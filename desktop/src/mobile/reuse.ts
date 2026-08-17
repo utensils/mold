@@ -52,6 +52,7 @@ export function applyMobileGalleryMetadata(
 ): MobileGalleryReuseResult {
   const plan = planSequenceReuse(metadata);
   const oneShotPrompt = form.prompt;
+  const oneShotOriginalPrompt = form.originalPrompt;
   const canonicalRecordedModel = canonicalMinimaxH3ModelName(metadata.model);
   const recordedH3Identity = isMinimaxH3Identity(null, metadata.model);
   const installedRecordedModel = models.find(
@@ -151,6 +152,11 @@ export function applyMobileGalleryMetadata(
     sequence = { clips, lossy: plan.lossy, raised };
     // Reusing a sequence must not overwrite the parked one-shot prompt.
     form.prompt = oneShotPrompt;
+    form.originalPrompt = oneShotOriginalPrompt;
+  } else if (!metadata.prompt?.trim()) {
+    // A promptless print has no prompt provenance. Clear any provenance left
+    // by the previously edited print so typing a new prompt cannot revive it.
+    form.originalPrompt = null;
   }
 
   return {

@@ -219,6 +219,15 @@ import {
   type MobileHost,
 } from "./hosts";
 import { applyMobileGalleryMetadata } from "./reuse";
+import {
+  clearCachedGalleryHosts,
+  loadCachedGallery,
+  loadCachedGalleryMedia,
+  pruneCachedGalleryMedia,
+  removeCachedGalleryPrints,
+  storeCachedGallery,
+  storeCachedGalleryMedia,
+} from "./galleryCache";
 import MobileAdvancedSheet from "./MobileAdvancedSheet.vue";
 import MobileCatalogView from "./MobileCatalogView.vue";
 import MobileExpansionPullStatus from "./MobileExpansionPullStatus.vue";
@@ -280,6 +289,7 @@ interface DiscoveredHost {
 
 interface GalleryPrint extends GalleryImage {
   hostId: string;
+  cacheKey: string;
   hostName: string;
   target: ApiTarget;
   thumbnailUrl: string;
@@ -287,6 +297,7 @@ interface GalleryPrint extends GalleryImage {
 
 interface PendingGalleryPrint extends GalleryImage {
   hostId: string;
+  cacheKey: string;
   hostName: string;
   target: ApiTarget;
 }
@@ -521,6 +532,7 @@ function resetAdvancedSettings(): void {
   form.wanRecipe = emptyWanRecipe();
 }
 const preparingGeneration = ref(false);
+const generationSubmissionPhase = ref<"preparing" | "placement" | null>(null);
 const preparedBatch = ref<PreparedExpansionBatchState | null>(null);
 const expansionRunning = ref(false);
 const expansionError = ref("");
@@ -1439,8 +1451,10 @@ const resultPreviewError = computed(() => {
   return job?.resultError ? describeTransportError(job.resultError, job.hostLabel) : "";
 });
 const developButtonLabel = computed(() =>
-  preparingGeneration.value
-    ? "Preparing source…"
+  generationSubmissionPhase.value
+    ? generationSubmissionPhase.value === "placement"
+      ? "Checking placement…"
+      : "Preparing source…"
     : `${form.batchSize > 1 ? `Develop ${form.batchSize} prints` : "Develop print"}${
         queuedJobs.value.length > 0 ? ` (+${queuedJobs.value.length} queued)` : ""
       }`,
@@ -1765,9 +1779,13 @@ function updateHostStatus(payload: { id: string; status: ServerStatus | null }):
   if (!host) return;
   host.online = payload.status !== null;
   if (payload.status) {
+    const priorCacheKey = host.instanceId?.trim() || host.id;
+    const nextInstanceId = payload.status.instance_id ?? host.instanceId;
+    const nextCacheKey = nextInstanceId?.trim() || host.id;
+    if (priorCacheKey !== nextCacheKey) void clearCachedGalleryHosts([priorCacheKey]);
     host.version = payload.status.version;
     host.hostname = payload.status.hostname ?? undefined;
-    host.instanceId = payload.status.instance_id ?? host.instanceId;
+    host.instanceId = nextInstanceId;
     captureHostTelemetry(host.id, payload.status);
   } else {
     delete hostTelemetry[host.id];
@@ -1921,6 +1939,7 @@ function removeHost(id: string): void {
   const removedSelectedHost = selectedHostId.value === id;
   const removedCatalogHost = catalogHostId.value === id;
   if (hostDetailId.value === id) hostDetailId.value = "";
+  const removedHost = hosts.value.find((host) => host.id === id);
   hosts.value = hosts.value.filter((host) => host.id !== id);
   if (removedSelectedHost) {
     selectedHostId.value = connectedHosts.value[0]?.id ?? "";
@@ -1930,6 +1949,12 @@ function removeHost(id: string): void {
   }
   if (removedCatalogHost) catalogHostId.value = connectedHosts.value[0]?.id ?? "";
   persistHosts();
+  if (removedHost) {
+    void clearCachedGalleryHosts([
+      removedHost.instanceId?.trim() || removedHost.id,
+      removedHost.id,
+    ]);
+  }
   void invoke("keychain_delete_api_key", { hostId: id });
 }
 
@@ -3044,6 +3069,7 @@ function restoreQuickExpansion(): void {
   expansionRunning.value = false;
   preparedSubmitting.value = false;
   preparingGeneration.value = false;
+  generationSubmissionPhase.value = null;
   submissionUiId += 1;
 }
 
@@ -3131,6 +3157,7 @@ function collapsePreparedBatch(removedId: string): void {
   expansionRunning.value = false;
   preparedSubmitting.value = false;
   preparingGeneration.value = false;
+  generationSubmissionPhase.value = null;
   expansionError.value = "";
   clearExpansionRecovery();
   form.batchSize = 1;
@@ -3160,6 +3187,7 @@ function discardPreparedBatch(): void {
   expansionRunning.value = false;
   preparedSubmitting.value = false;
   preparingGeneration.value = false;
+  generationSubmissionPhase.value = null;
   expansionError.value = "";
   clearExpansionRecovery();
   if (restoreFocus) {
@@ -3586,10 +3614,15 @@ async function generate(): Promise<void> {
     submissionGuard.isCurrent(token) &&
     (!preparedSubmission || preparedBatch.value?.batchId === preparedSubmission.batchId);
   const releasePreparedSubmission = () => {
+    if (!unmounted && uiId === submissionUiId) {
+      preparingGeneration.value = false;
+      generationSubmissionPhase.value = null;
+    }
     if (ownsPreparedSubmission()) preparedSubmitting.value = false;
   };
   let request: GenerateRequest;
   preparingGeneration.value = true;
+  generationSubmissionPhase.value = "preparing";
   preparedSubmitting.value = !!preparedSubmission;
   try {
     request = await prepareGenerationRequest(target, draft, () => submissionGuard.isCurrent(token));
@@ -3607,16 +3640,18 @@ async function generate(): Promise<void> {
       };
     }
   } catch (error) {
-    if (!ownsPreparedSubmission()) return;
+    if (!ownsPreparedSubmission()) {
+      releasePreparedSubmission();
+      return;
+    }
     setGenerationStatus(describeTransportError(error, route.label), true);
     generationAnnouncement.value = `Couldn’t prepare the source image. ${progress.value}`;
     releasePreparedSubmission();
     return;
-  } finally {
-    if (!unmounted && uiId === submissionUiId) preparingGeneration.value = false;
   }
 
   if (!submissionGuard.isCurrent(token)) {
+    releasePreparedSubmission();
     return;
   }
   if (guardedSubmission && JSON.stringify(cloneGenerateForm(form)) !== liveFormIdentity) {
@@ -3672,6 +3707,7 @@ async function generate(): Promise<void> {
     releasePreparedSubmission();
     return;
   }
+  if (!unmounted && uiId === submissionUiId) generationSubmissionPhase.value = "placement";
   const requireAuthoritativePlacement = requiresAuthoritativePlacement(
     request as unknown as Record<string, unknown>,
   );
@@ -3697,6 +3733,10 @@ async function generate(): Promise<void> {
             batchSize,
           );
   } catch (error) {
+    if (!submissionGuard.isCurrent(token)) {
+      releasePreparedSubmission();
+      return;
+    }
     if (error instanceof ApiError && (error.status === 404 || error.status === 405)) {
       if (requireAuthoritativePlacement) {
         setGenerationStatus(
@@ -3712,6 +3752,10 @@ async function generate(): Promise<void> {
       releasePreparedSubmission();
       return;
     }
+  }
+  if (!submissionGuard.isCurrent(token)) {
+    releasePreparedSubmission();
+    return;
   }
   const classification: string = classifyPlacementPreview(placement);
   if (requireAuthoritativePlacement && classification === "unsupported") {
@@ -3982,11 +4026,20 @@ function retryGeneratedPreview(): void {
   renewGeneratedResult(true);
 }
 
-async function thumbnailUrl(target: ApiTarget, filename: string): Promise<string> {
-  const response = await apiFetchTo(target, galleryMediaPath(filename, "host", true));
-  const url = URL.createObjectURL(await response.blob());
+async function thumbnailUrl(target: ApiTarget, hostId: string, filename: string): Promise<string> {
+  let blob = await loadCachedGalleryMedia(hostId, filename, "thumbnail");
+  if (!blob) {
+    const response = await apiFetchTo(target, galleryMediaPath(filename, "host", true));
+    blob = await response.blob();
+    void storeCachedGalleryMedia(hostId, filename, "thumbnail", blob);
+  }
+  const url = URL.createObjectURL(blob);
   objectUrls.add(url);
   return url;
+}
+
+function mobileGalleryCacheKey(host: MobileHost): string {
+  return host.instanceId?.trim() || host.id;
 }
 
 function refreshGallery(): Promise<void> {
@@ -4039,13 +4092,41 @@ async function performGalleryRefresh(): Promise<void> {
   const prior = gallery.value;
   gallery.value = [];
   for (const item of prior) revokeObjectUrl(item.thumbnailUrl);
-  const galleryHosts = connectedHosts.value.filter(
+  const allHosts = connectedHosts.value;
+  const cachedResults = await Promise.all(
+    allHosts.map(async (host) => ({
+      host,
+      cacheKey: mobileGalleryCacheKey(host),
+      prints: await loadCachedGallery(mobileGalleryCacheKey(host)),
+    })),
+  );
+  const cachedByHost = new Map(
+    cachedResults.map(({ host, cacheKey, prints }) => [host.id, { cacheKey, prints }]),
+  );
+  const cachedCopies = cachedResults.flatMap(({ host, cacheKey, prints }) => {
+    const target = { baseUrl: host.baseUrl, apiKey: host.apiKey || null };
+    return prints.map((print) => ({
+      ...print,
+      hostId: host.id,
+      cacheKey,
+      hostName: host.name,
+      target,
+    }));
+  });
+  if (cachedCopies.length > 0) {
+    galleryCopies = cachedCopies.sort((a, b) => b.timestamp - a.timestamp);
+    pendingGallery = groupLogicalGalleryPrints(galleryCopies).map((group) => group.representative);
+    await loadMoreGalleryPage();
+  }
+
+  const galleryHosts = allHosts.filter(
     (host) => host.online || !knownHostReachability.has(host.id),
   );
-  const knownOffline = connectedHosts.value.length - galleryHosts.length;
+  const knownOffline = allHosts.length - galleryHosts.length;
   const results = await Promise.allSettled(
     galleryHosts.map(async (host) => {
       const target = { baseUrl: host.baseUrl, apiKey: host.apiKey || null };
+      const cacheKey = mobileGalleryCacheKey(host);
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), GALLERY_HOST_TIMEOUT_MS);
       let prints: GalleryImage[];
@@ -4056,21 +4137,57 @@ async function performGalleryRefresh(): Promise<void> {
       } finally {
         clearTimeout(timeout);
       }
+      const currentHost = hosts.value.find((candidate) => candidate.id === host.id);
+      if (!currentHost || mobileGalleryCacheKey(currentHost) !== cacheKey) {
+        throw new Error("Gallery host identity changed while refreshing");
+      }
+      await storeCachedGallery(cacheKey, prints);
+      return { host, cacheKey, target, prints };
+    }),
+  );
+  const refreshedByHost = new Map(
+    results.flatMap((result) =>
+      result.status === "fulfilled" ? [[result.value.host.id, result.value] as const] : [],
+    ),
+  );
+  const refreshedCopies = connectedHosts.value
+    .flatMap((host) => {
+      const refreshed = refreshedByHost.get(host.id);
+      const cacheKey = refreshed?.cacheKey ?? mobileGalleryCacheKey(host);
+      const target = refreshed?.target ?? { baseUrl: host.baseUrl, apiKey: host.apiKey || null };
+      const cached = cachedByHost.get(host.id);
+      const prints = refreshed?.prints ?? (cached?.cacheKey === cacheKey ? cached.prints : []);
       return prints.map((print) => ({
         ...print,
         hostId: host.id,
+        cacheKey,
         hostName: host.name,
         target,
       }));
-    }),
-  );
-  galleryCopies = results
-    .flatMap((result) => (result.status === "fulfilled" ? result.value : []))
+    })
     .sort((a, b) => b.timestamp - a.timestamp);
-  pendingGallery = groupLogicalGalleryPrints(galleryCopies).map((group) => group.representative);
   const failed = knownOffline + results.filter((result) => result.status === "rejected").length;
-  if (failed) galleryError.value = `${failed} host${failed === 1 ? "" : "s"} unavailable`;
+  if (selectedPrint.value) {
+    galleryRefreshDeferred = true;
+    if (failed) {
+      galleryError.value = `${failed} host${failed === 1 ? "" : "s"} unavailable${
+        cachedCopies.length > 0 ? " · Showing saved Library" : ""
+      }`;
+    }
+    galleryLoading.value = false;
+    return;
+  }
+  galleryCopies = refreshedCopies;
+  for (const item of gallery.value) revokeObjectUrl(item.thumbnailUrl);
+  gallery.value = [];
+  pendingGallery = groupLogicalGalleryPrints(galleryCopies).map((group) => group.representative);
+  if (failed) {
+    galleryError.value = `${failed} host${failed === 1 ? "" : "s"} unavailable${
+      cachedCopies.length > 0 ? " · Showing saved Library" : ""
+    }`;
+  }
   await loadMoreGalleryPage();
+  void pruneCachedGalleryMedia();
   galleryLoading.value = false;
 }
 
@@ -4100,7 +4217,7 @@ async function loadMoreGalleryPage(): Promise<void> {
       page.slice(offset, offset + 4).map(async ({ target, ...print }) => ({
         ...print,
         target,
-        thumbnailUrl: await thumbnailUrl(target, print.filename),
+        thumbnailUrl: await thumbnailUrl(target, print.cacheKey, print.filename),
       })),
     );
     gallery.value.push(
@@ -4113,7 +4230,7 @@ async function loadMoreGalleryPage(): Promise<void> {
 }
 
 async function reusePrint(print: GalleryPrint): Promise<void> {
-  if (reusingPrint.value || print.metadata_synthetic || !print.metadata.prompt?.trim()) return;
+  if (reusingPrint.value || print.metadata_synthetic) return;
   reusingPrint.value = true;
   reusePrintError.value = "";
   try {
@@ -4472,11 +4589,16 @@ async function deleteSelectedGalleryPrints(): Promise<void> {
   );
   const deletedKeys = new Set<string>();
   const failedKeys = new Set<string>();
+  const deletedCacheEntries: Array<{ hostId: string; filename: string }> = [];
   results.forEach((result, index) => {
     const key = galleryPrintKey(targetList[index]!);
-    if (result.status === "fulfilled") deletedKeys.add(key);
-    else failedKeys.add(key);
+    if (result.status === "fulfilled") {
+      const print = targetList[index]!;
+      deletedKeys.add(key);
+      deletedCacheEntries.push({ hostId: print.cacheKey, filename: print.filename });
+    } else failedKeys.add(key);
   });
+  await removeCachedGalleryPrints(deletedCacheEntries);
   for (const print of gallery.value) revokeObjectUrl(print.thumbnailUrl);
   galleryCopies = galleryCopies.filter((print) => !deletedKeys.has(galleryPrintKey(print)));
   gallery.value = [];
@@ -5920,7 +6042,7 @@ onBeforeUnmount(() => {
       v-if="selectedPrint"
       :item="selectedPrint"
       :target="selectedPrint.target"
-      :cache-key="selectedPrint.hostId"
+      :cache-key="selectedPrint.cacheKey"
       :host-name="selectedPrint.hostName"
       :thumbnail-url="selectedPrint.thumbnailUrl"
       :reusing="reusingPrint"

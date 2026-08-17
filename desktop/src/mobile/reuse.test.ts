@@ -110,6 +110,21 @@ describe("applyMobileGalleryMetadata", () => {
     expect(request.upscale_model).toBeUndefined();
   });
 
+  it("clears stale provenance when reusing a promptless print", () => {
+    const form = newGenerateForm();
+    form.prompt = "previous expanded prompt";
+    form.originalPrompt = "previous source prompt";
+
+    applyMobileGalleryMetadata(form, { ...metadata, prompt: "", original_prompt: "stale" }, [
+      model,
+    ]);
+
+    expect(form.prompt).toBe("");
+    expect(form.originalPrompt).toBeNull();
+    form.prompt = "a newly typed prompt";
+    expect(buildRequest(form).original_prompt).toBeUndefined();
+  });
+
   it("keeps generation valid when the print's original model is no longer installed", () => {
     const replacement = {
       ...model,
@@ -379,12 +394,14 @@ describe("applyMobileGalleryMetadata — sequence prints", () => {
   it("returns the clip rail without overwriting the one-shot prompt", () => {
     const form = newGenerateForm();
     form.prompt = "parked one shot";
+    form.originalPrompt = "parked provenance";
     const result = applyMobileGalleryMetadata(form, chainPrint([25, 33]), [sequenceModel]);
 
     expect(result.sequence?.clips.map((c) => c.prompt)).toEqual(["clip 1", "clip 2"]);
     expect(result.sequence?.clips.map((c) => c.frames)).toEqual([25, 33]);
     expect(result.sequence?.raised).toBe(0);
     expect(form.prompt).toBe("parked one shot");
+    expect(form.originalPrompt).toBe("parked provenance");
   });
 
   it("raises clips that no longer clear the model's motion tail", () => {

@@ -1599,6 +1599,24 @@ describe("applyModelDefaults — wan sampler recipe and solver", () => {
   });
 });
 
+describe("buildRequest prompt provenance", () => {
+  it("does not attach an earlier prompt to an intentionally promptless request", () => {
+    const form = newGenerateForm();
+    form.prompt = "";
+    form.originalPrompt = "an earlier expanded prompt";
+
+    expect(buildRequest(form).original_prompt).toBeUndefined();
+  });
+
+  it("keeps original prompt provenance when a visible transformed prompt is submitted", () => {
+    const form = newGenerateForm();
+    form.prompt = "an expanded lighthouse at dusk";
+    form.originalPrompt = "a lighthouse";
+
+    expect(buildRequest(form).original_prompt).toBe("a lighthouse");
+  });
+});
+
 describe("newGenerateForm source-fit default", () => {
   it("starts on pad-repaint, matching the web SPA's default policy", () => {
     expect(newGenerateForm().sourceFit).toEqual({ mode: "pad-repaint" });
