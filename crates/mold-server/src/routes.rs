@@ -2695,9 +2695,9 @@ async fn upscale_stream(
                     }));
                 }
                 Err(e) => {
-                    let _ = tx.send(SseMessage::Error(mold_core::SseErrorEvent {
-                        message: format!("failed to pull upscaler model: {}", e.error),
-                    }));
+                    let _ = tx.send(SseMessage::Error(mold_core::SseErrorEvent::failed(
+                        format!("failed to pull upscaler model: {}", e.error),
+                    )));
                     return;
                 }
             }
@@ -2717,12 +2717,12 @@ async fn upscale_stream(
         };
 
         let Some(weights_path) = weights_path else {
-            let _ = tx.send(SseMessage::Error(mold_core::SseErrorEvent {
-                message: format!(
+            let _ = tx.send(SseMessage::Error(mold_core::SseErrorEvent::failed(
+                format!(
                     "upscaler model '{}' not configured after pull",
                     model_name_owned
                 ),
-            }));
+            )));
             return;
         };
 
@@ -2753,9 +2753,9 @@ async fn upscale_stream(
                     ));
                 }
                 Err(error) => {
-                    let _ = tx.send(SseMessage::Error(mold_core::SseErrorEvent {
-                        message: error.error,
-                    }));
+                    let _ = tx.send(SseMessage::Error(mold_core::SseErrorEvent::failed(
+                        error.error,
+                    )));
                 }
             }
             return;
@@ -2791,9 +2791,9 @@ async fn upscale_stream(
                             *cache = Some(new_engine);
                         }
                         Err(e) => {
-                            let _ = tx.send(SseMessage::Error(mold_core::SseErrorEvent {
-                                message: format!("failed to load upscaler: {e}"),
-                            }));
+                            let _ = tx.send(SseMessage::Error(mold_core::SseErrorEvent::failed(
+                                format!("failed to load upscaler: {e}"),
+                            )));
                             return;
                         }
                     }
@@ -2823,9 +2823,9 @@ async fn upscale_stream(
                         ));
                     }
                     Err(e) => {
-                        let _ = tx.send(SseMessage::Error(mold_core::SseErrorEvent {
-                            message: format!("upscale failed: {e}"),
-                        }));
+                        let _ = tx.send(SseMessage::Error(mold_core::SseErrorEvent::failed(
+                            format!("upscale failed: {e}"),
+                        )));
                     }
                 }
 
@@ -2961,23 +2961,22 @@ async fn generate_stream(
                         if let crate::batch_runtime::CompletedServerBatch::Sse(event) = completed {
                             let _ = tx.send(SseMessage::BatchComplete(Box::new(event)));
                         } else {
-                            let _ = tx.send(SseMessage::Error(SseErrorEvent {
-                                message:
-                                    "server batch supervisor returned the wrong delivery shape"
-                                        .to_string(),
-                            }));
+                            let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(
+                                "server batch supervisor returned the wrong delivery shape"
+                                    .to_string(),
+                            )));
                         }
                     }
                     Err(error) => {
-                        let _ = tx.send(SseMessage::Error(SseErrorEvent {
-                            message: format!("server batch failed: {error:#}"),
-                        }));
+                        let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(format!(
+                            "server batch failed: {error:#}"
+                        ))));
                     }
                 },
                 Err(_) => {
-                    let _ = tx.send(SseMessage::Error(SseErrorEvent {
-                        message: "server batch supervisor exited without a result".to_string(),
-                    }));
+                    let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(
+                        "server batch supervisor exited without a result".to_string(),
+                    )));
                 }
             }
         });
@@ -3096,9 +3095,9 @@ async fn generate_stream(
     // which is what makes the worker/dispatcher skip a cancelled job.
     tokio::spawn(async move {
         if let Ok(crate::job_supervisor::SupervisedOutcome::Cancelled) = outcome_rx.await {
-            let _ = tx.send(SseMessage::Error(SseErrorEvent {
-                message: "cancelled".to_string(),
-            }));
+            let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(
+                "cancelled".to_string(),
+            )));
         }
         drop(tx); // closes the SSE stream
     });
@@ -3805,13 +3804,11 @@ async fn pull_model_endpoint(
                     break;
                 }
                 Ok(mold_core::types::DownloadEvent::JobFailed { id, error }) if id == job_id => {
-                    let _ = tx.send(SseMessage::Error(SseErrorEvent { message: error }));
+                    let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(error)));
                     break;
                 }
                 Ok(mold_core::types::DownloadEvent::JobCancelled { id }) if id == job_id => {
-                    let _ = tx.send(SseMessage::Error(SseErrorEvent {
-                        message: "pull cancelled".into(),
-                    }));
+                    let _ = tx.send(SseMessage::Error(SseErrorEvent::failed("pull cancelled")));
                     break;
                 }
                 Ok(_) => continue,
@@ -4575,7 +4572,72 @@ async fn health() -> impl IntoResponse {
 async fn list_queue(State(state): State<AppState>) -> Json<crate::job_registry::QueueListing> {
     let mut listing = state.job_registry.snapshot();
     listing.plan = state.scheduled_work.latest_plan();
+    project_durable_queue_state(&state, &mut listing);
     Json(listing)
+}
+
+/// Fold the durable journal into a `/api/queue` listing.
+///
+/// Live rows learn whether they are actually durable and how many times a
+/// worker has claimed them; held rows are appended, because they exist only in
+/// the journal and would otherwise be invisible — a job that is never going to
+/// run and that nothing reports is worse than one that failed.
+fn project_durable_queue_state(state: &AppState, listing: &mut crate::job_registry::QueueListing) {
+    if !state.queue_journal.is_enabled() {
+        return;
+    }
+    let rows = state.queue_journal.list_all();
+    if rows.is_empty() {
+        for entry in listing.entries.iter_mut() {
+            entry.durable = Some(false);
+        }
+        return;
+    }
+    let by_id: std::collections::HashMap<&str, &mold_db::generation_queue::GenerationQueueRow> =
+        rows.iter().map(|row| (row.id.as_str(), row)).collect();
+    for entry in listing.entries.iter_mut() {
+        match by_id.get(entry.id.as_str()) {
+            Some(row) => {
+                entry.durable = Some(true);
+                entry.replayed = Some(row.replay_seen > 0);
+                entry.dispatch_attempts = Some(row.dispatch_attempts);
+            }
+            None => entry.durable = Some(false),
+        }
+    }
+    let live: std::collections::HashSet<&str> = listing
+        .entries
+        .iter()
+        .map(|entry| entry.id.as_str())
+        .collect();
+    let mut position = listing.entries.len();
+    let held: Vec<crate::job_registry::JobEntry> = rows
+        .iter()
+        .filter(|row| {
+            row.state == mold_db::generation_queue::QueueRowState::Held
+                && !live.contains(row.id.as_str())
+        })
+        .map(|row| {
+            let entry = crate::job_registry::JobEntry {
+                id: row.id.clone(),
+                model: row.model.clone(),
+                state: crate::job_registry::JobLifecycle::Held,
+                started_at_unix_ms: row.created_at_ms.max(0) as u64,
+                position,
+                gpu: None,
+                target_gpu: row.target_gpu,
+                seed_pinned: Some(row.seed_pinned),
+                metadata: None,
+                durable: Some(true),
+                replayed: Some(row.replay_seen > 0),
+                dispatch_attempts: Some(row.dispatch_attempts),
+                held_reason: row.held_reason.clone(),
+            };
+            position += 1;
+            entry
+        })
+        .collect();
+    listing.entries.extend(held);
 }
 
 /// Wrap any present JSON value (including `null`) in `Some`, so a field using
@@ -5035,6 +5097,7 @@ async fn server_capabilities(
             can_reorder: true,
             stable_device_pins: true,
             cooperative_cancellation: false,
+            durable_queue: state.queue_journal.is_enabled(),
             server_batch,
             server_batch_max_outputs: server_batch
                 .then_some(crate::batch_runtime::MAX_LIVE_SERVER_BATCH_OUTPUTS),

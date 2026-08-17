@@ -4306,6 +4306,82 @@ mod tests {
         assert!(state.queue_journal.list_all().is_empty());
     }
 
+    /// `durable_queue` is a promise about this host, and a held row is
+    /// something only the journal knows about — invisible work that is never
+    /// going to run is worse than work that failed.
+    #[tokio::test]
+    async fn the_queue_listing_reports_durability_and_surfaces_held_rows() {
+        let output_dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (state, mut rx) = durable_state(db.clone(), output_dir.path());
+        let app = app_with_state(state.clone());
+
+        let capabilities = json_body(
+            app.clone()
+                .oneshot(
+                    Request::get("/api/capabilities")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(capabilities["queue"]["durable_queue"], true);
+        assert_eq!(
+            capabilities["queue"]["cooperative_cancellation"], false,
+            "running work stays non-cancellable until that UX decision is made"
+        );
+
+        let gen_app = app.clone();
+        let gen_task = tokio::spawn(async move {
+            gen_app
+                .oneshot(
+                    Request::post("/api/generate")
+                        .header("content-type", "application/json")
+                        .body(Body::from(generate_body("a cat", 512, 512)))
+                        .unwrap(),
+                )
+                .await
+        });
+        let job = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("submitted job")
+            .expect("open queue");
+
+        let listing = json_body(
+            app.clone()
+                .oneshot(Request::get("/api/queue").body(Body::empty()).unwrap())
+                .await
+                .unwrap(),
+        )
+        .await;
+        let live = &listing["entries"][0];
+        assert_eq!(live["id"], serde_json::json!(job.id));
+        assert_eq!(live["durable"], true);
+        assert_eq!(live["replayed"], false);
+        assert_eq!(live["dispatch_attempts"], 0);
+
+        // Park it the way an exhausted attempt cap would.
+        state
+            .queue_journal
+            .hold_id(&job.id, "dispatch attempts exhausted");
+        gen_task.abort();
+        let _ = gen_task.await;
+        state.job_registry.remove(&job.id);
+
+        let listing = json_body(
+            app.oneshot(Request::get("/api/queue").body(Body::empty()).unwrap())
+                .await
+                .unwrap(),
+        )
+        .await;
+        let held = &listing["entries"][0];
+        assert_eq!(held["id"], serde_json::json!(job.id));
+        assert_eq!(held["state"], "held");
+        assert_eq!(held["held_reason"], "dispatch attempts exhausted");
+    }
+
     /// Once the retention fence is up the process is tearing down, so a new
     /// request is refused with a retryable 503 rather than admitted into a
     /// queue that immediately retains it.

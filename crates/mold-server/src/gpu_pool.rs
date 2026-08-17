@@ -680,10 +680,9 @@ impl OwnerWork {
         match self {
             Self::Generation(job) => {
                 if let Some(progress) = &job.progress_tx {
-                    let _ =
-                        progress.send(crate::state::SseMessage::Error(mold_core::SseErrorEvent {
-                            message: error.clone(),
-                        }));
+                    let _ = progress.send(crate::state::SseMessage::Error(
+                        mold_core::SseErrorEvent::failed(error.clone()),
+                    ));
                 }
                 let job_id = job.id.clone();
                 let _ = job.result_tx.send(Err(error));

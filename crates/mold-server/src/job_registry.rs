@@ -35,6 +35,10 @@ use tokio::sync::Notify;
 pub enum JobLifecycle {
     Queued,
     Running,
+    /// Retained across a restart but parked: it exceeded an attempt cap, or
+    /// its recorded request could not be reconciled. Listed so an operator can
+    /// see it, never auto-run.
+    Held,
 }
 
 /// One row in the `GET /api/queue` response.
@@ -69,6 +73,24 @@ pub struct JobEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Object)]
     pub metadata: Option<Box<mold_core::OutputMetadata>>,
+    /// Whether this job survives a restart. Additive, and deliberately
+    /// per-job: `QueueCapabilities.durable_queue` says the server can promise
+    /// durability, this says whether *this* job got it. A job can be
+    /// non-durable on a durable host — no gallery target, reference-upload
+    /// authority, or an oversized request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub durable: Option<bool>,
+    /// Whether this job was resumed from the journal rather than submitted by
+    /// a live client.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replayed: Option<bool>,
+    /// How many times a worker has claimed this job for execution. Diagnoses a
+    /// held row: a job that keeps taking the process down shows its count here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch_attempts: Option<u32>,
+    /// Why a held job is parked. Present only for `state: held`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held_reason: Option<String>,
 }
 
 /// Whole-queue listing returned by `GET /api/queue`. Wrapped in a struct so
@@ -608,6 +630,14 @@ impl JobRegistry {
                 target_gpu: e.target_gpu,
                 seed_pinned: e.seed_pinned,
                 metadata: e.metadata.clone(),
+                // Durability is projected onto the listing by the route from
+                // the journal, which is the authority. Deriving it here would
+                // mean mirroring journal state into the registry and having
+                // two answers to keep in sync.
+                durable: None,
+                replayed: None,
+                dispatch_attempts: None,
+                held_reason: None,
             })
         })
     }
@@ -694,6 +724,14 @@ impl JobRegistry {
                 target_gpu: e.target_gpu,
                 seed_pinned: e.seed_pinned,
                 metadata: e.metadata.clone(),
+                // Durability is projected onto the listing by the route from
+                // the journal, which is the authority. Deriving it here would
+                // mean mirroring journal state into the registry and having
+                // two answers to keep in sync.
+                durable: None,
+                replayed: None,
+                dispatch_attempts: None,
+                held_reason: None,
             })
             .collect();
         QueueListing {
