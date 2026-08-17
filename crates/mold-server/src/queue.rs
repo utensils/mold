@@ -671,10 +671,18 @@ fn platform_rename_no_replace(
 /// Whether the error means "this platform or filesystem cannot do that",
 /// rather than a genuine failure to publish.
 fn is_unsupported_operation(error: &std::io::Error) -> bool {
-    matches!(
-        error.raw_os_error(),
-        Some(libc::ENOSYS) | Some(libc::ENOTSUP) | Some(libc::EINVAL) | Some(libc::EOPNOTSUPP)
-    )
+    // Compared rather than pattern-matched: Linux defines ENOTSUP and
+    // EOPNOTSUPP as the same value, so listing both as patterns makes the
+    // second arm unreachable and `-D warnings` rejects it. macOS keeps them
+    // distinct, which is why the pattern form compiled locally and failed only
+    // on Linux CI.
+    let Some(code) = error.raw_os_error() else {
+        return false;
+    };
+    code == libc::ENOSYS
+        || code == libc::ENOTSUP
+        || code == libc::EINVAL
+        || code == libc::EOPNOTSUPP
 }
 
 /// The universal fallback: reserve the final name with an atomic `create_new`,
