@@ -13,6 +13,7 @@ import DevelopCanvas from "@ui/components/DevelopCanvas.vue";
 import QueueEntryDrawer from "../jobs/QueueEntryDrawer.vue";
 import { useGenerationStore, jobPhase, jobProgress, type Job } from "../../stores/generation";
 import { type HostView } from "../../stores/hosts";
+import { queueWaitCode, resolveQueueWait } from "@studio/lib/queuePosition";
 import { enrichQueueEntries, useJobsStore, type EnrichedQueueEntry } from "../../stores/jobs";
 import { useHostsStore } from "../../stores/hosts";
 import { useHostModelsStore } from "../../stores/hostModels";
@@ -88,7 +89,8 @@ function entryCode(entry: EnrichedQueueEntry): string {
     if (job && job.total > 0 && job.status === "denoising") return `${job.step}/${job.total}`;
     return entry.gpu !== undefined ? `RUNNING · GPU ${entry.gpu}` : "RUNNING";
   }
-  return entry.position > 0 ? `QUEUED #${entry.position}` : "QUEUED";
+  // Same waiting vocabulary as Create and iPhone, resolved once in studio.
+  return queueWaitCode(resolveQueueWait({ position: entry.position }));
 }
 
 /** Elapsed wall-clock for running entries; re-evaluates on each poll frame. */

@@ -6,6 +6,7 @@ import type {
   SseChainCompleteEvent,
 } from "./api/types";
 import type { DevelopPhase } from "@ui/lib/grain";
+import { queueWaitCode, resolveQueueWait } from "@studio/lib/queuePosition";
 
 export type JobStatus = "queued" | "loading" | "denoising" | "finishing" | "complete" | "error";
 
@@ -343,7 +344,8 @@ export function jobStatusCode(job: Job): string {
     case "loading":
       return job.stage?.toUpperCase() ?? "PREPARING";
     case "queued":
-      return job.queuePosition && job.queuePosition > 0 ? `QUEUED #${job.queuePosition}` : "QUEUED";
+      // Shared waiting vocabulary, this surface's compact casing.
+      return queueWaitCode(resolveQueueWait({ position: job.queuePosition }));
     case "complete":
       return "DONE";
     case "error":
