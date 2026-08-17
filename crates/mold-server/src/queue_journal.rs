@@ -548,10 +548,26 @@ pub struct ReplayReport {
 /// type. Everything downstream — validation, admission, frozen plans,
 /// placement, auto-pull — applies unchanged: a model uninstalled between boots
 /// is blocked as `model_not_installed`, not silently rerouted.
-pub async fn replay(state: &crate::state::AppState) -> ReplayReport {
+pub async fn replay(state: &crate::state::AppState, dispatch_available: bool) -> ReplayReport {
     let journal = state.queue_journal.clone();
     let mut report = ReplayReport::default();
     if !journal.is_enabled() {
+        return report;
+    }
+    // A maintenance boot has no dispatch owner, so there is nothing to replay
+    // INTO — `run_server` has already dropped the queue receiver. Attempting
+    // it anyway would fail every send, and a failed send used to drop the
+    // ticket with this boot's fence still down, deleting the whole queue on a
+    // routine `MOLD_GPUS=none` restart. Skipped before anything is charged, so
+    // the rows keep their full replay budget for a boot that can run them.
+    if !dispatch_available {
+        let retained = journal.replayable().len();
+        if retained > 0 {
+            tracing::info!(
+                retained,
+                "generation is unavailable on this boot; retained jobs stay queued for the next one"
+            );
+        }
         return report;
     }
 
@@ -642,9 +658,10 @@ pub async fn replay(state: &crate::state::AppState) -> ReplayReport {
             h3_private_ingress_grant: None,
         };
 
+        let mut pending = Some(job);
         match state
             .queue
-            .submit_when_available(job, state.queue_capacity, &cancellation)
+            .submit_when_available(&mut pending, state.queue_capacity, &cancellation)
             .await
         {
             Ok(_) => report.resumed += 1,
@@ -654,6 +671,12 @@ pub async fn replay(state: &crate::state::AppState) -> ReplayReport {
                     ?error,
                     "could not resubmit a retained generation; it stays in the journal"
                 );
+                // Settle the ticket explicitly. Dropping it would delete a row
+                // for work that never reached a worker — the opposite of what
+                // the log line above promises.
+                if let Some(ticket) = pending.take().and_then(|job| job.journal) {
+                    ticket.retain();
+                }
                 state.job_registry.remove(&row.id);
             }
         }
@@ -718,6 +741,15 @@ impl QueueTicket {
     pub fn discard(mut self) {
         self.settled = true;
         self.journal.discard_id(&self.id);
+    }
+
+    /// The job never reached a worker, so leave its row exactly as it is.
+    ///
+    /// Distinct from `hold`: nothing is wrong with the job and the next boot
+    /// should replay it normally. The `replay_seen` budget is what stops a row
+    /// retrying forever if the condition persists.
+    pub fn retain(mut self) {
+        self.settled = true;
     }
 
     /// Charge a dispatch attempt on the GPU owner thread, immediately before

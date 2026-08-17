@@ -872,7 +872,11 @@ async fn submit_child(
     };
     state
         .queue
-        .submit_when_available(job, state.queue_capacity, &admission_cancellation)
+        .submit_when_available(
+            &mut Some(job),
+            state.queue_capacity,
+            &admission_cancellation,
+        )
         .await
         .inspect_err(|_| state.job_registry.remove(&id))
         .map_err(|error| match error {

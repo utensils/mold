@@ -4135,7 +4135,7 @@ mod tests {
 
         // A fresh server on the same database.
         let (state, mut rx) = durable_state(db.clone(), output_dir.path());
-        let report = crate::queue_journal::replay(&state).await;
+        let report = crate::queue_journal::replay(&state, true).await;
 
         assert_eq!(report.resumed, 3);
         assert_eq!(report.held, 0);
@@ -4237,7 +4237,7 @@ mod tests {
         };
 
         let (state, mut rx) = durable_state(db.clone(), output_dir.path());
-        let report = crate::queue_journal::replay(&state).await;
+        let report = crate::queue_journal::replay(&state, true).await;
         assert_eq!(report.resumed, 3);
 
         let mut replayed = Vec::new();
@@ -4257,6 +4257,103 @@ mod tests {
             ],
             "replay must honour the reorder, not the admission order"
         );
+    }
+
+    /// A maintenance boot (`MOLD_GPUS=none`) has no dispatch owner at all, so
+    /// there is nothing to replay INTO. Attempting it anyway sent every job
+    /// into a dropped receiver, and the failed send dropped the ticket with a
+    /// fresh boot's fence still down — deleting the whole queue on a routine
+    /// maintenance restart, which is precisely what this feature exists to
+    /// prevent.
+    #[tokio::test]
+    async fn a_boot_with_no_dispatch_owner_replays_nothing_and_keeps_every_row() {
+        let output_dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let submitted = seed_retained_jobs(db.clone(), output_dir.path(), 2).await;
+
+        let (state, mut rx) = durable_state(db.clone(), output_dir.path());
+        let report = crate::queue_journal::replay(&state, false).await;
+
+        assert_eq!(report.resumed, 0);
+        assert_eq!(report.held, 0);
+        assert!(rx.try_recv().is_err());
+        let rows = state.queue_journal.list_all();
+        assert_eq!(
+            rows.iter().map(|row| row.id.clone()).collect::<Vec<_>>(),
+            submitted
+        );
+        assert!(
+            rows.iter().all(|row| row.replay_seen == 0),
+            "a boot that cannot replay must not spend the row's replay budget"
+        );
+    }
+
+    /// The independent guard: whatever the reason a resubmission fails, the
+    /// job never reached a worker, so its row must survive for the next boot
+    /// rather than be deleted by the ticket's ordinary drop.
+    #[tokio::test]
+    async fn a_job_that_cannot_be_resubmitted_keeps_its_row() {
+        let output_dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let submitted = seed_retained_jobs(db.clone(), output_dir.path(), 2).await;
+
+        let (state, rx) = durable_state(db.clone(), output_dir.path());
+        // Exactly the maintenance shape: the dispatch owner is gone, so every
+        // send fails — but we ask for a replay anyway.
+        drop(rx);
+        let report = crate::queue_journal::replay(&state, true).await;
+
+        assert_eq!(report.resumed, 0);
+        let rows = state.queue_journal.list_all();
+        assert_eq!(
+            rows.iter().map(|row| row.id.clone()).collect::<Vec<_>>(),
+            submitted,
+            "a job that never reached the queue must still be there to retry"
+        );
+        assert!(
+            rows.iter()
+                .all(|row| row.state == mold_db::generation_queue::QueueRowState::Queued),
+            "it never ran, so it is not held — the replay budget bounds retries"
+        );
+    }
+
+    /// Admit `count` durable jobs and retain them, as a crash would.
+    async fn seed_retained_jobs(
+        db: Arc<Option<mold_db::MetadataDb>>,
+        output_dir: &std::path::Path,
+        count: usize,
+    ) -> Vec<String> {
+        let (state, mut rx) = durable_state(db, output_dir);
+        let app = app_with_state(state.clone());
+        let mut submitted = Vec::new();
+        let mut in_flight = Vec::new();
+        for index in 0..count {
+            let app = app.clone();
+            let task = tokio::spawn(async move {
+                app.oneshot(
+                    Request::post("/api/generate")
+                        .header("content-type", "application/json")
+                        .body(Body::from(generate_body(
+                            &format!("prompt {index}"),
+                            512,
+                            512,
+                        )))
+                        .unwrap(),
+                )
+                .await
+            });
+            let job = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                .await
+                .expect("submitted job")
+                .expect("open queue");
+            submitted.push(job.id.clone());
+            task.abort();
+            let _ = task.await;
+            in_flight.push(job);
+        }
+        state.queue_journal.retain_all();
+        drop(in_flight);
+        submitted
     }
 
     /// A job that finished between its last save and the crash must not be
@@ -4308,7 +4405,7 @@ mod tests {
             .unwrap();
 
         let (state, mut rx) = durable_state(db.clone(), output_dir.path());
-        let report = crate::queue_journal::replay(&state).await;
+        let report = crate::queue_journal::replay(&state, true).await;
 
         assert_eq!(report.already_completed, 1);
         assert_eq!(report.resumed, 0);
@@ -4347,7 +4444,7 @@ mod tests {
         .unwrap();
 
         let (state, mut rx) = durable_state(db.clone(), output_dir.path());
-        let report = crate::queue_journal::replay(&state).await;
+        let report = crate::queue_journal::replay(&state, true).await;
 
         assert_eq!(report.held, 1);
         assert_eq!(report.resumed, 0);
@@ -4386,7 +4483,7 @@ mod tests {
         .unwrap();
 
         let (state, mut rx) = durable_state(db.clone(), output_dir.path());
-        let report = crate::queue_journal::replay(&state).await;
+        let report = crate::queue_journal::replay(&state, true).await;
 
         assert_eq!(report.resumed, 0);
         assert!(rx.try_recv().is_err());

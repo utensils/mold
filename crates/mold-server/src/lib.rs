@@ -848,7 +848,7 @@ pub async fn run_server(
     // mutex, so parallel replay would land in arbitrary order and destroy the
     // ordering the journal exists to preserve.
     {
-        let report = crate::queue_journal::replay(&state).await;
+        let report = crate::queue_journal::replay(&state, startup.start_generation_runner).await;
         if report.resumed > 0 || report.held > 0 || report.already_completed > 0 {
             info!(
                 resumed = report.resumed,

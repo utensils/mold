@@ -171,13 +171,17 @@ impl QueueHandle {
     /// Wait for shared queue capacity without converting temporary occupancy
     /// into a terminal batch failure. Cancellation before transport drops the
     /// unsubmitted job and releases any reserved counter slot.
+    /// The job is passed by `&mut Option` rather than by value so a caller
+    /// still owns it when submission fails. That matters for replay: a
+    /// dropped `GenerationJob` also drops its durable queue ticket, which
+    /// deletes the row — for a job that never reached a worker, exactly the
+    /// wrong outcome. On success the option is taken.
     pub async fn submit_when_available(
         &self,
-        job: GenerationJob,
+        job: &mut Option<GenerationJob>,
         capacity: usize,
         cancellation: &tokio_util::sync::CancellationToken,
     ) -> Result<usize, SubmitError> {
-        let mut job = Some(job);
         let waiter = self.capacity_waiter.lock();
         tokio::pin!(waiter);
         let _waiter = tokio::select! {
@@ -193,18 +197,27 @@ impl QueueHandle {
             if previous < capacity {
                 let send = self
                     .job_tx
-                    .send(job.take().expect("batch queue job submitted once"));
+                    .send(job.take().expect("queued job submitted once"));
                 tokio::pin!(send);
                 return tokio::select! {
                     result = &mut send => {
-                        if result.is_err() {
-                            self.pending_count.fetch_sub(1, Ordering::SeqCst);
-                            self.capacity_notify.notify_waiters();
-                            Err(SubmitError::Shutdown)
-                        } else {
-                            Ok(previous)
+                        match result {
+                            // The receiver is gone. Hand the job back so the
+                            // caller can settle it rather than let a drop
+                            // delete a durable row for work that never ran.
+                            Err(returned) => {
+                                *job = Some(returned.0);
+                                self.pending_count.fetch_sub(1, Ordering::SeqCst);
+                                self.capacity_notify.notify_waiters();
+                                Err(SubmitError::Shutdown)
+                            }
+                            Ok(()) => Ok(previous),
                         }
                     }
+                    // A cancellation mid-send consumes the job: it is owned by
+                    // the in-flight send future. Callers that must settle a
+                    // failed submission check `job.is_some()` rather than
+                    // assume recovery.
                     _ = cancellation.cancelled() => {
                         self.pending_count.fetch_sub(1, Ordering::SeqCst);
                         self.capacity_notify.notify_waiters();
@@ -1052,7 +1065,7 @@ mod tests {
             let cancellation = cancellation.clone();
             async move {
                 handle
-                    .submit_when_available(queue_job("batch"), 1, &cancellation)
+                    .submit_when_available(&mut Some(queue_job("batch")), 1, &cancellation)
                     .await
             }
         });
@@ -1083,7 +1096,7 @@ mod tests {
             let cancellation = first_cancel.clone();
             async move {
                 handle
-                    .submit_when_available(queue_job("first"), 1, &cancellation)
+                    .submit_when_available(&mut Some(queue_job("first")), 1, &cancellation)
                     .await
             }
         });
@@ -1093,7 +1106,7 @@ mod tests {
             async move {
                 handle
                     .submit_when_available(
-                        queue_job("second"),
+                        &mut Some(queue_job("second")),
                         1,
                         &tokio_util::sync::CancellationToken::new(),
                     )
