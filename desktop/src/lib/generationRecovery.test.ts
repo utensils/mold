@@ -479,6 +479,69 @@ describe("reconcileInterruptedGenerationJobs", () => {
     expect(job.status).toBe("error");
   });
 
+  it("adopts the id of the row it recovered, so the job can still be cancelled", async () => {
+    // Suspension can beat the queued SSE frame, leaving the job with no id.
+    // `findQueueEntry` recovers the row by seed, timing, model and metadata —
+    // and if that id is not written back, the durable branch waits on work
+    // that `cancel()` still refuses to touch ("Remote cancellation was not
+    // confirmed"): identified, and uncancellable.
+    let queuePolls = 0;
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/queue") {
+        queuePolls += 1;
+        return Promise.resolve({
+          entries:
+            queuePolls === 1
+              ? [
+                  {
+                    id: "recovered-id",
+                    model: "ltx2:q8",
+                    state: "queued",
+                    position: 0,
+                    durable: true,
+                    started_at_unix_ms: job.submittedAtUnixMs + 10,
+                    metadata: galleryPrint.metadata,
+                  },
+                ]
+              : [],
+        });
+      }
+      if (path === "/api/gallery") return Promise.resolve([galleryPrint]);
+      return Promise.reject(new Error(`Unexpected path ${path}`));
+    });
+    const job = makeJob({ id: "" });
+    await reconcileInterruptedGenerationJobs([job], options());
+
+    expect(job.id).toBe("recovered-id");
+    expect(job.status).toBe("complete");
+  });
+
+  it("adopts the id before deleting a row the host did not journal", async () => {
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/queue") {
+        return Promise.resolve({
+          entries: [
+            {
+              id: "zombie-id",
+              model: "ltx2:q8",
+              state: "queued",
+              position: 0,
+              durable: false,
+              started_at_unix_ms: job.submittedAtUnixMs + 10,
+              metadata: galleryPrint.metadata,
+            },
+          ],
+        });
+      }
+      return Promise.reject(new Error(`Unexpected path ${path}`));
+    });
+    const job = makeJob({ id: "" });
+    await reconcileInterruptedGenerationJobs([job], options());
+
+    expect(job.id).toBe("zombie-id");
+    expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/queue/zombie-id", { method: "DELETE" });
+  });
+
   it("waits out the handoff gap when a retained job is briefly absent", async () => {
     // Between the retained worker exiting and restart replay running, the
     // durable row is invisible to /api/queue. A successful EMPTY listing in

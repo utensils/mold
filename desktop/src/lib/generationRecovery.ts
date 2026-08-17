@@ -599,6 +599,13 @@ async function reconcileJob(job: Job, opts: GenerationRecoveryOptions): Promise<
       // transport failure and waits out.
       const rows = Array.isArray(listing?.entries) ? listing.entries : [];
       const entry = findQueueEntry(rows, job, h3Identity);
+      // Adopt the recovered id immediately. The pre-ID join identifies the row
+      // by seed, timing, model and conditioning when suspension beat the queued
+      // frame — and every id-keyed action downstream, `cancel()` above all,
+      // reads `job.id`. Without this the durable branch can wait on a job the
+      // user is then told cannot be cancelled ("Remote cancellation was not
+      // confirmed"): identified by this client, and uncancellable by it.
+      if (entry && !job.id) job.id = entry.id;
       if (entry?.state === "running") {
         // Still developing server-side — re-attach by polling until it
         // leaves the queue, then collect the print from the gallery.
