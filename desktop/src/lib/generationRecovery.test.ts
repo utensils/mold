@@ -752,9 +752,7 @@ describe("reconcileInterruptedGenerationJobs", () => {
       if (path === "/api/queue") {
         polls += 1;
         return Promise.resolve({
-          entries: [
-            { id: "job-9", model: "ltx2:q8", state: "queued", position: 0, durable: true },
-          ],
+          entries: [{ id: "job-9", model: "ltx2:q8", state: "queued", position: 0, durable: true }],
         });
       }
       if (path === "/api/gallery") return Promise.resolve([]);
