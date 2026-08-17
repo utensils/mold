@@ -557,9 +557,11 @@ export const useGenerationStore = defineStore("generation", {
       // re-resolved current host. Siblings normally share one.
       const groups = new Map<string, { target: ApiTarget; label: string; jobs: Job[] }>();
       for (const job of candidates) {
-        // No frozen target and no live connection means there is no host to
-        // ask — leave the job's settled outcome exactly as the stream left it.
-        const target = targets.get(job.clientId) ?? connectedTarget();
+        // ONLY the frozen route. A job with none was never accepted anywhere
+        // this client can name, and resolving "the primary" now could point at
+        // a machine that never ran it — which recovery would then read prints
+        // from, or DELETE a matching queued row on.
+        const target = targets.get(job.clientId);
         if (!target) continue;
         const key = `${target.baseUrl}|${job.hostLabel ?? ""}`;
         const group = groups.get(key) ?? {
@@ -846,6 +848,16 @@ export const useGenerationStore = defineStore("generation", {
       }
       job.streamStarted = true;
       const body = chainRoute ? buildAutoChainRequest(req, chainRoute) : transportRequest;
+      // Freeze the exact host this stream opens against. Submit already
+      // snapshots the primary, but a job admitted while nothing was connected
+      // has no route recorded — and `sseStream` would then resolve the primary
+      // AGAIN, later, possibly a different machine. Recovery and cancel key off
+      // this map, and asking (or DELETEing on) a host that never ran the job is
+      // the one outcome the frozen-route invariant exists to prevent.
+      const streamTarget = target ?? connectedTarget();
+      if (streamTarget && !targets.has(job.clientId)) {
+        targets.set(job.clientId, streamTarget);
+      }
       await sseStream(path, {
         method: "POST",
         body,
@@ -854,7 +866,7 @@ export const useGenerationStore = defineStore("generation", {
         ...(job.metadataOnlyCompletion
           ? { headers: { "X-Mold-SSE-Payload": "metadata-only" } }
           : {}),
-        ...(target ? { target } : {}),
+        ...(streamTarget ? { target: streamTarget } : {}),
         onEvent: (event, data) => {
           const current = job;
           // Abort/reset/cancel and terminal frames are final. Some SSE

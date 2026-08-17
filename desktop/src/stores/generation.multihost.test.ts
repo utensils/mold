@@ -21,6 +21,13 @@ vi.mock("../lib/gallery/media", async (importOriginal) => ({
   evictMedia: (...a: unknown[]) => evictMedia(...a),
 }));
 
+/** The live primary connection, re-pointable mid-test. */
+const primary = vi.hoisted(() => ({
+  target: { baseUrl: "http://primary:7680", apiKey: "pk" } as {
+    baseUrl: string;
+    apiKey: string | null;
+  } | null,
+}));
 const apiFetchTo = vi.fn().mockResolvedValue(new Response(null, { status: 200 }));
 const apiJsonTo = vi.fn().mockResolvedValue([]);
 vi.mock("../lib/api/client", () => ({
@@ -34,7 +41,10 @@ vi.mock("../lib/api/client", () => ({
   },
   apiFetchTo: (...a: unknown[]) => apiFetchTo(...a),
   apiJsonTo: (...a: unknown[]) => apiJsonTo(...a),
-  currentTarget: () => ({ baseUrl: "http://primary:7680", apiKey: "pk" }),
+  currentTarget: () => {
+    if (!primary.target) throw new Error("No engine connected.");
+    return primary.target;
+  },
 }));
 
 vi.mock("../lib/notify", () => ({
@@ -94,6 +104,7 @@ function completeFrame() {
 
 beforeEach(() => {
   setActivePinia(createPinia());
+  primary.target = { baseUrl: "http://primary:7680", apiKey: "pk" };
   vi.clearAllMocks();
   apiFetchTo.mockResolvedValue(new Response(null, { status: 200 }));
   streamableMediaUrl.mockResolvedValue("https://hal9000/media/generated-video");
@@ -719,6 +730,52 @@ describe("generation store multi-host routing", () => {
     expect(target.baseUrl).toBe("http://hal9000:7680");
     expect(path).toBe("/api/queue/srv-1");
     expect(init.method).toBe("DELETE");
+  });
+
+  it("reconciles against the host that ACCEPTED the job, not the current primary", async () => {
+    // Nothing is frozen at submit when no engine is connected yet, so recovery
+    // used to ask whatever the primary had BECOME. Against a different machine
+    // that is destructive: it can claim a print that is not ours, or DELETE a
+    // queued row on a host that never ran our work. The frozen-route invariant
+    // (CLAUDE.md) exists for exactly this.
+    primary.target = null; // submit finds no connection
+    const asked: string[] = [];
+    apiJsonTo.mockImplementation((target: { baseUrl: string }, path: string) => {
+      asked.push(`${target?.baseUrl ?? "?"}${path}`);
+      if (path === "/api/queue") return Promise.resolve({ entries: [] });
+      return Promise.resolve([]);
+    });
+    sseStream.mockImplementation(
+      (_path: string, opts: { onEvent: (e: string, d: string) => void }) => {
+        opts.onEvent("progress", JSON.stringify({ type: "queued", position: 1, id: "srv-1" }));
+        // The user switches machines while this job is in flight.
+        primary.target = { baseUrl: "http://other:7680", apiKey: "ok" };
+        return Promise.resolve();
+      },
+    );
+    const store = useGenerationStore();
+    const { settled } = store.submitBatch(request(), 1);
+    // The engine comes up between submit and the stream opening.
+    primary.target = { baseUrl: "http://accepted:7680", apiKey: "ak" };
+    await settled;
+
+    expect(asked.length).toBeGreaterThan(0);
+    expect(asked.every((call) => call.startsWith("http://accepted:7680"))).toBe(true);
+    expect(asked.some((call) => call.startsWith("http://other:7680"))).toBe(false);
+  });
+
+  it("reconciles nothing at all when no host can be named for the job", async () => {
+    // Never connected: the request reached no machine, so there is no host to
+    // ask and every question would be about someone else's queue.
+    primary.target = null;
+    apiJsonTo.mockImplementation(() => Promise.resolve([]));
+    sseStream.mockRejectedValue(new Error("No engine connected."));
+    const store = useGenerationStore();
+    const { jobs, settled } = store.submitBatch(request(), 1);
+    await settled;
+
+    expect(apiJsonTo).not.toHaveBeenCalled();
+    expect(jobs[0]?.status).toBe("error");
   });
 
   it("reconciles a retained job to the print the host finished, never a failure", async () => {
