@@ -864,12 +864,19 @@ async fn submit_child(
             execution_equivalence_fingerprint: plan.equivalence.clone(),
             prepared_inputs: plan.prepared_inputs.clone(),
         }),
+        // Batch children are recovered by the batch transaction's own durable
+        // manifest, never by the singleton journal.
+        journal: None,
         #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
         h3_private_ingress_grant: None,
     };
     state
         .queue
-        .submit_when_available(job, state.queue_capacity, &admission_cancellation)
+        .submit_when_available(
+            &mut Some(job),
+            state.queue_capacity,
+            &admission_cancellation,
+        )
         .await
         .inspect_err(|_| state.job_registry.remove(&id))
         .map_err(|error| match error {

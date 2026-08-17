@@ -26,10 +26,12 @@ pub mod dispatch_mode;
 pub mod downloads;
 pub mod events;
 pub mod execution_plan;
+pub mod generation_cancel;
 pub mod gpu_pool;
 pub mod gpu_worker;
 pub mod instance;
 pub mod job_registry;
+pub mod job_supervisor;
 pub mod logging;
 mod ltx2_admission;
 #[cfg(feature = "mdns")]
@@ -40,6 +42,7 @@ pub mod metrics;
 pub mod model_cache;
 pub mod model_manager;
 pub mod queue;
+pub mod queue_journal;
 pub mod rate_limit;
 pub mod reference_uploads;
 pub mod request_id;
@@ -301,6 +304,23 @@ pub async fn run_server(
             std::sync::Arc::new(None)
         }
     };
+    // Resolved here rather than at its later assignment to `state` so the
+    // queue journal can use it: the identity is `(data dir, port)`-scoped, which
+    // is exactly the evidence a restarting server needs to recognise its own
+    // retained queue among a peer's.
+    let instance_id = instance::resolve_instance_id(metadata_db.as_ref().as_ref(), port);
+    // Built before any GPU owner thread exists: a worker that quarantines
+    // itself must be able to raise the retention fence, and that is the one
+    // restart mold performs on its own behalf.
+    let queue_journal = std::sync::Arc::new(queue_journal::QueueJournal::new(
+        metadata_db.clone(),
+        Config::mold_dir().as_deref(),
+        &instance_id,
+    ));
+    let generation_cancel = std::sync::Arc::new(generation_cancel::CancelRegistry::new());
+    if queue_journal.is_enabled() {
+        info!("durable generation queue enabled");
+    }
     let device_registry =
         std::sync::Arc::new(device_registry::DeviceRegistry::from_runtime_inventory(
             discovered,
@@ -372,6 +392,8 @@ pub async fn run_server(
                 poisoned: AtomicBool::new(false),
                 fatal_cuda_error: fatal_cuda_error.clone(),
                 fatal_cuda_shutdown: fatal_cuda_shutdown.clone(),
+                queue_journal: queue_journal.clone(),
+                generation_cancel: generation_cancel.clone(),
                 shutdown_requested: AtomicBool::new(false),
                 drain_state: std::sync::atomic::AtomicU8::new(crate::gpu_pool::DRAIN_RUNNING),
                 owner_thread_id: std::sync::OnceLock::new(),
@@ -419,6 +441,8 @@ pub async fn run_server(
                     shared_pool: shared_pool.clone(),
                     fatal_cuda_error: fatal_cuda_error.clone(),
                     fatal_cuda_shutdown: fatal_cuda_shutdown.clone(),
+                    queue_journal: queue_journal.clone(),
+                    generation_cancel: generation_cancel.clone(),
                     scheduler_tx: scheduler_worker_tx.clone(),
                     owner_spawner: std::sync::Arc::new(gpu_pool::RuntimeOwnerThreadSpawner),
                     max_cached,
@@ -616,6 +640,8 @@ pub async fn run_server(
             .with_placement_preview(placement_preview_tx);
     }
     state.metadata_db = metadata_db;
+    state.queue_journal = queue_journal.clone();
+    state.generation_cancel = generation_cancel.clone();
     state.device_registry = device_registry;
 
     let mut recovered_live_batches = None;
@@ -663,10 +689,7 @@ pub async fn run_server(
     // runs on the same DB — its address changes every run anyway. Captured
     // for mDNS here because `state` is moved into the router before the TXT
     // records are built.
-    state.instance_id = std::sync::Arc::new(instance::resolve_instance_id(
-        state.metadata_db.as_ref().as_ref(),
-        port,
-    ));
+    state.instance_id = std::sync::Arc::new(instance_id);
     #[cfg(feature = "mdns")]
     let mdns_instance_id = state.instance_id.clone();
 
@@ -816,6 +839,72 @@ pub async fn run_server(
         );
     }
 
+    // A SIGKILL runs no destructor, so every hard stop used to leak a
+    // directory of reference media under MOLD_HOME. Swept in the same startup
+    // pass that recovers the queue, because the two have the same cause.
+    {
+        let sweep = reference_uploads::sweep_orphaned_staging_roots(state.reference_uploads.root());
+        if sweep.removed > 0 || sweep.live > 0 {
+            info!(
+                removed = sweep.removed,
+                live = sweep.live,
+                "swept reference-upload staging roots"
+            );
+        }
+        if sweep.untracked > 0 {
+            // Not deleted on purpose: without a lock their liveness cannot be
+            // established, and another server may still be using them.
+            info!(
+                untracked = sweep.untracked,
+                "reference-upload staging roots predate lock tracking and were left alone; \
+                 remove them by hand once no other mold server is using this MOLD_HOME"
+            );
+        }
+    }
+
+    // Reclaim gallery writes that were staged but never published. The bounded
+    // shutdown deadline makes an interrupted write routine, so without this the
+    // partials accumulate forever.
+    {
+        let config = state.config.read().await;
+        if !state.is_output_disabled(&config) {
+            let output_dir = config.effective_output_dir();
+            drop(config);
+            let swept = tokio::task::spawn_blocking(move || {
+                queue::sweep_stale_gallery_partials(&output_dir)
+            })
+            .await
+            .unwrap_or(0);
+            if swept > 0 {
+                info!(
+                    swept,
+                    "removed gallery writes interrupted before publication"
+                );
+            }
+        }
+    }
+
+    // Retained generations resume before the router serves, as ONE sequential
+    // task: `submit_when_available` serializes on a single global capacity
+    // mutex, so parallel replay would land in arbitrary order and destroy the
+    // ordering the journal exists to preserve.
+    {
+        let report = crate::queue_journal::replay(&state, startup.start_generation_runner).await;
+        if report.resumed > 0
+            || report.held > 0
+            || report.already_completed > 0
+            || report.skipped_unverified > 0
+        {
+            info!(
+                resumed = report.resumed,
+                already_completed = report.already_completed,
+                held = report.held,
+                skipped_unverified = report.skipped_unverified,
+                "durable generation queue replay complete"
+            );
+        }
+    }
+
     // Background idle-TTL sweeper: reclaims parked engines that haven't been
     // touched for `MOLD_CACHE_IDLE_TTL_SECS` seconds. Abort handle bound to
     // graceful shutdown like every other long-running task in this fn.
@@ -934,9 +1023,21 @@ pub async fn run_server(
     *state.shutdown_tx.lock().await = Some(shutdown_tx);
     let shutdown_scheduler = scheduler_shutdown.clone();
     let shutdown_chain_jobs = state.chain_jobs.clone();
+    let shutdown_journal = state.queue_journal.clone();
+    let shutdown_generation_cancel = state.generation_cancel.clone();
+    let shutdown_fatal_cuda = fatal_cuda_error.clone();
     tokio::spawn(async move {
         let _ = shutdown_request_rx.await;
-        begin_runtime_shutdown(shutdown_chain_jobs.as_deref(), &shutdown_scheduler);
+        // Armed BEFORE the sequence, not after it: everything below this
+        // point can block, and a deadline that only starts once the drain is
+        // over bounds nothing.
+        arm_shutdown_deadline(shutdown_fatal_cuda);
+        begin_runtime_shutdown(
+            shutdown_chain_jobs.as_deref(),
+            &shutdown_scheduler,
+            &shutdown_journal,
+            &shutdown_generation_cancel,
+        );
         let _ = http_shutdown_tx.send(());
     });
 
@@ -1069,6 +1170,8 @@ pub async fn run_server(
         }
     };
 
+    let fatal_cuda_journal = queue_journal.clone();
+    let fatal_cuda_deadline = fatal_cuda_error.clone();
     let server = std::future::IntoFuture::into_future(
         axum::serve(
             listener,
@@ -1083,6 +1186,14 @@ pub async fn run_server(
     tokio::select! {
         result = &mut server => result?,
         _ = fatal_cuda_shutdown.notified() => {
+            // Before anything discards: this path ends in `anyhow::bail!` and a
+            // supervised restart, so the queue must survive it. Missing this
+            // fence would make the one restart mold performs on its own behalf
+            // the one that deletes every queued job.
+            fatal_cuda_journal.retain_all();
+            // Same bound as the operator-initiated path: this restart is the
+            // one mold performs on its own behalf, and it must not hang.
+            arm_shutdown_deadline(fatal_cuda_deadline);
             tracing::error!("fatal CUDA context error; stopping server for process restart");
             // Give the triggering request a brief window to receive its explicit
             // fatal-context error, then drop the server future. A normal graceful
@@ -1142,12 +1253,28 @@ pub async fn run_server(
     // Joining here makes an in-process server restart incapable of inheriting
     // detached CUDA owner threads or contexts.
     let shutdown_pool = gpu_pool.clone();
-    tokio::task::spawn_blocking(move || {
+    let join = tokio::task::spawn_blocking(move || {
         shutdown_pool.workers.shutdown_and_join_all();
         gpu_owner_threads.shutdown_and_join()
-    })
-    .await
-    .map_err(|error| anyhow::anyhow!("failed to run GPU owner join task: {error}"))??;
+    });
+    // Stop *awaiting* the owners at the budget so a lifecycle owner that can
+    // still act gets control back. This is deliberately not the bound —
+    // dropping a `spawn_blocking` handle does not cancel the blocking work,
+    // and the runtime waits on it at teardown. `arm_shutdown_deadline`, armed
+    // when shutdown began, is what actually ends an overrunning process.
+    let budget = std::time::Duration::from_secs(resolve_shutdown_abort_secs());
+    match tokio::time::timeout(budget, join).await {
+        Ok(joined) => joined
+            .map_err(|error| anyhow::anyhow!("failed to run GPU owner join task: {error}"))??,
+        Err(_) => {
+            tracing::warn!(
+                budget_secs = budget.as_secs(),
+                env = SHUTDOWN_ABORT_SECS_ENV,
+                "a GPU owner did not return within the shutdown budget; \
+                 no longer waiting — retained jobs replay after restart"
+            );
+        }
+    }
 
     if fatal_cuda_error.load(std::sync::atomic::Ordering::SeqCst) {
         anyhow::bail!("fatal CUDA context error; server restart required");
@@ -1156,10 +1283,158 @@ pub async fn run_server(
     Ok(())
 }
 
+/// Total budget for joining GPU owner threads at shutdown. The unit's
+/// `TimeoutStopSec` is derived from this and is strictly larger, so systemd is
+/// never the component that decides.
+pub const SHUTDOWN_ABORT_SECS_ENV: &str = "MOLD_SHUTDOWN_ABORT_SECS";
+/// Long enough for an ordinary render to reach its next checkpoint and unwind,
+/// short enough that a deploy never waits on a cold 19B load.
+pub const DEFAULT_SHUTDOWN_ABORT_SECS: u64 = 45;
+
+/// Resolve the shutdown join budget, warning rather than failing on nonsense.
+pub fn resolve_shutdown_abort_secs() -> u64 {
+    match std::env::var(SHUTDOWN_ABORT_SECS_ENV) {
+        Ok(raw) => match raw.trim().parse::<u64>() {
+            Ok(secs) if secs >= 1 => secs,
+            Ok(_) => {
+                tracing::warn!(
+                    env = SHUTDOWN_ABORT_SECS_ENV,
+                    "shutdown budget must be at least 1 second; using the default"
+                );
+                DEFAULT_SHUTDOWN_ABORT_SECS
+            }
+            Err(error) => {
+                tracing::warn!(
+                    env = SHUTDOWN_ABORT_SECS_ENV,
+                    raw = %raw,
+                    %error,
+                    "ignoring unparseable shutdown budget"
+                );
+                DEFAULT_SHUTDOWN_ABORT_SECS
+            }
+        },
+        Err(_) => DEFAULT_SHUTDOWN_ABORT_SECS,
+    }
+}
+
+/// Whether this process may end itself when the shutdown budget expires.
+///
+/// Off by default: `run_server` is also embedded in the desktop app, which
+/// runs it on a thread inside its own process and expects it to *return*.
+/// Exiting there would take the whole application down over a slow engine
+/// stop. `mold serve` and the standalone binary opt in.
+static HARD_SHUTDOWN_EXIT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Opt this process into ending itself if shutdown overruns its budget.
+///
+/// Call once, before `run_server`, from a binary whose only job is to be the
+/// server. Without it the budget can only stop *waiting*, which is not the
+/// same as bounding shutdown: dropping a `spawn_blocking` handle does not
+/// cancel the blocking work, and the runtime blocks on it at teardown.
+pub fn allow_hard_shutdown_exit() {
+    HARD_SHUTDOWN_EXIT.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+fn hard_shutdown_exit_allowed() -> bool {
+    HARD_SHUTDOWN_EXIT.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// What expiry of the shutdown budget should do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ShutdownExpiry {
+    /// End the process now. The status distinguishes an operator-initiated
+    /// stop that merely overran from a fatal-CUDA stop that supervision must
+    /// restart.
+    Exit(i32),
+    /// This process belongs to someone else; keep waiting and let them decide.
+    KeepWaiting,
+}
+
+pub(crate) fn shutdown_expiry_action(hard_exit_allowed: bool, fatal_cuda: bool) -> ShutdownExpiry {
+    if !hard_exit_allowed {
+        return ShutdownExpiry::KeepWaiting;
+    }
+    ShutdownExpiry::Exit(if fatal_cuda { 1 } else { 0 })
+}
+
+/// Arm the hard shutdown deadline the moment shutdown begins.
+///
+/// This is what makes `MOLD_SHUTDOWN_ABORT_SECS` a real bound rather than an
+/// aspiration. Two things in the drain are individually unbounded and neither
+/// can be fixed where it sits: Axum's graceful shutdown waits for in-flight
+/// responses, so an SSE stream whose generation is inside a cold model load
+/// holds it open indefinitely (the cancellation wrapper covers the generate
+/// call, not the load); and a `spawn_blocking` join cannot be cancelled by
+/// dropping its handle — the runtime waits on it at teardown regardless. A
+/// timeout placed anywhere *inside* the sequence therefore stops waiting
+/// without stopping anything.
+///
+/// So the deadline runs beside the drain instead of within it, and ends the
+/// process when it expires. That is safe precisely because of the two
+/// invariants this feature already established: the queue is retained before
+/// anything discards, and gallery bytes publish by rename, so a kill costs the
+/// in-flight render and nothing else. The retained rows replay on restart.
+fn spawn_shutdown_deadline(
+    budget: std::time::Duration,
+    fatal_cuda: std::sync::Arc<AtomicBool>,
+    hard_exit_allowed: bool,
+    on_expiry: impl FnOnce(ShutdownExpiry) + Send + 'static,
+) -> Option<tokio::task::JoinHandle<()>> {
+    if !hard_exit_allowed {
+        tracing::debug!(
+            "shutdown budget is advisory in an embedded server; the host owns the process"
+        );
+        return None;
+    }
+    Some(tokio::spawn(async move {
+        tokio::time::sleep(budget).await;
+        let fatal = fatal_cuda.load(std::sync::atomic::Ordering::SeqCst);
+        on_expiry(shutdown_expiry_action(true, fatal));
+    }))
+}
+
+/// Arm the deadline with the production expiry behaviour: log distinctly,
+/// then end the process.
+fn arm_shutdown_deadline(fatal_cuda: std::sync::Arc<AtomicBool>) {
+    let budget = std::time::Duration::from_secs(resolve_shutdown_abort_secs());
+    let allowed = hard_shutdown_exit_allowed();
+    let _ = spawn_shutdown_deadline(budget, fatal_cuda, allowed, move |action| match action {
+        ShutdownExpiry::Exit(status) => {
+            tracing::error!(
+                budget_secs = budget.as_secs(),
+                env = SHUTDOWN_ABORT_SECS_ENV,
+                status,
+                "shutdown did not complete within its budget; ending the process now — \
+                 retained generations replay on the next start"
+            );
+            std::process::exit(status);
+        }
+        ShutdownExpiry::KeepWaiting => {}
+    });
+}
+
+/// Order is the correctness argument, not a preference.
+///
+/// The retention fence goes up first, because every later step discards jobs:
+/// `scheduler_shutdown.cancel()` reaches `reject_all_unstarted`, which drops
+/// each pending `GenerationJob` and therefore its journal ticket. With the
+/// fence up those drops retain their rows instead of deleting them, and none
+/// of the ~20 discard sites has to know durability exists.
 fn begin_runtime_shutdown(
     chain_jobs: Option<&chain_job_runner::ChainJobRunnerHandle>,
     scheduler_shutdown: &tokio_util::sync::CancellationToken,
+    queue_journal: &queue_journal::QueueJournal,
+    generation_cancel: &generation_cancel::CancelRegistry,
 ) {
+    queue_journal.retain_all();
+    let aborted = generation_cancel.request_all();
+    if aborted > 0 {
+        tracing::info!(
+            aborted,
+            "aborting in-flight generations; they stay queued and are replayed after restart"
+        );
+    }
     if let Some(chain_jobs) = chain_jobs {
         let active_chains = chain_jobs.request_shutdown();
         tracing::info!(active_chains, "cancelled chain work before HTTP drain");
@@ -1279,12 +1554,171 @@ mod tests {
         chains.register_cancel_for_tests("chain-in-flight");
         let scheduler = tokio_util::sync::CancellationToken::new();
 
-        begin_runtime_shutdown(Some(&chains), &scheduler);
+        let journal = Arc::new(crate::queue_journal::QueueJournal::disabled());
+
+        let singletons = Arc::new(crate::generation_cancel::CancelRegistry::new());
+        begin_runtime_shutdown(Some(&chains), &scheduler, &journal, &singletons);
 
         assert!(chains.is_cancelling("chain-in-flight"));
         chains.register_cancel_for_tests("chain-claimed-during-shutdown");
         assert!(chains.is_cancelling("chain-claimed-during-shutdown"));
         assert!(scheduler.is_cancelled());
+    }
+
+    /// The whole correctness argument for retention: the fence has to be up
+    /// before anything can discard a job. `scheduler_shutdown.cancel()` is
+    /// what reaches `reject_all_unstarted`, so the fence must already be
+    /// visible from the moment that token resolves.
+    #[tokio::test]
+    async fn runtime_shutdown_retains_the_queue_before_cancelling_the_scheduler() {
+        let scheduler = tokio_util::sync::CancellationToken::new();
+        let journal = Arc::new(crate::queue_journal::QueueJournal::disabled());
+
+        let observed = Arc::new(AtomicBool::new(false));
+        let watcher = {
+            let scheduler = scheduler.clone();
+            let journal = journal.clone();
+            let observed = observed.clone();
+            tokio::spawn(async move {
+                scheduler.cancelled().await;
+                observed.store(journal.is_retaining(), std::sync::atomic::Ordering::SeqCst);
+            })
+        };
+
+        begin_runtime_shutdown(
+            None,
+            &scheduler,
+            &journal,
+            &crate::generation_cancel::CancelRegistry::new(),
+        );
+        watcher.await.unwrap();
+
+        assert!(
+            observed.load(std::sync::atomic::Ordering::SeqCst),
+            "the queue must already be retained when the scheduler starts discarding"
+        );
+    }
+
+    #[test]
+    fn shutdown_budget_falls_back_to_the_default_for_nonsense() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        std::env::set_var(super::SHUTDOWN_ABORT_SECS_ENV, "90");
+        assert_eq!(super::resolve_shutdown_abort_secs(), 90);
+        std::env::set_var(super::SHUTDOWN_ABORT_SECS_ENV, "0");
+        assert_eq!(
+            super::resolve_shutdown_abort_secs(),
+            super::DEFAULT_SHUTDOWN_ABORT_SECS
+        );
+        std::env::set_var(super::SHUTDOWN_ABORT_SECS_ENV, "soon");
+        assert_eq!(
+            super::resolve_shutdown_abort_secs(),
+            super::DEFAULT_SHUTDOWN_ABORT_SECS
+        );
+        std::env::remove_var(super::SHUTDOWN_ABORT_SECS_ENV);
+        assert_eq!(
+            super::resolve_shutdown_abort_secs(),
+            super::DEFAULT_SHUTDOWN_ABORT_SECS
+        );
+    }
+
+    /// The budget is only meaningful if expiry actually ends the process. A
+    /// server embedded in the desktop app owns neither the process nor the
+    /// decision, so it keeps waiting instead.
+    #[test]
+    fn shutdown_expiry_exits_only_where_the_process_is_ours_to_end() {
+        use super::{shutdown_expiry_action, ShutdownExpiry};
+
+        assert_eq!(
+            shutdown_expiry_action(true, false),
+            ShutdownExpiry::Exit(0),
+            "an operator-initiated stop that overran is still a clean stop"
+        );
+        assert_eq!(
+            shutdown_expiry_action(true, true),
+            ShutdownExpiry::Exit(1),
+            "a fatal-CUDA stop must exit non-zero so supervision restarts us"
+        );
+        assert_eq!(
+            shutdown_expiry_action(false, false),
+            ShutdownExpiry::KeepWaiting
+        );
+        assert_eq!(
+            shutdown_expiry_action(false, true),
+            ShutdownExpiry::KeepWaiting
+        );
+    }
+
+    /// The property that matters: the deadline is armed when shutdown *starts*
+    /// and runs independently of the drain, so a request that never completes
+    /// — an SSE stream held open by a cold model load, which is exactly the
+    /// incident this exists for — cannot postpone it.
+    #[tokio::test(start_paused = true)]
+    async fn the_shutdown_deadline_fires_even_when_the_drain_never_completes() {
+        let fired = Arc::new(AtomicBool::new(false));
+        let fatal = Arc::new(AtomicBool::new(false));
+
+        // Stands in for axum's graceful drain waiting on an in-flight SSE
+        // response whose generation is still loading its model.
+        let blocked_drain = tokio::spawn(std::future::pending::<()>());
+
+        let observed = fired.clone();
+        let deadline =
+            super::spawn_shutdown_deadline(Duration::from_secs(45), fatal, true, move |action| {
+                assert_eq!(action, super::ShutdownExpiry::Exit(0));
+                observed.store(true, std::sync::atomic::Ordering::SeqCst);
+            })
+            .expect("a process that owns its lifecycle arms the deadline");
+
+        tokio::time::advance(Duration::from_secs(46)).await;
+        deadline.await.unwrap();
+
+        assert!(
+            fired.load(std::sync::atomic::Ordering::SeqCst),
+            "the deadline must not be reachable only after the drain finishes"
+        );
+        assert!(!blocked_drain.is_finished());
+        blocked_drain.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_embedded_server_arms_no_deadline() {
+        let fatal = Arc::new(AtomicBool::new(false));
+        assert!(
+            super::spawn_shutdown_deadline(Duration::from_secs(1), fatal, false, |_| panic!(
+                "an embedded server must never end its host process"
+            ),)
+            .is_none()
+        );
+    }
+
+    /// Shutdown must abort the running render, not just stop admitting new
+    /// work — waiting for a video generation is structurally unbounded.
+    #[test]
+    fn runtime_shutdown_aborts_in_flight_generations() {
+        let scheduler = tokio_util::sync::CancellationToken::new();
+        let journal = Arc::new(crate::queue_journal::QueueJournal::disabled());
+        let singletons = Arc::new(crate::generation_cancel::CancelRegistry::new());
+        let running = singletons.token("job-1");
+        assert!(!running.is_cancelled());
+
+        begin_runtime_shutdown(None, &scheduler, &journal, &singletons);
+
+        assert!(running.is_cancelled());
+    }
+
+    /// A worker that quarantines itself is initiating the one restart mold
+    /// performs on its own behalf. Without this fence that restart is also the
+    /// one that deletes the entire queue.
+    #[test]
+    fn quarantining_a_worker_retains_the_queue() {
+        let (mut worker, _rx) = owner_test_worker();
+        let journal = Arc::new(crate::queue_journal::QueueJournal::disabled());
+        Arc::get_mut(&mut worker).unwrap().queue_journal = journal.clone();
+        assert!(!journal.is_retaining());
+
+        gpu_worker::quarantine_poisoned_worker(&worker);
+
+        assert!(journal.is_retaining());
     }
 
     #[test]
@@ -1697,6 +2131,8 @@ mod tests {
                 poisoned: AtomicBool::new(false),
                 fatal_cuda_error: Arc::new(AtomicBool::new(false)),
                 fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
+                queue_journal: Arc::new(crate::queue_journal::QueueJournal::disabled()),
+                generation_cancel: Arc::new(crate::generation_cancel::CancelRegistry::new()),
                 shutdown_requested: AtomicBool::new(false),
                 drain_state: std::sync::atomic::AtomicU8::new(crate::gpu_pool::DRAIN_RUNNING),
                 owner_thread_id: std::sync::OnceLock::new(),

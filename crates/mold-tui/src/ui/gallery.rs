@@ -327,6 +327,7 @@ mod tests {
             sample_shift: None,
             distill_strength_high: None,
             distill_strength_low: None,
+            job_id: None,
             prompt: "test prompt".to_string(),
             negative_prompt: None,
             original_prompt: None,

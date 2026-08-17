@@ -109,6 +109,9 @@ pub async fn list_active_work(State(state): State<AppState>) -> Json<ActiveWorkS
             || match entry.state {
                 crate::job_registry::JobLifecycle::Queued => "queued",
                 crate::job_registry::JobLifecycle::Running => "running",
+                // Held work is parked, not in flight. The activity strip is
+                // present-tense only.
+                crate::job_registry::JobLifecycle::Held => "held",
             },
             |activity| activity.phase,
         );

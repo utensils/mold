@@ -245,6 +245,76 @@ Environment variables take precedence over config file values.
 | `MOLD_FLUX_DELTA_CACHE`       | `1`                 | `0` disables the CPU-side FLUX LoRA delta cache (~25 GB host RAM on typical FLUX LoRAs). Disabling forces a sub-second `B@A·scale` recompute on each rebuild.                                            |
 | `MOLD_FLUX_KEEP_TRANSFORMER`  | `0`                 | `1` keeps the FLUX transformer GPU-resident across same-LoRA generations (saves a full GGUF+LoRA rebuild). Server force-drops it if VAE decode headroom is too tight at that resolution.                 |
 
+### Durable queue and shutdown
+
+A queued generation survives a server restart: it is recorded in `mold.db`
+before it is queued and replayed automatically at the next start, under its
+original job id. `GET /api/capabilities` reports `queue.durable_queue` — false on a host with
+server gallery output disabled, which cannot promise durability for anything —
+and each row in `GET /api/queue` reports whether that particular job is durable —
+a job with no gallery target, one carrying reference-upload media, or one
+whose request exceeds the payload ceiling runs normally but is not replayed.
+
+| Variable                           | Default             | Description                                                                                                                                                                                                                                                                                                                                                                   |
+| ---------------------------------- | ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `MOLD_QUEUE_JOURNAL_DISABLE`       | —                   | `1` turns the durable queue off entirely. Jobs still run; nothing survives a restart, and `queue.durable_queue` reports `false`.                                                                                                                                                                                                                                              |
+| `MOLD_QUEUE_JOURNAL_MAX_BYTES`     | `33554432` (32 MiB) | Ceiling on one recorded request. A larger request (an inline video, say) runs normally and is reported `durable: false` rather than being half-persisted.                                                                                                                                                                                                                     |
+| `MOLD_QUEUE_MAX_DISPATCH_ATTEMPTS` | `2`                 | How many times a worker may start a job before it is **held** instead of retried. Charged only when a worker actually claims the job, so a job that merely waits behind a long render through many restarts is never charged.                                                                                                                                                 |
+| `MOLD_QUEUE_MAX_REPLAY_SEEN`       | `10`                | How many restarts may replay a job that never starts before it is **held**. Sized for a crash loop; ordinary deploys never approach it.                                                                                                                                                                                                                                       |
+| `MOLD_QUEUE_ADOPT_OWNER`           | —                   | Adopt a specific orphaned queue by its owner id, printed in the startup warning. Only needed when several retained queues share one `MOLD_HOME` and none matches this server.                                                                                                                                                                                                 |
+| `MOLD_SHUTDOWN_ABORT_SECS`         | `45`                | Hard deadline for the whole shutdown after `SIGTERM`. The running generation is aborted at its next checkpoint and requeued; queued work is retained and replayed. If shutdown overruns, `mold serve` ends the process rather than wait — a cold model load is not interruptible, and hanging past systemd's stop timeout is what used to get the server SIGKILLed mid-write. |
+
+A **held** job is listed by `GET /api/queue` with `state: "held"` and a reason,
+and is never started automatically — it is waiting for you to look at it.
+Clear one with `DELETE /api/queue/{id}`.
+
+### Sharing one MOLD_HOME between servers
+
+Each server owns its queue through a record under
+`$MOLD_HOME/queue-owners/`, so two servers on different ports never replay each
+other's work. A server recognises its own queue after a restart, including
+after a port change, in every case but one: if several retained queues are
+present and none was last used by this server, it cannot tell which is its own.
+It then starts with a fresh queue and warns at startup, naming each orphaned
+owner with its last-known instance and its queued and held row counts. Adopt
+one deliberately with:
+
+```bash
+MOLD_QUEUE_ADOPT_OWNER=<owner-id-from-the-warning> mold serve
+```
+
+There is one case the server deliberately gets wrong rather than leave work
+stranded. If exactly **one** retained queue is present, nobody is running it,
+and it was last used by a different server, the starting server adopts it and
+says so loudly in the log. Nearly always that is correct — it is the same
+server coming back on a changed port, which is precisely what the queue is
+designed to survive, and what makes the "this job will finish on the host"
+message clients show at shutdown true rather than a lie.
+
+But a genuinely **new** second server, started while the first is stopped
+against a `MOLD_HOME` that holds one retained queue, cannot be distinguished
+from that and will adopt the queue too. It runs the other server's jobs. The
+trade is deliberate: a silently stranded queue is worse than an announced
+adoption, because nothing tells the user their job is never coming. If you are
+adding a second server to an existing `MOLD_HOME`, start it while the first is
+running, or drain the first server's queue before you do.
+
+Under systemd, set the budget through the NixOS module rather than the
+environment, so the unit's stop timeout stays derived from it:
+
+```nix
+services.mold.shutdown.abortSeconds = 45;  # TimeoutStopSec becomes 105s
+```
+
+Do not set `TimeoutStopSec=infinity`: with a durable queue the right response
+to a wedged worker is to exit and replay, not to hang the deploy.
+
+When the deadline expires the server exits with status 0 for an ordinary stop
+that merely overran, and 1 for a shutdown triggered by a fatal CUDA error so
+`Restart=on-failure` brings it back. The desktop app's built-in engine never
+does this — it runs inside a process it does not own, so its budget only stops
+it waiting.
+
 ### Upscaling
 
 | Variable                 | Default | Description                                                    |

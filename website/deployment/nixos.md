@@ -112,6 +112,10 @@ works for SPA hot-iteration without recompiling Rust.
     # gpus = "0,1";
     # queueSize = 200; # max queued jobs; overflow returns HTTP 503
 
+    # Stop budget — the running generation is aborted at its next checkpoint
+    # and requeued; queued work is retained and replayed on the next start.
+    # shutdown.abortSeconds = 45;
+
     # Image persistence — save copies of all server-generated images
     # outputDir = "/srv/mold/gallery";
 
@@ -157,32 +161,33 @@ works for SPA hot-iteration without recompiling Rust.
 
 ### Server Options
 
-| Option             | Type        | Default             | Description                                                          |
-| ------------------ | ----------- | ------------------- | -------------------------------------------------------------------- |
-| `enable`           | bool        | `false`             | Enable the mold server                                               |
-| `package`          | package     | —                   | The mold package (must set explicitly)                               |
-| `cudaArch`         | null/enum   | `null`              | See the exact advisory architecture-to-package mapping below         |
-| `port`             | port        | `7680`              | HTTP server port                                                     |
-| `bindAddress`      | string      | `"0.0.0.0"`         | Address to bind                                                      |
-| `homeDir`          | string      | `"/var/lib/mold"`   | Base directory (MOLD_HOME)                                           |
-| `modelsDir`        | string      | `homeDir + /models` | Model storage directory                                              |
-| `logLevel`         | enum        | `"info"`            | Log level (trace/debug/info/warn/error)                              |
-| `corsOrigin`       | null/string | `null`              | CORS origin restriction (null = permissive)                          |
-| `openFirewall`     | bool        | `false`             | Open firewall port (also UDP 5353 when `mdns` is on)                 |
-| `mdns`             | bool        | `true`              | Advertise and browse `_mold._tcp`; `false` sets `MOLD_MDNS=0`        |
-| `defaultModel`     | null/string | `null`              | Default model name                                                   |
-| `gpus`             | null/string | `null`              | `all`, `none`, ordinals, or stable CUDA/Metal/NVIDIA UUID IDs        |
-| `queueSize`        | null/int    | `null`              | Max queued generation jobs (null = default 200)                      |
-| `outputDir`        | null/string | `null`              | Image output directory (default: `homeDir/output`)                   |
-| `hfTokenFile`      | null/path   | `null`              | Path to overridable default HuggingFace token                        |
-| `civitaiTokenFile` | null/path   | `null`              | Path to overridable default Civitai token                            |
-| `apiKeyFile`       | null/path   | `null`              | Path to file with API key(s) for authentication (e.g. agenix secret) |
-| `rateLimit`        | null/string | `null`              | Per-IP rate limit (e.g. `"10/min"`)                                  |
-| `rateLimitBurst`   | null/int    | `null`              | Override burst allowance (defaults to 2x rate)                       |
-| `logToFile`        | bool        | `false`             | Enable file logging (in addition to journal)                         |
-| `logDir`           | string      | `homeDir + /logs`   | Directory for log files when `logToFile` is enabled                  |
-| `logRetentionDays` | int         | `7`                 | Days to retain rotated log files                                     |
-| `environment`      | attrs       | `{}`                | Extra environment variables                                          |
+| Option                  | Type        | Default             | Description                                                          |
+| ----------------------- | ----------- | ------------------- | -------------------------------------------------------------------- |
+| `enable`                | bool        | `false`             | Enable the mold server                                               |
+| `package`               | package     | —                   | The mold package (must set explicitly)                               |
+| `cudaArch`              | null/enum   | `null`              | See the exact advisory architecture-to-package mapping below         |
+| `port`                  | port        | `7680`              | HTTP server port                                                     |
+| `bindAddress`           | string      | `"0.0.0.0"`         | Address to bind                                                      |
+| `homeDir`               | string      | `"/var/lib/mold"`   | Base directory (MOLD_HOME)                                           |
+| `modelsDir`             | string      | `homeDir + /models` | Model storage directory                                              |
+| `logLevel`              | enum        | `"info"`            | Log level (trace/debug/info/warn/error)                              |
+| `corsOrigin`            | null/string | `null`              | CORS origin restriction (null = permissive)                          |
+| `openFirewall`          | bool        | `false`             | Open firewall port (also UDP 5353 when `mdns` is on)                 |
+| `mdns`                  | bool        | `true`              | Advertise and browse `_mold._tcp`; `false` sets `MOLD_MDNS=0`        |
+| `defaultModel`          | null/string | `null`              | Default model name                                                   |
+| `gpus`                  | null/string | `null`              | `all`, `none`, ordinals, or stable CUDA/Metal/NVIDIA UUID IDs        |
+| `queueSize`             | null/int    | `null`              | Max queued generation jobs (null = default 200)                      |
+| `shutdown.abortSeconds` | int         | `45`                | Seconds the server waits for its GPU workers on stop (see below)     |
+| `outputDir`             | null/string | `null`              | Image output directory (default: `homeDir/output`)                   |
+| `hfTokenFile`           | null/path   | `null`              | Path to overridable default HuggingFace token                        |
+| `civitaiTokenFile`      | null/path   | `null`              | Path to overridable default Civitai token                            |
+| `apiKeyFile`            | null/path   | `null`              | Path to file with API key(s) for authentication (e.g. agenix secret) |
+| `rateLimit`             | null/string | `null`              | Per-IP rate limit (e.g. `"10/min"`)                                  |
+| `rateLimitBurst`        | null/int    | `null`              | Override burst allowance (defaults to 2x rate)                       |
+| `logToFile`             | bool        | `false`             | Enable file logging (in addition to journal)                         |
+| `logDir`                | string      | `homeDir + /logs`   | Directory for log files when `logToFile` is enabled                  |
+| `logRetentionDays`      | int         | `7`                 | Days to retain rotated log files                                     |
+| `environment`           | attrs       | `{}`                | Extra environment variables                                          |
 
 `cudaArch` does not select a package automatically. Set `package` to the
 matching flake output:
@@ -191,6 +196,31 @@ matching flake output:
 - `"ada"` → `packages.${system}.mold` (RTX 40-series, sm_89)
 - `"blackwell-datacenter"` → `packages.${system}.mold-sm100` (B200/B300, sm_100)
 - `"blackwell"` → `packages.${system}.mold-sm120` (RTX 50-series, sm_120)
+
+### Restarts and the durable queue
+
+Queued generations are recorded in `mold.db` and replayed automatically after a
+restart, under their original job ids, so `systemctl restart mold` during a busy
+queue no longer loses work. `shutdown.abortSeconds` (default 45) is a hard
+deadline on the whole shutdown, not just a wait: the running generation is
+aborted at its next inference checkpoint and requeued, and if shutdown overruns
+the server ends the process itself (status 0 for an ordinary stop, 1 after a
+fatal CUDA error so `Restart=on-failure` brings it back). A cold model load is
+not interruptible, so without that the unit would sit until systemd SIGKILLed
+it.
+
+The unit's `TimeoutStopSec` is **derived** from that option — `abortSeconds + 60`
+— so systemd is never the component that decides. Do not set
+`TimeoutStopSec=infinity` through `environment` or an override: with a durable
+queue the correct response to a wedged worker is to exit and replay, not to hang
+the deploy. Raising `abortSeconds` past a cold model load is likewise the wrong
+lever; the job comes back either way.
+
+A job that repeatedly fails to finish is **held** rather than retried forever.
+Held rows appear in `GET /api/queue` with `state: "held"` and a reason and are
+never started automatically. See
+[Durable queue and shutdown](/guide/configuration#durable-queue-and-shutdown)
+for the environment knobs behind this.
 
 ### Monitoring
 

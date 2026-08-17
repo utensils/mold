@@ -2650,9 +2650,21 @@ mod tests {
 
         let recovery_started = std::time::Instant::now();
         let mut recovered = DurableBatchParent::recover_unfenced(dir.path()).unwrap();
+        // A coarse tripwire for super-linear replay, not a performance SLO.
+        // The journal is 1025 records of 1025-element vectors, so it is already
+        // quadratic in bytes; the bug this guards against — re-parsing or
+        // re-cloning per record — costs minutes, not seconds.
+        //
+        // The budget is deliberately far above the observed cost rather than
+        // just above it. An unoptimized debug build measures ~8.5-9 s here on
+        // a developer machine, and that figure moves by 40% from nothing more
+        // than added test code elsewhere in the crate changing how rustc
+        // partitions codegen units. A budget sitting ~15% above the
+        // measurement therefore fails on binary growth that has nothing to do
+        // with replay, which is what it did.
         assert!(
-            recovery_started.elapsed() < std::time::Duration::from_secs(10),
-            "linear legacy replay exceeded its regression budget"
+            recovery_started.elapsed() < std::time::Duration::from_secs(60),
+            "legacy replay is super-linear, not merely slow"
         );
         assert_eq!(recovered.tracked_child_count(), total);
         assert!(recovered.grant(total - 1).is_err());

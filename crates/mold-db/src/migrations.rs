@@ -408,6 +408,59 @@ ALTER TABLE scheduler_estimates ADD COLUMN ewma_audio_decode_ms REAL;
 ALTER TABLE scheduler_estimates ADD COLUMN ewma_mux_ms REAL;
 "#;
 
+/// v18 → durable singleton generation admission queue.
+///
+/// Unlike `chain_jobs` there is no companion manifest: a queued singleton owns
+/// no artifacts, so the row is the whole state. A row present at startup means
+/// this installation died owing that output.
+///
+/// `owner_uuid` is a port-independent journal identity persisted in `settings`
+/// — deliberately NOT `instance_id`, which is scoped to `(data dir, port)` and
+/// would make a server that came back on a different port orphan its own
+/// queue. Deliberately not profile-scoped, matching `chain_jobs`: queued jobs
+/// are server-wide.
+///
+/// The row never carries a secret. Reference-upload handles and resolved
+/// reference paths are excluded at admission rather than redacted here.
+const V18_GENERATION_QUEUE: &str = r#"
+CREATE TABLE generation_queue (
+    id                 TEXT PRIMARY KEY,
+    owner_uuid         TEXT NOT NULL,
+    state              TEXT NOT NULL,
+    model              TEXT NOT NULL,
+    request_json       TEXT NOT NULL,
+    output_dir         TEXT NOT NULL,
+    target_gpu         INTEGER,
+    completion_payload TEXT NOT NULL,
+    seed_pinned        INTEGER NOT NULL DEFAULT 0,
+    dispatch_attempts  INTEGER NOT NULL DEFAULT 0,
+    replay_seen        INTEGER NOT NULL DEFAULT 0,
+    held_reason        TEXT,
+    created_at         INTEGER NOT NULL,
+    updated_at         INTEGER NOT NULL,
+    started_at         INTEGER
+);
+
+-- `rowid` breaks ties for same-millisecond inserts in the replay query but
+-- cannot appear in an index (SQLite rejects it as a column here), so the
+-- index covers the selective prefix and the tiebreak rides on the ordering.
+CREATE INDEX generation_queue_replay
+ON generation_queue(owner_uuid, state, created_at);
+"#;
+
+/// v19 → remember a queued job's STABLE device pin, not just the ordinal it
+/// resolved to.
+///
+/// `PATCH /api/queue/:id` accepts `hard_pinned_device_id` and resolves it to an
+/// ordinal for dispatch, but ordinals are an enumeration artifact: MIG
+/// reconfiguration or a changed `MOLD_GPUS` renumbers them across a restart.
+/// Replaying a stale ordinal runs the job on the wrong device, or fails while
+/// the device the user actually pinned is present. NULL means Auto or a
+/// legacy ordinal-only pin.
+const V19_GENERATION_QUEUE_DEVICE_PIN: &str = r#"
+ALTER TABLE generation_queue ADD COLUMN target_device_id TEXT;
+"#;
+
 /// Ordered list of schema migrations. Version numbers must be strictly
 /// increasing — [`apply_pending`] validates this at startup.
 pub(crate) const MIGRATIONS: &[Migration] = &[
@@ -479,11 +532,19 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         version: 17,
         kind: MigrationKind::Sql(V17_SCHEDULER_AV_PHASES),
     },
+    Migration {
+        version: 18,
+        kind: MigrationKind::Sql(V18_GENERATION_QUEUE),
+    },
+    Migration {
+        version: 19,
+        kind: MigrationKind::Sql(V19_GENERATION_QUEUE_DEVICE_PIN),
+    },
 ];
 
 /// The highest migration version this build ships. Exposed publicly so
 /// operators / tests can assert what schema level they're running against.
-pub const SCHEMA_VERSION: i64 = 17;
+pub const SCHEMA_VERSION: i64 = 19;
 
 /// v1 → v2: rewrite every `output_dir` value to its canonical form so
 /// rows written by the v0.8.x release (which keyed on raw paths) keep
@@ -859,7 +920,7 @@ mod tests {
             SCHEMA_VERSION,
             "fresh DB must end at the latest SCHEMA_VERSION",
         );
-        assert_eq!(SCHEMA_VERSION, 17);
+        assert_eq!(SCHEMA_VERSION, 19);
         assert!(table_exists(&conn, "device_preferences"));
         assert_eq!(
             column_names(&conn, "device_preferences"),
@@ -983,6 +1044,69 @@ mod tests {
             .unwrap();
         assert_eq!(profile, "default");
         assert_eq!(width, 1024);
+    }
+
+    /// v18: a v17 database gains the durable generation queue without
+    /// disturbing anything already recorded.
+    #[test]
+    fn v18_upgrade_adds_the_generation_queue_and_preserves_existing_rows() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        let tx = conn.transaction().unwrap();
+        for migration in MIGRATIONS
+            .iter()
+            .filter(|migration| migration.version <= 17)
+        {
+            match &migration.kind {
+                MigrationKind::Sql(sql) => tx.execute_batch(sql).unwrap(),
+                MigrationKind::Rust(run) => run(&tx).unwrap(),
+            }
+        }
+        tx.execute_batch("PRAGMA user_version = 17;").unwrap();
+        tx.commit().unwrap();
+        conn.execute(
+            "INSERT INTO generations
+                (filename, output_dir, created_at_ms, format, model)
+             VALUES ('kept.png', '/gallery', 1, 'png', 'flux-dev:q4')",
+            [],
+        )
+        .unwrap();
+
+        apply_pending(&mut conn).unwrap();
+
+        assert_eq!(current_version(&conn).unwrap(), 19);
+        assert_eq!(SCHEMA_VERSION, 19);
+        assert!(table_exists(&conn, "generation_queue"));
+        let columns = column_names(&conn, "generation_queue");
+        for expected in [
+            "id",
+            "owner_uuid",
+            "state",
+            "model",
+            "request_json",
+            "output_dir",
+            "target_gpu",
+            "completion_payload",
+            "seed_pinned",
+            "dispatch_attempts",
+            "replay_seen",
+            "held_reason",
+            "created_at",
+            "updated_at",
+            "started_at",
+        ] {
+            assert!(
+                columns.iter().any(|column| column == expected),
+                "generation_queue must carry {expected}, got {columns:?}"
+            );
+        }
+        let kept: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM generations WHERE filename = 'kept.png'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(kept, 1, "the upgrade must not disturb existing rows");
     }
 
     #[test]
@@ -1191,7 +1315,7 @@ mod v9_tests {
 
     #[test]
     fn schema_version_is_current() {
-        assert_eq!(SCHEMA_VERSION, 17);
+        assert_eq!(SCHEMA_VERSION, 19);
     }
 
     #[test]

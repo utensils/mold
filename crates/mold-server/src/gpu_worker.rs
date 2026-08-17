@@ -2026,9 +2026,7 @@ fn process_post_generation_upscale(worker: &GpuWorker, mut job: PostGenerationUp
         }
         let message = fatal_cuda_user_message(&job.generation.model);
         if let Some(ref tx) = job.generation.progress_tx {
-            let _ = tx.send(SseMessage::Error(SseErrorEvent {
-                message: message.clone(),
-            }));
+            let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(message.clone())));
         }
         let _ = job.generation.result_tx.send(Err(message));
         drop(cleanup);
@@ -2350,7 +2348,45 @@ fn fatal_cuda_user_message(model_name: &str) -> String {
     )
 }
 
-fn quarantine_poisoned_worker(worker: &GpuWorker) {
+/// What a client is told when its job did not start because the host is going
+/// down. Deliberately distinct from [`fatal_cuda_user_message`]: the
+/// coordinator calls `request_shutdown()` on every worker during an ordinary
+/// graceful deploy, so lumping the two together told every in-flight client
+/// that CUDA was fatally poisoned on every restart.
+pub(crate) fn shutdown_retention_user_message(model_name: &str) -> String {
+    format!("the host is restarting; '{model_name}' did not start and stays queued to finish there")
+}
+
+/// Why this worker cannot accept work, if it cannot. Poison outranks shutdown:
+/// a quarantined context is the more specific and more actionable fact.
+struct WorkerUnavailable {
+    message: String,
+    /// True only for the shutdown branch — a poisoned context is a real
+    /// failure and must not be dressed up as a retention.
+    retainable: bool,
+}
+
+fn worker_unavailable(worker: &GpuWorker, model_name: &str) -> Option<WorkerUnavailable> {
+    if worker.poisoned.load(Ordering::SeqCst) || worker.fatal_cuda_error.load(Ordering::SeqCst) {
+        Some(WorkerUnavailable {
+            message: fatal_cuda_user_message(model_name),
+            retainable: false,
+        })
+    } else if worker.shutdown_requested.load(Ordering::SeqCst) {
+        Some(WorkerUnavailable {
+            message: shutdown_retention_user_message(model_name),
+            retainable: true,
+        })
+    } else {
+        None
+    }
+}
+
+pub(crate) fn quarantine_poisoned_worker(worker: &GpuWorker) {
+    // Retain the durable queue first. This function is the process-restart
+    // initiator for a fatal context or an inference panic, and everything that
+    // follows it drops jobs.
+    worker.queue_journal.retain_all();
     // Latch and notify before touching any lock that the faulting path may have
     // poisoned. `notify_one` stores a permit when the server has not reached
     // its shutdown waiter yet, which makes startup-time owner panics fail
@@ -2621,11 +2657,8 @@ pub(crate) fn ensure_worker_not_poisoned(
     worker: &GpuWorker,
     model_name: &str,
 ) -> anyhow::Result<()> {
-    if worker.poisoned.load(Ordering::SeqCst)
-        || worker.fatal_cuda_error.load(Ordering::SeqCst)
-        || worker.shutdown_requested.load(Ordering::SeqCst)
-    {
-        anyhow::bail!(fatal_cuda_user_message(model_name));
+    if let Some(unavailable) = worker_unavailable(worker, model_name) {
+        anyhow::bail!(unavailable.message);
     }
     Ok(())
 }
@@ -3475,9 +3508,7 @@ fn validate_h3_publication_contract(
 
 fn reject_claimed_h3_generation_message(job: GpuJob, error: String) -> bool {
     if let Some(progress_tx) = &job.progress_tx {
-        let _ = progress_tx.send(SseMessage::Error(SseErrorEvent {
-            message: error.clone(),
-        }));
+        let _ = progress_tx.send(SseMessage::Error(SseErrorEvent::failed(error.clone())));
     }
     let _ = job.result_tx.send(Err(error));
     false
@@ -3538,9 +3569,21 @@ impl GenerationEventSink<'_> {
     }
 }
 
+/// Unregisters a singleton generation's cancellation token on every exit path.
+struct SingletonCancelGuard<'a> {
+    registry: &'a crate::generation_cancel::CancelRegistry,
+    job_id: String,
+}
+
+impl Drop for SingletonCancelGuard<'_> {
+    fn drop(&mut self) {
+        self.registry.unregister(&self.job_id);
+    }
+}
+
 fn process_job_with_sink(
     worker: &GpuWorker,
-    job: GpuJob,
+    mut job: GpuJob,
     event_sink: GenerationEventSink<'_>,
     h3_attempt_cancellation: Option<mold_inference::InferenceCancellationToken>,
 ) -> bool {
@@ -3558,15 +3601,16 @@ fn process_job_with_sink(
     // Jobs may already be buffered in this worker's channel when a preceding
     // job kills the context. Fail them without touching CUDA, including jobs
     // explicitly pinned to this ordinal.
-    if worker.poisoned.load(Ordering::SeqCst)
-        || worker.fatal_cuda_error.load(Ordering::SeqCst)
-        || worker.shutdown_requested.load(Ordering::SeqCst)
-    {
-        let err_msg = fatal_cuda_user_message(&model_name);
+    if let Some(unavailable) = worker_unavailable(worker, &model_name) {
+        let err_msg = unavailable.message;
+        let retained = job.journal.is_some() && unavailable.retainable;
         if let Some(ref tx) = job.progress_tx {
-            let _ = tx.send(SseMessage::Error(SseErrorEvent {
-                message: err_msg.clone(),
-            }));
+            let event = if retained {
+                SseErrorEvent::retained(err_msg.clone())
+            } else {
+                SseErrorEvent::failed(err_msg.clone())
+            };
+            let _ = tx.send(SseMessage::Error(event));
         }
         let _ = job.result_tx.send(Err(err_msg));
         return false;
@@ -3577,6 +3621,32 @@ fn process_job_with_sink(
         return false;
     }
 
+    // Charge the attempt here, on the owner thread, immediately before the
+    // model load — the phase that can take the process down with it. Charging
+    // at replay instead would delete a job that merely waited behind a long
+    // render through a few deploys, having never touched a GPU.
+    if let Some(ticket) = job.journal.as_ref() {
+        if let crate::queue_journal::DispatchClaim::Exhausted { attempts, cap } =
+            ticket.claim_dispatch()
+        {
+            let err_msg = format!(
+                "'{model_name}' was started {attempts} times without finishing (limit {cap}); \
+                 it is held for review instead of being retried"
+            );
+            tracing::error!(gpu = ordinal, model = %model_name, attempts, cap, "held an exhausted durable queue row");
+            if let Some(ref tx) = job.progress_tx {
+                let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
+            }
+            // The row is already `held`; settle the ticket so its drop does
+            // not delete what the operator now needs to inspect.
+            if let Some(ticket) = job.journal.take() {
+                ticket.hold("dispatch attempts exhausted");
+            }
+            let _ = job.result_tx.send(Err(err_msg));
+            return false;
+        }
+    }
+
     // The durable parent owns an attempt-scoped token. Reference hashing runs
     // on this dedicated worker thread and polls the same token before any
     // model or CUDA work begins.
@@ -3584,9 +3654,23 @@ fn process_job_with_sink(
         .batch_child
         .as_ref()
         .map(|child| child.cancellation.clone());
+    // An ordinary singleton gets a token too, so a shutdown aborts it at the
+    // next inference checkpoint instead of holding the deploy open. Registered
+    // through a guard because this function has a dozen early returns and a
+    // leaked token would cancel an unrelated later job with the same id.
+    let singleton_cancellation = (h3_attempt_cancellation.is_none()
+        && batch_cancellation.is_none())
+    .then(|| worker.generation_cancel.token(&job_id));
+    let _singleton_cancel_guard = singleton_cancellation
+        .is_some()
+        .then(|| SingletonCancelGuard {
+            registry: worker.generation_cancel.as_ref(),
+            job_id: job_id.clone(),
+        });
     let inference_cancellation = h3_attempt_cancellation
         .as_ref()
-        .or(batch_cancellation.as_ref());
+        .or(batch_cancellation.as_ref())
+        .or(singleton_cancellation.as_ref());
     let reference_bindings = match crate::reference_uploads::inference_bindings_for_request(
         &job.request,
         job.resolved_references.as_ref(),
@@ -3596,9 +3680,7 @@ fn process_job_with_sink(
         Err(error) => {
             let err_msg = format!("generation reference binding error: {error:#}");
             if let Some(ref tx) = job.progress_tx {
-                let _ = tx.send(SseMessage::Error(SseErrorEvent {
-                    message: err_msg.clone(),
-                }));
+                let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
             }
             let _ = job.result_tx.send(Err(err_msg));
             return false;
@@ -3633,9 +3715,7 @@ fn process_job_with_sink(
     if let Err(error) = ensure_worker_not_poisoned(worker, &model_name) {
         let err_msg = error.to_string();
         if let Some(ref tx) = job.progress_tx {
-            let _ = tx.send(SseMessage::Error(SseErrorEvent {
-                message: err_msg.clone(),
-            }));
+            let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
         }
         let _ = job.result_tx.send(Err(err_msg));
         return false;
@@ -3718,9 +3798,7 @@ fn process_job_with_sink(
             )
         };
         if let Some(ref tx) = job.progress_tx {
-            let _ = tx.send(SseMessage::Error(SseErrorEvent {
-                message: err_msg.clone(),
-            }));
+            let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
         }
         let _ = job.result_tx.send(Err(err_msg));
         if count_worker_failure {
@@ -3745,9 +3823,7 @@ fn process_job_with_sink(
     if let Err(error) = ensure_worker_not_poisoned(worker, &model_name) {
         let err_msg = error.to_string();
         if let Some(ref tx) = job.progress_tx {
-            let _ = tx.send(SseMessage::Error(SseErrorEvent {
-                message: err_msg.clone(),
-            }));
+            let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
         }
         let _ = job.result_tx.send(Err(err_msg));
         return false;
@@ -3786,9 +3862,7 @@ fn process_job_with_sink(
     let Some(mut cached_engine) = taken else {
         let err_msg = "engine not found in cache after load".to_string();
         if let Some(ref tx) = job.progress_tx {
-            let _ = tx.send(SseMessage::Error(SseErrorEvent {
-                message: err_msg.clone(),
-            }));
+            let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
         }
         let _ = job.result_tx.send(Err(err_msg));
         clear_active_generation(worker);
@@ -3910,9 +3984,7 @@ fn process_job_with_sink(
                 clear_active_generation(worker);
                 let error = error.to_string();
                 if let Some(ref tx) = job.progress_tx {
-                    let _ = tx.send(SseMessage::Error(SseErrorEvent {
-                        message: error.clone(),
-                    }));
+                    let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(error.clone())));
                 }
                 let _ = job.result_tx.send(Err(error));
                 return false;
@@ -3939,9 +4011,7 @@ fn process_job_with_sink(
                 let err_msg =
                     "generation error: engine returned no images, video, or audio".to_string();
                 if let Some(ref tx) = job.progress_tx {
-                    let _ = tx.send(SseMessage::Error(SseErrorEvent {
-                        message: err_msg.clone(),
-                    }));
+                    let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
                 }
                 let _ = job.result_tx.send(Err(err_msg));
                 return false;
@@ -4098,6 +4168,11 @@ fn process_job_with_sink(
                 } else {
                     (fatal_cuda_user_message(&model_name), false)
                 }
+            } else if mold_inference::is_inference_cancelled(&e) {
+                // A shutdown abort is not worker ill-health. Counting it would
+                // let one deploy's worth of cancellations quarantine a healthy
+                // GPU on the next boot.
+                (shutdown_retention_user_message(&model_name), false)
             } else {
                 (
                     format!("generation error: {}", clean_error_message(&e)),
@@ -4107,10 +4182,18 @@ fn process_job_with_sink(
             if count_worker_failure {
                 record_failure(worker);
             }
+            // A retained job's stream ends with a terminal frame rather than a
+            // quiet close: a quiet close leaves the desktop app in `loading`
+            // forever and hard-fails the web client. The flag is what lets a
+            // new client read this as interrupted instead of failed.
+            let retained = job.journal.is_some() && mold_inference::is_inference_cancelled(&e);
             if let Some(ref tx) = job.progress_tx {
-                let _ = tx.send(SseMessage::Error(SseErrorEvent {
-                    message: err_msg.clone(),
-                }));
+                let event = if retained {
+                    SseErrorEvent::retained(err_msg.clone())
+                } else {
+                    SseErrorEvent::failed(err_msg.clone())
+                };
+                let _ = tx.send(SseMessage::Error(event));
             }
             let _ = job.result_tx.send(Err(err_msg));
             false
@@ -4126,9 +4209,7 @@ fn process_job_with_sink(
                 "inference panicked on GPU {ordinal}: {msg}; CUDA owner was quarantined and the server must restart"
             );
             if let Some(ref tx) = job.progress_tx {
-                let _ = tx.send(SseMessage::Error(SseErrorEvent {
-                    message: err_msg.clone(),
-                }));
+                let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
             }
             let _ = job.result_tx.send(Err(err_msg));
             false
@@ -4137,7 +4218,7 @@ fn process_job_with_sink(
 }
 
 fn finish_generation_success(
-    job: GpuJob,
+    mut job: GpuJob,
     response: mold_core::GenerateResponse,
     image: ImageData,
     original_image: Option<ImageData>,
@@ -4148,6 +4229,10 @@ fn finish_generation_success(
         None,
         mold_core::build_info::version_string(),
     );
+    // Written into the saved print before the save, so boot replay can tell a
+    // job that already produced its output from one that never ran. Output
+    // filenames are wall-clock, so nothing downstream could tell them apart.
+    metadata.job_id = Some(job.id.clone());
     if let Some(video) = response.video.as_ref() {
         metadata.apply_video_output(video);
     }
@@ -4200,6 +4285,30 @@ fn finish_generation_success(
                 events,
                 &job.gallery_publication_gate,
             );
+        }
+    }
+
+    // Settle the durable row on what actually reached the gallery, not on the
+    // fact that inference returned. The save helpers answer `None` when
+    // publication fails — an unwritable directory, a full disk, a refused
+    // archive — and for a replayed job the gallery file IS the delivery, so
+    // clearing the row there would lose the generation outright: nothing on
+    // disk, nobody to tell, and no row left to replay.
+    //
+    // Settled here rather than on the ticket's ordinary drop so a shutdown
+    // racing the last microseconds of delivery cannot retain a completed job
+    // and replay it into a duplicate print.
+    if let Some(ticket) = job.journal.take() {
+        if saved_names.output.is_some() {
+            ticket.complete();
+        } else {
+            tracing::error!(
+                job = %job.id,
+                dir = ?job.output_dir,
+                "generation finished but its output could not be saved; \
+                 holding the queue row for review"
+            );
+            ticket.hold("the generated output could not be saved to the gallery");
         }
     }
 
@@ -5757,6 +5866,7 @@ mod tests {
                         result_tx: placeholder_tx,
                         output_dir: None,
                         batch_child: None,
+                        journal: None,
                         #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
                         h3_private_ingress_grant: None,
                     },
@@ -5789,6 +5899,7 @@ mod tests {
             h3_prepared_attempt: None,
             lease: None,
             batch_child: None,
+            journal: None,
         };
         (job, result_rx, progress_rx, queue_rx, queue, registry)
     }
@@ -6785,7 +6896,7 @@ mod tests {
         assert!(error.contains("claimed-attempt runtime bridge is not available"));
         assert!(matches!(
             progress_rx.recv().await,
-            Some(SseMessage::Error(SseErrorEvent { message }))
+            Some(SseMessage::Error(SseErrorEvent { message, .. }))
                 if message.contains("claimed-attempt runtime bridge is not available")
         ));
         assert_eq!(settlements.load(Ordering::SeqCst), 1);
@@ -6820,7 +6931,7 @@ mod tests {
         assert!(error.contains("cancelled before execution"));
         assert!(matches!(
             progress_rx.recv().await,
-            Some(SseMessage::Error(SseErrorEvent { message }))
+            Some(SseMessage::Error(SseErrorEvent { message, .. }))
                 if message.contains("cancelled before execution")
         ));
         assert_eq!(settlements.load(Ordering::SeqCst), 1);
@@ -7495,6 +7606,30 @@ mod tests {
         drop_calls: Arc<AtomicUsize>,
     }
 
+    /// Reports the cancellation an aborted shutdown produces.
+    struct CancelledGenerateEngine {
+        name: String,
+    }
+
+    impl InferenceEngine for CancelledGenerateEngine {
+        fn generate(&mut self, _req: &GenerateRequest) -> anyhow::Result<GenerateResponse> {
+            Err(anyhow::Error::new(mold_inference::InferenceCancelled)
+                .context("generation aborted"))
+        }
+
+        fn model_name(&self) -> &str {
+            &self.name
+        }
+
+        fn is_loaded(&self) -> bool {
+            true
+        }
+
+        fn load(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
     struct PoisoningLoadEngine {
         name: String,
         panic: bool,
@@ -7642,6 +7777,32 @@ mod tests {
         }
     }
 
+    /// A graceful deploy calls `request_shutdown()` on every worker, so a job
+    /// that reaches one in that window used to be told its CUDA context was
+    /// fatally poisoned. That is a lie on every ordinary restart, and it is
+    /// about to become the common case now that a retained job is replayed.
+    #[test]
+    fn a_shutting_down_worker_reports_retention_not_a_fatal_cuda_context() {
+        let worker = single_worker_pool_with_parked("mock-model", Duration::from_millis(0));
+        worker.shutdown_requested.store(true, Ordering::SeqCst);
+
+        let error = ensure_worker_not_poisoned(&worker, "mock-model")
+            .expect_err("a shutting-down worker must refuse work");
+        let message = error.to_string();
+        assert!(
+            message.contains("restarting") && message.contains("stays queued"),
+            "expected a retention message, got: {message}"
+        );
+        assert_ne!(message, fatal_cuda_user_message("mock-model"));
+
+        // A genuinely poisoned context keeps the specific, actionable message.
+        worker.poisoned.store(true, Ordering::SeqCst);
+        let poisoned = ensure_worker_not_poisoned(&worker, "mock-model")
+            .expect_err("a poisoned worker must refuse work")
+            .to_string();
+        assert_eq!(poisoned, fatal_cuda_user_message("mock-model"));
+    }
+
     fn single_worker_pool_with_parked(model: &str, load_sleep: Duration) -> Arc<GpuWorker> {
         let (job_tx, _job_rx) = std::sync::mpsc::sync_channel::<GpuWorkerCommand>(2);
         let mut cache = ModelCache::new(3);
@@ -7676,6 +7837,8 @@ mod tests {
             poisoned: AtomicBool::new(false),
             fatal_cuda_error: Arc::new(AtomicBool::new(false)),
             fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
+            queue_journal: Arc::new(crate::queue_journal::QueueJournal::disabled()),
+            generation_cancel: Arc::new(crate::generation_cancel::CancelRegistry::new()),
             shutdown_requested: AtomicBool::new(false),
             drain_state: std::sync::atomic::AtomicU8::new(crate::gpu_pool::DRAIN_RUNNING),
             owner_thread_id: std::sync::OnceLock::new(),
@@ -7712,6 +7875,7 @@ mod tests {
             h3_prepared_attempt: None,
             lease: None,
             batch_child: None,
+            journal: None,
         }
     }
 
@@ -7766,6 +7930,8 @@ mod tests {
             poisoned: AtomicBool::new(false),
             fatal_cuda_error,
             fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
+            queue_journal: Arc::new(crate::queue_journal::QueueJournal::disabled()),
+            generation_cancel: Arc::new(crate::generation_cancel::CancelRegistry::new()),
             shutdown_requested: AtomicBool::new(false),
             drain_state: std::sync::atomic::AtomicU8::new(crate::gpu_pool::DRAIN_RUNNING),
             owner_thread_id: std::sync::OnceLock::new(),
@@ -7961,6 +8127,8 @@ mod tests {
             poisoned: AtomicBool::new(false),
             fatal_cuda_error: Arc::new(AtomicBool::new(false)),
             fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
+            queue_journal: Arc::new(crate::queue_journal::QueueJournal::disabled()),
+            generation_cancel: Arc::new(crate::generation_cancel::CancelRegistry::new()),
             shutdown_requested: AtomicBool::new(false),
             drain_state: std::sync::atomic::AtomicU8::new(crate::gpu_pool::DRAIN_RUNNING),
             owner_thread_id: std::sync::OnceLock::new(),
@@ -8015,6 +8183,7 @@ mod tests {
                     memory_ledger_sequence: 0,
                 }),
                 batch_child: None,
+                journal: None,
             })
             .unwrap();
 
@@ -8753,6 +8922,8 @@ mod tests {
             poisoned: AtomicBool::new(false),
             fatal_cuda_error: Arc::new(AtomicBool::new(false)),
             fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
+            queue_journal: Arc::new(crate::queue_journal::QueueJournal::disabled()),
+            generation_cancel: Arc::new(crate::generation_cancel::CancelRegistry::new()),
             shutdown_requested: AtomicBool::new(false),
             drain_state: std::sync::atomic::AtomicU8::new(crate::gpu_pool::DRAIN_RUNNING),
             owner_thread_id: std::sync::OnceLock::new(),
@@ -8867,6 +9038,7 @@ mod tests {
                 h3_prepared_attempt: None,
                 lease: None,
                 batch_child: None,
+                journal: None,
             };
             worker
                 .send_grant(LeaseGrant {
@@ -8998,6 +9170,7 @@ mod tests {
                     h3_prepared_attempt: None,
                     lease: None,
                     batch_child: None,
+                    journal: None,
                 })),
                 retry: None,
             })
@@ -9633,6 +9806,7 @@ mod tests {
                     h3_prepared_attempt: None,
                     lease: None,
                     batch_child: None,
+                    journal: None,
                 })),
                 retry: None,
             })
@@ -10166,6 +10340,7 @@ mod tests {
                     result_tx: placeholder_tx,
                     output_dir: None,
                     batch_child: None,
+                    journal: None,
                     #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
                     h3_private_ingress_grant: None,
                 },
@@ -10198,6 +10373,7 @@ mod tests {
                 h3_prepared_attempt: None,
                 lease: Some(fence("generate", 3)),
                 batch_child: None,
+                journal: None,
             })
             .unwrap();
         drain_lease(&mut event_rx, "generate");
@@ -10355,6 +10531,7 @@ mod tests {
                     result_tx: placeholder_tx,
                     output_dir: None,
                     batch_child: None,
+                    journal: None,
                     #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
                     h3_private_ingress_grant: None,
                 },
@@ -10391,6 +10568,7 @@ mod tests {
                 h3_prepared_attempt: None,
                 lease: None,
                 batch_child: None,
+                journal: None,
             },
             &event_tx,
             1,
@@ -10415,6 +10593,226 @@ mod tests {
         assert!(registry.snapshot().entries.is_empty());
         assert!(worker.model_cache.lock().unwrap().contains("flux-dev:q4"));
         drop(queue_rx.recv().await);
+    }
+
+    fn fake_image() -> ImageData {
+        ImageData {
+            data: vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A],
+            format: OutputFormat::Png,
+            width: 64,
+            height: 64,
+            index: 0,
+        }
+    }
+
+    fn fake_response() -> GenerateResponse {
+        GenerateResponse {
+            audio: None,
+            images: vec![fake_image()],
+            video: None,
+            generation_time_ms: 1,
+            model: "mock-model".to_string(),
+            seed_used: 7,
+            gpu: None,
+        }
+    }
+
+    /// A replayed job has no client, so the gallery file IS the delivery.
+    /// Deleting its row after a failed publication (unwritable directory, full
+    /// disk, a refused archive) loses the generation outright — nothing on
+    /// disk, nobody to tell, and no row to replay.
+    #[test]
+    fn a_generation_whose_output_never_published_holds_its_row_instead_of_clearing_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        // A regular file where the gallery directory should be: every save
+        // helper fails its `create_dir_all` and returns None.
+        let blocked = tmp.path().join("gallery");
+        std::fs::write(&blocked, b"not a directory").unwrap();
+
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let journal = Arc::new(crate::queue_journal::QueueJournal::new(
+            db.clone(),
+            Some(tmp.path()),
+            "test-instance",
+        ));
+        let request = fake_upscale_job(Config::default(), "unused").request;
+        let ticket = journal
+            .record(crate::queue_journal::JournalAdmission {
+                id: "publish-fails",
+                request: &request,
+                output_dir: Some(&blocked),
+                target_gpu: None,
+                completion_payload: SseCompletionPayload::Full,
+                batch_child: false,
+                carries_reference_authority: false,
+            })
+            .expect("a gallery-bound generation is durable");
+
+        let (result_tx, _result_rx) = tokio::sync::oneshot::channel();
+        let (queue_tx, _queue_rx) = tokio::sync::mpsc::channel(1);
+        let job = GpuJob {
+            id: "publish-fails".to_string(),
+            model: "mock-model".to_string(),
+            request,
+            resolved_references: None,
+            completion_payload: SseCompletionPayload::Full,
+            progress_tx: None,
+            result_tx,
+            output_dir: Some(blocked.clone()),
+            config: Arc::new(tokio::sync::RwLock::new(Config::default())),
+            metadata_db: db,
+            gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
+            queue: QueueHandle::new(queue_tx),
+            registry: JobRegistry::new(),
+            events: crate::events::EventBroadcaster::new(),
+            execution_plan: None,
+            prepared_execution_inputs: None,
+            h3_prepared_attempt: None,
+            lease: None,
+            batch_child: None,
+            journal: Some(ticket),
+        };
+
+        finish_generation_success(job, fake_response(), fake_image(), None);
+
+        let rows = journal.list_all();
+        assert_eq!(rows.len(), 1, "the row must not be deleted");
+        assert_eq!(
+            rows[0].state,
+            mold_db::generation_queue::QueueRowState::Held
+        );
+        assert!(rows[0]
+            .held_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("could not be saved")));
+    }
+
+    /// The ordinary path still clears the row, or every completed job would
+    /// pile up as held work.
+    #[test]
+    fn a_published_generation_clears_its_row() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let journal = Arc::new(crate::queue_journal::QueueJournal::new(
+            db.clone(),
+            Some(tmp.path()),
+            "test-instance",
+        ));
+        let request = fake_upscale_job(Config::default(), "unused").request;
+        let ticket = journal
+            .record(crate::queue_journal::JournalAdmission {
+                id: "publishes",
+                request: &request,
+                output_dir: Some(tmp.path()),
+                target_gpu: None,
+                completion_payload: SseCompletionPayload::Full,
+                batch_child: false,
+                carries_reference_authority: false,
+            })
+            .unwrap();
+
+        let (result_tx, _result_rx) = tokio::sync::oneshot::channel();
+        let (queue_tx, _queue_rx) = tokio::sync::mpsc::channel(1);
+        let job = GpuJob {
+            id: "publishes".to_string(),
+            model: "mock-model".to_string(),
+            request,
+            resolved_references: None,
+            completion_payload: SseCompletionPayload::Full,
+            progress_tx: None,
+            result_tx,
+            output_dir: Some(tmp.path().to_path_buf()),
+            config: Arc::new(tokio::sync::RwLock::new(Config::default())),
+            metadata_db: db,
+            gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
+            queue: QueueHandle::new(queue_tx),
+            registry: JobRegistry::new(),
+            events: crate::events::EventBroadcaster::new(),
+            execution_plan: None,
+            prepared_execution_inputs: None,
+            h3_prepared_attempt: None,
+            lease: None,
+            batch_child: None,
+            journal: Some(ticket),
+        };
+
+        finish_generation_success(job, fake_response(), fake_image(), None);
+
+        assert!(journal.list_all().is_empty());
+    }
+
+    /// A shutdown abort is a deliberate cancellation, not evidence that this
+    /// GPU is sick. Counting it would let one deploy's worth of aborts
+    /// quarantine a healthy worker on the next boot.
+    #[tokio::test]
+    async fn a_cancelled_generation_is_not_counted_against_worker_health() {
+        let worker = single_worker_pool_with_parked("parked", Duration::ZERO);
+        worker.model_cache.lock().unwrap().insert_loaded(
+            "cancel-model".to_string(),
+            Box::new(CancelledGenerateEngine {
+                name: "cancel-model".to_string(),
+            }),
+            123,
+        );
+        worker.in_flight.store(1, Ordering::SeqCst);
+
+        let mut request = fake_upscale_job(Config::default(), "unused").request;
+        request.model = "cancel-model".to_string();
+        request.upscale_model = None;
+        let (queue_tx, mut queue_rx) = tokio::sync::mpsc::channel(1);
+        let queue = QueueHandle::new(queue_tx);
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        let worker_for_job = worker.clone();
+        tokio::task::spawn_blocking(move || {
+            let (scheduler_tx, _scheduler_rx) = tokio::sync::mpsc::unbounded_channel();
+            process_job(
+                &worker_for_job,
+                GpuJob {
+                    id: "cancelled-job".to_string(),
+                    model: "cancel-model".to_string(),
+                    request,
+                    resolved_references: None,
+                    completion_payload: SseCompletionPayload::Full,
+                    progress_tx: None,
+                    result_tx,
+                    output_dir: None,
+                    config: Arc::new(tokio::sync::RwLock::new(Config::default())),
+                    metadata_db: Arc::new(None),
+                    gallery_publication_gate:
+                        crate::batch_transaction::GalleryPublicationGate::default(),
+                    queue: queue.clone(),
+                    registry: JobRegistry::new(),
+                    events: crate::events::EventBroadcaster::new(),
+                    execution_plan: None,
+                    prepared_execution_inputs: None,
+                    h3_prepared_attempt: None,
+                    lease: None,
+                    batch_child: None,
+                    journal: None,
+                },
+                &scheduler_tx,
+                1,
+                None,
+            );
+        })
+        .await
+        .unwrap();
+
+        let message = match result_rx.await.unwrap() {
+            Err(error) => error,
+            Ok(_) => panic!("a cancelled engine unexpectedly generated"),
+        };
+        assert!(
+            message.contains("restarting") && message.contains("stays queued"),
+            "a cancelled generation must read as retention, got: {message}"
+        );
+        assert_eq!(
+            worker.consecutive_failures.load(Ordering::SeqCst),
+            0,
+            "a deliberate abort must not degrade or quarantine the worker"
+        );
+        assert!(!worker.poisoned.load(Ordering::SeqCst));
+        let _ = queue_rx.try_recv();
     }
 
     #[tokio::test]
@@ -10448,6 +10846,7 @@ mod tests {
                     result_tx: placeholder_tx,
                     output_dir: None,
                     batch_child: None,
+                    journal: None,
                     #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
                     h3_private_ingress_grant: None,
                 },
@@ -10484,6 +10883,7 @@ mod tests {
                     h3_prepared_attempt: None,
                     lease: None,
                     batch_child: None,
+                    journal: None,
                 },
                 &scheduler_tx,
                 1,
@@ -10519,6 +10919,7 @@ mod tests {
                     result_tx: placeholder_tx,
                     output_dir: None,
                     batch_child: None,
+                    journal: None,
                     #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
                     h3_private_ingress_grant: None,
                 },
@@ -10553,6 +10954,7 @@ mod tests {
                     h3_prepared_attempt: None,
                     lease: None,
                     batch_child: None,
+                    journal: None,
                 },
                 &scheduler_tx,
                 1,
@@ -10959,6 +11361,7 @@ mod tests {
                     result_tx: dummy_tx,
                     output_dir: None,
                     batch_child: None,
+                    journal: None,
                     #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
                     h3_private_ingress_grant: None,
                 },

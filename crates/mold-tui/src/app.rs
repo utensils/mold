@@ -7368,6 +7368,7 @@ impl App {
                             sample_shift: submitted_params.sample_shift,
                             distill_strength_high: None,
                             distill_strength_low: None,
+                            job_id: None,
                             prompt: prompt_text,
                             negative_prompt,
                             original_prompt: submitted_params.original_prompt.clone(),
@@ -7783,6 +7784,7 @@ impl App {
                         sample_shift: None,
                         distill_strength_high: None,
                         distill_strength_low: None,
+                        job_id: None,
                         prompt: source_meta
                             .as_ref()
                             .map(|m| m.prompt.clone())
@@ -8991,6 +8993,7 @@ mod tests {
                 sample_shift: None,
                 distill_strength_high: None,
                 distill_strength_low: None,
+                job_id: None,
                 prompt: "test".to_string(),
                 negative_prompt: None,
                 original_prompt: None,
@@ -9060,6 +9063,7 @@ mod tests {
                 sample_shift: None,
                 distill_strength_high: None,
                 distill_strength_low: None,
+                job_id: None,
                 prompt: "test".to_string(),
                 negative_prompt: None,
                 original_prompt: None,
@@ -9190,6 +9194,7 @@ mod tests {
             sample_shift: None,
             distill_strength_high: None,
             distill_strength_low: None,
+            job_id: None,
             prompt: "a test prompt".to_string(),
             negative_prompt: Some("blurry".to_string()),
             original_prompt: None,

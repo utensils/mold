@@ -11,6 +11,7 @@ pub mod chain_jobs;
 pub mod config_sync;
 mod db;
 mod device_preferences;
+pub mod generation_queue;
 pub mod metadata_io;
 pub mod migrations;
 mod model_prefs;

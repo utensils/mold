@@ -150,6 +150,13 @@ impl ApiError {
         Self::with_code(msg, "QUEUE_FULL", StatusCode::SERVICE_UNAVAILABLE)
     }
 
+    /// The host is going down. Distinct from `QUEUE_FULL` so a client can tell
+    /// "come back in a second" from "this instance is restarting"; both carry
+    /// `Retry-After`.
+    pub fn server_restarting(msg: impl Into<String>) -> Self {
+        Self::with_code(msg, "SERVER_RESTARTING", StatusCode::SERVICE_UNAVAILABLE)
+    }
+
     pub fn generation_unavailable(msg: impl Into<String>) -> Self {
         Self::with_code(
             msg,
@@ -171,7 +178,7 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
         let status = self.status;
         // On queue-full (503), hint clients to retry with a short delay.
-        if self.code == "QUEUE_FULL" {
+        if self.code == "QUEUE_FULL" || self.code == "SERVER_RESTARTING" {
             let mut headers = HeaderMap::new();
             headers.insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
             return (status, headers, Json(self)).into_response();
@@ -810,6 +817,14 @@ async fn prepare_generation(
     request: &mut mold_core::GenerateRequest,
     authenticated: Option<&crate::auth::ApiKeyAuthenticated>,
 ) -> Result<PreparedGenerationRoute, ApiError> {
+    // Stop admitting once the retention fence is up. Anything accepted after
+    // that point is queued into a process that is already tearing down, so the
+    // honest answer is "not now" rather than a job that immediately retains.
+    if state.queue_journal.is_retaining() {
+        return Err(ApiError::server_restarting(
+            "the host is restarting; retry shortly",
+        ));
+    }
     // Collapse every released H3 alias to one exact task/layout identity
     // before activation, upload scope, admission, placement, queue, metadata,
     // and retry state can observe the request. This is deliberately a no-op
@@ -1836,8 +1851,6 @@ async fn generate(
         "generate request"
     );
 
-    // Submit to generation queue
-    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
     // Non-streaming path still gets a registry entry so an HTTP client
     // hanging on the response is visible via GET /api/queue alongside
     // SSE clients. Cleanup happens unconditionally on every terminal
@@ -1860,6 +1873,26 @@ async fn generate(
         Some(req.seed.is_some()),
         Some(queue_metadata),
     );
+    // The result channel's receiver is owned by a detached supervisor, not by
+    // this handler: an admitted job runs to completion even if the client hangs
+    // up, and only an explicit `DELETE /api/queue/:id` closes it early.
+    let crate::job_supervisor::SupervisedJob {
+        result_tx,
+        outcome_rx,
+    } = crate::job_supervisor::supervise_job(job_id.clone(), cancel);
+    // Record the durable row BEFORE submit, so a crash between here and the
+    // worker still leaves something to replay.
+    let journal = state
+        .queue_journal
+        .record(crate::queue_journal::JournalAdmission {
+            id: &job_id,
+            request: &req,
+            output_dir: output_dir.as_deref(),
+            target_gpu: preferred_gpu,
+            completion_payload: SseCompletionPayload::Full,
+            batch_child: false,
+            carries_reference_authority: resolved_references.is_some() || req.references.is_some(),
+        });
     let job = GenerationJob {
         id: job_id.clone(),
         request: req,
@@ -1869,6 +1902,7 @@ async fn generate(
         result_tx,
         output_dir,
         batch_child: None,
+        journal,
         #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
         h3_private_ingress_grant,
     };
@@ -1881,16 +1915,20 @@ async fn generate(
         .map_err(submit_error_to_api)?;
 
     // Wait for the queue worker to process the job — or for
-    // `DELETE /api/queue/:id` to cancel it while it's still queued.
-    // Returning here drops `result_rx`, so the worker's is_closed()
-    // check skips the job when it eventually reaches the head.
-    let result = tokio::select! {
-        result = result_rx => result
-            .map_err(|_| ApiError::internal("generation queue worker dropped the job"))?,
-        _ = cancel.notified() => {
+    // `DELETE /api/queue/:id` to cancel it while it's still queued. Returning
+    // here no longer discards the job: the supervisor keeps holding the result
+    // channel, so the render finishes and the output is still saved.
+    let result = match outcome_rx.await {
+        Ok(crate::job_supervisor::SupervisedOutcome::Finished(result)) => *result,
+        Ok(crate::job_supervisor::SupervisedOutcome::Cancelled) => {
             return Err(ApiError::cancelled(format!(
                 "generation job {job_id} was cancelled while queued"
             )));
+        }
+        Err(_) => {
+            return Err(ApiError::internal(
+                "generation queue worker dropped the job",
+            ));
         }
     };
 
@@ -2657,9 +2695,9 @@ async fn upscale_stream(
                     }));
                 }
                 Err(e) => {
-                    let _ = tx.send(SseMessage::Error(mold_core::SseErrorEvent {
-                        message: format!("failed to pull upscaler model: {}", e.error),
-                    }));
+                    let _ = tx.send(SseMessage::Error(mold_core::SseErrorEvent::failed(
+                        format!("failed to pull upscaler model: {}", e.error),
+                    )));
                     return;
                 }
             }
@@ -2679,12 +2717,12 @@ async fn upscale_stream(
         };
 
         let Some(weights_path) = weights_path else {
-            let _ = tx.send(SseMessage::Error(mold_core::SseErrorEvent {
-                message: format!(
+            let _ = tx.send(SseMessage::Error(mold_core::SseErrorEvent::failed(
+                format!(
                     "upscaler model '{}' not configured after pull",
                     model_name_owned
                 ),
-            }));
+            )));
             return;
         };
 
@@ -2715,9 +2753,9 @@ async fn upscale_stream(
                     ));
                 }
                 Err(error) => {
-                    let _ = tx.send(SseMessage::Error(mold_core::SseErrorEvent {
-                        message: error.error,
-                    }));
+                    let _ = tx.send(SseMessage::Error(mold_core::SseErrorEvent::failed(
+                        error.error,
+                    )));
                 }
             }
             return;
@@ -2753,9 +2791,9 @@ async fn upscale_stream(
                             *cache = Some(new_engine);
                         }
                         Err(e) => {
-                            let _ = tx.send(SseMessage::Error(mold_core::SseErrorEvent {
-                                message: format!("failed to load upscaler: {e}"),
-                            }));
+                            let _ = tx.send(SseMessage::Error(mold_core::SseErrorEvent::failed(
+                                format!("failed to load upscaler: {e}"),
+                            )));
                             return;
                         }
                     }
@@ -2785,9 +2823,9 @@ async fn upscale_stream(
                         ));
                     }
                     Err(e) => {
-                        let _ = tx.send(SseMessage::Error(mold_core::SseErrorEvent {
-                            message: format!("upscale failed: {e}"),
-                        }));
+                        let _ = tx.send(SseMessage::Error(mold_core::SseErrorEvent::failed(
+                            format!("upscale failed: {e}"),
+                        )));
                     }
                 }
 
@@ -2923,23 +2961,22 @@ async fn generate_stream(
                         if let crate::batch_runtime::CompletedServerBatch::Sse(event) = completed {
                             let _ = tx.send(SseMessage::BatchComplete(Box::new(event)));
                         } else {
-                            let _ = tx.send(SseMessage::Error(SseErrorEvent {
-                                message:
-                                    "server batch supervisor returned the wrong delivery shape"
-                                        .to_string(),
-                            }));
+                            let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(
+                                "server batch supervisor returned the wrong delivery shape"
+                                    .to_string(),
+                            )));
                         }
                     }
                     Err(error) => {
-                        let _ = tx.send(SseMessage::Error(SseErrorEvent {
-                            message: format!("server batch failed: {error:#}"),
-                        }));
+                        let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(format!(
+                            "server batch failed: {error:#}"
+                        ))));
                     }
                 },
                 Err(_) => {
-                    let _ = tx.send(SseMessage::Error(SseErrorEvent {
-                        message: "server batch supervisor exited without a result".to_string(),
-                    }));
+                    let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(
+                        "server batch supervisor exited without a result".to_string(),
+                    )));
                 }
             }
         });
@@ -2970,7 +3007,6 @@ async fn generate_stream(
         }));
     }
 
-    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
     // Assign a server-side ID and register before submit so the entry is
     // visible to /api/queue from the moment we accept the request.
     let job_id = uuid::Uuid::new_v4().to_string();
@@ -2991,6 +3027,22 @@ async fn generate_stream(
         Some(req.seed.is_some()),
         Some(queue_metadata),
     );
+    // Detached ownership of the result channel — see the non-streaming path.
+    let crate::job_supervisor::SupervisedJob {
+        result_tx,
+        outcome_rx,
+    } = crate::job_supervisor::supervise_job(job_id.clone(), cancel);
+    let journal = state
+        .queue_journal
+        .record(crate::queue_journal::JournalAdmission {
+            id: &job_id,
+            request: &req,
+            output_dir: output_dir.as_deref(),
+            target_gpu: preferred_gpu,
+            completion_payload,
+            batch_child: false,
+            carries_reference_authority: resolved_references.is_some() || req.references.is_some(),
+        });
     let job = GenerationJob {
         id: job_id.clone(),
         request: req,
@@ -3000,6 +3052,7 @@ async fn generate_stream(
         result_tx,
         output_dir,
         batch_child: None,
+        journal,
         #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
         h3_private_ingress_grant,
     };
@@ -3034,20 +3087,17 @@ async fn generate_stream(
         id: job_id,
     }));
 
-    // Hold `tx` alive in a background task until the job completes, so the SSE
+    // Hold `tx` alive in a background task until the job settles, so the SSE
     // stream never closes prematurely even if the queue worker hasn't received
-    // the job yet. A `DELETE /api/queue/:id` cancel resolves the select's
-    // second arm: emit a terminal error event, then drop both channel ends —
-    // dropping `result_rx` closes the job's result channel, which is what
-    // makes the queue worker/dispatcher skip the job when it dequeues it.
+    // the job yet. A `DELETE /api/queue/:id` cancel arrives as
+    // `SupervisedOutcome::Cancelled`: emit a terminal error event, then drop
+    // `tx`. The supervisor drops the job's result receiver on that same path,
+    // which is what makes the worker/dispatcher skip a cancelled job.
     tokio::spawn(async move {
-        tokio::select! {
-            _ = result_rx => {}
-            _ = cancel.notified() => {
-                let _ = tx.send(SseMessage::Error(SseErrorEvent {
-                    message: "cancelled".to_string(),
-                }));
-            }
+        if let Ok(crate::job_supervisor::SupervisedOutcome::Cancelled) = outcome_rx.await {
+            let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(
+                "cancelled".to_string(),
+            )));
         }
         drop(tx); // closes the SSE stream
     });
@@ -3754,13 +3804,11 @@ async fn pull_model_endpoint(
                     break;
                 }
                 Ok(mold_core::types::DownloadEvent::JobFailed { id, error }) if id == job_id => {
-                    let _ = tx.send(SseMessage::Error(SseErrorEvent { message: error }));
+                    let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(error)));
                     break;
                 }
                 Ok(mold_core::types::DownloadEvent::JobCancelled { id }) if id == job_id => {
-                    let _ = tx.send(SseMessage::Error(SseErrorEvent {
-                        message: "pull cancelled".into(),
-                    }));
+                    let _ = tx.send(SseMessage::Error(SseErrorEvent::failed("pull cancelled")));
                     break;
                 }
                 Ok(_) => continue,
@@ -4524,7 +4572,82 @@ async fn health() -> impl IntoResponse {
 async fn list_queue(State(state): State<AppState>) -> Json<crate::job_registry::QueueListing> {
     let mut listing = state.job_registry.snapshot();
     listing.plan = state.scheduled_work.latest_plan();
+    project_durable_queue_state(&state, &mut listing);
     Json(listing)
+}
+
+/// Fold the durable journal into a `/api/queue` listing.
+///
+/// Live rows learn whether they are actually durable and how many times a
+/// worker has claimed them; held rows are appended, because they exist only in
+/// the journal and would otherwise be invisible — a job that is never going to
+/// run and that nothing reports is worse than one that failed.
+fn project_durable_queue_state(state: &AppState, listing: &mut crate::job_registry::QueueListing) {
+    if !state.queue_journal.is_enabled() {
+        return;
+    }
+    let rows = state.queue_journal.list_all();
+    if rows.is_empty() {
+        for entry in listing.entries.iter_mut() {
+            entry.durable = Some(false);
+        }
+        return;
+    }
+    let by_id: std::collections::HashMap<&str, &mold_db::generation_queue::GenerationQueueRow> =
+        rows.iter().map(|row| (row.id.as_str(), row)).collect();
+    for entry in listing.entries.iter_mut() {
+        match by_id.get(entry.id.as_str()) {
+            Some(row) => {
+                entry.durable = Some(true);
+                entry.replayed = Some(row.replay_seen > 0);
+                entry.dispatch_attempts = Some(row.dispatch_attempts);
+            }
+            None => entry.durable = Some(false),
+        }
+    }
+    let live: std::collections::HashSet<&str> = listing
+        .entries
+        .iter()
+        .map(|entry| entry.id.as_str())
+        .collect();
+    let mut position = listing.entries.len();
+    // Every retained row that is not already live. Held rows exist only here,
+    // and so do queued rows on a boot with no dispatch owner — replay returns
+    // before registering anything there, so without this a maintenance server
+    // reports an empty queue while owing work, exactly when an operator is
+    // most likely to be looking and least able to inspect or cancel it.
+    let unlisted: Vec<crate::job_registry::JobEntry> = rows
+        .iter()
+        .filter(|row| !live.contains(row.id.as_str()))
+        .map(|row| {
+            let state = match row.state {
+                mold_db::generation_queue::QueueRowState::Held => {
+                    crate::job_registry::JobLifecycle::Held
+                }
+                // A `running` row whose worker died reads as queued: that is
+                // what the next boot will do with it.
+                _ => crate::job_registry::JobLifecycle::Queued,
+            };
+            let entry = crate::job_registry::JobEntry {
+                id: row.id.clone(),
+                model: row.model.clone(),
+                state,
+                started_at_unix_ms: row.created_at_ms.max(0) as u64,
+                position,
+                gpu: None,
+                target_gpu: row.target_gpu,
+                seed_pinned: Some(row.seed_pinned),
+                metadata: None,
+                durable: Some(true),
+                replayed: Some(row.replay_seen > 0),
+                dispatch_attempts: Some(row.dispatch_attempts),
+                held_reason: row.held_reason.clone(),
+            };
+            position += 1;
+            entry
+        })
+        .collect();
+    listing.entries.extend(unlisted);
 }
 
 /// Wrap any present JSON value (including `null`) in `Some`, so a field using
@@ -4654,6 +4777,26 @@ async fn patch_queue_job(
             })?;
     }
 
+    // Mirror the mutation into the durable row while still holding the
+    // scheduler fence, so a restart resumes the lane and order the user chose
+    // rather than the ones the job was admitted with.
+    let reordered = req.position.is_some().then(|| {
+        state
+            .job_registry
+            .snapshot()
+            .entries
+            .into_iter()
+            .map(|entry| entry.id)
+            .collect::<Vec<_>>()
+    });
+    let pinned_device_id = req.hard_pinned_device_id.as_ref().map(|pin| pin.as_deref());
+    state.queue_journal.apply_queue_mutation(
+        &id,
+        resolved_target_gpu,
+        pinned_device_id,
+        reordered.as_deref(),
+    );
+
     let entry = state
         .job_registry
         .entry(&id)
@@ -4682,14 +4825,29 @@ async fn cancel_queue_job(
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     let _scheduler_mutation = state.scheduler_mutation_fence.lock().await;
-    state.job_registry.cancel_queued(&id).map_err(|e| match e {
-        crate::job_registry::QueuedJobCancelError::NotFound => {
-            ApiError::queue_job_not_found(format!("queue job {id} not found"))
+    match state.job_registry.cancel_queued(&id) {
+        Ok(()) => {}
+        Err(crate::job_registry::QueuedJobCancelError::AlreadyRunning) => {
+            return Err(ApiError::queue_job_running(format!(
+                "queue job {id} is already running; only queued jobs can be cancelled"
+            )));
         }
-        crate::job_registry::QueuedJobCancelError::AlreadyRunning => ApiError::queue_job_running(
-            format!("queue job {id} is already running; only queued jobs can be cancelled"),
-        ),
-    })?;
+        // Some retained rows have no registry entry: a held job, and a queued
+        // job on a boot with no dispatch owner. This endpoint is the
+        // documented way to clear either, and `/api/queue` lists both — so
+        // falling straight through to 404 would show an operator work they
+        // cannot act on.
+        Err(crate::job_registry::QueuedJobCancelError::NotFound) => {
+            if !state.queue_journal.owns_cancellable_row(&id) {
+                return Err(ApiError::queue_job_not_found(format!(
+                    "queue job {id} not found"
+                )));
+            }
+        }
+    }
+    // Unconditional, not fence-aware: a cancel that lands during the shutdown
+    // drain must not come back after the restart.
+    state.queue_journal.discard_id(&id);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -4779,6 +4937,7 @@ async fn resume_queue(State(state): State<AppState>) -> Result<Json<QueuePauseRe
 async fn cancel_all_queue(State(state): State<AppState>) -> Json<QueueCancelAllResponse> {
     let _scheduler_mutation = state.scheduler_mutation_fence.lock().await;
     let cancelled = state.job_registry.cancel_all_queued();
+    state.queue_journal.discard_all_queued();
     Json(QueueCancelAllResponse { cancelled })
 }
 
@@ -4955,6 +5114,12 @@ async fn server_capabilities(
 
     let server_batch =
         state.scheduled_work.v2_authoritative() && !state.is_output_disabled(&config);
+    // A host with no server gallery target cannot promise durability for ANY
+    // job: the only delivery is the HTTP response, which by definition does
+    // not survive a restart, so `record` declines every admission there. That
+    // makes it a systematic over-promise rather than an edge case, and clients
+    // read this to decide whether to keep polling a job whose stream died.
+    let durable_queue = state.queue_journal.is_enabled() && !state.is_output_disabled(&config);
     Json(mold_core::ServerCapabilities {
         generation_profile_v1: true,
         gallery: mold_core::GalleryCapabilities { can_delete: true },
@@ -4980,6 +5145,7 @@ async fn server_capabilities(
             can_reorder: true,
             stable_device_pins: true,
             cooperative_cancellation: false,
+            durable_queue,
             server_batch,
             server_batch_max_outputs: server_batch
                 .then_some(crate::batch_runtime::MAX_LIVE_SERVER_BATCH_OUTPUTS),

@@ -132,6 +132,10 @@ pub async fn run(
         );
     }
 
+    // `mold serve` owns its process, so an overrunning shutdown may end it
+    // rather than wait past systemd's stop timeout and be SIGKILLed — which
+    // is what used to lose the whole queue.
+    mold_server::allow_hard_shutdown_exit();
     mold_server::run_server(bind, port, models_path, gpu_selection, queue_size).await
 }
 

@@ -201,6 +201,7 @@ mod tests {
             sample_shift: None,
             distill_strength_high: None,
             distill_strength_low: None,
+            job_id: None,
             prompt: "a lighthouse at dusk".to_string(),
             negative_prompt: Some("blurry".to_string()),
             original_prompt: None,

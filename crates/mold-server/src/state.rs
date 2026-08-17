@@ -77,6 +77,12 @@ pub struct GenerationJob {
     /// Server-owned adaptive-batch child authority. Public singleton and
     /// client-owned prepared siblings leave this absent.
     pub batch_child: Option<BatchChildExecution>,
+    /// Durable-queue row ownership. Dropping this deletes the row unless the
+    /// retention fence is up, which is what turns every existing discard path
+    /// into "retain and replay" during shutdown. `None` for a job that is not
+    /// durable — no gallery target, a batch child, reference-upload authority,
+    /// an oversized payload, or no journal at all.
+    pub journal: Option<crate::queue_journal::QueueTicket>,
     /// Cloneable, payload-free authenticated ingress authority. The API key
     /// marker itself never leaves the route; dependency preparation must
     /// revalidate this grant against the exact canonical request.
@@ -165,13 +171,17 @@ impl QueueHandle {
     /// Wait for shared queue capacity without converting temporary occupancy
     /// into a terminal batch failure. Cancellation before transport drops the
     /// unsubmitted job and releases any reserved counter slot.
+    /// The job is passed by `&mut Option` rather than by value so a caller
+    /// still owns it when submission fails. That matters for replay: a
+    /// dropped `GenerationJob` also drops its durable queue ticket, which
+    /// deletes the row — for a job that never reached a worker, exactly the
+    /// wrong outcome. On success the option is taken.
     pub async fn submit_when_available(
         &self,
-        job: GenerationJob,
+        job: &mut Option<GenerationJob>,
         capacity: usize,
         cancellation: &tokio_util::sync::CancellationToken,
     ) -> Result<usize, SubmitError> {
-        let mut job = Some(job);
         let waiter = self.capacity_waiter.lock();
         tokio::pin!(waiter);
         let _waiter = tokio::select! {
@@ -187,18 +197,27 @@ impl QueueHandle {
             if previous < capacity {
                 let send = self
                     .job_tx
-                    .send(job.take().expect("batch queue job submitted once"));
+                    .send(job.take().expect("queued job submitted once"));
                 tokio::pin!(send);
                 return tokio::select! {
                     result = &mut send => {
-                        if result.is_err() {
-                            self.pending_count.fetch_sub(1, Ordering::SeqCst);
-                            self.capacity_notify.notify_waiters();
-                            Err(SubmitError::Shutdown)
-                        } else {
-                            Ok(previous)
+                        match result {
+                            // The receiver is gone. Hand the job back so the
+                            // caller can settle it rather than let a drop
+                            // delete a durable row for work that never ran.
+                            Err(returned) => {
+                                *job = Some(returned.0);
+                                self.pending_count.fetch_sub(1, Ordering::SeqCst);
+                                self.capacity_notify.notify_waiters();
+                                Err(SubmitError::Shutdown)
+                            }
+                            Ok(()) => Ok(previous),
                         }
                     }
+                    // A cancellation mid-send consumes the job: it is owned by
+                    // the in-flight send future. Callers that must settle a
+                    // failed submission check `job.is_some()` rather than
+                    // assume recovery.
                     _ = cancellation.cancelled() => {
                         self.pending_count.fetch_sub(1, Ordering::SeqCst);
                         self.capacity_notify.notify_waiters();
@@ -336,6 +355,14 @@ pub struct AppState {
     /// when MOLD_HOME could not be resolved — callers must fall back to the
     /// filesystem walk in `routes::scan_gallery_dir`.
     pub metadata_db: Arc<Option<mold_db::MetadataDb>>,
+    /// Durable admission journal for public singleton generations. Disabled
+    /// (recording nothing) when `metadata_db` is `None` or the operator turned
+    /// it off; the server still runs every job either way.
+    pub queue_journal: Arc<crate::queue_journal::QueueJournal>,
+    /// Cooperative cancellation for ordinary singleton generations. Separate
+    /// from the chain runner's registry so a chain cancel never reaches an
+    /// unrelated print; shutdown signals both.
+    pub generation_cancel: Arc<crate::generation_cancel::CancelRegistry>,
     /// Global logical publication barrier for every gallery observer and
     /// mutator. Batch commits take the writer side until files, DB rows, and
     /// the durable manifest agree.
@@ -605,6 +632,8 @@ impl AppState {
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
             upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
             metadata_db: Arc::new(None),
+            queue_journal: Arc::new(crate::queue_journal::QueueJournal::disabled()),
+            generation_cancel: Arc::new(crate::generation_cancel::CancelRegistry::new()),
             gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
             chain_jobs: None,
             downloads: DownloadQueue::new(),
@@ -675,6 +704,8 @@ impl AppState {
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
             upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
             metadata_db: Arc::new(None),
+            queue_journal: Arc::new(crate::queue_journal::QueueJournal::disabled()),
+            generation_cancel: Arc::new(crate::generation_cancel::CancelRegistry::new()),
             gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
             chain_jobs: None,
             downloads: DownloadQueue::new(),
@@ -758,6 +789,8 @@ impl AppState {
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
             upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
             metadata_db: Arc::new(None),
+            queue_journal: Arc::new(crate::queue_journal::QueueJournal::disabled()),
+            generation_cancel: Arc::new(crate::generation_cancel::CancelRegistry::new()),
             gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
             chain_jobs: None,
             downloads: DownloadQueue::new(),
@@ -808,6 +841,8 @@ impl AppState {
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
             upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
             metadata_db: Arc::new(None),
+            queue_journal: Arc::new(crate::queue_journal::QueueJournal::disabled()),
+            generation_cancel: Arc::new(crate::generation_cancel::CancelRegistry::new()),
             gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
             chain_jobs: None,
             downloads: DownloadQueue::new(),
@@ -855,6 +890,8 @@ impl AppState {
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
             upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
             metadata_db: Arc::new(None),
+            queue_journal: Arc::new(crate::queue_journal::QueueJournal::disabled()),
+            generation_cancel: Arc::new(crate::generation_cancel::CancelRegistry::new()),
             gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
             chain_jobs: None,
             downloads: DownloadQueue::new(),
@@ -899,6 +936,7 @@ mod tests {
             result_tx,
             output_dir: None,
             batch_child: None,
+            journal: None,
             #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
             h3_private_ingress_grant: None,
         }
@@ -1027,7 +1065,7 @@ mod tests {
             let cancellation = cancellation.clone();
             async move {
                 handle
-                    .submit_when_available(queue_job("batch"), 1, &cancellation)
+                    .submit_when_available(&mut Some(queue_job("batch")), 1, &cancellation)
                     .await
             }
         });
@@ -1058,7 +1096,7 @@ mod tests {
             let cancellation = first_cancel.clone();
             async move {
                 handle
-                    .submit_when_available(queue_job("first"), 1, &cancellation)
+                    .submit_when_available(&mut Some(queue_job("first")), 1, &cancellation)
                     .await
             }
         });
@@ -1068,7 +1106,7 @@ mod tests {
             async move {
                 handle
                     .submit_when_available(
-                        queue_job("second"),
+                        &mut Some(queue_job("second")),
                         1,
                         &tokio_util::sync::CancellationToken::new(),
                     )

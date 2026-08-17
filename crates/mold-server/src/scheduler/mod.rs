@@ -5396,6 +5396,7 @@ fn gpu_job_from_generation(
         h3_prepared_attempt: None,
         lease: Some(lease),
         batch_child: job.batch_child,
+        journal: job.journal,
     }
 }
 
@@ -5420,6 +5421,7 @@ fn generation_and_prepared_from_gpu_job(
             result_tx: job.result_tx,
             output_dir: job.output_dir,
             batch_child: job.batch_child,
+            journal: job.journal,
             #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
             h3_private_ingress_grant,
         },
@@ -5460,9 +5462,9 @@ fn exact_leased_execution_plan(
 
 fn reject_generation(state: &AppState, job: GenerationJob, error: String) {
     if let Some(progress) = job.progress_tx {
-        let _ = progress.send(SseMessage::Error(mold_core::SseErrorEvent {
-            message: error.clone(),
-        }));
+        let _ = progress.send(SseMessage::Error(mold_core::SseErrorEvent::failed(
+            error.clone(),
+        )));
     }
     let id = job.id.clone();
     let _ = job.result_tx.send(Err(error));
@@ -6430,6 +6432,8 @@ mod tests {
             poisoned: AtomicBool::new(false),
             fatal_cuda_error: Arc::new(AtomicBool::new(false)),
             fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
+            queue_journal: Arc::new(crate::queue_journal::QueueJournal::disabled()),
+            generation_cancel: Arc::new(crate::generation_cancel::CancelRegistry::new()),
             shutdown_requested: AtomicBool::new(false),
             drain_state: std::sync::atomic::AtomicU8::new(crate::gpu_pool::DRAIN_RUNNING),
             owner_thread_id: std::sync::OnceLock::new(),
@@ -6722,6 +6726,7 @@ mod tests {
                 result_tx,
                 output_dir: None,
                 batch_child: None,
+                journal: None,
                 #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
                 h3_private_ingress_grant: None,
             },
