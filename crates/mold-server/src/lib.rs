@@ -833,6 +833,16 @@ pub async fn run_server(
         );
     }
 
+    // A SIGKILL runs no destructor, so every hard stop used to leak a
+    // directory of reference media under MOLD_HOME. Swept in the same startup
+    // pass that recovers the queue, because the two have the same cause.
+    {
+        let swept = reference_uploads::sweep_orphaned_staging_roots(state.reference_uploads.root());
+        if swept > 0 {
+            info!(swept, "removed orphaned reference-upload staging roots");
+        }
+    }
+
     // Retained generations resume before the router serves, as ONE sequential
     // task: `submit_when_available` serializes on a single global capacity
     // mutex, so parallel replay would land in arbitrary order and destroy the

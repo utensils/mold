@@ -295,7 +295,56 @@ pub(crate) fn inference_bindings_for_request(
     }
 }
 
+/// Delete `runtime-*` staging roots left behind by earlier processes.
+///
+/// [`StoreLifetime`] removes this process's root on drop, but a SIGKILL runs
+/// no destructor — and a durable queue exists precisely because SIGKILLs
+/// happen. Without this sweep every hard stop leaks a directory of reference
+/// media forever. Only `runtime-*` directories are considered, and the current
+/// process's own root is skipped.
+///
+/// Returns how many roots were removed.
+pub fn sweep_orphaned_staging_roots(current_root: &std::path::Path) -> usize {
+    let Some(parent) = current_root.parent() else {
+        return 0;
+    };
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path == current_root || !path.is_dir() {
+            continue;
+        }
+        if !entry.file_name().to_string_lossy().starts_with("runtime-") {
+            continue;
+        }
+        match std::fs::remove_dir_all(&path) {
+            Ok(()) => {
+                tracing::info!(
+                    root = %path.display(),
+                    "removed reference-upload staging left by an earlier process"
+                );
+                removed += 1;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => tracing::warn!(
+                root = %path.display(),
+                %error,
+                "could not remove orphaned reference-upload staging"
+            ),
+        }
+    }
+    removed
+}
+
 impl ReferenceUploadStore {
+    /// This process's staging root. Exposed so startup can sweep its siblings.
+    pub fn root(&self) -> &std::path::Path {
+        self.root.as_path()
+    }
+
     pub fn from_mold_home() -> Self {
         let mold_home = mold_core::Config::mold_dir().unwrap_or_else(|| PathBuf::from(".mold"));
         let mold_home = if mold_home.is_absolute() {
@@ -1967,6 +2016,35 @@ fn required_secret_header<'a>(headers: &'a HeaderMap, name: &str) -> Result<&'a 
 mod tests {
     use super::*;
     use mold_core::GenerationReferenceKind;
+
+    /// A SIGKILL leaves a `runtime-*` root behind because no destructor runs.
+    /// Eleven of them is a real directory of user media that nothing else
+    /// would ever remove.
+    #[test]
+    fn sweeping_removes_earlier_runtime_roots_but_never_the_live_one() {
+        let cache = tempfile::tempdir().unwrap();
+        let live = cache.path().join("runtime-live");
+        std::fs::create_dir_all(live.join("session")).unwrap();
+        for index in 0..3 {
+            let orphan = cache.path().join(format!("runtime-orphan-{index}"));
+            std::fs::create_dir_all(&orphan).unwrap();
+            std::fs::write(orphan.join("reference.png"), b"leaked media").unwrap();
+        }
+        // Anything that is not a runtime root is somebody else's.
+        let unrelated = cache.path().join("catalog-credentials");
+        std::fs::create_dir_all(&unrelated).unwrap();
+
+        assert_eq!(sweep_orphaned_staging_roots(&live), 3);
+
+        assert!(live.join("session").is_dir());
+        assert!(unrelated.is_dir());
+        assert!(!cache.path().join("runtime-orphan-0").exists());
+        assert_eq!(
+            sweep_orphaned_staging_roots(&live),
+            0,
+            "sweeping is idempotent"
+        );
+    }
 
     fn png_reference(
         media: GenerationReferenceAuthority,
