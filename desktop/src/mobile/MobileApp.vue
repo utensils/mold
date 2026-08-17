@@ -91,6 +91,7 @@ import {
   listActiveWork,
   reconcileActivityHost,
   type ActivityHostSnapshot,
+  type FleetActiveWork,
 } from "@studio/api/activity";
 import { listQueue, type QueueListing } from "@studio/api/queuePlan";
 import { buildChainRequest } from "@studio/lib/sequenceForm";
@@ -122,6 +123,7 @@ import type {
   Ltx2ControlAdapterInfo,
   Ltx2CameraControlInfo,
   ModelEntry,
+  OutputMetadata,
   PromptTransformProvenance,
   RemixDimension,
   RemixSourceKind,
@@ -144,6 +146,7 @@ import {
 } from "../lib/chainRouting";
 import {
   applyModelDefaults,
+  applyMetadataToForm,
   applyRequestToForm,
   buildRequest,
   cloneGenerateForm,
@@ -1352,11 +1355,19 @@ function selectCurrentMobileSequence(): void {
   const route = sequenceRoute.value;
   const detail = sequenceJob.value;
   if (!route || !detail) return;
+  loadMobileSequenceIntoCreate(detail);
+}
+
+function loadMobileSequenceIntoCreate(detail: ChainJobDetail): void {
   const script = normalizeServerChainScript(detail.script);
   if (script) {
     const loaded = chainScriptToClips(script);
     const shared = loaded.shared;
-    if (shared.model) form.model = shared.model;
+    if (shared.model) {
+      const model = generationModels.value.find((entry) => entry.name === shared.model);
+      if (model) applyModelDefaults(form, model);
+      else form.model = shared.model;
+    }
     if (shared.width != null) form.width = shared.width;
     if (shared.height != null) form.height = shared.height;
     if (shared.fps != null) form.fps = shared.fps;
@@ -1373,6 +1384,93 @@ function selectCurrentMobileSequence(): void {
     draft.openingImage = loaded.openingImage;
   }
   tab.value = "generate";
+}
+
+let mobileLiveWorkSelectionEpoch = 0;
+
+/** Restore server-owned work through its exact Keychain-authenticated route.
+ *  This mirrors desktop's live-work selection while keeping iPhone remote-only:
+ *  generation settings come from the authoritative queue row, and durable
+ *  sequences come from their server-side script. */
+async function openMobileLiveWork(row: FleetActiveWork): Promise<void> {
+  const epoch = ++mobileLiveWorkSelectionEpoch;
+  const host = connectedHosts.value.find((candidate) => candidate.id === row.hostId);
+  if (!host) {
+    setGenerationStatus("That machine is no longer connected.", true);
+    return;
+  }
+  const target = mobileHostTarget(host);
+  const snapshot = liveActivityHosts.value[row.hostId];
+
+  try {
+    if (!snapshot?.instanceId || snapshot.routeUrl !== target.baseUrl) {
+      throw new Error("This queue item belongs to a machine route that has changed.");
+    }
+    const verifyAuthority = async (): Promise<void> => {
+      const current = await apiJsonTo<ServerStatus>(target, "/api/status");
+      if (current.instance_id !== snapshot.instanceId) {
+        throw new Error("This queue item belongs to a different Mold server instance.");
+      }
+    };
+    await verifyAuthority();
+    if (epoch !== mobileLiveWorkSelectionEpoch) return;
+
+    if (row.kind === "generation") {
+      const queue = await listQueue(target);
+      if (epoch !== mobileLiveWorkSelectionEpoch) return;
+      await verifyAuthority();
+      if (epoch !== mobileLiveWorkSelectionEpoch) return;
+      const entry = queue.entries.find((candidate) => candidate.id === row.id);
+      if (!entry?.metadata) {
+        setGenerationStatus("This host cannot restore settings for that generation.", true);
+        return;
+      }
+      await selectHost(host.id);
+      if (epoch !== mobileLiveWorkSelectionEpoch) return;
+      const metadata = entry.metadata as OutputMetadata;
+      applyMetadataToForm(
+        form,
+        entry.seed_pinned === false
+          ? ({ ...metadata, seed: null } as unknown as OutputMetadata)
+          : metadata,
+        generationModels.value,
+      );
+      draft.stopEditing();
+      draft.output = "single";
+      setGenerationStatus("Prompt settings restored");
+      tab.value = "generate";
+      void nextTick(() => document.querySelector<HTMLTextAreaElement>("#mobile-prompt")?.focus());
+      return;
+    }
+
+    if (row.kind === "sequence") {
+      const detail = await apiJsonTo<ChainJobDetail>(
+        target,
+        `/api/chain-jobs/${encodeURIComponent(row.id)}`,
+      );
+      if (epoch !== mobileLiveWorkSelectionEpoch) return;
+      await verifyAuthority();
+      if (epoch !== mobileLiveWorkSelectionEpoch) return;
+      await selectHost(host.id);
+      if (epoch !== mobileLiveWorkSelectionEpoch) return;
+      if (!normalizeServerChainScript(detail.script)) {
+        throw new Error("This sequence job has no restorable script.");
+      }
+      loadMobileSequenceIntoCreate(detail);
+      setGenerationStatus("Sequence settings restored");
+      return;
+    }
+
+    if (row.kind === "download") {
+      openCatalog(host.id);
+      return;
+    }
+    tab.value = "hosts";
+    showHostDetail(host.id);
+  } catch (error) {
+    if (epoch !== mobileLiveWorkSelectionEpoch) return;
+    setGenerationStatus(describeTransportError(error, host.name), true);
+  }
 }
 /**
  * Running and waiting are counted apart. A settled sequence keeps its row (for
@@ -5705,7 +5803,11 @@ onBeforeUnmount(() => {
                 </template>
               </li>
             </ol>
-            <LiveActivityList :rows="sharedMobileActivity" />
+            <LiveActivityList
+              :rows="sharedMobileActivity"
+              interactive
+              @select="openMobileLiveWork"
+            />
           </section>
           <p
             v-if="sequenceError && sequenceRoute && !isSequence"

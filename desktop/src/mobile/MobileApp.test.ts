@@ -530,7 +530,7 @@ describe("MobileApp sequence generation", () => {
       if (path === "/api/gallery") return Promise.resolve([print]);
       if (path === "/api/activity") {
         return Promise.resolve({
-          instance_id: "mobile-host",
+          instance_id: status.instance_id,
           observed_at_unix_ms: 10,
           items: [
             {
@@ -554,6 +554,209 @@ describe("MobileApp sequence generation", () => {
     expect(activity.text()).toContain("Studio");
     expect(activity.text()).toContain("flux-dev:q4");
     expect(localStorage.getItem("mold.mobile.live-activity.v1")).not.toContain(target.apiKey);
+  });
+
+  it("loads a tapped server-owned generation into Create like desktop", async () => {
+    const metadata = {
+      prompt: "a lighthouse beyond the red dunes",
+      negative_prompt: "fog",
+      model: model.name,
+      seed: 0,
+      steps: 18,
+      guidance: 2.5,
+      width: 1024,
+      height: 576,
+    };
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/gallery") return Promise.resolve([print]);
+      if (path === "/api/activity") {
+        return Promise.resolve({
+          instance_id: status.instance_id,
+          observed_at_unix_ms: 10,
+          items: [
+            {
+              id: "foreign-job",
+              kind: "generation",
+              phase: "running",
+              model: model.name,
+              created_at_unix_ms: 1,
+              updated_at_unix_ms: 9,
+              can_cancel: false,
+            },
+          ],
+        });
+      }
+      if (path === "/api/queue") {
+        return Promise.resolve({
+          entries: [
+            {
+              id: "foreign-job",
+              model: model.name,
+              state: "running",
+              started_at_unix_ms: 1,
+              position: 0,
+              metadata,
+              seed_pinned: false,
+            },
+          ],
+          plan: null,
+        });
+      }
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await flushPromises();
+
+    const row = wrapper.get("[data-test='live-activity-select-studio-id:generation:foreign-job']");
+    expect(row.element.tagName).toBe("BUTTON");
+    await row.trigger("click");
+    await flushPromises();
+
+    expect(fieldControl("Prompt").element).toHaveProperty(
+      "value",
+      "a lighthouse beyond the red dunes",
+    );
+    expect(fieldControl("Steps").element).toHaveProperty("value", "18");
+    expect(wrapper.text()).toContain("New seed for every print.");
+    expect(wrapper.get("[data-test='mobile-generation-summary']").text()).toBe(
+      "Prompt settings restored",
+    );
+    expect(apiJsonTo).toHaveBeenCalledWith(target, "/api/queue");
+  });
+
+  it("loads a tapped server-owned sequence script into the clip rail", async () => {
+    const pinia = createPinia();
+    const priorModel: ModelEntry = {
+      ...model,
+      name: "flux-dev:q8",
+      family: "flux",
+      default_guidance: 4,
+    };
+    const sequenceModel: ModelEntry = {
+      ...model,
+      name: "ltx-video-0.9.8-2b-distilled:bf16",
+      family: "ltx-video",
+    };
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([priorModel, sequenceModel]);
+      if (path === "/api/gallery") return Promise.resolve([print]);
+      if (path === "/api/activity") {
+        return Promise.resolve({
+          instance_id: status.instance_id,
+          observed_at_unix_ms: 10,
+          items: [
+            {
+              id: "foreign-sequence",
+              kind: "sequence",
+              phase: "running",
+              model: sequenceModel.name,
+              created_at_unix_ms: 1,
+              updated_at_unix_ms: 9,
+              can_cancel: false,
+            },
+          ],
+        });
+      }
+      if (path === "/api/queue") return Promise.resolve({ entries: [], plan: null });
+      if (path === "/api/chain-jobs/foreign-sequence") {
+        return Promise.resolve({
+          id: "foreign-sequence",
+          state: "running",
+          model: sequenceModel.name,
+          stage_count: 2,
+          current_stage: 0,
+          created_at_unix_ms: 1,
+          updated_at_unix_ms: 9,
+          error: null,
+          ephemeral: false,
+          stages: [],
+          script: {
+            schema: "mold.chain.v1",
+            chain: {
+              model: sequenceModel.name,
+              width: 1024,
+              height: 576,
+              fps: 24,
+              steps: 18,
+              guidance: 2.5,
+            },
+            stages: [
+              { prompt: "A lighthouse wakes", frames: 25, transition: "smooth" },
+              { prompt: "The beam crosses red dunes", frames: 33, transition: "smooth" },
+            ],
+          },
+        });
+      }
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    wrapper = mountMobileApp(pinia);
+    await flushPromises();
+    await flushPromises();
+
+    await wrapper
+      .get("[data-test='live-activity-select-studio-id:sequence:foreign-sequence']")
+      .trigger("click");
+    await flushPromises();
+
+    const draft = useSequenceDraftStore(pinia);
+    expect(draft.output).toBe("sequence");
+    expect(draft.clips.map((clip) => clip.prompt)).toEqual([
+      "A lighthouse wakes",
+      "The beam crosses red dunes",
+    ]);
+    expect(wrapper.find("[data-test='mobile-sequence-composer']").exists()).toBe(true);
+    expect(fieldControl("Video model").element).toHaveProperty("value", sequenceModel.name);
+    expect(wrapper.text()).toContain("Distilled recipe fixes CFG at 1.0");
+    expect(apiJsonTo).toHaveBeenCalledWith(target, "/api/chain-jobs/foreign-sequence");
+  });
+
+  it("refuses to restore a stale queue row after the server instance changes", async () => {
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/gallery") return Promise.resolve([print]);
+      if (path === "/api/activity") {
+        return Promise.resolve({
+          instance_id: "replaced-studio-id",
+          observed_at_unix_ms: 10,
+          items: [
+            {
+              id: "colliding-job-id",
+              kind: "generation",
+              phase: "running",
+              model: model.name,
+              created_at_unix_ms: 1,
+              updated_at_unix_ms: 9,
+              can_cancel: false,
+            },
+          ],
+        });
+      }
+      if (path === "/api/queue") {
+        return Promise.reject(new Error("queue must not be read from the replacement instance"));
+      }
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await flushPromises();
+    const queueReads = apiJsonTo.mock.calls.filter(([, path]) => path === "/api/queue").length;
+
+    await wrapper
+      .get("[data-test='live-activity-select-studio-id:generation:colliding-job-id']")
+      .trigger("click");
+    await flushPromises();
+
+    expect(wrapper.get("[data-test='mobile-generation-summary']").text()).toContain(
+      "different Mold server instance",
+    );
+    expect(apiJsonTo.mock.calls.filter(([, path]) => path === "/api/queue")).toHaveLength(
+      queueReads,
+    );
   });
 
   it("queues a durable two-clip sequence on the selected Keychain-authenticated host", async () => {
