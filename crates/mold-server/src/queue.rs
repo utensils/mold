@@ -579,18 +579,114 @@ fn write_gallery_bytes_no_replace_with_directory_sync(
         return Err(error.into());
     }
     drop(file);
-    // Publish with a no-replace primitive. `rename` REPLACES its destination on
-    // Unix, which would silently overwrite a file another writer created at the
-    // reserved name between reservation and publication — the exact thing this
-    // helper's `no_replace` contract promises not to do. `hard_link` fails with
-    // AlreadyExists instead, and is equally atomic.
-    if let Err(error) = std::fs::hard_link(&staged, &path) {
+    if let Err(error) = publish_staged_no_replace(&staged, &path) {
         let _ = std::fs::remove_file(&staged);
         return Err(error.into());
     }
-    let _ = std::fs::remove_file(&staged);
     sync_directory(dir)?;
     Ok((filename, path, reservation))
+}
+
+/// Move staged bytes onto their final gallery name, atomically, without ever
+/// replacing a file somebody else put there.
+///
+/// Plain `rename` replaces its destination on Unix, which would silently
+/// overwrite a name another writer took between reservation and publication.
+/// `hard_link` refuses correctly but demands a filesystem with links, and
+/// exFAT and some SMB mounts do not have them — requiring links made every
+/// save on such a gallery fail, discard its bytes, and hold the durable job
+/// forever. So: use the platform's real no-replace rename where there is one,
+/// and fall back to reserving the name where there is not.
+fn publish_staged_no_replace(
+    staged: &std::path::Path,
+    final_path: &std::path::Path,
+) -> std::io::Result<()> {
+    match platform_rename_no_replace(staged, final_path) {
+        Some(Ok(())) => Ok(()),
+        // The destination exists — the contract firing, not a platform gap.
+        Some(Err(error)) if error.kind() == std::io::ErrorKind::AlreadyExists => Err(error),
+        Some(Err(error)) if !is_unsupported_operation(&error) => Err(error),
+        // No primitive, or this filesystem does not implement it.
+        _ => publish_by_reserving_final_name(staged, final_path),
+    }
+}
+
+/// `Some` when the platform has a no-replace rename; `None` when it has none
+/// to try.
+fn platform_rename_no_replace(
+    staged: &std::path::Path,
+    final_path: &std::path::Path,
+) -> Option<std::io::Result<()>> {
+    #[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let (Ok(from), Ok(to)) = (
+            std::ffi::CString::new(staged.as_os_str().as_bytes()),
+            std::ffi::CString::new(final_path.as_os_str().as_bytes()),
+        ) else {
+            return None;
+        };
+        // SAFETY: both paths are NUL-terminated C strings that outlive the call.
+        let result = unsafe {
+            #[cfg(target_os = "macos")]
+            {
+                libc::renamex_np(from.as_ptr(), to.as_ptr(), libc::RENAME_EXCL)
+            }
+            #[cfg(all(target_os = "linux", target_env = "gnu"))]
+            {
+                libc::renameat2(
+                    libc::AT_FDCWD,
+                    from.as_ptr(),
+                    libc::AT_FDCWD,
+                    to.as_ptr(),
+                    libc::RENAME_NOREPLACE,
+                )
+            }
+        };
+        if result == 0 {
+            Some(Ok(()))
+        } else {
+            Some(Err(std::io::Error::last_os_error()))
+        }
+    }
+    #[cfg(not(any(target_os = "macos", all(target_os = "linux", target_env = "gnu"))))]
+    {
+        let _ = (staged, final_path);
+        None
+    }
+}
+
+/// Whether the error means "this platform or filesystem cannot do that",
+/// rather than a genuine failure to publish.
+fn is_unsupported_operation(error: &std::io::Error) -> bool {
+    matches!(
+        error.raw_os_error(),
+        Some(libc::ENOSYS) | Some(libc::ENOTSUP) | Some(libc::EINVAL) | Some(libc::EOPNOTSUPP)
+    )
+}
+
+/// The universal fallback: reserve the final name with an atomic `create_new`,
+/// then rename our own staged bytes over our own reservation.
+///
+/// `create_new` is the no-replace guarantee — it fails with `AlreadyExists` if
+/// anybody else holds the name — and the rename that follows only ever
+/// replaces the empty placeholder this call just made. A crash in between
+/// leaves a zero-byte file, which the gallery's existing size floor already
+/// filters out, so it is never mistaken for a print.
+fn publish_by_reserving_final_name(
+    staged: &std::path::Path,
+    final_path: &std::path::Path,
+) -> std::io::Result<()> {
+    let placeholder = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(final_path)?;
+    drop(placeholder);
+    if let Err(error) = std::fs::rename(staged, final_path) {
+        let _ = std::fs::remove_file(final_path);
+        return Err(error);
+    }
+    Ok(())
 }
 
 /// Suffix of a gallery write that has been staged but not yet published.
@@ -3960,6 +4056,49 @@ mod tests {
             b"written by someone else",
             "the other writer's bytes must survive"
         );
+    }
+
+    /// A filesystem without hard-link support — exFAT, some SMB mounts — is a
+    /// perfectly ordinary place to keep a gallery. Requiring links there made
+    /// every save fail, discard its bytes, and hold the durable job forever,
+    /// so the server rendered and then threw the result away. The fallback is
+    /// what such a host runs, and it has to be correct on its own.
+    #[test]
+    fn the_link_free_publish_fallback_is_atomic_and_still_refuses_to_replace() {
+        let tmp = TempDir::new().unwrap();
+        let staged = tmp.path().join("out.png.partial");
+        let published = tmp.path().join("out.png");
+        std::fs::write(&staged, b"generated bytes").unwrap();
+
+        publish_by_reserving_final_name(&staged, &published).expect("publishes without links");
+        assert_eq!(std::fs::read(&published).unwrap(), b"generated bytes");
+        assert!(!staged.exists());
+
+        // A name somebody else already holds is refused, not overwritten.
+        let other = tmp.path().join("taken.png.partial");
+        std::fs::write(&other, b"ours").unwrap();
+        std::fs::write(tmp.path().join("taken.png"), b"theirs").unwrap();
+        let refused = publish_by_reserving_final_name(&other, &tmp.path().join("taken.png"))
+            .expect_err("a taken name must be refused");
+        assert_eq!(refused.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            std::fs::read(tmp.path().join("taken.png")).unwrap(),
+            b"theirs"
+        );
+    }
+
+    /// Whatever primitive the host supports, the contract is the same.
+    #[test]
+    fn publishing_refuses_an_existing_destination_on_this_host() {
+        let tmp = TempDir::new().unwrap();
+        let staged = tmp.path().join("out.png.partial");
+        std::fs::write(&staged, b"ours").unwrap();
+        let published = tmp.path().join("out.png");
+        std::fs::write(&published, b"theirs").unwrap();
+
+        let refused = publish_staged_no_replace(&staged, &published).expect_err("must not replace");
+        assert_eq!(refused.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&published).unwrap(), b"theirs");
     }
 
     /// A kill mid-write leaves `<final>.partial` behind, and the bounded
