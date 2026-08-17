@@ -104,7 +104,15 @@ export function isInterruptedGenerationError(error: string | null | undefined): 
 
 type GalleryMatchJob = Pick<
   Job,
-  "visualSeed" | "model" | "prompt" | "width" | "height" | "total" | "request" | "submittedAtUnixMs"
+  | "id"
+  | "visualSeed"
+  | "model"
+  | "prompt"
+  | "width"
+  | "height"
+  | "total"
+  | "request"
+  | "submittedAtUnixMs"
 >;
 
 interface H3BoundaryIdentity {
@@ -261,6 +269,16 @@ function matchGalleryPrintWithIdentity(
   prints: readonly GalleryImage[],
   h3Identity: H3RecoveryIdentity | null | undefined,
 ): GalleryImage | null {
+  // The server stamps the producing job's queue id into the print it saves.
+  // Read that before inferring anything: it is exact, it survives clock skew
+  // between host and client (the age fence below compares a CLIENT submit time
+  // against a HOST print stamp), and it separates same-second fixed-seed twins
+  // that every other field in this join reproduces identically. The heuristic
+  // stays as the fallback for hosts that predate the stamp.
+  if (job.id) {
+    const stamped = prints.find((print) => print.metadata?.job_id === job.id);
+    if (stamped) return stamped;
+  }
   const seed = Number(job.visualSeed);
   if (!Number.isSafeInteger(seed) || h3Identity === null) return null;
   const differs = (recorded: number | null | undefined, submitted: number): boolean =>

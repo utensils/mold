@@ -381,6 +381,56 @@ describe("galleryCompletion", () => {
   });
 });
 
+describe("gallery recovery reads the server's own job id", () => {
+  it("matches on job_id even when the host clock trails the client's", async () => {
+    // The age fence compares a CLIENT submit time against a HOST print stamp,
+    // so a host running behind rejects its own valid output. `job_id` is the
+    // id the server stamped into the print it saved — exact, and immune to
+    // whatever the two clocks disagree about.
+    const skewed: GalleryImage = {
+      ...galleryPrint,
+      filename: "host-clock-behind.png",
+      timestamp: Math.floor(Date.now() / 1000) - 600,
+      metadata: { ...galleryPrint.metadata, job_id: "job-9" },
+    };
+    const job = makeJob();
+
+    expect(await matchGalleryPrint(job, [skewed])).toBe(skewed);
+  });
+
+  it("picks the stamped print over a same-second twin the heuristic cannot split", async () => {
+    // Same seed, model, prompt, size, steps and second: everything the
+    // heuristic joins on is identical. Only the server's id separates them.
+    const twin: GalleryImage = { ...galleryPrint, filename: "twin.png" };
+    const mine: GalleryImage = {
+      ...galleryPrint,
+      filename: "mine.png",
+      metadata: { ...galleryPrint.metadata, job_id: "job-9" },
+    };
+    const job = makeJob();
+
+    expect(await matchGalleryPrint(job, [twin, mine])).toBe(mine);
+  });
+
+  it("never reads someone else's stamped job id as a match", async () => {
+    const theirs: GalleryImage = {
+      ...galleryPrint,
+      filename: "theirs.png",
+      timestamp: Math.floor(Date.now() / 1000) - 600,
+      metadata: { ...galleryPrint.metadata, job_id: "some-other-job" },
+    };
+    const job = makeJob();
+
+    // Wrong id AND too old for the heuristic: nothing here belongs to us.
+    expect(await matchGalleryPrint(job, [theirs])).toBeNull();
+  });
+
+  it("still recovers from a legacy host that stamps no job id at all", async () => {
+    const job = makeJob();
+    expect(await matchGalleryPrint(job, [galleryPrint])).toBe(galleryPrint);
+  });
+});
+
 describe("gallery recovery is bounded by submission time", () => {
   it("never claims a print that existed BEFORE the job was submitted", async () => {
     // Fixed seed, same model, same prompt, same dimensions and steps: an older

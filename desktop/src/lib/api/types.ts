@@ -631,6 +631,10 @@ export interface OutputMetadata {
    * chain jobs with a server-side record — ephemeral chain outputs and
    * pre-#564 rows carry nothing (additive; newer servers only). */
   chain_job_id?: string | null;
+  /** The queue id of the generation that produced this print. The server's own
+   * replay idempotence key, and the exact answer to "is this print mine?" —
+   * absent on hosts that predate it. */
+  job_id?: string | null;
   /** Per-clip provenance for a stitched sequence — what the Library's
    * sequence-aware Reuse settings reloads into the clip rail. */
   chain?: ChainOutputMetadata | null;
