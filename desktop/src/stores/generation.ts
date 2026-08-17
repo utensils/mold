@@ -907,9 +907,19 @@ export const useGenerationStore = defineStore("generation", {
             } else if (event === "error") {
               settleJob(current, "error");
               try {
-                const parsed = JSON.parse(data) as { error?: string; message?: string };
+                const parsed = JSON.parse(data) as {
+                  error?: string;
+                  message?: string;
+                  retained?: boolean;
+                };
                 const message = parsed.error ?? parsed.message ?? data;
                 current.error = isCancelledError(message) ? "Cancelled" : message;
+                // A durable-queue host ends a retained job's stream with an
+                // error frame carrying `retained` while keeping the work: it
+                // will run and land in that host's gallery. Treating it as an
+                // interruption suppresses the "failed" notification and hands
+                // the job to reconciliation, exactly like a dead socket.
+                current.interrupted = parsed.retained === true;
               } catch {
                 current.error = isCancelledError(data) ? "Cancelled" : data;
               }

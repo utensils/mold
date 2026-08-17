@@ -52,6 +52,7 @@ vi.mock("../lib/ipc", () => ({
   },
 }));
 
+import { notifyGenerationFailed } from "../lib/notify";
 import { useGenerationStore, suggestOutputFilename, needsHostRoute } from "./generation";
 import { useAppPrefsStore } from "./appPrefs";
 import { useConnectionStore } from "./connection";
@@ -718,6 +719,48 @@ describe("generation store multi-host routing", () => {
     expect(target.baseUrl).toBe("http://hal9000:7680");
     expect(path).toBe("/api/queue/srv-1");
     expect(init.method).toBe("DELETE");
+  });
+
+  it("treats a retained terminal frame as an interruption the host will finish", async () => {
+    sseStream.mockImplementation(
+      (_path: string, opts: { onEvent: (e: string, d: string) => void }) => {
+        opts.onEvent("progress", JSON.stringify({ type: "queued", position: 1, id: "srv-9" }));
+        opts.onEvent(
+          "error",
+          JSON.stringify({
+            message: "mold is restarting; this generation was kept in the queue",
+            retained: true,
+            code: "server_restarting",
+          }),
+        );
+        return Promise.resolve();
+      },
+    );
+    const store = useGenerationStore();
+    const { jobs, settled } = store.submitBatch(request(), 1, halRoute);
+    await settled;
+
+    expect(jobs[0]?.status).toBe("error");
+    expect(jobs[0]?.interrupted).toBe(true);
+    expect(jobs[0]?.error).toBe("mold is restarting; this generation was kept in the queue");
+    // A retained job is still work in progress on the host — the OS failure
+    // notification would be a lie, and reconciliation picks it back up.
+    expect(notifyGenerationFailed).not.toHaveBeenCalled();
+  });
+
+  it("keeps an ordinary server error a final failure", async () => {
+    sseStream.mockImplementation(
+      (_path: string, opts: { onEvent: (e: string, d: string) => void }) => {
+        opts.onEvent("error", JSON.stringify({ message: "host ran out of memory" }));
+        return Promise.resolve();
+      },
+    );
+    const store = useGenerationStore();
+    const { jobs, settled } = store.submitBatch(request(), 1, halRoute);
+    await settled;
+
+    expect(jobs[0]?.interrupted).toBe(false);
+    expect(notifyGenerationFailed).toHaveBeenCalled();
   });
 
   it("posts only the supported auto-expand body and maps chain progress/completion", async () => {
