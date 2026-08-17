@@ -122,8 +122,8 @@ function plannedPlacement() {
 }
 // Keep the real reconciliation logic but collapse its re-attach poll interval
 // so tests never wait out the production cadence.
-vi.mock("./mobileGenerationRecovery", async (importOriginal) => {
-  const original = await importOriginal<typeof import("./mobileGenerationRecovery")>();
+vi.mock("../lib/generationRecovery", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../lib/generationRecovery")>();
   return {
     ...original,
     reconcileInterruptedGenerationJobs: (

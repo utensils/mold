@@ -1,34 +1,34 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { GalleryImage, GenerateRequest } from "../lib/api/types";
-import { newJob, type Job } from "../lib/generationJob";
+import type { GalleryImage, GenerateRequest } from "./api/types";
+import { newJob, type Job } from "./generationJob";
 
 const { apiFetchTo, apiJsonTo } = vi.hoisted(() => ({
   apiFetchTo: vi.fn(),
   apiJsonTo: vi.fn(),
 }));
 
-vi.mock("../lib/api/client", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../lib/api/client")>()),
+vi.mock("./api/client", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./api/client")>()),
   apiFetchTo,
   apiJsonTo,
 }));
 
-vi.mock("../lib/sourceRestore", async (importOriginal) => {
-  const original = await importOriginal<typeof import("../lib/sourceRestore")>();
+vi.mock("./sourceRestore", async (importOriginal) => {
+  const original = await importOriginal<typeof import("./sourceRestore")>();
   return {
     ...original,
     sha256HexOfBase64: vi.fn(original.sha256HexOfBase64),
   };
 });
 
-import { ApiError } from "../lib/api/client";
-import { sha256HexOfBase64 } from "../lib/sourceRestore";
+import { ApiError } from "./api/client";
+import { sha256HexOfBase64 } from "./sourceRestore";
 import {
   galleryCompletion,
   isInterruptedGenerationError,
   matchGalleryPrint,
   reconcileInterruptedGenerationJobs,
-} from "./mobileGenerationRecovery";
+} from "./generationRecovery";
 
 const target = { baseUrl: "http://studio.tailnet.ts.net:7680", apiKey: "secret" };
 const ABC_SHA256 = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
@@ -505,6 +505,36 @@ describe("reconcileInterruptedGenerationJobs", () => {
     expect(job.status).toBe("error");
     expect(job.error).toBe(
       "Studio is holding this print and will not run it automatically (dispatch attempts exhausted). Develop again to requeue it.",
+    );
+  });
+
+  it("reaches no verdict when the host never answers, and says so", async () => {
+    // Three dead queries in a row is not evidence the print failed — the
+    // client simply never learned anything. The row stays flagged as an
+    // interruption so a later resume can try again and callers that use the
+    // flag to suppress failure announcements keep doing so.
+    apiJsonTo.mockRejectedValue(new TypeError("Load failed"));
+    const job = makeJob();
+    await reconcileInterruptedGenerationJobs([job], options());
+
+    expect(job.status).toBe("error");
+    expect(job.interrupted).toBe(true);
+    expect(apiFetchTo).not.toHaveBeenCalled();
+  });
+
+  it("reaches a verdict when the host answers that the work is gone", async () => {
+    apiJsonTo.mockImplementation((_target: unknown, path: string) =>
+      Promise.resolve(path === "/api/queue" ? { entries: [] } : []),
+    );
+    const job = makeJob();
+    await reconcileInterruptedGenerationJobs([job], options());
+
+    // The host answered: no such job, no such print. That IS a failure, and
+    // the flag clears so it is announced like one.
+    expect(job.status).toBe("error");
+    expect(job.interrupted).toBe(false);
+    expect(job.error).toBe(
+      "The connection to Studio was interrupted and this print didn’t finish.",
     );
   });
 

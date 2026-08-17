@@ -6,6 +6,10 @@ import { evictMedia, galleryMediaPath, streamableMediaUrl } from "../lib/gallery
 import { ipc } from "../lib/ipc";
 import { notifyGenerated, notifyGenerationFailed } from "../lib/notify";
 import { describeTransportError } from "../lib/api/errors";
+import {
+  isInterruptedGenerationError,
+  reconcileInterruptedGenerationJobs,
+} from "../lib/generationRecovery";
 import { useAppPrefsStore } from "./appPrefs";
 import { useGalleryStore } from "./gallery";
 import { useHostsStore } from "./hosts";
@@ -96,6 +100,17 @@ export function suggestOutputFilename(
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "");
   return `mold-${slug}-${seed}-${nowMs}${role ? `-${role}` : ""}.${format}`;
+}
+
+/** The primary connection as a target, or `null` when nothing is connected —
+ *  `currentTarget()` throws in that case, and a reconcile with no host to ask
+ *  must simply not happen rather than reject the batch. */
+function connectedTarget(): ApiTarget | null {
+  try {
+    return currentTarget();
+  } catch {
+    return null;
+  }
 }
 
 /** Random 32-bit seed — small enough to stay an exact integer after `+ i`. */
@@ -482,32 +497,92 @@ export const useGenerationStore = defineStore("generation", {
         if (job.status === "error") return Promise.resolve();
         return this.streamJob(job, plans[i]!);
       });
-      const settled = runWithConcurrency(tasks, MAX_STREAMS_PER_TARGET).then(() => {
-        // Background notification (the view toasts in the foreground).
-        const failed = jobs.find((s) => s.status === "error");
-        const completed = jobs.find((s) => s.status === "complete");
-        if (completed) notifyGenerated(completed.prompt, completed.result?.filename);
-        else if (failed?.error && !failed.interrupted && !isCancelledError(failed.error)) {
-          notifyGenerationFailed(describeTransportError(failed.error, failed.hostLabel));
-        }
-        // Consumers such as the iPhone UI promote the returned result in
-        // their own promise callback. Defer housekeeping until that callback
-        // has run and protect this batch if older jobs happened to settle
-        // after newer ones.
-        setTimeout(() => {
-          this.pendingConsumerBatchIds = this.pendingConsumerBatchIds.filter(
-            (pendingBatchId) => pendingBatchId !== batchId,
-          );
-          const pendingBatches = new Set(this.pendingConsumerBatchIds);
-          this.prune(
-            GENERATION_HISTORY_LIMIT,
-            jobs.map((job) => job.clientId),
-            this.jobs.filter((job) => !pendingBatches.has(job.batchId)).map((job) => job.clientId),
-          );
-        }, 0);
-        return jobs;
-      });
+      const settled = runWithConcurrency(tasks, MAX_STREAMS_PER_TARGET)
+        // A stream that died while the host kept working is not an outcome.
+        // Reconcile against the frozen route BEFORE anyone reads these jobs:
+        // every shell renders `status: "error"` as a failure (desktop Create
+        // also hides the matching live fleet row by id), so settling here is
+        // what decides whether a retained generation reads as failed or as the
+        // work it still is. Part of `settled`, so consumers see final state.
+        .then(() => this.reconcileInterrupted(jobs))
+        .then(() => {
+          // Background notification (the view toasts in the foreground).
+          const failed = jobs.find((s) => s.status === "error");
+          const completed = jobs.find((s) => s.status === "complete");
+          if (completed) notifyGenerated(completed.prompt, completed.result?.filename);
+          else if (failed?.error && !failed.interrupted && !isCancelledError(failed.error)) {
+            notifyGenerationFailed(describeTransportError(failed.error, failed.hostLabel));
+          }
+          // Consumers such as the iPhone UI promote the returned result in
+          // their own promise callback. Defer housekeeping until that callback
+          // has run and protect this batch if older jobs happened to settle
+          // after newer ones.
+          setTimeout(() => {
+            this.pendingConsumerBatchIds = this.pendingConsumerBatchIds.filter(
+              (pendingBatchId) => pendingBatchId !== batchId,
+            );
+            const pendingBatches = new Set(this.pendingConsumerBatchIds);
+            this.prune(
+              GENERATION_HISTORY_LIMIT,
+              jobs.map((job) => job.clientId),
+              this.jobs
+                .filter((job) => !pendingBatches.has(job.batchId))
+                .map((job) => job.clientId),
+            );
+          }, 0);
+          return jobs;
+        });
       return { jobs, settled };
+    },
+    /**
+     * Settle every job whose stream died while the host kept going, by asking
+     * the exact host it was submitted to.
+     *
+     * Both shells need this and neither can do it alone: the iPhone loses its
+     * sockets to iOS suspension, and any surface loses them when a
+     * durable-queue host restarts and retains the job. The job is reclaimed as
+     * live work synchronously — before any consumer of `settled` runs — and
+     * then settled by what the host actually did: the finished print, a
+     * re-attached running job, or a directed human failure.
+     */
+    async reconcileInterrupted(jobs: readonly Job[]): Promise<void> {
+      const candidates = jobs.filter(
+        (job) =>
+          job.status === "error" &&
+          (job.interrupted || isInterruptedGenerationError(job.error)) &&
+          !isCancelledError(job.error),
+      );
+      if (candidates.length === 0) return;
+      // Group by the FROZEN route each job was submitted to — never a
+      // re-resolved current host. Siblings normally share one.
+      const groups = new Map<string, { target: ApiTarget; label: string; jobs: Job[] }>();
+      for (const job of candidates) {
+        // No frozen target and no live connection means there is no host to
+        // ask — leave the job's settled outcome exactly as the stream left it.
+        const target = targets.get(job.clientId) ?? connectedTarget();
+        if (!target) continue;
+        const key = `${target.baseUrl}|${job.hostLabel ?? ""}`;
+        const group = groups.get(key) ?? {
+          target,
+          label: job.hostLabel ?? new URL(target.baseUrl).hostname,
+          jobs: [],
+        };
+        group.jobs.push(job);
+        groups.set(key, group);
+      }
+      await Promise.all(
+        [...groups.values()].map((group) =>
+          reconcileInterruptedGenerationJobs(group.jobs, {
+            target: { ...group.target },
+            hostLabel: group.label,
+            chain: group.jobs.some((job) => chainRoutes.has(job.clientId)),
+            refreshResultUrl: (clientId) =>
+              void this.refreshRemoteResultUrl(clientId).catch(() => {
+                // The reactive job carries the directed, user-visible error.
+              }),
+          }),
+        ),
+      );
     },
     /** Submit and wait for the whole batch (menu Generate, tests). */
     async generateBatch(req: GenerateRequest, batchSize: number): Promise<Job[]> {
@@ -918,8 +993,11 @@ export const useGenerationStore = defineStore("generation", {
                 // error frame carrying `retained` while keeping the work: it
                 // will run and land in that host's gallery. Treating it as an
                 // interruption suppresses the "failed" notification and hands
-                // the job to reconciliation, exactly like a dead socket.
+                // the job to reconciliation, exactly like a dead socket —
+                // `retainedByHost` additionally tells reconciliation to wait
+                // out the restart instead of the much shorter suspension budget.
                 current.interrupted = parsed.retained === true;
+                current.retainedByHost = parsed.retained === true;
               } catch {
                 current.error = isCancelledError(data) ? "Cancelled" : data;
               }

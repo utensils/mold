@@ -721,10 +721,56 @@ describe("generation store multi-host routing", () => {
     expect(init.method).toBe("DELETE");
   });
 
-  it("treats a retained terminal frame as an interruption the host will finish", async () => {
+  it("reconciles a retained job to the print the host finished, never a failure", async () => {
+    // Desktop Create renders `status: "error"` as a Failed row AND hides the
+    // matching live fleet row by id, so settling a retained job as an error
+    // tells the user it failed and hides the work that would correct them.
+    let queuePolls = 0;
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/queue") {
+        queuePolls += 1;
+        return Promise.resolve({
+          entries:
+            queuePolls === 1
+              ? [
+                  {
+                    id: "srv-9",
+                    model: "flux2-klein",
+                    state: "queued",
+                    position: 0,
+                    durable: true,
+                  },
+                ]
+              : [],
+        });
+      }
+      if (path === "/api/gallery") {
+        return Promise.resolve([
+          {
+            filename: "resumed.png",
+            timestamp: 1_700_000_000,
+            format: "png",
+            metadata: {
+              prompt: "a cat",
+              model: "flux2-klein",
+              seed: 7,
+              steps: 4,
+              guidance: 3.5,
+              width: 512,
+              height: 512,
+            },
+          },
+        ]);
+      }
+      return Promise.resolve([]);
+    });
     sseStream.mockImplementation(
       (_path: string, opts: { onEvent: (e: string, d: string) => void }) => {
         opts.onEvent("progress", JSON.stringify({ type: "queued", position: 1, id: "srv-9" }));
+        opts.onEvent(
+          "progress",
+          JSON.stringify({ type: "denoise_step", step: 1, total: 4, elapsed_ms: 10 }),
+        );
         opts.onEvent(
           "error",
           JSON.stringify({
@@ -737,15 +783,19 @@ describe("generation store multi-host routing", () => {
       },
     );
     const store = useGenerationStore();
-    const { jobs, settled } = store.submitBatch(request(), 1, halRoute);
+    const { jobs, settled } = store.submitBatch({ ...request(), seed: 7 }, 1, halRoute);
     await settled;
+    await vi.waitFor(() => expect(jobs[0]?.status).not.toBe("loading"));
 
-    expect(jobs[0]?.status).toBe("error");
-    expect(jobs[0]?.interrupted).toBe(true);
-    expect(jobs[0]?.error).toBe("mold is restarting; this generation was kept in the queue");
-    // A retained job is still work in progress on the host — the OS failure
-    // notification would be a lie, and reconciliation picks it back up.
+    // The host kept it, so the row is reclaimed as live work and then settled
+    // by the print that actually landed — never announced as a failure.
+    expect(queuePolls).toBeGreaterThan(0);
+    expect(jobs[0]?.status).toBe("complete");
+    expect(jobs[0]?.result?.filename).toBe("resumed.png");
     expect(notifyGenerationFailed).not.toHaveBeenCalled();
+    // The frame's marking survives the reconcile: it is what buys a restarting
+    // host a far longer wait than a merely unreachable one.
+    expect(jobs[0]?.retainedByHost).toBe(true);
   });
 
   it("keeps an ordinary server error a final failure", async () => {

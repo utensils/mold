@@ -34,6 +34,11 @@ vi.mock("../lib/api/sse", () => ({
 vi.mock("../lib/api/client", () => ({
   apiFetch: vi.fn(() => Promise.resolve(new Response(null, { status: 204 }))),
   apiFetchTo: vi.fn(() => Promise.resolve(new Response(null, { status: 204 }))),
+  // Reconciliation asks the host what really happened to a dead stream: an
+  // empty queue and an empty gallery mean the print is genuinely gone.
+  apiJsonTo: vi.fn((_target: unknown, path: string) =>
+    Promise.resolve(path === "/api/queue" ? { entries: [] } : []),
+  ),
   currentTarget: () => ({ baseUrl: "http://primary:7680", apiKey: null }),
   ApiError: class ApiError extends Error {
     constructor(
@@ -400,13 +405,16 @@ describe("generation queueing", () => {
     openStreams[0]!.resolve();
     await settled;
 
+    // The bare close is no longer the outcome — the host is asked. It has no
+    // such job queued and no such print, so this one really is gone, and the
+    // directed copy (plus the notification) says so with authority instead of
+    // reporting a raw socket event the user cannot act on.
     expect(jobs[0]).toMatchObject({
       status: "error",
-      error: "The generation stream closed before completion.",
-      interrupted: true,
+      error: "The connection to primary was interrupted and this print didn’t finish.",
     });
     const { notifyGenerationFailed } = await import("../lib/notify");
-    expect(vi.mocked(notifyGenerationFailed)).not.toHaveBeenCalled();
+    expect(vi.mocked(notifyGenerationFailed)).toHaveBeenCalled();
   });
 
   it("does not classify an HTTP rejection as a resumable transport interruption", async () => {

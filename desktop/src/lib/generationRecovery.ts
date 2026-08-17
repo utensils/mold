@@ -1,5 +1,5 @@
-import { ApiError, apiFetchTo, apiJsonTo, type ApiTarget } from "../lib/api/client";
-import { describeTransportError, isTransportFailure } from "../lib/api/errors";
+import { ApiError, apiFetchTo, apiJsonTo, type ApiTarget } from "./api/client";
+import { describeTransportError, isTransportFailure } from "./api/errors";
 import type {
   ChainJobDetail,
   ChainJobListing,
@@ -7,9 +7,9 @@ import type {
   GalleryImage,
   OutputFormat,
   OutputMetadata,
-} from "../lib/api/types";
-import { isCancelledError, metadataOnlyResult, type Job } from "../lib/generationJob";
-import { sha256HexOfBase64 } from "../lib/sourceRestore";
+} from "./api/types";
+import { isCancelledError, metadataOnlyResult, type Job } from "./generationJob";
+import { sha256HexOfBase64 } from "./sourceRestore";
 import {
   isMinimaxH3Identity,
   minimaxH3TaskForModel,
@@ -17,11 +17,13 @@ import {
 } from "@studio/lib/minimaxH3Authoring";
 
 /**
- * Foreground-resume reconciliation for iPhone generations.
+ * Reconciliation for generations whose stream died while the host kept going.
  *
- * iOS freezes the WebView and tears down sockets while the app is
- * backgrounded, so every held generation stream dies with a raw WebKit
- * transport error even though the host kept working: a RUNNING job finishes
+ * Two shells need this. iOS freezes the WebView and tears down sockets while
+ * the app is backgrounded, so every held generation stream dies with a raw
+ * WebKit transport error even though the host kept working; and on any surface
+ * a durable-queue host ends a retained job's stream while keeping the job. In
+ * both cases the host is still the authority: a RUNNING job finishes
  * and lands in the host's gallery, a QUEUED job is skipped at dispatch once
  * its stream is gone. This module re-queries the job's frozen submission
  * route and settles each interrupted job with its true outcome — the
@@ -41,6 +43,13 @@ const DEFAULT_POLL_INTERVAL_MS = 4_000;
  *  the exact moment reconciliation exists for — so a dead query is retried
  *  (bounded) instead of settling a possibly-finished print as failed. */
 const MAX_TRANSPORT_RETRIES = 3;
+/** Retry budget for a job the host explicitly RETAINED. The host told us it
+ *  kept the work and is restarting, so an unreachable socket is expected for
+ *  as long as that takes — a cold model load alone outlasts the suspension
+ *  budget above, and settling such a job as failed after ~12 s would announce
+ *  a failure for work that is about to run. Bounded so the reconcile always
+ *  ends: ~5 minutes at the default poll interval. */
+const RETAINED_TRANSPORT_RETRIES = 75;
 const PRE_ID_CLOCK_SKEW_MS = 1_000;
 const PRE_ID_JOIN_WINDOW_MS = 5_000;
 
@@ -358,6 +367,20 @@ function settleFailure(job: Job, message: string): void {
   job.interrupted = false;
 }
 
+/**
+ * Settle a job the host never answered about. Reconciliation reached no
+ * verdict, so the row stays marked as an interruption: a later resume may
+ * still learn the truth, and callers that treat `interrupted` as "do not
+ * announce this as a failure" keep that protection. A definitive answer —
+ * the host has no such job and no such print — uses `settleFailure` instead.
+ */
+function settleUnreconciled(job: Job, message: string): void {
+  job.stage = null;
+  job.error = message;
+  job.status = "error";
+  job.interrupted = true;
+}
+
 function settleCompleted(job: Job, complete: CompleteEvent, opts: GenerationRecoveryOptions): void {
   job.result = metadataOnlyResult(complete);
   job.visualSeed = String(complete.seed_used);
@@ -430,6 +453,13 @@ async function reconcileJob(job: Job, opts: GenerationRecoveryOptions): Promise<
     opts.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const interval = opts.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
   const interruptedCopy = `The connection to ${opts.hostLabel} was interrupted and this print didn’t finish.`;
+  // A retained job is the host's to finish; never claim it failed just because
+  // this client stopped being able to see it.
+  const retained = job.retainedByHost === true;
+  const maxTransportRetries = retained ? RETAINED_TRANSPORT_RETRIES : MAX_TRANSPORT_RETRIES;
+  const retainedUnreachableCopy =
+    `${opts.hostLabel} kept this print in its queue but hasn’t come back yet. ` +
+    `It will finish there — check the Library.`;
   let transportRetries = 0;
   let h3Identity: H3RecoveryIdentity | null | undefined;
   try {
@@ -452,10 +482,18 @@ async function reconcileJob(job: Job, opts: GenerationRecoveryOptions): Promise<
         // is likely still coming back from suspension. Back off and retry
         // (bounded) before declaring an outcome; any successful round-trip
         // inside reconcileJobOnce resets the budget.
-        if (isTransportFailure(cause) && transportRetries < MAX_TRANSPORT_RETRIES) {
+        if (isTransportFailure(cause) && transportRetries < maxTransportRetries) {
           transportRetries += 1;
           await sleep(interval);
           continue;
+        }
+        if (isTransportFailure(cause)) {
+          // The host never answered — no verdict, so no announcement.
+          settleUnreconciled(
+            job,
+            retained ? retainedUnreachableCopy : describeTransportError(cause, opts.hostLabel),
+          );
+          return;
         }
         settleFailure(job, describeTransportError(cause, opts.hostLabel));
         return;
@@ -463,7 +501,11 @@ async function reconcileJob(job: Job, opts: GenerationRecoveryOptions): Promise<
     }
   } catch (cause) {
     if (!settledExternally(job) && isActive()) {
-      settleFailure(job, describeTransportError(cause, opts.hostLabel));
+      if (isTransportFailure(cause)) {
+        settleUnreconciled(job, describeTransportError(cause, opts.hostLabel));
+      } else {
+        settleFailure(job, describeTransportError(cause, opts.hostLabel));
+      }
     }
   }
 
@@ -542,7 +584,12 @@ async function reconcileJob(job: Job, opts: GenerationRecoveryOptions): Promise<
       );
       transportRetries = 0;
       if (settledExternally(job) || !isActive()) return;
-      const entry = findQueueEntry(listing.entries ?? [], job, h3Identity);
+      // `Array.prototype.entries` exists, so a body that is itself an array
+      // must never be read as a listing — that yields a FUNCTION here and
+      // throws deep inside the join, which the retry loop then mistakes for a
+      // transport failure and waits out.
+      const rows = Array.isArray(listing?.entries) ? listing.entries : [];
+      const entry = findQueueEntry(rows, job, h3Identity);
       if (entry?.state === "running") {
         // Still developing server-side — re-attach by polling until it
         // leaves the queue, then collect the print from the gallery.
