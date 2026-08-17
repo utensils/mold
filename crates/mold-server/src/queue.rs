@@ -601,6 +601,10 @@ fn publish_staged_no_replace(
     staged: &std::path::Path,
     final_path: &std::path::Path,
 ) -> std::io::Result<()> {
+    #[cfg(test)]
+    if FORCE_PUBLISH_FALLBACK.load(std::sync::atomic::Ordering::SeqCst) {
+        return publish_by_reserving_final_name(staged, final_path);
+    }
     match platform_rename_no_replace(staged, final_path) {
         Some(Ok(())) => Ok(()),
         // The destination exists — the contract firing, not a platform gap.
@@ -610,6 +614,14 @@ fn publish_staged_no_replace(
         _ => publish_by_reserving_final_name(staged, final_path),
     }
 }
+
+/// Test seam: behave as a filesystem with no no-replace rename, which is what
+/// exFAT and some SMB mounts are. Setting it is harmless to any test running
+/// concurrently — the fallback satisfies exactly the same contract, so every
+/// other gallery assertion holds under either path.
+#[cfg(test)]
+static FORCE_PUBLISH_FALLBACK: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// `Some` when the platform has a no-replace rename; `None` when it has none
 /// to try.
@@ -4084,6 +4096,54 @@ mod tests {
         assert_eq!(
             std::fs::read(tmp.path().join("taken.png")).unwrap(),
             b"theirs"
+        );
+    }
+
+    /// The proof that matters for a link-less host: not that a fallback
+    /// function exists, but that a real gallery save completes through it. A
+    /// broken fallback would park every job on exactly the filesystems it was
+    /// added for, so this drives the whole helper with the platform primitive
+    /// forced off.
+    #[test]
+    fn a_filesystem_without_no_replace_rename_still_publishes_and_still_refuses() {
+        let tmp = TempDir::new().unwrap();
+        FORCE_PUBLISH_FALLBACK.store(true, Ordering::SeqCst);
+
+        let saved = write_gallery_bytes_no_replace(tmp.path(), "ordinary.png", b"generated output");
+
+        let published = match saved {
+            Ok((filename, path, _reservation)) => {
+                assert_eq!(filename, "ordinary.png");
+                path
+            }
+            Err(error) => {
+                FORCE_PUBLISH_FALLBACK.store(false, Ordering::SeqCst);
+                panic!("a link-less filesystem must still publish: {error:#}");
+            }
+        };
+        assert_eq!(
+            std::fs::read(&published).unwrap(),
+            b"generated output",
+            "the whole file must land, not a placeholder"
+        );
+        assert!(
+            !tmp.path().join("ordinary.png.partial").exists(),
+            "staging must not be left behind"
+        );
+
+        // And the no-replace contract still holds on that path.
+        std::fs::write(tmp.path().join("taken.png"), b"someone else's").unwrap();
+        let refused = write_gallery_bytes_no_replace(tmp.path(), "taken.png", b"ours");
+        FORCE_PUBLISH_FALLBACK.store(false, Ordering::SeqCst);
+        if let Ok((filename, _, _)) = refused {
+            assert_ne!(
+                filename, "taken.png",
+                "a taken name must not be published over"
+            );
+        }
+        assert_eq!(
+            std::fs::read(tmp.path().join("taken.png")).unwrap(),
+            b"someone else's"
         );
     }
 
