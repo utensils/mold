@@ -5099,6 +5099,12 @@ async fn server_capabilities(
 
     let server_batch =
         state.scheduled_work.v2_authoritative() && !state.is_output_disabled(&config);
+    // A host with no server gallery target cannot promise durability for ANY
+    // job: the only delivery is the HTTP response, which by definition does
+    // not survive a restart, so `record` declines every admission there. That
+    // makes it a systematic over-promise rather than an edge case, and clients
+    // read this to decide whether to keep polling a job whose stream died.
+    let durable_queue = state.queue_journal.is_enabled() && !state.is_output_disabled(&config);
     Json(mold_core::ServerCapabilities {
         generation_profile_v1: true,
         gallery: mold_core::GalleryCapabilities { can_delete: true },
@@ -5124,7 +5130,7 @@ async fn server_capabilities(
             can_reorder: true,
             stable_device_pins: true,
             cooperative_cancellation: false,
-            durable_queue: state.queue_journal.is_enabled(),
+            durable_queue,
             server_batch,
             server_batch_max_outputs: server_batch
                 .then_some(crate::batch_runtime::MAX_LIVE_SERVER_BATCH_OUTPUTS),

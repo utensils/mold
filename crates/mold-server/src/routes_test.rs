@@ -4393,6 +4393,52 @@ mod tests {
         assert!(state.queue_journal.list_all().is_empty());
     }
 
+    /// `durable_queue` promises that a queued job survives a restart. A host
+    /// with server gallery output disabled cannot promise that for ANY job —
+    /// the only delivery is the HTTP response — so advertising the capability
+    /// there would make every job on it a silent over-promise, not an edge
+    /// case. Clients read the capability to decide whether to keep polling a
+    /// job whose stream died.
+    #[tokio::test]
+    async fn a_host_with_no_gallery_output_does_not_promise_a_durable_queue() {
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+
+        let (mut state, _rx) = AppState::with_engine_and_queue(MockEngine::ready());
+        state.metadata_db = db.clone();
+        state.queue_journal = Arc::new(crate::queue_journal::QueueJournal::new(db.clone()));
+        assert!(
+            state.queue_journal.is_enabled(),
+            "the journal itself is available; only output is off"
+        );
+        let capabilities = json_body(
+            app_with_state(state)
+                .oneshot(
+                    Request::get("/api/capabilities")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(capabilities["queue"]["durable_queue"], false);
+
+        let output_dir = tempfile::tempdir().unwrap();
+        let (state, _rx) = durable_state(db, output_dir.path());
+        let capabilities = json_body(
+            app_with_state(state)
+                .oneshot(
+                    Request::get("/api/capabilities")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(capabilities["queue"]["durable_queue"], true);
+    }
+
     /// `durable_queue` is a promise about this host, and a held row is
     /// something only the journal knows about — invisible work that is never
     /// going to run is worse than work that failed.

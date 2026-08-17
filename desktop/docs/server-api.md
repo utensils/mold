@@ -108,12 +108,23 @@ Three client rules follow, and the first is not optional:
    queue reconciler pick the job back up. Old clients that ignore the flag see
    an ordinary error message, which is why a frame is sent rather than a quiet
    close (a quiet close leaves a client stuck in `loading`, or hard-fails).
-3. **Durability is per job, not just per host.** `JobEntry` gains additive
+3. **`durable_queue` is false when the host has no server gallery output.**
+   Such a host cannot promise durability for any job — the only delivery is
+   the HTTP response — so the capability is false there even though the
+   journal itself is available. A client gating on the capability alone is
+   therefore correct for that whole class, and does not need to model it.
+4. **Durability is per job, not just per host.** `JobEntry` gains additive
    `durable`, `replayed`, `dispatch_attempts`, and `held_reason`.
    `capabilities.queue.durable_queue` says the host _can_ promise durability;
    `JobEntry.durable` says whether _this_ job got it. A job with no gallery
    target, one carrying reference-upload media, or one whose request exceeded
    the payload ceiling reports `durable: false` and behaves as before.
+
+**Replay finishes before the router serves.** A restarted host does not answer
+`/api/queue` until every retained job has been re-registered under its original
+id, so a successful listing after a restart already reflects resumed work.
+Absence from a `200` response is therefore a sound signal that a job is gone;
+absence because the host was unreachable is not.
 
 `JobLifecycle` gains `held`: a job retained across restarts that exceeded its
 attempt budget or could not be reconciled. Held rows are listed with a
