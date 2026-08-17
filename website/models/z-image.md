@@ -60,18 +60,11 @@ renders. Metal keeps the fast quantized path, which is validated against
 stable-diffusion.cpp. `MOLD_ZIMAGE_QMATMUL=1` re-enables the CUDA fast path
 for kernel debugging only.
 
-`MOLD_ZIMAGE_GGUF_DENSE=1` was a diagnostic escape hatch meant to dequantize a
-GGUF transformer into a dense BF16 parameter map. It is currently
-non-functional — the variable is not registered in the frozen runtime
-environment, so it always reads as unset — and it stays that way until memory
-admission budgets the dense expansion
-([#1109](https://github.com/utensils/mold/issues/1109)). This uses about
-12 GB for the map instead of keeping a Q4 checkpoint near its roughly 3.4 GB
-quantized size, and its speed advantage has not been measured. Leave it unset
-for normal use. Do not enable it on Metal: that backend expands the map to about
-24 GB of F32 parameters, and the retained dense route has produced corrupted
-renders there. The setting is read when the runtime is created, so restart Mold
-after changing it; `true` and `yes` are accepted as alternatives to `1`.
+GGUF transformers always stay quantized at rest. Mold does not expose the old
+dense-map diagnostic route: expanding a Q4 checkpoint from roughly 3.4 GB to
+about 12 GB on CUDA or 24 GB on Metal was never memory-planned, its speed
+advantage was unmeasured, and the Metal route produced corrupted renders under
+that pressure ([#1109](https://github.com/utensils/mold/issues/1109)).
 
 Catalog `cv:*` Z-Image checkpoints use the hidden `z-image-te` companion for
 the same Qwen3 text encoder shards, tokenizer, and VAE. When the Civitai

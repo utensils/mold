@@ -13,9 +13,9 @@ import type {
   ChainJobSummary,
 } from "./api/chainTypes";
 import {
-  blockedReasonLabel,
-  queuePositionLabel,
   queueStatusFor,
+  queueWaitLabel,
+  resolveQueueWait,
   type QueueStatusIndex,
 } from "./queuePosition";
 import { friendlySequenceError } from "./sequence";
@@ -173,15 +173,49 @@ export function withLiveQueueStatus(
 }
 
 /**
- * The one short suffix a queued pill adds after "Queued". A parked job says
- * why it is parked — that is the answer the user is actually after — and
- * otherwise the row counts down its place in line. Null means stay quiet.
+ * The one line a waiting print shows, in every shell. A job the scheduler
+ * genuinely parked says why — that is the answer the user is after — the head
+ * of the line says "Next up", everyone behind it counts down, and a host that
+ * lists nothing still says "Queued". Null means the row is not waiting at all
+ * (running, settled, or a sequence), so the surface renders its own chrome.
  */
 export function queueStatusLabel(vm: ActivityJobVM): string | null {
   if (vm.kind !== "print" || vm.phase !== "queued") return null;
-  return (
-    blockedReasonLabel(vm.blockedReason) ?? queuePositionLabel(vm.queuePosition)
+  return queueWaitLabel(
+    resolveQueueWait({
+      position: vm.queuePosition,
+      blockedReason: vm.blockedReason,
+    }),
   );
+}
+
+/** Running vs waiting, counted separately because they are not the same news. */
+export interface ActivityCounts {
+  running: number;
+  waiting: number;
+}
+
+/**
+ * The count beside a queue header. Queued work is NOT active work — calling
+ * five rows "5 ACTIVE" when one GPU is rendering one of them is the header
+ * half of the same lie the row labels told.
+ */
+export function activityCountLabel(counts: ActivityCounts): string {
+  const parts: string[] = [];
+  if (counts.running > 0) parts.push(`${counts.running} active`);
+  if (counts.waiting > 0) parts.push(`${counts.waiting} queued`);
+  return parts.length > 0 ? parts.join(" · ") : "0 active";
+}
+
+/** The same truth as a spoken sentence, for the live region. */
+export function activityAnnouncement(counts: ActivityCounts): string {
+  const { running, waiting } = counts;
+  if (running === 0 && waiting === 0) return "No active generations.";
+  if (running === 0) {
+    return `${waiting} queued generation${waiting === 1 ? "" : "s"}.`;
+  }
+  const active = `${running} active generation${running === 1 ? "" : "s"}`;
+  return waiting === 0 ? `${active}.` : `${active}, ${waiting} queued.`;
 }
 
 function isActive(vm: ActivityJobVM): boolean {

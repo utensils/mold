@@ -39,43 +39,127 @@ function finitePosition(value: unknown): number | null {
 }
 
 /**
- * Reasons the scheduler reports that are ordinary bookkeeping rather than
- * something a user can act on. Same set the device panel filters, so the two
- * surfaces never disagree about what counts as blocked.
+ * Every value `QueueBlockedReason::as_str()` can produce
+ * (`crates/mold-core/src/types.rs`). The wire also carries the legacy
+ * `assignment_reason` alias in `QueueWorkItem.reason`, handled separately
+ * below. Keep this list in step with the Rust enum: the copy table is typed
+ * against it, so a new reason will not compile until it is classified.
  */
-const BENIGN_REASONS = new Set([
+export const QUEUE_BLOCKED_REASONS = [
+  "device_disabled",
+  "device_draining",
+  "device_startup_excluded",
+  "device_unavailable",
+  "device_degraded",
+  "hard_pin_unavailable",
+  "backend_unsupported",
+  "model_not_installed",
+  "insufficient_vram",
+  "insufficient_host_ram",
+  "aggregate_host_ram_reserved",
+  "execution_plan_incompatible",
+  "dependency_wait",
+  "warm_wait",
+  "queue_paused",
+  "maintenance_mode",
+  "cancelling",
+  "no_schedulable_device",
+  "no_idle_device",
+  "lower_priority_opening",
+] as const;
+
+export type QueueBlockedReasonId = (typeof QUEUE_BLOCKED_REASONS)[number];
+
+/**
+ * What each reason means to a person waiting on a print.
+ *
+ * `null` is the load-bearing half: those reasons are ordinary queue
+ * bookkeeping, not faults. A one-GPU host reports `no_idle_device` for every
+ * job behind the running one, `warm_wait` while it holds a slot for a warm
+ * device, and `lower_priority_opening` when higher-priority work took the
+ * opening this pass (`mold-scheduler/src/planner.rs`). Rendering those is how
+ * four ordinary queued rows came to read "no idle device" instead of their
+ * place in line. A `null` row falls through to its position.
+ */
+const BLOCKED_REASON_COPY: Record<QueueBlockedReasonId, string | null> = {
+  device_disabled: "Device turned off",
+  device_draining: "Device draining",
+  device_startup_excluded: "Device excluded at startup",
+  device_unavailable: "Waiting for a device",
+  device_degraded: "Device degraded",
+  hard_pin_unavailable: "Pinned device unavailable",
+  backend_unsupported: "Not supported on this machine",
+  model_not_installed: "Model not installed",
+  insufficient_vram: "Waiting for GPU memory",
+  insufficient_host_ram: "Waiting for memory",
+  aggregate_host_ram_reserved: "Waiting for memory",
+  execution_plan_incompatible: "Cannot run as planned",
+  dependency_wait: null,
+  warm_wait: null,
+  queue_paused: "Queue paused",
+  maintenance_mode: "Host in maintenance",
+  cancelling: "Cancelling",
+  no_schedulable_device: "No usable device",
+  no_idle_device: null,
+  lower_priority_opening: null,
+};
+
+/**
+ * `QueueWorkItem.reason` is a display alias that may carry an
+ * `AssignmentReason` rather than a blocking one. Those describe why work WON
+ * a device, so they are never a reason to say anything at all.
+ */
+const ASSIGNMENT_REASONS = new Set([
   "priority",
   "starvation_forced",
   "warm_resident",
 ]);
 
+/** Copy the whole fleet says for a reason nobody has taught it yet. */
+const UNKNOWN_REASON_LABEL = "Waiting on the host";
+
+function knownCopy(reason: string): string | null | undefined {
+  // Not `Object.hasOwn`: the desktop app ships `minimumSystemVersion: 12.0`
+  // and WebKit only gained it in Safari 15.4 (macOS 12.3), so on 12.0-12.2 the
+  // first non-empty reason in a queue plan would throw and take the queue and
+  // device panels down with it. Vite does not polyfill it.
+  return Object.prototype.hasOwnProperty.call(BLOCKED_REASON_COPY, reason)
+    ? BLOCKED_REASON_COPY[reason as QueueBlockedReasonId]
+    : undefined;
+}
+
+/**
+ * True when a reason is ordinary bookkeeping rather than something worth
+ * saying. Same predicate the device panel filters on, so the two surfaces
+ * never disagree about what counts as blocked.
+ */
+export function isBenignQueueReason(
+  reason: string | null | undefined,
+): boolean {
+  if (!reason) return true;
+  if (ASSIGNMENT_REASONS.has(reason)) return true;
+  return knownCopy(reason) === null;
+}
+
 /** Scheduler reason → display text, or null when it is not worth surfacing. */
 export function normalizeBlockedReason(
   reason: string | null | undefined,
 ): string | null {
-  if (!reason || BENIGN_REASONS.has(reason)) return null;
-  return reason.replaceAll("_", " ");
+  if (!reason || isBenignQueueReason(reason)) return null;
+  return knownCopy(reason) ?? reason.replaceAll("_", " ");
 }
 
 /**
- * Short, plain-language copy for a queued row. Falls back to the normalized
- * scheduler reason so a server that grows a new one still says something.
+ * Short, plain-language copy for a queued row, or null when the reason is
+ * ordinary bookkeeping and the row should keep counting its place in line.
+ * A reason this build has never heard of still says something a person can
+ * read — never the raw scheduler identifier.
  */
 export function blockedReasonLabel(
   reason: string | null | undefined,
 ): string | null {
-  switch (reason) {
-    case "insufficient_host_ram":
-      return "Waiting for memory";
-    case "insufficient_vram":
-      return "Waiting for GPU memory";
-    case "device_unavailable":
-      return "Waiting for a device";
-    case "queue_paused":
-      return "Queue paused";
-    default:
-      return normalizeBlockedReason(reason);
-  }
+  if (isBenignQueueReason(reason)) return null;
+  return knownCopy(reason as string) ?? UNKNOWN_REASON_LABEL;
 }
 
 /** The parked reason for a job's work items, if the plan named one. */
@@ -137,4 +221,64 @@ export function queuePositionLabel(
   const value = finitePosition(position);
   if (value === null || value < 1) return null;
   return `#${value} in line`;
+}
+
+/**
+ * What one waiting row is actually doing, decided once for web, desktop, and
+ * iPhone. Surfaces format it in their own casing idiom; none of them decides
+ * the vocabulary, which is how the same host came to describe four identical
+ * queued jobs three different ways.
+ */
+export type QueueWaitStatus =
+  /** An actionable reason outranks the position: say what to fix. */
+  | { kind: "blocked"; label: string }
+  /** Head of the line — running next, with nobody in front. */
+  | { kind: "next" }
+  /** 0-based dispatch order, so `position` is how many jobs are ahead. */
+  | { kind: "position"; position: number }
+  /** No evidence at all (older server, or the host was never read). */
+  | { kind: "queued" };
+
+export interface QueueWaitInput {
+  position?: number | null | undefined;
+  blockedReason?: string | null | undefined;
+}
+
+/** Resolve one waiting row. Absent evidence degrades to a plain "Queued". */
+export function resolveQueueWait(
+  input: QueueWaitInput | null | undefined,
+): QueueWaitStatus {
+  const label = blockedReasonLabel(input?.blockedReason);
+  if (label !== null) return { kind: "blocked", label };
+  const position = finitePosition(input?.position);
+  if (position === null) return { kind: "queued" };
+  return position < 1 ? { kind: "next" } : { kind: "position", position };
+}
+
+/** Sentence-case copy — web and desktop pills, and the iPhone status line. */
+export function queueWaitLabel(wait: QueueWaitStatus): string {
+  switch (wait.kind) {
+    case "blocked":
+      return wait.label;
+    case "next":
+      return "Next up";
+    case "position":
+      return queuePositionLabel(wait.position) ?? "Queued";
+    case "queued":
+      return "Queued";
+  }
+}
+
+/** Compact uppercase code — the iPhone queue list's existing idiom. */
+export function queueWaitCode(wait: QueueWaitStatus): string {
+  switch (wait.kind) {
+    case "blocked":
+      return wait.label.toUpperCase();
+    case "next":
+      return "NEXT UP";
+    case "position":
+      return `QUEUED #${wait.position}`;
+    case "queued":
+      return "QUEUED";
+  }
 }

@@ -3323,7 +3323,11 @@ describe("MobileApp generation queue", () => {
     expect(wrapper.get("[data-test='mobile-generation-queue']").attributes("aria-live")).toBe(
       undefined,
     );
-    expect(wrapper.get(".sr-only[aria-live='polite']").text()).toBe("2 active generations.");
+    // One is rendering and one is waiting — never "2 active".
+    expect(wrapper.get(".sr-only[aria-live='polite']").text()).toBe(
+      "1 active generation, 1 queued.",
+    );
+    expect(wrapper.get("[data-test='mobile-queue-count']").text()).toBe("1 active · 1 queued");
 
     const rows = wrapper.findAll("[data-test='mobile-generation-job']");
     expect(rows).toHaveLength(2);
@@ -3398,6 +3402,71 @@ describe("MobileApp generation queue", () => {
 
     const rows = wrapper.findAll("[data-test='mobile-generation-job']");
     expect(rows[1]?.get("[data-test='mobile-generation-status']").text()).toBe("QUEUED #1");
+  });
+
+  it("counts the line on a busy single-GPU host instead of naming the planner", async () => {
+    // Reported from a 1-GPU host with five z-image jobs queued: the waiting
+    // rows rendered the scheduler's own `no idle device` string, which just
+    // means the one GPU is busy — normal serialization, not a fault.
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/gallery") return Promise.resolve([print]);
+      if (path === "/api/activity")
+        return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
+      if (path === "/api/queue")
+        return Promise.resolve({
+          entries: [
+            { id: "job-a", model: "m", state: "running", started_at_unix_ms: 1, position: 0 },
+            { id: "job-2", model: "m", state: "queued", started_at_unix_ms: 2, position: 1 },
+          ],
+          plan: {
+            plan_version: 1,
+            state_version: 1,
+            optimizer_state: "settled",
+            dirty_since_unix_ms: null,
+            next_replan_at_unix_ms: null,
+            work_items: [
+              {
+                work_id: "w2",
+                parent_id: "job-2",
+                work_kind: "generation",
+                priority_class: "normal",
+                queue_rank: 1,
+                bypass_count: 0,
+                estimate_confidence: "low",
+                blocked_reason: "no_idle_device",
+              },
+            ],
+          },
+        });
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    await submitPrompt("first prompt");
+    openStreams[0]?.options.onEvent(
+      "progress",
+      JSON.stringify({ type: "denoise_step", step: 7, total: 9, elapsed_ms: 10 }),
+    );
+    await submitPrompt("second prompt");
+    openStreams[1]?.options.onEvent(
+      "progress",
+      JSON.stringify({ type: "queued", position: 1, id: "job-2" }),
+    );
+    await flushPromises();
+    window.dispatchEvent(new Event("pageshow"));
+    await flushPromises();
+
+    const rows = wrapper.findAll("[data-test='mobile-generation-job']");
+    expect(rows[0]?.get("[data-test='mobile-generation-status']").text()).toBe("7/9");
+    expect(rows[1]?.get("[data-test='mobile-generation-status']").text()).toBe("QUEUED #1");
+    // One job is rendering; the other is waiting. The header says so.
+    expect(wrapper.get("[data-test='mobile-queue-count']").text()).toBe("1 active · 1 queued");
+    expect(wrapper.get(".sr-only[aria-live='polite']").text()).toBe(
+      "1 active generation, 1 queued.",
+    );
   });
 
   it("keeps a pre-ID job live when remote cancellation is unconfirmed", async () => {
