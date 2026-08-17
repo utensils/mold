@@ -72,6 +72,9 @@ pub struct GenerationQueueRow {
     pub request_json: String,
     pub output_dir: PathBuf,
     pub target_gpu: Option<usize>,
+    /// Stable device id the user pinned, when they pinned one. Survives the
+    /// renumbering that makes `target_gpu` unreliable across a restart.
+    pub target_device_id: Option<String>,
     /// `"full"` or `"metadata_only"` — the SSE completion payload the original
     /// caller asked for. Recorded so a replayed row keeps the same shape.
     pub completion_payload: String,
@@ -89,9 +92,10 @@ pub fn insert(db: &MetadataDb, row: &GenerationQueueRow) -> Result<()> {
         conn.execute(
             "INSERT INTO generation_queue (
                 id, owner_uuid, state, model, request_json, output_dir,
-                target_gpu, completion_payload, seed_pinned, dispatch_attempts,
-                replay_seen, held_reason, created_at, updated_at, started_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                target_gpu, target_device_id, completion_payload, seed_pinned,
+                dispatch_attempts, replay_seen, held_reason, created_at, updated_at,
+                started_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             params![
                 &row.id,
                 &row.owner_uuid,
@@ -100,6 +104,7 @@ pub fn insert(db: &MetadataDb, row: &GenerationQueueRow) -> Result<()> {
                 &row.request_json,
                 row.output_dir.to_string_lossy().into_owned(),
                 row.target_gpu.map(|gpu| gpu as i64),
+                row.target_device_id.as_deref(),
                 &row.completion_payload,
                 row.seed_pinned as i64,
                 row.dispatch_attempts as i64,
@@ -138,8 +143,9 @@ pub fn get(db: &MetadataDb, id: &str) -> Result<Option<GenerationQueueRow>> {
     db.with_conn(|conn| {
         conn.query_row(
             "SELECT id, owner_uuid, state, model, request_json, output_dir,
-                    target_gpu, completion_payload, seed_pinned, dispatch_attempts,
-                    replay_seen, held_reason, created_at, updated_at, started_at
+                    target_gpu, target_device_id, completion_payload, seed_pinned,
+                    dispatch_attempts, replay_seen, held_reason, created_at, updated_at,
+                    started_at
              FROM generation_queue WHERE id = ?1",
             params![id],
             row_to_queue_row,
@@ -157,8 +163,9 @@ pub fn list_all(db: &MetadataDb, owner_uuid: &str) -> Result<Vec<GenerationQueue
     db.with_conn(|conn| {
         let mut stmt = conn.prepare(
             "SELECT id, owner_uuid, state, model, request_json, output_dir,
-                    target_gpu, completion_payload, seed_pinned, dispatch_attempts,
-                    replay_seen, held_reason, created_at, updated_at, started_at
+                    target_gpu, target_device_id, completion_payload, seed_pinned,
+                    dispatch_attempts, replay_seen, held_reason, created_at, updated_at,
+                    started_at
              FROM generation_queue
              WHERE owner_uuid = ?1
              ORDER BY created_at, rowid",
@@ -174,8 +181,9 @@ pub fn list_replayable(db: &MetadataDb, owner_uuid: &str) -> Result<Vec<Generati
     db.with_conn(|conn| {
         let mut stmt = conn.prepare(
             "SELECT id, owner_uuid, state, model, request_json, output_dir,
-                    target_gpu, completion_payload, seed_pinned, dispatch_attempts,
-                    replay_seen, held_reason, created_at, updated_at, started_at
+                    target_gpu, target_device_id, completion_payload, seed_pinned,
+                    dispatch_attempts, replay_seen, held_reason, created_at, updated_at,
+                    started_at
              FROM generation_queue
              WHERE owner_uuid = ?1 AND state IN ('queued', 'running')
              ORDER BY created_at, rowid",
@@ -262,12 +270,20 @@ pub fn set_target_gpu(
     db: &MetadataDb,
     id: &str,
     target_gpu: Option<usize>,
+    target_device_id: Option<&str>,
     now_ms: i64,
 ) -> Result<bool> {
     db.with_conn(|conn| {
         let updated = conn.execute(
-            "UPDATE generation_queue SET target_gpu = ?2, updated_at = ?3 WHERE id = ?1",
-            params![id, target_gpu.map(|gpu| gpu as i64), now_ms],
+            "UPDATE generation_queue
+                SET target_gpu = ?2, target_device_id = ?3, updated_at = ?4
+              WHERE id = ?1",
+            params![
+                id,
+                target_gpu.map(|gpu| gpu as i64),
+                target_device_id,
+                now_ms
+            ],
         )?;
         Ok(updated > 0)
     })
@@ -365,14 +381,15 @@ fn row_to_queue_row(row: &Row<'_>) -> rusqlite::Result<GenerationQueueRow> {
         request_json: row.get(4)?,
         output_dir: PathBuf::from(output_dir),
         target_gpu: row.get::<_, Option<i64>>(6)?.map(|gpu| gpu as usize),
-        completion_payload: row.get(7)?,
-        seed_pinned: row.get::<_, i64>(8)? != 0,
-        dispatch_attempts: row.get::<_, i64>(9)? as u32,
-        replay_seen: row.get::<_, i64>(10)? as u32,
-        held_reason: row.get(11)?,
-        created_at_ms: row.get(12)?,
-        updated_at_ms: row.get(13)?,
-        started_at_ms: row.get(14)?,
+        target_device_id: row.get(7)?,
+        completion_payload: row.get(8)?,
+        seed_pinned: row.get::<_, i64>(9)? != 0,
+        dispatch_attempts: row.get::<_, i64>(10)? as u32,
+        replay_seen: row.get::<_, i64>(11)? as u32,
+        held_reason: row.get(12)?,
+        created_at_ms: row.get(13)?,
+        updated_at_ms: row.get(14)?,
+        started_at_ms: row.get(15)?,
     })
 }
 
@@ -389,6 +406,7 @@ mod tests {
             request_json: r#"{"prompt":"a cat"}"#.to_string(),
             output_dir: PathBuf::from("/gallery"),
             target_gpu: None,
+            target_device_id: None,
             completion_payload: "full".to_string(),
             seed_pinned: false,
             dispatch_attempts: 0,
@@ -549,12 +567,20 @@ mod tests {
         let db = MetadataDb::open_in_memory().unwrap();
         insert(&db, &row("job-1", "owner-a", 1)).unwrap();
 
-        assert!(set_target_gpu(&db, "job-1", Some(3), 9).unwrap());
-        assert_eq!(get(&db, "job-1").unwrap().unwrap().target_gpu, Some(3));
+        assert!(set_target_gpu(&db, "job-1", Some(3), Some("cuda:abc"), 9).unwrap());
+        let pinned = get(&db, "job-1").unwrap().unwrap();
+        assert_eq!(pinned.target_gpu, Some(3));
+        assert_eq!(
+            pinned.target_device_id.as_deref(),
+            Some("cuda:abc"),
+            "the stable pin is what survives an ordinal renumbering"
+        );
 
-        assert!(set_target_gpu(&db, "job-1", None, 10).unwrap());
-        assert_eq!(get(&db, "job-1").unwrap().unwrap().target_gpu, None);
-        assert!(!set_target_gpu(&db, "missing", Some(1), 11).unwrap());
+        assert!(set_target_gpu(&db, "job-1", None, None, 10).unwrap());
+        let auto = get(&db, "job-1").unwrap().unwrap();
+        assert_eq!(auto.target_gpu, None);
+        assert_eq!(auto.target_device_id, None);
+        assert!(!set_target_gpu(&db, "missing", Some(1), None, 11).unwrap());
     }
 
     #[test]

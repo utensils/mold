@@ -448,6 +448,19 @@ CREATE INDEX generation_queue_replay
 ON generation_queue(owner_uuid, state, created_at);
 "#;
 
+/// v19 → remember a queued job's STABLE device pin, not just the ordinal it
+/// resolved to.
+///
+/// `PATCH /api/queue/:id` accepts `hard_pinned_device_id` and resolves it to an
+/// ordinal for dispatch, but ordinals are an enumeration artifact: MIG
+/// reconfiguration or a changed `MOLD_GPUS` renumbers them across a restart.
+/// Replaying a stale ordinal runs the job on the wrong device, or fails while
+/// the device the user actually pinned is present. NULL means Auto or a
+/// legacy ordinal-only pin.
+const V19_GENERATION_QUEUE_DEVICE_PIN: &str = r#"
+ALTER TABLE generation_queue ADD COLUMN target_device_id TEXT;
+"#;
+
 /// Ordered list of schema migrations. Version numbers must be strictly
 /// increasing — [`apply_pending`] validates this at startup.
 pub(crate) const MIGRATIONS: &[Migration] = &[
@@ -523,11 +536,15 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         version: 18,
         kind: MigrationKind::Sql(V18_GENERATION_QUEUE),
     },
+    Migration {
+        version: 19,
+        kind: MigrationKind::Sql(V19_GENERATION_QUEUE_DEVICE_PIN),
+    },
 ];
 
 /// The highest migration version this build ships. Exposed publicly so
 /// operators / tests can assert what schema level they're running against.
-pub const SCHEMA_VERSION: i64 = 18;
+pub const SCHEMA_VERSION: i64 = 19;
 
 /// v1 → v2: rewrite every `output_dir` value to its canonical form so
 /// rows written by the v0.8.x release (which keyed on raw paths) keep
@@ -903,7 +920,7 @@ mod tests {
             SCHEMA_VERSION,
             "fresh DB must end at the latest SCHEMA_VERSION",
         );
-        assert_eq!(SCHEMA_VERSION, 18);
+        assert_eq!(SCHEMA_VERSION, 19);
         assert!(table_exists(&conn, "device_preferences"));
         assert_eq!(
             column_names(&conn, "device_preferences"),
@@ -1056,8 +1073,8 @@ mod tests {
 
         apply_pending(&mut conn).unwrap();
 
-        assert_eq!(current_version(&conn).unwrap(), 18);
-        assert_eq!(SCHEMA_VERSION, 18);
+        assert_eq!(current_version(&conn).unwrap(), 19);
+        assert_eq!(SCHEMA_VERSION, 19);
         assert!(table_exists(&conn, "generation_queue"));
         let columns = column_names(&conn, "generation_queue");
         for expected in [
@@ -1298,7 +1315,7 @@ mod v9_tests {
 
     #[test]
     fn schema_version_is_current() {
-        assert_eq!(SCHEMA_VERSION, 18);
+        assert_eq!(SCHEMA_VERSION, 19);
     }
 
     #[test]

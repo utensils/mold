@@ -4779,9 +4779,13 @@ async fn patch_queue_job(
             .map(|entry| entry.id)
             .collect::<Vec<_>>()
     });
-    state
-        .queue_journal
-        .apply_queue_mutation(&id, resolved_target_gpu, reordered.as_deref());
+    let pinned_device_id = req.hard_pinned_device_id.as_ref().map(|pin| pin.as_deref());
+    state.queue_journal.apply_queue_mutation(
+        &id,
+        resolved_target_gpu,
+        pinned_device_id,
+        reordered.as_deref(),
+    );
 
     let entry = state
         .job_registry

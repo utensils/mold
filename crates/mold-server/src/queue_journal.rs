@@ -353,6 +353,9 @@ impl QueueJournal {
             request_json,
             output_dir: output_dir.to_path_buf(),
             target_gpu: admission.target_gpu,
+            // Admission records the ordinal a client asked for; a stable pin
+            // only ever arrives later, through PATCH /api/queue/:id.
+            target_device_id: None,
             completion_payload: completion_payload_as_str(admission.completion_payload).to_string(),
             seed_pinned: admission.request.seed.is_some(),
             dispatch_attempts: 0,
@@ -573,6 +576,7 @@ impl QueueJournal {
         &self,
         id: &str,
         target_gpu: Option<Option<usize>>,
+        target_device_id: Option<Option<&str>>,
         order: Option<&[String]>,
     ) {
         let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
@@ -580,7 +584,11 @@ impl QueueJournal {
         };
         let now = now_ms();
         if let Some(target_gpu) = target_gpu {
-            if let Err(error) = generation_queue::set_target_gpu(db, id, target_gpu, now) {
+            // The stable id is recorded alongside the ordinal so replay can
+            // re-resolve it: ordinals are an enumeration artifact that MIG or
+            // a changed MOLD_GPUS renumbers across a restart.
+            let stable = target_device_id.flatten();
+            if let Err(error) = generation_queue::set_target_gpu(db, id, target_gpu, stable, now) {
                 tracing::warn!(
                     job = %id,
                     error = %format!("{error:#}"),
@@ -750,10 +758,28 @@ pub async fn replay(state: &crate::state::AppState, dispatch_available: bool) ->
             request.scheduler,
             mold_core::build_info::version_string(),
         ));
+        // Re-resolve a stable pin against THIS boot's device inventory. The
+        // recorded ordinal is only a fallback, and only when no stable pin was
+        // taken — replaying a renumbered ordinal runs the job on a device the
+        // user did not choose.
+        let target_gpu = match row.target_device_id.as_deref() {
+            Some(device_id) => match resolve_pinned_ordinal(state, device_id) {
+                Some(ordinal) => Some(ordinal),
+                None => {
+                    tracing::warn!(
+                        job = %row.id,
+                        device = %device_id,
+                        "the device this job was pinned to is not present; resuming on Auto"
+                    );
+                    None
+                }
+            },
+            None => row.target_gpu,
+        };
         let cancel = state.job_registry.register_job(
             &row.id,
             &row.model,
-            row.target_gpu,
+            target_gpu,
             Some(row.seed_pinned),
             Some(metadata),
         );
@@ -820,6 +846,17 @@ pub async fn replay(state: &crate::state::AppState, dispatch_available: bool) ->
         }
     }
     report
+}
+
+/// Map a stable device id to this boot's ordinal, or `None` when the device is
+/// no longer present.
+fn resolve_pinned_ordinal(state: &crate::state::AppState, device_id: &str) -> Option<usize> {
+    state
+        .gpu_pool
+        .workers
+        .iter()
+        .find(|worker| crate::scheduler::worker_device_id(worker) == device_id)
+        .map(|worker| worker.gpu.ordinal)
 }
 
 fn completion_payload_as_str(payload: SseCompletionPayload) -> &'static str {
@@ -1225,23 +1262,29 @@ mod tests {
             );
         }
 
-        journal.apply_queue_mutation("b", Some(Some(2)), None);
+        journal.apply_queue_mutation("b", Some(Some(2)), Some(Some("cuda:sibling")), None);
         let relaned = journal
             .list_all()
             .into_iter()
             .find(|row| row.id == "b")
             .unwrap();
         assert_eq!(relaned.target_gpu, Some(2));
+        assert_eq!(
+            relaned.target_device_id.as_deref(),
+            Some("cuda:sibling"),
+            "the stable pin is what replay re-resolves; the ordinal renumbers"
+        );
 
         journal.apply_queue_mutation(
             "c",
+            None,
             None,
             Some(&["c".to_string(), "a".to_string(), "b".to_string()]),
         );
         assert_eq!(rows(&journal), vec!["c", "a", "b"]);
 
         // Clearing the pin returns the row to Auto rather than leaving it.
-        journal.apply_queue_mutation("b", Some(None), None);
+        journal.apply_queue_mutation("b", Some(None), Some(None), None);
         assert_eq!(
             journal
                 .list_all()
@@ -1255,6 +1298,17 @@ mod tests {
         for ticket in tickets {
             ticket.discard();
         }
+    }
+
+    /// The point of persisting the stable pin: if the device is gone at replay
+    /// the job resumes on Auto rather than on whatever now holds that ordinal.
+    #[test]
+    fn a_missing_pinned_device_resolves_to_auto_rather_than_a_renumbered_ordinal() {
+        let state = crate::state::AppState::for_tests();
+        assert_eq!(
+            super::resolve_pinned_ordinal(&state, "cuda:not-present-on-this-boot"),
+            None
+        );
     }
 
     #[test]
