@@ -276,7 +276,19 @@ function matchGalleryPrintWithIdentity(
   // that every other field in this join reproduces identically. The heuristic
   // stays as the fallback for hosts that predate the stamp.
   if (job.id) {
-    const stamped = prints.find((print) => print.metadata?.job_id === job.id);
+    // One job can legitimately own two prints: a replay that crashed after
+    // publishing leaves the original and the re-render, both stamped. Take the
+    // NEWEST rather than the first listed — `/api/gallery` happens to sort
+    // newest-first today, but recovery must not depend on an ordering it never
+    // states, or an unrelated change to that endpoint silently hands back the
+    // older copy and the stale-print bug returns wearing someone else's diff.
+    const stamped = prints
+      .filter((print) => print.metadata?.job_id === job.id)
+      .reduce<GalleryImage | null>(
+        (newest, print) =>
+          !newest || (print.timestamp ?? 0) > (newest.timestamp ?? 0) ? print : newest,
+        null,
+      );
     if (stamped) return stamped;
   }
   const seed = Number(job.visualSeed);

@@ -425,6 +425,31 @@ describe("gallery recovery reads the server's own job id", () => {
     expect(await matchGalleryPrint(job, [theirs])).toBeNull();
   });
 
+  it("takes the NEWEST print sharing a job id, whatever order the host lists", async () => {
+    // A publish-then-crash replay can leave two prints for one job, both
+    // carrying its id. `/api/gallery` happens to sort newest-first today, so
+    // taking the first match would look correct — until that sort moves, or an
+    // archive path returns insertion order, and recovery silently starts
+    // handing back the older copy. The array here is deliberately OLDEST
+    // first, so this fails the moment the matcher trusts listing order again.
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    const older: GalleryImage = {
+      ...galleryPrint,
+      filename: "first-attempt.png",
+      timestamp: nowSeconds + 1,
+      metadata: { ...galleryPrint.metadata, job_id: "job-9" },
+    };
+    const newer: GalleryImage = {
+      ...galleryPrint,
+      filename: "replayed.png",
+      timestamp: nowSeconds + 90,
+      metadata: { ...galleryPrint.metadata, job_id: "job-9" },
+    };
+    const job = makeJob();
+
+    expect(await matchGalleryPrint(job, [older, newer])).toBe(newer);
+  });
+
   it("still recovers from a legacy host that stamps no job id at all", async () => {
     const job = makeJob();
     expect(await matchGalleryPrint(job, [galleryPrint])).toBe(galleryPrint);
