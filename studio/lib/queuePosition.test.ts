@@ -1,11 +1,15 @@
 import { describe, expect, it } from "vitest";
 import type { QueueEntry, QueuePlan } from "../api/queuePlan";
 import {
+  QUEUE_BLOCKED_REASONS,
   blockedReasonLabel,
   buildQueueStatusIndex,
   normalizeBlockedReason,
   queuePositionLabel,
   queueStatusFor,
+  queueWaitCode,
+  queueWaitLabel,
+  resolveQueueWait,
 } from "./queuePosition";
 
 function entry(id: string, position: number): QueueEntry {
@@ -104,6 +108,22 @@ describe("buildQueueStatusIndex", () => {
     ]);
     expect(queueStatusFor(index, "alpha", "job-1")?.blockedReason).toBeNull();
   });
+
+  it("keeps a busy single-GPU host counting the line instead of parking it", () => {
+    // `no_idle_device` is what a one-GPU host reports for every job behind the
+    // running one (`mold-scheduler/src/planner.rs`) — normal serialization,
+    // not a fault, so the row must fall through to its place in line.
+    const index = buildQueueStatusIndex([
+      {
+        hostId: "alpha",
+        entries: [entry("job-1", 3)],
+        plan: plan({ "job-1": "no_idle_device" }),
+      },
+    ]);
+    const status = queueStatusFor(index, "alpha", "job-1");
+    expect(status?.blockedReason).toBeNull();
+    expect(queueWaitLabel(resolveQueueWait(status))).toBe("#3 in line");
+  });
 });
 
 describe("queuePositionLabel", () => {
@@ -130,12 +150,115 @@ describe("blockedReasonLabel", () => {
     );
   });
 
-  it("falls back to the normalized reason for anything newer", () => {
+  it("never leaks a raw scheduler string for a reason it does not know", () => {
     expect(blockedReasonLabel("waiting_on_download")).toBe(
-      "waiting on download",
+      "Waiting on the host",
     );
     expect(normalizeBlockedReason("warm_resident")).toBeNull();
     expect(blockedReasonLabel("warm_resident")).toBeNull();
     expect(blockedReasonLabel(null)).toBeNull();
+  });
+
+  it("treats every ordinary planner wait as bookkeeping, not a fault", () => {
+    for (const reason of [
+      "no_idle_device",
+      "lower_priority_opening",
+      "warm_wait",
+      "dependency_wait",
+    ]) {
+      expect(blockedReasonLabel(reason)).toBeNull();
+      expect(normalizeBlockedReason(reason)).toBeNull();
+    }
+  });
+});
+
+/**
+ * One row per `QueueBlockedReason::as_str()` value in
+ * `crates/mold-core/src/types.rs`. Every reason must resolve to something a
+ * person can read: either its own copy, or silence that lets the row keep
+ * counting its place in line.
+ */
+describe("queue blocked-reason vocabulary", () => {
+  it("classifies every reason the server can send", () => {
+    for (const reason of QUEUE_BLOCKED_REASONS) {
+      const label = blockedReasonLabel(reason);
+      if (label === null) continue;
+      expect(label, reason).not.toBe(reason);
+      expect(label, reason).not.toBe(reason.replaceAll("_", " "));
+      expect(label[0], reason).toBe(label[0]?.toUpperCase());
+    }
+  });
+
+  it("never renders an internal identifier", () => {
+    for (const reason of [...QUEUE_BLOCKED_REASONS, "a_brand_new_reason"]) {
+      const label = blockedReasonLabel(reason);
+      if (label !== null) expect(label, reason).not.toContain("_");
+      expect(
+        queueWaitLabel(resolveQueueWait({ blockedReason: reason })),
+      ).not.toContain("_");
+      expect(
+        queueWaitCode(resolveQueueWait({ blockedReason: reason })),
+      ).not.toContain("_");
+    }
+  });
+
+  it("gives an unknown future reason generic but honest copy", () => {
+    expect(blockedReasonLabel("solar_flare")).toBe("Waiting on the host");
+  });
+
+  it("always renders something for a waiting row", () => {
+    for (const reason of [...QUEUE_BLOCKED_REASONS, "solar_flare", null]) {
+      for (const position of [null, 0, 1, 7]) {
+        const wait = resolveQueueWait({ position, blockedReason: reason });
+        expect(
+          queueWaitLabel(wait).length,
+          `${reason}/${position}`,
+        ).toBeGreaterThan(0);
+        expect(
+          queueWaitCode(wait).length,
+          `${reason}/${position}`,
+        ).toBeGreaterThan(0);
+      }
+    }
+  });
+});
+
+describe("resolveQueueWait", () => {
+  it("names the head of the line rather than staying silent", () => {
+    expect(resolveQueueWait({ position: 0 })).toEqual({ kind: "next" });
+    expect(queueWaitLabel(resolveQueueWait({ position: 0 }))).toBe("Next up");
+    expect(queueWaitCode(resolveQueueWait({ position: 0 }))).toBe("NEXT UP");
+  });
+
+  it("counts the line for everyone behind it", () => {
+    expect(resolveQueueWait({ position: 2 })).toEqual({
+      kind: "position",
+      position: 2,
+    });
+    expect(queueWaitLabel(resolveQueueWait({ position: 2 }))).toBe(
+      "#2 in line",
+    );
+    expect(queueWaitCode(resolveQueueWait({ position: 2 }))).toBe("QUEUED #2");
+  });
+
+  it("degrades to today's plain pill when the host lists nothing", () => {
+    expect(resolveQueueWait(null)).toEqual({ kind: "queued" });
+    expect(queueWaitLabel(resolveQueueWait(null))).toBe("Queued");
+    expect(queueWaitCode(resolveQueueWait(undefined))).toBe("QUEUED");
+  });
+
+  it("lets an actionable reason outrank the position", () => {
+    const wait = resolveQueueWait({
+      position: 4,
+      blockedReason: "insufficient_host_ram",
+    });
+    expect(wait).toEqual({ kind: "blocked", label: "Waiting for memory" });
+    expect(queueWaitCode(wait)).toBe("WAITING FOR MEMORY");
+  });
+
+  it("lets a benign reason fall through to the position", () => {
+    expect(
+      resolveQueueWait({ position: 4, blockedReason: "no_idle_device" }),
+    ).toEqual({ kind: "position", position: 4 });
   });
 });

@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  activityAnnouncement,
+  activityCountLabel,
   activityDigestLabel,
   mergeActivity,
   partitionActivity,
@@ -404,7 +406,8 @@ describe("withLiveQueueStatus", () => {
       "srv-missing",
     );
     expect(vm.queuePosition).toBeUndefined();
-    expect(queueStatusLabel(vm)).toBeNull();
+    // No evidence still says the one true thing: it is queued.
+    expect(queueStatusLabel(vm)).toBe("Queued");
     const unread = withLiveQueueStatus(
       print() as PrintActivityVM,
       null,
@@ -440,17 +443,50 @@ describe("withLiveQueueStatus", () => {
     expect(queueStatusLabel(vm)).toBe("Waiting for memory");
   });
 
-  it("stays quiet for the job at the head of the queue", () => {
+  it("names the job at the head of the queue", () => {
     const vm = withLiveQueueStatus(
       print() as PrintActivityVM,
       index,
       "srv-run",
     );
     expect(vm.queuePosition).toBe(0);
-    expect(queueStatusLabel(vm)).toBeNull();
+    expect(queueStatusLabel(vm)).toBe("Next up");
   });
 
   it("says nothing for a sequence row", () => {
     expect(queueStatusLabel(print({ kind: "sequence" } as never))).toBeNull();
+  });
+});
+
+describe("activity counts", () => {
+  it("never calls queued work active", () => {
+    // The iPhone screenshot: one z-image job running, four behind it.
+    expect(activityCountLabel({ running: 1, waiting: 4 })).toBe(
+      "1 active · 4 queued",
+    );
+    expect(activityAnnouncement({ running: 1, waiting: 4 })).toBe(
+      "1 active generation, 4 queued.",
+    );
+  });
+
+  it("drops the half that is zero", () => {
+    expect(activityCountLabel({ running: 2, waiting: 0 })).toBe("2 active");
+    expect(activityCountLabel({ running: 0, waiting: 3 })).toBe("3 queued");
+    expect(activityAnnouncement({ running: 1, waiting: 0 })).toBe(
+      "1 active generation.",
+    );
+    expect(activityAnnouncement({ running: 0, waiting: 1 })).toBe(
+      "1 queued generation.",
+    );
+    expect(activityAnnouncement({ running: 0, waiting: 3 })).toBe(
+      "3 queued generations.",
+    );
+  });
+
+  it("stays honest when only settled rows are left on screen", () => {
+    expect(activityCountLabel({ running: 0, waiting: 0 })).toBe("0 active");
+    expect(activityAnnouncement({ running: 0, waiting: 0 })).toBe(
+      "No active generations.",
+    );
   });
 });
