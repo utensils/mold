@@ -565,7 +565,10 @@ fn write_gallery_bytes_no_replace_with_directory_sync(
     // gallery name, which the next boot's `db.reconcile` imports as a valid
     // print — and the shutdown path deliberately bounds itself and exits, so
     // that kill is a routine event rather than a hypothetical one.
-    let staged = dir.join(format!("{filename}.partial"));
+    let staged = dir.join(format!("{filename}{GALLERY_PARTIAL_SUFFIX}"));
+    // Any leftover from an earlier interrupted write at this exact name: the
+    // reservation says the name is ours, so a stale sibling is ours to drop.
+    let _ = std::fs::remove_file(&staged);
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -576,12 +579,80 @@ fn write_gallery_bytes_no_replace_with_directory_sync(
         return Err(error.into());
     }
     drop(file);
-    if let Err(error) = std::fs::rename(&staged, &path) {
+    // Publish with a no-replace primitive. `rename` REPLACES its destination on
+    // Unix, which would silently overwrite a file another writer created at the
+    // reserved name between reservation and publication — the exact thing this
+    // helper's `no_replace` contract promises not to do. `hard_link` fails with
+    // AlreadyExists instead, and is equally atomic.
+    if let Err(error) = std::fs::hard_link(&staged, &path) {
         let _ = std::fs::remove_file(&staged);
         return Err(error.into());
     }
+    let _ = std::fs::remove_file(&staged);
     sync_directory(dir)?;
     Ok((filename, path, reservation))
+}
+
+/// Suffix of a gallery write that has been staged but not yet published.
+const GALLERY_PARTIAL_SUFFIX: &str = ".partial";
+
+/// Remove staged gallery writes no process is still making.
+///
+/// A kill between staging and publication leaves `<final>.partial` behind, and
+/// the bounded shutdown deadline turns that from a rare event into a routine
+/// one. Nothing else reclaims them and later generations take fresh
+/// timestamped names, so without this repeated interruptions consume gallery
+/// disk permanently.
+///
+/// Safe against a concurrent writer — including one in another server sharing
+/// this gallery — because it holds the gallery bookkeeping lock, which every
+/// writer already holds for its whole reserve-write-publish window. A partial
+/// visible while we hold that lock cannot be in flight.
+pub(crate) fn sweep_stale_gallery_partials(dir: &std::path::Path) -> usize {
+    let _bookkeeping = match crate::batch_transaction::acquire_gallery_bookkeeping_lock(dir) {
+        Ok(guard) => guard,
+        Err(error) => {
+            tracing::warn!(
+                dir = %dir.display(),
+                error = %format!("{error:#}"),
+                "skipping stale gallery partial sweep: bookkeeping lock unavailable"
+            );
+            return 0;
+        }
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        if !entry
+            .file_name()
+            .to_string_lossy()
+            .ends_with(GALLERY_PARTIAL_SUFFIX)
+        {
+            continue;
+        }
+        match std::fs::remove_file(&path) {
+            Ok(()) => {
+                tracing::info!(
+                    file = %path.display(),
+                    "removed a gallery write interrupted before publication"
+                );
+                removed += 1;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => tracing::warn!(
+                file = %path.display(),
+                %error,
+                "could not remove an interrupted gallery write"
+            ),
+        }
+    }
+    removed
 }
 
 fn requested_post_upscale_model(req: &mold_core::GenerateRequest) -> Option<&str> {
@@ -3855,6 +3926,65 @@ mod tests {
         assert!(
             !tmp.path().join("ordinary.png").exists(),
             "a failed write must leave nothing at the gallery name"
+        );
+    }
+
+    /// The helper is `no_replace` in its name and in its contract. Publishing
+    /// by plain `rename` quietly broke that on Unix, where rename REPLACES the
+    /// destination: an external gallery writer that created the reserved
+    /// filename between reservation and publication would be overwritten
+    /// instead of refused.
+    #[test]
+    fn ordinary_gallery_save_refuses_to_replace_a_name_that_appeared_underneath_it() {
+        let tmp = TempDir::new().unwrap();
+        let reservations = tmp
+            .path()
+            .join(crate::batch_transaction::TRANSACTION_DIR)
+            .join("reservations");
+        std::fs::create_dir_all(&reservations).unwrap();
+        // Reserve the name so the helper picks it, then have somebody else
+        // create the file after the reservation and before publication.
+        let planted = tmp.path().join("ordinary.png");
+        std::fs::write(&planted, b"written by someone else").unwrap();
+
+        let outcome = write_gallery_bytes_no_replace(tmp.path(), "ordinary.png", b"ours");
+
+        if let Ok((filename, _, _)) = outcome {
+            assert_ne!(
+                filename, "ordinary.png",
+                "a taken name must never be published over"
+            );
+        }
+        assert_eq!(
+            std::fs::read(&planted).unwrap(),
+            b"written by someone else",
+            "the other writer's bytes must survive"
+        );
+    }
+
+    /// A kill mid-write leaves `<final>.partial` behind, and the bounded
+    /// shutdown deadline makes that a routine event rather than a rare one.
+    /// Nothing else reclaims them and later generations take fresh timestamped
+    /// names, so repeated interruptions would consume gallery disk forever.
+    #[test]
+    fn stale_gallery_partials_are_reclaimed_at_startup() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("mold-1.png.partial"), b"half a print").unwrap();
+        std::fs::write(tmp.path().join("mold-2.mp4.partial"), b"half a clip").unwrap();
+        // Real prints and unrelated files are not partials.
+        std::fs::write(tmp.path().join("mold-3.png"), b"a real print").unwrap();
+        std::fs::write(tmp.path().join("notes.txt"), b"not ours").unwrap();
+
+        assert_eq!(sweep_stale_gallery_partials(tmp.path()), 2);
+
+        assert!(!tmp.path().join("mold-1.png.partial").exists());
+        assert!(!tmp.path().join("mold-2.mp4.partial").exists());
+        assert!(tmp.path().join("mold-3.png").is_file());
+        assert!(tmp.path().join("notes.txt").is_file());
+        assert_eq!(
+            sweep_stale_gallery_partials(tmp.path()),
+            0,
+            "sweeping is idempotent"
         );
     }
 

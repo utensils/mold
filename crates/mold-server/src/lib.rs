@@ -859,6 +859,28 @@ pub async fn run_server(
         }
     }
 
+    // Reclaim gallery writes that were staged but never published. The bounded
+    // shutdown deadline makes an interrupted write routine, so without this the
+    // partials accumulate forever.
+    {
+        let config = state.config.read().await;
+        if !state.is_output_disabled(&config) {
+            let output_dir = config.effective_output_dir();
+            drop(config);
+            let swept = tokio::task::spawn_blocking(move || {
+                queue::sweep_stale_gallery_partials(&output_dir)
+            })
+            .await
+            .unwrap_or(0);
+            if swept > 0 {
+                info!(
+                    swept,
+                    "removed gallery writes interrupted before publication"
+                );
+            }
+        }
+    }
+
     // Retained generations resume before the router serves, as ONE sequential
     // task: `submit_when_available` serializes on a single global capacity
     // mutex, so parallel replay would land in arbitrary order and destroy the
