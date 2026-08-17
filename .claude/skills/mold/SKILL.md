@@ -1035,7 +1035,9 @@ normally but is not replayed).
 
 On `SIGTERM` the running generation is aborted at its next inference checkpoint
 and requeued, new requests get `503 SERVER_RESTARTING` with `Retry-After`, and
-the server exits within `MOLD_SHUTDOWN_ABORT_SECS` (45 s). A job that keeps
+the server exits within `MOLD_SHUTDOWN_ABORT_SECS` (45 s) — a hard deadline that
+ends the process if the drain overruns, since a cold model load cannot be
+interrupted. A job that keeps
 failing to finish is **held** — listed as `state: "held"` with a reason, never
 started automatically. Clear one with `DELETE /api/queue/{id}`.
 
