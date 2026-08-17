@@ -1172,18 +1172,69 @@ pub async fn run_server(
     // Joining here makes an in-process server restart incapable of inheriting
     // detached CUDA owner threads or contexts.
     let shutdown_pool = gpu_pool.clone();
-    tokio::task::spawn_blocking(move || {
+    let join = tokio::task::spawn_blocking(move || {
         shutdown_pool.workers.shutdown_and_join_all();
         gpu_owner_threads.shutdown_and_join()
-    })
-    .await
-    .map_err(|error| anyhow::anyhow!("failed to run GPU owner join task: {error}"))??;
+    });
+    // Bounded, because waiting on a GPU owner is structurally unbounded: a
+    // cancel arriving during a cold model load is not honoured (the
+    // cancellation wrapper covers the generate call, not the load), and a
+    // 19B checkpoint takes minutes to stream in. The queue is already retained
+    // at this point and the gallery write is atomic, so exiting on the
+    // deadline costs the in-flight render and nothing else.
+    let budget = std::time::Duration::from_secs(resolve_shutdown_abort_secs());
+    match tokio::time::timeout(budget, join).await {
+        Ok(joined) => joined
+            .map_err(|error| anyhow::anyhow!("failed to run GPU owner join task: {error}"))??,
+        Err(_) => {
+            tracing::warn!(
+                budget_secs = budget.as_secs(),
+                env = SHUTDOWN_ABORT_SECS_ENV,
+                "a GPU owner did not return within the shutdown budget; \
+                 exiting anyway — retained jobs are replayed after restart"
+            );
+        }
+    }
 
     if fatal_cuda_error.load(std::sync::atomic::Ordering::SeqCst) {
         anyhow::bail!("fatal CUDA context error; server restart required");
     }
 
     Ok(())
+}
+
+/// Total budget for joining GPU owner threads at shutdown. The unit's
+/// `TimeoutStopSec` is derived from this and is strictly larger, so systemd is
+/// never the component that decides.
+pub const SHUTDOWN_ABORT_SECS_ENV: &str = "MOLD_SHUTDOWN_ABORT_SECS";
+/// Long enough for an ordinary render to reach its next checkpoint and unwind,
+/// short enough that a deploy never waits on a cold 19B load.
+pub const DEFAULT_SHUTDOWN_ABORT_SECS: u64 = 45;
+
+/// Resolve the shutdown join budget, warning rather than failing on nonsense.
+pub fn resolve_shutdown_abort_secs() -> u64 {
+    match std::env::var(SHUTDOWN_ABORT_SECS_ENV) {
+        Ok(raw) => match raw.trim().parse::<u64>() {
+            Ok(secs) if secs >= 1 => secs,
+            Ok(_) => {
+                tracing::warn!(
+                    env = SHUTDOWN_ABORT_SECS_ENV,
+                    "shutdown budget must be at least 1 second; using the default"
+                );
+                DEFAULT_SHUTDOWN_ABORT_SECS
+            }
+            Err(error) => {
+                tracing::warn!(
+                    env = SHUTDOWN_ABORT_SECS_ENV,
+                    raw = %raw,
+                    %error,
+                    "ignoring unparseable shutdown budget"
+                );
+                DEFAULT_SHUTDOWN_ABORT_SECS
+            }
+        },
+        Err(_) => DEFAULT_SHUTDOWN_ABORT_SECS,
+    }
 }
 
 /// Order is the correctness argument, not a preference.
@@ -1368,6 +1419,28 @@ mod tests {
         assert!(
             observed.load(std::sync::atomic::Ordering::SeqCst),
             "the queue must already be retained when the scheduler starts discarding"
+        );
+    }
+
+    #[test]
+    fn shutdown_budget_falls_back_to_the_default_for_nonsense() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        std::env::set_var(super::SHUTDOWN_ABORT_SECS_ENV, "90");
+        assert_eq!(super::resolve_shutdown_abort_secs(), 90);
+        std::env::set_var(super::SHUTDOWN_ABORT_SECS_ENV, "0");
+        assert_eq!(
+            super::resolve_shutdown_abort_secs(),
+            super::DEFAULT_SHUTDOWN_ABORT_SECS
+        );
+        std::env::set_var(super::SHUTDOWN_ABORT_SECS_ENV, "soon");
+        assert_eq!(
+            super::resolve_shutdown_abort_secs(),
+            super::DEFAULT_SHUTDOWN_ABORT_SECS
+        );
+        std::env::remove_var(super::SHUTDOWN_ABORT_SECS_ENV);
+        assert_eq!(
+            super::resolve_shutdown_abort_secs(),
+            super::DEFAULT_SHUTDOWN_ABORT_SECS
         );
     }
 

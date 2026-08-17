@@ -150,6 +150,13 @@ impl ApiError {
         Self::with_code(msg, "QUEUE_FULL", StatusCode::SERVICE_UNAVAILABLE)
     }
 
+    /// The host is going down. Distinct from `QUEUE_FULL` so a client can tell
+    /// "come back in a second" from "this instance is restarting"; both carry
+    /// `Retry-After`.
+    pub fn server_restarting(msg: impl Into<String>) -> Self {
+        Self::with_code(msg, "SERVER_RESTARTING", StatusCode::SERVICE_UNAVAILABLE)
+    }
+
     pub fn generation_unavailable(msg: impl Into<String>) -> Self {
         Self::with_code(
             msg,
@@ -171,7 +178,7 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
         let status = self.status;
         // On queue-full (503), hint clients to retry with a short delay.
-        if self.code == "QUEUE_FULL" {
+        if self.code == "QUEUE_FULL" || self.code == "SERVER_RESTARTING" {
             let mut headers = HeaderMap::new();
             headers.insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
             return (status, headers, Json(self)).into_response();
@@ -810,6 +817,14 @@ async fn prepare_generation(
     request: &mut mold_core::GenerateRequest,
     authenticated: Option<&crate::auth::ApiKeyAuthenticated>,
 ) -> Result<PreparedGenerationRoute, ApiError> {
+    // Stop admitting once the retention fence is up. Anything accepted after
+    // that point is queued into a process that is already tearing down, so the
+    // honest answer is "not now" rather than a job that immediately retains.
+    if state.queue_journal.is_retaining() {
+        return Err(ApiError::server_restarting(
+            "the host is restarting; retry shortly",
+        ));
+    }
     // Collapse every released H3 alias to one exact task/layout identity
     // before activation, upload scope, admission, placement, queue, metadata,
     // and retry state can observe the request. This is deliberately a no-op

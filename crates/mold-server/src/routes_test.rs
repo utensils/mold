@@ -4060,6 +4060,43 @@ mod tests {
         let _ = gen_task.await;
     }
 
+    /// Once the retention fence is up the process is tearing down, so a new
+    /// request is refused with a retryable 503 rather than admitted into a
+    /// queue that immediately retains it.
+    #[tokio::test]
+    async fn a_restarting_host_refuses_new_generations_with_a_retry_hint() {
+        let (state, _rx) = AppState::with_engine_and_queue(MockEngine::ready());
+        state.queue_journal.retain_all();
+        let app = app_with_state(state);
+
+        for route in ["/api/generate", "/api/generate/stream"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::post(route)
+                        .header("content-type", "application/json")
+                        .body(Body::from(generate_body("a cat", 512, 512)))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "{route}"
+            );
+            assert_eq!(
+                response
+                    .headers()
+                    .get(axum::http::header::RETRY_AFTER)
+                    .and_then(|value| value.to_str().ok()),
+                Some("1"),
+                "{route}"
+            );
+            assert_eq!(json_body(response).await["code"], "SERVER_RESTARTING");
+        }
+    }
+
     #[tokio::test]
     async fn oversized_raw_batch_is_rejected_before_preparation_or_reservation() {
         let output_dir = tempfile::tempdir().unwrap();
