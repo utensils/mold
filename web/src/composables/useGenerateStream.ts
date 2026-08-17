@@ -105,6 +105,11 @@ export interface Job {
    * for the settled one, which a reload would otherwise demote to a plain
    * error. */
   detached?: boolean;
+  /** The host journalled THIS job at admission (`/api/queue` row `durable`),
+   * captured while the row was still listable. Evidence that a vanished row
+   * means "kept and running" rather than "lost". Absent until the answer
+   * arrives, and on hosts without a durable queue. */
+  durable?: boolean;
 }
 
 /**
@@ -231,7 +236,13 @@ function captureJobDurability(
   target: StreamTarget | undefined,
 ): void {
   if (!job.serverId || durabilityByJob.has(job.id)) return;
-  durabilityByJob.set(job.id, hostJournalledJob(job.serverId, target));
+  const answer = hostJournalledJob(job.serverId, target);
+  durabilityByJob.set(job.id, answer);
+  // Mirror it onto the job so consumers that never see this map — queue
+  // reconciliation above all — can tell "the host kept it" from "it vanished".
+  void answer.then((durable) => {
+    if (durable) job.durable = true;
+  });
 }
 
 /**

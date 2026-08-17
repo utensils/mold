@@ -13,9 +13,10 @@ import type { GenerateRequestWire } from "../types";
 
 vi.mock("../api", () => ({
   fetchQueue: vi.fn(),
+  listGalleryFrom: vi.fn().mockResolvedValue([]),
 }));
 
-import { fetchQueue } from "../api";
+import { fetchQueue, listGalleryFrom } from "../api";
 
 function makeJob(overrides: Partial<Job> = {}): Job {
   return {
@@ -152,14 +153,17 @@ describe("startQueueReconciler (live polling)", () => {
   });
 
   it("does not dead-letter a job whose row vanished because it COMPLETED", async () => {
-    // A row leaves `/api/queue` for two reasons and this loop cannot tell them
-    // apart: the job died, or it FINISHED. For a job that had started real
-    // work, finishing is the likely one — and every trigger this sweeper
-    // documents (reload, server restart, tab suspended past keepalive) leaves
-    // the host still rendering. Announcing "connection lost" there reports a
-    // failure for a print sitting in the Library.
+    // Evidence, not inference: the host's gallery carries a print stamped with
+    // this job's id, so the row left the queue by finishing.
     vi.useFakeTimers();
     vi.mocked(fetchQueue).mockResolvedValue({ entries: [] });
+    vi.mocked(listGalleryFrom).mockResolvedValue([
+      {
+        filename: "finished.png",
+        timestamp: 0,
+        metadata: { job_id: "srv-1" },
+      },
+    ] as never);
     const jobs = ref<Job[]>([
       makeJob({ id: "finished-client", lastProgressAt: 0, workStarted: true }),
     ]);
@@ -175,6 +179,66 @@ describe("startQueueReconciler (live polling)", () => {
     expect(failRunning).not.toHaveBeenCalled();
     expect(settleDetached).toHaveBeenCalledWith(
       "finished-client",
+      DETACHED_SETTLE_NOTE,
+    );
+    handle.stop();
+    vi.useRealTimers();
+  });
+
+  it("keeps the failure path for work that started and then genuinely died", async () => {
+    // No print, and the host never promised to keep it. Soft-settling here
+    // hides the row (the strip retires detached rows) AND shows no output —
+    // silence, which is worse than the dead letter it replaced.
+    vi.useFakeTimers();
+    vi.mocked(fetchQueue).mockResolvedValue({ entries: [] });
+    vi.mocked(listGalleryFrom).mockResolvedValue([] as never);
+    const jobs = ref<Job[]>([
+      makeJob({ id: "died-client", lastProgressAt: 0, workStarted: true }),
+    ]);
+    const failRunning = vi.fn();
+    const settleDetached = vi.fn();
+    const handle = startGenerateQueueReconciler(
+      { jobs, failRunning, settleDetached },
+      { intervalMs: 1_000 },
+    );
+
+    await vi.advanceTimersByTimeAsync(RECONCILE_GRACE_MS + 2_100);
+
+    expect(settleDetached).not.toHaveBeenCalled();
+    expect(failRunning).toHaveBeenCalledWith(
+      "died-client",
+      "job not found on server — connection lost",
+    );
+    handle.stop();
+    vi.useRealTimers();
+  });
+
+  it("accepts the host's own promise as evidence when no print exists yet", async () => {
+    // A durable host said it journalled this job at admission: it will run,
+    // even though nothing has landed in the gallery yet.
+    vi.useFakeTimers();
+    vi.mocked(fetchQueue).mockResolvedValue({ entries: [] });
+    vi.mocked(listGalleryFrom).mockResolvedValue([] as never);
+    const jobs = ref<Job[]>([
+      makeJob({
+        id: "retained-client",
+        lastProgressAt: 0,
+        workStarted: true,
+        durable: true,
+      }),
+    ]);
+    const failRunning = vi.fn();
+    const settleDetached = vi.fn();
+    const handle = startGenerateQueueReconciler(
+      { jobs, failRunning, settleDetached },
+      { intervalMs: 1_000 },
+    );
+
+    await vi.advanceTimersByTimeAsync(RECONCILE_GRACE_MS + 2_100);
+
+    expect(failRunning).not.toHaveBeenCalled();
+    expect(settleDetached).toHaveBeenCalledWith(
+      "retained-client",
       DETACHED_SETTLE_NOTE,
     );
     handle.stop();

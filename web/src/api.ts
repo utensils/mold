@@ -132,6 +132,22 @@ export async function fetchQueue(
   return (await res.json()) as QueueListing;
 }
 
+/** Read a specific host's gallery. Reconciliation uses this to ask whether a
+ * job that vanished from the queue actually PRODUCED something, rather than
+ * inferring an outcome from its absence. */
+export async function listGalleryFrom(
+  target?: StreamTarget,
+  signal?: AbortSignal,
+): Promise<GalleryImage[]> {
+  const headers = targetHeaders(target);
+  const res = await fetch(`${targetBase(target)}/api/gallery`, {
+    ...(Object.keys(headers).length ? { headers } : {}),
+    signal,
+  });
+  if (!res.ok) throw new Error(`GET /api/gallery failed: ${res.status}`);
+  return (await res.json()) as GalleryImage[];
+}
+
 /** Cancel a queued generation on the exact host that owns it. */
 export async function cancelQueueJob(
   id: string,
