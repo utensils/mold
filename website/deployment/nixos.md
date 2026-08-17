@@ -201,9 +201,13 @@ matching flake output:
 
 Queued generations are recorded in `mold.db` and replayed automatically after a
 restart, under their original job ids, so `systemctl restart mold` during a busy
-queue no longer loses work. `shutdown.abortSeconds` (default 45) is how long the
-server waits for its GPU workers after `SIGTERM` before exiting anyway; the
-running generation is aborted at its next inference checkpoint and requeued.
+queue no longer loses work. `shutdown.abortSeconds` (default 45) is a hard
+deadline on the whole shutdown, not just a wait: the running generation is
+aborted at its next inference checkpoint and requeued, and if shutdown overruns
+the server ends the process itself (status 0 for an ordinary stop, 1 after a
+fatal CUDA error so `Restart=on-failure` brings it back). A cold model load is
+not interruptible, so without that the unit would sit until systemd SIGKILLed
+it.
 
 The unit's `TimeoutStopSec` is **derived** from that option — `abortSeconds + 60`
 — so systemd is never the component that decides. Do not set

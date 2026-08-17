@@ -81,6 +81,9 @@ async fn main() -> anyhow::Result<()> {
 
             let gpu_selection = config.gpu_selection();
             let queue_size = config.queue_size();
+            // This process exists only to be the server, so an overrunning
+            // shutdown may end it rather than hang the service manager.
+            mold_server::allow_hard_shutdown_exit();
             mold_server::run_server(&bind, port, models_path, gpu_selection, queue_size).await?;
         }
     }

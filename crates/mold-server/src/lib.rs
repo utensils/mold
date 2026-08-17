@@ -979,8 +979,13 @@ pub async fn run_server(
     let shutdown_chain_jobs = state.chain_jobs.clone();
     let shutdown_journal = state.queue_journal.clone();
     let shutdown_generation_cancel = state.generation_cancel.clone();
+    let shutdown_fatal_cuda = fatal_cuda_error.clone();
     tokio::spawn(async move {
         let _ = shutdown_request_rx.await;
+        // Armed BEFORE the sequence, not after it: everything below this
+        // point can block, and a deadline that only starts once the drain is
+        // over bounds nothing.
+        arm_shutdown_deadline(shutdown_fatal_cuda);
         begin_runtime_shutdown(
             shutdown_chain_jobs.as_deref(),
             &shutdown_scheduler,
@@ -1120,6 +1125,7 @@ pub async fn run_server(
     };
 
     let fatal_cuda_journal = queue_journal.clone();
+    let fatal_cuda_deadline = fatal_cuda_error.clone();
     let server = std::future::IntoFuture::into_future(
         axum::serve(
             listener,
@@ -1139,6 +1145,9 @@ pub async fn run_server(
             // fence would make the one restart mold performs on its own behalf
             // the one that deletes every queued job.
             fatal_cuda_journal.retain_all();
+            // Same bound as the operator-initiated path: this restart is the
+            // one mold performs on its own behalf, and it must not hang.
+            arm_shutdown_deadline(fatal_cuda_deadline);
             tracing::error!("fatal CUDA context error; stopping server for process restart");
             // Give the triggering request a brief window to receive its explicit
             // fatal-context error, then drop the server future. A normal graceful
@@ -1202,12 +1211,11 @@ pub async fn run_server(
         shutdown_pool.workers.shutdown_and_join_all();
         gpu_owner_threads.shutdown_and_join()
     });
-    // Bounded, because waiting on a GPU owner is structurally unbounded: a
-    // cancel arriving during a cold model load is not honoured (the
-    // cancellation wrapper covers the generate call, not the load), and a
-    // 19B checkpoint takes minutes to stream in. The queue is already retained
-    // at this point and the gallery write is atomic, so exiting on the
-    // deadline costs the in-flight render and nothing else.
+    // Stop *awaiting* the owners at the budget so a lifecycle owner that can
+    // still act gets control back. This is deliberately not the bound —
+    // dropping a `spawn_blocking` handle does not cancel the blocking work,
+    // and the runtime waits on it at teardown. `arm_shutdown_deadline`, armed
+    // when shutdown began, is what actually ends an overrunning process.
     let budget = std::time::Duration::from_secs(resolve_shutdown_abort_secs());
     match tokio::time::timeout(budget, join).await {
         Ok(joined) => joined
@@ -1217,7 +1225,7 @@ pub async fn run_server(
                 budget_secs = budget.as_secs(),
                 env = SHUTDOWN_ABORT_SECS_ENV,
                 "a GPU owner did not return within the shutdown budget; \
-                 exiting anyway — retained jobs are replayed after restart"
+                 no longer waiting — retained jobs replay after restart"
             );
         }
     }
@@ -1261,6 +1269,103 @@ pub fn resolve_shutdown_abort_secs() -> u64 {
         },
         Err(_) => DEFAULT_SHUTDOWN_ABORT_SECS,
     }
+}
+
+/// Whether this process may end itself when the shutdown budget expires.
+///
+/// Off by default: `run_server` is also embedded in the desktop app, which
+/// runs it on a thread inside its own process and expects it to *return*.
+/// Exiting there would take the whole application down over a slow engine
+/// stop. `mold serve` and the standalone binary opt in.
+static HARD_SHUTDOWN_EXIT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Opt this process into ending itself if shutdown overruns its budget.
+///
+/// Call once, before `run_server`, from a binary whose only job is to be the
+/// server. Without it the budget can only stop *waiting*, which is not the
+/// same as bounding shutdown: dropping a `spawn_blocking` handle does not
+/// cancel the blocking work, and the runtime blocks on it at teardown.
+pub fn allow_hard_shutdown_exit() {
+    HARD_SHUTDOWN_EXIT.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+fn hard_shutdown_exit_allowed() -> bool {
+    HARD_SHUTDOWN_EXIT.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// What expiry of the shutdown budget should do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ShutdownExpiry {
+    /// End the process now. The status distinguishes an operator-initiated
+    /// stop that merely overran from a fatal-CUDA stop that supervision must
+    /// restart.
+    Exit(i32),
+    /// This process belongs to someone else; keep waiting and let them decide.
+    KeepWaiting,
+}
+
+pub(crate) fn shutdown_expiry_action(hard_exit_allowed: bool, fatal_cuda: bool) -> ShutdownExpiry {
+    if !hard_exit_allowed {
+        return ShutdownExpiry::KeepWaiting;
+    }
+    ShutdownExpiry::Exit(if fatal_cuda { 1 } else { 0 })
+}
+
+/// Arm the hard shutdown deadline the moment shutdown begins.
+///
+/// This is what makes `MOLD_SHUTDOWN_ABORT_SECS` a real bound rather than an
+/// aspiration. Two things in the drain are individually unbounded and neither
+/// can be fixed where it sits: Axum's graceful shutdown waits for in-flight
+/// responses, so an SSE stream whose generation is inside a cold model load
+/// holds it open indefinitely (the cancellation wrapper covers the generate
+/// call, not the load); and a `spawn_blocking` join cannot be cancelled by
+/// dropping its handle — the runtime waits on it at teardown regardless. A
+/// timeout placed anywhere *inside* the sequence therefore stops waiting
+/// without stopping anything.
+///
+/// So the deadline runs beside the drain instead of within it, and ends the
+/// process when it expires. That is safe precisely because of the two
+/// invariants this feature already established: the queue is retained before
+/// anything discards, and gallery bytes publish by rename, so a kill costs the
+/// in-flight render and nothing else. The retained rows replay on restart.
+fn spawn_shutdown_deadline(
+    budget: std::time::Duration,
+    fatal_cuda: std::sync::Arc<AtomicBool>,
+    hard_exit_allowed: bool,
+    on_expiry: impl FnOnce(ShutdownExpiry) + Send + 'static,
+) -> Option<tokio::task::JoinHandle<()>> {
+    if !hard_exit_allowed {
+        tracing::debug!(
+            "shutdown budget is advisory in an embedded server; the host owns the process"
+        );
+        return None;
+    }
+    Some(tokio::spawn(async move {
+        tokio::time::sleep(budget).await;
+        let fatal = fatal_cuda.load(std::sync::atomic::Ordering::SeqCst);
+        on_expiry(shutdown_expiry_action(true, fatal));
+    }))
+}
+
+/// Arm the deadline with the production expiry behaviour: log distinctly,
+/// then end the process.
+fn arm_shutdown_deadline(fatal_cuda: std::sync::Arc<AtomicBool>) {
+    let budget = std::time::Duration::from_secs(resolve_shutdown_abort_secs());
+    let allowed = hard_shutdown_exit_allowed();
+    let _ = spawn_shutdown_deadline(budget, fatal_cuda, allowed, move |action| match action {
+        ShutdownExpiry::Exit(status) => {
+            tracing::error!(
+                budget_secs = budget.as_secs(),
+                env = SHUTDOWN_ABORT_SECS_ENV,
+                status,
+                "shutdown did not complete within its budget; ending the process now — \
+                 retained generations replay on the next start"
+            );
+            std::process::exit(status);
+        }
+        ShutdownExpiry::KeepWaiting => {}
+    });
 }
 
 /// Order is the correctness argument, not a preference.
@@ -1467,6 +1572,76 @@ mod tests {
         assert_eq!(
             super::resolve_shutdown_abort_secs(),
             super::DEFAULT_SHUTDOWN_ABORT_SECS
+        );
+    }
+
+    /// The budget is only meaningful if expiry actually ends the process. A
+    /// server embedded in the desktop app owns neither the process nor the
+    /// decision, so it keeps waiting instead.
+    #[test]
+    fn shutdown_expiry_exits_only_where_the_process_is_ours_to_end() {
+        use super::{shutdown_expiry_action, ShutdownExpiry};
+
+        assert_eq!(
+            shutdown_expiry_action(true, false),
+            ShutdownExpiry::Exit(0),
+            "an operator-initiated stop that overran is still a clean stop"
+        );
+        assert_eq!(
+            shutdown_expiry_action(true, true),
+            ShutdownExpiry::Exit(1),
+            "a fatal-CUDA stop must exit non-zero so supervision restarts us"
+        );
+        assert_eq!(
+            shutdown_expiry_action(false, false),
+            ShutdownExpiry::KeepWaiting
+        );
+        assert_eq!(
+            shutdown_expiry_action(false, true),
+            ShutdownExpiry::KeepWaiting
+        );
+    }
+
+    /// The property that matters: the deadline is armed when shutdown *starts*
+    /// and runs independently of the drain, so a request that never completes
+    /// — an SSE stream held open by a cold model load, which is exactly the
+    /// incident this exists for — cannot postpone it.
+    #[tokio::test(start_paused = true)]
+    async fn the_shutdown_deadline_fires_even_when_the_drain_never_completes() {
+        let fired = Arc::new(AtomicBool::new(false));
+        let fatal = Arc::new(AtomicBool::new(false));
+
+        // Stands in for axum's graceful drain waiting on an in-flight SSE
+        // response whose generation is still loading its model.
+        let blocked_drain = tokio::spawn(std::future::pending::<()>());
+
+        let observed = fired.clone();
+        let deadline =
+            super::spawn_shutdown_deadline(Duration::from_secs(45), fatal, true, move |action| {
+                assert_eq!(action, super::ShutdownExpiry::Exit(0));
+                observed.store(true, std::sync::atomic::Ordering::SeqCst);
+            })
+            .expect("a process that owns its lifecycle arms the deadline");
+
+        tokio::time::advance(Duration::from_secs(46)).await;
+        deadline.await.unwrap();
+
+        assert!(
+            fired.load(std::sync::atomic::Ordering::SeqCst),
+            "the deadline must not be reachable only after the drain finishes"
+        );
+        assert!(!blocked_drain.is_finished());
+        blocked_drain.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_embedded_server_arms_no_deadline() {
+        let fatal = Arc::new(AtomicBool::new(false));
+        assert!(
+            super::spawn_shutdown_deadline(Duration::from_secs(1), fatal, false, |_| panic!(
+                "an embedded server must never end its host process"
+            ),)
+            .is_none()
         );
     }
 

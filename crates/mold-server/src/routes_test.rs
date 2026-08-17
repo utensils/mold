@@ -4172,6 +4172,93 @@ mod tests {
         );
     }
 
+    /// `PATCH /api/queue/:id` is authoritative over the lane and the order, so
+    /// the durable row has to move with it. Otherwise a restart silently
+    /// restores the admission-time lane — possibly the very GPU the user moved
+    /// the job away from — and the original FIFO position.
+    #[tokio::test]
+    async fn a_reordered_and_relaned_job_replays_where_the_user_put_it() {
+        let output_dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+
+        let submitted = {
+            let (state, mut rx) = durable_state(db.clone(), output_dir.path());
+            let app = app_with_state(state.clone());
+            let mut submitted = Vec::new();
+            let mut in_flight = Vec::new();
+            for index in 0..3 {
+                let app = app.clone();
+                let task = tokio::spawn(async move {
+                    app.oneshot(
+                        Request::post("/api/generate")
+                            .header("content-type", "application/json")
+                            .body(Body::from(generate_body(
+                                &format!("prompt {index}"),
+                                512,
+                                512,
+                            )))
+                            .unwrap(),
+                    )
+                    .await
+                });
+                let job = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                    .await
+                    .expect("submitted job")
+                    .expect("open queue");
+                submitted.push(job.id.clone());
+                task.abort();
+                let _ = task.await;
+                in_flight.push(job);
+            }
+
+            // Send the last job to the head of the line.
+            let response = app_with_state(state.clone())
+                .oneshot(
+                    Request::patch(format!("/api/queue/{}", submitted[2]))
+                        .header("content-type", "application/json")
+                        .body(Body::from(r#"{"position":0}"#))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+
+            let row = state
+                .queue_journal
+                .list_all()
+                .into_iter()
+                .find(|row| row.id == submitted[2])
+                .expect("the reordered job keeps its durable row");
+            assert_eq!(row.target_gpu, None, "admitted with no lane pin");
+
+            state.queue_journal.retain_all();
+            drop(in_flight);
+            submitted
+        };
+
+        let (state, mut rx) = durable_state(db.clone(), output_dir.path());
+        let report = crate::queue_journal::replay(&state).await;
+        assert_eq!(report.resumed, 3);
+
+        let mut replayed = Vec::new();
+        for _ in 0..3 {
+            let job = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                .await
+                .expect("replayed job")
+                .expect("open queue");
+            replayed.push(job.id);
+        }
+        assert_eq!(
+            replayed,
+            vec![
+                submitted[2].clone(),
+                submitted[0].clone(),
+                submitted[1].clone()
+            ],
+            "replay must honour the reorder, not the admission order"
+        );
+    }
+
     /// A job that finished between its last save and the crash must not be
     /// re-rendered — output filenames are wall-clock, so a duplicate print
     /// could never be merged afterwards.
@@ -4304,6 +4391,52 @@ mod tests {
         assert_eq!(report.resumed, 0);
         assert!(rx.try_recv().is_err());
         assert!(state.queue_journal.list_all().is_empty());
+    }
+
+    /// `durable_queue` promises that a queued job survives a restart. A host
+    /// with server gallery output disabled cannot promise that for ANY job —
+    /// the only delivery is the HTTP response — so advertising the capability
+    /// there would make every job on it a silent over-promise, not an edge
+    /// case. Clients read the capability to decide whether to keep polling a
+    /// job whose stream died.
+    #[tokio::test]
+    async fn a_host_with_no_gallery_output_does_not_promise_a_durable_queue() {
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+
+        let (mut state, _rx) = AppState::with_engine_and_queue(MockEngine::ready());
+        state.metadata_db = db.clone();
+        state.queue_journal = Arc::new(crate::queue_journal::QueueJournal::new(db.clone()));
+        assert!(
+            state.queue_journal.is_enabled(),
+            "the journal itself is available; only output is off"
+        );
+        let capabilities = json_body(
+            app_with_state(state)
+                .oneshot(
+                    Request::get("/api/capabilities")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(capabilities["queue"]["durable_queue"], false);
+
+        let output_dir = tempfile::tempdir().unwrap();
+        let (state, _rx) = durable_state(db, output_dir.path());
+        let capabilities = json_body(
+            app_with_state(state)
+                .oneshot(
+                    Request::get("/api/capabilities")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(capabilities["queue"]["durable_queue"], true);
     }
 
     /// `durable_queue` is a promise about this host, and a held row is

@@ -448,6 +448,15 @@ pub fn list_profiles(db: &MetadataDb) -> Result<Vec<String>> {
     Ok(profiles)
 }
 
+/// Serializes every test that mutates `MOLD_PROFILE`. Shared across modules
+/// because the variable is process-global: two test modules toggling it
+/// concurrently would read each other's value.
+#[cfg(test)]
+pub(crate) fn profile_env_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
 /// Persist the active profile as the `profile.active` meta-row (always
 /// stored under [`DEFAULT_PROFILE`] so the bootstrap read can find it).
 /// Note `MOLD_PROFILE` still wins over this at runtime.
@@ -631,7 +640,9 @@ mod tests {
     #[test]
     fn resolve_active_profile_priority_env_then_setting_then_default() {
         // Coordinate env-var mutation with other tests that read MOLD_PROFILE.
-        let _g = profile_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _g = crate::settings::profile_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let prior = std::env::var("MOLD_PROFILE").ok();
         let db = db();
         // 1. Env var wins outright.
@@ -654,11 +665,6 @@ mod tests {
         if let Some(p) = prior {
             std::env::set_var("MOLD_PROFILE", p);
         }
-    }
-
-    fn profile_env_lock() -> &'static std::sync::Mutex<()> {
-        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        LOCK.get_or_init(|| std::sync::Mutex::new(()))
     }
 
     #[test]
