@@ -442,6 +442,18 @@ impl QueueJournal {
         }
     }
 
+    /// Whether this id names a parked row. `DELETE /api/queue/:id` is the
+    /// documented way to clear one, and a held job has no registry entry.
+    pub fn is_held(&self, id: &str) -> bool {
+        let Some(db) = self.db() else {
+            return false;
+        };
+        generation_queue::get(db, id)
+            .ok()
+            .flatten()
+            .is_some_and(|row| row.state == QueueRowState::Held)
+    }
+
     /// Park a row by id, for a caller that has no ticket.
     pub fn hold_id(&self, id: &str, reason: &str) {
         let Some(db) = self.db() else {

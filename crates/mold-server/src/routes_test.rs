@@ -4380,6 +4380,34 @@ mod tests {
         assert_eq!(held["id"], serde_json::json!(job.id));
         assert_eq!(held["state"], "held");
         assert_eq!(held["held_reason"], "dispatch attempts exhausted");
+
+        // A held job has no registry entry, so the documented way to clear one
+        // has to reach the journal directly or the row is unreachable short of
+        // editing the database.
+        let response = app_with_state(state.clone())
+            .oneshot(
+                Request::delete(format!("/api/queue/{}", job.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert!(state.queue_journal.list_all().is_empty());
+
+        let response = app_with_state(state.clone())
+            .oneshot(
+                Request::delete("/api/queue/never-existed")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "an unknown id is still a 404"
+        );
     }
 
     /// Once the retention fence is up the process is tearing down, so a new

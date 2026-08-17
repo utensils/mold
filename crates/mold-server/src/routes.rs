@@ -4795,14 +4795,25 @@ async fn cancel_queue_job(
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     let _scheduler_mutation = state.scheduler_mutation_fence.lock().await;
-    state.job_registry.cancel_queued(&id).map_err(|e| match e {
-        crate::job_registry::QueuedJobCancelError::NotFound => {
-            ApiError::queue_job_not_found(format!("queue job {id} not found"))
+    match state.job_registry.cancel_queued(&id) {
+        Ok(()) => {}
+        Err(crate::job_registry::QueuedJobCancelError::AlreadyRunning) => {
+            return Err(ApiError::queue_job_running(format!(
+                "queue job {id} is already running; only queued jobs can be cancelled"
+            )));
         }
-        crate::job_registry::QueuedJobCancelError::AlreadyRunning => ApiError::queue_job_running(
-            format!("queue job {id} is already running; only queued jobs can be cancelled"),
-        ),
-    })?;
+        // A held job has no registry entry — it exists only in the journal,
+        // and this endpoint is the documented way to clear one. Falling
+        // straight through to 404 would leave a parked job with no way out
+        // short of editing the database.
+        Err(crate::job_registry::QueuedJobCancelError::NotFound) => {
+            if !state.queue_journal.is_held(&id) {
+                return Err(ApiError::queue_job_not_found(format!(
+                    "queue job {id} not found"
+                )));
+            }
+        }
+    }
     // Unconditional, not fence-aware: a cancel that lands during the shutdown
     // drain must not come back after the restart.
     state.queue_journal.discard_id(&id);
