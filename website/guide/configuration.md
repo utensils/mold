@@ -262,11 +262,27 @@ whose request exceeds the payload ceiling runs normally but is not replayed.
 | `MOLD_QUEUE_JOURNAL_MAX_BYTES`     | `33554432` (32 MiB) | Ceiling on one recorded request. A larger request (an inline video, say) runs normally and is reported `durable: false` rather than being half-persisted.                                                                                                                                                                                                                     |
 | `MOLD_QUEUE_MAX_DISPATCH_ATTEMPTS` | `2`                 | How many times a worker may start a job before it is **held** instead of retried. Charged only when a worker actually claims the job, so a job that merely waits behind a long render through many restarts is never charged.                                                                                                                                                 |
 | `MOLD_QUEUE_MAX_REPLAY_SEEN`       | `10`                | How many restarts may replay a job that never starts before it is **held**. Sized for a crash loop; ordinary deploys never approach it.                                                                                                                                                                                                                                       |
+| `MOLD_QUEUE_ADOPT_OWNER`           | —                   | Adopt a specific orphaned queue by its owner id, printed in the startup warning. Only needed when several retained queues share one `MOLD_HOME` and none matches this server.                                                                                                                                                                                                 |
 | `MOLD_SHUTDOWN_ABORT_SECS`         | `45`                | Hard deadline for the whole shutdown after `SIGTERM`. The running generation is aborted at its next checkpoint and requeued; queued work is retained and replayed. If shutdown overruns, `mold serve` ends the process rather than wait — a cold model load is not interruptible, and hanging past systemd's stop timeout is what used to get the server SIGKILLed mid-write. |
 
 A **held** job is listed by `GET /api/queue` with `state: "held"` and a reason,
 and is never started automatically — it is waiting for you to look at it.
 Clear one with `DELETE /api/queue/{id}`.
+
+### Sharing one MOLD_HOME between servers
+
+Each server owns its queue through a record under
+`$MOLD_HOME/queue-owners/`, so two servers on different ports never replay each
+other's work. A server recognises its own queue after a restart, including
+after a port change, in every case but one: if several retained queues are
+present and none was last used by this server, it cannot tell which is its own.
+It then starts with a fresh queue and warns at startup, naming each orphaned
+owner with its last-known instance and its queued and held row counts. Adopt
+one deliberately with:
+
+```bash
+MOLD_QUEUE_ADOPT_OWNER=<owner-id-from-the-warning> mold serve
+```
 
 Under systemd, set the budget through the NixOS module rather than the
 environment, so the unit's stop timeout stays derived from it:
