@@ -30,6 +30,7 @@ pub mod gpu_pool;
 pub mod gpu_worker;
 pub mod instance;
 pub mod job_registry;
+pub mod job_supervisor;
 pub mod logging;
 mod ltx2_admission;
 #[cfg(feature = "mdns")]

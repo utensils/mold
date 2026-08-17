@@ -1836,8 +1836,6 @@ async fn generate(
         "generate request"
     );
 
-    // Submit to generation queue
-    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
     // Non-streaming path still gets a registry entry so an HTTP client
     // hanging on the response is visible via GET /api/queue alongside
     // SSE clients. Cleanup happens unconditionally on every terminal
@@ -1860,6 +1858,13 @@ async fn generate(
         Some(req.seed.is_some()),
         Some(queue_metadata),
     );
+    // The result channel's receiver is owned by a detached supervisor, not by
+    // this handler: an admitted job runs to completion even if the client hangs
+    // up, and only an explicit `DELETE /api/queue/:id` closes it early.
+    let crate::job_supervisor::SupervisedJob {
+        result_tx,
+        outcome_rx,
+    } = crate::job_supervisor::supervise_job(job_id.clone(), cancel);
     let job = GenerationJob {
         id: job_id.clone(),
         request: req,
@@ -1881,16 +1886,20 @@ async fn generate(
         .map_err(submit_error_to_api)?;
 
     // Wait for the queue worker to process the job — or for
-    // `DELETE /api/queue/:id` to cancel it while it's still queued.
-    // Returning here drops `result_rx`, so the worker's is_closed()
-    // check skips the job when it eventually reaches the head.
-    let result = tokio::select! {
-        result = result_rx => result
-            .map_err(|_| ApiError::internal("generation queue worker dropped the job"))?,
-        _ = cancel.notified() => {
+    // `DELETE /api/queue/:id` to cancel it while it's still queued. Returning
+    // here no longer discards the job: the supervisor keeps holding the result
+    // channel, so the render finishes and the output is still saved.
+    let result = match outcome_rx.await {
+        Ok(crate::job_supervisor::SupervisedOutcome::Finished(result)) => result,
+        Ok(crate::job_supervisor::SupervisedOutcome::Cancelled) => {
             return Err(ApiError::cancelled(format!(
                 "generation job {job_id} was cancelled while queued"
             )));
+        }
+        Err(_) => {
+            return Err(ApiError::internal(
+                "generation queue worker dropped the job",
+            ));
         }
     };
 
@@ -2970,7 +2979,6 @@ async fn generate_stream(
         }));
     }
 
-    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
     // Assign a server-side ID and register before submit so the entry is
     // visible to /api/queue from the moment we accept the request.
     let job_id = uuid::Uuid::new_v4().to_string();
@@ -2991,6 +2999,11 @@ async fn generate_stream(
         Some(req.seed.is_some()),
         Some(queue_metadata),
     );
+    // Detached ownership of the result channel — see the non-streaming path.
+    let crate::job_supervisor::SupervisedJob {
+        result_tx,
+        outcome_rx,
+    } = crate::job_supervisor::supervise_job(job_id.clone(), cancel);
     let job = GenerationJob {
         id: job_id.clone(),
         request: req,
@@ -3034,20 +3047,17 @@ async fn generate_stream(
         id: job_id,
     }));
 
-    // Hold `tx` alive in a background task until the job completes, so the SSE
+    // Hold `tx` alive in a background task until the job settles, so the SSE
     // stream never closes prematurely even if the queue worker hasn't received
-    // the job yet. A `DELETE /api/queue/:id` cancel resolves the select's
-    // second arm: emit a terminal error event, then drop both channel ends —
-    // dropping `result_rx` closes the job's result channel, which is what
-    // makes the queue worker/dispatcher skip the job when it dequeues it.
+    // the job yet. A `DELETE /api/queue/:id` cancel arrives as
+    // `SupervisedOutcome::Cancelled`: emit a terminal error event, then drop
+    // `tx`. The supervisor drops the job's result receiver on that same path,
+    // which is what makes the worker/dispatcher skip a cancelled job.
     tokio::spawn(async move {
-        tokio::select! {
-            _ = result_rx => {}
-            _ = cancel.notified() => {
-                let _ = tx.send(SseMessage::Error(SseErrorEvent {
-                    message: "cancelled".to_string(),
-                }));
-            }
+        if let Ok(crate::job_supervisor::SupervisedOutcome::Cancelled) = outcome_rx.await {
+            let _ = tx.send(SseMessage::Error(SseErrorEvent {
+                message: "cancelled".to_string(),
+            }));
         }
         drop(tx); // closes the SSE stream
     });

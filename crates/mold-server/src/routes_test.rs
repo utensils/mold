@@ -4066,6 +4066,43 @@ mod tests {
         panic!("job never appeared in the registry");
     }
 
+    /// Once a job is queued it runs, even if the client that asked for it
+    /// goes away. The detached result supervisor owns `result_tx`'s receiver,
+    /// so the fifteen `result_tx.is_closed()` dispatch gates keep reading
+    /// `false` and the job still reaches a worker.
+    #[tokio::test]
+    async fn a_disconnected_blocking_generate_still_reaches_the_worker() {
+        let (state, mut rx) = AppState::with_engine_and_queue(MockEngine::ready());
+        let app = app_with_state(state.clone());
+
+        let gen_app = app.clone();
+        let gen_task = tokio::spawn(async move {
+            gen_app
+                .oneshot(
+                    Request::post("/api/generate")
+                        .header("content-type", "application/json")
+                        .body(Body::from(generate_body("a cat", 512, 512)))
+                        .unwrap(),
+                )
+                .await
+        });
+
+        wait_for_registered_job(&state).await;
+        // The client hung up: axum drops the handler future mid-await.
+        gen_task.abort();
+        let _ = gen_task.await;
+        tokio::task::yield_now().await;
+
+        let job = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("the queued job must still be dispatchable")
+            .expect("the queue channel must stay open");
+        assert!(
+            !job.result_tx.is_closed(),
+            "a disconnected client must not make the worker skip an admitted job"
+        );
+    }
+
     #[tokio::test]
     async fn delete_queue_resolves_blocking_generate_with_cancelled_error() {
         // No queue worker is spawned — the submitted job sits queued in the
