@@ -1,34 +1,34 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { GalleryImage, GenerateRequest } from "../lib/api/types";
-import { newJob, type Job } from "../lib/generationJob";
+import type { GalleryImage, GenerateRequest } from "./api/types";
+import { newJob, type Job } from "./generationJob";
 
 const { apiFetchTo, apiJsonTo } = vi.hoisted(() => ({
   apiFetchTo: vi.fn(),
   apiJsonTo: vi.fn(),
 }));
 
-vi.mock("../lib/api/client", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../lib/api/client")>()),
+vi.mock("./api/client", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./api/client")>()),
   apiFetchTo,
   apiJsonTo,
 }));
 
-vi.mock("../lib/sourceRestore", async (importOriginal) => {
-  const original = await importOriginal<typeof import("../lib/sourceRestore")>();
+vi.mock("./sourceRestore", async (importOriginal) => {
+  const original = await importOriginal<typeof import("./sourceRestore")>();
   return {
     ...original,
     sha256HexOfBase64: vi.fn(original.sha256HexOfBase64),
   };
 });
 
-import { ApiError } from "../lib/api/client";
-import { sha256HexOfBase64 } from "../lib/sourceRestore";
+import { ApiError } from "./api/client";
+import { sha256HexOfBase64 } from "./sourceRestore";
 import {
   galleryCompletion,
   isInterruptedGenerationError,
   matchGalleryPrint,
   reconcileInterruptedGenerationJobs,
-} from "./mobileGenerationRecovery";
+} from "./generationRecovery";
 
 const target = { baseUrl: "http://studio.tailnet.ts.net:7680", apiKey: "secret" };
 const ABC_SHA256 = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
@@ -71,13 +71,23 @@ function makeH3Job(request: GenerateRequest, overrides: Partial<Job> = {}): Job 
     streamStarted: true,
     status: "error" as const,
     error: "Load failed",
+    // These fixtures exercise conditioning-hash binding, not age; submitting
+    // at the epoch keeps every print newer than the job that claims it.
+    submittedAtUnixMs: 0,
     ...overrides,
   });
 }
 
+/** A print the host produced for the submission under test. Recovery is now
+ *  age-bounded, so fixtures must be NEWER than the job that claims them. */
 const galleryPrint: GalleryImage = {
   filename: "resumed print.png",
-  timestamp: 1_700_000_000,
+  // Read when the matcher reads it, never frozen at import: a long file can
+  // reach a test well after module load, and a stale stamp would predate the
+  // very submission it belongs to.
+  get timestamp() {
+    return Math.floor(Date.now() / 1000) + 5;
+  },
   format: "png",
   metadata: {
     prompt: "a ship crossing violet lightning",
@@ -371,6 +381,278 @@ describe("galleryCompletion", () => {
   });
 });
 
+describe("a released id is still a server identity on later passes", () => {
+  it("completes an ordinary job whose id was released, once the print lands", async () => {
+    // An earlier pass gave up on an unreachable host and released the id so the
+    // fleet row could surface. The host then came back and finished the work.
+    // Reading only `job.id` makes this look like a job that never got one.
+    const stamped: GalleryImage = {
+      ...galleryPrint,
+      filename: "landed-after-release.png",
+      metadata: { ...galleryPrint.metadata, job_id: "job-9" },
+    };
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/queue") return Promise.resolve({ entries: [] });
+      if (path === "/api/gallery") return Promise.resolve([stamped]);
+      return Promise.reject(new Error(`Unexpected path ${path}`));
+    });
+    const job = makeJob({ id: "", recoveredJobId: "job-9" });
+
+    await reconcileInterruptedGenerationJobs([job], options());
+
+    expect(job.status).toBe("complete");
+    expect(job.result?.filename).toBe("landed-after-release.png");
+  });
+
+  it("reads a released id as the chain id instead of hunting for a pre-ID chain", async () => {
+    // `findPreIdChain` deliberately excludes chains that finished while the
+    // host was away, so a completed sequence would be reported interrupted.
+    const asked: string[] = [];
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      asked.push(path);
+      if (path === "/api/chain-jobs/chain-7") {
+        return Promise.resolve({
+          id: "chain-7",
+          state: "completed",
+          finalizes: [{ output: "sequence.mp4" }],
+        });
+      }
+      if (path === "/api/gallery") {
+        return Promise.resolve([{ ...galleryPrint, filename: "sequence.mp4", format: "mp4" }]);
+      }
+      return Promise.reject(new Error(`Unexpected path ${path}`));
+    });
+    const job = makeJob({ id: "", recoveredJobId: "chain-7" });
+
+    await reconcileInterruptedGenerationJobs([job], options({ chain: true }));
+
+    expect(asked).toContain("/api/chain-jobs/chain-7");
+    expect(asked.some((path) => path.startsWith("/api/chain-jobs?"))).toBe(false);
+    expect(job.status).toBe("complete");
+  });
+
+  it("looks a released id up in the queue exactly, not by pre-ID guesswork", async () => {
+    // The host came back and REPLAYED the job: its row is queued again under
+    // the original id. An exact lookup finds it; the pre-ID join would fall
+    // back to matching by seed and timing.
+    let polls = 0;
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/queue") {
+        polls += 1;
+        return Promise.resolve({
+          entries:
+            polls === 1
+              ? [
+                  {
+                    id: "job-9",
+                    model: "ltx2:q8",
+                    state: "queued",
+                    position: 0,
+                    durable: true,
+                  },
+                ]
+              : [],
+        });
+      }
+      if (path === "/api/gallery") return Promise.resolve([galleryPrint]);
+      return Promise.reject(new Error(`Unexpected path ${path}`));
+    });
+    const job = makeJob({ id: "", recoveredJobId: "job-9", retainedByHost: true });
+
+    await reconcileInterruptedGenerationJobs([job], options());
+
+    // Re-adopted, so the row is tracked as one job again while it runs.
+    expect(job.id).toBe("job-9");
+    expect(job.status).toBe("complete");
+  });
+});
+
+describe("a second pass does not repeat a pass that just ran", () => {
+  it("skips a job the shared store already reconciled moments ago", async () => {
+    // The store runs reconciliation as part of `settled`, and MobileApp then
+    // calls the same entry point in its own `settled.then`. A first pass that
+    // ended unreconciled deliberately leaves `interrupted = true`, so the
+    // foreground call would immediately spend the ENTIRE retry budget again —
+    // up to another five minutes before the phone shows any summary.
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/queue") return Promise.resolve({ entries: [] });
+      if (path === "/api/gallery") return Promise.resolve([]);
+      return Promise.reject(new Error(`Unexpected path ${path}`));
+    });
+    const job = makeJob({ retainedByHost: true });
+    await reconcileInterruptedGenerationJobs([job], options());
+    expect(job.interrupted).toBe(true);
+    const settledError = job.error;
+    apiJsonTo.mockClear();
+
+    await reconcileInterruptedGenerationJobs([job], options());
+
+    expect(apiJsonTo).not.toHaveBeenCalled();
+    expect(job.error).toBe(settledError);
+  });
+
+  it("never reconciles a job the user cancelled, however it was flagged", async () => {
+    // The store guards this in its own pre-filter; the module did not, so the
+    // OTHER caller had no protection. A retained frame sets `interrupted`, and
+    // a cancel landing afterwards must still be terminal — reconciliation
+    // would re-attach a job the user deliberately stopped.
+    apiJsonTo.mockImplementation(() => Promise.resolve([]));
+    const job = makeJob({ interrupted: true, error: "Cancelled" });
+
+    await reconcileInterruptedGenerationJobs([job], options());
+
+    expect(apiJsonTo).not.toHaveBeenCalled();
+    expect(job.error).toBe("Cancelled");
+  });
+
+  it("reconciles again once the cooldown has passed", async () => {
+    // A genuine later resume — minutes on from the last attempt — must still
+    // get a fresh pass; the cooldown suppresses a duplicate, not recovery.
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/queue") return Promise.resolve({ entries: [] });
+      if (path === "/api/gallery") return Promise.resolve([]);
+      return Promise.reject(new Error(`Unexpected path ${path}`));
+    });
+    const job = makeJob();
+    await reconcileInterruptedGenerationJobs([job], options());
+    job.interrupted = true;
+    job.reconciledAtUnixMs = Date.now() - 10 * 60_000;
+    apiJsonTo.mockClear();
+
+    await reconcileInterruptedGenerationJobs([job], options());
+
+    expect(apiJsonTo).toHaveBeenCalled();
+  });
+});
+
+describe("gallery recovery reads the server's own job id", () => {
+  it("matches on job_id even when the host clock trails the client's", async () => {
+    // The age fence compares a CLIENT submit time against a HOST print stamp,
+    // so a host running behind rejects its own valid output. `job_id` is the
+    // id the server stamped into the print it saved — exact, and immune to
+    // whatever the two clocks disagree about.
+    const skewed: GalleryImage = {
+      ...galleryPrint,
+      filename: "host-clock-behind.png",
+      timestamp: Math.floor(Date.now() / 1000) - 600,
+      metadata: { ...galleryPrint.metadata, job_id: "job-9" },
+    };
+    const job = makeJob();
+
+    expect(await matchGalleryPrint(job, [skewed])).toBe(skewed);
+  });
+
+  it("picks the stamped print over a same-second twin the heuristic cannot split", async () => {
+    // Same seed, model, prompt, size, steps and second: everything the
+    // heuristic joins on is identical. Only the server's id separates them.
+    const twin: GalleryImage = { ...galleryPrint, filename: "twin.png" };
+    const mine: GalleryImage = {
+      ...galleryPrint,
+      filename: "mine.png",
+      metadata: { ...galleryPrint.metadata, job_id: "job-9" },
+    };
+    const job = makeJob();
+
+    expect(await matchGalleryPrint(job, [twin, mine])).toBe(mine);
+  });
+
+  it("never reads someone else's stamped job id as a match", async () => {
+    const theirs: GalleryImage = {
+      ...galleryPrint,
+      filename: "theirs.png",
+      timestamp: Math.floor(Date.now() / 1000) - 600,
+      metadata: { ...galleryPrint.metadata, job_id: "some-other-job" },
+    };
+    const job = makeJob();
+
+    // Wrong id AND too old for the heuristic: nothing here belongs to us.
+    expect(await matchGalleryPrint(job, [theirs])).toBeNull();
+  });
+
+  it("takes the NEWEST print sharing a job id, whatever order the host lists", async () => {
+    // A publish-then-crash replay can leave two prints for one job, both
+    // carrying its id. `/api/gallery` happens to sort newest-first today, so
+    // taking the first match would look correct — until that sort moves, or an
+    // archive path returns insertion order, and recovery silently starts
+    // handing back the older copy. The array here is deliberately OLDEST
+    // first, so this fails the moment the matcher trusts listing order again.
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    const older: GalleryImage = {
+      ...galleryPrint,
+      filename: "first-attempt.png",
+      timestamp: nowSeconds + 1,
+      metadata: { ...galleryPrint.metadata, job_id: "job-9" },
+    };
+    const newer: GalleryImage = {
+      ...galleryPrint,
+      filename: "replayed.png",
+      timestamp: nowSeconds + 90,
+      metadata: { ...galleryPrint.metadata, job_id: "job-9" },
+    };
+    const job = makeJob();
+
+    expect(await matchGalleryPrint(job, [older, newer])).toBe(newer);
+  });
+
+  it("still recovers from a legacy host that stamps no job id at all", async () => {
+    const job = makeJob();
+    expect(await matchGalleryPrint(job, [galleryPrint])).toBe(galleryPrint);
+  });
+});
+
+describe("gallery recovery is bounded by submission time", () => {
+  it("never claims a print that existed BEFORE the job was submitted", async () => {
+    // Fixed seed, same model, same prompt, same dimensions and steps: an older
+    // print matches on every field the join uses. If the request never reached
+    // the server, matching it shows the user a previous image as though it
+    // were the render they just asked for — silently, with no error.
+    const older: GalleryImage = {
+      ...galleryPrint,
+      filename: "yesterday.png",
+      timestamp: Math.floor(Date.now() / 1000) - 86_400,
+    };
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/queue") return Promise.resolve({ entries: [] });
+      if (path === "/api/gallery") return Promise.resolve([older]);
+      return Promise.reject(new Error(`Unexpected path ${path}`));
+    });
+    const job = makeJob();
+    await reconcileInterruptedGenerationJobs([job], options());
+
+    expect(job.status).toBe("error");
+    expect(job.result).toBeNull();
+  });
+
+  it("refuses gallery recovery when nothing proves the job was ever admitted", async () => {
+    // No server id (the queued frame never arrived) and no queue row: there is
+    // no evidence this submission ever reached the host, so a similar-looking
+    // print is a guess, not a recovery.
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/queue") return Promise.resolve({ entries: [] });
+      if (path === "/api/gallery") return Promise.resolve([galleryPrint]);
+      return Promise.reject(new Error(`Unexpected path ${path}`));
+    });
+    const job = makeJob({ id: "" });
+    await reconcileInterruptedGenerationJobs([job], options());
+
+    expect(job.status).toBe("error");
+    expect(job.result).toBeNull();
+  });
+
+  it("still recovers a print for a job the server acknowledged", async () => {
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/queue") return Promise.resolve({ entries: [] });
+      if (path === "/api/gallery") return Promise.resolve([galleryPrint]);
+      return Promise.reject(new Error(`Unexpected path ${path}`));
+    });
+    const job = makeJob();
+    await reconcileInterruptedGenerationJobs([job], options());
+
+    expect(job.status).toBe("complete");
+    expect(job.result?.filename).toBe("resumed print.png");
+  });
+});
+
 describe("reconcileInterruptedGenerationJobs", () => {
   it("reconciles a structured interruption even when the transport copy is localized", async () => {
     apiJsonTo.mockImplementation((_target: unknown, path: string) => {
@@ -418,6 +700,319 @@ describe("reconcileInterruptedGenerationJobs", () => {
     expect(job.status).toBe("error");
     expect(job.error).toBe(
       "The connection dropped while this print waited in Studio’s queue. Develop again to requeue it.",
+    );
+  });
+
+  it("keeps a queued row waiting when THAT JOB is durable on the host", async () => {
+    let queueCalls = 0;
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/queue") {
+        queueCalls += 1;
+        return Promise.resolve({
+          entries:
+            queueCalls <= 2
+              ? [{ id: "job-9", model: "ltx2:q8", state: "queued", position: 0, durable: true }]
+              : [],
+        });
+      }
+      if (path === "/api/gallery") return Promise.resolve([galleryPrint]);
+      return Promise.reject(new Error(`Unexpected path ${path}`));
+    });
+    const job = makeJob();
+    const stages: Array<string | null> = [];
+    await reconcileInterruptedGenerationJobs(
+      [job],
+      options({
+        sleep: () => {
+          stages.push(job.stage);
+          return Promise.resolve();
+        },
+      }),
+    );
+
+    // The host runs this job with no client attached — deleting it would
+    // destroy exactly the work the host kept. Per-job truth, and no extra
+    // request: `/api/queue` already carries it.
+    expect(apiFetchTo).not.toHaveBeenCalled();
+    expect(apiJsonTo).not.toHaveBeenCalledWith(target, "/api/capabilities");
+    expect(stages).toEqual(["Waiting in Studio’s queue", "Waiting in Studio’s queue"]);
+    expect(job.status).toBe("complete");
+    expect(job.result?.filename).toBe("resumed print.png");
+  });
+
+  it("stops waiting on a durable row the host never starts, and says where to look", async () => {
+    // A visible durable row normally means "the host has this and will run
+    // it", so the wait is patient by design. On a boot with no dispatch owner
+    // (`MOLD_GPUS=none`) that row is real, durable, and never picked up — and
+    // an unbounded wait there does not just spin: desktop awaits this inside
+    // `settled`, so the batch's completion toast and its pending-consumer
+    // entry are stranded too.
+    let polls = 0;
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/queue") {
+        polls += 1;
+        return Promise.resolve({
+          entries: [{ id: "job-9", model: "ltx2:q8", state: "queued", position: 0, durable: true }],
+        });
+      }
+      if (path === "/api/gallery") return Promise.resolve([]);
+      return Promise.reject(new Error(`Unexpected path ${path}`));
+    });
+    const job = makeJob();
+
+    await reconcileInterruptedGenerationJobs([job], options());
+
+    // Terminates rather than hanging, and stays reconcilable — the host still
+    // holds the work, so this is never announced as a failure.
+    expect(polls).toBeGreaterThan(1);
+    expect(job.status).toBe("error");
+    expect(job.interrupted).toBe(true);
+    expect(job.error).toContain("check the Library");
+    // Released, so the host's own row is free to surface once it does run.
+    expect(job.recoveredJobId).toBe("job-9");
+  });
+
+  it("clears a queued row the durable host did not journal", async () => {
+    // `durable: false` on a durable host — no gallery target, reference-upload
+    // media, or an oversized request. Host capability alone would over-promise
+    // and hang this row forever.
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/queue") {
+        return Promise.resolve({
+          entries: [
+            { id: "job-9", model: "ltx2:q8", state: "queued", position: 0, durable: false },
+          ],
+        });
+      }
+      return Promise.reject(new Error(`Unexpected path ${path}`));
+    });
+    const job = makeJob();
+    await reconcileInterruptedGenerationJobs([job], options());
+
+    expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/queue/job-9", { method: "DELETE" });
+    expect(job.status).toBe("error");
+  });
+
+  it("adopts the id of the row it recovered, so the job can still be cancelled", async () => {
+    // Suspension can beat the queued SSE frame, leaving the job with no id.
+    // `findQueueEntry` recovers the row by seed, timing, model and metadata —
+    // and if that id is not written back, the durable branch waits on work
+    // that `cancel()` still refuses to touch ("Remote cancellation was not
+    // confirmed"): identified, and uncancellable.
+    let queuePolls = 0;
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/queue") {
+        queuePolls += 1;
+        return Promise.resolve({
+          entries:
+            queuePolls === 1
+              ? [
+                  {
+                    id: "recovered-id",
+                    model: "ltx2:q8",
+                    state: "queued",
+                    position: 0,
+                    durable: true,
+                    started_at_unix_ms: job.submittedAtUnixMs + 10,
+                    metadata: galleryPrint.metadata,
+                  },
+                ]
+              : [],
+        });
+      }
+      if (path === "/api/gallery") return Promise.resolve([galleryPrint]);
+      return Promise.reject(new Error(`Unexpected path ${path}`));
+    });
+    const job = makeJob({ id: "" });
+    await reconcileInterruptedGenerationJobs([job], options());
+
+    expect(job.id).toBe("recovered-id");
+    expect(job.status).toBe("complete");
+  });
+
+  it("adopts the id before deleting a row the host did not journal", async () => {
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/queue") {
+        return Promise.resolve({
+          entries: [
+            {
+              id: "zombie-id",
+              model: "ltx2:q8",
+              state: "queued",
+              position: 0,
+              durable: false,
+              started_at_unix_ms: job.submittedAtUnixMs + 10,
+              metadata: galleryPrint.metadata,
+            },
+          ],
+        });
+      }
+      return Promise.reject(new Error(`Unexpected path ${path}`));
+    });
+    const job = makeJob({ id: "" });
+    await reconcileInterruptedGenerationJobs([job], options());
+
+    expect(job.id).toBe("zombie-id");
+    expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/queue/zombie-id", { method: "DELETE" });
+  });
+
+  it("waits out the handoff gap when a retained job is briefly absent", async () => {
+    // Between the retained worker exiting and restart replay running, the
+    // durable row is invisible to /api/queue. A successful EMPTY listing in
+    // that window is a moment of server bookkeeping, not evidence the work is
+    // gone — and `retainedByHost` is proof the host said it kept it.
+    let queuePolls = 0;
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/queue") {
+        queuePolls += 1;
+        // Absent for two polls (the handoff), then replayed as queued, then
+        // gone for real once it has finished.
+        if (queuePolls <= 2) return Promise.resolve({ entries: [] });
+        if (queuePolls === 3) {
+          return Promise.resolve({
+            entries: [
+              { id: "job-9", model: "ltx2:q8", state: "queued", position: 0, durable: true },
+            ],
+          });
+        }
+        return Promise.resolve({ entries: [] });
+      }
+      if (path === "/api/gallery") {
+        // The print only exists after the replay actually ran.
+        return Promise.resolve(queuePolls >= 4 ? [galleryPrint] : []);
+      }
+      return Promise.reject(new Error(`Unexpected path ${path}`));
+    });
+    const job = makeJob({ retainedByHost: true });
+    await reconcileInterruptedGenerationJobs([job], options());
+
+    expect(job.status).toBe("complete");
+    expect(job.result?.filename).toBe("resumed print.png");
+  });
+
+  it("still fails a NON-retained job that is absent with no print", async () => {
+    // Without the host's promise, an empty queue and an empty gallery is the
+    // only evidence there is, and it says the work is gone.
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/queue") return Promise.resolve({ entries: [] });
+      if (path === "/api/gallery") return Promise.resolve([]);
+      return Promise.reject(new Error(`Unexpected path ${path}`));
+    });
+    const job = makeJob();
+    await reconcileInterruptedGenerationJobs([job], options());
+
+    expect(job.status).toBe("error");
+    expect(job.error).toBe(
+      "The connection to Studio was interrupted and this print didn’t finish.",
+    );
+  });
+
+  it("releases the server id when it gives up, so the host's own row can surface", async () => {
+    // Desktop suppresses every fleet row whose id matches a local job — that
+    // is how a live server row and a local row stay one row. Holding the id on
+    // a row this client has stopped tracking means the resumed, server-owned
+    // work is hidden when the host comes back and finishes it: the print lands
+    // and the user never sees it. Releasing the id lets the host's row through;
+    // the id is retained separately so a later pass can still match the print
+    // exactly by `metadata.job_id`.
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/queue") return Promise.resolve({ entries: [] });
+      if (path === "/api/gallery") return Promise.resolve([]);
+      return Promise.reject(new Error(`Unexpected path ${path}`));
+    });
+    const job = makeJob({ retainedByHost: true });
+    await reconcileInterruptedGenerationJobs([job], options());
+
+    expect(job.id).toBe("");
+    expect(job.recoveredJobId).toBe("job-9");
+  });
+
+  it("matches a print by a released id on a later pass", async () => {
+    // Deliberately older than the submission, so ONLY the released id can
+    // match it — the heuristic's age fence rejects it outright.
+    const stamped: GalleryImage = {
+      ...galleryPrint,
+      filename: "landed-later.png",
+      timestamp: Math.floor(Date.now() / 1000) - 600,
+      metadata: { ...galleryPrint.metadata, job_id: "job-9" },
+    };
+    const job = makeJob({ id: "", recoveredJobId: "job-9" });
+
+    expect(await matchGalleryPrint(job, [stamped])).toBe(stamped);
+  });
+
+  it("gives up on a retained job that never comes back, without claiming it failed", async () => {
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/queue") return Promise.resolve({ entries: [] });
+      if (path === "/api/gallery") return Promise.resolve([]);
+      return Promise.reject(new Error(`Unexpected path ${path}`));
+    });
+    const job = makeJob({ retainedByHost: true });
+    await reconcileInterruptedGenerationJobs([job], options());
+
+    // Bounded, so reconciliation always ends — but the copy still points at
+    // the host, and the row stays reconcilable rather than declared failed.
+    expect(job.status).toBe("error");
+    expect(job.interrupted).toBe(true);
+    expect(job.error).toContain("check the Library");
+  });
+
+  it("settles a held row with the host's reason instead of waiting forever", async () => {
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/queue") {
+        return Promise.resolve({
+          entries: [
+            {
+              id: "job-9",
+              model: "ltx2:q8",
+              state: "held",
+              position: 0,
+              durable: true,
+              held_reason: "dispatch attempts exhausted",
+            },
+          ],
+        });
+      }
+      return Promise.reject(new Error(`Unexpected path ${path}`));
+    });
+    const job = makeJob();
+    await reconcileInterruptedGenerationJobs([job], options());
+
+    // A held row is listed but never auto-run, so waiting on it never ends.
+    expect(apiFetchTo).not.toHaveBeenCalled();
+    expect(job.status).toBe("error");
+    expect(job.error).toBe(
+      "Studio is holding this print and will not run it automatically (dispatch attempts exhausted). Develop again to requeue it.",
+    );
+  });
+
+  it("reaches no verdict when the host never answers, and says so", async () => {
+    // Three dead queries in a row is not evidence the print failed — the
+    // client simply never learned anything. The row stays flagged as an
+    // interruption so a later resume can try again and callers that use the
+    // flag to suppress failure announcements keep doing so.
+    apiJsonTo.mockRejectedValue(new TypeError("Load failed"));
+    const job = makeJob();
+    await reconcileInterruptedGenerationJobs([job], options());
+
+    expect(job.status).toBe("error");
+    expect(job.interrupted).toBe(true);
+    expect(apiFetchTo).not.toHaveBeenCalled();
+  });
+
+  it("reaches a verdict when the host answers that the work is gone", async () => {
+    apiJsonTo.mockImplementation((_target: unknown, path: string) =>
+      Promise.resolve(path === "/api/queue" ? { entries: [] } : []),
+    );
+    const job = makeJob();
+    await reconcileInterruptedGenerationJobs([job], options());
+
+    // The host answered: no such job, no such print. That IS a failure, and
+    // the flag clears so it is announced like one.
+    expect(job.status).toBe("error");
+    expect(job.interrupted).toBe(false);
+    expect(job.error).toBe(
+      "The connection to Studio was interrupted and this print didn’t finish.",
     );
   });
 
@@ -607,7 +1202,8 @@ describe("reconcileInterruptedGenerationJobs", () => {
     };
     const print = {
       filename: "exact.mp4",
-      timestamp: 1,
+      // Just after this job's submission — recovery is age-bounded.
+      timestamp: Math.floor(submittedAtUnixMs / 1000) + 1,
       format: "mp4" as const,
       metadata,
     };

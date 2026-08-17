@@ -129,6 +129,13 @@ function queuedIndexOf(id: string): number {
             {{ entry.state }}
           </BadgePill>
           <span class="qc__model">{{ modelLabel(entry.model) }}</span>
+          <span
+            v-if="entry.state === 'held' && entry.held_reason"
+            class="qc__held"
+            :title="entry.held_reason ?? undefined"
+          >
+            {{ entry.held_reason }}
+          </span>
 
           <select
             v-if="gpuOrdinals.length > 1"
@@ -198,6 +205,16 @@ function queuedIndexOf(id: string): number {
 
 .qc[data-dimmed="true"] {
   opacity: 0.55;
+}
+
+/* The host's own words for why a job is parked — it will not start itself, so
+   the reason is what makes the row actionable. */
+.qc__held {
+  overflow: hidden;
+  color: var(--c-ink-3);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .qc__label {

@@ -159,6 +159,10 @@ import { useQueue } from "../composables/useQueue";
 import { useLiveActivity } from "../composables/useLiveActivity";
 import { useOpenLiveWork } from "../composables/useOpenLiveWork";
 import { ORIGIN_HOST_ID, listHosts } from "../lib/hostRegistry";
+import {
+  localRowHiddenFromStrip,
+  sharedRowIsLocallyOwned,
+} from "../lib/activityDedup";
 import { fetchMergedGallery } from "../lib/multiHostGallery";
 import { fetchGalleryBlob } from "../lib/galleryMedia";
 import {
@@ -673,15 +677,13 @@ const sequenceVMs = computed<ActivityJobVM[]>(() => {
 });
 
 /** Server-owned rows survive this tab and client. Avoid duplicating work that
- * the current Create session already renders with its richer local controls. */
+ * the current Create session is still streaming — but a LOCAL row that has
+ * already settled as a failure loses to the live server row, because a host
+ * that retained the job across a restart is still rendering it. */
 const sharedActivityRows = computed(() =>
   liveActivity.rows.value.filter((row) => {
     if (row.kind === "generation") {
-      return !stream.jobs.value.some(
-        (job) =>
-          job.serverId === row.id &&
-          (job.hostId ?? ORIGIN_HOST_ID) === row.hostId,
-      );
+      return !sharedRowIsLocallyOwned(row, stream.jobs.value, ORIGIN_HOST_ID);
     }
     if (row.kind === "sequence") {
       return !sequenceVMs.value.some(
@@ -693,6 +695,16 @@ const sharedActivityRows = computed(() =>
     }
     return true;
   }),
+);
+
+/** The other half of that dedup: a settled row the server's view supersedes —
+ * a live fleet row for the same job, or a detached settle whose fate the host
+ * owns — is dropped here, so a resumed job renders once and never as failed. */
+const localActivityJobs = computed(() =>
+  stream.jobs.value.filter(
+    (job) =>
+      !localRowHiddenFromStrip(job, liveActivity.rows.value, ORIGIN_HOST_ID),
+  ),
 );
 
 // The watched job's progress renders in the canvas region (the old
@@ -3738,7 +3750,7 @@ onBeforeUnmount(() => {
           Create
         </h1>
         <ActivityStrip
-          :jobs="stream.jobs.value"
+          :jobs="localActivityJobs"
           :sequences="sequenceVMs"
           :shared="sharedActivityRows"
           :queue-status="routing.queueStatus.value"

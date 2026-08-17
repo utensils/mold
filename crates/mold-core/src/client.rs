@@ -28,6 +28,84 @@ pub struct MoldClient {
     api_key_configured: bool,
 }
 
+/// How long the retention probe may take once the stream has already died.
+/// The shared reqwest client carries no request timeout, so a host that
+/// accepts the connection and never answers — wedged mid-restart, or a proxy
+/// holding the socket — would otherwise strand the original SSE error and the
+/// caller would never learn the stream failed at all.
+const RETENTION_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(4);
+
+/// An admitted generation plus the in-flight answer to "did the host journal
+/// THIS job?". Held only while a stream is open; read only if that stream dies
+/// before the terminal event.
+struct RetainedJobProbe {
+    job_id: String,
+    host: String,
+    durable: tokio::task::JoinHandle<bool>,
+    timeout: std::time::Duration,
+}
+
+/// Explain a TERMINAL error frame in which the host said it kept the job.
+///
+/// This is the graceful-restart path — an operator restarting the server —
+/// and it is the scenario the durable queue exists for, so it must never read
+/// as an ordinary failure. The frame is per-job authoritative (the server sets
+/// `retained` only for a job it actually journalled), so no probe is consulted
+/// and none is needed. The server's own message is preserved as the cause.
+fn retained_frame_error(message: &str, job_id: Option<&str>, host: &str) -> anyhow::Error {
+    let note = match job_id {
+        Some(id) if !id.is_empty() => {
+            format!("job {id} is retained on {host} and will finish there")
+        }
+        _ => format!("this generation is retained on {host} and will finish there"),
+    };
+    tracing::warn!(job_id = job_id.unwrap_or(""), host = %host, "{note}");
+    anyhow::anyhow!("server error: {message}").context(note)
+}
+
+/// Explain a stream that ended without a terminal event.
+///
+/// A host that journalled this job runs it whether or not a client is
+/// attached, and replays across a restart what it could not finish, so the job
+/// the caller just lost sight of is still going to render there. Say so — but
+/// only when that job is durable, because on an older server, and for a job
+/// the host excluded at admission, a lost stream really does mean lost work.
+///
+/// The original transport error is preserved as the cause, so
+/// [`MoldClient::is_connection_error`] still reports `false` for a mid-body
+/// death and the CLI surfaces it instead of silently re-rendering locally.
+async fn annotate_lost_stream(
+    err: anyhow::Error,
+    retained: Option<RetainedJobProbe>,
+) -> anyhow::Error {
+    let Some(probe) = retained else {
+        return err;
+    };
+    // Bounded: on expiry the original error is returned exactly as it would
+    // have been without a probe, and the task is abandoned rather than left
+    // holding the caller's future open.
+    let durable = match tokio::time::timeout(probe.timeout, probe.durable).await {
+        Ok(answer) => answer.unwrap_or(false),
+        Err(_) => {
+            tracing::debug!(
+                job_id = %probe.job_id,
+                host = %probe.host,
+                "retention probe timed out; reporting the stream failure unqualified"
+            );
+            return err;
+        }
+    };
+    if !durable {
+        return err;
+    }
+    let note = format!(
+        "job {} is retained on {} and will finish there",
+        probe.job_id, probe.host
+    );
+    tracing::warn!(job_id = %probe.job_id, host = %probe.host, "{note}");
+    err.context(note)
+}
+
 impl MoldClient {
     pub fn new(base_url: &str) -> Self {
         let (client, api_key_configured) = build_client(None);
@@ -495,7 +573,18 @@ impl MoldClient {
 
         // Parse SSE events from chunked response body
         let mut buffer = String::new();
-        while let Some(chunk) = resp.chunk().await? {
+        // The server-assigned job id, latched from the first `queued` event,
+        // plus the in-flight probe of that host's queue contract. Both exist
+        // only once the job is admitted, so an unqueued stream pays nothing.
+        let mut retained: Option<RetainedJobProbe> = None;
+        loop {
+            let chunk = match resp.chunk().await {
+                Ok(Some(chunk)) => chunk,
+                Ok(None) => break,
+                Err(err) => {
+                    return Err(annotate_lost_stream(anyhow::Error::new(err), retained).await);
+                }
+            };
             buffer.push_str(&String::from_utf8_lossy(&chunk));
 
             while let Some(event_text) = next_sse_event(&mut buffer) {
@@ -503,6 +592,11 @@ impl MoldClient {
                 match event_type.as_str() {
                     "progress" => {
                         if let Ok(p) = serde_json::from_str::<SseProgressEvent>(&data) {
+                            if let SseProgressEvent::Queued { id, .. } = &p {
+                                if !id.is_empty() && retained.is_none() {
+                                    retained = Some(self.probe_retention(id.clone()));
+                                }
+                            }
                             let _ = progress_tx.send(p);
                         }
                     }
@@ -611,6 +705,20 @@ impl MoldClient {
                     }
                     "error" => {
                         let error: SseErrorEvent = serde_json::from_str(&data)?;
+                        // A terminal frame ends the stream either way, so the
+                        // in-flight probe has nothing left to answer.
+                        let probe = retained.take();
+                        if let Some(probe) = &probe {
+                            probe.durable.abort();
+                        }
+                        if error.retained {
+                            return Err(retained_frame_error(
+                                &error.message,
+                                probe.as_ref().map(|probe| probe.job_id.as_str()),
+                                &self.base_url,
+                            ));
+                        }
+                        // A definitive server failure promises nothing.
                         anyhow::bail!("server error: {}", error.message);
                     }
                     _ => {}
@@ -618,7 +726,58 @@ impl MoldClient {
             }
         }
 
-        anyhow::bail!("SSE stream ended without complete event")
+        Err(annotate_lost_stream(
+            anyhow::anyhow!("SSE stream ended without complete event"),
+            retained,
+        )
+        .await)
+    }
+
+    /// Ask this exact host, while it is demonstrably still up, whether it
+    /// journalled THIS job (`GET /api/queue` → the row's additive `durable`).
+    ///
+    /// Deliberately per-job rather than `capabilities.queue.durable_queue`: a
+    /// host that can promise durability still reports `durable: false` for a
+    /// job it excluded at admission — no gallery target, reference-upload
+    /// media, or a request over the journal's payload ceiling — and telling
+    /// the user one of those will finish later would be a lie. Started when
+    /// the job is queued and read only if the stream later dies, so a host
+    /// that never answers, or one that predates the field, promises nothing.
+    fn probe_retention(&self, job_id: String) -> RetainedJobProbe {
+        let client = self.client.clone();
+        let url = format!("{}/api/queue", self.base_url);
+        let host = self.base_url.clone();
+        let wanted = job_id.clone();
+        let durable = tokio::spawn(async move {
+            // Bound the request too, so the task itself cannot outlive the
+            // answer anyone is waiting for.
+            let Ok(response) = client
+                .get(url)
+                .timeout(RETENTION_PROBE_TIMEOUT)
+                .send()
+                .await
+            else {
+                return false;
+            };
+            let Ok(listing) = response.json::<serde_json::Value>().await else {
+                return false;
+            };
+            listing
+                .get("entries")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .find(|entry| entry.get("id").and_then(serde_json::Value::as_str) == Some(&wanted))
+                .and_then(|entry| entry.get("durable"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+        });
+        RetainedJobProbe {
+            job_id,
+            host,
+            durable,
+            timeout: RETENTION_PROBE_TIMEOUT,
+        }
     }
 
     /// Submit a chained video generation request (non-streaming).
@@ -2382,5 +2541,335 @@ mod tests {
 
         let meta = parse_video_headers(&headers).expect("should detect video");
         assert!(!meta.has_audio);
+    }
+
+    /// A server that answers `GET /api/queue` with `queue`, then serves one
+    /// `/api/generate/stream` request by emitting a `queued` SSE event with
+    /// `job_id` and dropping the connection mid-body (an under-delivered
+    /// `Content-Length`), exactly like a process that exits while a client is
+    /// attached.
+    async fn spawn_dying_stream_server(queue: serde_json::Value, job_id: &'static str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let queue = queue.clone();
+                tokio::spawn(async move {
+                    let mut request = Vec::new();
+                    let mut buf = [0u8; 1024];
+                    // Read until the end of the request head; the generate
+                    // body follows on the same read for these small requests.
+                    while let Ok(read) = socket.read(&mut buf).await {
+                        if read == 0 {
+                            return;
+                        }
+                        request.extend_from_slice(&buf[..read]);
+                        if request.windows(4).any(|w| w == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    let head = String::from_utf8_lossy(&request).to_string();
+                    if head.starts_with("GET /api/queue") {
+                        let body = queue.to_string();
+                        let _ = socket
+                            .write_all(
+                                format!(
+                                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                                    body.len()
+                                )
+                                .as_bytes(),
+                            )
+                            .await;
+                        let _ = socket.flush().await;
+                        return;
+                    }
+                    let frame = format!(
+                        "event: progress\ndata: {{\"type\":\"queued\",\"position\":0,\"id\":\"{job_id}\"}}\n\n"
+                    );
+                    // Promise far more body than is delivered, then hang up.
+                    let _ = socket
+                        .write_all(
+                            format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 40960\r\n\r\n{frame}"
+                            )
+                            .as_bytes(),
+                        )
+                        .await;
+                    let _ = socket.flush().await;
+                    let _ = socket.shutdown().await;
+                });
+            }
+        });
+        base
+    }
+
+    fn stream_request() -> GenerateRequest {
+        serde_json::from_value(serde_json::json!({
+            "prompt": "a lighthouse in a storm",
+            "model": "z-image-turbo:q8",
+            "width": 1024,
+            "height": 1024,
+            "steps": 8,
+            "guidance": 1.0,
+            "seed": 7,
+            "batch_size": 1,
+            "output_format": "png",
+            "strength": 1.0
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn mid_stream_death_reports_the_job_retained_on_a_durable_host() {
+        let base = spawn_dying_stream_server(
+            serde_json::json!({ "entries": [{
+                "id": "job-77",
+                "model": "z-image-turbo:q8",
+                "state": "queued",
+                "started_at_unix_ms": 0,
+                "position": 0,
+                "durable": true
+            }] }),
+            "job-77",
+        )
+        .await;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let err = MoldClient::new(&base)
+            .generate_stream(&stream_request(), tx)
+            .await
+            .expect_err("the stream dies mid-body");
+
+        // The queued id reached the caller and the retention note names it.
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(SseProgressEvent::Queued { ref id, .. }) if id == "job-77"
+        ));
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains("job job-77 is retained on")
+                && rendered.contains("will finish there"),
+            "expected a retention note, got: {rendered}"
+        );
+
+        // Crucially, this is NOT a connect error: the CLI must surface it
+        // rather than silently re-rendering the same job locally.
+        assert!(!MoldClient::is_connection_error(&err));
+        assert!(!MoldClient::is_model_not_found(&err));
+        assert_eq!(
+            crate::control::classify_generate_error(&err),
+            crate::control::GenerateServerAction::SurfaceError
+        );
+    }
+
+    #[tokio::test]
+    async fn mid_stream_death_claims_no_retention_on_a_legacy_host() {
+        // A server that predates the durable queue: no `durable` field at all.
+        let base = spawn_dying_stream_server(
+            serde_json::json!({ "entries": [{
+                "id": "job-88",
+                "model": "z-image-turbo:q8",
+                "state": "queued",
+                "started_at_unix_ms": 0,
+                "position": 0
+            }] }),
+            "job-88",
+        )
+        .await;
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let err = MoldClient::new(&base)
+            .generate_stream(&stream_request(), tx)
+            .await
+            .expect_err("the stream dies mid-body");
+
+        let rendered = format!("{err:#}");
+        assert!(
+            !rendered.contains("retained"),
+            "a host without a durable queue must not promise retention: {rendered}"
+        );
+        assert_eq!(
+            crate::control::classify_generate_error(&err),
+            crate::control::GenerateServerAction::SurfaceError
+        );
+    }
+
+    #[tokio::test]
+    async fn mid_stream_death_claims_no_retention_for_a_job_the_host_did_not_journal() {
+        // A durable host still excludes some jobs at admission — no gallery
+        // target, reference-upload media, an oversized request — and reports
+        // `durable: false` for them. Host capability alone would over-promise.
+        let base = spawn_dying_stream_server(
+            serde_json::json!({ "entries": [{
+                "id": "job-99",
+                "model": "z-image-turbo:q8",
+                "state": "queued",
+                "started_at_unix_ms": 0,
+                "position": 0,
+                "durable": false
+            }] }),
+            "job-99",
+        )
+        .await;
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let err = MoldClient::new(&base)
+            .generate_stream(&stream_request(), tx)
+            .await
+            .expect_err("the stream dies mid-body");
+
+        let rendered = format!("{err:#}");
+        assert!(
+            !rendered.contains("retained"),
+            "a job the host did not journal must not promise retention: {rendered}"
+        );
+    }
+
+    /// A server that emits a `queued` event and then a TERMINAL error frame —
+    /// the graceful-restart shape PR 1 produces, where the host keeps the job.
+    async fn spawn_retained_frame_server(job_id: &'static str, frame: &'static str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let mut request = Vec::new();
+            let mut buf = [0u8; 1024];
+            while let Ok(read) = socket.read(&mut buf).await {
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buf[..read]);
+                if request.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let body = format!(
+                "event: progress\ndata: {{\"type\":\"queued\",\"position\":0,\"id\":\"{job_id}\"}}\n\nevent: error\ndata: {frame}\n\n"
+            );
+            let _ = socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await;
+            let _ = socket.flush().await;
+            let _ = socket.shutdown().await;
+        });
+        base
+    }
+
+    #[tokio::test]
+    async fn a_retained_terminal_frame_reports_the_job_as_kept() {
+        // The graceful restart: an operator runs `systemctl restart mold`. The
+        // host sends an explicit terminal frame saying it KEPT this job, which
+        // is the exact scenario the durable queue exists for.
+        let base = spawn_retained_frame_server(
+            "job-graceful",
+            r#"{"message":"mold is restarting; this generation was kept in the queue","retained":true,"code":"server_restarting"}"#,
+        )
+        .await;
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let err = MoldClient::new(&base)
+            .generate_stream(&stream_request(), tx)
+            .await
+            .expect_err("a terminal error frame is still an error");
+
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains("job job-graceful is retained on")
+                && rendered.contains("will finish there"),
+            "expected the retention note, got: {rendered}"
+        );
+        assert!(
+            rendered.contains("mold is restarting"),
+            "the server's own message must survive: {rendered}"
+        );
+        assert_eq!(
+            crate::control::classify_generate_error(&err),
+            crate::control::GenerateServerAction::SurfaceError
+        );
+    }
+
+    #[tokio::test]
+    async fn a_retained_frame_without_a_job_id_still_names_the_host() {
+        let base = spawn_retained_frame_server(
+            "",
+            r#"{"message":"mold is restarting","retained":true,"code":"server_restarting"}"#,
+        )
+        .await;
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let err = MoldClient::new(&base)
+            .generate_stream(&stream_request(), tx)
+            .await
+            .expect_err("a terminal error frame is still an error");
+
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains("retained on") && rendered.contains("will finish there"),
+            "expected a host-scoped retention note, got: {rendered}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_ordinary_terminal_frame_promises_nothing() {
+        let base =
+            spawn_retained_frame_server("job-failed", r#"{"message":"host ran out of memory"}"#)
+                .await;
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let err = MoldClient::new(&base)
+            .generate_stream(&stream_request(), tx)
+            .await
+            .expect_err("the server reported a failure");
+
+        let rendered = format!("{err:#}");
+        assert!(
+            !rendered.contains("retained"),
+            "a definitive server failure must not promise retention: {rendered}"
+        );
+        assert!(rendered.contains("host ran out of memory"));
+    }
+
+    #[tokio::test]
+    async fn a_wedged_retention_probe_falls_back_to_the_original_error() {
+        // The shared reqwest client sets no request timeout, so a probe whose
+        // `/api/queue` connects and then never answers — a host wedged
+        // mid-restart, a proxy holding the socket — would strand the SSE error
+        // forever and CLI/TUI callers would never see it.
+        let probe = RetainedJobProbe {
+            job_id: "job-wedged".into(),
+            host: "http://wedged:7680".into(),
+            durable: tokio::spawn(async { std::future::pending::<bool>().await }),
+            timeout: std::time::Duration::from_millis(50),
+        };
+
+        let started = std::time::Instant::now();
+        let err = annotate_lost_stream(anyhow::anyhow!("stream died"), Some(probe)).await;
+
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "the join must be bounded, took {:?}",
+            started.elapsed()
+        );
+        let rendered = format!("{err:#}");
+        assert_eq!(rendered, "stream died", "expiry must promise nothing");
+        assert_eq!(
+            crate::control::classify_generate_error(&err),
+            crate::control::GenerateServerAction::SurfaceError
+        );
+    }
+
+    #[test]
+    fn the_retention_probe_timeout_is_bounded() {
+        assert!(RETENTION_PROBE_TIMEOUT > std::time::Duration::ZERO);
+        assert!(RETENTION_PROBE_TIMEOUT <= std::time::Duration::from_secs(10));
     }
 }

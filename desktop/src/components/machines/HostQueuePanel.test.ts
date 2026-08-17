@@ -103,3 +103,47 @@ describe("HostQueuePanel", () => {
     expect(wrapper.get("[data-test='queue-empty']").text()).toBe("Nothing queued");
   });
 });
+
+describe("held rows", () => {
+  it("labels a held row and explains why, instead of calling it queued", async () => {
+    // Held is not waiting — it exhausted its budget and will never start on
+    // its own. Rendering it as "QUEUED #2" tells the operator to wait for
+    // something that is never coming.
+    const { wrapper } = await mountPanel(
+      [],
+      [
+        {
+          id: "srv-held",
+          model: "flux2-klein",
+          state: "held",
+          started_at_unix_ms: 1,
+          position: 2,
+          held_reason: "dispatch attempts exhausted",
+        },
+      ],
+    );
+
+    const text = wrapper.text();
+    expect(text).toContain("HELD");
+    expect(text).not.toContain("QUEUED #2");
+    expect(text).toContain("dispatch attempts exhausted");
+  });
+
+  it("offers Cancel on a held row — the one row that cannot clear itself", async () => {
+    const { wrapper } = await mountPanel(
+      [],
+      [
+        {
+          id: "srv-held",
+          model: "flux2-klein",
+          state: "held",
+          started_at_unix_ms: 1,
+          position: 2,
+          held_reason: "replay budget exhausted",
+        },
+      ],
+    );
+
+    expect(wrapper.find("[data-test='cancel-entry']").exists()).toBe(true);
+  });
+});

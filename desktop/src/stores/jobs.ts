@@ -18,7 +18,10 @@ const POLL_INTERVAL_MS = 5_000;
 export interface QueueEntry {
   id: string;
   model: string;
-  state: "queued" | "running";
+  /** `held` is additive: a journalled job the host parked after it exhausted
+   * its replay or dispatch budget. It exists only in the durable queue, will
+   * never start on its own, and is listed precisely so it is not invisible. */
+  state: "queued" | "running" | "held";
   started_at_unix_ms: number;
   position: number;
   gpu?: number;
@@ -29,6 +32,8 @@ export interface QueueEntry {
   /** The submitted request's settings, metadata-shaped (additive; absent on
    * older servers; never carries image payloads). */
   metadata?: OutputMetadata | null;
+  /** Why the host parked this job. Present only for `state: "held"`. */
+  held_reason?: string | null;
 }
 
 /** Queue controls a host supports (from `GET /api/capabilities`). */
@@ -73,9 +78,11 @@ export interface QueueSurfaceRow {
   canReorder: boolean;
 }
 
-/** Running rows sort before queued; within a state, by queue position. */
+/** Running first, then queued, then held — held work is parked, not in line,
+ *  so it must never sort among rows that are actually waiting for a lane. */
 function queueSurfaceRank(entry: EnrichedQueueEntry): number {
-  return entry.state === "running" ? 0 : 1;
+  if (entry.state === "running") return 0;
+  return entry.state === "held" ? 2 : 1;
 }
 
 /**
@@ -186,7 +193,15 @@ export const useJobsStore = defineStore("jobs", {
         this.queues[host.id] = {
           hostId: host.id,
           entries: (listing.entries ?? [])
-            .filter((entry) => entry.state === "queued" || entry.state === "running")
+            .filter(
+              (entry) =>
+                entry.state === "queued" ||
+                entry.state === "running" ||
+                // Held rows exist only in the journal: dropping them here is
+                // what would make the one job guaranteed never to run also the
+                // one nobody can see or clear.
+                entry.state === "held",
+            )
             .map((entry) => {
               const { target_gpu: targetGpu, ...rest } = entry;
               const local = rest as QueueEntry;

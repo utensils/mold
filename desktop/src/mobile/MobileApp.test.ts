@@ -122,8 +122,8 @@ function plannedPlacement() {
 }
 // Keep the real reconciliation logic but collapse its re-attach poll interval
 // so tests never wait out the production cadence.
-vi.mock("./mobileGenerationRecovery", async (importOriginal) => {
-  const original = await importOriginal<typeof import("./mobileGenerationRecovery")>();
+vi.mock("../lib/generationRecovery", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../lib/generationRecovery")>();
   return {
     ...original,
     reconcileInterruptedGenerationJobs: (
@@ -171,7 +171,11 @@ const cinematicHint =
   "Cinematic look — cinematic film still, cinematic lighting, anamorphic, dramatic mood, subtle film grain";
 const print: GalleryImage = {
   filename: "storm clip.mp4",
-  timestamp: 1_700_000_000,
+  // Newer than the submission under test: gallery recovery is age-bounded.
+  // A getter, so a late-running test still reads a stamp after its own submit.
+  get timestamp() {
+    return Math.floor(Date.now() / 1000) + 5;
+  },
   format: "mp4",
   metadata: {
     prompt: "a ship crossing violet lightning",
@@ -4572,7 +4576,10 @@ describe("MobileApp transport error copy", () => {
 describe("MobileApp foreground resume", () => {
   const resumedPrint: GalleryImage = {
     filename: "resumed print.png",
-    timestamp: 1_700_000_100,
+    // Newer than the submission under test: gallery recovery is age-bounded.
+    get timestamp() {
+      return Math.floor(Date.now() / 1000) + 5;
+    },
     format: "png",
     metadata: {
       prompt: "a ship crossing violet lightning",

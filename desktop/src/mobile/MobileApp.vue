@@ -247,7 +247,7 @@ import {
   type MobileRemixRecoveryPayload,
   type MobileExpansionRecoveryRecord,
 } from "./mobileExpansionRecovery";
-import { reconcileInterruptedGenerationJobs } from "./mobileGenerationRecovery";
+import { reconcileInterruptedGenerationJobs } from "../lib/generationRecovery";
 import { watchChainJob, type SequenceWatchHandle } from "./sequenceWatch";
 
 type Tab = "generate" | "gallery" | "catalog" | "hosts";

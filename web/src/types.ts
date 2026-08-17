@@ -90,6 +90,10 @@ export interface OutputMetadata {
    * chain jobs with a server-side record — ephemeral chain outputs and
    * pre-#564 rows carry nothing (additive; newer servers only). */
   chain_job_id?: string | null;
+  /** Queue id of the generation that produced this print — the server's replay
+   * idempotence key, and the exact answer to "did my job produce this?".
+   * Absent on hosts that predate it. */
+  job_id?: string | null;
   /** Per-clip provenance for a stitched sequence — what the Library's
    * sequence-aware Reuse settings reloads into the clip rail. */
   chain?: ChainOutputMetadata | null;
@@ -218,6 +222,10 @@ export interface ServerCapabilities {
     can_pause?: boolean;
     can_cancel_all?: boolean;
     can_reorder?: boolean;
+    /** The host journals admitted generations, keeps them across a restart,
+     * and runs them whether or not a client is still attached. Absent on
+     * servers that predate the durable queue. */
+    durable_queue?: boolean;
   };
 }
 
@@ -472,7 +480,10 @@ export interface HostDiskUsage {
 
 // ── /api/queue (L3 reconciliation) ─────────────────────────────────────────
 
-export type QueueJobState = "queued" | "running";
+/** `held` is additive: a journalled job the host parked after it exhausted its
+ * replay or dispatch budget. It exists only in the durable queue, never starts
+ * on its own, and is listed so it is not invisible. Absent on older servers. */
+export type QueueJobState = "queued" | "running" | "held";
 
 export interface QueueEntry {
   id: string;
@@ -484,6 +495,13 @@ export interface QueueEntry {
   gpu?: number;
   /** Preferred lane for queued jobs. Omitted/null means Auto. */
   target_gpu?: number | null;
+  /** Why the host parked this job. Present only for `state: "held"`. */
+  held_reason?: string | null;
+  /** Whether the host journalled THIS job and will run it across a restart.
+   * Additive and deliberately per-job: a host that advertises
+   * `queue.durable_queue` still reports `false` for a job it excluded at
+   * admission. Absent on servers without the durable queue. */
+  durable?: boolean;
 }
 
 export interface QueueListing {

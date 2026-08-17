@@ -1,5 +1,5 @@
-import { ApiError, apiFetchTo, apiJsonTo, type ApiTarget } from "../lib/api/client";
-import { describeTransportError, isTransportFailure } from "../lib/api/errors";
+import { ApiError, apiFetchTo, apiJsonTo, type ApiTarget } from "./api/client";
+import { describeTransportError, isTransportFailure } from "./api/errors";
 import type {
   ChainJobDetail,
   ChainJobListing,
@@ -7,9 +7,9 @@ import type {
   GalleryImage,
   OutputFormat,
   OutputMetadata,
-} from "../lib/api/types";
-import { isCancelledError, metadataOnlyResult, type Job } from "../lib/generationJob";
-import { sha256HexOfBase64 } from "../lib/sourceRestore";
+} from "./api/types";
+import { isCancelledError, metadataOnlyResult, type Job } from "./generationJob";
+import { sha256HexOfBase64 } from "./sourceRestore";
 import {
   isMinimaxH3Identity,
   minimaxH3TaskForModel,
@@ -17,11 +17,13 @@ import {
 } from "@studio/lib/minimaxH3Authoring";
 
 /**
- * Foreground-resume reconciliation for iPhone generations.
+ * Reconciliation for generations whose stream died while the host kept going.
  *
- * iOS freezes the WebView and tears down sockets while the app is
- * backgrounded, so every held generation stream dies with a raw WebKit
- * transport error even though the host kept working: a RUNNING job finishes
+ * Two shells need this. iOS freezes the WebView and tears down sockets while
+ * the app is backgrounded, so every held generation stream dies with a raw
+ * WebKit transport error even though the host kept working; and on any surface
+ * a durable-queue host ends a retained job's stream while keeping the job. In
+ * both cases the host is still the authority: a RUNNING job finishes
  * and lands in the host's gallery, a QUEUED job is skipped at dispatch once
  * its stream is gone. This module re-queries the job's frozen submission
  * route and settles each interrupted job with its true outcome — the
@@ -41,6 +43,38 @@ const DEFAULT_POLL_INTERVAL_MS = 4_000;
  *  the exact moment reconciliation exists for — so a dead query is retried
  *  (bounded) instead of settling a possibly-finished print as failed. */
 const MAX_TRANSPORT_RETRIES = 3;
+/** Retry budget for a job the host explicitly RETAINED. The host told us it
+ *  kept the work and is restarting, so an unreachable socket is expected for
+ *  as long as that takes — a cold model load alone outlasts the suspension
+ *  budget above, and settling such a job as failed after ~12 s would announce
+ *  a failure for work that is about to run. Bounded so the reconcile always
+ *  ends: ~5 minutes at the default poll interval. */
+const RETAINED_TRANSPORT_RETRIES = 75;
+/** How many times a RETAINED job may be absent from a successfully-read queue
+ *  before reconciliation gives up on it. This is the restart handoff window —
+ *  the worker has exited and its registry entry is gone, but the durable row
+ *  is invisible until replay resubmits it — so it is sized like the retry
+ *  budget above rather than like a normal poll. */
+const RETAINED_HANDOFF_POLLS = 75;
+/** How many times a visible, journalled `queued` row may be re-read before
+ *  reconciliation stops waiting on it. A durable row normally means "the host
+ *  has this and will run it", so the wait is patient by design — but it is not
+ *  a promise of dispatch: a host booted with no dispatch owner (`MOLD_GPUS=none`)
+ *  keeps that row listed and durable forever. Unbounded there does not merely
+ *  spin — desktop awaits this inside `settled`, so the batch's completion toast
+ *  and its pending-consumer entry are stranded with it. ~30 minutes at the
+ *  default poll interval, which outlasts an ordinary queue wait; giving up is
+ *  purely a client-side decision, so it settles as unreconciled and the host's
+ *  own row is released to surface the work if it ever does run. */
+const DURABLE_QUEUE_POLLS = 450;
+/** How long a finished reconciliation pass suppresses another one for the same
+ *  job. The shared store runs recovery as part of a batch settling and the
+ *  iPhone shell calls the same entry point immediately afterwards in its own
+ *  `settled.then`; a pass that reached no verdict deliberately leaves the job
+ *  eligible, so without this the second caller spends the ENTIRE retry budget
+ *  again before the phone can show a summary. Short enough that a genuine
+ *  later resume still reconciles. */
+const RECONCILE_COOLDOWN_MS = 5_000;
 const PRE_ID_CLOCK_SKEW_MS = 1_000;
 const PRE_ID_JOIN_WINDOW_MS = 5_000;
 
@@ -49,10 +83,18 @@ const PRE_ID_JOIN_WINDOW_MS = 5_000;
 interface RecoveryQueueEntry {
   id: string;
   model?: string;
-  state: "queued" | "running";
+  /** `held` is additive: a journalled job the host parked and will not
+   * auto-run. Absent on servers without the durable queue. */
+  state: "queued" | "running" | "held";
   seed_pinned?: boolean | null;
   started_at_unix_ms?: number;
   metadata?: OutputMetadata | null;
+  /** Whether the host journalled THIS job — additive and deliberately
+   * per-job: a host that can promise durability still reports `false` for a
+   * job it excluded at admission. Absent on older servers. */
+  durable?: boolean | null;
+  /** Why a held job is parked. Present only for `state: "held"`. */
+  held_reason?: string | null;
 }
 
 export interface GenerationRecoveryOptions {
@@ -81,7 +123,16 @@ export function isInterruptedGenerationError(error: string | null | undefined): 
 
 type GalleryMatchJob = Pick<
   Job,
-  "visualSeed" | "model" | "prompt" | "width" | "height" | "total" | "request"
+  | "id"
+  | "recoveredJobId"
+  | "visualSeed"
+  | "model"
+  | "prompt"
+  | "width"
+  | "height"
+  | "total"
+  | "request"
+  | "submittedAtUnixMs"
 >;
 
 interface H3BoundaryIdentity {
@@ -238,12 +289,41 @@ function matchGalleryPrintWithIdentity(
   prints: readonly GalleryImage[],
   h3Identity: H3RecoveryIdentity | null | undefined,
 ): GalleryImage | null {
+  // The server stamps the producing job's queue id into the print it saves.
+  // Read that before inferring anything: it is exact, it survives clock skew
+  // between host and client (the age fence below compares a CLIENT submit time
+  // against a HOST print stamp), and it separates same-second fixed-seed twins
+  // that every other field in this join reproduces identically. The heuristic
+  // stays as the fallback for hosts that predate the stamp.
+  const stampedId = serverIdentity(job);
+  if (stampedId) {
+    // One job can legitimately own two prints: a replay that crashed after
+    // publishing leaves the original and the re-render, both stamped. Take the
+    // NEWEST rather than the first listed — `/api/gallery` happens to sort
+    // newest-first today, but recovery must not depend on an ordering it never
+    // states, or an unrelated change to that endpoint silently hands back the
+    // older copy and the stale-print bug returns wearing someone else's diff.
+    const stamped = prints
+      .filter((print) => print.metadata?.job_id === stampedId)
+      .reduce<GalleryImage | null>(
+        (newest, print) =>
+          !newest || (print.timestamp ?? 0) > (newest.timestamp ?? 0) ? print : newest,
+        null,
+      );
+    if (stamped) return stamped;
+  }
   const seed = Number(job.visualSeed);
   if (!Number.isSafeInteger(seed) || h3Identity === null) return null;
   const differs = (recorded: number | null | undefined, submitted: number): boolean =>
     typeof recorded === "number" && submitted > 0 && recorded !== submitted;
+  // A print that already existed cannot be the output of this submission.
+  // Every other field in this join — seed, model, prompt, dimensions, steps —
+  // is reproduced exactly by a fixed-seed re-run, so age is the only thing
+  // separating "the render I just asked for" from "one I made yesterday".
+  const earliestSeconds = (job.submittedAtUnixMs - PRE_ID_CLOCK_SKEW_MS) / 1000;
   for (const print of prints) {
     const meta = print.metadata;
+    if (typeof print.timestamp === "number" && print.timestamp < earliestSeconds) continue;
     if (!meta || meta.seed !== seed || meta.model !== job.model) continue;
     if (meta.prompt && job.prompt && meta.prompt !== job.prompt) continue;
     if (h3Identity) {
@@ -263,8 +343,10 @@ function matchGalleryPrintWithIdentity(
  * join; the recorded prompt is the tiebreaker for prepared siblings, whose
  * prompts are unique within a batch. Dimensions and steps must also agree
  * when both sides know them — a fixed-seed re-run at new settings whose
- * stream died pre-queue must not resurrect an older print. H3 additionally
- * joins on exact endpoint and ordered-reference content hashes.
+ * stream died pre-queue must not resurrect an older print. Age is the final
+ * bound and the only one a fixed-seed re-run cannot reproduce: a print that
+ * already existed when this job was submitted can never be its output. H3
+ * additionally joins on exact endpoint and ordered-reference content hashes.
  */
 export async function matchGalleryPrint(
   job: GalleryMatchJob,
@@ -343,11 +425,48 @@ function settledExternally(job: Job): boolean {
   return job.status === "complete" || job.status === "error";
 }
 
+/**
+ * The server id this job is known by, whether it is still on the row or was
+ * released by an earlier pass.
+ *
+ * `settleUnreconciled` moves the id to `recoveredJobId` so the host's own fleet
+ * row stops being suppressed — but the job is no more anonymous for it. Every
+ * question of the form "do we have a server identity?" must ask THIS, or a
+ * later pass re-reads a known job as one that never received a queued frame
+ * and falls back to guesswork that is deliberately narrower than the truth.
+ */
+function serverIdentity(job: Pick<Job, "id" | "recoveredJobId">): string {
+  return job.id || job.recoveredJobId || "";
+}
+
 function settleFailure(job: Job, message: string): void {
   job.stage = null;
   job.error = message;
   job.status = "error";
   job.interrupted = false;
+}
+
+/**
+ * Settle a job the host never answered about. Reconciliation reached no
+ * verdict, so the row stays marked as an interruption: a later resume may
+ * still learn the truth, and callers that treat `interrupted` as "do not
+ * announce this as a failure" keep that protection. A definitive answer —
+ * the host has no such job and no such print — uses `settleFailure` instead.
+ */
+function settleUnreconciled(job: Job, message: string): void {
+  job.stage = null;
+  job.error = message;
+  job.status = "error";
+  job.interrupted = true;
+  // Release the server id. Desktop suppresses every fleet row whose id matches
+  // a local job — that is how one job renders as one row — so a row this
+  // client has stopped tracking would otherwise HIDE the host's own row when
+  // it comes back and finishes the work, and the print would land unseen. The
+  // id is kept aside: it is still the exact key for the print the host saves.
+  if (job.id) {
+    job.recoveredJobId = job.id;
+    job.id = "";
+  }
 }
 
 function settleCompleted(job: Job, complete: CompleteEvent, opts: GenerationRecoveryOptions): void {
@@ -365,7 +484,8 @@ function findQueueEntry(
   job: Job,
   h3Identity: H3RecoveryIdentity | null | undefined,
 ): RecoveryQueueEntry | null {
-  if (job.id) return entries.find((entry) => entry.id === job.id) ?? null;
+  const known = serverIdentity(job);
+  if (known) return entries.find((entry) => entry.id === known) ?? null;
   // Pre-ID jobs (the queued frame never arrived) join on the pinned seed the
   // request carried, plus H3 conditioning identity when applicable — mirrors
   // the cancel path's pre-ID snapshot semantics without crossing submissions.
@@ -422,7 +542,23 @@ async function reconcileJob(job: Job, opts: GenerationRecoveryOptions): Promise<
     opts.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const interval = opts.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
   const interruptedCopy = `The connection to ${opts.hostLabel} was interrupted and this print didn’t finish.`;
+  // A retained job is the host's to finish; never claim it failed just because
+  // this client stopped being able to see it.
+  const retained = job.retainedByHost === true;
+  const maxTransportRetries = retained ? RETAINED_TRANSPORT_RETRIES : MAX_TRANSPORT_RETRIES;
+  const retainedUnreachableCopy =
+    `${opts.hostLabel} kept this print in its queue but hasn’t come back yet. ` +
+    `It will finish there — check the Library.`;
   let transportRetries = 0;
+  // Successful polls that found no row for a retained job — the restart
+  // handoff window, bounded so reconciliation always ends.
+  let handoffPolls = 0;
+  // Re-reads of a visible durable `queued` row, bounded so a row the host never
+  // dispatches cannot hold the reconcile open forever.
+  let durableQueuePolls = 0;
+  const durableStalledCopy =
+    `${opts.hostLabel} still has this print queued but hasn’t started it. ` +
+    `It will finish there if the host picks it up — check the Library.`;
   let h3Identity: H3RecoveryIdentity | null | undefined;
   try {
     // Digest the frozen H3 request once. Queue polls and the eventual gallery
@@ -444,10 +580,18 @@ async function reconcileJob(job: Job, opts: GenerationRecoveryOptions): Promise<
         // is likely still coming back from suspension. Back off and retry
         // (bounded) before declaring an outcome; any successful round-trip
         // inside reconcileJobOnce resets the budget.
-        if (isTransportFailure(cause) && transportRetries < MAX_TRANSPORT_RETRIES) {
+        if (isTransportFailure(cause) && transportRetries < maxTransportRetries) {
           transportRetries += 1;
           await sleep(interval);
           continue;
+        }
+        if (isTransportFailure(cause)) {
+          // The host never answered — no verdict, so no announcement.
+          settleUnreconciled(
+            job,
+            retained ? retainedUnreachableCopy : describeTransportError(cause, opts.hostLabel),
+          );
+          return;
         }
         settleFailure(job, describeTransportError(cause, opts.hostLabel));
         return;
@@ -455,7 +599,11 @@ async function reconcileJob(job: Job, opts: GenerationRecoveryOptions): Promise<
     }
   } catch (cause) {
     if (!settledExternally(job) && isActive()) {
-      settleFailure(job, describeTransportError(cause, opts.hostLabel));
+      if (isTransportFailure(cause)) {
+        settleUnreconciled(job, describeTransportError(cause, opts.hostLabel));
+      } else {
+        settleFailure(job, describeTransportError(cause, opts.hostLabel));
+      }
     }
   }
 
@@ -463,25 +611,23 @@ async function reconcileJob(job: Job, opts: GenerationRecoveryOptions): Promise<
   // settled or abandoned (external settle / unmount).
   async function reconcileJobOnce(): Promise<void> {
     while (isActive() && !settledExternally(job)) {
-      if (opts.chain && !job.id) {
+      if (opts.chain && !serverIdentity(job)) {
         const chainId = await findPreIdChain(job, opts);
         transportRetries = 0;
         if (settledExternally(job) || !isActive()) return;
         job.id = chainId ?? "";
         if (!job.id) {
-          const prints = await apiJsonTo<GalleryImage[]>(opts.target, "/api/gallery");
-          transportRetries = 0;
-          if (settledExternally(job) || !isActive()) return;
-          const match = matchGalleryPrintWithIdentity(job, prints, h3Identity);
-          if (match) settleCompleted(job, galleryCompletion(match), opts);
-          else settleFailure(job, interruptedCopy);
+          // The host has no chain record for this submission, so nothing
+          // proves it was ever admitted. Guessing from the gallery here would
+          // hand back whichever older clip happens to match.
+          settleFailure(job, interruptedCopy);
           return;
         }
       }
-      if (opts.chain && job.id) {
+      if (opts.chain && serverIdentity(job)) {
         const detail = await apiJsonTo<ChainJobDetail>(
           opts.target,
-          `/api/chain-jobs/${encodeURIComponent(job.id)}`,
+          `/api/chain-jobs/${encodeURIComponent(serverIdentity(job))}`,
         ).catch((cause: unknown) => {
           if (cause instanceof ApiError && cause.status === 404) return null;
           throw cause;
@@ -534,7 +680,19 @@ async function reconcileJob(job: Job, opts: GenerationRecoveryOptions): Promise<
       );
       transportRetries = 0;
       if (settledExternally(job) || !isActive()) return;
-      const entry = findQueueEntry(listing.entries ?? [], job, h3Identity);
+      // `Array.prototype.entries` exists, so a body that is itself an array
+      // must never be read as a listing — that yields a FUNCTION here and
+      // throws deep inside the join, which the retry loop then mistakes for a
+      // transport failure and waits out.
+      const rows = Array.isArray(listing?.entries) ? listing.entries : [];
+      const entry = findQueueEntry(rows, job, h3Identity);
+      // Adopt the recovered id immediately. The pre-ID join identifies the row
+      // by seed, timing, model and conditioning when suspension beat the queued
+      // frame — and every id-keyed action downstream, `cancel()` above all,
+      // reads `job.id`. Without this the durable branch can wait on a job the
+      // user is then told cannot be cancelled ("Remote cancellation was not
+      // confirmed"): identified by this client, and uncancellable by it.
+      if (entry && !job.id) job.id = entry.id;
       if (entry?.state === "running") {
         // Still developing server-side — re-attach by polling until it
         // leaves the queue, then collect the print from the gallery.
@@ -542,7 +700,38 @@ async function reconcileJob(job: Job, opts: GenerationRecoveryOptions): Promise<
         await sleep(interval);
         continue;
       }
+      if (entry?.state === "held") {
+        // Listed but parked: the host exhausted this job's dispatch or replay
+        // budget and will never start it on its own. Waiting would never end.
+        settleFailure(
+          job,
+          `${opts.hostLabel} is holding this print and will not run it automatically${
+            entry.held_reason ? ` (${entry.held_reason})` : ""
+          }. Develop again to requeue it.`,
+        );
+        return;
+      }
       if (entry?.state === "queued") {
+        if (entry.durable === true) {
+          // The host journalled THIS job: it runs whether or not a client is
+          // attached and is replayed if a restart interrupts it. Deleting the
+          // row would destroy exactly the work the host kept — wait for it.
+          // Deliberately per-job, never `capabilities.queue.durable_queue`: a
+          // durable host still reports `durable: false` for a job with no
+          // gallery target, reference-upload media, or an oversized payload,
+          // and waiting on one of those would hang forever.
+          if (durableQueuePolls >= DURABLE_QUEUE_POLLS) {
+            // Listed, durable, and never dispatched. The host still owns the
+            // work, so this is never announced as a failure — but the wait
+            // ends, because a caller is blocked on it.
+            settleUnreconciled(job, durableStalledCopy);
+            return;
+          }
+          durableQueuePolls += 1;
+          job.stage = `Waiting in ${opts.hostLabel}’s queue`;
+          await sleep(interval);
+          continue;
+        }
         // The host skips queued jobs whose client stream died with the
         // suspension — clear the zombie row instead of letting it linger.
         await apiFetchTo(opts.target, `/api/queue/${encodeURIComponent(entry.id)}`, {
@@ -558,12 +747,37 @@ async function reconcileJob(job: Job, opts: GenerationRecoveryOptions): Promise<
       const prints = await apiJsonTo<GalleryImage[]>(opts.target, "/api/gallery");
       transportRetries = 0;
       if (settledExternally(job) || !isActive()) return;
-      const match = matchGalleryPrintWithIdentity(job, prints, h3Identity);
+      // Only claim a print for work the host is known to have accepted. A job
+      // id is that proof: it arrives on the server's own `queued` frame, and
+      // the pre-ID join adopts it from a matching queue row. Without either,
+      // this submission may never have reached the host at all — and a
+      // fixed-seed re-run of the same prompt makes an unrelated print look
+      // exactly like its output.
+      const match = serverIdentity(job)
+        ? matchGalleryPrintWithIdentity(job, prints, h3Identity)
+        : null;
       if (match) {
         settleCompleted(job, galleryCompletion(match), opts);
-      } else {
-        settleFailure(job, interruptedCopy);
+        return;
       }
+      if (retained && handoffPolls < RETAINED_HANDOFF_POLLS) {
+        // Absent from the queue AND absent from the gallery, on a job the host
+        // told us it kept. That combination is the handoff window: the worker
+        // has exited and dropped its registry entry, but the durable row stays
+        // invisible to `/api/queue` until restart replay resubmits it. A
+        // successful empty listing there is server bookkeeping, not evidence.
+        handoffPolls += 1;
+        job.stage = `Waiting for ${opts.hostLabel} to come back`;
+        await sleep(interval);
+        continue;
+      }
+      if (retained) {
+        // Bounded, so reconciliation always ends — but the host promised to
+        // run this, so it stays reconcilable rather than declared failed.
+        settleUnreconciled(job, retainedUnreachableCopy);
+        return;
+      }
+      settleFailure(job, interruptedCopy);
       return;
     }
   }
@@ -581,8 +795,20 @@ export function reconcileInterruptedGenerationJobs(
   jobs: readonly Job[],
   opts: GenerationRecoveryOptions,
 ): Promise<void> {
+  const now = Date.now();
   const interrupted = jobs.filter(
-    (job) => job.status === "error" && (job.interrupted || isInterruptedGenerationError(job.error)),
+    (job) =>
+      job.status === "error" &&
+      (job.interrupted || isInterruptedGenerationError(job.error)) &&
+      // A cancel is terminal even on a row already flagged as interrupted —
+      // the store guards this in its own pre-filter, and the entry point both
+      // callers share must not depend on that.
+      !isCancelledError(job.error) &&
+      // Not one another pass just finished: its outcome is this outcome.
+      !(
+        typeof job.reconciledAtUnixMs === "number" &&
+        now - job.reconciledAtUnixMs < RECONCILE_COOLDOWN_MS
+      ),
   );
   if (interrupted.length === 0) return Promise.resolve();
   for (const job of interrupted) {
@@ -593,5 +819,11 @@ export function reconcileInterruptedGenerationJobs(
     job.status = "loading";
     job.stage = `Reconnecting to ${opts.hostLabel}`;
   }
-  return Promise.all(interrupted.map((job) => reconcileJob(job, opts))).then(() => undefined);
+  return Promise.all(
+    interrupted.map((job) =>
+      reconcileJob(job, opts).finally(() => {
+        job.reconciledAtUnixMs = Date.now();
+      }),
+    ),
+  ).then(() => undefined);
 }

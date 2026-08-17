@@ -1,6 +1,7 @@
 import { computed, onUnmounted, reactive, ref, watch, type Ref } from "vue";
 import {
   cancelQueueJob,
+  fetchQueue,
   generateChainStream,
   generateStream,
   type StreamTarget,
@@ -94,11 +95,21 @@ export interface Job {
    * or a stable `model·prompt` stand-in when the seed is random (desktop
    * `generationJob.ts` recipe). Recomputed from the request on rehydrate. */
   seedVisual: string;
-  /** True for a job rehydrated from a previous session whose SSE stream is
-   * gone but whose `serverId` is known: the server may still be rendering
-   * it, so the reconciler — not this boot — decides its fate. Never
-   * persisted; derived on load. */
+  /** True when the HOST owns this job's fate rather than this page: a row
+   * rehydrated from a previous session whose SSE stream is gone but whose
+   * `serverId` is known (the reconciler, not this boot, rules on it), or a
+   * row settled by `settleDetachedJob` — the job was retained across a server
+   * restart, or ran while the page was away. A settled detached row is
+   * advisory, never a failure, so the activity strip retires it instead of
+   * labelling it "Failed". Derived on load for the running case and persisted
+   * for the settled one, which a reload would otherwise demote to a plain
+   * error. */
   detached?: boolean;
+  /** The host journalled THIS job at admission (`/api/queue` row `durable`),
+   * captured while the row was still listable. Evidence that a vanished row
+   * means "kept and running" rather than "lost". Absent until the answer
+   * arrives, and on hosts without a durable queue. */
+  durable?: boolean;
 }
 
 /**
@@ -183,6 +194,82 @@ function serverErrorMessage(body: string | undefined): string | null {
     // Plain-text HTTP errors are already suitable for display.
   }
   return body.trim() || null;
+}
+
+/**
+ * Whether a terminal SSE error frame says the host KEPT this generation.
+ * A durable-queue host ends the stream of a job it retained across a restart
+ * with `{ retained: true, code: "server_restarting" }`; the work is still
+ * queued there and will land in that host's gallery. Older servers never send
+ * the field, so an absent or malformed body stays a hard failure.
+ */
+function terminalErrorRetained(body: string | undefined): boolean {
+  if (!body) return false;
+  try {
+    const parsed = JSON.parse(body) as { retained?: unknown };
+    return parsed.retained === true;
+  } catch {
+    return false;
+  }
+}
+
+/** How long the post-close durability lookup may take before the job settles
+ *  as an ordinary failure. The socket just died, so the host may well be gone;
+ *  the row must not sit in `running` waiting on a request that never answers. */
+const RETENTION_LOOKUP_TIMEOUT_MS = 4_000;
+
+/**
+ * Per-job durability, captured when the `queued` event arrives — while the row
+ * demonstrably exists — and read later if the stream dies.
+ *
+ * Asking AFTER the close is a race the job can lose by succeeding: if the
+ * transport drops once rendering has finished, the server has already removed
+ * the row, and the absent row reads as "not durable" for output that is
+ * sitting in the Library. Keyed by client job id, outside Pinia state (it is
+ * plumbing, and the value is a promise).
+ */
+const durabilityByJob = new Map<string, Promise<boolean>>();
+
+/** Take the host's answer while the row is still there to be asked about. */
+function captureJobDurability(
+  job: Job,
+  target: StreamTarget | undefined,
+): void {
+  if (!job.serverId || durabilityByJob.has(job.id)) return;
+  const answer = hostJournalledJob(job.serverId, target);
+  durabilityByJob.set(job.id, answer);
+  // Mirror it onto the job so consumers that never see this map — queue
+  // reconciliation above all — can tell "the host kept it" from "it vanished".
+  void answer.then((durable) => {
+    if (durable) job.durable = true;
+  });
+}
+
+/**
+ * Whether the host's queue still holds `serverId` AND journalled it.
+ *
+ * Deliberately per-job rather than `capabilities.queue.durable_queue`: a host
+ * that can promise durability still reports `durable: false` for a job it
+ * excluded at admission — no gallery target, reference-upload media, or a
+ * request over the journal's payload ceiling, which a large inline base64
+ * source image can reach. Any failure resolves `false`, so an unreachable
+ * host, a vanished row, or an older server all keep the hard failure.
+ */
+async function hostJournalledJob(
+  serverId: string,
+  target: StreamTarget | undefined,
+): Promise<boolean> {
+  try {
+    const listing = await fetchQueue(
+      target,
+      AbortSignal.timeout(RETENTION_LOOKUP_TIMEOUT_MS),
+    );
+    return (
+      listing.entries.find((entry) => entry.id === serverId)?.durable === true
+    );
+  } catch {
+    return false;
+  }
 }
 
 function markWorkStarted(job: Job) {
@@ -491,6 +578,9 @@ interface PersistedJob {
   hostId: string | null;
   hostLabel: string | null;
   serverId: string | null;
+  /** A settled row whose fate the host owns. Persisted so a reload cannot
+   * resurrect it as an ordinary failure. */
+  detached?: boolean;
 }
 
 const JOB_STORAGE_VERSION = 1;
@@ -581,7 +671,11 @@ function loadPersistedState(raw: string | null): LoadedJobsState {
     const canvasErrorJobId = newestZombie?.id ?? null;
     const loadedAt = Date.now();
     const loadedJobs = parsed.jobs.map((p) => {
-      const detached = p.state === "running" && Boolean(p.serverId);
+      // A rehydrated RUNNING row with a known server id is detached because
+      // the reconciler owns it; a settled row is detached only if it was
+      // settled that way before the reload.
+      const detached =
+        (p.state === "running" && Boolean(p.serverId)) || p.detached === true;
       const wasZombie = p.state === "running" && !detached;
       const state: Job["state"] = wasZombie ? "error" : p.state;
       const error = wasZombie
@@ -673,6 +767,7 @@ function persistJobs(jobs: Job[]) {
       hostId: j.hostId,
       hostLabel: j.hostLabel,
       serverId: j.serverId,
+      detached: j.detached === true,
     }));
     const payload: PersistedJobs = {
       version: JOB_STORAGE_VERSION,
@@ -744,11 +839,13 @@ function fireComplete(job: Job) {
 }
 
 function recordSuccessfulSettlement(job: Job) {
+  durabilityByJob.delete(job.id);
   job.settledAt = Date.now();
   canvasErrorJobId.value = null;
 }
 
 function recordFailedSettlement(job: Job) {
+  durabilityByJob.delete(job.id);
   job.state = "error";
   job.settledAt = Date.now();
   job.previewUrl = null;
@@ -767,10 +864,16 @@ function failRunningJob(id: string, error: string) {
 function settleDetachedJob(id: string, note: string) {
   const job = jobs.value.find((candidate) => candidate.id === id);
   if (!job || job.state !== "running") return;
+  durabilityByJob.delete(id);
   job.error = note;
   job.state = "error";
   job.settledAt = Date.now();
   job.previewUrl = null;
+  // `error` is the only settled state the rail models, but this is NOT a
+  // failure: the host owns the job's fate and it may already have landed in
+  // the Library. The flag is what keeps the activity strip from labelling it
+  // "Failed" for five minutes once the fleet stops listing it as active.
+  job.detached = true;
   // Deliberately no canvasErrorJobId takeover: the job may have completed
   // successfully while the page was away — the note is advisory history.
 }
@@ -871,6 +974,10 @@ function submitJob(
     body?: string;
     message?: string;
   }) => {
+    // Terminal state wins. A confirmed cancellation (or a completion) can land
+    // between the socket dying and this handler running, and a settled row must
+    // not be re-opened by a late transport event — not even to carry its note.
+    if (job.state !== "running") return;
     if (err.kind === "http") {
       const message = serverErrorMessage(err.body);
       job.error =
@@ -879,8 +986,58 @@ function submitJob(
           : err.status === 0
             ? (message ?? "generation failed")
             : `HTTP ${err.status}${message ? `: ${message}` : ""}`;
-    } else {
-      job.error = err.message ?? "network error";
+      // A terminal frame is self-describing and per-job by construction: the
+      // host sends `retained` only for a job it actually kept.
+      if (err.status === 0 && terminalErrorRetained(err.body)) {
+        settleDetachedJob(job.id, job.error ?? "");
+        return;
+      }
+      recordFailedSettlement(job);
+      return;
+    }
+    job.error = err.message ?? "network error";
+    // The socket died with no terminal frame, so the host never got to say
+    // whether it kept this job. Ask it — per job, because a host that can
+    // promise durability still excludes some jobs at admission and a false
+    // "it will finish" is worse than a failure the user can simply retry.
+    void settleFramelessClose(job, job.error, req);
+  };
+
+  /** Resolve a frameless close against the answer captured at `queued` time.
+   *  Anything short of a `durable: true` row — an unreachable host, a vanished
+   *  row, an unadmitted job, a host that never promised durability — keeps the
+   *  hard failure that has always been the behaviour here.
+   *
+   *  Deliberately NOT gated on the route's advertised `durable_queue`: a
+   *  single-host page submits with no route at all (`normalizeSubmitRoute`
+   *  collapses the origin to `null`), which is the common deployment, and
+   *  requiring one would leave the default path permanently unreachable. The
+   *  row's own `durable` flag is the stronger per-job answer anyway — only a
+   *  host with the durable queue ever reports it — so asking for it directly
+   *  is both correct for the origin and correct for a routed host whose
+   *  capabilities were never read. */
+  const settleFramelessClose = async (
+    job: Job,
+    note: string,
+    request: GenerateRequestWire | ChainRequestWire,
+  ) => {
+    const durable =
+      !!job.serverId &&
+      !requestNeedsReferenceUpload(request as GenerateRequestWire) &&
+      // Captured at `queued`, never asked now: by this point a job that
+      // SUCCEEDED has already had its row removed, and asking would read that
+      // absence as "not durable" for a print already in the Library.
+      (await (durabilityByJob.get(job.id) ?? Promise.resolve(false)));
+    // The lookup is asynchronous: a cancellation can be confirmed, or a late
+    // completion can land, while it is in flight. Re-check before EITHER
+    // settlement — replacing a confirmed cancellation with an error is as
+    // wrong as replacing it with a detached note.
+    if (job.state !== "running") return;
+    if (durable) {
+      // Soft settle: the row stops moving and keeps its note, but the canvas
+      // never claims a print failed that the host is still going to render.
+      settleDetachedJob(job.id, note);
+      return;
     }
     recordFailedSettlement(job);
   };
@@ -943,7 +1100,13 @@ function submitJob(
         await generateStream(
           transportRequest,
           {
-            onProgress: (evt) => applyProgress(job, evt),
+            onProgress: (evt) => {
+              applyProgress(job, evt);
+              // `queued` is the first event the server emits per request, and
+              // the one moment the durable row is guaranteed to be listable.
+              if (evt.type === "queued")
+                captureJobDurability(job, route?.target);
+            },
             onComplete: (evt) => {
               job.result = evt;
               job.state = "done";
@@ -1013,6 +1176,7 @@ async function cancelJob(id: string): Promise<void> {
       "Remote cancellation was not confirmed before the queue ID arrived.",
     );
   }
+  durabilityByJob.delete(id);
   job.controller.abort();
   job.state = "canceled";
   job.settledAt = Date.now();
@@ -1026,6 +1190,7 @@ function clearDoneJobs() {
 }
 
 function removeJob(id: string) {
+  durabilityByJob.delete(id);
   jobs.value = jobs.value.filter((j) => j.id !== id);
   if (selectedJobId.value === id) selectedJobId.value = null;
   if (canvasErrorJobId.value === id) canvasErrorJobId.value = null;

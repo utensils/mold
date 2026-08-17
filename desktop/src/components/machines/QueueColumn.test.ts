@@ -64,6 +64,31 @@ describe("QueueColumn", () => {
     expect(rows[0]!.text()).toContain("queued · This device");
   });
 
+  it("shows a held row as held, not as something still waiting its turn", async () => {
+    // Held rows only reach this column because the store stopped filtering
+    // them out; without this they would render as "queued · This device",
+    // which is the same lie in a new place.
+    setActivePinia(createPinia());
+    const conn = useConnectionStore();
+    conn.info = { mode: "local", baseUrl: "http://127.0.0.1:49152", apiKey: null };
+    conn.status = "ready";
+    const jobs = useJobsStore();
+    jobs.queues.local = {
+      hostId: "local",
+      entries: [entry({ state: "held", held_reason: "dispatch attempts exhausted" })],
+      paused: null,
+      caps: { canPause: true, canCancelAll: true, canReorder: false },
+      gpuOrdinals: [],
+      error: null,
+    };
+    const wrapper = mount(QueueColumn);
+    await flushPromises();
+
+    const text = wrapper.get("[data-test='queue-surface-row']").text();
+    expect(text).toContain("held");
+    expect(text).not.toContain("queued");
+  });
+
   it("cancels a queued row against its owning host", async () => {
     const { wrapper, jobs } = await mountColumn();
     const cancel = vi.spyOn(jobs, "cancelJob").mockResolvedValue(undefined);

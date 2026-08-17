@@ -89,8 +89,19 @@ function entryCode(entry: EnrichedQueueEntry): string {
     if (job && job.total > 0 && job.status === "denoising") return `${job.step}/${job.total}`;
     return entry.gpu !== undefined ? `RUNNING · GPU ${entry.gpu}` : "RUNNING";
   }
+  // Held work is parked, not in line. Showing it a position tells the operator
+  // to wait for something the host will never start on its own — and the
+  // shared waiting vocabulary below is about a row that IS in line.
+  if (entry.state === "held") return "HELD";
   // Same waiting vocabulary as Create and iPhone, resolved once in studio.
   return queueWaitCode(resolveQueueWait({ position: entry.position }));
+}
+
+/** The host's own words for why a job is parked, shown beside the row so the
+ *  operator can act on it rather than just seeing it stuck. */
+function entryHeldReason(entry: EnrichedQueueEntry): string | null {
+  if (entry.state !== "held") return null;
+  return entry.held_reason?.trim() || null;
 }
 
 /** Elapsed wall-clock for running entries; re-evaluates on each poll frame. */
@@ -326,6 +337,13 @@ function loadQueueSettings(metadata: OutputMetadata) {
                   AUTO
                 </span>
                 <span class="truncate text-caption text-ink-3">{{ modelLabel(entry.model) }}</span>
+                <span
+                  v-if="entryHeldReason(entry)"
+                  class="truncate text-caption text-ink-3"
+                  :title="entryHeldReason(entry) ?? undefined"
+                >
+                  · {{ entryHeldReason(entry) }}
+                </span>
                 <span v-if="!entry.mine" class="edge-code shrink-0 text-ink-3">OTHER CLIENT</span>
                 <span v-if="entryElapsed(entry)" class="data-mono shrink-0 text-ink-3">
                   {{ entryElapsed(entry) }}
@@ -333,7 +351,7 @@ function loadQueueSettings(metadata: OutputMetadata) {
               </div>
             </div>
             <button
-              v-if="entry.state === 'queued' || entry.mine"
+              v-if="entry.state === 'queued' || entry.state === 'held' || entry.mine"
               type="button"
               data-test="cancel-entry"
               class="h-7 shrink-0 rounded-control px-2.5 text-body text-ink-3 hover:text-stop"

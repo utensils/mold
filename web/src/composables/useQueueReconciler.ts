@@ -1,5 +1,5 @@
 import type { Ref } from "vue";
-import { fetchQueue } from "../api";
+import { fetchQueue, listGalleryFrom } from "../api";
 import { getHost, ORIGIN_HOST_ID } from "../lib/hostRegistry";
 import type { StreamTarget } from "../api";
 import type { Job, UseGenerateStream } from "./useGenerateStream";
@@ -119,14 +119,31 @@ export function startQueueReconciler(
       [...groups.values()].map(async (group) => {
         const listing = await fetchQueue(group.target ?? undefined);
         const known = new Set(listing.entries.map((e) => e.id));
-        for (const missing of reconcileRound(group.jobs, known, Date.now())) {
-          if (missing.detached) {
-            settleDetached(missing.id, DETACHED_SETTLE_NOTE);
+        const missing = reconcileRound(group.jobs, known, Date.now());
+        if (missing.length === 0) return;
+        // A row leaves the queue for two reasons this loop cannot tell apart:
+        // the job died, or it FINISHED. Absence decides neither — so ask the
+        // host what it actually has. A print stamped with the job's own id is
+        // proof it finished; the host's `durable` promise is proof it will.
+        // Without either, the failure path stands: soft-settling a job that
+        // genuinely died would retire its row from the strip and show no
+        // output, leaving the user with silence instead of a wrong message.
+        const produced = await listGalleryFrom(group.target ?? undefined)
+          .then(
+            (prints) =>
+              new Set(
+                prints
+                  .map((print) => print.metadata?.job_id)
+                  .filter((id): id is string => !!id),
+              ),
+          )
+          .catch(() => new Set<string>());
+        for (const job of missing) {
+          const finished = !!job.serverId && produced.has(job.serverId);
+          if (job.detached || job.durable === true || finished) {
+            settleDetached(job.id, DETACHED_SETTLE_NOTE);
           } else {
-            failRunning(
-              missing.id,
-              "job not found on server — connection lost",
-            );
+            failRunning(job.id, "job not found on server — connection lost");
           }
         }
       }),

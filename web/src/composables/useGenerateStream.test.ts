@@ -19,7 +19,7 @@ import type {
   GenerateStreamHandlers,
   StreamTarget,
 } from "../api";
-import { cancelQueueJob } from "../api";
+import { cancelQueueJob, fetchQueue } from "../api";
 import type { HostRoute } from "../lib/hostRouting";
 
 function persistedPayload(jobs: unknown[]): string {
@@ -39,6 +39,7 @@ let lastChainTarget: StreamTarget | undefined;
 
 vi.mock("../api", () => ({
   cancelQueueJob: vi.fn().mockResolvedValue(undefined),
+  fetchQueue: vi.fn().mockResolvedValue({ entries: [] }),
   generateStream: vi.fn(
     (
       _req: GenerateRequestWire,
@@ -62,6 +63,21 @@ vi.mock("../api", () => ({
       lastChainTarget = target;
       return Promise.resolve();
     },
+  ),
+}));
+
+vi.mock("@studio/api/referenceUploads", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@studio/api/referenceUploads")>()),
+  // Keep the real `requestNeedsReferenceUpload` predicate; only the network
+  // side of the lease is stubbed so a submission can reach the stream.
+  prepareReferenceUploads: vi.fn(
+    ({ request }: { request: GenerateRequestWire }) =>
+      Promise.resolve({
+        request,
+        expiresAtMs: Date.now() + 60_000,
+        requestScopeSha256: "a".repeat(64),
+        cancel: () => Promise.resolve(),
+      }),
   ),
 }));
 
@@ -179,6 +195,32 @@ describe("loadPersistedJobs dead-letters running rows on rehydrate", () => {
     // instead of an empty card.
     expect(jobs[0].progress.stage).toBe("Denoising");
     expect(jobs[0].progress.step).toBe(5);
+  });
+
+  it("keeps a detached settle detached across a reload", () => {
+    // Without this the row comes back as a plain error and the strip labels a
+    // print the host finished "Failed" — the same lie, one refresh later.
+    const raw = persistedPayload([
+      persisted({
+        id: "retained-1",
+        state: "error",
+        error: "mold is restarting; this generation was kept in the queue",
+        serverId: "srv-1",
+        detached: true,
+      }),
+    ]);
+
+    const jobs = __testing__.loadPersistedJobs(raw);
+
+    expect(jobs[0].detached).toBe(true);
+  });
+
+  it("does not invent a detached flag for an ordinary persisted failure", () => {
+    const raw = persistedPayload([
+      persisted({ id: "failed-1", state: "error", error: "out of memory" }),
+    ]);
+
+    expect(__testing__.loadPersistedJobs(raw)[0].detached).not.toBe(true);
   });
 
   it("gives a failure discovered from a running row current canvas authority", () => {
@@ -492,6 +534,69 @@ describe("workStarted tracking", () => {
     expect(job.state).toBe("done");
     expect(job.error).toBeNull();
     expect(stream.canvasErrorJobId.value).toBeNull();
+  });
+
+  it("settles a retained terminal frame softly instead of as a hard failure", () => {
+    const stream = useGenerateStream();
+    const id = stream.submit(singleGen({ prompt: "kept in the queue" }), {
+      kind: "single",
+    });
+    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
+    job.previewUrl = "data:image/png;base64,preview";
+
+    lastSingleHandlers!.onError({
+      kind: "http",
+      status: 0,
+      body: JSON.stringify({
+        message: "mold is restarting; this generation was kept in the queue",
+        retained: true,
+        code: "server_restarting",
+      }),
+    });
+
+    expect(job.state).toBe("error");
+    expect(job.error).toBe(
+      "mold is restarting; this generation was kept in the queue",
+    );
+    expect(job.settledAt).not.toBeNull();
+    expect(job.previewUrl).toBeNull();
+    // The host kept the work: it may well finish. The canvas must not claim
+    // this print failed.
+    expect(stream.canvasErrorJobId.value).toBeNull();
+    // ...and the strip must not either, once the job leaves the host's active
+    // work by FINISHING. `detached` is what retires the row.
+    expect(job.detached).toBe(true);
+  });
+
+  it("marks a reconciler-detached settle the same way", () => {
+    const stream = useGenerateStream();
+    const id = stream.submit(singleGen({ prompt: "away while it ran" }), {
+      kind: "single",
+    });
+    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
+
+    stream.settleDetached(id, "check the Library for the result");
+
+    expect(job.state).toBe("error");
+    expect(job.detached).toBe(true);
+  });
+
+  it("keeps a non-retained terminal frame the canvas failure authority", () => {
+    const stream = useGenerateStream();
+    const id = stream.submit(singleGen({ prompt: "really failed" }), {
+      kind: "single",
+    });
+    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
+
+    lastSingleHandlers!.onError({
+      kind: "http",
+      status: 0,
+      body: JSON.stringify({ message: "host ran out of memory" }),
+    });
+
+    expect(job.error).toBe("host ran out of memory");
+    expect(stream.canvasErrorJobId.value).toBe(id);
+    expect(job.detached).not.toBe(true);
   });
 
   it("does not treat pre-queue info as work, but does treat post-queue info as work", () => {
@@ -1095,6 +1200,410 @@ describe("useGenerateStream host routing", () => {
     const stream = useGenerateStream();
     stream.submit(singleGen({ frames: 1 }), { kind: "single" });
     expect(lastSingleTarget).toBeUndefined();
+  });
+
+  /** Submit to a routed host, latch a server id, then kill the socket with no
+   *  terminal frame — the frameless close this gate exists for. */
+  async function networkCloseWithServerId(serverId = "srv-net") {
+    const stream = useGenerateStream();
+    const id = stream.submit(
+      singleGen({ frames: 1 }),
+      { kind: "single" },
+      studioRoute,
+    );
+    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
+    lastSingleHandlers!.onProgress({
+      type: "queued",
+      position: 1,
+      id: serverId,
+    });
+    lastSingleHandlers!.onError({
+      kind: "network",
+      message: "connection lost",
+    });
+    await vi.waitFor(() => expect(job.state).not.toBe("running"));
+    return { stream, id, job };
+  }
+
+  it("softly detaches a frameless close on the ORIGIN host, the default path", async () => {
+    // Single-host web submits with NO route: `normalizeSubmitRoute` collapses
+    // the origin to `null`. This is the common deployment — someone opening
+    // mold's own web UI — so the lookup must not require an explicit route.
+    vi.mocked(fetchQueue).mockResolvedValue({
+      entries: [
+        {
+          id: "srv-origin",
+          model: "m",
+          state: "queued",
+          started_at_unix_ms: 0,
+          position: 0,
+          durable: true,
+        },
+      ],
+    } as never);
+
+    const stream = useGenerateStream();
+    const id = stream.submit(singleGen({ frames: 1 }), { kind: "single" });
+    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
+    lastSingleHandlers!.onProgress({
+      type: "queued",
+      position: 1,
+      id: "srv-origin",
+    });
+    lastSingleHandlers!.onError({
+      kind: "network",
+      message: "connection lost",
+    });
+    await vi.waitFor(() => expect(job.state).not.toBe("running"));
+
+    // Undefined target === the serving origin's relative URL.
+    expect(fetchQueue).toHaveBeenCalled();
+    expect(vi.mocked(fetchQueue).mock.lastCall?.[0]).toBeUndefined();
+    expect(stream.canvasErrorJobId.value).toBeNull();
+  });
+
+  it("keeps an origin frameless close hard when the origin did not journal it", async () => {
+    vi.mocked(fetchQueue).mockResolvedValue({
+      entries: [
+        {
+          id: "srv-origin",
+          model: "m",
+          state: "queued",
+          started_at_unix_ms: 0,
+          position: 0,
+          durable: false,
+        },
+      ],
+    } as never);
+
+    const stream = useGenerateStream();
+    const id = stream.submit(singleGen({ frames: 1 }), { kind: "single" });
+    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
+    lastSingleHandlers!.onProgress({
+      type: "queued",
+      position: 1,
+      id: "srv-origin",
+    });
+    lastSingleHandlers!.onError({
+      kind: "network",
+      message: "connection lost",
+    });
+    await vi.waitFor(() => expect(job.state).not.toBe("running"));
+
+    expect(stream.canvasErrorJobId.value).toBe(id);
+  });
+
+  it("softly detaches a frameless close when the host journalled THIS job", async () => {
+    vi.mocked(fetchQueue).mockResolvedValue({
+      entries: [
+        {
+          id: "srv-net",
+          model: "m",
+          state: "queued",
+          started_at_unix_ms: 0,
+          position: 0,
+          durable: true,
+        },
+      ],
+    } as never);
+
+    const { stream, job } = await networkCloseWithServerId();
+
+    expect(vi.mocked(fetchQueue).mock.lastCall?.[0]).toEqual({
+      baseUrl: "http://studio:7680",
+      apiKey: "sk-studio",
+    });
+    expect(job.state).toBe("error");
+    expect(stream.canvasErrorJobId.value).toBeNull();
+  });
+
+  it("keeps a frameless close hard when the host did not journal this job", async () => {
+    // Reachable on web: a large inline base64 source image can exceed the
+    // journal's payload ceiling, so the host admits the job but keeps no row.
+    vi.mocked(fetchQueue).mockResolvedValue({
+      entries: [
+        {
+          id: "srv-net",
+          model: "m",
+          state: "queued",
+          started_at_unix_ms: 0,
+          position: 0,
+          durable: false,
+        },
+      ],
+    } as never);
+
+    const { stream, id, job } = await networkCloseWithServerId();
+
+    expect(stream.canvasErrorJobId.value).toBe(id);
+    expect(job.error).toBe("connection lost");
+  });
+
+  it("keeps a frameless close hard when the row is gone or the lookup fails", async () => {
+    vi.mocked(fetchQueue).mockResolvedValue({ entries: [] } as never);
+    const gone = await networkCloseWithServerId();
+    expect(gone.stream.canvasErrorJobId.value).toBe(gone.id);
+
+    vi.mocked(fetchQueue).mockRejectedValue(new Error("host unreachable"));
+    const failed = await networkCloseWithServerId("srv-net-2");
+    expect(failed.stream.canvasErrorJobId.value).toBe(failed.id);
+    expect(failed.job.error).toBe("connection lost");
+  });
+
+  it("captures durability at queued time, so a finished job is not called failed", async () => {
+    // The race: rendering finishes, the server removes the row, and only THEN
+    // does the transport drop before the complete frame lands. Asking after
+    // the close reads the absent row as "not durable" and reports a failed
+    // generation for output already sitting in the Library.
+    vi.mocked(fetchQueue).mockResolvedValue({
+      entries: [
+        {
+          id: "srv-finished",
+          model: "m",
+          state: "running",
+          started_at_unix_ms: 0,
+          position: 0,
+          durable: true,
+        },
+      ],
+    } as never);
+
+    const stream = useGenerateStream();
+    const id = stream.submit(
+      singleGen({ frames: 1 }),
+      { kind: "single" },
+      studioRoute,
+    );
+    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
+    lastSingleHandlers!.onProgress({
+      type: "queued",
+      position: 1,
+      id: "srv-finished",
+    });
+    // The durability answer is taken while the row demonstrably exists.
+    await vi.waitFor(() => expect(vi.mocked(fetchQueue)).toHaveBeenCalled());
+
+    // By the time the socket dies the job has finished and the row is gone.
+    vi.mocked(fetchQueue).mockResolvedValue({ entries: [] } as never);
+    lastSingleHandlers!.onError({
+      kind: "network",
+      message: "connection lost",
+    });
+    await vi.waitFor(() => expect(job.state).not.toBe("running"));
+
+    expect(stream.canvasErrorJobId.value).toBeNull();
+  });
+
+  it("asks once at queued time, not again after the close", async () => {
+    // The singleton's job list spans this file, so count only THIS job's asks.
+    vi.mocked(fetchQueue).mockClear();
+    vi.mocked(fetchQueue).mockResolvedValue({
+      entries: [
+        {
+          id: "srv-once",
+          model: "m",
+          state: "queued",
+          started_at_unix_ms: 0,
+          position: 0,
+          durable: true,
+        },
+      ],
+    } as never);
+
+    const stream = useGenerateStream();
+    const id = stream.submit(
+      singleGen({ frames: 1 }),
+      { kind: "single" },
+      studioRoute,
+    );
+    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
+    lastSingleHandlers!.onProgress({
+      type: "queued",
+      position: 1,
+      id: "srv-once",
+    });
+    await vi.waitFor(() =>
+      expect(vi.mocked(fetchQueue)).toHaveBeenCalledTimes(1),
+    );
+
+    vi.mocked(fetchQueue).mockClear();
+    lastSingleHandlers!.onError({
+      kind: "network",
+      message: "connection lost",
+    });
+    await vi.waitFor(() => expect(job.state).not.toBe("running"));
+
+    // Nothing is asked after the close — that question can no longer be
+    // answered honestly, because a job that SUCCEEDED has no row left.
+    expect(vi.mocked(fetchQueue)).not.toHaveBeenCalled();
+  });
+
+  it("never overwrites a cancellation that lands while the lookup is in flight", async () => {
+    // The lookup is asynchronous, so a cancel can be confirmed between the
+    // close and the answer. Cancellation is terminal: neither settlement may
+    // replace it, and neither may hand it canvas failure authority.
+    let releaseLookup: (value: unknown) => void = () => {};
+    vi.mocked(fetchQueue).mockReturnValue(
+      new Promise((resolve) => {
+        releaseLookup = resolve;
+      }) as never,
+    );
+
+    const stream = useGenerateStream();
+    const id = stream.submit(
+      singleGen({ frames: 1 }),
+      { kind: "single" },
+      studioRoute,
+    );
+    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
+    lastSingleHandlers!.onProgress({
+      type: "queued",
+      position: 1,
+      id: "srv-cancel",
+    });
+    lastSingleHandlers!.onError({
+      kind: "network",
+      message: "connection lost",
+    });
+
+    await stream.cancel(id);
+    expect(job.state).toBe("canceled");
+
+    // The host answers after the cancel: not journalled, i.e. the hard path.
+    releaseLookup({ entries: [] });
+    await vi.waitFor(() => expect(vi.mocked(fetchQueue)).toHaveBeenCalled());
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(job.state).toBe("canceled");
+    expect(stream.canvasErrorJobId.value).toBeNull();
+  });
+
+  it("never overwrites a cancellation with the soft detached settle either", async () => {
+    let releaseLookup: (value: unknown) => void = () => {};
+    vi.mocked(fetchQueue).mockReturnValue(
+      new Promise((resolve) => {
+        releaseLookup = resolve;
+      }) as never,
+    );
+
+    const stream = useGenerateStream();
+    const id = stream.submit(
+      singleGen({ frames: 1 }),
+      { kind: "single" },
+      studioRoute,
+    );
+    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
+    lastSingleHandlers!.onProgress({
+      type: "queued",
+      position: 1,
+      id: "srv-cancel-2",
+    });
+    lastSingleHandlers!.onError({
+      kind: "network",
+      message: "connection lost",
+    });
+
+    await stream.cancel(id);
+    const cancelledAt = job.settledAt;
+
+    // ...and the durable answer must not resurrect it either.
+    releaseLookup({
+      entries: [
+        {
+          id: "srv-cancel-2",
+          model: "m",
+          state: "queued",
+          started_at_unix_ms: 0,
+          position: 0,
+          durable: true,
+        },
+      ],
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // Still cancelled, and never re-settled: a detached settle would have
+    // stamped a new `settledAt` and reopened the row's story. (The note itself
+    // was written by the still-running row before the cancel landed; the state
+    // is what the UI reads, and Cancelled wins.)
+    expect(job.state).toBe("canceled");
+    expect(job.settledAt).toBe(cancelledAt);
+  });
+
+  it("keeps a frameless close hard when no server id was ever assigned", async () => {
+    const stream = useGenerateStream();
+    const id = stream.submit(
+      singleGen({ frames: 1 }),
+      { kind: "single" },
+      studioRoute,
+    );
+    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
+    vi.mocked(fetchQueue).mockClear();
+
+    lastSingleHandlers!.onError({
+      kind: "network",
+      message: "connection lost",
+    });
+
+    // Nothing to look up, and an unadmitted job was never journalled.
+    expect(fetchQueue).not.toHaveBeenCalled();
+    expect(job.state).toBe("error");
+    expect(stream.canvasErrorJobId.value).toBe(id);
+  });
+
+  it("keeps a reference-upload network close a hard failure even on a durable host", async () => {
+    // Reference-upload media is excluded from the journal at admission, so
+    // this job reports `durable: false` on a host that advertises the durable
+    // queue. Promising it will finish would be a lie.
+    const stream = useGenerateStream();
+    const id = stream.submit(
+      singleGen({
+        model: "minimax-h3-ref2va",
+        frames: 124,
+        references: [
+          {
+            kind: "image",
+            media: { authority: "inline", data: "PRIVATE-IMAGE-BYTES" },
+            provenance: { name: "identity.png", sha256: "a".repeat(64) },
+            mime_type: "image/png",
+            width: 32,
+            height: 24,
+          },
+        ],
+      } as Partial<GenerateRequestWire>),
+      { kind: "single" },
+      studioRoute,
+    );
+    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
+    // The lease is awaited before the stream opens.
+    await vi.waitFor(() => expect(job.streamStarted).toBe(true));
+
+    lastSingleHandlers!.onError({
+      kind: "network",
+      message: "connection lost",
+    });
+
+    expect(stream.canvasErrorJobId.value).toBe(id);
+    expect(job.error).toBe("connection lost");
+  });
+
+  it("keeps a network close a hard failure against a host without a durable queue", () => {
+    const stream = useGenerateStream();
+    const id = stream.submit(
+      singleGen({ frames: 1 }),
+      { kind: "single" },
+      studioRoute,
+    );
+    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
+
+    lastSingleHandlers!.onError({
+      kind: "network",
+      message: "connection lost",
+    });
+
+    expect(job.error).toBe("connection lost");
+    expect(stream.canvasErrorJobId.value).toBe(id);
   });
 
   it("attributes the job to the host it was routed to", () => {

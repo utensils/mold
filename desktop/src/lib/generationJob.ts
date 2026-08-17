@@ -41,8 +41,22 @@ export interface Job {
   /** Total clips reported by the chain stream. */
   chainStageCount: number | null;
   error: string | null;
-  /** Structured transport-close marker used by iOS resume reconciliation. */
+  /** Structured transport-close marker used by resume reconciliation. */
   interrupted: boolean;
+  /** The host ended this job's stream while KEEPING the job: it journalled the
+   *  work, is restarting, and will run it. Reconciliation waits far longer for
+   *  a host that said this than for one that merely stopped answering. */
+  retainedByHost: boolean;
+  /** The server id this row USED to hold, released when reconciliation stopped
+   *  tracking the job so the host's own fleet row is no longer suppressed by
+   *  the id match. Kept because it is still the exact key for the print the
+   *  host eventually saves (`OutputMetadata.job_id`). */
+  recoveredJobId?: string;
+  /** When a reconciliation pass last finished for this job. Two entry points
+   *  run the same recovery — the shared store as part of a batch settling, and
+   *  the iPhone shell on foreground resume — and a pass that ended without a
+   *  verdict leaves the job eligible for both. */
+  reconciledAtUnixMs?: number;
   /** Client submission time used to avoid joining a later fixed-seed duplicate.
    *  Also the print's `createdAtMs` in the shared activity merge — a real wall
    *  clock, never the clientId counter. */
@@ -99,6 +113,7 @@ export function newJob(req: GenerateRequest): Job {
     chainStageCount: null,
     error: null,
     interrupted: false,
+    retainedByHost: false,
     submittedAtUnixMs: Date.now(),
     settledAtMs: null,
     resultUrl: null,

@@ -21,6 +21,13 @@ vi.mock("../lib/gallery/media", async (importOriginal) => ({
   evictMedia: (...a: unknown[]) => evictMedia(...a),
 }));
 
+/** The live primary connection, re-pointable mid-test. */
+const primary = vi.hoisted(() => ({
+  target: { baseUrl: "http://primary:7680", apiKey: "pk" } as {
+    baseUrl: string;
+    apiKey: string | null;
+  } | null,
+}));
 const apiFetchTo = vi.fn().mockResolvedValue(new Response(null, { status: 200 }));
 const apiJsonTo = vi.fn().mockResolvedValue([]);
 vi.mock("../lib/api/client", () => ({
@@ -34,7 +41,10 @@ vi.mock("../lib/api/client", () => ({
   },
   apiFetchTo: (...a: unknown[]) => apiFetchTo(...a),
   apiJsonTo: (...a: unknown[]) => apiJsonTo(...a),
-  currentTarget: () => ({ baseUrl: "http://primary:7680", apiKey: "pk" }),
+  currentTarget: () => {
+    if (!primary.target) throw new Error("No engine connected.");
+    return primary.target;
+  },
 }));
 
 vi.mock("../lib/notify", () => ({
@@ -52,6 +62,7 @@ vi.mock("../lib/ipc", () => ({
   },
 }));
 
+import { notifyGenerationFailed } from "../lib/notify";
 import { useGenerationStore, suggestOutputFilename, needsHostRoute } from "./generation";
 import { useAppPrefsStore } from "./appPrefs";
 import { useConnectionStore } from "./connection";
@@ -93,6 +104,7 @@ function completeFrame() {
 
 beforeEach(() => {
   setActivePinia(createPinia());
+  primary.target = { baseUrl: "http://primary:7680", apiKey: "pk" };
   vi.clearAllMocks();
   apiFetchTo.mockResolvedValue(new Response(null, { status: 200 }));
   streamableMediaUrl.mockResolvedValue("https://hal9000/media/generated-video");
@@ -718,6 +730,147 @@ describe("generation store multi-host routing", () => {
     expect(target.baseUrl).toBe("http://hal9000:7680");
     expect(path).toBe("/api/queue/srv-1");
     expect(init.method).toBe("DELETE");
+  });
+
+  it("reconciles against the host that ACCEPTED the job, not the current primary", async () => {
+    // Nothing is frozen at submit when no engine is connected yet, so recovery
+    // used to ask whatever the primary had BECOME. Against a different machine
+    // that is destructive: it can claim a print that is not ours, or DELETE a
+    // queued row on a host that never ran our work. The frozen-route invariant
+    // (CLAUDE.md) exists for exactly this.
+    primary.target = null; // submit finds no connection
+    const asked: string[] = [];
+    apiJsonTo.mockImplementation((target: { baseUrl: string }, path: string) => {
+      asked.push(`${target?.baseUrl ?? "?"}${path}`);
+      if (path === "/api/queue") return Promise.resolve({ entries: [] });
+      return Promise.resolve([]);
+    });
+    sseStream.mockImplementation(
+      (_path: string, opts: { onEvent: (e: string, d: string) => void }) => {
+        opts.onEvent("progress", JSON.stringify({ type: "queued", position: 1, id: "srv-1" }));
+        // The user switches machines while this job is in flight.
+        primary.target = { baseUrl: "http://other:7680", apiKey: "ok" };
+        return Promise.resolve();
+      },
+    );
+    const store = useGenerationStore();
+    const { settled } = store.submitBatch(request(), 1);
+    // The engine comes up between submit and the stream opening.
+    primary.target = { baseUrl: "http://accepted:7680", apiKey: "ak" };
+    await settled;
+
+    expect(asked.length).toBeGreaterThan(0);
+    expect(asked.every((call) => call.startsWith("http://accepted:7680"))).toBe(true);
+    expect(asked.some((call) => call.startsWith("http://other:7680"))).toBe(false);
+  });
+
+  it("reconciles nothing at all when no host can be named for the job", async () => {
+    // Never connected: the request reached no machine, so there is no host to
+    // ask and every question would be about someone else's queue.
+    primary.target = null;
+    apiJsonTo.mockImplementation(() => Promise.resolve([]));
+    sseStream.mockRejectedValue(new Error("No engine connected."));
+    const store = useGenerationStore();
+    const { jobs, settled } = store.submitBatch(request(), 1);
+    await settled;
+
+    expect(apiJsonTo).not.toHaveBeenCalled();
+    expect(jobs[0]?.status).toBe("error");
+  });
+
+  it("reconciles a retained job to the print the host finished, never a failure", async () => {
+    // Desktop Create renders `status: "error"` as a Failed row AND hides the
+    // matching live fleet row by id, so settling a retained job as an error
+    // tells the user it failed and hides the work that would correct them.
+    let queuePolls = 0;
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/queue") {
+        queuePolls += 1;
+        return Promise.resolve({
+          entries:
+            queuePolls === 1
+              ? [
+                  {
+                    id: "srv-9",
+                    model: "flux2-klein",
+                    state: "queued",
+                    position: 0,
+                    durable: true,
+                  },
+                ]
+              : [],
+        });
+      }
+      if (path === "/api/gallery") {
+        return Promise.resolve([
+          {
+            filename: "resumed.png",
+            // Newer than the submission under test: gallery recovery is age-bounded.
+            get timestamp() {
+              return Math.floor(Date.now() / 1000) + 5;
+            },
+            format: "png",
+            metadata: {
+              prompt: "a cat",
+              model: "flux2-klein",
+              seed: 7,
+              steps: 4,
+              guidance: 3.5,
+              width: 512,
+              height: 512,
+            },
+          },
+        ]);
+      }
+      return Promise.resolve([]);
+    });
+    sseStream.mockImplementation(
+      (_path: string, opts: { onEvent: (e: string, d: string) => void }) => {
+        opts.onEvent("progress", JSON.stringify({ type: "queued", position: 1, id: "srv-9" }));
+        opts.onEvent(
+          "progress",
+          JSON.stringify({ type: "denoise_step", step: 1, total: 4, elapsed_ms: 10 }),
+        );
+        opts.onEvent(
+          "error",
+          JSON.stringify({
+            message: "mold is restarting; this generation was kept in the queue",
+            retained: true,
+            code: "server_restarting",
+          }),
+        );
+        return Promise.resolve();
+      },
+    );
+    const store = useGenerationStore();
+    const { jobs, settled } = store.submitBatch({ ...request(), seed: 7 }, 1, halRoute);
+    await settled;
+    await vi.waitFor(() => expect(jobs[0]?.status).not.toBe("loading"));
+
+    // The host kept it, so the row is reclaimed as live work and then settled
+    // by the print that actually landed — never announced as a failure.
+    expect(queuePolls).toBeGreaterThan(0);
+    expect(jobs[0]?.status).toBe("complete");
+    expect(jobs[0]?.result?.filename).toBe("resumed.png");
+    expect(notifyGenerationFailed).not.toHaveBeenCalled();
+    // The frame's marking survives the reconcile: it is what buys a restarting
+    // host a far longer wait than a merely unreachable one.
+    expect(jobs[0]?.retainedByHost).toBe(true);
+  });
+
+  it("keeps an ordinary server error a final failure", async () => {
+    sseStream.mockImplementation(
+      (_path: string, opts: { onEvent: (e: string, d: string) => void }) => {
+        opts.onEvent("error", JSON.stringify({ message: "host ran out of memory" }));
+        return Promise.resolve();
+      },
+    );
+    const store = useGenerationStore();
+    const { jobs, settled } = store.submitBatch(request(), 1, halRoute);
+    await settled;
+
+    expect(jobs[0]?.interrupted).toBe(false);
+    expect(notifyGenerationFailed).toHaveBeenCalled();
   });
 
   it("posts only the supported auto-expand body and maps chain progress/completion", async () => {
