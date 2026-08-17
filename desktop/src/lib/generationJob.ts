@@ -46,6 +46,11 @@ export interface Job {
    *  work, is restarting, and will run it. Reconciliation waits far longer for
    *  a host that said this than for one that merely stopped answering. */
   retainedByHost: boolean;
+  /** The server id this row USED to hold, released when reconciliation stopped
+   *  tracking the job so the host's own fleet row is no longer suppressed by
+   *  the id match. Kept because it is still the exact key for the print the
+   *  host eventually saves (`OutputMetadata.job_id`). */
+  recoveredJobId?: string;
   /** Client submission time used to avoid joining a later fixed-seed duplicate.
    *  Also the print's `createdAtMs` in the shared activity merge — a real wall
    *  clock, never the clientId counter. */

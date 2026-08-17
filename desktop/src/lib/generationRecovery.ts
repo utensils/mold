@@ -105,6 +105,7 @@ export function isInterruptedGenerationError(error: string | null | undefined): 
 type GalleryMatchJob = Pick<
   Job,
   | "id"
+  | "recoveredJobId"
   | "visualSeed"
   | "model"
   | "prompt"
@@ -275,7 +276,8 @@ function matchGalleryPrintWithIdentity(
   // against a HOST print stamp), and it separates same-second fixed-seed twins
   // that every other field in this join reproduces identically. The heuristic
   // stays as the fallback for hosts that predate the stamp.
-  if (job.id) {
+  const stampedId = job.id || job.recoveredJobId;
+  if (stampedId) {
     // One job can legitimately own two prints: a replay that crashed after
     // publishing leaves the original and the re-render, both stamped. Take the
     // NEWEST rather than the first listed — `/api/gallery` happens to sort
@@ -283,7 +285,7 @@ function matchGalleryPrintWithIdentity(
     // states, or an unrelated change to that endpoint silently hands back the
     // older copy and the stale-print bug returns wearing someone else's diff.
     const stamped = prints
-      .filter((print) => print.metadata?.job_id === job.id)
+      .filter((print) => print.metadata?.job_id === stampedId)
       .reduce<GalleryImage | null>(
         (newest, print) =>
           !newest || (print.timestamp ?? 0) > (newest.timestamp ?? 0) ? print : newest,
@@ -423,6 +425,15 @@ function settleUnreconciled(job: Job, message: string): void {
   job.error = message;
   job.status = "error";
   job.interrupted = true;
+  // Release the server id. Desktop suppresses every fleet row whose id matches
+  // a local job — that is how one job renders as one row — so a row this
+  // client has stopped tracking would otherwise HIDE the host's own row when
+  // it comes back and finishes the work, and the print would land unseen. The
+  // id is kept aside: it is still the exact key for the print the host saves.
+  if (job.id) {
+    job.recoveredJobId = job.id;
+    job.id = "";
+  }
 }
 
 function settleCompleted(job: Job, complete: CompleteEvent, opts: GenerationRecoveryOptions): void {

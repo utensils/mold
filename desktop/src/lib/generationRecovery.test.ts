@@ -731,6 +731,40 @@ describe("reconcileInterruptedGenerationJobs", () => {
     );
   });
 
+  it("releases the server id when it gives up, so the host's own row can surface", async () => {
+    // Desktop suppresses every fleet row whose id matches a local job — that
+    // is how a live server row and a local row stay one row. Holding the id on
+    // a row this client has stopped tracking means the resumed, server-owned
+    // work is hidden when the host comes back and finishes it: the print lands
+    // and the user never sees it. Releasing the id lets the host's row through;
+    // the id is retained separately so a later pass can still match the print
+    // exactly by `metadata.job_id`.
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/queue") return Promise.resolve({ entries: [] });
+      if (path === "/api/gallery") return Promise.resolve([]);
+      return Promise.reject(new Error(`Unexpected path ${path}`));
+    });
+    const job = makeJob({ retainedByHost: true });
+    await reconcileInterruptedGenerationJobs([job], options());
+
+    expect(job.id).toBe("");
+    expect(job.recoveredJobId).toBe("job-9");
+  });
+
+  it("matches a print by a released id on a later pass", async () => {
+    // Deliberately older than the submission, so ONLY the released id can
+    // match it — the heuristic's age fence rejects it outright.
+    const stamped: GalleryImage = {
+      ...galleryPrint,
+      filename: "landed-later.png",
+      timestamp: Math.floor(Date.now() / 1000) - 600,
+      metadata: { ...galleryPrint.metadata, job_id: "job-9" },
+    };
+    const job = makeJob({ id: "", recoveredJobId: "job-9" });
+
+    expect(await matchGalleryPrint(job, [stamped])).toBe(stamped);
+  });
+
   it("gives up on a retained job that never comes back, without claiming it failed", async () => {
     apiJsonTo.mockImplementation((_target: unknown, path: string) => {
       if (path === "/api/queue") return Promise.resolve({ entries: [] });
