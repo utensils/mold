@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
 use std::ops::ControlFlow;
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -45,11 +45,6 @@ pub struct ChainJobRunnerHandle {
     events: Arc<JobEventBus>,
     job_locks: Arc<JobMutationLocks>,
     claims: Arc<EphemeralClaims>,
-}
-
-pub struct CancelRegistry {
-    tokens: Mutex<HashMap<String, mold_inference::InferenceCancellationToken>>,
-    shutting_down: AtomicBool,
 }
 
 struct ActiveChainAttemptGuard {
@@ -251,6 +246,8 @@ pub struct ScheduledChainStageWork {
     pub before_second_fence: Option<Box<dyn FnOnce() + Send>>,
 }
 
+pub use crate::generation_cancel::CancelRegistry;
+
 pub trait QueueProbe: Send + Sync {
     fn small_jobs_waiting(&self) -> usize;
 }
@@ -258,95 +255,6 @@ pub trait QueueProbe: Send + Sync {
 struct StageArtifactPaths {
     segment_rel: String,
     preview_written: bool,
-}
-
-impl CancelRegistry {
-    pub fn new() -> Self {
-        Self {
-            tokens: Mutex::new(HashMap::new()),
-            shutting_down: AtomicBool::new(false),
-        }
-    }
-
-    fn register(&self, job_id: &str) {
-        let mut tokens = self
-            .tokens
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let token = tokens.entry(job_id.to_string()).or_default();
-        // The load happens while the token map is locked. If shutdown races
-        // after this load, request_all() must acquire the same lock and will
-        // observe/cancel this token; if shutdown won first, cancel it here.
-        if self.shutting_down.load(Ordering::Acquire) {
-            token.cancel();
-        }
-    }
-
-    fn unregister(&self, job_id: &str) {
-        self.tokens
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(job_id);
-    }
-
-    fn request(&self, job_id: &str) -> bool {
-        let token = self
-            .tokens
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(job_id)
-            .cloned();
-        if let Some(token) = token {
-            token.cancel();
-            true
-        } else {
-            false
-        }
-    }
-
-    fn request_all(&self) -> usize {
-        // Fence future registrations before snapshotting current attempts.
-        // register() checks this flag while holding the token-map lock, making
-        // a claim racing shutdown either visible here or cancelled on insert.
-        self.shutting_down.store(true, Ordering::Release);
-        let tokens = self
-            .tokens
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .values()
-            .cloned()
-            .collect::<Vec<_>>();
-        for token in &tokens {
-            token.cancel();
-        }
-        tokens.len()
-    }
-
-    fn is_cancelled(&self, job_id: &str) -> bool {
-        self.tokens
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(job_id)
-            .is_some_and(mold_inference::InferenceCancellationToken::is_cancelled)
-    }
-
-    fn token(&self, job_id: &str) -> mold_inference::InferenceCancellationToken {
-        let mut tokens = self
-            .tokens
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let token = tokens.entry(job_id.to_string()).or_default();
-        if self.shutting_down.load(Ordering::Acquire) {
-            token.cancel();
-        }
-        token.clone()
-    }
-}
-
-impl Default for CancelRegistry {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 impl EphemeralClaims {
@@ -4020,6 +3928,7 @@ mod tests {
                     fatal_cuda_error: Arc::new(AtomicBool::new(false)),
                     fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
                     queue_journal: Arc::new(crate::queue_journal::QueueJournal::disabled()),
+                    generation_cancel: Arc::new(crate::generation_cancel::CancelRegistry::new()),
                     shutdown_requested: AtomicBool::new(false),
                     drain_state: std::sync::atomic::AtomicU8::new(crate::gpu_pool::DRAIN_RUNNING),
                     owner_thread_id: std::sync::OnceLock::new(),
@@ -8480,12 +8389,7 @@ mod tests {
             .unwrap();
         assert_eq!(stored.state, ChainJobState::Failed);
         assert!(
-            !deps
-                .cancel
-                .tokens
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .contains_key(&row.id),
+            !deps.cancel.is_registered(&row.id),
             "actor attempt token must clear even when the turn fails before authority bootstrap"
         );
     }

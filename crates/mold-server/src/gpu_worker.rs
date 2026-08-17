@@ -3561,6 +3561,18 @@ impl GenerationEventSink<'_> {
     }
 }
 
+/// Unregisters a singleton generation's cancellation token on every exit path.
+struct SingletonCancelGuard<'a> {
+    registry: &'a crate::generation_cancel::CancelRegistry,
+    job_id: String,
+}
+
+impl Drop for SingletonCancelGuard<'_> {
+    fn drop(&mut self) {
+        self.registry.unregister(&self.job_id);
+    }
+}
+
 fn process_job_with_sink(
     worker: &GpuWorker,
     mut job: GpuJob,
@@ -3631,9 +3643,23 @@ fn process_job_with_sink(
         .batch_child
         .as_ref()
         .map(|child| child.cancellation.clone());
+    // An ordinary singleton gets a token too, so a shutdown aborts it at the
+    // next inference checkpoint instead of holding the deploy open. Registered
+    // through a guard because this function has a dozen early returns and a
+    // leaked token would cancel an unrelated later job with the same id.
+    let singleton_cancellation = (h3_attempt_cancellation.is_none()
+        && batch_cancellation.is_none())
+    .then(|| worker.generation_cancel.token(&job_id));
+    let _singleton_cancel_guard = singleton_cancellation
+        .is_some()
+        .then(|| SingletonCancelGuard {
+            registry: worker.generation_cancel.as_ref(),
+            job_id: job_id.clone(),
+        });
     let inference_cancellation = h3_attempt_cancellation
         .as_ref()
-        .or(batch_cancellation.as_ref());
+        .or(batch_cancellation.as_ref())
+        .or(singleton_cancellation.as_ref());
     let reference_bindings = match crate::reference_uploads::inference_bindings_for_request(
         &job.request,
         job.resolved_references.as_ref(),
@@ -4145,6 +4171,11 @@ fn process_job_with_sink(
                 } else {
                     (fatal_cuda_user_message(&model_name), false)
                 }
+            } else if mold_inference::is_inference_cancelled(&e) {
+                // A shutdown abort is not worker ill-health. Counting it would
+                // let one deploy's worth of cancellations quarantine a healthy
+                // GPU on the next boot.
+                (shutdown_retention_user_message(&model_name), false)
             } else {
                 (
                     format!("generation error: {}", clean_error_message(&e)),
@@ -7556,6 +7587,30 @@ mod tests {
         drop_calls: Arc<AtomicUsize>,
     }
 
+    /// Reports the cancellation an aborted shutdown produces.
+    struct CancelledGenerateEngine {
+        name: String,
+    }
+
+    impl InferenceEngine for CancelledGenerateEngine {
+        fn generate(&mut self, _req: &GenerateRequest) -> anyhow::Result<GenerateResponse> {
+            Err(anyhow::Error::new(mold_inference::InferenceCancelled)
+                .context("generation aborted"))
+        }
+
+        fn model_name(&self) -> &str {
+            &self.name
+        }
+
+        fn is_loaded(&self) -> bool {
+            true
+        }
+
+        fn load(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
     struct PoisoningLoadEngine {
         name: String,
         panic: bool,
@@ -7764,6 +7819,7 @@ mod tests {
             fatal_cuda_error: Arc::new(AtomicBool::new(false)),
             fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
             queue_journal: Arc::new(crate::queue_journal::QueueJournal::disabled()),
+            generation_cancel: Arc::new(crate::generation_cancel::CancelRegistry::new()),
             shutdown_requested: AtomicBool::new(false),
             drain_state: std::sync::atomic::AtomicU8::new(crate::gpu_pool::DRAIN_RUNNING),
             owner_thread_id: std::sync::OnceLock::new(),
@@ -7856,6 +7912,7 @@ mod tests {
             fatal_cuda_error,
             fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
             queue_journal: Arc::new(crate::queue_journal::QueueJournal::disabled()),
+            generation_cancel: Arc::new(crate::generation_cancel::CancelRegistry::new()),
             shutdown_requested: AtomicBool::new(false),
             drain_state: std::sync::atomic::AtomicU8::new(crate::gpu_pool::DRAIN_RUNNING),
             owner_thread_id: std::sync::OnceLock::new(),
@@ -8052,6 +8109,7 @@ mod tests {
             fatal_cuda_error: Arc::new(AtomicBool::new(false)),
             fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
             queue_journal: Arc::new(crate::queue_journal::QueueJournal::disabled()),
+            generation_cancel: Arc::new(crate::generation_cancel::CancelRegistry::new()),
             shutdown_requested: AtomicBool::new(false),
             drain_state: std::sync::atomic::AtomicU8::new(crate::gpu_pool::DRAIN_RUNNING),
             owner_thread_id: std::sync::OnceLock::new(),
@@ -8846,6 +8904,7 @@ mod tests {
             fatal_cuda_error: Arc::new(AtomicBool::new(false)),
             fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
             queue_journal: Arc::new(crate::queue_journal::QueueJournal::disabled()),
+            generation_cancel: Arc::new(crate::generation_cancel::CancelRegistry::new()),
             shutdown_requested: AtomicBool::new(false),
             drain_state: std::sync::atomic::AtomicU8::new(crate::gpu_pool::DRAIN_RUNNING),
             owner_thread_id: std::sync::OnceLock::new(),
@@ -10515,6 +10574,80 @@ mod tests {
         assert!(registry.snapshot().entries.is_empty());
         assert!(worker.model_cache.lock().unwrap().contains("flux-dev:q4"));
         drop(queue_rx.recv().await);
+    }
+
+    /// A shutdown abort is a deliberate cancellation, not evidence that this
+    /// GPU is sick. Counting it would let one deploy's worth of aborts
+    /// quarantine a healthy worker on the next boot.
+    #[tokio::test]
+    async fn a_cancelled_generation_is_not_counted_against_worker_health() {
+        let worker = single_worker_pool_with_parked("parked", Duration::ZERO);
+        worker.model_cache.lock().unwrap().insert_loaded(
+            "cancel-model".to_string(),
+            Box::new(CancelledGenerateEngine {
+                name: "cancel-model".to_string(),
+            }),
+            123,
+        );
+        worker.in_flight.store(1, Ordering::SeqCst);
+
+        let mut request = fake_upscale_job(Config::default(), "unused").request;
+        request.model = "cancel-model".to_string();
+        request.upscale_model = None;
+        let (queue_tx, mut queue_rx) = tokio::sync::mpsc::channel(1);
+        let queue = QueueHandle::new(queue_tx);
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        let worker_for_job = worker.clone();
+        tokio::task::spawn_blocking(move || {
+            let (scheduler_tx, _scheduler_rx) = tokio::sync::mpsc::unbounded_channel();
+            process_job(
+                &worker_for_job,
+                GpuJob {
+                    id: "cancelled-job".to_string(),
+                    model: "cancel-model".to_string(),
+                    request,
+                    resolved_references: None,
+                    completion_payload: SseCompletionPayload::Full,
+                    progress_tx: None,
+                    result_tx,
+                    output_dir: None,
+                    config: Arc::new(tokio::sync::RwLock::new(Config::default())),
+                    metadata_db: Arc::new(None),
+                    gallery_publication_gate:
+                        crate::batch_transaction::GalleryPublicationGate::default(),
+                    queue: queue.clone(),
+                    registry: JobRegistry::new(),
+                    events: crate::events::EventBroadcaster::new(),
+                    execution_plan: None,
+                    prepared_execution_inputs: None,
+                    h3_prepared_attempt: None,
+                    lease: None,
+                    batch_child: None,
+                    journal: None,
+                },
+                &scheduler_tx,
+                1,
+                None,
+            );
+        })
+        .await
+        .unwrap();
+
+        let message = match result_rx.await.unwrap() {
+            Err(error) => error,
+            Ok(_) => panic!("a cancelled engine unexpectedly generated"),
+        };
+        assert!(
+            message.contains("restarting") && message.contains("stays queued"),
+            "a cancelled generation must read as retention, got: {message}"
+        );
+        assert_eq!(
+            worker.consecutive_failures.load(Ordering::SeqCst),
+            0,
+            "a deliberate abort must not degrade or quarantine the worker"
+        );
+        assert!(!worker.poisoned.load(Ordering::SeqCst));
+        let _ = queue_rx.try_recv();
     }
 
     #[tokio::test]

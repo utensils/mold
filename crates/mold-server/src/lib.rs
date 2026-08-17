@@ -26,6 +26,7 @@ pub mod dispatch_mode;
 pub mod downloads;
 pub mod events;
 pub mod execution_plan;
+pub mod generation_cancel;
 pub mod gpu_pool;
 pub mod gpu_worker;
 pub mod instance;
@@ -307,6 +308,7 @@ pub async fn run_server(
     // itself must be able to raise the retention fence, and that is the one
     // restart mold performs on its own behalf.
     let queue_journal = std::sync::Arc::new(queue_journal::QueueJournal::new(metadata_db.clone()));
+    let generation_cancel = std::sync::Arc::new(generation_cancel::CancelRegistry::new());
     if queue_journal.is_enabled() {
         info!("durable generation queue enabled");
     }
@@ -382,6 +384,7 @@ pub async fn run_server(
                 fatal_cuda_error: fatal_cuda_error.clone(),
                 fatal_cuda_shutdown: fatal_cuda_shutdown.clone(),
                 queue_journal: queue_journal.clone(),
+                generation_cancel: generation_cancel.clone(),
                 shutdown_requested: AtomicBool::new(false),
                 drain_state: std::sync::atomic::AtomicU8::new(crate::gpu_pool::DRAIN_RUNNING),
                 owner_thread_id: std::sync::OnceLock::new(),
@@ -430,6 +433,7 @@ pub async fn run_server(
                     fatal_cuda_error: fatal_cuda_error.clone(),
                     fatal_cuda_shutdown: fatal_cuda_shutdown.clone(),
                     queue_journal: queue_journal.clone(),
+                    generation_cancel: generation_cancel.clone(),
                     scheduler_tx: scheduler_worker_tx.clone(),
                     owner_spawner: std::sync::Arc::new(gpu_pool::RuntimeOwnerThreadSpawner),
                     max_cached,
@@ -628,6 +632,7 @@ pub async fn run_server(
     }
     state.metadata_db = metadata_db;
     state.queue_journal = queue_journal.clone();
+    state.generation_cancel = generation_cancel.clone();
     state.device_registry = device_registry;
 
     let mut recovered_live_batches = None;
@@ -947,12 +952,14 @@ pub async fn run_server(
     let shutdown_scheduler = scheduler_shutdown.clone();
     let shutdown_chain_jobs = state.chain_jobs.clone();
     let shutdown_journal = state.queue_journal.clone();
+    let shutdown_generation_cancel = state.generation_cancel.clone();
     tokio::spawn(async move {
         let _ = shutdown_request_rx.await;
         begin_runtime_shutdown(
             shutdown_chain_jobs.as_deref(),
             &shutdown_scheduler,
             &shutdown_journal,
+            &shutdown_generation_cancel,
         );
         let _ = http_shutdown_tx.send(());
     });
@@ -1190,8 +1197,16 @@ fn begin_runtime_shutdown(
     chain_jobs: Option<&chain_job_runner::ChainJobRunnerHandle>,
     scheduler_shutdown: &tokio_util::sync::CancellationToken,
     queue_journal: &queue_journal::QueueJournal,
+    generation_cancel: &generation_cancel::CancelRegistry,
 ) {
     queue_journal.retain_all();
+    let aborted = generation_cancel.request_all();
+    if aborted > 0 {
+        tracing::info!(
+            aborted,
+            "aborting in-flight generations; they stay queued and are replayed after restart"
+        );
+    }
     if let Some(chain_jobs) = chain_jobs {
         let active_chains = chain_jobs.request_shutdown();
         tracing::info!(active_chains, "cancelled chain work before HTTP drain");
@@ -1313,7 +1328,8 @@ mod tests {
 
         let journal = Arc::new(crate::queue_journal::QueueJournal::disabled());
 
-        begin_runtime_shutdown(Some(&chains), &scheduler, &journal);
+        let singletons = Arc::new(crate::generation_cancel::CancelRegistry::new());
+        begin_runtime_shutdown(Some(&chains), &scheduler, &journal, &singletons);
 
         assert!(chains.is_cancelling("chain-in-flight"));
         chains.register_cancel_for_tests("chain-claimed-during-shutdown");
@@ -1341,13 +1357,33 @@ mod tests {
             })
         };
 
-        begin_runtime_shutdown(None, &scheduler, &journal);
+        begin_runtime_shutdown(
+            None,
+            &scheduler,
+            &journal,
+            &crate::generation_cancel::CancelRegistry::new(),
+        );
         watcher.await.unwrap();
 
         assert!(
             observed.load(std::sync::atomic::Ordering::SeqCst),
             "the queue must already be retained when the scheduler starts discarding"
         );
+    }
+
+    /// Shutdown must abort the running render, not just stop admitting new
+    /// work — waiting for a video generation is structurally unbounded.
+    #[test]
+    fn runtime_shutdown_aborts_in_flight_generations() {
+        let scheduler = tokio_util::sync::CancellationToken::new();
+        let journal = Arc::new(crate::queue_journal::QueueJournal::disabled());
+        let singletons = Arc::new(crate::generation_cancel::CancelRegistry::new());
+        let running = singletons.token("job-1");
+        assert!(!running.is_cancelled());
+
+        begin_runtime_shutdown(None, &scheduler, &journal, &singletons);
+
+        assert!(running.is_cancelled());
     }
 
     /// A worker that quarantines itself is initiating the one restart mold
@@ -1776,6 +1812,7 @@ mod tests {
                 fatal_cuda_error: Arc::new(AtomicBool::new(false)),
                 fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
                 queue_journal: Arc::new(crate::queue_journal::QueueJournal::disabled()),
+                generation_cancel: Arc::new(crate::generation_cancel::CancelRegistry::new()),
                 shutdown_requested: AtomicBool::new(false),
                 drain_state: std::sync::atomic::AtomicU8::new(crate::gpu_pool::DRAIN_RUNNING),
                 owner_thread_id: std::sync::OnceLock::new(),

@@ -346,6 +346,10 @@ pub struct AppState {
     /// (recording nothing) when `metadata_db` is `None` or the operator turned
     /// it off; the server still runs every job either way.
     pub queue_journal: Arc<crate::queue_journal::QueueJournal>,
+    /// Cooperative cancellation for ordinary singleton generations. Separate
+    /// from the chain runner's registry so a chain cancel never reaches an
+    /// unrelated print; shutdown signals both.
+    pub generation_cancel: Arc<crate::generation_cancel::CancelRegistry>,
     /// Global logical publication barrier for every gallery observer and
     /// mutator. Batch commits take the writer side until files, DB rows, and
     /// the durable manifest agree.
@@ -616,6 +620,7 @@ impl AppState {
             upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
             metadata_db: Arc::new(None),
             queue_journal: Arc::new(crate::queue_journal::QueueJournal::disabled()),
+            generation_cancel: Arc::new(crate::generation_cancel::CancelRegistry::new()),
             gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
             chain_jobs: None,
             downloads: DownloadQueue::new(),
@@ -687,6 +692,7 @@ impl AppState {
             upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
             metadata_db: Arc::new(None),
             queue_journal: Arc::new(crate::queue_journal::QueueJournal::disabled()),
+            generation_cancel: Arc::new(crate::generation_cancel::CancelRegistry::new()),
             gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
             chain_jobs: None,
             downloads: DownloadQueue::new(),
@@ -771,6 +777,7 @@ impl AppState {
             upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
             metadata_db: Arc::new(None),
             queue_journal: Arc::new(crate::queue_journal::QueueJournal::disabled()),
+            generation_cancel: Arc::new(crate::generation_cancel::CancelRegistry::new()),
             gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
             chain_jobs: None,
             downloads: DownloadQueue::new(),
@@ -822,6 +829,7 @@ impl AppState {
             upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
             metadata_db: Arc::new(None),
             queue_journal: Arc::new(crate::queue_journal::QueueJournal::disabled()),
+            generation_cancel: Arc::new(crate::generation_cancel::CancelRegistry::new()),
             gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
             chain_jobs: None,
             downloads: DownloadQueue::new(),
@@ -870,6 +878,7 @@ impl AppState {
             upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
             metadata_db: Arc::new(None),
             queue_journal: Arc::new(crate::queue_journal::QueueJournal::disabled()),
+            generation_cancel: Arc::new(crate::generation_cancel::CancelRegistry::new()),
             gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
             chain_jobs: None,
             downloads: DownloadQueue::new(),
