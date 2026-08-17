@@ -284,7 +284,7 @@ function matchGalleryPrintWithIdentity(
   // against a HOST print stamp), and it separates same-second fixed-seed twins
   // that every other field in this join reproduces identically. The heuristic
   // stays as the fallback for hosts that predate the stamp.
-  const stampedId = job.id || job.recoveredJobId;
+  const stampedId = serverIdentity(job);
   if (stampedId) {
     // One job can legitimately own two prints: a replay that crashed after
     // publishing leaves the original and the re-render, both stamped. Take the
@@ -414,6 +414,20 @@ function settledExternally(job: Job): boolean {
   return job.status === "complete" || job.status === "error";
 }
 
+/**
+ * The server id this job is known by, whether it is still on the row or was
+ * released by an earlier pass.
+ *
+ * `settleUnreconciled` moves the id to `recoveredJobId` so the host's own fleet
+ * row stops being suppressed — but the job is no more anonymous for it. Every
+ * question of the form "do we have a server identity?" must ask THIS, or a
+ * later pass re-reads a known job as one that never received a queued frame
+ * and falls back to guesswork that is deliberately narrower than the truth.
+ */
+function serverIdentity(job: Pick<Job, "id" | "recoveredJobId">): string {
+  return job.id || job.recoveredJobId || "";
+}
+
 function settleFailure(job: Job, message: string): void {
   job.stage = null;
   job.error = message;
@@ -459,7 +473,8 @@ function findQueueEntry(
   job: Job,
   h3Identity: H3RecoveryIdentity | null | undefined,
 ): RecoveryQueueEntry | null {
-  if (job.id) return entries.find((entry) => entry.id === job.id) ?? null;
+  const known = serverIdentity(job);
+  if (known) return entries.find((entry) => entry.id === known) ?? null;
   // Pre-ID jobs (the queued frame never arrived) join on the pinned seed the
   // request carried, plus H3 conditioning identity when applicable — mirrors
   // the cancel path's pre-ID snapshot semantics without crossing submissions.
@@ -579,7 +594,7 @@ async function reconcileJob(job: Job, opts: GenerationRecoveryOptions): Promise<
   // settled or abandoned (external settle / unmount).
   async function reconcileJobOnce(): Promise<void> {
     while (isActive() && !settledExternally(job)) {
-      if (opts.chain && !job.id) {
+      if (opts.chain && !serverIdentity(job)) {
         const chainId = await findPreIdChain(job, opts);
         transportRetries = 0;
         if (settledExternally(job) || !isActive()) return;
@@ -592,10 +607,10 @@ async function reconcileJob(job: Job, opts: GenerationRecoveryOptions): Promise<
           return;
         }
       }
-      if (opts.chain && job.id) {
+      if (opts.chain && serverIdentity(job)) {
         const detail = await apiJsonTo<ChainJobDetail>(
           opts.target,
-          `/api/chain-jobs/${encodeURIComponent(job.id)}`,
+          `/api/chain-jobs/${encodeURIComponent(serverIdentity(job))}`,
         ).catch((cause: unknown) => {
           if (cause instanceof ApiError && cause.status === 404) return null;
           throw cause;
@@ -713,7 +728,9 @@ async function reconcileJob(job: Job, opts: GenerationRecoveryOptions): Promise<
       // this submission may never have reached the host at all — and a
       // fixed-seed re-run of the same prompt makes an unrelated print look
       // exactly like its output.
-      const match = job.id ? matchGalleryPrintWithIdentity(job, prints, h3Identity) : null;
+      const match = serverIdentity(job)
+        ? matchGalleryPrintWithIdentity(job, prints, h3Identity)
+        : null;
       if (match) {
         settleCompleted(job, galleryCompletion(match), opts);
         return;

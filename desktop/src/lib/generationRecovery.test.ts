@@ -381,6 +381,92 @@ describe("galleryCompletion", () => {
   });
 });
 
+describe("a released id is still a server identity on later passes", () => {
+  it("completes an ordinary job whose id was released, once the print lands", async () => {
+    // An earlier pass gave up on an unreachable host and released the id so the
+    // fleet row could surface. The host then came back and finished the work.
+    // Reading only `job.id` makes this look like a job that never got one.
+    const stamped: GalleryImage = {
+      ...galleryPrint,
+      filename: "landed-after-release.png",
+      metadata: { ...galleryPrint.metadata, job_id: "job-9" },
+    };
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/queue") return Promise.resolve({ entries: [] });
+      if (path === "/api/gallery") return Promise.resolve([stamped]);
+      return Promise.reject(new Error(`Unexpected path ${path}`));
+    });
+    const job = makeJob({ id: "", recoveredJobId: "job-9" });
+
+    await reconcileInterruptedGenerationJobs([job], options());
+
+    expect(job.status).toBe("complete");
+    expect(job.result?.filename).toBe("landed-after-release.png");
+  });
+
+  it("reads a released id as the chain id instead of hunting for a pre-ID chain", async () => {
+    // `findPreIdChain` deliberately excludes chains that finished while the
+    // host was away, so a completed sequence would be reported interrupted.
+    const asked: string[] = [];
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      asked.push(path);
+      if (path === "/api/chain-jobs/chain-7") {
+        return Promise.resolve({
+          id: "chain-7",
+          state: "completed",
+          finalizes: [{ output: "sequence.mp4" }],
+        });
+      }
+      if (path === "/api/gallery") {
+        return Promise.resolve([{ ...galleryPrint, filename: "sequence.mp4", format: "mp4" }]);
+      }
+      return Promise.reject(new Error(`Unexpected path ${path}`));
+    });
+    const job = makeJob({ id: "", recoveredJobId: "chain-7" });
+
+    await reconcileInterruptedGenerationJobs([job], options({ chain: true }));
+
+    expect(asked).toContain("/api/chain-jobs/chain-7");
+    expect(asked.some((path) => path.startsWith("/api/chain-jobs?"))).toBe(false);
+    expect(job.status).toBe("complete");
+  });
+
+  it("looks a released id up in the queue exactly, not by pre-ID guesswork", async () => {
+    // The host came back and REPLAYED the job: its row is queued again under
+    // the original id. An exact lookup finds it; the pre-ID join would fall
+    // back to matching by seed and timing.
+    let polls = 0;
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/queue") {
+        polls += 1;
+        return Promise.resolve({
+          entries:
+            polls === 1
+              ? [
+                  {
+                    id: "job-9",
+                    model: "ltx2:q8",
+                    state: "queued",
+                    position: 0,
+                    durable: true,
+                  },
+                ]
+              : [],
+        });
+      }
+      if (path === "/api/gallery") return Promise.resolve([galleryPrint]);
+      return Promise.reject(new Error(`Unexpected path ${path}`));
+    });
+    const job = makeJob({ id: "", recoveredJobId: "job-9", retainedByHost: true });
+
+    await reconcileInterruptedGenerationJobs([job], options());
+
+    // Re-adopted, so the row is tracked as one job again while it runs.
+    expect(job.id).toBe("job-9");
+    expect(job.status).toBe("complete");
+  });
+});
+
 describe("a second pass does not repeat a pass that just ran", () => {
   it("skips a job the shared store already reconciled moments ago", async () => {
     // The store runs reconciliation as part of `settled`, and MobileApp then
