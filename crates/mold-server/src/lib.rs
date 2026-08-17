@@ -837,9 +837,22 @@ pub async fn run_server(
     // directory of reference media under MOLD_HOME. Swept in the same startup
     // pass that recovers the queue, because the two have the same cause.
     {
-        let swept = reference_uploads::sweep_orphaned_staging_roots(state.reference_uploads.root());
-        if swept > 0 {
-            info!(swept, "removed orphaned reference-upload staging roots");
+        let sweep = reference_uploads::sweep_orphaned_staging_roots(state.reference_uploads.root());
+        if sweep.removed > 0 || sweep.live > 0 {
+            info!(
+                removed = sweep.removed,
+                live = sweep.live,
+                "swept reference-upload staging roots"
+            );
+        }
+        if sweep.untracked > 0 {
+            // Not deleted on purpose: without a lock their liveness cannot be
+            // established, and another server may still be using them.
+            info!(
+                untracked = sweep.untracked,
+                "reference-upload staging roots predate lock tracking and were left alone; \
+                 remove them by hand once no other mold server is using this MOLD_HOME"
+            );
         }
     }
 

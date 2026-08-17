@@ -57,6 +57,10 @@ pub struct ReferenceUploadStore {
 
 struct StoreLifetime {
     root: PathBuf,
+    /// Advisory lock proving this root is live. Held for the store's whole
+    /// lifetime so a peer server booting against the same `MOLD_HOME` cannot
+    /// mistake it for an orphan; released by the OS however this process ends.
+    _claim: Option<std::fs::File>,
 }
 
 impl Drop for StoreLifetime {
@@ -201,7 +205,8 @@ impl ResolvedReferenceSet {
             entries: Vec::new(),
             fingerprint: mold_core::generation_reference_fingerprint(&metadata),
             _quota: ResolvedQuotaLease::new(Arc::new(AtomicU64::new(0))),
-            _store_lifetime: Arc::new(StoreLifetime { root }),
+            // A test/synthetic set owns no live staging root of its own.
+            _store_lifetime: Arc::new(StoreLifetime { _claim: None, root }),
         }
     }
 
@@ -295,23 +300,77 @@ pub(crate) fn inference_bindings_for_request(
     }
 }
 
-/// Delete `runtime-*` staging roots left behind by earlier processes.
+/// Name of the advisory lock a live staging root holds for its whole lifetime.
+///
+/// The OS releases it when the process dies, however it dies, which is what
+/// makes "dead" decidable without a heuristic.
+pub(crate) const STAGING_LOCK_FILE: &str = ".lock";
+
+/// What one boot sweep found.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct StagingSweep {
+    /// Roots proven dead and deleted.
+    pub removed: usize,
+    /// Roots another running process still holds.
+    pub live: usize,
+    /// Roots with no lock file, whose liveness cannot be established.
+    pub untracked: usize,
+}
+
+/// Claim this process's staging root by taking its advisory lock.
+///
+/// Held open for the store's lifetime. Returns `None` when the lock cannot be
+/// taken — a filesystem without working advisory locks, say — which costs only
+/// reclaimability: an unlocked root is never deleted by a peer.
+fn claim_staging_root(root: &std::path::Path) -> Option<std::fs::File> {
+    if let Err(error) = std::fs::create_dir_all(root) {
+        tracing::warn!(root = %root.display(), %error, "could not create staging root");
+        return None;
+    }
+    let lock_path = root.join(STAGING_LOCK_FILE);
+    let file = match std::fs::File::create(&lock_path) {
+        Ok(file) => file,
+        Err(error) => {
+            tracing::warn!(root = %root.display(), %error, "could not create staging lock");
+            return None;
+        }
+    };
+    match fs2::FileExt::try_lock_exclusive(&file) {
+        Ok(()) => Some(file),
+        Err(error) => {
+            tracing::warn!(
+                root = %root.display(),
+                %error,
+                "could not lock this server's staging root; peers will leave it alone"
+            );
+            None
+        }
+    }
+}
+
+/// Delete `runtime-*` staging roots whose owning process is provably gone.
 ///
 /// [`StoreLifetime`] removes this process's root on drop, but a SIGKILL runs
 /// no destructor — and a durable queue exists precisely because SIGKILLs
 /// happen. Without this sweep every hard stop leaks a directory of reference
-/// media forever. Only `runtime-*` directories are considered, and the current
-/// process's own root is skipped.
+/// media forever.
 ///
-/// Returns how many roots were removed.
-pub fn sweep_orphaned_staging_roots(current_root: &std::path::Path) -> usize {
+/// **Being a sibling is not evidence of being dead.** Two servers can share
+/// one `MOLD_HOME` on different ports, so excluding only our own root would
+/// let the second one to boot delete the first one's media out from under an
+/// in-flight upload. A root is removed only when its advisory lock can be
+/// acquired, which proves no process holds it; the OS releases that lock
+/// however the owner died. A root with no lock file predates lock tracking and
+/// is deliberately left alone and reported — guessing there is how a
+/// long-running older server loses its media.
+pub fn sweep_orphaned_staging_roots(current_root: &std::path::Path) -> StagingSweep {
+    let mut sweep = StagingSweep::default();
     let Some(parent) = current_root.parent() else {
-        return 0;
+        return sweep;
     };
     let Ok(entries) = std::fs::read_dir(parent) else {
-        return 0;
+        return sweep;
     };
-    let mut removed = 0;
     for entry in entries.flatten() {
         let path = entry.path();
         if path == current_root || !path.is_dir() {
@@ -320,13 +379,22 @@ pub fn sweep_orphaned_staging_roots(current_root: &std::path::Path) -> usize {
         if !entry.file_name().to_string_lossy().starts_with("runtime-") {
             continue;
         }
+        let lock_path = path.join(STAGING_LOCK_FILE);
+        let Ok(lock) = std::fs::OpenOptions::new().write(true).open(&lock_path) else {
+            sweep.untracked += 1;
+            continue;
+        };
+        if fs2::FileExt::try_lock_exclusive(&lock).is_err() {
+            sweep.live += 1;
+            continue;
+        }
         match std::fs::remove_dir_all(&path) {
             Ok(()) => {
                 tracing::info!(
                     root = %path.display(),
-                    "removed reference-upload staging left by an earlier process"
+                    "removed reference-upload staging left by a stopped process"
                 );
-                removed += 1;
+                sweep.removed += 1;
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => tracing::warn!(
@@ -335,8 +403,9 @@ pub fn sweep_orphaned_staging_roots(current_root: &std::path::Path) -> usize {
                 "could not remove orphaned reference-upload staging"
             ),
         }
+        let _ = fs2::FileExt::unlock(&lock);
     }
-    removed
+    sweep
 }
 
 impl ReferenceUploadStore {
@@ -366,7 +435,10 @@ impl ReferenceUploadStore {
                 MAX_CONCURRENT_REFERENCE_UPLOADS,
             )),
             root: Arc::new(root.clone()),
-            _lifetime: Arc::new(StoreLifetime { root }),
+            _lifetime: Arc::new(StoreLifetime {
+                _claim: claim_staging_root(&root),
+                root,
+            }),
             resolved_bytes: Arc::new(AtomicU64::new(0)),
             handle_salt: Arc::new(handle_salt),
         }
@@ -376,7 +448,10 @@ impl ReferenceUploadStore {
     fn at(root: PathBuf) -> Self {
         let mut store = Self::from_mold_home();
         store.root = Arc::new(root.clone());
-        store._lifetime = Arc::new(StoreLifetime { root });
+        store._lifetime = Arc::new(StoreLifetime {
+            _claim: claim_staging_root(&root),
+            root,
+        });
         store
     }
 
@@ -2017,33 +2092,88 @@ mod tests {
     use super::*;
     use mold_core::GenerationReferenceKind;
 
+    /// Create a staging root that looks like a dead process left it: a lock
+    /// file nobody holds.
+    fn dead_root(cache: &std::path::Path, name: &str) -> PathBuf {
+        let root = cache.join(name);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("reference.png"), b"leaked media").unwrap();
+        std::fs::File::create(root.join(STAGING_LOCK_FILE)).unwrap();
+        root
+    }
+
     /// A SIGKILL leaves a `runtime-*` root behind because no destructor runs.
     /// Eleven of them is a real directory of user media that nothing else
     /// would ever remove.
     #[test]
-    fn sweeping_removes_earlier_runtime_roots_but_never_the_live_one() {
+    fn sweeping_removes_dead_runtime_roots_but_never_the_live_one() {
         let cache = tempfile::tempdir().unwrap();
         let live = cache.path().join("runtime-live");
         std::fs::create_dir_all(live.join("session")).unwrap();
         for index in 0..3 {
-            let orphan = cache.path().join(format!("runtime-orphan-{index}"));
-            std::fs::create_dir_all(&orphan).unwrap();
-            std::fs::write(orphan.join("reference.png"), b"leaked media").unwrap();
+            dead_root(cache.path(), &format!("runtime-orphan-{index}"));
         }
         // Anything that is not a runtime root is somebody else's.
         let unrelated = cache.path().join("catalog-credentials");
         std::fs::create_dir_all(&unrelated).unwrap();
 
-        assert_eq!(sweep_orphaned_staging_roots(&live), 3);
+        assert_eq!(sweep_orphaned_staging_roots(&live).removed, 3);
 
         assert!(live.join("session").is_dir());
         assert!(unrelated.is_dir());
         assert!(!cache.path().join("runtime-orphan-0").exists());
         assert_eq!(
-            sweep_orphaned_staging_roots(&live),
+            sweep_orphaned_staging_roots(&live).removed,
             0,
             "sweeping is idempotent"
         );
+    }
+
+    /// Two servers can share one MOLD_HOME on different ports. The second one
+    /// starting must not delete the first one's media out from under an
+    /// in-flight upload — its own root is not the only one that is live.
+    #[test]
+    fn sweeping_never_touches_a_root_another_process_still_holds() {
+        let cache = tempfile::tempdir().unwrap();
+        let mine = cache.path().join("runtime-mine");
+        std::fs::create_dir_all(&mine).unwrap();
+
+        let sibling = cache.path().join("runtime-sibling");
+        std::fs::create_dir_all(&sibling).unwrap();
+        std::fs::write(sibling.join("reference.png"), b"live media").unwrap();
+        // Exactly what a running peer holds for its whole lifetime.
+        let held = std::fs::File::create(sibling.join(STAGING_LOCK_FILE)).unwrap();
+        fs2::FileExt::try_lock_exclusive(&held).unwrap();
+
+        let report = sweep_orphaned_staging_roots(&mine);
+
+        assert_eq!(report.removed, 0);
+        assert_eq!(report.live, 1);
+        assert!(
+            sibling.join("reference.png").is_file(),
+            "a running server's staging must survive a peer's boot"
+        );
+        fs2::FileExt::unlock(&held).unwrap();
+    }
+
+    /// A root with no lock file predates lock tracking, so its liveness cannot
+    /// be established. Deleting it on a guess is how a long-running older
+    /// server loses its media; it is reported instead so an operator can
+    /// decide.
+    #[test]
+    fn sweeping_leaves_untracked_roots_alone_and_reports_them() {
+        let cache = tempfile::tempdir().unwrap();
+        let mine = cache.path().join("runtime-mine");
+        std::fs::create_dir_all(&mine).unwrap();
+        let legacy = cache.path().join("runtime-legacy");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("reference.png"), b"unknown provenance").unwrap();
+
+        let report = sweep_orphaned_staging_roots(&mine);
+
+        assert_eq!(report.removed, 0);
+        assert_eq!(report.untracked, 1);
+        assert!(legacy.join("reference.png").is_file());
     }
 
     fn png_reference(
