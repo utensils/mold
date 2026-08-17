@@ -57,10 +57,21 @@ pub struct ReferenceUploadStore {
 
 struct StoreLifetime {
     root: PathBuf,
-    /// Advisory lock proving this root is live. Held for the store's whole
-    /// lifetime so a peer server booting against the same `MOLD_HOME` cannot
-    /// mistake it for an orphan; released by the OS however this process ends.
-    _claim: Option<std::fs::File>,
+    /// Advisory lock proving this root is live, so a peer server booting
+    /// against the same `MOLD_HOME` cannot mistake it for an orphan. Released
+    /// by the OS however this process ends.
+    ///
+    /// Taken lazily, when the root is first created for authorized use — the
+    /// store must not materialize a staging directory before then, and a lock
+    /// is a property of a root that exists. The gap between creating the root
+    /// and locking it is safe because an unlocked root is never swept.
+    claim: std::sync::OnceLock<Option<std::fs::File>>,
+}
+
+impl StoreLifetime {
+    fn ensure_claimed(&self) {
+        self.claim.get_or_init(|| claim_staging_root(&self.root));
+    }
 }
 
 impl Drop for StoreLifetime {
@@ -206,7 +217,11 @@ impl ResolvedReferenceSet {
             fingerprint: mold_core::generation_reference_fingerprint(&metadata),
             _quota: ResolvedQuotaLease::new(Arc::new(AtomicU64::new(0))),
             // A test/synthetic set owns no live staging root of its own.
-            _store_lifetime: Arc::new(StoreLifetime { _claim: None, root }),
+            // A resolved set owns no staging root of its own to claim.
+            _store_lifetime: Arc::new(StoreLifetime {
+                claim: std::sync::OnceLock::new(),
+                root,
+            }),
         }
     }
 
@@ -436,7 +451,7 @@ impl ReferenceUploadStore {
             )),
             root: Arc::new(root.clone()),
             _lifetime: Arc::new(StoreLifetime {
-                _claim: claim_staging_root(&root),
+                claim: std::sync::OnceLock::new(),
                 root,
             }),
             resolved_bytes: Arc::new(AtomicU64::new(0)),
@@ -449,7 +464,7 @@ impl ReferenceUploadStore {
         let mut store = Self::from_mold_home();
         store.root = Arc::new(root.clone());
         store._lifetime = Arc::new(StoreLifetime {
-            _claim: claim_staging_root(&root),
+            claim: std::sync::OnceLock::new(),
             root,
         });
         store
@@ -492,7 +507,12 @@ impl ReferenceUploadStore {
                 ApiError::internal(format!(
                     "failed to prepare private reference staging: {error:#}"
                 ))
-            })
+            })?;
+        // The root now exists, so claim it before anything is staged inside.
+        // A peer sweeping in this window leaves it alone anyway — an unlocked
+        // root is never removed — so the ordering is safe as well as correct.
+        self._lifetime.ensure_claimed();
+        Ok(())
     }
 
     async fn purge_expired(&self) {
@@ -2127,6 +2147,39 @@ mod tests {
             0,
             "sweeping is idempotent"
         );
+    }
+
+    /// Claiming must not be what creates the staging directory: an
+    /// unauthenticated request has to leave no trace on disk, and taking the
+    /// lock eagerly at construction broke exactly that. The claim is a
+    /// property of a root that already exists, so it happens when authorized
+    /// use first creates one.
+    #[tokio::test]
+    async fn a_store_claims_its_root_only_once_authorized_use_creates_it() {
+        let cache = tempfile::tempdir().unwrap();
+        let root = cache.path().join("runtime-lazy");
+        let store = ReferenceUploadStore::at(root.clone());
+
+        assert!(
+            !store.staging_exists(),
+            "constructing a store must not materialize staging"
+        );
+        assert!(!root.join(STAGING_LOCK_FILE).exists());
+
+        store.ensure_roots().await.unwrap();
+
+        assert!(store.staging_exists());
+        assert!(
+            root.join(STAGING_LOCK_FILE).is_file(),
+            "the live root must be claimed once it exists"
+        );
+        // A peer must now see it as live rather than as an orphan.
+        let peer = cache.path().join("runtime-peer");
+        std::fs::create_dir_all(&peer).unwrap();
+        let sweep = sweep_orphaned_staging_roots(&peer);
+        assert_eq!(sweep.removed, 0);
+        assert_eq!(sweep.live, 1);
+        assert!(root.is_dir());
     }
 
     /// Two servers can share one MOLD_HOME on different ports. The second one
