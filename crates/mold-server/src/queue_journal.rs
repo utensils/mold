@@ -107,9 +107,113 @@ pub struct JournalAdmission<'a> {
     pub carries_reference_authority: bool,
 }
 
+/// Directory of per-identity claim locks, one file per queue owner.
+const QUEUE_OWNERS_DIR: &str = "queue-owners";
+
+/// A queue identity held for this process's lifetime.
+///
+/// The identity is port-independent so a server that comes back on a different
+/// port still adopts its own rows — but two servers can legitimately share one
+/// `MOLD_HOME`, and a shared identity would let the second to start adopt the
+/// first's queued *and running* rows, requeue work that is actively rendering,
+/// and run the same job twice at once.
+///
+/// So identities are claimed rather than derived: each is a lock file, and a
+/// booting server adopts the first one nobody holds. A restart finds its own
+/// lock free and reclaims it; a live peer's lock is held, so it is skipped and
+/// a fresh identity is minted. Two simultaneous first starts cannot collide,
+/// because neither can see a directory entry the other has not created yet and
+/// each mints its own — there is no shared setting to race on.
+pub struct QueueOwnerClaim {
+    owner_uuid: String,
+    _lock: std::fs::File,
+}
+
+impl QueueOwnerClaim {
+    pub fn owner_uuid(&self) -> &str {
+        &self.owner_uuid
+    }
+}
+
+/// Take a queue identity for this process, or `None` when one cannot be held.
+///
+/// Failing to lock means the filesystem cannot give us exclusive ownership, and
+/// an identity we cannot fence is one a peer might share — so the journal is
+/// disabled rather than risk two servers replaying each other's work.
+pub fn claim_queue_owner(mold_dir: &Path) -> Option<QueueOwnerClaim> {
+    let owners = mold_dir.join(QUEUE_OWNERS_DIR);
+    if let Err(error) = std::fs::create_dir_all(&owners) {
+        tracing::warn!(
+            dir = %owners.display(),
+            %error,
+            "durable generation queue unavailable: could not create its identity directory"
+        );
+        return None;
+    }
+
+    // Deterministic order so a restarting pair reclaims predictably.
+    let mut existing: Vec<String> = std::fs::read_dir(&owners)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .strip_suffix(".lock")
+                .map(str::to_string)
+        })
+        .collect();
+    existing.sort();
+
+    for owner_uuid in existing {
+        let path = owners.join(format!("{owner_uuid}.lock"));
+        let Ok(file) = std::fs::OpenOptions::new().write(true).open(&path) else {
+            continue;
+        };
+        if fs2::FileExt::try_lock_exclusive(&file).is_ok() {
+            tracing::debug!(owner = %owner_uuid, "adopted an existing durable queue identity");
+            return Some(QueueOwnerClaim {
+                owner_uuid,
+                _lock: file,
+            });
+        }
+        // Held by a live peer sharing this MOLD_HOME.
+    }
+
+    let owner_uuid = uuid::Uuid::new_v4().to_string();
+    let path = owners.join(format!("{owner_uuid}.lock"));
+    let file = match std::fs::File::create(&path) {
+        Ok(file) => file,
+        Err(error) => {
+            tracing::warn!(
+                path = %path.display(),
+                %error,
+                "durable generation queue unavailable: could not create its identity lock"
+            );
+            return None;
+        }
+    };
+    if fs2::FileExt::try_lock_exclusive(&file).is_err() {
+        tracing::warn!(
+            path = %path.display(),
+            "durable generation queue unavailable: this filesystem cannot fence its identity"
+        );
+        return None;
+    }
+    tracing::debug!(owner = %owner_uuid, "minted a durable queue identity");
+    Some(QueueOwnerClaim {
+        owner_uuid,
+        _lock: file,
+    })
+}
+
 pub struct QueueJournal {
     db: Arc<Option<MetadataDb>>,
     owner_uuid: Option<String>,
+    /// Held for the process's lifetime so a peer sharing this `MOLD_HOME`
+    /// cannot adopt the same identity.
+    _owner_claim: Option<QueueOwnerClaim>,
     retain: AtomicBool,
     max_bytes: usize,
     max_dispatch_attempts: u32,
@@ -120,28 +224,27 @@ impl QueueJournal {
     /// Build the journal for a running server. Returns a disabled journal when
     /// the DB is unavailable or `MOLD_QUEUE_JOURNAL_DISABLE` is set — the
     /// server still runs every job, it just cannot promise replay.
-    pub fn new(db: Arc<Option<MetadataDb>>) -> Self {
-        let owner_uuid = if env_flag(JOURNAL_DISABLE_ENV) {
+    pub fn new(db: Arc<Option<MetadataDb>>, mold_dir: Option<&Path>) -> Self {
+        let claim = if env_flag(JOURNAL_DISABLE_ENV) {
             tracing::info!("durable generation queue disabled by environment");
             None
+        } else if db.as_ref().is_none() {
+            None
         } else {
-            match db.as_ref().as_ref() {
-                Some(db) => match generation_queue::resolve_owner_uuid(db) {
-                    Ok(owner) => Some(owner),
-                    Err(error) => {
-                        tracing::warn!(
-                            error = %format!("{error:#}"),
-                            "durable generation queue unavailable: could not resolve its owner id"
-                        );
-                        None
-                    }
-                },
-                None => None,
+            match mold_dir {
+                Some(dir) => claim_queue_owner(dir),
+                None => {
+                    tracing::warn!(
+                        "durable generation queue unavailable: MOLD_HOME could not be resolved"
+                    );
+                    None
+                }
             }
         };
         Self {
             db,
-            owner_uuid,
+            owner_uuid: claim.as_ref().map(|claim| claim.owner_uuid.clone()),
+            _owner_claim: claim,
             retain: AtomicBool::new(false),
             max_bytes: env_usize(JOURNAL_MAX_BYTES_ENV, DEFAULT_JOURNAL_MAX_BYTES),
             max_dispatch_attempts: env_u32(
@@ -158,6 +261,7 @@ impl QueueJournal {
         Self {
             db: Arc::new(None),
             owner_uuid: None,
+            _owner_claim: None,
             retain: AtomicBool::new(false),
             max_bytes: DEFAULT_JOURNAL_MAX_BYTES,
             max_dispatch_attempts: DEFAULT_MAX_DISPATCH_ATTEMPTS,
@@ -830,10 +934,11 @@ mod tests {
 
     fn journal_with_db() -> Arc<QueueJournal> {
         let db = MetadataDb::open_in_memory().unwrap();
-        let owner = generation_queue::resolve_owner_uuid(&db).unwrap();
+        let owner = "test-owner".to_string();
         Arc::new(QueueJournal {
             db: Arc::new(Some(db)),
             owner_uuid: Some(owner),
+            _owner_claim: None,
             retain: AtomicBool::new(false),
             max_bytes: DEFAULT_JOURNAL_MAX_BYTES,
             max_dispatch_attempts: DEFAULT_MAX_DISPATCH_ATTEMPTS,
@@ -871,6 +976,65 @@ mod tests {
 
     fn rows(journal: &QueueJournal) -> Vec<String> {
         journal.list_all().into_iter().map(|row| row.id).collect()
+    }
+
+    /// Two servers can share one `MOLD_HOME` on different ports. They must
+    /// never resolve the same queue identity: the second to start would adopt
+    /// the first's queued AND running rows, requeue work that is actively
+    /// rendering, and run the same job twice at once.
+    #[test]
+    fn a_second_live_server_never_adopts_the_first_servers_queue() {
+        let home = tempfile::tempdir().unwrap();
+
+        let first = claim_queue_owner(home.path()).expect("first server claims an identity");
+        let second = claim_queue_owner(home.path()).expect("second server claims its own");
+
+        assert_ne!(
+            first.owner_uuid(),
+            second.owner_uuid(),
+            "a live peer's identity must never be adopted"
+        );
+    }
+
+    /// The intentional case the port-independent identity exists for: the same
+    /// server stopping and starting again adopts its own rows, including after
+    /// a port change.
+    #[test]
+    fn a_restarted_server_adopts_its_own_queue() {
+        let home = tempfile::tempdir().unwrap();
+
+        let first = claim_queue_owner(home.path()).unwrap();
+        let owner = first.owner_uuid().to_string();
+        drop(first);
+
+        let restarted = claim_queue_owner(home.path()).expect("restart reclaims the identity");
+        assert_eq!(restarted.owner_uuid(), owner);
+    }
+
+    /// Both peers stopped, then both start: each takes back one identity and
+    /// neither is left orphaned.
+    #[test]
+    fn two_stopped_servers_each_reclaim_one_identity() {
+        let home = tempfile::tempdir().unwrap();
+        let first = claim_queue_owner(home.path()).unwrap();
+        let second = claim_queue_owner(home.path()).unwrap();
+        let owners = std::collections::BTreeSet::from([
+            first.owner_uuid().to_string(),
+            second.owner_uuid().to_string(),
+        ]);
+        drop(first);
+        drop(second);
+
+        let a = claim_queue_owner(home.path()).unwrap();
+        let b = claim_queue_owner(home.path()).unwrap();
+        assert_eq!(
+            std::collections::BTreeSet::from([
+                a.owner_uuid().to_string(),
+                b.owner_uuid().to_string()
+            ]),
+            owners,
+            "restarting the pair must not mint fresh identities and strand the old rows"
+        );
     }
 
     #[test]
@@ -957,10 +1121,11 @@ mod tests {
     #[test]
     fn an_oversized_request_runs_without_being_journaled() {
         let db = MetadataDb::open_in_memory().unwrap();
-        let owner = generation_queue::resolve_owner_uuid(&db).unwrap();
+        let owner = "test-owner".to_string();
         let journal = Arc::new(QueueJournal {
             db: Arc::new(Some(db)),
             owner_uuid: Some(owner),
+            _owner_claim: None,
             retain: AtomicBool::new(false),
             max_bytes: 64,
             max_dispatch_attempts: DEFAULT_MAX_DISPATCH_ATTEMPTS,
@@ -978,10 +1143,11 @@ mod tests {
     #[test]
     fn claiming_past_the_dispatch_cap_holds_the_row_instead_of_deleting_it() {
         let db = MetadataDb::open_in_memory().unwrap();
-        let owner = generation_queue::resolve_owner_uuid(&db).unwrap();
+        let owner = "test-owner".to_string();
         let journal = Arc::new(QueueJournal {
             db: Arc::new(Some(db)),
             owner_uuid: Some(owner),
+            _owner_claim: None,
             retain: AtomicBool::new(false),
             max_bytes: DEFAULT_JOURNAL_MAX_BYTES,
             max_dispatch_attempts: 2,

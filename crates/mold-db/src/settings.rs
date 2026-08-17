@@ -448,9 +448,8 @@ pub fn list_profiles(db: &MetadataDb) -> Result<Vec<String>> {
     Ok(profiles)
 }
 
-/// Serializes every test that mutates `MOLD_PROFILE`. Shared across modules
-/// because the variable is process-global: two test modules toggling it
-/// concurrently would read each other's value.
+/// Serializes every test that mutates `MOLD_PROFILE`; the variable is
+/// process-global.
 #[cfg(test)]
 pub(crate) fn profile_env_lock() -> &'static std::sync::Mutex<()> {
     static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();

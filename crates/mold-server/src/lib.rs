@@ -307,7 +307,10 @@ pub async fn run_server(
     // Built before any GPU owner thread exists: a worker that quarantines
     // itself must be able to raise the retention fence, and that is the one
     // restart mold performs on its own behalf.
-    let queue_journal = std::sync::Arc::new(queue_journal::QueueJournal::new(metadata_db.clone()));
+    let queue_journal = std::sync::Arc::new(queue_journal::QueueJournal::new(
+        metadata_db.clone(),
+        Config::mold_dir().as_deref(),
+    ));
     let generation_cancel = std::sync::Arc::new(generation_cancel::CancelRegistry::new());
     if queue_journal.is_enabled() {
         info!("durable generation queue enabled");

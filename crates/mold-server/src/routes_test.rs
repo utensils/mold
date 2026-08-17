@@ -3989,8 +3989,10 @@ mod tests {
         state.config.write().await.output_dir =
             Some(output_dir.path().to_string_lossy().into_owned());
         state.metadata_db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let home = tempfile::tempdir().unwrap();
         state.queue_journal = Arc::new(crate::queue_journal::QueueJournal::new(
             state.metadata_db.clone(),
+            Some(home.path()),
         ));
         let journal = state.queue_journal.clone();
         let app = app_with_state(state.clone());
@@ -4018,7 +4020,7 @@ mod tests {
         let rows = journal.list_all();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].id, job.id);
-        assert_eq!(rows[0].output_dir, output_dir.path());
+        assert_eq!(rows[0].output_dir, durable_gallery_dir(output_dir.path()));
 
         gen_task.abort();
         let _ = gen_task.await;
@@ -4031,8 +4033,10 @@ mod tests {
     async fn a_generation_with_no_gallery_target_is_not_journaled() {
         let (mut state, mut rx) = AppState::with_engine_and_queue(MockEngine::ready());
         state.metadata_db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let home = tempfile::tempdir().unwrap();
         state.queue_journal = Arc::new(crate::queue_journal::QueueJournal::new(
             state.metadata_db.clone(),
+            Some(home.path()),
         ));
         let journal = state.queue_journal.clone();
         let app = app_with_state(state.clone());
@@ -4061,24 +4065,35 @@ mod tests {
     }
 
     /// Build a state whose journal is backed by `db` and whose gallery lands
-    /// in `output_dir` — the shape a durable generation is admitted under.
+    /// under `root` — the shape a durable generation is admitted under.
+    ///
+    /// `root` doubles as MOLD_HOME, so the queue identity's claim lock lives
+    /// there. Calling this twice on one `root` is the restart case: the first
+    /// state must be dropped first, exactly as a stopped server releases its
+    /// claim, or the second boot mints a fresh identity and adopts nothing.
     fn durable_state(
         db: Arc<Option<mold_db::MetadataDb>>,
-        output_dir: &std::path::Path,
+        root: &std::path::Path,
     ) -> (
         AppState,
         tokio::sync::mpsc::Receiver<crate::state::GenerationJob>,
     ) {
+        let gallery = durable_gallery_dir(root);
+        std::fs::create_dir_all(&gallery).unwrap();
         let (mut state, rx) = AppState::with_engine_and_queue(MockEngine::ready());
         state.output_disabled_override = false;
         state.metadata_db = db.clone();
-        state.queue_journal = Arc::new(crate::queue_journal::QueueJournal::new(db));
+        state.queue_journal = Arc::new(crate::queue_journal::QueueJournal::new(db, Some(root)));
         state
             .config
             .try_write()
             .expect("fresh test config")
-            .output_dir = Some(output_dir.to_string_lossy().into_owned());
+            .output_dir = Some(gallery.to_string_lossy().into_owned());
         (state, rx)
+    }
+
+    fn durable_gallery_dir(root: &std::path::Path) -> PathBuf {
+        root.join("gallery")
     }
 
     /// The end-to-end shape: admit jobs, fence, drop the coordinator, rebuild
@@ -4482,8 +4497,10 @@ mod tests {
     async fn a_retained_generation_with_an_unreadable_request_is_held() {
         let output_dir = tempfile::tempdir().unwrap();
         let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
-        let owner =
-            mold_db::generation_queue::resolve_owner_uuid(db.as_ref().as_ref().unwrap()).unwrap();
+        let (state, mut rx) = durable_state(db.clone(), output_dir.path());
+        // The identity is claimed at boot, so the row has to be written under
+        // whatever this server took.
+        let owner = state.queue_journal.owner_uuid().unwrap().to_string();
         mold_db::generation_queue::insert(
             db.as_ref().as_ref().unwrap(),
             &mold_db::generation_queue::GenerationQueueRow {
@@ -4506,7 +4523,6 @@ mod tests {
         )
         .unwrap();
 
-        let (state, mut rx) = durable_state(db.clone(), output_dir.path());
         let report = crate::queue_journal::replay(&state, true).await;
 
         assert_eq!(report.held, 1);
@@ -4565,7 +4581,11 @@ mod tests {
 
         let (mut state, _rx) = AppState::with_engine_and_queue(MockEngine::ready());
         state.metadata_db = db.clone();
-        state.queue_journal = Arc::new(crate::queue_journal::QueueJournal::new(db.clone()));
+        let home = tempfile::tempdir().unwrap();
+        state.queue_journal = Arc::new(crate::queue_journal::QueueJournal::new(
+            db.clone(),
+            Some(home.path()),
+        ));
         assert!(
             state.queue_journal.is_enabled(),
             "the journal itself is available; only output is off"
