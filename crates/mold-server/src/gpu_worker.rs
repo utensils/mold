@@ -2350,7 +2350,11 @@ fn fatal_cuda_user_message(model_name: &str) -> String {
     )
 }
 
-fn quarantine_poisoned_worker(worker: &GpuWorker) {
+pub(crate) fn quarantine_poisoned_worker(worker: &GpuWorker) {
+    // Retain the durable queue first. This function is the process-restart
+    // initiator for a fatal context or an inference panic, and everything that
+    // follows it drops jobs.
+    worker.queue_journal.retain_all();
     // Latch and notify before touching any lock that the faulting path may have
     // poisoned. `notify_one` stores a permit when the server has not reached
     // its shutdown waiter yet, which makes startup-time owner panics fail
@@ -7676,6 +7680,7 @@ mod tests {
             poisoned: AtomicBool::new(false),
             fatal_cuda_error: Arc::new(AtomicBool::new(false)),
             fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
+            queue_journal: Arc::new(crate::queue_journal::QueueJournal::disabled()),
             shutdown_requested: AtomicBool::new(false),
             drain_state: std::sync::atomic::AtomicU8::new(crate::gpu_pool::DRAIN_RUNNING),
             owner_thread_id: std::sync::OnceLock::new(),
@@ -7766,6 +7771,7 @@ mod tests {
             poisoned: AtomicBool::new(false),
             fatal_cuda_error,
             fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
+            queue_journal: Arc::new(crate::queue_journal::QueueJournal::disabled()),
             shutdown_requested: AtomicBool::new(false),
             drain_state: std::sync::atomic::AtomicU8::new(crate::gpu_pool::DRAIN_RUNNING),
             owner_thread_id: std::sync::OnceLock::new(),
@@ -7961,6 +7967,7 @@ mod tests {
             poisoned: AtomicBool::new(false),
             fatal_cuda_error: Arc::new(AtomicBool::new(false)),
             fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
+            queue_journal: Arc::new(crate::queue_journal::QueueJournal::disabled()),
             shutdown_requested: AtomicBool::new(false),
             drain_state: std::sync::atomic::AtomicU8::new(crate::gpu_pool::DRAIN_RUNNING),
             owner_thread_id: std::sync::OnceLock::new(),
@@ -8753,6 +8760,7 @@ mod tests {
             poisoned: AtomicBool::new(false),
             fatal_cuda_error: Arc::new(AtomicBool::new(false)),
             fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
+            queue_journal: Arc::new(crate::queue_journal::QueueJournal::disabled()),
             shutdown_requested: AtomicBool::new(false),
             drain_state: std::sync::atomic::AtomicU8::new(crate::gpu_pool::DRAIN_RUNNING),
             owner_thread_id: std::sync::OnceLock::new(),

@@ -366,6 +366,11 @@ pub struct GpuWorker {
     /// supervised servers restart after `run_server` returns an error.
     pub fatal_cuda_error: Arc<AtomicBool>,
     pub fatal_cuda_shutdown: Arc<tokio::sync::Notify>,
+    /// Durable-queue retention fence. A worker that quarantines itself is
+    /// initiating a process restart, so it must retain the queue before any
+    /// discard path runs — otherwise the one restart mold performs on its own
+    /// behalf is also the one that deletes every queued job.
+    pub queue_journal: Arc<crate::queue_journal::QueueJournal>,
     /// Explicit owner-thread shutdown. The command wakes an idle blocking
     /// receiver; the flag also fences a grant that was already transported.
     pub shutdown_requested: AtomicBool,
@@ -1168,6 +1173,7 @@ pub(crate) struct WorkerFactory {
     pub shared_pool: Arc<Mutex<SharedPool>>,
     pub fatal_cuda_error: Arc<AtomicBool>,
     pub fatal_cuda_shutdown: Arc<tokio::sync::Notify>,
+    pub queue_journal: Arc<crate::queue_journal::QueueJournal>,
     pub scheduler_tx: tokio::sync::mpsc::UnboundedSender<crate::scheduler::WorkerEvent>,
     pub owner_spawner: Arc<dyn OwnerThreadSpawner>,
     pub max_cached: usize,
@@ -1565,6 +1571,7 @@ impl WorkerSet {
             poisoned: AtomicBool::new(false),
             fatal_cuda_error: factory.fatal_cuda_error.clone(),
             fatal_cuda_shutdown: factory.fatal_cuda_shutdown.clone(),
+            queue_journal: factory.queue_journal.clone(),
             shutdown_requested: AtomicBool::new(false),
             drain_state: AtomicU8::new(DRAIN_RUNNING),
             owner_thread_id: OnceLock::new(),
@@ -2057,6 +2064,7 @@ mod tests {
             poisoned: AtomicBool::new(false),
             fatal_cuda_error: Arc::new(AtomicBool::new(false)),
             fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
+            queue_journal: Arc::new(crate::queue_journal::QueueJournal::disabled()),
             shutdown_requested: AtomicBool::new(false),
             drain_state: std::sync::atomic::AtomicU8::new(crate::gpu_pool::DRAIN_RUNNING),
             owner_thread_id: std::sync::OnceLock::new(),
@@ -2085,6 +2093,7 @@ mod tests {
                     shared_pool: Arc::new(Mutex::new(SharedPool::new())),
                     fatal_cuda_error: Arc::new(AtomicBool::new(false)),
                     fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
+                    queue_journal: Arc::new(crate::queue_journal::QueueJournal::disabled()),
                     scheduler_tx,
                     owner_spawner: Arc::new(RuntimeOwnerThreadSpawner),
                     max_cached: 1,
@@ -2173,6 +2182,7 @@ mod tests {
                     shared_pool: Arc::new(Mutex::new(SharedPool::new())),
                     fatal_cuda_error: Arc::new(AtomicBool::new(false)),
                     fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
+                    queue_journal: Arc::new(crate::queue_journal::QueueJournal::disabled()),
                     scheduler_tx,
                     owner_spawner: spawner.clone(),
                     max_cached: 1,

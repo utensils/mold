@@ -41,6 +41,7 @@ pub mod metrics;
 pub mod model_cache;
 pub mod model_manager;
 pub mod queue;
+pub mod queue_journal;
 pub mod rate_limit;
 pub mod reference_uploads;
 pub mod request_id;
@@ -302,6 +303,13 @@ pub async fn run_server(
             std::sync::Arc::new(None)
         }
     };
+    // Built before any GPU owner thread exists: a worker that quarantines
+    // itself must be able to raise the retention fence, and that is the one
+    // restart mold performs on its own behalf.
+    let queue_journal = std::sync::Arc::new(queue_journal::QueueJournal::new(metadata_db.clone()));
+    if queue_journal.is_enabled() {
+        info!("durable generation queue enabled");
+    }
     let device_registry =
         std::sync::Arc::new(device_registry::DeviceRegistry::from_runtime_inventory(
             discovered,
@@ -373,6 +381,7 @@ pub async fn run_server(
                 poisoned: AtomicBool::new(false),
                 fatal_cuda_error: fatal_cuda_error.clone(),
                 fatal_cuda_shutdown: fatal_cuda_shutdown.clone(),
+                queue_journal: queue_journal.clone(),
                 shutdown_requested: AtomicBool::new(false),
                 drain_state: std::sync::atomic::AtomicU8::new(crate::gpu_pool::DRAIN_RUNNING),
                 owner_thread_id: std::sync::OnceLock::new(),
@@ -420,6 +429,7 @@ pub async fn run_server(
                     shared_pool: shared_pool.clone(),
                     fatal_cuda_error: fatal_cuda_error.clone(),
                     fatal_cuda_shutdown: fatal_cuda_shutdown.clone(),
+                    queue_journal: queue_journal.clone(),
                     scheduler_tx: scheduler_worker_tx.clone(),
                     owner_spawner: std::sync::Arc::new(gpu_pool::RuntimeOwnerThreadSpawner),
                     max_cached,
@@ -617,6 +627,7 @@ pub async fn run_server(
             .with_placement_preview(placement_preview_tx);
     }
     state.metadata_db = metadata_db;
+    state.queue_journal = queue_journal.clone();
     state.device_registry = device_registry;
 
     let mut recovered_live_batches = None;
@@ -935,9 +946,14 @@ pub async fn run_server(
     *state.shutdown_tx.lock().await = Some(shutdown_tx);
     let shutdown_scheduler = scheduler_shutdown.clone();
     let shutdown_chain_jobs = state.chain_jobs.clone();
+    let shutdown_journal = state.queue_journal.clone();
     tokio::spawn(async move {
         let _ = shutdown_request_rx.await;
-        begin_runtime_shutdown(shutdown_chain_jobs.as_deref(), &shutdown_scheduler);
+        begin_runtime_shutdown(
+            shutdown_chain_jobs.as_deref(),
+            &shutdown_scheduler,
+            &shutdown_journal,
+        );
         let _ = http_shutdown_tx.send(());
     });
 
@@ -1070,6 +1086,7 @@ pub async fn run_server(
         }
     };
 
+    let fatal_cuda_journal = queue_journal.clone();
     let server = std::future::IntoFuture::into_future(
         axum::serve(
             listener,
@@ -1084,6 +1101,11 @@ pub async fn run_server(
     tokio::select! {
         result = &mut server => result?,
         _ = fatal_cuda_shutdown.notified() => {
+            // Before anything discards: this path ends in `anyhow::bail!` and a
+            // supervised restart, so the queue must survive it. Missing this
+            // fence would make the one restart mold performs on its own behalf
+            // the one that deletes every queued job.
+            fatal_cuda_journal.retain_all();
             tracing::error!("fatal CUDA context error; stopping server for process restart");
             // Give the triggering request a brief window to receive its explicit
             // fatal-context error, then drop the server future. A normal graceful
@@ -1157,10 +1179,19 @@ pub async fn run_server(
     Ok(())
 }
 
+/// Order is the correctness argument, not a preference.
+///
+/// The retention fence goes up first, because every later step discards jobs:
+/// `scheduler_shutdown.cancel()` reaches `reject_all_unstarted`, which drops
+/// each pending `GenerationJob` and therefore its journal ticket. With the
+/// fence up those drops retain their rows instead of deleting them, and none
+/// of the ~20 discard sites has to know durability exists.
 fn begin_runtime_shutdown(
     chain_jobs: Option<&chain_job_runner::ChainJobRunnerHandle>,
     scheduler_shutdown: &tokio_util::sync::CancellationToken,
+    queue_journal: &queue_journal::QueueJournal,
 ) {
+    queue_journal.retain_all();
     if let Some(chain_jobs) = chain_jobs {
         let active_chains = chain_jobs.request_shutdown();
         tracing::info!(active_chains, "cancelled chain work before HTTP drain");
@@ -1280,12 +1311,58 @@ mod tests {
         chains.register_cancel_for_tests("chain-in-flight");
         let scheduler = tokio_util::sync::CancellationToken::new();
 
-        begin_runtime_shutdown(Some(&chains), &scheduler);
+        let journal = Arc::new(crate::queue_journal::QueueJournal::disabled());
+
+        begin_runtime_shutdown(Some(&chains), &scheduler, &journal);
 
         assert!(chains.is_cancelling("chain-in-flight"));
         chains.register_cancel_for_tests("chain-claimed-during-shutdown");
         assert!(chains.is_cancelling("chain-claimed-during-shutdown"));
         assert!(scheduler.is_cancelled());
+    }
+
+    /// The whole correctness argument for retention: the fence has to be up
+    /// before anything can discard a job. `scheduler_shutdown.cancel()` is
+    /// what reaches `reject_all_unstarted`, so the fence must already be
+    /// visible from the moment that token resolves.
+    #[tokio::test]
+    async fn runtime_shutdown_retains_the_queue_before_cancelling_the_scheduler() {
+        let scheduler = tokio_util::sync::CancellationToken::new();
+        let journal = Arc::new(crate::queue_journal::QueueJournal::disabled());
+
+        let observed = Arc::new(AtomicBool::new(false));
+        let watcher = {
+            let scheduler = scheduler.clone();
+            let journal = journal.clone();
+            let observed = observed.clone();
+            tokio::spawn(async move {
+                scheduler.cancelled().await;
+                observed.store(journal.is_retaining(), std::sync::atomic::Ordering::SeqCst);
+            })
+        };
+
+        begin_runtime_shutdown(None, &scheduler, &journal);
+        watcher.await.unwrap();
+
+        assert!(
+            observed.load(std::sync::atomic::Ordering::SeqCst),
+            "the queue must already be retained when the scheduler starts discarding"
+        );
+    }
+
+    /// A worker that quarantines itself is initiating the one restart mold
+    /// performs on its own behalf. Without this fence that restart is also the
+    /// one that deletes the entire queue.
+    #[test]
+    fn quarantining_a_worker_retains_the_queue() {
+        let (mut worker, _rx) = owner_test_worker();
+        let journal = Arc::new(crate::queue_journal::QueueJournal::disabled());
+        Arc::get_mut(&mut worker).unwrap().queue_journal = journal.clone();
+        assert!(!journal.is_retaining());
+
+        gpu_worker::quarantine_poisoned_worker(&worker);
+
+        assert!(journal.is_retaining());
     }
 
     #[test]
@@ -1698,6 +1775,7 @@ mod tests {
                 poisoned: AtomicBool::new(false),
                 fatal_cuda_error: Arc::new(AtomicBool::new(false)),
                 fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
+                queue_journal: Arc::new(crate::queue_journal::QueueJournal::disabled()),
                 shutdown_requested: AtomicBool::new(false),
                 drain_state: std::sync::atomic::AtomicU8::new(crate::gpu_pool::DRAIN_RUNNING),
                 owner_thread_id: std::sync::OnceLock::new(),

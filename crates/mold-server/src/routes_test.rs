@@ -813,6 +813,7 @@ mod tests {
             poisoned: AtomicBool::new(false),
             fatal_cuda_error: Arc::new(AtomicBool::new(false)),
             fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
+            queue_journal: Arc::new(crate::queue_journal::QueueJournal::disabled()),
             shutdown_requested: AtomicBool::new(false),
             drain_state: std::sync::atomic::AtomicU8::new(crate::gpu_pool::DRAIN_RUNNING),
             owner_thread_id: std::sync::OnceLock::new(),
@@ -2038,6 +2039,7 @@ mod tests {
                     )),
                     fatal_cuda_error: Arc::new(AtomicBool::new(false)),
                     fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
+                    queue_journal: Arc::new(crate::queue_journal::QueueJournal::disabled()),
                     scheduler_tx,
                     owner_spawner: Arc::new(crate::gpu_pool::RuntimeOwnerThreadSpawner),
                     max_cached: 1,
@@ -2149,6 +2151,7 @@ mod tests {
                     )),
                     fatal_cuda_error: Arc::new(AtomicBool::new(false)),
                     fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
+                    queue_journal: Arc::new(crate::queue_journal::QueueJournal::disabled()),
                     scheduler_tx,
                     owner_spawner: Arc::new(crate::gpu_pool::RuntimeOwnerThreadSpawner),
                     max_cached: 1,
@@ -7162,6 +7165,7 @@ mod tests {
         cache.insert(Box::new(engine), 0);
         let state = AppState {
             instance_id: Arc::new(uuid::Uuid::new_v4().to_string()),
+            queue_journal: Arc::new(crate::queue_journal::QueueJournal::disabled()),
             discovery: Arc::new(crate::state::DiscoveryState::default()),
             gpu_pool: std::sync::Arc::new(crate::gpu_pool::GpuPool {
                 workers: Vec::new().into(),
@@ -7235,6 +7239,7 @@ mod tests {
         cache.insert(Box::new(engine), 0);
         let state = AppState {
             instance_id: Arc::new(uuid::Uuid::new_v4().to_string()),
+            queue_journal: Arc::new(crate::queue_journal::QueueJournal::disabled()),
             discovery: Arc::new(crate::state::DiscoveryState::default()),
             gpu_pool: std::sync::Arc::new(crate::gpu_pool::GpuPool {
                 workers: Vec::new().into(),
@@ -7535,6 +7540,7 @@ mod tests {
         cache.insert(Box::new(engine), 0);
         let state = AppState {
             instance_id: Arc::new(uuid::Uuid::new_v4().to_string()),
+            queue_journal: Arc::new(crate::queue_journal::QueueJournal::disabled()),
             discovery: Arc::new(crate::state::DiscoveryState::default()),
             gpu_pool: std::sync::Arc::new(crate::gpu_pool::GpuPool {
                 workers: Vec::new().into(),

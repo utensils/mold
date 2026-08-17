@@ -4019,6 +4019,7 @@ mod tests {
                     poisoned: AtomicBool::new(false),
                     fatal_cuda_error: Arc::new(AtomicBool::new(false)),
                     fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
+                    queue_journal: Arc::new(crate::queue_journal::QueueJournal::disabled()),
                     shutdown_requested: AtomicBool::new(false),
                     drain_state: std::sync::atomic::AtomicU8::new(crate::gpu_pool::DRAIN_RUNNING),
                     owner_thread_id: std::sync::OnceLock::new(),
