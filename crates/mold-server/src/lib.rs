@@ -833,6 +833,22 @@ pub async fn run_server(
         );
     }
 
+    // Retained generations resume before the router serves, as ONE sequential
+    // task: `submit_when_available` serializes on a single global capacity
+    // mutex, so parallel replay would land in arbitrary order and destroy the
+    // ordering the journal exists to preserve.
+    {
+        let report = crate::queue_journal::replay(&state).await;
+        if report.resumed > 0 || report.held > 0 || report.already_completed > 0 {
+            info!(
+                resumed = report.resumed,
+                already_completed = report.already_completed,
+                held = report.held,
+                "durable generation queue replay complete"
+            );
+        }
+    }
+
     // Background idle-TTL sweeper: reclaims parked engines that haven't been
     // touched for `MOLD_CACHE_IDLE_TTL_SECS` seconds. Abort handle bound to
     // graceful shutdown like every other long-running task in this fn.
