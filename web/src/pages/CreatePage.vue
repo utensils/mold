@@ -160,7 +160,7 @@ import { useLiveActivity } from "../composables/useLiveActivity";
 import { useOpenLiveWork } from "../composables/useOpenLiveWork";
 import { ORIGIN_HOST_ID, listHosts } from "../lib/hostRegistry";
 import {
-  localFailureSupersededByShared,
+  localRowHiddenFromStrip,
   sharedRowIsLocallyOwned,
 } from "../lib/activityDedup";
 import { fetchMergedGallery } from "../lib/multiHostGallery";
@@ -697,16 +697,13 @@ const sharedActivityRows = computed(() =>
   }),
 );
 
-/** The other half of that dedup: a settled local failure the live server row
- * replaces is dropped here, so a resumed job renders once, as running. */
+/** The other half of that dedup: a settled row the server's view supersedes —
+ * a live fleet row for the same job, or a detached settle whose fate the host
+ * owns — is dropped here, so a resumed job renders once and never as failed. */
 const localActivityJobs = computed(() =>
   stream.jobs.value.filter(
     (job) =>
-      !localFailureSupersededByShared(
-        job,
-        liveActivity.rows.value,
-        ORIGIN_HOST_ID,
-      ),
+      !localRowHiddenFromStrip(job, liveActivity.rows.value, ORIGIN_HOST_ID),
   ),
 );
 

@@ -197,6 +197,32 @@ describe("loadPersistedJobs dead-letters running rows on rehydrate", () => {
     expect(jobs[0].progress.step).toBe(5);
   });
 
+  it("keeps a detached settle detached across a reload", () => {
+    // Without this the row comes back as a plain error and the strip labels a
+    // print the host finished "Failed" — the same lie, one refresh later.
+    const raw = persistedPayload([
+      persisted({
+        id: "retained-1",
+        state: "error",
+        error: "mold is restarting; this generation was kept in the queue",
+        serverId: "srv-1",
+        detached: true,
+      }),
+    ]);
+
+    const jobs = __testing__.loadPersistedJobs(raw);
+
+    expect(jobs[0].detached).toBe(true);
+  });
+
+  it("does not invent a detached flag for an ordinary persisted failure", () => {
+    const raw = persistedPayload([
+      persisted({ id: "failed-1", state: "error", error: "out of memory" }),
+    ]);
+
+    expect(__testing__.loadPersistedJobs(raw)[0].detached).not.toBe(true);
+  });
+
   it("gives a failure discovered from a running row current canvas authority", () => {
     const raw = persistedPayload([
       persisted({ id: "older-zombie", startedAt: 100 }),
@@ -537,6 +563,22 @@ describe("workStarted tracking", () => {
     // The host kept the work: it may well finish. The canvas must not claim
     // this print failed.
     expect(stream.canvasErrorJobId.value).toBeNull();
+    // ...and the strip must not either, once the job leaves the host's active
+    // work by FINISHING. `detached` is what retires the row.
+    expect(job.detached).toBe(true);
+  });
+
+  it("marks a reconciler-detached settle the same way", () => {
+    const stream = useGenerateStream();
+    const id = stream.submit(singleGen({ prompt: "away while it ran" }), {
+      kind: "single",
+    });
+    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
+
+    stream.settleDetached(id, "check the Library for the result");
+
+    expect(job.state).toBe("error");
+    expect(job.detached).toBe(true);
   });
 
   it("keeps a non-retained terminal frame the canvas failure authority", () => {
@@ -554,6 +596,7 @@ describe("workStarted tracking", () => {
 
     expect(job.error).toBe("host ran out of memory");
     expect(stream.canvasErrorJobId.value).toBe(id);
+    expect(job.detached).not.toBe(true);
   });
 
   it("does not treat pre-queue info as work, but does treat post-queue info as work", () => {

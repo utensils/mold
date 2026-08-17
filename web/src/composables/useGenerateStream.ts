@@ -95,10 +95,15 @@ export interface Job {
    * or a stable `model·prompt` stand-in when the seed is random (desktop
    * `generationJob.ts` recipe). Recomputed from the request on rehydrate. */
   seedVisual: string;
-  /** True for a job rehydrated from a previous session whose SSE stream is
-   * gone but whose `serverId` is known: the server may still be rendering
-   * it, so the reconciler — not this boot — decides its fate. Never
-   * persisted; derived on load. */
+  /** True when the HOST owns this job's fate rather than this page: a row
+   * rehydrated from a previous session whose SSE stream is gone but whose
+   * `serverId` is known (the reconciler, not this boot, rules on it), or a
+   * row settled by `settleDetachedJob` — the job was retained across a server
+   * restart, or ran while the page was away. A settled detached row is
+   * advisory, never a failure, so the activity strip retires it instead of
+   * labelling it "Failed". Derived on load for the running case and persisted
+   * for the settled one, which a reload would otherwise demote to a plain
+   * error. */
   detached?: boolean;
 }
 
@@ -541,6 +546,9 @@ interface PersistedJob {
   hostId: string | null;
   hostLabel: string | null;
   serverId: string | null;
+  /** A settled row whose fate the host owns. Persisted so a reload cannot
+   * resurrect it as an ordinary failure. */
+  detached?: boolean;
 }
 
 const JOB_STORAGE_VERSION = 1;
@@ -631,7 +639,11 @@ function loadPersistedState(raw: string | null): LoadedJobsState {
     const canvasErrorJobId = newestZombie?.id ?? null;
     const loadedAt = Date.now();
     const loadedJobs = parsed.jobs.map((p) => {
-      const detached = p.state === "running" && Boolean(p.serverId);
+      // A rehydrated RUNNING row with a known server id is detached because
+      // the reconciler owns it; a settled row is detached only if it was
+      // settled that way before the reload.
+      const detached =
+        (p.state === "running" && Boolean(p.serverId)) || p.detached === true;
       const wasZombie = p.state === "running" && !detached;
       const state: Job["state"] = wasZombie ? "error" : p.state;
       const error = wasZombie
@@ -723,6 +735,7 @@ function persistJobs(jobs: Job[]) {
       hostId: j.hostId,
       hostLabel: j.hostLabel,
       serverId: j.serverId,
+      detached: j.detached === true,
     }));
     const payload: PersistedJobs = {
       version: JOB_STORAGE_VERSION,
@@ -821,6 +834,11 @@ function settleDetachedJob(id: string, note: string) {
   job.state = "error";
   job.settledAt = Date.now();
   job.previewUrl = null;
+  // `error` is the only settled state the rail models, but this is NOT a
+  // failure: the host owns the job's fate and it may already have landed in
+  // the Library. The flag is what keeps the activity strip from labelling it
+  // "Failed" for five minutes once the fleet stops listing it as active.
+  job.detached = true;
   // Deliberately no canvasErrorJobId takeover: the job may have completed
   // successfully while the page was away — the note is advisory history.
 }

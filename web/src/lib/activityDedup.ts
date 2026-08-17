@@ -24,6 +24,10 @@ export interface LocalActivityJob {
   /** Registry id of the routed host; `null` means the serving origin. */
   hostId: string | null;
   state: string;
+  /** The host owns this job's fate — it was retained across a restart, or the
+   * page was away while it ran. Settled `detached` is advisory, never a
+   * failure. */
+  detached?: boolean;
 }
 
 /** The subset of a server-owned fleet activity row this policy reads. */
@@ -61,14 +65,31 @@ export function sharedRowIsLocallyOwned(
 }
 
 /**
- * Whether a settled local failure is superseded by a live shared row for the
- * same job, and should therefore be dropped from the local list.
+ * Whether a local row should be dropped from the activity strip.
+ *
+ * Two ways a settled local row stops being the truth:
+ *
+ * 1. It settled DETACHED — the host kept the job (retained across a restart)
+ *    or ran it while the page was away. The strip models only `error` for a
+ *    settled row and renders that as "Failed", which for this row is a lie
+ *    that outlives the masking shared row: once the job finishes it leaves
+ *    the host's active work, the shared row disappears, and the local row
+ *    would resurface as a failure for a print sitting in the Library. It is
+ *    retired instead; the fleet row covers it while it runs and the Library
+ *    covers it afterwards.
+ * 2. A live shared row reports the same job still running, so the server's
+ *    view supersedes this one.
+ *
+ * A running row is never hidden — including a rehydrated detached one, which
+ * is live work the reconciler has yet to rule on.
  */
-export function localFailureSupersededByShared(
+export function localRowHiddenFromStrip(
   job: LocalActivityJob,
   rows: readonly SharedActivityRow[],
   originHostId: string,
 ): boolean {
+  if (job.state === "running") return false;
+  if (job.detached === true) return true;
   if (job.state !== "error") return false;
   return rows.some((row) => sameWork(job, row, originHostId));
 }
