@@ -211,6 +211,8 @@ pub fn claim_queue_owner(mold_dir: &Path) -> Option<QueueOwnerClaim> {
 pub struct QueueJournal {
     db: Arc<Option<MetadataDb>>,
     owner_uuid: Option<String>,
+    #[cfg(test)]
+    fail_completion_lookup: AtomicBool,
     /// Held for the process's lifetime so a peer sharing this `MOLD_HOME`
     /// cannot adopt the same identity.
     _owner_claim: Option<QueueOwnerClaim>,
@@ -245,6 +247,8 @@ impl QueueJournal {
             db,
             owner_uuid: claim.as_ref().map(|claim| claim.owner_uuid.clone()),
             _owner_claim: claim,
+            #[cfg(test)]
+            fail_completion_lookup: AtomicBool::new(false),
             retain: AtomicBool::new(false),
             max_bytes: env_usize(JOURNAL_MAX_BYTES_ENV, DEFAULT_JOURNAL_MAX_BYTES),
             max_dispatch_attempts: env_u32(
@@ -262,6 +266,8 @@ impl QueueJournal {
             db: Arc::new(None),
             owner_uuid: None,
             _owner_claim: None,
+            #[cfg(test)]
+            fail_completion_lookup: AtomicBool::new(false),
             retain: AtomicBool::new(false),
             max_bytes: DEFAULT_JOURNAL_MAX_BYTES,
             max_dispatch_attempts: DEFAULT_MAX_DISPATCH_ATTEMPTS,
@@ -473,38 +479,48 @@ impl QueueJournal {
         report
     }
 
+    /// Test seam: force the idempotence gate to fail the way a malformed
+    /// `metadata_json` or a transient SQLite error would.
+    #[cfg(test)]
+    pub(crate) fn fail_completion_lookup_for_tests(&self) {
+        self.fail_completion_lookup
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
     /// Drop every row whose output already exists.
     ///
     /// A print records the queue job that produced it, so a job that finished
     /// between its last save and the crash is recognised and never re-run.
     /// Without this, replay duplicates prints: output filenames are wall-clock,
     /// so no downstream dedupe can merge the two afterwards.
-    pub fn drop_already_completed(&self) -> usize {
+    pub fn drop_already_completed(&self) -> Result<usize, String> {
         let Some(db) = self.db() else {
-            return 0;
+            return Ok(0);
         };
+        #[cfg(test)]
+        if self
+            .fail_completion_lookup
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err("injected completion-lookup failure".to_string());
+        }
         let candidates: Vec<String> = self
             .list_all()
             .into_iter()
             .filter(|row| row.state != QueueRowState::Held)
             .map(|row| row.id)
             .collect();
-        let completed = match generation_queue::find_completed_job_ids(db, &candidates) {
-            Ok(completed) => completed,
-            Err(error) => {
-                tracing::warn!(
-                    error = %format!("{error:#}"),
-                    "could not check the durable queue against saved prints; \
-                     skipping replay to avoid duplicating output"
-                );
-                return 0;
-            }
-        };
+        // A failure here is NOT "nothing was completed". Reporting it as an
+        // empty result would let replay re-render every job whose output was
+        // already published, so one malformed `metadata_json` or a transient
+        // SQLite error would defeat the idempotence guarantee outright.
+        let completed = generation_queue::find_completed_job_ids(db, &candidates)
+            .map_err(|error| format!("{error:#}"))?;
         for id in &completed {
             tracing::info!(job = %id, "a retained generation already produced its print");
             self.discard_id(id);
         }
-        completed.len()
+        Ok(completed.len())
     }
 
     /// Rows to replay, oldest first, after reconcile and the idempotence gate.
@@ -637,6 +653,9 @@ pub struct ReplayReport {
     pub resumed: usize,
     pub already_completed: usize,
     pub held: usize,
+    /// Rows left untouched because the idempotence gate could not be checked.
+    /// They keep their full replay budget for the next boot.
+    pub skipped_unverified: usize,
 }
 
 /// Resubmit every retained generation through the ordinary admission path.
@@ -685,7 +704,22 @@ pub async fn replay(state: &crate::state::AppState, dispatch_available: bool) ->
     };
     let reconcile = journal.startup_reconcile(current_output_dir.as_deref());
     report.held += reconcile.held;
-    report.already_completed = journal.drop_already_completed();
+    match journal.drop_already_completed() {
+        Ok(dropped) => report.already_completed = dropped,
+        Err(error) => {
+            // Skip the whole boot's replay rather than replay blind. The rows
+            // are untouched and unspent, so the next boot tries again; running
+            // them now could duplicate prints that already exist, and a
+            // duplicate is unmergeable because output filenames are wall-clock.
+            tracing::error!(
+                %error,
+                "could not check the durable queue against saved prints; \
+                 skipping replay this boot so nothing is rendered twice"
+            );
+            report.skipped_unverified = journal.replayable().len();
+            return report;
+        }
+    }
 
     let cancellation = tokio_util::sync::CancellationToken::new();
     for row in journal.replayable() {
@@ -939,6 +973,7 @@ mod tests {
             db: Arc::new(Some(db)),
             owner_uuid: Some(owner),
             _owner_claim: None,
+            fail_completion_lookup: AtomicBool::new(false),
             retain: AtomicBool::new(false),
             max_bytes: DEFAULT_JOURNAL_MAX_BYTES,
             max_dispatch_attempts: DEFAULT_MAX_DISPATCH_ATTEMPTS,
@@ -1126,6 +1161,7 @@ mod tests {
             db: Arc::new(Some(db)),
             owner_uuid: Some(owner),
             _owner_claim: None,
+            fail_completion_lookup: AtomicBool::new(false),
             retain: AtomicBool::new(false),
             max_bytes: 64,
             max_dispatch_attempts: DEFAULT_MAX_DISPATCH_ATTEMPTS,
@@ -1148,6 +1184,7 @@ mod tests {
             db: Arc::new(Some(db)),
             owner_uuid: Some(owner),
             _owner_claim: None,
+            fail_completion_lookup: AtomicBool::new(false),
             retain: AtomicBool::new(false),
             max_bytes: DEFAULT_JOURNAL_MAX_BYTES,
             max_dispatch_attempts: 2,

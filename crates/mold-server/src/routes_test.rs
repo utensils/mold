@@ -4434,6 +4434,36 @@ mod tests {
         submitted
     }
 
+    /// A failure to CHECK the idempotence gate is not the same as "nothing was
+    /// completed". Reading it as an empty result would re-render every job
+    /// whose print already exists, and those duplicates are unmergeable
+    /// because output filenames are wall-clock — so one malformed
+    /// `metadata_json` would defeat the whole guarantee.
+    #[tokio::test]
+    async fn replay_renders_nothing_when_the_idempotence_gate_cannot_be_checked() {
+        let output_dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let submitted = seed_retained_jobs(db.clone(), output_dir.path(), 2).await;
+
+        let (state, mut rx) = durable_state(db.clone(), output_dir.path());
+        state.queue_journal.fail_completion_lookup_for_tests();
+        let report = crate::queue_journal::replay(&state, true).await;
+
+        assert_eq!(report.resumed, 0, "nothing may be rendered unverified");
+        assert_eq!(report.skipped_unverified, 2);
+        assert!(rx.try_recv().is_err());
+
+        let rows = state.queue_journal.list_all();
+        assert_eq!(
+            rows.iter().map(|row| row.id.clone()).collect::<Vec<_>>(),
+            submitted
+        );
+        assert!(
+            rows.iter().all(|row| row.replay_seen == 0),
+            "the next boot must get a full budget to try again"
+        );
+    }
+
     /// A job that finished between its last save and the crash must not be
     /// re-rendered — output filenames are wall-clock, so a duplicate print
     /// could never be merged afterwards.
