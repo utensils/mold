@@ -172,7 +172,10 @@ const cinematicHint =
 const print: GalleryImage = {
   filename: "storm clip.mp4",
   // Newer than the submission under test: gallery recovery is age-bounded.
-  timestamp: Math.floor(Date.now() / 1000) + 5,
+  // A getter, so a late-running test still reads a stamp after its own submit.
+  get timestamp() {
+    return Math.floor(Date.now() / 1000) + 5;
+  },
   format: "mp4",
   metadata: {
     prompt: "a ship crossing violet lightning",
@@ -4505,7 +4508,9 @@ describe("MobileApp foreground resume", () => {
   const resumedPrint: GalleryImage = {
     filename: "resumed print.png",
     // Newer than the submission under test: gallery recovery is age-bounded.
-    timestamp: Math.floor(Date.now() / 1000) + 5,
+    get timestamp() {
+      return Math.floor(Date.now() / 1000) + 5;
+    },
     format: "png",
     metadata: {
       prompt: "a ship crossing violet lightning",

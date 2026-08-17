@@ -82,7 +82,12 @@ function makeH3Job(request: GenerateRequest, overrides: Partial<Job> = {}): Job 
  *  age-bounded, so fixtures must be NEWER than the job that claims them. */
 const galleryPrint: GalleryImage = {
   filename: "resumed print.png",
-  timestamp: Math.floor(Date.now() / 1000) + 5,
+  // Read when the matcher reads it, never frozen at import: a long file can
+  // reach a test well after module load, and a stale stamp would predate the
+  // very submission it belongs to.
+  get timestamp() {
+    return Math.floor(Date.now() / 1000) + 5;
+  },
   format: "png",
   metadata: {
     prompt: "a ship crossing violet lightning",

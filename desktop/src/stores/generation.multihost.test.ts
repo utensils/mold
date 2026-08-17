@@ -749,7 +749,9 @@ describe("generation store multi-host routing", () => {
           {
             filename: "resumed.png",
             // Newer than the submission under test: gallery recovery is age-bounded.
-            timestamp: Math.floor(Date.now() / 1000) + 5,
+            get timestamp() {
+              return Math.floor(Date.now() / 1000) + 5;
+            },
             format: "png",
             metadata: {
               prompt: "a cat",
