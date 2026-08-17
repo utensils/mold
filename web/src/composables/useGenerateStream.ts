@@ -1,6 +1,7 @@
 import { computed, onUnmounted, reactive, ref, watch, type Ref } from "vue";
 import {
   cancelQueueJob,
+  fetchQueue,
   generateChainStream,
   generateStream,
   type StreamTarget,
@@ -197,6 +198,38 @@ function terminalErrorRetained(body: string | undefined): boolean {
   try {
     const parsed = JSON.parse(body) as { retained?: unknown };
     return parsed.retained === true;
+  } catch {
+    return false;
+  }
+}
+
+/** How long the post-close durability lookup may take before the job settles
+ *  as an ordinary failure. The socket just died, so the host may well be gone;
+ *  the row must not sit in `running` waiting on a request that never answers. */
+const RETENTION_LOOKUP_TIMEOUT_MS = 4_000;
+
+/**
+ * Whether the host's queue still holds `serverId` AND journalled it.
+ *
+ * Deliberately per-job rather than `capabilities.queue.durable_queue`: a host
+ * that can promise durability still reports `durable: false` for a job it
+ * excluded at admission — no gallery target, reference-upload media, or a
+ * request over the journal's payload ceiling, which a large inline base64
+ * source image can reach. Any failure resolves `false`, so an unreachable
+ * host, a vanished row, or an older server all keep the hard failure.
+ */
+async function hostJournalledJob(
+  serverId: string,
+  target: StreamTarget | undefined,
+): Promise<boolean> {
+  try {
+    const listing = await fetchQueue(
+      target,
+      AbortSignal.timeout(RETENTION_LOOKUP_TIMEOUT_MS),
+    );
+    return (
+      listing.entries.find((entry) => entry.id === serverId)?.durable === true
+    );
   } catch {
     return false;
   }
@@ -888,7 +921,6 @@ function submitJob(
     body?: string;
     message?: string;
   }) => {
-    let retained = false;
     if (err.kind === "http") {
       const message = serverErrorMessage(err.body);
       job.error =
@@ -897,22 +929,42 @@ function submitJob(
           : err.status === 0
             ? (message ?? "generation failed")
             : `HTTP ${err.status}${message ? `: ${message}` : ""}`;
-      retained = err.status === 0 && terminalErrorRetained(err.body);
-    } else {
-      job.error = err.message ?? "network error";
-      // The socket died without a terminal frame. Against a host that keeps
-      // its admitted queue the work outlives this connection, so the loss is
-      // detachment, not failure — except for a job that host would never have
-      // journalled. Reference-upload media is excluded at admission (the row
-      // must never hold a secret), so such a job reports `durable: false` even
-      // on a durable host and really is gone.
-      retained =
-        route?.durableQueue === true && !requestNeedsReferenceUpload(req);
+      // A terminal frame is self-describing and per-job by construction: the
+      // host sends `retained` only for a job it actually kept.
+      if (err.status === 0 && terminalErrorRetained(err.body)) {
+        settleDetachedJob(job.id, job.error ?? "");
+        return;
+      }
+      recordFailedSettlement(job);
+      return;
     }
-    if (retained) {
+    job.error = err.message ?? "network error";
+    // The socket died with no terminal frame, so the host never got to say
+    // whether it kept this job. Ask it — per job, because a host that can
+    // promise durability still excludes some jobs at admission and a false
+    // "it will finish" is worse than a failure the user can simply retry.
+    void settleFramelessClose(job, job.error, route, req);
+  };
+
+  /** Resolve a frameless close against the host's own record of THIS job.
+   *  Anything short of a `durable: true` row — an unreachable host, a vanished
+   *  row, an unadmitted job, a host that never promised durability — keeps the
+   *  hard failure that has always been the behaviour here. */
+  const settleFramelessClose = async (
+    job: Job,
+    note: string,
+    route: HostRoute | null,
+    request: GenerateRequestWire | ChainRequestWire,
+  ) => {
+    const durable =
+      route?.durableQueue === true &&
+      !!job.serverId &&
+      !requestNeedsReferenceUpload(request as GenerateRequestWire) &&
+      (await hostJournalledJob(job.serverId, route.target));
+    if (durable) {
       // Soft settle: the row stops moving and keeps its note, but the canvas
       // never claims a print failed that the host is still going to render.
-      settleDetachedJob(job.id, job.error ?? "");
+      settleDetachedJob(job.id, note);
       return;
     }
     recordFailedSettlement(job);

@@ -19,7 +19,7 @@ import type {
   GenerateStreamHandlers,
   StreamTarget,
 } from "../api";
-import { cancelQueueJob } from "../api";
+import { cancelQueueJob, fetchQueue } from "../api";
 import type { HostRoute } from "../lib/hostRouting";
 
 function persistedPayload(jobs: unknown[]): string {
@@ -39,6 +39,7 @@ let lastChainTarget: StreamTarget | undefined;
 
 vi.mock("../api", () => ({
   cancelQueueJob: vi.fn().mockResolvedValue(undefined),
+  fetchQueue: vi.fn().mockResolvedValue({ entries: [] }),
   generateStream: vi.fn(
     (
       _req: GenerateRequestWire,
@@ -1158,7 +1159,9 @@ describe("useGenerateStream host routing", () => {
     expect(lastSingleTarget).toBeUndefined();
   });
 
-  it("softly detaches a network close from a host that retains its queue", () => {
+  /** Submit against a durable host, latch a server id, then kill the socket
+   *  with no terminal frame — the frameless close this gate exists for. */
+  async function networkCloseWithServerId(serverId = "srv-net") {
     const stream = useGenerateStream();
     const id = stream.submit(
       singleGen({ frames: 1 }),
@@ -1169,14 +1172,98 @@ describe("useGenerateStream host routing", () => {
       },
     );
     const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
+    lastSingleHandlers!.onProgress({
+      type: "queued",
+      position: 1,
+      id: serverId,
+    });
+    lastSingleHandlers!.onError({
+      kind: "network",
+      message: "connection lost",
+    });
+    await vi.waitFor(() => expect(job.state).not.toBe("running"));
+    return { stream, id, job };
+  }
+
+  it("softly detaches a frameless close when the host journalled THIS job", async () => {
+    vi.mocked(fetchQueue).mockResolvedValue({
+      entries: [
+        {
+          id: "srv-net",
+          model: "m",
+          state: "queued",
+          started_at_unix_ms: 0,
+          position: 0,
+          durable: true,
+        },
+      ],
+    } as never);
+
+    const { stream, job } = await networkCloseWithServerId();
+
+    expect(vi.mocked(fetchQueue).mock.calls[0]?.[0]).toEqual({
+      baseUrl: "http://studio:7680",
+      apiKey: "sk-studio",
+    });
+    expect(job.state).toBe("error");
+    expect(stream.canvasErrorJobId.value).toBeNull();
+  });
+
+  it("keeps a frameless close hard when the host did not journal this job", async () => {
+    // Reachable on web: a large inline base64 source image can exceed the
+    // journal's payload ceiling, so the host admits the job but keeps no row.
+    vi.mocked(fetchQueue).mockResolvedValue({
+      entries: [
+        {
+          id: "srv-net",
+          model: "m",
+          state: "queued",
+          started_at_unix_ms: 0,
+          position: 0,
+          durable: false,
+        },
+      ],
+    } as never);
+
+    const { stream, id, job } = await networkCloseWithServerId();
+
+    expect(stream.canvasErrorJobId.value).toBe(id);
+    expect(job.error).toBe("connection lost");
+  });
+
+  it("keeps a frameless close hard when the row is gone or the lookup fails", async () => {
+    vi.mocked(fetchQueue).mockResolvedValue({ entries: [] } as never);
+    const gone = await networkCloseWithServerId();
+    expect(gone.stream.canvasErrorJobId.value).toBe(gone.id);
+
+    vi.mocked(fetchQueue).mockRejectedValue(new Error("host unreachable"));
+    const failed = await networkCloseWithServerId("srv-net-2");
+    expect(failed.stream.canvasErrorJobId.value).toBe(failed.id);
+    expect(failed.job.error).toBe("connection lost");
+  });
+
+  it("keeps a frameless close hard when no server id was ever assigned", async () => {
+    const stream = useGenerateStream();
+    const id = stream.submit(
+      singleGen({ frames: 1 }),
+      { kind: "single" },
+      {
+        ...studioRoute,
+        durableQueue: true,
+      },
+    );
+    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
+    vi.mocked(fetchQueue).mockClear();
 
     lastSingleHandlers!.onError({
       kind: "network",
       message: "connection lost",
     });
 
+    // Nothing to look up, and an unadmitted job was never journalled.
+    expect(fetchQueue).not.toHaveBeenCalled();
     expect(job.state).toBe("error");
-    expect(stream.canvasErrorJobId.value).toBeNull();
+    expect(stream.canvasErrorJobId.value).toBe(id);
   });
 
   it("keeps a reference-upload network close a hard failure even on a durable host", async () => {

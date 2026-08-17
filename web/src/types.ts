@@ -488,6 +488,11 @@ export interface QueueEntry {
   gpu?: number;
   /** Preferred lane for queued jobs. Omitted/null means Auto. */
   target_gpu?: number | null;
+  /** Whether the host journalled THIS job and will run it across a restart.
+   * Additive and deliberately per-job: a host that advertises
+   * `queue.durable_queue` still reports `false` for a job it excluded at
+   * admission. Absent on servers without the durable queue. */
+  durable?: boolean;
 }
 
 export interface QueueListing {
