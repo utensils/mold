@@ -22,9 +22,9 @@ import {
   type ActivityJobVM,
 } from "@studio/lib/activity";
 import {
-  blockedReasonLabel,
-  queuePositionLabel,
   queueStatusFor,
+  queueWaitLabel,
+  resolveQueueWait,
   type QueueStatusIndex,
 } from "@studio/lib/queuePosition";
 import type { Job } from "../../composables/useGenerateStream";
@@ -45,18 +45,19 @@ const props = withDefaults(
   { sequences: () => [], shared: () => [], queueStatus: null },
 );
 
-/** "#2 in line", or "Waiting for memory" when the scheduler parked the job.
- * Null keeps today's bare pill against a server that lists nothing. */
-function queueLabel(job: Job): string | null {
-  const status = queueStatusFor(
-    props.queueStatus,
-    job.hostId ?? ORIGIN_HOST_ID,
-    job.serverId,
-  );
-  if (!status) return null;
-  return (
-    blockedReasonLabel(status.blockedReason) ??
-    queuePositionLabel(status.position)
+/** "Next up" / "#2 in line", or "Waiting for memory" when the scheduler really
+ * did park the job. Resolved in the shared studio layer so web, desktop, and
+ * iPhone describe the same waiting row the same way; a server that lists
+ * nothing degrades to the plain "Queued" pill. */
+function queueLabel(job: Job): string {
+  return queueWaitLabel(
+    resolveQueueWait(
+      queueStatusFor(
+        props.queueStatus,
+        job.hostId ?? ORIGIN_HOST_ID,
+        job.serverId,
+      ),
+    ),
   );
 }
 
@@ -343,7 +344,6 @@ const active = computed(
             >{{ hostBadge(job) }}</span
           >
           <span
-            v-if="queueLabel(job)"
             class="activity__queue-position"
             :data-test="`activity-queue-position-${job.id}`"
             >{{ queueLabel(job) }}</span
