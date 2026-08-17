@@ -479,6 +479,73 @@ describe("reconcileInterruptedGenerationJobs", () => {
     expect(job.status).toBe("error");
   });
 
+  it("waits out the handoff gap when a retained job is briefly absent", async () => {
+    // Between the retained worker exiting and restart replay running, the
+    // durable row is invisible to /api/queue. A successful EMPTY listing in
+    // that window is a moment of server bookkeeping, not evidence the work is
+    // gone — and `retainedByHost` is proof the host said it kept it.
+    let queuePolls = 0;
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/queue") {
+        queuePolls += 1;
+        // Absent for two polls (the handoff), then replayed as queued, then
+        // gone for real once it has finished.
+        if (queuePolls <= 2) return Promise.resolve({ entries: [] });
+        if (queuePolls === 3) {
+          return Promise.resolve({
+            entries: [
+              { id: "job-9", model: "ltx2:q8", state: "queued", position: 0, durable: true },
+            ],
+          });
+        }
+        return Promise.resolve({ entries: [] });
+      }
+      if (path === "/api/gallery") {
+        // The print only exists after the replay actually ran.
+        return Promise.resolve(queuePolls >= 4 ? [galleryPrint] : []);
+      }
+      return Promise.reject(new Error(`Unexpected path ${path}`));
+    });
+    const job = makeJob({ retainedByHost: true });
+    await reconcileInterruptedGenerationJobs([job], options());
+
+    expect(job.status).toBe("complete");
+    expect(job.result?.filename).toBe("resumed print.png");
+  });
+
+  it("still fails a NON-retained job that is absent with no print", async () => {
+    // Without the host's promise, an empty queue and an empty gallery is the
+    // only evidence there is, and it says the work is gone.
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/queue") return Promise.resolve({ entries: [] });
+      if (path === "/api/gallery") return Promise.resolve([]);
+      return Promise.reject(new Error(`Unexpected path ${path}`));
+    });
+    const job = makeJob();
+    await reconcileInterruptedGenerationJobs([job], options());
+
+    expect(job.status).toBe("error");
+    expect(job.error).toBe(
+      "The connection to Studio was interrupted and this print didn’t finish.",
+    );
+  });
+
+  it("gives up on a retained job that never comes back, without claiming it failed", async () => {
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/queue") return Promise.resolve({ entries: [] });
+      if (path === "/api/gallery") return Promise.resolve([]);
+      return Promise.reject(new Error(`Unexpected path ${path}`));
+    });
+    const job = makeJob({ retainedByHost: true });
+    await reconcileInterruptedGenerationJobs([job], options());
+
+    // Bounded, so reconciliation always ends — but the copy still points at
+    // the host, and the row stays reconcilable rather than declared failed.
+    expect(job.status).toBe("error");
+    expect(job.interrupted).toBe(true);
+    expect(job.error).toContain("check the Library");
+  });
+
   it("settles a held row with the host's reason instead of waiting forever", async () => {
     apiJsonTo.mockImplementation((_target: unknown, path: string) => {
       if (path === "/api/queue") {

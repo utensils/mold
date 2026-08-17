@@ -50,6 +50,12 @@ const MAX_TRANSPORT_RETRIES = 3;
  *  a failure for work that is about to run. Bounded so the reconcile always
  *  ends: ~5 minutes at the default poll interval. */
 const RETAINED_TRANSPORT_RETRIES = 75;
+/** How many times a RETAINED job may be absent from a successfully-read queue
+ *  before reconciliation gives up on it. This is the restart handoff window —
+ *  the worker has exited and its registry entry is gone, but the durable row
+ *  is invisible until replay resubmits it — so it is sized like the retry
+ *  budget above rather than like a normal poll. */
+const RETAINED_HANDOFF_POLLS = 75;
 const PRE_ID_CLOCK_SKEW_MS = 1_000;
 const PRE_ID_JOIN_WINDOW_MS = 5_000;
 
@@ -461,6 +467,9 @@ async function reconcileJob(job: Job, opts: GenerationRecoveryOptions): Promise<
     `${opts.hostLabel} kept this print in its queue but hasn’t come back yet. ` +
     `It will finish there — check the Library.`;
   let transportRetries = 0;
+  // Successful polls that found no row for a retained job — the restart
+  // handoff window, bounded so reconciliation always ends.
+  let handoffPolls = 0;
   let h3Identity: H3RecoveryIdentity | null | undefined;
   try {
     // Digest the frozen H3 request once. Queue polls and the eventual gallery
@@ -639,9 +648,26 @@ async function reconcileJob(job: Job, opts: GenerationRecoveryOptions): Promise<
       const match = matchGalleryPrintWithIdentity(job, prints, h3Identity);
       if (match) {
         settleCompleted(job, galleryCompletion(match), opts);
-      } else {
-        settleFailure(job, interruptedCopy);
+        return;
       }
+      if (retained && handoffPolls < RETAINED_HANDOFF_POLLS) {
+        // Absent from the queue AND absent from the gallery, on a job the host
+        // told us it kept. That combination is the handoff window: the worker
+        // has exited and dropped its registry entry, but the durable row stays
+        // invisible to `/api/queue` until restart replay resubmits it. A
+        // successful empty listing there is server bookkeeping, not evidence.
+        handoffPolls += 1;
+        job.stage = `Waiting for ${opts.hostLabel} to come back`;
+        await sleep(interval);
+        continue;
+      }
+      if (retained) {
+        // Bounded, so reconciliation always ends — but the host promised to
+        // run this, so it stays reconcilable rather than declared failed.
+        settleUnreconciled(job, retainedUnreachableCopy);
+        return;
+      }
+      settleFailure(job, interruptedCopy);
       return;
     }
   }
