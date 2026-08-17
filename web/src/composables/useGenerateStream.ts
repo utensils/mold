@@ -949,7 +949,16 @@ function submitJob(
   /** Resolve a frameless close against the host's own record of THIS job.
    *  Anything short of a `durable: true` row — an unreachable host, a vanished
    *  row, an unadmitted job, a host that never promised durability — keeps the
-   *  hard failure that has always been the behaviour here. */
+   *  hard failure that has always been the behaviour here.
+   *
+   *  Deliberately NOT gated on the route's advertised `durable_queue`: a
+   *  single-host page submits with no route at all (`normalizeSubmitRoute`
+   *  collapses the origin to `null`), which is the common deployment, and
+   *  requiring one would leave the default path permanently unreachable. The
+   *  row's own `durable` flag is the stronger per-job answer anyway — only a
+   *  host with the durable queue ever reports it — so asking for it directly
+   *  is both correct for the origin and correct for a routed host whose
+   *  capabilities were never read. */
   const settleFramelessClose = async (
     job: Job,
     note: string,
@@ -957,10 +966,9 @@ function submitJob(
     request: GenerateRequestWire | ChainRequestWire,
   ) => {
     const durable =
-      route?.durableQueue === true &&
       !!job.serverId &&
       !requestNeedsReferenceUpload(request as GenerateRequestWire) &&
-      (await hostJournalledJob(job.serverId, route.target));
+      (await hostJournalledJob(job.serverId, route?.target));
     if (durable) {
       // Soft settle: the row stops moving and keeps its note, but the canvas
       // never claims a print failed that the host is still going to render.

@@ -1159,17 +1159,14 @@ describe("useGenerateStream host routing", () => {
     expect(lastSingleTarget).toBeUndefined();
   });
 
-  /** Submit against a durable host, latch a server id, then kill the socket
-   *  with no terminal frame — the frameless close this gate exists for. */
+  /** Submit to a routed host, latch a server id, then kill the socket with no
+   *  terminal frame — the frameless close this gate exists for. */
   async function networkCloseWithServerId(serverId = "srv-net") {
     const stream = useGenerateStream();
     const id = stream.submit(
       singleGen({ frames: 1 }),
       { kind: "single" },
-      {
-        ...studioRoute,
-        durableQueue: true,
-      },
+      studioRoute,
     );
     const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
     lastSingleHandlers!.onProgress({
@@ -1184,6 +1181,74 @@ describe("useGenerateStream host routing", () => {
     await vi.waitFor(() => expect(job.state).not.toBe("running"));
     return { stream, id, job };
   }
+
+  it("softly detaches a frameless close on the ORIGIN host, the default path", async () => {
+    // Single-host web submits with NO route: `normalizeSubmitRoute` collapses
+    // the origin to `null`. This is the common deployment — someone opening
+    // mold's own web UI — so the lookup must not require an explicit route.
+    vi.mocked(fetchQueue).mockResolvedValue({
+      entries: [
+        {
+          id: "srv-origin",
+          model: "m",
+          state: "queued",
+          started_at_unix_ms: 0,
+          position: 0,
+          durable: true,
+        },
+      ],
+    } as never);
+
+    const stream = useGenerateStream();
+    const id = stream.submit(singleGen({ frames: 1 }), { kind: "single" });
+    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
+    lastSingleHandlers!.onProgress({
+      type: "queued",
+      position: 1,
+      id: "srv-origin",
+    });
+    lastSingleHandlers!.onError({
+      kind: "network",
+      message: "connection lost",
+    });
+    await vi.waitFor(() => expect(job.state).not.toBe("running"));
+
+    // Undefined target === the serving origin's relative URL.
+    expect(fetchQueue).toHaveBeenCalled();
+    expect(vi.mocked(fetchQueue).mock.lastCall?.[0]).toBeUndefined();
+    expect(stream.canvasErrorJobId.value).toBeNull();
+  });
+
+  it("keeps an origin frameless close hard when the origin did not journal it", async () => {
+    vi.mocked(fetchQueue).mockResolvedValue({
+      entries: [
+        {
+          id: "srv-origin",
+          model: "m",
+          state: "queued",
+          started_at_unix_ms: 0,
+          position: 0,
+          durable: false,
+        },
+      ],
+    } as never);
+
+    const stream = useGenerateStream();
+    const id = stream.submit(singleGen({ frames: 1 }), { kind: "single" });
+    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
+    lastSingleHandlers!.onProgress({
+      type: "queued",
+      position: 1,
+      id: "srv-origin",
+    });
+    lastSingleHandlers!.onError({
+      kind: "network",
+      message: "connection lost",
+    });
+    await vi.waitFor(() => expect(job.state).not.toBe("running"));
+
+    expect(stream.canvasErrorJobId.value).toBe(id);
+  });
 
   it("softly detaches a frameless close when the host journalled THIS job", async () => {
     vi.mocked(fetchQueue).mockResolvedValue({
@@ -1201,7 +1266,7 @@ describe("useGenerateStream host routing", () => {
 
     const { stream, job } = await networkCloseWithServerId();
 
-    expect(vi.mocked(fetchQueue).mock.calls[0]?.[0]).toEqual({
+    expect(vi.mocked(fetchQueue).mock.lastCall?.[0]).toEqual({
       baseUrl: "http://studio:7680",
       apiKey: "sk-studio",
     });
@@ -1247,10 +1312,7 @@ describe("useGenerateStream host routing", () => {
     const id = stream.submit(
       singleGen({ frames: 1 }),
       { kind: "single" },
-      {
-        ...studioRoute,
-        durableQueue: true,
-      },
+      studioRoute,
     );
     const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
     vi.mocked(fetchQueue).mockClear();
@@ -1287,7 +1349,7 @@ describe("useGenerateStream host routing", () => {
         ],
       } as Partial<GenerateRequestWire>),
       { kind: "single" },
-      { ...studioRoute, durableQueue: true },
+      studioRoute,
     );
     const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
     // The lease is awaited before the stream opens.
