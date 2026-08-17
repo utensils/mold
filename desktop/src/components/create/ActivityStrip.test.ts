@@ -449,8 +449,44 @@ describe("ActivityStrip live queue position", () => {
     const generation = useGenerationStore();
     generation.jobs = [{ ...baseJob(), id: "srv-5", hostId: "local" }];
     const wrapper = mount(ActivityStrip);
-    expect(wrapper.get("[data-test='activity-queued']").text()).toContain("Queued");
-    expect(wrapper.find("[data-test='activity-queued-position']").exists()).toBe(false);
+    const pill = wrapper.get("[data-test='activity-queued']");
+    expect(pill.get("[data-test='activity-queued-position']").text()).toBe("Queued");
+    // The pill says it once. The word is the shared label, not chrome around it.
+    expect(pill.text().match(/Queued/g)).toHaveLength(1);
+  });
+
+  it("counts the line on a busy single-GPU host instead of naming the planner", () => {
+    const generation = useGenerationStore();
+    generation.jobs = [{ ...baseJob(), id: "srv-6", hostId: "local" }];
+    seedQueue([{ id: "srv-6", model: "m", state: "queued", started_at_unix_ms: 6, position: 2 }], {
+      plan_version: 1,
+      state_version: 1,
+      optimizer_state: "settled",
+      dirty_since_unix_ms: null,
+      next_replan_at_unix_ms: null,
+      work_items: [
+        {
+          work_id: "w6",
+          parent_id: "srv-6",
+          work_kind: "generation",
+          priority_class: "normal",
+          queue_rank: 2,
+          bypass_count: 0,
+          estimate_confidence: "low",
+          blocked_reason: "no_idle_device",
+        },
+      ],
+    });
+    const wrapper = mount(ActivityStrip);
+    expect(wrapper.get("[data-test='activity-queued-position']").text()).toBe("#2 in line");
+  });
+
+  it("names the job at the head of the queue", () => {
+    const generation = useGenerationStore();
+    generation.jobs = [{ ...baseJob(), id: "srv-7", hostId: "local" }];
+    seedQueue([{ id: "srv-7", model: "m", state: "queued", started_at_unix_ms: 7, position: 0 }]);
+    const wrapper = mount(ActivityStrip);
+    expect(wrapper.get("[data-test='activity-queued-position']").text()).toBe("Next up");
   });
 
   it("retains the shared queue poll only while work is waiting", async () => {
