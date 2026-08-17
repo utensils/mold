@@ -284,6 +284,22 @@ one deliberately with:
 MOLD_QUEUE_ADOPT_OWNER=<owner-id-from-the-warning> mold serve
 ```
 
+There is one case the server deliberately gets wrong rather than leave work
+stranded. If exactly **one** retained queue is present, nobody is running it,
+and it was last used by a different server, the starting server adopts it and
+says so loudly in the log. Nearly always that is correct — it is the same
+server coming back on a changed port, which is precisely what the queue is
+designed to survive, and what makes the "this job will finish on the host"
+message clients show at shutdown true rather than a lie.
+
+But a genuinely **new** second server, started while the first is stopped
+against a `MOLD_HOME` that holds one retained queue, cannot be distinguished
+from that and will adopt the queue too. It runs the other server's jobs. The
+trade is deliberate: a silently stranded queue is worse than an announced
+adoption, because nothing tells the user their job is never coming. If you are
+adding a second server to an existing `MOLD_HOME`, start it while the first is
+running, or drain the first server's queue before you do.
+
 Under systemd, set the budget through the NixOS module rather than the
 environment, so the unit's stop timeout stays derived from it:
 
