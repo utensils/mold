@@ -88,7 +88,12 @@ pub struct GenerationQueueRow {
 /// `(data dir, port)`: a server that comes back on a different port must still
 /// replay its own queue rather than orphaning every row.
 pub fn resolve_owner_uuid(db: &MetadataDb) -> Result<String> {
-    let settings = crate::settings::Settings::new(db);
+    // Explicitly the default profile, never the active one. The queue is
+    // server-wide (see the v18 DDL comment), so its identity must not move
+    // when the user switches `MOLD_PROFILE` or `settings.profile.active`: a
+    // server that shut down under one profile and came back under another
+    // would mint a fresh owner and silently orphan every retained row.
+    let settings = crate::settings::Settings::for_profile(db, crate::settings::DEFAULT_PROFILE);
     if let Some(existing) = settings.get_str(OWNER_UUID_KEY)? {
         let trimmed = existing.trim();
         if !trimmed.is_empty() {
@@ -503,10 +508,51 @@ mod tests {
 
     #[test]
     fn owner_uuid_is_stable_across_resolutions() {
+        let _guard = crate::settings::profile_env_lock().lock().unwrap();
         let db = MetadataDb::open_in_memory().unwrap();
         let first = resolve_owner_uuid(&db).unwrap();
         assert!(!first.is_empty());
         assert_eq!(resolve_owner_uuid(&db).unwrap(), first);
+    }
+
+    /// The queue is server-wide, so its identity must not move with the user's
+    /// active profile. A server that shuts down under one profile and comes
+    /// back under another would otherwise mint a fresh owner and silently
+    /// orphan every retained row — invisible to replay, listing, and cancel.
+    #[test]
+    fn owner_uuid_survives_a_profile_change() {
+        let _guard = crate::settings::profile_env_lock().lock().unwrap();
+        let db = MetadataDb::open_in_memory().unwrap();
+        let owner = resolve_owner_uuid(&db).unwrap();
+        insert(&db, &row("job-1", &owner, 1)).unwrap();
+
+        crate::settings::set_active_profile(&db, "portrait").unwrap();
+
+        assert_eq!(
+            resolve_owner_uuid(&db).unwrap(),
+            owner,
+            "a profile switch must not orphan the durable queue"
+        );
+        let ids: Vec<String> = list_replayable(&db, &resolve_owner_uuid(&db).unwrap())
+            .unwrap()
+            .into_iter()
+            .map(|row| row.id)
+            .collect();
+        assert_eq!(ids, vec!["job-1"]);
+    }
+
+    /// Same rule for the env override, which outranks the stored profile.
+    #[test]
+    fn owner_uuid_ignores_the_profile_environment_override() {
+        let _guard = crate::settings::profile_env_lock().lock().unwrap();
+        let db = MetadataDb::open_in_memory().unwrap();
+        let owner = resolve_owner_uuid(&db).unwrap();
+
+        std::env::set_var("MOLD_PROFILE", "portrait");
+        let under_override = resolve_owner_uuid(&db);
+        std::env::remove_var("MOLD_PROFILE");
+
+        assert_eq!(under_override.unwrap(), owner);
     }
 
     #[test]
