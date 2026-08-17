@@ -45,6 +45,24 @@ struct RetainedJobProbe {
     timeout: std::time::Duration,
 }
 
+/// Explain a TERMINAL error frame in which the host said it kept the job.
+///
+/// This is the graceful-restart path — an operator restarting the server —
+/// and it is the scenario the durable queue exists for, so it must never read
+/// as an ordinary failure. The frame is per-job authoritative (the server sets
+/// `retained` only for a job it actually journalled), so no probe is consulted
+/// and none is needed. The server's own message is preserved as the cause.
+fn retained_frame_error(message: &str, job_id: Option<&str>, host: &str) -> anyhow::Error {
+    let note = match job_id {
+        Some(id) if !id.is_empty() => {
+            format!("job {id} is retained on {host} and will finish there")
+        }
+        _ => format!("this generation is retained on {host} and will finish there"),
+    };
+    tracing::warn!(job_id = job_id.unwrap_or(""), host = %host, "{note}");
+    anyhow::anyhow!("server error: {message}").context(note)
+}
+
 /// Explain a stream that ended without a terminal event.
 ///
 /// A host that journalled this job runs it whether or not a client is
@@ -687,6 +705,20 @@ impl MoldClient {
                     }
                     "error" => {
                         let error: SseErrorEvent = serde_json::from_str(&data)?;
+                        // A terminal frame ends the stream either way, so the
+                        // in-flight probe has nothing left to answer.
+                        let probe = retained.take();
+                        if let Some(probe) = &probe {
+                            probe.durable.abort();
+                        }
+                        if error.retained {
+                            return Err(retained_frame_error(
+                                &error.message,
+                                probe.as_ref().map(|probe| probe.job_id.as_str()),
+                                &self.base_url,
+                            ));
+                        }
+                        // A definitive server failure promises nothing.
                         anyhow::bail!("server error: {}", error.message);
                     }
                     _ => {}
@@ -2693,6 +2725,117 @@ mod tests {
             !rendered.contains("retained"),
             "a job the host did not journal must not promise retention: {rendered}"
         );
+    }
+
+    /// A server that emits a `queued` event and then a TERMINAL error frame —
+    /// the graceful-restart shape PR 1 produces, where the host keeps the job.
+    async fn spawn_retained_frame_server(job_id: &'static str, frame: &'static str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let mut request = Vec::new();
+            let mut buf = [0u8; 1024];
+            while let Ok(read) = socket.read(&mut buf).await {
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buf[..read]);
+                if request.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let body = format!(
+                "event: progress\ndata: {{\"type\":\"queued\",\"position\":0,\"id\":\"{job_id}\"}}\n\nevent: error\ndata: {frame}\n\n"
+            );
+            let _ = socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await;
+            let _ = socket.flush().await;
+            let _ = socket.shutdown().await;
+        });
+        base
+    }
+
+    #[tokio::test]
+    async fn a_retained_terminal_frame_reports_the_job_as_kept() {
+        // The graceful restart: an operator runs `systemctl restart mold`. The
+        // host sends an explicit terminal frame saying it KEPT this job, which
+        // is the exact scenario the durable queue exists for.
+        let base = spawn_retained_frame_server(
+            "job-graceful",
+            r#"{"message":"mold is restarting; this generation was kept in the queue","retained":true,"code":"server_restarting"}"#,
+        )
+        .await;
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let err = MoldClient::new(&base)
+            .generate_stream(&stream_request(), tx)
+            .await
+            .expect_err("a terminal error frame is still an error");
+
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains("job job-graceful is retained on")
+                && rendered.contains("will finish there"),
+            "expected the retention note, got: {rendered}"
+        );
+        assert!(
+            rendered.contains("mold is restarting"),
+            "the server's own message must survive: {rendered}"
+        );
+        assert_eq!(
+            crate::control::classify_generate_error(&err),
+            crate::control::GenerateServerAction::SurfaceError
+        );
+    }
+
+    #[tokio::test]
+    async fn a_retained_frame_without_a_job_id_still_names_the_host() {
+        let base = spawn_retained_frame_server(
+            "",
+            r#"{"message":"mold is restarting","retained":true,"code":"server_restarting"}"#,
+        )
+        .await;
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let err = MoldClient::new(&base)
+            .generate_stream(&stream_request(), tx)
+            .await
+            .expect_err("a terminal error frame is still an error");
+
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains("retained on") && rendered.contains("will finish there"),
+            "expected a host-scoped retention note, got: {rendered}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_ordinary_terminal_frame_promises_nothing() {
+        let base =
+            spawn_retained_frame_server("job-failed", r#"{"message":"host ran out of memory"}"#)
+                .await;
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let err = MoldClient::new(&base)
+            .generate_stream(&stream_request(), tx)
+            .await
+            .expect_err("the server reported a failure");
+
+        let rendered = format!("{err:#}");
+        assert!(
+            !rendered.contains("retained"),
+            "a definitive server failure must not promise retention: {rendered}"
+        );
+        assert!(rendered.contains("host ran out of memory"));
     }
 
     #[tokio::test]
