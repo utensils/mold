@@ -1350,6 +1350,94 @@ describe("useGenerateStream host routing", () => {
     expect(failed.job.error).toBe("connection lost");
   });
 
+  it("captures durability at queued time, so a finished job is not called failed", async () => {
+    // The race: rendering finishes, the server removes the row, and only THEN
+    // does the transport drop before the complete frame lands. Asking after
+    // the close reads the absent row as "not durable" and reports a failed
+    // generation for output already sitting in the Library.
+    vi.mocked(fetchQueue).mockResolvedValue({
+      entries: [
+        {
+          id: "srv-finished",
+          model: "m",
+          state: "running",
+          started_at_unix_ms: 0,
+          position: 0,
+          durable: true,
+        },
+      ],
+    } as never);
+
+    const stream = useGenerateStream();
+    const id = stream.submit(
+      singleGen({ frames: 1 }),
+      { kind: "single" },
+      studioRoute,
+    );
+    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
+    lastSingleHandlers!.onProgress({
+      type: "queued",
+      position: 1,
+      id: "srv-finished",
+    });
+    // The durability answer is taken while the row demonstrably exists.
+    await vi.waitFor(() => expect(vi.mocked(fetchQueue)).toHaveBeenCalled());
+
+    // By the time the socket dies the job has finished and the row is gone.
+    vi.mocked(fetchQueue).mockResolvedValue({ entries: [] } as never);
+    lastSingleHandlers!.onError({
+      kind: "network",
+      message: "connection lost",
+    });
+    await vi.waitFor(() => expect(job.state).not.toBe("running"));
+
+    expect(stream.canvasErrorJobId.value).toBeNull();
+  });
+
+  it("asks once at queued time, not again after the close", async () => {
+    // The singleton's job list spans this file, so count only THIS job's asks.
+    vi.mocked(fetchQueue).mockClear();
+    vi.mocked(fetchQueue).mockResolvedValue({
+      entries: [
+        {
+          id: "srv-once",
+          model: "m",
+          state: "queued",
+          started_at_unix_ms: 0,
+          position: 0,
+          durable: true,
+        },
+      ],
+    } as never);
+
+    const stream = useGenerateStream();
+    const id = stream.submit(
+      singleGen({ frames: 1 }),
+      { kind: "single" },
+      studioRoute,
+    );
+    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
+    lastSingleHandlers!.onProgress({
+      type: "queued",
+      position: 1,
+      id: "srv-once",
+    });
+    await vi.waitFor(() =>
+      expect(vi.mocked(fetchQueue)).toHaveBeenCalledTimes(1),
+    );
+
+    vi.mocked(fetchQueue).mockClear();
+    lastSingleHandlers!.onError({
+      kind: "network",
+      message: "connection lost",
+    });
+    await vi.waitFor(() => expect(job.state).not.toBe("running"));
+
+    // Nothing is asked after the close — that question can no longer be
+    // answered honestly, because a job that SUCCEEDED has no row left.
+    expect(vi.mocked(fetchQueue)).not.toHaveBeenCalled();
+  });
+
   it("never overwrites a cancellation that lands while the lookup is in flight", async () => {
     // The lookup is asynchronous, so a cancel can be confirmed between the
     // close and the answer. Cancellation is terminal: neither settlement may

@@ -214,6 +214,27 @@ function terminalErrorRetained(body: string | undefined): boolean {
 const RETENTION_LOOKUP_TIMEOUT_MS = 4_000;
 
 /**
+ * Per-job durability, captured when the `queued` event arrives — while the row
+ * demonstrably exists — and read later if the stream dies.
+ *
+ * Asking AFTER the close is a race the job can lose by succeeding: if the
+ * transport drops once rendering has finished, the server has already removed
+ * the row, and the absent row reads as "not durable" for output that is
+ * sitting in the Library. Keyed by client job id, outside Pinia state (it is
+ * plumbing, and the value is a promise).
+ */
+const durabilityByJob = new Map<string, Promise<boolean>>();
+
+/** Take the host's answer while the row is still there to be asked about. */
+function captureJobDurability(
+  job: Job,
+  target: StreamTarget | undefined,
+): void {
+  if (!job.serverId || durabilityByJob.has(job.id)) return;
+  durabilityByJob.set(job.id, hostJournalledJob(job.serverId, target));
+}
+
+/**
  * Whether the host's queue still holds `serverId` AND journalled it.
  *
  * Deliberately per-job rather than `capabilities.queue.durable_queue`: a host
@@ -807,11 +828,13 @@ function fireComplete(job: Job) {
 }
 
 function recordSuccessfulSettlement(job: Job) {
+  durabilityByJob.delete(job.id);
   job.settledAt = Date.now();
   canvasErrorJobId.value = null;
 }
 
 function recordFailedSettlement(job: Job) {
+  durabilityByJob.delete(job.id);
   job.state = "error";
   job.settledAt = Date.now();
   job.previewUrl = null;
@@ -830,6 +853,7 @@ function failRunningJob(id: string, error: string) {
 function settleDetachedJob(id: string, note: string) {
   const job = jobs.value.find((candidate) => candidate.id === id);
   if (!job || job.state !== "running") return;
+  durabilityByJob.delete(id);
   job.error = note;
   job.state = "error";
   job.settledAt = Date.now();
@@ -965,10 +989,10 @@ function submitJob(
     // whether it kept this job. Ask it — per job, because a host that can
     // promise durability still excludes some jobs at admission and a false
     // "it will finish" is worse than a failure the user can simply retry.
-    void settleFramelessClose(job, job.error, route, req);
+    void settleFramelessClose(job, job.error, req);
   };
 
-  /** Resolve a frameless close against the host's own record of THIS job.
+  /** Resolve a frameless close against the answer captured at `queued` time.
    *  Anything short of a `durable: true` row — an unreachable host, a vanished
    *  row, an unadmitted job, a host that never promised durability — keeps the
    *  hard failure that has always been the behaviour here.
@@ -984,13 +1008,15 @@ function submitJob(
   const settleFramelessClose = async (
     job: Job,
     note: string,
-    route: HostRoute | null,
     request: GenerateRequestWire | ChainRequestWire,
   ) => {
     const durable =
       !!job.serverId &&
       !requestNeedsReferenceUpload(request as GenerateRequestWire) &&
-      (await hostJournalledJob(job.serverId, route?.target));
+      // Captured at `queued`, never asked now: by this point a job that
+      // SUCCEEDED has already had its row removed, and asking would read that
+      // absence as "not durable" for a print already in the Library.
+      (await (durabilityByJob.get(job.id) ?? Promise.resolve(false)));
     // The lookup is asynchronous: a cancellation can be confirmed, or a late
     // completion can land, while it is in flight. Re-check before EITHER
     // settlement — replacing a confirmed cancellation with an error is as
@@ -1063,7 +1089,13 @@ function submitJob(
         await generateStream(
           transportRequest,
           {
-            onProgress: (evt) => applyProgress(job, evt),
+            onProgress: (evt) => {
+              applyProgress(job, evt);
+              // `queued` is the first event the server emits per request, and
+              // the one moment the durable row is guaranteed to be listable.
+              if (evt.type === "queued")
+                captureJobDurability(job, route?.target);
+            },
             onComplete: (evt) => {
               job.result = evt;
               job.state = "done";
@@ -1133,6 +1165,7 @@ async function cancelJob(id: string): Promise<void> {
       "Remote cancellation was not confirmed before the queue ID arrived.",
     );
   }
+  durabilityByJob.delete(id);
   job.controller.abort();
   job.state = "canceled";
   job.settledAt = Date.now();
@@ -1146,6 +1179,7 @@ function clearDoneJobs() {
 }
 
 function removeJob(id: string) {
+  durabilityByJob.delete(id);
   jobs.value = jobs.value.filter((j) => j.id !== id);
   if (selectedJobId.value === id) selectedJobId.value = null;
   if (canvasErrorJobId.value === id) canvasErrorJobId.value = null;
