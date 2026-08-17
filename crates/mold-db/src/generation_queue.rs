@@ -278,6 +278,57 @@ pub fn requeue_running(db: &MetadataDb, owner_uuid: &str, now_ms: i64) -> Result
     })
 }
 
+/// Re-lane a row after `PATCH /api/queue/:id` moved it.
+pub fn set_target_gpu(
+    db: &MetadataDb,
+    id: &str,
+    target_gpu: Option<usize>,
+    now_ms: i64,
+) -> Result<bool> {
+    db.with_conn(|conn| {
+        let updated = conn.execute(
+            "UPDATE generation_queue SET target_gpu = ?2, updated_at = ?3 WHERE id = ?1",
+            params![id, target_gpu.map(|gpu| gpu as i64), now_ms],
+        )?;
+        Ok(updated > 0)
+    })
+}
+
+/// Re-stamp `created_at` so replay follows `ids` in the order given.
+///
+/// `created_at` is the replay sort key, so a queue reorder has to move it or
+/// the restart quietly restores the admission order. Values are rewritten as a
+/// dense sequence anchored at the oldest row's existing timestamp, which keeps
+/// them plausible wall-clock times and makes the pass self-healing: any prior
+/// drift is corrected. Ids absent from the table are ignored, and rows absent
+/// from `ids` (held work) keep their stamps.
+pub fn apply_queue_order(db: &MetadataDb, owner_uuid: &str, ids: &[String]) -> Result<usize> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    db.with_conn(|conn| {
+        let anchor: Option<i64> = conn.query_row(
+            "SELECT MIN(created_at) FROM generation_queue WHERE owner_uuid = ?1",
+            params![owner_uuid],
+            |row| row.get(0),
+        )?;
+        let Some(anchor) = anchor else {
+            return Ok(0);
+        };
+        let mut stmt = conn.prepare(
+            "UPDATE generation_queue
+                SET created_at = ?2, updated_at = ?3
+              WHERE id = ?1 AND owner_uuid = ?4",
+        )?;
+        let mut moved = 0;
+        for (index, id) in ids.iter().enumerate() {
+            let stamp = anchor.saturating_add(index as i64);
+            moved += stmt.execute(params![id, stamp, stamp, owner_uuid])?;
+        }
+        Ok(moved)
+    })
+}
+
 /// Rewrite a row's output directory after startup re-resolution.
 pub fn set_output_dir(db: &MetadataDb, id: &str, output_dir: &str, now_ms: i64) -> Result<bool> {
     db.with_conn(|conn| {
@@ -478,6 +529,53 @@ mod tests {
             QueueRowState::Running,
             "another installation's rows are never touched"
         );
+    }
+
+    #[test]
+    fn apply_queue_order_rewrites_the_replay_order() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        for (id, created) in [("first", 100), ("second", 200), ("third", 300)] {
+            insert(&db, &row(id, "owner-a", created)).unwrap();
+        }
+        insert(&db, &row("parked", "owner-a", 400)).unwrap();
+        hold(&db, "parked", "held for review", 500).unwrap();
+
+        let moved = apply_queue_order(
+            &db,
+            "owner-a",
+            &[
+                "third".to_string(),
+                "first".to_string(),
+                "second".to_string(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(moved, 3);
+
+        let ids: Vec<String> = list_replayable(&db, "owner-a")
+            .unwrap()
+            .into_iter()
+            .map(|row| row.id)
+            .collect();
+        assert_eq!(ids, vec!["third", "first", "second"]);
+        assert_eq!(
+            get(&db, "parked").unwrap().unwrap().created_at_ms,
+            400,
+            "held rows are not part of the dispatch order"
+        );
+    }
+
+    #[test]
+    fn set_target_gpu_relanes_a_row() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        insert(&db, &row("job-1", "owner-a", 1)).unwrap();
+
+        assert!(set_target_gpu(&db, "job-1", Some(3), 9).unwrap());
+        assert_eq!(get(&db, "job-1").unwrap().unwrap().target_gpu, Some(3));
+
+        assert!(set_target_gpu(&db, "job-1", None, 10).unwrap());
+        assert_eq!(get(&db, "job-1").unwrap().unwrap().target_gpu, None);
+        assert!(!set_target_gpu(&db, "missing", Some(1), 11).unwrap());
     }
 
     #[test]

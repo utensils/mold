@@ -4767,6 +4767,22 @@ async fn patch_queue_job(
             })?;
     }
 
+    // Mirror the mutation into the durable row while still holding the
+    // scheduler fence, so a restart resumes the lane and order the user chose
+    // rather than the ones the job was admitted with.
+    let reordered = req.position.is_some().then(|| {
+        state
+            .job_registry
+            .snapshot()
+            .entries
+            .into_iter()
+            .map(|entry| entry.id)
+            .collect::<Vec<_>>()
+    });
+    state
+        .queue_journal
+        .apply_queue_mutation(&id, resolved_target_gpu, reordered.as_deref());
+
     let entry = state
         .job_registry
         .entry(&id)

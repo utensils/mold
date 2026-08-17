@@ -442,6 +442,42 @@ impl QueueJournal {
         }
     }
 
+    /// Mirror an authoritative queue mutation into the durable row.
+    ///
+    /// `PATCH /api/queue/:id` owns the lane and the dispatch order, so without
+    /// this a restart silently restores the admission-time lane — possibly the
+    /// GPU the user explicitly moved the job away from — and the original FIFO
+    /// position. `order` is the registry's post-mutation order; passing it
+    /// wholesale also repairs any drift.
+    pub fn apply_queue_mutation(
+        &self,
+        id: &str,
+        target_gpu: Option<Option<usize>>,
+        order: Option<&[String]>,
+    ) {
+        let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
+            return;
+        };
+        let now = now_ms();
+        if let Some(target_gpu) = target_gpu {
+            if let Err(error) = generation_queue::set_target_gpu(db, id, target_gpu, now) {
+                tracing::warn!(
+                    job = %id,
+                    error = %format!("{error:#}"),
+                    "could not re-lane a durable queue row"
+                );
+            }
+        }
+        if let Some(order) = order {
+            if let Err(error) = generation_queue::apply_queue_order(db, owner, order) {
+                tracing::warn!(
+                    error = %format!("{error:#}"),
+                    "could not persist the new queue order"
+                );
+            }
+        }
+    }
+
     /// Whether this id names a parked row. `DELETE /api/queue/:id` is the
     /// documented way to clear one, and a held job has no registry entry.
     pub fn is_held(&self, id: &str) -> bool {
@@ -939,6 +975,51 @@ mod tests {
         let held = journal.list_all().pop().unwrap();
         assert_eq!(held.state, QueueRowState::Held);
         assert!(held.held_reason.is_some());
+    }
+
+    #[test]
+    fn a_queue_mutation_moves_the_durable_row_with_it() {
+        let journal = journal_with_db();
+        let request = request();
+        let mut tickets = Vec::new();
+        for id in ["a", "b", "c"] {
+            tickets.push(
+                journal
+                    .record(admission(id, &request, Path::new("/gallery")))
+                    .unwrap(),
+            );
+        }
+
+        journal.apply_queue_mutation("b", Some(Some(2)), None);
+        let relaned = journal
+            .list_all()
+            .into_iter()
+            .find(|row| row.id == "b")
+            .unwrap();
+        assert_eq!(relaned.target_gpu, Some(2));
+
+        journal.apply_queue_mutation(
+            "c",
+            None,
+            Some(&["c".to_string(), "a".to_string(), "b".to_string()]),
+        );
+        assert_eq!(rows(&journal), vec!["c", "a", "b"]);
+
+        // Clearing the pin returns the row to Auto rather than leaving it.
+        journal.apply_queue_mutation("b", Some(None), None);
+        assert_eq!(
+            journal
+                .list_all()
+                .into_iter()
+                .find(|row| row.id == "b")
+                .unwrap()
+                .target_gpu,
+            None
+        );
+
+        for ticket in tickets {
+            ticket.discard();
+        }
     }
 
     #[test]
