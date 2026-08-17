@@ -78,12 +78,10 @@ const canExportVideo = computed(
 );
 const canSaveVideo = computed(() => props.exportEnabled && video.value);
 const pipeline = computed(() => (video.value ? (props.item.metadata.pipeline ?? null) : null));
-const canReuse = computed(
-  () => !props.item.metadata_synthetic && !!props.item.metadata.prompt?.trim(),
-);
+const canReuse = computed(() => !props.item.metadata_synthetic);
 const canUseSource = computed(() => props.canUseAsSource && !video.value && !audio.value);
 const actionLabel = computed(() =>
-  props.reusing ? "Loading prompt…" : canReuse.value ? "Use as prompt" : "Prompt unavailable",
+  props.reusing ? "Loading settings…" : canReuse.value ? "Reuse settings" : "Settings unavailable",
 );
 const galleryTotal = computed(() => Math.max(1, Math.floor(props.total)));
 const galleryPosition = computed(() =>
@@ -103,7 +101,9 @@ const preparedPosition = computed(() => {
     ? `Batch ${index} of ${count}`
     : "";
 });
-const originalPrompt = computed(() => props.item.metadata.original_prompt?.trim() ?? "");
+const originalPrompt = computed(() =>
+  props.item.metadata.prompt?.trim() ? (props.item.metadata.original_prompt?.trim() ?? "") : "",
+);
 const upscaled = computed(() => isUpscaledImage(props.item));
 const actionStatus = ref("");
 const actionBusy = ref<"copy" | "save" | "save-video" | null>(null);
@@ -546,7 +546,7 @@ onBeforeUnmount(() => {
       <div class="gallery-viewer-prompt">
         <span v-if="preparedPosition" data-test="gallery-viewer-batch">{{ preparedPosition }}</span>
         <span>Prompt</span>
-        <p data-selectable>{{ item.metadata.prompt || "No prompt saved with this print." }}</p>
+        <p data-selectable>{{ item.metadata.prompt || "No prompt was used for this print." }}</p>
         <p v-if="pipeline" data-test="gallery-viewer-pipeline" data-selectable>
           <span>Pipeline</span> {{ pipeline }}
         </p>

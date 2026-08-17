@@ -533,7 +533,27 @@ describe("MobileGalleryViewer", () => {
 
     const reuse = view.get("[data-test='gallery-viewer-reuse']");
     expect(reuse.attributes("disabled")).toBe("");
-    expect(reuse.text()).toBe("Prompt unavailable");
+    expect(reuse.text()).toBe("Settings unavailable");
+  });
+
+  it("offers settings reuse for a promptless print and hides stale original prompt provenance", async () => {
+    const view = mountViewer({
+      ...image,
+      metadata: {
+        ...image.metadata,
+        prompt: "",
+        original_prompt: "stale prior prompt",
+      },
+    });
+    await flushPromises();
+
+    const reuse = view.get("[data-test='gallery-viewer-reuse']");
+    expect(reuse.attributes("disabled")).toBeUndefined();
+    expect(reuse.text()).toBe("Reuse settings");
+    expect(view.text()).toContain("No prompt was used for this print.");
+    expect(view.text()).not.toContain("stale prior prompt");
+    await reuse.trigger("click");
+    expect(view.emitted("reuse")).toHaveLength(1);
   });
 
   it("shows prepared sibling position and source prompt with graceful legacy absence", async () => {

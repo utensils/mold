@@ -1,9 +1,11 @@
 import { flushPromises, mount, type DOMWrapper, type VueWrapper } from "@vue/test-utils";
 import { createPinia, type Pinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { IDBFactory } from "fake-indexeddb";
 import { installMemoryLocalStorage } from "../lib/testSupport/memoryLocalStorage";
 import type { GalleryImage, ModelEntry, ServerStatus } from "../lib/api/types";
 import { applyModelDefaults, type GenerateForm } from "../lib/generateForm";
+import { loadCachedGallery, storeCachedGallery, storeCachedGalleryMedia } from "./galleryCache";
 
 const {
   invoke,
@@ -370,9 +372,114 @@ afterEach(() => {
   delete document.documentElement.dataset.themeFamily;
   delete (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
   delete (globalThis as Partial<typeof globalThis>).IntersectionObserver;
+  Reflect.deleteProperty(globalThis, "indexedDB");
 });
 
 describe("MobileApp sequence generation", () => {
+  it("acknowledges a tap through placement preview and blocks duplicate submission", async () => {
+    const preview = deferred<ReturnType<typeof plannedPlacement>>();
+    previewGenerationPlacement.mockReturnValueOnce(preview.promise);
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await fieldControl("Prompt").setValue("a responsive placement check");
+
+    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await vi.waitFor(() => expect(previewGenerationPlacement).toHaveBeenCalledTimes(1));
+
+    const button = wrapper.get("[data-test='mobile-develop-button']");
+    expect(button.text()).toBe("Checking placement…");
+    expect(button.attributes("disabled")).toBe("");
+    await button.trigger("click");
+    expect(previewGenerationPlacement).toHaveBeenCalledTimes(1);
+    expect(openStreams).toHaveLength(0);
+
+    preview.resolve(plannedPlacement());
+    await flushPromises();
+    expect(openStreams).toHaveLength(1);
+    expect(button.text()).toContain("Develop print");
+  });
+
+  it("cancels a placement-pending submission when prompt work takes authority", async () => {
+    const preview = deferred<ReturnType<typeof plannedPlacement>>();
+    previewGenerationPlacement.mockReturnValueOnce(preview.promise);
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await fieldControl("Prompt").setValue("a placement-pending prompt");
+
+    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await vi.waitFor(() => expect(previewGenerationPlacement).toHaveBeenCalledTimes(1));
+    await wrapper.get("[data-test='mobile-prompt-expand']").trigger("click");
+    await flushPromises();
+    preview.resolve(plannedPlacement());
+    await flushPromises();
+
+    expect(openStreams).toHaveLength(0);
+    expect(
+      wrapper.get("[data-test='mobile-develop-button']").attributes("disabled"),
+    ).toBeUndefined();
+  });
+
+  it("cancels source preparation and releases Generate when prompt work takes authority", async () => {
+    const imageModel: ModelEntry = { ...model, name: "flux:image", family: "flux" };
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([imageModel]);
+      if (path === "/api/gallery") return Promise.resolve([]);
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    const preprocess = deferred<{ source: string | null; mask: string | null; changed: boolean }>();
+    applySourceFitPreprocess.mockReturnValueOnce(preprocess.promise);
+    wrapper = mountMobileApp();
+    await flushPromises();
+    const liveForm = wrapper.getComponent(MobileLoraControls).props("form") as GenerateForm;
+    liveForm.sourceImage = btoa("source");
+    liveForm.sourceImageName = "source.png";
+    await fieldControl("Prompt").setValue("a source-preparing prompt");
+
+    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await vi.waitFor(() => expect(applySourceFitPreprocess).toHaveBeenCalledTimes(1));
+    await wrapper.get("[data-test='mobile-prompt-expand']").trigger("click");
+    await flushPromises();
+    preprocess.resolve({ source: btoa("source"), mask: null, changed: false });
+    await flushPromises();
+
+    expect(openStreams).toHaveLength(0);
+    expect(
+      wrapper.get("[data-test='mobile-develop-button']").attributes("disabled"),
+    ).toBeUndefined();
+  });
+
+  it("releases Generate when invalidated source preparation rejects", async () => {
+    const imageModel: ModelEntry = { ...model, name: "flux:image", family: "flux" };
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([imageModel]);
+      if (path === "/api/gallery") return Promise.resolve([]);
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    const preprocess = deferred<{ source: string | null; mask: string | null; changed: boolean }>();
+    applySourceFitPreprocess.mockReturnValueOnce(preprocess.promise);
+    wrapper = mountMobileApp();
+    await flushPromises();
+    const liveForm = wrapper.getComponent(MobileLoraControls).props("form") as GenerateForm;
+    liveForm.sourceImage = btoa("source");
+    liveForm.sourceImageName = "source.png";
+    await fieldControl("Prompt").setValue("a source-preparing prompt");
+
+    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await vi.waitFor(() => expect(applySourceFitPreprocess).toHaveBeenCalledTimes(1));
+    await wrapper.get("[data-test='mobile-prompt-expand']").trigger("click");
+    await flushPromises();
+    preprocess.reject(new Error("stale source failure"));
+    await flushPromises();
+
+    expect(openStreams).toHaveLength(0);
+    expect(wrapper.text()).not.toContain("stale source failure");
+    expect(
+      wrapper.get("[data-test='mobile-develop-button']").attributes("disabled"),
+    ).toBeUndefined();
+  });
+
   it("removes capability-restricted models from the picker before submission", async () => {
     const restrictedModel: ModelEntry = {
       ...model,
@@ -5025,6 +5132,140 @@ describe("MobileApp primary navigation", () => {
 });
 
 describe("MobileApp gallery", () => {
+  it("renders instance-scoped cached gallery metadata and thumbnails while its host is offline", async () => {
+    Object.defineProperty(globalThis, "indexedDB", {
+      configurable: true,
+      value: new IDBFactory(),
+    });
+    localStorage.setItem(
+      "mold.mobile.hosts.v1",
+      JSON.stringify([
+        {
+          id: "url-derived-id",
+          instanceId: "studio-instance",
+          name: "Studio",
+          baseUrl: target.baseUrl,
+          online: false,
+        },
+      ]),
+    );
+    await storeCachedGallery("studio-instance", [print]);
+    await storeCachedGalleryMedia(
+      "studio-instance",
+      print.filename,
+      "thumbnail",
+      new Blob(["cached thumbnail"], { type: "image/webp" }),
+    );
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status" || path === "/api/gallery") {
+        return Promise.reject(new Error("offline"));
+      }
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/activity")
+        return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    apiFetchTo.mockRejectedValue(new Error("offline"));
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+
+    await vi.waitFor(() => expect(wrapper?.find("[data-test='gallery-item']").exists()).toBe(true));
+    expect(wrapper.get("[data-test='gallery-item'] img").attributes("src")).toContain("blob:");
+    expect(wrapper.text()).toContain("Showing saved Library");
+  });
+
+  it("does not restore an old instance cache from a gallery response that resolves after replacement", async () => {
+    Object.defineProperty(globalThis, "indexedDB", {
+      configurable: true,
+      value: new IDBFactory(),
+    });
+    localStorage.setItem(
+      "mold.mobile.hosts.v1",
+      JSON.stringify([
+        {
+          id: "url-derived-id",
+          instanceId: "old-instance",
+          name: "Studio",
+          baseUrl: target.baseUrl,
+          online: false,
+        },
+      ]),
+    );
+    await storeCachedGallery("old-instance", [print]);
+    const galleryResponse = deferred<GalleryImage[]>();
+    let replacement = false;
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") {
+        return Promise.resolve({
+          ...status,
+          instance_id: replacement ? "replacement-instance" : "old-instance",
+        });
+      }
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/gallery") return galleryResponse.promise;
+      if (path === "/api/activity") {
+        return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
+      }
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await vi.waitFor(() =>
+      expect(apiJsonTo).toHaveBeenCalledWith(target, "/api/gallery", expect.anything()),
+    );
+    const statusCalls = apiJsonTo.mock.calls.filter(([, path]) => path === "/api/status").length;
+    replacement = true;
+    window.dispatchEvent(new Event("pageshow"));
+    await vi.waitFor(() =>
+      expect(
+        apiJsonTo.mock.calls.filter(([, path]) => path === "/api/status").length,
+      ).toBeGreaterThan(statusCalls),
+    );
+    await vi.waitFor(async () => expect(await loadCachedGallery("old-instance")).toEqual([]));
+    galleryResponse.resolve([print]);
+    await flushPromises();
+
+    expect(await loadCachedGallery("old-instance")).toEqual([]);
+  });
+
+  it("reuses promptless print settings without reviving stale original prompt text", async () => {
+    const promptless: GalleryImage = {
+      ...print,
+      metadata: {
+        ...print.metadata,
+        prompt: "",
+        original_prompt: "a previous prompt that did not render this print",
+      },
+    };
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/gallery") return Promise.resolve([promptless]);
+      if (path === "/api/activity")
+        return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await vi.waitFor(() => expect(wrapper?.find("[data-test='gallery-item']").exists()).toBe(true));
+    await wrapper.get("[data-test='gallery-item']").trigger("click");
+    await flushPromises();
+
+    expect(wrapper.get("[data-test='gallery-viewer-reuse']").text()).toBe("Reuse settings");
+    expect(wrapper.text()).toContain("No prompt was used for this print.");
+    expect(wrapper.text()).not.toContain("a previous prompt that did not render this print");
+    await wrapper.get("[data-test='gallery-viewer-reuse']").trigger("click");
+    await flushPromises();
+    expect(wrapper.get("#mobile-prompt").element).toHaveProperty("value", "");
+    expect(fieldControl("Negative prompt").element).toHaveProperty("value", "calm water");
+  });
+
   it("loads reachable hosts without waiting for a host already known to be offline", async () => {
     const offlineTarget = { baseUrl: "http://halcyon.tailnet.ts.net:7680", apiKey: "secret" };
     localStorage.setItem(

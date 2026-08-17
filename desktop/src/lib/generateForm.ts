@@ -775,7 +775,7 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
   };
 
   if (parsedSeed !== undefined && Number.isFinite(parsedSeed)) req.seed = parsedSeed;
-  if (form.originalPrompt && form.originalPrompt !== req.prompt) {
+  if (req.prompt && form.originalPrompt && form.originalPrompt !== req.prompt) {
     req.original_prompt = form.originalPrompt;
   }
   if (caps.supportsNegativePrompt) {
