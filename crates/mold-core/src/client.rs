@@ -28,6 +28,13 @@ pub struct MoldClient {
     api_key_configured: bool,
 }
 
+/// How long the retention probe may take once the stream has already died.
+/// The shared reqwest client carries no request timeout, so a host that
+/// accepts the connection and never answers — wedged mid-restart, or a proxy
+/// holding the socket — would otherwise strand the original SSE error and the
+/// caller would never learn the stream failed at all.
+const RETENTION_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(4);
+
 /// An admitted generation plus the in-flight answer to "did the host journal
 /// THIS job?". Held only while a stream is open; read only if that stream dies
 /// before the terminal event.
@@ -35,6 +42,7 @@ struct RetainedJobProbe {
     job_id: String,
     host: String,
     durable: tokio::task::JoinHandle<bool>,
+    timeout: std::time::Duration,
 }
 
 /// Explain a stream that ended without a terminal event.
@@ -55,7 +63,21 @@ async fn annotate_lost_stream(
     let Some(probe) = retained else {
         return err;
     };
-    if !probe.durable.await.unwrap_or(false) {
+    // Bounded: on expiry the original error is returned exactly as it would
+    // have been without a probe, and the task is abandoned rather than left
+    // holding the caller's future open.
+    let durable = match tokio::time::timeout(probe.timeout, probe.durable).await {
+        Ok(answer) => answer.unwrap_or(false),
+        Err(_) => {
+            tracing::debug!(
+                job_id = %probe.job_id,
+                host = %probe.host,
+                "retention probe timed out; reporting the stream failure unqualified"
+            );
+            return err;
+        }
+    };
+    if !durable {
         return err;
     }
     let note = format!(
@@ -695,7 +717,14 @@ impl MoldClient {
         let host = self.base_url.clone();
         let wanted = job_id.clone();
         let durable = tokio::spawn(async move {
-            let Ok(response) = client.get(url).send().await else {
+            // Bound the request too, so the task itself cannot outlive the
+            // answer anyone is waiting for.
+            let Ok(response) = client
+                .get(url)
+                .timeout(RETENTION_PROBE_TIMEOUT)
+                .send()
+                .await
+            else {
                 return false;
             };
             let Ok(listing) = response.json::<serde_json::Value>().await else {
@@ -715,6 +744,7 @@ impl MoldClient {
             job_id,
             host,
             durable,
+            timeout: RETENTION_PROBE_TIMEOUT,
         }
     }
 
@@ -2663,5 +2693,40 @@ mod tests {
             !rendered.contains("retained"),
             "a job the host did not journal must not promise retention: {rendered}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_wedged_retention_probe_falls_back_to_the_original_error() {
+        // The shared reqwest client sets no request timeout, so a probe whose
+        // `/api/queue` connects and then never answers — a host wedged
+        // mid-restart, a proxy holding the socket — would strand the SSE error
+        // forever and CLI/TUI callers would never see it.
+        let probe = RetainedJobProbe {
+            job_id: "job-wedged".into(),
+            host: "http://wedged:7680".into(),
+            durable: tokio::spawn(async { std::future::pending::<bool>().await }),
+            timeout: std::time::Duration::from_millis(50),
+        };
+
+        let started = std::time::Instant::now();
+        let err = annotate_lost_stream(anyhow::anyhow!("stream died"), Some(probe)).await;
+
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "the join must be bounded, took {:?}",
+            started.elapsed()
+        );
+        let rendered = format!("{err:#}");
+        assert_eq!(rendered, "stream died", "expiry must promise nothing");
+        assert_eq!(
+            crate::control::classify_generate_error(&err),
+            crate::control::GenerateServerAction::SurfaceError
+        );
+    }
+
+    #[test]
+    fn the_retention_probe_timeout_is_bounded() {
+        assert!(RETENTION_PROBE_TIMEOUT > std::time::Duration::ZERO);
+        assert!(RETENTION_PROBE_TIMEOUT <= std::time::Duration::from_secs(10));
     }
 }
