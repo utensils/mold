@@ -828,16 +828,23 @@ impl QueueJournal {
         }
     }
 
-    /// Whether this id names a parked row. `DELETE /api/queue/:id` is the
-    /// documented way to clear one, and a held job has no registry entry.
-    pub fn is_held(&self, id: &str) -> bool {
+    /// Whether this id names a retained row that is cancellable but has no
+    /// registry entry.
+    ///
+    /// Two kinds qualify: a held row, which exists only in the journal; and a
+    /// queued row on a boot with no dispatch owner, which replay deliberately
+    /// never registered. `DELETE /api/queue/:id` is the documented way to
+    /// clear either, and listing work an operator cannot then act on would be
+    /// half an answer. A `running` row is excluded — the endpoint refuses
+    /// running work, and the registry is the authority on that.
+    pub fn owns_cancellable_row(&self, id: &str) -> bool {
         let Some(db) = self.db() else {
             return false;
         };
         generation_queue::get(db, id)
             .ok()
             .flatten()
-            .is_some_and(|row| row.state == QueueRowState::Held)
+            .is_some_and(|row| matches!(row.state, QueueRowState::Held | QueueRowState::Queued))
     }
 
     /// Park a row by id, for a caller that has no ticket.

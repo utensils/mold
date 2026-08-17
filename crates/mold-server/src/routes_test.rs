@@ -4472,6 +4472,56 @@ mod tests {
         assert_eq!(replayed, submitted);
     }
 
+    /// A maintenance boot owes work it deliberately does not register, so
+    /// without projecting the journal the operator sees an empty queue while
+    /// the server is holding their jobs — exactly when they are most likely to
+    /// be looking, and with no way to inspect or cancel them.
+    #[tokio::test]
+    async fn a_maintenance_boot_still_shows_the_jobs_it_owes() {
+        let output_dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let submitted = seed_retained_jobs(db.clone(), output_dir.path(), 2).await;
+
+        let (state, _rx) = durable_state(db.clone(), output_dir.path());
+        // No dispatch owner: replay returns without registering anything.
+        let report = crate::queue_journal::replay(&state, false).await;
+        assert_eq!(report.resumed, 0);
+        assert!(state.job_registry.snapshot().entries.is_empty());
+
+        let listing = json_body(
+            app_with_state(state.clone())
+                .oneshot(Request::get("/api/queue").body(Body::empty()).unwrap())
+                .await
+                .unwrap(),
+        )
+        .await;
+        let entries = listing["entries"].as_array().unwrap();
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry["id"].as_str().unwrap().to_string())
+                .collect::<Vec<_>>(),
+            submitted,
+            "retained work must be visible even when this boot cannot run it"
+        );
+        for entry in entries {
+            assert_eq!(entry["state"], "queued");
+            assert_eq!(entry["durable"], true);
+        }
+
+        // And it can be cancelled, which is the other thing an operator needs.
+        let response = app_with_state(state.clone())
+            .oneshot(
+                Request::delete(format!("/api/queue/{}", submitted[0]))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(state.queue_journal.list_all().len(), 1);
+    }
+
     /// A failure to CHECK the idempotence gate is not the same as "nothing was
     /// completed". Reading it as an empty result would re-render every job
     /// whose print already exists, and those duplicates are unmergeable

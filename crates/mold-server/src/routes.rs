@@ -4611,17 +4611,27 @@ fn project_durable_queue_state(state: &AppState, listing: &mut crate::job_regist
         .map(|entry| entry.id.as_str())
         .collect();
     let mut position = listing.entries.len();
-    let held: Vec<crate::job_registry::JobEntry> = rows
+    // Every retained row that is not already live. Held rows exist only here,
+    // and so do queued rows on a boot with no dispatch owner — replay returns
+    // before registering anything there, so without this a maintenance server
+    // reports an empty queue while owing work, exactly when an operator is
+    // most likely to be looking and least able to inspect or cancel it.
+    let unlisted: Vec<crate::job_registry::JobEntry> = rows
         .iter()
-        .filter(|row| {
-            row.state == mold_db::generation_queue::QueueRowState::Held
-                && !live.contains(row.id.as_str())
-        })
+        .filter(|row| !live.contains(row.id.as_str()))
         .map(|row| {
+            let state = match row.state {
+                mold_db::generation_queue::QueueRowState::Held => {
+                    crate::job_registry::JobLifecycle::Held
+                }
+                // A `running` row whose worker died reads as queued: that is
+                // what the next boot will do with it.
+                _ => crate::job_registry::JobLifecycle::Queued,
+            };
             let entry = crate::job_registry::JobEntry {
                 id: row.id.clone(),
                 model: row.model.clone(),
-                state: crate::job_registry::JobLifecycle::Held,
+                state,
                 started_at_unix_ms: row.created_at_ms.max(0) as u64,
                 position,
                 gpu: None,
@@ -4637,7 +4647,7 @@ fn project_durable_queue_state(state: &AppState, listing: &mut crate::job_regist
             entry
         })
         .collect();
-    listing.entries.extend(held);
+    listing.entries.extend(unlisted);
 }
 
 /// Wrap any present JSON value (including `null`) in `Some`, so a field using
@@ -4822,12 +4832,13 @@ async fn cancel_queue_job(
                 "queue job {id} is already running; only queued jobs can be cancelled"
             )));
         }
-        // A held job has no registry entry — it exists only in the journal,
-        // and this endpoint is the documented way to clear one. Falling
-        // straight through to 404 would leave a parked job with no way out
-        // short of editing the database.
+        // Some retained rows have no registry entry: a held job, and a queued
+        // job on a boot with no dispatch owner. This endpoint is the
+        // documented way to clear either, and `/api/queue` lists both — so
+        // falling straight through to 404 would show an operator work they
+        // cannot act on.
         Err(crate::job_registry::QueuedJobCancelError::NotFound) => {
-            if !state.queue_journal.is_held(&id) {
+            if !state.queue_journal.owns_cancellable_row(&id) {
                 return Err(ApiError::queue_job_not_found(format!(
                     "queue job {id} not found"
                 )));
