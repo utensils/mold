@@ -740,6 +740,40 @@ describe("reconcileInterruptedGenerationJobs", () => {
     expect(job.result?.filename).toBe("resumed print.png");
   });
 
+  it("stops waiting on a durable row the host never starts, and says where to look", async () => {
+    // A visible durable row normally means "the host has this and will run
+    // it", so the wait is patient by design. On a boot with no dispatch owner
+    // (`MOLD_GPUS=none`) that row is real, durable, and never picked up — and
+    // an unbounded wait there does not just spin: desktop awaits this inside
+    // `settled`, so the batch's completion toast and its pending-consumer
+    // entry are stranded too.
+    let polls = 0;
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/queue") {
+        polls += 1;
+        return Promise.resolve({
+          entries: [
+            { id: "job-9", model: "ltx2:q8", state: "queued", position: 0, durable: true },
+          ],
+        });
+      }
+      if (path === "/api/gallery") return Promise.resolve([]);
+      return Promise.reject(new Error(`Unexpected path ${path}`));
+    });
+    const job = makeJob();
+
+    await reconcileInterruptedGenerationJobs([job], options());
+
+    // Terminates rather than hanging, and stays reconcilable — the host still
+    // holds the work, so this is never announced as a failure.
+    expect(polls).toBeGreaterThan(1);
+    expect(job.status).toBe("error");
+    expect(job.interrupted).toBe(true);
+    expect(job.error).toContain("check the Library");
+    // Released, so the host's own row is free to surface once it does run.
+    expect(job.recoveredJobId).toBe("job-9");
+  });
+
   it("clears a queued row the durable host did not journal", async () => {
     // `durable: false` on a durable host — no gallery target, reference-upload
     // media, or an oversized request. Host capability alone would over-promise
