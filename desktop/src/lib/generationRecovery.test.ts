@@ -71,13 +71,18 @@ function makeH3Job(request: GenerateRequest, overrides: Partial<Job> = {}): Job 
     streamStarted: true,
     status: "error" as const,
     error: "Load failed",
+    // These fixtures exercise conditioning-hash binding, not age; submitting
+    // at the epoch keeps every print newer than the job that claims it.
+    submittedAtUnixMs: 0,
     ...overrides,
   });
 }
 
+/** A print the host produced for the submission under test. Recovery is now
+ *  age-bounded, so fixtures must be NEWER than the job that claims them. */
 const galleryPrint: GalleryImage = {
   filename: "resumed print.png",
-  timestamp: 1_700_000_000,
+  timestamp: Math.floor(Date.now() / 1000) + 5,
   format: "png",
   metadata: {
     prompt: "a ship crossing violet lightning",
@@ -368,6 +373,59 @@ describe("galleryCompletion", () => {
       generation_time_ms: 0,
     });
     expect(complete.metadata).toBe(galleryPrint.metadata);
+  });
+});
+
+describe("gallery recovery is bounded by submission time", () => {
+  it("never claims a print that existed BEFORE the job was submitted", async () => {
+    // Fixed seed, same model, same prompt, same dimensions and steps: an older
+    // print matches on every field the join uses. If the request never reached
+    // the server, matching it shows the user a previous image as though it
+    // were the render they just asked for — silently, with no error.
+    const older: GalleryImage = {
+      ...galleryPrint,
+      filename: "yesterday.png",
+      timestamp: Math.floor(Date.now() / 1000) - 86_400,
+    };
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/queue") return Promise.resolve({ entries: [] });
+      if (path === "/api/gallery") return Promise.resolve([older]);
+      return Promise.reject(new Error(`Unexpected path ${path}`));
+    });
+    const job = makeJob();
+    await reconcileInterruptedGenerationJobs([job], options());
+
+    expect(job.status).toBe("error");
+    expect(job.result).toBeNull();
+  });
+
+  it("refuses gallery recovery when nothing proves the job was ever admitted", async () => {
+    // No server id (the queued frame never arrived) and no queue row: there is
+    // no evidence this submission ever reached the host, so a similar-looking
+    // print is a guess, not a recovery.
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/queue") return Promise.resolve({ entries: [] });
+      if (path === "/api/gallery") return Promise.resolve([galleryPrint]);
+      return Promise.reject(new Error(`Unexpected path ${path}`));
+    });
+    const job = makeJob({ id: "" });
+    await reconcileInterruptedGenerationJobs([job], options());
+
+    expect(job.status).toBe("error");
+    expect(job.result).toBeNull();
+  });
+
+  it("still recovers a print for a job the server acknowledged", async () => {
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/queue") return Promise.resolve({ entries: [] });
+      if (path === "/api/gallery") return Promise.resolve([galleryPrint]);
+      return Promise.reject(new Error(`Unexpected path ${path}`));
+    });
+    const job = makeJob();
+    await reconcileInterruptedGenerationJobs([job], options());
+
+    expect(job.status).toBe("complete");
+    expect(job.result?.filename).toBe("resumed print.png");
   });
 });
 
@@ -854,7 +912,8 @@ describe("reconcileInterruptedGenerationJobs", () => {
     };
     const print = {
       filename: "exact.mp4",
-      timestamp: 1,
+      // Just after this job's submission — recovery is age-bounded.
+      timestamp: Math.floor(submittedAtUnixMs / 1000) + 1,
       format: "mp4" as const,
       metadata,
     };

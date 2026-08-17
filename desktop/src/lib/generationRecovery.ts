@@ -104,7 +104,7 @@ export function isInterruptedGenerationError(error: string | null | undefined): 
 
 type GalleryMatchJob = Pick<
   Job,
-  "visualSeed" | "model" | "prompt" | "width" | "height" | "total" | "request"
+  "visualSeed" | "model" | "prompt" | "width" | "height" | "total" | "request" | "submittedAtUnixMs"
 >;
 
 interface H3BoundaryIdentity {
@@ -265,8 +265,14 @@ function matchGalleryPrintWithIdentity(
   if (!Number.isSafeInteger(seed) || h3Identity === null) return null;
   const differs = (recorded: number | null | undefined, submitted: number): boolean =>
     typeof recorded === "number" && submitted > 0 && recorded !== submitted;
+  // A print that already existed cannot be the output of this submission.
+  // Every other field in this join — seed, model, prompt, dimensions, steps —
+  // is reproduced exactly by a fixed-seed re-run, so age is the only thing
+  // separating "the render I just asked for" from "one I made yesterday".
+  const earliestSeconds = (job.submittedAtUnixMs - PRE_ID_CLOCK_SKEW_MS) / 1000;
   for (const print of prints) {
     const meta = print.metadata;
+    if (typeof print.timestamp === "number" && print.timestamp < earliestSeconds) continue;
     if (!meta || meta.seed !== seed || meta.model !== job.model) continue;
     if (meta.prompt && job.prompt && meta.prompt !== job.prompt) continue;
     if (h3Identity) {
@@ -286,8 +292,10 @@ function matchGalleryPrintWithIdentity(
  * join; the recorded prompt is the tiebreaker for prepared siblings, whose
  * prompts are unique within a batch. Dimensions and steps must also agree
  * when both sides know them — a fixed-seed re-run at new settings whose
- * stream died pre-queue must not resurrect an older print. H3 additionally
- * joins on exact endpoint and ordered-reference content hashes.
+ * stream died pre-queue must not resurrect an older print. Age is the final
+ * bound and the only one a fixed-seed re-run cannot reproduce: a print that
+ * already existed when this job was submitted can never be its output. H3
+ * additionally joins on exact endpoint and ordered-reference content hashes.
  */
 export async function matchGalleryPrint(
   job: GalleryMatchJob,
@@ -528,12 +536,10 @@ async function reconcileJob(job: Job, opts: GenerationRecoveryOptions): Promise<
         if (settledExternally(job) || !isActive()) return;
         job.id = chainId ?? "";
         if (!job.id) {
-          const prints = await apiJsonTo<GalleryImage[]>(opts.target, "/api/gallery");
-          transportRetries = 0;
-          if (settledExternally(job) || !isActive()) return;
-          const match = matchGalleryPrintWithIdentity(job, prints, h3Identity);
-          if (match) settleCompleted(job, galleryCompletion(match), opts);
-          else settleFailure(job, interruptedCopy);
+          // The host has no chain record for this submission, so nothing
+          // proves it was ever admitted. Guessing from the gallery here would
+          // hand back whichever older clip happens to match.
+          settleFailure(job, interruptedCopy);
           return;
         }
       }
@@ -652,7 +658,13 @@ async function reconcileJob(job: Job, opts: GenerationRecoveryOptions): Promise<
       const prints = await apiJsonTo<GalleryImage[]>(opts.target, "/api/gallery");
       transportRetries = 0;
       if (settledExternally(job) || !isActive()) return;
-      const match = matchGalleryPrintWithIdentity(job, prints, h3Identity);
+      // Only claim a print for work the host is known to have accepted. A job
+      // id is that proof: it arrives on the server's own `queued` frame, and
+      // the pre-ID join adopts it from a matching queue row. Without either,
+      // this submission may never have reached the host at all — and a
+      // fixed-seed re-run of the same prompt makes an unrelated print look
+      // exactly like its output.
+      const match = job.id ? matchGalleryPrintWithIdentity(job, prints, h3Identity) : null;
       if (match) {
         settleCompleted(job, galleryCompletion(match), opts);
         return;
