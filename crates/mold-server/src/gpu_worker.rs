@@ -4288,12 +4288,28 @@ fn finish_generation_success(
         }
     }
 
-    // The output is on disk and in the gallery index; the row has done its
-    // job. Settled here rather than on the ticket's ordinary drop so a
-    // shutdown racing the last few microseconds of delivery cannot retain a
-    // completed job and replay it into a duplicate print.
+    // Settle the durable row on what actually reached the gallery, not on the
+    // fact that inference returned. The save helpers answer `None` when
+    // publication fails — an unwritable directory, a full disk, a refused
+    // archive — and for a replayed job the gallery file IS the delivery, so
+    // clearing the row there would lose the generation outright: nothing on
+    // disk, nobody to tell, and no row left to replay.
+    //
+    // Settled here rather than on the ticket's ordinary drop so a shutdown
+    // racing the last microseconds of delivery cannot retain a completed job
+    // and replay it into a duplicate print.
     if let Some(ticket) = job.journal.take() {
-        ticket.complete();
+        if saved_names.output.is_some() {
+            ticket.complete();
+        } else {
+            tracing::error!(
+                job = %job.id,
+                dir = ?job.output_dir,
+                "generation finished but its output could not be saved; \
+                 holding the queue row for review"
+            );
+            ticket.hold("the generated output could not be saved to the gallery");
+        }
     }
 
     if let Some(ref tx) = job.progress_tx {
@@ -10577,6 +10593,144 @@ mod tests {
         assert!(registry.snapshot().entries.is_empty());
         assert!(worker.model_cache.lock().unwrap().contains("flux-dev:q4"));
         drop(queue_rx.recv().await);
+    }
+
+    fn fake_image() -> ImageData {
+        ImageData {
+            data: vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A],
+            format: OutputFormat::Png,
+            width: 64,
+            height: 64,
+            index: 0,
+        }
+    }
+
+    fn fake_response() -> GenerateResponse {
+        GenerateResponse {
+            audio: None,
+            images: vec![fake_image()],
+            video: None,
+            generation_time_ms: 1,
+            model: "mock-model".to_string(),
+            seed_used: 7,
+            gpu: None,
+        }
+    }
+
+    /// A replayed job has no client, so the gallery file IS the delivery.
+    /// Deleting its row after a failed publication (unwritable directory, full
+    /// disk, a refused archive) loses the generation outright — nothing on
+    /// disk, nobody to tell, and no row to replay.
+    #[test]
+    fn a_generation_whose_output_never_published_holds_its_row_instead_of_clearing_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        // A regular file where the gallery directory should be: every save
+        // helper fails its `create_dir_all` and returns None.
+        let blocked = tmp.path().join("gallery");
+        std::fs::write(&blocked, b"not a directory").unwrap();
+
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let journal = Arc::new(crate::queue_journal::QueueJournal::new(db.clone()));
+        let request = fake_upscale_job(Config::default(), "unused").request;
+        let ticket = journal
+            .record(crate::queue_journal::JournalAdmission {
+                id: "publish-fails",
+                request: &request,
+                output_dir: Some(&blocked),
+                target_gpu: None,
+                completion_payload: SseCompletionPayload::Full,
+                batch_child: false,
+                carries_reference_authority: false,
+            })
+            .expect("a gallery-bound generation is durable");
+
+        let (result_tx, _result_rx) = tokio::sync::oneshot::channel();
+        let (queue_tx, _queue_rx) = tokio::sync::mpsc::channel(1);
+        let job = GpuJob {
+            id: "publish-fails".to_string(),
+            model: "mock-model".to_string(),
+            request,
+            resolved_references: None,
+            completion_payload: SseCompletionPayload::Full,
+            progress_tx: None,
+            result_tx,
+            output_dir: Some(blocked.clone()),
+            config: Arc::new(tokio::sync::RwLock::new(Config::default())),
+            metadata_db: db,
+            gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
+            queue: QueueHandle::new(queue_tx),
+            registry: JobRegistry::new(),
+            events: crate::events::EventBroadcaster::new(),
+            execution_plan: None,
+            prepared_execution_inputs: None,
+            h3_prepared_attempt: None,
+            lease: None,
+            batch_child: None,
+            journal: Some(ticket),
+        };
+
+        finish_generation_success(job, fake_response(), fake_image(), None);
+
+        let rows = journal.list_all();
+        assert_eq!(rows.len(), 1, "the row must not be deleted");
+        assert_eq!(
+            rows[0].state,
+            mold_db::generation_queue::QueueRowState::Held
+        );
+        assert!(rows[0]
+            .held_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("could not be saved")));
+    }
+
+    /// The ordinary path still clears the row, or every completed job would
+    /// pile up as held work.
+    #[test]
+    fn a_published_generation_clears_its_row() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let journal = Arc::new(crate::queue_journal::QueueJournal::new(db.clone()));
+        let request = fake_upscale_job(Config::default(), "unused").request;
+        let ticket = journal
+            .record(crate::queue_journal::JournalAdmission {
+                id: "publishes",
+                request: &request,
+                output_dir: Some(tmp.path()),
+                target_gpu: None,
+                completion_payload: SseCompletionPayload::Full,
+                batch_child: false,
+                carries_reference_authority: false,
+            })
+            .unwrap();
+
+        let (result_tx, _result_rx) = tokio::sync::oneshot::channel();
+        let (queue_tx, _queue_rx) = tokio::sync::mpsc::channel(1);
+        let job = GpuJob {
+            id: "publishes".to_string(),
+            model: "mock-model".to_string(),
+            request,
+            resolved_references: None,
+            completion_payload: SseCompletionPayload::Full,
+            progress_tx: None,
+            result_tx,
+            output_dir: Some(tmp.path().to_path_buf()),
+            config: Arc::new(tokio::sync::RwLock::new(Config::default())),
+            metadata_db: db,
+            gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
+            queue: QueueHandle::new(queue_tx),
+            registry: JobRegistry::new(),
+            events: crate::events::EventBroadcaster::new(),
+            execution_plan: None,
+            prepared_execution_inputs: None,
+            h3_prepared_attempt: None,
+            lease: None,
+            batch_child: None,
+            journal: Some(ticket),
+        };
+
+        finish_generation_success(job, fake_response(), fake_image(), None);
+
+        assert!(journal.list_all().is_empty());
     }
 
     /// A shutdown abort is a deliberate cancellation, not evidence that this
