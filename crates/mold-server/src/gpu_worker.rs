@@ -2350,6 +2350,28 @@ fn fatal_cuda_user_message(model_name: &str) -> String {
     )
 }
 
+/// What a client is told when its job did not start because the host is going
+/// down. Deliberately distinct from [`fatal_cuda_user_message`]: the
+/// coordinator calls `request_shutdown()` on every worker during an ordinary
+/// graceful deploy, so lumping the two together told every in-flight client
+/// that CUDA was fatally poisoned on every restart.
+pub(crate) fn shutdown_retention_user_message(model_name: &str) -> String {
+    format!("the host is restarting; '{model_name}' did not start and stays queued to finish there")
+}
+
+/// The reason this worker cannot accept work, if any. Poison outranks
+/// shutdown: a quarantined context is the more specific and more actionable
+/// fact.
+fn worker_unavailable_message(worker: &GpuWorker, model_name: &str) -> Option<String> {
+    if worker.poisoned.load(Ordering::SeqCst) || worker.fatal_cuda_error.load(Ordering::SeqCst) {
+        Some(fatal_cuda_user_message(model_name))
+    } else if worker.shutdown_requested.load(Ordering::SeqCst) {
+        Some(shutdown_retention_user_message(model_name))
+    } else {
+        None
+    }
+}
+
 pub(crate) fn quarantine_poisoned_worker(worker: &GpuWorker) {
     // Retain the durable queue first. This function is the process-restart
     // initiator for a fatal context or an inference panic, and everything that
@@ -2625,11 +2647,8 @@ pub(crate) fn ensure_worker_not_poisoned(
     worker: &GpuWorker,
     model_name: &str,
 ) -> anyhow::Result<()> {
-    if worker.poisoned.load(Ordering::SeqCst)
-        || worker.fatal_cuda_error.load(Ordering::SeqCst)
-        || worker.shutdown_requested.load(Ordering::SeqCst)
-    {
-        anyhow::bail!(fatal_cuda_user_message(model_name));
+    if let Some(message) = worker_unavailable_message(worker, model_name) {
+        anyhow::bail!(message);
     }
     Ok(())
 }
@@ -3544,7 +3563,7 @@ impl GenerationEventSink<'_> {
 
 fn process_job_with_sink(
     worker: &GpuWorker,
-    job: GpuJob,
+    mut job: GpuJob,
     event_sink: GenerationEventSink<'_>,
     h3_attempt_cancellation: Option<mold_inference::InferenceCancellationToken>,
 ) -> bool {
@@ -3562,11 +3581,7 @@ fn process_job_with_sink(
     // Jobs may already be buffered in this worker's channel when a preceding
     // job kills the context. Fail them without touching CUDA, including jobs
     // explicitly pinned to this ordinal.
-    if worker.poisoned.load(Ordering::SeqCst)
-        || worker.fatal_cuda_error.load(Ordering::SeqCst)
-        || worker.shutdown_requested.load(Ordering::SeqCst)
-    {
-        let err_msg = fatal_cuda_user_message(&model_name);
+    if let Some(err_msg) = worker_unavailable_message(worker, &model_name) {
         if let Some(ref tx) = job.progress_tx {
             let _ = tx.send(SseMessage::Error(SseErrorEvent {
                 message: err_msg.clone(),
@@ -3579,6 +3594,34 @@ fn process_job_with_sink(
     if job.result_tx.is_closed() {
         tracing::debug!(gpu = ordinal, model = %model_name, "skipping dispatched job — client disconnected");
         return false;
+    }
+
+    // Charge the attempt here, on the owner thread, immediately before the
+    // model load — the phase that can take the process down with it. Charging
+    // at replay instead would delete a job that merely waited behind a long
+    // render through a few deploys, having never touched a GPU.
+    if let Some(ticket) = job.journal.as_ref() {
+        if let crate::queue_journal::DispatchClaim::Exhausted { attempts, cap } =
+            ticket.claim_dispatch()
+        {
+            let err_msg = format!(
+                "'{model_name}' was started {attempts} times without finishing (limit {cap}); \
+                 it is held for review instead of being retried"
+            );
+            tracing::error!(gpu = ordinal, model = %model_name, attempts, cap, "held an exhausted durable queue row");
+            if let Some(ref tx) = job.progress_tx {
+                let _ = tx.send(SseMessage::Error(SseErrorEvent {
+                    message: err_msg.clone(),
+                }));
+            }
+            // The row is already `held`; settle the ticket so its drop does
+            // not delete what the operator now needs to inspect.
+            if let Some(ticket) = job.journal.take() {
+                ticket.hold("dispatch attempts exhausted");
+            }
+            let _ = job.result_tx.send(Err(err_msg));
+            return false;
+        }
     }
 
     // The durable parent owns an attempt-scoped token. Reference hashing runs
@@ -4141,7 +4184,7 @@ fn process_job_with_sink(
 }
 
 fn finish_generation_success(
-    job: GpuJob,
+    mut job: GpuJob,
     response: mold_core::GenerateResponse,
     image: ImageData,
     original_image: Option<ImageData>,
@@ -4152,6 +4195,10 @@ fn finish_generation_success(
         None,
         mold_core::build_info::version_string(),
     );
+    // Written into the saved print before the save, so boot replay can tell a
+    // job that already produced its output from one that never ran. Output
+    // filenames are wall-clock, so nothing downstream could tell them apart.
+    metadata.job_id = Some(job.id.clone());
     if let Some(video) = response.video.as_ref() {
         metadata.apply_video_output(video);
     }
@@ -4205,6 +4252,14 @@ fn finish_generation_success(
                 &job.gallery_publication_gate,
             );
         }
+    }
+
+    // The output is on disk and in the gallery index; the row has done its
+    // job. Settled here rather than on the ticket's ordinary drop so a
+    // shutdown racing the last few microseconds of delivery cannot retain a
+    // completed job and replay it into a duplicate print.
+    if let Some(ticket) = job.journal.take() {
+        ticket.complete();
     }
 
     if let Some(ref tx) = job.progress_tx {
@@ -5761,6 +5816,7 @@ mod tests {
                         result_tx: placeholder_tx,
                         output_dir: None,
                         batch_child: None,
+                        journal: None,
                         #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
                         h3_private_ingress_grant: None,
                     },
@@ -5793,6 +5849,7 @@ mod tests {
             h3_prepared_attempt: None,
             lease: None,
             batch_child: None,
+            journal: None,
         };
         (job, result_rx, progress_rx, queue_rx, queue, registry)
     }
@@ -7646,6 +7703,32 @@ mod tests {
         }
     }
 
+    /// A graceful deploy calls `request_shutdown()` on every worker, so a job
+    /// that reaches one in that window used to be told its CUDA context was
+    /// fatally poisoned. That is a lie on every ordinary restart, and it is
+    /// about to become the common case now that a retained job is replayed.
+    #[test]
+    fn a_shutting_down_worker_reports_retention_not_a_fatal_cuda_context() {
+        let worker = single_worker_pool_with_parked("mock-model", Duration::from_millis(0));
+        worker.shutdown_requested.store(true, Ordering::SeqCst);
+
+        let error = ensure_worker_not_poisoned(&worker, "mock-model")
+            .expect_err("a shutting-down worker must refuse work");
+        let message = error.to_string();
+        assert!(
+            message.contains("restarting") && message.contains("stays queued"),
+            "expected a retention message, got: {message}"
+        );
+        assert_ne!(message, fatal_cuda_user_message("mock-model"));
+
+        // A genuinely poisoned context keeps the specific, actionable message.
+        worker.poisoned.store(true, Ordering::SeqCst);
+        let poisoned = ensure_worker_not_poisoned(&worker, "mock-model")
+            .expect_err("a poisoned worker must refuse work")
+            .to_string();
+        assert_eq!(poisoned, fatal_cuda_user_message("mock-model"));
+    }
+
     fn single_worker_pool_with_parked(model: &str, load_sleep: Duration) -> Arc<GpuWorker> {
         let (job_tx, _job_rx) = std::sync::mpsc::sync_channel::<GpuWorkerCommand>(2);
         let mut cache = ModelCache::new(3);
@@ -7717,6 +7800,7 @@ mod tests {
             h3_prepared_attempt: None,
             lease: None,
             batch_child: None,
+            journal: None,
         }
     }
 
@@ -8022,6 +8106,7 @@ mod tests {
                     memory_ledger_sequence: 0,
                 }),
                 batch_child: None,
+                journal: None,
             })
             .unwrap();
 
@@ -8875,6 +8960,7 @@ mod tests {
                 h3_prepared_attempt: None,
                 lease: None,
                 batch_child: None,
+                journal: None,
             };
             worker
                 .send_grant(LeaseGrant {
@@ -9006,6 +9092,7 @@ mod tests {
                     h3_prepared_attempt: None,
                     lease: None,
                     batch_child: None,
+                    journal: None,
                 })),
                 retry: None,
             })
@@ -9641,6 +9728,7 @@ mod tests {
                     h3_prepared_attempt: None,
                     lease: None,
                     batch_child: None,
+                    journal: None,
                 })),
                 retry: None,
             })
@@ -10174,6 +10262,7 @@ mod tests {
                     result_tx: placeholder_tx,
                     output_dir: None,
                     batch_child: None,
+                    journal: None,
                     #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
                     h3_private_ingress_grant: None,
                 },
@@ -10206,6 +10295,7 @@ mod tests {
                 h3_prepared_attempt: None,
                 lease: Some(fence("generate", 3)),
                 batch_child: None,
+                journal: None,
             })
             .unwrap();
         drain_lease(&mut event_rx, "generate");
@@ -10363,6 +10453,7 @@ mod tests {
                     result_tx: placeholder_tx,
                     output_dir: None,
                     batch_child: None,
+                    journal: None,
                     #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
                     h3_private_ingress_grant: None,
                 },
@@ -10399,6 +10490,7 @@ mod tests {
                 h3_prepared_attempt: None,
                 lease: None,
                 batch_child: None,
+                journal: None,
             },
             &event_tx,
             1,
@@ -10456,6 +10548,7 @@ mod tests {
                     result_tx: placeholder_tx,
                     output_dir: None,
                     batch_child: None,
+                    journal: None,
                     #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
                     h3_private_ingress_grant: None,
                 },
@@ -10492,6 +10585,7 @@ mod tests {
                     h3_prepared_attempt: None,
                     lease: None,
                     batch_child: None,
+                    journal: None,
                 },
                 &scheduler_tx,
                 1,
@@ -10527,6 +10621,7 @@ mod tests {
                     result_tx: placeholder_tx,
                     output_dir: None,
                     batch_child: None,
+                    journal: None,
                     #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
                     h3_private_ingress_grant: None,
                 },
@@ -10561,6 +10656,7 @@ mod tests {
                     h3_prepared_attempt: None,
                     lease: None,
                     batch_child: None,
+                    journal: None,
                 },
                 &scheduler_tx,
                 1,
@@ -10967,6 +11063,7 @@ mod tests {
                     result_tx: dummy_tx,
                     output_dir: None,
                     batch_child: None,
+                    journal: None,
                     #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
                     h3_private_ingress_grant: None,
                 },

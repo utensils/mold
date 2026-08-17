@@ -5396,6 +5396,7 @@ fn gpu_job_from_generation(
         h3_prepared_attempt: None,
         lease: Some(lease),
         batch_child: job.batch_child,
+        journal: job.journal,
     }
 }
 
@@ -5420,6 +5421,7 @@ fn generation_and_prepared_from_gpu_job(
             result_tx: job.result_tx,
             output_dir: job.output_dir,
             batch_child: job.batch_child,
+            journal: job.journal,
             #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
             h3_private_ingress_grant,
         },
@@ -6723,6 +6725,7 @@ mod tests {
                 result_tx,
                 output_dir: None,
                 batch_child: None,
+                journal: None,
                 #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
                 h3_private_ingress_grant: None,
             },

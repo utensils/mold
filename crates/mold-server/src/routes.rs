@@ -1865,6 +1865,19 @@ async fn generate(
         result_tx,
         outcome_rx,
     } = crate::job_supervisor::supervise_job(job_id.clone(), cancel);
+    // Record the durable row BEFORE submit, so a crash between here and the
+    // worker still leaves something to replay.
+    let journal = state
+        .queue_journal
+        .record(crate::queue_journal::JournalAdmission {
+            id: &job_id,
+            request: &req,
+            output_dir: output_dir.as_deref(),
+            target_gpu: preferred_gpu,
+            completion_payload: SseCompletionPayload::Full,
+            batch_child: false,
+            carries_reference_authority: resolved_references.is_some() || req.references.is_some(),
+        });
     let job = GenerationJob {
         id: job_id.clone(),
         request: req,
@@ -1874,6 +1887,7 @@ async fn generate(
         result_tx,
         output_dir,
         batch_child: None,
+        journal,
         #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
         h3_private_ingress_grant,
     };
@@ -1890,7 +1904,7 @@ async fn generate(
     // here no longer discards the job: the supervisor keeps holding the result
     // channel, so the render finishes and the output is still saved.
     let result = match outcome_rx.await {
-        Ok(crate::job_supervisor::SupervisedOutcome::Finished(result)) => result,
+        Ok(crate::job_supervisor::SupervisedOutcome::Finished(result)) => *result,
         Ok(crate::job_supervisor::SupervisedOutcome::Cancelled) => {
             return Err(ApiError::cancelled(format!(
                 "generation job {job_id} was cancelled while queued"
@@ -3004,6 +3018,17 @@ async fn generate_stream(
         result_tx,
         outcome_rx,
     } = crate::job_supervisor::supervise_job(job_id.clone(), cancel);
+    let journal = state
+        .queue_journal
+        .record(crate::queue_journal::JournalAdmission {
+            id: &job_id,
+            request: &req,
+            output_dir: output_dir.as_deref(),
+            target_gpu: preferred_gpu,
+            completion_payload,
+            batch_child: false,
+            carries_reference_authority: resolved_references.is_some() || req.references.is_some(),
+        });
     let job = GenerationJob {
         id: job_id.clone(),
         request: req,
@@ -3013,6 +3038,7 @@ async fn generate_stream(
         result_tx,
         output_dir,
         batch_child: None,
+        journal,
         #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
         h3_private_ingress_grant,
     };
@@ -4700,6 +4726,9 @@ async fn cancel_queue_job(
             format!("queue job {id} is already running; only queued jobs can be cancelled"),
         ),
     })?;
+    // Unconditional, not fence-aware: a cancel that lands during the shutdown
+    // drain must not come back after the restart.
+    state.queue_journal.discard_id(&id);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -4789,6 +4818,7 @@ async fn resume_queue(State(state): State<AppState>) -> Result<Json<QueuePauseRe
 async fn cancel_all_queue(State(state): State<AppState>) -> Json<QueueCancelAllResponse> {
     let _scheduler_mutation = state.scheduler_mutation_fence.lock().await;
     let cancelled = state.job_registry.cancel_all_queued();
+    state.queue_journal.discard_all_queued();
     Json(QueueCancelAllResponse { cancelled })
 }
 

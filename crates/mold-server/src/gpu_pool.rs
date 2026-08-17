@@ -435,6 +435,8 @@ pub struct GpuJob {
     /// `None` exists only for legacy unit tests and the single-GPU adapter.
     pub lease: Option<crate::scheduler::LeaseFence>,
     pub batch_child: Option<crate::state::BatchChildExecution>,
+    /// Durable-queue row ownership, moved across from the `GenerationJob`.
+    pub journal: Option<crate::queue_journal::QueueTicket>,
 }
 
 pub struct PromptExpansionJob {

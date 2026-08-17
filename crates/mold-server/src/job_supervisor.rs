@@ -20,8 +20,9 @@ use crate::state::GenerationJobResult;
 
 /// What the submitting handler learns about its job.
 pub enum SupervisedOutcome {
-    /// The worker resolved the job (successfully or not).
-    Finished(Result<GenerationJobResult, String>),
+    /// The worker resolved the job (successfully or not). Boxed because a
+    /// successful result carries the whole raster.
+    Finished(Box<Result<GenerationJobResult, String>>),
     /// `DELETE /api/queue/:id` removed the job while it was still queued.
     Cancelled,
 }
@@ -56,7 +57,7 @@ pub fn supervise_job(job_id: String, cancel: Arc<Notify>) -> SupervisedJob {
         };
 
         let outcome = match delivered {
-            Some(Ok(result)) => SupervisedOutcome::Finished(result),
+            Some(Ok(result)) => SupervisedOutcome::Finished(Box::new(result)),
             Some(Err(_)) => {
                 // The job was dropped without resolving. Submission failures
                 // are reported by the handler's own error path; anything else
@@ -126,7 +127,10 @@ mod tests {
         assert!(result_tx.send(Err("boom".to_string())).is_ok());
 
         match outcome_rx.await {
-            Ok(SupervisedOutcome::Finished(Err(message))) => assert_eq!(message, "boom"),
+            Ok(SupervisedOutcome::Finished(outcome)) => match *outcome {
+                Err(message) => assert_eq!(message, "boom"),
+                Ok(_) => panic!("expected the worker's error to survive the hop"),
+            },
             _ => panic!("expected the worker outcome to reach the handler"),
         }
     }

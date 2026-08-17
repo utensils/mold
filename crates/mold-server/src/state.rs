@@ -77,6 +77,12 @@ pub struct GenerationJob {
     /// Server-owned adaptive-batch child authority. Public singleton and
     /// client-owned prepared siblings leave this absent.
     pub batch_child: Option<BatchChildExecution>,
+    /// Durable-queue row ownership. Dropping this deletes the row unless the
+    /// retention fence is up, which is what turns every existing discard path
+    /// into "retain and replay" during shutdown. `None` for a job that is not
+    /// durable — no gallery target, a batch child, reference-upload authority,
+    /// an oversized payload, or no journal at all.
+    pub journal: Option<crate::queue_journal::QueueTicket>,
     /// Cloneable, payload-free authenticated ingress authority. The API key
     /// marker itself never leaves the route; dependency preparation must
     /// revalidate this grant against the exact canonical request.
@@ -908,6 +914,7 @@ mod tests {
             result_tx,
             output_dir: None,
             batch_child: None,
+            journal: None,
             #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
             h3_private_ingress_grant: None,
         }

@@ -966,6 +966,7 @@ mod tests {
             sample_shift: None,
             distill_strength_high: None,
             distill_strength_low: None,
+            job_id: None,
             prompt: prompt.into(),
             negative_prompt: None,
             original_prompt: None,
@@ -3973,6 +3974,87 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("authoritative scheduler V2"));
+    }
+
+    /// The durable row is written before `submit()`, so a crash between
+    /// admission and the worker still leaves something to replay.
+    #[tokio::test]
+    async fn an_admitted_gallery_bound_generation_is_journaled_before_it_is_queued() {
+        let output_dir = tempfile::tempdir().unwrap();
+        let (mut state, mut rx) = AppState::with_engine_and_queue(MockEngine::ready());
+        state.output_disabled_override = false;
+        state.config.write().await.output_dir =
+            Some(output_dir.path().to_string_lossy().into_owned());
+        state.metadata_db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        state.queue_journal = Arc::new(crate::queue_journal::QueueJournal::new(
+            state.metadata_db.clone(),
+        ));
+        let journal = state.queue_journal.clone();
+        let app = app_with_state(state.clone());
+
+        let gen_app = app.clone();
+        let gen_task = tokio::spawn(async move {
+            gen_app
+                .oneshot(
+                    Request::post("/api/generate")
+                        .header("content-type", "application/json")
+                        .body(Body::from(generate_body("a cat", 512, 512)))
+                        .unwrap(),
+                )
+                .await
+        });
+
+        let job = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("the job must be queued")
+            .expect("the queue channel must stay open");
+        assert!(
+            job.journal.is_some(),
+            "a gallery-bound singleton must carry a durable queue ticket"
+        );
+        let rows = journal.list_all();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, job.id);
+        assert_eq!(rows[0].output_dir, output_dir.path());
+
+        gen_task.abort();
+        let _ = gen_task.await;
+    }
+
+    /// No gallery target means the only delivery is the HTTP response, which
+    /// by definition does not survive the restart. Replaying such a job would
+    /// burn a full render whose result is discarded.
+    #[tokio::test]
+    async fn a_generation_with_no_gallery_target_is_not_journaled() {
+        let (mut state, mut rx) = AppState::with_engine_and_queue(MockEngine::ready());
+        state.metadata_db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        state.queue_journal = Arc::new(crate::queue_journal::QueueJournal::new(
+            state.metadata_db.clone(),
+        ));
+        let journal = state.queue_journal.clone();
+        let app = app_with_state(state.clone());
+
+        let gen_app = app.clone();
+        let gen_task = tokio::spawn(async move {
+            gen_app
+                .oneshot(
+                    Request::post("/api/generate")
+                        .header("content-type", "application/json")
+                        .body(Body::from(generate_body("a cat", 512, 512)))
+                        .unwrap(),
+                )
+                .await
+        });
+
+        let job = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("the job must be queued")
+            .expect("the queue channel must stay open");
+        assert!(job.journal.is_none());
+        assert!(journal.list_all().is_empty());
+
+        gen_task.abort();
+        let _ = gen_task.await;
     }
 
     #[tokio::test]
@@ -8654,6 +8736,7 @@ mod tests {
             sample_shift: None,
             distill_strength_high: None,
             distill_strength_low: None,
+            job_id: None,
             prompt: "from db".into(),
             negative_prompt: None,
             original_prompt: None,
@@ -9569,6 +9652,7 @@ mod tests {
             sample_shift: None,
             distill_strength_high: None,
             distill_strength_low: None,
+            job_id: None,
             prompt: "doomed".into(),
             negative_prompt: None,
             original_prompt: None,

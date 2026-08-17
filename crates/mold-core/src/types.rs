@@ -1988,6 +1988,15 @@ pub struct OutputMetadata {
     pub batch_index: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batch_count: Option<u32>,
+    /// Queue job that produced this print. Additive; absent on every print
+    /// written before the durable queue existed and on client-side saves.
+    ///
+    /// This is the replay idempotence key: output filenames are wall-clock, so
+    /// once a job's row survives a restart nothing else can tell a replayed
+    /// render from the original. Boot replay looks this id up in
+    /// `generations.metadata_json` and drops the row instead of re-rendering.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
     pub model: String,
     pub seed: u64,
     pub steps: u32,
@@ -2176,6 +2185,9 @@ impl OutputMetadata {
             batch_id: req.batch_id.clone(),
             batch_index: req.batch_index,
             batch_count: req.batch_count,
+            // Stamped by the worker immediately before the save; the request
+            // does not know which queue job is carrying it.
+            job_id: None,
             model: req.model.clone(),
             seed,
             steps: req.steps,
