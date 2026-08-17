@@ -28,9 +28,9 @@ pub struct MoldClient {
     api_key_configured: bool,
 }
 
-/// An admitted generation plus the in-flight answer to "does this host keep
-/// its queue?". Held only while a stream is open; read only if that stream
-/// dies before the terminal event.
+/// An admitted generation plus the in-flight answer to "did the host journal
+/// THIS job?". Held only while a stream is open; read only if that stream dies
+/// before the terminal event.
 struct RetainedJobProbe {
     job_id: String,
     host: String,
@@ -39,11 +39,11 @@ struct RetainedJobProbe {
 
 /// Explain a stream that ended without a terminal event.
 ///
-/// A durable-queue host runs everything it admitted whether or not a client
-/// is attached, and replays across a restart what it could not finish, so the
-/// job the caller just lost sight of is still going to render there. Say so —
-/// but only for a host that advertised it, because on every older server a
-/// lost stream really does mean lost work.
+/// A host that journalled this job runs it whether or not a client is
+/// attached, and replays across a restart what it could not finish, so the job
+/// the caller just lost sight of is still going to render there. Say so — but
+/// only when that job is durable, because on an older server, and for a job
+/// the host excluded at admission, a lost stream really does mean lost work.
 ///
 /// The original transport error is preserved as the cause, so
 /// [`MoldClient::is_connection_error`] still reports `false` for a mid-body
@@ -680,24 +680,34 @@ impl MoldClient {
     }
 
     /// Ask this exact host, while it is demonstrably still up, whether it
-    /// keeps admitted generations across a restart
-    /// (`/api/capabilities.queue.durable_queue`). Started when the job is
-    /// queued and read only if the stream later dies, so a host that never
-    /// answers — or one that predates the field — simply promises nothing.
+    /// journalled THIS job (`GET /api/queue` → the row's additive `durable`).
+    ///
+    /// Deliberately per-job rather than `capabilities.queue.durable_queue`: a
+    /// host that can promise durability still reports `durable: false` for a
+    /// job it excluded at admission — no gallery target, reference-upload
+    /// media, or a request over the journal's payload ceiling — and telling
+    /// the user one of those will finish later would be a lie. Started when
+    /// the job is queued and read only if the stream later dies, so a host
+    /// that never answers, or one that predates the field, promises nothing.
     fn probe_retention(&self, job_id: String) -> RetainedJobProbe {
         let client = self.client.clone();
-        let url = format!("{}/api/capabilities", self.base_url);
+        let url = format!("{}/api/queue", self.base_url);
         let host = self.base_url.clone();
+        let wanted = job_id.clone();
         let durable = tokio::spawn(async move {
             let Ok(response) = client.get(url).send().await else {
                 return false;
             };
-            let Ok(capabilities) = response.json::<serde_json::Value>().await else {
+            let Ok(listing) = response.json::<serde_json::Value>().await else {
                 return false;
             };
-            capabilities
-                .get("queue")
-                .and_then(|queue| queue.get("durable_queue"))
+            listing
+                .get("entries")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .find(|entry| entry.get("id").and_then(serde_json::Value::as_str) == Some(&wanted))
+                .and_then(|entry| entry.get("durable"))
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false)
         });
@@ -2471,15 +2481,12 @@ mod tests {
         assert!(!meta.has_audio);
     }
 
-    /// A server that answers `/api/capabilities` with `capabilities`, then
-    /// serves one `/api/generate/stream` request by emitting a `queued` SSE
-    /// event with `job_id` and dropping the connection mid-body (an
-    /// under-delivered `Content-Length`), exactly like a process that exits
-    /// while a client is attached.
-    async fn spawn_dying_stream_server(
-        capabilities: serde_json::Value,
-        job_id: &'static str,
-    ) -> String {
+    /// A server that answers `GET /api/queue` with `queue`, then serves one
+    /// `/api/generate/stream` request by emitting a `queued` SSE event with
+    /// `job_id` and dropping the connection mid-body (an under-delivered
+    /// `Content-Length`), exactly like a process that exits while a client is
+    /// attached.
+    async fn spawn_dying_stream_server(queue: serde_json::Value, job_id: &'static str) -> String {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2489,7 +2496,7 @@ mod tests {
                 let Ok((mut socket, _)) = listener.accept().await else {
                     return;
                 };
-                let capabilities = capabilities.clone();
+                let queue = queue.clone();
                 tokio::spawn(async move {
                     let mut request = Vec::new();
                     let mut buf = [0u8; 1024];
@@ -2505,8 +2512,8 @@ mod tests {
                         }
                     }
                     let head = String::from_utf8_lossy(&request).to_string();
-                    if head.starts_with("GET /api/capabilities") {
-                        let body = capabilities.to_string();
+                    if head.starts_with("GET /api/queue") {
+                        let body = queue.to_string();
                         let _ = socket
                             .write_all(
                                 format!(
@@ -2558,7 +2565,14 @@ mod tests {
     #[tokio::test]
     async fn mid_stream_death_reports_the_job_retained_on_a_durable_host() {
         let base = spawn_dying_stream_server(
-            serde_json::json!({ "queue": { "durable_queue": true } }),
+            serde_json::json!({ "entries": [{
+                "id": "job-77",
+                "model": "z-image-turbo:q8",
+                "state": "queued",
+                "started_at_unix_ms": 0,
+                "position": 0,
+                "durable": true
+            }] }),
             "job-77",
         )
         .await;
@@ -2592,8 +2606,15 @@ mod tests {
 
     #[tokio::test]
     async fn mid_stream_death_claims_no_retention_on_a_legacy_host() {
+        // A server that predates the durable queue: no `durable` field at all.
         let base = spawn_dying_stream_server(
-            serde_json::json!({ "queue": { "can_pause": false } }),
+            serde_json::json!({ "entries": [{
+                "id": "job-88",
+                "model": "z-image-turbo:q8",
+                "state": "queued",
+                "started_at_unix_ms": 0,
+                "position": 0
+            }] }),
             "job-88",
         )
         .await;
@@ -2611,6 +2632,36 @@ mod tests {
         assert_eq!(
             crate::control::classify_generate_error(&err),
             crate::control::GenerateServerAction::SurfaceError
+        );
+    }
+
+    #[tokio::test]
+    async fn mid_stream_death_claims_no_retention_for_a_job_the_host_did_not_journal() {
+        // A durable host still excludes some jobs at admission — no gallery
+        // target, reference-upload media, an oversized request — and reports
+        // `durable: false` for them. Host capability alone would over-promise.
+        let base = spawn_dying_stream_server(
+            serde_json::json!({ "entries": [{
+                "id": "job-99",
+                "model": "z-image-turbo:q8",
+                "state": "queued",
+                "started_at_unix_ms": 0,
+                "position": 0,
+                "durable": false
+            }] }),
+            "job-99",
+        )
+        .await;
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let err = MoldClient::new(&base)
+            .generate_stream(&stream_request(), tx)
+            .await
+            .expect_err("the stream dies mid-body");
+
+        let rendered = format!("{err:#}");
+        assert!(
+            !rendered.contains("retained"),
+            "a job the host did not journal must not promise retention: {rendered}"
         );
     }
 }

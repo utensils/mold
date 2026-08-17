@@ -65,6 +65,21 @@ vi.mock("../api", () => ({
   ),
 }));
 
+vi.mock("@studio/api/referenceUploads", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@studio/api/referenceUploads")>()),
+  // Keep the real `requestNeedsReferenceUpload` predicate; only the network
+  // side of the lease is stubbed so a submission can reach the stream.
+  prepareReferenceUploads: vi.fn(
+    ({ request }: { request: GenerateRequestWire }) =>
+      Promise.resolve({
+        request,
+        expiresAtMs: Date.now() + 60_000,
+        requestScopeSha256: "a".repeat(64),
+        cancel: () => Promise.resolve(),
+      }),
+  ),
+}));
+
 function fakeCompleteEvent(
   overrides: Partial<SseCompleteEvent> = {},
 ): SseCompleteEvent {
@@ -1162,6 +1177,42 @@ describe("useGenerateStream host routing", () => {
 
     expect(job.state).toBe("error");
     expect(stream.canvasErrorJobId.value).toBeNull();
+  });
+
+  it("keeps a reference-upload network close a hard failure even on a durable host", async () => {
+    // Reference-upload media is excluded from the journal at admission, so
+    // this job reports `durable: false` on a host that advertises the durable
+    // queue. Promising it will finish would be a lie.
+    const stream = useGenerateStream();
+    const id = stream.submit(
+      singleGen({
+        model: "minimax-h3-ref2va",
+        frames: 124,
+        references: [
+          {
+            kind: "image",
+            media: { authority: "inline", data: "PRIVATE-IMAGE-BYTES" },
+            provenance: { name: "identity.png", sha256: "a".repeat(64) },
+            mime_type: "image/png",
+            width: 32,
+            height: 24,
+          },
+        ],
+      } as Partial<GenerateRequestWire>),
+      { kind: "single" },
+      { ...studioRoute, durableQueue: true },
+    );
+    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
+    // The lease is awaited before the stream opens.
+    await vi.waitFor(() => expect(job.streamStarted).toBe(true));
+
+    lastSingleHandlers!.onError({
+      kind: "network",
+      message: "connection lost",
+    });
+
+    expect(stream.canvasErrorJobId.value).toBe(id);
+    expect(job.error).toBe("connection lost");
   });
 
   it("keeps a network close a hard failure against a host without a durable queue", () => {

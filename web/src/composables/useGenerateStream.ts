@@ -902,8 +902,12 @@ function submitJob(
       job.error = err.message ?? "network error";
       // The socket died without a terminal frame. Against a host that keeps
       // its admitted queue the work outlives this connection, so the loss is
-      // detachment, not failure.
-      retained = route?.durableQueue === true;
+      // detachment, not failure — except for a job that host would never have
+      // journalled. Reference-upload media is excluded at admission (the row
+      // must never hold a secret), so such a job reports `durable: false` even
+      // on a durable host and really is gone.
+      retained =
+        route?.durableQueue === true && !requestNeedsReferenceUpload(req);
     }
     if (retained) {
       // Soft settle: the row stops moving and keeps its note, but the canvas

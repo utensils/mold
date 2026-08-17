@@ -421,20 +421,15 @@ describe("reconcileInterruptedGenerationJobs", () => {
     );
   });
 
-  it("keeps a queued row waiting when the host retains its queue across restarts", async () => {
+  it("keeps a queued row waiting when THAT JOB is durable on the host", async () => {
     let queueCalls = 0;
-    let capabilityCalls = 0;
     apiJsonTo.mockImplementation((_target: unknown, path: string) => {
-      if (path === "/api/capabilities") {
-        capabilityCalls += 1;
-        return Promise.resolve({ queue: { durable_queue: true } });
-      }
       if (path === "/api/queue") {
         queueCalls += 1;
         return Promise.resolve({
           entries:
             queueCalls <= 2
-              ? [{ id: "job-9", model: "ltx2:q8", state: "queued", position: 0 }]
+              ? [{ id: "job-9", model: "ltx2:q8", state: "queued", position: 0, durable: true }]
               : [],
         });
       }
@@ -453,23 +448,26 @@ describe("reconcileInterruptedGenerationJobs", () => {
       }),
     );
 
-    // The durable host runs the job with no client attached — deleting it
-    // would destroy exactly the work the server kept.
+    // The host runs this job with no client attached — deleting it would
+    // destroy exactly the work the host kept. Per-job truth, and no extra
+    // request: `/api/queue` already carries it.
     expect(apiFetchTo).not.toHaveBeenCalled();
-    expect(capabilityCalls).toBe(1);
+    expect(apiJsonTo).not.toHaveBeenCalledWith(target, "/api/capabilities");
     expect(stages).toEqual(["Waiting in Studio’s queue", "Waiting in Studio’s queue"]);
     expect(job.status).toBe("complete");
     expect(job.result?.filename).toBe("resumed print.png");
   });
 
-  it("still clears a zombie queued row when the host advertises no durable queue", async () => {
+  it("clears a queued row the durable host did not journal", async () => {
+    // `durable: false` on a durable host — no gallery target, reference-upload
+    // media, or an oversized request. Host capability alone would over-promise
+    // and hang this row forever.
     apiJsonTo.mockImplementation((_target: unknown, path: string) => {
-      if (path === "/api/capabilities") {
-        return Promise.resolve({ queue: { can_pause: false } });
-      }
       if (path === "/api/queue") {
         return Promise.resolve({
-          entries: [{ id: "job-9", model: "ltx2:q8", state: "queued", position: 0 }],
+          entries: [
+            { id: "job-9", model: "ltx2:q8", state: "queued", position: 0, durable: false },
+          ],
         });
       }
       return Promise.reject(new Error(`Unexpected path ${path}`));
@@ -479,6 +477,35 @@ describe("reconcileInterruptedGenerationJobs", () => {
 
     expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/queue/job-9", { method: "DELETE" });
     expect(job.status).toBe("error");
+  });
+
+  it("settles a held row with the host's reason instead of waiting forever", async () => {
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/queue") {
+        return Promise.resolve({
+          entries: [
+            {
+              id: "job-9",
+              model: "ltx2:q8",
+              state: "held",
+              position: 0,
+              durable: true,
+              held_reason: "dispatch attempts exhausted",
+            },
+          ],
+        });
+      }
+      return Promise.reject(new Error(`Unexpected path ${path}`));
+    });
+    const job = makeJob();
+    await reconcileInterruptedGenerationJobs([job], options());
+
+    // A held row is listed but never auto-run, so waiting on it never ends.
+    expect(apiFetchTo).not.toHaveBeenCalled();
+    expect(job.status).toBe("error");
+    expect(job.error).toBe(
+      "Studio is holding this print and will not run it automatically (dispatch attempts exhausted). Develop again to requeue it.",
+    );
   });
 
   it("re-attaches to a running job by polling until the print lands", async () => {

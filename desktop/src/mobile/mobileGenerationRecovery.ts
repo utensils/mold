@@ -49,10 +49,18 @@ const PRE_ID_JOIN_WINDOW_MS = 5_000;
 interface RecoveryQueueEntry {
   id: string;
   model?: string;
-  state: "queued" | "running";
+  /** `held` is additive: a journalled job the host parked and will not
+   * auto-run. Absent on servers without the durable queue. */
+  state: "queued" | "running" | "held";
   seed_pinned?: boolean | null;
   started_at_unix_ms?: number;
   metadata?: OutputMetadata | null;
+  /** Whether the host journalled THIS job — additive and deliberately
+   * per-job: a host that can promise durability still reports `false` for a
+   * job it excluded at admission. Absent on older servers. */
+  durable?: boolean | null;
+  /** Why a held job is parked. Present only for `state: "held"`. */
+  held_reason?: string | null;
 }
 
 export interface GenerationRecoveryOptions {
@@ -416,29 +424,7 @@ async function findPreIdChain(job: Job, opts: GenerationRecoveryOptions): Promis
   );
 }
 
-/**
- * Whether the frozen host keeps admitted generations across a restart and
- * dispatches them with no client attached (`/api/capabilities.queue`
- * `durable_queue`). Probed lazily — only a queued row asks — and memoized for
- * the whole resume pass so one foreground wake costs at most one request.
- * Any failure resolves `false`: an unknown host keeps the legacy contract,
- * where a queued job whose stream died is skipped at dispatch.
- */
-function durableQueueProbe(opts: GenerationRecoveryOptions): () => Promise<boolean> {
-  let pending: Promise<boolean> | null = null;
-  return () => {
-    pending ??= apiJsonTo<{ queue?: { durable_queue?: boolean } }>(opts.target, "/api/capabilities")
-      .then((capabilities) => capabilities.queue?.durable_queue === true)
-      .catch(() => false);
-    return pending;
-  };
-}
-
-async function reconcileJob(
-  job: Job,
-  opts: GenerationRecoveryOptions,
-  hostRetainsQueue: () => Promise<boolean> = durableQueueProbe(opts),
-): Promise<void> {
+async function reconcileJob(job: Job, opts: GenerationRecoveryOptions): Promise<void> {
   const isActive = opts.isActive ?? (() => true);
   const sleep =
     opts.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
@@ -564,12 +550,26 @@ async function reconcileJob(
         await sleep(interval);
         continue;
       }
+      if (entry?.state === "held") {
+        // Listed but parked: the host exhausted this job's dispatch or replay
+        // budget and will never start it on its own. Waiting would never end.
+        settleFailure(
+          job,
+          `${opts.hostLabel} is holding this print and will not run it automatically${
+            entry.held_reason ? ` (${entry.held_reason})` : ""
+          }. Develop again to requeue it.`,
+        );
+        return;
+      }
       if (entry?.state === "queued") {
-        if (await hostRetainsQueue()) {
-          // A durable-queue host runs everything it admitted, client attached
-          // or not, and replays what a restart interrupted. Deleting the row
-          // here would destroy exactly the work the host kept — wait for it.
-          if (settledExternally(job) || !isActive()) return;
+        if (entry.durable === true) {
+          // The host journalled THIS job: it runs whether or not a client is
+          // attached and is replayed if a restart interrupts it. Deleting the
+          // row would destroy exactly the work the host kept — wait for it.
+          // Deliberately per-job, never `capabilities.queue.durable_queue`: a
+          // durable host still reports `durable: false` for a job with no
+          // gallery target, reference-upload media, or an oversized payload,
+          // and waiting on one of those would hang forever.
           job.stage = `Waiting in ${opts.hostLabel}’s queue`;
           await sleep(interval);
           continue;
@@ -624,10 +624,5 @@ export function reconcileInterruptedGenerationJobs(
     job.status = "loading";
     job.stage = `Reconnecting to ${opts.hostLabel}`;
   }
-  // One probe for the whole batch: every sibling was submitted to the same
-  // frozen route, so they share one answer about that host's queue contract.
-  const hostRetainsQueue = durableQueueProbe(opts);
-  return Promise.all(interrupted.map((job) => reconcileJob(job, opts, hostRetainsQueue))).then(
-    () => undefined,
-  );
+  return Promise.all(interrupted.map((job) => reconcileJob(job, opts))).then(() => undefined);
 }
