@@ -1,3 +1,4 @@
+#[cfg(test)]
 mod gguf_dense;
 pub(crate) mod lora;
 mod offload;
