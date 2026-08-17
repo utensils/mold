@@ -433,19 +433,6 @@ fn model_timestep(scheduler: &FlowMatchEulerDiscreteScheduler) -> f64 {
     1.0 - scheduler.current_sigma()
 }
 
-/// Opt back into dequantizing a GGUF checkpoint into a dense parameter map.
-///
-/// The quantized runtime is the default because the dense map inflates a
-/// 3.4 GB Q4_K file to ~24 GB on Metal (F32) and silently corrupted renders
-/// there. The dense path is retained because it may still be the faster choice
-/// on CUDA, where the map is BF16 (~12 GB) and VRAM is usually sufficient —
-/// that comparison has not been measured, so the escape hatch stays until it
-/// is.
-fn zimage_gguf_dense_forced() -> bool {
-    crate::runtime_env::value("MOLD_ZIMAGE_GGUF_DENSE")
-        .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes"))
-}
-
 /// Largest latent axis candle's GPU VAE decode is measured to handle whole.
 ///
 /// Determined by bisection against a CPU reference on an M4 Max: the Z-Image
@@ -721,12 +708,10 @@ impl ZImageEngine {
     ///   `VarBuilder` whose backend can't be wrapped after the fact),
     ///   wrap it with a `ZImageLoraBackend`, and feed the resulting
     ///   `VarBuilder` to `ZImageTransformer2DModel::new`.
-    /// * **GGUF path**: dequantise into a dense tensor map via
-    ///   [`super::gguf_dense::dequantize_gguf_dense_tensors`], wrap the
-    ///   `HashMap` `SimpleBackend` impl with the LoRA wrapper, then build
-    ///   the model. The fused-QKV `attention.qkv` LoRA targets the split
-    ///   `to_q`/`to_k`/`to_v` candle keys (the same key-space the BF16
-    ///   path sees) — see [`super::lora`] for the splat math.
+    /// * **GGUF path**: patch only affected quantized tensors and build the
+    ///   quantized transformer. The fused-QKV `attention.qkv` LoRA targets the
+    ///   split `to_q`/`to_k`/`to_v` candle keys — see [`super::lora`] for the
+    ///   splat math.
     fn load_transformer(
         &self,
         device: &Device,
@@ -765,11 +750,6 @@ impl ZImageEngine {
             }
             let qvb =
                 quantized_var_builder::VarBuilder::from_gguf(&self.base.paths.transformer, device)?;
-            if zimage_gguf_dense_forced() {
-                return Ok(ZImageTransformer::Dense(Box::new(
-                    super::gguf_dense::load_gguf_dense_transformer(cfg, dtype, qvb)?,
-                )));
-            }
             // Keep GGUF weights quantized at runtime instead of inflating them
             // into a dense map. Dequantizing the whole checkpoint turns the
             // 3.4 GB Q4_K file into ~24 GB resident on Metal (F32) — mold

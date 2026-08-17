@@ -2,11 +2,8 @@ use std::collections::HashMap;
 
 use anyhow::{bail, Context, Result};
 use candle_core::{DType, Tensor};
-use candle_nn::VarBuilder as DenseVarBuilder;
 use candle_transformers::models::z_image::Config;
 use mold_candle::quantized::VarBuilder as QuantizedVarBuilder;
-
-use super::transformer::MoldZImageTransformer2DModel;
 
 fn dequantized_tensor(vb: &QuantizedVarBuilder, name: &str, dtype: DType) -> Result<Tensor> {
     let tensor = vb
@@ -183,15 +180,14 @@ fn insert_transformer_block(
     Ok(())
 }
 
-/// Dequantise the GGUF tensor map into a dense `HashMap<String, Tensor>`
-/// keyed by the candle key-space (`layers.{i}.attention.to_q.weight`, …).
-/// The fused `attention.qkv` is already split into three `to_q`/`to_k`/`to_v`
-/// tensors here, so downstream consumers see the same key-space as the
-/// BF16 path.
+/// Test-only reconstruction of a GGUF tensor map as a dense
+/// `HashMap<String, Tensor>` keyed by the BF16 candle key-space
+/// (`layers.{i}.attention.to_q.weight`, …). It lets the ignored checkpoint
+/// comparison below prove that the fused `attention.qkv` split and other key
+/// transforms match the reference BF16 checkpoint without exposing a dense
+/// production loader.
 ///
-/// The returned device is the device the tensors were dequantised onto —
-/// callers feed it back into `DenseVarBuilder::from_tensors` (or wrap the
-/// `HashMap` with a `ZImageLoraBackend` first).
+/// The returned device is the device the tensors were dequantised onto.
 pub(crate) fn dequantize_gguf_dense_tensors(
     cfg: &Config,
     dtype: DType,
@@ -328,19 +324,6 @@ fn populate_gguf_dense_tensors(
     }
 
     Ok(())
-}
-
-/// Convenience wrapper: dequantise the GGUF transformer into a dense
-/// `ZImageTransformer2DModel`. No LoRA path.
-pub(crate) fn load_gguf_dense_transformer(
-    cfg: &Config,
-    dtype: DType,
-    vb: QuantizedVarBuilder,
-) -> Result<MoldZImageTransformer2DModel> {
-    let (tensors, device) = dequantize_gguf_dense_tensors(cfg, dtype, &vb)?;
-    let vb = DenseVarBuilder::from_tensors(tensors, dtype, &device);
-    MoldZImageTransformer2DModel::new(cfg, vb)
-        .context("failed to build dense Z-Image transformer from GGUF weights")
 }
 
 #[cfg(test)]
