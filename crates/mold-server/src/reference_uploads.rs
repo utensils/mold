@@ -321,6 +321,29 @@ pub(crate) fn inference_bindings_for_request(
 /// makes "dead" decidable without a heuristic.
 pub(crate) const STAGING_LOCK_FILE: &str = ".lock";
 
+/// Serializes claiming a new staging root against sweeping for dead ones.
+///
+/// Creating a root is not atomic — the directory exists before its lock is
+/// held — so without this a sweeper running in that window would see a lock
+/// file nobody holds and delete a root that is about to become live. Both
+/// sides take this lock, so the window cannot be observed.
+const STAGING_SWEEP_LOCK_FILE: &str = ".sweep.lock";
+
+/// Take the claim/sweep mutex, creating it if needed.
+fn lock_staging_parent(parent: &std::path::Path) -> Option<std::fs::File> {
+    if std::fs::create_dir_all(parent).is_err() {
+        return None;
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(parent.join(STAGING_SWEEP_LOCK_FILE))
+        .ok()?;
+    fs2::FileExt::lock_exclusive(&file).ok()?;
+    Some(file)
+}
+
 /// What one boot sweep found.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct StagingSweep {
@@ -342,6 +365,9 @@ fn claim_staging_root(root: &std::path::Path) -> Option<std::fs::File> {
         tracing::warn!(root = %root.display(), %error, "could not create staging root");
         return None;
     }
+    // Held across create-and-lock so a concurrent sweep cannot see the lock
+    // file before we hold it and reclaim a root that is coming alive.
+    let _sweep_guard = root.parent().and_then(lock_staging_parent);
     let lock_path = root.join(STAGING_LOCK_FILE);
     let file = match std::fs::File::create(&lock_path) {
         Ok(file) => file,
@@ -353,6 +379,11 @@ fn claim_staging_root(root: &std::path::Path) -> Option<std::fs::File> {
     match fs2::FileExt::try_lock_exclusive(&file) {
         Ok(()) => Some(file),
         Err(error) => {
+            // Leave no unlocked lock file behind: a sweeper would read it as a
+            // tracked-but-dead root and delete media this server is using.
+            // Without the file the root is untracked, which is never removed.
+            drop(file);
+            let _ = std::fs::remove_file(&lock_path);
             tracing::warn!(
                 root = %root.display(),
                 %error,
@@ -381,6 +412,15 @@ fn claim_staging_root(root: &std::path::Path) -> Option<std::fs::File> {
 pub fn sweep_orphaned_staging_roots(current_root: &std::path::Path) -> StagingSweep {
     let mut sweep = StagingSweep::default();
     let Some(parent) = current_root.parent() else {
+        return sweep;
+    };
+    // Mutually exclusive with `claim_staging_root`, so a root cannot be
+    // created-but-not-yet-locked while this pass is looking at it.
+    let Some(_sweep_guard) = lock_staging_parent(parent) else {
+        tracing::warn!(
+            dir = %parent.display(),
+            "skipping the staging sweep: its claim mutex could not be taken"
+        );
         return sweep;
     };
     let Ok(entries) = std::fs::read_dir(parent) else {
@@ -2207,6 +2247,48 @@ mod tests {
             "a running server's staging must survive a peer's boot"
         );
         fs2::FileExt::unlock(&held).unwrap();
+    }
+
+    /// A claim that cannot take the lock must leave no lock file behind. A
+    /// leftover unlocked one reads as tracked-and-dead to a peer sweep, which
+    /// would then delete the media of a server that is very much alive; with
+    /// no file the root is untracked, and untracked is never removed.
+    #[test]
+    fn a_failed_claim_leaves_no_lock_file_for_a_peer_to_acquire() {
+        let cache = tempfile::tempdir().unwrap();
+        let root = cache.path().join("runtime-contended");
+        std::fs::create_dir_all(&root).unwrap();
+
+        // Another handle in this process already owns the lock, so the claim's
+        // `try_lock_exclusive` fails the way an unsupported filesystem would.
+        let lock_path = root.join(STAGING_LOCK_FILE);
+        let held = std::fs::File::create(&lock_path).unwrap();
+        fs2::FileExt::try_lock_exclusive(&held).unwrap();
+        let contended = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        assert!(fs2::FileExt::try_lock_exclusive(&contended).is_err());
+        drop(contended);
+        fs2::FileExt::unlock(&held).unwrap();
+        drop(held);
+        std::fs::remove_file(&lock_path).unwrap();
+
+        // Now the real shape: claiming a root whose lock cannot be taken.
+        let blocker = std::fs::create_dir(&lock_path);
+        assert!(
+            blocker.is_ok(),
+            "a directory at the lock path fails the claim"
+        );
+        assert!(claim_staging_root(&root).is_none());
+        std::fs::remove_dir(&lock_path).unwrap();
+
+        let peer = cache.path().join("runtime-peer");
+        std::fs::create_dir_all(&peer).unwrap();
+        let sweep = sweep_orphaned_staging_roots(&peer);
+        assert_eq!(sweep.removed, 0, "a live root must not be reclaimed");
+        assert_eq!(sweep.untracked, 1);
+        assert!(root.is_dir());
     }
 
     /// A root with no lock file predates lock tracking, so its liveness cannot
