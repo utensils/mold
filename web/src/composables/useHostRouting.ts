@@ -582,6 +582,8 @@ function withReferenceUploads(route: HostRoute | null): HostRoute | null {
     target: { ...route.target },
     referenceUploads:
       capabilitiesByHost.value[route.hostId]?.reference_uploads ?? null,
+    durableQueue:
+      capabilitiesByHost.value[route.hostId]?.queue?.durable_queue ?? null,
   };
 }
 
@@ -765,6 +767,8 @@ async function resolveFeasibleWithPreview(
           instanceId: chosen.instanceId ?? null,
           referenceUploads:
             capabilitiesByHost.value[chosen.id]?.reference_uploads ?? null,
+          durableQueue:
+            capabilitiesByHost.value[chosen.id]?.queue?.durable_queue ?? null,
         },
       };
     }
@@ -1074,6 +1078,8 @@ async function revalidateFeasibleWithPreview(
       instanceId: capturedInstanceId,
       referenceUploads:
         capabilitiesByHost.value[route.hostId]?.reference_uploads ?? null,
+      durableQueue:
+        capabilitiesByHost.value[route.hostId]?.queue?.durable_queue ?? null,
     },
   };
 }

@@ -185,6 +185,23 @@ function serverErrorMessage(body: string | undefined): string | null {
   return body.trim() || null;
 }
 
+/**
+ * Whether a terminal SSE error frame says the host KEPT this generation.
+ * A durable-queue host ends the stream of a job it retained across a restart
+ * with `{ retained: true, code: "server_restarting" }`; the work is still
+ * queued there and will land in that host's gallery. Older servers never send
+ * the field, so an absent or malformed body stays a hard failure.
+ */
+function terminalErrorRetained(body: string | undefined): boolean {
+  if (!body) return false;
+  try {
+    const parsed = JSON.parse(body) as { retained?: unknown };
+    return parsed.retained === true;
+  } catch {
+    return false;
+  }
+}
+
 function markWorkStarted(job: Job) {
   job.workStarted = true;
   job.progress.queuePosition = null;
@@ -871,6 +888,7 @@ function submitJob(
     body?: string;
     message?: string;
   }) => {
+    let retained = false;
     if (err.kind === "http") {
       const message = serverErrorMessage(err.body);
       job.error =
@@ -879,8 +897,19 @@ function submitJob(
           : err.status === 0
             ? (message ?? "generation failed")
             : `HTTP ${err.status}${message ? `: ${message}` : ""}`;
+      retained = err.status === 0 && terminalErrorRetained(err.body);
     } else {
       job.error = err.message ?? "network error";
+      // The socket died without a terminal frame. Against a host that keeps
+      // its admitted queue the work outlives this connection, so the loss is
+      // detachment, not failure.
+      retained = route?.durableQueue === true;
+    }
+    if (retained) {
+      // Soft settle: the row stops moving and keeps its note, but the canvas
+      // never claims a print failed that the host is still going to render.
+      settleDetachedJob(job.id, job.error ?? "");
+      return;
     }
     recordFailedSettlement(job);
   };

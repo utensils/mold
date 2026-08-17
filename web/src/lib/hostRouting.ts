@@ -59,6 +59,10 @@ export interface HostRoute {
   instanceId?: string | null;
   /** Frozen authenticated reference-ingress contract for this exact host. */
   referenceUploads?: ReferenceUploadCapabilities | null;
+  /** Whether this host advertised `queue.durable_queue` — it keeps admitted
+   * generations across a restart and runs them with no client attached. Absent
+   * on hosts whose capabilities were never read, and on older servers. */
+  durableQueue?: boolean | null;
 }
 
 export function sameHostRoute(

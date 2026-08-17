@@ -2234,6 +2234,7 @@ describe("CreatePage layout and behavior", () => {
       label: "Studio",
       instanceId: null,
       referenceUploads: null,
+      durableQueue: null,
       target: { baseUrl: "http://studio:7680", apiKey: "sk-studio" },
     });
   });
@@ -3112,6 +3113,7 @@ describe("CreatePage host routing", () => {
       label: "Studio",
       instanceId: null,
       referenceUploads: null,
+      durableQueue: null,
       target: { baseUrl: "http://studio:7680", apiKey: "sk-studio" },
     });
   });

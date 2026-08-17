@@ -494,6 +494,52 @@ describe("workStarted tracking", () => {
     expect(stream.canvasErrorJobId.value).toBeNull();
   });
 
+  it("settles a retained terminal frame softly instead of as a hard failure", () => {
+    const stream = useGenerateStream();
+    const id = stream.submit(singleGen({ prompt: "kept in the queue" }), {
+      kind: "single",
+    });
+    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
+    job.previewUrl = "data:image/png;base64,preview";
+
+    lastSingleHandlers!.onError({
+      kind: "http",
+      status: 0,
+      body: JSON.stringify({
+        message: "mold is restarting; this generation was kept in the queue",
+        retained: true,
+        code: "server_restarting",
+      }),
+    });
+
+    expect(job.state).toBe("error");
+    expect(job.error).toBe(
+      "mold is restarting; this generation was kept in the queue",
+    );
+    expect(job.settledAt).not.toBeNull();
+    expect(job.previewUrl).toBeNull();
+    // The host kept the work: it may well finish. The canvas must not claim
+    // this print failed.
+    expect(stream.canvasErrorJobId.value).toBeNull();
+  });
+
+  it("keeps a non-retained terminal frame the canvas failure authority", () => {
+    const stream = useGenerateStream();
+    const id = stream.submit(singleGen({ prompt: "really failed" }), {
+      kind: "single",
+    });
+    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
+
+    lastSingleHandlers!.onError({
+      kind: "http",
+      status: 0,
+      body: JSON.stringify({ message: "host ran out of memory" }),
+    });
+
+    expect(job.error).toBe("host ran out of memory");
+    expect(stream.canvasErrorJobId.value).toBe(id);
+  });
+
   it("does not treat pre-queue info as work, but does treat post-queue info as work", () => {
     const stream = useGenerateStream();
     const id = stream.submit(singleGen({ frames: 1 }), { kind: "single" });
@@ -1095,6 +1141,45 @@ describe("useGenerateStream host routing", () => {
     const stream = useGenerateStream();
     stream.submit(singleGen({ frames: 1 }), { kind: "single" });
     expect(lastSingleTarget).toBeUndefined();
+  });
+
+  it("softly detaches a network close from a host that retains its queue", () => {
+    const stream = useGenerateStream();
+    const id = stream.submit(
+      singleGen({ frames: 1 }),
+      { kind: "single" },
+      {
+        ...studioRoute,
+        durableQueue: true,
+      },
+    );
+    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
+
+    lastSingleHandlers!.onError({
+      kind: "network",
+      message: "connection lost",
+    });
+
+    expect(job.state).toBe("error");
+    expect(stream.canvasErrorJobId.value).toBeNull();
+  });
+
+  it("keeps a network close a hard failure against a host without a durable queue", () => {
+    const stream = useGenerateStream();
+    const id = stream.submit(
+      singleGen({ frames: 1 }),
+      { kind: "single" },
+      studioRoute,
+    );
+    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
+
+    lastSingleHandlers!.onError({
+      kind: "network",
+      message: "connection lost",
+    });
+
+    expect(job.error).toBe("connection lost");
+    expect(stream.canvasErrorJobId.value).toBe(id);
   });
 
   it("attributes the job to the host it was routed to", () => {
