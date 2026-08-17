@@ -473,6 +473,17 @@ describe("ActivityStrip live queue position", () => {
             estimate_confidence: "low",
             blocked_reason: "insufficient_host_ram",
           },
+          {
+            work_id: "w2",
+            parent_id: "srv-2",
+            work_kind: "generation",
+            priority_class: "normal",
+            queue_rank: 2,
+            bypass_count: 0,
+            estimate_confidence: "low",
+            // Every GPU busy: ordinary serialization, not a fault.
+            blocked_reason: "no_idle_device",
+          },
         ],
       },
     },
@@ -482,6 +493,8 @@ describe("ActivityStrip live queue position", () => {
     const wrapper = mount(ActivityStrip, {
       props: { jobs: [queued("srv-2")], queueStatus: index },
     });
+    // `no_idle_device` on this row is a busy host, not a stall: the row keeps
+    // counting rather than printing the scheduler's own string.
     expect(
       wrapper.get("[data-test='activity-queue-position-client-srv-2']").text(),
     ).toBe("#2 in line");
@@ -496,28 +509,24 @@ describe("ActivityStrip live queue position", () => {
     ).toBe("Waiting for memory");
   });
 
-  it("keeps the bare pill against a server that lists nothing", () => {
+  it("keeps the plain pill against a server that lists nothing", () => {
     const wrapper = mount(ActivityStrip, {
       props: { jobs: [queued("srv-9")] },
     });
     expect(
-      wrapper
-        .find("[data-test='activity-queue-position-client-srv-9']")
-        .exists(),
-    ).toBe(false);
+      wrapper.get("[data-test='activity-queue-position-client-srv-9']").text(),
+    ).toBe("Queued");
     expect(wrapper.get("[data-test='activity-strip']").text()).toContain(
       "a cat",
     );
   });
 
-  it("says nothing for the job at the head of the queue", () => {
+  it("names the job at the head of the queue", () => {
     const wrapper = mount(ActivityStrip, {
       props: { jobs: [queued("srv-1")], queueStatus: index },
     });
     expect(
-      wrapper
-        .find("[data-test='activity-queue-position-client-srv-1']")
-        .exists(),
-    ).toBe(false);
+      wrapper.get("[data-test='activity-queue-position-client-srv-1']").text(),
+    ).toBe("Next up");
   });
 });

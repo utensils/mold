@@ -10,6 +10,7 @@ import {
 import DevicePanel from "@studio/components/DevicePanel.vue";
 import MinimaxH3InventoryPanel from "@studio/components/MinimaxH3InventoryPanel.vue";
 import { canMutateDevice } from "@studio/lib/deviceLifecycle";
+import { queueWaitCode, resolveQueueWait } from "@studio/lib/queuePosition";
 import { hostMemoryLevel } from "@studio/lib/hostMemory";
 import { apiJsonTo } from "../lib/api/client";
 import { describeTransportError } from "../lib/api/errors";
@@ -499,7 +500,8 @@ async function unload(name: string): Promise<void> {
 function queueCode(entry: QueueEntry): string {
   if (entry.state === "running")
     return entry.gpu == null ? "RUNNING" : `RUNNING · GPU ${entry.gpu}`;
-  return entry.position > 0 ? `QUEUED #${entry.position}` : "QUEUED";
+  // Same waiting vocabulary as the Create queue, resolved once in studio.
+  return queueWaitCode(resolveQueueWait({ position: entry.position }));
 }
 
 function downloadPercent(done: number, total: number): number {
