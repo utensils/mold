@@ -23,8 +23,13 @@ Environment=MOLD_PORT=7680
 
 Restart=on-failure
 RestartSec=5
-TimeoutStopSec=30
 KillSignal=SIGTERM
+
+# The server's own budget (MOLD_SHUTDOWN_ABORT_SECS, 45 s by default) plus
+# headroom, so systemd is never the component that decides. The old 30 s was
+# tighter than a cold model load: a deploy landing mid-render was SIGKILLed
+# and, before the queue became durable, took every queued job with it.
+TimeoutStopSec=105
 
 # Logs go to the user journal: `journalctl --user -u mold-server -f`
 StandardOutput=journal
