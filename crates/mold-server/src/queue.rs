@@ -560,13 +560,24 @@ fn write_gallery_bytes_no_replace_with_directory_sync(
     )?;
     let filename = reservation.final_name().to_owned();
     let path = dir.join(&filename);
+    // Stage under `<final>.partial` and publish by rename. Writing the final
+    // name in place means a kill mid-write leaves a truncated file at a real
+    // gallery name, which the next boot's `db.reconcile` imports as a valid
+    // print — and the shutdown path deliberately bounds itself and exits, so
+    // that kill is a routine event rather than a hypothetical one.
+    let staged = dir.join(format!("{filename}.partial"));
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(&path)?;
+        .open(&staged)?;
     if let Err(error) = file.write_all(bytes).and_then(|()| file.sync_all()) {
         drop(file);
-        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&staged);
+        return Err(error.into());
+    }
+    drop(file);
+    if let Err(error) = std::fs::rename(&staged, &path) {
+        let _ = std::fs::remove_file(&staged);
         return Err(error.into());
     }
     sync_directory(dir)?;
@@ -3820,6 +3831,40 @@ mod tests {
         assert_eq!(filename, "same-1.png");
         assert_eq!(std::fs::read(path).unwrap(), b"ordinary");
         assert!(!tmp.path().join("same.png").exists());
+    }
+
+    /// Gallery bytes are staged under `<final>.partial` and published by
+    /// rename, so a kill mid-write can never leave a truncated file at a real
+    /// gallery name for `db.reconcile` to import as a valid print. Blocking
+    /// the staging path is the cheapest way to prove the final name is only
+    /// ever created by the publish step.
+    #[test]
+    fn ordinary_gallery_save_publishes_by_rename_and_never_writes_the_final_name_directly() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join("ordinary.png.partial")).unwrap();
+
+        let outcome =
+            write_gallery_bytes_no_replace(tmp.path(), "ordinary.png", b"generated output");
+        assert!(
+            outcome.is_err(),
+            "staging must fail when the partial path is unusable"
+        );
+        assert!(
+            !tmp.path().join("ordinary.png").exists(),
+            "a failed write must leave nothing at the gallery name"
+        );
+    }
+
+    #[test]
+    fn ordinary_gallery_save_leaves_no_staging_file_behind() {
+        let tmp = TempDir::new().unwrap();
+        let (filename, path, _reservation) =
+            write_gallery_bytes_no_replace(tmp.path(), "ordinary.png", b"generated output")
+                .unwrap();
+
+        assert_eq!(filename, "ordinary.png");
+        assert_eq!(std::fs::read(path).unwrap(), b"generated output");
+        assert!(!tmp.path().join("ordinary.png.partial").exists());
     }
 
     #[test]
