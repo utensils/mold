@@ -38,6 +38,9 @@ const props = withDefaults(
     barPercent?: number | null;
     /** Row and name become buttons that emit `open` (catalog detail drawer). */
     clickable?: boolean;
+    /** When false, only the title is a semantic button. Use this when slots
+     * contain their own interactive controls such as selection checkboxes. */
+    interactiveContainer?: boolean;
     /** The row currently backing an open detail drawer. */
     selected?: boolean;
     /** Rich accessible name when visible metadata adds context to the row. */
@@ -53,6 +56,7 @@ const props = withDefaults(
     sizeSecondary: null,
     barPercent: null,
     clickable: false,
+    interactiveContainer: true,
     selected: false,
     accessibilityLabel: null,
   },
@@ -90,9 +94,13 @@ function onRowKeydown(event: KeyboardEvent): void {
       $slots.actions ? 'model-table-row--has-actions' : '',
       selected ? 'model-table-row--selected' : '',
     ]"
-    :role="clickable ? 'button' : undefined"
-    :tabindex="clickable ? 0 : undefined"
-    :aria-label="clickable ? (accessibilityLabel ?? `${name} — view details`) : undefined"
+    :role="clickable && interactiveContainer ? 'button' : undefined"
+    :tabindex="clickable && interactiveContainer ? 0 : undefined"
+    :aria-label="
+      clickable && interactiveContainer
+        ? (accessibilityLabel ?? `${name} — view details`)
+        : undefined
+    "
     :aria-describedby="barPercent != null ? footprintDescriptionId : undefined"
     :aria-current="selected ? 'true' : undefined"
     :data-selected="selected ? 'true' : undefined"
@@ -116,6 +124,9 @@ function onRowKeydown(event: KeyboardEvent): void {
         type="button"
         class="model-table-row__title truncate text-left text-body text-ink transition-colors duration-100 hover:text-safelight"
         :title="`${name} — view details`"
+        :aria-label="
+          !interactiveContainer ? (accessibilityLabel ?? `${name} — view details`) : undefined
+        "
         data-test="row-title"
         @click.stop="emit('open')"
       >

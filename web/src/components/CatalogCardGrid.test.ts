@@ -172,6 +172,82 @@ describe("CatalogCardGrid download feedback", () => {
   });
 });
 
+describe("CatalogCardGrid batch downloads", () => {
+  it("checks multiple models and queues all of them on one chosen machine", async () => {
+    const second = { ...baseEntry, id: "hf:row-1", name: "Row 1" };
+    mockState.entries = ref([baseEntry, second]);
+    mockState.visibleEntries = ref([baseEntry, second]);
+    mockState.resultCount = ref(2);
+    const w = mount(CatalogCardGrid);
+
+    const cards = w.findAllComponents({ name: "CatalogCard" });
+    cards[0]!.vm.$emit("toggle-select", true);
+    cards[1]!.vm.$emit("toggle-select", true);
+    await w.vm.$nextTick();
+
+    expect(w.get("[data-test='catalog-batch-bar']").text()).toContain(
+      "2 selected",
+    );
+    expect(
+      w.get<HTMLSelectElement>("[data-test='catalog-batch-target']").element
+        .value,
+    ).toBe("origin");
+    await w.get("[data-test='catalog-batch-download']").trigger("click");
+    await flushPromises();
+
+    expect(mockState.startDownload).toHaveBeenCalledTimes(2);
+    expect(mockState.startDownload).toHaveBeenCalledWith("hf:row-0");
+    expect(mockState.startDownload).toHaveBeenCalledWith("hf:row-1");
+    expect(w.find("[data-test='catalog-batch-bar']").exists()).toBe(false);
+    expect(toastMock).toHaveBeenCalledWith(
+      "success",
+      "2 downloads queued on this server",
+    );
+  });
+
+  it("keeps failed models selected for retry", async () => {
+    const second = { ...baseEntry, id: "hf:row-1", name: "Row 1" };
+    mockState.entries = ref([baseEntry, second]);
+    mockState.visibleEntries = ref([baseEntry, second]);
+    mockState.resultCount = ref(2);
+    mockState.startDownload
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error("disk full"));
+    const w = mount(CatalogCardGrid);
+    const cards = w.findAllComponents({ name: "CatalogCard" });
+    cards[0]!.vm.$emit("toggle-select", true);
+    cards[1]!.vm.$emit("toggle-select", true);
+    await w.vm.$nextTick();
+
+    await w.get("[data-test='catalog-batch-download']").trigger("click");
+    await flushPromises();
+
+    expect(w.get("[data-test='catalog-batch-bar']").text()).toContain(
+      "1 selected",
+    );
+    expect(toastMock).toHaveBeenCalledWith("error", "Row 1: disk full");
+  });
+
+  it("treats an already-queued conflict as an idempotent success", async () => {
+    mockState.startDownload.mockRejectedValueOnce(
+      Object.assign(new Error("already queued"), { status: 409 }),
+    );
+    const w = mount(CatalogCardGrid);
+    w.getComponent({ name: "CatalogCard" }).vm.$emit("toggle-select", true);
+    await w.vm.$nextTick();
+
+    await w.get("[data-test='catalog-batch-download']").trigger("click");
+    await flushPromises();
+
+    expect(w.find("[data-test='catalog-batch-bar']").exists()).toBe(false);
+    expect(toastMock).toHaveBeenCalledWith(
+      "success",
+      "1 download queued on this server",
+    );
+    expect(toastMock).not.toHaveBeenCalledWith("error", expect.anything());
+  });
+});
+
 describe("CatalogCardGrid layout", () => {
   it("renders the existing card grid by default", () => {
     const w = mount(CatalogCardGrid);

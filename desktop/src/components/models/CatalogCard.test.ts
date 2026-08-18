@@ -57,6 +57,7 @@ describe("CatalogCard", () => {
     expect(wrapper.get("img").attributes("decoding")).toBe("async");
     expect(wrapper.get("img").attributes("fetchpriority")).toBe("low");
     expect(wrapper.get('[data-test="catalog-card"]').classes()).toContain("catalog-card-contained");
+    expect(wrapper.get('[data-test="catalog-card"]').attributes("role")).toBeUndefined();
   });
 
   it("labels the model kind and mature content, includes both in the accessible name", async () => {
@@ -158,12 +159,14 @@ describe("CatalogCard", () => {
     expect(openExternalMock).not.toHaveBeenCalled();
   });
 
-  it("exposes the card as a keyboard-focusable button", async () => {
+  it("uses dedicated keyboard controls instead of nesting them in a card button", async () => {
     const wrapper = mount(CatalogCard, { props: { entry: entry(), pulling: false } });
     await flushPromises();
     const card = wrapper.get('[data-test="catalog-card"]');
-    expect(card.attributes("role")).toBe("button");
-    expect(card.attributes("tabindex")).toBe("0");
+    expect(card.attributes("role")).toBeUndefined();
+    expect(card.attributes("tabindex")).toBeUndefined();
+    expect(wrapper.get('[data-test="card-title"]').element.tagName).toBe("BUTTON");
+    expect(wrapper.get('[data-test="catalog-select"]').element.tagName).toBe("INPUT");
   });
 
   it("marks the card that backs the open model detail", async () => {
@@ -177,14 +180,11 @@ describe("CatalogCard", () => {
     expect(card.classes()).toContain("catalog-card-contained--selected");
   });
 
-  it("opens the drawer from Enter and Space on the focused card", async () => {
+  it("opens the drawer from the dedicated title button", async () => {
     const wrapper = mount(CatalogCard, { props: { entry: entry(), pulling: false } });
     await flushPromises();
-    const card = wrapper.get('[data-test="catalog-card"]');
-
-    await card.trigger("keydown.enter");
-    await card.trigger("keydown.space");
-    expect(wrapper.emitted("open")).toHaveLength(2);
+    await wrapper.get('[data-test="card-title"]').trigger("click");
+    expect(wrapper.emitted("open")).toHaveLength(1);
     expect(wrapper.emitted("open")?.[0]?.[0]).toMatchObject({ id: "cv:8001" });
   });
 

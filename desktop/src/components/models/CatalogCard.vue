@@ -39,13 +39,17 @@ const props = withDefaults(
     installable?: boolean | undefined;
     /** The card currently backing the open detail drawer. */
     selected?: boolean;
+    /** Batch-download checkbox state. */
+    selectable?: boolean;
+    checked?: boolean;
   }>(),
   // Explicit so Vue's boolean casting doesn't turn "not supplied" into false.
-  { installable: undefined, selected: false },
+  { installable: undefined, selected: false, selectable: true, checked: false },
 );
 const emit = defineEmits<{
   (e: "pull", entry: CatalogEntry): void;
   (e: "open", entry: CatalogEntry): void;
+  (e: "toggle-select", entry: CatalogEntry, checked: boolean): void;
 }>();
 
 const glyphSource = computed<ModelSource>(() =>
@@ -101,34 +105,34 @@ const thumbFailed = ref(false);
 function openPage(): void {
   if (pageUrl.value) void openExternal(pageUrl.value);
 }
-
-/**
- * Enter/Space on the card opens the drawer, but keydown bubbles — a keypress
- * on an inner control (Pull, the link-out) reaches here too. Only act when the
- * card itself is focused so those controls keep their own single action.
- */
-function onCardKeydown(event: KeyboardEvent): void {
-  if (event.target !== event.currentTarget) return;
-  event.preventDefault();
-  emit("open", props.entry);
-}
 </script>
 
 <template>
-  <div
-    class="catalog-card-contained border-edge flex cursor-pointer flex-col rounded-chrome border bg-bath transition-colors duration-150 hover:bg-bench focus-visible:outline-2 focus-visible:outline-safelight"
+  <article
+    class="catalog-card-contained border-edge flex cursor-pointer flex-col rounded-chrome border bg-bath transition-colors duration-150 hover:bg-bench"
     :class="selected ? 'catalog-card-contained--selected' : ''"
-    role="button"
-    tabindex="0"
     data-test="catalog-card"
     data-layout="grid"
     :aria-label="accessibilityLabel"
     :aria-current="selected ? 'true' : undefined"
     :data-selected="selected ? 'true' : undefined"
     @click="emit('open', entry)"
-    @keydown.enter="onCardKeydown"
-    @keydown.space="onCardKeydown"
   >
+    <label
+      class="catalog-card-checkbox border-edge absolute left-2 top-2 z-10 flex h-7 w-7 items-center justify-center rounded-control border bg-bench/95"
+      :title="selectable ? 'Select model for batch download' : 'No download target available'"
+      @click.stop
+    >
+      <input
+        type="checkbox"
+        class="h-4 w-4 accent-[var(--safelight)]"
+        :checked="checked"
+        :disabled="!selectable"
+        :aria-label="`Select ${displayName}`"
+        data-test="catalog-select"
+        @change="emit('toggle-select', entry, ($event.target as HTMLInputElement).checked)"
+      />
+    </label>
     <!-- Civitai preview image (public URL); shimmer while loading and use a
          local family mark when no custom image is available. -->
     <div
@@ -259,12 +263,18 @@ function onCardKeydown(event: KeyboardEvent): void {
         </button>
       </div>
     </div>
-  </div>
+  </article>
 </template>
 
 <style scoped>
 .catalog-card-contained {
+  position: relative;
   contain: layout paint style;
+}
+
+.catalog-card-contained:has(.catalog-card-checkbox input:checked) {
+  border-color: var(--safelight);
+  box-shadow: inset 0 0 0 1px var(--safelight);
 }
 
 .catalog-card-contained--selected,

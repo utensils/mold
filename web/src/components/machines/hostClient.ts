@@ -27,7 +27,11 @@ import type {
   ServerStatus,
 } from "../../types";
 import type { HostEntry } from "../../lib/hostRegistry";
-import { looksLikeCatalogId, type CatalogDownloadResponse } from "../../api";
+import {
+  ApiHttpError,
+  looksLikeCatalogId,
+  type CatalogDownloadResponse,
+} from "../../api";
 import { parseCurrentServerStatus } from "@studio/api/client";
 import {
   listDevices,
@@ -208,7 +212,7 @@ export async function hostModelDownload(
   });
   if (!res.ok) {
     const detail = await res.text().catch(() => "");
-    throw new Error(detail || `POST ${path} failed: ${res.status}`);
+    throw new ApiHttpError(`POST ${path}`, res.status, detail);
   }
   return catalog ? ((await res.json()) as CatalogDownloadResponse) : null;
 }
