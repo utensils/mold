@@ -19,4 +19,13 @@ fi
 grep -Fq '<key>testFlightInternalTestingOnly</key><false/>' "$WORKFLOW" ||
   fail "TestFlight export must explicitly preserve external-testing eligibility"
 
+grep -Fq 'path: ~/.cargo/bin/cargo-tauri' "$WORKFLOW" ||
+  fail "TestFlight must cache the pinned Tauri CLI binary"
+
+grep -Fq "if: steps.tauri-cli-cache.outputs.cache-hit != 'true'" "$WORKFLOW" ||
+  fail "TestFlight must install Tauri CLI only on a cache miss"
+
+grep -Fq "cargo tauri --version | grep -F '2.11.4'" "$WORKFLOW" ||
+  fail "TestFlight must verify the cached Tauri CLI version"
+
 echo "ios-testflight-distribution: ok"

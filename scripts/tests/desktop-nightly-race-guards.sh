@@ -35,13 +35,15 @@ grep -Fq "if: github.event_name != 'pull_request'" <<< "$linux_job" \
 nightly_header="$(sed -n '/^  desktop-nightly:/,/^  publish-desktop-nightly:/p' "$workflow")"
 grep -Fq 'uses: ./.github/workflows/desktop-distribution.yml' <<< "$nightly_header" \
   || fail "main pushes have no macOS packaging proof"
-grep -Fq 'needs: [desktop-frontend, desktop-rust]' <<< "$nightly_header" \
-  || fail "macOS Nightly distribution does not start after its own frontend and Rust gates"
+grep -Fq 'needs: [changes]' <<< "$nightly_header" \
+  || fail "macOS Nightly distribution is not launched immediately after classification"
 if grep -Fq 'desktop-linux' <<< "$nightly_header"; then
   fail "macOS Nightly distribution is still blocked on the Linux AppImage job"
 fi
 
 publisher_header="$(sed -n '/^  publish-desktop-nightly:/,/^    steps:/p' "$workflow")"
+grep -Fq 'needs: [desktop-nightly, desktop-frontend, desktop-rust]' <<< "$publisher_header" \
+  || fail "Nightly publication is not gated by distribution, frontend, and Rust validation"
 grep -Fq 'group: desktop-nightly-publication' <<< "$publisher_header" \
   || fail "Nightly publication is not serialized"
 grep -Fq 'cancel-in-progress: false' <<< "$publisher_header" \

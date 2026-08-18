@@ -195,6 +195,16 @@ grep -q 'render-release-pr-body.sh' "$workflow" || fail "workflow does not popul
 # The dollar sign is part of the workflow source being asserted.
 # shellcheck disable=SC2016
 grep -Fq 'if [ -z "$version" ]; then' "$workflow" || fail "workflow does not validate the workspace version"
+grep -Fq 'actions: read' "$workflow" || fail "release tag job cannot inspect candidate workflows"
+grep -Fq 'Detect an unpublished release candidate' "$workflow" || fail "release tag job does not distinguish ordinary main pushes"
+grep -Fq 'Wait for exact Apple candidate delivery' "$workflow" || fail "release tag job does not wait for Apple candidates"
+grep -Fq 'Desktop|push|Publish nightly update' "$workflow" || fail "release tag job does not gate on macOS publication"
+grep -Fq 'iOS TestFlight|workflow_run|Build, upload, and validate' "$workflow" || fail "release tag job does not gate on TestFlight delivery"
+# These dollar signs are literal workflow source assertions.
+# shellcheck disable=SC2016
+grep -Fq -- '--commit "$GITHUB_SHA"' "$workflow" || fail "release tag job does not bind candidates to the exact SHA"
+# shellcheck disable=SC2016
+grep -Fq 'select(.name == \"$job_name\")' "$workflow" || fail "release tag job gates on whole workflows instead of Apple delivery jobs"
 grep -q 'bash scripts/tests/release-sync-pr.sh' "$ci_workflow" || fail "CI does not exercise release PR synchronization"
 
 echo "PASS: release PR body sync"

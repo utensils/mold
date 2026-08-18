@@ -359,14 +359,14 @@ jobs:
           path: desktop/src-tauri/target/release/bundle/appimage/*.AppImage
           if-no-files-found: error
 
-  # Every desktop-relevant main commit that passes the frontend and macOS Rust
-  # gates becomes a signed, notarized nightly. Linux remains an independent
-  # required check so its slower AppImage build cannot delay macOS updates.
-  # Distribution packaging remains isolated from pull-request formatting.
+  # Build the signed candidate in parallel with frontend/Rust validation, then
+  # gate only publication on all three. The distribution build compiles the
+  # same frontend and Rust application itself, so serializing it behind those
+  # checks only added latency without improving the shipped artifact.
   desktop-nightly:
     name: Build nightly distribution
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [desktop-frontend, desktop-rust]
+    needs: [changes]
     uses: ./.github/workflows/desktop-distribution.yml
     with:
       channel: nightly
@@ -375,7 +375,7 @@ jobs:
   publish-desktop-nightly:
     name: Publish nightly update
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [desktop-nightly]
+    needs: [desktop-nightly, desktop-frontend, desktop-rust]
     runs-on: ubuntu-latest
     concurrency:
       group: desktop-nightly-publication

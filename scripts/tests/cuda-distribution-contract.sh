@@ -74,6 +74,24 @@ require_release_job_need() {
   fail "$release job $job does not depend on $dependency"
 }
 
+reject_release_job_need() {
+  local job="$1"
+  local dependency="$2"
+  local block
+
+  block="$(
+    awk -v job="  ${job}:" '
+      $0 == job { in_job = 1 }
+      in_job && /^  [[:alnum:]_-]+:$/ && $0 != job { exit }
+      in_job { print }
+    ' "$repo_root/$release"
+  )"
+  [[ -n "$block" ]] || fail "$release is missing job: $job"
+  if grep -Eq "^[[:space:]]+needs:.*(^|[,[[:space:]])${dependency}([],[[:space:]]|$)" <<<"$block"; then
+    fail "$release job $job must not depend on lower-priority $dependency"
+  fi
+}
+
 release=".github/workflows/release.yml"
 cache_workflow=".github/workflows/nix-cache.yml"
 require_text "$release" \
@@ -162,10 +180,18 @@ for target in 86 100; do
   require_text "$release" "artifacts/mold-x86_64-unknown-linux-gnu-cuda-sm${target}.tar.gz"
 done
 
-for release_job in release-latest release-version; do
-  require_release_job_need "$release_job" "docker"
-  require_release_job_need "$release_job" "build-nix-distribution"
+for release_job in release-latest release-version release-native; do
+  reject_release_job_need "$release_job" "docker"
+  reject_release_job_need "$release_job" "build-nix-distribution"
 done
+require_release_job_need "release-version" "build-macos"
+require_release_job_need "release-version" "build-desktop-dmg"
+for target in 86 89 100 120; do
+  require_release_job_need "release-native" "build-linux-sm${target}"
+done
+require_release_job_need "release-native" "release-version"
+require_release_job_need "release-containers" "release-native"
+require_release_job_need "release-containers" "docker"
 require_release_job_text "release-latest" \
   "Pin rolling tag to this release"
 require_release_job_text "release-latest" \
@@ -291,7 +317,6 @@ require_release_job_text "docker" 'cuda_cap: "89"'
 require_release_job_text "docker" 'suffix: ""'
 require_ci_release_path "$cache_workflow"
 require_text "$cache_workflow" 'branches: [main]'
-require_text "$cache_workflow" 'tags: ["v*"]'
 require_text "$cache_workflow" 'group: nix-cache-${{ github.ref }}'
 require_text "$cache_workflow" 'cancel-in-progress: false'
 require_text "$cache_workflow" 'permissions:'
@@ -301,28 +326,34 @@ require_text "$cache_workflow" 'uses: cachix/cachix-action@v17'
 require_text "$cache_workflow" 'name: mold'
 require_text "$cache_workflow" 'authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}'
 require_text "$cache_workflow" 'useDaemon: false'
-require_text "$cache_workflow" 'pathsToPush: result-mold'
-require_text "$cache_workflow" 'nix build .#mold --out-link result-mold'
+require_text "$cache_workflow" 'pathsToPush: ${{ matrix.out_link }}'
+for package in mold mold-sm86 mold-sm100 mold-desktop-sm86; do
+  require_text "$cache_workflow" "package: $package"
+done
+require_text "$cache_workflow" \
+  'nix build ".#${{ matrix.package }}" --out-link "${{ matrix.out_link }}"'
 if grep -Fq 'cachix/cachix-action' "$repo_root/$release"; then
   fail "$release must not wait for best-effort Cachix publication"
 fi
-require_release_job_text "build-nix-distribution" \
-  'nix build .#mold-sm86 .#mold-sm100 .#mold-desktop-sm86 --no-link'
+if grep -Fq 'build-nix-distribution:' "$repo_root/$release"; then
+  fail "$release must not contain blocking Nix distribution builds"
+fi
 require_text "flake.nix" 'extra-substituters = [ "https://mold.cachix.org" ];'
 require_text "flake.nix" \
   '"mold.cachix.org-1:9HBc/bEXDdpbxMjOwpaIDpjZqBh9JYg0h5Fipm+D8m4="'
 require_release_job_need "publish" "release-version"
-require_release_job_text "release-version" \
+require_release_job_need "publish-aur" "release-native"
+require_release_job_text "release-containers" \
   'scripts/create-container-digest-manifest.sh'
-require_release_job_text "release-version" \
+require_release_job_text "release-containers" \
   'artifacts/mold-container-digests.json'
-require_release_job_text "release-version" \
+require_release_job_text "release-containers" \
   'scripts/create-release-provenance.sh'
-require_release_job_text "release-version" \
+require_release_job_text "release-containers" \
   'artifacts/mold-release-provenance.json'
-require_release_job_text "release-version" \
+require_release_job_text "release-containers" \
   'sha256sum mold-release-provenance.json >> SHA256SUMS'
-require_release_job_text "release-version" \
+require_release_job_text "release-containers" \
   'sha256sum mold-container-digests.json >> SHA256SUMS'
 provenance_line="$(grep -n 'scripts/create-release-provenance.sh' "$repo_root/$release" | cut -d: -f1)"
 provenance_checksum_line="$(
