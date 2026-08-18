@@ -1443,15 +1443,36 @@ describe("useHostRouting", () => {
     expect(route?.target.baseUrl).not.toContain("sk-studio");
   });
 
-  it("requires an explicit machine when installed model profiles differ", async () => {
+  it("allows Auto across differing model profiles on the same Mold major version", async () => {
     const studio = addHost({ url: "http://studio:7680", name: "Studio" });
-    statuses.set(ORIGIN_HOST_ID, status());
+    statuses.set(ORIGIN_HOST_ID, status({ version: "0.23.1", queue_depth: 1 }));
     models.set(ORIGIN_HOST_ID, [
       model("flux-dev:q4", {
         generation_profile: { profile_hash: "origin-profile" } as never,
       }),
     ]);
-    statuses.set(studio.id, status());
+    statuses.set(studio.id, status({ version: "0.23.0", queue_depth: 0 }));
+    models.set(studio.id, [
+      model("flux-dev:q4", {
+        generation_profile: { profile_hash: "studio-profile" } as never,
+      }),
+    ]);
+    setGenerateTargetId(AUTO_TARGET_ID);
+    const routing = useHostRouting();
+    await routing.refresh();
+
+    expect(routing.resolve("flux-dev:q4")?.hostId).toBe(studio.id);
+  });
+
+  it("requires an explicit machine when model owners use different Mold major versions", async () => {
+    const studio = addHost({ url: "http://studio:7680", name: "Studio" });
+    statuses.set(ORIGIN_HOST_ID, status({ version: "0.23.1" }));
+    models.set(ORIGIN_HOST_ID, [
+      model("flux-dev:q4", {
+        generation_profile: { profile_hash: "origin-profile" } as never,
+      }),
+    ]);
+    statuses.set(studio.id, status({ version: "1.0.0" }));
     models.set(studio.id, [
       model("flux-dev:q4", {
         generation_profile: { profile_hash: "studio-profile" } as never,
@@ -1483,10 +1504,12 @@ describe("useHostRouting", () => {
         expect.objectContaining({
           hostId: ORIGIN_HOST_ID,
           profileHash: "origin-profile",
+          version: "0.23.1",
         }),
         expect.objectContaining({
           hostId: studio.id,
           profileHash: "studio-profile",
+          version: "1.0.0",
         }),
       ],
     });

@@ -177,6 +177,7 @@ pub fn run() {
             updater::install_pending_update,
             gallery::local_gallery_list,
             gallery::local_gallery_delete,
+            gallery::fetch_gallery_thumbnail,
             gallery::import_source_image,
             gallery::save_output_bytes,
             gallery::save_media_bytes,

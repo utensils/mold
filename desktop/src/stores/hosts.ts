@@ -192,7 +192,12 @@ export type FeasibleRouteResult =
   | { kind: "route"; route: HostRoute }
   | {
       kind: "profile_mismatch";
-      perHost: Array<{ hostId: string; label: string; profileHash: string | null }>;
+      perHost: Array<{
+        hostId: string;
+        label: string;
+        profileHash: string | null;
+        version: string | null;
+      }>;
     }
   | { kind: "infeasible"; perHost: HostPlacementFailure[] }
   | { kind: "unreachable"; perHost: HostProbeFailure[] }
@@ -577,6 +582,9 @@ export const useHostsStore = defineStore("hosts", {
           ),
           modelName,
           routable.filter((host) => host.status === "ready").map((host) => host.id),
+          Object.fromEntries(
+            routable.map((host) => [host.id, this.telemetry[host.id]?.version ?? null]),
+          ),
         )
       ) {
         return null;
@@ -692,6 +700,9 @@ export const useHostsStore = defineStore("hosts", {
               ),
               request.model,
               candidates.map((host) => host.id),
+              Object.fromEntries(
+                candidates.map((host) => [host.id, this.telemetry[host.id]?.version ?? null]),
+              ),
             )
           : null;
         if (profileConflict) {
@@ -701,6 +712,7 @@ export const useHostsStore = defineStore("hosts", {
               hostId,
               label: this.all.find((host) => host.id === hostId)?.label ?? hostId,
               profileHash: profileConflict.hashesByHost[hostId] ?? null,
+              version: this.telemetry[hostId]?.version ?? null,
             })),
           };
         }

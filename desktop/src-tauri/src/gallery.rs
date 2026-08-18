@@ -1,14 +1,25 @@
-use std::io::{Read, Seek, SeekFrom};
+use std::{
+    io::{Read, Seek, SeekFrom},
+    sync::OnceLock,
+    time::Duration,
+};
 
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use tauri::http::{header, Request, Response, StatusCode};
 use tauri::Manager;
+use tokio::sync::Semaphore;
 
 use crate::commands::{AppState, LocalServer, LocalServerInfo, SettingsStore};
 
 const MAX_SOURCE_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_GALLERY_THUMBNAIL_BYTES: usize = 8 * 1024 * 1024;
+const MAX_CONCURRENT_GALLERY_THUMBNAILS: usize = 16;
 const GALLERY_IMPORT_CONTENT_TYPE: &str = "application/vnd.mold.gallery-import";
+
+static GALLERY_THUMBNAIL_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+static GALLERY_THUMBNAIL_PERMITS: Semaphore =
+    Semaphore::const_new(MAX_CONCURRENT_GALLERY_THUMBNAILS);
 
 #[derive(Debug, Serialize)]
 pub struct ImportedSourceImage {
@@ -512,6 +523,79 @@ pub async fn save_output_bytes(
 pub struct MediaSaveTarget {
     base_url: String,
     api_key: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeGalleryThumbnail {
+    base64: String,
+    content_type: String,
+}
+
+#[tauri::command]
+pub async fn fetch_gallery_thumbnail(
+    target: MediaSaveTarget,
+    filename: String,
+) -> Result<NativeGalleryThumbnail, String> {
+    use base64::Engine;
+
+    if !valid_filename(&filename) {
+        return Err("Invalid gallery filename.".into());
+    }
+    let _permit = tokio::time::timeout(Duration::from_secs(5), GALLERY_THUMBNAIL_PERMITS.acquire())
+        .await
+        .map_err(|_| "The gallery thumbnail queue is busy; retrying may help.".to_string())?
+        .map_err(|_| "The gallery thumbnail service is unavailable.".to_string())?;
+    let encoded =
+        percent_encoding::utf8_percent_encode(&filename, percent_encoding::NON_ALPHANUMERIC);
+    let url = format!(
+        "{}/api/gallery/thumbnail/{encoded}",
+        target.base_url.trim_end_matches('/')
+    );
+    let client = GALLERY_THUMBNAIL_CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(15))
+            .pool_max_idle_per_host(MAX_CONCURRENT_GALLERY_THUMBNAILS)
+            .build()
+            .expect("static gallery HTTP client settings must be valid")
+    });
+    let mut request = client.get(url);
+    if let Some(key) = target.api_key.filter(|key| !key.is_empty()) {
+        request = request.header("X-Api-Key", key);
+    }
+    let response = request
+        .send()
+        .await
+        .map_err(|error| format!("Couldn't reach the gallery host: {error}"))?;
+    if !response.status().is_success() {
+        return Err(response_error(response).await);
+    }
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_GALLERY_THUMBNAIL_BYTES as u64)
+    {
+        return Err("The gallery thumbnail is unexpectedly large.".into());
+    }
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_string();
+    let mut bytes = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| format!("The thumbnail transfer failed: {error}"))?;
+        if bytes.len().saturating_add(chunk.len()) > MAX_GALLERY_THUMBNAIL_BYTES {
+            return Err("The gallery thumbnail is unexpectedly large.".into());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(NativeGalleryThumbnail {
+        base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+        content_type,
+    })
 }
 
 #[derive(Debug, Serialize)]

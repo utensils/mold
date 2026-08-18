@@ -1,11 +1,10 @@
 /**
  * Profile-consistency checks for automatic multi-host generation routing.
  *
- * A model name is not a sufficient execution contract: two machines may run
- * different Mold versions and advertise different settings for that model.
- * Explicit routing is always safe because the selected machine is the
- * authority. Automatic routing is safe only when every eligible owner agrees
- * on the exact profile hash.
+ * A model name is not a sufficient execution contract across incompatible
+ * protocol generations. Explicit routing is always safe because the selected
+ * machine is the authority. Automatic routing only stops at a Mold major-
+ * version boundary; minor, patch, and build drift is intentionally compatible.
  */
 
 export interface FleetProfileModel {
@@ -22,6 +21,7 @@ export interface ProfileHashConflict {
 export interface ProfileConflictHost {
   label: string;
   profileHash: string | null;
+  version?: string | null;
 }
 
 function formatMachineList(hosts: readonly ProfileConflictHost[]): string {
@@ -36,17 +36,21 @@ export function profileConflictMessage(
   hosts: readonly ProfileConflictHost[],
 ): string {
   const owners = formatMachineList(hosts);
-  const hasLegacyOwner = hosts.some((host) => !host.profileHash);
-  const cause = hasLegacyOwner
-    ? "At least one may be running an older Mold version, so the same controls could produce different results."
-    : "They may be running different Mold versions or builds, so the same controls could produce different results.";
-  return `Auto can't safely choose a machine because ${owners} use different generation settings for this model. ${cause} Update and reconnect them, or choose one machine for this print. Nothing was queued.`;
+  return `Auto can't safely choose a machine because ${owners} use incompatible major Mold versions for this model. Update and reconnect them, or choose one machine for this print. Nothing was queued.`;
+}
+
+function majorVersion(version: string | null | undefined): number | null {
+  const match = version?.trim().match(/^v?(\d+)(?:\.|$)/);
+  if (!match) return null;
+  const major = Number(match[1]);
+  return Number.isSafeInteger(major) ? major : null;
 }
 
 export function profileHashConflict(
   modelsByHost: Readonly<Record<string, readonly FleetProfileModel[]>>,
   modelName: string,
   eligibleHostIds: readonly string[],
+  versionsByHost: Readonly<Record<string, string | null | undefined>> = {},
 ): ProfileHashConflict | null {
   const owners = eligibleHostIds.flatMap((hostId) => {
     const model = modelsByHost[hostId]?.find(
@@ -62,15 +66,15 @@ export function profileHashConflict(
       model.generation_profile?.profile_hash?.trim() || null,
     ]),
   );
-  const hashes = Object.values(hashesByHost);
-  // During the one-release compatibility window, a fleet made entirely of
-  // legacy servers has one shared (legacy) contract. The unsafe case is a
-  // partially upgraded fleet or two concrete hashes that disagree.
-  if (
-    hashes.every((hash) => hash === null) ||
-    (hashes.every((hash) => hash !== null) && new Set(hashes).size === 1)
-  ) {
-    return null;
-  }
+  const majors = new Set(
+    owners
+      .map(({ hostId }) => majorVersion(versionsByHost[hostId]))
+      .filter((major): major is number => major !== null),
+  );
+  // Profile hashes naturally drift as defaults and capabilities evolve. They
+  // remain useful diagnostics, but only a definite major-version split is an
+  // automatic-routing incompatibility. Unknown versions fail open here; the
+  // selected host's placement preview still validates the concrete request.
+  if (majors.size <= 1) return null;
   return { hostIds: owners.map(({ hostId }) => hostId), hashesByHost };
 }

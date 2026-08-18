@@ -427,7 +427,7 @@ describe("hosts store", () => {
     expect(hosts.resolveRoute(null)?.hostId).toBe("hal9000-7680");
   });
 
-  it("requires an explicit machine when installed model profiles differ", async () => {
+  it("allows Auto across differing profiles on the same Mold major version", () => {
     const hosts = useHostsStore();
     hosts.extras.push({
       id: hal.id,
@@ -438,6 +438,46 @@ describe("hosts store", () => {
       error: null,
       instanceId: "hal-instance",
     });
+    hosts.telemetry.local = { queueDepth: 1, queueCapacity: 8, version: "0.23.1" };
+    hosts.telemetry[hal.id] = { queueDepth: 0, queueCapacity: 8, version: "0.23.0" };
+    const hostModels = useHostModelsStore();
+    hostModels.byHost.local = {
+      entries: [
+        {
+          ...installedModel(placementRequest.model),
+          generation_profile: { profile_hash: "local-profile" } as never,
+        },
+      ],
+      fetchedAt: Date.now(),
+      error: null,
+    };
+    hostModels.byHost[hal.id] = {
+      entries: [
+        {
+          ...installedModel(placementRequest.model),
+          generation_profile: { profile_hash: "remote-profile" } as never,
+        },
+      ],
+      fetchedAt: Date.now(),
+      error: null,
+    };
+
+    expect(hosts.resolveRoute(null, placementRequest.model)?.hostId).toBe(hal.id);
+  });
+
+  it("requires an explicit machine when model owners use different Mold major versions", async () => {
+    const hosts = useHostsStore();
+    hosts.extras.push({
+      id: hal.id,
+      label: "hal9000",
+      url: hal.url,
+      apiKey: "host-key",
+      status: "ready",
+      error: null,
+      instanceId: "hal-instance",
+    });
+    hosts.telemetry.local = { queueDepth: 0, queueCapacity: 8, version: "0.23.1" };
+    hosts.telemetry[hal.id] = { queueDepth: 0, queueCapacity: 8, version: "1.0.0" };
     const hostModels = useHostModelsStore();
     hostModels.byHost.local = {
       entries: [

@@ -11,6 +11,7 @@ import { useConnectionStore } from "../stores/connection";
 import { useGenerateFormStore } from "../stores/generateForm";
 import { newJob, useGenerationStore } from "../stores/generation";
 import { useHostsStore, type FeasibleRouteResult } from "../stores/hosts";
+import { useHostModelsStore } from "../stores/hostModels";
 import { useModelStore } from "../stores/models";
 import { useToastStore } from "../stores/toasts";
 import { useDownloadsStore } from "../stores/downloads";
@@ -192,6 +193,54 @@ describe("GenerateView prepared expansion batches", () => {
       "aerial coast",
     ]);
     expect(prepared.props("batch").route.hostId).toBe("local");
+  });
+
+  it("expands in Auto when model owners differ only by patch version", async () => {
+    const hosts = useHostsStore();
+    hosts.extras.push({
+      id: "hal9000-7680",
+      label: "hal9000",
+      url: "http://hal9000:7680",
+      apiKey: "remote-key",
+      status: "ready",
+      error: null,
+      instanceId: "hal-instance",
+    });
+    hosts.telemetry.local = { queueDepth: 1, queueCapacity: 8, version: "0.23.1" };
+    hosts.telemetry["hal9000-7680"] = {
+      queueDepth: 0,
+      queueCapacity: 8,
+      version: "0.23.0",
+    };
+    const hostModels = useHostModelsStore();
+    hostModels.byHost.local = {
+      entries: [{ ...model, generation_profile: { profile_hash: "local-profile" } } as ModelEntry],
+      fetchedAt: Date.now(),
+      error: null,
+    };
+    hostModels.byHost["hal9000-7680"] = {
+      entries: [{ ...model, generation_profile: { profile_hash: "remote-profile" } } as ModelEntry],
+      fetchedAt: Date.now(),
+      error: null,
+    };
+    vi.mocked(expandPrompt).mockResolvedValue({
+      original: "a lighthouse at dusk",
+      expanded: ["storm light", "sea mist", "aerial coast"],
+    });
+    const wrapper = mountView();
+    await flushPromises();
+
+    wrapper.findComponent(ExpandControl).vm.$emit("expand");
+    await flushPromises();
+
+    expect(expandPrompt).toHaveBeenCalledWith(
+      "a lighthouse at dusk",
+      { variations: 3, modelFamily: "flux", task: "text-to-image" },
+      { baseUrl: "http://hal9000:7680", apiKey: "remote-key" },
+    );
+    expect(wrapper.findComponent(PreparedExpansionBatch).props("batch").route.hostId).toBe(
+      "hal9000-7680",
+    );
   });
 
   it("generates Batch N directly without implicitly expanding the prompt", async () => {

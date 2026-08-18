@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { flushPromises, mount } from "@vue/test-utils";
+import { enableAutoUnmount, flushPromises, mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import type { CatalogEntry } from "../../lib/api/types";
 import type { CatalogSearchParams } from "../../lib/api/catalog";
@@ -35,6 +35,23 @@ import { useHostsStore } from "../../stores/hosts";
 import { useModelStore } from "../../stores/models";
 
 const PAGE_SIZE = 24;
+
+enableAutoUnmount(afterEach);
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+function familyOptionValues(wrapper: ReturnType<typeof mount>): string[] {
+  return wrapper
+    .get("select[aria-label='Model family']")
+    .findAll("option")
+    .map((option) => option.attributes("value") ?? "");
+}
 
 /** Records instances so tests can walk the sentinel into view. */
 class FakeIntersectionObserver {
@@ -90,6 +107,13 @@ function imagePage(page: number, size = PAGE_SIZE): CatalogEntry[] {
 
 async function mountTab(mediaType: "all" | "image" | "video" = "all") {
   setActivePinia(createPinia());
+  const connection = useConnectionStore();
+  connection.info = {
+    mode: "local",
+    baseUrl: "http://127.0.0.1:7680",
+    apiKey: "local-key",
+  };
+  connection.status = "ready";
   const wrapper = mount(CatalogTab, {
     props: { query: "", layout: "grid" as const, mediaType },
     global: { plugins: [] },
@@ -117,6 +141,99 @@ afterEach(() => {
 });
 
 describe("CatalogTab media filter under pagination", () => {
+  it("offers installed families immediately while the taxonomy request is still pending", async () => {
+    const taxonomy = deferred<string[]>();
+    fetchCatalogFamilies.mockReturnValue(taxonomy.promise);
+    setActivePinia(createPinia());
+    const wrapper = mount(CatalogTab, {
+      props: {
+        query: "",
+        layout: "grid" as const,
+        installedEntries: [
+          {
+            name: "qwen-image:q4",
+            family: "qwen-image",
+            downloaded: true,
+            hostIds: ["local"],
+          },
+          {
+            name: "z-image-turbo:q4",
+            family: "z-image",
+            downloaded: true,
+            hostIds: ["local"],
+          },
+        ] as never,
+      },
+    });
+    await flushPromises();
+
+    expect(familyOptionValues(wrapper)).toEqual(["", "qwen-image", "z-image"]);
+
+    taxonomy.resolve(["flux", "qwen-image", "z-image"]);
+    await flushPromises();
+    expect(familyOptionValues(wrapper)).toEqual(["", "flux", "qwen-image", "z-image"]);
+  });
+
+  it("falls back to families observed across inventory and results without collapsing after filtering", async () => {
+    fetchCatalogFamilies.mockRejectedValue(new Error("taxonomy unavailable"));
+    searchCatalog.mockResolvedValue({
+      entries: [entry("Flux model", "flux"), entry("Video model", "ltx2")],
+      page: 1,
+      page_size: PAGE_SIZE,
+      total: 2,
+    });
+    setActivePinia(createPinia());
+    const wrapper = mount(CatalogTab, {
+      props: {
+        query: "",
+        layout: "grid" as const,
+        installedEntries: [
+          {
+            name: "qwen-image:q4",
+            family: "qwen-image",
+            downloaded: true,
+            hostIds: ["local"],
+          },
+        ] as never,
+      },
+    });
+    await flushPromises();
+
+    expect(familyOptionValues(wrapper)).toEqual(["", "flux", "ltx2", "qwen-image"]);
+    await wrapper.get("select[aria-label='Model family']").setValue("ltx2");
+    await flushPromises();
+    expect(familyOptionValues(wrapper)).toEqual(["", "flux", "ltx2", "qwen-image"]);
+  });
+
+  it("retries taxonomy when reachability changes and retains the last good families", async () => {
+    fetchCatalogFamilies
+      .mockResolvedValueOnce(["flux"])
+      .mockRejectedValueOnce(new Error("host restarting"))
+      .mockResolvedValueOnce(["qwen-image", "z-image"]);
+    setActivePinia(createPinia());
+    const connection = useConnectionStore();
+    connection.info = {
+      mode: "local",
+      baseUrl: "http://127.0.0.1:7680",
+      apiKey: "local-key",
+    };
+    connection.status = "ready";
+    const wrapper = mount(CatalogTab, {
+      props: { query: "", layout: "grid" as const },
+    });
+    await flushPromises();
+    expect(familyOptionValues(wrapper)).toEqual(["", "flux"]);
+
+    connection.status = "error";
+    await flushPromises();
+    expect(familyOptionValues(wrapper)).toEqual(["", "flux"]);
+
+    connection.status = "ready";
+    await flushPromises();
+    expect(familyOptionValues(wrapper)).toEqual(["", "qwen-image", "z-image"]);
+    expect(fetchCatalogFamilies).toHaveBeenCalledTimes(3);
+  });
+
   it("shows an installed model ONCE, host-tagged, when a live catalog copy also matches", async () => {
     setActivePinia(createPinia());
     searchCatalog.mockResolvedValue({

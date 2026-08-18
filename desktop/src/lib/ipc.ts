@@ -65,6 +65,11 @@ export interface SavedMedia {
   directory: string;
 }
 
+export interface NativeGalleryThumbnail {
+  base64: string;
+  contentType: string;
+}
+
 /** A remote host the app has connected to before (most recent first). */
 export interface SavedHost {
   /** URL-derived slug; its API key lives at secret `remote-api-key.<id>`. */
@@ -279,6 +284,17 @@ export const ipc = {
   localGalleryDelete(filename: string): Promise<void> {
     if (!inTauri()) return Promise.resolve();
     return invoke<void>("local_gallery_delete", { filename });
+  },
+  /** Fetch a bounded gallery thumbnail through native HTTP. Long-lived
+   * generation SSE requests can exhaust WebKit's per-host connection pool;
+   * the native client keeps Library media responsive without reducing GPU
+   * submission concurrency. */
+  fetchGalleryThumbnail(
+    target: ApiTarget,
+    filename: string,
+  ): Promise<NativeGalleryThumbnail | null> {
+    if (!inTauri()) return Promise.resolve(null);
+    return invoke<NativeGalleryThumbnail>("fetch_gallery_thumbnail", { target, filename });
   },
   /** Read a native OS-dropped PNG/JPEG plus any embedded Mold metadata. */
   importSourceImage(path: string): Promise<DesktopImageImport> {

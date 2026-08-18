@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref, watch } from "vue";
+import { onMounted, onUnmounted, ref, watch } from "vue";
 import { authedMediaUrl } from "../../lib/gallery/media";
 import type { ApiTarget } from "../../lib/api/client";
 
@@ -21,22 +21,38 @@ const props = withDefaults(
 
 const src = ref<string | null>(null);
 const failed = ref(false);
+let loadEpoch = 0;
+
+const retryDelaysMs = [0, 250, 1_000] as const;
 
 async function load() {
+  const epoch = ++loadEpoch;
   src.value = null;
   failed.value = false;
-  try {
-    src.value = await authedMediaUrl(props.path, {
-      ...(props.target ? { target: props.target } : {}),
-      ...(props.cacheKey ? { cacheKey: props.cacheKey } : {}),
-    });
-  } catch {
-    failed.value = true;
+  const delays = props.path.startsWith("/api/gallery/thumbnail/") ? retryDelaysMs : ([0] as const);
+  for (const delayMs of delays) {
+    if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
+    if (epoch !== loadEpoch) return;
+    try {
+      const url = await authedMediaUrl(props.path, {
+        ...(props.target ? { target: props.target } : {}),
+        ...(props.cacheKey ? { cacheKey: props.cacheKey } : {}),
+      });
+      if (epoch === loadEpoch) src.value = url;
+      return;
+    } catch {
+      // Retry bounded transient native/network failures. The media cache
+      // evicts rejected promises, so each attempt performs a fresh request.
+    }
   }
+  if (epoch === loadEpoch) failed.value = true;
 }
 
-watch(() => [props.path, props.cacheKey], load);
+watch(() => [props.path, props.cacheKey, props.target?.baseUrl, props.target?.apiKey], load);
 onMounted(load);
+onUnmounted(() => {
+  loadEpoch += 1;
+});
 </script>
 
 <template>

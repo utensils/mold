@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError, apiFetch, apiFetchTo, currentTarget } from "../api/client";
+import { inTauri, ipc } from "../ipc";
 import {
   authedMediaUrl,
   evictHostMedia,
@@ -14,9 +15,21 @@ vi.mock("../api/client", async (importOriginal) => ({
   apiFetchTo: vi.fn(),
   currentTarget: vi.fn(),
 }));
+vi.mock("../ipc", () => ({
+  inTauri: vi.fn(),
+  ipc: { fetchGalleryThumbnail: vi.fn() },
+}));
 
 const blobResponse = () =>
   ({ blob: () => Promise.resolve(new Blob(["png bytes"])) }) as unknown as Response;
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
 
 let objectUrlSeq = 0;
 const revoked: string[] = [];
@@ -26,6 +39,8 @@ beforeEach(() => {
   vi.mocked(apiFetch).mockImplementation(() => Promise.resolve(blobResponse()));
   vi.mocked(apiFetchTo).mockImplementation(() => Promise.resolve(blobResponse()));
   vi.mocked(currentTarget).mockReturnValue({ baseUrl: "http://primary:7680", apiKey: null });
+  vi.mocked(inTauri).mockReturnValue(false);
+  vi.mocked(ipc.fetchGalleryThumbnail).mockReset();
   revoked.length = 0;
   URL.createObjectURL = vi.fn(() => `blob:mock-${++objectUrlSeq}`);
   URL.revokeObjectURL = vi.fn((url: string) => void revoked.push(url));
@@ -162,6 +177,25 @@ describe("galleryMediaPath", () => {
 });
 
 describe("authedMediaUrl host-keyed cache", () => {
+  it("loads desktop thumbnails through native HTTP so held generation streams cannot starve them", async () => {
+    vi.mocked(inTauri).mockReturnValue(true);
+    vi.mocked(ipc.fetchGalleryThumbnail).mockResolvedValue({
+      base64: btoa("thumbnail bytes"),
+      contentType: "image/png",
+    });
+    const target = { baseUrl: "http://hal9000:7680", apiKey: "hk" };
+
+    await expect(
+      authedMediaUrl("/api/gallery/thumbnail/new%20print.png", {
+        target,
+        cacheKey: "hal9000-7680",
+      }),
+    ).resolves.toMatch(/^blob:mock-/);
+
+    expect(ipc.fetchGalleryThumbnail).toHaveBeenCalledWith(target, "new print.png");
+    expect(apiFetchTo).not.toHaveBeenCalled();
+  });
+
   it("caches the same path separately per cacheKey", async () => {
     const path = "/api/gallery/thumbnail/same.png";
     const target = { baseUrl: "http://hal9000:7680", apiKey: "hk" };
@@ -175,6 +209,26 @@ describe("authedMediaUrl host-keyed cache", () => {
     // A repeat on either key hits the cache — no third fetch.
     expect(await authedMediaUrl(path, { target, cacheKey: "hal9000-7680" })).toBe(a);
     expect(apiFetchTo).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not reuse an in-flight thumbnail after the host route changes", async () => {
+    const oldResponse = deferred<Response>();
+    const oldTarget = { baseUrl: "http://hal9000:7680", apiKey: "old-key" };
+    const newTarget = { baseUrl: "http://hal9000:7680", apiKey: "new-key" };
+    vi.mocked(apiFetchTo).mockImplementation((target) =>
+      target.apiKey === "old-key" ? oldResponse.promise : Promise.resolve(blobResponse()),
+    );
+    const path = "/api/gallery/thumbnail/reconnected.png";
+
+    const oldLoad = authedMediaUrl(path, { target: oldTarget, cacheKey: "hal9000-7680" });
+    await Promise.resolve();
+    const newLoad = authedMediaUrl(path, { target: newTarget, cacheKey: "hal9000-7680" });
+    await expect(newLoad).resolves.toMatch(/^blob:mock-/);
+
+    expect(apiFetchTo).toHaveBeenCalledTimes(2);
+    expect(apiFetchTo).toHaveBeenLastCalledWith(newTarget, path);
+    oldResponse.resolve(blobResponse());
+    await expect(oldLoad).resolves.toMatch(/^blob:mock-/);
   });
 
   it("uses the primary connection when no target is given", async () => {

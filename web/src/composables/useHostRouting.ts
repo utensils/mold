@@ -86,6 +86,7 @@ type GpuInfoWithBackend = GpuInfo & { backend?: string | null };
 
 interface HostTelemetry {
   status: HostRoutingStatus;
+  version: string | null;
   instanceId: string | null;
   queueDepth: number | null;
   gpu: RoutableGpu | null;
@@ -184,6 +185,7 @@ export type FeasibilityResult =
         hostId: string;
         label: string;
         profileHash: string | null;
+        version: string | null;
       }>;
     }
   | {
@@ -450,6 +452,7 @@ async function pollHost(entry: HostEntry): Promise<void> {
       ...telemetry.value,
       [entry.id]: {
         status: generationReady ? "ready" : "error",
+        version: status.value.version ?? null,
         instanceId: nextInstanceId,
         queueDepth: status.value.queue_depth ?? null,
         gpu: gpuFromStatus(status.value, inventory),
@@ -468,6 +471,7 @@ async function pollHost(entry: HostEntry): Promise<void> {
       ...telemetry.value,
       [entry.id]: {
         status: "error",
+        version: telemetry.value[entry.id]?.version ?? null,
         instanceId:
           telemetry.value[entry.id]?.instanceId ?? entry.instanceId ?? null,
         queueDepth: null,
@@ -605,6 +609,12 @@ function resolve(model: string | null): HostRoute | null {
       accessibleModelsByHost.value,
       model,
       eligible.filter((host) => host.status === "ready").map((host) => host.id),
+      Object.fromEntries(
+        eligible.map((host) => [
+          host.id,
+          telemetry.value[host.id]?.version ?? null,
+        ]),
+      ),
     )
   ) {
     return null;
@@ -655,6 +665,12 @@ async function resolveFeasibleWithPreview(
       accessibleModelsByHost.value,
       model,
       candidates.map((candidate) => candidate.id),
+      Object.fromEntries(
+        candidates.map((candidate) => [
+          candidate.id,
+          telemetry.value[candidate.id]?.version ?? null,
+        ]),
+      ),
     );
     if (conflict) {
       return {
@@ -665,6 +681,7 @@ async function resolveFeasibleWithPreview(
             candidates.find((candidate) => candidate.id === hostId)?.label ??
             hostId,
           profileHash: conflict.hashesByHost[hostId] ?? null,
+          version: telemetry.value[hostId]?.version ?? null,
         })),
       };
     }
