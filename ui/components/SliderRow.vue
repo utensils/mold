@@ -81,7 +81,8 @@ function onPointerDown() {
 function onPointerUp(event: PointerEvent) {
   if (!pointerDragging.value) return;
   pointerDragging.value = false;
-  const value = pointerValue.value ?? Number((event.target as HTMLInputElement).value);
+  const value =
+    pointerValue.value ?? Number((event.target as HTMLInputElement).value);
   pointerValue.value = null;
   const snapped = snappedValue(value);
   if (snapped !== value) emit("update:modelValue", snapped);
