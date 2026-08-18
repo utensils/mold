@@ -61,9 +61,11 @@ import {
 import { isAudioCompletion } from "@studio/lib/ltx2Pipeline";
 import { imageDimensionsFromBase64 } from "@studio/lib/imageDimensions";
 import {
-  canvasMatchesSourceResolution,
+  resolveDefaultSourceResolution,
   resolveSourceConditioningTarget,
+  resolveSourceCanvasTransition,
   resolveSourceResolution,
+  type SourceDimensions,
   type SourceResolutionResult,
 } from "@studio/lib/sourceResolution";
 import { copyableError, describeTransportError } from "@studio/lib/errors";
@@ -1123,8 +1125,19 @@ const currentModel = computed(
 
 let previousStillSource = "";
 let previousStillResolution: SourceResolutionResult | null = null;
+let previousStillAutomaticResolution: SourceDimensions | null = null;
 let previousOpeningSource = "";
 let previousOpeningResolution: SourceResolutionResult | null = null;
+let previousOpeningAutomaticResolution: SourceDimensions | null = null;
+const sourceCanvasMode = ref<"automatic" | "source" | "manual">("manual");
+let preservedSourceReplacement = "";
+function setSourceCanvasMode(mode: "source" | "manual") {
+  sourceCanvasMode.value = mode;
+}
+function preserveRestoredSourceCanvas(base64: string) {
+  preservedSourceReplacement = base64;
+  sourceCanvasMode.value = "manual";
+}
 
 function syncSourceCanvas(
   image: {
@@ -1132,14 +1145,30 @@ function syncSourceCanvas(
     width?: number | null;
     height?: number | null;
   } | null,
-  previous: { base64: string; resolution: SourceResolutionResult | null },
-): { base64: string; resolution: SourceResolutionResult | null } {
-  if (!image?.base64) return { base64: "", resolution: null };
+  previous: {
+    base64: string;
+    resolution: SourceResolutionResult | null;
+    automaticResolution: SourceDimensions | null;
+  },
+): {
+  base64: string;
+  resolution: SourceResolutionResult | null;
+  automaticResolution: SourceDimensions | null;
+} {
+  if (!image?.base64) {
+    return { base64: "", resolution: null, automaticResolution: null };
+  }
   const dimensions =
     image.width && image.height
       ? { width: image.width, height: image.height }
       : imageDimensionsFromBase64(image.base64);
-  if (!dimensions) return { base64: image.base64, resolution: null };
+  if (!dimensions) {
+    return {
+      base64: image.base64,
+      resolution: null,
+      automaticResolution: null,
+    };
+  }
   image.width = dimensions.width;
   image.height = dimensions.height;
   const resolution = resolveSourceResolution(
@@ -1147,24 +1176,44 @@ function syncSourceCanvas(
     currentModel.value ?? form.state.value.modelFamily,
     form.state.value.pipeline,
   );
+  const automaticResolution = resolveDefaultSourceResolution(
+    dimensions,
+    currentModel.value ?? form.state.value.modelFamily,
+    form.state.value.pipeline,
+  );
   const replaced = image.base64 !== previous.base64;
-  const wasFollowing =
-    previous.resolution !== null &&
-    canvasMatchesSourceResolution(
-      {
-        width: form.state.value.width,
-        height: form.state.value.height,
-      },
-      previous.resolution,
-    );
+  const canvas = {
+    width: form.state.value.width,
+    height: form.state.value.height,
+  };
   const isReferenceConditioning = isFlux2DevModel(
     currentModel.value?.name ?? form.state.value.model,
   );
-  if (!isReferenceConditioning && (replaced || wasFollowing)) {
-    form.state.value.width = resolution.output.width;
-    form.state.value.height = resolution.output.height;
+  if (!isReferenceConditioning) {
+    const preserveReplacement =
+      replaced && preservedSourceReplacement === image.base64;
+    const nextResolution = resolveSourceCanvasTransition({
+      current: canvas,
+      previousSource: previous.resolution,
+      previousAutomatic: previous.automaticResolution,
+      source: resolution,
+      automatic: automaticResolution,
+      replaced,
+      mode: sourceCanvasMode.value,
+      preserveReplacement,
+    });
+    if (replaced) {
+      preservedSourceReplacement = "";
+      if (preserveReplacement) sourceCanvasMode.value = "manual";
+      else if (sourceCanvasMode.value !== "source")
+        sourceCanvasMode.value = "automatic";
+    }
+    if (nextResolution) {
+      form.state.value.width = nextResolution.width;
+      form.state.value.height = nextResolution.height;
+    }
   }
-  return { base64: image.base64, resolution };
+  return { base64: image.base64, resolution, automaticResolution };
 }
 
 watch(
@@ -1188,10 +1237,12 @@ watch(
       {
         base64: previousStillSource,
         resolution: previousStillResolution,
+        automaticResolution: previousStillAutomaticResolution,
       },
     );
     previousStillSource = next.base64;
     previousStillResolution = next.resolution;
+    previousStillAutomaticResolution = next.automaticResolution;
   },
   { immediate: true },
 );
@@ -1215,9 +1266,11 @@ watch(
     const next = syncSourceCanvas(draft.openingImage, {
       base64: previousOpeningSource,
       resolution: previousOpeningResolution,
+      automaticResolution: previousOpeningAutomaticResolution,
     });
     previousOpeningSource = next.base64;
     previousOpeningResolution = next.resolution;
+    previousOpeningAutomaticResolution = next.automaticResolution;
   },
   { immediate: true },
 );
@@ -1700,7 +1753,8 @@ async function loadSequence(hostId: string, jobId: string, editing: boolean) {
     if (!script) throw new Error("This sequence job has no editable script.");
     const loaded = chainScriptToClips(script);
     applySharedToForm(loaded.shared);
-    if (loaded.openingImage) {
+    if (loaded.openingImage?.base64) {
+      preserveRestoredSourceCanvas(loaded.openingImage.base64);
       form.state.value.sourceFitPolicy = {
         mode: "crop-fill",
         alignX: "center",
@@ -3548,6 +3602,11 @@ function openJob(job: Job) {
   const source = request.source_image
     ? image(request.source_image, request.source_image_name || "Source image")
     : null;
+  if (request.edit_images?.length || source) {
+    preserveRestoredSourceCanvas(
+      request.edit_images?.[0] ?? request.source_image ?? "",
+    );
+  }
   form.state.value.imageAttachments = request.edit_images?.length
     ? request.edit_images.map((base64, index) =>
         image(base64, index === 0 ? "Target image" : `Reference ${index}`),
@@ -3566,6 +3625,7 @@ function openJob(job: Job) {
           form.state.value.imageAttachments[0]?.base64 !== effectiveSource
         )
           return;
+        preserveRestoredSourceCanvas(restored.base64);
         form.state.value.imageAttachments = [
           {
             kind: restored.kind ?? "upload",
@@ -3891,6 +3951,7 @@ onBeforeUnmount(() => {
               :model="currentModel"
               :routing-request="durationRoutingRequest"
               :source-dimensions="activeSourceDimensions"
+              :source-canvas-mode="sourceCanvasMode"
               :adv-count="advCount"
               :mobile="true"
               :last-seed="lastSeedUsed"
@@ -3900,6 +3961,7 @@ onBeforeUnmount(() => {
               @update:output="setOutput"
               @open-advanced="openAdvanced"
               @reset-settings="onResetSettings"
+              @source-canvas-mode="setSourceCanvasMode"
             />
           </template>
           <SequenceComposer
@@ -4093,6 +4155,7 @@ onBeforeUnmount(() => {
                   :model="currentModel"
                   :routing-request="durationRoutingRequest"
                   :source-dimensions="activeSourceDimensions"
+                  :source-canvas-mode="sourceCanvasMode"
                   :adv-count="advCount"
                   :mobile="true"
                   :last-seed="lastSeedUsed"
@@ -4101,6 +4164,7 @@ onBeforeUnmount(() => {
                   @update:output="setOutput"
                   @open-advanced="openAdvanced"
                   @reset-settings="onResetSettings"
+                  @source-canvas-mode="setSourceCanvasMode"
                 />
                 <SourceMediaPanel
                   v-if="!sequenceMode"
@@ -4278,6 +4342,7 @@ onBeforeUnmount(() => {
           :model="currentModel"
           :routing-request="durationRoutingRequest"
           :source-dimensions="activeSourceDimensions"
+          :source-canvas-mode="sourceCanvasMode"
           :adv-count="advCount"
           :mobile="false"
           :last-seed="lastSeedUsed"
@@ -4286,6 +4351,7 @@ onBeforeUnmount(() => {
           @update:output="setOutput"
           @open-advanced="openAdvanced"
           @reset-settings="onResetSettings"
+          @source-canvas-mode="setSourceCanvasMode"
         />
         <!-- Source media in the primary form: the model dictates whether
              (and how) it renders, exactly like resolutions. -->

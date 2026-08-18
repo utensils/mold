@@ -40,9 +40,11 @@ import {
 import { claimPairingSession, parseMobilePairingPayload } from "@studio/api/pairing";
 import { imageDimensionsFromBase64 } from "@studio/lib/imageDimensions";
 import {
-  canvasMatchesSourceResolution,
+  resolveDefaultSourceResolution,
   resolveSourceConditioningTarget,
+  resolveSourceCanvasTransition,
   resolveSourceResolution,
+  type SourceDimensions,
   type SourceResolutionResult,
 } from "@studio/lib/sourceResolution";
 import { groupLogicalGalleryPrints } from "@studio/lib/galleryPrintIdentity";
@@ -1013,20 +1015,36 @@ function generationProfileHashForHost(hostId: string, model: string): string | n
 
 let previousStillSource = "";
 let previousStillResolution: SourceResolutionResult | null = null;
+let previousStillAutomaticResolution: SourceDimensions | null = null;
 let previousOpeningSource = "";
 let previousOpeningResolution: SourceResolutionResult | null = null;
+let previousOpeningAutomaticResolution: SourceDimensions | null = null;
+const sourceCanvasMode = ref<"automatic" | "source" | "manual">("manual");
+let preservedSourceReplacement = "";
+function setSourceCanvasMode(mode: "source" | "manual") {
+  sourceCanvasMode.value = mode;
+}
+function preserveRestoredSourceCanvas(base64: string) {
+  preservedSourceReplacement = base64;
+  sourceCanvasMode.value = "manual";
+}
 
 function applyMobileSourceResolution(
   base64: string | null,
   previous: {
     base64: string;
     resolution: SourceResolutionResult | null;
+    automaticResolution: SourceDimensions | null;
   },
   setDimensions: (width: number | null, height: number | null) => void,
-): { base64: string; resolution: SourceResolutionResult | null } {
+): {
+  base64: string;
+  resolution: SourceResolutionResult | null;
+  automaticResolution: SourceDimensions | null;
+} {
   if (!base64) {
     setDimensions(null, null);
-    return { base64: "", resolution: null };
+    return { base64: "", resolution: null, automaticResolution: null };
   }
   const dimensions =
     base64 === previous.base64 && previous.resolution
@@ -1034,7 +1052,7 @@ function applyMobileSourceResolution(
       : imageDimensionsFromBase64(base64);
   if (!dimensions) {
     setDimensions(null, null);
-    return { base64, resolution: null };
+    return { base64, resolution: null, automaticResolution: null };
   }
   setDimensions(dimensions.width, dimensions.height);
   const resolution = resolveSourceResolution(
@@ -1042,15 +1060,36 @@ function applyMobileSourceResolution(
     selectedGenerationModel.value ?? form.family,
     form.pipeline,
   );
+  const automaticResolution = resolveDefaultSourceResolution(
+    dimensions,
+    selectedGenerationModel.value ?? form.family,
+    form.pipeline,
+  );
   const replaced = base64 !== previous.base64;
-  const wasFollowing =
-    previous.resolution !== null &&
-    canvasMatchesSourceResolution({ width: form.width, height: form.height }, previous.resolution);
-  if (caps.value.sourceImageMode !== "references" && (replaced || wasFollowing)) {
-    form.width = resolution.output.width;
-    form.height = resolution.output.height;
+  const canvas = { width: form.width, height: form.height };
+  if (caps.value.sourceImageMode !== "references") {
+    const preserveReplacement = replaced && preservedSourceReplacement === base64;
+    const nextResolution = resolveSourceCanvasTransition({
+      current: canvas,
+      previousSource: previous.resolution,
+      previousAutomatic: previous.automaticResolution,
+      source: resolution,
+      automatic: automaticResolution,
+      replaced,
+      mode: sourceCanvasMode.value,
+      preserveReplacement,
+    });
+    if (replaced) {
+      preservedSourceReplacement = "";
+      if (preserveReplacement) sourceCanvasMode.value = "manual";
+      else if (sourceCanvasMode.value !== "source") sourceCanvasMode.value = "automatic";
+    }
+    if (nextResolution) {
+      form.width = nextResolution.width;
+      form.height = nextResolution.height;
+    }
   }
-  return { base64, resolution };
+  return { base64, resolution, automaticResolution };
 }
 
 watch(
@@ -1078,6 +1117,7 @@ watch(
       {
         base64: previousStillSource,
         resolution: previousStillResolution,
+        automaticResolution: previousStillAutomaticResolution,
       },
       (width, height) => {
         form.sourceImageWidth = width;
@@ -1086,6 +1126,7 @@ watch(
     );
     previousStillSource = next.base64;
     previousStillResolution = next.resolution;
+    previousStillAutomaticResolution = next.automaticResolution;
     if (replaced && caps.value.sourceImageMode === "single") {
       form.sourceFit = { mode: "lanczos-resize" };
     }
@@ -1114,6 +1155,7 @@ watch(
       {
         base64: previousOpeningSource,
         resolution: previousOpeningResolution,
+        automaticResolution: previousOpeningAutomaticResolution,
       },
       (width, height) => {
         if (!draft.openingImage) return;
@@ -1125,6 +1167,7 @@ watch(
     );
     previousOpeningSource = next.base64;
     previousOpeningResolution = next.resolution;
+    previousOpeningAutomaticResolution = next.automaticResolution;
   },
   { immediate: true },
 );
@@ -1306,6 +1349,9 @@ async function selectMobilePrint(job: Job): Promise<void> {
   if (epoch !== mobilePrintSelectionEpoch) return;
   const request = job.request;
   if (request) {
+    if (request.source_image || request.edit_images?.length) {
+      preserveRestoredSourceCanvas(request.edit_images?.[0] ?? request.source_image ?? "");
+    }
     applyRequestToForm(form, request, generationModels.value);
     void restoreRunningJobSource(request, epoch);
   }
@@ -1328,6 +1374,7 @@ async function restoreRunningJobSource(request: GenerateRequest, epoch: number):
     form.model !== request.model
   )
     return;
+  preserveRestoredSourceCanvas(restored.base64);
   form.sourceImage = restored.base64;
   form.sourceImageName = restored.filename;
   await nextTick();
@@ -1368,6 +1415,9 @@ function loadMobileSequenceIntoCreate(detail: ChainJobDetail): void {
     if (shared.steps != null) form.steps = shared.steps;
     if (shared.guidance != null) form.guidance = shared.guidance;
     if (shared.strength != null) form.strength = shared.strength;
+    if (loaded.openingImage?.base64) {
+      preserveRestoredSourceCanvas(loaded.openingImage.base64);
+    }
     form.sourceFit = { mode: "crop-fill", alignX: "center", alignY: "center" };
     form.seed = shared.seed ?? "";
     draft.stopEditing();
@@ -4458,6 +4508,7 @@ async function restoreOrdinaryReusedSource(print: GalleryPrint): Promise<void> {
     () => null,
   );
   if (stored) {
+    preserveRestoredSourceCanvas(stored.base64);
     form.sourceImage = stored.base64;
     form.sourceImageName = stored.filename;
     // The normal source-change watcher selects Resize for a newly attached
@@ -4488,6 +4539,7 @@ async function restoreOrdinaryReusedSource(print: GalleryPrint): Promise<void> {
       if (!blob.size) continue;
       const base64 = await blobToBase64(blob);
       const dimensions = imageDimensionsFromBase64(base64);
+      preserveRestoredSourceCanvas(base64);
       form.sourceImage = base64;
       form.sourceImageName = filename;
       await nextTick();
@@ -5372,8 +5424,10 @@ onBeforeUnmount(() => {
                   show-fps
                   :steps-error="stepsError"
                   :guidance-error="guidanceError"
+                  :source-canvas-mode="sourceCanvasMode"
                   @resolution-validity="resolutionValid = $event"
                   @seed-validity="seedValid = $event"
+                  @source-canvas-mode="setSourceCanvasMode"
                 />
               </template>
             </MobileSequenceComposer>
@@ -5606,8 +5660,10 @@ onBeforeUnmount(() => {
               :disabled="loadingModels"
               :steps-error="stepsError"
               :guidance-error="guidanceError"
+              :source-canvas-mode="sourceCanvasMode"
               @resolution-validity="resolutionValid = $event"
               @seed-validity="seedValid = $event"
+              @source-canvas-mode="setSourceCanvasMode"
             />
 
             <label
