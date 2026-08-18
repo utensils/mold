@@ -119,7 +119,6 @@ let activeMedia: MediaLoad | null = null;
 let gesturePointerId: number | null = null;
 let gestureStartX = 0;
 let gestureStartY = 0;
-let gestureCaptured = false;
 
 const SWIPE_DISTANCE = 48;
 const HORIZONTAL_INTENT_RATIO = 1.25;
@@ -247,28 +246,13 @@ function beginSwipe(event: PointerEvent): void {
   gesturePointerId = event.pointerId;
   gestureStartX = event.clientX;
   gestureStartY = event.clientY;
-  gestureCaptured = false;
 }
 
 function trackSwipe(event: PointerEvent): void {
   if (gesturePointerId !== event.pointerId) return;
   const deltaX = event.clientX - gestureStartX;
   const deltaY = event.clientY - gestureStartY;
-  if (Math.abs(deltaX) > 12 && Math.abs(deltaX) > Math.abs(deltaY)) {
-    event.preventDefault();
-    if (
-      !gestureCaptured &&
-      event.currentTarget instanceof Element &&
-      "setPointerCapture" in event.currentTarget
-    ) {
-      try {
-        event.currentTarget.setPointerCapture(event.pointerId);
-        gestureCaptured = true;
-      } catch {
-        // WebKit can reject pointer capture when the gesture has already ended.
-      }
-    }
-  }
+  if (Math.abs(deltaX) > 12 && Math.abs(deltaX) > Math.abs(deltaY)) event.preventDefault();
 }
 
 function finishSwipe(event: PointerEvent): void {
@@ -276,7 +260,6 @@ function finishSwipe(event: PointerEvent): void {
   const deltaX = event.clientX - gestureStartX;
   const deltaY = event.clientY - gestureStartY;
   gesturePointerId = null;
-  gestureCaptured = false;
 
   if (
     Math.abs(deltaX) < SWIPE_DISTANCE ||
@@ -288,10 +271,7 @@ function finishSwipe(event: PointerEvent): void {
 }
 
 function cancelSwipe(event?: PointerEvent): void {
-  if (!event || gesturePointerId === event.pointerId) {
-    gesturePointerId = null;
-    gestureCaptured = false;
-  }
+  if (!event || gesturePointerId === event.pointerId) gesturePointerId = null;
 }
 
 function handleViewerKeydown(event: KeyboardEvent): void {
@@ -414,6 +394,14 @@ async function performVideoExport(options: VideoExportOptions): Promise<void> {
 
 onMounted(() => {
   mounted = true;
+  // WKWebView's native video layer can stop the target/bubble phase once a
+  // playback control recognizes the touch. Keep the active swipe at the
+  // window capture boundary so image -> video -> image navigation cannot be
+  // stranded by a media element, while the excluded control strip still gets
+  // ordinary taps and scrubbing gestures.
+  window.addEventListener("pointermove", trackSwipe, { capture: true, passive: false });
+  window.addEventListener("pointerup", finishSwipe, true);
+  window.addEventListener("pointercancel", cancelSwipe, true);
   restoreFocusElement = document.activeElement as HTMLElement | null;
   try {
     dialog.value?.showModal();
@@ -426,6 +414,10 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   mounted = false;
+  window.removeEventListener("pointermove", trackSwipe, true);
+  window.removeEventListener("pointerup", finishSwipe, true);
+  window.removeEventListener("pointercancel", cancelSwipe, true);
+  cancelSwipe();
   loadEpoch += 1;
   if (dialog.value?.open && typeof dialog.value.close === "function") dialog.value.close();
   evictLoad(activeMedia);
@@ -480,11 +472,10 @@ onBeforeUnmount(() => {
     <div
       class="gallery-viewer-stage"
       data-test="gallery-viewer-stage"
-      @pointerdown="beginSwipe"
+      @pointerdown.capture="beginSwipe"
       @pointermove="trackSwipe"
       @pointerup="finishSwipe"
       @pointercancel="cancelSwipe"
-      @lostpointercapture="cancelSwipe"
     >
       <img
         v-if="!mediaUrl"
