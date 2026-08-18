@@ -1,28 +1,4 @@
-import { orientationLabel, type ResolutionPreset } from "../lib/resolutions";
-
-export type ResolutionOrientation = ReturnType<typeof orientationLabel>;
-
-/** Phone-first order: the neutral square first, then the two directional choices. */
-export const MOBILE_RESOLUTION_ORIENTATIONS: readonly ResolutionOrientation[] = [
-  "Square",
-  "Portrait",
-  "Landscape",
-];
-
-export function presetsForOrientation(
-  presets: readonly ResolutionPreset[],
-  orientation: ResolutionOrientation,
-): ResolutionPreset[] {
-  return presets.filter((preset) => orientationLabel(preset.width, preset.height) === orientation);
-}
-
-/** Preserve desktop ordering while collapsing repeated ratios into one chip. */
-export function aspectsForOrientation(
-  presets: readonly ResolutionPreset[],
-  orientation: ResolutionOrientation,
-): string[] {
-  return [...new Set(presetsForOrientation(presets, orientation).map((preset) => preset.aspect))];
-}
+import type { ResolutionPreset } from "../lib/resolutions";
 
 /** Pick the available bucket whose pixel area is closest to the current size. */
 export function closestResolutionPreset(

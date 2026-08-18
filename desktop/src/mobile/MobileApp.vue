@@ -137,9 +137,9 @@ import {
   parseCameraControlAvailability,
   syncCameraMotionLora,
 } from "@studio/lib/cameraMotion";
-import { emptyGuidanceOverrides, guidanceOverridesAreEmpty } from "@studio/lib/guidanceOverrides";
+import { guidanceOverridesAreEmpty } from "@studio/lib/guidanceOverrides";
 import { negativePromptWireValue } from "@studio/lib/negativePrompt";
-import { emptyWanRecipe, wanRecipeCount } from "@studio/lib/wanRecipe";
+import { wanRecipeCount } from "@studio/lib/wanRecipe";
 import {
   buildAutoChainRequest,
   buildGenerationEstimateRequest,
@@ -155,6 +155,7 @@ import {
   newGenerateForm,
   normalizeLegacyNegativeSnapshot,
   reconcileModelCapabilities,
+  resetAdvancedToModelDefaults,
   resetFormToModelDefaults,
   type GenerateForm,
 } from "../lib/generateForm";
@@ -521,20 +522,10 @@ function resetCreateSettings(): void {
   resetFormToModelDefaults(form, selectedGenerationModel.value);
 }
 
-/** Restore only the advanced-tier fields to their defaults; prompt, model,
- * dimensions, steps, guidance, seed, batch, and staged source media (which
- * lives in the primary form, not the Advanced sheet) are left untouched. */
+/** Match the desktop Advanced reset: restore model-owned generation controls
+ * while preserving the prompt, selected model, batch, and staged source media. */
 function resetAdvancedSettings(): void {
-  const defaults = newGenerateForm();
-  // Reset restores the model's advertised default negative (wan), not an
-  // explicit empty opt-out.
-  form.negativePrompt = form.negativePromptDefault;
-  form.scheduler = defaults.scheduler;
-  form.cfgPlus = defaults.cfgPlus;
-  form.upscaleModel = defaults.upscaleModel;
-  form.loras = [];
-  form.guidanceOverrides = emptyGuidanceOverrides();
-  form.wanRecipe = emptyWanRecipe();
+  resetAdvancedToModelDefaults(form, selectedGenerationModel.value);
 }
 const preparingGeneration = ref(false);
 const generationSubmissionPhase = ref<"preparing" | "placement" | null>(null);
@@ -5245,7 +5236,18 @@ onBeforeUnmount(() => {
           </div>
         </div>
         <template v-else>
-          <h1 class="section-title">Create</h1>
+          <div class="mobile-create-head">
+            <h1 class="section-title">Create</h1>
+            <button
+              class="mobile-settings-reset"
+              type="button"
+              data-test="mobile-settings-reset"
+              aria-label="Reset settings to model defaults"
+              @click="resetCreateSettings"
+            >
+              ↺ Reset
+            </button>
+          </div>
           <p class="section-note">Develop on {{ selectedHost.name }}</p>
           <label v-if="connectedHosts.length > 1" class="field">
             <span>Host</span>
@@ -5597,6 +5599,7 @@ onBeforeUnmount(() => {
 
             <MobileSharedParams
               :form="form"
+              :model="selectedGenerationModel"
               :duration-model="selectedGenerationModel"
               :last-seed="generation.lastSeedUsed"
               :disabled="loadingModels"
@@ -5623,15 +5626,6 @@ onBeforeUnmount(() => {
                   data-test="mobile-advanced-trigger-count"
                   >{{ advancedActiveCount }}</span
                 >
-              </button>
-              <button
-                class="mobile-settings-reset"
-                type="button"
-                data-test="mobile-settings-reset"
-                aria-label="Reset settings to model defaults"
-                @click="resetCreateSettings"
-              >
-                ↺ Reset
               </button>
             </div>
 

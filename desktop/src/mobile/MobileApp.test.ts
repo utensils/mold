@@ -14,6 +14,7 @@ const {
   sseStream,
   streamableMediaUrl,
   evictMedia,
+  applyH3BoundaryFit,
   applySourceFitPreprocess,
   expandPrompt,
   remixPrompt,
@@ -37,6 +38,7 @@ const {
   sseStream: vi.fn(),
   streamableMediaUrl: vi.fn(),
   evictMedia: vi.fn(),
+  applyH3BoundaryFit: vi.fn(),
   applySourceFitPreprocess: vi.fn(),
   expandPrompt: vi.fn(),
   remixPrompt: vi.fn(),
@@ -82,7 +84,7 @@ vi.mock("@studio/api/client", async (importOriginal) => ({
   apiJsonTo,
 }));
 vi.mock("../lib/api/sse", () => ({ sseStream }));
-vi.mock("../lib/sourceFitPreprocess", () => ({ applySourceFitPreprocess }));
+vi.mock("../lib/sourceFitPreprocess", () => ({ applyH3BoundaryFit, applySourceFitPreprocess }));
 vi.mock("../lib/api/expand", () => ({ expandPrompt }));
 vi.mock("../lib/api/remix", () => ({ remixPrompt }));
 vi.mock("../lib/api/catalog", async (importOriginal) => ({
@@ -320,6 +322,7 @@ beforeEach(() => {
   );
   streamableMediaUrl.mockReset().mockResolvedValue("https://studio/media/full-video");
   evictMedia.mockReset();
+  applyH3BoundaryFit.mockReset().mockImplementation((state) => Promise.resolve(state));
   applySourceFitPreprocess.mockReset().mockImplementation((input) =>
     Promise.resolve({
       source: input.source,
@@ -1960,14 +1963,12 @@ describe("MobileApp generation queue", () => {
 
     wrapper = mountMobileApp();
     await flushPromises();
-    expect(wrapper.get("[data-orientation='square']").attributes("aria-pressed")).toBe("true");
-    expect(wrapper.get("[data-aspect='1:1']").attributes("aria-pressed")).toBe("true");
+    expect(wrapper.get("[data-shape='1:1']").attributes("aria-checked")).toBe("true");
     expect(wrapper.get("[data-test='mobile-resolution-tier-dims']").text()).toBe("1024 × 1024 px");
 
     await fieldControl("Model").setValue(model.name);
     await flushPromises();
-    expect(wrapper.get("[data-orientation='landscape']").attributes("aria-pressed")).toBe("true");
-    expect(wrapper.get("[data-aspect='3:2']").attributes("aria-pressed")).toBe("true");
+    expect(wrapper.get("[data-shape='3:2']").attributes("aria-checked")).toBe("true");
     expect(wrapper.get("[data-test='mobile-resolution-tier-dims']").text()).toBe("768 × 512 px");
 
     await submitPrompt("use the video defaults");
@@ -2311,10 +2312,10 @@ describe("MobileApp generation queue", () => {
     await wrapper.get("input[aria-label='Custom width']").setValue("2000");
     await wrapper.get("input[aria-label='Custom height']").setValue("2000");
     await flushPromises();
-    // An oversized custom size is advisory only — the server is the
-    // authority, so Develop stays enabled and the size still submits.
+    // This legacy model's synthesized profile leaves custom sizes to server
+    // admission, so the exact model wiring must not invent a local blocker.
     expect(wrapper.find("[data-test='mobile-resolution-error']").exists()).toBe(false);
-    expect(wrapper.get("[data-test='mobile-resolution-warning']").text()).toContain("1.8 MP");
+    expect(wrapper.find("[data-test='mobile-resolution-warning']").exists()).toBe(false);
     expect(wrapper.get("[data-test='mobile-develop-button']").attributes()).not.toHaveProperty(
       "disabled",
     );
@@ -4701,6 +4702,67 @@ describe("MobileApp wan source conditioning", () => {
     );
   });
 
+  it("uses the selected H3 model profile and queues its conditioned render", async () => {
+    const h3Model: ModelEntry = {
+      ...wanModel,
+      name: "minimax-h3-fl2va:comfy-pruned-int8",
+      family: "minimax-h3",
+      hf_repo: "Comfy-Org/MiniMax-H3",
+      default_steps: 21,
+      default_guidance: 0,
+      default_width: 1344,
+      default_height: 768,
+      default_frames: 124,
+      default_fps: 24,
+      source_image: "required",
+      recommended_dimensions: [
+        { width: 1344, height: 768 },
+        { width: 1024, height: 768 },
+        { width: 768, height: 768 },
+        { width: 768, height: 1024 },
+      ],
+      dimension_alignment: 32,
+      max_pixels: 1344 * 768,
+    };
+    serveWan(h3Model);
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    expect(wrapper.find("[data-orientation]").exists()).toBe(false);
+    expect(
+      wrapper
+        .findAll("[data-test='mobile-resolution-shape'] button")
+        .map((button) => button.text()),
+    ).toEqual(["7:4", "4:3", "1:1", "3:4"]);
+    expect(wrapper.get("[data-shape='7:4']").attributes("aria-checked")).toBe("true");
+
+    const liveForm = wrapper.getComponent(MobileLoraControls).props("form") as GenerateForm;
+    liveForm.h3Authoring = {
+      firstFrame: {
+        filename: "opening.png",
+        mimeType: "image/png",
+        width: 1344,
+        height: 768,
+        data: "QUJD",
+      },
+      lastFrame: null,
+      references: [],
+    };
+    await fieldControl("Prompt").setValue("a pickup crossing a desert at dusk");
+    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await vi.waitFor(() => expect(openStreams).toHaveLength(1));
+
+    expect(openStreams[0]?.path).toBe("/api/generate/stream");
+    expect(openStreams[0]?.options.body).toMatchObject({
+      model: h3Model.name,
+      width: 1344,
+      height: 768,
+      frames: 124,
+      fps: 24,
+      source_image: "QUJD",
+    });
+  });
+
   it("keeps the well and offers no end frame when the host advertises no contract", async () => {
     serveWan(wanModel);
     wrapper = mountMobileApp();
@@ -5349,6 +5411,9 @@ describe("MobileApp create settings reset", () => {
     expect(wrapper.get("[data-test='mobile-settings-reset']").attributes("aria-label")).toBe(
       "Reset settings to model defaults",
     );
+    expect(wrapper.get("[data-test='mobile-settings-reset']").element.parentElement).toBe(
+      wrapper.get(".mobile-create-head").element,
+    );
   });
 
   it("badges and resets LTX-2 guidance overrides from the Advanced sheet", async () => {
@@ -5356,6 +5421,9 @@ describe("MobileApp create settings reset", () => {
     await flushPromises();
 
     await wrapper.get("[data-test='mobile-open-advanced']").trigger("click");
+    expect(wrapper.get("[data-test='mobile-advanced-reset']").element.closest("header")).toBe(
+      wrapper.get(".mobile-advanced-sheet-head").element,
+    );
     await wrapper.get("[data-test='mobile-ltx2-disclosure']").trigger("click");
     await wrapper.get("[data-test='mobile-ltx2-stg-scale']").setValue("1.5");
     await flushPromises();
@@ -5428,6 +5496,7 @@ describe("MobileApp create settings reset", () => {
     liveForm.controlScale = 0.8;
     liveForm.imageAttachments = ["ATT"];
     liveForm.negativePrompt = "blurry";
+    liveForm.cameraControl = "dolly-in";
     await flushPromises();
 
     await wrapper.get("[data-test='mobile-open-advanced']").trigger("click");
@@ -5444,6 +5513,7 @@ describe("MobileApp create settings reset", () => {
     expect(liveForm.controlScale).toBe(0.8);
     expect(liveForm.imageAttachments).toEqual(["ATT"]);
     expect(liveForm.negativePrompt).toBe("");
+    expect(liveForm.cameraControl).toBeNull();
   });
 });
 
@@ -5937,8 +6007,7 @@ describe("MobileApp gallery", () => {
     );
     expect(wrapper.get("#mobile-prompt").element).toHaveProperty("value", print.metadata.prompt);
     expect(fieldControl("Negative prompt").element).toHaveProperty("value", "calm water");
-    expect(wrapper.get("[data-orientation='landscape']").attributes("aria-pressed")).toBe("true");
-    expect(wrapper.get("[data-aspect='3:2']").attributes("aria-pressed")).toBe("true");
+    expect(wrapper.get("[data-shape='3:2']").attributes("aria-checked")).toBe("true");
     expect(wrapper.get("[data-test='mobile-resolution-tier-dims']").text()).toBe("768 × 512 px");
     expect(fieldControl("Format").element).toHaveProperty("value", "mp4");
     expect(fieldControl("Frames").element).toHaveProperty("value", "121");
