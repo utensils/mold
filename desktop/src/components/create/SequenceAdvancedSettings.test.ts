@@ -86,6 +86,7 @@ describe("SequenceAdvancedSettings camera motion", () => {
 
   it("resets camera motion across the sequence", async () => {
     const draft = useSequenceDraftStore();
+    draft.enableAudio = true;
     draft.clips[0]!.cameraControl = "dolly-in";
     draft.clips[1]!.cameraControl = "/models/camera/custom.safetensors";
     const wrapper = mount(SequenceAdvancedSettings, {
@@ -93,6 +94,7 @@ describe("SequenceAdvancedSettings camera motion", () => {
     });
     await wrapper.get("[data-test='sequence-advanced-reset']").trigger("click");
     expect(draft.clips.map((clip) => clip.cameraControl)).toEqual([null, null]);
+    expect(draft.enableAudio).toBe(true);
   });
 
   it("preserves the opening image and source conditioning across Reset", async () => {

@@ -6,9 +6,11 @@ import SegmentedControl from "@ui/components/SegmentedControl.vue";
 import SliderRow from "@ui/components/SliderRow.vue";
 import VideoDurationSlider from "@ui/components/VideoDurationSlider.vue";
 import Stepper from "@ui/components/Stepper.vue";
+import SwitchToggle from "@ui/components/SwitchToggle.vue";
 import BadgePill from "@ui/components/BadgePill.vue";
 import Icon from "@ui/components/Icon.vue";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
+import { isMinimaxH3Identity } from "@studio/lib/minimaxH3Authoring";
 import { defaultClipFrames, modelsForOutput, sequenceMotionTailFrames } from "@studio/lib/sequence";
 import { filterRestrictedModels } from "@studio/lib/modelAccess";
 import type { ChainLimits } from "@studio/lib/api/chainTypes";
@@ -229,10 +231,22 @@ const advancedCount = computed(() =>
       Number(
         caps.value.supportsNegativePrompt && draft.clips.some((clip) => clip.negativePrompt.trim()),
       ) +
-      Number(Boolean(draft.clips.some((clip) => clip.cameraControl))) +
-      Number(draft.enableAudio)
+      Number(Boolean(draft.clips.some((clip) => clip.cameraControl)))
     : advancedActiveCount(props.form),
 );
+const showGenerateAudio = computed(() =>
+  isSequence.value
+    ? props.chainLimits?.supports_audio === true
+    : caps.value.supportsAudio && !isMinimaxH3Identity(props.form.family, props.form.model),
+);
+const generateAudio = computed(() =>
+  isSequence.value ? draft.enableAudio : props.form.enableAudio,
+);
+const audioOutputSupported = computed(() => selectedModel.value?.supports_audio !== false);
+function setGenerateAudio(value: boolean) {
+  if (isSequence.value) draft.enableAudio = value;
+  else props.form.enableAudio = value;
+}
 const advancedExpanded = ref(false);
 
 // ── Model picker (the shared ModelPicker; chains uses the same control) ──────
@@ -578,6 +592,7 @@ const batchMax = computed(() => (batchLocked.value ? 1 : MAX_BATCH_SIZE));
 // the prompt, the model, and any prepared batch size survive.
 function resetSettings() {
   resetFormToModelDefaults(props.form, selectedModel.value);
+  if (isSequence.value) draft.enableAudio = false;
 }
 </script>
 
@@ -770,6 +785,26 @@ function resetSettings() {
         />
       </div>
 
+      <div
+        v-if="showGenerateAudio"
+        class="ms-field ms-field--row"
+        data-test="generate-audio-control"
+      >
+        <span class="ms-field__label ms-field__label--inline">Generate audio</span>
+        <SwitchToggle
+          :model-value="generateAudio"
+          :disabled="!isSequence && !audioOutputSupported"
+          label="Generate audio"
+          @update:model-value="setGenerateAudio"
+        />
+      </div>
+      <p
+        v-if="showGenerateAudio && !isSequence && !audioOutputSupported"
+        class="ms-field__hint -mt-2"
+      >
+        Audio assets are not included with this checkpoint. Video generation remains available.
+      </p>
+
       <!-- Seed -->
       <div class="ms-field">
         <div class="ms-field__label">Seed</div>
@@ -876,7 +911,6 @@ function resetSettings() {
       <SequenceAdvancedSettings
         v-if="advancedExpanded && isSequence"
         id="desktop-inline-advanced"
-        :chain-limits="chainLimits"
         :form="form"
         :upscalers="models.upscalers"
         :camera-controls-enabled="form.family === 'ltx2'"

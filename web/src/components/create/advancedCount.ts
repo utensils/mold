@@ -27,7 +27,7 @@ export interface AdvancedCountParams {
   /** A video family has non-default video controls set. */
   videoNonDefault: boolean;
   /** Any LTX-2 / video advanced control beyond frames/fps is set — pipeline,
-   * audio, source video, keyframes, retake, spatial/temporal upscale, or the
+   * source video, keyframes, retake, spatial/temporal upscale, or the
    * GIF preview toggle. Counts once. Optional for the same reason. */
   videoSuite?: boolean;
   /** How many wan recipe controls (flow shift, distill strengths) are set.

@@ -15,16 +15,10 @@ function baseForm(
   return { ...state, ...overrides };
 }
 
-function factory(
-  overrides: Partial<GenerateFormState> = {},
-  audioOutputSupported = true,
-  extra: { canExtend?: boolean; extendDefaultOverlapFrames?: number } = {},
-) {
+function factory(overrides: Partial<GenerateFormState> = {}) {
   return mount(Ltx2VideoControls, {
     props: {
       modelValue: baseForm(overrides),
-      audioOutputSupported,
-      ...extra,
     },
   });
 }
@@ -49,22 +43,6 @@ describe("Ltx2VideoControls", () => {
   afterEach(() => {
     __testing__.resetForTest();
     vi.unstubAllGlobals();
-  });
-
-  it("reads a null enableAudio as on and writes false when toggled", async () => {
-    const wrapper = factory({ enableAudio: null });
-    await wrapper.get("[data-test='ltx2-enable-audio']").trigger("click");
-    expect(lastPatch(wrapper).enableAudio).toBe(false);
-  });
-
-  it("disables audio with an actionable reason for video-only checkpoints", async () => {
-    const wrapper = factory({ enableAudio: false }, false);
-    const toggle = wrapper.get("[data-test='ltx2-enable-audio']");
-    expect(toggle.attributes("disabled")).toBeDefined();
-    expect(toggle.attributes("aria-checked")).toBe("false");
-    expect(wrapper.text()).toContain("Audio assets are not included");
-    await toggle.trigger("click");
-    expect(wrapper.emitted("update:modelValue")).toBeUndefined();
   });
 
   it("selects a pipeline mode and can return to auto", async () => {

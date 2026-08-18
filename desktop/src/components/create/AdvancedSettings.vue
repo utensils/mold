@@ -95,7 +95,6 @@ import { attachPickedVideo } from "../../lib/sourceAttachment";
 import MinimaxH3AuthoringPanel from "@studio/components/MinimaxH3AuthoringPanel.vue";
 import {
   emptyMinimaxH3AuthoringState,
-  isMinimaxH3Identity,
   minimaxH3TaskForModel,
   type MinimaxH3AuthoringState,
 } from "@studio/lib/minimaxH3Authoring";
@@ -137,13 +136,11 @@ const caps = computed(() =>
     effectiveGenerationRecipe(props.selectedModel, props.form.pipeline),
   ),
 );
-const audioOutputSupported = computed(() => props.selectedModel?.supports_audio !== false);
 const formats = computed(() => caps.value.outputFormats as OutputFormat[]);
 const advancedCount = computed(() => advancedActiveCount(props.form));
 const h3Task = computed(() =>
   props.selectedModel ? minimaxH3TaskForModel(props.form.model) : null,
 );
-const h3Family = computed(() => isMinimaxH3Identity(props.form.family, props.form.model));
 const h3Authoring = computed(() => props.form.h3Authoring ?? emptyMinimaxH3AuthoringState());
 function setH3Authoring(value: MinimaxH3AuthoringState): void {
   props.form.h3Authoring = value;
@@ -870,18 +867,6 @@ function reset() {
           </p>
         </template>
 
-        <div v-if="caps.supportsAudio && !h3Family" class="ms-switch-row ms-switch-row--mt">
-          <div class="ms-switch-row__title">Generate audio</div>
-          <SwitchToggle
-            :model-value="form.enableAudio"
-            :disabled="!audioOutputSupported"
-            label="Generate audio"
-            @update:model-value="form.enableAudio = $event"
-          />
-        </div>
-        <p v-if="caps.supportsAudio && !h3Family && !audioOutputSupported" class="ms-hint">
-          Audio assets are not included with this checkpoint. Video generation remains available.
-        </p>
         <p v-if="audioFormatError" class="ms-error" role="alert">{{ audioFormatError }}</p>
 
         <template v-if="caps.supportsAdvancedVideo">

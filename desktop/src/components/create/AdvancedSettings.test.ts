@@ -649,6 +649,7 @@ describe("AdvancedSettings — reset and summary", () => {
     form.sourceFit = { mode: "crop-fill" };
     form.maskImage = "MASK";
     form.negativePrompt = "blurry";
+    form.enableAudio = true;
     const wrapper = mountSettings(form, { selectedModel: model });
     wrapper.get("[data-test='advanced-reset']").trigger("click");
     expect(form.sourceImage).toBe("SRC");
@@ -657,6 +658,7 @@ describe("AdvancedSettings — reset and summary", () => {
     expect(form.sourceFit).toEqual({ mode: "crop-fill" });
     expect(form.maskImage).toBe("MASK");
     expect(form.negativePrompt).toBe("");
+    expect(form.enableAudio).toBe(true);
   });
 
   it("badges the active advanced count in the header", () => {

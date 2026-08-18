@@ -2354,6 +2354,7 @@ describe("resetAdvancedToModelDefaults", () => {
     form.extendOverlapFrames = 17;
     form.keyframes = [{ frame: 9, image: { filename: "k.png", base64: "KEY" } }];
     form.audioFile = { filename: "voice.wav", base64: "AUD" };
+    form.enableAudio = true;
     form.h3Authoring!.firstFrame = {
       filename: "first.png",
       mimeType: "image/png",
@@ -2392,6 +2393,7 @@ describe("resetAdvancedToModelDefaults", () => {
     expect(form.extendOverlapFrames).toBe(17);
     expect(form.keyframes).toHaveLength(1);
     expect(form.audioFile?.filename).toBe("voice.wav");
+    expect(form.enableAudio).toBe(true);
     expect(form.h3Authoring!.firstFrame?.filename).toBe("first.png");
   });
 

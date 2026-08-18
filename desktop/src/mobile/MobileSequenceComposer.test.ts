@@ -489,6 +489,9 @@ describe("MobileSequenceComposer guardrails", () => {
 
     wrapper!.unmount();
     mountComposer({ chainLimits: { ...limits, supports_audio: true } });
+    expect(
+      wrapper!.get("[data-test='mobile-sequence-audio']").element.closest(".mobile-advanced-sheet"),
+    ).toBeNull();
     const audio = wrapper!.get("[data-test='mobile-sequence-audio'] input");
     await audio.setValue(true);
     expect(useSequenceDraftStore().enableAudio).toBe(true);

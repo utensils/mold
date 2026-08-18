@@ -81,7 +81,6 @@ import {
 import MinimaxH3AuthoringPanel from "@studio/components/MinimaxH3AuthoringPanel.vue";
 import {
   emptyMinimaxH3AuthoringState,
-  isMinimaxH3Identity,
   minimaxH3TaskForModel,
   type MinimaxH3AuthoringState,
 } from "@studio/lib/minimaxH3Authoring";
@@ -93,7 +92,6 @@ const props = withDefaults(
     selectedModel?: ModelEntry | null;
     target?: ApiTarget | null;
     upscalers?: ModelEntry[];
-    audioOutputSupported?: boolean;
     controlAdapters?: Ltx2ControlAdapterInfo[];
     cameraControls?: Ltx2CameraControlInfo[];
     cameraControlsLoaded?: boolean;
@@ -103,7 +101,6 @@ const props = withDefaults(
     selectedModel: null,
     target: null,
     upscalers: () => [],
-    audioOutputSupported: true,
     controlAdapters: () => [],
     cameraControls: () => [],
     cameraControlsLoaded: false,
@@ -129,7 +126,6 @@ const caps = computed(() =>
 const h3Task = computed(() =>
   props.selectedModel ? minimaxH3TaskForModel(props.form.model) : null,
 );
-const h3Family = computed(() => isMinimaxH3Identity(props.form.family, props.form.model));
 const h3Authoring = computed(() => props.form.h3Authoring ?? emptyMinimaxH3AuthoringState());
 function setH3Authoring(value: MinimaxH3AuthoringState): void {
   props.form.h3Authoring = value;
@@ -868,24 +864,6 @@ const fpsErrorId = `mobile-fps-error-${useId()}`;
         {{ chainDecision.reason }}
       </p>
 
-      <label v-if="caps.supportsAudio && !h3Family" class="mobile-generate-toggle-row">
-        <span>
-          <strong>Generate audio</strong>
-          <small>Include a synchronized soundtrack when the model supports it.</small>
-        </span>
-        <input
-          v-model="form.enableAudio"
-          type="checkbox"
-          :disabled="!audioOutputSupported"
-          data-test="mobile-enable-audio"
-        />
-      </label>
-      <p
-        v-if="caps.supportsAudio && !h3Family && !audioOutputSupported"
-        class="mobile-generate-validation"
-      >
-        Audio assets are not included with this checkpoint. Video generation remains available.
-      </p>
       <p
         v-if="audioFormatError"
         class="mobile-generate-validation"

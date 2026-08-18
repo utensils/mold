@@ -704,6 +704,7 @@ export function resetAdvancedToModelDefaults(
     extendOverlapFrames: form.extendOverlapFrames,
     extendDefaultOverlapFrames: form.extendDefaultOverlapFrames,
     keyframes: form.keyframes,
+    enableAudio: form.enableAudio,
     audioFile: form.audioFile,
     h3Authoring: form.h3Authoring,
   };

@@ -6,6 +6,9 @@ import ResolutionSelector from "@ui/components/ResolutionSelector.vue";
 import Stepper from "@ui/components/Stepper.vue";
 import SliderRow from "@ui/components/SliderRow.vue";
 import VideoDurationSlider from "@ui/components/VideoDurationSlider.vue";
+import SwitchToggle from "@ui/components/SwitchToggle.vue";
+import { createPinia, setActivePinia } from "pinia";
+import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import {
   useGenerateForm,
   __testing__,
@@ -52,6 +55,7 @@ function factory(overrides: Partial<GenerateFormState> = {}, family = "flux") {
 
 describe("ControlsAside", () => {
   beforeEach(() => {
+    setActivePinia(createPinia());
     localStorage.clear();
     pushMock.mockClear();
     routingTesting.reset();
@@ -84,6 +88,70 @@ describe("ControlsAside", () => {
         .find((row) => row.props("label") === "Prompt strength")!
         .props("disabled"),
     ).toBe(false);
+  });
+
+  it("keeps one-shot generated audio in the primary settings", async () => {
+    const model = {
+      name: "ltx-2-19b-distilled:fp8",
+      family: "ltx2",
+      supports_audio: true,
+    } as ModelInfoExtended;
+    const wrapper = mount(ControlsAside, {
+      props: {
+        modelValue: baseForm({
+          model: model.name,
+          modelFamily: "ltx2",
+          enableAudio: null,
+        }),
+        family: "ltx2",
+        model,
+      },
+    });
+    expect(wrapper.find("[data-test='generate-audio-control']").exists()).toBe(
+      true,
+    );
+    wrapper.getComponent(SwitchToggle).vm.$emit("update:modelValue", false);
+    const [next] = wrapper.emitted("update:modelValue")!.at(-1) as [
+      GenerateFormState,
+    ];
+    expect(next.enableAudio).toBe(false);
+  });
+
+  it("keeps sequence generated audio in the primary settings", async () => {
+    const draft = useSequenceDraftStore();
+    const model = {
+      name: "ltx-2-19b-distilled:fp8",
+      family: "ltx2",
+      supports_audio: true,
+    } as ModelInfoExtended;
+    const wrapper = mount(ControlsAside, {
+      props: {
+        modelValue: baseForm({ model: model.name, modelFamily: "ltx2" }),
+        family: "ltx2",
+        model,
+        output: "sequence",
+      },
+    });
+    wrapper.getComponent(SwitchToggle).vm.$emit("update:modelValue", true);
+    expect(draft.enableAudio).toBe(true);
+  });
+
+  it("does not expose the audio toggle for an H3 model restored without a family", () => {
+    const model = {
+      name: "minimax-h3-fl2va:official-bf16",
+      family: "minimax-h3",
+      supports_audio: true,
+    } as ModelInfoExtended;
+    const wrapper = mount(ControlsAside, {
+      props: {
+        modelValue: baseForm({ model: model.name, modelFamily: "" }),
+        family: "",
+        model,
+      },
+    });
+    expect(wrapper.find("[data-test='generate-audio-control']").exists()).toBe(
+      false,
+    );
   });
 
   it("projects the current pixels onto Shape and Resolution", () => {

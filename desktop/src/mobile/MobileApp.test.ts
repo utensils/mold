@@ -5437,8 +5437,6 @@ describe("MobileApp create settings reset", () => {
     await fieldControl("Prompt").setValue("a ship crossing violet lightning");
     await fieldControl("Negative prompt").setValue("calm water");
     await fieldControl("Steps").setValue("12");
-    await flushPromises();
-
     await wrapper.get("[data-test='mobile-settings-reset']").trigger("click");
     await flushPromises();
 
@@ -5454,6 +5452,13 @@ describe("MobileApp create settings reset", () => {
     expect(wrapper.get("[data-test='mobile-settings-reset']").element.parentElement).toBe(
       wrapper.get(".mobile-create-head").element,
     );
+
+    const draft = useSequenceDraftStore();
+    draft.output = "sequence";
+    draft.enableAudio = true;
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-settings-reset']").trigger("click");
+    expect(draft.enableAudio).toBe(false);
   });
 
   it("badges and resets LTX-2 guidance overrides from the Advanced sheet", async () => {
@@ -5483,6 +5488,21 @@ describe("MobileApp create settings reset", () => {
     liveForm.family = "flux";
     await flushPromises();
     expect(wrapper.find("[data-test='mobile-advanced-trigger-count']").exists()).toBe(false);
+  });
+
+  it("keeps generated audio in the primary Create settings", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    const control = wrapper.get("[data-test='mobile-generate-audio-control']");
+    expect(control.element.closest(".mobile-advanced-sheet")).toBeNull();
+    await control.get("input").setValue(true);
+    const liveForm = wrapper.getComponent(MobileLoraControls).props("form") as GenerateForm;
+    expect(liveForm.enableAudio).toBe(true);
+
+    await wrapper.get("[data-test='mobile-open-advanced']").trigger("click");
+    await wrapper.get("[data-test='mobile-advanced-reset']").trigger("click");
+    expect(liveForm.enableAudio).toBe(true);
   });
 
   it("keeps the visible source across an H3 round trip via the shared bridge", async () => {
@@ -5536,6 +5556,7 @@ describe("MobileApp create settings reset", () => {
     liveForm.controlScale = 0.8;
     liveForm.imageAttachments = ["ATT"];
     liveForm.negativePrompt = "blurry";
+    liveForm.enableAudio = true;
     liveForm.cameraControl = "dolly-in";
     await flushPromises();
 
@@ -5553,6 +5574,7 @@ describe("MobileApp create settings reset", () => {
     expect(liveForm.controlScale).toBe(0.8);
     expect(liveForm.imageAttachments).toEqual(["ATT"]);
     expect(liveForm.negativePrompt).toBe("");
+    expect(liveForm.enableAudio).toBe(true);
     expect(liveForm.cameraControl).toBeNull();
   });
 });

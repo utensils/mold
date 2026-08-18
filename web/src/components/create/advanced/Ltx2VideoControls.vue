@@ -3,14 +3,13 @@
  * LTX-2 advanced video suite — the family-specific controls the Advanced
  * drawer nests inside its "Video" section for LTX-2 / LTX-2.3 (the audio
  * families). Restores the full set the deleted GenerateParamsPanel offered:
- * pipeline mode, audio decode toggle + audio conditioning file, source video,
+ * pipeline mode, audio conditioning file, source video,
  * retake range, spatial/temporal upscale, and the keyframe editor. Every
  * control maps onto an existing GenerateFormState field (no renames); binary
  * uploads become SourceImage/SourceMediaState just like the source dropzone.
  * The component holds no local copy — it patches the parent form via v-model.
  */
 import { computed, ref, watch } from "vue";
-import SwitchToggle from "@ui/components/SwitchToggle.vue";
 import SegmentedControl from "@ui/components/SegmentedControl.vue";
 import type {
   GenerateFormState,
@@ -51,13 +50,7 @@ import {
   MAX_GUIDANCE_SKIP_STEP,
 } from "@studio/lib/guidanceOverrides";
 
-const props = withDefaults(
-  defineProps<{
-    modelValue: GenerateFormState;
-    audioOutputSupported?: boolean;
-  }>(),
-  { audioOutputSupported: true },
-);
+const props = defineProps<{ modelValue: GenerateFormState }>();
 const emit = defineEmits<{ "update:modelValue": [value: GenerateFormState] }>();
 const controlAdapters = ref<Ltx2ControlAdapterInfo[]>([]);
 const cameraControls = ref<Ltx2CameraControlInfo[]>([]);
@@ -166,16 +159,6 @@ const cameraSlotAvailable = computed(() =>
     MAX_LORA_STACK,
   ),
 );
-
-// ── Audio decode toggle ───────────────────────────────────────────────
-// enableAudio is boolean | null; null lets the server default (on for MP4).
-// The switch reads on unless explicitly disabled, and writes true/false.
-const audioOn = computed(
-  () => props.audioOutputSupported && props.modelValue.enableAudio !== false,
-);
-function setAudio(on: boolean) {
-  patch({ enableAudio: on });
-}
 
 // ── Pipeline mode ─────────────────────────────────────────────────────
 const PIPELINE_OPTIONS: Ltx2PipelineMode[] = [
@@ -372,17 +355,6 @@ function removeKeyframe(index: number) {
 
 <template>
   <div class="ltx2" data-test="ltx2-suite">
-    <div class="ltx2__row">
-      <span class="ltx2__label">Decode audio</span>
-      <SwitchToggle
-        :model-value="audioOn"
-        :disabled="!audioOutputSupported"
-        label="Decode audio"
-        data-test="ltx2-enable-audio"
-        @update:model-value="setAudio"
-      />
-    </div>
-
     <div class="ltx2__field">
       <label class="ltx2__label">Reference control</label>
       <select
@@ -413,15 +385,6 @@ function removeKeyframe(index: number) {
         }}
       </p>
     </div>
-    <p
-      v-if="!audioOutputSupported"
-      class="ltx2__hint"
-      data-test="ltx2-audio-unavailable"
-    >
-      Audio assets are not included with this checkpoint. Video generation
-      remains available.
-    </p>
-
     <div class="ltx2__field">
       <label class="ltx2__label">Pipeline</label>
       <select

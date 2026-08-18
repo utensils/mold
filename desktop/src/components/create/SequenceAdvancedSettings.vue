@@ -2,9 +2,7 @@
 import { computed, ref } from "vue";
 import AccordionSection from "@ui/components/AccordionSection.vue";
 import Chip from "@ui/components/Chip.vue";
-import SwitchToggle from "@ui/components/SwitchToggle.vue";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
-import type { ChainLimits } from "@studio/lib/api/chainTypes";
 import { cameraMotionMode } from "@studio/lib/cameraMotion";
 import type { GenerateForm, PickedImage } from "../../lib/generateForm";
 import type { Ltx2CameraControlInfo, ModelEntry } from "../../lib/api/types";
@@ -24,7 +22,6 @@ import { useToastStore } from "../../stores/toasts";
 const props = withDefaults(
   defineProps<{
     form: GenerateForm;
-    chainLimits?: ChainLimits | null;
     cameraControlsEnabled?: boolean;
     cameraControls?: Ltx2CameraControlInfo[];
     cameraControlsLoaded?: boolean;
@@ -32,7 +29,6 @@ const props = withDefaults(
     cameraUnsupportedReason?: string | null;
   }>(),
   {
-    chainLimits: null,
     cameraControlsEnabled: false,
     cameraControls: () => [],
     cameraControlsLoaded: false,
@@ -67,8 +63,7 @@ const activeCount = computed(
     Number(
       guidanceCaps.value.supportsNegativePrompt && Boolean(activeClip.value?.negativePrompt.trim()),
     ) +
-    Number(props.cameraControlsEnabled && Boolean(activeClip.value?.cameraControl)) +
-    Number(draft.enableAudio),
+    Number(props.cameraControlsEnabled && Boolean(activeClip.value?.cameraControl)),
 );
 const fitOptions = SOURCE_FIT_OPTIONS.filter((option) => option.value !== "pad-repaint");
 const fitMode = computed(() => coerceSourceFitForMaskless(props.form.sourceFit).mode);
@@ -139,7 +134,6 @@ async function onOpeningImageFile(file: File) {
 // Reset clears sequence-advanced knobs only; the opening image and its
 // strength/fit are staged source media and survive (web parity).
 function reset() {
-  draft.enableAudio = false;
   for (const clip of draft.clips) {
     clip.negativePrompt = "";
     clip.cameraControl = null;
@@ -297,25 +291,6 @@ function reset() {
             "Built-in camera motions are available for LTX-2 19B only. This model accepts a custom LoRA path."
           }}
         </p>
-      </AccordionSection>
-
-      <AccordionSection
-        v-if="props.chainLimits?.supports_audio"
-        icon="video"
-        title="Sequence audio"
-        summary="Generate and mux audio for this timeline"
-        :open="true"
-        :header-interactive="false"
-        data-test="sequence-section-audio"
-      >
-        <div class="ms-switch-row">
-          <span>Generate audio</span>
-          <SwitchToggle
-            :model-value="draft.enableAudio"
-            label="Generate sequence audio"
-            @update:model-value="draft.enableAudio = $event"
-          />
-        </div>
       </AccordionSection>
     </div>
 

@@ -739,7 +739,6 @@ describe("CreatePage layout and behavior", () => {
     form.state.value.seedMode = "static";
     form.state.value.seed = 42;
     form.state.value.negativePrompt = "blurry";
-
     await wrapper.get("[data-test='controls-reset']").trigger("click");
     expect(form.state.value.steps).toBe(30);
     expect(form.state.value.guidance).toBe(7.5);
@@ -757,6 +756,18 @@ describe("CreatePage layout and behavior", () => {
     expect(form.state.value.steps).toBe(3);
     expect(form.state.value.seed).toBe(42);
     expect(form.state.value.negativePrompt).toBe("blurry");
+
+    const draft = useSequenceDraftStore();
+    draft.output = "sequence";
+    draft.enableAudio = true;
+    await flushPromises();
+    await wrapper.get("[data-test='controls-reset']").trigger("click");
+    expect(draft.enableAudio).toBe(false);
+    const sequenceToast = [...notifications.toasts]
+      .reverse()
+      .find((t) => /settings/i.test(t.text));
+    runToastAction(sequenceToast!.id);
+    expect(draft.enableAudio).toBe(true);
   });
 
   it("guides a first pull when no models are installed (cold start)", async () => {
