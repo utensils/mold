@@ -233,6 +233,29 @@ describe("MobileGalleryViewer", () => {
     await video.trigger("loadedmetadata");
     expect(view.find("[role='status']").exists()).toBe(false);
 
+    await view.get("dialog").trigger("cancel");
+    expect(view.emitted("close")).toHaveLength(1);
+  });
+
+  it("swipes naturally in both directions from native video playback", async () => {
+    const view = mountViewer(
+      {
+        ...image,
+        filename: "developed clip.mp4",
+        format: "mp4",
+      },
+      { position: 2, total: 4 },
+    );
+    await flushPromises();
+
+    const video = view.get("[data-test='gallery-viewer-video']");
+    const stage = view.get("[data-test='gallery-viewer-stage']");
+    const setPointerCapture = vi.fn();
+    Object.defineProperty(stage.element, "setPointerCapture", {
+      value: setPointerCapture,
+      configurable: true,
+    });
+
     await video.trigger("pointerdown", {
       pointerId: 7,
       pointerType: "touch",
@@ -240,17 +263,128 @@ describe("MobileGalleryViewer", () => {
       clientX: 280,
       clientY: 200,
     });
-    await view.get("[data-test='gallery-viewer-stage']").trigger("pointerup", {
+    expect(setPointerCapture).not.toHaveBeenCalled();
+    await stage.trigger("pointermove", {
       pointerId: 7,
+      pointerType: "touch",
+      isPrimary: true,
+      clientX: 180,
+      clientY: 204,
+    });
+    expect(setPointerCapture).toHaveBeenCalledWith(7);
+    await stage.trigger("pointerup", {
+      pointerId: 7,
+      pointerType: "touch",
+      isPrimary: true,
+      clientX: 80,
+      clientY: 204,
+    });
+    expect(view.emitted("next")).toHaveLength(1);
+
+    await video.trigger("pointerdown", {
+      pointerId: 8,
       pointerType: "touch",
       isPrimary: true,
       clientX: 80,
       clientY: 200,
     });
-    expect(view.emitted("next")).toBeUndefined();
+    await stage.trigger("pointerup", {
+      pointerId: 8,
+      pointerType: "touch",
+      isPrimary: true,
+      clientX: 280,
+      clientY: 204,
+    });
+    expect(view.emitted("previous")).toHaveLength(1);
 
-    await view.get("dialog").trigger("cancel");
-    expect(view.emitted("close")).toHaveLength(1);
+    await video.trigger("pointerdown", {
+      pointerId: 9,
+      pointerType: "touch",
+      isPrimary: true,
+      clientX: 180,
+      clientY: 200,
+    });
+    await stage.trigger("pointerup", {
+      pointerId: 9,
+      pointerType: "touch",
+      isPrimary: true,
+      clientX: 184,
+      clientY: 202,
+    });
+    expect(view.emitted("next")).toHaveLength(1);
+    expect(view.emitted("previous")).toHaveLength(1);
+  });
+
+  it("leaves taps and native video scrubber gestures with the playback controls", async () => {
+    const view = mountViewer(
+      {
+        ...image,
+        filename: "developed clip.mp4",
+        format: "mp4",
+      },
+      { position: 2, total: 4 },
+    );
+    await flushPromises();
+
+    const video = view.get("[data-test='gallery-viewer-video']");
+    const stage = view.get("[data-test='gallery-viewer-stage']");
+    const setPointerCapture = vi.fn();
+    Object.defineProperty(stage.element, "setPointerCapture", {
+      value: setPointerCapture,
+      configurable: true,
+    });
+    vi.spyOn(video.element, "getBoundingClientRect").mockReturnValue({
+      top: 0,
+      bottom: 400,
+      left: 0,
+      right: 320,
+      width: 320,
+      height: 400,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    });
+
+    await video.trigger("pointerdown", {
+      pointerId: 10,
+      pointerType: "touch",
+      isPrimary: true,
+      clientX: 180,
+      clientY: 200,
+    });
+    await stage.trigger("pointerup", {
+      pointerId: 10,
+      pointerType: "touch",
+      isPrimary: true,
+      clientX: 184,
+      clientY: 202,
+    });
+    expect(setPointerCapture).not.toHaveBeenCalled();
+
+    await video.trigger("pointerdown", {
+      pointerId: 11,
+      pointerType: "touch",
+      isPrimary: true,
+      clientX: 280,
+      clientY: 380,
+    });
+    await stage.trigger("pointermove", {
+      pointerId: 11,
+      pointerType: "touch",
+      isPrimary: true,
+      clientX: 180,
+      clientY: 380,
+    });
+    await stage.trigger("pointerup", {
+      pointerId: 11,
+      pointerType: "touch",
+      isPrimary: true,
+      clientX: 80,
+      clientY: 380,
+    });
+    expect(setPointerCapture).not.toHaveBeenCalled();
+    expect(view.emitted("next")).toBeUndefined();
+    expect(view.emitted("previous")).toBeUndefined();
   });
 
   it("saves the original MP4 to Photos through the native iOS bridge", async () => {
