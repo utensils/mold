@@ -66,9 +66,12 @@ on:
   workflow_dispatch:
 
 concurrency:
-  # Superseded PR commits cancel within their own PR. First-attempt main pushes
-  # stay in one non-canceling primary lane; reruns/manual runs remain isolated.
-  group: desktop-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.event_name == 'push' && github.run_attempt == 1 && 'primary' || github.run_id }}
+  # Superseded PR commits cancel within their own PR. Main pushes must remain
+  # independent: a multi-hour Linux build from an older commit must never hold
+  # the macOS Nightly for the current head in a workflow-level queue. The
+  # publication job is serialized separately and fences every upload against
+  # the live main SHA.
+  group: desktop-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
