@@ -77,6 +77,8 @@ describe("ActivityStrip", () => {
       model: "ltx-2",
       hostId: "render",
       hostLabel: "Render box",
+      routeUrl: "http://render:7680",
+      instanceId: "render-instance",
       stale: true,
       hostError: "offline",
       created_at_unix_ms: 1,

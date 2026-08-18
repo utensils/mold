@@ -19,6 +19,8 @@ function row(): FleetActiveWork {
     key: "origin/job-1",
     hostId: "origin",
     hostLabel: "this server",
+    routeUrl: "http://origin:7680",
+    instanceId: "origin-instance",
     stale: false,
     hostError: null,
   };
