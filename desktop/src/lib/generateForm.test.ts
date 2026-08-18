@@ -1704,6 +1704,51 @@ function richImageMetadata(): OutputMetadata {
 }
 
 describe("applyMetadataToForm", () => {
+  it("keeps automatic-chain reuse eligible for the same generation count and notches", () => {
+    const form = newGenerateForm();
+    applyMetadataToForm(
+      form,
+      {
+        prompt: "a long tracking shot",
+        model: "ltx-2-19b-distilled:fp8",
+        seed: 42,
+        steps: 8,
+        guidance: 1,
+        width: 768,
+        height: 512,
+        frames: 177,
+        fps: 24,
+        pipeline: "distilled",
+        output_mode: "one-shot",
+        chain: { stages: [{ frames: 97 }, { frames: 97 }] },
+      } as OutputMetadata,
+      [{ ...ltx2Model(), name: "ltx-2-19b-distilled:fp8" }],
+    );
+
+    expect(form.frames).toBe(177);
+    expect(form.pipeline).toBeNull();
+    expect(buildRequest(form).pipeline).toBeUndefined();
+
+    applyMetadataToForm(
+      form,
+      {
+        prompt: "a legacy long tracking shot",
+        model: "ltx-2-19b-distilled:fp8",
+        seed: 43,
+        steps: 8,
+        guidance: 1,
+        width: 768,
+        height: 512,
+        frames: 177,
+        fps: 24,
+        pipeline: "distilled",
+        chain: { stages: [{ frames: 97 }, { frames: 97 }] },
+      } as OutputMetadata,
+      [{ ...ltx2Model(), name: "ltx-2-19b-distilled:fp8" }],
+    );
+    expect(form.pipeline).toBeNull();
+  });
+
   it("restores the full serialized parameter set for an installed model", () => {
     const form = newGenerateForm();
     applyMetadataToForm(form, richImageMetadata(), [sd15Model()]);

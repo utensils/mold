@@ -31,6 +31,7 @@ import {
 } from "@studio/lib/sourceFit";
 import { defaultVideoFps } from "@studio/lib/sequence";
 import { videoFramesForModelSelection } from "@studio/lib/videoDuration";
+import { pipelineForSettingsReuse } from "@studio/lib/outputReuse";
 import { familySupportsExtend, resolveExtendOverlapFrames } from "@studio/lib/extend";
 import { findInstalledModel } from "./generateModels";
 import {
@@ -1029,7 +1030,7 @@ export function applyMetadataToForm(
   const fps = metadata.fps ?? metadata.video_fps;
   if (fps != null) form.fps = fps;
   if (metadata.enable_audio != null) form.enableAudio = metadata.enable_audio;
-  form.pipeline = metadata.pipeline ?? null;
+  form.pipeline = pipelineForSettingsReuse(metadata);
   form.icLoraControl = metadata.ic_lora_control ?? null;
   form.retakeRange = metadata.retake_range ?? null;
   form.spatialUpscale = metadata.spatial_upscale ?? null;
