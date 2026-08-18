@@ -47,6 +47,31 @@ const metadata: OutputMetadata = {
 };
 
 describe("applyMobileGalleryMetadata", () => {
+  it("keeps an auto-chained One shot out of the sequence editor", () => {
+    const form = newGenerateForm();
+    const result = applyMobileGalleryMetadata(
+      form,
+      {
+        ...metadata,
+        output_mode: "one-shot",
+        chain_job_id: "internal-chain",
+        chain: {
+          stage_count: 3,
+          motion_tail_frames: 17,
+          stages: [
+            { prompt: metadata.prompt, frames: 97, transition: "smooth" },
+            { prompt: metadata.prompt, frames: 97, transition: "smooth" },
+            { prompt: metadata.prompt, frames: 97, transition: "smooth" },
+          ],
+        },
+      },
+      [model],
+    );
+
+    expect(result.sequence).toBeNull();
+    expect(form.frames).toBe(metadata.frames);
+  });
+
   it("restores the desktop's full-fidelity metadata for mobile generation", () => {
     const form = newGenerateForm();
     const result = applyMobileGalleryMetadata(form, metadata, [model]);

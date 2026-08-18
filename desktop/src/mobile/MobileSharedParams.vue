@@ -8,7 +8,7 @@
  */
 import { computed } from "vue";
 import { fpsValidationError } from "../lib/generateValidation";
-import type { GenerateForm } from "../lib/generateForm";
+import { buildRequest, type GenerateForm } from "../lib/generateForm";
 import type { ModelEntry } from "../lib/api/types";
 import MobileResolutionPicker from "./MobileResolutionPicker.vue";
 import MobileSeedPicker from "./MobileSeedPicker.vue";
@@ -102,6 +102,12 @@ const sourceDimensions = computed(() => {
     :frames="form.frames"
     :fps="form.fps"
     :model="durationModel ?? model"
+    :family="form.family"
+    :model-name="form.model"
+    :source-image-capability="
+      durationModel?.source_image ?? model?.source_image ?? form.sourceImageCapability
+    "
+    :routing-request="buildRequest(form)"
     touch-friendly
     data-test="mobile-duration"
     @update:frames="form.frames = $event"

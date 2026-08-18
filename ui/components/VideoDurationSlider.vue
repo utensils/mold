@@ -5,9 +5,12 @@ import {
   formatVideoDuration,
   maxVideoFrames,
   minVideoFrames,
+  videoGenerationCount,
+  videoGenerationMarks,
   videoFrameStep,
   type VideoFrameContract,
 } from "@studio/lib/videoDuration";
+import type { GenerateRoutingRequest } from "@studio/lib/chainRouting";
 import SliderRow from "./SliderRow.vue";
 
 const props = withDefaults(
@@ -15,6 +18,10 @@ const props = withDefaults(
     frames: number;
     fps: number;
     model?: VideoFrameContract | null;
+    family?: string | null | undefined;
+    modelName?: string | null | undefined;
+    sourceImageCapability?: string | null | undefined;
+    routingRequest?: Partial<GenerateRoutingRequest> | null | undefined;
     label?: string;
     touchFriendly?: boolean;
   }>(),
@@ -23,17 +30,42 @@ const props = withDefaults(
 
 const emit = defineEmits<{ "update:frames": [frames: number] }>();
 
+const contract = computed<VideoFrameContract>(() => ({
+  ...(props.model ?? {}),
+  family: props.model?.family ?? props.family,
+  name: props.model?.name ?? props.modelName,
+  source_image: props.model?.source_image ?? props.sourceImageCapability,
+}));
 const rate = computed(() => Math.max(1, Math.round(props.fps) || 24));
 const sliderValue = computed(() =>
-  clampVideoFrames(props.frames, rate.value, props.model),
+  clampVideoFrames(props.frames, rate.value, contract.value),
 );
-const maximum = computed(() => maxVideoFrames(props.model, rate.value));
+const maximum = computed(() => maxVideoFrames(contract.value, rate.value));
 const isLongVideo = computed(() => props.frames > maximum.value);
 const displayedFrames = computed(() =>
   isLongVideo.value ? props.frames : sliderValue.value,
 );
 const readout = computed(() =>
   formatVideoDuration(displayedFrames.value, rate.value),
+);
+const generations = computed(() =>
+  videoGenerationCount(
+    displayedFrames.value,
+    rate.value,
+    contract.value,
+    props.routingRequest ?? {},
+  ),
+);
+const marks = computed(() =>
+  videoGenerationMarks(
+    rate.value,
+    contract.value,
+    props.routingRequest ?? {},
+  ).map((mark) => ({
+    value: mark.frames,
+    label: mark.label,
+    title: `${mark.generations} ${mark.generations === 1 ? "generation" : "generations"} · ${formatVideoDuration(mark.frames, rate.value)}`,
+  })),
 );
 
 // FPS/model changes can lower a previously legal single-shot value. Clamp that
@@ -43,13 +75,13 @@ watch(maximum, (next, previous) => {
   if (props.frames <= previous && props.frames > next) {
     emit(
       "update:frames",
-      clampVideoFrames(props.frames, rate.value, props.model),
+      clampVideoFrames(props.frames, rate.value, contract.value),
     );
   }
 });
 
 function update(frames: number): void {
-  emit("update:frames", clampVideoFrames(frames, rate.value, props.model));
+  emit("update:frames", clampVideoFrames(frames, rate.value, contract.value));
 }
 </script>
 
@@ -61,16 +93,22 @@ function update(frames: number): void {
   >
     <SliderRow
       :model-value="sliderValue"
-      :min="minVideoFrames(model)"
+      :min="minVideoFrames(contract)"
       :max="maximum"
-      :step="videoFrameStep(model)"
+      :step="videoFrameStep(contract)"
       :label="label"
       :value-label="readout"
+      :aria-value-text="`${readout}, ${generations} ${generations === 1 ? 'generation' : 'generations'}`"
+      :marks="marks"
+      :snap-threshold-ratio="touchFriendly ? 0.04 : 0.015"
       @update:model-value="update"
     />
     <p class="video-duration__hint" data-test="video-duration-detail">
-      {{ displayedFrames }} frames · {{ rate }} fps · {{ readout }}
-      <template v-if="isLongVideo"> · automatic sequence</template>
+      {{ displayedFrames }} frames · {{ rate }} fps · {{ readout }} ·
+      {{ generations }} {{ generations === 1 ? "generation" : "generations" }}
+      <template v-if="generations > 1 || isLongVideo">
+        · automatic sequence</template
+      >
     </p>
   </div>
 </template>
@@ -94,5 +132,9 @@ function update(frames: number): void {
     var(--ce) 24px,
     transparent 24px
   );
+}
+
+.video-duration--touch :deep(.ms-slider__track--marked) {
+  padding-top: 0;
 }
 </style>

@@ -335,6 +335,7 @@ mod tests {
             batch_id: None,
             batch_index: None,
             batch_count: None,
+            output_mode: None,
             model: "flux2-klein:q8".to_string(),
             seed: 1,
             steps: 4,

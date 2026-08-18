@@ -1,8 +1,9 @@
 /**
  * Sequence provenance helpers shared by every shell.
  *
- * A finished sequence is a print: a `/api/gallery` row carrying
- * `metadata.chain_job_id` and `metadata.chain`. These helpers are how a
+ * A finished authored sequence is a print whose `metadata.output_mode` is
+ * `sequence` (or whose legacy metadata carries a durable `chain_job_id`) and
+ * whose `metadata.chain` records the clips. These helpers are how a
  * surface gets from that print back to something editable — the Create
  * canvas's settled-sequence result, History ▸ Sequences' "Show print", and
  * the Library's **Reuse settings** / **Edit sequence** pair.
@@ -30,6 +31,7 @@ import {
 import { CAMERA_MOTION_PRESETS, isCameraMotionPreset } from "./cameraMotion";
 
 export interface OutputMetadataLike {
+  output_mode?: "one-shot" | "sequence" | null;
   chain_job_id?: string | null;
   chain?: ChainOutputMetadata | null;
   /** Clip 1's negative prompt — `synthetic_generate_request` records the
@@ -109,6 +111,12 @@ export interface SequenceReusePlan {
 export function planSequenceReuse(
   metadata: OutputMetadataLike,
 ): SequenceReusePlan | null {
+  if (metadata.output_mode === "one-shot") return null;
+  // Legacy automatic chains used the ephemeral shim and therefore never had
+  // a durable chain job id. Legacy authored sequences did. This fallback
+  // preserves both behaviours until every reachable host stamps output_mode.
+  if (metadata.output_mode !== "sequence" && !metadata.chain_job_id)
+    return null;
   const chain = metadata.chain;
   if (!chain?.stages?.length) return null;
   const negative = metadata.negative_prompt?.trim() ?? "";

@@ -105,6 +105,7 @@ impl VideoMetadata {
             batch_id: None,
             batch_index: None,
             batch_count: None,
+            output_mode: Some(mold_core::GenerationOutputMode::OneShot),
             model: self.model.clone(),
             seed: self.seed,
             steps: self.steps,

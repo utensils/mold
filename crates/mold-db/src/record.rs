@@ -151,6 +151,7 @@ mod tests {
             batch_id: None,
             batch_index: None,
             batch_count: None,
+            output_mode: None,
             model: "m".into(),
             seed: 1,
             steps: 2,

@@ -33,6 +33,7 @@ import {
   presetsNearRatio,
 } from "@studio/lib/resolutions";
 import type { OutputMode } from "@studio/lib/sequence";
+import type { GenerateRoutingRequest } from "@studio/lib/chainRouting";
 import { generationCapabilitiesForFamily } from "../../lib/generateCapabilities";
 import { projectResolution } from "./resolutionProjection";
 import {
@@ -63,6 +64,7 @@ const props = withDefaults(
     output?: OutputMode;
     /** Clips currently parked on the composer rail (sequence caption). */
     clipCount?: number;
+    routingRequest?: Partial<GenerateRoutingRequest> | null | undefined;
   }>(),
   {
     advCount: 0,
@@ -482,6 +484,12 @@ function lockLastSeed() {
         :frames="modelValue.frames ?? model?.default_frames ?? 25"
         :fps="modelValue.fps ?? model?.default_fps ?? 24"
         :model="model"
+        :family="family"
+        :model-name="modelValue.model"
+        :source-image-capability="
+          model?.source_image ?? modelValue.sourceImageCapability
+        "
+        :routing-request="routingRequest"
         @update:frames="patch({ frames: $event })"
       />
     </div>

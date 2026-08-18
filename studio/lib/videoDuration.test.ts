@@ -12,6 +12,8 @@ import {
   fixedVideoFps,
   videoFrameGridError,
   videoFrameGridLabel,
+  videoGenerationCount,
+  videoGenerationMarks,
 } from "./videoDuration";
 
 const ltx2 = {
@@ -128,5 +130,47 @@ describe("video duration controls", () => {
     expect(clampVideoFrames(999, 24, ltx2)).toBe(481);
     expect(clampVideoFrames(1, 24, ltx2)).toBe(1);
     expect(formatVideoDuration(1, 24)).toBe("0.04s");
+  });
+
+  it("derives LTX generation notches from the shared chain routing authority", () => {
+    const model = { ...ltx2, name: "ltx-2-19b-distilled:fp8", family: "ltx2" };
+    expect(videoGenerationCount(97, 24, model)).toBe(1);
+    expect(videoGenerationCount(241, 24, model)).toBe(3);
+    expect(videoGenerationMarks(24, model)).toEqual([
+      { frames: 97, generations: 1, label: "1×" },
+      { frames: 177, generations: 2, label: "2×" },
+      { frames: 257, generations: 3, label: "3×" },
+      { frames: 337, generations: 4, label: "4×" },
+      { frames: 417, generations: 5, label: "5×" },
+      { frames: 481, generations: 6, label: "6×" },
+    ]);
+  });
+
+  it("uses the exact submit-time route for temporal upscale and advanced options", () => {
+    const model = { ...ltx2, name: "ltx-2-19b-distilled:fp8", family: "ltx2" };
+    expect(
+      videoGenerationCount(241, 24, model, { temporal_upscale: "x2" }),
+    ).toBe(1);
+    expect(
+      videoGenerationCount(241, 24, model, {
+        negative_prompt: "preserve this option",
+      }),
+    ).toBe(1);
+    expect(videoGenerationMarks(24, model, { temporal_upscale: "x2" })).toEqual(
+      [{ frames: 481, generations: 1, label: "1×" }],
+    );
+  });
+
+  it("keeps a non-chainable video model on one generation", () => {
+    expect(
+      videoGenerationMarks(24, {
+        name: "minimax-h3-fl2va:official-bf16",
+        family: "minimax-h3",
+        min_frames: 124,
+        max_frames: 362,
+        frame_step: 17,
+        frame_offset: 5,
+      }),
+    ).toEqual([{ frames: 362, generations: 1, label: "1×" }]);
   });
 });

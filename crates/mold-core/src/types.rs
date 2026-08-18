@@ -1973,6 +1973,17 @@ pub struct KeyframeMetadata {
     pub sha256: String,
 }
 
+/// Authoring surface that produced a saved output. This is deliberately
+/// independent of the execution route: a One shot may be auto-expanded into
+/// several internal chain stages, but Reuse settings must still return to the
+/// One shot form rather than exposing those implementation-detail stages.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum GenerationOutputMode {
+    OneShot,
+    Sequence,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct OutputMetadata {
     pub prompt: String,
@@ -1988,6 +1999,11 @@ pub struct OutputMetadata {
     pub batch_index: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batch_count: Option<u32>,
+    /// User-facing output mode. Additive so legacy rows can fall back to
+    /// durable chain provenance without conflating automatic chaining with an
+    /// authored sequence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_mode: Option<GenerationOutputMode>,
     /// Queue job that produced this print. Additive; absent on every print
     /// written before the durable queue existed and on client-side saves.
     ///
@@ -2119,9 +2135,10 @@ pub struct OutputMetadata {
     /// absent for single generations, the ephemeral shim, and legacy rows).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chain_job_id: Option<String>,
-    /// Structured multi-clip provenance for chain outputs (additive) —
-    /// every clip's prompt, frames, transition, and effective seed, so a
-    /// sequence is never recorded under clip 1's prompt alone.
+    /// Structured multi-clip execution provenance for chain outputs
+    /// (additive) — both authored sequences and automatically chained One
+    /// shots carry this. `output_mode`, not this field, selects the Reuse
+    /// settings authoring surface.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chain: Option<crate::chain::ChainOutputMetadata>,
     pub version: String,
@@ -2185,6 +2202,7 @@ impl OutputMetadata {
             batch_id: req.batch_id.clone(),
             batch_index: req.batch_index,
             batch_count: req.batch_count,
+            output_mode: Some(GenerationOutputMode::OneShot),
             // Stamped by the worker immediately before the save; the request
             // does not know which queue job is carrying it.
             job_id: None,
@@ -4967,6 +4985,7 @@ mod tests {
         };
 
         let metadata = OutputMetadata::from_generate_request(&req, 7, None, "0.1.0");
+        assert_eq!(metadata.output_mode, Some(GenerationOutputMode::OneShot));
         assert_eq!(
             metadata.source_image_name.as_deref(),
             Some("mold-flux-123-456.png")

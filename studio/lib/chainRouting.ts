@@ -34,7 +34,7 @@ export type ChainRoutingDecision =
     }
   | { kind: "reject"; reason: string };
 
-type GenerateRoutingRequest = {
+export type GenerateRoutingRequest = {
   frames?: number | null;
   fps?: number | null;
   model: string;

@@ -28,6 +28,7 @@ export function buildAutoChainRequest(
   decision: AutoChainRoutingDecision,
 ): AutoChainRequest {
   return {
+    output_mode: "one-shot",
     model: req.model,
     prompt: req.prompt,
     total_frames: req.frames!,

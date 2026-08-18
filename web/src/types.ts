@@ -59,6 +59,8 @@ export type Scheduler =
   | { "uni-pc": unknown };
 
 export interface OutputMetadata {
+  /** User-facing authoring mode; independent of internal auto-chaining. */
+  output_mode?: "one-shot" | "sequence" | null;
   prompt: string;
   negative_prompt?: string | null;
   original_prompt?: string | null;
@@ -94,8 +96,8 @@ export interface OutputMetadata {
    * idempotence key, and the exact answer to "did my job produce this?".
    * Absent on hosts that predate it. */
   job_id?: string | null;
-  /** Per-clip provenance for a stitched sequence — what the Library's
-   * sequence-aware Reuse settings reloads into the clip rail. */
+  /** Per-clip execution provenance for a stitched output. `output_mode`
+   * decides whether Reuse settings exposes it as an authored sequence. */
   chain?: ChainOutputMetadata | null;
   scheduler?: Scheduler | null;
   output_format?: OutputFormat | null;
@@ -636,6 +638,7 @@ export interface ChainRequestWire {
   batch_id?: string | null;
   batch_index?: number | null;
   batch_count?: number | null;
+  output_mode?: "one-shot" | "sequence" | null;
 }
 
 export type ChainProgressEvent =

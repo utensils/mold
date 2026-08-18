@@ -537,6 +537,9 @@ function drawableFitPolicy(
 const draft = useSequenceDraftStore();
 draft.hydrate();
 const sequenceMode = computed(() => draft.output === "sequence");
+const durationRoutingRequest = computed(() =>
+  form.toRequest(currentModel.value),
+);
 const promptBridge = {
   getPrompt: () => form.state.value.prompt,
   setPrompt: (v: string) => {
@@ -3862,6 +3865,7 @@ onBeforeUnmount(() => {
               v-model="form.state.value"
               :family="currentFamily"
               :model="currentModel"
+              :routing-request="durationRoutingRequest"
               :source-dimensions="activeSourceDimensions"
               :adv-count="advCount"
               :mobile="true"
@@ -4063,6 +4067,7 @@ onBeforeUnmount(() => {
                   v-model="form.state.value"
                   :family="currentFamily"
                   :model="currentModel"
+                  :routing-request="durationRoutingRequest"
                   :source-dimensions="activeSourceDimensions"
                   :adv-count="advCount"
                   :mobile="true"
@@ -4246,6 +4251,7 @@ onBeforeUnmount(() => {
           v-model="form.state.value"
           :family="currentFamily"
           :model="currentModel"
+          :routing-request="durationRoutingRequest"
           :source-dimensions="activeSourceDimensions"
           :adv-count="advCount"
           :mobile="false"
@@ -4279,6 +4285,7 @@ onBeforeUnmount(() => {
           :adv-count="advCount"
           :placement-gpus="gpuListForPlacement"
           :models="models"
+          :routing-request="durationRoutingRequest"
           :audio-output-supported="currentModel?.supports_audio !== false"
           :can-extend="canExtend"
           :extend-default-overlap-frames="extendDefaultOverlapFrames"
@@ -4310,6 +4317,7 @@ onBeforeUnmount(() => {
         :adv-count="advCount"
         :placement-gpus="gpuListForPlacement"
         :models="models"
+        :routing-request="durationRoutingRequest"
         :audio-output-supported="currentModel?.supports_audio !== false"
         :can-extend="canExtend"
         :extend-default-overlap-frames="extendDefaultOverlapFrames"

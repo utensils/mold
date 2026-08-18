@@ -41,6 +41,7 @@ export interface ChainRequestWire {
   batch_id?: string | null;
   batch_index?: number | null;
   batch_count?: number | null;
+  output_mode?: "one-shot" | "sequence" | null;
 }
 
 export interface ChainValidationStage {
@@ -88,8 +89,9 @@ export interface ChainStageMetadata {
   loras?: Array<{ path: string; scale: number; name?: string | null }>;
 }
 
-/** Structured multi-clip provenance block on `OutputMetadata` (additive;
- * absent for single generations and pre-#564 rows). */
+/** Structured multi-clip execution provenance on `OutputMetadata` (additive;
+ * present for authored sequences and auto-chained One shots). The additive
+ * `output_mode` field is authoritative for restoring the authoring surface. */
 export interface ChainOutputMetadata {
   stage_count: number;
   motion_tail_frames: number;

@@ -5,10 +5,16 @@ import {
   MINIMAX_H3_FRAME_STEP,
   MINIMAX_H3_MIN_FRAMES,
 } from "./minimaxH3Authoring";
+import {
+  decideGenerateRequestRouting,
+  type GenerateRoutingRequest,
+} from "./chainRouting";
 
 /** Additive `/api/models` fields that describe a model's requestable video grid. */
 export interface VideoFrameContract {
-  family?: string | null;
+  name?: string | null | undefined;
+  family?: string | null | undefined;
+  source_image?: string | null | undefined;
   default_frames?: number | null;
   default_fps?: number | null;
   min_frames?: number | null;
@@ -17,6 +23,12 @@ export interface VideoFrameContract {
   max_frames_absolute?: number | null;
   frame_step?: number | null;
   frame_offset?: number | null;
+}
+
+export interface VideoGenerationMark {
+  frames: number;
+  generations: number;
+  label: string;
 }
 
 const LEGACY_FRAME_STEP = 8;
@@ -214,4 +226,50 @@ export function formatVideoDuration(frames: number, fps: number): string {
   }
   if (seconds < 0.1) return `${seconds.toFixed(2)}s`;
   return `${seconds.toFixed(1)}s`;
+}
+
+/** Number of concrete model invocations used by the ordinary One shot route.
+ * This delegates to the same shared routing authority used at submit time so
+ * family clip sizes and handoff overlap cannot drift in the UI. */
+export function videoGenerationCount(
+  frames: number,
+  fps: number,
+  model?: VideoFrameContract | null,
+  routingRequest: Partial<GenerateRoutingRequest> = {},
+): number {
+  const decision = decideGenerateRequestRouting(
+    {
+      ...routingRequest,
+      frames,
+      fps,
+      model: model?.name ?? routingRequest.model ?? "",
+    },
+    model?.family,
+  );
+  return decision.kind === "chain" ? decision.stageCount : 1;
+}
+
+/** Natural slider stops: the longest valid duration delivered by each model
+ * invocation count. A browser range may snap to the datalist values, while
+ * the rendered notches remain an exact visual map even where native snapping
+ * is not available. */
+export function videoGenerationMarks(
+  fps: number,
+  model?: VideoFrameContract | null,
+  routingRequest: Partial<GenerateRoutingRequest> = {},
+): VideoGenerationMark[] {
+  const minimum = minVideoFrames(model);
+  const maximum = maxVideoFrames(model, fps);
+  const step = videoFrameStep(model);
+  const marks = new Map<number, number>();
+  for (let frames = minimum; frames <= maximum; frames += step) {
+    marks.set(videoGenerationCount(frames, fps, model, routingRequest), frames);
+  }
+  return [...marks]
+    .sort(([left], [right]) => left - right)
+    .map(([generations, frames]) => ({
+      frames,
+      generations,
+      label: `${generations}×`,
+    }));
 }

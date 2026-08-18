@@ -301,6 +301,7 @@ impl ScriptComposerState {
             batch_id: None,
             batch_index: None,
             batch_count: None,
+            output_mode: Some(mold_core::GenerationOutputMode::Sequence),
             prompt: None,
             total_frames: None,
             clip_frames: None,

@@ -13,7 +13,7 @@ import { defaultClipFrames, modelsForOutput, sequenceMotionTailFrames } from "@s
 import { filterRestrictedModels } from "@studio/lib/modelAccess";
 import type { ChainLimits } from "@studio/lib/api/chainTypes";
 import type { GenerateForm } from "../../lib/generateForm";
-import { resetFormToModelDefaults, seedMode } from "../../lib/generateForm";
+import { buildRequest, resetFormToModelDefaults, seedMode } from "../../lib/generateForm";
 import type {
   Ltx2CameraControlInfo,
   Ltx2ControlAdapterInfo,
@@ -86,6 +86,7 @@ const props = withDefaults(
 );
 
 const emit = defineEmits<{ "append-word": [word: string] }>();
+const durationRoutingRequest = computed(() => buildRequest(props.form));
 
 const formStore = useGenerateFormStore();
 const models = useModelStore();
@@ -740,6 +741,10 @@ function resetSettings() {
           :frames="form.frames"
           :fps="form.fps"
           :model="selectedModel"
+          :family="form.family"
+          :model-name="form.model"
+          :source-image-capability="selectedModel?.source_image ?? form.sourceImageCapability"
+          :routing-request="durationRoutingRequest"
           @update:frames="form.frames = $event"
         />
       </div>
@@ -884,6 +889,7 @@ function resetSettings() {
         id="desktop-inline-advanced"
         :form="form"
         :selected-model="selectedModel"
+        :routing-request="durationRoutingRequest"
         :upscalers="models.upscalers"
         :control-adapters="controlAdapters"
         :camera-controls="cameraControls"

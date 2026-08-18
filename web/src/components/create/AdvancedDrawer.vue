@@ -49,6 +49,7 @@ import { emptyGuidanceOverrides } from "@studio/lib/guidanceOverrides";
 import { useOverlayFocus } from "../../composables/useOverlayFocus";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import type { OutputMode } from "@studio/lib/sequence";
+import type { GenerateRoutingRequest } from "@studio/lib/chainRouting";
 import VideoDurationSlider from "@ui/components/VideoDurationSlider.vue";
 import {
   clampVideoFrames,
@@ -103,6 +104,7 @@ const props = withDefaults(
     extendDefaultOverlapFrames?: number;
     output?: OutputMode;
     sequenceSupportsAudio?: boolean;
+    routingRequest?: Partial<GenerateRoutingRequest> | null | undefined;
   }>(),
   {
     open: false,
@@ -1037,6 +1039,12 @@ function setSequenceCameraMode(mode: string) {
               :frames="modelValue.frames ?? selectedModel?.default_frames ?? 25"
               :fps="modelValue.fps ?? selectedModel?.default_fps ?? 24"
               :model="selectedModel"
+              :family="family"
+              :model-name="modelValue.model"
+              :source-image-capability="
+                selectedModel?.source_image ?? modelValue.sourceImageCapability
+              "
+              :routing-request="routingRequest"
               label="Duration"
               @update:frames="patch({ frames: $event })"
             />
