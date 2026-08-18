@@ -29,13 +29,16 @@ const props = withDefaults(
     installable?: boolean | undefined;
     /** The row currently backing the open detail drawer. */
     selected?: boolean;
+    selectable?: boolean;
+    checked?: boolean;
   }>(),
   // Explicit so Vue's boolean casting doesn't turn "not supplied" into false.
-  { installable: undefined, selected: false },
+  { installable: undefined, selected: false, selectable: true, checked: false },
 );
 const emit = defineEmits<{
   (e: "pull", entry: CatalogEntry): void;
   (e: "open", entry: CatalogEntry): void;
+  (e: "toggle-select", entry: CatalogEntry, checked: boolean): void;
 }>();
 
 const glyphSource = computed<ModelSource>(() =>
@@ -100,10 +103,26 @@ const counts = computed(() => {
     :accessibility-label="accessibilityLabel"
     :selected="selected"
     clickable
+    :interactive-container="false"
     data-test="catalog-table-row"
     @open="emit('open', entry)"
   >
     <template #meta>
+      <label
+        class="flex h-6 w-6 shrink-0 items-center justify-center"
+        :title="selectable ? 'Select model for batch download' : 'No download target available'"
+        @click.stop
+      >
+        <input
+          type="checkbox"
+          class="h-4 w-4 accent-[var(--safelight)]"
+          :checked="checked"
+          :disabled="!selectable"
+          :aria-label="`Select ${entry.display_name ?? entry.name}`"
+          data-test="catalog-select"
+          @change="emit('toggle-select', entry, ($event.target as HTMLInputElement).checked)"
+        />
+      </label>
       <ModelMetadataBadges
         :kind="entry.kind"
         :family="entry.family"

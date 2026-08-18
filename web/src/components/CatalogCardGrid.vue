@@ -1,5 +1,9 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import {
+  isAlreadyQueuedError,
+  planBatchInstallTargets,
+} from "@studio/lib/modelBatchInstall";
 import { useCatalog } from "../composables/useCatalog";
 import { useModelInstallTargets } from "../composables/useModelInstallTargets";
 import { toast } from "../lib/toasts";
@@ -9,6 +13,9 @@ import CatalogCard from "./CatalogCard.vue";
 const cat = useCatalog();
 const installTargets = useModelInstallTargets();
 const sentinel = ref<HTMLElement | null>(null);
+const selected = ref(new Map<string, CatalogEntryWire>());
+const selectedTargetId = ref("");
+const batchStarting = ref(false);
 let observer: IntersectionObserver | null = null;
 
 function detach() {
@@ -59,6 +66,93 @@ async function pullCard(entry: CatalogEntryWire) {
   } catch (error) {
     toast("error", error instanceof Error ? error.message : String(error));
   }
+}
+
+function selectionTargets(entry: CatalogEntryWire) {
+  return installTargets.planFor(entry.id, entry.installed).targets;
+}
+
+function selectable(entry: CatalogEntryWire): boolean {
+  return entry.supported && selectionTargets(entry).length > 0;
+}
+
+function toggleSelection(entry: CatalogEntryWire, checked: boolean): void {
+  const next = new Map(selected.value);
+  if (checked) next.set(entry.id, entry);
+  else next.delete(entry.id);
+  selected.value = next;
+}
+
+const batchTargets = computed(() =>
+  planBatchInstallTargets(
+    [...selected.value.values()].map((entry) => ({
+      modelId: entry.id,
+      targets: selectionTargets(entry),
+    })),
+  ),
+);
+
+watch(
+  batchTargets,
+  (targets) => {
+    if (targets.some(({ host }) => host.id === selectedTargetId.value)) return;
+    selectedTargetId.value = targets.length === 1 ? targets[0]!.host.id : "";
+  },
+  { immediate: true },
+);
+
+const selectedBatchTarget = computed(() =>
+  batchTargets.value.find(({ host }) => host.id === selectedTargetId.value),
+);
+
+function targetSummary(installCount: number, repairCount: number): string {
+  const parts = [];
+  if (installCount) parts.push(`${installCount} new`);
+  if (repairCount) parts.push(`${repairCount} repair`);
+  return parts.join(", ");
+}
+
+async function startBatch(): Promise<void> {
+  const target = selectedBatchTarget.value;
+  if (!target || batchStarting.value) return;
+  batchStarting.value = true;
+  const entriesById = new Map(selected.value);
+  const results = await Promise.allSettled(
+    target.items.map(async (item) => {
+      try {
+        await installTargets.startDownloadOn(
+          { host: target.host, action: item.action },
+          item.modelId,
+        );
+      } catch (error) {
+        if (!isAlreadyQueuedError(error)) throw error;
+      }
+      return item.modelId;
+    }),
+  );
+  const next = new Map(selected.value);
+  let succeeded = 0;
+  const failures: string[] = [];
+  results.forEach((result, index) => {
+    if (result.status === "fulfilled") {
+      next.delete(result.value);
+      succeeded += 1;
+    } else {
+      const item = target.items[index]!;
+      const entry = entriesById.get(item.modelId);
+      failures.push(
+        `${entry?.name ?? "Model"}: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`,
+      );
+    }
+  });
+  selected.value = next;
+  if (succeeded)
+    toast(
+      "success",
+      `${succeeded} ${succeeded === 1 ? "download" : "downloads"} queued on ${target.host.label}`,
+    );
+  if (failures.length) toast("error", failures.join(" · "));
+  batchStarting.value = false;
 }
 </script>
 
@@ -132,6 +226,55 @@ async function pullCard(entry: CatalogEntryWire) {
       </p>
 
       <div
+        v-if="selected.size > 0"
+        class="batch-bar"
+        data-test="catalog-batch-bar"
+        aria-live="polite"
+      >
+        <strong>{{ selected.size }} selected</strong>
+        <template v-if="batchTargets.length">
+          <label class="batch-bar__target">
+            <span>Target machine</span>
+            <select
+              v-model="selectedTargetId"
+              data-test="catalog-batch-target"
+              :disabled="batchStarting"
+            >
+              <option value="" disabled>Choose a machine…</option>
+              <option
+                v-for="target in batchTargets"
+                :key="target.host.id"
+                :value="target.host.id"
+              >
+                {{ target.host.label }} ·
+                {{ targetSummary(target.installCount, target.repairCount) }}
+              </option>
+            </select>
+          </label>
+          <button
+            type="button"
+            class="batch-bar__download"
+            data-test="catalog-batch-download"
+            :disabled="!selectedBatchTarget || batchStarting"
+            @click="startBatch"
+          >
+            {{ batchStarting ? "Starting…" : `Download ${selected.size}` }}
+          </button>
+        </template>
+        <span v-else class="batch-bar__warning"
+          >No machine can receive every selected model.</span
+        >
+        <button
+          type="button"
+          class="batch-bar__clear"
+          :disabled="batchStarting"
+          @click="selected = new Map()"
+        >
+          Clear
+        </button>
+      </div>
+
+      <div
         data-test="catalog-results"
         :data-layout="cat.layout.value"
         :class="
@@ -145,8 +288,11 @@ async function pullCard(entry: CatalogEntryWire) {
           :key="entry.id"
           :entry="entry"
           :layout="cat.layout.value"
+          :selectable="!batchStarting && selectable(entry)"
+          :checked="selected.has(entry.id)"
           @open="openCard(entry.id)"
           @pull="pullCard(entry)"
+          @toggle-select="toggleSelection(entry, $event)"
         />
       </div>
 
@@ -170,3 +316,77 @@ async function pullCard(entry: CatalogEntryWire) {
     </template>
   </div>
 </template>
+
+<style scoped>
+.batch-bar {
+  position: sticky;
+  top: 8px;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--ce);
+  border-radius: var(--radius-control-lg);
+  background: color-mix(in srgb, var(--bench) 94%, transparent);
+  box-shadow: var(--shadow-raised);
+  backdrop-filter: blur(12px);
+  color: var(--rebate);
+  font-size: 12px;
+}
+
+.batch-bar__target {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  color: var(--ink-2);
+}
+
+.batch-bar select,
+.batch-bar button {
+  min-height: 34px;
+  border: 1px solid var(--ce);
+  border-radius: var(--radius-control);
+  background: var(--bath);
+  color: var(--rebate);
+  padding: 0 10px;
+}
+
+.batch-bar__download {
+  border-color: var(--safelight) !important;
+  background: var(--safelight) !important;
+  color: var(--on-accent) !important;
+  font-weight: 700;
+}
+
+.batch-bar button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.batch-bar__clear {
+  background: transparent !important;
+}
+
+.batch-bar__warning {
+  flex: 1;
+  color: var(--stop);
+}
+
+@media (max-width: 700px) {
+  .batch-bar {
+    align-items: stretch;
+    flex-wrap: wrap;
+  }
+
+  .batch-bar__target {
+    width: 100%;
+    flex-basis: 100%;
+    align-items: stretch;
+    flex-direction: column;
+  }
+}
+</style>

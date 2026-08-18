@@ -5,6 +5,7 @@ import CatalogLayoutToggle, {
   type CatalogLayoutChoice,
 } from "@ui/components/CatalogLayoutToggle.vue";
 import { planModelInstall } from "@studio/lib/modelInstallTargets";
+import { isAlreadyQueuedError, planBatchInstallTargets } from "@studio/lib/modelBatchInstall";
 import { useDownloadsStore } from "../../stores/downloads";
 import { useHostsStore, type HostView } from "../../stores/hosts";
 import { useInventoryKnown } from "../../lib/modelInventory";
@@ -28,7 +29,7 @@ import CatalogCard from "./CatalogCard.vue";
 import CatalogTableRow from "./CatalogTableRow.vue";
 import CatalogDetailDrawer, { type DrawerVariant } from "./CatalogDetailDrawer.vue";
 import DownloadTargetDialog from "./DownloadTargetDialog.vue";
-import { installedModelToEntry } from "../../lib/catalogDetail";
+import { canDownloadEntry, installedModelToEntry } from "../../lib/catalogDetail";
 import type { CatalogEntry, CatalogProviderError, ModelEntry } from "../../lib/api/types";
 
 type LibraryModelEntry = ModelEntry & { hostIds?: string[] };
@@ -89,6 +90,9 @@ const loading = ref(false);
 const error = ref<string | null>(null);
 const providerErrors = ref<CatalogProviderError[]>([]);
 const pulling = ref<Set<string>>(new Set());
+const selected = ref(new Map<string, CatalogListEntry>());
+const selectedTargetId = ref("");
+const batchStarting = ref(false);
 const pendingEntry = ref<CatalogEntry | null>(null);
 /** Entry whose in-app detail drawer is open. */
 const detailEntry = ref<CatalogListEntry | null>(null);
@@ -321,6 +325,46 @@ function actionTargets(entry: CatalogEntry & { hostIds?: string[] }) {
   return installPlan(entry).targets;
 }
 
+function selectable(entry: CatalogListEntry): boolean {
+  return canDownloadEntry(entry) && actionTargets(entry).length > 0;
+}
+
+function toggleSelection(entry: CatalogListEntry, checked: boolean): void {
+  const next = new Map(selected.value);
+  if (checked) next.set(entry.id, entry);
+  else next.delete(entry.id);
+  selected.value = next;
+}
+
+const batchTargets = computed(() =>
+  planBatchInstallTargets(
+    [...selected.value.values()].map((entry) => ({
+      modelId: entry.id,
+      targets: actionTargets(entry),
+    })),
+  ),
+);
+
+watch(
+  batchTargets,
+  (targets) => {
+    if (targets.some(({ host }) => host.id === selectedTargetId.value)) return;
+    selectedTargetId.value = targets.length === 1 ? targets[0]!.host.id : "";
+  },
+  { immediate: true },
+);
+
+const selectedBatchTarget = computed(() =>
+  batchTargets.value.find(({ host }) => host.id === selectedTargetId.value),
+);
+
+function targetSummary(installCount: number, repairCount: number): string {
+  const parts = [];
+  if (installCount) parts.push(`${installCount} new`);
+  if (repairCount) parts.push(`${repairCount} repair`);
+  return parts.join(", ");
+}
+
 /** The row keeps its action while any machine can still receive the model —
  *  and an entry nobody owns always keeps it, even before hosts resolve. */
 function installable(entry: CatalogEntry & { hostIds?: string[] }): boolean {
@@ -423,14 +467,18 @@ function retrySearch(): void {
 const sentinel = ref<HTMLElement | null>(null);
 useInfiniteScrollSentinel(sentinel, loading, hasMore, loadMore, MAX_AUTO_PAGES);
 
+async function queueOnHost(entry: CatalogEntry, host: HostView | null): Promise<void> {
+  const target = host?.baseUrl ? { baseUrl: host.baseUrl, apiKey: host.apiKey } : undefined;
+  // Attach the snapshot-first stream before enqueueing so a cached,
+  // near-instant pull still produces a visible terminal event and refresh.
+  await downloads.subscribe(host ?? undefined);
+  await startCatalogDownload(entry.id, target, host ? host.kind === "remote" : false);
+}
+
 async function pullTo(entry: CatalogEntry, host: HostView | null) {
   pulling.value.add(entry.id);
   try {
-    const target = host?.baseUrl ? { baseUrl: host.baseUrl, apiKey: host.apiKey } : undefined;
-    // Attach the snapshot-first stream before enqueueing so a cached,
-    // near-instant pull still produces a visible terminal event and refresh.
-    await downloads.subscribe(host ?? undefined);
-    await startCatalogDownload(entry.id, target, host ? host.kind === "remote" : false);
+    await queueOnHost(entry, host);
     toasts.push(`Pulling ${entry.display_name ?? entry.name}${host ? ` on ${host.label}` : ""}`);
   } catch (err) {
     if (err instanceof ApiError && err.status === 409) {
@@ -442,6 +490,50 @@ async function pullTo(entry: CatalogEntry, host: HostView | null) {
     pulling.value.delete(entry.id);
     pendingEntry.value = null;
   }
+}
+
+async function startBatch(): Promise<void> {
+  const target = selectedBatchTarget.value;
+  if (!target || batchStarting.value) return;
+  batchStarting.value = true;
+  for (const item of target.items) pulling.value.add(item.modelId);
+  const entriesById = new Map(selected.value);
+  const results = await Promise.allSettled(
+    target.items.map(async (item) => {
+      const entry = entriesById.get(item.modelId);
+      if (!entry) throw new Error(`Model ${item.modelId} is no longer selected`);
+      try {
+        await queueOnHost(entry, target.host);
+      } catch (error) {
+        if (!isAlreadyQueuedError(error)) throw error;
+      }
+      return item.modelId;
+    }),
+  );
+  const next = new Map(selected.value);
+  let succeeded = 0;
+  const failures: string[] = [];
+  results.forEach((result, index) => {
+    const item = target.items[index]!;
+    pulling.value.delete(item.modelId);
+    if (result.status === "fulfilled") {
+      next.delete(result.value);
+      succeeded += 1;
+    } else {
+      const entry = entriesById.get(item.modelId);
+      failures.push(
+        `${entry?.display_name ?? entry?.name ?? "Model"}: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`,
+      );
+    }
+  });
+  selected.value = next;
+  if (succeeded) {
+    toasts.push(
+      `${succeeded} ${succeeded === 1 ? "download" : "downloads"} queued on ${target.host.label}`,
+    );
+  }
+  if (failures.length) toasts.push(failures.join(" · "), "error");
+  batchStarting.value = false;
 }
 
 function pull(entry: CatalogEntry) {
@@ -696,6 +788,51 @@ onUnmounted(() => {
       </button>
     </div>
 
+    <div
+      v-if="selected.size > 0"
+      class="border-edge sticky top-2 z-20 flex flex-wrap items-center gap-3 rounded-control border bg-bench/95 p-2.5 shadow-raised backdrop-blur"
+      data-test="catalog-batch-bar"
+      aria-live="polite"
+    >
+      <strong class="text-body text-ink">{{ selected.size }} selected</strong>
+      <template v-if="batchTargets.length">
+        <label class="ml-auto flex items-center gap-2 text-caption text-ink-2">
+          Target machine
+          <select
+            v-model="selectedTargetId"
+            data-test="catalog-batch-target"
+            :disabled="batchStarting"
+            class="border-edge h-8 rounded-control border bg-bath px-2 text-caption text-ink"
+          >
+            <option value="" disabled>Choose a machine…</option>
+            <option v-for="target in batchTargets" :key="target.host.id" :value="target.host.id">
+              {{ target.host.label }} · {{ targetSummary(target.installCount, target.repairCount) }}
+            </option>
+          </select>
+        </label>
+        <button
+          type="button"
+          data-test="catalog-batch-download"
+          class="h-8 rounded-control bg-safelight px-3 text-caption font-semibold text-on-accent disabled:opacity-50"
+          :disabled="!selectedBatchTarget || batchStarting"
+          @click="startBatch"
+        >
+          {{ batchStarting ? "Starting…" : `Download ${selected.size}` }}
+        </button>
+      </template>
+      <span v-else class="ml-auto text-caption text-stop">
+        No machine can receive every selected model.
+      </span>
+      <button
+        type="button"
+        class="border-edge h-8 rounded-control border px-2.5 text-caption text-ink-2 hover:text-ink"
+        :disabled="batchStarting"
+        @click="selected = new Map()"
+      >
+        Clear
+      </button>
+    </div>
+
     <!-- Empty state — keyed on the FILTERED list so an all-image page under
          the Video chip explains itself instead of rendering a blank grid. -->
     <div
@@ -724,7 +861,7 @@ onUnmounted(() => {
     <!-- Results, installed first. Grid keeps preview cards; the table layout
          is the app-wide model-row shape — clean info, no thumbnails. -->
     <div
-      v-else
+      v-if="loading || displayEntries.length > 0"
       :class="
         effectiveLayout === 'grid'
           ? 'grid grid-cols-[repeat(auto-fill,minmax(260px,1fr))] gap-2'
@@ -739,8 +876,11 @@ onUnmounted(() => {
           :hosts="hostLabelsFor(entry)"
           :installable="installable(entry)"
           :selected="detailEntry?.id === entry.id"
+          :selectable="!batchStarting && selectable(entry)"
+          :checked="selected.has(entry.id)"
           @pull="pull"
           @open="detailEntry = $event"
+          @toggle-select="toggleSelection"
         />
         <CatalogTableRow
           v-else
@@ -749,9 +889,12 @@ onUnmounted(() => {
           :hosts="hostLabelsFor(entry)"
           :installable="installable(entry)"
           :selected="detailEntry?.id === entry.id"
+          :selectable="!batchStarting && selectable(entry)"
+          :checked="selected.has(entry.id)"
           class="px-3 py-2"
           @pull="pull"
           @open="detailEntry = $event"
+          @toggle-select="toggleSelection"
         />
       </template>
     </div>

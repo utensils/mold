@@ -62,8 +62,10 @@ describe("CatalogTableRow", () => {
     expect(wrapper.get('[data-test="model-kind-badge"]').text()).toBe("LoRA");
     expect(wrapper.get('[data-test="model-nsfw-badge"]').text()).toBe("18+ NSFW");
     const row = wrapper.get("[data-test='catalog-table-row']");
-    expect(row.attributes("aria-label")).toContain("LoRA");
-    expect(row.attributes("aria-label")).toContain("18+ NSFW");
+    expect(row.attributes("role")).toBeUndefined();
+    const title = wrapper.get("[data-test='row-title']");
+    expect(title.attributes("aria-label")).toContain("LoRA");
+    expect(title.attributes("aria-label")).toContain("18+ NSFW");
   });
 
   it("shows SIZE and FETCH as the two size lines once resolved", async () => {

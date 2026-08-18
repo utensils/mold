@@ -14,10 +14,19 @@ import type { CatalogEntryWire } from "../types";
 import { formatGB } from "../util/format";
 
 const props = withDefaults(
-  defineProps<{ entry: CatalogEntryWire; layout?: "grid" | "list" }>(),
-  { layout: "grid" },
+  defineProps<{
+    entry: CatalogEntryWire;
+    layout?: "grid" | "list";
+    selectable?: boolean;
+    checked?: boolean;
+  }>(),
+  { layout: "grid", selectable: true, checked: false },
 );
-const emit = defineEmits<{ open: []; pull: [] }>();
+const emit = defineEmits<{
+  open: [];
+  pull: [];
+  "toggle-select": [checked: boolean];
+}>();
 
 const CATALOG_THUMBNAIL_WIDTH = 512;
 const CIVITAI_IMAGE_HOSTS = new Set([
@@ -120,6 +129,7 @@ const pullLabel = computed(() =>
 <template>
   <article
     class="card"
+    :class="{ 'card--checked': checked }"
     data-test="discover-card"
     :data-layout="props.layout"
     :aria-label="accessibleName"
@@ -162,6 +172,26 @@ const pullLabel = computed(() =>
     </button>
 
     <div class="card__top">
+      <label
+        class="card__select"
+        :title="
+          selectable
+            ? 'Select model for batch download'
+            : 'No common download target available'
+        "
+        @click.stop
+      >
+        <input
+          type="checkbox"
+          :checked="checked"
+          :disabled="!selectable"
+          :aria-label="`Select ${props.entry.name}`"
+          data-test="catalog-select"
+          @change="
+            emit('toggle-select', ($event.target as HTMLInputElement).checked)
+          "
+        />
+      </label>
       <ModelMetadataBadges
         :kind="props.entry.kind"
         :family="props.entry.family"
@@ -234,6 +264,31 @@ const pullLabel = computed(() =>
 
 .card:hover {
   border-color: var(--ce);
+}
+
+.card--checked {
+  border-color: var(--safelight);
+  box-shadow: inset 0 0 0 1px var(--safelight);
+}
+
+.card__select {
+  display: inline-flex;
+  align-items: center;
+  min-width: 20px;
+  min-height: 20px;
+}
+
+.card__select input {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  accent-color: var(--safelight);
+  cursor: pointer;
+}
+
+.card__select input:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
 }
 
 .card[data-layout="list"] {

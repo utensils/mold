@@ -33,6 +33,7 @@ import { useDownloadsStore } from "../../stores/downloads";
 import { useHostModelsStore } from "../../stores/hostModels";
 import { useHostsStore } from "../../stores/hosts";
 import { useModelStore } from "../../stores/models";
+import { ApiError } from "../../lib/api/client";
 
 const PAGE_SIZE = 24;
 
@@ -1117,6 +1118,149 @@ describe("CatalogTab install on a machine that is missing the model", () => {
     expect(wrapper.text()).toContain("● installed");
     expect(wrapper.find("[data-test='pull']").exists()).toBe(false);
     wrapper.unmount();
+  });
+});
+
+describe("CatalogTab batch downloads", () => {
+  it("queues every checked model on the selected target machine", async () => {
+    setActivePinia(createPinia());
+    const connection = useConnectionStore();
+    connection.info = {
+      mode: "local",
+      baseUrl: "http://127.0.0.1:7680",
+      apiKey: "local-key",
+    };
+    connection.status = "ready";
+    useHostModelsStore().byHost.local = {
+      entries: [],
+      fetchedAt: Date.now(),
+      error: null,
+    };
+    vi.spyOn(useDownloadsStore(), "subscribe").mockResolvedValue(undefined);
+    searchCatalog.mockResolvedValue({
+      entries: [entry("flux-one", "flux"), entry("flux-two", "flux")],
+      page: 1,
+      page_size: PAGE_SIZE,
+      total: 2,
+    });
+    const wrapper = mount(CatalogTab, {
+      props: { query: "", layout: "table" as const },
+    });
+    await flushPromises();
+
+    const checks = wrapper.findAll<HTMLInputElement>("[data-test='catalog-select']");
+    expect(checks).toHaveLength(2);
+    await checks[0]!.setValue(true);
+    await wrapper.findAll<HTMLInputElement>("[data-test='catalog-select']")[1]!.setValue(true);
+
+    expect(wrapper.get("[data-test='catalog-batch-bar']").text()).toContain("2 selected");
+    expect(wrapper.get<HTMLSelectElement>("[data-test='catalog-batch-target']").element.value).toBe(
+      "local",
+    );
+    await wrapper.get("[data-test='catalog-batch-download']").trigger("click");
+    await flushPromises();
+
+    expect(startCatalogDownload).toHaveBeenCalledTimes(2);
+    expect(startCatalogDownload).toHaveBeenCalledWith(
+      "hf:flux-one",
+      { baseUrl: "http://127.0.0.1:7680", apiKey: "local-key" },
+      false,
+    );
+    expect(startCatalogDownload).toHaveBeenCalledWith(
+      "hf:flux-two",
+      { baseUrl: "http://127.0.0.1:7680", apiKey: "local-key" },
+      false,
+    );
+    expect(wrapper.find("[data-test='catalog-batch-bar']").exists()).toBe(false);
+  });
+
+  it("does not offer a batch checkbox before a host inventory is known", async () => {
+    setActivePinia(createPinia());
+    const connection = useConnectionStore();
+    connection.info = {
+      mode: "local",
+      baseUrl: "http://127.0.0.1:7680",
+      apiKey: "local-key",
+    };
+    connection.status = "ready";
+    searchCatalog.mockResolvedValue({
+      entries: [entry("flux-one", "flux")],
+      page: 1,
+      page_size: PAGE_SIZE,
+      total: 1,
+    });
+    const wrapper = mount(CatalogTab, {
+      props: { query: "", layout: "table" as const },
+    });
+    await flushPromises();
+
+    expect(wrapper.get<HTMLInputElement>("[data-test='catalog-select']").element.disabled).toBe(
+      true,
+    );
+  });
+
+  it("does not offer unsupported catalog packages for batch download", async () => {
+    setActivePinia(createPinia());
+    const connection = useConnectionStore();
+    connection.info = {
+      mode: "local",
+      baseUrl: "http://127.0.0.1:7680",
+      apiKey: "local-key",
+    };
+    connection.status = "ready";
+    useHostModelsStore().byHost.local = {
+      entries: [],
+      fetchedAt: Date.now(),
+      error: null,
+    };
+    searchCatalog.mockResolvedValue({
+      entries: [{ ...entry("unsupported", "flux"), supported: false }],
+      page: 1,
+      page_size: PAGE_SIZE,
+      total: 1,
+    });
+    const wrapper = mount(CatalogTab, {
+      props: { query: "", layout: "table" as const },
+    });
+    await flushPromises();
+
+    expect(wrapper.get<HTMLInputElement>("[data-test='catalog-select']").element.disabled).toBe(
+      true,
+    );
+  });
+
+  it("clears already-queued models from the batch selection", async () => {
+    setActivePinia(createPinia());
+    const connection = useConnectionStore();
+    connection.info = {
+      mode: "local",
+      baseUrl: "http://127.0.0.1:7680",
+      apiKey: "local-key",
+    };
+    connection.status = "ready";
+    useHostModelsStore().byHost.local = {
+      entries: [],
+      fetchedAt: Date.now(),
+      error: null,
+    };
+    vi.spyOn(useDownloadsStore(), "subscribe").mockResolvedValue(undefined);
+    startCatalogDownload.mockRejectedValueOnce(new ApiError("already queued", 409));
+    searchCatalog.mockResolvedValue({
+      entries: [entry("flux-one", "flux")],
+      page: 1,
+      page_size: PAGE_SIZE,
+      total: 1,
+    });
+    const wrapper = mount(CatalogTab, {
+      props: { query: "", layout: "table" as const },
+    });
+    await flushPromises();
+    await wrapper.get<HTMLInputElement>("[data-test='catalog-select']").setValue(true);
+
+    await wrapper.get("[data-test='catalog-batch-download']").trigger("click");
+    await flushPromises();
+
+    expect(wrapper.find("[data-test='catalog-batch-bar']").exists()).toBe(false);
   });
 });
 
