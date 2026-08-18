@@ -3942,6 +3942,9 @@ pub fn resolved_model_fingerprint(
 fn resolved_paths_model_fingerprint(model: &str, paths: ModelPaths) -> String {
     let mut artifacts = BTreeMap::new();
     artifacts.insert(ComponentRole::Transformer, paths.transformer);
+    if let Some(path) = paths.low_noise_transformer {
+        artifacts.insert(ComponentRole::LowNoiseTransformer, path);
+    }
     for (index, shard) in paths.transformer_shards.into_iter().enumerate() {
         artifacts.insert(ComponentRole::TransformerShard(index), shard);
     }
@@ -3985,6 +3988,8 @@ pub fn frozen_model_fingerprint(
     optional_file!("spatial_upscaler", paths.spatial_upscaler);
     optional_file!("temporal_upscaler", paths.temporal_upscaler);
     optional_file!("distilled_lora", paths.distilled_lora);
+    optional_file!("low_noise_transformer", paths.low_noise_transformer);
+    optional_file!("low_noise_distilled_lora", paths.low_noise_distilled_lora);
     optional_file!("t5_encoder", paths.t5_encoder);
     optional_file!("clip_encoder", paths.clip_encoder);
     optional_file!("t5_tokenizer", paths.t5_tokenizer);
@@ -4061,12 +4066,14 @@ pub fn freeze_chain_model_with_paths(
                 .collect()
         })
         .transpose()?;
+    frozen.low_noise_transformer = canonical_optional(paths.low_noise_transformer.as_ref())?;
     frozen.vae = (!paths.vae.as_os_str().is_empty())
         .then(|| canonical(&paths.vae))
         .transpose()?;
     frozen.spatial_upscaler = canonical_optional(paths.spatial_upscaler.as_ref())?;
     frozen.temporal_upscaler = canonical_optional(paths.temporal_upscaler.as_ref())?;
     frozen.distilled_lora = canonical_optional(paths.distilled_lora.as_ref())?;
+    frozen.low_noise_distilled_lora = canonical_optional(paths.low_noise_distilled_lora.as_ref())?;
     frozen.t5_encoder = canonical_optional(paths.t5_encoder.as_ref())?;
     frozen.clip_encoder = canonical_optional(paths.clip_encoder.as_ref())?;
     frozen.t5_tokenizer = canonical_optional(paths.t5_tokenizer.as_ref())?;
@@ -5786,6 +5793,21 @@ mod tests {
     }
 
     #[test]
+    fn resolved_paths_model_fingerprint_includes_low_noise_expert() {
+        let paths = |low: &str| {
+            let mut paths = indexed_paths(Vec::new(), Vec::new());
+            paths.low_noise_transformer = Some(PathBuf::from(low));
+            paths
+        };
+
+        assert_ne!(
+            resolved_paths_model_fingerprint("model", paths("/models/low-a.gguf")),
+            resolved_paths_model_fingerprint("model", paths("/models/low-b.gguf")),
+            "the paired expert must participate in model identity"
+        );
+    }
+
+    #[test]
     fn text_encoder_and_lora_roles_do_not_alias_past_u16_cardinality() {
         let role_count = usize::from(u16::MAX) + 2;
         let text_encoder_files = (0..role_count)
@@ -6954,6 +6976,50 @@ mod tests {
             .expect("LTX-2 frozen paths remain exactly resolvable without a standalone VAE");
         assert_eq!(recovered.transformer, transformer.canonicalize().unwrap());
         assert_eq!(recovered.vae, PathBuf::new());
+    }
+
+    #[test]
+    fn frozen_wan_chain_model_preserves_both_experts_and_distilled_loras() {
+        let root = TempDir::new().unwrap();
+        let write = |name: &str| {
+            let path = root.path().join(name);
+            std::fs::write(&path, name.as_bytes()).unwrap();
+            path
+        };
+        let high = write("high.gguf");
+        let low = write("low.gguf");
+        let vae = write("vae.safetensors");
+        let high_lora = write("high-lora.safetensors");
+        let low_lora = write("low-lora.safetensors");
+        let model = "wan-pair-test";
+        let config = Config::default();
+        let mut paths = indexed_paths(Vec::new(), Vec::new());
+        paths.transformer = high.canonicalize().unwrap();
+        paths.low_noise_transformer = Some(low.canonicalize().unwrap());
+        paths.vae = vae.canonicalize().unwrap();
+        paths.distilled_lora = Some(high_lora.canonicalize().unwrap());
+        paths.low_noise_distilled_lora = Some(low_lora.canonicalize().unwrap());
+
+        let frozen = freeze_chain_model_with_paths(&config, model, paths.clone()).unwrap();
+        let recovered = ModelPaths::resolve_from_model_config_exact(&frozen.config)
+            .expect("the frozen Wan pair remains exactly resolvable");
+
+        assert_eq!(recovered, paths);
+        let original_fingerprint = frozen.model_fingerprint;
+        replace_artifact_bytes(&low, b"changed-low");
+        assert_ne!(
+            frozen_model_fingerprint(model, &frozen.config).unwrap(),
+            original_fingerprint,
+            "replacing the low-noise expert must invalidate durable chain authority"
+        );
+        replace_artifact_bytes(&low, b"low.gguf");
+        let restored_fingerprint = frozen_model_fingerprint(model, &frozen.config).unwrap();
+        replace_artifact_bytes(&low_lora, b"changed-low-lora");
+        assert_ne!(
+            frozen_model_fingerprint(model, &frozen.config).unwrap(),
+            restored_fingerprint,
+            "replacing the low-noise distillation adapter must invalidate durable chain authority"
+        );
     }
 
     #[test]

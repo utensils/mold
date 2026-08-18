@@ -1676,6 +1676,9 @@ impl Config {
 fn overlay_model_paths(target: &mut ModelConfig, source: &ModelConfig) {
     target.transformer = source.transformer.clone();
     target.transformer_shards = source.transformer_shards.clone();
+    if source.low_noise_transformer.is_some() {
+        target.low_noise_transformer = source.low_noise_transformer.clone();
+    }
     target.vae = source.vae.clone();
     if source.spatial_upscaler.is_some() {
         target.spatial_upscaler = source.spatial_upscaler.clone();
@@ -1685,6 +1688,9 @@ fn overlay_model_paths(target: &mut ModelConfig, source: &ModelConfig) {
     }
     if source.distilled_lora.is_some() {
         target.distilled_lora = source.distilled_lora.clone();
+    }
+    if source.low_noise_distilled_lora.is_some() {
+        target.low_noise_distilled_lora = source.low_noise_distilled_lora.clone();
     }
 
     if source.t5_encoder.is_some() {
@@ -1860,7 +1866,28 @@ fn parse_device_ref_env(key: &str) -> Option<crate::types::DeviceRef> {
 
 #[cfg(test)]
 mod scheduler_settings_tests {
-    use super::SchedulerSettings;
+    use super::{overlay_model_paths, ModelConfig, SchedulerSettings};
+
+    #[test]
+    fn manifest_overlay_preserves_paired_expert_paths() {
+        let mut target = ModelConfig::default();
+        let source = ModelConfig {
+            low_noise_transformer: Some("/models/low-noise.gguf".to_string()),
+            low_noise_distilled_lora: Some("/models/low-noise-lora.safetensors".to_string()),
+            ..ModelConfig::default()
+        };
+
+        overlay_model_paths(&mut target, &source);
+
+        assert_eq!(
+            target.low_noise_transformer.as_deref(),
+            Some("/models/low-noise.gguf")
+        );
+        assert_eq!(
+            target.low_noise_distilled_lora.as_deref(),
+            Some("/models/low-noise-lora.safetensors")
+        );
+    }
 
     #[test]
     fn scheduler_settings_defaults_and_rejects_invalid_toml() {
