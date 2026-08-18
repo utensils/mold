@@ -1403,7 +1403,7 @@ fn multi_gpu_loaded_models(state: &AppState) -> std::collections::HashSet<String
         }
         if let Ok(resident) = worker.resident_model.read() {
             if let Some(name) = resident.as_ref() {
-                set.insert(name.clone());
+                set.insert(crate::gpu_pool::resident_model_display_name(name).to_string());
             }
         }
     }

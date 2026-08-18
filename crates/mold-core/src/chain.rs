@@ -847,6 +847,7 @@ impl ChainRequest {
                 clip_frames,
                 motion_tail,
                 source_image,
+                family.as_deref(),
             )?;
         }
 
@@ -1048,6 +1049,7 @@ fn build_auto_expand_stages(
     clip_frames: u32,
     motion_tail_frames: u32,
     source_image: Option<Vec<u8>>,
+    family: Option<&str>,
 ) -> Result<Vec<ChainStage>> {
     let (stage_count, per_stage_frames) = if total_frames <= clip_frames {
         // Single stage: match the user's requested length exactly so we
@@ -1072,20 +1074,23 @@ fn build_auto_expand_stages(
     }
 
     let mut stages = Vec::with_capacity(count_usize);
-    for _ in 0..stage_count {
-        // Every stage carries the starting image: stage 0 uses it as the
-        // i2v replacement at frame 0, and continuation stages use it as a
-        // soft identity anchor through the append path (see
-        // `Ltx2Engine::render_chain_stage`). Keeping a durable reference
-        // across stages is what stops scene/identity drift past the first
-        // clip, whose effects were traced in render-chain v1 as the
-        // dominant cause of "strange" continuations — the motion tail
-        // alone only carries ~0.7 s of pixel context, nowhere near enough
-        // for the model to remember the scene across an 8-stage chain.
+    for idx in 0..stage_count {
+        // LTX-2 consumes the repeated starting image as a soft identity
+        // anchor alongside the motion tail. Wan has no such append path: a
+        // stage-local source image is its hard frame-0 authority, and its
+        // renderer deliberately refuses to replace one with the preceding
+        // stage's tail. Repeating the opening still therefore restarted every
+        // auto-expanded Wan continuation from the same frame instead of
+        // producing the promised seamless handoff.
+        let stage_source = if family == Some("wan") && idx > 0 {
+            None
+        } else {
+            source_image.clone()
+        };
         stages.push(ChainStage {
             prompt: prompt.to_string(),
             frames: per_stage_frames,
-            source_image: source_image.clone(),
+            source_image: stage_source,
             negative_prompt: None,
             seed_offset: None,
             transition: TransitionMode::Smooth,
@@ -1278,7 +1283,7 @@ mod tests {
     }
 
     #[test]
-    fn normalise_preserves_starting_image_across_all_stages() {
+    fn normalise_preserves_ltx2_starting_image_across_all_stages() {
         let png = vec![0x89, 0x50, 0x4e, 0x47, 0xde, 0xad, 0xbe, 0xef];
         let normalised = auto_expand_request("test", 200, 97, 9, Some(png.clone()))
             .normalise()
@@ -1296,6 +1301,28 @@ mod tests {
                 "stage {idx} must carry the starting image for cross-stage identity anchoring",
             );
         }
+    }
+
+    #[test]
+    fn normalise_seeds_only_the_first_wan_stage_from_the_opening_image() {
+        let png = vec![0x89, 0x50, 0x4e, 0x47, 0xde, 0xad, 0xbe, 0xef];
+        let mut request = auto_expand_request("test", 105, 53, 1, Some(png.clone()));
+        request.model = "hf:opaque-wan-i2v".into();
+        request.width = 832;
+        request.height = 480;
+        let normalised = request
+            .normalise_with_family(Some("wan"))
+            .expect("wan auto-expand should succeed");
+
+        assert_eq!(normalised.stages.len(), 2);
+        assert_eq!(
+            normalised.stages[0].source_image.as_deref(),
+            Some(png.as_slice())
+        );
+        assert!(
+            normalised.stages[1].source_image.is_none(),
+            "the continuation must accept Wan's previous-frame seam carry"
+        );
     }
 
     #[test]

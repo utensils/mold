@@ -3895,6 +3895,7 @@ async fn unload_model(
                         .read()
                         .unwrap_or_else(|poisoned| poisoned.into_inner())
                         .as_deref()
+                        .map(crate::gpu_pool::resident_model_display_name)
                         == Some(model)
                 })
                 .collect(),
@@ -3987,7 +3988,11 @@ async fn model_is_gpu_resident(state: &AppState, canonical: &str) -> bool {
             }
         }
         if let Ok(resident) = worker.resident_model.read() {
-            if resident.as_deref() == Some(canonical) {
+            if resident
+                .as_deref()
+                .map(crate::gpu_pool::resident_model_display_name)
+                == Some(canonical)
+            {
                 return true;
             }
         }
