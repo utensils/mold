@@ -120,8 +120,7 @@ const advancedCount = computed(
     Number(
       guidanceCaps.value.supportsNegativePrompt && Boolean(activeClip.value?.negativePrompt.trim()),
     ) +
-    Number(Boolean(activeClip.value?.cameraControl)) +
-    Number(draft.enableAudio),
+    Number(Boolean(activeClip.value?.cameraControl)),
 );
 const fitOptions = SOURCE_FIT_OPTIONS.filter((option) => option.value !== "pad-repaint");
 const fitMode = computed(() => coerceSourceFitForMaskless(props.form.sourceFit).mode);
@@ -467,6 +466,15 @@ function sourceImageMime(filename: string): string {
       <span v-if="advancedCount > 0">· {{ advancedCount }} on</span>
     </button>
 
+    <label
+      v-if="chainLimits?.supports_audio"
+      class="mobile-sequence-check"
+      data-test="mobile-sequence-audio"
+    >
+      <input v-model="draft.enableAudio" type="checkbox" :disabled="locked" />
+      Generate audio
+    </label>
+
     <p
       v-if="blockingReason"
       class="mobile-sequence-error"
@@ -513,7 +521,6 @@ function sourceImageMime(filename: string): string {
       @close="advancedOpen = false"
       @reset="
         draft.openingImage = null;
-        draft.enableAudio = false;
         form.strength = 0.75;
         form.sourceFit = { mode: 'crop-fill', alignX: 'center', alignY: 'center' };
         draft.clips.forEach((clip) => {
@@ -668,14 +675,6 @@ function sourceImageMime(filename: string): string {
           "Built-in camera motions are available for LTX-2 19B only. This model accepts a custom LoRA path."
         }}
       </p>
-      <label
-        v-if="chainLimits?.supports_audio"
-        class="mobile-sequence-check"
-        data-test="mobile-sequence-audio"
-      >
-        <input v-model="draft.enableAudio" type="checkbox" :disabled="locked" />
-        Generate audio
-      </label>
     </MobileAdvancedSheet>
     <MobileImagePickerSheet
       :open="imagePickerOpen"

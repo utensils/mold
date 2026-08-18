@@ -43,7 +43,6 @@ function formFor(family: string, model = `${family}:test`): GenerateForm {
 function mountParameters(
   initial: GenerateForm,
   upscalers: ModelEntry[] = [],
-  audioOutputSupported = true,
   controlAdapters: Ltx2ControlAdapterInfo[] = [],
   cameraControls: Ltx2CameraControlInfo[] = [cameraControl],
   selectedModel: ModelEntry | null = null,
@@ -52,14 +51,13 @@ function mountParameters(
   const Harness = defineComponent({
     components: { MobileGenerateParameters },
     setup: () => ({
-      audioOutputSupported,
       cameraControls,
       controlAdapters,
       form,
       selectedModel,
       upscalers,
     }),
-    template: `<MobileGenerateParameters :form="form" :upscalers="upscalers" :selected-model="selectedModel" :audio-output-supported="audioOutputSupported" :control-adapters="controlAdapters" :camera-controls="cameraControls" camera-controls-loaded />`,
+    template: `<MobileGenerateParameters :form="form" :upscalers="upscalers" :selected-model="selectedModel" :control-adapters="controlAdapters" :camera-controls="cameraControls" camera-controls-loaded />`,
   });
   return { wrapper: mount(Harness), form };
 }
@@ -78,7 +76,7 @@ describe("MobileGenerateParameters", () => {
       family: "minimax-h3",
       source_image: "required",
     } as ModelEntry;
-    const boundaries = mountParameters(formFor(fl2va.family, fl2va.name), [], true, [], [], fl2va);
+    const boundaries = mountParameters(formFor(fl2va.family, fl2va.name), [], [], [], fl2va);
     // FL2VA boundaries render as the shared source wells in the primary form.
     expect(boundaries.wrapper.find("[data-test='mobile-h3-authoring']").exists()).toBe(false);
 
@@ -86,14 +84,7 @@ describe("MobileGenerateParameters", () => {
       name: "minimax-h3-ref2va:comfy-pruned-int8",
       family: "minimax-h3",
     } as ModelEntry;
-    const references = mountParameters(
-      formFor(ref2va.family, ref2va.name),
-      [],
-      true,
-      [],
-      [],
-      ref2va,
-    );
+    const references = mountParameters(formFor(ref2va.family, ref2va.name), [], [], [], ref2va);
     expect(references.wrapper.find("[data-test='mobile-h3-authoring']").exists()).toBe(true);
     expect(references.wrapper.text()).toContain("Ordered references");
   });
@@ -114,7 +105,7 @@ describe("MobileGenerateParameters", () => {
     } as ModelEntry;
     const initial = formFor("ltx2", model.name);
     Object.assign(initial, { width: 640, height: 640, steps: 7, guidance: 8 });
-    const { wrapper, form } = mountParameters(initial, [], true, [], [], model);
+    const { wrapper, form } = mountParameters(initial, [], [], [], model);
     await wrapper.get("[data-test='mobile-ltx2-disclosure']").trigger("click");
     await wrapper.get("[data-test='mobile-ltx2-pipeline']").setValue("two-stage");
     expect(form).toMatchObject({
@@ -139,7 +130,6 @@ describe("MobileGenerateParameters", () => {
     const { wrapper, form } = mountParameters(
       { ...formFor("ltx2", model.name), frames: 97, fps: 24 },
       [],
-      true,
       [],
       [cameraControl],
       model,
@@ -168,7 +158,6 @@ describe("MobileGenerateParameters", () => {
     const { wrapper, form } = mountParameters(
       formFor("ltx2", "ltx-2-19b-distilled:fp8"),
       [],
-      true,
       adapters,
     );
     await wrapper.get("[data-test='mobile-ltx2-reference-control']").setValue("detailer");
@@ -335,7 +324,6 @@ describe("MobileGenerateParameters", () => {
     const wan = mountParameters(
       { ...formFor("wan", model.name), frames: 45 },
       [],
-      true,
       [],
       [cameraControl],
       model,
@@ -458,17 +446,6 @@ describe("MobileGenerateParameters", () => {
     expect(child.emitted("validity-change")?.at(-1)).toEqual([false]);
   });
 
-  it("disables generated audio for video-only LTX-2 checkpoints", () => {
-    const initial = formFor("ltx2", "cv:3143864");
-    initial.enableAudio = false;
-    const { wrapper } = mountParameters(initial, [], false);
-
-    expect(wrapper.get("[data-test='mobile-enable-audio']").attributes()).toHaveProperty(
-      "disabled",
-    );
-    expect(wrapper.text()).toContain("Audio assets are not included with this checkpoint");
-  });
-
   it("requires a real custom camera LoRA path", async () => {
     const initial = formFor("ltx2", "ltx-2.3-22b-distilled:fp8");
     initial.outputFormat = "mp4";
@@ -520,10 +497,7 @@ describe("MobileGenerateParameters", () => {
     initial.outputFormat = "mp4";
     const { wrapper, form } = mountParameters(initial);
 
-    expect(wrapper.find("[data-test='mobile-enable-audio']").exists()).toBe(true);
-    await wrapper.get("[data-test='mobile-enable-audio']").setValue(true);
     await wrapper.get("[data-test='mobile-camera-motion']").setValue("dolly-in");
-    expect(form.enableAudio).toBe(true);
     expect(form.cameraControl).toBe("dolly-in");
     expect(form.loras).toEqual([
       {
@@ -645,7 +619,6 @@ describe("MobileGenerateParameters — continue a video", () => {
     const capable = mountParameters(
       formFor("ltx2", "ltx-2-19b-distilled:fp8"),
       [],
-      true,
       [],
       [cameraControl],
       extendModel,
@@ -658,7 +631,7 @@ describe("MobileGenerateParameters — continue a video", () => {
     const form = formFor("ltx2", "ltx-2-19b-distilled:fp8");
     form.frames = 97;
     form.extendVideo = { filename: "clip.mp4", base64: "AAAA" };
-    const { wrapper } = mountParameters(form, [], true, [], [cameraControl], extendModel);
+    const { wrapper } = mountParameters(form, [], [], [cameraControl], extendModel);
 
     // 97 rendered frames minus the 17 that re-render the source tail.
     expect(wrapper.get("[data-test='mobile-ltx2-extend-summary']").text()).toContain(
@@ -671,7 +644,7 @@ describe("MobileGenerateParameters — continue a video", () => {
     form.frames = 97;
     form.extendVideo = { filename: "clip.mp4", base64: "AAAA" };
     form.sourceImage = "AAAA";
-    const { wrapper } = mountParameters(form, [], true, [], [cameraControl], extendModel);
+    const { wrapper } = mountParameters(form, [], [], [cameraControl], extendModel);
 
     expect(wrapper.get("[data-test='mobile-ltx2-extend-error']").text()).toContain("source image");
   });
@@ -681,7 +654,7 @@ describe("MobileGenerateParameters — continue a video", () => {
     form.frames = 97;
     form.extendVideo = { filename: "clip.mp4", base64: "AAAA" };
     form.extendOverlapFrames = 33;
-    const { wrapper } = mountParameters(form, [], true, [], [cameraControl], extendModel);
+    const { wrapper } = mountParameters(form, [], [], [cameraControl], extendModel);
 
     await wrapper.get("[data-test='mobile-ltx2-extend-clear']").trigger("click");
     expect(form.extendVideo).toBeNull();
@@ -704,7 +677,7 @@ describe("MobileGenerateParameters — continue a video", () => {
     const form = formFor("wan", "wan22-i2v-a14b:q5");
     form.frames = 53;
     form.extendVideo = { filename: "clip.mp4", base64: "AAAA" };
-    const { wrapper } = mountParameters(form, [], true, [], [cameraControl], wanExtendModel);
+    const { wrapper } = mountParameters(form, [], [], [cameraControl], wanExtendModel);
 
     expect(wrapper.find("[data-test='mobile-ltx2-extend-video']").exists()).toBe(false);
     expect(wrapper.find("[data-test='mobile-ltx2-extend-clear']").exists()).toBe(true);
@@ -725,7 +698,6 @@ describe("MobileGenerateParameters — continue a video", () => {
     const { wrapper } = mountParameters(
       formFor("wan", "wan22-t2v-a14b:q5"),
       [],
-      true,
       [],
       [cameraControl],
       {
@@ -748,7 +720,7 @@ describe("MobileGenerateParameters — continue a video", () => {
     const form = formFor("wan", "wan22-i2v-a14b:q5");
     form.frames = 53;
     form.extendVideo = { filename: "clip.mp4", base64: "AAAA" };
-    const { wrapper, form: live } = mountParameters(form, [], true, [], [cameraControl], {
+    const { wrapper, form: live } = mountParameters(form, [], [], [cameraControl], {
       name: "wan22-i2v-a14b:q5",
       family: "wan",
       source_image: "required",

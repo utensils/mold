@@ -125,11 +125,7 @@ describe("AdvancedDrawer sequence contract", () => {
   });
 
   it("shows only sequence-owned controls", () => {
-    const wrapper = factory(
-      "ltx2",
-      {},
-      { output: "sequence", sequenceSupportsAudio: true },
-    );
+    const wrapper = factory("ltx2", {}, { output: "sequence" });
     expect(
       wrapper.find("[data-test='sequence-section-opening-image']").exists(),
     ).toBe(true);
@@ -137,7 +133,7 @@ describe("AdvancedDrawer sequence contract", () => {
       wrapper.find("[data-test='sequence-section-negative']").exists(),
     ).toBe(true);
     expect(wrapper.find("[data-test='sequence-section-audio']").exists()).toBe(
-      true,
+      false,
     );
     expect(wrapper.find("[data-test='section-source']").exists()).toBe(false);
     expect(wrapper.find("[data-test='section-lora']").exists()).toBe(false);
@@ -261,6 +257,7 @@ describe("AdvancedDrawer sequence contract", () => {
       { output: "sequence" },
     );
     const draft = useSequenceDraftStore();
+    draft.enableAudio = true;
     draft.openingImage = {
       kind: "upload",
       filename: "open.png",
@@ -268,6 +265,7 @@ describe("AdvancedDrawer sequence contract", () => {
     } as never;
     await wrapper.get("[data-test='advanced-reset']").trigger("click");
     expect(draft.openingImage).not.toBeNull();
+    expect(draft.enableAudio).toBe(true);
     // Strength/fit render beside the opening-image well, not in Advanced.
     const patched = wrapper.emitted("update:modelValue")?.at(-1)?.[0] as
       GenerateFormState | undefined;
@@ -545,15 +543,6 @@ describe("AdvancedDrawer video suite", () => {
     expect(next.pipeline).toBe("two-stage-hq");
   });
 
-  it("toggles LTX-2 audio decode off (null default reads as on)", async () => {
-    const wrapper = await openVideo("ltx2");
-    await wrapper.get("[data-test='ltx2-enable-audio']").trigger("click");
-    const [next] = wrapper.emitted("update:modelValue")!.at(-1) as [
-      GenerateFormState,
-    ];
-    expect(next.enableAudio).toBe(false);
-  });
-
   it("edits an existing keyframe's frame", async () => {
     const wrapper = await openVideo("ltx2", {
       keyframes: [
@@ -588,6 +577,7 @@ describe("AdvancedDrawer video suite", () => {
 
   it("Reset also clears the video suite", async () => {
     const wrapper = factory("ltx2", {
+      enableAudio: false,
       pipeline: "two-stage",
       gifPreview: true,
       spatialUpscale: "x2",
@@ -599,6 +589,7 @@ describe("AdvancedDrawer video suite", () => {
     expect(next.pipeline).toBe(null);
     expect(next.gifPreview).toBe(false);
     expect(next.spatialUpscale).toBe(null);
+    expect(next.enableAudio).toBe(false);
   });
 });
 

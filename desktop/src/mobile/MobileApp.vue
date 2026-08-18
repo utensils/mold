@@ -520,6 +520,7 @@ function closeAdvancedSheet(): void {
  * inspector's Reset — the sheet's scoped reset below is deliberately narrower. */
 function resetCreateSettings(): void {
   resetFormToModelDefaults(form, selectedGenerationModel.value);
+  if (isSequence.value) draft.enableAudio = false;
 }
 
 /** Match the desktop Advanced reset: restore model-owned generation controls
@@ -5609,6 +5610,34 @@ onBeforeUnmount(() => {
               @seed-validity="seedValid = $event"
             />
 
+            <label
+              v-if="caps.supportsAudio && !isMinimaxH3Identity(form.family, form.model)"
+              class="mobile-generate-toggle-row"
+              data-test="mobile-generate-audio-control"
+            >
+              <span>
+                <strong>Generate audio</strong>
+                <small>Include a synchronized soundtrack when the model supports it.</small>
+              </span>
+              <input
+                v-model="form.enableAudio"
+                type="checkbox"
+                :disabled="selectedGenerationModel?.supports_audio === false"
+                data-test="mobile-enable-audio"
+              />
+            </label>
+            <p
+              v-if="
+                caps.supportsAudio &&
+                !isMinimaxH3Identity(form.family, form.model) &&
+                selectedGenerationModel?.supports_audio === false
+              "
+              class="mobile-generate-validation"
+            >
+              Audio assets are not included with this checkpoint. Video generation remains
+              available.
+            </p>
+
             <div class="mobile-advanced-row">
               <button
                 class="mobile-advanced-trigger"
@@ -5640,7 +5669,6 @@ onBeforeUnmount(() => {
                 :target="selectedTarget"
                 :upscalers="upscalers"
                 :selected-model="selectedGenerationModel"
-                :audio-output-supported="selectedGenerationModel?.supports_audio !== false"
                 :control-adapters="controlAdapters"
                 :camera-controls="cameraControls"
                 :camera-controls-loaded="cameraControlsLoaded"

@@ -2048,11 +2048,15 @@ function onResetSettings() {
   // resetSettings swaps in a freshly built state object, so the previous one is
   // never mutated and can be handed straight back on undo.
   const previous = form.state.value;
+  const previousSequenceAudio = sequenceMode.value ? draft.enableAudio : null;
   form.resetSettings(currentModel.value ?? null);
+  if (sequenceMode.value) draft.enableAudio = false;
   undoableAction({
     text: "Settings reset to model defaults",
     undo: () => {
       form.state.value = previous;
+      if (previousSequenceAudio !== null)
+        draft.enableAudio = previousSequenceAudio;
     },
     commit: () => {},
   });
@@ -2074,8 +2078,7 @@ const advCount = computed(() =>
         capabilities.value.supportsNegativePrompt &&
           draft.clips.some((clip) => clip.negativePrompt.trim()),
       ) +
-      Number(Boolean(draft.clips.some((clip) => clip.cameraControl))) +
-      Number(draft.enableAudio)
+      Number(Boolean(draft.clips.some((clip) => clip.cameraControl)))
     : advancedActiveCount({
         negativePrompt: capabilities.value.supportsNegativePrompt
           ? form.state.value.negativePrompt
@@ -2097,7 +2100,6 @@ const advCount = computed(() =>
           capabilities.value.supportsVideo &&
           (form.state.value.gifPreview ||
             form.state.value.cameraControl != null ||
-            form.state.value.enableAudio === false ||
             form.state.value.pipeline != null ||
             form.state.value.icLoraControl != null ||
             form.state.value.audioFile != null ||
@@ -4310,13 +4312,9 @@ onBeforeUnmount(() => {
           :placement-gpus="gpuListForPlacement"
           :models="models"
           :routing-request="durationRoutingRequest"
-          :audio-output-supported="currentModel?.supports_audio !== false"
           :can-extend="canExtend"
           :extend-default-overlap-frames="extendDefaultOverlapFrames"
           :output="sequenceMode ? 'sequence' : 'single'"
-          :sequence-supports-audio="
-            currentFamily === 'ltx2' && currentModel?.supports_audio !== false
-          "
           @open-picker="showPicker = true"
           @open-h3-first-frame-picker="h3BoundaryPickerTarget = 'firstFrame'"
           @open-h3-last-frame-picker="h3BoundaryPickerTarget = 'lastFrame'"
@@ -4342,13 +4340,9 @@ onBeforeUnmount(() => {
         :placement-gpus="gpuListForPlacement"
         :models="models"
         :routing-request="durationRoutingRequest"
-        :audio-output-supported="currentModel?.supports_audio !== false"
         :can-extend="canExtend"
         :extend-default-overlap-frames="extendDefaultOverlapFrames"
         :output="sequenceMode ? 'sequence' : 'single'"
-        :sequence-supports-audio="
-          currentFamily === 'ltx2' && currentModel?.supports_audio !== false
-        "
         @close="showAdvanced = false"
         @open-picker="showPicker = true"
         @open-h3-first-frame-picker="h3BoundaryPickerTarget = 'firstFrame'"

@@ -15,6 +15,7 @@ import SliderRow from "@ui/components/SliderRow.vue";
 import VideoDurationSlider from "@ui/components/VideoDurationSlider.vue";
 import SegmentedControl from "@ui/components/SegmentedControl.vue";
 import Stepper from "@ui/components/Stepper.vue";
+import SwitchToggle from "@ui/components/SwitchToggle.vue";
 import BadgePill from "@ui/components/BadgePill.vue";
 import Icon from "@ui/components/Icon.vue";
 import { aspectsSupportedByPresets } from "@ui/lib/resolution";
@@ -44,6 +45,8 @@ import {
 } from "@studio/lib/sourceResolution";
 import HostRoutingPicker from "./HostRoutingPicker.vue";
 import { useHostRouting } from "../../composables/useHostRouting";
+import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
+import { isMinimaxH3Identity } from "@studio/lib/minimaxH3Authoring";
 
 const props = withDefaults(
   defineProps<{
@@ -113,6 +116,28 @@ const resolutionWarning = computed(() => {
   return finding?.level === "warn" ? finding.message : null;
 });
 const sequenceMode = computed(() => props.output === "sequence");
+const draft = useSequenceDraftStore();
+const showGenerateAudio = computed(() =>
+  sequenceMode.value
+    ? props.family === "ltx2" && props.model?.supports_audio !== false
+    : capabilities.value.supportsAudio &&
+      !isMinimaxH3Identity(
+        props.family,
+        props.model?.name ?? props.modelValue.model,
+      ),
+);
+const generateAudio = computed(() =>
+  sequenceMode.value
+    ? draft.enableAudio
+    : props.modelValue.enableAudio !== false,
+);
+const audioOutputSupported = computed(
+  () => props.model?.supports_audio !== false,
+);
+function setGenerateAudio(value: boolean) {
+  if (sequenceMode.value) draft.enableAudio = value;
+  else patch({ enableAudio: value });
+}
 // Edit families (Qwen image edit) render one print at a time; a sequence
 // renders one timeline.
 const batchLocked = computed(
@@ -494,6 +519,29 @@ function lockLastSeed() {
       />
     </div>
 
+    <div
+      v-if="showGenerateAudio"
+      class="controls__group controls__toggle"
+      data-test="generate-audio-control"
+    >
+      <span class="controls__label controls__label--inline"
+        >Generate audio</span
+      >
+      <SwitchToggle
+        :model-value="generateAudio"
+        :disabled="!sequenceMode && !audioOutputSupported"
+        label="Generate audio"
+        @update:model-value="setGenerateAudio"
+      />
+      <p
+        v-if="!sequenceMode && !audioOutputSupported"
+        class="controls__hint controls__hint--full"
+      >
+        Audio assets are not included with this checkpoint. Video generation
+        remains available.
+      </p>
+    </div>
+
     <div class="controls__group">
       <SliderRow
         label="Prompt strength"
@@ -677,6 +725,16 @@ function lockLastSeed() {
 
 .controls__label--inline {
   margin-bottom: 0;
+}
+
+.controls__toggle {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px 12px;
+}
+.controls__hint--full {
+  grid-column: 1 / -1;
 }
 
 .controls__seed {

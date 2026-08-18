@@ -8,6 +8,7 @@ import ResolutionSelector from "@ui/components/ResolutionSelector.vue";
 import SliderRow from "@ui/components/SliderRow.vue";
 import VideoDurationSlider from "@ui/components/VideoDurationSlider.vue";
 import Stepper from "@ui/components/Stepper.vue";
+import SwitchToggle from "@ui/components/SwitchToggle.vue";
 import BadgePill from "@ui/components/BadgePill.vue";
 import PanelResizeHandle from "../shell/PanelResizeHandle.vue";
 import { aspectIdFor } from "../../lib/resolutions";
@@ -82,9 +83,19 @@ describe("InspectorPanel — layout", () => {
     const wrapper = mount(InspectorPanel, { props: { form } });
     const duration = wrapper.getComponent(VideoDurationSlider);
     expect(duration.text()).toContain("4.0s");
+    expect(wrapper.find('[data-test="generate-audio-control"]').exists()).toBe(true);
+    wrapper.getComponent(SwitchToggle).vm.$emit("update:modelValue", true);
+    expect(form.enableAudio).toBe(true);
     duration.vm.$emit("update:frames", 241);
     await flushPromises();
     expect(form.frames).toBe(241);
+  });
+
+  it("does not expose the audio toggle for an H3 model restored without a family", () => {
+    const form = formFor("");
+    form.model = "minimax-h3-fl2va:official-bf16";
+    const wrapper = mount(InspectorPanel, { props: { form } });
+    expect(wrapper.find('[data-test="generate-audio-control"]').exists()).toBe(false);
   });
 
   it("defaults wide enough for one ratio row and persists left-edge resizing", async () => {
@@ -485,9 +496,10 @@ describe("InspectorPanel — advanced", () => {
 
     await wrapper.get('[data-test="open-advanced"]').trigger("click");
 
+    expect(wrapper.find('[data-test="generate-audio-control"]').exists()).toBe(true);
     expect(wrapper.find('[data-test="sequence-section-opening-image"]').exists()).toBe(true);
     expect(wrapper.find('[data-test="sequence-section-negative"]').exists()).toBe(true);
-    expect(wrapper.find('[data-test="sequence-section-audio"]').exists()).toBe(true);
+    expect(wrapper.find('[data-test="sequence-section-audio"]').exists()).toBe(false);
     expect(wrapper.find('[data-test="inline-advanced"]').exists()).toBe(false);
   });
 });
@@ -532,6 +544,17 @@ describe("InspectorPanel — reset to model defaults", () => {
     expect(form.steps).toBe(30);
     expect(form.width).toBe(1024);
     expect(form.height).toBe(768);
+  });
+
+  it("resets sequence audio as part of the full Settings reset", async () => {
+    const draft = useSequenceDraftStore();
+    draft.output = "sequence";
+    draft.enableAudio = true;
+    const wrapper = mount(InspectorPanel, { props: { form: formFor("ltx2") } });
+
+    await wrapper.get('[data-test="settings-reset"]').trigger("click");
+
+    expect(draft.enableAudio).toBe(false);
   });
 });
 

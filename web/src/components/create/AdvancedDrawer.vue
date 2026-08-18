@@ -100,13 +100,10 @@ const props = withDefaults(
     placementGpus?: { ordinal: number; name: string }[];
     /** Installed models on the selected generation route. */
     models?: ModelInfoExtended[];
-    /** Selected model's resolved audio assets are available. */
-    audioOutputSupported?: boolean;
     /** Host advertises `video.can_extend`; false hides the continuation UI. */
     canExtend?: boolean;
     extendDefaultOverlapFrames?: number;
     output?: OutputMode;
-    sequenceSupportsAudio?: boolean;
     routingRequest?: Partial<GenerateRoutingRequest> | null | undefined;
   }>(),
   {
@@ -115,11 +112,9 @@ const props = withDefaults(
     mobile: false,
     placementGpus: () => [],
     models: () => [],
-    audioOutputSupported: true,
     canExtend: false,
     extendDefaultOverlapFrames: DEFAULT_EXTEND_OVERLAP_FRAMES,
     output: "single",
-    sequenceSupportsAudio: false,
   },
 );
 
@@ -382,7 +377,7 @@ function setSequenceFit(mode: SourceFitMode) {
     }),
   });
 }
-// LTX-2 / LTX-2.3 own the full advanced video suite (pipeline, audio,
+// LTX-2 / LTX-2.3 own the full advanced video suite (pipeline, conditioning,
 // keyframes, retake, spatial/temporal). `supportsAudio` is true for
 // exactly those families, so it doubles as the suite gate; plain
 // ltx-video keeps just frames/fps/GIF.
@@ -472,7 +467,6 @@ function clampFrames(n: number): number {
 // media lives in the primary form now and must survive too) ───────────
 function resetAdvanced() {
   if (sequenceMode.value) {
-    draft.enableAudio = false;
     for (const clip of draft.clips) {
       clip.negativePrompt = "";
       clip.cameraControl = null;
@@ -726,25 +720,6 @@ function setSequenceCameraMode(mode: string) {
               "
               >+ {{ word }}</Chip
             >
-          </div>
-        </AccordionSection>
-
-        <AccordionSection
-          v-if="sequenceSupportsAudio"
-          icon="video"
-          title="Sequence audio"
-          summary="Generate and mux audio for this timeline"
-          :open="true"
-          :header-interactive="false"
-          data-test="sequence-section-audio"
-        >
-          <div class="adv__row">
-            <span class="adv__label">Generate audio</span>
-            <SwitchToggle
-              :model-value="draft.enableAudio"
-              label="Generate sequence audio"
-              @update:model-value="draft.enableAudio = $event"
-            />
           </div>
         </AccordionSection>
       </template>
@@ -1152,7 +1127,6 @@ function setSequenceCameraMode(mode: string) {
           <Ltx2VideoControls
             v-if="showLtx2"
             :model-value="modelValue"
-            :audio-output-supported="audioOutputSupported"
             @update:model-value="emit('update:modelValue', $event)"
           />
         </AccordionSection>
