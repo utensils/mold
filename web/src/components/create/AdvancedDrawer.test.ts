@@ -162,10 +162,10 @@ describe("AdvancedDrawer sequence contract", () => {
     const fit = wrapper.get("[data-test='sequence-source-fit']");
     expect((fit.element as HTMLSelectElement).value).toBe("crop-fill");
     expect(fit.findAll("option").map((option) => option.text())).toEqual([
-      "Crop fill",
-      "Scale to fit",
-      "Resize to fill",
-      "Upscale + crop",
+      "Crop to fill",
+      "Fit with borders",
+      "Stretch to fill",
+      "Upscale, then crop",
     ]);
     await fit.setValue("lanczos-resize");
     expect(wrapper.emitted("update:modelValue")?.at(-1)?.[0]).toMatchObject({
