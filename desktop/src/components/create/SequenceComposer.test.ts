@@ -249,6 +249,50 @@ describe("SequenceComposer — footer", () => {
     expect(wrapper.find("[data-test='sequence-validation-plan']").exists()).toBe(false);
   });
 
+  it("validates without parked images when the checkpoint does not support them", async () => {
+    validateChainMock.mockResolvedValue({
+      model: "wan22-t2v-a14b:q4",
+      width: 1280,
+      height: 720,
+      fps: 24,
+      motion_tail_frames: 17,
+      stage_count: 2,
+      estimated_total_frames: 50,
+      estimated_duration_ms: 2_083,
+      stages: [],
+      warnings: [],
+      vram_estimate: null,
+    });
+    const draft = seedDraft();
+    draft.openingImage = { filename: "opening.png", base64: "OPENING" };
+    draft.clips[1]!.sourceImage = { filename: "second.png", base64: "SECOND" };
+    const unsupported = {
+      name: "wan22-t2v-a14b:q4",
+      family: "wan",
+      source_image: "unsupported",
+    } as ModelEntry;
+    const unsupportedForm = form();
+    unsupportedForm.model = unsupported.name;
+    unsupportedForm.family = unsupported.family;
+    unsupportedForm.sourceImageCapability = "unsupported";
+    const target = { baseUrl: "http://render-box:7680", apiKey: "secret" };
+    const wrapper = mountComposer({
+      form: unsupportedForm,
+      selectedModel: unsupported,
+      target,
+    });
+
+    await wrapper.get("[data-test='sequence-validate']").trigger("click");
+    await flushPromises();
+
+    expect(validateChainMock.mock.calls[0]?.[0].stages).toEqual([
+      expect.not.objectContaining({ source_image: expect.anything() }),
+      expect.not.objectContaining({ source_image: expect.anything() }),
+    ]);
+    expect(draft.openingImage?.base64).toBe("OPENING");
+    expect(draft.clips[1]!.sourceImage?.base64).toBe("SECOND");
+  });
+
   it("disables Generate with the first validation message while a clip is blank", () => {
     seedDraft(["described", ""]);
     const wrapper = mountComposer();

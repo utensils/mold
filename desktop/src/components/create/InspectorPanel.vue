@@ -220,6 +220,9 @@ const caps = computed(() =>
  * heuristic. `none` hides the well outright; `h3-references` keeps the H3
  * ordered-reference editor in Advanced. */
 const sourcePlan = computed(() => sourceMediaPlan(caps.value));
+const sequenceSourceImagesSupported = computed(
+  () => (selectedModel.value?.source_image ?? props.form.sourceImageCapability) !== "unsupported",
+);
 const showSourceMedia = computed(
   () =>
     !isSequence.value &&
@@ -231,7 +234,7 @@ const activeRecipe = computed(() =>
 );
 const advancedCount = computed(() =>
   isSequence.value
-    ? Number(Boolean(draft.openingImage)) +
+    ? Number(sequenceSourceImagesSupported.value && Boolean(draft.openingImage)) +
       Number(
         caps.value.supportsNegativePrompt && draft.clips.some((clip) => clip.negativePrompt.trim()),
       ) +
@@ -356,9 +359,19 @@ function pickModel(m: ModelEntry) {
 // ── Shape + resolution projection ────────────────────────────────────────────
 const sourceDimensions = computed(() => {
   if (isSequence.value) {
+    // Sequence stage images predate the additive per-model field, so absence
+    // stays compatible. Only an explicit unsupported contract parks them.
+    if (!sequenceSourceImagesSupported.value) {
+      return null;
+    }
     const { width, height } = draft.openingImage ?? {};
     return width && height ? { width, height } : null;
   }
+  if (!caps.value.supportsSourceImage) return null;
+  // Keep a parked image and its dimensions intact across model switches, but
+  // do not let them project Source shape/resolution controls for a checkpoint
+  // whose request cannot carry that image. Switching back recomputes these
+  // controls from the retained dimensions without destructive cleanup.
   return props.form.sourceImageWidth && props.form.sourceImageHeight
     ? {
         width: props.form.sourceImageWidth,

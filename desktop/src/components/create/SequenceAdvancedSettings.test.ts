@@ -1,6 +1,7 @@
-import { mount } from "@vue/test-utils";
+import { flushPromises, mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it } from "vitest";
+import { reactive } from "vue";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import SequenceAdvancedSettings from "./SequenceAdvancedSettings.vue";
 import { newGenerateForm } from "../../lib/generateForm";
@@ -24,6 +25,28 @@ beforeEach(() => {
 });
 
 describe("SequenceAdvancedSettings camera motion", () => {
+  it("parks unsupported opening-image controls and restores them on switch back", async () => {
+    const draft = useSequenceDraftStore();
+    draft.openingImage = { filename: "opening.png", base64: "PARKED" };
+    const form = reactive(newGenerateForm());
+    form.sourceImageCapability = "unsupported";
+    const wrapper = mount(SequenceAdvancedSettings, { props: { form } });
+
+    expect(wrapper.find("[data-test='sequence-section-opening-image']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='sequence-source-strength']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='sequence-source-fit']").exists()).toBe(false);
+    expect(wrapper.findComponent({ name: "ImagePickerModal" }).exists()).toBe(false);
+    expect(wrapper.get(".ms-adv__summary").text()).toBe("Sequence controls");
+    expect(draft.openingImage?.base64).toBe("PARKED");
+
+    form.sourceImageCapability = "optional";
+    await flushPromises();
+    expect(wrapper.find("[data-test='sequence-section-opening-image']").exists()).toBe(true);
+    expect(wrapper.findComponent({ name: "ImagePickerModal" }).exists()).toBe(true);
+    expect(wrapper.get(".ms-adv__summary").text()).toBe("1 active");
+    expect(draft.openingImage?.base64).toBe("PARKED");
+  });
+
   it("preserves but disables clip negatives from an opaque model's advertised recipe", () => {
     const form = newGenerateForm();
     form.family = "ltx2";

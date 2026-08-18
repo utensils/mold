@@ -84,6 +84,20 @@ const hosts = useHostsStore();
 const toasts = useToastStore();
 
 const motionTail = computed(() => sequenceMotionTailFrames(props.selectedModel));
+// Sequence stage images existed before the additive per-model contract, so an
+// absent/unknown field remains compatible. Only explicit `unsupported` parks
+// them while retaining the shared draft for a later model switch.
+const supportsSourceImages = computed(
+  () => (props.selectedModel?.source_image ?? props.form.sourceImageCapability) !== "unsupported",
+);
+const requestOpeningImage = computed(() =>
+  supportsSourceImages.value ? draft.openingImage : null,
+);
+const requestClips = computed(() =>
+  supportsSourceImages.value
+    ? draft.clips
+    : draft.clips.map((clip) => ({ ...clip, sourceImage: null })),
+);
 const maxStages = computed(() => props.chainLimits?.max_stages ?? 16);
 const newClipFrames = computed(() =>
   defaultClipFrames(props.selectedModel, props.chainLimits, motionTail.value),
@@ -174,7 +188,7 @@ const stages = computed<SequenceStage[]>(() =>
 // previous clip's motion tail — the same handoff extend uses — so a
 // promptless-capable family can render the whole sequence undescribed.
 const clipPromptOptional = computed(() =>
-  promptOptional({ family: props.form.family, sourceImage: draft.openingImage }),
+  promptOptional({ family: props.form.family, sourceImage: requestOpeningImage.value }),
 );
 const validation = computed(() =>
   sequenceValidation(stages.value, {
@@ -199,7 +213,7 @@ const disabledReason = computed(() => {
     );
   }
   if (!props.form.model) return "Pick a video model first.";
-  const openingError = sequenceOpeningImageError(draft.openingImage, draft.mediaRestoring);
+  const openingError = sequenceOpeningImageError(requestOpeningImage.value, draft.mediaRestoring);
   if (openingError) return openingError;
   return validation.value[0] ?? null;
 });
@@ -210,8 +224,8 @@ const validationError = ref("");
 const validationSourceRevision = ref(0);
 watch(
   () => [
-    draft.openingImage?.base64 ?? null,
-    ...draft.clips.map((clip) => clip.sourceImage?.base64 ?? null),
+    requestOpeningImage.value?.base64 ?? null,
+    ...requestClips.value.map((clip) => clip.sourceImage?.base64 ?? null),
   ],
   () => {
     validationSourceRevision.value += 1;
@@ -223,8 +237,8 @@ const validationInputSignature = computed(() =>
     motionTail: motionTail.value,
     enableAudio: draft.enableAudio,
     sourceRevision: validationSourceRevision.value,
-    openingSourceFilename: draft.openingImage?.filename ?? null,
-    clips: draft.clips.map((clip) => ({
+    openingSourceFilename: requestOpeningImage.value?.filename ?? null,
+    clips: requestClips.value.map((clip) => ({
       id: clip.id,
       prompt: clip.prompt,
       frames: clip.frames,
@@ -252,11 +266,11 @@ async function validatePlan() {
   try {
     const request = buildChainRequest(
       sequenceParams(props.form, props.selectedModel),
-      draft.clips,
+      requestClips.value,
       {
         motionTailFrames: motionTail.value,
         enableAudio: draft.enableAudio,
-        openingImage: draft.openingImage,
+        openingImage: requestOpeningImage.value,
       },
     );
     const plan = await validateChain(request, target);
@@ -329,10 +343,10 @@ const fileToolsOpen = ref(false);
 const tomlInput = ref<HTMLInputElement | null>(null);
 
 function currentScript() {
-  return clipsToChainScript(sequenceParams(props.form, props.selectedModel), draft.clips, {
+  return clipsToChainScript(sequenceParams(props.form, props.selectedModel), requestClips.value, {
     motionTailFrames: motionTail.value,
     enableAudio: draft.enableAudio,
-    openingImage: draft.openingImage,
+    openingImage: requestOpeningImage.value,
   });
 }
 

@@ -450,6 +450,24 @@ describe("InspectorPanel — seed mode", () => {
 });
 
 describe("InspectorPanel — advanced", () => {
+  it("does not count a parked Sequence image for an unsupported checkpoint", async () => {
+    const draft = useSequenceDraftStore();
+    draft.output = "sequence";
+    draft.openingImage = { filename: "opening.png", base64: "PARKED" };
+    const form = formFor("wan");
+    form.model = "wan22-t2v-a14b";
+    form.sourceImageCapability = "unsupported";
+    const wrapper = mount(InspectorPanel, { props: { form } });
+
+    expect(wrapper.find("[data-test='advanced-count']").exists()).toBe(false);
+    expect(draft.openingImage?.base64).toBe("PARKED");
+
+    form.sourceImageCapability = "optional";
+    await flushPromises();
+    expect(wrapper.get("[data-test='advanced-count']").text()).toContain("1 on");
+    expect(draft.openingImage?.base64).toBe("PARKED");
+  });
+
   it("keeps the simplified inspector by default and expands Advanced inline", async () => {
     const form = formFor("sdxl");
     form.negativePrompt = "blurry";
@@ -737,6 +755,41 @@ describe("InspectorPanel — source media in the primary form", () => {
     expect(field.find("[data-test='end-frame-well']").exists()).toBe(true);
   });
 
+  it("hides source-derived controls while an image is parked, then restores them", async () => {
+    const form = formFor("wan");
+    form.model = "wan22-t2v-a14b";
+    form.sourceImage = "PARKED";
+    form.sourceImageName = "previous.png";
+    form.sourceImageWidth = 1024;
+    form.sourceImageHeight = 1024;
+    form.width = 720;
+    form.height = 1280;
+    form.sourceImageCapability = "unsupported";
+    useModelStore().all = [wanModel("unsupported")];
+
+    const wrapper = mount(InspectorPanel, { props: { form } });
+
+    expect(wrapper.getComponent(ShapePicker).props("options")).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: "source" })]),
+    );
+    expect(wrapper.getComponent(ResolutionSelector).props("customLabel")).toBeUndefined();
+    expect(wrapper.getComponent(ResolutionSelector).props("status")).toBeUndefined();
+    expect(wrapper.find("[data-test='match-source-resolution']").exists()).toBe(false);
+    expect(form.sourceImage).toBe("PARKED");
+    expect(form.sourceImageName).toBe("previous.png");
+    expect(form.sourceImageWidth).toBe(1024);
+    expect(form.sourceImageHeight).toBe(1024);
+
+    form.sourceImageCapability = "optional";
+    useModelStore().all = [wanModel("optional")];
+    await flushPromises();
+    expect(wrapper.getComponent(ShapePicker).props("options")).toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: "source" })]),
+    );
+    expect(wrapper.getComponent(ResolutionSelector).props("status")).toContain("source");
+    expect(wrapper.find("[data-test='match-source-resolution']").exists()).toBe(true);
+  });
+
   it("renders H3 FL2VA boundaries as the same standard wells and applies a gallery pick", async () => {
     const form = formFor("minimax-h3");
     form.model = "minimax-h3-fl2va:comfy-pruned-int8";
@@ -789,6 +842,30 @@ describe("InspectorPanel — source media in the primary form", () => {
     useSequenceDraftStore().output = "sequence";
     const wrapper = mount(InspectorPanel, { props: { form: formFor("sd15") } });
     expect(wrapper.find("[data-test='inspector-source-media']").exists()).toBe(false);
+  });
+
+  it("hides a parked Sequence opening image from unsupported shape controls", () => {
+    const form = formFor("wan");
+    form.model = "wan22-t2v-a14b";
+    form.sourceImageCapability = "unsupported";
+    useModelStore().all = [wanModel("unsupported")];
+    const draft = useSequenceDraftStore();
+    draft.output = "sequence";
+    draft.openingImage = {
+      filename: "opening.png",
+      base64: "PARKED",
+      width: 1024,
+      height: 1024,
+    };
+
+    const wrapper = mount(InspectorPanel, { props: { form } });
+
+    expect(wrapper.getComponent(ShapePicker).props("options")).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: "source" })]),
+    );
+    expect(wrapper.getComponent(ResolutionSelector).props("status")).toBeUndefined();
+    expect(wrapper.find("[data-test='match-source-resolution']").exists()).toBe(false);
+    expect(draft.openingImage?.base64).toBe("PARKED");
   });
 });
 

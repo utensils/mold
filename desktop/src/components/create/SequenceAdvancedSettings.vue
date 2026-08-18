@@ -57,9 +57,12 @@ const guidanceCaps = computed(() =>
     props.form.guidanceCapabilities,
   ),
 );
+// Keep old/unknown servers compatible; only an explicit per-checkpoint
+// rejection parks the opening image and its controls.
+const supportsOpeningImage = computed(() => props.form.sourceImageCapability !== "unsupported");
 const activeCount = computed(
   () =>
-    Number(Boolean(draft.openingImage)) +
+    Number(supportsOpeningImage.value && Boolean(draft.openingImage)) +
     Number(
       guidanceCaps.value.supportsNegativePrompt && Boolean(activeClip.value?.negativePrompt.trim()),
     ) +
@@ -159,6 +162,7 @@ function reset() {
 
     <div class="ms-adv__list">
       <AccordionSection
+        v-if="supportsOpeningImage"
         icon="image"
         title="Opening sequence image"
         :summary="draft.openingImage?.filename ?? 'Optional original starting frame'"
@@ -295,6 +299,7 @@ function reset() {
     </div>
 
     <ImagePickerModal
+      v-if="supportsOpeningImage"
       :open="pickerOpen"
       title="Opening sequence image"
       :multiple="false"
