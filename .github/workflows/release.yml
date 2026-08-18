@@ -424,33 +424,6 @@ jobs:
           name: mold-x86_64-unknown-linux-gnu-cuda-sm120
           path: mold-x86_64-unknown-linux-gnu-cuda-sm120.tar.gz
 
-  # Evaluate and build every new public Nix output on a hosted runner. This is
-  # intentionally a real build gate, not a source grep or dry-run.
-  build-nix-distribution:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Free runner disk space
-        shell: bash
-        run: |
-          set -euxo pipefail
-          sudo rm -rf \
-            /usr/share/dotnet \
-            /usr/local/lib/android \
-            /opt/ghc \
-            /usr/local/.ghcup \
-            /usr/local/share/boost \
-            "$AGENT_TOOLSDIRECTORY"
-          sudo apt-get clean
-          sudo rm -rf /var/lib/apt/lists/*
-          df -h
-
-      - uses: cachix/install-nix-action@v31
-
-      - name: Build sm86, sm100, and Linux desktop sm86 outputs
-        run: nix build .#mold-sm86 .#mold-sm100 .#mold-desktop-sm86 --no-link
-
   # Signed + notarized stable desktop app and Tauri updater payload — tags only.
   # Main-branch desktop nightlies are gated and published by desktop.yml.
   build-desktop-dmg:
@@ -619,7 +592,10 @@ jobs:
   # Rolling pre-release on every push to main
   release-latest:
     if: github.ref == 'refs/heads/main'
-    needs: [build-macos, build-linux-sm86, build-linux-sm89, build-linux-sm100, build-linux-sm120, build-nix-distribution, docker]
+    # Native rolling artifacts should not wait for best-effort Nix validation
+    # or the lower-priority container matrix. Docker publishes its own rolling
+    # aliases, and Nix builds live in nix-cache.yml.
+    needs: [build-macos, build-linux-sm86, build-linux-sm89, build-linux-sm100, build-linux-sm120]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -723,10 +699,12 @@ jobs:
             exit 1
           fi
 
-  # Versioned release + crates.io publish on v* tags
+  # Publish the signed/notarized Apple release first. Linux archives and
+  # container provenance enrich the same release in later, lower-priority
+  # stages, so neither can hold back the desktop updater channel.
   release-version:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build-macos, build-linux-sm86, build-linux-sm89, build-linux-sm100, build-linux-sm120, build-nix-distribution, build-desktop-dmg, docker]
+    needs: [build-macos, build-desktop-dmg]
     runs-on: ubuntu-latest
     concurrency:
       group: stable-release-publication
@@ -810,56 +788,24 @@ jobs:
       - name: Generate checksums
         run: cd artifacts && sha256sum ./*.tar.gz ./*.dmg ./*.zip > SHA256SUMS
 
-      - name: Generate exact container digest manifest and release provenance
-        env:
-          RELEASE_TAG: ${{ github.ref_name }}
-          SOURCE_SHA: ${{ github.sha }}
-        run: |
-          scripts/create-container-digest-manifest.sh \
-            artifacts/mold-container-digests.json \
-            "ghcr.io/$GITHUB_REPOSITORY" \
-            "$RELEASE_TAG" \
-            "$SOURCE_SHA" \
-            artifacts/container-digest-*.json
-          (
-            cd artifacts
-            sha256sum mold-container-digests.json >> SHA256SUMS
-          )
-          scripts/create-release-provenance.sh \
-            artifacts/mold-release-provenance.json \
-            "$RELEASE_TAG" \
-            "$SOURCE_SHA" \
-            artifacts/SHA256SUMS \
-            artifacts
-          # Provenance is derived from the artifact-only checksum set above.
-          # Append its digest afterwards so SHA256SUMS binds the exact manifest
-          # without creating a circular provenance/checksum dependency.
-          (
-            cd artifacts
-            sha256sum mold-release-provenance.json >> SHA256SUMS
-          )
-
-      - name: Create release
+      - name: Create Apple-first release
         uses: softprops/action-gh-release@v2
         with:
           name: ${{ github.ref_name }}
           make_latest: ${{ steps.stable-pointer.outputs.make_latest }}
           files: |
             artifacts/mold-aarch64-apple-darwin.tar.gz
-            artifacts/mold-x86_64-unknown-linux-gnu-cuda-sm86.tar.gz
-            artifacts/mold-x86_64-unknown-linux-gnu-cuda-sm89.tar.gz
-            artifacts/mold-x86_64-unknown-linux-gnu-cuda-sm100.tar.gz
-            artifacts/mold-x86_64-unknown-linux-gnu-cuda-sm120.tar.gz
             artifacts/*.dmg
             artifacts/Mold.app.zip
             artifacts/Mold_*_aarch64.app.tar.gz
             artifacts/Mold_*_aarch64.app.tar.gz.sig
             artifacts/mold-desktop-stable.json
-            artifacts/mold-release-provenance.json
-            artifacts/mold-container-digests.json
             artifacts/SHA256SUMS
           generate_release_notes: true
           body: |
+            > Release assets publish in priority order: signed Apple artifacts
+            > first, native Linux archives next, and container metadata last.
+
             ## Install
 
             ```bash
@@ -957,6 +903,100 @@ jobs:
           fi
           echo "Verified stable updater manifest: $manifest_url"
 
+  # Add native Linux archives once their independent CUDA builds pass. The
+  # checksum manifest is atomically replaced with the complete native set.
+  release-native:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [release-version, build-linux-sm86, build-linux-sm89, build-linux-sm100, build-linux-sm120]
+    runs-on: ubuntu-latest
+    concurrency:
+      group: stable-release-publication
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Publish native Linux archives and checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          (
+            cd artifacts
+            sha256sum ./*.tar.gz ./*.dmg ./*.zip > SHA256SUMS
+          )
+          gh release upload "$GITHUB_REF_NAME" \
+            artifacts/mold-x86_64-unknown-linux-gnu-cuda-sm86.tar.gz \
+            artifacts/mold-x86_64-unknown-linux-gnu-cuda-sm89.tar.gz \
+            artifacts/mold-x86_64-unknown-linux-gnu-cuda-sm100.tar.gz \
+            artifacts/mold-x86_64-unknown-linux-gnu-cuda-sm120.tar.gz \
+            artifacts/SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
+
+  # Containers are deliberately last. They publish their image aliases in the
+  # matrix job, then attach exact digest/provenance metadata without blocking
+  # Apple, crates.io, native archives, or AUR.
+  release-containers:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [release-native, docker]
+    runs-on: ubuntu-latest
+    concurrency:
+      group: stable-release-publication
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Generate exact container digest manifest and release provenance
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          (
+            cd artifacts
+            sha256sum ./*.tar.gz ./*.dmg ./*.zip > SHA256SUMS
+          )
+          scripts/create-container-digest-manifest.sh \
+            artifacts/mold-container-digests.json \
+            "ghcr.io/$GITHUB_REPOSITORY" \
+            "$RELEASE_TAG" \
+            "$SOURCE_SHA" \
+            artifacts/container-digest-*.json
+          (
+            cd artifacts
+            sha256sum mold-container-digests.json >> SHA256SUMS
+          )
+          scripts/create-release-provenance.sh \
+            artifacts/mold-release-provenance.json \
+            "$RELEASE_TAG" \
+            "$SOURCE_SHA" \
+            artifacts/SHA256SUMS \
+            artifacts
+          (
+            cd artifacts
+            sha256sum mold-release-provenance.json >> SHA256SUMS
+          )
+      - name: Publish container metadata and final provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "$GITHUB_REF_NAME" \
+            artifacts/mold-container-digests.json \
+            artifacts/mold-release-provenance.json \
+            artifacts/SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
+
   # Publish to crates.io on v* tags
   publish:
     if: startsWith(github.ref, 'refs/tags/v')
@@ -978,7 +1018,7 @@ jobs:
   # container, and pushes to ssh://aur@aur.archlinux.org/<pkgname>.git.
   publish-aur:
     name: Publish AUR (${{ matrix.pkgname }})
-    needs: [release-version]
+    needs: [release-native]
     # Fires on `v*` tag pushes. Manually re-running the workflow on a
     # past tag (via "Re-run jobs" in the UI) preserves the tag ref so
     # this job re-evaluates, BUT `allow_empty_commits: false` in the

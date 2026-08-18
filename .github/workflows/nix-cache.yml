@@ -3,7 +3,6 @@ name: Publish Nix Cache
 on:
   push:
     branches: [main]
-    tags: ["v*"]
 
 concurrency:
   # CUDA builds routinely outlive the interval between main pushes. Queue them
@@ -20,6 +19,18 @@ jobs:
     # can never delay or fail rolling nightlies or stable releases.
     continue-on-error: true
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - package: mold
+            out_link: result-mold
+          - package: mold-sm86
+            out_link: result-mold-sm86
+          - package: mold-sm100
+            out_link: result-mold-sm100
+          - package: mold-desktop-sm86
+            out_link: result-mold-desktop-sm86
     steps:
       - uses: actions/checkout@v6
 
@@ -40,16 +51,16 @@ jobs:
 
       - uses: cachix/install-nix-action@v31
 
-      # Pull the exact default sm89 package before building, then push only its
-      # runtime closure. Avoid daemon/store-scan uploads: the public cache is
-      # intentionally scoped to the package consumed by NixOS deployments.
+      # Pull/build each public Nix distribution independently and push only its
+      # runtime closure. Matrix parallelism keeps these best-effort builds away
+      # from the native release critical path while warming every public output.
       - name: Configure Mold binary cache
         uses: cachix/cachix-action@v17
         with:
           name: mold
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
           useDaemon: false
-          pathsToPush: result-mold
+          pathsToPush: ${{ matrix.out_link }}
 
-      - name: Build cacheable default sm89 output
-        run: nix build .#mold --out-link result-mold
+      - name: Build cacheable ${{ matrix.package }} output
+        run: nix build ".#${{ matrix.package }}" --out-link "${{ matrix.out_link }}"

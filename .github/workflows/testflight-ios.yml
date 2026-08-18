@@ -44,10 +44,19 @@ jobs:
         with:
           workspaces: apps/mobile/src-tauri
           key: mold-testflight-ios
-      - name: Install dependencies
-        run: |
-          bun install --frozen-lockfile
-          cargo install tauri-cli --version 2.11.4 --locked
+      - name: Cache Tauri CLI
+        id: tauri-cli-cache
+        uses: actions/cache@v5
+        with:
+          path: ~/.cargo/bin/cargo-tauri
+          key: tauri-cli-${{ runner.os }}-${{ runner.arch }}-2.11.4
+      - name: Install Tauri CLI
+        if: steps.tauri-cli-cache.outputs.cache-hit != 'true'
+        run: cargo install tauri-cli --version 2.11.4 --locked
+      - name: Verify Tauri CLI
+        run: cargo tauri --version | grep -F '2.11.4'
+      - name: Install frontend dependencies
+        run: bun install --frozen-lockfile
       - name: Install App Store Connect key
         env:
           APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
