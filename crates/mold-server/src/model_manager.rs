@@ -359,7 +359,15 @@ fn loaded_models_across_pool(state: &AppState) -> Vec<String> {
             .read()
             .ok()
             .and_then(|g| g.as_ref().map(|g| g.model.clone()));
-        let loaded = active.or_else(|| worker.resident_model.read().ok()?.clone());
+        let loaded = active.or_else(|| {
+            worker
+                .resident_model
+                .read()
+                .ok()?
+                .as_deref()
+                .map(crate::gpu_pool::resident_model_display_name)
+                .map(str::to_string)
+        });
         if let Some(name) = loaded {
             if !names.contains(&name) {
                 names.push(name);

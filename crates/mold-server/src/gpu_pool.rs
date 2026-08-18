@@ -334,6 +334,25 @@ pub(crate) fn clear_model_cuda_ooms_for_tests() {
     MODEL_CUDA_OOMS.write().unwrap().clear();
 }
 
+const CHAIN_CACHE_MODEL_SEPARATOR: &str = "\u{1f}model:";
+
+/// Keep the immutable frozen artifact identity as the cache authority while
+/// retaining the semantic model name for status/UI consumers.
+pub(crate) fn frozen_chain_cache_key(runtime_model_id: &str, model: &str) -> String {
+    format!("{runtime_model_id}{CHAIN_CACHE_MODEL_SEPARATOR}{model}")
+}
+
+/// Translate an internal cache identity back to the model a user selected.
+/// Ordinary cache keys pass through unchanged.
+pub(crate) fn resident_model_display_name(cache_key: &str) -> &str {
+    if !cache_key.starts_with("mold-frozen-chain:") {
+        return cache_key;
+    }
+    cache_key
+        .split_once(CHAIN_CACHE_MODEL_SEPARATOR)
+        .map_or(cache_key, |(_, model)| model)
+}
+
 /// Per-GPU worker state. Each GPU gets its own model cache, load lock, and health tracking.
 pub struct GpuWorker {
     pub owner_epoch: u64,
@@ -1695,10 +1714,14 @@ impl GpuWorker {
     pub fn status(&self) -> GpuWorkerStatus {
         let active_gen = self.active_generation.read().unwrap();
         let in_flight = self.in_flight.load(Ordering::SeqCst);
-        let loaded_model = active_gen
-            .as_ref()
-            .map(|g| g.model.clone())
-            .or_else(|| self.resident_model.read().unwrap().clone());
+        let loaded_model = active_gen.as_ref().map(|g| g.model.clone()).or_else(|| {
+            self.resident_model
+                .read()
+                .unwrap()
+                .as_deref()
+                .map(resident_model_display_name)
+                .map(str::to_string)
+        });
 
         let state = if self.is_degraded() {
             GpuWorkerState::Degraded
@@ -2284,6 +2307,27 @@ mod tests {
         let status = worker.status();
         assert_eq!(status.loaded_model.as_deref(), Some("flux-dev:q4"));
         assert_eq!(status.vram_used_bytes, 0);
+    }
+
+    #[test]
+    fn worker_status_hides_frozen_chain_cache_identity() {
+        let (worker, _job_rx) = test_worker(0, 24_000_000_000);
+        *worker.resident_model.write().unwrap() = Some(frozen_chain_cache_key(
+            "mold-frozen-chain:0123456789abcdef",
+            "wan22-i2v-a14b:q4",
+        ));
+
+        let status = worker.status();
+        assert_eq!(status.loaded_model.as_deref(), Some("wan22-i2v-a14b:q4"));
+    }
+
+    #[test]
+    fn cache_display_name_preserves_opaque_model_separators() {
+        let opaque = format!("hf:opaque{CHAIN_CACHE_MODEL_SEPARATOR}variant");
+        assert_eq!(resident_model_display_name(&opaque), opaque);
+
+        let frozen = frozen_chain_cache_key("mold-frozen-chain:0123456789abcdef", &opaque);
+        assert_eq!(resident_model_display_name(&frozen), opaque);
     }
 
     #[test]

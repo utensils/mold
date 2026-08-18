@@ -2169,12 +2169,20 @@ fn process_admin_unload(worker: &GpuWorker, job: AdminModelUnloadJob) -> bool {
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
-        if resident.as_deref() != Some(expected) {
+        if resident
+            .as_deref()
+            .map(crate::gpu_pool::resident_model_display_name)
+            != Some(expected)
+        {
             let _ = job.result_tx.send(Ok(None));
             return true;
         }
     }
-    let result = unload_blocking(worker).map_err(|error| error.to_string());
+    let result = unload_blocking(worker)
+        .map(|unloaded| {
+            unloaded.map(|model| crate::gpu_pool::resident_model_display_name(&model).to_string())
+        })
+        .map_err(|error| error.to_string());
     let successful = result.is_ok();
     let _ = job.result_tx.send(result);
     successful

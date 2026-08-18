@@ -2972,16 +2972,16 @@ impl StageExecutor for ProductionStageExecutor {
                 }
                 config.install_frozen_model_config(model, frozen.config.clone());
                 if frozen.runtime_model_id.is_empty() {
-                    model
+                    model.to_string()
                 } else {
-                    frozen.runtime_model_id.as_str()
+                    crate::gpu_pool::frozen_chain_cache_key(&frozen.runtime_model_id, model)
                 }
             } else {
-                model
+                model.to_string()
             };
             return self
                 .render_stage_with_authority(
-                    cache_key,
+                    &cache_key,
                     model,
                     &config,
                     stage_req,
@@ -3005,7 +3005,9 @@ impl StageExecutor for ProductionStageExecutor {
         let mut frozen_config = self.fresh_config();
         let cache_key = frozen_model
             .and_then(|frozen| {
-                (!frozen.runtime_model_id.is_empty()).then_some(frozen.runtime_model_id.clone())
+                (!frozen.runtime_model_id.is_empty()).then(|| {
+                    crate::gpu_pool::frozen_chain_cache_key(&frozen.runtime_model_id, model)
+                })
             })
             .unwrap_or_else(|| model.to_string());
         let expected_fingerprint = frozen_model.map(|frozen| {
@@ -8278,7 +8280,8 @@ mod tests {
             }
         }
         let stage_request = stage_requests[0].clone();
-        let expected_cache_key = frozen.runtime_model_id.clone();
+        let expected_cache_key =
+            crate::gpu_pool::frozen_chain_cache_key(&frozen.runtime_model_id, "test-chain:q4");
         let expected_frozen_config = frozen.config.clone();
         let task = tokio::task::spawn_blocking(move || {
             executor.render_stage_with_context(
