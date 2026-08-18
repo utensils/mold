@@ -33,7 +33,7 @@ import {
   type CatalogKindFilter,
   type CatalogSortOption,
 } from "../lib/catalogFilters";
-import { familyLabel } from "@studio/lib/modelFamily";
+import { catalogFamily, familyLabel, matchesCatalogFamily } from "@studio/lib/modelFamily";
 import { filterRestrictedModels } from "@studio/lib/modelAccess";
 import { isMinimaxH3Identity } from "@studio/lib/minimaxH3Authoring";
 import { reviewedMiniMaxH3ModelAccess } from "@studio/lib/minimaxH3Inventory";
@@ -262,7 +262,7 @@ function recordFamilies(values: Iterable<string | null | undefined>): void {
   const before = seen.size;
   for (const value of values) {
     const name = value?.trim();
-    if (name) seen.add(name);
+    if (name) seen.add(catalogFamily(name));
   }
   if (seen.size !== before) observedFamilies.value = [...seen].sort((a, b) => a.localeCompare(b));
 }
@@ -309,7 +309,7 @@ const manifestEntries = computed<MobileCatalogEntry[]>(() => {
     .filter((model) => !model.downloaded && !isUtilityModel(model))
     .filter((model) => !installedNames.value.has(model.name))
     .filter((model) => !q || model.name.toLowerCase().includes(q))
-    .filter((model) => !family.value || model.family === family.value)
+    .filter((model) => matchesCatalogFamily(model.family, family.value))
     .map(manifestModelToEntry);
 });
 
@@ -391,7 +391,7 @@ const filteredInstalled = computed(() => {
       (entry) =>
         !q || entry.name.toLowerCase().includes(q) || entryTitle(entry).toLowerCase().includes(q),
     )
-    .filter((entry) => !family.value || entry.family === family.value)
+    .filter((entry) => matchesCatalogFamily(entry.family, family.value))
     .filter((entry) => !kind.value || entry.kind === kind.value)
     .filter(sourceMatches)
     .filter(mediaMatches);
@@ -630,9 +630,9 @@ async function runSearch(reset: boolean): Promise<void> {
   const target = selectedTarget.value;
   if (!target || source.value === "installed") return;
   const epoch = ++searchEpoch;
+  let nextEntries = reset ? [] : [...entries.value];
   if (reset) {
     page.value = 1;
-    entries.value = [];
   }
   loading.value = true;
   error.value = "";
@@ -653,7 +653,9 @@ async function runSearch(reset: boolean): Promise<void> {
         target,
       );
       if (epoch !== searchEpoch) return;
-      entries.value = [...entries.value, ...response.entries];
+      error.value = (response.provider_errors ?? []).map((item) => item.message).join(" ");
+      nextEntries = [...nextEntries, ...response.entries];
+      entries.value = nextEntries;
       recordFamilies(response.entries.map((row) => row.family));
       // Exhaustion comes from the wire `total`, not page fullness: under
       // source=All the server splits the page budget across sources, so a
@@ -1358,7 +1360,20 @@ onBeforeUnmount(() => {
         </label>
       </div>
 
-      <p v-if="error" class="mobile-catalog-error error-text" role="alert">{{ error }}</p>
+      <div v-if="error" class="mobile-catalog-error error-text" role="alert">
+        <span>
+          {{ error }}
+          <template v-if="combinedEntries.length"> Showing available models.</template>
+        </span>
+        <button
+          class="mobile-catalog-retry"
+          type="button"
+          :disabled="loading"
+          @click="runSearch(true)"
+        >
+          {{ loading ? "Retrying…" : "Retry" }}
+        </button>
+      </div>
       <div v-if="loading && combinedEntries.length === 0" class="mobile-catalog-empty empty-state">
         Loading models…
       </div>

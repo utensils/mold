@@ -901,6 +901,59 @@ pub async fn live_search_catalog(
     };
     let result = match search_result {
         Ok(result) => result,
+        Err(error) if opts.source.is_none() => {
+            // Merged searches propagate auth failures so the credential loop
+            // above can try its candidates. If that loop is exhausted, keep
+            // the other provider usable instead of turning one rejected token
+            // into a blank catalog.
+            let failed_source = match &error {
+                mold_catalog::live::LiveSearchError::Upstream { host, .. }
+                    if *host == "civitai.com" =>
+                {
+                    mold_catalog::entry::Source::Civitai
+                }
+                _ => mold_catalog::entry::Source::Hf,
+            };
+            let mut fallback_opts = opts.clone();
+            fallback_opts.source = Some(match failed_source {
+                mold_catalog::entry::Source::Hf => mold_catalog::entry::Source::Civitai,
+                mold_catalog::entry::Source::Civitai => mold_catalog::entry::Source::Hf,
+            });
+            match mold_catalog::live::search_page(
+                state.catalog_live_civitai_base.as_str(),
+                "https://huggingface.co",
+                &state.catalog_live_cache,
+                &fallback_opts,
+            )
+            .await
+            {
+                Ok(mut partial) => {
+                    let provider = match failed_source {
+                        mold_catalog::entry::Source::Hf => "Hugging Face",
+                        mold_catalog::entry::Source::Civitai => "Civitai",
+                    };
+                    partial
+                        .provider_errors
+                        .push(mold_catalog::live::CatalogProviderError {
+                            source: failed_source,
+                            message: format!("{provider} is temporarily unavailable."),
+                        });
+                    partial
+                }
+                Err(fallback_error) => {
+                    tracing::warn!(
+                        target: "catalog.live",
+                        error = %fallback_error,
+                        "catalog fallback provider failed"
+                    );
+                    return (
+                        StatusCode::BAD_GATEWAY,
+                        format!("upstream: {fallback_error}"),
+                    )
+                        .into_response();
+                }
+            }
+        }
         Err(e) => {
             tracing::warn!(target: "catalog.live", error = %e, "live search failed");
             return (StatusCode::BAD_GATEWAY, format!("upstream: {e}")).into_response();
@@ -918,6 +971,7 @@ pub async fn live_search_catalog(
         "page": opts.page,
         "page_size": opts.page_size,
         "total": result.total,
+        "provider_errors": result.provider_errors,
     }))
     .into_response()
 }

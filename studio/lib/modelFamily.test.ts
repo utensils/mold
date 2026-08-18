@@ -12,7 +12,11 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
-import { familyLabel } from "./modelFamily";
+import {
+  catalogFamily,
+  familyLabel,
+  matchesCatalogFamily,
+} from "./modelFamily";
 
 const FIXTURE_RELATIVE = "tests/fixtures/wan/surface-parity-v1.json";
 
@@ -61,6 +65,12 @@ describe("model family labels", () => {
     expect(familyLabel("some-new-family")).toBe("Some New Family");
     expect(familyLabel("another_one")).toBe("Another One");
     expect(familyLabel("")).toBe("");
+  });
+
+  it("groups Qwen Image Edit under Qwen Image for catalog browsing", () => {
+    expect(catalogFamily("qwen-image-edit")).toBe("qwen-image");
+    expect(matchesCatalogFamily("qwen-image-edit", "qwen-image")).toBe(true);
+    expect(catalogFamily("flux")).toBe("flux");
   });
 
   it("does not make a family chip wider than it already is", () => {

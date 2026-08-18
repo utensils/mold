@@ -1223,6 +1223,12 @@ export interface CatalogListResponse {
   page_size: number;
   /** Total rows matching the request's filters, ignoring pagination. */
   total: number;
+  provider_errors?: CatalogProviderError[];
+}
+
+export interface CatalogProviderError {
+  source: "hf" | "civitai";
+  message: string;
 }
 
 export interface CatalogFamilyCount {

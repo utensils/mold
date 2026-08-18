@@ -1,4 +1,5 @@
 import { computed, ref, watch } from "vue";
+import { matchesCatalogFamily } from "@studio/lib/modelFamily";
 import {
   deleteModel,
   fetchCatalogEntry,
@@ -16,6 +17,7 @@ import type {
   CatalogEntryWire,
   CatalogFamilyCount,
   CatalogListParams,
+  CatalogProviderError,
   ModelComponentStatus,
   ModelInfoExtended,
 } from "../types";
@@ -94,6 +96,7 @@ function build() {
   const loading = ref(false);
   const loadingMore = ref(false);
   const errorMsg = ref<string | null>(null);
+  const providerErrors = ref<CatalogProviderError[]>([]);
   const detail = ref<ModelDetail | null>(null);
   // Detail drawer non-content states (G4: the drawer is never blank). While a
   // non-cached row's `/api/catalog/:id` fetch is in flight the drawer shows a
@@ -125,8 +128,8 @@ function build() {
     if (filter.value.kind && filter.value.kind !== "checkpoint") return [];
     return availableManifests.value
       .filter((model) => model.family === "minimax-h3" && !model.downloaded)
-      .filter(
-        (model) => !filter.value.family || model.family === filter.value.family,
+      .filter((model) =>
+        matchesCatalogFamily(model.family, filter.value.family ?? ""),
       )
       .filter(
         (model) =>
@@ -209,6 +212,7 @@ function build() {
     if (!hasMore.value) return false;
     const next = page.value + 1;
     const list = await fetchCatalogSearch(searchParams(next));
+    providerErrors.value = list.provider_errors ?? [];
     entries.value = [...entries.value, ...list.entries];
     page.value = next;
     if (typeof list.total === "number") total.value = list.total;
@@ -231,15 +235,21 @@ function build() {
   async function refresh() {
     loading.value = true;
     errorMsg.value = null;
+    providerErrors.value = [];
     try {
-      const [list, fams] = await Promise.all([
+      const [listResult, familiesResult] = await Promise.allSettled([
         fetchCatalogSearch(searchParams(1)),
         fetchCatalogFamilies(),
       ]);
+      if (listResult.status === "rejected") throw listResult.reason;
+      const list = listResult.value;
       entries.value = list.entries;
       total.value = typeof list.total === "number" ? list.total : null;
       page.value = 1;
-      families.value = fams.families;
+      providerErrors.value = list.provider_errors ?? [];
+      if (familiesResult.status === "fulfilled") {
+        families.value = familiesResult.value.families;
+      }
       await autoFill();
     } catch (e: unknown) {
       errorMsg.value = e instanceof Error ? e.message : String(e);
@@ -487,6 +497,7 @@ function build() {
     loading,
     loadingMore,
     errorMsg,
+    providerErrors,
     detail,
     detailLoadingId,
     detailError,

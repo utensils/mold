@@ -3234,7 +3234,21 @@ button:disabled {
 }
 
 .mobile-catalog-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
   margin: 14px 0;
+}
+
+.mobile-catalog-retry {
+  min-width: 72px;
+  min-height: 44px;
+  border: 1px solid currentcolor;
+  border-radius: var(--radius-control);
+  padding: 0 12px;
+  color: inherit;
+  font: inherit;
 }
 
 .mobile-catalog-action-status {

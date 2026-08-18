@@ -66,7 +66,7 @@ async function pullCard(entry: CatalogEntryWire) {
   <div class="min-w-0 flex-1">
     <!-- Loading state -->
     <div
-      v-if="cat.loading.value"
+      v-if="cat.loading.value && cat.visibleEntries.value.length === 0"
       class="flex items-center justify-center py-12 text-sm text-ink-3"
     >
       Loading…
@@ -74,19 +74,44 @@ async function pullCard(entry: CatalogEntryWire) {
 
     <!-- Error state -->
     <div
-      v-else-if="cat.errorMsg.value"
+      v-if="cat.errorMsg.value || cat.providerErrors.value.length"
+      data-test="catalog-provider-warning"
       class="bg-bench border border-edge flex items-start gap-3 rounded-2xl px-4 py-3 text-sm text-rose-200"
+      role="alert"
     >
       <span class="mt-0.5">⚠</span>
-      <div>
-        <p class="font-medium text-rose-100">Couldn't load the catalog.</p>
-        <p class="text-rose-200/80">{{ cat.errorMsg.value }}</p>
+      <div class="min-w-0 flex-1">
+        <p class="font-medium text-rose-100">
+          {{
+            cat.errorMsg.value
+              ? "Couldn't refresh the catalog."
+              : "Part of the catalog is unavailable."
+          }}
+        </p>
+        <p class="text-rose-200/80">
+          {{
+            cat.errorMsg.value ??
+            cat.providerErrors.value.map((item) => item.message).join(" ")
+          }}
+          <span v-if="cat.providerErrors.value.length">
+            Showing available models.</span
+          >
+        </p>
       </div>
+      <button
+        type="button"
+        data-test="catalog-retry"
+        class="border border-rose-200/40 shrink-0 rounded-lg px-3 py-1.5 font-medium text-rose-100 hover:bg-rose-100/10"
+        :disabled="cat.loading.value"
+        @click="cat.refresh()"
+      >
+        {{ cat.loading.value ? "Retrying…" : "Retry" }}
+      </button>
     </div>
 
     <!-- Empty state -->
     <div
-      v-else-if="cat.visibleEntries.value.length === 0"
+      v-if="!cat.loading.value && cat.visibleEntries.value.length === 0"
       class="flex flex-col items-center justify-center gap-2 py-16 text-ink-3"
     >
       <p class="text-sm">No models found.</p>
@@ -96,7 +121,7 @@ async function pullCard(entry: CatalogEntryWire) {
     </div>
 
     <!-- Grid -->
-    <template v-else>
+    <template v-else-if="cat.visibleEntries.value.length > 0">
       <p
         data-testid="catalog-result-count"
         class="mb-3 text-[12px] text-ink-3"
