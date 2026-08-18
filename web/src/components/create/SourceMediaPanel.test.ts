@@ -39,11 +39,17 @@ describe("SourceMediaPanel — the model dictates the wells", () => {
 
   it("renders the attachment strip entry for Qwen edit and FLUX.2 Dev", () => {
     const qwen = factory("qwen-image-edit");
-    expect(qwen.find("[data-test='source-attach']").exists()).toBe(true);
+    expect(qwen.find("[data-test='source-well']").exists()).toBe(true);
     expect(qwen.text()).toContain("Edit images");
 
     const flux2 = factory("flux2", { model: "flux2-dev" });
     expect(flux2.text()).toContain("Reference images");
+  });
+
+  it("routes the Qwen Target well through the standard gallery picker", async () => {
+    const wrapper = factory("qwen-image-edit");
+    await wrapper.get("[data-test='source-gallery']").trigger("click");
+    expect(wrapper.emitted("open-target-picker")).toHaveLength(1);
   });
 
   it("routes gallery, and clear per slot to the page's pickers", async () => {
@@ -199,6 +205,18 @@ describe("SourceMediaPanel — source fit", () => {
       "Lanczos",
       "Upscale + fit",
     ]);
+  });
+
+  it("offers maskless fit choices for a Qwen edit Target", () => {
+    const wrapper = factory("qwen-image-edit", {
+      imageAttachments: [
+        { kind: "upload", filename: "target.png", base64: "AA" },
+      ],
+    });
+    const labels = wrapper
+      .findAll("[aria-label='Fit to canvas'] button")
+      .map((button) => button.text());
+    expect(labels).toEqual(["Contain", "Cover", "Lanczos", "Upscale + fit"]);
   });
 });
 

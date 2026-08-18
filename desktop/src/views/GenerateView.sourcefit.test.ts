@@ -295,6 +295,52 @@ describe("GenerateView source-fit submit path", () => {
     expect(form.maskImage).toBe("USERMASK");
   });
 
+  it("fits only Qwen edit's target while preserving ordered references", async () => {
+    const qwenEdit = {
+      ...model,
+      name: "qwen-image-edit-2511:q4",
+      family: "qwen-image-edit",
+      default_width: 1024,
+      default_height: 1024,
+    } as ModelEntry;
+    apiJsonTo.mockResolvedValue([qwenEdit]);
+    useModelStore().all = [qwenEdit];
+    setupMultiHost();
+    const submitBatch = vi.spyOn(useGenerationStore(), "submitBatch").mockReturnValue({
+      jobs: [],
+      settled: Promise.resolve([]),
+    });
+    applySourceFitPreprocess.mockResolvedValue({
+      source: "FITTED_TARGET",
+      mask: null,
+      changed: true,
+    });
+
+    mount(GenerateView, { shallow: true, attachTo: document.body });
+    await flushPromises();
+    const form = useGenerateFormStore().form;
+    form.prompt = "edit the target";
+    form.model = qwenEdit.name;
+    form.family = qwenEdit.family;
+    form.width = 1024;
+    form.height = 1024;
+    form.imageAttachments = ["TARGET", "REFERENCE"];
+    form.sourceFit = { mode: "lanczos-resize" };
+    useUiStore().generateTick++;
+    await flushPromises();
+
+    expect(applySourceFitPreprocess).toHaveBeenCalledTimes(1);
+    expect(applySourceFitPreprocess.mock.calls[0]![0]).toMatchObject({
+      source: "TARGET",
+      mask: null,
+      policy: { mode: "lanczos-resize" },
+      target: { width: 1024, height: 1024 },
+    });
+    expect(submitBatch).toHaveBeenCalledTimes(1);
+    expect(submitBatch.mock.calls[0]![0].edit_images).toEqual(["FITTED_TARGET", "REFERENCE"]);
+    expect(form.imageAttachments).toEqual(["TARGET", "REFERENCE"]);
+  });
+
   it("reuses one per-composer cache across repeat submits", async () => {
     setupMultiHost();
     vi.spyOn(useGenerationStore(), "submitBatch").mockReturnValue({

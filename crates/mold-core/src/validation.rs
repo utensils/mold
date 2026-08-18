@@ -607,6 +607,12 @@ pub fn max_pixels_for_family(family: Option<&str>) -> u64 {
     max_pixels_for_family_composed(family, Ltx2SpatialComposition::SinglePass)
 }
 
+/// Upstream Qwen-Image-Edit normalizes each edit image to a 1024x1024 pixel
+/// area while preserving its aspect ratio before VAE conditioning. Keep this
+/// separate from the output canvas ceiling: edit inputs and generated images
+/// are independent memory domains.
+pub const QWEN_IMAGE_EDIT_SOURCE_MAX_PIXELS: u64 = 1024 * 1024;
+
 /// Composition-aware counterpart to [`max_pixels_for_family`].
 pub fn max_pixels_for_family_composed(
     family: Option<&str>,

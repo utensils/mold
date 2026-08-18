@@ -2247,6 +2247,49 @@ describe("MobileApp generation queue", () => {
     );
   });
 
+  it("fits only Qwen edit's Target before submitting ordered references", async () => {
+    const qwen: ModelEntry = {
+      ...model,
+      name: "qwen-image-edit:bf16",
+      family: "qwen-image-edit",
+      default_width: 1024,
+      default_height: 1024,
+    };
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([qwen]);
+      if (path === "/api/gallery") return Promise.resolve([]);
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    applySourceFitPreprocess.mockResolvedValueOnce({
+      source: "FITTED_TARGET",
+      mask: null,
+      changed: true,
+    });
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    const liveForm = wrapper.getComponent(MobileLoraControls).props("form") as GenerateForm;
+    liveForm.imageAttachments = ["TARGET", "REFERENCE"];
+    liveForm.sourceFit = { mode: "crop-fill" };
+    await fieldControl("Prompt").setValue("change the target only");
+    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+
+    expect(applySourceFitPreprocess).toHaveBeenCalledWith(
+      expect.objectContaining({
+        source: "TARGET",
+        mask: null,
+        policy: { mode: "crop-fill" },
+        target: { width: 1024, height: 1024 },
+      }),
+      expect.any(Object),
+    );
+    expect(openStreams).toHaveLength(1);
+    expect(openStreams[0]?.options.body.edit_images).toEqual(["FITTED_TARGET", "REFERENCE"]);
+    expect(liveForm.imageAttachments).toEqual(["TARGET", "REFERENCE"]);
+  });
+
   it("blocks invalid numeric parameters and oversized custom resolutions", async () => {
     wrapper = mountMobileApp();
     await flushPromises();

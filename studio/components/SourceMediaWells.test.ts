@@ -11,7 +11,7 @@ describe("SourceMediaWells", () => {
   it("renders nothing for plans it does not own", () => {
     for (const plan of [
       { kind: "none" },
-      { kind: "attachments", max: null, required: false },
+      { kind: "attachments", max: null, required: false, primary: null },
       { kind: "h3-references" },
     ] satisfies SourceMediaPlan[]) {
       const wrapper = factory(plan);
@@ -19,6 +19,20 @@ describe("SourceMediaWells", () => {
         false,
       );
     }
+  });
+
+  it("renders the shared primary well as a Qwen edit Target", () => {
+    const wrapper = factory({
+      kind: "attachments",
+      max: null,
+      required: true,
+      primary: "target",
+    });
+    expect(wrapper.text()).toContain("Target");
+    expect(wrapper.find("[data-test='source-well']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='source-required-badge']").exists()).toBe(
+      true,
+    );
   });
 
   it("renders one optional image well for a plain image model", () => {

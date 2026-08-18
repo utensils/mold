@@ -1,7 +1,7 @@
 import {
   dimensionAlignmentForFamily,
   maxAxisPixelsForModel,
-  maxPixelsForModel,
+  sourceMaxPixelsForModel,
   type ModelResolutionContract,
 } from "./resolutions";
 import { effectiveGenerationRecipe } from "./generationProfile";
@@ -64,9 +64,10 @@ function familyAlignment(model: ModelResolutionContract | string): number {
  * sole exception is an input dimension below the generation contract's 64 px
  * minimum, where the minimum valid aligned canvas necessarily wins.
  *
- * Recommended dimensions are presets, not bounds. The server-advertised pixel
- * ceiling and alignment are the actual custom-canvas contract, so preserving
- * the source aspect is the authority here.
+ * Recommended dimensions are presets, not bounds. The server-advertised
+ * source ceiling (falling back to the output ceiling) and alignment are the
+ * actual custom-canvas contract, so preserving the source aspect is the
+ * authority here.
  */
 export function resolveSourceResolution(
   source: SourceDimensions,
@@ -88,11 +89,10 @@ export function resolveSourceResolution(
     recipe?.resolution.min_width ?? 0,
     recipe?.resolution.min_height ?? 0,
   );
-  const advertisedMaxPixels = positiveInteger(
-    recipe?.resolution.max_pixels ?? contract?.max_pixels,
-    maxPixelsForModel(model, pipeline),
+  const maxPixels = positiveInteger(
+    sourceMaxPixelsForModel(model, pipeline),
+    sourceMaxPixelsForModel(familyOf(model)),
   );
-  const maxPixels = advertisedMaxPixels;
   const sourcePixels = sourceWidth * sourceHeight;
   // The per-axis span is a second, independent bound. It matters most for an
   // extreme aspect ratio: an 8000x600 source is under any pixel budget once

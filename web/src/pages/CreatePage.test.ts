@@ -1124,14 +1124,42 @@ describe("CreatePage layout and behavior", () => {
     );
   });
 
-  it("submits Qwen edit images without sending stale mask state", async () => {
+  it("fits only Qwen edit's target and preserves ordered references", async () => {
+    class LoadedImage {
+      onload: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      naturalWidth = 2048;
+      naturalHeight = 1024;
+      set src(_value: string) {
+        queueMicrotask(() => this.onload?.());
+      }
+    }
+    vi.stubGlobal("Image", LoadedImage);
+    const getContext = vi
+      .spyOn(HTMLCanvasElement.prototype, "getContext")
+      .mockReturnValue({
+        fillStyle: "",
+        fillRect: vi.fn(),
+        drawImage: vi.fn(),
+      } as unknown as CanvasRenderingContext2D);
+    const toDataUrl = vi
+      .spyOn(HTMLCanvasElement.prototype, "toDataURL")
+      .mockReturnValue("data:image/png;base64,FITTED_TARGET");
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     const form = useGenerateForm();
     form.state.value.model = "qwen-image-edit:q4";
     form.state.value.modelFamily = "qwen-image-edit";
     form.state.value.imageAttachments = [
-      { kind: "upload", filename: "target.png", base64: "TARGET" },
+      {
+        kind: "upload",
+        filename: "target.png",
+        base64: "TARGET",
+        width: 2048,
+        height: 1024,
+      },
+      { kind: "upload", filename: "reference.png", base64: "REFERENCE" },
     ];
+    form.state.value.sourceFitPolicy = { mode: "crop-fill" };
     form.state.value.maskImage = {
       kind: "upload",
       filename: "mask.png",
@@ -1144,9 +1172,15 @@ describe("CreatePage layout and behavior", () => {
 
     expect(submitMock).toHaveBeenCalledTimes(1);
     const req = submitMock.mock.calls[0][0];
-    expect(req.edit_images).toEqual(["TARGET"]);
+    expect(req.edit_images).toEqual(["FITTED_TARGET", "REFERENCE"]);
     expect(req.mask_image).toBeUndefined();
     expect(req.source_image).toBeUndefined();
+    expect(
+      form.state.value.imageAttachments.map((image) => image.base64),
+    ).toEqual(["TARGET", "REFERENCE"]);
+    getContext.mockRestore();
+    toDataUrl.mockRestore();
+    vi.unstubAllGlobals();
   });
 
   it("keeps a long advanced video request single-shot and preserves its settings", async () => {

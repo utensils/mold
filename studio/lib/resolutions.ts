@@ -29,6 +29,9 @@ export interface ModelResolutionContract {
   generation_profile?: GenerationProfileSet | null;
 }
 
+/** Official Qwen-Image-Edit VAE conditioning area. */
+export const QWEN_IMAGE_EDIT_SOURCE_MAX_PIXELS = 1024 * 1024;
+
 export const MAX_GENERATION_PIXELS = 1_800_000;
 /**
  * LTX-2's own ceiling: upstream's shipped LTX_2_3_HQ_PARAMS renders 1920x1088.
@@ -72,6 +75,25 @@ export function maxPixelsForFamily(family: string | null | undefined): number {
   if (canonical === "ltx2") return LTX2_MAX_GENERATION_PIXELS;
   if (canonical === "minimax-h3") return 576 * 1856;
   return MAX_GENERATION_PIXELS;
+}
+
+/** Source-image ceiling, distinct from the generated-output ceiling. */
+export function sourceMaxPixelsForModel(
+  model: ModelResolutionContract | string | null | undefined,
+  pipeline?: string | null,
+): number {
+  const family = typeof model === "string" ? model : model?.family;
+  const recipe =
+    typeof model === "string" || !model
+      ? null
+      : effectiveGenerationRecipe(model, pipeline);
+  const advertised = recipe?.resolution.source_max_pixels;
+  if (Number.isFinite(advertised) && Number(advertised) > 0) {
+    return Number(advertised);
+  }
+  return canonicalFamily(family) === "qwen-image-edit"
+    ? QWEN_IMAGE_EDIT_SOURCE_MAX_PIXELS
+    : maxPixelsForModel(model, pipeline);
 }
 
 export function maxAxisPixelsForFamily(

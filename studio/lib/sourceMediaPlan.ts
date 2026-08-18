@@ -20,8 +20,14 @@ export type SourceMediaPlan =
       /** Video families condition their opening frame on the source. */
       video: boolean;
     }
-  /** Ordered picture strip (Qwen edit target+references, FLUX.2 references). */
-  | { kind: "attachments"; max: number | null; required: boolean }
+  /** Ordered picture strip. Qwen edit exposes its first item through the same
+   * Target well as other primary sources; FLUX.2 has references only. */
+  | {
+      kind: "attachments";
+      max: number | null;
+      required: boolean;
+      primary: "target" | null;
+    }
   /** MiniMax H3 FL2VA first/last boundaries — the same two wells as
    * `single`+`endFrame`, backed by dedicated H3 authoring state. */
   | { kind: "h3-boundaries"; requiredEndpoint: "first" | null }
@@ -58,7 +64,9 @@ export function sourceMediaPlan(
           caps.sourceImageMode === "references"
             ? FLUX2_DEV_MAX_ATTACHMENTS
             : null,
-        required: caps.requiresSourceImage,
+        required:
+          caps.sourceImageMode === "qwen-edit" || caps.requiresSourceImage,
+        primary: caps.sourceImageMode === "qwen-edit" ? "target" : null,
       };
     case "single":
       if (!caps.supportsSourceImage) return { kind: "none" };

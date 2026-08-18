@@ -260,6 +260,11 @@ const showRemix = ref(false);
 const remixRoute = ref<HostRoute | null>(null);
 const remixTask = ref<ExpandTask>("text-to-image");
 const showPicker = ref(false);
+const replaceTargetOnPick = ref(false);
+function openTargetPicker() {
+  replaceTargetOnPick.value = true;
+  showPicker.value = true;
+}
 // One picker serves both FL2VA boundaries; the target names the slot.
 const h3BoundaryPickerTarget = ref<MinimaxH3BoundaryEndpoint | null>(null);
 /** Wan's closing still gets its own picker (#779) so attaching one can never
@@ -2271,7 +2276,12 @@ async function prepareStillSourceToRequest(
     override?.settings?.policy ??
     form.state.value.sourceFitPolicy ??
     ({ mode: "pad-repaint" } as const);
-  const outerPolicy = override?.maskless
+  const family =
+    override?.settings?.family ??
+    currentModel.value?.family ??
+    form.state.value.modelFamily;
+  const maskless = override?.maskless || isQwenImageEditFamily(family);
+  const outerPolicy = maskless
     ? coerceSourceFitForMaskless(configuredPolicy)
     : configuredPolicy;
   if (outerPolicy?.mode === "upscale-then-fit") {
@@ -2336,15 +2346,7 @@ async function prepareStillSourceToRequest(
     }
   }
 
-  const family =
-    override?.settings?.family ??
-    currentModel.value?.family ??
-    form.state.value.modelFamily;
-  if (
-    isQwenImageEditFamily(family) ||
-    ((override?.settings?.frames ?? form.state.value.frames) &&
-      !override?.maskless)
-  )
+  if ((override?.settings?.frames ?? form.state.value.frames) && !maskless)
     return { source, mask };
   const target = {
     width: override?.settings?.width ?? form.state.value.width,
@@ -2890,6 +2892,11 @@ async function onSubmitInner(allowStaleQuick = false) {
       if (fitted === false) return;
       keyframes[0].image = fitted;
     }
+  } else if (
+    isQwenImageEditFamily(currentFamily.value) &&
+    req.edit_images?.[0]
+  ) {
+    req.edit_images[0] = preparedSource.source?.base64 ?? req.edit_images[0];
   } else if ("source_image" in req) {
     req.source_image = preparedSource.source?.base64 ?? null;
     if (preparedSource.mask) req.mask_image = preparedSource.mask.base64;
@@ -3372,17 +3379,24 @@ async function onPickSource(v: SourceImageState[]) {
   ) {
     return;
   }
-  form.state.value.imageAttachments = referenceEdit
-    ? [...form.state.value.imageAttachments, ...v].slice(
-        0,
-        flux2Dev ? 4 : undefined,
-      )
-    : v.slice(0, 1);
-  if (!referenceEdit && v.length > 0) {
+  form.state.value.imageAttachments =
+    qwenEdit && replaceTargetOnPick.value && v[0]
+      ? [v[0], ...form.state.value.imageAttachments.slice(1)]
+      : referenceEdit
+        ? [...form.state.value.imageAttachments, ...v].slice(
+            0,
+            flux2Dev ? 4 : undefined,
+          )
+        : v.slice(0, 1);
+  if (
+    (!referenceEdit || (qwenEdit && replaceTargetOnPick.value)) &&
+    v.length > 0
+  ) {
     // A source-matched canvas differs only by the model's pixel grid or safe
     // downscale. Resize exactly instead of manufacturing narrow repaint bands.
     form.state.value.sourceFitPolicy = { mode: "lanczos-resize" };
   }
+  replaceTargetOnPick.value = false;
   composerError.value = null;
 }
 
@@ -4084,6 +4098,7 @@ onBeforeUnmount(() => {
                   :family="currentFamily"
                   :models="models"
                   @open-picker="showPicker = true"
+                  @open-target-picker="openTargetPicker"
                   @clear-source="onClearSource"
                   @open-end-frame-picker="showEndFramePicker = true"
                   @clear-end-frame="onClearEndFrame"
@@ -4270,6 +4285,7 @@ onBeforeUnmount(() => {
           :family="currentFamily"
           :models="models"
           @open-picker="showPicker = true"
+          @open-target-picker="openTargetPicker"
           @clear-source="onClearSource"
           @open-end-frame-picker="showEndFramePicker = true"
           @clear-end-frame="onClearEndFrame"
@@ -4372,23 +4388,30 @@ onBeforeUnmount(() => {
       :title="
         sequenceMode
           ? 'Opening sequence image'
-          : currentFamily === 'qwen-image-edit' ||
-              isFlux2DevModel(form.state.value.model)
-            ? 'Edit images'
-            : 'Source image'
+          : replaceTargetOnPick
+            ? 'Edit target'
+            : currentFamily === 'qwen-image-edit' ||
+                isFlux2DevModel(form.state.value.model)
+              ? 'Edit images'
+              : 'Source image'
       "
       :multiple="
         !sequenceMode &&
+        !replaceTargetOnPick &&
         (currentFamily === 'qwen-image-edit' ||
           isFlux2DevModel(form.state.value.model))
       "
       :gallery-only="
-        !sequenceMode &&
-        currentFamily !== 'qwen-image-edit' &&
-        !isFlux2DevModel(form.state.value.model)
+        replaceTargetOnPick ||
+        (!sequenceMode &&
+          currentFamily !== 'qwen-image-edit' &&
+          !isFlux2DevModel(form.state.value.model))
       "
       @pick="onPickSource"
-      @close="showPicker = false"
+      @close="
+        showPicker = false;
+        replaceTargetOnPick = false;
+      "
     />
     <ImagePickerModal
       :open="h3BoundaryPickerTarget !== null"

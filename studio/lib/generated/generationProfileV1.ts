@@ -15,7 +15,12 @@ export type ProfileResolutionPreset = { id: string, width: number, height: numbe
 
 export type ProfileAspectGroup = { id: string, label: string, presets: Array<ProfileResolutionPreset>, };
 
-export type ResolutionProfile = { domain: ResolutionDomain, alignment: number, min_width: number, min_height: number, max_pixels: number, max_axis_pixels?: number | null, min_aspect_ratio?: number | null, max_aspect_ratio?: number | null,
+export type ResolutionProfile = { domain: ResolutionDomain, alignment: number, min_width: number, min_height: number, max_pixels: number,
+/**
+ * Optional source-image canvas ceiling. Source-driven models can accept
+ * a larger output canvas than their conditioning encoder should ingest.
+ */
+source_max_pixels?: number | null, max_axis_pixels?: number | null, min_aspect_ratio?: number | null, max_aspect_ratio?: number | null,
 /**
  * Only meaningful for the `Buckets` domain; see [`OffBucketPolicy`].
  * Absent on the wire (older servers and profiles) means `Reject`.

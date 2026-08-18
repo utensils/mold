@@ -6,10 +6,10 @@ import ImageDropWell from "./ImageDropWell.vue";
 /**
  * The primary-form image conditioning block shared by desktop, web, and
  * iPhone: a source well plus an optional closing-frame well, with wording
- * that follows the model's `SourceMediaPlan`. MiniMax H3 FL2VA boundaries
- * render through the exact same wells — the surface only maps slots to its
- * own state and pickers. Renders nothing for `none`, `attachments`, and
- * `h3-references` plans; those keep surface-owned UI.
+ * that follows the model's `SourceMediaPlan`. Qwen edit's primary Target and
+ * MiniMax H3 FL2VA boundaries render through the exact same wells — the
+ * surface only maps slots to its own state and pickers. Attachment plans
+ * without a primary well keep their surface-owned strip.
  */
 export type SourceMediaSlot = "source" | "end";
 
@@ -51,9 +51,14 @@ const emit = defineEmits<{
 const wells = computed(() =>
   props.plan.kind === "single" || props.plan.kind === "h3-boundaries"
     ? props.plan
-    : null,
+    : props.plan.kind === "attachments" && props.plan.primary === "target"
+      ? props.plan
+      : null,
 );
 const h3 = computed(() => props.plan.kind === "h3-boundaries");
+const target = computed(
+  () => props.plan.kind === "attachments" && props.plan.primary === "target",
+);
 const video = computed(
   () => h3.value || (props.plan.kind === "single" && props.plan.video),
 );
@@ -62,13 +67,19 @@ const required = computed(() =>
     ? props.plan.required
     : props.plan.kind === "h3-boundaries"
       ? props.plan.requiredEndpoint === "first"
-      : false,
+      : props.plan.kind === "attachments"
+        ? props.plan.required
+        : false,
 );
-const sourceLabel = computed(() => (h3.value ? "First frame" : "Source"));
+const sourceLabel = computed(() =>
+  h3.value ? "First frame" : target.value ? "Target" : "Source",
+);
 const sourcePlaceholder = computed(() =>
-  video.value
-    ? "Drop the opening frame or click to pick"
-    : "Drop an image or click to pick",
+  target.value
+    ? "Drop the image to edit or click to pick"
+    : video.value
+      ? "Drop the opening frame or click to pick"
+      : "Drop an image or click to pick",
 );
 /** H3's reviewed first-frame-only runtime refuses a closing frame; a restored
  * one stays visible so it can be removed, but never re-acquired. */
@@ -116,7 +127,7 @@ const endHint = computed(() =>
       :required="required"
       gallery
       :touch-friendly="touchFriendly"
-      :alt="h3 ? 'First frame' : 'Source image'"
+      :alt="h3 ? 'First frame' : target ? 'Edit target' : 'Source image'"
       test-id="source"
       @file="emit('file', 'source', $event)"
       @gallery="emit('gallery', 'source')"

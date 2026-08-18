@@ -10,6 +10,7 @@ import { attachmentRoleLabel, attachmentTitleLabel, moveAttachment } from "../li
 import type { GenerateForm } from "../lib/generateForm";
 import {
   inlineGenerationMediaBytes,
+  decodedBase64Bytes,
   MAX_MOBILE_GENERATION_REQUEST_MEDIA_BYTES,
   MOBILE_MEDIA_BUDGET_ERROR,
   sourceConditioningValidationError,
@@ -138,7 +139,10 @@ const sourcePickerMaxBytes = computed(() =>
   Math.max(
     0,
     MAX_MOBILE_GENERATION_REQUEST_MEDIA_BYTES -
-      inlineGenerationMediaBytes(props.form, "sourceImage"),
+      (isAttachmentMode.value
+        ? inlineGenerationMediaBytes(props.form) -
+          decodedBase64Bytes(props.form.imageAttachments[0])
+        : inlineGenerationMediaBytes(props.form, "sourceImage")),
   ),
 );
 const endFramePickerMaxBytes = computed(() =>
@@ -313,6 +317,38 @@ function pickSource(image: MobilePickedImage): void {
   sourcePickerOpen.value = false;
 }
 
+function replaceEditTarget(base64: string): void {
+  props.form.imageAttachments = [base64, ...props.form.imageAttachments.slice(1)];
+  props.form.sourceFit = { mode: "lanczos-resize" };
+}
+
+function pickEditTarget(image: MobilePickedImage): void {
+  error.value = "";
+  replaceEditTarget(image.base64);
+  sourcePickerOpen.value = false;
+}
+
+async function onEditTargetFile(_slot: SourceMediaSlot, file: File): Promise<void> {
+  if (!isAcceptedImage(file)) {
+    error.value = "Only PNG or JPEG photos can be used here.";
+    return;
+  }
+  if (file.size > sourcePickerMaxBytes.value) {
+    error.value = MOBILE_MEDIA_BUDGET_ERROR;
+    return;
+  }
+  try {
+    replaceEditTarget(await fileToBase64(file));
+    error.value = "";
+  } catch {
+    error.value = "Couldn’t read that photo. Try choosing it again.";
+  }
+}
+
+function clearEditTarget(): void {
+  props.form.imageAttachments = props.form.imageAttachments.slice(1);
+}
+
 /** The closing still of a wan first/last-frame render (#779). It keeps its own
  * name because that name — with the digest — is all saved metadata will ever
  * hold of it. */
@@ -458,6 +494,32 @@ function applyMask(mask: string): void {
       data-test="mobile-source-controls"
     >
       <legend class="mobile-source-legend">{{ flux2Dev ? "References" : "Pictures" }}</legend>
+      <SourceMediaWells
+        v-if="plan.kind === 'attachments' && plan.primary === 'target'"
+        :plan="plan"
+        touch-friendly
+        :source="form.imageAttachments[0] ? { data: form.imageAttachments[0] } : null"
+        @file="onEditTargetFile"
+        @gallery="sourcePickerOpen = true"
+        @clear="clearEditTarget"
+      />
+      <label
+        v-if="plan.kind === 'attachments' && plan.primary === 'target' && form.imageAttachments[0]"
+        class="field"
+      >
+        <span>Source fit</span>
+        <select
+          class="control"
+          :value="coerceSourceFitForMaskless(form.sourceFit).mode"
+          data-test="mobile-source-fit"
+          @change="setSourceFit"
+        >
+          <option value="crop-fill">Crop fill</option>
+          <option value="pad-fit">Pad fit</option>
+          <option value="lanczos-resize">Lanczos resize</option>
+          <option value="upscale-then-fit">Upscale then fit</option>
+        </select>
+      </label>
       <p class="mobile-source-note">
         {{
           flux2Dev
@@ -867,13 +929,13 @@ function applyMask(mask: string): void {
       @close="maskOpen = false"
     />
     <MobileImagePickerSheet
-      v-if="!isAttachmentMode"
+      v-if="!isAttachmentMode || (plan.kind === 'attachments' && plan.primary === 'target')"
       :open="sourcePickerOpen"
       :target="target"
-      title="Source image"
+      :title="isAttachmentMode ? 'Edit target' : 'Source image'"
       :max-bytes="sourcePickerMaxBytes"
       :oversize-message="MOBILE_MEDIA_BUDGET_ERROR"
-      @pick="pickSource"
+      @pick="isAttachmentMode ? pickEditTarget($event) : pickSource($event)"
       @close="sourcePickerOpen = false"
     />
     <MobileImagePickerSheet

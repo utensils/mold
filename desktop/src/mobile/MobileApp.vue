@@ -3534,6 +3534,32 @@ async function prepareGenerationRequest(
           },
         },
       )) ?? emptyMinimaxH3AuthoringState();
+  } else if (draftCaps.sourceImageMode === "qwen-edit" && draft.imageAttachments[0]) {
+    const result = await applySourceFitPreprocess(
+      {
+        source: draft.imageAttachments[0],
+        mask: null,
+        policy: coerceSourceFitForMaskless(draft.sourceFit),
+        target: { width: draft.width, height: draft.height },
+      },
+      {
+        ops: domCanvasOps,
+        cache: sourceFitCache,
+        upscale: (image, model) =>
+          upscaleImage({
+            image,
+            model,
+            target,
+            onProgress: (message) => {
+              if (isCurrent()) setGenerationStatus(message);
+            },
+          }),
+        onStatus: (message) => {
+          if (isCurrent()) setGenerationStatus(message);
+        },
+      },
+    );
+    if (result.source) draft.imageAttachments[0] = result.source;
   } else if (
     draftCaps.supportsImg2img &&
     draftCaps.sourceImageMode === "single" &&

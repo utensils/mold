@@ -185,6 +185,14 @@ merge again on the next request. Block offloading (`--offload` /
 `qwen-image-edit-2511` runs a real multimodal edit path: Qwen2.5-VL condition
 images are patchified through the vision tower, source-image latents are packed
 and concatenated with output-noise tokens, and true CFG uses norm rescaling.
+Mold follows the upstream edit-plus preprocessing split: each ordered input is
+normalized to a 1024×1024 pixel area for VAE conditioning and independently to
+a 384×384 area for Qwen2.5-VL. Studio advertises the 1 MP source ceiling from
+the model profile, downscales source-matched canvases without changing aspect,
+and lets the Target use contain, crop, Lanczos resize, or upscale-and-fit before
+the request is frozen. For CLI and direct API callers, the server independently
+enforces the 1 MP VAE ceiling while the existing Qwen2.5-VL preprocessor remains
+the single authority for its 384×384 conditioning area.
 Quantized `--qwen2-variant` values are supported for the edit family through a
 GGUF Qwen2.5 language path plus the staged Qwen2.5-VL vision tower used for
 image conditioning. On CUDA, quantized edit transformers run true CFG as two
