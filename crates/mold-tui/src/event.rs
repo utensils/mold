@@ -214,7 +214,7 @@ fn map_models_key(key: &KeyEvent) -> Action {
 /// routes by `MachinesFocus`), Tab toggles panes, Enter sets the sticky
 /// generation target, and the row actions are `c` connect / `d` disconnect /
 /// reconnect / `f` forget /
-/// `r` refresh / `x` cancel-queued-job (detail focus). `[` / `]` select a
+/// `r` refresh / `x` cancel-job (detail focus). `[` / `]` select a
 /// stable device and `e` toggles its desired enabled state.
 fn map_machines_key(key: &KeyEvent) -> Action {
     match key.code {

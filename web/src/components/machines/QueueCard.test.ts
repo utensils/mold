@@ -63,6 +63,18 @@ describe("QueueCard reorder index", () => {
     ).toBeUndefined();
   });
 
+  it("offers running cancellation only when the host advertises cooperative support", () => {
+    const legacy = mount(QueueCard, {
+      props: { entries: listing(), gpuOrdinals: [0] },
+    });
+    expect(legacy.findAll("[data-test='queue-cancel']")).toHaveLength(2);
+
+    const current = mount(QueueCard, {
+      props: { entries: listing(), gpuOrdinals: [0], canCancelRunning: true },
+    });
+    expect(current.findAll("[data-test='queue-cancel']")).toHaveLength(3);
+  });
+
   it("preserves non-contiguous advertised GPU ordinals in lane values", () => {
     const wrapper = mount(QueueCard, {
       props: {

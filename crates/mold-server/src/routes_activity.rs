@@ -115,17 +115,24 @@ pub async fn list_active_work(State(state): State<AppState>) -> Json<ActiveWorkS
             },
             |activity| activity.phase,
         );
+        let cancelling = entry.state == crate::job_registry::JobLifecycle::Running
+            && state.job_registry.cancel_requested(&entry.id);
         items.push(ActiveWorkItem {
             id: entry.id,
             kind: "generation".into(),
-            phase: phase.into(),
+            phase: if cancelling { "cancelling" } else { phase }.into(),
             model: Some(entry.model),
             created_at_unix_ms: entry.started_at_unix_ms,
             updated_at_unix_ms: observed_at_unix_ms,
             position: Some(entry.position),
             current: None,
             total: None,
-            can_cancel: matches!(entry.state, crate::job_registry::JobLifecycle::Queued),
+            can_cancel: !cancelling
+                && matches!(
+                    entry.state,
+                    crate::job_registry::JobLifecycle::Queued
+                        | crate::job_registry::JobLifecycle::Running
+                ),
         });
     }
 

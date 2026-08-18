@@ -135,8 +135,10 @@ hide them, and clear one with `DELETE /api/queue/:id`.
 It is the server's replay idempotence key; clients may use it to correlate a
 resumed job with the print it eventually produced.
 
-`queue.cooperative_cancellation` remains `false`. Running work is still not
-cancellable over the API.
+`queue.cooperative_cancellation` is `true` on current servers. A
+`DELETE /api/queue/:id` for running singleton work revokes its inference token
+and returns immediately; the worker stops at the next model safe point. Older
+servers omit/false this capability, so clients keep their running rows read-only.
 
 During shutdown, `POST /api/generate` and `/api/generate/stream` answer
 `503` with code `SERVER_RESTARTING` and a `Retry-After` header.

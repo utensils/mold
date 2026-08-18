@@ -224,6 +224,8 @@ export interface ServerCapabilities {
     can_pause?: boolean;
     can_cancel_all?: boolean;
     can_reorder?: boolean;
+    /** Running singleton generations accept cooperative cancellation. */
+    cooperative_cancellation?: boolean;
     /** The host journals admitted generations, keeps them across a restart,
      * and runs them whether or not a client is still attached. Absent on
      * servers that predate the durable queue. */

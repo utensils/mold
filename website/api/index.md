@@ -609,18 +609,18 @@ queued range, so a large value sends a job to the back. Reordering changes real
 dispatch priority, not only the listing returned by `GET /api/queue`.
 Already-running jobs reject lane and position changes.
 
-Use `DELETE /api/queue/:id` to cancel a job that is still queued:
+Use `DELETE /api/queue/:id` to cancel a queued or running singleton job:
 
 ```bash
 curl -X DELETE http://localhost:7680/api/queue/00000000-0000-0000-0000-000000000000
 ```
 
-Returns `204 No Content` on success, `404` for unknown ids, and `409`
-(`QUEUE_JOB_RUNNING`) once a GPU worker owns the job — only queued jobs are
-cancelable. The waiting client observes the cancellation immediately: a
-blocking `POST /api/generate` resolves with a `499` `CANCELLED` error, and a
-`POST /api/generate/stream` connection receives a terminal `error` event and
-closes.
+Returns `204 No Content` as soon as cancellation authority is revoked and `404`
+for unknown ids. Queued work is removed immediately; running work stops at the
+next model safe point. Feature-detect active support through
+`queue.cooperative_cancellation`. The waiting client observes a terminal
+`CANCELLED` error and a streaming connection receives an `error` event before
+it closes.
 
 ## `/api/history`
 

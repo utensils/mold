@@ -58,6 +58,7 @@ const generation = useGenerationStore();
 const hosts = useHostsStore();
 const hostModels = useHostModelsStore();
 const jobs = useJobsStore();
+const cancellingIds = ref<string[]>([]);
 const composer = useComposerStore();
 const toasts = useToastStore();
 const contextMenu = useContextMenuStore();
@@ -175,6 +176,8 @@ function laneDroppable(laneKey: LaneKey): boolean {
 }
 
 async function cancelEntry(entry: EnrichedQueueEntry) {
+  if (cancellingIds.value.includes(entry.id)) return;
+  cancellingIds.value = [...cancellingIds.value, entry.id];
   try {
     const cancelled =
       entry.clientId !== null
@@ -183,6 +186,8 @@ async function cancelEntry(entry: EnrichedQueueEntry) {
     if (cancelled) toasts.push("Cancelled");
   } catch (err) {
     toasts.push(String(err), "error");
+  } finally {
+    cancellingIds.value = cancellingIds.value.filter((id) => id !== entry.id);
   }
 }
 
@@ -359,13 +364,18 @@ function loadQueueSettings(metadata: OutputMetadata) {
               </div>
             </div>
             <button
-              v-if="entry.state === 'queued' || entry.state === 'held' || entry.mine"
+              v-if="
+                entry.state === 'queued' ||
+                entry.state === 'held' ||
+                (entry.state === 'running' && caps?.canCancelRunning)
+              "
               type="button"
               data-test="cancel-entry"
+              :disabled="cancellingIds.includes(entry.id)"
               class="h-7 shrink-0 rounded-control px-2.5 text-body text-ink-3 hover:text-stop"
               @click.stop="cancelEntry(entry)"
             >
-              Cancel
+              {{ cancellingIds.includes(entry.id) ? "Cancelling…" : "Cancel" }}
             </button>
           </li>
         </ul>

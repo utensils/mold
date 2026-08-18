@@ -147,6 +147,13 @@ export interface ServerCapabilities {
     observes_v2_decisions?: boolean;
     request_placement_preview?: boolean;
   } | null;
+  queue?: {
+    can_pause?: boolean;
+    can_cancel_all?: boolean;
+    can_reorder?: boolean;
+    cooperative_cancellation?: boolean;
+    durable_queue?: boolean;
+  } | null;
   /** Absent on older servers means unknown, not unavailable. */
   expand?: ExpandCapabilities | null;
 }
