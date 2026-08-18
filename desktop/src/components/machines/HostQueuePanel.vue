@@ -378,11 +378,7 @@ function loadQueueSettings(metadata: OutputMetadata) {
         </p>
       </div>
     </template>
-    <QueuePlanWorkList
-      class="mt-2"
-      :plan="snapshot?.plan ?? null"
-      :exclude-ids="entryIds"
-    />
+    <QueuePlanWorkList class="mt-2" :plan="snapshot?.plan ?? null" :exclude-ids="entryIds" />
     <p
       v-if="!hasEntries && !hasPlanOnlyWork"
       class="mt-1 text-caption text-ink-3"
