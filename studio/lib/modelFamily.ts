@@ -45,3 +45,17 @@ export function familyLabel(family: string): string {
       .join(" ")
   );
 }
+
+/** Catalog browsing groups edit-specialized Qwen Image variants with the
+ * Qwen Image shelf. Runtime forms keep the concrete `qwen-image-edit` family;
+ * this only controls Models taxonomy/filtering. */
+export function catalogFamily(family: string): string {
+  return family === "qwen-image-edit" ? "qwen-image" : family;
+}
+
+export function matchesCatalogFamily(
+  family: string,
+  selected: string,
+): boolean {
+  return !selected || catalogFamily(family) === catalogFamily(selected);
+}

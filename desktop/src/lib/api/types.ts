@@ -877,6 +877,13 @@ export interface CatalogSearchResponse {
   page: number;
   page_size: number;
   total: number;
+  /** A merged search can keep one provider's rows when the other is down. */
+  provider_errors?: CatalogProviderError[];
+}
+
+export interface CatalogProviderError {
+  source: "hf" | "civitai";
+  message: string;
 }
 
 /** One family from `GET /api/catalog/families`. */

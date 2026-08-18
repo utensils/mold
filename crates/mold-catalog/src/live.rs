@@ -24,7 +24,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::civitai_map::{map_base_model, CIVITAI_BASE_MODELS};
 use crate::companions::{Companion, COMPANIONS};
@@ -398,6 +398,60 @@ pub struct LiveSearchResult {
     /// Complete filtered row count when the upstream exposes it; otherwise a
     /// conservative lower bound that keeps pagination available.
     pub total: usize,
+    /// Provider-scoped failures from a merged search. A healthy provider's
+    /// rows remain usable; clients render these as retryable, non-blocking
+    /// warnings instead of replacing the entire catalog with an error page.
+    pub provider_errors: Vec<CatalogProviderError>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct CatalogProviderError {
+    pub source: Source,
+    pub message: String,
+}
+
+const SEARCH_RETRY_DELAYS: [Duration; 2] = [Duration::from_millis(100), Duration::from_millis(250)];
+
+fn retryable_search_error(error: &LiveSearchError) -> bool {
+    match error {
+        LiveSearchError::Network(_) | LiveSearchError::Decode(_) => true,
+        LiveSearchError::Upstream { status, .. } => {
+            matches!(status, 408 | 425 | 429 | 500..=599)
+        }
+    }
+}
+
+async fn retry_search<T, F, Fut>(mut search: F) -> Result<T, LiveSearchError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, LiveSearchError>>,
+{
+    for (attempt, delay) in SEARCH_RETRY_DELAYS.iter().enumerate() {
+        match search().await {
+            Err(error) if retryable_search_error(&error) => {
+                tracing::warn!(
+                    target: "catalog.live",
+                    attempt = attempt + 1,
+                    error = %error,
+                    "catalog provider request failed; retrying"
+                );
+                tokio::time::sleep(*delay).await;
+            }
+            result => return result,
+        }
+    }
+    search().await
+}
+
+fn provider_error(source: Source) -> CatalogProviderError {
+    let provider = match source {
+        Source::Hf => "Hugging Face",
+        Source::Civitai => "Civitai",
+    };
+    CatalogProviderError {
+        source,
+        message: format!("{provider} is temporarily unavailable."),
+    }
 }
 
 /// Backwards-compatible one-shot query for Rust consumers that only need the
@@ -441,14 +495,14 @@ pub async fn search_page(
     let want_hf = !matches!(opts.source, Some(Source::Civitai));
     let civitai_fut = async {
         if want_civitai {
-            Some(civitai_search_paged(civitai_base, cache, &upstream_opts).await)
+            Some(retry_search(|| civitai_search_paged(civitai_base, cache, &upstream_opts)).await)
         } else {
             None
         }
     };
     let hf_fut = async {
         if want_hf {
-            Some(hf_search_paged(hf_base, cache, &upstream_opts).await)
+            Some(retry_search(|| hf_search_paged(hf_base, cache, &upstream_opts)).await)
         } else {
             None
         }
@@ -457,9 +511,24 @@ pub async fn search_page(
 
     let mut entries = Vec::new();
     let mut total = 0;
-    if let Some(page) = civitai_result.transpose()? {
-        total += page.total;
-        entries.extend(page.entries);
+    let mut provider_errors = Vec::new();
+    if let Some(result) = civitai_result {
+        match result {
+            Ok(page) => {
+                total += page.total;
+                entries.extend(page.entries);
+            }
+            Err(
+                error @ LiveSearchError::Upstream {
+                    status: 401 | 403, ..
+                },
+            ) => return Err(error),
+            Err(error) if matches!(opts.source, Some(Source::Civitai)) => return Err(error),
+            Err(error) => {
+                tracing::warn!(target: "catalog.live", error = %error, "civitai search failed");
+                provider_errors.push(provider_error(Source::Civitai));
+            }
+        }
     }
     if let Some(result) = hf_result {
         // Authentication errors must surface so the server can retry with its
@@ -477,6 +546,7 @@ pub async fn search_page(
             Err(e) if matches!(opts.source, Some(Source::Hf)) => return Err(e),
             Err(e) => {
                 tracing::warn!(target: "catalog.live", error = %e, "hf search failed");
+                provider_errors.push(provider_error(Source::Hf));
             }
         }
     }
@@ -486,8 +556,18 @@ pub async fn search_page(
         entries.extend(local_page.entries);
     }
     entries.truncate(opts.page_size as usize);
+    if !provider_errors.is_empty() {
+        // A provider recovering on a later page would start at that later
+        // provider page and permanently skip its earlier rows. End degraded
+        // pagination here; Retry restarts the merged epoch from page 1.
+        total = page_offset(opts).saturating_add(entries.len());
+    }
 
-    Ok(LiveSearchResult { entries, total })
+    Ok(LiveSearchResult {
+        entries,
+        total,
+        provider_errors,
+    })
 }
 
 fn paginate_local(entries: Vec<CatalogEntry>, opts: &LiveSearchOpts) -> LiveSearchResult {
@@ -498,7 +578,11 @@ fn paginate_local(entries: Vec<CatalogEntry>, opts: &LiveSearchOpts) -> LiveSear
         .skip(start)
         .take(opts.page_size as usize)
         .collect();
-    LiveSearchResult { entries, total }
+    LiveSearchResult {
+        entries,
+        total,
+        provider_errors: Vec::new(),
+    }
 }
 
 fn page_offset(opts: &LiveSearchOpts) -> usize {
@@ -799,6 +883,7 @@ async fn civitai_search_paged(
                 let page_result = LiveSearchResult {
                     entries,
                     total: chain.total(),
+                    provider_errors: Vec::new(),
                 };
                 cache.put_civitai_page(
                     SourcePageKey {
@@ -818,6 +903,7 @@ async fn civitai_search_paged(
         let page_result = LiveSearchResult {
             entries,
             total: chain.total(),
+            provider_errors: Vec::new(),
         };
         cache.put_civitai_page(
             SourcePageKey {
@@ -836,6 +922,7 @@ async fn civitai_search_paged(
             result = Some(LiveSearchResult {
                 entries: Vec::new(),
                 total: chain.total(),
+                provider_errors: Vec::new(),
             });
             break;
         }
@@ -845,6 +932,7 @@ async fn civitai_search_paged(
     Ok(result.unwrap_or(LiveSearchResult {
         entries: Vec::new(),
         total,
+        provider_errors: Vec::new(),
     }))
 }
 
@@ -1108,7 +1196,11 @@ async fn hf_search(base: &str, opts: &LiveSearchOpts) -> Result<LiveSearchResult
             .saturating_add(entries.len())
             .saturating_add(usize::from(!entries.is_empty()))
     };
-    Ok(LiveSearchResult { entries, total })
+    Ok(LiveSearchResult {
+        entries,
+        total,
+        provider_errors: Vec::new(),
+    })
 }
 
 /// Build a recipe-less `CatalogEntry` from an HF search hit. The recipe
@@ -2287,10 +2379,31 @@ mod tests {
         .expect("merged search must survive an HF 5xx");
         assert!(result.entries.iter().all(|e| e.id.0.starts_with("cv:")));
         assert!(!result.entries.is_empty());
+        assert_eq!(
+            result.total,
+            result.entries.len(),
+            "a degraded merged page is terminal until the client retries page 1"
+        );
+        assert_eq!(
+            result.provider_errors,
+            [CatalogProviderError {
+                source: Source::Hf,
+                message: "Hugging Face is temporarily unavailable.".into(),
+            }]
+        );
+        let requests = server.received_requests().await.expect("requests");
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.url.path() == "/api/models")
+                .count(),
+            3,
+            "transient provider failures get two bounded retries"
+        );
     }
 
     #[tokio::test]
-    async fn merged_search_propagates_civitai_errors() {
+    async fn merged_search_soft_fails_civitai_server_errors() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/v1/models"))
@@ -2303,21 +2416,50 @@ mod tests {
             .mount(&server)
             .await;
 
-        let err = search_page(
+        let result = search_page(
             &server.uri(),
             &server.uri(),
             &test_cache(),
             &LiveSearchOpts::default(),
         )
         .await
-        .expect_err("civitai errors must propagate from the parallel path");
-        match err {
-            LiveSearchError::Upstream { host, status, .. } => {
-                assert_eq!(host, "civitai.com");
-                assert_eq!(status, 500);
+        .expect("merged search must survive a Civitai 5xx");
+        assert!(result.entries.iter().all(|e| e.id.0.starts_with("hf:")));
+        assert!(!result.entries.is_empty());
+        assert_eq!(
+            result.total,
+            result.entries.len(),
+            "a degraded merged page is terminal until the client retries page 1"
+        );
+        assert_eq!(
+            result.provider_errors,
+            [CatalogProviderError {
+                source: Source::Civitai,
+                message: "Civitai is temporarily unavailable.".into(),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn transient_search_retry_stops_after_a_success() {
+        let attempts = std::sync::atomic::AtomicUsize::new(0);
+        let result = retry_search(|| async {
+            let attempt = attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if attempt == 0 {
+                Err(LiveSearchError::Upstream {
+                    host: "huggingface.co",
+                    status: 502,
+                    body: "bad gateway".into(),
+                })
+            } else {
+                Ok("recovered")
             }
-            other => panic!("expected Upstream 500, got {other:?}"),
-        }
+        })
+        .await
+        .expect("the second attempt succeeds");
+
+        assert_eq!(result, "recovered");
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
     #[tokio::test]

@@ -187,7 +187,7 @@ async fn h3_search_identity_reaches_the_upstream_catalog() {
     Mock::given(method("GET"))
         .and(wm_path("/api/v1/models"))
         .respond_with(ResponseTemplate::new(500))
-        .expect(2)
+        .expect(6)
         .mount(&server)
         .await;
     let state = AppState::for_tests().with_civitai_base(server.uri());
@@ -207,7 +207,8 @@ async fn h3_search_identity_reaches_the_upstream_catalog() {
             .await
             .expect("recorded requests")
             .len(),
-        2
+        6,
+        "each transient upstream failure gets two bounded retries"
     );
     server.verify().await;
 }

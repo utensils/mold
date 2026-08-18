@@ -122,6 +122,22 @@ async function mountTab(mediaType: "all" | "image" | "video" = "all") {
   return wrapper;
 }
 
+async function mountCatalog(extraProps: Record<string, unknown> = {}) {
+  setActivePinia(createPinia());
+  const connection = useConnectionStore();
+  connection.info = {
+    mode: "local",
+    baseUrl: "http://127.0.0.1:7680",
+    apiKey: "local-key",
+  };
+  connection.status = "ready";
+  const wrapper = mount(CatalogTab, {
+    props: { query: "", layout: "grid" as const, ...extraProps },
+  });
+  await flushPromises();
+  return wrapper;
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   FakeIntersectionObserver.instances = [];
@@ -203,6 +219,59 @@ describe("CatalogTab media filter under pagination", () => {
     await wrapper.get("select[aria-label='Model family']").setValue("ltx2");
     await flushPromises();
     expect(familyOptionValues(wrapper)).toEqual(["", "flux", "ltx2", "qwen-image"]);
+  });
+
+  it("keeps available models visible with a provider warning and retries on demand", async () => {
+    searchCatalog.mockResolvedValue({
+      entries: [entry("Healthy HF model", "flux")],
+      page: 1,
+      page_size: PAGE_SIZE,
+      total: 1,
+      provider_errors: [{ source: "civitai", message: "Civitai is temporarily unavailable." }],
+    });
+    const wrapper = await mountCatalog({
+      installedEntries: [
+        {
+          name: "qwen-image-edit:q4",
+          family: "qwen-image-edit",
+          downloaded: true,
+          hostIds: ["local"],
+        },
+      ] as never,
+    });
+
+    expect(wrapper.get("[data-test='catalog-provider-warning']").text()).toContain("Civitai");
+    expect(wrapper.text()).toContain("Healthy HF model");
+    expect(wrapper.text()).toContain("qwen-image-edit:q4");
+
+    searchCatalog.mockRejectedValueOnce(new Error("still unavailable"));
+    await wrapper.get("[data-test='catalog-retry']").trigger("click");
+    await flushPromises();
+    expect(searchCatalog).toHaveBeenCalledTimes(2);
+    expect(wrapper.text()).toContain("Healthy HF model");
+    expect(wrapper.text()).toContain("qwen-image-edit:q4");
+    expect(wrapper.get("[data-test='catalog-provider-warning']").text()).toContain(
+      "still unavailable",
+    );
+  });
+
+  it("lists Qwen Image Edit models under the Qwen Image family", async () => {
+    const wrapper = await mountCatalog({
+      installedEntries: [
+        {
+          name: "qwen-image-edit-2511:q4",
+          family: "qwen-image-edit",
+          downloaded: true,
+          hostIds: ["local"],
+        },
+      ] as never,
+    });
+
+    expect(familyOptionValues(wrapper)).toContain("qwen-image");
+    expect(familyOptionValues(wrapper)).not.toContain("qwen-image-edit");
+    await wrapper.get("select[aria-label='Model family']").setValue("qwen-image");
+    await flushPromises();
+    expect(wrapper.text()).toContain("qwen-image-edit-2511:q4");
   });
 
   it("retries taxonomy when reachability changes and retains the last good families", async () => {

@@ -1902,6 +1902,23 @@ describe("MobileCatalogView", () => {
     expect(wrapper.text()).not.toContain("Couldn’t reach Studio");
   });
 
+  it("keeps partial provider rows when a manual retry still fails", async () => {
+    searchCatalog.mockResolvedValueOnce({
+      ...searchResponse([entry("Healthy HF model")]),
+      provider_errors: [{ source: "civitai", message: "Civitai is temporarily unavailable." }],
+    });
+    wrapper = mountCatalog(studio.id, [studio]);
+    await flushPromises();
+    expect(wrapper.text()).toContain("Healthy HF model");
+
+    searchCatalog.mockRejectedValueOnce(new Error("still unavailable"));
+    await wrapper.get(".mobile-catalog-retry").trigger("click");
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("Healthy HF model");
+    expect(wrapper.text()).toContain("still unavailable");
+  });
+
   it("falls back to the families seen in results when the taxonomy is unavailable", async () => {
     fetchCatalogFamilies.mockRejectedValue(new Error("fetch failed"));
     searchCatalog.mockResolvedValue(

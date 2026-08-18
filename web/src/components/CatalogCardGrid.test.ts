@@ -80,6 +80,8 @@ let mockState: {
   loadingMore: any;
   hasMore: any;
   errorMsg: any;
+  providerErrors: any;
+  refresh: ReturnType<typeof vi.fn>;
   loadMore: ReturnType<typeof vi.fn>;
   openDetail: ReturnType<typeof vi.fn>;
   startDownload: ReturnType<typeof vi.fn>;
@@ -102,6 +104,8 @@ beforeEach(() => {
     loadingMore: ref(false),
     hasMore: ref(true),
     errorMsg: ref<string | null>(null),
+    providerErrors: ref([]),
+    refresh: vi.fn(),
     loadMore: vi.fn(),
     openDetail: vi.fn(),
     startDownload: vi.fn(),
@@ -132,6 +136,22 @@ describe("CatalogCardGrid result count", () => {
     expect(w.find('[data-testid="catalog-result-count"]').text()).toBe(
       "1 result",
     );
+  });
+});
+
+describe("CatalogCardGrid provider resilience", () => {
+  it("keeps healthy rows visible beside a provider warning and retries", async () => {
+    mockState.providerErrors = ref([
+      { source: "civitai", message: "Civitai is temporarily unavailable." },
+    ]);
+    const w = mount(CatalogCardGrid);
+
+    expect(w.get("[data-test='catalog-provider-warning']").text()).toContain(
+      "Civitai",
+    );
+    expect(w.findAllComponents({ name: "CatalogCard" })).toHaveLength(1);
+    await w.get("[data-test='catalog-retry']").trigger("click");
+    expect(mockState.refresh).toHaveBeenCalledOnce();
   });
 });
 

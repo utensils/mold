@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import { catalogFamily, matchesCatalogFamily } from "@studio/lib/modelFamily";
 import CatalogLayoutToggle, {
   type CatalogLayoutChoice,
 } from "@ui/components/CatalogLayoutToggle.vue";
@@ -28,7 +29,7 @@ import CatalogTableRow from "./CatalogTableRow.vue";
 import CatalogDetailDrawer, { type DrawerVariant } from "./CatalogDetailDrawer.vue";
 import DownloadTargetDialog from "./DownloadTargetDialog.vue";
 import { installedModelToEntry } from "../../lib/catalogDetail";
-import type { CatalogEntry, ModelEntry } from "../../lib/api/types";
+import type { CatalogEntry, CatalogProviderError, ModelEntry } from "../../lib/api/types";
 
 type LibraryModelEntry = ModelEntry & { hostIds?: string[] };
 type CatalogListEntry = CatalogEntry & { hostIds?: string[] };
@@ -86,6 +87,7 @@ const page = ref(1);
 const hasMore = ref(false);
 const loading = ref(false);
 const error = ref<string | null>(null);
+const providerErrors = ref<CatalogProviderError[]>([]);
 const pulling = ref<Set<string>>(new Set());
 const pendingEntry = ref<CatalogEntry | null>(null);
 /** Entry whose in-app detail drawer is open. */
@@ -101,7 +103,7 @@ function recordFamilies(values: Iterable<string | null | undefined>): void {
   const before = seen.size;
   for (const value of values) {
     const name = value?.trim();
-    if (name) seen.add(name);
+    if (name) seen.add(catalogFamily(name));
   }
   if (seen.size !== before) observedFamilies.value = [...seen].sort((a, b) => a.localeCompare(b));
 }
@@ -137,7 +139,7 @@ const installedCatalogEntries = computed<CatalogListEntry[]>(() => {
       (m) =>
         !q || m.name.toLowerCase().includes(q) || modelDisplayName(m).toLowerCase().includes(q),
     )
-    .filter((m) => !family.value || m.family === family.value)
+    .filter((m) => matchesCatalogFamily(m.family, family.value))
     .map((m) => ({ ...installedModelToEntry(m), hostIds: m.hostIds ?? [] }))
     .filter(
       (entry) =>
@@ -214,7 +216,7 @@ const manifestEntries = computed<CatalogEntry[]>(() => {
     .filter((model) => !model.downloaded && isGenerationModel(model))
     .filter((model) => !installed.has(model.name))
     .filter((model) => !q || model.name.toLowerCase().includes(q))
-    .filter((model) => !family.value || model.family === family.value)
+    .filter((model) => matchesCatalogFamily(model.family, family.value))
     .map(manifestCatalogEntry);
 });
 
@@ -348,9 +350,9 @@ let searchEpoch = 0;
 
 async function runSearch(reset: boolean) {
   const epoch = ++searchEpoch;
+  let nextEntries = reset ? [] : [...entries.value];
   if (reset) {
     page.value = 1;
-    entries.value = [];
   }
   loading.value = true;
   error.value = null;
@@ -372,8 +374,10 @@ async function runSearch(reset: boolean) {
         target,
       );
       if (epoch !== searchEpoch) return;
+      providerErrors.value = res.provider_errors ?? [];
       recordFamilies(res.entries.map((entry) => entry.family));
-      entries.value = [...entries.value, ...res.entries];
+      nextEntries = [...nextEntries, ...res.entries];
+      entries.value = nextEntries;
       // Exhaustion comes from the wire `total`, not page fullness: under
       // source=All the server splits the page budget across sources, so a
       // merged page is legitimately short whenever one source has no rows
@@ -410,6 +414,10 @@ function loadMore() {
   if (loading.value || !hasMore.value) return;
   page.value += 1;
   void runSearch(false);
+}
+
+function retrySearch(): void {
+  void runSearch(true);
 }
 
 const sentinel = ref<HTMLElement | null>(null);
@@ -667,12 +675,31 @@ onUnmounted(() => {
       />
     </div>
 
-    <p v-if="error" class="text-caption text-stop">{{ error }}</p>
+    <div
+      v-if="error || providerErrors.length"
+      data-test="catalog-provider-warning"
+      class="border-stop/30 bg-stop/5 flex items-center gap-3 rounded-control border px-3 py-2 text-caption text-stop"
+      role="alert"
+    >
+      <p class="min-w-0 flex-1">
+        {{ error ?? providerErrors.map((item) => item.message).join(" ") }}
+        <span v-if="providerErrors.length"> Showing available models.</span>
+      </p>
+      <button
+        type="button"
+        data-test="catalog-retry"
+        class="border-stop/40 shrink-0 rounded-control border px-2 py-1 font-medium hover:bg-stop/10"
+        :disabled="loading"
+        @click="retrySearch"
+      >
+        {{ loading ? "Retrying…" : "Retry" }}
+      </button>
+    </div>
 
     <!-- Empty state — keyed on the FILTERED list so an all-image page under
          the Video chip explains itself instead of rendering a blank grid. -->
     <div
-      v-else-if="!loading && displayEntries.length === 0"
+      v-if="!loading && displayEntries.length === 0"
       class="p-8 text-center text-body text-ink-2"
       data-test="catalog-empty"
     >
