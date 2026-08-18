@@ -69,6 +69,21 @@ describe("SequenceAdvancedSettings camera motion", () => {
     expect(wrapper.text()).toContain("Install an upscaler");
   });
 
+  it("renders the shared one-shot thumbnail for the sequence opening image", () => {
+    const draft = useSequenceDraftStore();
+    draft.openingImage = { filename: "opening.jpg", base64: "QUJD" };
+    const wrapper = mount(SequenceAdvancedSettings, {
+      props: { form: newGenerateForm() },
+    });
+
+    const image = wrapper.get(
+      "[data-test='sequence-section-opening-image'] .image-well__preview img",
+    );
+    expect(image.attributes("src")).toBe("data:image/jpeg;base64,QUJD");
+    expect(image.attributes("alt")).toBe("Opening sequence image");
+    expect(wrapper.find("[data-test='sequence-opening-image-remove']").exists()).toBe(true);
+  });
+
   it("resets camera motion across the sequence", async () => {
     const draft = useSequenceDraftStore();
     draft.clips[0]!.cameraControl = "dolly-in";

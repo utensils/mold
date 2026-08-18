@@ -8,6 +8,7 @@ import {
 import type { GenerateFormState, ModelInfoExtended } from "../../types";
 import { createPinia, setActivePinia } from "pinia";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
+import ImageDropWell from "@studio/components/ImageDropWell.vue";
 
 // The upscale section reads the host's model list. Only upscalers matter here.
 const UPSCALERS: ModelInfoExtended[] = [
@@ -171,6 +172,46 @@ describe("AdvancedDrawer sequence contract", () => {
     expect(wrapper.emitted("update:modelValue")?.at(-1)?.[0]).toMatchObject({
       sourceFitPolicy: { mode: "lanczos-resize" },
     });
+  });
+
+  it("renders the shared one-shot thumbnail for the sequence opening image", async () => {
+    const wrapper = factory("ltx2", {}, { output: "sequence" });
+    useSequenceDraftStore().openingImage = {
+      filename: "opening.jpg",
+      base64: "QUJD",
+    };
+    await wrapper.vm.$nextTick();
+
+    const image = wrapper.get(
+      "[data-test='sequence-section-opening-image'] .image-well__preview img",
+    );
+    expect(image.attributes("src")).toBe("data:image/jpeg;base64,QUJD");
+    expect(image.attributes("alt")).toBe("Opening sequence image");
+    expect(
+      wrapper.find("[data-test='sequence-opening-image-remove']").exists(),
+    ).toBe(true);
+  });
+
+  it("clears a rejected-file error before opening the gallery picker", async () => {
+    const wrapper = factory("ltx2", {}, { output: "sequence" });
+    wrapper.findComponent(ImageDropWell).vm.$emit(
+      "file",
+      new File([new Uint8Array([0x47, 0x49, 0x46, 0x38])], "bad.gif", {
+        type: "image/gif",
+      }),
+    );
+    await flushPromises();
+    expect(
+      wrapper.find("[data-test='sequence-opening-image-error']").exists(),
+    ).toBe(true);
+
+    await wrapper
+      .get("[data-test='sequence-opening-image-gallery']")
+      .trigger("click");
+    expect(
+      wrapper.find("[data-test='sequence-opening-image-error']").exists(),
+    ).toBe(false);
+    expect(wrapper.emitted("open-picker")).toHaveLength(1);
   });
 
   it("edits and resets camera motion on the active clip", async () => {
