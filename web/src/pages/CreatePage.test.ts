@@ -1167,20 +1167,24 @@ describe("CreatePage layout and behavior", () => {
     };
     await nextTick();
 
-    await wrapper.get("[data-test='composer-submit']").trigger("click");
-    await flushPromises();
+    try {
+      await wrapper.get("[data-test='composer-submit']").trigger("click");
+      await vi.waitFor(() => expect(submitMock).toHaveBeenCalledTimes(1), {
+        timeout: 5_000,
+      });
 
-    expect(submitMock).toHaveBeenCalledTimes(1);
-    const req = submitMock.mock.calls[0][0];
-    expect(req.edit_images).toEqual(["FITTED_TARGET", "REFERENCE"]);
-    expect(req.mask_image).toBeUndefined();
-    expect(req.source_image).toBeUndefined();
-    expect(
-      form.state.value.imageAttachments.map((image) => image.base64),
-    ).toEqual(["TARGET", "REFERENCE"]);
-    getContext.mockRestore();
-    toDataUrl.mockRestore();
-    vi.unstubAllGlobals();
+      const req = submitMock.mock.calls[0][0];
+      expect(req.edit_images).toEqual(["FITTED_TARGET", "REFERENCE"]);
+      expect(req.mask_image).toBeUndefined();
+      expect(req.source_image).toBeUndefined();
+      expect(
+        form.state.value.imageAttachments.map((image) => image.base64),
+      ).toEqual(["TARGET", "REFERENCE"]);
+    } finally {
+      getContext.mockRestore();
+      toDataUrl.mockRestore();
+      vi.unstubAllGlobals();
+    }
   });
 
   it("keeps a long advanced video request single-shot and preserves its settings", async () => {
