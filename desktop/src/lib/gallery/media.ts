@@ -1,5 +1,6 @@
 import { ApiError, apiFetch, apiFetchTo, currentTarget, type ApiTarget } from "../api/client";
 import type { GalleryImage } from "../api/types";
+import { inTauri, ipc } from "../ipc";
 
 /**
  * Gallery media sits behind X-Api-Key auth, and <img>/<video> cannot send
@@ -31,16 +32,41 @@ export interface StreamableMediaOptions extends AuthedMediaOptions {
   allowLegacyBlob?: boolean;
 }
 
-const keyOf = (path: string, cacheKey?: string) => `${cacheKey ?? "primary"}|${path}`;
+const keyOf = (path: string, target: ApiTarget, cacheKey?: string) =>
+  `${cacheKey ?? "primary"}|${path}|${JSON.stringify([target.baseUrl, target.apiKey])}`;
 
 export function authedMediaUrl(path: string, opts: AuthedMediaOptions = {}): Promise<string> {
   if (path.startsWith("mold-local:")) return Promise.resolve(path);
-  const key = keyOf(path, opts.cacheKey);
+  const target = opts.target;
+  const effectiveTarget = target ?? currentTarget();
+  // Target identity is part of the cache authority. A reconnect may retain
+  // the host bucket and path while changing URL or credentials; an in-flight
+  // object URL from the old route must never satisfy the new one.
+  const key = keyOf(path, effectiveTarget, opts.cacheKey);
   let url = cache.get(key);
   if (!url) {
-    const target = opts.target;
-    url = (target ? apiFetchTo(target, path) : apiFetch(path))
-      .then((r) => r.blob())
+    const thumbnailPrefix = "/api/gallery/thumbnail/";
+    const encodedFilename = path.startsWith(thumbnailPrefix)
+      ? path.slice(thumbnailPrefix.length)
+      : null;
+    const nativeThumbnail = async (): Promise<Blob | null> => {
+      if (!target || !inTauri() || encodedFilename === null) return null;
+      let filename: string;
+      try {
+        filename = decodeURIComponent(encodedFilename);
+      } catch {
+        return null;
+      }
+      const media = await ipc.fetchGalleryThumbnail(target, filename);
+      if (!media) return null;
+      const bytes = Uint8Array.from(atob(media.base64), (character) => character.charCodeAt(0));
+      return new Blob([bytes], { type: media.contentType });
+    };
+    url = nativeThumbnail()
+      .then(
+        async (native) =>
+          native ?? (await (target ? apiFetchTo(target, path) : apiFetch(path))).blob(),
+      )
       .then((b) => URL.createObjectURL(b));
     cache.set(key, url);
     url.catch(() => cache.delete(key));
@@ -104,10 +130,12 @@ export async function streamableMediaUrl(
 }
 
 export function evictMedia(path: string, cacheKey?: string): void {
-  const key = keyOf(path, cacheKey);
-  const cached = cache.get(key);
-  cache.delete(key);
-  void cached?.then((u) => URL.revokeObjectURL(u)).catch(() => {});
+  const prefix = `${cacheKey ?? "primary"}|${path}|`;
+  for (const [key, cached] of [...cache]) {
+    if (!key.startsWith(prefix)) continue;
+    cache.delete(key);
+    void cached.then((u) => URL.revokeObjectURL(u)).catch(() => {});
+  }
 }
 
 /** Drop every cached blob belonging to one origin (host bucket dropped). */

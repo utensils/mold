@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import CatalogLayoutToggle, {
   type CatalogLayoutChoice,
 } from "@ui/components/CatalogLayoutToggle.vue";
@@ -76,6 +76,10 @@ const kind = ref<CatalogKindFilter | "">("");
 const sort = ref<CatalogSortOption>("downloads");
 const includeNsfw = ref(false);
 const families = ref<string[]>([]);
+/** Families observed anywhere in this component's inventory/search lifetime.
+ *  This is deliberately not derived from the currently filtered rows: doing
+ *  so collapses the selector to its active family and strands the user. */
+const observedFamilies = ref<string[]>([]);
 
 const entries = ref<CatalogEntry[]>([]);
 const page = ref(1);
@@ -88,6 +92,27 @@ const pendingEntry = ref<CatalogEntry | null>(null);
 const detailEntry = ref<CatalogListEntry | null>(null);
 
 let debounce: ReturnType<typeof setTimeout> | null = null;
+let familyEpoch = 0;
+let mounted = false;
+let activeCatalogRoute = "";
+
+function recordFamilies(values: Iterable<string | null | undefined>): void {
+  const seen = new Set(observedFamilies.value);
+  const before = seen.size;
+  for (const value of values) {
+    const name = value?.trim();
+    if (name) seen.add(name);
+  }
+  if (seen.size !== before) observedFamilies.value = [...seen].sort((a, b) => a.localeCompare(b));
+}
+
+/** Prefer the host taxonomy once available; inventory/results cover startup
+ *  latency and failed taxonomy reads without ever presenting an empty picker. */
+const familyOptions = computed(() => {
+  const options = families.value.length > 0 ? [...families.value] : [...observedFamilies.value];
+  if (family.value && !options.includes(family.value)) options.push(family.value);
+  return options.sort((a, b) => a.localeCompare(b));
+});
 
 /** True when `entry` passes the active media-type chip. */
 function matchesMediaType(entry: CatalogEntry): boolean {
@@ -347,6 +372,7 @@ async function runSearch(reset: boolean) {
         target,
       );
       if (epoch !== searchEpoch) return;
+      recordFamilies(res.entries.map((entry) => entry.family));
       entries.value = [...entries.value, ...res.entries];
       // Exhaustion comes from the wire `total`, not page fullness: under
       // source=All the server splits the page budget across sources, so a
@@ -489,6 +515,50 @@ watch([() => props.query, source, family, kind, sort, includeNsfw], () => {
   scheduleSearch();
 });
 
+watch(
+  () => [
+    ...(props.installedEntries ?? []).map((model) => model.family),
+    ...models.all.map((model) => model.family),
+  ],
+  (values) => recordFamilies(values),
+  { immediate: true },
+);
+
+async function loadFamilies(): Promise<void> {
+  const epoch = ++familyEpoch;
+  try {
+    const { target, forward } = catalogTarget();
+    const result = await fetchCatalogFamilies(forward, target);
+    if (epoch === familyEpoch) families.value = result;
+  } catch {
+    // Retain the last good taxonomy. `familyOptions` covers first-load errors.
+  }
+}
+
+/** URL/key/reachability decide which catalog authority answers. Re-drive a
+ * failed/empty view when that route changes so a late connection self-heals. */
+const catalogRoute = computed(() => {
+  const { target, forward } = catalogTarget();
+  return JSON.stringify([
+    target?.baseUrl ?? "primary",
+    target?.apiKey ?? null,
+    forward,
+    hosts.all.map((host) => [host.id, host.status, host.baseUrl]),
+  ]);
+});
+
+watch(
+  catalogRoute,
+  (route) => {
+    if (!mounted) return;
+    if (route === activeCatalogRoute) return;
+    activeCatalogRoute = route;
+    void loadFamilies();
+    if (error.value || entries.value.length === 0) void runSearch(true);
+  },
+  { flush: "sync" },
+);
+
 // Flipping to a media chip with no matching entries loaded yet continues the
 // existing pagination instead of leaving a blank grid behind the chip.
 watch(
@@ -500,13 +570,23 @@ watch(
 );
 
 onMounted(async () => {
-  try {
-    const { target, forward } = catalogTarget();
-    families.value = await fetchCatalogFamilies(forward, target);
-  } catch {
-    /* families are a nicety; search still works without them */
-  }
-  void runSearch(true);
+  const startingRoute = catalogRoute.value;
+  activeCatalogRoute = startingRoute;
+  await Promise.allSettled([loadFamilies(), runSearch(true)]);
+  mounted = true;
+  const currentRoute = catalogRoute.value;
+  if (currentRoute === startingRoute) return;
+  activeCatalogRoute = currentRoute;
+  void loadFamilies();
+  if (error.value || entries.value.length === 0) void runSearch(true);
+});
+
+onUnmounted(() => {
+  mounted = false;
+  familyEpoch += 1;
+  searchEpoch += 1;
+  if (debounce) clearTimeout(debounce);
+  debounce = null;
 });
 </script>
 
@@ -553,10 +633,11 @@ onMounted(async () => {
 
       <select
         v-model="family"
+        aria-label="Model family"
         class="border-edge h-7 rounded-control border bg-bath px-1.5 text-caption text-ink"
       >
         <option value="">All families</option>
-        <option v-for="f in families" :key="f" :value="f">{{ f }}</option>
+        <option v-for="f in familyOptions" :key="f" :value="f">{{ f }}</option>
       </select>
 
       <select
