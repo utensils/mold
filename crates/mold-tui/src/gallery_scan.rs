@@ -497,6 +497,7 @@ mod tests {
             batch_id: None,
             batch_index: None,
             batch_count: None,
+            output_mode: None,
             model: model.to_string(),
             seed: 1,
             steps: 4,

@@ -2,6 +2,7 @@
 import { computed, ref, watch } from "vue";
 import AccordionSection from "@ui/components/AccordionSection.vue";
 import VideoDurationSlider from "@ui/components/VideoDurationSlider.vue";
+import type { GenerateRoutingRequest } from "@studio/lib/chainRouting";
 import SegmentedControl, { type SegmentOption } from "@ui/components/SegmentedControl.vue";
 import SwitchToggle from "@ui/components/SwitchToggle.vue";
 import Chip from "@ui/components/Chip.vue";
@@ -102,6 +103,7 @@ import {
 const props = withDefaults(
   defineProps<{
     form: GenerateForm;
+    routingRequest?: Partial<GenerateRoutingRequest> | null | undefined;
     /** The picked model, used by Reset to restore its defaults. */
     selectedModel?: ModelEntry | null;
     upscalers?: ModelEntry[];
@@ -767,6 +769,10 @@ function reset() {
           :frames="form.frames"
           :fps="form.fps"
           :model="selectedModel"
+          :family="form.family"
+          :model-name="form.model"
+          :source-image-capability="selectedModel?.source_image ?? form.sourceImageCapability"
+          :routing-request="routingRequest"
           @update:frames="form.frames = $event"
         />
 

@@ -17,10 +17,129 @@ describe("VideoDurationSlider", () => {
     });
 
     expect(wrapper.text()).toContain("4.0s");
+    expect(wrapper.text()).toContain("1 generation");
     const range = wrapper.get('input[type="range"]');
     expect(range.attributes("max")).toBe("481");
     await range.setValue("241");
     expect(wrapper.emitted("update:frames")?.[0]).toEqual([241]);
+  });
+
+  it("shows shared automatic-generation notches and count", () => {
+    const wrapper = mount(VideoDurationSlider, {
+      props: {
+        frames: 241,
+        fps: 24,
+        model: {
+          name: "ltx-2-19b-distilled:fp8",
+          family: "ltx2",
+          max_runtime_seconds: 20,
+          max_frames_absolute: 604,
+          frame_step: 8,
+        },
+      },
+    });
+
+    expect(wrapper.text()).toContain("3 generations");
+    expect(wrapper.text()).toContain("automatic sequence");
+    expect(
+      wrapper.get('input[type="range"]').attributes("aria-valuetext"),
+    ).toBe("10s, 3 generations");
+    expect(
+      wrapper.findAll(".ms-slider__mark b").map((mark) => mark.text()),
+    ).toEqual(["1×", "2×", "3×", "4×", "5×", "6×"]);
+  });
+
+  it("follows submit-time temporal-upscale routing without an invisible snap", async () => {
+    const wrapper = mount(VideoDurationSlider, {
+      props: {
+        frames: 241,
+        fps: 24,
+        model: {
+          name: "ltx-2-19b-distilled:fp8",
+          family: "ltx2",
+          max_runtime_seconds: 20,
+          max_frames_absolute: 604,
+          frame_step: 8,
+        },
+        routingRequest: { temporal_upscale: "x2" },
+      },
+    });
+
+    expect(wrapper.text()).toContain("1 generation");
+    expect(wrapper.text()).not.toContain("automatic sequence");
+    expect(
+      wrapper.findAll(".ms-slider__mark b").map((mark) => mark.text()),
+    ).toEqual([]);
+    await wrapper.get('input[type="range"]').trigger("pointerdown");
+    await wrapper.get('input[type="range"]').setValue("473");
+    await wrapper.get('input[type="range"]').trigger("pointerup");
+    expect(wrapper.emitted("update:frames")?.at(-1)).toEqual([473]);
+  });
+
+  it("magnetically snaps near a generation boundary while retaining fine steps", async () => {
+    const wrapper = mount(VideoDurationSlider, {
+      props: {
+        frames: 241,
+        fps: 24,
+        model: {
+          name: "ltx-2-19b-distilled:fp8",
+          family: "ltx2",
+          max_runtime_seconds: 20,
+          max_frames_absolute: 604,
+          frame_step: 8,
+        },
+      },
+    });
+
+    const range = wrapper.get('input[type="range"]');
+    await range.trigger("pointerdown");
+    await range.setValue("249");
+    await range.trigger("pointerup");
+    expect(wrapper.emitted("update:frames")?.at(-1)).toEqual([257]);
+    await range.setValue("225");
+    expect(wrapper.emitted("update:frames")?.at(-1)).toEqual([225]);
+  });
+
+  it("uses a wider magnetic capture area for touch drags", async () => {
+    const wrapper = mount(VideoDurationSlider, {
+      props: {
+        frames: 241,
+        fps: 24,
+        touchFriendly: true,
+        model: {
+          name: "ltx-2-19b-distilled:fp8",
+          family: "ltx2",
+          max_runtime_seconds: 20,
+          max_frames_absolute: 604,
+          frame_step: 8,
+        },
+      },
+    });
+
+    const range = wrapper.get('input[type="range"]');
+    await range.trigger("pointerdown");
+    await range.setValue("193");
+    await range.trigger("pointerup");
+    expect(wrapper.emitted("update:frames")?.at(-1)).toEqual([177]);
+  });
+
+  it("lets keyboard input move one frame-grid step away from a notch", async () => {
+    const wrapper = mount(VideoDurationSlider, {
+      props: {
+        frames: 97,
+        fps: 24,
+        model: {
+          name: "ltx-2-19b-distilled:fp8",
+          family: "ltx2",
+          max_runtime_seconds: 20,
+          max_frames_absolute: 604,
+          frame_step: 8,
+        },
+      },
+    });
+
+    await wrapper.get('input[type="range"]').setValue("105");
+    expect(wrapper.emitted("update:frames")?.at(-1)).toEqual([105]);
   });
 
   it("updates the request value when FPS lowers the model ceiling", async () => {

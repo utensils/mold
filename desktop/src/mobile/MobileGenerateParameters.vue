@@ -761,6 +761,10 @@ const fpsErrorId = `mobile-fps-error-${useId()}`;
         :frames="form.frames"
         :fps="form.fps"
         :model="selectedModel"
+        :family="form.family"
+        :model-name="form.model"
+        :source-image-capability="selectedModel?.source_image ?? form.sourceImageCapability"
+        :routing-request="buildRequest(form)"
         touch-friendly
         data-test="mobile-advanced-duration"
         @update:frames="form.frames = $event"

@@ -961,6 +961,7 @@ describe("generation store multi-host routing", () => {
     ];
     expect(path).toBe("/api/generate/chain/stream");
     expect(options.body).toEqual({
+      output_mode: "one-shot",
       model: chainRequest.model,
       prompt: chainRequest.prompt,
       total_frames: 241,

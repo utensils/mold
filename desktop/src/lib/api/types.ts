@@ -597,6 +597,8 @@ export interface CompleteEvent {
  * Everything beyond the required core is optional — the desktop talks to
  * arbitrary-version remote servers, older ones simply omit newer fields. */
 export interface OutputMetadata {
+  /** User-facing authoring mode; independent of internal auto-chaining. */
+  output_mode?: "one-shot" | "sequence" | null;
   prompt: string;
   negative_prompt?: string | null;
   original_prompt?: string | null;
@@ -635,8 +637,8 @@ export interface OutputMetadata {
    * replay idempotence key, and the exact answer to "is this print mine?" —
    * absent on hosts that predate it. */
   job_id?: string | null;
-  /** Per-clip provenance for a stitched sequence — what the Library's
-   * sequence-aware Reuse settings reloads into the clip rail. */
+  /** Per-clip execution provenance for a stitched output. `output_mode`
+   * decides whether Reuse settings exposes it as an authored sequence. */
   chain?: ChainOutputMetadata | null;
   /** Plain kebab-case name, or a serde-tagged object for parameterized
    * variants (e.g. `{ "ddim": … }`). Normalize before feeding the form. */
@@ -950,6 +952,7 @@ export interface ChainRequest {
   batch_id?: string | null;
   batch_index?: number | null;
   batch_count?: number | null;
+  output_mode?: "one-shot" | "sequence" | null;
   placement?: DevicePlacement | null;
 }
 
@@ -979,6 +982,7 @@ export interface AutoChainRequest {
   batch_id?: string | null;
   batch_index?: number | null;
   batch_count?: number | null;
+  output_mode?: "one-shot" | "sequence" | null;
 }
 
 /**

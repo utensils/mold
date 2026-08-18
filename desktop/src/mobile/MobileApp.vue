@@ -4366,6 +4366,21 @@ async function reusePrint(print: GalleryPrint): Promise<void> {
       draft.activeClipId = reuse.sequence.clips[0]?.id ?? null;
       draft.enableAudio = print.metadata.enable_audio === true;
       draft.bindSequenceModel(form.model);
+    } else {
+      // Reuse follows the mode the print was authored in. In particular, a
+      // One shot may carry internal chain provenance after automatic long-
+      // video routing; that must never strand iPhone in its persisted
+      // Sequence mode.
+      draft.setOutput(
+        "single",
+        {
+          getPrompt: () => form.prompt,
+          setPrompt: (prompt) => (form.prompt = prompt),
+        },
+        25,
+      );
+      draft.stopEditing();
+      draft.lastSingleModel = null;
     }
     const notes: string[] = [];
     if (reuse.substitutedModel) {

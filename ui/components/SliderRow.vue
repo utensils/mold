@@ -5,7 +5,13 @@
  * range input sits below. The readout defaults to the raw value and can be
  * overridden with a formatted string (e.g. "28 steps").
  */
-import { computed } from "vue";
+import { computed, ref, useId } from "vue";
+
+interface SliderMark {
+  value: number;
+  label: string;
+  title?: string;
+}
 
 const props = withDefaults(
   defineProps<{
@@ -16,7 +22,11 @@ const props = withDefaults(
     label: string;
     /** Formatted readout; defaults to String(modelValue). */
     valueLabel?: string;
+    ariaValueText?: string;
     disabled?: boolean;
+    marks?: readonly SliderMark[];
+    /** Fraction of the full range captured by a mark during pointer drag. */
+    snapThresholdRatio?: number;
   }>(),
   { step: 1 },
 );
@@ -24,9 +34,63 @@ const props = withDefaults(
 const emit = defineEmits<{ "update:modelValue": [value: number] }>();
 
 const readout = computed(() => props.valueLabel ?? String(props.modelValue));
+const datalistId = `ms-slider-marks-${useId()}`;
+const positionedMarks = computed(() => {
+  const span = props.max - props.min;
+  if (span <= 0) return [];
+  return (props.marks ?? [])
+    .filter((mark) => mark.value >= props.min && mark.value <= props.max)
+    .map((mark) => ({
+      ...mark,
+      left: `${((mark.value - props.min) / span) * 100}%`,
+    }));
+});
+
+const pointerDragging = ref(false);
+const pointerValue = ref<number | null>(null);
+
+function snappedValue(value: number): number {
+  if (positionedMarks.value.length <= 1) return value;
+  const snapDistance = Math.max(
+    props.step,
+    (props.max - props.min) * (props.snapThresholdRatio ?? 0.015),
+  );
+  const nearest = positionedMarks.value.reduce<
+    (typeof positionedMarks.value)[number] | null
+  >((best, mark) => {
+    if (Math.abs(mark.value - value) > snapDistance) return best;
+    if (!best || Math.abs(mark.value - value) < Math.abs(best.value - value)) {
+      return mark;
+    }
+    return best;
+  }, null);
+  return nearest?.value ?? value;
+}
 
 function onInput(event: Event) {
-  emit("update:modelValue", Number((event.target as HTMLInputElement).value));
+  const value = Number((event.target as HTMLInputElement).value);
+  if (pointerDragging.value) pointerValue.value = value;
+  emit("update:modelValue", value);
+}
+
+function onPointerDown() {
+  pointerDragging.value = true;
+  pointerValue.value = null;
+}
+
+function onPointerUp(event: PointerEvent) {
+  if (!pointerDragging.value) return;
+  pointerDragging.value = false;
+  const value =
+    pointerValue.value ?? Number((event.target as HTMLInputElement).value);
+  pointerValue.value = null;
+  const snapped = snappedValue(value);
+  if (snapped !== value) emit("update:modelValue", snapped);
+}
+
+function onPointerCancel() {
+  pointerDragging.value = false;
+  pointerValue.value = null;
 }
 </script>
 
@@ -36,18 +100,50 @@ function onInput(event: Event) {
       <span class="ms-slider__label">{{ label }}</span>
       <span class="ms-slider__value">{{ readout }}</span>
     </div>
-    <input
-      class="ms-slider__input"
-      type="range"
-      :min="min"
-      :max="max"
-      :step="step"
-      :value="modelValue"
-      :aria-label="label"
-      :aria-valuetext="readout"
-      :disabled="disabled"
-      @input="onInput"
-    />
+    <div
+      class="ms-slider__track"
+      :class="{ 'ms-slider__track--marked': positionedMarks.length > 1 }"
+    >
+      <input
+        class="ms-slider__input"
+        type="range"
+        :min="min"
+        :max="max"
+        :step="step"
+        :value="modelValue"
+        :list="positionedMarks.length > 1 ? datalistId : undefined"
+        :aria-label="label"
+        :aria-valuetext="ariaValueText ?? readout"
+        :disabled="disabled"
+        @pointerdown="onPointerDown"
+        @pointerup="onPointerUp"
+        @pointercancel="onPointerCancel"
+        @input="onInput"
+      />
+      <datalist v-if="positionedMarks.length > 1" :id="datalistId">
+        <option
+          v-for="mark in positionedMarks"
+          :key="mark.value"
+          :value="mark.value"
+        />
+      </datalist>
+      <div
+        v-if="positionedMarks.length > 1"
+        class="ms-slider__marks"
+        aria-hidden="true"
+      >
+        <span
+          v-for="mark in positionedMarks"
+          :key="mark.value"
+          class="ms-slider__mark"
+          :style="{ left: mark.left }"
+          :title="mark.title"
+        >
+          <i />
+          <b>{{ mark.label }}</b>
+        </span>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -112,5 +208,45 @@ function onInput(event: Event) {
 .ms-slider__input:disabled {
   cursor: not-allowed;
   opacity: 0.45;
+}
+
+.ms-slider__track {
+  position: relative;
+}
+
+.ms-slider__track--marked {
+  padding-top: 20px;
+}
+
+.ms-slider__marks {
+  position: absolute;
+  inset: 0 8px auto;
+  height: 20px;
+  pointer-events: none;
+}
+
+.ms-slider__mark {
+  position: absolute;
+  top: 0;
+  display: grid;
+  justify-items: center;
+  transform: translateX(-50%);
+  color: var(--ink-3);
+  font-family: var(--f-mono);
+}
+
+.ms-slider__mark i {
+  order: 2;
+  width: 1px;
+  height: 6px;
+  margin-top: 4px;
+  background: currentColor;
+}
+
+.ms-slider__mark b {
+  order: 1;
+  font-size: 8px;
+  font-weight: 500;
+  line-height: 1;
 }
 </style>

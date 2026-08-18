@@ -304,6 +304,11 @@ async fn shim_start_job(state: &AppState, req: ChainRequest) -> Result<ShimJob, 
         )
     })?;
 
+    // The compatibility endpoint carries two distinct authoring contracts:
+    // the ordinary Generate form sends the auto-expand shape (no stages),
+    // while CLI/TUI/script callers send explicit authored stages. Preserve
+    // that distinction before normalization erases it.
+    let output_mode = req.output_mode.unwrap_or_else(|| shim_output_mode(&req));
     let mut req = req;
     {
         let config = state.config.read().await;
@@ -343,13 +348,23 @@ async fn shim_start_job(state: &AppState, req: ChainRequest) -> Result<ShimJob, 
     Ok(ShimJob {
         job_id,
         original_format,
+        output_mode,
         guard,
     })
+}
+
+fn shim_output_mode(req: &ChainRequest) -> mold_core::GenerationOutputMode {
+    if req.stages.is_empty() {
+        mold_core::GenerationOutputMode::OneShot
+    } else {
+        mold_core::GenerationOutputMode::Sequence
+    }
 }
 
 struct ShimJob {
     job_id: String,
     original_format: OutputFormat,
+    output_mode: mold_core::GenerationOutputMode,
     guard: EphemeralClaimGuard,
 }
 
@@ -553,7 +568,9 @@ fn shim_build_response_and_cleanup(
             chain_job_id: None,
             stage_seeds: Some(&stage_seeds),
         };
-        let metadata = req.stitched_output_metadata(actual_format, frame_count, Some(&provenance));
+        let mut metadata =
+            req.stitched_output_metadata(actual_format, frame_count, Some(&provenance));
+        metadata.output_mode = Some(shim.output_mode);
         let filename = save_video_to_dir(
             &dir,
             &bytes,
@@ -1497,6 +1514,7 @@ mod tests {
             batch_id: None,
             batch_index: None,
             batch_count: None,
+            output_mode: None,
             prompt: None,
             total_frames: None,
             clip_frames: None,
@@ -2205,6 +2223,7 @@ mod tests {
             ShimJob {
                 job_id: row.id.clone(),
                 original_format: OutputFormat::Mp4,
+                output_mode: mold_core::GenerationOutputMode::Sequence,
                 guard,
             },
         )
@@ -2277,6 +2296,7 @@ mod tests {
             ShimJob {
                 job_id: row.id.clone(),
                 original_format: OutputFormat::Apng,
+                output_mode: mold_core::GenerationOutputMode::Sequence,
                 guard,
             },
         )
@@ -2660,9 +2680,32 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].filename, filename);
         assert_eq!(
+            rows[0].metadata.output_mode,
+            Some(mold_core::GenerationOutputMode::Sequence)
+        );
+        assert_eq!(
             complete["metadata"],
             serde_json::to_value(&rows[0].metadata).unwrap(),
             "completion metadata must exactly match the gallery record"
+        );
+    }
+
+    #[test]
+    fn legacy_shim_preserves_authored_mode_before_normalizing_request_shape() {
+        let authored = req(OutputFormat::Mp4);
+        assert_eq!(
+            shim_output_mode(&authored),
+            mold_core::GenerationOutputMode::Sequence
+        );
+
+        let mut automatic = authored;
+        automatic.stages.clear();
+        automatic.prompt = Some("one shot stretched across clips".into());
+        automatic.total_frames = Some(177);
+        automatic.clip_frames = Some(97);
+        assert_eq!(
+            shim_output_mode(&automatic),
+            mold_core::GenerationOutputMode::OneShot
         );
     }
 

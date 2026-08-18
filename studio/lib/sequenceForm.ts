@@ -135,6 +135,7 @@ export function buildChainRequest(
   if (openingError) throw new Error(openingError);
   const seed = shared.seed.trim() === "" ? undefined : Number(shared.seed);
   const req: ChainRequestWire = {
+    output_mode: "sequence",
     model: shared.model,
     stages: clips.map((clip, idx) =>
       serializeStage(clip, idx, opts.openingImage ?? null, "source_image"),

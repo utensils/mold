@@ -457,6 +457,7 @@ function buildChainRequest(
   decision: Extract<ChainRoutingDecision, { kind: "chain" }>,
 ): ChainRequestWire {
   return {
+    output_mode: "one-shot",
     model: req.model,
     motion_tail_frames: decision.motionTail,
     width: req.width,

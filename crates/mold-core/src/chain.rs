@@ -239,6 +239,11 @@ pub struct ChainRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batch_count: Option<u32>,
 
+    /// User-facing authoring mode, independent of normalized execution
+    /// shape. Older clients omit it and retain authored-Sequence behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_mode: Option<crate::GenerationOutputMode>,
+
     // ── Auto-expand form ────────────────────────────────────────────────
     // These are only read when `stages` is empty; `normalise` clears them
     // after expansion so the canonical form only ever carries `stages`.
@@ -714,6 +719,10 @@ impl ChainRequest {
             crate::build_info::version_string(),
         );
         metadata.chain_job_id = provenance.and_then(|p| p.chain_job_id).map(str::to_string);
+        metadata.output_mode = Some(
+            self.output_mode
+                .unwrap_or(crate::GenerationOutputMode::Sequence),
+        );
         let stage_seeds = provenance.and_then(|p| p.stage_seeds);
         metadata.chain = Some(ChainOutputMetadata {
             stage_count: self.stages.len() as u32,
@@ -1189,6 +1198,7 @@ mod tests {
             batch_id: None,
             batch_index: None,
             batch_count: None,
+            output_mode: None,
             prompt: Some(prompt.into()),
             total_frames: Some(total_frames),
             clip_frames: Some(clip_frames),
@@ -1216,6 +1226,7 @@ mod tests {
             batch_id: None,
             batch_index: None,
             batch_count: None,
+            output_mode: None,
             prompt: None,
             total_frames: None,
             clip_frames: None,
@@ -1680,6 +1691,7 @@ mod tests {
             batch_id: None,
             batch_index: None,
             batch_count: None,
+            output_mode: None,
             prompt: None,
             total_frames: None,
             clip_frames: None,
@@ -1867,6 +1879,7 @@ mod tests {
             batch_id: None,
             batch_index: None,
             batch_count: None,
+            output_mode: None,
             prompt: None,
             total_frames: None,
             clip_frames: None,
@@ -2064,6 +2077,10 @@ mod tests {
         };
         let meta = req.stitched_output_metadata(OutputFormat::Mp4, 122, Some(&provenance));
 
+        assert_eq!(
+            meta.output_mode,
+            Some(crate::GenerationOutputMode::Sequence)
+        );
         assert_eq!(meta.chain_job_id.as_deref(), Some("job-123"));
         let chain = meta.chain.expect("chain block must be present");
         assert_eq!(chain.stage_count, 2);
@@ -2147,17 +2164,41 @@ mod tests {
             .normalise()
             .unwrap();
         let synth = req.synthetic_generate_request(OutputFormat::Mp4, 190, req.fps);
-        let expected = OutputMetadata::from_generate_request(
+        let mut expected = OutputMetadata::from_generate_request(
             &synth,
             req.seed.unwrap_or(0),
             None,
             crate::build_info::version_string(),
         );
-        // The chain block is the one deliberate addition over the synthetic
-        // single-clip projection; everything else must stay in lockstep.
+        // The chain block and authored Sequence mode are the deliberate
+        // additions over the synthetic single-clip projection; everything
+        // else must stay in lockstep.
         let mut stitched = req.stitched_output_metadata(OutputFormat::Mp4, 190, None);
         assert!(stitched.chain.is_some());
+        assert_eq!(
+            stitched.output_mode,
+            Some(crate::GenerationOutputMode::Sequence)
+        );
         stitched.chain = None;
+        expected.output_mode = Some(crate::GenerationOutputMode::Sequence);
         assert_eq!(stitched, expected);
+    }
+
+    #[test]
+    fn explicit_one_shot_mode_survives_normalization_and_stitched_metadata() {
+        let mut request = auto_expand_request("p", 190, 97, 17, None);
+        request.output_mode = Some(crate::GenerationOutputMode::OneShot);
+
+        let request = request.normalise().unwrap();
+        assert_eq!(
+            request.output_mode,
+            Some(crate::GenerationOutputMode::OneShot)
+        );
+        assert_eq!(
+            request
+                .stitched_output_metadata(OutputFormat::Mp4, 190, None)
+                .output_mode,
+            Some(crate::GenerationOutputMode::OneShot)
+        );
     }
 }

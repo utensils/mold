@@ -112,6 +112,7 @@ fn normalised_request_survives_round_trip() {
         batch_id: None,
         batch_index: None,
         batch_count: None,
+        output_mode: None,
         prompt: None,
         total_frames: None,
         clip_frames: None,

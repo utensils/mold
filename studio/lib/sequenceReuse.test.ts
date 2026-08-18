@@ -130,12 +130,58 @@ describe("planSequenceReuse", () => {
     expect(planSequenceReuse({ chain_job_id: "job-1" })).toBeNull();
   });
 
+  it("does not expose automatic One shot chain stages as an authored sequence", () => {
+    expect(
+      planSequenceReuse({
+        output_mode: "one-shot",
+        chain_job_id: "internal-job",
+        chain: chain([
+          { prompt: "one prompt", frames: 97, transition: "smooth" },
+          { prompt: "one prompt", frames: 97, transition: "smooth" },
+        ]),
+      }),
+    ).toBeNull();
+  });
+
+  it("restores an explicitly authored sequence", () => {
+    expect(
+      planSequenceReuse({
+        output_mode: "sequence",
+        chain: chain([
+          { prompt: "opening", frames: 97, transition: "smooth" },
+          { prompt: "closing", frames: 97, transition: "smooth" },
+        ]),
+      })?.clips.map((clip) => clip.prompt),
+    ).toEqual(["opening", "closing"]);
+  });
+
+  it("uses durable job provenance to recognize legacy sequences", () => {
+    expect(
+      planSequenceReuse({
+        chain_job_id: "legacy-sequence",
+        chain: chain([
+          { prompt: "opening", frames: 97, transition: "smooth" },
+          { prompt: "closing", frames: 97, transition: "smooth" },
+        ]),
+      }),
+    ).not.toBeNull();
+    expect(
+      planSequenceReuse({
+        chain: chain([
+          { prompt: "automatic", frames: 97, transition: "smooth" },
+          { prompt: "automatic", frames: 97, transition: "smooth" },
+        ]),
+      }),
+    ).toBeNull();
+  });
+
   it("returns null for a chain block with no stages", () => {
     expect(planSequenceReuse({ chain: chain([]) })).toBeNull();
   });
 
   it("reports the recorded motion tail without applying it", () => {
     const plan = planSequenceReuse({
+      output_mode: "sequence",
       chain: chain(
         [
           { prompt: "one", frames: 25, transition: "smooth" },
@@ -150,6 +196,7 @@ describe("planSequenceReuse", () => {
 
   it("reports nothing lossy for a row that had neither negatives nor sources", () => {
     const plan = planSequenceReuse({
+      output_mode: "sequence",
       chain: chain([
         { prompt: "one", frames: 25, transition: "smooth" },
         { prompt: "two", frames: 25, transition: "smooth" },
@@ -164,6 +211,7 @@ describe("planSequenceReuse", () => {
 
   it("flags negatives, clip sources and per-clip seeds when the row had them", () => {
     const plan = planSequenceReuse({
+      output_mode: "sequence",
       negative_prompt: "blurry",
       source_image_sha256: "abc123",
       chain: chain([
@@ -183,6 +231,7 @@ describe("planSequenceReuse", () => {
 
   it("does not call a single-clip row's negative lossy", () => {
     const plan = planSequenceReuse({
+      output_mode: "sequence",
       negative_prompt: "blurry",
       chain: chain([{ prompt: "only", frames: 25, transition: "smooth" }]),
     });

@@ -3983,6 +3983,7 @@ dependencies = [
  "mold-ai-candle",
  "mold-ai-catalog",
  "mold-ai-core",
+ "moxcms",
  "mp4",
  "openh264",
  "png 0.18.1",

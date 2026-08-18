@@ -110,6 +110,7 @@ pub fn synthesize_from_filename(filename: &str, timestamp_secs: u64) -> OutputMe
         batch_id: None,
         batch_index: None,
         batch_count: None,
+        output_mode: None,
         model,
         seed: 0,
         steps: 0,

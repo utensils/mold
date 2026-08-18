@@ -303,6 +303,7 @@ describe("automatic chain request projection", () => {
     if (decision.kind !== "chain") throw new Error("expected chain routing");
 
     expect(buildAutoChainRequest(request, decision)).toEqual({
+      output_mode: "one-shot",
       model: request.model,
       prompt: request.prompt,
       total_frames: 241,

@@ -236,6 +236,12 @@ and clears terminal, error, null-id, removed-host, and unmount state for retry.
 
 **Durable jobs** (`mold jobs`, `POST /api/chain/jobs`, SSE events): survive restart and retain editable scene artifacts until job deletion or an explicit cleanup.
 
+`ChainRequest.output_mode` records additive authoring provenance (`one-shot` or
+`sequence`) independently of execution routing, and the same value is retained
+in `OutputMetadata`. Automatic long-video chains therefore restore the one-shot
+form, while authored sequences restore the clip rail. Legacy durable chain rows
+fall back through `chain_job_id`.
+
 - `jobs list [--json]`, `jobs show <id>`, `jobs resume <id>`, `jobs cancel <id>`, `jobs delete <id> [--yes]`, `jobs gc`.
 - `jobs retake <id> --stage N --mode cascade|splice --seed-offset --prompt`: regenerate one stage (cascade re-renders downstream, splice replaces in place).
 - Web: `createChainJob`, `listChainJobs`, `getChainJob`, `resumeChainJob`, `retakeChainJob`, `cancelChainJob`, `deleteChainJob`, `gcChainJobs`, per-stage preview URL, SSE events URL. Components: `ScriptComposer.vue`, `StageCard.vue`, `ChainJobCard.vue`, `JobsPanel.vue`. TUI has full script composer (add/reorder/delete stages, cycle transition, edit prompt/frames modals, save/load).
