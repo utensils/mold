@@ -234,10 +234,9 @@ describe("mobile safe areas", () => {
 
   it("keeps frequent resolution and catalog controls at least 44px tall", () => {
     for (const selector of [
-      ".mobile-resolution-segment",
+      ".mobile-resolution-group .ms-shape__btn",
       ".mobile-resolution-tier .ms-seg .ms-seg__btn",
       ".mobile-output-mode .ms-seg .ms-seg__btn",
-      ".mobile-resolution-aspect",
       ".mobile-catalog-segment button",
       ".mobile-catalog-media button",
       ".mobile-catalog-sources button",
@@ -306,15 +305,14 @@ describe("mobile safe areas", () => {
     expect(value?.[1]).not.toMatch(/text-overflow:\s*ellipsis\s*;/);
   });
 
-  it("gives aspect choices a proportional visual frame inside a uniform touch tile", () => {
-    const aspects = css.match(/\.mobile-resolution-aspects\s*\{([^}]*)\}/s);
-    const choice = css.match(/\.mobile-resolution-aspect\s*\{([^}]*)\}/s);
-    const shape = css.match(/\.mobile-resolution-aspect-shape\s*\{([^}]*)\}/s);
+  it("gives shared desktop shape choices a uniform mobile touch tile", () => {
+    const group = css.match(/\.mobile-resolution-group \.ms-shape\s*\{([^}]*)\}/s);
+    const choice = css.match(/\.mobile-resolution-group \.ms-shape__btn\s*\{([^}]*)\}/s);
 
-    expect(aspects?.[1]).toMatch(/display:\s*grid\s*;/);
-    expect(aspects?.[1]).toMatch(/minmax\(64px,\s*84px\)/);
+    expect(group?.[1]).toMatch(/gap:\s*7px\s*;/);
+    expect(choice?.[1]).toMatch(/min-width:\s*60px\s*;/);
     expect(choice?.[1]).toMatch(/min-height:\s*72px\s*;/);
-    expect(shape?.[1]).toMatch(/border:\s*1px solid currentColor\s*;/);
+    expect(choice?.[1]).toMatch(/flex:\s*1 1 60px\s*;/);
   });
 
   it("keeps the kit tier segments at touch size with legible sublabels", () => {
@@ -330,6 +328,13 @@ describe("mobile safe areas", () => {
     expect(sub?.[1]).toMatch(/font-size:\s*10px\s*;/);
     expect(dims?.[1]).toMatch(/font-family:\s*var\(--font-utility\)/);
     expect(dims?.[1]).toMatch(/color:\s*var\(--ink-3\)/);
+  });
+
+  it("allocates separate disclosure columns for title, filename, and toggle", () => {
+    const summary = css.match(/\.mobile-native-disclosure > summary\s*\{([^}]*)\}/s);
+    const detail = css.match(/\.mobile-native-disclosure > summary small\s*\{([^}]*)\}/s);
+    expect(summary?.[1]).toMatch(/grid-template-columns:\s*auto minmax\(0,\s*1fr\) auto\s*;/);
+    expect(detail?.[1]).toMatch(/text-align:\s*right\s*;/);
   });
 
   it("does not keep the redundant resolution summary card", () => {

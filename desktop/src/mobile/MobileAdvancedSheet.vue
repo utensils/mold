@@ -36,26 +36,28 @@ defineEmits<{
           {{ count }}
         </span>
       </div>
-      <button
-        class="mobile-advanced-sheet-close"
-        type="button"
-        aria-label="Close advanced settings"
-        data-test="mobile-advanced-close"
-        @click="$emit('close')"
-      >
-        <span aria-hidden="true">✕</span>
-      </button>
+      <div class="mobile-advanced-sheet-actions">
+        <button
+          class="mobile-advanced-sheet-reset"
+          type="button"
+          data-test="mobile-advanced-reset"
+          @click="$emit('reset')"
+        >
+          Reset
+        </button>
+        <button
+          class="mobile-advanced-sheet-close"
+          type="button"
+          aria-label="Close advanced settings"
+          data-test="mobile-advanced-close"
+          @click="$emit('close')"
+        >
+          <span aria-hidden="true">✕</span>
+        </button>
+      </div>
     </header>
     <div class="mobile-advanced-sheet-body">
       <slot />
-      <button
-        class="mobile-advanced-sheet-reset"
-        type="button"
-        data-test="mobile-advanced-reset"
-        @click="$emit('reset')"
-      >
-        Reset advanced
-      </button>
     </div>
   </div>
 </template>

@@ -69,6 +69,7 @@ function onKeydown(event: KeyboardEvent) {
       class="ms-shape__btn"
       role="radio"
       :aria-checked="option.id === modelValue"
+      :data-shape="option.id"
       :data-on="option.id === modelValue ? 'true' : undefined"
       :data-approximate="
         option.id === modelValue && approximate ? 'true' : undefined

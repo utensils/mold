@@ -1,12 +1,17 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
+import ShapePicker from "@ui/components/ShapePicker.vue";
 import SegmentedControl from "@ui/components/SegmentedControl.vue";
+import { aspectsSupportedByPresets } from "@ui/lib/resolution";
 import { resolutionValidationError, resolutionValidationWarning } from "../lib/generateValidation";
 import {
+  aspectIdFor,
   aspectRatioLabel,
   matchPreset,
   orientationLabel,
+  presetsForAspectGroup,
   presetsForModel,
+  presetsNearRatio,
   type ResolutionPreset,
 } from "../lib/resolutions";
 import type { ModelEntry } from "../lib/api/types";
@@ -16,16 +21,16 @@ import {
   sourceResolutionStatus,
   type SourceDimensions,
 } from "@studio/lib/sourceResolution";
-import { effectiveGenerationRecipe } from "@studio/lib/generationProfile";
 import {
-  aspectsForOrientation,
+  closestProfileAspect,
+  effectiveGenerationRecipe,
+  profileAspectOptions,
+} from "@studio/lib/generationProfile";
+import {
   closestResolutionPreset,
-  MOBILE_RESOLUTION_ORIENTATIONS,
-  presetsForOrientation,
   resolutionTierLabel,
   snapMobileDimension,
   sortedResolutionTiers,
-  type ResolutionOrientation,
 } from "./resolutionPicker";
 
 const props = withDefaults(
@@ -82,57 +87,39 @@ const sourceStatus = computed(() =>
   sourceResolution.value ? sourceResolutionStatus(sourceResolution.value) : null,
 );
 watch(resolutionError, (next) => emit("validity-change", !next), { immediate: true });
-const aspectOptions = computed(() =>
-  aspectsForOrientation(presets.value, currentOrientation.value),
+const canonicalShapeOptions = computed(() => {
+  return props.model
+    ? profileAspectOptions(props.model, props.pipeline)
+    : aspectsSupportedByPresets(presets.value);
+});
+const shapeOptions = computed(() => {
+  const source = sourceResolution.value;
+  return source
+    ? [
+        ...canonicalShapeOptions.value,
+        { id: "source", label: "Source", ratio: source.output.width / source.output.height },
+      ]
+    : canonicalShapeOptions.value;
+});
+const closestShape = computed(() =>
+  props.model ? closestProfileAspect(props.model, props.pipeline, width.value, height.value) : null,
 );
-/** With no exact preset match (custom size from the manual fields), the
- * closest preset's aspect chip lights up marked "≈" — never left blank. */
-const approximateAspect = computed(() =>
-  currentPreset.value
-    ? null
-    : (closestResolutionPreset(presets.value, width.value, height.value)?.aspect ?? null),
+const canonicalShapeId = computed(
+  () => closestShape.value?.id ?? aspectIdFor(width.value, height.value) ?? "",
+);
+const explicitShapeId = ref<string | null>(null);
+const shapeId = computed(() => {
+  const explicit = explicitShapeId.value;
+  if (explicit === "source" && followsSource.value) return "source";
+  if (explicit && explicit !== "source" && canonicalShapeId.value === explicit) return explicit;
+  return followsSource.value ? "source" : canonicalShapeId.value;
+});
+const shapeApproximate = computed(
+  () => shapeId.value !== "source" && shapeId.value !== "" && closestShape.value?.exact === false,
 );
 const tierOptions = computed(() =>
   currentPreset.value ? sortedResolutionTiers(presets.value, currentPreset.value.aspect) : [],
 );
-
-function proportionalShapeStyle(
-  shapeWidth: number,
-  shapeHeight: number,
-  maxWidth: number,
-  maxHeight: number,
-): Record<string, string> {
-  const safeWidth = Math.max(1, shapeWidth);
-  const safeHeight = Math.max(1, shapeHeight);
-  const scale = Math.min(maxWidth / safeWidth, maxHeight / safeHeight);
-  return {
-    width: `${(safeWidth * scale).toFixed(2)}px`,
-    height: `${(safeHeight * scale).toFixed(2)}px`,
-  };
-}
-
-function aspectDimensions(aspect: string): [number, number] {
-  const preset = presets.value.find((candidate) => candidate.aspect === aspect);
-  if (preset) return [preset.width, preset.height];
-  const match = aspect.replace(/^≈/, "").match(/^(\d+(?:\.\d+)?):(\d+(?:\.\d+)?)$/);
-  if (!match) return [1, 1];
-  return [Number(match[1]), Number(match[2])];
-}
-
-function aspectOptionShapeStyle(aspect: string): Record<string, string> {
-  const [shapeWidth, shapeHeight] = aspectDimensions(aspect);
-  return proportionalShapeStyle(shapeWidth, shapeHeight, 30, 28);
-}
-
-function aspectAccessibleLabel(aspect: string): string {
-  const approximate = aspect.startsWith("≈");
-  const [left, right] = aspect.replace(/^≈/, "").split(":");
-  return `${approximate ? "Approximately " : ""}${left} by ${right} aspect ratio`;
-}
-
-function isOrientationAvailable(orientation: ResolutionOrientation): boolean {
-  return presetsForOrientation(presets.value, orientation).length > 0;
-}
 
 function applyResolution(preset: ResolutionPreset | null): void {
   if (!preset) return;
@@ -141,20 +128,18 @@ function applyResolution(preset: ResolutionPreset | null): void {
   manualOpen.value = false;
 }
 
-function setOrientation(orientation: ResolutionOrientation): void {
+function setShape(id: string): void {
+  explicitShapeId.value = id;
+  if (id === "source") {
+    matchSource();
+    return;
+  }
+  const shape = shapeOptions.value.find((option) => option.id === id);
+  if (!shape) return;
+  const exactGroup = presetsForAspectGroup(props.model, props.pipeline, id);
   applyResolution(
     closestResolutionPreset(
-      presetsForOrientation(presets.value, orientation),
-      width.value,
-      height.value,
-    ),
-  );
-}
-
-function setAspect(aspect: string): void {
-  applyResolution(
-    closestResolutionPreset(
-      presets.value.filter((preset) => preset.aspect === aspect),
+      exactGroup.length > 0 ? exactGroup : presetsNearRatio(presets.value, shape.ratio),
       width.value,
       height.value,
     ),
@@ -198,6 +183,7 @@ function swapDimensions(): void {
 function matchSource(): void {
   const source = sourceResolution.value;
   if (!source) return;
+  explicitShapeId.value = "source";
   width.value = source.output.width;
   height.value = source.output.height;
   manualOpen.value = true;
@@ -242,54 +228,16 @@ function matchSource(): void {
     </div>
 
     <div class="mobile-resolution-group">
-      <span class="mobile-resolution-label">Orientation</span>
-      <div class="mobile-resolution-segments" role="group" aria-label="Orientation">
-        <button
-          v-for="orientation in MOBILE_RESOLUTION_ORIENTATIONS"
-          :key="orientation"
-          type="button"
-          class="mobile-resolution-segment"
-          :class="{ 'is-selected': currentOrientation === orientation }"
-          :aria-pressed="currentOrientation === orientation"
-          :disabled="!isOrientationAvailable(orientation)"
-          :data-orientation="orientation.toLowerCase()"
-          @click="setOrientation(orientation)"
-        >
-          {{ orientation }}
-        </button>
-      </div>
-    </div>
-
-    <div class="mobile-resolution-group">
-      <span class="mobile-resolution-label">Aspect ratio</span>
-      <div class="mobile-resolution-aspects" role="group" aria-label="Aspect ratio presets">
-        <button
-          v-for="aspect in aspectOptions"
-          :key="aspect"
-          type="button"
-          class="mobile-resolution-aspect"
-          :class="{
-            'is-selected': currentPreset?.aspect === aspect || approximateAspect === aspect,
-            'is-approximate': approximateAspect === aspect,
-          }"
-          :aria-pressed="currentPreset?.aspect === aspect || approximateAspect === aspect"
-          :aria-label="aspectAccessibleLabel(approximateAspect === aspect ? `≈${aspect}` : aspect)"
-          :data-aspect="aspect"
-          @click="setAspect(aspect)"
-        >
-          <span class="mobile-resolution-aspect-visual" aria-hidden="true">
-            <span
-              class="mobile-resolution-aspect-shape"
-              data-test="mobile-resolution-aspect-shape"
-              aria-hidden="true"
-              :style="aspectOptionShapeStyle(aspect)"
-            />
-          </span>
-          <span class="mobile-resolution-aspect-label">
-            {{ approximateAspect === aspect ? "≈" : "" }}{{ aspect }}
-          </span>
-        </button>
-      </div>
+      <span class="mobile-resolution-label">Shape</span>
+      <ShapePicker
+        :model-value="shapeId"
+        :options="shapeOptions"
+        :approximate="shapeApproximate"
+        :disabled="disabled"
+        label="Aspect ratio"
+        data-test="mobile-resolution-shape"
+        @update:model-value="setShape"
+      />
     </div>
 
     <div v-if="currentPreset" class="mobile-resolution-group mobile-resolution-tier">
