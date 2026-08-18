@@ -196,6 +196,28 @@ export function videoFrameGridError(
   return null;
 }
 
+/**
+ * Keep an authored duration when it is valid for the newly selected model,
+ * otherwise enter that model on its advertised default. This is deliberately
+ * different from snapping to the nearest grid point: a carried H3 value such
+ * as 124 would render as 125 in Wan's slider while the request still contained
+ * the rejected 124. Model selection is the authority boundary, so an invalid
+ * carried value yields to the target model's own measured default instead.
+ */
+export function videoFramesForModelSelection(
+  frames: number | null | undefined,
+  model?: VideoFrameContract | null,
+): number {
+  const fallback = model?.default_frames ?? frames ?? 25;
+  const rate = fixedVideoFps(model) ?? model?.default_fps ?? 24;
+  const normalizedDefault = clampVideoFrames(fallback, rate, model);
+
+  if (frames == null || videoFrameGridError(frames, model)) {
+    return normalizedDefault;
+  }
+  return frames;
+}
+
 export function clampVideoFrames(
   frames: number,
   fps: number,
