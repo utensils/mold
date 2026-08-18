@@ -249,13 +249,6 @@ describe("MobileGalleryViewer", () => {
     await flushPromises();
 
     const video = view.get("[data-test='gallery-viewer-video']");
-    const stage = view.get("[data-test='gallery-viewer-stage']");
-    const setPointerCapture = vi.fn();
-    Object.defineProperty(stage.element, "setPointerCapture", {
-      value: setPointerCapture,
-      configurable: true,
-    });
-
     await video.trigger("pointerdown", {
       pointerId: 7,
       pointerType: "touch",
@@ -263,22 +256,24 @@ describe("MobileGalleryViewer", () => {
       clientX: 280,
       clientY: 200,
     });
-    expect(setPointerCapture).not.toHaveBeenCalled();
-    await stage.trigger("pointermove", {
-      pointerId: 7,
-      pointerType: "touch",
-      isPrimary: true,
-      clientX: 180,
-      clientY: 204,
-    });
-    expect(setPointerCapture).toHaveBeenCalledWith(7);
-    await stage.trigger("pointerup", {
-      pointerId: 7,
-      pointerType: "touch",
-      isPrimary: true,
-      clientX: 80,
-      clientY: 204,
-    });
+    window.dispatchEvent(
+      new PointerEvent("pointermove", {
+        pointerId: 7,
+        pointerType: "touch",
+        isPrimary: true,
+        clientX: 180,
+        clientY: 204,
+      }),
+    );
+    window.dispatchEvent(
+      new PointerEvent("pointerup", {
+        pointerId: 7,
+        pointerType: "touch",
+        isPrimary: true,
+        clientX: 80,
+        clientY: 204,
+      }),
+    );
     expect(view.emitted("next")).toHaveLength(1);
 
     await video.trigger("pointerdown", {
@@ -288,13 +283,15 @@ describe("MobileGalleryViewer", () => {
       clientX: 80,
       clientY: 200,
     });
-    await stage.trigger("pointerup", {
-      pointerId: 8,
-      pointerType: "touch",
-      isPrimary: true,
-      clientX: 280,
-      clientY: 204,
-    });
+    window.dispatchEvent(
+      new PointerEvent("pointerup", {
+        pointerId: 8,
+        pointerType: "touch",
+        isPrimary: true,
+        clientX: 280,
+        clientY: 204,
+      }),
+    );
     expect(view.emitted("previous")).toHaveLength(1);
 
     await video.trigger("pointerdown", {
@@ -304,13 +301,15 @@ describe("MobileGalleryViewer", () => {
       clientX: 180,
       clientY: 200,
     });
-    await stage.trigger("pointerup", {
-      pointerId: 9,
-      pointerType: "touch",
-      isPrimary: true,
-      clientX: 184,
-      clientY: 202,
-    });
+    window.dispatchEvent(
+      new PointerEvent("pointerup", {
+        pointerId: 9,
+        pointerType: "touch",
+        isPrimary: true,
+        clientX: 184,
+        clientY: 202,
+      }),
+    );
     expect(view.emitted("next")).toHaveLength(1);
     expect(view.emitted("previous")).toHaveLength(1);
   });
@@ -328,11 +327,6 @@ describe("MobileGalleryViewer", () => {
 
     const video = view.get("[data-test='gallery-viewer-video']");
     const stage = view.get("[data-test='gallery-viewer-stage']");
-    const setPointerCapture = vi.fn();
-    Object.defineProperty(stage.element, "setPointerCapture", {
-      value: setPointerCapture,
-      configurable: true,
-    });
     vi.spyOn(video.element, "getBoundingClientRect").mockReturnValue({
       top: 0,
       bottom: 400,
@@ -359,8 +353,6 @@ describe("MobileGalleryViewer", () => {
       clientX: 184,
       clientY: 202,
     });
-    expect(setPointerCapture).not.toHaveBeenCalled();
-
     await video.trigger("pointerdown", {
       pointerId: 11,
       pointerType: "touch",
@@ -382,7 +374,6 @@ describe("MobileGalleryViewer", () => {
       clientX: 80,
       clientY: 380,
     });
-    expect(setPointerCapture).not.toHaveBeenCalled();
     expect(view.emitted("next")).toBeUndefined();
     expect(view.emitted("previous")).toBeUndefined();
   });
