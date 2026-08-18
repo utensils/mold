@@ -2523,6 +2523,13 @@ button:disabled {
   gap: 6px;
 }
 
+.gallery-grid.is-selecting .gallery-item {
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+
 .mobile-library-heading {
   display: flex;
   align-items: flex-start;

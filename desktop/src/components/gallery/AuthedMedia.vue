@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref, watch } from "vue";
-import { authedMediaUrl } from "../../lib/gallery/media";
+import { authedMediaUrl, streamableMediaUrl } from "../../lib/gallery/media";
 import type { ApiTarget } from "../../lib/api/client";
 
 const props = withDefaults(
@@ -34,10 +34,20 @@ async function load() {
     if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
     if (epoch !== loadEpoch) return;
     try {
-      const url = await authedMediaUrl(props.path, {
+      const options = {
         ...(props.target ? { target: props.target } : {}),
         ...(props.cacheKey ? { cacheKey: props.cacheKey } : {}),
-      });
+      };
+      // Full-size remote media must stay streamable. Fetching it into a blob
+      // blocks the viewer until the entire file crosses WebKit and prevents
+      // video seeking; authenticated hosts instead mint a short-lived,
+      // exact-path ticket that the media element can load directly.
+      const url = props.path.startsWith("/api/gallery/thumbnail/")
+        ? await authedMediaUrl(props.path, options)
+        : await streamableMediaUrl(props.path, {
+            ...options,
+            allowLegacyBlob: !props.video && !props.audio,
+          });
       if (epoch === loadEpoch) src.value = url;
       return;
     } catch {

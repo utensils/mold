@@ -31,6 +31,7 @@ const {
   getCurrentDeepLinks,
   onOpenDeepLinks,
   unlistenDeepLinks,
+  isNativeIOSRuntime,
 } = vi.hoisted(() => ({
   invoke: vi.fn(),
   apiFetchTo: vi.fn(),
@@ -55,6 +56,7 @@ const {
   getCurrentDeepLinks: vi.fn(),
   onOpenDeepLinks: vi.fn(),
   unlistenDeepLinks: vi.fn(),
+  isNativeIOSRuntime: vi.fn(),
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
@@ -105,6 +107,7 @@ vi.mock("@studio/lib/generationSourceMedia", () => ({
   persistGenerationSourceMedia,
   restoreGenerationSourceMedia,
 }));
+vi.mock("./platform", () => ({ isNativeIOSRuntime }));
 
 function plannedPlacement() {
   return {
@@ -362,6 +365,7 @@ beforeEach(() => {
   getCurrentDeepLinks.mockReset().mockResolvedValue(null);
   unlistenDeepLinks.mockReset();
   onOpenDeepLinks.mockReset().mockResolvedValue(unlistenDeepLinks);
+  isNativeIOSRuntime.mockReset().mockReturnValue(false);
   objectUrlSequence = 0;
   URL.createObjectURL = vi.fn(() => `blob:thumbnail-${++objectUrlSequence}`);
   URL.revokeObjectURL = vi.fn();
@@ -376,6 +380,7 @@ afterEach(() => {
   delete (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
   delete (globalThis as Partial<typeof globalThis>).IntersectionObserver;
   Reflect.deleteProperty(globalThis, "indexedDB");
+  Reflect.deleteProperty(document, "elementsFromPoint");
 });
 
 describe("MobileApp sequence generation", () => {
@@ -5848,6 +5853,117 @@ describe("MobileApp gallery", () => {
     expect(wrapper.get("[data-test='mobile-gallery-actions']").text()).toContain("1 selected");
     expect(wrapper.get("[data-test='gallery-item']").attributes("aria-pressed")).toBe("true");
     expect(wrapper.get("[data-test='mobile-gallery-selection-indicator']").text()).toBe("✓");
+  });
+
+  it("backs the native iOS image context menu with image data instead of a blob URL", async () => {
+    isNativeIOSRuntime.mockReturnValue(true);
+    apiFetchTo.mockResolvedValue({
+      blob: () => Promise.resolve(new Blob([Uint8Array.from([1, 2, 3])], { type: "image/png" })),
+    } as Response);
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await vi.waitFor(() => expect(wrapper?.find("[data-test='gallery-item']").exists()).toBe(true));
+
+    const image = wrapper.get("[data-test='gallery-item'] img");
+    expect(image.attributes("src")).toBe("data:image/png;base64,AQID");
+    expect(URL.createObjectURL).not.toHaveBeenCalled();
+
+    const contextMenu = new Event("contextmenu", { bubbles: true, cancelable: true });
+    image.element.dispatchEvent(contextMenu);
+    expect(contextMenu.defaultPrevented).toBe(false);
+  });
+
+  it("drag-selects and drag-deselects every Library tile crossed in Select mode", async () => {
+    const prints = [
+      print,
+      { ...print, filename: "second.png", timestamp: print.timestamp - 1 },
+      { ...print, filename: "third.png", timestamp: print.timestamp - 2 },
+    ];
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/gallery") return Promise.resolve(prints);
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await vi.waitFor(() => expect(wrapper?.findAll("[data-test='gallery-item']")).toHaveLength(3));
+    await wrapper.get("[data-test='mobile-gallery-select']").trigger("click");
+    const tiles = wrapper.findAll("[data-test='gallery-item']");
+    const toolbar = wrapper.get("[data-test='mobile-gallery-actions']").element;
+    Object.defineProperty(document, "elementsFromPoint", {
+      configurable: true,
+      value: vi.fn((x: number) => [
+        toolbar,
+        (x < 150 ? tiles[0] : x < 250 ? tiles[1] : tiles[2])!.element,
+      ]),
+    });
+
+    await tiles[0]!.trigger("pointerdown", {
+      pointerId: 41,
+      pointerType: "touch",
+      isPrimary: true,
+      clientX: 20,
+      clientY: 240,
+    });
+    window.dispatchEvent(
+      new PointerEvent("pointermove", {
+        pointerId: 41,
+        pointerType: "touch",
+        isPrimary: true,
+        // One fast event crosses both remaining columns. The sticky toolbar
+        // is deliberately first in the hit stack to cover edge auto-scroll.
+        clientX: 320,
+        clientY: 240,
+      }),
+    );
+    window.dispatchEvent(
+      new PointerEvent("pointerup", {
+        pointerId: 41,
+        pointerType: "touch",
+        isPrimary: true,
+      }),
+    );
+    await wrapper.vm.$nextTick();
+
+    expect(wrapper.get("[data-test='mobile-gallery-actions']").text()).toContain("3 selected");
+    expect(tiles.map((tile) => tile.attributes("aria-pressed"))).toEqual(["true", "true", "true"]);
+
+    await tiles[0]!.trigger("pointerdown", {
+      pointerId: 42,
+      pointerType: "touch",
+      isPrimary: true,
+      clientX: 20,
+      clientY: 240,
+    });
+    window.dispatchEvent(
+      new PointerEvent("pointermove", {
+        pointerId: 42,
+        pointerType: "touch",
+        isPrimary: true,
+        clientX: 200,
+        clientY: 240,
+      }),
+    );
+    window.dispatchEvent(
+      new PointerEvent("pointerup", {
+        pointerId: 42,
+        pointerType: "touch",
+        isPrimary: true,
+      }),
+    );
+    await wrapper.vm.$nextTick();
+
+    expect(wrapper.get("[data-test='mobile-gallery-actions']").text()).toContain("1 selected");
+    expect(tiles.map((tile) => tile.attributes("aria-pressed"))).toEqual([
+      "false",
+      "false",
+      "true",
+    ]);
   });
 
   it("deletes one selected print from every host that contains a copy", async () => {
