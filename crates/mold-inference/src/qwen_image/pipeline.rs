@@ -2598,9 +2598,15 @@ impl QwenImageEngine {
             width,
             height,
         )?;
-        loaded.transformer = Some(transformer);
-        self.note_transformer_lora_stack();
+        self.install_reloaded_transformer(&mut loaded.transformer, transformer);
         Ok(())
+    }
+
+    /// Install weights returned by the real loader and bind their residency
+    /// authority to the exact pending LoRA stack that loader consumed.
+    fn install_reloaded_transformer<T>(&mut self, slot: &mut Option<T>, transformer: T) {
+        *slot = Some(transformer);
+        self.note_transformer_lora_stack();
     }
 
     /// Record the stack that a just-built transformer carries.
@@ -2627,6 +2633,17 @@ impl QwenImageEngine {
     ) {
         *transformer = None;
         active_lora_fingerprint.clear();
+    }
+
+    fn release_edit_transformer<T>(&mut self, transformer: &mut Option<T>) {
+        Self::release_resident_transformer(transformer, &mut self.active_lora_fingerprint);
+    }
+
+    fn finish_edit_generation<T>(&mut self, result: Result<T>) -> Result<T> {
+        if self.base.load_strategy == LoadStrategy::Sequential {
+            self.unload();
+        }
+        result
     }
 
     /// Make the resident transformer match this request's LoRA stack.
@@ -3414,16 +3431,33 @@ impl QwenImageEngine {
     }
 
     fn generate_edit_loaded(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
-        // Started before the reload below so `generation_time_ms` keeps
-        // covering the transformer rebuild and its LoRA merge, exactly as
-        // FLUX's does. That cost is the whole subject of the fingerprint
-        // elision — a timing that excluded it could not show the win.
+        // Started before conditioning so `generation_time_ms` includes the
+        // transformer reload and any request LoRA merge performed after the
+        // multimodal encoder has been released.
         let start = Instant::now();
-        // Before any borrow of `self.base`: reuse the resident transformer
-        // when this request's LoRA stack is the one already merged into it.
-        self.ensure_transformer_for_request(req.width as usize, req.height as usize)?;
 
-        let progress = &self.base.progress;
+        // Edit conditioning runs the Qwen2.5-VL language/vision encoder. It is
+        // materially larger than text-only conditioning and must not overlap
+        // the resident diffusion transformer on a 24 GB card. Keep the loaded
+        // bundle outside `self.base` while the inner routine moves through the
+        // conditioning -> VAE encode -> transformer phases; putting it back on
+        // every exit preserves the engine even when one phase fails.
+        let mut loaded = self
+            .base
+            .loaded
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("model not loaded"))?;
+        let result = self.generate_edit_loaded_inner(req, start, &mut loaded);
+        self.base.loaded = Some(loaded);
+        result
+    }
+
+    fn generate_edit_loaded_inner(
+        &mut self,
+        req: &GenerateRequest,
+        start: Instant,
+        loaded: &mut LoadedQwenImage,
+    ) -> Result<GenerateResponse> {
         // The checkpoint's own packaged scheduler config, not the family's.
         let shift_policy = shift_policy_for_model(&self.base.model_name);
         // Read before the long `&mut self.base.loaded` borrow below: the
@@ -3432,11 +3466,6 @@ impl QwenImageEngine {
         let engine_unloads_after = self.base.load_strategy == LoadStrategy::Sequential;
 
         let is_edit_family = self.is_edit_family();
-        let loaded = self
-            .base
-            .loaded
-            .as_mut()
-            .ok_or_else(|| anyhow::anyhow!("model not loaded"))?;
         let seed = req.seed.unwrap_or_else(rand_seed);
         let width = req.width as usize;
         let height = req.height as usize;
@@ -3461,23 +3490,39 @@ impl QwenImageEngine {
             "starting Qwen-Image edit generation"
         );
 
+        // The GGUF memory model is phase-sequential: Qwen2.5-VL conditioning,
+        // edit-image VAE encoding, then diffusion. The old runtime kept the
+        // transformer resident through the first two phases, so a 768x768 q4
+        // edit could pass a ~16.6 GB admission estimate and still OOM on a
+        // 24 GB RTX 4090 while the multimodal encoder loaded. Make runtime
+        // residency match the plan before allocating any encoder weights.
+        if loaded.transformer.is_some() {
+            self.base
+                .progress
+                .info("Releasing Qwen-Image transformer before multimodal edit conditioning");
+            self.release_edit_transformer(&mut loaded.transformer);
+            loaded.device.synchronize()?;
+        }
+
         if loaded.text_encoder.model.is_none() {
             let label = if loaded.text_encoder.is_parked() {
                 "Unparking Qwen2.5 encoder (CPU→GPU)"
             } else {
                 "Reloading Qwen2.5 encoder"
             };
-            progress.stage_start(label);
+            self.base.progress.stage_start(label);
             let reload_start = Instant::now();
             if loaded.text_encoder.is_parked() {
-                loaded.text_encoder.unpark_to_gpu(progress)?;
+                loaded.text_encoder.unpark_to_gpu(&self.base.progress)?;
             } else {
-                loaded.text_encoder.reload(progress)?;
+                loaded.text_encoder.reload(&self.base.progress)?;
             }
-            progress.stage_done(label, reload_start.elapsed());
+            self.base.progress.stage_done(label, reload_start.elapsed());
         }
 
-        progress.stage_start("Encoding prompt (Qwen2.5 edit)");
+        self.base
+            .progress
+            .stage_start("Encoding prompt (Qwen2.5 edit)");
         let encode_start = Instant::now();
         let (encoder_hidden_states, _, _) = loaded.text_encoder.encode_formatted_multimodal(
             &formatted_prompt,
@@ -3485,13 +3530,15 @@ impl QwenImageEngine {
             &loaded.device,
             loaded.dtype,
         )?;
-        progress.phase_done(
+        self.base.progress.phase_done(
             crate::ProgressPhase::PromptEncode,
             "Encoding prompt (Qwen2.5 edit)",
             encode_start.elapsed(),
         );
         let uncond_hs = if use_cfg {
-            progress.stage_start("Encoding negative prompt (Qwen2.5 edit)");
+            self.base
+                .progress
+                .stage_start("Encoding negative prompt (Qwen2.5 edit)");
             let neg_start = Instant::now();
             let (hs, _, _) = loaded.text_encoder.encode_formatted_multimodal(
                 &formatted_negative,
@@ -3499,7 +3546,7 @@ impl QwenImageEngine {
                 &loaded.device,
                 loaded.dtype,
             )?;
-            progress.stage_done(
+            self.base.progress.stage_done(
                 "Encoding negative prompt (Qwen2.5 edit)",
                 neg_start.elapsed(),
             );
@@ -3536,7 +3583,7 @@ impl QwenImageEngine {
 
         let mut packed_input_storage = Vec::with_capacity(edit_images.len());
         let mut img_shapes = vec![(1usize, height / 16, width / 16)];
-        progress.stage_start("Encoding edit images (VAE)");
+        self.base.progress.stage_start("Encoding edit images (VAE)");
         let encode_start = Instant::now();
         for image_bytes in edit_images {
             let (vae_width, vae_height) =
@@ -3548,13 +3595,13 @@ impl QwenImageEngine {
                 &loaded.vae,
                 &loaded.vae_device,
                 &loaded.device,
-                progress,
+                &self.base.progress,
                 || {
                     Ok(QwenImageVae::load(
                         &loaded.vae_path,
                         &Device::Cpu,
                         DType::F32,
-                        progress,
+                        &self.base.progress,
                     )?)
                 },
             )?
@@ -3563,7 +3610,7 @@ impl QwenImageEngine {
             img_shapes.push((1, encoded.dim(2)? / 2, encoded.dim(3)? / 2));
             packed_input_storage.push(Self::pack_latents_4d(&encoded)?);
         }
-        progress.phase_done(
+        self.base.progress.phase_done(
             crate::ProgressPhase::Vae,
             "Encoding edit images (VAE)",
             encode_start.elapsed(),
@@ -3575,6 +3622,16 @@ impl QwenImageEngine {
             let tensors = packed_input_storage.iter().collect::<Vec<_>>();
             Some(Tensor::cat(&tensors, 1)?)
         };
+
+        self.base
+            .progress
+            .stage_start("Reloading Qwen-Image transformer after edit conditioning");
+        let reload_start = Instant::now();
+        self.reload_transformer(loaded, width, height)?;
+        self.base.progress.stage_done(
+            "Reloading Qwen-Image transformer after edit conditioning",
+            reload_start.elapsed(),
+        );
 
         let noise = crate::engine::seeded_randn(
             seed,
@@ -3592,7 +3649,7 @@ impl QwenImageEngine {
         let output_seq_len = latents.dim(1)?;
 
         let denoise_label = format!("Denoising edit ({} steps)", num_steps);
-        progress.stage_start(&denoise_label);
+        self.base.progress.stage_start(&denoise_label);
         let denoise_start = Instant::now();
 
         {
@@ -3612,7 +3669,7 @@ impl QwenImageEngine {
             };
 
             for step in 0..num_steps {
-                progress.checkpoint()?;
+                self.base.progress.checkpoint()?;
                 let step_start = Instant::now();
                 let t = scheduler.current_timestep();
                 let timestep = if use_batched_cfg {
@@ -3691,7 +3748,7 @@ impl QwenImageEngine {
                 };
 
                 latents = scheduler.step(&noise_pred, &latents)?;
-                progress.emit(ProgressEvent::DenoiseStep {
+                self.base.progress.emit(ProgressEvent::DenoiseStep {
                     step: step + 1,
                     total: num_steps,
                     elapsed: step_start.elapsed(),
@@ -3699,8 +3756,21 @@ impl QwenImageEngine {
             }
         }
 
-        progress.checkpoint()?;
-        progress.stage_done(&denoise_label, denoise_start.elapsed());
+        self.base.progress.checkpoint()?;
+        self.base
+            .progress
+            .stage_done(&denoise_label, denoise_start.elapsed());
+
+        // Decode is the final independent Qwen VAE phase. Admission prices
+        // its workspace as a max with (not an addition to) transformer
+        // residency, so release the transformer before allocating decode
+        // buffers. The next edit would release this resident copy before
+        // conditioning anyway.
+        self.base
+            .progress
+            .info("Releasing Qwen-Image transformer before VAE decode");
+        self.release_edit_transformer(&mut loaded.transformer);
+        loaded.device.synchronize()?;
 
         let latents = Self::unpack_latents_packed(&latents, height / 8, width / 8)?;
         let free_for_decode = usable_free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
@@ -3715,14 +3785,14 @@ impl QwenImageEngine {
             &loaded.vae,
             &loaded.vae_device,
             &loaded.device,
-            progress,
+            &self.base.progress,
             prefer_tiled,
             || {
                 Ok(QwenImageVae::load(
                     &loaded.vae_path,
                     &Device::Cpu,
                     DType::F32,
-                    progress,
+                    &self.base.progress,
                 )?)
             },
         )?;
@@ -3775,10 +3845,7 @@ impl QwenImageEngine {
                 bail!("model not loaded -- call load() first");
             }
             let result = self.generate_edit_loaded(req);
-            if sequential {
-                self.unload();
-            }
-            return result;
+            return self.finish_edit_generation(result);
         }
 
         // Sequential mode: load-use-drop each component
@@ -6428,6 +6495,53 @@ mod tests {
             &baked,
             &fingerprint_stack(&[lora("/loras/lightning-8.safetensors", 1.0)]),
         ));
+    }
+
+    #[test]
+    fn qwen_edit_phase_transitions_install_pending_loras_and_release_them() {
+        let stack = vec![
+            lora("/loras/lightning-8.safetensors", 1.0),
+            lora("/loras/style.safetensors", 0.4),
+        ];
+        let mut engine = fingerprint_test_engine(LoadStrategy::Eager);
+        engine.pending_loras = stack.clone();
+
+        // A resident transformer from the previous request cannot overlap
+        // multimodal conditioning. Releasing it must also revoke its baked
+        // stack authority.
+        let mut transformer = Some(());
+        engine.note_transformer_lora_stack();
+        engine.release_edit_transformer(&mut transformer);
+        assert!(transformer.is_none());
+        assert!(engine.active_lora_fingerprint.is_empty());
+
+        // `reload_transformer` routes the real weights through this install
+        // transition, so the post-conditioning resident transformer records
+        // the exact pending stack the loader merged.
+        engine.install_reloaded_transformer(&mut transformer, ());
+        assert!(transformer.is_some());
+        assert_eq!(engine.active_lora_fingerprint, fingerprint_stack(&stack));
+
+        // Final VAE decode is another independent phase and must revoke both
+        // pieces of residency authority again.
+        engine.release_edit_transformer(&mut transformer);
+        assert!(transformer.is_none());
+        assert!(engine.active_lora_fingerprint.is_empty());
+    }
+
+    #[test]
+    fn qwen_edit_finish_keeps_eager_bundle_but_unloads_sequential_state() {
+        let stack = fingerprint_stack(&[lora("/loras/lightning-8.safetensors", 1.0)]);
+
+        let mut eager = fingerprint_test_engine(LoadStrategy::Eager);
+        eager.active_lora_fingerprint = stack.clone();
+        eager.finish_edit_generation(Ok(())).unwrap();
+        assert_eq!(eager.active_lora_fingerprint, stack);
+
+        let mut sequential = fingerprint_test_engine(LoadStrategy::Sequential);
+        sequential.active_lora_fingerprint = stack;
+        sequential.finish_edit_generation(Ok(())).unwrap();
+        assert!(sequential.active_lora_fingerprint.is_empty());
     }
 
     /// `unload()` is what the model-cache LRU calls when it evicts this

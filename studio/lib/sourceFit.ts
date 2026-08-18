@@ -30,13 +30,43 @@ export type SourceFitMode = SourceFitPolicy["mode"];
 export const SOURCE_FIT_OPTIONS: readonly {
   value: SourceFitMode;
   label: string;
+  help: string;
 }[] = [
-  { value: "pad-repaint", label: "Pad + repaint" },
-  { value: "crop-fill", label: "Crop fill" },
-  { value: "pad-fit", label: "Scale to fit" },
-  { value: "lanczos-resize", label: "Resize to fill" },
-  { value: "upscale-then-fit", label: "Upscale + crop" },
+  {
+    value: "pad-repaint",
+    label: "Fit + repaint borders",
+    help: "Keeps the whole image and asks the model to paint the added borders.",
+  },
+  {
+    value: "crop-fill",
+    label: "Crop to fill",
+    help: "Keeps proportions and trims the edges that do not fit.",
+  },
+  {
+    value: "pad-fit",
+    label: "Fit with borders",
+    help: "Keeps the whole image and adds borders without repainting them.",
+  },
+  {
+    value: "lanczos-resize",
+    label: "Stretch to fill",
+    help: "Resizes directly to the conditioning shape; proportions may change.",
+  },
+  {
+    value: "upscale-then-fit",
+    label: "Upscale, then crop",
+    help: "Enhances a small image first, then keeps proportions and trims edges.",
+  },
 ];
+
+/** Fit choices for models without a repaint mask, including Qwen Image Edit. */
+export const MASKLESS_SOURCE_FIT_OPTIONS = SOURCE_FIT_OPTIONS.filter(
+  (option) => option.value !== "pad-repaint",
+);
+
+export function sourceFitHelp(mode: SourceFitMode): string {
+  return SOURCE_FIT_OPTIONS.find((option) => option.value === mode)?.help ?? "";
+}
 
 const ALIGN_X = new Set(["left", "center", "right"]);
 const ALIGN_Y = new Set(["top", "center", "bottom"]);

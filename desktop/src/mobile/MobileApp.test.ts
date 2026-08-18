@@ -2272,6 +2272,8 @@ describe("MobileApp generation queue", () => {
     const liveForm = wrapper.getComponent(MobileLoraControls).props("form") as GenerateForm;
     liveForm.imageAttachments = ["TARGET", "REFERENCE"];
     liveForm.sourceFit = { mode: "crop-fill" };
+    liveForm.width = 1328;
+    liveForm.height = 1328;
     await fieldControl("Prompt").setValue("change the target only");
     await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
     await flushPromises();

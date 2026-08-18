@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   canvasMatchesSourceResolution,
+  resolveSourceConditioningTarget,
   resolveSourceResolution,
+  sourceConditioningLimitLabel,
   sourceResolutionStatus,
 } from "./sourceResolution";
 
@@ -12,6 +14,13 @@ const qwen = {
 };
 
 describe("source resolution", () => {
+  it("caps a Qwen conditioning canvas independently from its larger output", () => {
+    expect(
+      resolveSourceConditioningTarget({ width: 1328, height: 1328 }, qwen),
+    ).toEqual({ width: 1024, height: 1024 });
+    expect(sourceConditioningLimitLabel(qwen)).toBe("1 MP");
+  });
+
   it("keeps an in-bounds aligned custom resolution exactly", () => {
     const result = resolveSourceResolution({ width: 896, height: 1152 }, qwen);
 

@@ -305,6 +305,9 @@ describe("MobileSourceControls", () => {
     expect(wrapper.text()).toContain("Target");
     expect(wrapper.find("[data-test='source-remove']").exists()).toBe(true);
     expect(wrapper.find("[data-test='mobile-source-fit']").exists()).toBe(true);
+    expect(wrapper.get("[data-test='mobile-source-fit-help']").text()).toContain(
+      "conditioning limit: 1 MP from this model",
+    );
     expect(wrapper.get("[data-test='mobile-edit-role-0']").text()).toBe("Target");
     expect(wrapper.get("[data-test='mobile-edit-role-1']").text()).toBe("Reference");
     expect(wrapper.get("[data-test='mobile-edit-title-2']").text()).toBe("Picture 3");

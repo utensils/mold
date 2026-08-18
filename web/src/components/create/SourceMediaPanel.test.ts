@@ -199,11 +199,11 @@ describe("SourceMediaPanel — source fit", () => {
       .findAll("[aria-label='Fit to canvas'] button")
       .map((button) => button.text());
     expect(labels).toEqual([
-      "Contain",
-      "Cover",
-      "Pad + repaint",
-      "Lanczos",
-      "Upscale + fit",
+      "Fit + repaint borders",
+      "Crop to fill",
+      "Fit with borders",
+      "Stretch to fill",
+      "Upscale, then crop",
     ]);
   });
 
@@ -216,7 +216,15 @@ describe("SourceMediaPanel — source fit", () => {
     const labels = wrapper
       .findAll("[aria-label='Fit to canvas'] button")
       .map((button) => button.text());
-    expect(labels).toEqual(["Contain", "Cover", "Lanczos", "Upscale + fit"]);
+    expect(labels).toEqual([
+      "Crop to fill",
+      "Fit with borders",
+      "Stretch to fill",
+      "Upscale, then crop",
+    ]);
+    expect(wrapper.get("[data-test='source-fit-help']").text()).toContain(
+      "conditioning limit: 1 MP from this model",
+    );
   });
 });
 

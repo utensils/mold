@@ -24,7 +24,12 @@ import ImageDropWell from "@studio/components/ImageDropWell.vue";
 import SourceMediaWells, { type SourceMediaSlot } from "@studio/components/SourceMediaWells.vue";
 import { sourceMediaPlan } from "@studio/lib/sourceMediaPlan";
 import { strengthSemantics } from "@studio/lib/strengthSemantics";
-import { coerceSourceFitForMaskless } from "@studio/lib/sourceFit";
+import { sourceConditioningLimitLabel } from "@studio/lib/sourceResolution";
+import {
+  coerceSourceFitForMaskless,
+  MASKLESS_SOURCE_FIT_OPTIONS,
+  sourceFitHelp,
+} from "@studio/lib/sourceFit";
 import {
   emptyMinimaxH3AuthoringState,
   setMinimaxH3BoundaryFile,
@@ -73,6 +78,10 @@ const plan = computed(() => sourceMediaPlan(caps.value));
 const flux2Dev = computed(() => isFlux2DevModel(props.form.model));
 /** Why the attached conditioning would be refused, in the server's own order. */
 const conditioningError = computed(() => sourceConditioningValidationError(props.form));
+const editFitMode = computed(() => coerceSourceFitForMaskless(props.form.sourceFit).mode);
+const sourceLimitLabel = computed(() =>
+  sourceConditioningLimitLabel(props.selectedModel ?? props.form.family, props.form.pipeline),
+);
 
 const pickerOpen = ref(false);
 const endPickerOpen = ref(false);
@@ -353,16 +362,23 @@ function setSourceFitMode(e: Event) {
       </label>
       <select
         id="edit-source-fit-policy"
-        :value="coerceSourceFitForMaskless(form.sourceFit).mode"
+        :value="editFitMode"
         data-test="source-fit-policy"
         class="border-edge mt-1 h-7 w-full rounded-control border bg-bath px-1.5 text-body text-ink"
         @change="setSourceFitMode"
       >
-        <option value="crop-fill">Crop fill</option>
-        <option value="pad-fit">Pad fit</option>
-        <option value="lanczos-resize">Lanczos resize</option>
-        <option value="upscale-then-fit">Upscale then fit</option>
+        <option
+          v-for="option in MASKLESS_SOURCE_FIT_OPTIONS"
+          :key="option.value"
+          :value="option.value"
+        >
+          {{ option.label }}
+        </option>
       </select>
+      <p class="mt-1 text-caption text-ink-3" data-test="source-fit-help">
+        {{ sourceFitHelp(editFitMode) }} Qwen conditioning limit: {{ sourceLimitLabel }} from this
+        model; Output size is separate.
+      </p>
     </template>
     <div class="mb-2 flex items-center gap-2">
       <span class="edge-code">Pictures</span>
