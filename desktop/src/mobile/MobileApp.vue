@@ -258,6 +258,7 @@ import {
   type MobileSettings,
 } from "./settings";
 import { useMobileDownloadsStore } from "./mobileDownloads";
+import { isNativeIOSRuntime } from "./platform";
 import {
   createMobileExpansionRecovery,
   mobileExpansionRecoveryStaleReason,
@@ -610,6 +611,15 @@ let galleryLoadMoreQueued = false;
 let gallerySentinelObserver: IntersectionObserver | null = null;
 let galleryChainedFetches = 0;
 const MAX_GALLERY_CHAINED_FETCHES = 3;
+let galleryDragPointerId: number | null = null;
+let galleryDragSelect = true;
+let galleryDragClientX = 0;
+let galleryDragClientY = 0;
+let galleryDragFrame: number | null = null;
+let galleryDragSuppressClick = false;
+const galleryDragVisited = new Set<string>();
+const GALLERY_DRAG_SCROLL_EDGE = 72;
+const GALLERY_DRAG_SCROLL_MAX = 18;
 let resultMediaRecoveryClientId: number | null = null;
 let resultMediaRecoveryAttempts = 0;
 let hostProbeTimer: ReturnType<typeof setInterval> | null = null;
@@ -3535,6 +3545,7 @@ async function retryExpansionAfterPull(): Promise<void> {
 }
 
 function revokeObjectUrl(url: string): void {
+  if (!url.startsWith("blob:")) return;
   URL.revokeObjectURL(url);
   objectUrls.delete(url);
 }
@@ -4210,6 +4221,15 @@ async function thumbnailUrl(target: ApiTarget, hostId: string, filename: string)
     blob = await response.blob();
     void storeCachedGalleryMedia(hostId, filename, "thumbnail", blob);
   }
+  // WKWebView's native image context menu forwards an object URL as text to
+  // Share extensions. Give iOS an inline image resource so Share, Copy, and
+  // Save to Photos receive image data rather than a process-local `blob:` URL.
+  // Thumbnails are bounded to 256 px by the server, so the base64 expansion
+  // stays small; browser development keeps cheaper revocable object URLs.
+  if (isNativeIOSRuntime()) {
+    const mimeType = blob.type.startsWith("image/") ? blob.type : "image/png";
+    return `data:${mimeType};base64,${await blobToBase64(blob)}`;
+  }
   const url = URL.createObjectURL(blob);
   objectUrls.add(url);
   return url;
@@ -4715,6 +4735,7 @@ function allGalleryPrints(): Array<GalleryPrint | PendingGalleryPrint> {
 }
 
 function setGallerySelectMode(next: boolean): void {
+  if (!next) finishGallerySelectionDrag();
   gallerySelectMode.value = next;
   galleryDeleteConfirming.value = false;
   if (!next) gallerySelection.value = new Set();
@@ -4738,12 +4759,122 @@ function toggleGallerySelection(print: GalleryPrint): void {
   galleryDeleteConfirming.value = false;
 }
 
+function applyGalleryDragSelection(print: GalleryPrint): void {
+  const key = galleryPrintKey(print);
+  if (galleryDragVisited.has(key)) return;
+  galleryDragVisited.add(key);
+  const next = new Set(gallerySelection.value);
+  if (galleryDragSelect) next.add(key);
+  else next.delete(key);
+  gallerySelection.value = next;
+  galleryDeleteConfirming.value = false;
+}
+
+function galleryPrintAtPoint(x: number, y: number): GalleryPrint | null {
+  // Keep tiles discoverable beneath the sticky selection toolbar while edge
+  // auto-scroll moves the grid behind it.
+  const elements = document.elementsFromPoint?.(x, y) ?? [document.elementFromPoint(x, y)];
+  const tile = elements
+    .map((element) => element?.closest<HTMLElement>("[data-gallery-print-key]") ?? null)
+    .find((element) => element !== null);
+  const key = tile?.dataset.galleryPrintKey;
+  return key ? (gallery.value.find((print) => galleryPrintKey(print) === key) ?? null) : null;
+}
+
+function applyGalleryDragAtPoint(): void {
+  const print = galleryPrintAtPoint(galleryDragClientX, galleryDragClientY);
+  if (print) applyGalleryDragSelection(print);
+}
+
+function applyGalleryDragSegment(fromX: number, fromY: number, toX: number, toY: number): void {
+  const distance = Math.hypot(toX - fromX, toY - fromY);
+  // This stride is well below the 44pt minimum tile target. Sampling the
+  // whole segment prevents a fast native swipe from jumping over a column.
+  const steps = Math.max(1, Math.ceil(distance / 12));
+  for (let step = 1; step <= steps; step += 1) {
+    const progress = step / steps;
+    const print = galleryPrintAtPoint(
+      fromX + (toX - fromX) * progress,
+      fromY + (toY - fromY) * progress,
+    );
+    if (print) applyGalleryDragSelection(print);
+  }
+}
+
+function runGalleryDragFrame(): void {
+  galleryDragFrame = null;
+  if (galleryDragPointerId === null || !gallerySelectMode.value) return;
+  const scroller = mobileContent.value;
+  if (scroller) {
+    const bounds = scroller.getBoundingClientRect();
+    const topDepth = Math.max(0, bounds.top + GALLERY_DRAG_SCROLL_EDGE - galleryDragClientY);
+    const bottomDepth = Math.max(
+      0,
+      galleryDragClientY - (bounds.bottom - GALLERY_DRAG_SCROLL_EDGE),
+    );
+    const direction = bottomDepth > 0 ? 1 : topDepth > 0 ? -1 : 0;
+    const depth = Math.max(topDepth, bottomDepth);
+    if (direction && depth) {
+      const speed = Math.min(
+        GALLERY_DRAG_SCROLL_MAX,
+        Math.max(2, (depth / GALLERY_DRAG_SCROLL_EDGE) * GALLERY_DRAG_SCROLL_MAX),
+      );
+      scroller.scrollTop += direction * speed;
+      applyGalleryDragAtPoint();
+    }
+  }
+  galleryDragFrame = requestAnimationFrame(runGalleryDragFrame);
+}
+
+function beginGallerySelectionDrag(event: PointerEvent, print: GalleryPrint): void {
+  if (
+    !gallerySelectMode.value ||
+    event.isPrimary === false ||
+    (event.pointerType === "mouse" && event.button !== 0)
+  ) {
+    return;
+  }
+  event.preventDefault();
+  galleryDragPointerId = event.pointerId;
+  galleryDragSelect = !gallerySelection.value.has(galleryPrintKey(print));
+  galleryDragClientX = event.clientX;
+  galleryDragClientY = event.clientY;
+  galleryDragVisited.clear();
+  galleryDragSuppressClick = true;
+  applyGalleryDragSelection(print);
+  (event.currentTarget as HTMLElement | null)?.setPointerCapture?.(event.pointerId);
+  if (galleryDragFrame === null) galleryDragFrame = requestAnimationFrame(runGalleryDragFrame);
+}
+
+function moveGallerySelectionDrag(event: PointerEvent): void {
+  if (event.pointerId !== galleryDragPointerId) return;
+  event.preventDefault();
+  const points = [...(event.getCoalescedEvents?.() ?? []), event];
+  for (const point of points) {
+    applyGalleryDragSegment(galleryDragClientX, galleryDragClientY, point.clientX, point.clientY);
+    galleryDragClientX = point.clientX;
+    galleryDragClientY = point.clientY;
+  }
+}
+
+function finishGallerySelectionDrag(event?: PointerEvent): void {
+  if (event && event.pointerId !== galleryDragPointerId) return;
+  galleryDragPointerId = null;
+  galleryDragVisited.clear();
+  if (galleryDragFrame !== null) cancelAnimationFrame(galleryDragFrame);
+  galleryDragFrame = null;
+  setTimeout(() => {
+    galleryDragSuppressClick = false;
+  }, 0);
+}
+
 function selectAllGalleryPrints(): void {
   gallerySelection.value = new Set(gallery.value.map(galleryPrintKey));
   galleryDeleteConfirming.value = false;
 }
 
-function handleGalleryTileClick(print: GalleryPrint): void {
+function handleGalleryTileClick(event: MouseEvent, print: GalleryPrint): void {
+  if (gallerySelectMode.value && galleryDragSuppressClick && event.detail !== 0) return;
   if (gallerySelectMode.value) toggleGallerySelection(print);
   else openPrint(print);
 }
@@ -5112,6 +5243,9 @@ onMounted(async () => {
   document.addEventListener("focusin", handleKeyboardFocusIn, true);
   document.addEventListener("focusout", handleKeyboardFocusOut, true);
   window.addEventListener("scroll", syncVisualViewportOffset, true);
+  window.addEventListener("pointermove", moveGallerySelectionDrag, { passive: false });
+  window.addEventListener("pointerup", finishGallerySelectionDrag);
+  window.addEventListener("pointercancel", finishGallerySelectionDrag);
   window.visualViewport?.addEventListener("resize", syncVisualViewportOffset);
   window.visualViewport?.addEventListener("scroll", syncVisualViewportOffset);
   syncVisualViewportOffset();
@@ -5170,6 +5304,10 @@ onBeforeUnmount(() => {
   document.removeEventListener("focusin", handleKeyboardFocusIn, true);
   document.removeEventListener("focusout", handleKeyboardFocusOut, true);
   window.removeEventListener("scroll", syncVisualViewportOffset, true);
+  window.removeEventListener("pointermove", moveGallerySelectionDrag);
+  window.removeEventListener("pointerup", finishGallerySelectionDrag);
+  window.removeEventListener("pointercancel", finishGallerySelectionDrag);
+  finishGallerySelectionDrag();
   window.visualViewport?.removeEventListener("resize", syncVisualViewportOffset);
   window.visualViewport?.removeEventListener("scroll", syncVisualViewportOffset);
   document.documentElement.style.removeProperty("--mobile-visual-viewport-page-top");
@@ -6015,7 +6153,11 @@ onBeforeUnmount(() => {
         </div>
         <p v-if="galleryError" class="status-line error-text">{{ galleryError }}</p>
         <div v-if="galleryLoading" class="empty-state">Loading prints…</div>
-        <div v-else-if="gallery.length" class="gallery-grid">
+        <div
+          v-else-if="gallery.length"
+          class="gallery-grid"
+          :class="{ 'is-selecting': gallerySelectMode }"
+        >
           <button
             v-for="print in gallery"
             :key="`${print.hostId}:${print.filename}`"
@@ -6030,8 +6172,10 @@ onBeforeUnmount(() => {
             :aria-pressed="
               gallerySelectMode ? gallerySelection.has(galleryPrintKey(print)) : undefined
             "
+            :data-gallery-print-key="galleryPrintKey(print)"
             data-test="gallery-item"
-            @click="handleGalleryTileClick(print)"
+            @pointerdown="beginGallerySelectionDrag($event, print)"
+            @click="handleGalleryTileClick($event, print)"
           >
             <img
               :src="print.thumbnailUrl"
