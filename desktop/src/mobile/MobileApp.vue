@@ -4951,8 +4951,21 @@ function usesSoftwareKeyboard(target: EventTarget | null): target is HTMLElement
   return !NON_KEYBOARD_INPUT_TYPES.has(target.type.toLowerCase());
 }
 
+function syncVisualViewportOffset(): void {
+  const pageTop = window.visualViewport?.pageTop ?? window.scrollY;
+  document.documentElement.style.setProperty(
+    "--mobile-visual-viewport-page-top",
+    `${Math.max(0, pageTop)}px`,
+  );
+}
+
 function restoreNativeViewport(): void {
   if (!("__TAURI_INTERNALS__" in window) || unmounted) return;
+  // Keyboard avoidance may scroll WebKit's document layer despite Mold's
+  // non-scrolling root. Reset it without disturbing .mobile-content, whose
+  // independent scroll position belongs to the user.
+  window.scrollTo(0, 0);
+  syncVisualViewportOffset();
   void invoke("restore_mobile_viewport").catch(() => undefined);
 }
 
@@ -4963,7 +4976,21 @@ function cancelKeyboardViewportRestore(): void {
 }
 
 function handleKeyboardFocusIn(event: FocusEvent): void {
-  if (usesSoftwareKeyboard(event.target)) cancelKeyboardViewportRestore();
+  if (!usesSoftwareKeyboard(event.target)) return;
+  const editor = event.target;
+  cancelKeyboardViewportRestore();
+  // iOS pans WKWebView after focus to reveal an editor. Re-anchor after the
+  // focus turn and once more after the keyboard animation; the Create body's
+  // own overflow remains the only scrollable app layer.
+  queueMicrotask(() => {
+    if (unmounted || document.activeElement !== editor) return;
+    restoreNativeViewport();
+    keyboardViewportRestoreTimer = setTimeout(() => {
+      keyboardViewportRestoreTimer = null;
+      if (document.activeElement !== editor) return;
+      restoreNativeViewport();
+    }, KEYBOARD_VIEWPORT_SETTLE_MS);
+  });
 }
 
 /**
@@ -4993,6 +5020,10 @@ watch(resultPreviewError, (error) => {
 onMounted(async () => {
   document.addEventListener("focusin", handleKeyboardFocusIn, true);
   document.addEventListener("focusout", handleKeyboardFocusOut, true);
+  window.addEventListener("scroll", syncVisualViewportOffset, true);
+  window.visualViewport?.addEventListener("resize", syncVisualViewportOffset);
+  window.visualViewport?.addEventListener("scroll", syncVisualViewportOffset);
+  syncVisualViewportOffset();
   if ("__TAURI_INTERNALS__" in window) {
     void invoke("restore_mobile_viewport").catch(() => undefined);
     void import("@tauri-apps/api/app")
@@ -5047,6 +5078,10 @@ onBeforeUnmount(() => {
   document.removeEventListener("visibilitychange", handleForegroundResume);
   document.removeEventListener("focusin", handleKeyboardFocusIn, true);
   document.removeEventListener("focusout", handleKeyboardFocusOut, true);
+  window.removeEventListener("scroll", syncVisualViewportOffset, true);
+  window.visualViewport?.removeEventListener("resize", syncVisualViewportOffset);
+  window.visualViewport?.removeEventListener("scroll", syncVisualViewportOffset);
+  document.documentElement.style.removeProperty("--mobile-visual-viewport-page-top");
   window.removeEventListener("pageshow", handleForegroundResume);
   cancelKeyboardViewportRestore();
   stopPairingDeepLinks?.();

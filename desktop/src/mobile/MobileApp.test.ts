@@ -4945,6 +4945,7 @@ describe("MobileApp foreground resume", () => {
 
   it("restores the native WKWebView frame after the software keyboard dismisses", async () => {
     vi.useFakeTimers();
+    const scrollTo = vi.spyOn(window, "scrollTo").mockImplementation(() => undefined);
     try {
       Object.defineProperty(window, "__TAURI_INTERNALS__", {
         value: {},
@@ -4960,16 +4961,72 @@ describe("MobileApp foreground resume", () => {
       await vi.advanceTimersByTimeAsync(0);
       expect(invoke).toHaveBeenCalledTimes(1);
       expect(invoke).toHaveBeenLastCalledWith("restore_mobile_viewport");
+      expect(scrollTo).toHaveBeenLastCalledWith(0, 0);
 
       await vi.advanceTimersByTimeAsync(400);
       expect(invoke).toHaveBeenCalledTimes(2);
       expect(invoke).toHaveBeenLastCalledWith("restore_mobile_viewport");
+      expect(scrollTo).toHaveBeenCalledTimes(2);
     } finally {
+      scrollTo.mockRestore();
       vi.useRealTimers();
     }
   });
 
-  it("does not restore the viewport while focus moves between keyboard editors", async () => {
+  it("resets only the keyboard-shifted document layer and preserves Create scrolling", async () => {
+    const scrollTo = vi.spyOn(window, "scrollTo").mockImplementation(() => undefined);
+    try {
+      Object.defineProperty(window, "__TAURI_INTERNALS__", {
+        value: {},
+        configurable: true,
+      });
+      wrapper = mountMobileApp();
+      await flushPromises();
+      scrollTo.mockClear();
+
+      const content = wrapper.get(".mobile-content").element as HTMLElement;
+      content.scrollTop = 420;
+      const prompt = fieldControl("Prompt").element as HTMLTextAreaElement;
+      prompt.focus();
+      prompt.blur();
+      await Promise.resolve();
+
+      expect(scrollTo).toHaveBeenCalledWith(0, 0);
+      expect(content.scrollTop).toBe(420);
+    } finally {
+      scrollTo.mockRestore();
+    }
+  });
+
+  it("counters visual-viewport keyboard panning so the header stays below iOS chrome", async () => {
+    const originalViewport = Object.getOwnPropertyDescriptor(window, "visualViewport");
+    const visualViewport = new EventTarget() as EventTarget & { pageTop: number };
+    visualViewport.pageTop = 58;
+    Object.defineProperty(window, "visualViewport", {
+      value: visualViewport,
+      configurable: true,
+    });
+    try {
+      wrapper = mountMobileApp();
+      await flushPromises();
+      expect(
+        document.documentElement.style.getPropertyValue("--mobile-visual-viewport-page-top"),
+      ).toBe("58px");
+
+      visualViewport.pageTop = 0;
+      visualViewport.dispatchEvent(new Event("scroll"));
+      expect(
+        document.documentElement.style.getPropertyValue("--mobile-visual-viewport-page-top"),
+      ).toBe("0px");
+    } finally {
+      wrapper?.unmount();
+      wrapper = null;
+      if (originalViewport) Object.defineProperty(window, "visualViewport", originalViewport);
+      else Reflect.deleteProperty(window, "visualViewport");
+    }
+  });
+
+  it("reanchors the viewport when focus moves between keyboard editors", async () => {
     Object.defineProperty(window, "__TAURI_INTERNALS__", {
       value: {},
       configurable: true,
@@ -4984,10 +5041,11 @@ describe("MobileApp foreground resume", () => {
     negativePrompt.focus();
     await Promise.resolve();
 
-    expect(invoke).not.toHaveBeenCalled();
+    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(invoke).toHaveBeenLastCalledWith("restore_mobile_viewport");
   });
 
-  it("cancels the settling restore when an editor refocuses before it fires", async () => {
+  it("replaces a dismissal restore with active-keyboard re-anchoring on refocus", async () => {
     vi.useFakeTimers();
     try {
       Object.defineProperty(window, "__TAURI_INTERNALS__", {
@@ -5006,7 +5064,8 @@ describe("MobileApp foreground resume", () => {
 
       prompt.focus();
       await vi.advanceTimersByTimeAsync(400);
-      expect(invoke).toHaveBeenCalledTimes(1);
+      expect(invoke).toHaveBeenCalledTimes(3);
+      expect(invoke).toHaveBeenLastCalledWith("restore_mobile_viewport");
     } finally {
       vi.useRealTimers();
     }

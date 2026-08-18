@@ -40,9 +40,13 @@ button {
   --radius-card: 16px;
   --radius-pill: 20px;
   --text-large-title: 1.875rem;
-  /* UIKit restores the WKWebView frame after native pickers dismiss. Follow
-     that stable native container instead of WebKit's transient dvh. */
-  height: 100%;
+  /* Stay pinned to the unobscured iPhone viewport. WebKit can leave the root
+     percentage height at its keyboard-reduced value after dismissal; lvh is
+     deliberately independent of that transient visual viewport. */
+  height: 100lvh;
+  /* Counter WebKit's visual-viewport pan while an editor is focused. Without
+     this, keyboard avoidance can move the app header under iOS status chrome. */
+  transform: translateY(var(--mobile-visual-viewport-page-top, 0px));
   min-height: 0;
   box-sizing: border-box;
   overflow: hidden;
