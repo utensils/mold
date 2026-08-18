@@ -379,6 +379,46 @@ afterEach(() => {
 });
 
 describe("MobileApp sequence generation", () => {
+  it("enters Wan on its default duration after an H3 model", async () => {
+    const h3: ModelEntry = {
+      ...model,
+      name: "minimax-h3-fl2va:official-bf16",
+      family: "minimax-h3",
+      source_image: "required",
+      default_frames: 124,
+      default_fps: 24,
+    };
+    const wan: ModelEntry = {
+      ...model,
+      name: "wan22-ti2v-5b:turbo",
+      family: "wan",
+      default_frames: 121,
+      default_fps: 24,
+      frame_step: 4,
+    };
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([h3, wan]);
+      if (path === "/api/gallery") return Promise.resolve([]);
+      if (path === "/api/activity") {
+        return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
+      }
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    const liveForm = wrapper.getComponent(MobileLoraControls).props("form") as GenerateForm;
+    expect(liveForm.frames).toBe(124);
+
+    await fieldControl("Model").setValue(wan.name);
+    await flushPromises();
+
+    expect(liveForm.frames).toBe(121);
+    expect(liveForm.fps).toBe(24);
+    expect(wrapper.text()).not.toContain("Frames must be 4n+1");
+  });
+
   it("retires dormant original-prompt provenance when a new prompt is authored", async () => {
     wrapper = mountMobileApp();
     await flushPromises();

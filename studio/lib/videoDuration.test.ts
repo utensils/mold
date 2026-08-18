@@ -7,6 +7,7 @@ import {
   minVideoFrames,
   snapVideoFrames,
   videoFramesError,
+  videoFramesForModelSelection,
   videoFrameStep,
   videoFrameOffset,
   fixedVideoFps,
@@ -64,6 +65,18 @@ describe("video duration controls", () => {
     expect(snapVideoFrames(45, { family: "ltx2" })).toBe(49);
     expect(snapVideoFrames(53, wan)).toBe(53);
     expect(snapVideoFrames(53, { family: "ltx2" })).toBe(57);
+  });
+
+  it("uses the target default instead of carrying an off-grid duration", () => {
+    const wan = {
+      family: "wan",
+      default_frames: 121,
+      default_fps: 24,
+      frame_step: 4,
+    };
+
+    expect(videoFramesForModelSelection(124, wan)).toBe(121);
+    expect(videoFramesForModelSelection(125, wan)).toBe(125);
   });
 
   it("validates frame counts against the selected model grid", () => {

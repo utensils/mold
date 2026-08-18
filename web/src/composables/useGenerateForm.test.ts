@@ -1028,6 +1028,24 @@ describe("useGenerateForm", () => {
     expect(form.state.value.fps).toBe(30);
   });
 
+  it("applyModelDefaults replaces an off-grid H3 duration with Wan's default", () => {
+    const form = useGenerateForm();
+    form.state.value.frames = 124;
+
+    form.applyModelDefaults(
+      makeModel({
+        name: "wan22-t2v-a14b:q5",
+        family: "wan",
+        default_frames: 121,
+        default_fps: 24,
+        frame_step: 4,
+      }),
+    );
+
+    expect(form.state.value.frames).toBe(121);
+    expect(form.state.value.fps).toBe(24);
+  });
+
   it("applyModelDefaults clears a scheduler the new family's options reject", () => {
     const form = useGenerateForm();
     // A UNet scheduler carried into wan is a server-side rejection, not a

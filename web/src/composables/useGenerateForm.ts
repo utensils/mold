@@ -36,6 +36,7 @@ import {
   restoredNegativePrompt,
 } from "@studio/lib/negativePrompt";
 import { defaultVideoFps } from "@studio/lib/sequence";
+import { videoFramesForModelSelection } from "@studio/lib/videoDuration";
 import {
   familySupportsExtend,
   resolveExtendOverlapFrames,
@@ -281,7 +282,7 @@ function modelDefaultsPatch(
   if (capabilities.supportsVideo) {
     next.frames = isMinimaxH3Family(model.family)
       ? (model.default_frames ?? MINIMAX_H3_MIN_FRAMES)
-      : (next.frames ?? model.default_frames ?? 25);
+      : videoFramesForModelSelection(next.frames, model);
     // The model's advertised rate is applied like steps/guidance — it is only
     // absent-server/absent-field that leaves the current value in place.
     next.fps = defaultVideoFps(model, next.fps);

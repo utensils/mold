@@ -1020,6 +1020,37 @@ describe("applyModelDefaults — model-advertised fps", () => {
   });
 });
 
+describe("applyModelDefaults — model-aware duration", () => {
+  it("replaces an off-grid H3 duration with Wan's advertised default", () => {
+    const form = newGenerateForm();
+    form.frames = 124;
+
+    applyModelDefaults(form, {
+      ...wanModel(),
+      default_frames: 121,
+      default_fps: 24,
+      frame_step: 4,
+    });
+
+    expect(form.frames).toBe(121);
+    expect(form.fps).toBe(24);
+  });
+
+  it("preserves a deliberate duration that is valid for the target model", () => {
+    const form = newGenerateForm();
+    form.frames = 125;
+
+    applyModelDefaults(form, {
+      ...wanModel(),
+      default_frames: 121,
+      default_fps: 24,
+      frame_step: 4,
+    });
+
+    expect(form.frames).toBe(125);
+  });
+});
+
 describe("applyModelDefaults resets advanced video on family change", () => {
   it("clears the LTX-2 settings knobs but retains staged media when leaving", () => {
     const form = ltx2Form();

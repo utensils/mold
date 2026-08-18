@@ -30,6 +30,7 @@ import {
   type SourceFitPolicy,
 } from "@studio/lib/sourceFit";
 import { defaultVideoFps } from "@studio/lib/sequence";
+import { videoFramesForModelSelection } from "@studio/lib/videoDuration";
 import { familySupportsExtend, resolveExtendOverlapFrames } from "@studio/lib/extend";
 import { findInstalledModel } from "./generateModels";
 import {
@@ -324,6 +325,8 @@ export function applyModelDefaults(form: GenerateForm, m: ModelEntry): void {
   form.guidanceCapabilities = m.guidance_capabilities ?? null;
   if (isMinimaxH3Family(m.family)) {
     form.frames = m.default_frames ?? MINIMAX_H3_MIN_FRAMES;
+  } else if (m.default_frames != null) {
+    form.frames = videoFramesForModelSelection(form.frames, m);
   }
   // The model's advertised rate is applied like steps/guidance — it is only
   // absent-server/absent-field that leaves the current value in place.
