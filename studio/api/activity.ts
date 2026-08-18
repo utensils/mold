@@ -146,6 +146,8 @@ export interface FleetActiveWork extends ActiveWorkItem {
   key: string;
   hostId: string;
   hostLabel: string;
+  routeUrl: string;
+  instanceId: string | null;
   stale: boolean;
   hostError: string | null;
 }
@@ -161,6 +163,8 @@ export function mergeFleetActivity(
         key: `${host.hostId}:${item.kind}:${item.id}`,
         hostId: host.hostId,
         hostLabel: host.hostLabel,
+        routeUrl: host.routeUrl,
+        instanceId: host.instanceId,
         stale: host.stale || host.unavailableKinds.includes(item.kind),
         hostError: host.unavailableKinds.includes(item.kind)
           ? `${item.kind.replaceAll("_", " ")} status is temporarily unavailable`

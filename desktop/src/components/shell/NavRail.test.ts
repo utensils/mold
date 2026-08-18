@@ -12,6 +12,8 @@ import { useChainJobsStore } from "../../stores/chainJobs";
 import { useHostModelsStore } from "../../stores/hostModels";
 import { useLiveActivityStore } from "../../stores/liveActivity";
 import { useComposerStore } from "../../stores/composer";
+import { useContextMenuStore } from "../../stores/contextMenu";
+import { useJobsStore } from "../../stores/jobs";
 
 const stub = { template: "<div />" };
 const authedMediaStub = {
@@ -107,6 +109,149 @@ describe("NavRail collapse", () => {
 });
 
 describe("NavRail developing jobs", () => {
+  function setLocalAuthority(baseUrl = "http://127.0.0.1:49152", instanceId = "local-instance") {
+    const connection = useConnectionStore();
+    connection.info = { mode: "local", baseUrl, apiKey: "secret" };
+    connection.status = "ready";
+    useHostsStore().telemetry.local = {
+      queueDepth: 1,
+      queueCapacity: 1,
+      version: null,
+      instanceId,
+    };
+  }
+
+  it("cancels another client's running job from its context menu", async () => {
+    const wrapper = await mountAt("/create");
+    setLocalAuthority();
+    const liveActivity = useLiveActivityStore();
+    vi.spyOn(liveActivity, "refresh").mockResolvedValue(undefined);
+    const cancel = vi.spyOn(useJobsStore(), "cancelJob").mockResolvedValue(undefined);
+    liveActivity.hosts = {
+      local: {
+        hostId: "local",
+        hostLabel: "This Mac",
+        target: { baseUrl: "http://127.0.0.1:49152", apiKey: "secret" },
+        routeUrl: "http://127.0.0.1:49152",
+        instanceId: "local-instance",
+        observedAtUnixMs: 2,
+        stale: false,
+        error: null,
+        unavailableKinds: [],
+        items: [
+          {
+            id: "foreign-running",
+            kind: "generation",
+            phase: "running",
+            model: "ltx-2.3-22b-distilled:fp8",
+            created_at_unix_ms: 1,
+            updated_at_unix_ms: 2,
+            can_cancel: true,
+          },
+        ],
+      },
+    };
+    await flushPromises();
+
+    await wrapper.get("[data-test^='live-activity-select-']").trigger("contextmenu");
+    const menu = useContextMenuStore();
+    expect(menu.visible).toBe(true);
+    expect(menu.entries).toMatchObject([{ label: "Cancel", danger: true, disabled: false }]);
+
+    menu.activate(menu.entries[0]!);
+    await flushPromises();
+    expect(cancel).toHaveBeenCalledWith("local", "foreign-running");
+  });
+
+  it("does not send duplicate cancellation requests while one is in flight", async () => {
+    const wrapper = await mountAt("/create");
+    setLocalAuthority();
+    const liveActivity = useLiveActivityStore();
+    vi.spyOn(liveActivity, "refresh").mockResolvedValue(undefined);
+    liveActivity.hosts = {
+      local: {
+        hostId: "local",
+        hostLabel: "This Mac",
+        target: { baseUrl: "http://127.0.0.1:49152", apiKey: "secret" },
+        routeUrl: "http://127.0.0.1:49152",
+        instanceId: "local-instance",
+        observedAtUnixMs: 2,
+        stale: false,
+        error: null,
+        unavailableKinds: [],
+        items: [
+          {
+            id: "foreign-running",
+            kind: "generation",
+            phase: "running",
+            model: "flux-dev",
+            created_at_unix_ms: 1,
+            updated_at_unix_ms: 2,
+            can_cancel: true,
+          },
+        ],
+      },
+    };
+    let finishCancel!: () => void;
+    const cancel = vi
+      .spyOn(useJobsStore(), "cancelJob")
+      .mockImplementation(() => new Promise<void>((resolve) => (finishCancel = resolve)));
+    await flushPromises();
+
+    const row = wrapper.get("[data-test^='live-activity-select-']");
+    await row.trigger("contextmenu");
+    const menu = useContextMenuStore();
+    menu.activate(menu.entries[0]!);
+    await row.trigger("contextmenu");
+    expect(menu.entries).toMatchObject([{ label: "Cancel", disabled: true }]);
+    menu.activate(menu.entries[0]!);
+    expect(cancel).toHaveBeenCalledTimes(1);
+
+    finishCancel();
+    await flushPromises();
+  });
+
+  it("refuses cancellation if the host authority changed after the menu opened", async () => {
+    const wrapper = await mountAt("/create");
+    setLocalAuthority();
+    const liveActivity = useLiveActivityStore();
+    vi.spyOn(liveActivity, "refresh").mockResolvedValue(undefined);
+    liveActivity.hosts = {
+      local: {
+        hostId: "local",
+        hostLabel: "This Mac",
+        target: { baseUrl: "http://127.0.0.1:49152", apiKey: "secret" },
+        routeUrl: "http://127.0.0.1:49152",
+        instanceId: "local-instance",
+        observedAtUnixMs: 2,
+        stale: false,
+        error: null,
+        unavailableKinds: [],
+        items: [
+          {
+            id: "foreign-running",
+            kind: "generation",
+            phase: "running",
+            model: "flux-dev",
+            created_at_unix_ms: 1,
+            updated_at_unix_ms: 2,
+            can_cancel: true,
+          },
+        ],
+      },
+    };
+    const cancel = vi.spyOn(useJobsStore(), "cancelJob").mockResolvedValue(undefined);
+    await flushPromises();
+
+    await wrapper.get("[data-test^='live-activity-select-']").trigger("contextmenu");
+    useHostsStore().telemetry.local!.instanceId = "replacement-instance";
+    const menu = useContextMenuStore();
+    menu.activate(menu.entries[0]!);
+    await flushPromises();
+
+    expect(cancel).not.toHaveBeenCalled();
+  });
+
   it("shows recovered work and reloads its submitted settings", async () => {
     const wrapper = await mountAt("/create");
     useHostsStore().extras.push({

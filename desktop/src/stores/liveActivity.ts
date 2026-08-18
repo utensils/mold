@@ -35,6 +35,8 @@ export const useLiveActivityStore = defineStore("liveActivity", {
     epochs: {} as Record<string, number>,
     timer: null as ReturnType<typeof setInterval> | null,
     refreshing: false,
+    refreshQueued: false,
+    refreshPromise: null as Promise<void> | null,
     consumers: 0,
   }),
   getters: {
@@ -49,40 +51,54 @@ export const useLiveActivityStore = defineStore("liveActivity", {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(safe));
     },
     async refresh() {
-      if (this.refreshing) return;
+      if (this.refreshPromise) {
+        this.refreshQueued = true;
+        return this.refreshPromise;
+      }
       this.refreshing = true;
-      const hosts = useHostsStore();
+      const run = async () => {
+        do {
+          this.refreshQueued = false;
+          await this.refreshOnce();
+        } while (this.refreshQueued);
+      };
+      this.refreshPromise = run();
       try {
-        await Promise.all(
-          hosts.all.map(async (host) => {
-            if (!host.baseUrl) return;
-            const route = {
-              hostId: host.id,
-              hostLabel: host.label,
-              target: { baseUrl: host.baseUrl, apiKey: host.apiKey },
-            };
-            const epoch = (this.epochs[host.id] ?? 0) + 1;
-            this.epochs[host.id] = epoch;
-            const previous = this.hosts[host.id];
-            let result;
-            try {
-              if (host.status !== "ready") throw new Error("Host is offline");
-              result = await listActiveWork(route.target);
-            } catch (error) {
-              result = error instanceof Error ? error : new Error(String(error));
-            }
-            if (this.epochs[host.id] !== epoch) return;
-            this.hosts[host.id] = reconcileActivityHost(route, previous, result);
-          }),
-        );
-        const configured = new Set(hosts.all.map((host) => host.id));
-        for (const id of Object.keys(this.hosts)) {
-          if (!configured.has(id)) delete this.hosts[id];
-        }
-        this.persist();
+        await this.refreshPromise;
       } finally {
+        this.refreshPromise = null;
         this.refreshing = false;
       }
+    },
+    async refreshOnce() {
+      const hosts = useHostsStore();
+      await Promise.all(
+        hosts.all.map(async (host) => {
+          if (!host.baseUrl) return;
+          const route = {
+            hostId: host.id,
+            hostLabel: host.label,
+            target: { baseUrl: host.baseUrl, apiKey: host.apiKey },
+          };
+          const epoch = (this.epochs[host.id] ?? 0) + 1;
+          this.epochs[host.id] = epoch;
+          const previous = this.hosts[host.id];
+          let result;
+          try {
+            if (host.status !== "ready") throw new Error("Host is offline");
+            result = await listActiveWork(route.target);
+          } catch (error) {
+            result = error instanceof Error ? error : new Error(String(error));
+          }
+          if (this.epochs[host.id] !== epoch) return;
+          this.hosts[host.id] = reconcileActivityHost(route, previous, result);
+        }),
+      );
+      const configured = new Set(hosts.all.map((host) => host.id));
+      for (const id of Object.keys(this.hosts)) {
+        if (!configured.has(id)) delete this.hosts[id];
+      }
+      this.persist();
     },
     start() {
       this.consumers += 1;
