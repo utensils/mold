@@ -32,9 +32,11 @@ import { profileConflictMessage } from "@studio/lib/profileFleet";
 import { useLiveActivityStore } from "../stores/liveActivity";
 import { imageDimensionsFromBase64 } from "@studio/lib/imageDimensions";
 import {
-  canvasMatchesSourceResolution,
+  resolveDefaultSourceResolution,
   resolveSourceConditioningTarget,
+  resolveSourceCanvasTransition,
   resolveSourceResolution,
+  type SourceDimensions,
   type SourceResolutionResult,
 } from "@studio/lib/sourceResolution";
 import { useChainJobsStore } from "../stores/chainJobs";
@@ -748,20 +750,36 @@ const selectedEntry = computed(() =>
 
 let previousStillSource = "";
 let previousStillResolution: SourceResolutionResult | null = null;
+let previousStillAutomaticResolution: SourceDimensions | null = null;
 let previousOpeningSource = "";
 let previousOpeningResolution: SourceResolutionResult | null = null;
+let previousOpeningAutomaticResolution: SourceDimensions | null = null;
+const sourceCanvasMode = ref<"automatic" | "source" | "manual">("manual");
+let preservedSourceReplacement = "";
+function setSourceCanvasMode(mode: "source" | "manual") {
+  sourceCanvasMode.value = mode;
+}
+function preserveRestoredSourceCanvas(base64: string) {
+  preservedSourceReplacement = base64;
+  sourceCanvasMode.value = "manual";
+}
 
 function applyDecodedSourceResolution(
   base64: string | null,
   previous: {
     base64: string;
     resolution: SourceResolutionResult | null;
+    automaticResolution: SourceDimensions | null;
   },
   setDimensions: (width: number | null, height: number | null) => void,
-): { base64: string; resolution: SourceResolutionResult | null } {
+): {
+  base64: string;
+  resolution: SourceResolutionResult | null;
+  automaticResolution: SourceDimensions | null;
+} {
   if (!base64) {
     setDimensions(null, null);
-    return { base64: "", resolution: null };
+    return { base64: "", resolution: null, automaticResolution: null };
   }
   const dimensions =
     base64 === previous.base64 && previous.resolution
@@ -769,7 +787,7 @@ function applyDecodedSourceResolution(
       : imageDimensionsFromBase64(base64);
   if (!dimensions) {
     setDimensions(null, null);
-    return { base64, resolution: null };
+    return { base64, resolution: null, automaticResolution: null };
   }
   setDimensions(dimensions.width, dimensions.height);
   const resolution = resolveSourceResolution(
@@ -777,15 +795,36 @@ function applyDecodedSourceResolution(
     selectedEntry.value ?? form.family,
     form.pipeline,
   );
+  const automaticResolution = resolveDefaultSourceResolution(
+    dimensions,
+    selectedEntry.value ?? form.family,
+    form.pipeline,
+  );
   const replaced = base64 !== previous.base64;
-  const wasFollowing =
-    previous.resolution !== null &&
-    canvasMatchesSourceResolution({ width: form.width, height: form.height }, previous.resolution);
-  if (caps.value.sourceImageMode !== "references" && (replaced || wasFollowing)) {
-    form.width = resolution.output.width;
-    form.height = resolution.output.height;
+  const canvas = { width: form.width, height: form.height };
+  if (caps.value.sourceImageMode !== "references") {
+    const preserveReplacement = replaced && preservedSourceReplacement === base64;
+    const nextResolution = resolveSourceCanvasTransition({
+      current: canvas,
+      previousSource: previous.resolution,
+      previousAutomatic: previous.automaticResolution,
+      source: resolution,
+      automatic: automaticResolution,
+      replaced,
+      mode: sourceCanvasMode.value,
+      preserveReplacement,
+    });
+    if (replaced) {
+      preservedSourceReplacement = "";
+      if (preserveReplacement) sourceCanvasMode.value = "manual";
+      else if (sourceCanvasMode.value !== "source") sourceCanvasMode.value = "automatic";
+    }
+    if (nextResolution) {
+      form.width = nextResolution.width;
+      form.height = nextResolution.height;
+    }
   }
-  return { base64, resolution };
+  return { base64, resolution, automaticResolution };
 }
 
 watch(
@@ -815,6 +854,7 @@ watch(
       {
         base64: previousStillSource,
         resolution: previousStillResolution,
+        automaticResolution: previousStillAutomaticResolution,
       },
       (width, height) => {
         form.sourceImageWidth = width;
@@ -823,6 +863,7 @@ watch(
     );
     previousStillSource = next.base64;
     previousStillResolution = next.resolution;
+    previousStillAutomaticResolution = next.automaticResolution;
   },
   { immediate: true },
 );
@@ -848,6 +889,7 @@ watch(
       {
         base64: previousOpeningSource,
         resolution: previousOpeningResolution,
+        automaticResolution: previousOpeningAutomaticResolution,
       },
       (width, height) => {
         if (!draft.openingImage) return;
@@ -859,6 +901,7 @@ watch(
     );
     previousOpeningSource = next.base64;
     previousOpeningResolution = next.resolution;
+    previousOpeningAutomaticResolution = next.automaticResolution;
   },
   { immediate: true },
 );
@@ -1513,7 +1556,8 @@ async function loadSequence(payload: { hostId: string; jobId: string }, editing:
     if (shared.steps != null) form.steps = shared.steps;
     if (shared.guidance != null) form.guidance = shared.guidance;
     if (shared.strength != null) form.strength = shared.strength;
-    if (loaded.openingImage) {
+    if (loaded.openingImage?.base64) {
+      preserveRestoredSourceCanvas(loaded.openingImage.base64);
       form.sourceFit = { mode: "crop-fill", alignX: "center", alignY: "center" };
     }
     form.seed = shared.seed ?? "";
@@ -2968,6 +3012,14 @@ function applyPrefill() {
   }
   // Gallery reuse ships full metadata (full-fidelity restore); palette /
   // history / jobs keep the legacy scalar copy.
+  if (
+    "request" in prefill &&
+    (prefill.request?.source_image || prefill.request?.edit_images?.length)
+  ) {
+    preserveRestoredSourceCanvas(
+      prefill.request.edit_images?.[0] ?? prefill.request.source_image ?? "",
+    );
+  }
   applyPrefillToForm(form, prefill, installedModels.value);
   if ("metadata" in prefill && prefill.metadata) {
     // A first/last-frame print restores every knob except its closing still:
@@ -3004,6 +3056,7 @@ async function restoreRequestSource(request: GenerateRequest, epoch: number) {
     form.sourceImage !== effective
   )
     return;
+  preserveRestoredSourceCanvas(restored.base64);
   form.sourceImage = restored.base64;
   form.sourceImageName = restored.filename;
   await nextTick();
@@ -3112,6 +3165,7 @@ async function restorePrefillSource(metadata: OutputMetadata, epoch: number) {
         ? editRestore.images.slice(0, 4)
         : editRestore.images;
     const omitted = editRestore.images.length - restoredImages.length;
+    preserveRestoredSourceCanvas(restoredImages[0]!);
     form.imageAttachments = restoredImages;
     if (editRestore.missing > 0 || omitted > 0) {
       toasts.push(
@@ -3126,6 +3180,7 @@ async function restorePrefillSource(metadata: OutputMetadata, epoch: number) {
   } else if (!attachmentMode && caps.value.sourceImageMode === "single" && restored) {
     const generationWidth = metadata.generation_width ?? metadata.width;
     const generationHeight = metadata.generation_height ?? metadata.height;
+    preserveRestoredSourceCanvas(restored.base64);
     form.sourceImage = restored.base64;
     form.sourceImageName = restored.filename;
     await nextTick();
@@ -3804,7 +3859,9 @@ onBeforeUnmount(() => {
       :form="form"
       :last-seed="generation.lastSeedUsed"
       :chain-limits="chainLimits"
+      :source-canvas-mode="sourceCanvasMode"
       @append-word="appendPromptWord"
+      @source-canvas-mode="setSourceCanvasMode"
     />
 
     <MissingModelDialog

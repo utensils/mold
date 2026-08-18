@@ -40,14 +40,24 @@ const props = withDefaults(
     /** The user's explicit LTX-2 pipeline; a non-refining one lowers the ceiling. */
     pipeline?: string | null;
     sourceDimensions?: SourceDimensions | null;
+    sourceCanvasMode?: "automatic" | "source" | "manual";
     disabled?: boolean;
   }>(),
-  { disabled: false, model: null, pipeline: null, sourceDimensions: null },
+  {
+    disabled: false,
+    model: null,
+    pipeline: null,
+    sourceDimensions: null,
+    sourceCanvasMode: "manual",
+  },
 );
 
 const width = defineModel<number>("width", { required: true });
 const height = defineModel<number>("height", { required: true });
-const emit = defineEmits<{ "validity-change": [valid: boolean] }>();
+const emit = defineEmits<{
+  "validity-change": [valid: boolean];
+  "source-canvas-mode": [mode: "source" | "manual"];
+}>();
 
 const manualOpen = ref(false);
 const recipe = computed(() => effectiveGenerationRecipe(props.model, props.pipeline));
@@ -110,9 +120,10 @@ const canonicalShapeId = computed(
 const explicitShapeId = ref<string | null>(null);
 const shapeId = computed(() => {
   const explicit = explicitShapeId.value;
-  if (explicit === "source" && followsSource.value) return "source";
+  if ((props.sourceCanvasMode === "source" || explicit === "source") && followsSource.value)
+    return "source";
   if (explicit && explicit !== "source" && canonicalShapeId.value === explicit) return explicit;
-  return followsSource.value ? "source" : canonicalShapeId.value;
+  return canonicalShapeId.value || (followsSource.value ? "source" : "");
 });
 const shapeApproximate = computed(
   () => shapeId.value !== "source" && shapeId.value !== "" && closestShape.value?.exact === false,
@@ -136,6 +147,7 @@ function setShape(id: string): void {
   }
   const shape = shapeOptions.value.find((option) => option.id === id);
   if (!shape) return;
+  emit("source-canvas-mode", "manual");
   const exactGroup = presetsForAspectGroup(props.model, props.pipeline, id);
   applyResolution(
     closestResolutionPreset(
@@ -147,6 +159,7 @@ function setShape(id: string): void {
 }
 
 function setTier(label: string): void {
+  emit("source-canvas-mode", "manual");
   applyResolution(tierOptions.value.find((preset) => preset.label === label) ?? null);
 }
 
@@ -169,14 +182,17 @@ function changedDimension(event: Event): number {
 }
 
 function snapWidth(event: Event): void {
+  emit("source-canvas-mode", "manual");
   width.value = changedDimension(event);
 }
 
 function snapHeight(event: Event): void {
+  emit("source-canvas-mode", "manual");
   height.value = changedDimension(event);
 }
 
 function swapDimensions(): void {
+  emit("source-canvas-mode", "manual");
   [width.value, height.value] = [height.value, width.value];
 }
 
@@ -184,6 +200,7 @@ function matchSource(): void {
   const source = sourceResolution.value;
   if (!source) return;
   explicitShapeId.value = "source";
+  emit("source-canvas-mode", "source");
   width.value = source.output.width;
   height.value = source.output.height;
   manualOpen.value = true;

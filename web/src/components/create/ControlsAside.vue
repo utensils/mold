@@ -54,6 +54,7 @@ const props = withDefaults(
     family: string;
     model?: ModelInfoExtended | null;
     sourceDimensions?: SourceDimensions | null;
+    sourceCanvasMode?: "automatic" | "source" | "manual";
     /** Count of active advanced fields (drives the badge). */
     advCount?: number;
     /** Phone surface: the Advanced sheet button shows here; on tablet+ the
@@ -77,6 +78,7 @@ const props = withDefaults(
     clipCount: 0,
     model: null,
     sourceDimensions: null,
+    sourceCanvasMode: "manual",
   },
 );
 
@@ -87,6 +89,7 @@ const emit = defineEmits<{
   /* The rail only knows the form, not the catalog row behind it, so the page
    * owns the actual reset (model defaults + the undo offer). */
   "reset-settings": [];
+  "source-canvas-mode": [mode: "source" | "manual"];
 }>();
 
 // The fifth argument is the selected row's advertised source-image contract
@@ -234,14 +237,16 @@ const canonicalAspectId = computed(
   () =>
     (props.model ? closestAspect.value?.id : projection.value.aspectId) ?? "",
 );
-/** The user's explicit Shape pick disambiguates a canvas that satisfies both
- * a canonical aspect and the source (a 1280×704 source IS wan's 20:11
- * bucket) — without it the Source chip would win forever and the bucket chip
- * could never light up. Forgotten once the canvas stops matching the pick. */
+/** An explicit Source pick wins when a canvas also matches a canonical
+ * bucket. Otherwise the model-authored aspect is the natural default. */
 const explicitAspectId = ref<string | null>(null);
 const aspectId = computed(() => {
   const explicit = explicitAspectId.value;
-  if (explicit === "source" && followsSource.value) return "source";
+  if (
+    (props.sourceCanvasMode === "source" || explicit === "source") &&
+    followsSource.value
+  )
+    return "source";
   if (
     explicit &&
     explicit !== "source" &&
@@ -249,7 +254,7 @@ const aspectId = computed(() => {
   ) {
     return explicit;
   }
-  return followsSource.value ? "source" : canonicalAspectId.value;
+  return canonicalAspectId.value || (followsSource.value ? "source" : "");
 });
 /** The active chip approximates a custom size (never the Source chip). */
 const aspectApproximate = computed(
@@ -346,6 +351,7 @@ function setAspect(id: string) {
   }
   const a = shapeOptions.value.find((x) => x.id === id);
   if (!a) return;
+  emit("source-canvas-mode", "manual");
   const exactGroup = presetsForAspectGroup(
     props.model,
     props.modelValue.pipeline,
@@ -371,6 +377,7 @@ function matchSource() {
   // Matching the source is itself an explicit pick — without this, a source
   // whose size is also a canonical bucket would re-light the earlier chip.
   explicitAspectId.value = "source";
+  emit("source-canvas-mode", "source");
   const source = sourceResolution.value;
   if (!source) return;
   patch({ width: source.output.width, height: source.output.height });
@@ -380,7 +387,10 @@ function setMp(nextMp: number) {
   const preset = resolutionPresets.value.find(
     (candidate) => (candidate.width * candidate.height) / 1_000_000 === nextMp,
   );
-  if (preset) patch({ width: preset.width, height: preset.height });
+  if (preset) {
+    emit("source-canvas-mode", "manual");
+    patch({ width: preset.width, height: preset.height });
+  }
 }
 
 // Seed: Random / Fixed segments. "Fixed" covers the persisted static and

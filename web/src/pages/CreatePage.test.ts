@@ -1178,6 +1178,7 @@ describe("CreatePage layout and behavior", () => {
       base64: "MASK",
     };
     await nextTick();
+    expect(form.state.value).toMatchObject({ width: 1664, height: 928 });
 
     try {
       await wrapper.get("[data-test='composer-submit']").trigger("click");
@@ -1191,10 +1192,10 @@ describe("CreatePage layout and behavior", () => {
       expect(req.source_image).toBeUndefined();
       expect(getContext.mock.results[0]?.value?.drawImage).toHaveBeenCalledWith(
         expect.anything(),
+        -72,
         0,
-        0,
-        1440,
-        720,
+        1504,
+        752,
       );
       expect(
         form.state.value.imageAttachments.map((image) => image.base64),

@@ -16,11 +16,12 @@ function mountPicker(
   family = "flux",
   sourceDimensions: { width: number; height: number } | null = null,
   model: ModelEntry | null = null,
+  sourceCanvasMode: "automatic" | "source" | "manual" = "manual",
 ) {
   const state = reactive<PickerState>({ width, height, family });
   const Harness = defineComponent({
     components: { MobileResolutionPicker },
-    setup: () => ({ state, sourceDimensions, model }),
+    setup: () => ({ state, sourceDimensions, model, sourceCanvasMode }),
     template: `
       <MobileResolutionPicker
         v-model:width="state.width"
@@ -28,6 +29,7 @@ function mountPicker(
         :family="state.family"
         :model="model"
         :source-dimensions="sourceDimensions"
+        :source-canvas-mode="sourceCanvasMode"
       />
     `,
   });
@@ -204,6 +206,31 @@ describe("MobileResolutionPicker", () => {
     const { wrapper } = mountPicker(1024, 1024, "flux");
     expect(wrapper.find("[data-approximate='true']").exists()).toBe(false);
     expect(wrapper.get("[data-shape='square']").text()).not.toContain("≈");
+  });
+
+  it("defaults a source-sized preset to the model aspect but keeps Source selectable", async () => {
+    const { wrapper } = mountPicker(1024, 1024, "flux", {
+      width: 1024,
+      height: 1024,
+    });
+
+    expect(wrapper.get("[data-shape='square']").attributes("aria-checked")).toBe("true");
+    await wrapper.get("[data-shape='source']").trigger("click");
+    expect(wrapper.get("[data-shape='source']").attributes("aria-checked")).toBe("true");
+    expect(
+      wrapper.getComponent(MobileResolutionPicker).emitted("source-canvas-mode")?.at(-1),
+    ).toEqual(["source"]);
+
+    wrapper.unmount();
+    const remounted = mountPicker(
+      1024,
+      1024,
+      "flux",
+      { width: 1024, height: 1024 },
+      null,
+      "source",
+    ).wrapper;
+    expect(remounted.get("[data-shape='source']").attributes("aria-checked")).toBe("true");
   });
 
   it("advises on custom sizes above the 1.8 MP guideline without blocking", async () => {

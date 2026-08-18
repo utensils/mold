@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   canvasMatchesSourceResolution,
+  resolveDefaultSourceResolution,
+  resolveSourceCanvasTransition,
   resolveSourceConditioningTarget,
   resolveSourceResolution,
   sourceConditioningLimitLabel,
@@ -14,6 +16,144 @@ const qwen = {
 };
 
 describe("source resolution", () => {
+  it("applies the automatic preset to a fresh attachment", () => {
+    const source = resolveSourceResolution({ width: 1080, height: 1920 }, qwen);
+    expect(
+      resolveSourceCanvasTransition({
+        current: { width: 1024, height: 1024 },
+        previousSource: null,
+        previousAutomatic: null,
+        source,
+        automatic: { width: 928, height: 1664 },
+        replaced: true,
+        mode: "automatic",
+      }),
+    ).toEqual({ width: 928, height: 1664 });
+  });
+
+  it("preserves an arbitrary manual canvas during an asynchronous restore", () => {
+    const source = resolveSourceResolution({ width: 640, height: 384 }, qwen);
+    expect(
+      resolveSourceCanvasTransition({
+        current: { width: 1024, height: 1024 },
+        previousSource: null,
+        previousAutomatic: null,
+        source,
+        automatic: { width: 1664, height: 928 },
+        replaced: true,
+        mode: "manual",
+        preserveReplacement: true,
+      }),
+    ).toBeNull();
+  });
+
+  it("preserves explicit Source intent when source and automatic sizes had tied", () => {
+    const previous = resolveSourceResolution(
+      { width: 1024, height: 1024 },
+      qwen,
+    );
+    const portrait = resolveSourceResolution(
+      { width: 896, height: 1600 },
+      qwen,
+    );
+    expect(
+      resolveSourceCanvasTransition({
+        current: { width: 1024, height: 1024 },
+        previousSource: previous,
+        previousAutomatic: { width: 1024, height: 1024 },
+        source: portrait,
+        automatic: { width: 576, height: 1024 },
+        replaced: true,
+        mode: "source",
+      }),
+    ).toEqual(portrait.output);
+  });
+
+  it("keeps automatic and explicit Source choices live across model changes", () => {
+    const previousSource = resolveSourceResolution(
+      { width: 1080, height: 1920 },
+      qwen,
+    );
+    const nextSource = resolveSourceResolution(
+      { width: 1080, height: 1920 },
+      { ...qwen, dimension_alignment: 32 },
+    );
+    const transition = {
+      previousSource,
+      source: nextSource,
+      automatic: { width: 720, height: 1280 },
+      replaced: false,
+    };
+
+    expect(
+      resolveSourceCanvasTransition({
+        ...transition,
+        current: { width: 928, height: 1664 },
+        previousAutomatic: { width: 928, height: 1664 },
+        mode: "automatic" as const,
+      }),
+    ).toEqual({ width: 720, height: 1280 });
+    expect(
+      resolveSourceCanvasTransition({
+        ...transition,
+        current: previousSource.output,
+        previousAutomatic: { width: 928, height: 1664 },
+        mode: "source" as const,
+      }),
+    ).toEqual(nextSource.output);
+  });
+
+  it("defaults a source to the model preset with the closest aspect ratio", () => {
+    const model = {
+      family: "flux",
+      default_width: 1024,
+      default_height: 1024,
+      recommended_dimensions: [
+        { width: 1024, height: 1024 },
+        { width: 1024, height: 576 },
+        { width: 576, height: 1024 },
+      ],
+      dimension_alignment: 16,
+    };
+
+    expect(
+      resolveDefaultSourceResolution({ width: 1080, height: 1920 }, model),
+    ).toEqual({ width: 576, height: 1024 });
+    expect(
+      resolveDefaultSourceResolution({ width: 1920, height: 1080 }, model),
+    ).toEqual({ width: 1024, height: 576 });
+  });
+
+  it("uses the recipe default area to choose a tier within the closest aspect", () => {
+    const model = {
+      family: "flux",
+      default_width: 1024,
+      default_height: 1024,
+      recommended_dimensions: [
+        { width: 768, height: 768 },
+        { width: 1024, height: 1024 },
+      ],
+      dimension_alignment: 16,
+    };
+
+    expect(
+      resolveDefaultSourceResolution({ width: 2000, height: 2000 }, model),
+    ).toEqual({ width: 1024, height: 1024 });
+  });
+
+  it("falls back to the model-safe source canvas when no preset is advertised", () => {
+    const model = {
+      family: "custom",
+      max_pixels: 1_800_000,
+      dimension_alignment: 16,
+      recommended_dimensions: [],
+    };
+
+    expect(
+      resolveDefaultSourceResolution({ width: 1179, height: 786 }, model),
+    ).toEqual({ width: 1168, height: 784 });
+  });
+
   it("caps a Qwen conditioning canvas independently from its larger output", () => {
     expect(
       resolveSourceConditioningTarget({ width: 1328, height: 1328 }, qwen),

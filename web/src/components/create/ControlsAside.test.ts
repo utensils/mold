@@ -205,7 +205,7 @@ describe("ControlsAside", () => {
     });
 
     expect(wrapper.getComponent(ShapePicker).props("modelValue")).toBe(
-      "source",
+      "portrait",
     );
     expect(wrapper.getComponent(ResolutionSelector).props()).toMatchObject({
       resolvedWidth: 896,
@@ -639,11 +639,8 @@ describe("ControlsAside", () => {
   });
 });
 
-describe("ControlsAside — explicit shape pick vs source tie", () => {
-  it("lets the user select the canonical aspect even when it equals the source", async () => {
-    // A source whose size IS a canonical aspect describes the same canvas as
-    // that aspect chip — the explicit pick, not derived matching, decides
-    // which chip lights up.
+describe("ControlsAside — model aspect vs source tie", () => {
+  it("defaults to the canonical aspect and preserves an explicit Source pick", async () => {
     const sourceDimensions = { width: 1024, height: 1024 };
     const wrapper = mount(ControlsAside, {
       props: {
@@ -654,22 +651,34 @@ describe("ControlsAside — explicit shape pick vs source tie", () => {
       },
     });
     const shape = wrapper.getComponent(ShapePicker);
-    expect(shape.props("modelValue")).toBe("source");
-
     const canonical = (
       shape.props("options") as ReadonlyArray<{ id: string }>
     ).find((option) => option.id !== "source")!.id;
-    shape.vm.$emit("update:modelValue", canonical);
+    expect(shape.props("modelValue")).toBe(canonical);
+
+    shape.vm.$emit("update:modelValue", "source");
     await wrapper.vm.$nextTick();
-    // The pick may or may not resize (nearest preset); when the canvas stays
-    // identical the explicit pick must still win the highlight.
     const emitted = wrapper.emitted("update:modelValue");
     if (emitted) {
       await wrapper.setProps({
         modelValue: emitted.at(-1)![0] as GenerateFormState,
       });
     }
-    expect(shape.props("modelValue")).toBe(canonical);
+    expect(shape.props("modelValue")).toBe("source");
+    expect(wrapper.emitted("source-canvas-mode")?.at(-1)).toEqual(["source"]);
+
+    const remounted = mount(ControlsAside, {
+      props: {
+        modelValue: emitted?.at(-1)?.[0] as GenerateFormState,
+        family: "flux",
+        advCount: 0,
+        sourceDimensions,
+        sourceCanvasMode: "source",
+      },
+    });
+    expect(remounted.getComponent(ShapePicker).props("modelValue")).toBe(
+      "source",
+    );
   });
 
   it("advises on an off-profile custom size instead of blocking", () => {

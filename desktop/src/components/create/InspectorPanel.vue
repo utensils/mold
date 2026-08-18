@@ -83,11 +83,15 @@ const props = withDefaults(
     /** Per-model chain caps for the selected model, when Create has them —
      * sizes new clips' default frames on the Output switch. */
     chainLimits?: ChainLimits | null;
+    sourceCanvasMode?: "automatic" | "source" | "manual";
   }>(),
-  { lastSeed: null, chainLimits: null },
+  { lastSeed: null, chainLimits: null, sourceCanvasMode: "manual" },
 );
 
-const emit = defineEmits<{ "append-word": [word: string] }>();
+const emit = defineEmits<{
+  "append-word": [word: string];
+  "source-canvas-mode": [mode: "source" | "manual"];
+}>();
 const durationRoutingRequest = computed(() => buildRequest(props.form));
 
 const formStore = useGenerateFormStore();
@@ -420,18 +424,17 @@ const canonicalShapeId = computed(
       ? closestShape.value?.id
       : aspectIdFor(props.form.width, props.form.height)) ?? "",
 );
-/** The user's explicit Shape pick disambiguates a canvas that satisfies both
- * a canonical aspect and the source (a 1280×704 source IS wan's 20:11
- * bucket) — without it the Source chip would win forever and the bucket chip
- * could never light up. Forgotten once the canvas stops matching the pick. */
+/** An explicit Source pick wins when a canvas also matches a canonical
+ * bucket. Otherwise the model-authored aspect is the natural default. */
 const explicitShapeId = ref<string | null>(null);
 const shapeId = computed(() => {
   const explicit = explicitShapeId.value;
-  if (explicit === "source" && followsSource.value) return "source";
+  if ((props.sourceCanvasMode === "source" || explicit === "source") && followsSource.value)
+    return "source";
   if (explicit && explicit !== "source" && canonicalShapeId.value === explicit) {
     return explicit;
   }
-  return followsSource.value ? "source" : canonicalShapeId.value;
+  return canonicalShapeId.value || (followsSource.value ? "source" : "");
 });
 /** The active chip approximates a custom size (never the Source chip). */
 const shapeApproximate = computed(
@@ -518,6 +521,7 @@ function onShape(id: string) {
   }
   const aspect = shapeOptions.value.find((option) => option.id === id);
   if (!aspect) return;
+  emit("source-canvas-mode", "manual");
   const exactGroup = presetsForAspectGroup(selectedModel.value, props.form.pipeline, id);
   const preset = closestResolutionPreset(
     exactGroup.length > 0
@@ -540,6 +544,7 @@ function matchSource() {
   // Matching the source is itself an explicit pick — without this, a source
   // whose size is also a canonical bucket would re-light the earlier chip.
   explicitShapeId.value = "source";
+  emit("source-canvas-mode", "source");
   props.form.width = source.output.width;
   props.form.height = source.output.height;
 }
@@ -548,6 +553,7 @@ function onResolution(mp: number) {
     (candidate) => (candidate.width * candidate.height) / 1_000_000 === mp,
   );
   if (preset) {
+    emit("source-canvas-mode", "manual");
     props.form.width = preset.width;
     props.form.height = preset.height;
   }

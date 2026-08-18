@@ -792,10 +792,8 @@ describe("InspectorPanel — source media in the primary form", () => {
   });
 });
 
-describe("InspectorPanel — explicit shape pick vs source tie", () => {
-  it("lets the user select the canonical aspect even when it equals the source", async () => {
-    // A 1280x704 source IS wan's 20:11 bucket: both chips describe the same
-    // canvas, so the pick — not derived matching — must decide the highlight.
+describe("InspectorPanel — model aspect vs source tie", () => {
+  it("defaults to the canonical aspect and preserves an explicit Source pick", async () => {
     const model = {
       name: "wan22-ti2v-5b:fp16",
       family: "wan",
@@ -813,23 +811,22 @@ describe("InspectorPanel — explicit shape pick vs source tie", () => {
     form.sourceImageHeight = 704;
     const wrapper = mount(InspectorPanel, { props: { form } });
     const shape = wrapper.getComponent(ShapePicker);
-    // Derived matching alone pins Source...
-    expect(shape.props("modelValue")).toBe("source");
-
-    // ...an explicit canonical pick wins the tie...
     const canonical = (shape.props("options") as ReadonlyArray<{ id: string }>).find(
       (option) => option.id !== "source",
     )!.id;
-    shape.vm.$emit("update:modelValue", canonical);
-    await flushPromises();
     expect(shape.props("modelValue")).toBe(canonical);
-    // ...and the canvas itself is unchanged (same bucket).
     expect(form.width).toBe(1280);
     expect(form.height).toBe(704);
 
-    // Picking Source hands the tie back.
     shape.vm.$emit("update:modelValue", "source");
     await flushPromises();
     expect(shape.props("modelValue")).toBe("source");
+    expect(wrapper.emitted("source-canvas-mode")?.at(-1)).toEqual(["source"]);
+
+    wrapper.unmount();
+    const remounted = mount(InspectorPanel, {
+      props: { form, sourceCanvasMode: "source" },
+    });
+    expect(remounted.getComponent(ShapePicker).props("modelValue")).toBe("source");
   });
 });

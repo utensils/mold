@@ -29,6 +29,7 @@ const props = withDefaults(
     showFps?: boolean;
     stepsError?: string | null;
     guidanceError?: string | null;
+    sourceCanvasMode?: "automatic" | "source" | "manual";
   }>(),
   {
     disabled: false,
@@ -37,12 +38,14 @@ const props = withDefaults(
     guidanceError: null,
     model: null,
     durationModel: null,
+    sourceCanvasMode: "manual",
   },
 );
 
 const emit = defineEmits<{
   "resolution-validity": [valid: boolean];
   "seed-validity": [valid: boolean];
+  "source-canvas-mode": [mode: "source" | "manual"];
 }>();
 
 const fpsError = computed(() => (props.showFps ? fpsValidationError(props.form.fps) : null));
@@ -94,8 +97,10 @@ const sourceDimensions = computed(() => {
     :model="model"
     :pipeline="form.pipeline"
     :source-dimensions="sourceDimensions"
+    :source-canvas-mode="sourceCanvasMode"
     :disabled="disabled"
     @validity-change="emit('resolution-validity', $event)"
+    @source-canvas-mode="emit('source-canvas-mode', $event)"
   />
   <VideoDurationSlider
     v-if="supportsVideo && !showFps"

@@ -182,6 +182,46 @@ describe("GenerateView source-fit submit path", () => {
     expect(form.height).toBe(1344);
   });
 
+  it("preserves a reused Qwen edit's manual canvas while portrait target bytes restore", async () => {
+    const qwenEdit = {
+      ...model,
+      name: "qwen-image-edit-2511:q4",
+      family: "qwen-image-edit",
+      default_width: 1328,
+      default_height: 1328,
+      recommended_dimensions: [
+        { width: 1328, height: 1328 },
+        { width: 928, height: 1664 },
+      ],
+    } as ModelEntry;
+    apiJsonTo.mockResolvedValue([qwenEdit]);
+    useModelStore().all = [qwenEdit];
+    sourceStashGet.mockResolvedValue("iVBORw0KGgoAAAANSUhEUgAABJIAAAnk");
+    useComposerStore().set({
+      metadata: {
+        prompt: "keep my square edit",
+        model: qwenEdit.name,
+        seed: 42,
+        steps: 20,
+        guidance: 7,
+        width: 1024,
+        height: 1024,
+        generation_width: 1024,
+        generation_height: 1024,
+        version: "test",
+        edit_image_sha256s: ["a".repeat(64)],
+      } as OutputMetadata,
+    });
+
+    mount(GenerateView, { shallow: true, attachTo: document.body });
+    await flushPromises();
+
+    const form = useGenerateFormStore().form;
+    expect(form.imageAttachments).toEqual(["iVBORw0KGgoAAAANSUhEUgAABJIAAAnk"]);
+    expect(form.width).toBe(1024);
+    expect(form.height).toBe(1024);
+  });
+
   it("resolves the host before preprocessing and routes the upscale to it", async () => {
     const hosts = setupMultiHost();
     const resolveFeasible = vi.spyOn(hosts, "resolveFeasible");

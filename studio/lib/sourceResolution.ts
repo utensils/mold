@@ -1,6 +1,7 @@
 import {
   dimensionAlignmentForFamily,
   maxAxisPixelsForModel,
+  presetsForModel,
   sourceMaxPixelsForModel,
   type ModelResolutionContract,
 } from "./resolutions";
@@ -29,6 +30,109 @@ export interface SourceResolutionResult {
 export interface SourceResolutionStatus {
   label: "Source" | "Adjusted" | "Downscaled";
   detail: string;
+}
+
+export interface SourceCanvasTransition {
+  current: SourceDimensions;
+  previousSource: SourceResolutionResult | null;
+  previousAutomatic: SourceDimensions | null;
+  source: SourceResolutionResult;
+  automatic: SourceDimensions;
+  replaced: boolean;
+  mode: "automatic" | "source" | "manual";
+  preserveReplacement?: boolean;
+}
+
+/**
+ * Preserve authored/restored canvases while keeping source-driven defaults
+ * live across model changes. All Create controllers use this transition so a
+ * programmatic Reuse/edit import is never mistaken for a fresh drag.
+ */
+export function resolveSourceCanvasTransition({
+  current,
+  previousSource,
+  previousAutomatic,
+  source,
+  automatic,
+  replaced,
+  mode,
+  preserveReplacement = false,
+}: SourceCanvasTransition): SourceDimensions | null {
+  if (mode === "source") return source.output;
+  if (replaced) return preserveReplacement ? null : automatic;
+  if (
+    mode === "automatic" &&
+    previousAutomatic &&
+    current.width === previousAutomatic.width &&
+    current.height === previousAutomatic.height
+  ) {
+    return automatic;
+  }
+  if (mode === "manual") return null;
+  return previousSource &&
+    canvasMatchesSourceResolution(current, previousSource)
+    ? source.output
+    : null;
+}
+
+/**
+ * Pick the model-authored canvas a newly attached source should use.
+ *
+ * Aspect distance is measured logarithmically so portrait and landscape are
+ * treated symmetrically. Once the closest aspect is known, prefer the tier
+ * nearest the recipe's default pixel area; older hosts without recipe
+ * defaults use the largest advertised tier. A model with no advertised
+ * presets retains the safe custom-source fallback.
+ *
+ * This is only the automatic choice. `resolveSourceResolution` remains the
+ * authority behind the explicit "Source" / "Match source" control.
+ */
+export function resolveDefaultSourceResolution(
+  source: SourceDimensions,
+  model: ModelResolutionContract | string,
+  pipeline?: string | null,
+): SourceDimensions {
+  const presets = presetsForModel(model, pipeline);
+  if (presets.length === 0) {
+    return resolveSourceResolution(source, model, pipeline).output;
+  }
+
+  const sourceRatio =
+    positiveInteger(source.width, 1) / positiveInteger(source.height, 1);
+  const recipe =
+    typeof model === "string"
+      ? null
+      : effectiveGenerationRecipe(model, pipeline);
+  const defaultWidth =
+    recipe?.defaults.width ??
+    (typeof model === "string" ? null : model.default_width);
+  const defaultHeight =
+    recipe?.defaults.height ??
+    (typeof model === "string" ? null : model.default_height);
+  const defaultArea =
+    defaultWidth && defaultHeight ? defaultWidth * defaultHeight : null;
+
+  const ranked = [...presets].sort((left, right) => {
+    const leftRatioDistance = Math.abs(
+      Math.log(left.width / left.height / sourceRatio),
+    );
+    const rightRatioDistance = Math.abs(
+      Math.log(right.width / right.height / sourceRatio),
+    );
+    if (Math.abs(leftRatioDistance - rightRatioDistance) > Number.EPSILON) {
+      return leftRatioDistance - rightRatioDistance;
+    }
+
+    const leftArea = left.width * left.height;
+    const rightArea = right.width * right.height;
+    return defaultArea === null
+      ? rightArea - leftArea
+      : Math.abs(leftArea - defaultArea) - Math.abs(rightArea - defaultArea);
+  });
+  const selected = ranked[0];
+  return selected
+    ? { width: selected.width, height: selected.height }
+    : resolveSourceResolution(source, model, pipeline).output;
 }
 
 function positiveInteger(
