@@ -1202,10 +1202,19 @@ describe("CreatePage layout and behavior", () => {
     };
     await nextTick();
 
-    await wrapper.get("[data-test='composer-submit']").trigger("click");
-    await flushPromises();
-    await wrapper.get("[data-test='composer-submit']").trigger("click");
-    await vi.waitFor(() => expect(submitMock).toHaveBeenCalledTimes(2));
+    const submitButton = wrapper.get("[data-test='composer-submit']");
+    await submitButton.trigger("click");
+    await vi.waitFor(
+      () => {
+        expect(submitMock).toHaveBeenCalledTimes(1);
+        expect(submitButton.attributes("disabled")).toBeUndefined();
+      },
+      { timeout: 5_000 },
+    );
+    await submitButton.trigger("click");
+    await vi.waitFor(() => expect(submitMock).toHaveBeenCalledTimes(2), {
+      timeout: 5_000,
+    });
 
     expect(upscaleStreamMock).toHaveBeenCalledTimes(1);
     expect(
