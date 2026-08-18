@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - **Qwen Image Edit now fits camera-sized Target photos before submission without overlapping its largest GPU phases.** Web, desktop, and iPhone use the standard Target image well, derive a model-safe conditioning canvas from the shared generation profile, expose the same plainly named crop/border/stretch/upscale choices as other source-driven models, and apply the selected fit to the frozen edit request without changing ordered References or the separately selected output size. The shared contract advertises Qwen's upstream 1024² VAE input area separately from its output ceiling, and the engine enforces that ceiling for CLI and direct API requests while retaining the existing official 384² Qwen2.5-VL preprocessing authority. The runtime now releases the diffusion transformer before loading the multimodal Qwen2.5-VL encoder, reloads it after source VAE encoding, and releases it again before final VAE decode, matching the phase-sequential admission estimate instead of passing a 24 GB placement check and failing during conditioning or decode. A recent-OOM cooldown rejection also names the reduced request budget and retry guidance instead of comparing the estimate with the GPU's larger physical capacity.
+
+## [0.23.1] - 2026-08-18
+
 - **Fixed stale prompt provenance across Create surfaces.** Starting a genuinely new prompt now retires any dormant `original_prompt` and transform authority left by a prior gallery reuse, Expand, Remix, prepared batch, history recall, or LoRA trigger-word insertion across web, desktop, iPhone, and the TUI. Active quick-transform snapshots still retain their source long enough for the explicit stale-work recovery flow.
 - **Fixed machine compute cards and queue visibility.** Desktop and web now keep multi-GPU cards consistently sized and constrain long model, device, and work identifiers so they cannot overlap adjacent metrics or controls. Host Queue panels also show scheduler-only active and staged work that is absent from the durable queue listing, while de-duplicating normal queue rows and leaving blocked work in its recovery section.
 
@@ -1857,7 +1860,8 @@ Initial public release on [crates.io](https://crates.io/crates/mold-ai).
 | [`mold-ai-inference`](https://crates.io/crates/mold-ai-inference) | Candle-based inference engine           |
 | [`mold-ai-server`](https://crates.io/crates/mold-ai-server)       | Axum HTTP inference server              |
 
-[Unreleased]: https://github.com/utensils/mold/compare/v0.23.0...HEAD
+[Unreleased]: https://github.com/utensils/mold/compare/v0.23.1...HEAD
+[0.23.1]: https://github.com/utensils/mold/compare/v0.23.0...v0.23.1
 [0.23.0]: https://github.com/utensils/mold/compare/v0.22.3...v0.23.0
 [0.22.3]: https://github.com/utensils/mold/compare/v0.22.2...v0.22.3
 [0.22.2]: https://github.com/utensils/mold/compare/v0.22.1...v0.22.2
