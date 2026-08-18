@@ -119,9 +119,11 @@ let activeMedia: MediaLoad | null = null;
 let gesturePointerId: number | null = null;
 let gestureStartX = 0;
 let gestureStartY = 0;
+let gestureCaptured = false;
 
 const SWIPE_DISTANCE = 48;
 const HORIZONTAL_INTENT_RATIO = 1.25;
+const VIDEO_CONTROL_STRIP_HEIGHT = 64;
 
 interface MediaLoad {
   path: string;
@@ -216,10 +218,26 @@ function isMediaControl(target: EventTarget | null): boolean {
   );
 }
 
+function isSwipeBlockingControl(target: EventTarget | null): boolean {
+  return (
+    target instanceof Element &&
+    !!target.closest("button, input, textarea, select, a, [contenteditable='true']")
+  );
+}
+
+function isVideoControlStrip(event: PointerEvent): boolean {
+  if (!(event.target instanceof Element)) return false;
+  const videoElement = event.target.closest("video");
+  if (!videoElement) return false;
+  const bounds = videoElement.getBoundingClientRect();
+  return bounds.height > 0 && event.clientY >= bounds.bottom - VIDEO_CONTROL_STRIP_HEIGHT;
+}
+
 function beginSwipe(event: PointerEvent): void {
   if (
     props.reusing ||
-    isMediaControl(event.target) ||
+    isSwipeBlockingControl(event.target) ||
+    isVideoControlStrip(event) ||
     event.isPrimary === false ||
     (event.pointerType === "mouse" && event.button !== 0)
   ) {
@@ -229,20 +247,28 @@ function beginSwipe(event: PointerEvent): void {
   gesturePointerId = event.pointerId;
   gestureStartX = event.clientX;
   gestureStartY = event.clientY;
-  if (event.currentTarget instanceof Element && "setPointerCapture" in event.currentTarget) {
-    try {
-      event.currentTarget.setPointerCapture(event.pointerId);
-    } catch {
-      // WebKit can reject pointer capture when the gesture has already ended.
-    }
-  }
+  gestureCaptured = false;
 }
 
 function trackSwipe(event: PointerEvent): void {
   if (gesturePointerId !== event.pointerId) return;
   const deltaX = event.clientX - gestureStartX;
   const deltaY = event.clientY - gestureStartY;
-  if (Math.abs(deltaX) > 12 && Math.abs(deltaX) > Math.abs(deltaY)) event.preventDefault();
+  if (Math.abs(deltaX) > 12 && Math.abs(deltaX) > Math.abs(deltaY)) {
+    event.preventDefault();
+    if (
+      !gestureCaptured &&
+      event.currentTarget instanceof Element &&
+      "setPointerCapture" in event.currentTarget
+    ) {
+      try {
+        event.currentTarget.setPointerCapture(event.pointerId);
+        gestureCaptured = true;
+      } catch {
+        // WebKit can reject pointer capture when the gesture has already ended.
+      }
+    }
+  }
 }
 
 function finishSwipe(event: PointerEvent): void {
@@ -250,6 +276,7 @@ function finishSwipe(event: PointerEvent): void {
   const deltaX = event.clientX - gestureStartX;
   const deltaY = event.clientY - gestureStartY;
   gesturePointerId = null;
+  gestureCaptured = false;
 
   if (
     Math.abs(deltaX) < SWIPE_DISTANCE ||
@@ -261,7 +288,10 @@ function finishSwipe(event: PointerEvent): void {
 }
 
 function cancelSwipe(event?: PointerEvent): void {
-  if (!event || gesturePointerId === event.pointerId) gesturePointerId = null;
+  if (!event || gesturePointerId === event.pointerId) {
+    gesturePointerId = null;
+    gestureCaptured = false;
+  }
 }
 
 function handleViewerKeydown(event: KeyboardEvent): void {
@@ -642,9 +672,13 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-.gallery-viewer-media:not(video),
+.gallery-viewer-media,
 .gallery-viewer-placeholder {
   touch-action: pan-y;
+}
+
+.gallery-viewer-media:not(video),
+.gallery-viewer-placeholder {
   user-select: none;
   -webkit-user-drag: none;
   -webkit-touch-callout: default;
