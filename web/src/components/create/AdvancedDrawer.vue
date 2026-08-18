@@ -25,6 +25,8 @@ import PlacementPanel from "../PlacementPanel.vue";
 import ExtendVideoControls from "./advanced/ExtendVideoControls.vue";
 import Ltx2VideoControls from "./advanced/Ltx2VideoControls.vue";
 import MinimaxH3AuthoringPanel from "@studio/components/MinimaxH3AuthoringPanel.vue";
+import ImageDropWell from "@studio/components/ImageDropWell.vue";
+import { imageDimensionsFromBase64 } from "@studio/lib/imageDimensions";
 import { DEFAULT_EXTEND_OVERLAP_FRAMES } from "@studio/lib/extend";
 import UpscaleSection from "./advanced/UpscaleSection.vue";
 import type {
@@ -83,6 +85,7 @@ import {
   effectiveGenerationRecipe,
   resolutionProfileFinding,
 } from "@studio/lib/generationProfile";
+import { blobToBase64 } from "../../lib/base64";
 
 const props = withDefaults(
   defineProps<{
@@ -218,6 +221,44 @@ const NEG_CHIPS = [
 // Desktop/tablet web (spec §06 v0.12): render inline as an always-visible
 // column. Phone: render inside the Advanced sheet.
 const inline = computed(() => !props.mobile);
+const sequenceOpeningImageError = ref<string | null>(null);
+const sequenceOpeningImageMime = computed(() =>
+  /\.jpe?g$/i.test(draft.openingImage?.filename ?? "")
+    ? "image/jpeg"
+    : "image/png",
+);
+
+async function onSequenceOpeningImageFile(file: File) {
+  const base64 = await blobToBase64(file);
+  const dimensions = imageDimensionsFromBase64(base64);
+  if (!dimensions) {
+    sequenceOpeningImageError.value =
+      "Only PNG or JPEG images can be used here.";
+    return;
+  }
+  sequenceOpeningImageError.value = null;
+  draft.openingImage = {
+    filename: file.name,
+    base64,
+    width: dimensions.width,
+    height: dimensions.height,
+  };
+  patch({
+    sourceFitPolicy: coerceSourceFitForMaskless(
+      props.modelValue.sourceFitPolicy ?? { mode: "crop-fill" },
+    ),
+  });
+}
+
+function clearSequenceOpeningImage() {
+  sequenceOpeningImageError.value = null;
+  draft.openingImage = null;
+}
+
+function openSequenceOpeningImagePicker() {
+  sequenceOpeningImageError.value = null;
+  emit("open-picker");
+}
 
 // The fifth argument is the selected checkpoint's own advertised
 // source-image contract (#772): wan's checkpoints split T2V / I2V-optional /
@@ -527,27 +568,27 @@ function setSequenceCameraMode(mode: string) {
           :header-interactive="false"
           data-test="sequence-section-opening-image"
         >
-          <button
-            type="button"
-            class="adv__dropzone"
-            data-test="sequence-opening-image-pick"
-            @click="emit('open-picker')"
+          <ImageDropWell
+            :image="draft.openingImage?.base64 ?? null"
+            :mime-type="sequenceOpeningImageMime"
+            :filename="draft.openingImage?.filename ?? null"
+            placeholder="Drop an image or click to pick the original starting frame"
+            accept="image/png,image/jpeg"
+            gallery
+            alt="Opening sequence image"
+            test-id="sequence-opening-image"
+            @file="onSequenceOpeningImageFile"
+            @gallery="openSequenceOpeningImagePicker"
+            @clear="clearSequenceOpeningImage"
+          />
+          <p
+            v-if="sequenceOpeningImageError"
+            class="adv__error"
+            role="alert"
+            data-test="sequence-opening-image-error"
           >
-            {{
-              draft.openingImage
-                ? `Replace ${draft.openingImage.filename}`
-                : "Drop an image or browse for the original starting frame"
-            }}
-          </button>
-          <button
-            v-if="draft.openingImage"
-            type="button"
-            class="adv__remove"
-            data-test="sequence-opening-image-clear"
-            @click="draft.openingImage = null"
-          >
-            Remove opening image
-          </button>
+            {{ sequenceOpeningImageError }}
+          </p>
           <template v-if="draft.openingImage">
             <SliderRow
               label="Source strength"
@@ -1292,16 +1333,6 @@ function setSequenceCameraMode(mode: string) {
   border-color: var(--safelight);
   color: var(--rebate);
 }
-.adv__dropzone {
-  width: 100%;
-  border: 1.5px dashed var(--ce);
-  background: transparent;
-  color: var(--ink-2);
-  border-radius: var(--radius-card);
-  padding: 26px;
-  font-size: 13px;
-  cursor: pointer;
-}
 .adv__accent {
   color: var(--safelight);
   font-weight: 600;
@@ -1318,14 +1349,6 @@ function setSequenceCameraMode(mode: string) {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-.adv__remove {
-  border: 0;
-  background: transparent;
-  color: var(--stop);
-  font-size: 12px;
-  font-weight: 600;
-  cursor: pointer;
 }
 .adv__mask {
   margin-top: 12px;

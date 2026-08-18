@@ -16,6 +16,10 @@ import {
 } from "@studio/lib/sourceFit";
 import ImagePickerModal from "../generate/ImagePickerModal.vue";
 import { generationCapabilitiesForFamily } from "../../lib/capabilities";
+import ImageDropWell from "@studio/components/ImageDropWell.vue";
+import { imageDimensionsFromBase64 } from "@studio/lib/imageDimensions";
+import { fileToBase64 } from "../../lib/image";
+import { useToastStore } from "../../stores/toasts";
 
 const props = withDefaults(
   defineProps<{
@@ -38,7 +42,11 @@ const props = withDefaults(
 );
 
 const draft = useSequenceDraftStore();
+const toasts = useToastStore();
 const pickerOpen = ref(false);
+const openingImageMime = computed(() =>
+  /\.jpe?g$/i.test(draft.openingImage?.filename ?? "") ? "image/jpeg" : "image/png",
+);
 const activeClip = computed(
   () => draft.clips.find((clip) => clip.id === draft.activeClipId) ?? draft.clips[0] ?? null,
 );
@@ -108,6 +116,26 @@ function onPickImage(images: PickedImage[]) {
   props.form.sourceFit = coerceSourceFitForMaskless(props.form.sourceFit);
 }
 
+async function onOpeningImageFile(file: File) {
+  try {
+    const base64 = await fileToBase64(file);
+    const dimensions = imageDimensionsFromBase64(base64);
+    if (!dimensions) {
+      toasts.push("Only PNG or JPEG images can be used here.", "error");
+      return;
+    }
+    draft.openingImage = {
+      filename: file.name,
+      base64,
+      width: dimensions.width,
+      height: dimensions.height,
+    };
+    props.form.sourceFit = coerceSourceFitForMaskless(props.form.sourceFit);
+  } catch {
+    toasts.push("Couldn't read the image.", "error");
+  }
+}
+
 // Reset clears sequence-advanced knobs only; the opening image and its
 // strength/fit are staged source media and survive (web parity).
 function reset() {
@@ -144,27 +172,19 @@ function reset() {
         :header-interactive="false"
         data-test="sequence-section-opening-image"
       >
-        <button
-          type="button"
-          class="ms-dropzone"
-          data-test="sequence-opening-image-pick"
-          @click="pickerOpen = true"
-        >
-          {{
-            draft.openingImage
-              ? `Replace ${draft.openingImage.filename}`
-              : "Drop an image or click to choose the original starting frame"
-          }}
-        </button>
-        <button
-          v-if="draft.openingImage"
-          type="button"
-          class="ms-remove"
-          data-test="sequence-opening-image-clear"
-          @click="draft.openingImage = null"
-        >
-          Remove opening image
-        </button>
+        <ImageDropWell
+          :image="draft.openingImage?.base64 ?? null"
+          :mime-type="openingImageMime"
+          :filename="draft.openingImage?.filename ?? null"
+          placeholder="Drop an image or click to pick the original starting frame"
+          accept="image/png,image/jpeg"
+          gallery
+          alt="Opening sequence image"
+          test-id="sequence-opening-image"
+          @file="onOpeningImageFile"
+          @gallery="pickerOpen = true"
+          @clear="draft.openingImage = null"
+        />
         <div v-if="draft.openingImage" class="ms-source-controls">
           <label class="ms-range">
             <span>
@@ -328,17 +348,14 @@ function reset() {
   font-family: var(--f-mono);
   font-size: 10px;
 }
-.ms-adv__reset,
-.ms-remove,
-.ms-dropzone {
+.ms-adv__reset {
   border: 1px solid var(--ce);
   background: transparent;
   color: var(--ink-2);
   border-radius: 8px;
   cursor: pointer;
 }
-.ms-adv__reset,
-.ms-remove {
+.ms-adv__reset {
   padding: 5px 9px;
   font-size: 11px;
 }
@@ -364,16 +381,6 @@ function reset() {
 .ms-range input {
   width: 100%;
   accent-color: var(--safelight);
-}
-.ms-dropzone {
-  width: 100%;
-  border-style: dashed;
-  padding: 22px 12px;
-  font-size: 12px;
-}
-.ms-remove {
-  margin-top: 9px;
-  color: var(--stop);
 }
 .ms-adv__list {
   display: flex;
