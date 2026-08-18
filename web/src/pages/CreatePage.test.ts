@@ -2056,6 +2056,66 @@ describe("CreatePage layout and behavior", () => {
     expect(form.state.value.negativePrompt).toBe("text");
   });
 
+  it("retires dormant original-prompt provenance when a new prompt is authored", async () => {
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    const form = useGenerateForm();
+    form.state.value.originalPrompt =
+      "the source for an earlier generated print";
+    await nextTick();
+
+    wrapper
+      .getComponent({ name: "ComposerCard" })
+      .vm.$emit("update:prompt", "a completely new print");
+    await nextTick();
+
+    expect(form.state.value.originalPrompt).toBeNull();
+    expect(form.toRequest().original_prompt).toBeUndefined();
+  });
+
+  it("retires dormant provenance when a LoRA trigger phrase edits the prompt", async () => {
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    const form = useGenerateForm();
+    form.state.value.prompt = "a portrait";
+    form.state.value.originalPrompt = "an earlier generated print";
+    await nextTick();
+
+    wrapper
+      .getComponent({ name: "AdvancedDrawer" })
+      .vm.$emit("append-prompt", "cinematic light");
+    await nextTick();
+
+    expect(form.state.value.prompt).toBe("a portrait, cinematic light");
+    expect(form.state.value.originalPrompt).toBeNull();
+    expect(form.toRequest().original_prompt).toBeUndefined();
+  });
+
+  it("preserves the source while an active quick expansion becomes stale", async () => {
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    const form = useGenerateForm();
+    form.state.value.model = "sdxl-base:fp16";
+    form.state.value.modelFamily = "sdxl";
+    form.state.value.prompt = "a lighthouse";
+    await nextTick();
+
+    await wrapper.get("[data-test='composer-expand']").trigger("click");
+    await nextTick();
+    wrapper
+      .getComponent({ name: "ExpandModal" })
+      .vm.$emit("apply-prompt", "a lighthouse in storm light");
+    await nextTick();
+
+    wrapper
+      .getComponent({ name: "ComposerCard" })
+      .vm.$emit("update:prompt", "a hand-edited storm lighthouse");
+    await nextTick();
+
+    expect(form.state.value.originalPrompt).toBe("a lighthouse");
+    const stale = wrapper.get("[data-test='web-quick-expansion-stale']");
+    expect(
+      stale.find("[data-test='web-reexpand-current-prompt']").exists(),
+    ).toBe(true);
+  });
+
   it("undoes an original-source Remix to the latest live composer edit", async () => {
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     const form = useGenerateForm();

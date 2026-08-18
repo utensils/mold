@@ -48,6 +48,7 @@ import type { DevelopPhase } from "@ui/lib/grain";
 import type { ClipRailMedia } from "@ui/components/types";
 import { SourceFitPreprocessCache } from "@ui/lib/sourceFitPreprocessCache";
 import { createUuid } from "@studio/lib/id";
+import { applyAuthoredPrompt } from "@studio/lib/promptProvenance";
 import { requestNeedsReferenceUpload } from "@studio/api/referenceUploads";
 import {
   expansionTaskForRequest,
@@ -1994,6 +1995,15 @@ function onShowSequenceHistory() {
 
 const composerCardRef = ref<InstanceType<typeof ComposerCard> | null>(null);
 
+function onPromptAuthored(prompt: string) {
+  applyAuthoredPrompt(form.state.value, prompt, quickPrepared.value !== null);
+}
+
+function onAppendPromptPhrase(phrase: string) {
+  form.appendPromptPhrase(phrase);
+  onPromptAuthored(form.state.value.prompt);
+}
+
 // ⌘K "New print" (spec §06): start a fresh print without leaving Create.
 // Reset the advanced knobs to the current model's defaults, clear the prompt,
 // source media, and any in-flight expansion/variation review, but KEEP the
@@ -2002,6 +2012,7 @@ function onNewPrint() {
   const model = currentModel.value;
   if (model) form.applyModelDefaults(model);
   form.state.value.prompt = "";
+  form.state.value.originalPrompt = null;
   form.state.value.stylePreset = null;
   form.state.value.imageAttachments = [];
   form.state.value.endFrame = null;
@@ -4017,7 +4028,7 @@ onBeforeUnmount(() => {
         <template v-else>
           <ComposerCard
             ref="composerCardRef"
-            v-model:prompt="form.state.value.prompt"
+            :prompt="form.state.value.prompt"
             v-model:style-preset="form.state.value.stylePreset"
             :aspect-label="aspectLabel"
             :width="form.state.value.width"
@@ -4030,6 +4041,7 @@ onBeforeUnmount(() => {
             :prompt-optional="canSkipPrompt"
             :required-placeholder="requiredPromptPlaceholder"
             :history="promptHistory"
+            @update:prompt="onPromptAuthored"
             @submit="onSubmit"
             @expand="onExpand"
             @remix="onRemix"
@@ -4281,7 +4293,7 @@ onBeforeUnmount(() => {
           @open-end-frame-picker="showEndFramePicker = true"
           @clear-end-frame="onClearEndFrame"
           @open-mask="showMask = true"
-          @append-prompt="form.appendPromptPhrase"
+          @append-prompt="onAppendPromptPhrase"
         />
       </div>
     </div>
@@ -4313,7 +4325,7 @@ onBeforeUnmount(() => {
         @open-end-frame-picker="showEndFramePicker = true"
         @clear-end-frame="onClearEndFrame"
         @open-mask="showMask = true"
-        @append-prompt="form.appendPromptPhrase"
+        @append-prompt="onAppendPromptPhrase"
       />
     </div>
 

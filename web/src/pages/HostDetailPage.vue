@@ -708,6 +708,7 @@ onBeforeUnmount(() => {
         </CardSurface>
         <QueueCard
           :entries="queue"
+          :plan="queuePlan"
           :models="models"
           :gpu-ordinals="gpuOrdinals"
           :can-reorder="canReorder"

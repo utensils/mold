@@ -132,3 +132,38 @@ describe("held rows", () => {
     expect(wrapper.find("[data-test='queue-cancel']").exists()).toBe(true);
   });
 });
+
+describe("scheduler plan work", () => {
+  it("does not claim the queue is empty when the scheduler has active work", () => {
+    const wrapper = mount(QueueCard, {
+      props: {
+        entries: [],
+        gpuOrdinals: [0],
+        plan: {
+          plan_version: 1,
+          state_version: 1,
+          optimizer_state: "optimized",
+          dirty_since_unix_ms: null,
+          next_replan_at_unix_ms: null,
+          work_items: [
+            {
+              work_id: "chain-stage-2",
+              parent_id: "chain-parent",
+              work_kind: "chain_stage",
+              chain_stage: 1,
+              priority_class: "user",
+              queue_rank: 0,
+              bypass_count: 0,
+              gpu: 0,
+              estimate_confidence: "medium",
+              activity_phase: "active",
+            },
+          ],
+        },
+      },
+    });
+
+    expect(wrapper.find("[data-test='queue-empty']").exists()).toBe(false);
+    expect(wrapper.findAll("[data-test='planned-queue-row']")).toHaveLength(1);
+  });
+});

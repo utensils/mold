@@ -213,6 +213,37 @@ describe("GenerateView prepared expansion batches", () => {
     expect(options).toEqual({});
   });
 
+  it("retires dormant original-prompt provenance when a new prompt is authored", async () => {
+    const form = useGenerateFormStore().form;
+    form.originalPrompt = "the source for an earlier generated print";
+    const wrapper = mountView();
+    await flushPromises();
+
+    await wrapper.get("textarea[aria-label='Prompt']").setValue("a completely new print");
+
+    expect(form.originalPrompt).toBeNull();
+    expect(form.prompt).toBe("a completely new print");
+  });
+
+  it("preserves quick-expansion provenance when the rewrite is hand-edited", async () => {
+    const form = useGenerateFormStore().form;
+    form.batchSize = 1;
+    vi.mocked(expandPrompt).mockResolvedValue({
+      original: "a lighthouse at dusk",
+      expanded: ["storm light"],
+    });
+    const wrapper = mountView();
+    await flushPromises();
+
+    wrapper.findComponent(ExpandControl).vm.$emit("expand");
+    await flushPromises();
+    await wrapper.get("textarea[aria-label='Prompt']").setValue("hand-edited storm light");
+    await nextTick();
+
+    expect(form.originalPrompt).toBe("a lighthouse at dusk");
+    expect(wrapper.find("[data-test='quick-expansion-stale']").exists()).toBe(true);
+  });
+
   it("prepares and preserves exactly eight reviewed prompts", async () => {
     const prompts = Array.from({ length: 8 }, (_, index) => `variation ${index + 1}`);
     useGenerateFormStore().form.batchSize = prompts.length;

@@ -256,9 +256,7 @@ describe("DevicePanel", () => {
         expect(wrapper.text()).not.toContain("Live GPU controls");
       }
       expect(
-        utility
-          .findAll("li")
-          .map((row) => row.text().split(" · ").slice(0, 2).join(" · ")),
+        utility.findAll(".device-card__work").map((row) => row.text()),
       ).toEqual([
         "expand-parent-1 · Prompt expansion",
         "future-parent-2 · Future utility",

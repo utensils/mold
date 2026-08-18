@@ -3107,13 +3107,10 @@ impl App {
                                 && textarea.cursor().0 == 0
                             {
                                 let current = self.generate.prompt.lines().join("\n");
-                                if let Some(prompt) = self.history.prev(&current) {
-                                    self.generate.prompt = TextArea::new(
-                                        prompt.lines().map(String::from).collect(),
-                                    );
-                                    self.generate
-                                        .prompt
-                                        .set_cursor_line_style(ratatui::style::Style::default());
+                                if let Some(prompt) =
+                                    self.history.prev(&current).map(str::to_owned)
+                                {
+                                    self.set_authored_prompt_text(&prompt);
                                 }
                                 return;
                             }
@@ -3138,13 +3135,10 @@ impl App {
                                 && textarea.cursor().0 >= last_line
                             {
                                 let current = self.generate.prompt.lines().join("\n");
-                                if let Some(prompt) = self.history.next(&current) {
-                                    self.generate.prompt = TextArea::new(
-                                        prompt.lines().map(String::from).collect(),
-                                    );
-                                    self.generate
-                                        .prompt
-                                        .set_cursor_line_style(ratatui::style::Style::default());
+                                if let Some(prompt) =
+                                    self.history.next(&current).map(str::to_owned)
+                                {
+                                    self.set_authored_prompt_text(&prompt);
                                 }
                                 return;
                             }
@@ -3175,20 +3169,24 @@ impl App {
                         }
                         _ => {
                             // Let the textarea consume the event
+                            let previous_prompt = if self.generate.focus == GenerateFocus::Prompt {
+                                Some(self.generate.prompt.lines().join("\n"))
+                            } else {
+                                None
+                            };
                             let textarea = match self.generate.focus {
                                 GenerateFocus::Prompt => &mut self.generate.prompt,
                                 GenerateFocus::NegativePrompt => &mut self.generate.negative_prompt,
                                 _ => unreachable!(),
                             };
                             textarea.input(event);
-                            if self.generate.focus == GenerateFocus::Prompt {
+                            let prompt_changed = previous_prompt.is_some_and(|previous| {
+                                previous != self.generate.prompt.lines().join("\n")
+                            });
+                            if prompt_changed {
                                 self.generate.prompt_transform_token =
                                     self.generate.prompt_transform_token.wrapping_add(1);
-                                self.generate.params.prompt_transform = None;
-                                self.generate.params.quick_transform_snapshot = None;
-                                self.generate.params.prepared_prompts.clear();
-                                self.generate.params.prepared_prompt_transforms.clear();
-                                self.generate.params.prepared_transform_snapshot = None;
+                                self.retire_prompt_provenance();
                             }
                             // Reset history navigation when user types
                             self.history.reset_cursor();
@@ -3366,12 +3364,7 @@ impl App {
                     self.start_prompt_transform(operation);
                 }
                 PromptAlternativeEffect::Restore(source) => {
-                    self.set_prompt_text(&source);
-                    self.generate.params.prepared_prompts.clear();
-                    self.generate.params.prepared_prompt_transforms.clear();
-                    self.generate.params.prepared_transform_snapshot = None;
-                    self.generate.params.prompt_transform = None;
-                    self.generate.params.quick_transform_snapshot = None;
+                    self.set_authored_prompt_text(&source);
                     self.close_popup();
                 }
             }
@@ -3576,12 +3569,7 @@ impl App {
                     KeyCode::Enter => {
                         if let Some(prompt) = results.get(*selected).cloned() {
                             self.close_popup();
-                            self.generate.prompt =
-                                TextArea::new(prompt.lines().map(String::from).collect());
-                            self.generate
-                                .prompt
-                                .set_cursor_line_style(ratatui::style::Style::default());
-                            self.generate.focus = GenerateFocus::Prompt;
+                            self.set_authored_prompt_text(&prompt);
                         }
                     }
                     KeyCode::Up | KeyCode::Char('k')
@@ -4307,12 +4295,8 @@ impl App {
                     && self.generate.focus == GenerateFocus::Prompt =>
             {
                 let current = self.generate.prompt.lines().join("\n");
-                if let Some(prompt) = self.history.prev(&current) {
-                    self.generate.prompt =
-                        TextArea::new(prompt.lines().map(String::from).collect());
-                    self.generate
-                        .prompt
-                        .set_cursor_line_style(ratatui::style::Style::default());
+                if let Some(prompt) = self.history.prev(&current).map(str::to_owned) {
+                    self.set_authored_prompt_text(&prompt);
                 }
             }
             Action::HistoryNext
@@ -4320,12 +4304,8 @@ impl App {
                     && self.generate.focus == GenerateFocus::Prompt =>
             {
                 let current = self.generate.prompt.lines().join("\n");
-                if let Some(prompt) = self.history.next(&current) {
-                    self.generate.prompt =
-                        TextArea::new(prompt.lines().map(String::from).collect());
-                    self.generate
-                        .prompt
-                        .set_cursor_line_style(ratatui::style::Style::default());
+                if let Some(prompt) = self.history.next(&current).map(str::to_owned) {
+                    self.set_authored_prompt_text(&prompt);
                 }
             }
             Action::SearchHistory => {
@@ -5145,6 +5125,20 @@ impl App {
         // restoring an empty editor would flip the reuse into an explicit
         // empty-uncond opt-out (#787).
         self.generate.prompt = tui_textarea::TextArea::from(meta.prompt.lines());
+        self.generate.params.original_prompt = if meta.prompt.trim().is_empty() {
+            None
+        } else {
+            meta.original_prompt.clone()
+        };
+        self.generate.params.prompt_transform = if meta.prompt.trim().is_empty() {
+            None
+        } else {
+            meta.prompt_transform.clone()
+        };
+        self.generate.params.quick_transform_snapshot = None;
+        self.generate.params.prepared_prompts.clear();
+        self.generate.params.prepared_prompt_transforms.clear();
+        self.generate.params.prepared_transform_snapshot = None;
         self.update_model(&meta.model);
         let restored_negative = meta
             .negative_prompt
@@ -6760,6 +6754,20 @@ impl App {
             .prompt
             .set_cursor_line_style(ratatui::style::Style::default());
         self.generate.focus = GenerateFocus::Prompt;
+    }
+
+    fn set_authored_prompt_text(&mut self, prompt: &str) {
+        self.set_prompt_text(prompt);
+        self.retire_prompt_provenance();
+    }
+
+    fn retire_prompt_provenance(&mut self) {
+        self.generate.params.original_prompt = None;
+        self.generate.params.prompt_transform = None;
+        self.generate.params.quick_transform_snapshot = None;
+        self.generate.params.prepared_prompts.clear();
+        self.generate.params.prepared_prompt_transforms.clear();
+        self.generate.params.prepared_transform_snapshot = None;
     }
 
     fn prompt_transform_task(&self) -> mold_core::ExpandTask {
@@ -10443,6 +10451,29 @@ mod tests {
             mold_core::manifest::WAN_DEFAULT_NEGATIVE_PROMPT,
             "absence predates truthful recording: the default conditioned the render"
         );
+    }
+
+    #[tokio::test]
+    async fn gallery_reuse_restores_only_provenance_backed_by_a_prompt() {
+        let mut app = make_settings_test_app();
+        let mut transformed = make_test_entry();
+        transformed.metadata.prompt = "an expanded lighthouse".into();
+        transformed.metadata.original_prompt = Some("a lighthouse".into());
+        app.gallery.entries = vec![transformed];
+        app.gallery.selected = 0;
+
+        app.load_gallery_into_generate();
+        assert_eq!(
+            app.generate.params.original_prompt.as_deref(),
+            Some("a lighthouse")
+        );
+
+        let mut promptless = make_test_entry();
+        promptless.metadata.prompt.clear();
+        promptless.metadata.original_prompt = Some("stale source".into());
+        app.gallery.entries = vec![promptless];
+        app.load_gallery_into_generate();
+        assert_eq!(app.generate.params.original_prompt, None);
     }
 
     /// #787 round 2: `App::new` never runs `sync_generate_capabilities`, so
@@ -15732,6 +15763,57 @@ mod tests {
         };
         assert_eq!(current_prompt, "current edited prompt");
         assert_eq!(root_prompt, "original idea");
+    }
+
+    #[tokio::test]
+    async fn authored_prompt_retires_dormant_transform_provenance() {
+        let mut app = make_settings_test_app();
+        let snapshot = PromptTransformSnapshot {
+            operation: PromptTransformOperation::Remix,
+            model: app.generate.params.model.clone(),
+            target: crate::hosts::GenTarget::Auto,
+            task: app.prompt_transform_task(),
+            reference_fingerprint: String::new(),
+            source_prompt: "old source".into(),
+            current_prompt: "old rewrite".into(),
+            root_prompt: Some("old source".into()),
+            source_kind: mold_core::RemixSourceKind::Original,
+        };
+        app.generate.params.original_prompt = Some("old source".into());
+        app.generate.params.prompt_transform = Some(App::prompt_provenance(&snapshot, vec![]));
+        app.generate.params.quick_transform_snapshot = Some(snapshot.clone());
+        app.generate.params.prepared_prompts = vec!["prepared sibling".into()];
+        app.generate.params.prepared_prompt_transforms =
+            vec![App::prompt_provenance(&snapshot, vec![])];
+        app.generate.params.prepared_transform_snapshot = Some(snapshot);
+
+        app.set_authored_prompt_text("a completely new idea");
+
+        assert_eq!(
+            app.generate.prompt.lines().join("\n"),
+            "a completely new idea"
+        );
+        assert_eq!(app.generate.params.original_prompt, None);
+        assert_eq!(app.generate.params.prompt_transform, None);
+        assert_eq!(app.generate.params.quick_transform_snapshot, None);
+        assert!(app.generate.params.prepared_prompts.is_empty());
+        assert!(app.generate.params.prepared_prompt_transforms.is_empty());
+        assert_eq!(app.generate.params.prepared_transform_snapshot, None);
+    }
+
+    #[tokio::test]
+    async fn moving_the_prompt_cursor_preserves_transform_provenance() {
+        use crossterm::event::{Event, KeyEvent};
+
+        let mut app = make_settings_test_app();
+        app.set_prompt_text("an expanded prompt");
+        app.generate.params.original_prompt = Some("the original idea".into());
+        app.handle_crossterm_event(Event::Key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)));
+
+        assert_eq!(
+            app.generate.params.original_prompt.as_deref(),
+            Some("the original idea")
+        );
     }
 
     /// Build a catalog entry for a wan checkpoint advertising `capability`,

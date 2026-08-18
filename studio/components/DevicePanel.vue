@@ -96,8 +96,7 @@ const lifecycleNote = computed(() => {
 });
 
 function shortId(id: string): string {
-  const tail = id.split(":").at(-1) ?? id;
-  return tail.length > 10 ? `…${tail.slice(-8)}` : tail;
+  return id.length > 14 ? `…${id.slice(-12)}` : id;
 }
 
 function gib(bytes: number | null): string {
@@ -159,6 +158,13 @@ function eta(work: QueueWorkItem): string {
 function workKindLabel(kind: unknown): string {
   const words = typeof kind === "string" ? kind.replaceAll("_", " ") : "";
   return words.length ? `${words[0]!.toUpperCase()}${words.slice(1)}` : "Work";
+}
+
+function workLabel(work: QueueWorkItem): string {
+  const kind = workKindLabel(work.work_kind);
+  return work.chain_stage == null
+    ? kind
+    : `${kind} · stage ${work.chain_stage + 1}`;
 }
 
 function replanLabel(): string | null {
@@ -266,10 +272,19 @@ onBeforeUnmount(() => {
           </span>
         </div>
         <div v-if="device.loaded_models.length" class="device-card__line">
-          Loaded: {{ device.loaded_models.join(", ") }}
+          <span class="device-card__line-label">Loaded</span>
+          <span
+            class="device-card__line-value"
+            :title="device.loaded_models.join(', ')"
+          >
+            {{ device.loaded_models.join(", ") }}
+          </span>
         </div>
         <div v-if="device.active_work_id" class="device-card__line">
-          Active: {{ device.active_work_id }}
+          <span class="device-card__line-label">Active</span>
+          <code class="device-card__line-value" :title="device.active_work_id">
+            {{ shortId(device.active_work_id) }}
+          </code>
         </div>
         <ol
           v-if="planned(device).length"
@@ -277,7 +292,10 @@ onBeforeUnmount(() => {
           data-test="device-lane"
         >
           <li v-for="work in planned(device)" :key="work.work_id">
-            {{ work.work_id }} · {{ eta(work) }}
+            <span class="device-card__work" :title="work.work_id">
+              {{ work.work_id }} · {{ workLabel(work) }}
+            </span>
+            <span class="device-card__eta">· {{ eta(work) }}</span>
           </li>
         </ol>
         <button
@@ -306,8 +324,10 @@ onBeforeUnmount(() => {
         </div>
         <ol class="device-card__lane">
           <li v-for="work in unassignedDeviceWork" :key="work.work_id">
-            {{ work.work_id }} · {{ workKindLabel(work.work_kind) }} ·
-            {{ eta(work) }}
+            <span class="device-card__work" :title="work.work_id">
+              {{ work.work_id }} · {{ workLabel(work) }}
+            </span>
+            <span class="device-card__eta">· {{ eta(work) }}</span>
           </li>
         </ol>
       </article>
@@ -325,8 +345,10 @@ onBeforeUnmount(() => {
         </div>
         <ol class="device-card__lane" data-test="cpu-utility-lane-list">
           <li v-for="work in cpuUtilityWork" :key="work.work_id">
-            {{ work.work_id }} · {{ workKindLabel(work.work_kind) }} ·
-            {{ eta(work) }}
+            <span class="device-card__work" :title="work.work_id">
+              {{ work.work_id }} · {{ workLabel(work) }}
+            </span>
+            <span class="device-card__eta">· {{ eta(work) }}</span>
           </li>
         </ol>
       </article>
@@ -341,8 +363,10 @@ onBeforeUnmount(() => {
         </div>
         <ol class="device-card__lane">
           <li v-for="work in otherComputeWork" :key="work.work_id">
-            {{ work.work_id }} · {{ workKindLabel(work.work_kind) }} ·
-            {{ eta(work) }}
+            <span class="device-card__work" :title="work.work_id">
+              {{ work.work_id }} · {{ workLabel(work) }}
+            </span>
+            <span class="device-card__eta">· {{ eta(work) }}</span>
           </li>
         </ol>
       </article>
@@ -405,7 +429,8 @@ onBeforeUnmount(() => {
 }
 .device-panel__grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr));
+  align-items: stretch;
   gap: 10px;
 }
 .device-panel--compact .device-panel__grid {
@@ -413,6 +438,9 @@ onBeforeUnmount(() => {
 }
 .device-card {
   display: grid;
+  min-width: 0;
+  min-height: 226px;
+  align-content: start;
   gap: 8px;
   padding: 12px;
   border: 1px solid var(--line, #d5d5d5);
@@ -431,20 +459,33 @@ onBeforeUnmount(() => {
 .device-card[data-health="poisoned"] {
   opacity: 0.68;
 }
-.device-card__title,
-.device-card__meta,
-.device-card__metrics {
+.device-card__title {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 6px;
+  align-items: center;
+}
+.device-card__meta {
   display: flex;
   flex-wrap: wrap;
   gap: 6px 10px;
   align-items: center;
 }
+.device-card__metrics {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px 10px;
+  align-items: center;
+}
 .device-card__name {
   min-width: 0;
-  flex: 1;
   font-weight: 650;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .device-card__badge {
+  white-space: nowrap;
   padding: 2px 6px;
   border: 1px solid var(--line, #aaa);
   border-radius: 999px;
@@ -459,14 +500,45 @@ onBeforeUnmount(() => {
   color: var(--ink-2, #555);
   font-size: 12px;
 }
-.device-card__metrics {
-  justify-content: space-between;
+.device-card__line {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 6px;
+  min-width: 0;
+}
+.device-card__line-label::after {
+  content: ":";
+}
+.device-card__line-value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .device-card__lane {
+  display: grid;
+  gap: 4px;
   margin: 0;
-  padding-left: 18px;
+  padding: 0;
+  list-style: none;
+}
+.device-card__lane li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  min-width: 0;
+}
+.device-card__work {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.device-card__eta {
+  white-space: nowrap;
 }
 .device-card__toggle {
+  margin-top: auto;
   justify-self: start;
   min-height: 32px;
   padding: 4px 10px;
