@@ -562,7 +562,9 @@ const formValidationError = computed(
     (caps.value.supportsVideo ? fpsValidationError(form.fps) : null) ??
     cameraControlValidationError(form) ??
     audioOutputValidationError(form) ??
-    sourceConditioningValidationError(form) ??
+    sourceConditioningValidationError(form, {
+      ignoreUnsupportedStagedSource: true,
+    }) ??
     advancedVideoValidationError(form) ??
     wanRecipeValidationError(form),
 );
@@ -1425,7 +1427,18 @@ async function generateSequence() {
   const editing = draft.editing ? { ...draft.editing } : null;
   const requestForm = cloneGenerateForm(form);
   const clips = JSON.parse(JSON.stringify(draft.clips)) as typeof draft.clips;
-  const openingSnapshot = draft.openingImage ? { ...draft.openingImage } : null;
+  // Sequence stage images predate the additive contract. Preserve compatible
+  // behavior for absent/unknown fields and park them only when this exact
+  // checkpoint explicitly advertises `unsupported`.
+  const supportsSourceImages = entry.source_image !== "unsupported";
+  // Sequence media is parked just like the one-shot source. Strip only the
+  // frozen request copy for an unsupported checkpoint; the shared draft stays
+  // intact so switching back restores every opening/per-clip image.
+  const openingSnapshot =
+    supportsSourceImages && draft.openingImage ? { ...draft.openingImage } : null;
+  if (!supportsSourceImages) {
+    for (const clip of clips) clip.sourceImage = null;
+  }
   const enableAudio = draft.enableAudio;
   const motionTailFrames = sequenceMotionTail.value;
   const hostRoute = editing ? hosts.resolveRoute(editing.hostId, entry.name) : routeForModel(entry);

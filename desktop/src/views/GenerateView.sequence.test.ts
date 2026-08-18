@@ -557,6 +557,45 @@ describe("GenerateView — sequence output", () => {
     });
   });
 
+  it("parks Sequence images instead of sending them to an unsupported checkpoint", async () => {
+    readyLocal();
+    const t2vModel = {
+      ...videoModel,
+      name: "wan22-t2v-a14b:q4",
+      family: "wan",
+      source_image: "unsupported",
+    } as ModelEntry;
+    installedPayload = [t2vModel];
+    useModelStore().all = [t2vModel];
+    const formStore = useGenerateFormStore();
+    formStore.form.model = t2vModel.name;
+    formStore.form.family = t2vModel.family;
+    formStore.form.sourceImageCapability = "unsupported";
+    const draft = useSequenceDraftStore();
+    draft.hydrate();
+    draft.output = "sequence";
+    draft.ensureClips(25);
+    draft.clips[0]!.prompt = "opening";
+    draft.clips[1]!.prompt = "landing";
+    draft.openingImage = { filename: "opening.png", base64: "OPENING" };
+    draft.clips[1]!.sourceImage = { filename: "second.png", base64: "SECOND" };
+    const create = vi.spyOn(useChainJobsStore(), "create").mockResolvedValue("job-1");
+
+    const wrapper = mountView();
+    await flushPromises();
+    wrapper.findComponent({ name: "SequenceComposer" }).vm.$emit("submit");
+    await flushPromises();
+
+    expect(applySourceFitPreprocess).not.toHaveBeenCalled();
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(create.mock.calls[0]?.[1].stages).toEqual([
+      expect.not.objectContaining({ source_image: expect.anything() }),
+      expect.not.objectContaining({ source_image: expect.anything() }),
+    ]);
+    expect(draft.openingImage?.base64).toBe("OPENING");
+    expect(draft.clips[1]!.sourceImage?.base64).toBe("SECOND");
+  });
+
   it("aborts when the sequence route changes during source preprocessing", async () => {
     readyLocal();
     installedPayload = [videoModel];

@@ -245,7 +245,10 @@ export function cameraControlValidationError(
  * extend-capable. `submitsExtend` applies the family gate `buildRequest`
  * applies, so a staged clip the wire drops satisfies nothing.
  */
-export function sourceConditioningValidationError(form: GenerateForm): string | null {
+export function sourceConditioningValidationError(
+  form: GenerateForm,
+  options: { ignoreUnsupportedStagedSource?: boolean } = {},
+): string | null {
   if (isMinimaxH3Family(form.family)) return null;
   const caps = generationCapabilitiesForFamily(
     form.family,
@@ -254,10 +257,17 @@ export function sourceConditioningValidationError(form: GenerateForm): string | 
     form.guidanceCapabilities,
     form.sourceImageCapability,
   );
+  // Source media is intentionally parked across model switches so changing
+  // back restores the user's draft. Validate the request the selected model
+  // will actually receive, not that retained UI state: buildRequest drops a
+  // parked image when the checkpoint advertises source images as unsupported.
+  // Continuations remain separate because their tail frames really do travel
+  // on the wire and must still satisfy/refuse the advertised contract.
   const hasSourceImage =
-    caps.sourceImageMode === "single"
+    (!options.ignoreUnsupportedStagedSource || caps.supportsSourceImage) &&
+    (caps.sourceImageMode === "single"
       ? Boolean(form.sourceImage)
-      : form.imageAttachments.length > 0;
+      : form.imageAttachments.length > 0);
   return sourceImageValidationError({
     capability: caps.sourceImageCapability,
     hasSourceImage,

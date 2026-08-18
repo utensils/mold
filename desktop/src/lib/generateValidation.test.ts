@@ -111,6 +111,20 @@ describe("sourceConditioningValidationError — a continuation carries source fr
     );
   });
 
+  it("ignores a parked source image for a text-to-video-only checkpoint", () => {
+    const form = wanContinuation("wan22-t2v-a14b:q8");
+    form.sourceImageCapability = "unsupported";
+    form.extendVideo = null;
+    form.sourceImage = "UEFSS0VE";
+
+    expect(
+      sourceConditioningValidationError(form, {
+        ignoreUnsupportedStagedSource: true,
+      }),
+    ).toBeNull();
+    expect(sourceConditioningValidationError(form)).toMatch(/text-to-video only/);
+  });
+
   it("ignores a staged clip on a family with no continuation path", () => {
     // Both request builders drop `extend_video` outside an extend-capable
     // family, so a stale staged clip must not smuggle the requirement away.

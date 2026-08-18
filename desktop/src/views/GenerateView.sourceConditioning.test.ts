@@ -102,7 +102,7 @@ describe("GenerateView source-conditioning gating (#772, #779)", () => {
     document.body.innerHTML = "";
   });
 
-  it("submits an advertised text-to-video checkpoint with no source image", async () => {
+  it("parks a source image while submitting an advertised text-to-video checkpoint", async () => {
     const model = wanModel("wan22-t2v-a14b", "unsupported");
     useModelStore().all = [model];
     const submitBatch = vi
@@ -111,12 +111,31 @@ describe("GenerateView source-conditioning gating (#772, #779)", () => {
 
     mount(GenerateView, { shallow: true, attachTo: document.body });
     await flushPromises();
-    primeForm(model);
+    const form = primeForm(model);
+    form.sourceImage = "PARKED";
+    form.sourceImageName = "previous.png";
     await flushPromises();
 
     useUiStore().generateTick++;
     await flushPromises();
     expect(submitBatch).toHaveBeenCalledTimes(1);
+    expect(submitBatch.mock.calls[0]![0].source_image).toBeUndefined();
+    expect(submitBatch.mock.calls[0]![0].source_image_name).toBeUndefined();
+    expect(form.sourceImage).toBe("PARKED");
+    expect(form.sourceImageName).toBe("previous.png");
+
+    const imageModel = wanModel("wan22-i2v-a14b", "optional");
+    form.model = imageModel.name;
+    form.sourceImageCapability = imageModel.source_image ?? null;
+    await flushPromises();
+    expect(form.sourceImage).toBe("PARKED");
+    expect(form.sourceImageName).toBe("previous.png");
+
+    useUiStore().generateTick++;
+    await flushPromises();
+    expect(submitBatch).toHaveBeenCalledTimes(2);
+    expect(submitBatch.mock.calls[1]![0].source_image).toBe("PARKED");
+    expect(submitBatch.mock.calls[1]![0].source_image_name).toBe("previous.png");
   });
 
   it("blocks Generate until a required source image is attached", async () => {
