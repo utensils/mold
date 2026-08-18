@@ -119,6 +119,11 @@ struct EntryInternal {
     /// fires `notify_one()` so the permit survives even when the cancel
     /// lands before the waiter starts awaiting.
     cancel: Arc<Notify>,
+    /// Attempt token installed by the owner once this row is running. A
+    /// cancel may arrive before installation; `cancel_requested` closes that
+    /// hand-off race and cancels the token as soon as it appears.
+    running_cancel: Option<mold_inference::InferenceCancellationToken>,
+    cancel_requested: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,6 +137,13 @@ pub enum TargetGpuUpdateError {
 pub enum QueuedJobCancelError {
     NotFound,
     AlreadyRunning,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CompletionClaim {
+    Claimed,
+    UserCancelled,
+    AttemptCancelled,
 }
 
 /// Why a `PATCH /api/queue/:id` `position` reorder was rejected. Same shape as
@@ -262,6 +274,8 @@ impl JobRegistry {
                 seed_pinned,
                 metadata,
                 cancel: cancel.clone(),
+                running_cancel: None,
+                cancel_requested: false,
             });
         }
         self.mark_mutated();
@@ -343,10 +357,10 @@ impl JobRegistry {
             .remove(parent_id);
     }
 
-    /// Cancel a still-queued job: remove its entry and fire the cancel
-    /// signal returned by `register*()` so the waiting request future
-    /// resolves with a cancellation error. Running jobs are not cancelable
-    /// — the GPU worker owns them and there is no safe preemption point.
+    /// Cancel a queued or running job. Queued work is removed immediately;
+    /// running work keeps its row until the owner acknowledges the cooperative
+    /// token. The running signal and terminal publication claim use this same
+    /// lock, so DELETE and completion have one deterministic winner.
     ///
     /// The state check and removal happen under the same write lock that
     /// `mark_running` takes, so a job can never be both cancelled and
@@ -370,14 +384,19 @@ impl JobRegistry {
             let removed = {
                 let mut entries = self.inner.write().unwrap_or_else(|e| e.into_inner());
                 let mut removed = Vec::new();
-                entries.retain(|entry| {
-                    if children.contains(&entry.id) && entry.state == JobLifecycle::Queued {
-                        entry.cancel.notify_one();
-                        removed.push(entry.id.clone());
-                        false
-                    } else {
-                        true
+                entries.retain_mut(|entry| {
+                    if children.contains(&entry.id) {
+                        entry.cancel_requested = true;
+                        if let Some(token) = &entry.running_cancel {
+                            token.cancel();
+                        }
+                        if entry.state == JobLifecycle::Queued && entry.running_cancel.is_none() {
+                            entry.cancel.notify_one();
+                            removed.push(entry.id.clone());
+                            return false;
+                        }
                     }
+                    true
                 });
                 removed
             };
@@ -394,10 +413,18 @@ impl JobRegistry {
             let Some(pos) = entries.iter().position(|e| e.id == id) else {
                 return Err(QueuedJobCancelError::NotFound);
             };
-            if entries[pos].state == JobLifecycle::Running {
+            if entries[pos].state == JobLifecycle::Running || entries[pos].running_cancel.is_some()
+            {
+                entries[pos].cancel_requested = true;
+                if let Some(token) = &entries[pos].running_cancel {
+                    token.cancel();
+                }
                 return Err(QueuedJobCancelError::AlreadyRunning);
             }
             let entry = entries.remove(pos);
+            if let Some(token) = &entry.running_cancel {
+                token.cancel();
+            }
             entry.cancel.notify_one();
         }
         self.mark_mutated();
@@ -411,7 +438,7 @@ impl JobRegistry {
     /// After dropping the entry lock this emits one `JobEnded` per removed
     /// queued row. The return value remains that queued-row count.
     pub fn cancel_all_queued(&self) -> usize {
-        {
+        let batch_children = {
             // Hold the write side while closing every still-open parent
             // authority. This orders bulk cancellation against
             // `begin_batch_commit` exactly like the single-parent path:
@@ -424,12 +451,22 @@ impl JobRegistry {
             for parent in parents.values() {
                 parent.cancel.cancel();
             }
-        }
+            parents
+                .values()
+                .flat_map(|parent| parent.children.iter().cloned())
+                .collect::<BTreeSet<_>>()
+        };
         let cancelled_ids = {
             let mut entries = self.inner.write().unwrap_or_else(|e| e.into_inner());
             let mut ids = Vec::new();
-            entries.retain(|e| {
-                if e.state == JobLifecycle::Queued {
+            entries.retain_mut(|e| {
+                if batch_children.contains(&e.id) {
+                    e.cancel_requested = true;
+                    if let Some(token) = &e.running_cancel {
+                        token.cancel();
+                    }
+                }
+                if e.state == JobLifecycle::Queued && e.running_cancel.is_none() {
                     e.cancel.notify_one();
                     ids.push(e.id.clone());
                     false
@@ -468,6 +505,62 @@ impl JobRegistry {
                 gpu,
             });
         }
+    }
+
+    /// Attach the exact attempt token to a running row. If DELETE won the
+    /// dispatch hand-off race, installation immediately observes that fact.
+    pub(crate) fn install_running_cancellation(
+        &self,
+        id: &str,
+        token: mold_inference::InferenceCancellationToken,
+    ) {
+        let mut entries = self.inner.write().unwrap_or_else(|e| e.into_inner());
+        if let Some(entry) = entries.iter_mut().find(|entry| entry.id == id) {
+            if entry.cancel_requested {
+                token.cancel();
+            }
+            entry.running_cancel = Some(token);
+        }
+    }
+
+    /// Claim the right to publish a terminal result. DELETE takes the same
+    /// write lock, so once this removes the row a later cancel returns 404;
+    /// if cancellation won, publication is refused.
+    pub(crate) fn claim_completion(&self, id: &str) -> CompletionClaim {
+        let claim = {
+            let mut entries = self.inner.write().unwrap_or_else(|e| e.into_inner());
+            let Some(pos) = entries.iter().position(|entry| entry.id == id) else {
+                // Legacy/unit jobs without a public registry row retain their
+                // historical completion behavior.
+                return CompletionClaim::Claimed;
+            };
+            if entries[pos].cancel_requested {
+                CompletionClaim::UserCancelled
+            } else if entries[pos]
+                .running_cancel
+                .as_ref()
+                .is_some_and(|token| token.is_cancelled())
+            {
+                CompletionClaim::AttemptCancelled
+            } else {
+                entries.remove(pos);
+                CompletionClaim::Claimed
+            }
+        };
+        if claim == CompletionClaim::Claimed {
+            self.mark_mutated();
+            self.emit(ServerEvent::JobEnded { id: id.to_string() });
+        }
+        claim
+    }
+
+    pub(crate) fn cancel_requested(&self, id: &str) -> bool {
+        self.inner
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .find(|entry| entry.id == id)
+            .is_some_and(|entry| entry.cancel_requested)
     }
 
     /// Claim a queued row for one scheduler grant.
@@ -1006,13 +1099,59 @@ mod tests {
     }
 
     #[test]
-    fn cancel_queued_rejects_running_jobs_and_keeps_the_entry() {
+    fn cancel_queued_latches_owner_token_installed_before_promotion() {
+        let reg = JobRegistry::new();
+        reg.register("a", "flux-dev:fp16");
+        let token = mold_inference::InferenceCancellationToken::default();
+        reg.install_running_cancellation("a", token.clone());
+        assert_eq!(
+            reg.cancel_queued("a"),
+            Err(QueuedJobCancelError::AlreadyRunning)
+        );
+        assert!(token.is_cancelled());
+        assert_eq!(reg.len(), 1);
+        assert_eq!(reg.claim_completion("a"), CompletionClaim::UserCancelled);
+    }
+
+    #[test]
+    fn cancel_running_signals_the_exact_attempt_and_refuses_publication() {
         let reg = JobRegistry::new();
         reg.register("a", "flux-dev:fp16");
         reg.mark_running("a", Some(0));
+        let token = mold_inference::InferenceCancellationToken::default();
+        reg.install_running_cancellation("a", token.clone());
         let err = reg.cancel_queued("a").unwrap_err();
         assert_eq!(err, QueuedJobCancelError::AlreadyRunning);
+        assert!(token.is_cancelled());
+        assert_eq!(reg.claim_completion("a"), CompletionClaim::UserCancelled);
         assert_eq!(reg.len(), 1, "running entry must survive a cancel attempt");
+    }
+
+    #[test]
+    fn cancel_before_attempt_installation_is_latched() {
+        let reg = JobRegistry::new();
+        reg.register("a", "flux-dev:fp16");
+        reg.mark_running("a", Some(0));
+        assert_eq!(
+            reg.cancel_queued("a"),
+            Err(QueuedJobCancelError::AlreadyRunning)
+        );
+        let token = mold_inference::InferenceCancellationToken::default();
+        reg.install_running_cancellation("a", token.clone());
+        assert!(token.is_cancelled());
+    }
+
+    #[test]
+    fn completion_claim_wins_before_a_late_cancel() {
+        let reg = JobRegistry::new();
+        reg.register("a", "flux-dev:fp16");
+        reg.mark_running("a", Some(0));
+        reg.install_running_cancellation(
+            "a",
+            mold_inference::InferenceCancellationToken::default(),
+        );
+        assert_eq!(reg.claim_completion("a"), CompletionClaim::Claimed);
+        assert_eq!(reg.cancel_queued("a"), Err(QueuedJobCancelError::NotFound));
     }
 
     #[test]
@@ -1101,6 +1240,29 @@ mod tests {
         assert_eq!(snapshot.entries.len(), 1);
         assert_eq!(snapshot.entries[0].id, "parent");
         assert_eq!(snapshot.entries[0].state, JobLifecycle::Running);
+    }
+
+    #[test]
+    fn running_later_batch_child_uses_its_installed_attempt_token() {
+        let reg = JobRegistry::new();
+        let parent_cancel = reg.register_batch_parent("parent");
+        let child_id = "parent:child:2:try:0";
+        reg.register(child_id, "flux-dev:fp16");
+        assert!(reg.register_batch_child("parent", child_id));
+        reg.mark_running(child_id, Some(0));
+        let child_cancel = mold_inference::InferenceCancellationToken::default();
+        reg.install_running_cancellation(child_id, child_cancel.clone());
+
+        assert_eq!(
+            reg.cancel_queued(child_id),
+            Err(QueuedJobCancelError::AlreadyRunning)
+        );
+        assert!(child_cancel.is_cancelled());
+        assert!(!parent_cancel.is_cancelled());
+        assert_eq!(
+            reg.claim_completion(child_id),
+            CompletionClaim::UserCancelled
+        );
     }
 
     #[test]

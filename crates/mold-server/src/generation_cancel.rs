@@ -16,8 +16,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 pub struct CancelRegistry {
-    tokens: Mutex<HashMap<String, mold_inference::InferenceCancellationToken>>,
+    tokens: Mutex<HashMap<String, CancelEntry>>,
     shutting_down: AtomicBool,
+}
+
+struct CancelEntry {
+    token: mold_inference::InferenceCancellationToken,
+    user_requested: bool,
 }
 
 impl CancelRegistry {
@@ -33,12 +38,17 @@ impl CancelRegistry {
             .tokens
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let token = tokens.entry(job_id.to_string()).or_default();
+        let entry = tokens
+            .entry(job_id.to_string())
+            .or_insert_with(|| CancelEntry {
+                token: mold_inference::InferenceCancellationToken::default(),
+                user_requested: false,
+            });
         // The load happens while the token map is locked. If shutdown races
         // after this load, request_all() must acquire the same lock and will
         // observe/cancel this token; if shutdown won first, cancel it here.
         if self.shutting_down.load(Ordering::Acquire) {
-            token.cancel();
+            entry.token.cancel();
         }
     }
 
@@ -50,18 +60,33 @@ impl CancelRegistry {
     }
 
     pub fn request(&self, job_id: &str) -> bool {
-        let token = self
+        let mut tokens = self
             .tokens
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(job_id)
-            .cloned();
-        if let Some(token) = token {
-            token.cancel();
-            true
-        } else {
-            false
-        }
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(entry) = tokens.get_mut(job_id) else {
+            return false;
+        };
+        entry.user_requested = true;
+        entry.token.cancel();
+        true
+    }
+
+    /// Revoke a running job even when dispatch marked it running just before
+    /// its owner thread registered the inference token.
+    pub fn request_or_register(&self, job_id: &str) {
+        let mut tokens = self
+            .tokens
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let entry = tokens
+            .entry(job_id.to_string())
+            .or_insert_with(|| CancelEntry {
+                token: mold_inference::InferenceCancellationToken::default(),
+                user_requested: false,
+            });
+        entry.user_requested = true;
+        entry.token.cancel();
     }
 
     pub fn request_all(&self) -> usize {
@@ -74,7 +99,7 @@ impl CancelRegistry {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .values()
-            .cloned()
+            .map(|entry| entry.token.clone())
             .collect::<Vec<_>>();
         for token in &tokens {
             token.cancel();
@@ -87,7 +112,15 @@ impl CancelRegistry {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .get(job_id)
-            .is_some_and(mold_inference::InferenceCancellationToken::is_cancelled)
+            .is_some_and(|entry| entry.token.is_cancelled())
+    }
+
+    pub fn was_user_requested(&self, job_id: &str) -> bool {
+        self.tokens
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(job_id)
+            .is_some_and(|entry| entry.user_requested)
     }
 
     pub fn token(&self, job_id: &str) -> mold_inference::InferenceCancellationToken {
@@ -95,11 +128,16 @@ impl CancelRegistry {
             .tokens
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let token = tokens.entry(job_id.to_string()).or_default();
+        let entry = tokens
+            .entry(job_id.to_string())
+            .or_insert_with(|| CancelEntry {
+                token: mold_inference::InferenceCancellationToken::default(),
+                user_requested: false,
+            });
         if self.shutting_down.load(Ordering::Acquire) {
-            token.cancel();
+            entry.token.cancel();
         }
-        token.clone()
+        entry.token.clone()
     }
 }
 
@@ -149,5 +187,15 @@ mod tests {
         registry.unregister("job-1");
         assert!(!registry.request("job-1"));
         assert!(!registry.is_cancelled("job-1"));
+    }
+
+    #[test]
+    fn request_before_worker_registration_cancels_the_future_owner_token() {
+        let registry = CancelRegistry::new();
+        registry.request_or_register("job-1");
+
+        let worker_token = registry.token("job-1");
+        assert!(worker_token.is_cancelled());
+        assert!(registry.was_user_requested("job-1"));
     }
 }

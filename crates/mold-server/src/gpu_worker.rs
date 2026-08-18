@@ -3008,6 +3008,13 @@ fn process_claimed_h3_generation(
     scope: crate::h3_attempt::H3AttemptScope<'_>,
     scheduler_tx: &tokio::sync::mpsc::UnboundedSender<crate::scheduler::WorkerEvent>,
 ) -> bool {
+    // H3 owns a private attempt token instead of the generic engine token.
+    // Install that exact authority in the public job row before any private
+    // preparation so DELETE reaches the real attempt (including the
+    // dispatch-to-owner hand-off race).
+    job.registry
+        .install_running_cancellation(&job.id, scope.cancellation_token());
+
     #[cfg(any(test, feature = "h3-private-bridge", feature = "h3-private-uat"))]
     let mut job = job;
 
@@ -3679,6 +3686,10 @@ fn process_job_with_sink(
         .as_ref()
         .or(batch_cancellation.as_ref())
         .or(singleton_cancellation.as_ref());
+    if let Some(cancellation) = inference_cancellation {
+        job.registry
+            .install_running_cancellation(&job_id, cancellation.clone());
+    }
     let reference_bindings = match crate::reference_uploads::inference_bindings_for_request(
         &job.request,
         job.resolved_references.as_ref(),
@@ -3705,6 +3716,12 @@ fn process_job_with_sink(
     }
 
     tracing::info!(gpu = ordinal, model = %model_name, "dispatched job");
+
+    if inference_cancellation.is_some_and(|token| token.is_cancelled()) {
+        let user_requested = job.registry.cancel_requested(&job_id);
+        finish_generation_cancelled(job, user_requested);
+        return false;
+    }
 
     // Hand the frozen plan's admitted peak down to the engine for this
     // dispatch. Held for the whole job (load + inference) and released on
@@ -3819,6 +3836,14 @@ fn process_job_with_sink(
             .as_ref()
             .map(|plan| plan.execution_fingerprint.as_str()),
     );
+
+    // Model construction is not safely preemptible, but a cancellation that
+    // lands during it must stop before inference or publication begins.
+    if inference_cancellation.is_some_and(|token| token.is_cancelled()) {
+        let user_requested = job.registry.cancel_requested(&job_id);
+        finish_generation_cancelled(job, user_requested);
+        return false;
+    }
 
     // This is the first real allocation boundary: model readiness has
     // completed, so host allocations owned by this lease now exist. The
@@ -4113,7 +4138,10 @@ fn process_job_with_sink(
                             generation: Box::new(job),
                             response,
                             image: img,
-                            cancellation: batch_cancellation.clone().unwrap_or_default(),
+                            // Preserve the generation's exact attempt token so
+                            // Cancel remains authoritative through this final
+                            // owner stage instead of signalling a fresh token.
+                            cancellation: inference_cancellation.cloned().unwrap_or_default(),
                             execution_plan: None,
                         })),
                     )
@@ -4159,6 +4187,8 @@ fn process_job_with_sink(
             // quarantine this worker. Ordinary OOMs retain the existing
             // synchronize-and-retry policy.
             let is_oom = is_cuda_oom(&e);
+            let user_cancelled = mold_inference::is_inference_cancelled(&e)
+                && job.registry.cancel_requested(&job_id);
             let (err_msg, count_worker_failure) = if fatal_cuda {
                 (fatal_cuda_user_message(&model_name), false)
             } else if is_oom {
@@ -4176,6 +4206,8 @@ fn process_job_with_sink(
                 } else {
                     (fatal_cuda_user_message(&model_name), false)
                 }
+            } else if user_cancelled {
+                ("Cancelled".to_string(), false)
             } else if mold_inference::is_inference_cancelled(&e) {
                 // A shutdown abort is not worker ill-health. Counting it would
                 // let one deploy's worth of cancellations quarantine a healthy
@@ -4194,7 +4226,9 @@ fn process_job_with_sink(
             // quiet close: a quiet close leaves the desktop app in `loading`
             // forever and hard-fails the web client. The flag is what lets a
             // new client read this as interrupted instead of failed.
-            let retained = job.journal.is_some() && mold_inference::is_inference_cancelled(&e);
+            let retained = job.journal.is_some()
+                && mold_inference::is_inference_cancelled(&e)
+                && !user_cancelled;
             if let Some(ref tx) = job.progress_tx {
                 let event = if retained {
                     SseErrorEvent::retained(err_msg.clone())
@@ -4231,6 +4265,17 @@ fn finish_generation_success(
     image: ImageData,
     original_image: Option<ImageData>,
 ) {
+    match job.registry.claim_completion(&job.id) {
+        crate::job_registry::CompletionClaim::Claimed => {}
+        crate::job_registry::CompletionClaim::UserCancelled => {
+            finish_generation_cancelled(job, true);
+            return;
+        }
+        crate::job_registry::CompletionClaim::AttemptCancelled => {
+            finish_generation_cancelled(job, false);
+            return;
+        }
+    }
     let mut metadata = OutputMetadata::from_generate_request(
         &job.request,
         response.seed_used,
@@ -4334,6 +4379,30 @@ fn finish_generation_success(
     let _ = job
         .result_tx
         .send(Ok(GenerationJobResult { image, response }));
+}
+
+fn finish_generation_cancelled(mut job: GpuJob, user_requested: bool) {
+    if let Some(ticket) = job.journal.take() {
+        if user_requested {
+            ticket.discard();
+        } else {
+            ticket.retain();
+        }
+    }
+    let message = if user_requested {
+        "Cancelled".to_string()
+    } else {
+        shutdown_retention_user_message(&job.model)
+    };
+    if let Some(ref tx) = job.progress_tx {
+        let event = if user_requested {
+            SseErrorEvent::failed(message.clone())
+        } else {
+            SseErrorEvent::retained(message.clone())
+        };
+        let _ = tx.send(SseMessage::Error(event));
+    }
+    let _ = job.result_tx.send(Err(message));
 }
 
 /// Preflight memory check with evict-to-fit recovery.

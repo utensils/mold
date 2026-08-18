@@ -591,11 +591,11 @@ export const useGenerationStore = defineStore("generation", {
       return this.submitBatch(req, batchSize).settled;
     },
     /**
-     * Cancel one job (default: the canvas job). Ordinary queued jobs leave
+     * Cancel one job (default: the canvas job). Queued and running ordinary jobs leave
      * the server queue via DELETE /api/queue/:id; automatic chains use their
      * durable shim id with POST /api/chain-jobs/:id/cancel. The stream is
-     * aborted only after the server confirms cancellation. A running job's
-     * 409 response leaves its stream and local state intact.
+     * aborted only after the server confirms cancellation. The `cancelling`
+     * flag repaints every desktop/iPhone consumer on the initiating tap.
      */
     async cancel(clientId?: number): Promise<boolean> {
       const job =
@@ -603,6 +603,8 @@ export const useGenerationStore = defineStore("generation", {
           ? (this.jobs.find((j) => j.clientId === clientId) ?? null)
           : this.active;
       if (!job || job.status === "complete" || job.status === "error") return false;
+      if (job.cancelling) return false;
+      job.cancelling = true;
       if (job.id) {
         try {
           const chainRoute = chainRoutes.get(job.clientId);
@@ -618,18 +620,24 @@ export const useGenerationStore = defineStore("generation", {
           // that authoritative outcome; otherwise the failed DELETE means the
           // server still owns the job and the live stream must remain open.
           if (jobHasSettled(job)) return false;
+          job.cancelling = false;
           throw err;
         }
       } else if (job.streamStarted) {
+        job.cancelling = false;
         throw new Error("Remote cancellation was not confirmed before the queue ID arrived.");
       }
       // A terminal SSE frame may win while DELETE is in flight. Preserve that
       // authoritative outcome, even if the DELETE request itself then fails.
-      if (jobHasSettled(job)) return false;
+      if (jobHasSettled(job)) {
+        job.cancelling = false;
+        return false;
+      }
       aborts.get(job.clientId)?.abort();
       aborts.delete(job.clientId);
       settleJob(job, "error");
       job.error = "Cancelled";
+      job.cancelling = false;
       return true;
     },
     /** Single generation — a batch of one. */

@@ -5896,11 +5896,16 @@ onBeforeUnmount(() => {
                     <button
                       class="mobile-generation-cancel"
                       type="button"
-                      :aria-label="`Cancel ${row.print.prompt}`"
+                      :aria-label="
+                        row.print.cancelling
+                          ? `Cancelling ${row.print.prompt}`
+                          : `Cancel ${row.print.prompt}`
+                      "
                       data-test="mobile-generation-cancel"
+                      :disabled="row.print.cancelling"
                       @click.stop="cancelGeneration(row.print)"
                     >
-                      Cancel
+                      {{ row.print.cancelling ? "Cancelling…" : "Cancel" }}
                     </button>
                   </div>
                 </template>

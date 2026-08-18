@@ -6975,10 +6975,8 @@ pub struct QueueCapabilities {
     /// Queue pins may use opaque stable device IDs.
     #[serde(default)]
     pub stable_device_pins: bool,
-    /// Server can cooperatively cancel already-running work. Deliberately
-    /// false: the machinery exists after the durable-queue work, but exposing
-    /// it contradicts the standing "running work remains non-cancellable"
-    /// contract and is its own UX decision.
+    /// Server can cooperatively cancel already-running work at model safe
+    /// points. Older servers omit this and clients keep running rows read-only.
     #[serde(default)]
     pub cooperative_cancellation: bool,
     /// A queued job survives a server restart and is replayed automatically.

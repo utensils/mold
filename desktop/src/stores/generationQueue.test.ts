@@ -159,6 +159,33 @@ describe("generation queueing", () => {
     expect(store.jobs[0]!.error).toBe("Cancelled");
   });
 
+  it("repaints as cancelling before a running Wan request is acknowledged", async () => {
+    const store = useGenerationStore();
+    const { jobs } = store.submitBatch({ ...req, model: "wan22-i2v-a14b:q4" }, 1);
+    await flushPromises();
+    openStreams[0]!.onEvent(
+      "progress",
+      JSON.stringify({ type: "denoise_step", step: 1, total: 28, id: "wan-running" }),
+    );
+    jobs[0]!.id = "wan-running";
+    const { apiFetchTo } = await import("../lib/api/client");
+    let acknowledge!: () => void;
+    vi.mocked(apiFetchTo).mockImplementationOnce(
+      () =>
+        new Promise<Response>((resolve) => {
+          acknowledge = () => resolve(new Response(null, { status: 204 }));
+        }),
+    );
+
+    const cancellation = store.cancel(jobs[0]!.clientId);
+    expect(jobs[0]!.cancelling).toBe(true);
+    expect(jobs[0]!.status).toBe("denoising");
+
+    acknowledge();
+    await cancellation;
+    expect(jobs[0]).toMatchObject({ cancelling: false, status: "error", error: "Cancelled" });
+  });
+
   it("keeps a running job and its stream alive when the server refuses cancellation", async () => {
     const store = useGenerationStore();
     const { jobs } = store.submitBatch({ ...req }, 1);
@@ -176,7 +203,7 @@ describe("generation queueing", () => {
     await expect(store.cancel(jobs[0]!.clientId)).rejects.toThrow("already running");
 
     expect(openStreams[0]!.signal.aborted).toBe(false);
-    expect(jobs[0]).toMatchObject({ status: "denoising", error: null });
+    expect(jobs[0]).toMatchObject({ status: "denoising", error: null, cancelling: false });
   });
 
   it("keeps a server cancellation frame classified as cancellation during DELETE", async () => {

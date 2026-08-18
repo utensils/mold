@@ -32,6 +32,9 @@ export interface Job {
   /** Seed driving the Develop grain — requested seed or a stand-in until seed_used arrives. */
   visualSeed: string;
   status: JobStatus;
+  /** A cancellation request has been sent and this row must not accept a
+   * second tap while the host acknowledges authority revocation. */
+  cancelling?: boolean;
   queuePosition: number | null;
   step: number;
   total: number;
@@ -105,6 +108,7 @@ export function newJob(req: GenerateRequest): Job {
     guidance: req.guidance ?? 1.0,
     visualSeed: req.seed !== undefined ? String(req.seed) : `${req.model}·${req.prompt}`,
     status: "queued",
+    cancelling: false,
     queuePosition: null,
     step: 0,
     total: req.steps,

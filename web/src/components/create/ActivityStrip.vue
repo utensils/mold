@@ -250,11 +250,17 @@ const active = computed(
       <button
         type="button"
         class="activity__cancel activity__cancel--running"
-        :aria-label="`Cancel ${promptFor(job)}`"
+        :aria-label="
+          job.cancelling
+            ? `Cancelling ${promptFor(job)}`
+            : `Cancel ${promptFor(job)}`
+        "
         :data-test="`activity-cancel-${job.id}`"
+        :disabled="job.cancelling"
         @click="emit('cancel', job.id)"
       >
-        <Icon name="close" :size="14" />
+        <span v-if="job.cancelling" class="data-mono">…</span>
+        <Icon v-else name="close" :size="14" />
       </button>
     </div>
 

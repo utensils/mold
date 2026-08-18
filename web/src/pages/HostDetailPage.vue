@@ -70,6 +70,7 @@ const hostName = ref(host.value?.name ?? "");
 const caps = ref<HostCapabilities | null>(null);
 const queue = ref<QueueEntry[]>([]);
 const queuePlan = ref<QueuePlan | null>(null);
+const cancellingIds = ref<string[]>([]);
 const mutatingDeviceIds = ref(new Set<string>());
 const models = ref<ModelInfoExtended[]>([]);
 const downloads = ref<DownloadJobWire[]>([]);
@@ -306,12 +307,17 @@ function toggleTarget() {
 
 async function onCancel(id: string) {
   const entry = host.value;
-  if (!entry) return;
+  if (!entry || cancellingIds.value.includes(id)) return;
+  cancellingIds.value = [...cancellingIds.value, id];
   try {
     await cancelQueueJob(entry, id);
     await reloadQueue();
   } catch (e) {
     toast("error", `Couldn't cancel job: ${errMsg(e)}`);
+  } finally {
+    cancellingIds.value = cancellingIds.value.filter(
+      (pending) => pending !== id,
+    );
   }
 }
 
@@ -714,6 +720,8 @@ onBeforeUnmount(() => {
           :can-reorder="canReorder"
           :can-pause="caps?.queue?.can_pause === true"
           :can-cancel-all="caps?.queue?.can_cancel_all === true"
+          :can-cancel-running="caps?.queue?.cooperative_cancellation === true"
+          :cancelling-ids="cancellingIds"
           :paused="paused"
           :dimmed="offline"
           @cancel="onCancel"

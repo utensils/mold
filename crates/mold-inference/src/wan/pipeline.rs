@@ -1101,6 +1101,11 @@ fn run_denoise_loop(inputs: DenoiseInputs<'_>) -> Result<Tensor> {
             rope,
             cond_cache.as_mut(),
         )?;
+        // Wan video steps can spend a long time in each transformer pass.
+        // Stop before launching the second CFG pass when cancellation arrived
+        // during the conditional pass instead of making the user wait for a
+        // full additional forward.
+        progress.checkpoint()?;
         // A step whose own scale is <= 1 skips its uncond forward even when
         // the uncond embedding was encoded for other steps' sake.
         let velocity = match uncond_embeds {
@@ -1916,6 +1921,7 @@ impl WanEngine {
         // ------------------------------------------------------------------
         // 3. VAE decode
         // ------------------------------------------------------------------
+        progress.checkpoint()?;
         progress.stage_start("Loading Wan VAE");
         let vae_start = Instant::now();
         let vae = WanVideoVae::from_safetensors(&paths.vae, vae_config, &device, dtype)?;
@@ -1924,10 +1930,12 @@ impl WanEngine {
             "Loading Wan VAE",
             vae_start.elapsed(),
         );
+        progress.checkpoint()?;
 
         progress.stage_start("Decoding video frames");
         let decode_start = Instant::now();
         let video = vae.decode(&latents)?;
+        progress.checkpoint()?;
         drop(vae);
         device.synchronize()?;
         progress.phase_done(
@@ -1939,6 +1947,7 @@ impl WanEngine {
         // ------------------------------------------------------------------
         // 4. Encode the artifact
         // ------------------------------------------------------------------
+        progress.checkpoint()?;
         let frames = video_frames_to_images(&video, width, height)?;
 
         // A single-frame render with an image format is a still (#798):

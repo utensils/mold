@@ -4459,9 +4459,9 @@ impl App {
                 if self.active_view == View::Machines
                     && self.machines.focus == crate::hosts::MachinesFocus::Detail =>
             {
-                if let Some((host_id, job)) = self.machines.selected_queued_job() {
+                if let Some((host_id, job)) = self.machines.selected_cancellable_job() {
                     self.popup = Some(Popup::Confirm {
-                        message: format!("Cancel queued job for {}?", job.model),
+                        message: format!("Cancel {} job for {}?", job.state, job.model),
                         on_confirm: ConfirmAction::CancelHostJob {
                             host_id,
                             job_id: job.id,
@@ -15642,7 +15642,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn machines_cancel_job_gated_on_detail_focus_and_queued_state() {
+    async fn machines_cancel_job_gated_on_detail_focus_and_host_capability() {
         let mut app = make_settings_test_app();
         app.active_view = View::Machines;
         app.machines
@@ -15681,15 +15681,28 @@ mod tests {
             }),
         );
 
+        let mut capabilities = mold_core::ServerCapabilities::default();
+        capabilities.queue.cooperative_cancellation = true;
+        app.machines
+            .apply_capabilities("hal9000".into(), Some(capabilities));
+
         // HostList focus: `x` is a no-op.
         app.dispatch_action(Action::MachinesCancelJob);
         assert!(app.popup.is_none());
 
-        // Detail focus on the running job: still a no-op (not cancelable).
+        // Current hosts expose the same cooperative running cancellation.
         app.machines.focus = crate::hosts::MachinesFocus::Detail;
         app.machines.queue_selected = 0;
         app.dispatch_action(Action::MachinesCancelJob);
-        assert!(app.popup.is_none(), "running jobs are not cancelable");
+        let Some(Popup::Confirm { on_confirm, .. }) = &app.popup else {
+            panic!("expected the running cancel confirm popup");
+        };
+        assert!(matches!(
+            on_confirm,
+            ConfirmAction::CancelHostJob { host_id, job_id }
+                if host_id == "hal9000" && job_id == "job-run"
+        ));
+        app.popup = None;
 
         // Detail focus on the queued job: confirm gate opens.
         app.machines.queue_selected = 1;

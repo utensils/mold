@@ -145,7 +145,7 @@ pub enum Action {
     MachinesForget,
     /// Machines: refresh telemetry and queue for all hosts now.
     MachinesRefresh,
-    /// Machines: cancel the selected queued job (confirmed).
+    /// Machines: cancel the selected queued/running job when supported (confirmed).
     MachinesCancelJob,
     /// Machines: move the device-detail selection to the next visible GPU.
     MachinesNextDevice,

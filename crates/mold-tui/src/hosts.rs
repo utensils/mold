@@ -458,11 +458,17 @@ impl MachinesState {
         }
     }
 
-    /// The queued (cancelable) job under the queue selection, if any.
-    pub fn selected_queued_job(&self) -> Option<(String, mold_core::QueueJobEntryWire)> {
+    /// The cancellable job under the queue selection. Running rows require
+    /// the additive host capability so older servers retain their safe gate.
+    pub fn selected_cancellable_job(&self) -> Option<(String, mold_core::QueueJobEntryWire)> {
         let (host_id, listing) = self.queue.as_ref()?;
         let job = listing.entries.get(self.queue_selected)?;
-        if job.state == "queued" {
+        let running_supported = job.state == "running"
+            && self
+                .capabilities
+                .get(host_id)
+                .is_some_and(|caps| caps.queue.cooperative_cancellation);
+        if job.state == "queued" || running_supported {
             Some((host_id.clone(), job.clone()))
         } else {
             None

@@ -230,8 +230,8 @@ Tap a saved host to inspect its current state. The detail screen shows:
 - GPU/VRAM, CPU, and RAM telemetry;
 - every GPU's utilization, VRAM, lifecycle state, and enable/disable control;
 - free and used storage for the models filesystem;
-- queued/running generation work, with a confirmed **Cancel** action for work
-  that has not started yet, and loaded models;
+- queued/running generation work, with a confirmed **Cancel** action for queued
+  work and active singleton generations on current hosts, and loaded models;
 - queued/active model downloads with progress; and
 - the models installed on that host.
 
@@ -239,7 +239,8 @@ From the same screen you can rename or retry the host, select it for Create,
 unload a model, open it in Models, or forget it. Forgetting a host also deletes
 its API key from the iOS Keychain. Queue cancellation uses that host's
 Keychain-authenticated route and refreshes the list after the server confirms
-it; running GPU work cannot be safely preempted and has no Cancel action.
+it. Current hosts revoke running inference cooperatively at its next safe point;
+older hosts keep running work read-only.
 
 ## Settings and themes
 

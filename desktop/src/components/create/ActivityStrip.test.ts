@@ -82,6 +82,19 @@ describe("ActivityStrip", () => {
     expect(wrapper.text()).toContain("50%");
   });
 
+  it("cancels the running print once and acknowledges the pending request", async () => {
+    const generation = useGenerationStore();
+    const cancel = vi.spyOn(generation, "cancel").mockResolvedValue(false);
+    generation.jobs = [{ ...baseJob(), status: "denoising", cancelling: true, step: 5, total: 10 }];
+    const wrapper = mount(ActivityStrip);
+    const button = wrapper.get("[data-test='activity-running-cancel']");
+
+    expect(button.attributes("disabled")).toBeDefined();
+    expect(button.attributes("aria-label")).toBe("Cancelling a lighthouse");
+    await button.trigger("click");
+    expect(cancel).not.toHaveBeenCalled();
+  });
+
   it("lists queued siblings with a working cancel", async () => {
     const generation = useGenerationStore();
     const cancel = vi.spyOn(generation, "cancel").mockResolvedValue(true);

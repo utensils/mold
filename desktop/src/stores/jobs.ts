@@ -43,6 +43,8 @@ export interface HostQueueCaps {
   /** Whether queued jobs can be reordered via `PATCH /api/queue/:id {position}`
    *  (older servers never report it → false). */
   canReorder: boolean;
+  /** Additive capability; false/absent keeps older hosts' running rows read-only. */
+  canCancelRunning?: boolean;
 }
 
 export interface HostQueueSnapshot {
@@ -76,6 +78,7 @@ export interface QueueSurfaceRow {
   entry: EnrichedQueueEntry;
   /** Whether this host supports queued-job reordering (capability-gated). */
   canReorder: boolean;
+  canCancelRunning: boolean;
 }
 
 /** Running first, then queued, then held — held work is parked, not in line,
@@ -135,8 +138,15 @@ export const useJobsStore = defineStore("jobs", {
         const snap = state.queues[host.id];
         if (!snap) continue;
         const canReorder = snap.caps?.canReorder ?? false;
+        const canCancelRunning = snap.caps?.canCancelRunning ?? false;
         for (const entry of enrichQueueEntries(snap.entries, host.id, generation.jobs, primaryId)) {
-          rows.push({ hostId: host.id, hostLabel: host.label, entry, canReorder });
+          rows.push({
+            hostId: host.id,
+            hostLabel: host.label,
+            entry,
+            canReorder,
+            canCancelRunning,
+          });
         }
       }
       return rows.sort(
@@ -172,12 +182,18 @@ export const useJobsStore = defineStore("jobs", {
         const caps =
           previous?.caps ??
           (await apiJsonTo<{
-            queue?: { can_pause?: boolean; can_cancel_all?: boolean; can_reorder?: boolean };
+            queue?: {
+              can_pause?: boolean;
+              can_cancel_all?: boolean;
+              can_reorder?: boolean;
+              cooperative_cancellation?: boolean;
+            };
           }>(target, "/api/capabilities").then(
             (c) => ({
               canPause: c.queue?.can_pause === true,
               canCancelAll: c.queue?.can_cancel_all === true,
               canReorder: c.queue?.can_reorder === true,
+              canCancelRunning: c.queue?.cooperative_cancellation === true,
             }),
             () => null,
           ));

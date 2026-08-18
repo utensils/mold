@@ -183,7 +183,12 @@ describe("jobs store", () => {
     const q = jobs.queues["local"]!;
     expect(q.entries).toHaveLength(2);
     expect(q.paused).toBe(true);
-    expect(q.caps).toEqual({ canPause: true, canCancelAll: true, canReorder: true });
+    expect(q.caps).toEqual({
+      canPause: true,
+      canCancelAll: true,
+      canReorder: true,
+      canCancelRunning: false,
+    });
   });
 
   it("refreshHost() snapshots only the given host", async () => {

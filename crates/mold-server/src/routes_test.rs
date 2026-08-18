@@ -2780,7 +2780,7 @@ mod tests {
         assert_eq!(item("queued-a")["phase"], "queued");
         assert_eq!(item("queued-a")["can_cancel"], true);
         assert_eq!(item("running-b")["phase"], "loading");
-        assert_eq!(item("running-b")["can_cancel"], false);
+        assert_eq!(item("running-b")["can_cancel"], true);
         assert_eq!(item("expand-parent")["kind"], "prompt_expand");
         assert_eq!(item("expand-parent")["phase"], "running");
         assert_eq!(item("sequence-c")["kind"], "sequence");
@@ -3005,6 +3005,7 @@ mod tests {
 
         let app = app_with_state(state);
         let resp = app
+            .clone()
             .oneshot(
                 Request::patch("/api/queue/aaaa")
                     .header("content-type", "application/json")
@@ -3499,13 +3500,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delete_queue_running_job_returns_409() {
+    async fn delete_queue_running_job_revokes_inference_without_waiting_for_teardown() {
         let (state, _rx) = AppState::with_engine_and_queue(MockEngine::ready());
         state.job_registry.register("aaaa", "flux-dev:fp16");
         state.job_registry.mark_running("aaaa", Some(0));
+        let attempt = mold_inference::InferenceCancellationToken::default();
+        state
+            .job_registry
+            .install_running_cancellation("aaaa", attempt.clone());
 
         let app = app_with_state(state.clone());
         let resp = app
+            .clone()
             .oneshot(
                 Request::delete("/api/queue/aaaa")
                     .body(Body::empty())
@@ -3513,14 +3519,23 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::CONFLICT);
-        let body = json_body(resp).await;
-        assert_eq!(body["code"], "QUEUE_JOB_RUNNING");
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
         assert_eq!(
             state.job_registry.len(),
             1,
-            "running job must survive the cancel attempt"
+            "the worker owns cleanup after cooperative cancellation"
         );
+        assert!(attempt.is_cancelled());
+        assert!(state.job_registry.cancel_requested("aaaa"));
+
+        let activity = app
+            .oneshot(Request::get("/api/activity").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let body = json_body(activity).await;
+        let item = &body["items"][0];
+        assert_eq!(item["phase"], "cancelling");
+        assert_eq!(item["can_cancel"], false);
     }
 
     #[tokio::test]
@@ -4764,10 +4779,7 @@ mod tests {
         )
         .await;
         assert_eq!(capabilities["queue"]["durable_queue"], true);
-        assert_eq!(
-            capabilities["queue"]["cooperative_cancellation"], false,
-            "running work stays non-cancellable until that UX decision is made"
-        );
+        assert_eq!(capabilities["queue"]["cooperative_cancellation"], true);
 
         let gen_app = app.clone();
         let gen_task = tokio::spawn(async move {

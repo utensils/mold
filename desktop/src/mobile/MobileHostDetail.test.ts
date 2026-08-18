@@ -521,6 +521,36 @@ describe("MobileHostDetail remote host data", () => {
     expect(view.get("[data-test='host-detail-queue']").text()).toContain("flux-dev:q8");
   });
 
+  it("confirms and cancels a running job when the host advertises cooperative support", async () => {
+    const originalApi = apiJsonTo.getMockImplementation()!;
+    apiJsonTo.mockImplementation((requestTarget, path) => {
+      if (path === "/api/capabilities") {
+        return Promise.resolve({
+          events: { available: true },
+          devices: { available: true, lifecycle: true },
+          dispatch: { v2_authoritative: true },
+          queue: { cooperative_cancellation: true },
+        });
+      }
+      return originalApi(requestTarget, path);
+    });
+    const fetchMock = vi.fn(async () => new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const view = await mountDetail();
+    const cancel = view.get("[data-test='host-detail-queue-cancel-job-running']");
+
+    await cancel.trigger("click");
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(cancel.text()).toBe("Cancel?");
+    await cancel.trigger("click");
+    await flushPromises();
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      `${studio.baseUrl}/api/queue/job-running`,
+      expect.objectContaining({ method: "DELETE" }),
+    );
+  });
+
   it("keeps a queued job visible and reports the host refusal when cancellation fails", async () => {
     vi.stubGlobal(
       "fetch",

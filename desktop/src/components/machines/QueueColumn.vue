@@ -6,7 +6,7 @@
  * cancelled, and reordered up/down when the owning host advertises
  * queue.can_reorder. Read-only mirror otherwise; the server is the authority.
  */
-import { computed } from "vue";
+import { computed, ref } from "vue";
 import ProgressBar from "@ui/components/ProgressBar.vue";
 import Icon from "@ui/components/Icon.vue";
 import { useGenerationStore, jobProgress } from "../../stores/generation";
@@ -16,6 +16,7 @@ import { useToastStore } from "../../stores/toasts";
 const generation = useGenerationStore();
 const jobs = useJobsStore();
 const toasts = useToastStore();
+const cancellingIds = ref<string[]>([]);
 
 const rows = computed(() => jobs.queueSurface);
 
@@ -53,6 +54,8 @@ function progressPct(row: QueueSurfaceRow): number {
 }
 
 async function cancel(row: QueueSurfaceRow) {
+  if (cancellingIds.value.includes(row.entry.id)) return;
+  cancellingIds.value = [...cancellingIds.value, row.entry.id];
   try {
     const cancelled =
       row.entry.clientId !== null
@@ -61,6 +64,8 @@ async function cancel(row: QueueSurfaceRow) {
     if (cancelled) toasts.push("Cancelled");
   } catch (err) {
     toasts.push(String(err), "error");
+  } finally {
+    cancellingIds.value = cancellingIds.value.filter((id) => id !== row.entry.id);
   }
 }
 
@@ -114,8 +119,15 @@ async function reorder(row: QueueSurfaceRow, delta: number) {
               {{ statusLine(row) }}
             </div>
           </div>
-          <div v-if="row.entry.state === 'queued'" class="flex shrink-0 items-center gap-0.5">
-            <template v-if="row.canReorder">
+          <div
+            v-if="
+              row.entry.state === 'queued' ||
+              row.entry.state === 'held' ||
+              (row.entry.state === 'running' && row.canCancelRunning)
+            "
+            class="flex shrink-0 items-center gap-0.5"
+          >
+            <template v-if="row.entry.state === 'queued' && row.canReorder">
               <button
                 type="button"
                 data-test="queue-reorder-up"
@@ -138,10 +150,11 @@ async function reorder(row: QueueSurfaceRow, delta: number) {
             <button
               type="button"
               data-test="queue-cancel"
+              :disabled="cancellingIds.includes(row.entry.id)"
               class="ml-1 rounded-control px-2 py-1 text-caption text-ink-3 transition-colors hover:text-stop"
               @click="cancel(row)"
             >
-              Cancel
+              {{ cancellingIds.includes(row.entry.id) ? "Cancelling…" : "Cancel" }}
             </button>
           </div>
         </div>

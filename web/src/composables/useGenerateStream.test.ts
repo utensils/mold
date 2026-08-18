@@ -1640,6 +1640,37 @@ describe("useGenerateStream host routing", () => {
     expect(stream.jobs.value.find((j) => j.id === id)?.state).toBe("canceled");
   });
 
+  it("repaints as cancelling before the host acknowledges a running job", async () => {
+    let acknowledge!: () => void;
+    vi.mocked(cancelQueueJob).mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          acknowledge = resolve;
+        }),
+    );
+    const stream = useGenerateStream();
+    const id = stream.submit(
+      singleGen({ model: "wan22-i2v-a14b:q4", frames: 81 }),
+    );
+    lastSingleHandlers?.onProgress({
+      type: "queued",
+      id: "wan-running",
+      position: 0,
+    });
+
+    const cancellation = stream.cancel(id);
+    expect(stream.jobs.value.find((job) => job.id === id)?.cancelling).toBe(
+      true,
+    );
+
+    acknowledge();
+    await cancellation;
+    expect(stream.jobs.value.find((job) => job.id === id)).toMatchObject({
+      cancelling: false,
+      state: "canceled",
+    });
+  });
+
   it("keeps a server-owned job running when cancellation is refused", async () => {
     vi.mocked(cancelQueueJob).mockRejectedValueOnce(
       new Error("already running"),
@@ -1660,6 +1691,7 @@ describe("useGenerateStream host routing", () => {
 
     const job = stream.jobs.value.find((candidate) => candidate.id === id);
     expect(job?.state).toBe("running");
+    expect(job?.cancelling).toBe(false);
     expect(job?.controller.signal.aborted).toBe(false);
   });
 

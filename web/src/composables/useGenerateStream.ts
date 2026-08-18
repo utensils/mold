@@ -49,6 +49,8 @@ export interface Job {
   result: SseCompleteEvent | null;
   error: string | null;
   state: "running" | "done" | "error" | "canceled";
+  /** Immediate UI acknowledgement while DELETE revokes server authority. */
+  cancelling?: boolean;
   /** Wall clock when the job stopped moving; `null` while it is running.
    * The Create activity strip expires settled-but-failed rows against this
    * (shared @studio partition rule) instead of keeping them forever. */
@@ -698,6 +700,7 @@ function loadPersistedState(raw: string | null): LoadedJobsState {
         result: p.result as SseCompleteEvent | null,
         error,
         state,
+        cancelling: false,
         // This boot just discovered that a formerly-running row lost its
         // stream, so keep its recovery row present and dismissible from now.
         // Genuinely settled history retains its original age.
@@ -946,6 +949,7 @@ function submitJob(
     result: null,
     error: null,
     state: "running",
+    cancelling: false,
     settledAt: null,
     chain: isChain
       ? {
@@ -1162,6 +1166,8 @@ function routeForDetachedJob(job: Job): StreamTarget | undefined {
 async function cancelJob(id: string): Promise<void> {
   const job = jobs.value.find((j) => j.id === id);
   if (!job || job.state !== "running") return;
+  if (job.cancelling) return;
+  job.cancelling = true;
   if (job.serverId) {
     try {
       await cancelQueueJob(job.serverId, routeForDetachedJob(job));
@@ -1170,9 +1176,11 @@ async function cancelJob(id: string): Promise<void> {
       // terminal frame is authoritative; otherwise cancellation was not
       // confirmed and the server-owned job must remain live locally.
       if (job.state !== "running") return;
+      job.cancelling = false;
       throw error;
     }
   } else if (job.streamStarted) {
+    job.cancelling = false;
     throw new Error(
       "Remote cancellation was not confirmed before the queue ID arrived.",
     );
@@ -1180,6 +1188,7 @@ async function cancelJob(id: string): Promise<void> {
   durabilityByJob.delete(id);
   job.controller.abort();
   job.state = "canceled";
+  job.cancelling = false;
   job.settledAt = Date.now();
   job.previewUrl = null;
   if (selectedJobId.value === id) selectedJobId.value = null;

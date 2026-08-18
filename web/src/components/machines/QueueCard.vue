@@ -28,6 +28,8 @@ const props = withDefaults(
     canReorder?: boolean;
     canPause?: boolean;
     canCancelAll?: boolean;
+    canCancelRunning?: boolean;
+    cancellingIds?: string[];
     paused?: boolean;
     /** Stale data (host offline) — dim and disable controls. */
     dimmed?: boolean;
@@ -36,6 +38,7 @@ const props = withDefaults(
     canReorder: false,
     canPause: false,
     canCancelAll: false,
+    canCancelRunning: false,
     paused: false,
     dimmed: false,
     models: () => [],
@@ -204,11 +207,12 @@ function queuedIndexOf(id: string): number {
           </div>
 
           <button
+            v-if="entry.state !== 'running' || canCancelRunning"
             type="button"
             class="qc__icon qc__icon--danger"
             data-test="queue-cancel"
-            :disabled="dimmed"
-            :aria-label="`Cancel ${modelLabel(entry.model)}`"
+            :disabled="dimmed || cancellingIds?.includes(entry.id)"
+            :aria-label="`${cancellingIds?.includes(entry.id) ? 'Cancelling' : 'Cancel'} ${modelLabel(entry.model)}`"
             @click="emit('cancel', entry.id)"
           >
             <Icon name="trash" :size="14" />

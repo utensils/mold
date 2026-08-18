@@ -4809,20 +4809,18 @@ async fn patch_queue_job(
     Ok(Json(entry))
 }
 
-/// Cancel a still-queued singleton generation or an active server-owned batch
-/// by its public parent ID. Ordinary running jobs return 409 because CUDA work
-/// cannot be safely preempted. A batch cancellation instead closes parent
-/// authority immediately, removes queued siblings, lets running siblings
-/// drain privately, and forbids publication.
+/// Cancel a queued or running singleton generation, or an active server-owned
+/// batch, by its public parent ID. Running inference is cooperatively stopped
+/// at the next model safe point; the request returns as soon as that authority
+/// is revoked rather than waiting for GPU teardown.
 #[utoipa::path(
     delete,
     path = "/api/queue/{id}",
     tag = "queue",
     params(("id" = String, Path, description = "Queue job id")),
     responses(
-        (status = 204, description = "Queued job cancelled"),
+        (status = 204, description = "Job cancellation accepted"),
         (status = 404, description = "Queue job not found"),
-        (status = 409, description = "Queue job is already running"),
     )
 )]
 async fn cancel_queue_job(
@@ -4833,9 +4831,9 @@ async fn cancel_queue_job(
     match state.job_registry.cancel_queued(&id) {
         Ok(()) => {}
         Err(crate::job_registry::QueuedJobCancelError::AlreadyRunning) => {
-            return Err(ApiError::queue_job_running(format!(
-                "queue job {id} is already running; only queued jobs can be cancelled"
-            )));
+            // `cancel_queued` already signalled (or latched) the exact running
+            // attempt token while holding the same lifecycle lock used by
+            // terminal publication.
         }
         // Some retained rows have no registry entry: a held job, and a queued
         // job on a boot with no dispatch owner. This endpoint is the
@@ -5149,7 +5147,7 @@ async fn server_capabilities(
             can_cancel_all: true,
             can_reorder: true,
             stable_device_pins: true,
-            cooperative_cancellation: false,
+            cooperative_cancellation: true,
             durable_queue,
             server_batch,
             server_batch_max_outputs: server_batch

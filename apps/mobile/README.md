@@ -130,9 +130,10 @@ pushed screen opened from the header.
   Keychain storage. Host detail shows telemetry, models-disk usage, queue,
   downloads, loaded models, and installed models (all using catalog display
   names rather than opaque `cv:` / `hf:` ids), with rename, retry, select,
-  unload, open-in-Models, and forget actions. Still-queued generation rows have
-  a 44pt two-tap **Cancel** action against that exact Keychain-authenticated
-  host; running work remains visible but cannot be preempted.
+  unload, open-in-Models, and forget actions. Queued rows and running singleton
+  generations have a 44pt two-tap **Cancel** action against that exact
+  Keychain-authenticated host when it advertises cooperative cancellation;
+  older hosts keep running work visible and read-only.
   Host detail's RAM card colors off the server's additive `host_memory`
   admission telemetry (headroom vs safety floor, mirroring the shared
   `studio/lib/hostMemory` levels; older servers keep the uncolored card), and

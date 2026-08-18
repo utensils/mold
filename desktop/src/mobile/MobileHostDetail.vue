@@ -418,7 +418,11 @@ async function unpinWork(workId: string): Promise<void> {
 }
 
 async function cancelQueuedJob(entry: QueueEntry): Promise<void> {
-  if (entry.state !== "queued" || cancellingQueueIds.value.has(entry.id)) return;
+  const cancellable =
+    entry.state === "queued" ||
+    (entry.state === "running" &&
+      deviceCapabilities.value?.queue?.cooperative_cancellation === true);
+  if (!cancellable || cancellingQueueIds.value.has(entry.id)) return;
   if (cancelConfirmId.value !== entry.id) {
     cancelConfirmId.value = entry.id;
     return;
@@ -734,17 +738,21 @@ onBeforeUnmount(() => {
               <span>{{ queueCode(entry) }}</span>
             </div>
             <button
-              v-if="entry.state === 'queued'"
+              v-if="
+                entry.state === 'queued' ||
+                (entry.state === 'running' &&
+                  deviceCapabilities?.queue?.cooperative_cancellation === true)
+              "
               type="button"
               class="mobile-inline-danger mobile-host-queue-cancel"
               :data-test="`host-detail-queue-cancel-${entry.id}`"
               :disabled="cancellingQueueIds.has(entry.id)"
               :aria-label="
                 cancellingQueueIds.has(entry.id)
-                  ? `Cancelling queued ${modelLabel(entry.model)} job`
+                  ? `Cancelling ${entry.state} ${modelLabel(entry.model)} job`
                   : cancelConfirmId === entry.id
-                    ? `Confirm cancellation of queued ${modelLabel(entry.model)} job`
-                    : `Cancel queued ${modelLabel(entry.model)} job`
+                    ? `Confirm cancellation of ${entry.state} ${modelLabel(entry.model)} job`
+                    : `Cancel ${entry.state} ${modelLabel(entry.model)} job`
               "
               @click="cancelQueuedJob(entry)"
               @blur="clearCancelConfirmation(entry.id)"

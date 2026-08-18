@@ -133,6 +133,7 @@ watchEffect(() => {
 });
 
 function cancel(job: Job) {
+  if (job.cancelling) return;
   void generation
     .cancel(job.clientId)
     .then((cancelled) => {
@@ -329,6 +330,18 @@ function deleteConfirmed() {
           </div>
           <ProgressBar :value="runningPct" :height="4" label="Print progress" />
         </button>
+        <button
+          type="button"
+          class="ms-activity__cancel"
+          data-test="activity-running-cancel"
+          :disabled="running.cancelling"
+          :aria-label="
+            running.cancelling ? `Cancelling ${running.prompt}` : `Cancel ${running.prompt}`
+          "
+          @click="cancel(running)"
+        >
+          {{ running.cancelling ? "…" : "✕" }}
+        </button>
       </template>
       <div v-else class="ms-activity__idle-spacer" />
       <div
@@ -352,10 +365,13 @@ function deleteConfirmed() {
         <button
           type="button"
           class="ms-activity__cancel"
-          :aria-label="`Cancel queued print: ${job.prompt}`"
+          :aria-label="
+            job.cancelling ? `Cancelling ${job.prompt}` : `Cancel queued print: ${job.prompt}`
+          "
+          :disabled="job.cancelling"
           @click.stop="cancel(job)"
         >
-          ✕
+          {{ job.cancelling ? "…" : "✕" }}
         </button>
       </div>
       <span

@@ -1106,11 +1106,7 @@ pub(crate) async fn execute_server_batch(
                 let _ = attempt.complete_without_artifact(&lease, ChildCompletion::Cancelled)?;
             }
             Err(error) => {
-                let completion = if error.contains("cancelled") {
-                    ChildCompletion::Cancelled
-                } else {
-                    ChildCompletion::Failed
-                };
+                let completion = child_completion_from_error(&error);
                 let disposition = attempt.complete_without_artifact(&lease, completion)?;
                 if disposition == CompletionDisposition::RetryChild && terminal_error.is_none() {
                     match grant_and_submit_child(
@@ -1434,11 +1430,7 @@ async fn resume_recovered_batch(
                 let _ = attempt.complete_without_artifact(&lease, ChildCompletion::Cancelled)?;
             }
             Err(error) => {
-                let completion = if error.contains("cancelled") {
-                    ChildCompletion::Cancelled
-                } else {
-                    ChildCompletion::Failed
-                };
+                let completion = child_completion_from_error(&error);
                 let disposition = attempt.complete_without_artifact(&lease, completion)?;
                 if disposition == CompletionDisposition::RetryChild && terminal_error.is_none() {
                     match grant_and_submit_child(
@@ -1519,9 +1511,29 @@ pub(crate) async fn resume_recovered_batches(
     Ok(report)
 }
 
+fn child_completion_from_error(error: &str) -> ChildCompletion {
+    if error.to_ascii_lowercase().contains("cancelled") {
+        ChildCompletion::Cancelled
+    } else {
+        ChildCompletion::Failed
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn user_cancelled_child_is_never_classified_for_retry() {
+        assert_eq!(
+            child_completion_from_error("Cancelled"),
+            ChildCompletion::Cancelled
+        );
+        assert_eq!(
+            child_completion_from_error("generation error"),
+            ChildCompletion::Failed
+        );
+    }
 
     fn profile(device: &str) -> BatchDeviceProfile {
         BatchDeviceProfile {
