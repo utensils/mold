@@ -37,6 +37,7 @@ import {
 } from "@studio/lib/negativePrompt";
 import { defaultVideoFps } from "@studio/lib/sequence";
 import { videoFramesForModelSelection } from "@studio/lib/videoDuration";
+import { pipelineForSettingsReuse } from "@studio/lib/outputReuse";
 import {
   familySupportsExtend,
   resolveExtendOverlapFrames,
@@ -635,7 +636,7 @@ export function applyMetadataToForm(
     sourceVideoPath: metadata.source_video_path ?? "",
     extendVideoPath: metadata.extend_video_path ?? "",
     extendOverlapFrames: metadata.extend_overlap_frames ?? null,
-    pipeline: metadata.pipeline ?? null,
+    pipeline: pipelineForSettingsReuse(metadata),
     icLoraControl: metadata.ic_lora_control ?? null,
     retakeRange: metadata.retake_range ?? null,
     spatialUpscale: metadata.spatial_upscale ?? null,

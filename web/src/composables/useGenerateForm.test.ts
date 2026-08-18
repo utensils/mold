@@ -569,6 +569,43 @@ describe("useGenerateForm", () => {
       expect(optedOut.negativePrompt).toBe("");
     });
 
+    it("does not restore an automatic chain's runtime pipeline as an authored override", () => {
+      const base = JSON.parse(
+        JSON.stringify(useGenerateForm().state.value),
+      ) as GenerateFormState;
+      const restored = applyMetadataToForm(
+        base,
+        {
+          prompt: "a long tracking shot",
+          model: "ltx-2-19b-distilled:fp8",
+          seed: 7,
+          steps: 8,
+          guidance: 1,
+          width: 768,
+          height: 512,
+          frames: 177,
+          fps: 24,
+          pipeline: "distilled",
+          output_mode: "one-shot",
+          chain: { stages: [{ frames: 97 }, { frames: 97 }] },
+        } as OutputMetadata,
+        {
+          models: [
+            makeModel({
+              name: "ltx-2-19b-distilled:fp8",
+              family: "ltx2",
+              default_frames: 97,
+              default_fps: 24,
+              frame_step: 8,
+            }),
+          ],
+        },
+      );
+
+      expect(restored.frames).toBe(177);
+      expect(restored.pipeline).toBeNull();
+    });
+
     it("an explicit clear restored before rows load survives the wan row arriving", () => {
       // Reuse settings with the inventory not yet resolved: the model row is
       // unknown, the default restores as "", and the saved `""` opt-out is

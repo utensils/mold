@@ -79,13 +79,24 @@ function onPointerDown() {
 }
 
 function onPointerUp(event: PointerEvent) {
+  finishPointerDrag(Number((event.target as HTMLInputElement).value));
+}
+
+function finishPointerDrag(fallbackValue: number) {
   if (!pointerDragging.value) return;
   pointerDragging.value = false;
-  const value =
-    pointerValue.value ?? Number((event.target as HTMLInputElement).value);
+  const value = pointerValue.value ?? fallbackValue;
   pointerValue.value = null;
   const snapped = snappedValue(value);
   if (snapped !== value) emit("update:modelValue", snapped);
+}
+
+// Mobile range controls can commit with `change` before WebKit delivers the
+// final pointerup to the input. Finish the same drag here so touch snapping is
+// not dependent on that browser-specific event order. Keyboard changes do not
+// set pointerDragging and therefore retain exact frame-grid movement.
+function onChange(event: Event) {
+  finishPointerDrag(Number((event.target as HTMLInputElement).value));
 }
 
 function onPointerCancel() {
@@ -104,29 +115,6 @@ function onPointerCancel() {
       class="ms-slider__track"
       :class="{ 'ms-slider__track--marked': positionedMarks.length > 1 }"
     >
-      <input
-        class="ms-slider__input"
-        type="range"
-        :min="min"
-        :max="max"
-        :step="step"
-        :value="modelValue"
-        :list="positionedMarks.length > 1 ? datalistId : undefined"
-        :aria-label="label"
-        :aria-valuetext="ariaValueText ?? readout"
-        :disabled="disabled"
-        @pointerdown="onPointerDown"
-        @pointerup="onPointerUp"
-        @pointercancel="onPointerCancel"
-        @input="onInput"
-      />
-      <datalist v-if="positionedMarks.length > 1" :id="datalistId">
-        <option
-          v-for="mark in positionedMarks"
-          :key="mark.value"
-          :value="mark.value"
-        />
-      </datalist>
       <div
         v-if="positionedMarks.length > 1"
         class="ms-slider__marks"
@@ -143,6 +131,30 @@ function onPointerCancel() {
           <b>{{ mark.label }}</b>
         </span>
       </div>
+      <input
+        class="ms-slider__input"
+        type="range"
+        :min="min"
+        :max="max"
+        :step="step"
+        :value="modelValue"
+        :list="positionedMarks.length > 1 ? datalistId : undefined"
+        :aria-label="label"
+        :aria-valuetext="ariaValueText ?? readout"
+        :disabled="disabled"
+        @pointerdown="onPointerDown"
+        @pointerup="onPointerUp"
+        @pointercancel="onPointerCancel"
+        @input="onInput"
+        @change="onChange"
+      />
+      <datalist v-if="positionedMarks.length > 1" :id="datalistId">
+        <option
+          v-for="mark in positionedMarks"
+          :key="mark.value"
+          :value="mark.value"
+        />
+      </datalist>
     </div>
   </div>
 </template>
@@ -176,6 +188,10 @@ function onPointerCancel() {
   height: 4px;
   border-radius: var(--radius-pill);
   background: var(--ce);
+}
+
+.ms-slider__track--marked .ms-slider__input {
+  grid-row: 2;
 }
 
 .ms-slider__input::-webkit-slider-thumb {
@@ -215,12 +231,14 @@ function onPointerCancel() {
 }
 
 .ms-slider__track--marked {
-  padding-top: 20px;
+  display: grid;
+  grid-template-rows: 20px auto;
 }
 
 .ms-slider__marks {
-  position: absolute;
-  inset: 0 8px auto;
+  grid-row: 1;
+  position: relative;
+  margin: 0 8px;
   height: 20px;
   pointer-events: none;
 }

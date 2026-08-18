@@ -133,8 +133,4 @@ function update(frames: number): void {
     transparent 24px
   );
 }
-
-.video-duration--touch :deep(.ms-slider__track--marked) {
-  padding-top: 0;
-}
 </style>

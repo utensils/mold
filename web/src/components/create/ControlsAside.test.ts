@@ -267,6 +267,9 @@ describe("ControlsAside", () => {
     });
     const duration = wrapper.getComponent(VideoDurationSlider);
     expect(duration.text()).toContain("4.0s");
+    expect(
+      duration.findAll(".ms-slider__mark b").map((mark) => mark.text()),
+    ).toEqual(["1×", "2×", "3×", "4×", "5×", "6×"]);
     duration.vm.$emit("update:frames", 241);
     await wrapper.vm.$nextTick();
     expect(wrapper.emitted("update:modelValue")?.at(-1)?.[0]).toMatchObject({

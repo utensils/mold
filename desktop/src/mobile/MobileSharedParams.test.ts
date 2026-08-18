@@ -62,6 +62,11 @@ describe("MobileSharedParams video duration", () => {
 
     const slider = wrapper.get("[data-test='mobile-duration'] input[type='range']");
     expect(wrapper.get("[data-test='mobile-duration']").text()).toContain("4.0s");
+    expect(
+      wrapper
+        .findAll("[data-test='mobile-duration'] .ms-slider__mark b")
+        .map((mark) => mark.text()),
+    ).toEqual(["1×", "2×", "3×", "4×", "5×", "6×"]);
     await slider.setValue("241");
     expect(form.frames).toBe(241);
   });

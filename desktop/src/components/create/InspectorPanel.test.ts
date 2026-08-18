@@ -83,6 +83,14 @@ describe("InspectorPanel — layout", () => {
     const wrapper = mount(InspectorPanel, { props: { form } });
     const duration = wrapper.getComponent(VideoDurationSlider);
     expect(duration.text()).toContain("4.0s");
+    expect(duration.findAll(".ms-slider__mark b").map((mark) => mark.text())).toEqual([
+      "1×",
+      "2×",
+      "3×",
+      "4×",
+      "5×",
+      "6×",
+    ]);
     expect(wrapper.find('[data-test="generate-audio-control"]').exists()).toBe(true);
     wrapper.getComponent(SwitchToggle).vm.$emit("update:modelValue", true);
     expect(form.enableAudio).toBe(true);
