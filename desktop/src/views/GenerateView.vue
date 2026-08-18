@@ -47,6 +47,7 @@ import {
   sequenceMotionTailFrames,
 } from "@studio/lib/sequence";
 import { OPTIONAL_PROMPT_GUIDANCE, promptRequired } from "@studio/lib/promptRequirement";
+import { applyAuthoredPrompt } from "@studio/lib/promptProvenance";
 import {
   emptyMinimaxH3AuthoringState,
   minimaxH3AuthoringError,
@@ -2324,7 +2325,11 @@ function retryExpansionAfterPull() {
 function appendPromptWord(word: string) {
   const trimmed = word.trim();
   if (!trimmed) return;
-  form.prompt = form.prompt.trim() ? `${form.prompt.trimEnd()}, ${trimmed}` : trimmed;
+  onPromptAuthored(form.prompt.trim() ? `${form.prompt.trimEnd()}, ${trimmed}` : trimmed);
+}
+
+function onPromptAuthored(prompt: string) {
+  applyAuthoredPrompt(form, prompt, quickExpansionSnapshot.value !== null);
 }
 
 /** Status line while the source is upscaled/refit ahead of the submit. */
@@ -3745,6 +3750,7 @@ onBeforeUnmount(() => {
             :preprocessing-status="preprocessingStatus"
             :history="promptHistory"
             :remix-source="remixSource"
+            @prompt-authored="onPromptAuthored"
             @generate="generate"
             @expand="expandForCurrentBatch()"
             @remix="remixForCurrentPrompt()"

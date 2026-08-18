@@ -30,6 +30,8 @@ import {
   type LaneKey,
 } from "../../lib/queueLanes";
 import type { OutputMetadata } from "../../lib/api/types";
+import QueuePlanWorkList from "@studio/components/QueuePlanWorkList.vue";
+import { queuePlanOnlyWork } from "@studio/lib/queuePlanPresentation";
 
 const props = withDefaults(
   defineProps<{
@@ -74,6 +76,12 @@ const lanes = computed(() => {
 });
 
 const hasEntries = computed(() => lanes.value.some((lane) => lane.entries.length > 0));
+const entryIds = computed(() =>
+  lanes.value.flatMap((lane) => lane.entries.map((entry) => entry.id)),
+);
+const hasPlanOnlyWork = computed(
+  () => queuePlanOnlyWork(snapshot.value?.plan, entryIds.value).length > 0,
+);
 const modelLabel = (name: string) =>
   modelDisplayNameForId(name, hostModels.modelsOn(props.host.id));
 
@@ -370,7 +378,18 @@ function loadQueueSettings(metadata: OutputMetadata) {
         </p>
       </div>
     </template>
-    <p v-else class="mt-1 text-caption text-ink-3" data-test="queue-empty">{{ emptyLabel }}</p>
+    <QueuePlanWorkList
+      class="mt-2"
+      :plan="snapshot?.plan ?? null"
+      :exclude-ids="entryIds"
+    />
+    <p
+      v-if="!hasEntries && !hasPlanOnlyWork"
+      class="mt-1 text-caption text-ink-3"
+      data-test="queue-empty"
+    >
+      {{ emptyLabel }}
+    </p>
 
     <QueueEntryDrawer
       v-if="queueDetail"

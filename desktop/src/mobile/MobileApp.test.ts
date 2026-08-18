@@ -376,6 +376,32 @@ afterEach(() => {
 });
 
 describe("MobileApp sequence generation", () => {
+  it("retires dormant original-prompt provenance when a new prompt is authored", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+    const form = wrapper.getComponent(MobileLoraControls).props("form") as GenerateForm;
+    form.originalPrompt = "the source for an earlier generated print";
+
+    await fieldControl("Prompt").setValue("a completely new print");
+
+    expect(form.originalPrompt).toBeNull();
+  });
+
+  it("preserves quick-expansion provenance when the rewrite is hand-edited", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+    const form = wrapper.getComponent(MobileLoraControls).props("form") as GenerateForm;
+    await fieldControl("Prompt").setValue("a lighthouse");
+    await wrapper.get("[data-test='mobile-prompt-expand']").trigger("click");
+    await flushPromises();
+
+    await fieldControl("Prompt").setValue("a hand-edited lighthouse rewrite");
+    await flushPromises();
+
+    expect(form.originalPrompt).toBe("a lighthouse");
+    expect(wrapper.find("[data-test='mobile-quick-expansion-stale']").exists()).toBe(true);
+  });
+
   it("acknowledges a tap through placement preview and blocks duplicate submission", async () => {
     const preview = deferred<ReturnType<typeof plannedPlacement>>();
     previewGenerationPlacement.mockReturnValueOnce(preview.promise);

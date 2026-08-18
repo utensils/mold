@@ -50,6 +50,7 @@ const emit = defineEmits<{
   expand: [];
   remix: [];
   restore: [];
+  "prompt-authored": [value: string];
   "update:remixSource": [value: "original" | "current"];
 }>();
 
@@ -87,10 +88,17 @@ function cycleHistory(direction: "prev" | "next") {
   const replacement = direction === "prev" ? cycler.prev(props.form.prompt) : cycler.next();
   if (replacement === null) return;
   props.form.prompt = replacement;
+  emit("prompt-authored", replacement);
   void nextTick(() => {
     const el = promptEl.value;
     el?.setSelectionRange(el.value.length, el.value.length);
   });
+}
+
+function onPromptInput(event: Event) {
+  cycler.reset();
+  growPrompt();
+  emit("prompt-authored", (event.target as HTMLTextAreaElement).value);
 }
 
 function onKeydown(e: KeyboardEvent) {
@@ -134,10 +142,7 @@ defineExpose({ focus, expand, record });
         :placeholder="placeholder"
         class="ms-composer__input"
         @keydown="onKeydown"
-        @input="
-          cycler.reset();
-          growPrompt();
-        "
+        @input="onPromptInput"
       />
       <StyleChips v-model="form.stylePreset" />
     </div>

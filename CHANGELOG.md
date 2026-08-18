@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Fixed stale prompt provenance across Create surfaces.** Starting a genuinely new prompt now retires any dormant `original_prompt` and transform authority left by a prior gallery reuse, Expand, Remix, prepared batch, history recall, or LoRA trigger-word insertion across web, desktop, iPhone, and the TUI. Active quick-transform snapshots still retain their source long enough for the explicit stale-work recovery flow.
+- **Fixed machine compute cards and queue visibility.** Desktop and web now keep multi-GPU cards consistently sized and constrain long model, device, and work identifiers so they cannot overlap adjacent metrics or controls. Host Queue panels also show scheduler-only active and staged work that is absent from the durable queue listing, while de-duplicating normal queue rows and leaving blocked work in its recovery section.
+
 - **The iPhone Generate control now acknowledges work immediately, and Library remains useful on slow or offline connections** ([#1121](https://github.com/utensils/mold/pull/1121)). Source preparation and placement checks now keep the button visibly busy and block duplicate taps without letting stale Expand/Remix work submit or permanently latch the control. Library metadata and bounded thumbnails are cached per server instance for fast/offline browsing, with deletion, host replacement, and delayed-write fences preventing stale prints from returning. Promptless prints now say that no prompt was used and offer **Reuse settings** instead of a disabled **Prompt unavailable** action; reuse restores their generation settings without displaying or resubmitting an unrelated previous prompt.
 
 ## [0.23.0] - 2026-08-17

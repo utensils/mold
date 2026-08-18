@@ -17,6 +17,7 @@ import HostQueuePanel from "./HostQueuePanel.vue";
 import { useConnectionStore } from "../../stores/connection";
 import { useHostsStore } from "../../stores/hosts";
 import { useJobsStore, type QueueEntry } from "../../stores/jobs";
+import type { QueuePlan } from "@studio/api/queuePlan";
 
 const stub = { template: "<div />" };
 let router: Router;
@@ -32,7 +33,11 @@ function queued(id: string, position: number, targetGpu: number): QueueEntry {
   };
 }
 
-async function mountPanel(gpuOrdinals: number[], entries: QueueEntry[]) {
+async function mountPanel(
+  gpuOrdinals: number[],
+  entries: QueueEntry[],
+  plan: QueuePlan | null = null,
+) {
   router = createRouter({
     history: createMemoryHistory(),
     routes: [
@@ -54,6 +59,7 @@ async function mountPanel(gpuOrdinals: number[], entries: QueueEntry[]) {
     paused: null,
     caps: { canPause: true, canCancelAll: true, canReorder: true },
     gpuOrdinals,
+    plan,
     error: null,
   };
   const host = hosts.all[0]!;
@@ -101,6 +107,33 @@ describe("HostQueuePanel", () => {
   it("shows the configurable empty line for a host with nothing queued", async () => {
     const { wrapper } = await mountPanel([], []);
     expect(wrapper.get("[data-test='queue-empty']").text()).toBe("Nothing queued");
+  });
+
+  it("shows scheduler-only work instead of an empty queue", async () => {
+    const { wrapper } = await mountPanel([], [], {
+      plan_version: 1,
+      state_version: 1,
+      optimizer_state: "optimized",
+      dirty_since_unix_ms: null,
+      next_replan_at_unix_ms: null,
+      work_items: [
+        {
+          work_id: "chain-stage-2",
+          parent_id: "chain-parent",
+          work_kind: "chain_stage",
+          chain_stage: 1,
+          priority_class: "user",
+          queue_rank: 0,
+          bypass_count: 0,
+          gpu: 2,
+          estimate_confidence: "medium",
+          activity_phase: "active",
+        },
+      ],
+    });
+
+    expect(wrapper.find("[data-test='queue-empty']").exists()).toBe(false);
+    expect(wrapper.findAll("[data-test='planned-queue-row']")).toHaveLength(1);
   });
 });
 

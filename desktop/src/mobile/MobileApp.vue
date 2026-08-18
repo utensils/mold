@@ -52,6 +52,7 @@ import {
   type OutputMode,
 } from "@studio/lib/sequence";
 import { promptPlaceholder, promptRequired } from "@studio/lib/promptRequirement";
+import { applyAuthoredPrompt } from "@studio/lib/promptProvenance";
 import {
   appendMinimaxH3GalleryImageReference,
   emptyMinimaxH3AuthoringState,
@@ -2411,7 +2412,11 @@ function clearHostScopedGenerationSelections(): void {
 function appendPromptWord(word: string): void {
   const trimmed = word.trim();
   if (!trimmed) return;
-  form.prompt = form.prompt.trim() ? `${form.prompt.trimEnd()}, ${trimmed}` : trimmed;
+  onPromptAuthored(form.prompt.trim() ? `${form.prompt.trimEnd()}, ${trimmed}` : trimmed);
+}
+
+function onPromptAuthored(prompt: string): void {
+  applyAuthoredPrompt(form, prompt, quickExpansionSnapshot.value !== null);
 }
 
 let templateLoadEpoch = 0;
@@ -5198,6 +5203,7 @@ onBeforeUnmount(() => {
                 v-model="form.prompt"
                 class="control"
                 :placeholder="promptFieldPlaceholder"
+                @input="onPromptAuthored(($event.target as HTMLTextAreaElement).value)"
               />
             </label>
             <MobileStyleChips v-model="form.stylePreset" />

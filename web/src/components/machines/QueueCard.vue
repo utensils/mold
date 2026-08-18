@@ -14,10 +14,14 @@ import Icon from "@ui/components/Icon.vue";
 import type { QueueEntry } from "../../types";
 import type { ModelInfoExtended } from "../../types";
 import { modelDisplayNameForId } from "@studio/lib/modelDisplay";
+import QueuePlanWorkList from "@studio/components/QueuePlanWorkList.vue";
+import type { QueuePlan } from "@studio/api/queuePlan";
+import { queuePlanOnlyWork } from "@studio/lib/queuePlanPresentation";
 
 const props = withDefaults(
   defineProps<{
     entries: QueueEntry[];
+    plan?: QueuePlan | null;
     models?: ModelInfoExtended[];
     /** Exact schedulable CUDA ordinals advertised by this host. */
     gpuOrdinals: number[];
@@ -35,6 +39,7 @@ const props = withDefaults(
     paused: false,
     dimmed: false,
     models: () => [],
+    plan: null,
   },
 );
 const modelLabel = (name: string) => modelDisplayNameForId(name, props.models);
@@ -49,6 +54,14 @@ const emit = defineEmits<{
 
 const queuedIds = computed(() =>
   props.entries.filter((e) => e.state === "queued").map((e) => e.id),
+);
+const entryIds = computed(() => props.entries.map((entry) => entry.id));
+const hasPlanOnlyWork = computed(
+  () => queuePlanOnlyWork(props.plan, entryIds.value).length > 0,
+);
+const visibleWorkCount = computed(
+  () =>
+    props.entries.length + queuePlanOnlyWork(props.plan, entryIds.value).length,
 );
 
 function laneValue(entry: QueueEntry): string {
@@ -79,7 +92,11 @@ function queuedIndexOf(id: string): number {
 <template>
   <CardSurface :padded="false">
     <div class="qc" :data-dimmed="dimmed ? 'true' : undefined">
-      <div class="qc__label">Queue</div>
+      <div class="qc__label">
+        Queue<template v-if="visibleWorkCount">
+          · {{ visibleWorkCount }} work</template
+        >
+      </div>
 
       <div
         v-if="canPause || (canCancelAll && queuedIds.length > 0) || paused"
@@ -111,11 +128,15 @@ function queuedIndexOf(id: string): number {
         </button>
       </div>
 
-      <p v-if="entries.length === 0" class="qc__empty" data-test="queue-empty">
+      <p
+        v-if="entries.length === 0 && !hasPlanOnlyWork"
+        class="qc__empty"
+        data-test="queue-empty"
+      >
         Nothing queued.
       </p>
 
-      <ul v-else class="qc__list">
+      <ul v-if="entries.length" class="qc__list">
         <li
           v-for="entry in entries"
           :key="entry.id"
@@ -194,6 +215,11 @@ function queuedIndexOf(id: string): number {
           </button>
         </li>
       </ul>
+      <QueuePlanWorkList
+        class="qc__planned"
+        :plan="plan"
+        :exclude-ids="entryIds"
+      />
     </div>
   </CardSurface>
 </template>
@@ -264,6 +290,10 @@ function queuedIndexOf(id: string): number {
   display: flex;
   flex-direction: column;
   gap: 4px;
+}
+
+.qc__planned {
+  margin-top: 8px;
 }
 
 .qc__row {

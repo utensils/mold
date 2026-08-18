@@ -9,6 +9,7 @@ import ModelMetadataBadges from "@studio/components/ModelMetadataBadges.vue";
 import DevicePanel from "@studio/components/DevicePanel.vue";
 import MinimaxH3InventoryPanel from "@studio/components/MinimaxH3InventoryPanel.vue";
 import { setQueueDevicePin } from "@studio/api/queuePlan";
+import { queuePlanOnlyWork } from "@studio/lib/queuePlanPresentation";
 import { modelKindLabel, modelKindValue } from "@studio/lib/modelMetadata";
 import { setDeviceEnabled } from "@studio/api/devices";
 import CatalogDetailDrawer from "../components/models/CatalogDetailDrawer.vue";
@@ -268,6 +269,7 @@ const h3Host = computed(() => [
 ]);
 
 const queueSnapshot = computed(() => jobs.queues[hostId.value] ?? null);
+const scheduledWorkCount = computed(() => queuePlanOnlyWork(queueSnapshot.value?.plan, []).length);
 const mutatingDeviceIds = ref(new Set<string>());
 const queuePaused = computed(() => queueSnapshot.value?.paused === true);
 
@@ -754,8 +756,10 @@ async function forget() {
                   PAUSED
                 </span>
                 <span class="edge-code" data-test="queue-depth">
+                  <template v-if="scheduledWorkCount"> {{ scheduledWorkCount }} work · </template>
                   {{ queueDepth ?? "—"
-                  }}<template v-if="queueCapacity">/{{ queueCapacity }}</template>
+                  }}<template v-if="queueCapacity">/{{ queueCapacity }}</template
+                  ><template v-if="scheduledWorkCount"> queued</template>
                 </span>
               </div>
               <HostQueuePanel
