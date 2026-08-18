@@ -10,9 +10,12 @@ fail() {
 }
 
 grep -Fq \
-  "group: desktop-\${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.event_name == 'push' && github.run_attempt == 1 && 'primary' || github.run_id }}" \
+  "group: desktop-\${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}" \
   "$workflow" \
-  || fail "workflow-level concurrency does not isolate PRs, reruns, and primary pushes"
+  || fail "workflow-level concurrency does not isolate PRs while keeping main runs independent"
+if grep -Fq "&& 'primary'" <<< "$(sed -n '/^concurrency:/,/^permissions:/p' "$workflow")"; then
+  fail "main pushes still share a workflow-level queue that lets Linux block macOS"
+fi
 
 workflow_concurrency="$(sed -n '/^concurrency:/,/^permissions:/p' "$workflow")"
 grep -Fq "cancel-in-progress: \${{ github.event_name == 'pull_request' }}" <<< "$workflow_concurrency" \
