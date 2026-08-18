@@ -31,6 +31,7 @@ import { useGalleryStore } from "../../stores/gallery";
 import { useHostsStore } from "../../stores/hosts";
 import { useHostModelsStore } from "../../stores/hostModels";
 import { useLiveActivityStore } from "../../stores/liveActivity";
+import { useJobsStore } from "../../stores/jobs";
 import { useToastStore } from "../../stores/toasts";
 import { badgeCount } from "../../lib/notifications";
 import { shortcutLabel } from "../../lib/platform";
@@ -38,6 +39,7 @@ import { modelDisplayNameForId } from "../../lib/models";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import { useOpenLiveWork } from "../../composables/useOpenLiveWork";
 import { thumbnailPath } from "../../lib/gallery/media";
+import type { FleetActiveWork } from "@studio/api/activity";
 
 const route = useRoute();
 const router = useRouter();
@@ -49,10 +51,12 @@ const contextMenu = useContextMenuStore();
 const hosts = useHostsStore();
 const hostModels = useHostModelsStore();
 const liveActivity = useLiveActivityStore();
+const jobs = useJobsStore();
 const gallery = useGalleryStore();
 const toasts = useToastStore();
 const draft = useSequenceDraftStore();
 const openLiveWork = useOpenLiveWork();
+const cancellingSharedJobs = ref<string[]>([]);
 
 // Workspace badges (§08 G11): Library counts prints developed since the last
 // visit; Machines shows a stop dot when any connected host is offline.
@@ -237,6 +241,57 @@ function jobMenu(job: Job): MenuEntry[] {
   ];
 }
 
+function sharedJobMenu(row: FleetActiveWork): MenuEntry[] {
+  return [
+    {
+      label: "Cancel",
+      danger: true,
+      disabled:
+        row.kind !== "generation" ||
+        !row.can_cancel ||
+        row.stale ||
+        cancellingSharedJobs.value.includes(row.key),
+      action: () => void cancelSharedJob(row),
+    },
+  ];
+}
+
+async function cancelSharedJob(row: FleetActiveWork) {
+  if (cancellingSharedJobs.value.includes(row.key)) return;
+  const snapshot = liveActivity.hosts[row.hostId];
+  const host = hosts.all.find((candidate) => candidate.id === row.hostId);
+  if (
+    !snapshot ||
+    snapshot.stale ||
+    snapshot.routeUrl !== row.routeUrl ||
+    snapshot.instanceId !== row.instanceId ||
+    host?.baseUrl !== row.routeUrl ||
+    host.instanceId !== row.instanceId
+  ) {
+    toasts.push("This machine changed. Refresh its jobs and try again.", "error");
+    void liveActivity.refresh();
+    return;
+  }
+
+  cancellingSharedJobs.value = [...cancellingSharedJobs.value, row.key];
+  try {
+    await jobs.cancelJob(row.hostId, row.id);
+    const current = liveActivity.hosts[row.hostId]?.items.find(
+      (item) => item.kind === row.kind && item.id === row.id,
+    );
+    if (current) {
+      current.can_cancel = false;
+      current.phase = "cancelling";
+    }
+    toasts.push("Cancelled");
+  } catch (error) {
+    toasts.push(error instanceof Error ? error.message : String(error), "error");
+  } finally {
+    await liveActivity.refresh();
+    cancellingSharedJobs.value = cancellingSharedJobs.value.filter((key) => key !== row.key);
+  }
+}
+
 function selectPrint(job: Job) {
   generation.select(job.clientId);
   draft.stopEditing();
@@ -318,7 +373,13 @@ function selectSequence(vm: ActivityJobVM & { kind: "sequence" }) {
         data-test="developing-jobs"
         class="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-2"
       >
-        <LiveActivityList :rows="sharedRows" compact interactive @select="openLiveWork" />
+        <LiveActivityList
+          :rows="sharedRows"
+          compact
+          interactive
+          @select="openLiveWork"
+          @contextmenu="(row, event) => contextMenu.open(event, sharedJobMenu(row))"
+        />
         <a
           v-for="vm in railSequences"
           :key="vm.key"

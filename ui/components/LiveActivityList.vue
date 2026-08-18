@@ -13,7 +13,10 @@ withDefaults(
   },
 );
 
-const emit = defineEmits<{ select: [row: FleetActiveWork] }>();
+const emit = defineEmits<{
+  select: [row: FleetActiveWork];
+  contextmenu: [row: FleetActiveWork, event: MouseEvent];
+}>();
 
 function title(row: FleetActiveWork): string {
   if (row.kind === "download")
@@ -52,6 +55,7 @@ function progress(row: FleetActiveWork): number | null {
         class="live-activity-surface"
         :data-test="interactive ? `live-activity-select-${row.key}` : undefined"
         @click="interactive && emit('select', row)"
+        @contextmenu="interactive && emit('contextmenu', row, $event)"
       >
         <span
           class="live-activity-dot"
