@@ -41,6 +41,7 @@ import { claimPairingSession, parseMobilePairingPayload } from "@studio/api/pair
 import { imageDimensionsFromBase64 } from "@studio/lib/imageDimensions";
 import {
   canvasMatchesSourceResolution,
+  resolveSourceConditioningTarget,
   resolveSourceResolution,
   type SourceResolutionResult,
 } from "@studio/lib/sourceResolution";
@@ -3535,12 +3536,17 @@ async function prepareGenerationRequest(
         },
       )) ?? emptyMinimaxH3AuthoringState();
   } else if (draftCaps.sourceImageMode === "qwen-edit" && draft.imageAttachments[0]) {
+    const sourceTarget = resolveSourceConditioningTarget(
+      { width: draft.width, height: draft.height },
+      selectedGenerationModel.value ?? draft.family,
+      draft.pipeline,
+    );
     const result = await applySourceFitPreprocess(
       {
         source: draft.imageAttachments[0],
         mask: null,
         policy: coerceSourceFitForMaskless(draft.sourceFit),
-        target: { width: draft.width, height: draft.height },
+        target: sourceTarget,
       },
       {
         ops: domCanvasOps,

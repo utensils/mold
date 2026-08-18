@@ -322,8 +322,10 @@ describe("GenerateView source-fit submit path", () => {
     form.prompt = "edit the target";
     form.model = qwenEdit.name;
     form.family = qwenEdit.family;
-    form.width = 1024;
-    form.height = 1024;
+    // Output may use Qwen's larger generation canvas; conditioning has its
+    // own model-profile ceiling and must be capped independently.
+    form.width = 1328;
+    form.height = 1328;
     form.imageAttachments = ["TARGET", "REFERENCE"];
     form.sourceFit = { mode: "lanczos-resize" };
     useUiStore().generateTick++;

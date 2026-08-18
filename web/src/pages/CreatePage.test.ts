@@ -879,6 +879,7 @@ describe("CreatePage layout and behavior", () => {
       base64: "MASK",
     };
     await nextTick();
+    await flushPromises();
 
     await wrapper.get("[data-test='composer-submit']").trigger("click");
     await flushPromises();
@@ -1177,6 +1178,13 @@ describe("CreatePage layout and behavior", () => {
       expect(req.edit_images).toEqual(["FITTED_TARGET", "REFERENCE"]);
       expect(req.mask_image).toBeUndefined();
       expect(req.source_image).toBeUndefined();
+      expect(getContext.mock.results[0]?.value?.drawImage).toHaveBeenCalledWith(
+        expect.anything(),
+        0,
+        0,
+        1440,
+        720,
+      );
       expect(
         form.state.value.imageAttachments.map((image) => image.base64),
       ).toEqual(["TARGET", "REFERENCE"]);

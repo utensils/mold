@@ -17,8 +17,13 @@ import {
   type InlineGenerationMediaField,
 } from "../lib/generateValidation";
 import { base64ToDataUrl, fileToBase64, isStillImageFile } from "../lib/image";
-import { coerceSourceFitForMaskless } from "@studio/lib/sourceFit";
+import {
+  coerceSourceFitForMaskless,
+  MASKLESS_SOURCE_FIT_OPTIONS,
+  sourceFitHelp,
+} from "@studio/lib/sourceFit";
 import { strengthSemantics } from "@studio/lib/strengthSemantics";
+import { sourceConditioningLimitLabel } from "@studio/lib/sourceResolution";
 import MobileImagePickerSheet, { type MobilePickedImage } from "./MobileImagePickerSheet.vue";
 import { effectiveGenerationRecipe } from "@studio/lib/generationProfile";
 import SourceMediaWells, { type SourceMediaSlot } from "@studio/components/SourceMediaWells.vue";
@@ -72,6 +77,10 @@ const strength = computed(() => strengthSemantics(props.form.family));
 /** The model's own image-attachment shape — the single shared policy. */
 const plan = computed(() => sourceMediaPlan(caps.value));
 const isAttachmentMode = computed(() => plan.value.kind === "attachments");
+const editFitMode = computed(() => coerceSourceFitForMaskless(props.form.sourceFit).mode);
+const sourceLimitLabel = computed(() =>
+  sourceConditioningLimitLabel(props.model ?? props.form.family, props.form.pipeline),
+);
 
 // ── MiniMax H3 FL2VA boundaries ─────────────────────────────────────────────
 // The same standard wells, backed by the dedicated H3 authoring state and the
@@ -469,10 +478,13 @@ function applyMask(mask: string): void {
           data-test="mobile-h3-source-fit"
           @change="setSourceFit"
         >
-          <option value="crop-fill">Crop fill</option>
-          <option value="pad-fit">Pad fit</option>
-          <option value="lanczos-resize">Lanczos resize</option>
-          <option value="upscale-then-fit">Upscale then fit</option>
+          <option
+            v-for="option in MASKLESS_SOURCE_FIT_OPTIONS"
+            :key="option.value"
+            :value="option.value"
+          >
+            {{ option.label }}
+          </option>
         </select>
       </label>
     </fieldset>
@@ -510,16 +522,23 @@ function applyMask(mask: string): void {
         <span>Source fit</span>
         <select
           class="control"
-          :value="coerceSourceFitForMaskless(form.sourceFit).mode"
+          :value="editFitMode"
           data-test="mobile-source-fit"
           @change="setSourceFit"
         >
-          <option value="crop-fill">Crop fill</option>
-          <option value="pad-fit">Pad fit</option>
-          <option value="lanczos-resize">Lanczos resize</option>
-          <option value="upscale-then-fit">Upscale then fit</option>
+          <option
+            v-for="option in MASKLESS_SOURCE_FIT_OPTIONS"
+            :key="option.value"
+            :value="option.value"
+          >
+            {{ option.label }}
+          </option>
         </select>
       </label>
+      <p class="mobile-source-note" data-test="mobile-source-fit-help">
+        {{ sourceFitHelp(editFitMode) }} Qwen conditioning limit: {{ sourceLimitLabel }} from this
+        model; Output size is separate.
+      </p>
       <p class="mobile-source-note">
         {{
           flux2Dev

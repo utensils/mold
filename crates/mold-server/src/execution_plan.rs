@@ -1629,7 +1629,7 @@ pub(crate) fn insufficient_vram_error(rejections: &[DeviceInfeasibility]) -> Exe
                 .map(|advice| format!(" ({advice})"))
                 .unwrap_or_default();
             format!(
-                "{} needs ~{:.1} GB of ~{:.1} GB usable{advice}",
+                "{} needs ~{:.1} GB but only ~{:.1} GB is currently available for this request{advice}",
                 rejection.device_id,
                 rejection.predicted_peak_bytes as f64 / 1_000_000_000.0,
                 rejection.available_bytes as f64 / 1_000_000_000.0,
@@ -2348,6 +2348,7 @@ fn build_plan(
     .map_or(device.available_vram_bytes, |grant| {
         grant.min(device.available_vram_bytes)
     });
+    let recent_oom_reduced_budget = device_budget < device.available_vram_bytes;
     let initial_memory = crate::memory_preflight::estimate_generation_memory_for_request(
         context.request,
         context.paths,
@@ -2437,11 +2438,19 @@ fn build_plan(
         );
     }
     if memory.fits_available_memory != Some(true) {
+        let mut advice = ltx2_shape_advice(context, device);
+        if recent_oom_reduced_budget {
+            let cooldown = "this request is temporarily limited after a recent CUDA OOM; retry after the cooldown or reduce the output size".to_string();
+            advice = Some(match advice {
+                Some(existing) => format!("{existing}; {cooldown}"),
+                None => cooldown,
+            });
+        }
         rejections.push(DeviceInfeasibility {
             device_id: device.id.clone(),
             predicted_peak_bytes: memory.peak_memory_bytes,
-            available_bytes: device.available_vram_bytes,
-            advice: ltx2_shape_advice(context, device),
+            available_bytes: device_budget,
+            advice,
         });
         return None;
     }
@@ -5212,6 +5221,21 @@ mod tests {
             resolve_execution_plans(&config, &request, &devices(&[0]), false),
             Err(ExecutionPlanError::InsufficientVram { .. })
         ));
+    }
+
+    #[test]
+    fn insufficient_vram_message_names_the_actual_request_budget() {
+        let error = insufficient_vram_error(&[DeviceInfeasibility {
+            device_id: "cuda:0".into(),
+            predicted_peak_bytes: 16_600_000_000,
+            available_bytes: 15_000_000_000,
+            advice: Some("retry after the cooldown".into()),
+        }]);
+
+        assert_eq!(
+            error.to_string(),
+            "no device has enough effective VRAM capacity for a safe execution plan: cuda:0 needs ~16.6 GB but only ~15.0 GB is currently available for this request (retry after the cooldown)"
+        );
     }
 
     #[test]

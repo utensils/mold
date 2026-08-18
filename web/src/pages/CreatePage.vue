@@ -62,6 +62,7 @@ import { isAudioCompletion } from "@studio/lib/ltx2Pipeline";
 import { imageDimensionsFromBase64 } from "@studio/lib/imageDimensions";
 import {
   canvasMatchesSourceResolution,
+  resolveSourceConditioningTarget,
   resolveSourceResolution,
   type SourceResolutionResult,
 } from "@studio/lib/sourceResolution";
@@ -2348,10 +2349,17 @@ async function prepareStillSourceToRequest(
 
   if ((override?.settings?.frames ?? form.state.value.frames) && !maskless)
     return { source, mask };
-  const target = {
+  const requestedTarget = {
     width: override?.settings?.width ?? form.state.value.width,
     height: override?.settings?.height ?? form.state.value.height,
   };
+  const target = isQwenImageEditFamily(family)
+    ? resolveSourceConditioningTarget(
+        requestedTarget,
+        currentModel.value ?? family,
+        form.state.value.pipeline,
+      )
+    : requestedTarget;
   if (source.width === target.width && source.height === target.height) {
     return { source, mask };
   }

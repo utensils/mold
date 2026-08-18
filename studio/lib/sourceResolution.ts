@@ -41,7 +41,12 @@ function positiveInteger(
 }
 
 function floorAligned(value: number, alignment: number): number {
-  return Math.floor(value / alignment) * alignment;
+  // Exact square caps such as sqrt(1024² / 1328²) can land one floating-point
+  // ulp below 1024 and otherwise lose an entire 16 px alignment step. Nudge
+  // only that machine-precision boundary before flooring; real fractions are
+  // unchanged.
+  const boundaryEpsilon = Number.EPSILON * Math.max(1, Math.abs(value)) * 8;
+  return Math.floor((value + boundaryEpsilon) / alignment) * alignment;
 }
 
 function minimumAligned(alignment: number): number {
@@ -176,6 +181,29 @@ export function resolveSourceResolution(
       width * height <= maxPixels &&
       (maxAxis === null || Math.max(width, height) <= maxAxis),
   };
+}
+
+/**
+ * Cap a request canvas to the model's independent source-conditioning
+ * contract. Qwen Image Edit can render at the ordinary output ceiling while
+ * its VAE input stays at roughly 1 MP; clients use this immediately before
+ * source-fit preprocessing so they never upload a larger intermediate only
+ * for the server to shrink it again.
+ */
+export function resolveSourceConditioningTarget(
+  canvas: SourceDimensions,
+  model: ModelResolutionContract | string,
+  pipeline?: string | null,
+): SourceDimensions {
+  return resolveSourceResolution(canvas, model, pipeline).output;
+}
+
+/** Human-ready source ceiling from the same model contract preprocessing uses. */
+export function sourceConditioningLimitLabel(
+  model: ModelResolutionContract | string,
+  pipeline?: string | null,
+): string {
+  return formatMegapixels(sourceMaxPixelsForModel(model, pipeline));
 }
 
 /** True when the current canvas still follows the model-safe source result. */

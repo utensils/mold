@@ -13,10 +13,16 @@ import {
 import { effectiveGenerationRecipe } from "@studio/lib/generationProfile";
 import { sourceImageValidationError } from "@studio/lib/sourceImageCapability";
 import { submitsExtend } from "@studio/lib/extend";
-import { coerceSourceFitForMaskless } from "@studio/lib/sourceFit";
+import {
+  coerceSourceFitForMaskless,
+  MASKLESS_SOURCE_FIT_OPTIONS,
+  SOURCE_FIT_OPTIONS,
+  sourceFitHelp,
+} from "@studio/lib/sourceFit";
 import { strengthSemantics } from "@studio/lib/strengthSemantics";
 import { blobToBase64 } from "../../lib/base64";
 import { imageDimensionsFromBase64 } from "@studio/lib/imageDimensions";
+import { sourceConditioningLimitLabel } from "@studio/lib/sourceResolution";
 import {
   emptyMinimaxH3AuthoringState,
   setMinimaxH3BoundaryFile,
@@ -83,6 +89,12 @@ const plan = computed(() => sourceMediaPlan(caps.value));
 /** Family-scoped label for the shared `strength` wire field (#1055). */
 const strength = computed(() => strengthSemantics(props.family));
 const flux2Dev = computed(() => isFlux2DevModel(props.modelValue.model));
+const sourceLimitLabel = computed(() =>
+  sourceConditioningLimitLabel(
+    selectedModel.value ?? props.family,
+    props.modelValue.pipeline,
+  ),
+);
 
 const kicker = computed(() =>
   plan.value.kind === "h3-boundaries"
@@ -214,20 +226,12 @@ function onH3Clear(slot: SourceMediaSlot) {
 }
 
 // ── Fit / strength / mask (single-source refinement) ──────────────────
-const fitOptions = [
-  { value: "pad-fit", label: "Contain" },
-  { value: "crop-fill", label: "Cover" },
-  { value: "pad-repaint", label: "Pad + repaint" },
-  { value: "lanczos-resize", label: "Lanczos" },
-  { value: "upscale-then-fit", label: "Upscale + fit" },
-] as const;
+const fitOptions = SOURCE_FIT_OPTIONS;
 const fitMode = computed(
   () => props.modelValue.sourceFitPolicy?.mode ?? "pad-repaint",
 );
 /** H3 has no repaint mask; pad-repaint is never offered for its boundaries. */
-const masklessFitOptions = fitOptions.filter(
-  (option) => option.value !== "pad-repaint",
-);
+const masklessFitOptions = MASKLESS_SOURCE_FIT_OPTIONS;
 const masklessFitMode = computed(
   () =>
     coerceSourceFitForMaskless(
@@ -360,6 +364,10 @@ function clearControl() {
           label="Fit to canvas"
           @update:model-value="setFit"
         />
+        <p class="smp__hint" data-test="source-fit-help">
+          {{ sourceFitHelp(masklessFitMode) }} Qwen conditioning limit:
+          {{ sourceLimitLabel }} from this model; Output size is separate.
+        </p>
       </div>
       <p class="smp__hint">
         {{
