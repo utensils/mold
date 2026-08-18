@@ -326,6 +326,13 @@ fn render_recipe(out: &mut String, recipe: &GenerationRecipeProfile) {
         resolution.max_pixels,
     )
     .unwrap();
+    if let Some(source_max_pixels) = resolution.source_max_pixels {
+        writeln!(
+            out,
+            "- Source input maximum: `{source_max_pixels}` pixels (independent of the output maximum)."
+        )
+        .unwrap();
+    }
     writeln!(
         out,
         "- Defaults: `{}x{}`, {} steps, guidance {}.",

@@ -2387,6 +2387,38 @@ async function preprocessSourceFit(
       preprocessingStatus.value = null;
     }
   }
+  if (draftCaps.sourceImageMode === "qwen-edit" && draft.imageAttachments[0]) {
+    try {
+      const result = await applySourceFitPreprocess(
+        {
+          source: draft.imageAttachments[0],
+          mask: null,
+          policy: coerceSourceFitForMaskless(draft.sourceFit),
+          target: { width: draft.width, height: draft.height },
+        },
+        {
+          ops: domCanvasOps,
+          cache: sourceFitCache,
+          upscale: (image, model) =>
+            upscaleImage({
+              model,
+              image,
+              ...(route ? { target: route.target } : {}),
+              onProgress: (message) => (preprocessingStatus.value = message),
+            }),
+          onStatus: (message) => (preprocessingStatus.value = message),
+        },
+      );
+      if (result.source) draft.imageAttachments[0] = result.source;
+      return true;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      toasts.push(`Source preprocessing failed: ${message}`, "error");
+      return false;
+    } finally {
+      preprocessingStatus.value = null;
+    }
+  }
   if (!draftCaps.supportsImg2img || draftCaps.sourceImageMode !== "single") return true;
   if (!draft.sourceImage) return true;
   try {
@@ -2433,8 +2465,8 @@ function sourcePreprocessingNeedsRoute(draft: ReturnType<typeof cloneGenerateFor
   const draftCaps = generationCapabilitiesForFamily(draft.family, draft.model);
   return (
     draftCaps.supportsImg2img &&
-    draftCaps.sourceImageMode === "single" &&
-    Boolean(draft.sourceImage) &&
+    ((draftCaps.sourceImageMode === "single" && Boolean(draft.sourceImage)) ||
+      (draftCaps.sourceImageMode === "qwen-edit" && Boolean(draft.imageAttachments[0]))) &&
     draft.sourceFit.mode === "upscale-then-fit" &&
     Boolean(draft.sourceFit.upscalerModel)
   );

@@ -153,14 +153,14 @@ describe("SourceImageWell", () => {
   });
 
   describe("qwen-edit Target + Reference strip", () => {
-    it("renders the picture strip instead of the single well", () => {
+    it("renders the shared Target well, fit choices, and ordered picture strip", () => {
       const form = formFor("qwen-image-edit");
       form.imageAttachments = ["T", "R"];
       const wrapper = mount(SourceImageWell, { props: { form }, attachTo: document.body });
       expect(wrapper.find("[data-test='attachment-strip']").exists()).toBe(true);
-      // The single-mode surface (source fit, strength) must not render.
-      expect(wrapper.find("[data-test='source-fit-policy']").exists()).toBe(false);
-      expect(wrapper.find("[data-test='source-choose-gallery']").exists()).toBe(false);
+      expect(wrapper.text()).toContain("Target");
+      expect(wrapper.find("[data-test='source-remove']").exists()).toBe(true);
+      expect(wrapper.find("[data-test='source-fit-policy']").exists()).toBe(true);
     });
 
     it("keeps the single well for every other family (no strip)", () => {
@@ -207,7 +207,9 @@ describe("SourceImageWell", () => {
       const form = formFor("qwen-image-edit");
       const wrapper = mount(SourceImageWell, { props: { form }, attachTo: document.body });
       await wrapper.get("[data-test='add-edit-image']").trigger("click");
-      const picker = wrapper.findComponent(ImagePickerModal);
+      const picker = wrapper
+        .findAllComponents(ImagePickerModal)
+        .find((candidate) => candidate.props("multiple") === true)!;
       expect(picker.props("multiple")).toBe(true);
       picker.vm.$emit("pick", [
         { filename: "a.png", base64: "A" },

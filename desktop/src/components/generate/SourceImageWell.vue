@@ -95,12 +95,38 @@ function onMaskApplied(mask: string) {
 // are References (web Composer parity — the order ships as `edit_images`).
 
 const editPickerOpen = ref(false);
+const targetPickerOpen = ref(false);
 const dragIndex = ref<number | null>(null);
 
 function onEditPicked(picked: PickedImage[]) {
   if (picked.length === 0) return;
   const next = [...props.form.imageAttachments, ...picked.map((p) => p.base64)];
   props.form.imageAttachments = flux2Dev.value ? next.slice(0, 4) : next;
+}
+function replaceEditTarget(base64: string) {
+  props.form.imageAttachments = [base64, ...props.form.imageAttachments.slice(1)];
+  props.form.sourceFit = { mode: "lanczos-resize" };
+}
+function onTargetPicked(picked: PickedImage[]) {
+  if (picked[0]) replaceEditTarget(picked[0].base64);
+}
+async function onTargetFile(_slot: SourceMediaSlot, file: File) {
+  if (
+    file.type !== "image/png" &&
+    file.type !== "image/jpeg" &&
+    !(!file.type && isStillImageFile(file.name))
+  ) {
+    toasts.push("Only PNG or JPEG images can be used here.", "error");
+    return;
+  }
+  try {
+    replaceEditTarget(await fileToBase64(file));
+  } catch {
+    toasts.push("Couldn't read the image.", "error");
+  }
+}
+function clearEditTarget() {
+  props.form.imageAttachments = props.form.imageAttachments.slice(1);
 }
 function removeAttachmentAt(index: number) {
   const next = props.form.imageAttachments.slice();
@@ -312,6 +338,32 @@ function setSourceFitMode(e: Event) {
 <template>
   <!-- Ordered Qwen edit pictures or FLUX.2 reference images. -->
   <div v-if="plan.kind === 'attachments'">
+    <SourceMediaWells
+      v-if="plan.primary === 'target'"
+      :plan="plan"
+      :source="form.imageAttachments[0] ? { data: form.imageAttachments[0] } : null"
+      :error="conditioningError"
+      @file="onTargetFile"
+      @gallery="targetPickerOpen = true"
+      @clear="clearEditTarget"
+    />
+    <template v-if="plan.primary === 'target' && form.imageAttachments[0]">
+      <label class="mt-3 block text-caption text-ink-2" for="edit-source-fit-policy">
+        Source fit
+      </label>
+      <select
+        id="edit-source-fit-policy"
+        :value="coerceSourceFitForMaskless(form.sourceFit).mode"
+        data-test="source-fit-policy"
+        class="border-edge mt-1 h-7 w-full rounded-control border bg-bath px-1.5 text-body text-ink"
+        @change="setSourceFitMode"
+      >
+        <option value="crop-fill">Crop fill</option>
+        <option value="pad-fit">Pad fit</option>
+        <option value="lanczos-resize">Lanczos resize</option>
+        <option value="upscale-then-fit">Upscale then fit</option>
+      </select>
+    </template>
     <div class="mb-2 flex items-center gap-2">
       <span class="edge-code">Pictures</span>
       <div class="border-edge h-px flex-1 border-t" />
@@ -391,6 +443,14 @@ function setSourceFitMode(e: Event) {
       }}
     </p>
 
+    <ImagePickerModal
+      :open="targetPickerOpen"
+      :multiple="false"
+      title="Edit target"
+      gallery-only
+      @pick="onTargetPicked"
+      @close="targetPickerOpen = false"
+    />
     <ImagePickerModal
       :open="editPickerOpen"
       :multiple="true"

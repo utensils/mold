@@ -1627,13 +1627,14 @@ Provenance: [Upstream](https://github.com/QwenLM/Qwen-Image/blob/6b5e1f5cec987d4
 
 ### Profile `qwen-image-edit.qwen-image-edit-2511`
 
-Schema 1 · hash `20790f77b3bbee4261ab6366410898296ecd63a0ab3b30e7c11b1a0a383fbc48` · default recipe `default`
+Schema 1 · hash `d4fd975e7eaf4241dc2b5e1910b0fcdfb0a681d7c2ed830d325486f671a096ed` · default recipe `default`
 
 Models: `qwen-image-edit-2511:bf16`, `qwen-image-edit-2511:q2`, `qwen-image-edit-2511:q3`, `qwen-image-edit-2511:q4`, `qwen-image-edit-2511:q5`, `qwen-image-edit-2511:q6`, `qwen-image-edit-2511:q8`.
 
 #### Default (`default`)
 
 - Resolution: source driven; alignment `16`; minimum `64x64`; maximum `1800000` pixels; axis limit `none`; aspect range `unbounded`.
+- Source input maximum: `1048576` pixels (independent of the output maximum).
 - Defaults: `1024x1024`, 50 steps, guidance 4.
 - Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
 
@@ -1647,17 +1648,18 @@ Models: `qwen-image-edit-2511:bf16`, `qwen-image-edit-2511:q2`, `qwen-image-edit
 | `3:2` | `1584x1056` (recommended) |
 | `2:3` | `1056x1584` (recommended) |
 
-Provenance: MoldPolicy `Mold source-driven Qwen Image Edit guidance`, qualified: `true`, evidence: `source fitting preserves the input aspect on the dynamic /16 canvas; optional shape presets reuse Mold's qualified Qwen Image aspect set`.
+Provenance: MoldPolicy `Mold source-driven Qwen Image Edit guidance`, qualified: `true`, evidence: `source fitting preserves the input aspect on the dynamic /16 canvas and caps edit inputs at upstream's 1024x1024 VAE area; optional shape presets reuse Mold's qualified Qwen Image aspect set`.
 
 ### `qwen-image-edit-lightning:fp8`
 
-Schema 1 · hash `4d53cca9b1a529ecc841fe9b570d6e15feb3657a61f9cf90d905a2be2ce3963a` · default recipe `default`
+Schema 1 · hash `639c5e7d0b8161ed92aa400532a03c459e79683f40899a5ddfc9f6f48f23751a` · default recipe `default`
 
 Models: `qwen-image-edit-lightning:fp8`.
 
 #### Default (`default`)
 
 - Resolution: source driven; alignment `16`; minimum `64x64`; maximum `1800000` pixels; axis limit `none`; aspect range `unbounded`.
+- Source input maximum: `1048576` pixels (independent of the output maximum).
 - Defaults: `1024x1024`, 4 steps, guidance 1.
 - Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
 
@@ -1671,7 +1673,7 @@ Models: `qwen-image-edit-lightning:fp8`.
 | `3:2` | `1584x1056` (recommended) |
 | `2:3` | `1056x1584` (recommended) |
 
-Provenance: MoldPolicy `Mold source-driven Qwen Image Edit guidance`, qualified: `true`, evidence: `source fitting preserves the input aspect on the dynamic /16 canvas; optional shape presets reuse Mold's qualified Qwen Image aspect set`.
+Provenance: MoldPolicy `Mold source-driven Qwen Image Edit guidance`, qualified: `true`, evidence: `source fitting preserves the input aspect on the dynamic /16 canvas and caps edit inputs at upstream's 1024x1024 VAE area; optional shape presets reuse Mold's qualified Qwen Image aspect set`.
 
 ## `sd15`
 

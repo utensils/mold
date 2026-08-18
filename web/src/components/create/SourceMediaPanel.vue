@@ -49,6 +49,7 @@ const props = withDefaults(
 const emit = defineEmits<{
   "update:modelValue": [value: GenerateFormState];
   "open-picker": [];
+  "open-target-picker": [];
   "clear-source": [];
   "open-end-frame-picker": [];
   "clear-end-frame": [];
@@ -150,7 +151,10 @@ async function onWellFile(slot: SourceMediaSlot, file: File) {
     // A source-matched canvas differs only by the model's pixel grid or a
     // safe downscale — resize exactly instead of manufacturing repaint bands.
     patch({
-      imageAttachments: [image],
+      imageAttachments:
+        plan.value.kind === "attachments"
+          ? [image, ...props.modelValue.imageAttachments.slice(1)]
+          : [image],
       sourceFitPolicy: { mode: "lanczos-resize" },
     });
   } else {
@@ -158,12 +162,17 @@ async function onWellFile(slot: SourceMediaSlot, file: File) {
   }
 }
 function onWellGallery(slot: SourceMediaSlot) {
-  if (slot === "source") emit("open-picker");
-  else emit("open-end-frame-picker");
+  if (slot === "source") {
+    if (plan.value.kind === "attachments") emit("open-target-picker");
+    else emit("open-picker");
+  } else emit("open-end-frame-picker");
 }
 function onWellClear(slot: SourceMediaSlot) {
-  if (slot === "source") emit("clear-source");
-  else emit("clear-end-frame");
+  if (slot === "source") {
+    if (plan.value.kind === "attachments") {
+      patch({ imageAttachments: props.modelValue.imageAttachments.slice(1) });
+    } else emit("clear-source");
+  } else emit("clear-end-frame");
 }
 
 // ── MiniMax H3 FL2VA boundaries ───────────────────────────────────────
@@ -273,15 +282,32 @@ function clearControl() {
 
     <!-- Ordered picture strip (Qwen edit / FLUX.2 references). -->
     <template v-if="plan.kind === 'attachments'">
+      <SourceMediaWells
+        v-if="plan.primary === 'target'"
+        :plan="plan"
+        :source="
+          sourceAttachment
+            ? {
+                data: sourceAttachment.base64,
+                mimeType: sourceAttachment.mime,
+                filename: sourceAttachment.filename,
+              }
+            : null
+        "
+        :error="uploadError"
+        @file="onWellFile"
+        @gallery="onWellGallery"
+        @clear="onWellClear"
+      />
       <p
-        v-if="plan.required"
+        v-if="plan.required && plan.primary === null"
         class="smp__required"
         data-test="source-required-badge"
       >
         Required — this checkpoint renders from an image.
       </p>
       <button
-        v-if="!hasSource"
+        v-if="!hasSource && plan.primary === null"
         type="button"
         class="smp__dropzone"
         data-test="source-attach"
@@ -291,7 +317,7 @@ function clearControl() {
         {{ flux2Dev ? "Attach references or " : "Attach images or "
         }}<span class="smp__accent">browse</span>
       </button>
-      <div v-else>
+      <div v-else-if="plan.primary === null">
         <div class="smp__source-row">
           <span class="smp__source-name">
             {{ modelValue.imageAttachments[0]?.filename }}
@@ -316,6 +342,24 @@ function clearControl() {
         >
           Add more or <span class="smp__accent">browse</span>
         </button>
+      </div>
+      <button
+        v-else-if="hasSource"
+        type="button"
+        class="smp__dropzone smp__dropzone--compact"
+        data-test="source-attach-more"
+        @click="emit('open-picker')"
+      >
+        Add references or <span class="smp__accent">browse</span>
+      </button>
+      <div v-if="plan.primary === 'target' && hasSource" class="smp__field">
+        <label class="smp__label">Fit to canvas</label>
+        <SegmentedControl
+          :model-value="masklessFitMode"
+          :options="masklessFitOptions"
+          label="Fit to canvas"
+          @update:model-value="setFit"
+        />
       </div>
       <p class="smp__hint">
         {{

@@ -100,8 +100,11 @@ Use regular img2img families when you need `--strength`-based denoising.
 Use `qwen-image-edit` when you want instruction-following edits against one or
 more reference images.
 
-In Mold Studio's web Create workspace, open **Advanced → Edit images** to attach
-the ordered target and reference images. Ordinary source-image families instead
+In Mold Studio, Qwen Image Edit uses the same Target image well as other
+source-driven models on web, desktop, and iPhone. Its ordered picture strip
+still adds and reorders References, while the Target offers contain, crop,
+Lanczos resize, and upscale-and-fit controls and automatically follows the
+model's 1 MP source ceiling. Other source-image families also
 show a strength slider plus all five fit policies — labelled **Denoise
 strength** for SD-lineage img2img (higher = more change) and **Source
 strength** for LTX-2 image-to-video (higher keeps more of the source; 1.0

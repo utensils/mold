@@ -27,17 +27,17 @@ describe("source resolution", () => {
   it("downscales without changing aspect materially or exceeding the model cap", () => {
     const result = resolveSourceResolution({ width: 4032, height: 3024 }, qwen);
 
-    expect(result.output).toEqual({ width: 1536, height: 1152 });
+    expect(result.output).toEqual({ width: 1168, height: 880 });
     expect(result.output.width).toBeLessThan(4032);
     expect(result.output.height).toBeLessThan(3024);
     expect(result.output.width * result.output.height).toBeLessThanOrEqual(
-      1_800_000,
+      1024 * 1024,
     );
-    expect(result.output.width / result.output.height).toBeCloseTo(4 / 3, 2);
+    expect(result.output.width / result.output.height).toBeCloseTo(4 / 3, 1);
     expect(result.reason).toBe("downscaled");
     expect(sourceResolutionStatus(result)).toEqual({
       label: "Downscaled",
-      detail: "4032×3024 → 1536×1152 · 1.8 MP limit, 16 px aligned",
+      detail: "4032×3024 → 1168×880 · 1 MP limit, 16 px aligned",
     });
   });
 

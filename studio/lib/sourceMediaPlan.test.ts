@@ -48,11 +48,13 @@ describe("sourceMediaPlan", () => {
       kind: "attachments",
       max: FLUX2_DEV_MAX_ATTACHMENTS,
       required: false,
+      primary: null,
     });
     expect(plan("qwen-image-edit")).toEqual({
       kind: "attachments",
       max: null,
-      required: false,
+      required: true,
+      primary: "target",
     });
   });
 

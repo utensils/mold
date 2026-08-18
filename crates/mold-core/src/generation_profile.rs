@@ -122,6 +122,11 @@ pub struct ResolutionProfile {
     pub min_height: u32,
     #[ts(type = "number")]
     pub max_pixels: u64,
+    /// Optional source-image canvas ceiling. Source-driven models can accept
+    /// a larger output canvas than their conditioning encoder should ingest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(type = "number | null")]
+    pub source_max_pixels: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_axis_pixels: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1008,6 +1013,7 @@ fn recipe(
             min_width: 0,
             min_height: 0,
             max_pixels: 0,
+            source_max_pixels: None,
             max_axis_pixels: None,
             min_aspect_ratio: None,
             max_aspect_ratio: None,
@@ -1027,6 +1033,8 @@ fn recipe(
             min_width: alignment.max(64),
             min_height: alignment.max(64),
             max_pixels: validation::max_pixels_for_family_composed(Some(family), composition),
+            source_max_pixels: (family == "qwen-image-edit")
+                .then_some(validation::QWEN_IMAGE_EDIT_SOURCE_MAX_PIXELS),
             max_axis_pixels: validation::max_axis_pixels_for_family_composed(
                 Some(family),
                 composition,
@@ -1387,7 +1395,7 @@ fn provenance(family: &str) -> Vec<ProfileProvenance> {
             revision: None,
             qualified: true,
             evidence: Some(
-                "source fitting preserves the input aspect on the dynamic /16 canvas; optional shape presets reuse Mold's qualified Qwen Image aspect set"
+                "source fitting preserves the input aspect on the dynamic /16 canvas and caps edit inputs at upstream's 1024x1024 VAE area; optional shape presets reuse Mold's qualified Qwen Image aspect set"
                     .to_string(),
             ),
         }];
@@ -1656,6 +1664,10 @@ mod tests {
             resolve_generation_profile(input("qwen-image-edit-2511:q4", "qwen-image-edit"));
         let recipe = profile.default_recipe().unwrap();
         assert_eq!(recipe.resolution.domain, ResolutionDomain::SourceDriven);
+        assert_eq!(
+            recipe.resolution.source_max_pixels,
+            Some(validation::QWEN_IMAGE_EDIT_SOURCE_MAX_PIXELS)
+        );
         assert_eq!(recipe.provenance[0].kind, ProvenanceKind::MoldPolicy);
         assert!(recipe.provenance[0].source.contains("source-driven"));
         assert!(resolution_qualification_record("qwen-image-edit").is_none());

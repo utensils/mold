@@ -124,7 +124,8 @@ const QWEN_DIT_MMQ_ACTIVATION_BYTES: u64 = 4;
 const QWEN_CFG_HEADROOM_SAFETY_NUM: u64 = 3;
 const QWEN_CFG_HEADROOM_SAFETY_DEN: u64 = 2;
 const QWEN_VAE_TILE_SIZES: [u32; 3] = [64, 32, 16];
-const QWEN_IMAGE_EDIT_VAE_AREA: u32 = 1024 * 1024;
+const QWEN_IMAGE_EDIT_VAE_AREA: u32 =
+    mold_core::validation::QWEN_IMAGE_EDIT_SOURCE_MAX_PIXELS as u32;
 const QWEN_IMAGE_EDIT_SYSTEM_PROMPT: &str = "Describe the key features of the input image (color, shape, size, texture, objects, background), then explain how the user's text instruction should alter or modify the image. Generate a new image that meets the user's requirements while maintaining consistency with the original input where appropriate.";
 
 /// Minimum free VRAM for BF16 Qwen2.5-VL 7B text encoder on GPU.
@@ -647,12 +648,39 @@ impl QwenImageEngine {
 
     fn qwen_image_edit_image_dims(image: &[u8], target_area: u32) -> Result<(u32, u32)> {
         let img = image::load_from_memory(image)?;
-        Ok(fit_to_target_area(
-            img.width().max(1),
-            img.height().max(1),
+        Ok(Self::qwen_image_edit_dims(
+            img.width(),
+            img.height(),
             target_area,
-            16,
         ))
+    }
+
+    fn qwen_image_edit_dims(source_width: u32, source_height: u32, target_area: u32) -> (u32, u32) {
+        let source_ratio = source_width.max(1) as f64 / source_height.max(1) as f64;
+        let (mut width, mut height) =
+            fit_to_target_area(source_width.max(1), source_height.max(1), target_area, 16);
+        // `fit_to_target_area` rounds to the nearest grid point and can land
+        // one block above the advertised area. Tighten downward, choosing the
+        // axis that least perturbs the source aspect, so the model contract is
+        // a ceiling rather than a guideline.
+        while width.saturating_mul(height) > target_area && (width > 16 || height > 16) {
+            if width == 16 {
+                height = ((target_area / width) / 16).max(1) * 16;
+                continue;
+            }
+            if height == 16 {
+                width = ((target_area / height) / 16).max(1) * 16;
+                continue;
+            }
+            let width_error = ((width - 16) as f64 / height as f64 - source_ratio).abs();
+            let height_error = (width as f64 / (height - 16) as f64 - source_ratio).abs();
+            if width_error <= height_error {
+                width -= 16;
+            } else {
+                height -= 16;
+            }
+        }
+        (width, height)
     }
 
     fn pack_latents_4d(latents: &Tensor) -> Result<Tensor> {
@@ -3423,7 +3451,6 @@ impl QwenImageEngine {
             .unwrap_or(QWEN_EMPTY_NEGATIVE_PROMPT);
         let formatted_prompt = Self::qwen_image_edit_prompt(&req.prompt, edit_images.len());
         let formatted_negative = Self::qwen_image_edit_prompt(negative_prompt, edit_images.len());
-
         tracing::info!(
             prompt = %req.prompt,
             seed,
@@ -4982,6 +5009,17 @@ mod tests {
         assert_eq!((width, height), (1360, 768));
         assert_eq!(width % 16, 0);
         assert_eq!(height % 16, 0);
+    }
+
+    #[test]
+    fn qwen_image_edit_dims_enforce_ceiling_when_one_axis_hits_the_minimum() {
+        for (width, height) in [(16, 200_000), (200_000, 16)] {
+            let (fitted_width, fitted_height) =
+                QwenImageEngine::qwen_image_edit_dims(width, height, QWEN_IMAGE_EDIT_VAE_AREA);
+            assert!(fitted_width * fitted_height <= QWEN_IMAGE_EDIT_VAE_AREA);
+            assert_eq!(fitted_width % 16, 0);
+            assert_eq!(fitted_height % 16, 0);
+        }
     }
 
     #[test]

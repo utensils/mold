@@ -302,6 +302,9 @@ describe("MobileSourceControls", () => {
     const wrapper = mount(MobileSourceControls, { props: { form } });
 
     expect(wrapper.find("[data-test='mobile-source-input']").exists()).toBe(false);
+    expect(wrapper.text()).toContain("Target");
+    expect(wrapper.find("[data-test='source-remove']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='mobile-source-fit']").exists()).toBe(true);
     expect(wrapper.get("[data-test='mobile-edit-role-0']").text()).toBe("Target");
     expect(wrapper.get("[data-test='mobile-edit-role-1']").text()).toBe("Reference");
     expect(wrapper.get("[data-test='mobile-edit-title-2']").text()).toBe("Picture 3");

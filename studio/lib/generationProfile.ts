@@ -180,6 +180,7 @@ function isResolutionProfile(value: unknown): value is ResolutionProfile {
         !positiveIntegerValue(value.min_height) ||
         !positiveIntegerValue(value.max_pixels)) ||
     !nullableFinite(value.max_axis_pixels) ||
+    !nullableFinite(value.source_max_pixels) ||
     !nullableFinite(value.min_aspect_ratio) ||
     !nullableFinite(value.max_aspect_ratio)
   ) {
