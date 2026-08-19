@@ -363,7 +363,14 @@ function offerExpansionPull(model: string, route: HostRoute | null): void {
  * separately from the print.
  */
 function expansionRouteFor(generation: HostRoute | null): HostRoute | null {
-  if (!routing.multiHost.value) return generation;
+  // Single-host web dispatches relative to the origin and has no route object
+  // to reason over; routing it would turn that into an absolute URL for no
+  // gain. A missing expander there still surfaces through the request's own
+  // 422, and clearing the offer here keeps that retry from being blocked.
+  if (!routing.multiHost.value) {
+    expansionPull.value = null;
+    return generation;
+  }
   const decision = resolveExpansionRoute(
     expansionPolicyForSelection(routing.targetId.value, {
       auto: AUTO_TARGET_ID,
