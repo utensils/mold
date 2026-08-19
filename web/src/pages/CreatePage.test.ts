@@ -794,6 +794,41 @@ describe("CreatePage layout and behavior", () => {
     expect(draft.enableAudio).toBe(true);
   });
 
+  it("returns the canvas authority to the model on reset, and undo restores it (#1166)", async () => {
+    const stubs: Record<string, Component> = pageStubs();
+    stubs.ControlsAside = defineComponent({
+      name: "ControlsAside",
+      props: { canvasIntent: { type: String, default: "" } },
+      template:
+        "<aside data-test='controls-stub' :data-intent='canvasIntent'>" +
+        "<button data-test='controls-reset' @click=\"$emit('reset-settings')\">reset</button>" +
+        "<button data-test='controls-source' @click=\"$emit('canvas-intent', 'source')\">source</button>" +
+        "</aside>",
+    });
+    const wrapper = mount(CreatePage, { global: { stubs } });
+    await flushPromises();
+
+    await wrapper.get("[data-test='controls-source']").trigger("click");
+    expect(
+      wrapper.get("[data-test='controls-stub']").attributes("data-intent"),
+    ).toBe("source");
+
+    await wrapper.get("[data-test='controls-reset']").trigger("click");
+    expect(
+      wrapper.get("[data-test='controls-stub']").attributes("data-intent"),
+    ).toBe("model-default");
+
+    const notifications = useNotifications();
+    const settingsToast = notifications.toasts.find((t) =>
+      /settings/i.test(t.text),
+    );
+    runToastAction(settingsToast!.id);
+    await flushPromises();
+    expect(
+      wrapper.get("[data-test='controls-stub']").attributes("data-intent"),
+    ).toBe("source");
+  });
+
   it("guides a first pull when no models are installed (cold start)", async () => {
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     await flushPromises();

@@ -38,25 +38,16 @@ import { generationCapabilitiesForFamily } from "../../lib/capabilities";
 import { sourceMediaPlan } from "@studio/lib/sourceMediaPlan";
 import SourceImageWell from "../generate/SourceImageWell.vue";
 import { advancedActiveCount } from "../../lib/advancedCount";
-import { aspectsSupportedByPresets } from "@ui/lib/resolution";
+import { effectiveGenerationRecipe } from "@studio/lib/generationProfile";
 import {
-  effectiveGenerationRecipe,
-  closestProfileAspect,
-  profileAspectOptions,
-} from "@studio/lib/generationProfile";
-import {
-  aspectIdFor,
-  closestResolutionPreset,
-  megapixelLabel,
-  presetsForAspectGroup,
-  presetsForModel,
-  presetsNearRatio,
-} from "../../lib/resolutions";
-import {
-  canvasMatchesSourceResolution,
-  resolveSourceResolution,
-  sourceResolutionStatus,
-} from "@studio/lib/sourceResolution";
+  intentForCanvas,
+  resolveOutputShape,
+  sizeForFamily,
+  SOURCE_FAMILY_ID,
+  type CanvasIntent,
+  type OutputShapeInput,
+} from "@studio/lib/outputShape";
+import { resolveSourceResolution } from "@studio/lib/sourceResolution";
 import {
   profileStepsValidationError,
   resolutionValidationError,
@@ -83,14 +74,15 @@ const props = withDefaults(
     /** Per-model chain caps for the selected model, when Create has them —
      * sizes new clips' default frames on the Output switch. */
     chainLimits?: ChainLimits | null;
-    sourceCanvasMode?: "automatic" | "source" | "manual";
+    /** Why the canvas holds its current size — the shape resolver's authority. */
+    canvasIntent?: CanvasIntent;
   }>(),
-  { lastSeed: null, chainLimits: null, sourceCanvasMode: "manual" },
+  { lastSeed: null, chainLimits: null, canvasIntent: "model-default" },
 );
 
 const emit = defineEmits<{
   "append-word": [word: string];
-  "source-canvas-mode": [mode: "source" | "manual"];
+  "canvas-intent": [intent: CanvasIntent];
   /** The picker's "Not installed" row: offer the pull for this exact id. */
   "pull-missing-model": [model: string];
 }>();
@@ -400,124 +392,36 @@ const sourceResolution = computed(() =>
       )
     : null,
 );
+/** One resolver drives the chips, the pills, the badge and the sentence. */
+const shapeInput = computed<OutputShapeInput>(() => ({
+  model: selectedModel.value ?? null,
+  family: props.form.family,
+  pipeline: props.form.pipeline,
+  width: props.form.width,
+  height: props.form.height,
+  source: sourceDimensions.value,
+  intent: props.canvasIntent,
+}));
+const outputShape = computed(() => resolveOutputShape(shapeInput.value));
 const followsSource = computed(
   () =>
-    sourceResolution.value !== null &&
-    canvasMatchesSourceResolution(
-      { width: props.form.width, height: props.form.height },
-      sourceResolution.value,
-    ),
+    outputShape.value.state === "follows-source" || outputShape.value.state === "matches-source",
 );
-const sourceStatus = computed(() =>
-  sourceResolution.value ? sourceResolutionStatus(sourceResolution.value) : null,
-);
-const canonicalShapeOptions = computed(() => {
-  const model = selectedModel.value;
-  return model
-    ? profileAspectOptions(model, props.form.pipeline)
-    : aspectsSupportedByPresets(presetsForModel(props.form.family));
-});
-const shapeOptions = computed(() => {
-  const source = sourceResolution.value;
-  return source
-    ? [
-        ...canonicalShapeOptions.value,
-        {
-          id: "source",
-          label: "Source",
-          ratio: source.output.width / source.output.height,
-        },
-      ]
-    : canonicalShapeOptions.value;
-});
-/** Always answers, any domain: an exact preset keeps `exact: true`, a custom
- * size from Advanced maps to the nearest group so a chip still lights up —
- * marked approximate ("≈") rather than left blank. */
-const closestShape = computed(() =>
-  selectedModel.value
-    ? closestProfileAspect(
-        selectedModel.value,
-        props.form.pipeline,
-        props.form.width,
-        props.form.height,
-      )
-    : null,
-);
-const canonicalShapeId = computed(
-  () =>
-    (selectedModel.value
-      ? closestShape.value?.id
-      : aspectIdFor(props.form.width, props.form.height)) ?? "",
-);
-/** An explicit Source pick wins when a canvas also matches a canonical
- * bucket. Otherwise the model-authored aspect is the natural default. */
-const explicitShapeId = ref<string | null>(null);
-const shapeId = computed(() => {
-  const explicit = explicitShapeId.value;
-  if ((props.sourceCanvasMode === "source" || explicit === "source") && followsSource.value)
-    return "source";
-  if (explicit && explicit !== "source" && canonicalShapeId.value === explicit) {
-    return explicit;
-  }
-  return canonicalShapeId.value || (followsSource.value ? "source" : "");
-});
-/** The active chip approximates a custom size (never the Source chip). */
-const shapeApproximate = computed(
-  () => shapeId.value !== "source" && shapeId.value !== "" && closestShape.value?.exact === false,
-);
+const shapeOptions = computed(() => outputShape.value.families);
+const shapeId = computed(() => outputShape.value.selectedFamilyId);
+const shapeApproximate = computed(() => outputShape.value.approximate);
 const resolutionRatio = computed(() => props.form.width / props.form.height);
-const resolutionPresets = computed(() => {
-  const exactGroup = presetsForAspectGroup(selectedModel.value, props.form.pipeline, shapeId.value);
-  return exactGroup.length > 0
-    ? exactGroup
-    : presetsNearRatio(
-        presetsForModel(selectedModel.value ?? props.form.family, props.form.pipeline),
-        resolutionRatio.value,
-      );
-});
-const resolutionOptions = computed(() => {
-  const presets = resolutionPresets.value.map((preset, index, all) => ({
-    mp: (preset.width * preset.height) / 1_000_000,
-    label: megapixelLabel(preset.width, preset.height),
-    sub:
-      all.length === 1
-        ? "Native"
-        : index === 0
-          ? "Small"
-          : index === all.length - 1
-            ? "Native"
-            : "Standard",
-    width: preset.width,
-    height: preset.height,
-  }));
-  const exact = presets.some(
-    (option) => option.width === props.form.width && option.height === props.form.height,
-  );
-  if (exact) return presets;
-  const currentMp = (props.form.width * props.form.height) / 1_000_000;
-  return [
-    {
-      mp: currentMp,
-      label: followsSource.value ? (sourceStatus.value?.label ?? "Source") : "Custom",
-      sub: followsSource.value ? "Matched" : "Manual",
-      width: props.form.width,
-      height: props.form.height,
-    },
-    ...presets.filter((option) => Math.abs(option.mp - currentMp) > Number.EPSILON),
-  ];
-});
-const resolutionMp = computed(() => {
-  const exact = resolutionOptions.value.find(
-    (option) => option.width === props.form.width && option.height === props.form.height,
-  );
-  if (exact) return exact.mp;
-  const current = (props.form.width * props.form.height) / 1_000_000;
-  return (
-    [...resolutionOptions.value].sort(
-      (a, b) => Math.abs(a.mp - current) - Math.abs(b.mp - current),
-    )[0]?.mp ?? current
-  );
-});
+const resolutionOptions = computed(() =>
+  outputShape.value.sizes.map((size) => ({
+    id: size.id,
+    mp: (size.width * size.height) / 1_000_000,
+    label: size.label,
+    sub: size.mark ? `${size.megapixels} · ${size.mark}` : size.megapixels,
+    width: size.width,
+    height: size.height,
+  })),
+);
+const resolutionSizeId = computed(() => outputShape.value.selectedSizeId);
 const resolutionWarning = computed(() =>
   resolutionValidationWarning(
     props.form.width,
@@ -539,49 +443,25 @@ const stepsError = computed(() =>
 );
 
 function onShape(id: string) {
-  explicitShapeId.value = id;
-  if (id === "source") {
-    matchSource();
-    return;
-  }
-  const aspect = shapeOptions.value.find((option) => option.id === id);
-  if (!aspect) return;
-  emit("source-canvas-mode", "manual");
-  const exactGroup = presetsForAspectGroup(selectedModel.value, props.form.pipeline, id);
-  const preset = closestResolutionPreset(
-    exactGroup.length > 0
-      ? exactGroup
-      : presetsNearRatio(
-          presetsForModel(selectedModel.value ?? props.form.family, props.form.pipeline),
-          aspect.ratio,
-        ),
-    props.form.width,
-    props.form.height,
-  );
-  if (preset) {
-    props.form.width = preset.width;
-    props.form.height = preset.height;
-  }
+  const size = sizeForFamily(id, shapeInput.value);
+  if (!size) return;
+  emit("canvas-intent", id === SOURCE_FAMILY_ID ? "source" : "manual");
+  props.form.width = size.width;
+  props.form.height = size.height;
 }
 function matchSource() {
   const source = sourceResolution.value;
   if (!source) return;
-  // Matching the source is itself an explicit pick — without this, a source
-  // whose size is also a canonical bucket would re-light the earlier chip.
-  explicitShapeId.value = "source";
-  emit("source-canvas-mode", "source");
+  emit("canvas-intent", "source-exact");
   props.form.width = source.output.width;
   props.form.height = source.output.height;
 }
-function onResolution(mp: number) {
-  const preset = resolutionPresets.value.find(
-    (candidate) => (candidate.width * candidate.height) / 1_000_000 === mp,
-  );
-  if (preset) {
-    emit("source-canvas-mode", "manual");
-    props.form.width = preset.width;
-    props.form.height = preset.height;
-  }
+function onResolution(id: string | number) {
+  const size = outputShape.value.sizes.find((candidate) => candidate.id === id);
+  if (!size) return;
+  emit("canvas-intent", intentForCanvas(shapeInput.value, size));
+  props.form.width = size.width;
+  props.form.height = size.height;
 }
 
 // ── Seed (mode is UI-owned to avoid focus loss — see the previous ParamPanel) ─
@@ -623,6 +503,10 @@ const batchMax = computed(() => (batchLocked.value ? 1 : MAX_BATCH_SIZE));
 // the prompt, the model, and any prepared batch size survive.
 function resetSettings() {
   resetFormToModelDefaults(props.form, selectedModel.value);
+  // The canvas is part of what Reset restores, so its authority resets with
+  // it — otherwise the next model change would re-snap the reset canvas back
+  // onto the attached source (#1166).
+  emit("canvas-intent", "model-default");
   if (isSequence.value) draft.enableAudio = false;
 }
 </script>
@@ -712,19 +596,13 @@ function resetSettings() {
       <div class="ms-field">
         <div class="ms-field__label">Resolution</div>
         <ResolutionSelector
-          :model-value="resolutionMp"
+          :model-value="resolutionSizeId"
           :ratio="resolutionRatio"
           :options="resolutionOptions"
           :resolved-width="form.width"
           :resolved-height="form.height"
-          :custom-label="sourceStatus?.label"
-          :status="
-            sourceStatus
-              ? followsSource
-                ? sourceStatus.detail
-                : `${sourceStatus.detail} · manual output`
-              : undefined
-          "
+          :custom-label="sourceResolution ? outputShape.badge : undefined"
+          :status="outputShape.status"
           @update:model-value="onResolution"
         />
         <button
@@ -963,6 +841,7 @@ function resetSettings() {
         :camera-controls-loaded="cameraControlsLoaded"
         :camera-unsupported-reason="cameraUnsupportedReason"
         @append-word="emit('append-word', $event)"
+        @canvas-intent="emit('canvas-intent', $event)"
       />
     </div>
   </aside>

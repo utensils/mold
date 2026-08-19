@@ -16,12 +16,12 @@ function mountPicker(
   family = "flux",
   sourceDimensions: { width: number; height: number } | null = null,
   model: ModelEntry | null = null,
-  sourceCanvasMode: "automatic" | "source" | "manual" = "manual",
+  canvasIntent: "source" | "source-exact" | "model-default" | "manual" = "model-default",
 ) {
   const state = reactive<PickerState>({ width, height, family });
   const Harness = defineComponent({
     components: { MobileResolutionPicker },
-    setup: () => ({ state, sourceDimensions, model, sourceCanvasMode }),
+    setup: () => ({ state, sourceDimensions, model, canvasIntent }),
     template: `
       <MobileResolutionPicker
         v-model:width="state.width"
@@ -29,7 +29,7 @@ function mountPicker(
         :family="state.family"
         :model="model"
         :source-dimensions="sourceDimensions"
-        :source-canvas-mode="sourceCanvasMode"
+        :canvas-intent="canvasIntent"
       />
     `,
   });
@@ -49,19 +49,19 @@ describe("MobileResolutionPicker", () => {
       "Selected resolution: 1024 by 1024 pixels, 1:1, Square.",
     );
     expect(wrapper.find("[data-orientation]").exists()).toBe(false);
-    expect(wrapper.get("[data-shape='square']").attributes("aria-checked")).toBe("true");
+    expect(wrapper.get("[data-shape='1:1']").attributes("aria-checked")).toBe("true");
     const active = wrapper.get("[data-test='mobile-resolution-tier'] [aria-checked='true']");
-    expect(active.get(".ms-seg__label").text()).toBe("1 MP");
-    expect(active.get(".ms-seg__sub").text()).toBe("High");
+    expect(active.get(".ms-seg__label").text()).toBe("1024×1024");
+    expect(active.get(".ms-seg__sub").text()).toBe("1 MP");
 
-    await wrapper.get("[data-shape='portrait']").trigger("click");
+    await wrapper.get("[data-shape='3:4']").trigger("click");
     expect(state).toMatchObject({ width: 768, height: 1024 });
     expect(wrapper.get("[data-test='mobile-resolution-announcement']").text()).toBe(
       "Selected resolution: 768 by 1024 pixels, 3:4, Portrait.",
     );
-    expect(wrapper.get("[data-shape='portrait']").attributes("aria-checked")).toBe("true");
+    expect(wrapper.get("[data-shape='3:4']").attributes("aria-checked")).toBe("true");
 
-    await wrapper.get("[data-shape='tall']").trigger("click");
+    await wrapper.get("[data-shape='9:16']").trigger("click");
     expect(state).toMatchObject({ width: 576, height: 1024 });
   });
 
@@ -71,14 +71,16 @@ describe("MobileResolutionPicker", () => {
     expect(wrapper.find("[data-test='mobile-resolution-tier']").exists()).toBe(true);
     expect(wrapper.findAll(".ms-shape__btn").map((button) => button.text())).toEqual([
       "1:1",
-      "3:4",
       "4:3",
+      "3:4",
+      "3:2",
+      "2:3",
       "16:9",
       "9:16",
     ]);
-    await wrapper.get("[data-shape='tall']").trigger("click");
+    await wrapper.get("[data-shape='9:16']").trigger("click");
     expect(state).toMatchObject({ width: 928, height: 1664 });
-    await wrapper.get("[data-shape='wide']").trigger("click");
+    await wrapper.get("[data-shape='16:9']").trigger("click");
     expect(state).toMatchObject({ width: 1664, height: 928 });
   });
 
@@ -97,45 +99,51 @@ describe("MobileResolutionPicker", () => {
     const { wrapper, state } = mountPicker(896, 1152, "qwen-image-edit", sourceDimensions);
 
     expect(wrapper.get("[data-test='mobile-source-resolution-status']").text()).toContain(
-      "Matches source · 896×1152",
+      "896×1152 · Matches source",
     );
     expect(wrapper.find("[data-test='mobile-match-source-resolution']").exists()).toBe(false);
 
     state.width = 1024;
     state.height = 1024;
     await flushPromises();
-    expect(wrapper.get("[data-test='mobile-source-resolution-status']").text()).toContain(
-      "output is 1024×1024",
-    );
+    const status = wrapper.get("[data-test='mobile-source-resolution-status']").text();
+    expect(status).toContain("Manual");
+    expect(status).toContain("1024×1024");
+    expect(status).not.toContain("Matches source");
     await wrapper.get("[data-test='mobile-match-source-resolution']").trigger("click");
     expect(state).toMatchObject(sourceDimensions);
   });
 
-  it("renders however many tiers the family's aspect bucket provides", () => {
+  it("lists every authored size in the family as exact pixels", () => {
     const single = tierSegments(mountPicker(1024, 1024, "flux").wrapper);
     expect(single).toHaveLength(2);
     expect(single.map((segment) => segment.get(".ms-seg__label").text())).toEqual([
-      "0.6 MP",
-      "1 MP",
+      "768×768",
+      "1024×1024",
     ]);
     expect(single[1]?.attributes("aria-checked")).toBe("true");
 
-    // Nearby-looking buckets stay separate when their reduced ratios differ.
-    const exact = tierSegments(mountPicker(1024, 576, "ltx2").wrapper);
-    expect(exact.map((segment) => segment.get(".ms-seg__label").text())).toEqual(["0.6 MP"]);
-    expect(exact[0]?.get(".ms-seg__sub").text()).toBe("Recommended");
-    expect(exact[0]?.attributes("aria-checked")).toBe("true");
+    // Every widescreen bucket LTX-2 authors — 16:9, 19:11, 30:17 — is one
+    // canonical family whose ladder shows the real pixels (#1166).
+    const wide = tierSegments(mountPicker(1024, 576, "ltx2").wrapper);
+    expect(wide.map((segment) => segment.get(".ms-seg__label").text())).toEqual([
+      "1024×576",
+      "1216×704",
+      "1920×1088",
+    ]);
+    expect(wide[0]?.get(".ms-seg__sub").text()).toBe("0.6 MP");
+    expect(wide[0]?.attributes("aria-checked")).toBe("true");
   });
 
   it("renders shared proportional shape swatches", () => {
     const { wrapper } = mountPicker(704, 1216, "ltx2");
     const choices = wrapper.findAll(".ms-shape__btn");
-    expect(choices.map((choice) => choice.text())).toEqual(["1:1", "16:9", "9:16"]);
+    expect(choices.map((choice) => choice.text())).toEqual(["1:1", "3:2", "2:3", "16:9", "9:16"]);
     const frames = wrapper.findAll(".ms-shape__swatch");
-    expect(frames).toHaveLength(3);
+    expect(frames).toHaveLength(5);
     expect(frames[0]?.attributes("style")).toContain("width: 24px");
-    expect(frames[1]?.attributes("style")).toContain("width: 27px");
-    expect(frames[2]?.attributes("style")).toContain("height: 27px");
+    expect(frames[3]?.attributes("style")).toContain("width: 27px");
+    expect(frames[4]?.attributes("style")).toContain("height: 27px");
   });
 
   it("falls back to iPhone-friendly custom fields and snaps values to 16", async () => {
@@ -145,7 +153,7 @@ describe("MobileResolutionPicker", () => {
     expect(wrapper.find("[data-test='mobile-resolution-tier-dims']").exists()).toBe(false);
     expect(wrapper.find("[data-test='mobile-resolution-custom']").exists()).toBe(true);
     expect(wrapper.get("[data-test='mobile-resolution-announcement']").text()).toBe(
-      "Selected resolution: 1000 by 777 pixels, 1000:777, Landscape.",
+      "Selected resolution: 1000 by 777 pixels, 5:4, Landscape.",
     );
 
     const width = wrapper.get("input[aria-label='Custom width']");
@@ -205,7 +213,7 @@ describe("MobileResolutionPicker", () => {
   it("keeps exact presets unmarked", () => {
     const { wrapper } = mountPicker(1024, 1024, "flux");
     expect(wrapper.find("[data-approximate='true']").exists()).toBe(false);
-    expect(wrapper.get("[data-shape='square']").text()).not.toContain("≈");
+    expect(wrapper.get("[data-shape='1:1']").text()).not.toContain("≈");
   });
 
   it("defaults a source-sized preset to the model aspect but keeps Source selectable", async () => {
@@ -214,14 +222,14 @@ describe("MobileResolutionPicker", () => {
       height: 1024,
     });
 
-    expect(wrapper.get("[data-shape='square']").attributes("aria-checked")).toBe("true");
+    expect(wrapper.get("[data-shape='1:1']").attributes("aria-checked")).toBe("true");
     await wrapper.get("[data-shape='source']").trigger("click");
-    expect(wrapper.get("[data-shape='source']").attributes("aria-checked")).toBe("true");
-    expect(
-      wrapper.getComponent(MobileResolutionPicker).emitted("source-canvas-mode")?.at(-1),
-    ).toEqual(["source"]);
+    expect(wrapper.getComponent(MobileResolutionPicker).emitted("canvas-intent")?.at(-1)).toEqual([
+      "source",
+    ]);
 
     wrapper.unmount();
+    // The parent owns the intent; once it flows back the Source chip wins.
     const remounted = mountPicker(
       1024,
       1024,
@@ -255,11 +263,13 @@ describe("MobileResolutionPicker", () => {
 
     expect(wrapper.findAll(".ms-shape__btn").map((button) => button.text())).toEqual([
       "1:1",
+      "3:2",
+      "2:3",
       "16:9",
       "9:16",
     ]);
-    expect(wrapper.get("[data-shape='wide']").attributes("aria-checked")).toBe("true");
-    await wrapper.get("[data-shape='tall']").trigger("click");
+    expect(wrapper.get("[data-shape='16:9']").attributes("aria-checked")).toBe("true");
+    await wrapper.get("[data-shape='9:16']").trigger("click");
     await flushPromises();
     expect(state).toMatchObject({ width: 576, height: 1024 });
   });
@@ -269,7 +279,8 @@ describe("MobileResolutionPicker", () => {
       props: { family: "sdxl", width: 1024, height: 1024 },
     });
 
-    await wrapper.get("[data-shape='portrait']").trigger("click");
+    // SDXL authors 896×1152, which is 4:5 rather than a true 3:4.
+    await wrapper.get("[data-shape='4:5']").trigger("click");
     expect(wrapper.emitted("update:width")).toEqual([[896]]);
     expect(wrapper.emitted("update:height")).toEqual([[1152]]);
   });

@@ -20,13 +20,10 @@ describe("source resolution", () => {
     const source = resolveSourceResolution({ width: 1080, height: 1920 }, qwen);
     expect(
       resolveSourceCanvasTransition({
-        current: { width: 1024, height: 1024 },
-        previousSource: null,
-        previousAutomatic: null,
         source,
         automatic: { width: 928, height: 1664 },
         replaced: true,
-        mode: "automatic",
+        intent: "source",
       }),
     ).toEqual({ width: 928, height: 1664 });
   });
@@ -35,72 +32,66 @@ describe("source resolution", () => {
     const source = resolveSourceResolution({ width: 640, height: 384 }, qwen);
     expect(
       resolveSourceCanvasTransition({
-        current: { width: 1024, height: 1024 },
-        previousSource: null,
-        previousAutomatic: null,
         source,
         automatic: { width: 1664, height: 928 },
         replaced: true,
-        mode: "manual",
+        intent: "manual",
         preserveReplacement: true,
       }),
     ).toBeNull();
   });
 
-  it("preserves explicit Source intent when source and automatic sizes had tied", () => {
-    const previous = resolveSourceResolution(
-      { width: 1024, height: 1024 },
-      qwen,
-    );
+  it("preserves explicit Source intent across an image replacement", () => {
     const portrait = resolveSourceResolution(
       { width: 896, height: 1600 },
       qwen,
     );
     expect(
       resolveSourceCanvasTransition({
-        current: { width: 1024, height: 1024 },
-        previousSource: previous,
-        previousAutomatic: { width: 1024, height: 1024 },
         source: portrait,
         automatic: { width: 576, height: 1024 },
         replaced: true,
-        mode: "source",
+        intent: "source-exact",
       }),
     ).toEqual(portrait.output);
   });
 
-  it("keeps automatic and explicit Source choices live across model changes", () => {
-    const previousSource = resolveSourceResolution(
-      { width: 1080, height: 1920 },
-      qwen,
-    );
+  it("keeps source-following canvases live across a model change", () => {
+    // The surfaces run `applyModelDefaults` before this watcher, so the live
+    // canvas is already the NEW model's default by the time it runs. The
+    // recorded intent, never the current size, is what keeps a canvas
+    // following its source (#1166).
     const nextSource = resolveSourceResolution(
       { width: 1080, height: 1920 },
       { ...qwen, dimension_alignment: 32 },
     );
     const transition = {
-      previousSource,
       source: nextSource,
       automatic: { width: 720, height: 1280 },
       replaced: false,
     };
 
     expect(
-      resolveSourceCanvasTransition({
-        ...transition,
-        current: { width: 928, height: 1664 },
-        previousAutomatic: { width: 928, height: 1664 },
-        mode: "automatic" as const,
-      }),
+      resolveSourceCanvasTransition({ ...transition, intent: "source" }),
     ).toEqual({ width: 720, height: 1280 });
     expect(
-      resolveSourceCanvasTransition({
-        ...transition,
-        current: previousSource.output,
-        previousAutomatic: { width: 928, height: 1664 },
-        mode: "source" as const,
-      }),
+      resolveSourceCanvasTransition({ ...transition, intent: "source-exact" }),
     ).toEqual(nextSource.output);
+  });
+
+  it("never moves a manual or model-default canvas on a model change", () => {
+    const source = resolveSourceResolution({ width: 1080, height: 1920 }, qwen);
+    const transition = {
+      source,
+      automatic: { width: 720, height: 1280 },
+      replaced: false,
+    };
+    expect(
+      resolveSourceCanvasTransition({ ...transition, intent: "manual" }),
+    ).toBeNull();
+    expect(
+      resolveSourceCanvasTransition({ ...transition, intent: "model-default" }),
+    ).toBeNull();
   });
 
   it("defaults a source to the model preset with the closest aspect ratio", () => {

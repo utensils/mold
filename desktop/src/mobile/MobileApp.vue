@@ -47,6 +47,7 @@ import {
   type SourceDimensions,
   type SourceResolutionResult,
 } from "@studio/lib/sourceResolution";
+import type { CanvasIntent } from "@studio/lib/outputShape";
 import { groupLogicalGalleryPrints } from "@studio/lib/galleryPrintIdentity";
 import {
   defaultClipFrames,
@@ -570,6 +571,10 @@ function closeAdvancedSheet(): void {
  * inspector's Reset — the sheet's scoped reset below is deliberately narrower. */
 function resetCreateSettings(): void {
   resetFormToModelDefaults(form, selectedGenerationModel.value);
+  // The canvas is part of what Reset restores, so its authority resets with
+  // it — otherwise the next model change would re-snap the reset canvas back
+  // onto the attached source (#1166).
+  canvasIntent.value = "model-default";
   if (isSequence.value) draft.enableAudio = false;
 }
 
@@ -577,6 +582,8 @@ function resetCreateSettings(): void {
  * while preserving the prompt, selected model, batch, and staged source media. */
 function resetAdvancedSettings(): void {
   resetAdvancedToModelDefaults(form, selectedGenerationModel.value);
+  // The canvas comes back to the model's default, so its authority does too.
+  canvasIntent.value = "model-default";
 }
 const preparingGeneration = ref(false);
 const generationSubmissionPhase = ref<"preparing" | "placement" | null>(null);
@@ -1200,14 +1207,14 @@ let previousStillAutomaticResolution: SourceDimensions | null = null;
 let previousOpeningSource = "";
 let previousOpeningResolution: SourceResolutionResult | null = null;
 let previousOpeningAutomaticResolution: SourceDimensions | null = null;
-const sourceCanvasMode = ref<"automatic" | "source" | "manual">("manual");
+const canvasIntent = ref<CanvasIntent>("model-default");
 let preservedSourceReplacement = "";
-function setSourceCanvasMode(mode: "source" | "manual") {
-  sourceCanvasMode.value = mode;
+function setCanvasIntent(intent: CanvasIntent) {
+  canvasIntent.value = intent;
 }
 function preserveRestoredSourceCanvas(base64: string) {
   preservedSourceReplacement = base64;
-  sourceCanvasMode.value = "manual";
+  canvasIntent.value = "manual";
 }
 
 function applyMobileSourceResolution(
@@ -1225,6 +1232,9 @@ function applyMobileSourceResolution(
 } {
   if (!base64) {
     setDimensions(null, null);
+    // Clearing the source hands the canvas back to the model, but never
+    // overrides a size the user chose deliberately.
+    if (canvasIntent.value !== "manual") canvasIntent.value = "model-default";
     return { base64: "", resolution: null, automaticResolution: null };
   }
   const dimensions =
@@ -1247,23 +1257,19 @@ function applyMobileSourceResolution(
     form.pipeline,
   );
   const replaced = base64 !== previous.base64;
-  const canvas = { width: form.width, height: form.height };
   if (caps.value.sourceImageMode !== "references") {
     const preserveReplacement = replaced && preservedSourceReplacement === base64;
     const nextResolution = resolveSourceCanvasTransition({
-      current: canvas,
-      previousSource: previous.resolution,
-      previousAutomatic: previous.automaticResolution,
       source: resolution,
       automatic: automaticResolution,
       replaced,
-      mode: sourceCanvasMode.value,
+      intent: canvasIntent.value,
       preserveReplacement,
     });
     if (replaced) {
       preservedSourceReplacement = "";
-      if (preserveReplacement) sourceCanvasMode.value = "manual";
-      else if (sourceCanvasMode.value !== "source") sourceCanvasMode.value = "automatic";
+      if (preserveReplacement) canvasIntent.value = "manual";
+      else if (canvasIntent.value !== "source-exact") canvasIntent.value = "source";
     }
     if (nextResolution) {
       form.width = nextResolution.width;
@@ -6298,10 +6304,10 @@ onBeforeUnmount(() => {
                   show-fps
                   :steps-error="stepsError"
                   :guidance-error="guidanceError"
-                  :source-canvas-mode="sourceCanvasMode"
+                  :canvas-intent="canvasIntent"
                   @resolution-validity="resolutionValid = $event"
                   @seed-validity="seedValid = $event"
-                  @source-canvas-mode="setSourceCanvasMode"
+                  @canvas-intent="setCanvasIntent"
                 />
               </template>
             </MobileSequenceComposer>
@@ -6534,10 +6540,10 @@ onBeforeUnmount(() => {
               :disabled="loadingModels"
               :steps-error="stepsError"
               :guidance-error="guidanceError"
-              :source-canvas-mode="sourceCanvasMode"
+              :canvas-intent="canvasIntent"
               @resolution-validity="resolutionValid = $event"
               @seed-validity="seedValid = $event"
-              @source-canvas-mode="setSourceCanvasMode"
+              @canvas-intent="setCanvasIntent"
             />
 
             <label

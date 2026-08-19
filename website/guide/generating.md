@@ -146,6 +146,24 @@ machine that produced it so rendered clips stay cached. **Duplicate as new**
 starts a fresh sequence from the recorded clips, telling you how many it
 restored and naming anything a print does not record.
 
+### Shape and Size
+
+Create's **Shape** row on web, desktop, and iPhone is the canonical family the
+selected model can express — 1:1, 5:4, 4:3, 3:2, 16:9, 21:9 and their portrait
+twins — plus **Source** while an image is attached. Model-specific buckets that
+are widescreen by another name (LTX-2's 1216×704, 1920×1088 and 3840×2112, Wan's
+832×480, MiniMax H3's 1344×768) all live under 16:9 rather than as separate
+`19:11` / `30:17` / `20:11` chips. Picking a family never guesses pixels: the
+**Size** row under it lists that family's authored sizes as exact `width×height`
+pills with megapixels and any model-authored mark (`Default`) as secondary text.
+
+One status sentence under the size row names the canvas and why it holds that
+size — `Matches source`, `Follows source`, `Model default`, or `Manual` — and the
+badge beside the pixels is the same fact, so they can never disagree. Attaching a
+source image selects the closest model-valid size with the source's shape and
+keeps following it across model and pipeline changes until you pick a shape,
+size, or exact dimensions yourself.
+
 On every surface, a **↺ Reset** in the Create settings header restores the
 generation settings to the selected model's defaults — shape, resolution,
 detail, prompt strength, seed, and the Advanced groups — while keeping your

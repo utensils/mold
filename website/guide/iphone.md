@@ -106,10 +106,15 @@ lists or numeric ranges stay in the Advanced sheet with inline feedback and
 cannot queue a request; **Reset advanced**, templates, and Library reuse share
 the same saved override state as desktop.
 
-Choose resolution through orientation, proportionally drawn aspect-ratio
-tiles, a resolution tier, or explicit custom dimensions. Seed has separate
-**Random** and **Fixed** modes, including one-tap reuse of the last generated
-seed.
+Choose resolution through proportionally drawn shape tiles — the canonical
+families (1:1, 4:3, 3:2, 16:9, 21:9 and their portrait twins) the selected
+model can actually express, plus **Source** when an image is attached — then a
+**Size** row that lists that family's authored sizes as exact pixels with
+their megapixels underneath. Explicit custom dimensions stay available. One
+status line names the canvas and why it holds that size (`Matches source`,
+`Follows source`, `Model default`, `Manual`), and the badge beside it always
+agrees with that sentence. Seed has separate **Random** and **Fixed** modes,
+including one-tap reuse of the last generated seed.
 
 When several jobs are submitted, the Queue section keeps them visible while
 you continue composing. Mold limits simultaneous streams so generation does

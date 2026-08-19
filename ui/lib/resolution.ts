@@ -22,20 +22,6 @@ export const ASPECTS: readonly AspectOption[] = [
   { id: "tall", label: "9:16", ratio: 9 / 16 },
 ];
 
-/** Canonical aspect choices that have a nearby server-advertised bucket. */
-export function aspectsSupportedByPresets(
-  presets: readonly { width: number; height: number }[],
-  tolerance = 0.09,
-): readonly AspectOption[] {
-  return ASPECTS.filter((aspect) =>
-    presets.some((preset) => {
-      if (!(preset.width > 0) || !(preset.height > 0)) return false;
-      const ratio = preset.width / preset.height;
-      return Math.abs(ratio - aspect.ratio) / aspect.ratio <= tolerance;
-    }),
-  );
-}
-
 /** The megapixel steps with their human labels (spec §03). */
 export const RESOLUTIONS = [
   { mp: 0.5, label: "0.5 MP", sub: "Draft" },

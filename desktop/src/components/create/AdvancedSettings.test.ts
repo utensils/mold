@@ -867,3 +867,21 @@ describe("AdvancedSettings — per-model source-image contract (#772)", () => {
     }
   });
 });
+
+describe("AdvancedSettings — exact size", () => {
+  it("records a typed exact size as a manual canvas intent (#1166)", async () => {
+    const form = formFor("flux");
+    form.width = 1024;
+    form.height = 1024;
+    const wrapper = mountSettings(form);
+    const width = wrapper.get("input[aria-label='Width']");
+    await width.setValue(900);
+    await width.trigger("change");
+    expect(form.width).toBe(896);
+    expect(wrapper.emitted("canvas-intent")?.at(-1)).toEqual(["manual"]);
+
+    await wrapper.get("[title='Swap width and height']").trigger("click");
+    expect([form.width, form.height]).toEqual([1024, 896]);
+    expect(wrapper.emitted("canvas-intent")?.at(-1)).toEqual(["manual"]);
+  });
+});

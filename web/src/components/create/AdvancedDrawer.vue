@@ -28,6 +28,7 @@ import MinimaxH3AuthoringPanel from "@studio/components/MinimaxH3AuthoringPanel.
 import ImageDropWell from "@studio/components/ImageDropWell.vue";
 import { imageDimensionsFromBase64 } from "@studio/lib/imageDimensions";
 import { DEFAULT_EXTEND_OVERLAP_FRAMES } from "@studio/lib/extend";
+import type { CanvasIntent } from "@studio/lib/outputShape";
 import UpscaleSection from "./advanced/UpscaleSection.vue";
 import type {
   DevicePlacement,
@@ -131,6 +132,7 @@ const emit = defineEmits<{
   "clear-end-frame": [];
   "open-mask": [];
   "append-prompt": [phrase: string];
+  "canvas-intent": [intent: CanvasIntent];
 }>();
 const host = ref<HTMLElement | { $el?: unknown } | null>(null);
 const draft = useSequenceDraftStore();
@@ -409,13 +411,18 @@ function snapDim(v: number): number {
   if (!Number.isFinite(v) || v <= 0) return Math.max(64, alignment);
   return Math.max(64, Math.round(v / alignment) * alignment);
 }
+// Typing an exact size is the user taking the canvas over: without recording
+// that intent, the next model switch would re-resolve it back to the source.
 function setWidth(raw: string) {
+  emit("canvas-intent", "manual");
   patch({ width: snapDim(Number(raw)) });
 }
 function setHeight(raw: string) {
+  emit("canvas-intent", "manual");
   patch({ height: snapDim(Number(raw)) });
 }
 function swapDims() {
+  emit("canvas-intent", "manual");
   patch({ width: props.modelValue.height, height: props.modelValue.width });
 }
 

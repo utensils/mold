@@ -14,12 +14,16 @@ export interface ResolutionOption {
   sub?: string;
   width?: number;
   height?: number;
+  /** Stable selection key. Defaults to `mp` for megapixel-budget callers;
+   * pixel ladders pass their own id so two sizes of equal area stay
+   * distinct. */
+  id?: string;
 }
 
 const props = withDefaults(
   defineProps<{
-    /** Megapixel budget. */
-    modelValue: number;
+    /** Selected option: a megapixel budget, or an explicit option id. */
+    modelValue: number | string;
     /** Aspect ratio (width / height) the pixels resolve against. */
     ratio: number;
     options?: readonly ResolutionOption[];
@@ -38,10 +42,14 @@ const props = withDefaults(
   { options: () => RESOLUTIONS, label: "Resolution", disabled: false },
 );
 
-const emit = defineEmits<{ "update:modelValue": [value: number] }>();
+const emit = defineEmits<{ "update:modelValue": [value: number | string] }>();
 
 const segments = computed(() =>
-  props.options.map((o) => ({ value: o.mp, label: o.label, sub: o.sub })),
+  props.options.map((o) => ({
+    value: o.id ?? o.mp,
+    label: o.label,
+    sub: o.sub,
+  })),
 );
 
 const resolved = computed(() => {
@@ -54,11 +62,13 @@ const resolved = computed(() => {
     return `${props.resolvedWidth}×${props.resolvedHeight} px`;
   }
   const selected = props.options.find(
-    (option) => option.mp === props.modelValue,
+    (option) => (option.id ?? option.mp) === props.modelValue,
   );
-  return selected?.width && selected.height
-    ? `${selected.width}×${selected.height} px`
-    : `${dimsLabel(props.modelValue, props.ratio)} px`;
+  if (selected?.width && selected.height) {
+    return `${selected.width}×${selected.height} px`;
+  }
+  const mp = typeof props.modelValue === "number" ? props.modelValue : 0;
+  return `${dimsLabel(mp, props.ratio)} px`;
 });
 </script>
 
@@ -69,6 +79,7 @@ const resolved = computed(() => {
       :options="segments"
       :label="label"
       :disabled="disabled"
+      :wrap="segments.length > 3"
       @update:model-value="emit('update:modelValue', $event)"
     />
     <div class="ms-res__resolved">
