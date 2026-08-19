@@ -377,6 +377,7 @@ pub async fn run(
     host: Option<String>,
     format: OutputFormat,
     no_metadata: bool,
+    title: Option<String>,
     preview: bool,
     local: bool,
     gpus: Option<String>,
@@ -826,7 +827,7 @@ pub async fn run(
     };
 
     let mut req = GenerateRequest {
-        title: None,
+        title,
         source_fit: None,
         hdr_exr_dir,
         hdr_exr_full_float,
@@ -2623,13 +2624,16 @@ impl BatchOutputs {
 ///
 /// `--output` names a single file, so anything past the first item has to be
 /// suffixed or the run ends with one file holding the last render. Shared by
-/// the video and audio savers, which name their outputs identically.
+/// the video and audio savers, which name their outputs identically. An
+/// explicit `--output` is used verbatim; only the default filename folds the
+/// request title in as a `~<slug>` (see [`title_slug_for`]).
 fn batch_media_filename(
     output: &Option<String>,
     model: &str,
     ext: &str,
     batch: u32,
     index: u32,
+    slug: Option<&str>,
 ) -> String {
     match output {
         Some(path) if batch == 1 => path.clone(),
@@ -2653,8 +2657,20 @@ fn batch_media_filename(
             ext,
             batch,
             index,
+            slug,
         ),
     }
+}
+
+/// The filename slug for a saved artifact: the request's `--title`, reduced
+/// by the shared `title_slug` so the CLI's default filename matches the
+/// `mold-{model}-{ts}[-{idx}]~{slug}.{ext}` shape the server's gallery
+/// writes. `None` when the print is untitled or the title has no ASCII
+/// alphanumerics — the legacy filename is then byte-identical.
+fn title_slug_for(persist: Option<&PersistArgs<'_>>) -> Option<String> {
+    persist
+        .and_then(|args| args.request.title.as_deref())
+        .and_then(mold_core::title_slug)
 }
 
 fn save_and_preview_video(
@@ -2672,7 +2688,15 @@ fn save_and_preview_video(
         stdout.flush()?;
         return Ok(());
     }
-    let filename = batch_media_filename(output, model, video.format.extension(), batch, index);
+    let slug = title_slug_for(persist.as_ref());
+    let filename = batch_media_filename(
+        output,
+        model,
+        video.format.extension(),
+        batch,
+        index,
+        slug.as_deref(),
+    );
 
     if std::path::Path::new(&filename).exists() {
         status!("{} Overwriting: {}", theme::icon_alert(), filename);
@@ -2734,7 +2758,15 @@ fn save_and_preview_audio(
         stdout.flush()?;
         return Ok(());
     }
-    let filename = batch_media_filename(output, model, audio.format.extension(), batch, index);
+    let slug = title_slug_for(persist.as_ref());
+    let filename = batch_media_filename(
+        output,
+        model,
+        audio.format.extension(),
+        batch,
+        index,
+        slug.as_deref(),
+    );
 
     if std::path::Path::new(&filename).exists() {
         status!("{} Overwriting: {}", theme::icon_alert(), filename);
@@ -2827,12 +2859,14 @@ fn save_and_preview_image(
         }
         None => {
             let ext = output_format.to_string();
+            let slug = title_slug_for(persist.as_ref());
             default_filename(
                 model,
                 mold_core::time::now_epoch_ms_u64(),
                 &ext,
                 batch,
                 img.index,
+                slug.as_deref(),
             )
         }
     };
@@ -3123,9 +3157,19 @@ pub(crate) fn preview_image(_data: &[u8]) {
     });
 }
 
-/// Build a default output filename, sanitizing colons from model names.
-fn default_filename(model: &str, timestamp: u64, ext: &str, batch: u32, index: u32) -> String {
-    mold_core::default_output_filename(model, timestamp, ext, batch, index)
+/// Build a default output filename, sanitizing colons from model names and
+/// appending `~<slug>` when the print is titled — the same shape the
+/// server's gallery writes, so a remote render and the CLI's local copy of
+/// it share a recognizable name.
+fn default_filename(
+    model: &str,
+    timestamp: u64,
+    ext: &str,
+    batch: u32,
+    index: u32,
+    slug: Option<&str>,
+) -> String {
+    mold_core::default_output_filename_titled(model, timestamp, ext, batch, index, slug)
 }
 
 #[cfg(test)]
@@ -3959,6 +4003,7 @@ mod tests {
             Some(server.uri()),
             OutputFormat::Png,
             false,
+            None,
             false,
             false,
             None,
@@ -4065,27 +4110,78 @@ mod tests {
 
     #[test]
     fn filename_sanitizes_colon() {
-        let name = default_filename("flux-dev:q6", 1773609166, "png", 1, 0);
+        let name = default_filename("flux-dev:q6", 1773609166, "png", 1, 0, None);
         assert_eq!(name, "mold-flux-dev-q6-1773609166.png");
         assert!(!name.contains(':'));
     }
 
     #[test]
     fn filename_no_colon_passthrough() {
-        let name = default_filename("flux-schnell", 100, "png", 1, 0);
+        let name = default_filename("flux-schnell", 100, "png", 1, 0, None);
         assert_eq!(name, "mold-flux-schnell-100.png");
     }
 
     #[test]
     fn filename_batch_includes_index() {
-        let name = default_filename("flux-dev:q4", 100, "jpeg", 3, 2);
+        let name = default_filename("flux-dev:q4", 100, "jpeg", 3, 2, None);
         assert_eq!(name, "mold-flux-dev-q4-100-2.jpeg");
     }
 
     #[test]
     fn filename_single_batch_no_index() {
-        let name = default_filename("flux-dev:q4", 100, "png", 1, 0);
+        let name = default_filename("flux-dev:q4", 100, "png", 1, 0, None);
         assert!(!name.contains("-0."));
+    }
+
+    /// `--title` folds into the default filename as `~<slug>` (the same
+    /// grammar the server's gallery writes); an explicit `--output` is never
+    /// rewritten, and an untitled request keeps the legacy name byte-for-byte.
+    #[test]
+    fn titled_requests_fold_the_slug_into_the_default_filename_only() {
+        let mut request: GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"source","model":"flux-dev:q4","width":512,"height":512,"steps":4,"guidance":1.0}"#,
+        )
+        .unwrap();
+        let untitled = PersistArgs {
+            request: &request,
+            seed_used: 1,
+            generation_time_ms: 1,
+        };
+        assert_eq!(title_slug_for(Some(&untitled)), None);
+        assert_eq!(title_slug_for(None), None);
+
+        request.title = Some("Smurf Village at Dusk".into());
+        let titled = PersistArgs {
+            request: &request,
+            seed_used: 1,
+            generation_time_ms: 1,
+        };
+        let slug = title_slug_for(Some(&titled));
+        assert_eq!(slug.as_deref(), Some("smurf-village-at-dusk"));
+
+        assert_eq!(
+            default_filename("flux-dev:q4", 100, "png", 1, 0, slug.as_deref()),
+            "mold-flux-dev-q4-100~smurf-village-at-dusk.png"
+        );
+        assert_eq!(
+            default_filename("flux-dev:q4", 100, "png", 3, 2, slug.as_deref()),
+            "mold-flux-dev-q4-100-2~smurf-village-at-dusk.png"
+        );
+        assert_eq!(
+            batch_media_filename(
+                &Some("clip.mp4".into()),
+                "ltx",
+                "mp4",
+                1,
+                0,
+                slug.as_deref()
+            ),
+            "clip.mp4"
+        );
+        assert!(
+            batch_media_filename(&None, "ltx", "mp4", 1, 0, slug.as_deref())
+                .ends_with("~smurf-village-at-dusk.mp4")
+        );
     }
 
     #[test]
@@ -4218,34 +4314,34 @@ mod tests {
 
     #[test]
     fn test_default_filename_empty_model() {
-        let name = default_filename("", 100, "png", 1, 0);
+        let name = default_filename("", 100, "png", 1, 0, None);
         assert_eq!(name, "mold--100.png");
         // Batch variant with empty model
-        let batch_name = default_filename("", 100, "png", 2, 1);
+        let batch_name = default_filename("", 100, "png", 2, 1, None);
         assert_eq!(batch_name, "mold--100-1.png");
     }
 
     #[test]
     fn test_default_filename_special_chars() {
         // Colons are sanitized to dashes
-        let name = default_filename("model:tag:extra", 42, "png", 1, 0);
+        let name = default_filename("model:tag:extra", 42, "png", 1, 0, None);
         assert_eq!(name, "mold-model-tag-extra-42.png");
         assert!(!name.contains(':'));
 
         // Other special characters pass through
-        let name2 = default_filename("my_model.v2", 42, "png", 1, 0);
+        let name2 = default_filename("my_model.v2", 42, "png", 1, 0, None);
         assert_eq!(name2, "mold-my_model.v2-42.png");
     }
 
     #[test]
     fn test_default_filename_jpeg_extension() {
         // "jpeg" extension passes through as-is
-        let name = default_filename("flux-dev:q4", 500, "jpeg", 1, 0);
+        let name = default_filename("flux-dev:q4", 500, "jpeg", 1, 0, None);
         assert_eq!(name, "mold-flux-dev-q4-500.jpeg");
         assert!(name.ends_with(".jpeg"));
 
         // "jpg" extension also works
-        let name2 = default_filename("flux-dev:q4", 500, "jpg", 1, 0);
+        let name2 = default_filename("flux-dev:q4", 500, "jpg", 1, 0, None);
         assert_eq!(name2, "mold-flux-dev-q4-500.jpg");
         assert!(name2.ends_with(".jpg"));
     }

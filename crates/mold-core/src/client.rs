@@ -5,11 +5,13 @@ use crate::chain_job::{
 };
 use crate::error::MoldError;
 use crate::types::{
-    AudioData, DeviceState, ExpandRequest, ExpandResponse, GalleryImage, GenerateRequest,
-    GenerateResponse, ImageData, LoraInfo, ModelInfo, ModelInfoExtended, OutputFormat,
-    QueueListingWire, ReferenceUploadCompleteResponse, ReferenceUploadSessionRequest,
-    ReferenceUploadSessionResponse, ServerStatus, SseCompleteEvent, SseErrorEvent,
-    SseProgressEvent, VideoData,
+    AudioData, Collection, CollectionCreateRequest, CollectionItemsRequest,
+    CollectionUpdateRequest, DeviceState, EmptyTrashResult, ExpandRequest, ExpandResponse,
+    GalleryImage, GalleryOrganizeRequest, GalleryPatchRequest, GenerateRequest, GenerateResponse,
+    ImageData, LoraInfo, ModelInfo, ModelInfoExtended, OutputFormat, QueueListingWire,
+    ReferenceUploadCompleteResponse, ReferenceUploadSessionRequest, ReferenceUploadSessionResponse,
+    ServerStatus, SseCompleteEvent, SseErrorEvent, SseProgressEvent, TagCount, TagRenameRequest,
+    TrashFilenamesRequest, TrashSweepResult, VideoData,
 };
 use anyhow::{Context, Result};
 use base64::Engine as _;
@@ -1306,6 +1308,280 @@ impl MoldClient {
             .send()
             .await?
             .error_for_status()?;
+        Ok(())
+    }
+
+    /// List one gallery view: `"library"` (live prints, the default the
+    /// bare `GET /api/gallery` serves) or `"trash"` (prints waiting in the
+    /// host's trash, each carrying `trashed_at` / `purge_at`). Older servers
+    /// ignore the query and return the live listing.
+    pub async fn list_gallery_view(&self, view: &str) -> Result<Vec<GalleryImage>> {
+        let resp = self
+            .client
+            .get(format!("{}/api/gallery", self.base_url))
+            .query(&[("view", view)])
+            .send()
+            .await?;
+        Ok(error_for_status_with_body(resp)
+            .await?
+            .json::<Vec<GalleryImage>>()
+            .await?)
+    }
+
+    /// Move one print to the host's trash (`DELETE /api/gallery/image/:name`
+    /// without `permanent`). On older servers without a trash this deletes
+    /// outright — check `capabilities.gallery.trash` first when that matters.
+    pub async fn trash_gallery_image(&self, filename: &str) -> Result<()> {
+        let resp = self
+            .client
+            .delete(format!(
+                "{}/api/gallery/image/{}",
+                self.base_url,
+                encode_path_segment(filename)
+            ))
+            .send()
+            .await?;
+        error_for_status_with_body(resp).await?;
+        Ok(())
+    }
+
+    /// Permanently delete one print, bypassing the trash
+    /// (`DELETE /api/gallery/image/:name?permanent=true`). Works on live and
+    /// already-trashed prints alike.
+    pub async fn delete_gallery_image_forever(&self, filename: &str) -> Result<()> {
+        let resp = self
+            .client
+            .delete(format!(
+                "{}/api/gallery/image/{}",
+                self.base_url,
+                encode_path_segment(filename)
+            ))
+            .query(&[("permanent", "true")])
+            .send()
+            .await?;
+        error_for_status_with_body(resp).await?;
+        Ok(())
+    }
+
+    /// Move several prints to the trash in one call (`POST /api/gallery/trash`).
+    pub async fn trash_gallery_images(&self, filenames: &[String]) -> Result<()> {
+        let resp = self
+            .client
+            .post(format!("{}/api/gallery/trash", self.base_url))
+            .json(&TrashFilenamesRequest {
+                filenames: filenames.to_vec(),
+            })
+            .send()
+            .await?;
+        error_for_status_with_body(resp).await?;
+        Ok(())
+    }
+
+    /// Restore trashed prints to the live gallery
+    /// (`POST /api/gallery/trash/restore`). A live print already using one of
+    /// the names surfaces as a `409` `GALLERY_RESTORE_CONFLICT` error.
+    pub async fn restore_trashed(&self, filenames: &[String]) -> Result<()> {
+        let resp = self
+            .client
+            .post(format!("{}/api/gallery/trash/restore", self.base_url))
+            .json(&TrashFilenamesRequest {
+                filenames: filenames.to_vec(),
+            })
+            .send()
+            .await?;
+        error_for_status_with_body(resp).await?;
+        Ok(())
+    }
+
+    /// Permanently purge every trashed print (`DELETE /api/gallery/trash`).
+    pub async fn empty_trash(&self) -> Result<EmptyTrashResult> {
+        let resp = self
+            .client
+            .delete(format!("{}/api/gallery/trash", self.base_url))
+            .send()
+            .await?;
+        Ok(error_for_status_with_body(resp)
+            .await?
+            .json::<EmptyTrashResult>()
+            .await?)
+    }
+
+    /// Run the retention sweep now (`POST /api/gallery/trash/sweep`): purges
+    /// trashed prints older than `gallery.trash_retention_days` and reports
+    /// how many remain.
+    pub async fn sweep_trash(&self) -> Result<TrashSweepResult> {
+        let resp = self
+            .client
+            .post(format!("{}/api/gallery/trash/sweep", self.base_url))
+            .send()
+            .await?;
+        Ok(error_for_status_with_body(resp)
+            .await?
+            .json::<TrashSweepResult>()
+            .await?)
+    }
+
+    /// Edit one print's title / favorite / tags
+    /// (`PATCH /api/gallery/image/:name`); returns the updated row.
+    pub async fn patch_gallery_image(
+        &self,
+        filename: &str,
+        patch: &GalleryPatchRequest,
+    ) -> Result<GalleryImage> {
+        let resp = self
+            .client
+            .patch(format!(
+                "{}/api/gallery/image/{}",
+                self.base_url,
+                encode_path_segment(filename)
+            ))
+            .json(patch)
+            .send()
+            .await?;
+        Ok(error_for_status_with_body(resp)
+            .await?
+            .json::<GalleryImage>()
+            .await?)
+    }
+
+    /// Apply one organization edit to many prints (`POST /api/gallery/organize`).
+    pub async fn organize_gallery(&self, req: &GalleryOrganizeRequest) -> Result<()> {
+        let resp = self
+            .client
+            .post(format!("{}/api/gallery/organize", self.base_url))
+            .json(req)
+            .send()
+            .await?;
+        error_for_status_with_body(resp).await?;
+        Ok(())
+    }
+
+    /// List the host's collections (`GET /api/gallery/collections`).
+    pub async fn list_collections(&self) -> Result<Vec<Collection>> {
+        let resp = self
+            .client
+            .get(format!("{}/api/gallery/collections", self.base_url))
+            .send()
+            .await?;
+        Ok(error_for_status_with_body(resp)
+            .await?
+            .json::<Vec<Collection>>()
+            .await?)
+    }
+
+    /// Create a collection (`POST /api/gallery/collections`).
+    pub async fn create_collection(&self, req: &CollectionCreateRequest) -> Result<Collection> {
+        let resp = self
+            .client
+            .post(format!("{}/api/gallery/collections", self.base_url))
+            .json(req)
+            .send()
+            .await?;
+        Ok(error_for_status_with_body(resp)
+            .await?
+            .json::<Collection>()
+            .await?)
+    }
+
+    /// Rename / describe / re-cover a collection
+    /// (`PATCH /api/gallery/collections/:id`); returns the updated record.
+    pub async fn update_collection(
+        &self,
+        id: &str,
+        req: &CollectionUpdateRequest,
+    ) -> Result<Collection> {
+        let resp = self
+            .client
+            .patch(format!(
+                "{}/api/gallery/collections/{}",
+                self.base_url,
+                encode_path_segment(id)
+            ))
+            .json(req)
+            .send()
+            .await?;
+        Ok(error_for_status_with_body(resp)
+            .await?
+            .json::<Collection>()
+            .await?)
+    }
+
+    /// Delete a collection (`DELETE /api/gallery/collections/:id`). Member
+    /// prints are never trashed or deleted.
+    pub async fn delete_collection(&self, id: &str) -> Result<()> {
+        let resp = self
+            .client
+            .delete(format!(
+                "{}/api/gallery/collections/{}",
+                self.base_url,
+                encode_path_segment(id)
+            ))
+            .send()
+            .await?;
+        error_for_status_with_body(resp).await?;
+        Ok(())
+    }
+
+    /// Add / remove prints in a collection
+    /// (`PUT /api/gallery/collections/:id/items`).
+    pub async fn set_collection_items(&self, id: &str, req: &CollectionItemsRequest) -> Result<()> {
+        let resp = self
+            .client
+            .put(format!(
+                "{}/api/gallery/collections/{}/items",
+                self.base_url,
+                encode_path_segment(id)
+            ))
+            .json(req)
+            .send()
+            .await?;
+        error_for_status_with_body(resp).await?;
+        Ok(())
+    }
+
+    /// List tags with live-print counts (`GET /api/gallery/tags`).
+    pub async fn list_tags(&self) -> Result<Vec<TagCount>> {
+        let resp = self
+            .client
+            .get(format!("{}/api/gallery/tags", self.base_url))
+            .send()
+            .await?;
+        Ok(error_for_status_with_body(resp)
+            .await?
+            .json::<Vec<TagCount>>()
+            .await?)
+    }
+
+    /// Rename a tag everywhere it is used (`PATCH /api/gallery/tags/:name`).
+    pub async fn rename_tag(&self, name: &str, new_name: &str) -> Result<()> {
+        let resp = self
+            .client
+            .patch(format!(
+                "{}/api/gallery/tags/{}",
+                self.base_url,
+                encode_path_segment(name)
+            ))
+            .json(&TagRenameRequest {
+                name: new_name.to_string(),
+            })
+            .send()
+            .await?;
+        error_for_status_with_body(resp).await?;
+        Ok(())
+    }
+
+    /// Delete a tag, detaching it from every print (`DELETE /api/gallery/tags/:name`).
+    pub async fn delete_tag(&self, name: &str) -> Result<()> {
+        let resp = self
+            .client
+            .delete(format!(
+                "{}/api/gallery/tags/{}",
+                self.base_url,
+                encode_path_segment(name)
+            ))
+            .send()
+            .await?;
+        error_for_status_with_body(resp).await?;
         Ok(())
     }
 
@@ -2871,5 +3147,356 @@ mod tests {
     fn the_retention_probe_timeout_is_bounded() {
         assert!(RETENTION_PROBE_TIMEOUT > std::time::Duration::ZERO);
         assert!(RETENTION_PROBE_TIMEOUT <= std::time::Duration::from_secs(10));
+    }
+
+    // ── Library organization + trash ────────────────────────────────────
+
+    fn trashed_row_json() -> serde_json::Value {
+        serde_json::json!({
+            "filename": "mold-flux-dev-q4-1700000000000~smurf-village.png",
+            "metadata": {
+                "prompt": "smurf village at dusk",
+                "title": "Smurf village",
+                "model": "flux-dev:q4",
+                "seed": 7,
+                "steps": 20,
+                "guidance": 3.5,
+                "width": 1024,
+                "height": 1024,
+                "version": "test"
+            },
+            "timestamp": 1_700_000_000_u64,
+            "format": "png",
+            "size_bytes": 123_456_u64,
+            "title": "Smurf village",
+            "tags": ["smurfs"],
+            "favorite": true,
+            "collections": ["col-1"],
+            "trashed_at": 1_700_000_100_u64,
+            "purge_at": 1_702_592_100_u64
+        })
+    }
+
+    #[tokio::test]
+    async fn list_gallery_view_sends_the_view_query_and_parses_trash_rows() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/gallery"))
+            .and(query_param("view", "trash"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!([trashed_row_json()])),
+            )
+            .mount(&server)
+            .await;
+
+        let client = MoldClient::new(&server.uri());
+        let rows = client.list_gallery_view("trash").await.unwrap();
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.title.as_deref(), Some("Smurf village"));
+        assert_eq!(row.tags, vec!["smurfs".to_string()]);
+        assert!(row.favorite);
+        assert_eq!(row.collections, vec!["col-1".to_string()]);
+        assert_eq!(row.trashed_at, Some(1_700_000_100));
+        assert_eq!(row.purge_at, Some(1_702_592_100));
+        assert_eq!(row.size_bytes, Some(123_456));
+    }
+
+    #[tokio::test]
+    async fn trash_gallery_image_deletes_without_the_permanent_flag() {
+        use wiremock::matchers::{method, path, query_param_is_missing};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/gallery/image/cat.png"))
+            .and(query_param_is_missing("permanent"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        let client = MoldClient::new(&server.uri());
+        client.trash_gallery_image("cat.png").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn delete_gallery_image_forever_sends_permanent_true() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/gallery/image/cat.png"))
+            .and(query_param("permanent", "true"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        let client = MoldClient::new(&server.uri());
+        client
+            .delete_gallery_image_forever("cat.png")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn bulk_trash_and_restore_post_the_filename_list() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let body = serde_json::json!({ "filenames": ["a.png", "b.png"] });
+        Mock::given(method("POST"))
+            .and(path("/api/gallery/trash"))
+            .and(body_json(body.clone()))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/gallery/trash/restore"))
+            .and(body_json(body))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        let client = MoldClient::new(&server.uri());
+        let names = vec!["a.png".to_string(), "b.png".to_string()];
+        client.trash_gallery_images(&names).await.unwrap();
+        client.restore_trashed(&names).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn restore_trashed_surfaces_the_409_conflict_body() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/gallery/trash/restore"))
+            .respond_with(ResponseTemplate::new(409).set_body_json(serde_json::json!({
+                "error": "a live print named cat.png already exists",
+                "code": "GALLERY_RESTORE_CONFLICT"
+            })))
+            .mount(&server)
+            .await;
+
+        let client = MoldClient::new(&server.uri());
+        let err = client
+            .restore_trashed(&["cat.png".to_string()])
+            .await
+            .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("409"), "status missing: {msg}");
+        assert!(
+            msg.contains("GALLERY_RESTORE_CONFLICT"),
+            "body missing: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_and_sweep_trash_parse_their_counts() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/gallery/trash"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "purged": 7 })),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/gallery/trash/sweep"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "purged": 2,
+                "remaining": 5
+            })))
+            .mount(&server)
+            .await;
+
+        let client = MoldClient::new(&server.uri());
+        assert_eq!(client.empty_trash().await.unwrap().purged, 7);
+        let sweep = client.sweep_trash().await.unwrap();
+        assert_eq!(sweep.purged, 2);
+        assert_eq!(sweep.remaining, 5);
+    }
+
+    #[tokio::test]
+    async fn patch_gallery_image_sends_the_patch_and_returns_the_row() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path(
+                "/api/gallery/image/mold-flux-dev-q4-1700000000000~smurf-village.png",
+            ))
+            .and(body_json(
+                serde_json::json!({ "title": "Smurf village", "favorite": true }),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(trashed_row_json()))
+            .mount(&server)
+            .await;
+
+        let client = MoldClient::new(&server.uri());
+        let patch = GalleryPatchRequest {
+            title: Some("Smurf village".into()),
+            favorite: Some(true),
+            ..Default::default()
+        };
+        let row = client
+            .patch_gallery_image("mold-flux-dev-q4-1700000000000~smurf-village.png", &patch)
+            .await
+            .unwrap();
+        assert_eq!(row.title.as_deref(), Some("Smurf village"));
+        assert!(row.favorite);
+    }
+
+    #[tokio::test]
+    async fn organize_gallery_posts_the_bulk_body() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/gallery/organize"))
+            .and(body_json(serde_json::json!({
+                "filenames": ["a.png"],
+                "add_tags": ["smurfs"],
+                "add_to_collections": ["col-1"]
+            })))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        let client = MoldClient::new(&server.uri());
+        let req = GalleryOrganizeRequest {
+            filenames: vec!["a.png".into()],
+            add_tags: Some(vec!["smurfs".into()]),
+            add_to_collections: Some(vec!["col-1".into()]),
+            ..Default::default()
+        };
+        client.organize_gallery(&req).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn collections_crud_round_trips_the_wire_types() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let collection = serde_json::json!({
+            "id": "col-1",
+            "name": "Smurfs",
+            "slug": "smurfs",
+            "count": 3,
+            "created_at": 1_700_000_000_u64,
+            "updated_at": 1_700_000_050_u64
+        });
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/gallery/collections"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([collection])))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/gallery/collections"))
+            .and(body_json(serde_json::json!({ "name": "Smurfs" })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(collection.clone()))
+            .mount(&server)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(path("/api/gallery/collections/col-1"))
+            .and(body_json(serde_json::json!({ "name": "Smurfs 2" })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(collection.clone()))
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/api/gallery/collections/col-1/items"))
+            .and(body_json(
+                serde_json::json!({ "add": ["a.png"], "remove": [] }),
+            ))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/gallery/collections/col-1"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        let client = MoldClient::new(&server.uri());
+        let listed = client.list_collections().await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].slug, "smurfs");
+        assert_eq!(listed[0].count, 3);
+        let created = client
+            .create_collection(&CollectionCreateRequest {
+                name: "Smurfs".into(),
+                description: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(created.id, "col-1");
+        let updated = client
+            .update_collection(
+                "col-1",
+                &CollectionUpdateRequest {
+                    name: Some("Smurfs 2".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(updated.id, "col-1");
+        client
+            .set_collection_items(
+                "col-1",
+                &CollectionItemsRequest {
+                    add: vec!["a.png".into()],
+                    remove: vec![],
+                },
+            )
+            .await
+            .unwrap();
+        client.delete_collection("col-1").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn tag_listing_rename_and_delete_encode_the_tag_name() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/gallery/tags"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                { "name": "smurfs", "count": 4 },
+                { "name": "sci fi", "count": 1 }
+            ])))
+            .mount(&server)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(path("/api/gallery/tags/sci%20fi"))
+            .and(body_json(serde_json::json!({ "name": "scifi" })))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/gallery/tags/sci%20fi"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        let client = MoldClient::new(&server.uri());
+        let tags = client.list_tags().await.unwrap();
+        assert_eq!(tags.len(), 2);
+        assert_eq!(tags[0].name, "smurfs");
+        assert_eq!(tags[0].count, 4);
+        client.rename_tag("sci fi", "scifi").await.unwrap();
+        client.delete_tag("sci fi").await.unwrap();
     }
 }

@@ -23,6 +23,7 @@ mold run "a cat on a skateboard"                    # Generate with default mode
 mold run flux-dev:q4 "a sunset over mountains"      # Specific model
 mold run "a portrait" -o portrait.png               # Custom output path
 mold run "a dog" --seed 42 --steps 20               # Reproducible generation
+mold run "a village" --title "Smurf village"        # Titled print (metadata + gallery row + ~slug in filename)
 mold run "watercolor" --image photo.png --strength 0.7  # img2img
 # NOTE --strength is family-specific: SD img2img higher = more change;
 # LTX-2 I2V higher = MORE source preservation (1.0 pins the opening frame)
@@ -34,6 +35,8 @@ mold lambda deploy --instance-type gpu_1x_a10 --region us-west-1  # Private Lamb
 mold gpu list                                       # Stable GPU/MIG inventory
 mold gpu disable cuda:<stable-id>                   # Drain, then disable
 mold gpu enable cuda:<stable-id>                    # Re-enable runtime scheduling
+mold trash list                                     # Trashed prints on $MOLD_HOST with purge countdowns
+mold trash restore <filename>...                    # Back to the live gallery
 ```
 
 `mold mcp` exposes synchronous image generation, async generation with status
@@ -44,7 +47,7 @@ polling, gallery search/fetch, model and LoRA listing, and server status tools.
 Parse `$ARGUMENTS` to determine the action:
 
 - If arguments look like a **prompt** (natural language), run `mold run "<prompt>"` with sensible defaults
-- If arguments start with a **subcommand** (`pull`, `list`, `default`, `config`, `serve`, `server`, `mcp`, `info`, `ps`, `rm`, `unload`, `update`, `stats`, `clean`, `tui`, `completions`, `version`, `runpod`, `lambda`, `jobs`, `gpu`), run that subcommand
+- If arguments start with a **subcommand** (`pull`, `list`, `default`, `config`, `serve`, `server`, `mcp`, `info`, `ps`, `rm`, `unload`, `update`, `stats`, `clean`, `tui`, `completions`, `version`, `runpod`, `lambda`, `jobs`, `gpu`, `trash`), run that subcommand
 - If arguments include **flags** (`--model`, `--image`, `--steps`, etc.), pass them through
 
 ## Generating Images
@@ -524,6 +527,28 @@ CLI surfaces. `mold jobs gc` mirrors `POST /api/chain-jobs/gc`, pruning
 successful ephemeral shim jobs and completed non-ephemeral artifacts older than
 `chain.jobs_artifact_ttl_days`.
 
+### mold trash CLI
+
+Deleting a print moves it to the serving host's trash
+(`<output_dir>/.trash/`); the sweeper purges it after
+`gallery.trash_retention_days` (default 30, `0` = keep forever). `mold trash`
+inspects and acts on that trash over HTTP against `MOLD_HOST` (with
+`MOLD_API_KEY`); there is deliberately no local fallback.
+
+```bash
+mold trash list [--json]          # FILENAME · TITLE · TRASHED (3h ago) · PURGES (in 27d | kept | due) · SIZE
+mold trash restore <FILENAME>...  # POST /api/gallery/trash/restore — 409 GALLERY_RESTORE_CONFLICT if a live print took the name
+mold trash empty [--yes]          # DELETE /api/gallery/trash — confirms [y/N] unless --yes
+mold trash sweep                  # POST /api/gallery/trash/sweep — prints purged= and remaining=
+```
+
+Titles: `mold run ... --title "Smurf village"` (≤120 chars, validated at
+parse time) rides `GenerateRequest.title` → `OutputMetadata.title` → the
+gallery row and folds into the default filename as
+`mold-{model}-{ts}[-{idx}]~{slug}.{ext}`; an explicit `-o` path is used
+verbatim and the file is never renamed later. `--title` applies to
+single-clip runs only (chain scripts / multi-`--prompt` sequences refuse it).
+
 ## Reference implementations
 
 When debugging or changing a model family, compare against the documented upstream — and prefer one you can **run** over one you can only read.
@@ -841,6 +866,7 @@ mold config set server_port 8080          # Bootstrap key → written to config.
 mold config set expand.enabled true       # User-preference → written to mold.db
 mold config set default_width 1024        # Generation default → written to mold.db
 mold config set scheduler.replan_debounce_ms 2000  # Scheduler timing → mold.db
+mold config set gallery.trash_retention_days 7     # Library trash retention → mold.db (0 = keep forever, max 3650)
 mold config set output_dir none           # Clear an optional field
 mold config set models.flux-dev:q4.default_steps 30   # Per-model generation default → model_prefs (DB)
 mold config where expand.enabled          # Print "db" or "file" so operators know the surface
@@ -854,6 +880,8 @@ mold config edit                          # Open config.toml in $EDITOR
 Keys use dot-notation matching the TOML / DB layout. Boolean values accept `true`/`false`, `on`/`off`, or `1`/`0`. Use `none` to clear optional fields. Values are validated (port range, enum options, numeric bounds) before saving. Environment variable overrides are shown when active. `mold config list` output tags each row with its surface (`[db]` / `[file]` / `[env]`), and `mold config set` tags the surface it wrote to (e.g. `Set expand.enabled = true [db]`).
 
 Scheduler timing preferences are profile-scoped and loaded when the server's V2 coordinator starts: `scheduler.replan_debounce_ms` defaults to 2000, `scheduler.replan_max_delay_ms` to 5000, and `scheduler.warm_wait_max_ms` to 2000. Each accepts 0–30000, and max delay must be at least the debounce. Restart the server after changing them.
+
+`gallery.trash_retention_days` (section Gallery, `gallery.` ⇒ DB surface, env `MOLD_GALLERY_TRASH_RETENTION_DAYS`) is the per-host Library trash retention: days a trashed print waits in `<output_dir>/.trash/` before the hourly/startup sweep purges it; default 30, `0` keeps trashed prints forever, max 3650. It is read fresh on every sweep (no restart) and advertised as `capabilities.gallery.trash.retention_days`; desktop/web/iPhone edit a remote host's value through that host's `/api/config`.
 
 On first launch after upgrading from a pre-#265 release, mold imports the `[expand]`/generation-defaults slices of `config.toml` into the DB (gated by `config.migrated_from_toml`), renames the original `config.toml` to `config.toml.migrated` as a one-release downgrade safety net, and rewrites `config.toml` as a stripped **bootstrap-only** file (paths, ports, credentials, per-model file paths — nothing the DB now owns). Multi-profile scoping landed in schema v6: set `MOLD_PROFILE=dev` or pass `--profile dev` to any `mold config` subcommand. Device enablement preferences are machine-wide in `device_preferences`, not profile-scoped; a missing row means enabled by default and discovery never writes one. SQLite corruption detected at open or during a gallery listing quarantines `mold.db` plus its WAL/SHM sidecars as `mold.db.corrupt-<timestamp>*`, rebuilds the schema, and reconciles gallery rows from disk; preferences and prompt history reset unless manually salvaged from that retained copy.
 
@@ -1065,7 +1093,9 @@ Core endpoints exposed by `mold serve` (full list + schemas at `/api/docs`):
 - `GET /api/models` · `GET /api/loras` · `POST /api/models/load` · `POST /api/models/pull` · `DELETE /api/models/unload`
 - `GET /api/discovery/peers` — cached `_mold._tcp` peers visible from the server's LAN; call only when `/api/capabilities.discovery.can_browse` is true, then connect to the returned URL directly
 - `DELETE /api/models/:model` — remove a downloaded model (HTTP `mold rm`): deletes only exclusively-owned files, keeps shared components, returns `{ removed, kept, freed_bytes }`; 409 while loaded
-- `GET /api/gallery` · `POST /api/gallery/media-token` · `GET /api/gallery/image/:name` · `GET /api/gallery/thumbnail/:name` · `DELETE /api/gallery/image/:name`
+- `GET /api/gallery[?view=library|trash]` · `POST /api/gallery/media-token` · `GET /api/gallery/image/:name` · `GET /api/gallery/thumbnail/:name` · `DELETE /api/gallery/image/:name[?permanent=true]` (trash by default; `permanent` hard-deletes) · `PATCH /api/gallery/image/:name` (`{title?, favorite?, tags?, add_tags?, remove_tags?}` → updated `GalleryImage`)
+- Library organization (per host; `capabilities.gallery.organize`): `POST /api/gallery/organize` (bulk `{filenames, favorite?, add_tags?, remove_tags?, add_to_collections?, remove_from_collections?}`) · `GET/POST /api/gallery/collections` · `GET/PATCH/DELETE /api/gallery/collections/:id` · `PUT /api/gallery/collections/:id/items` (`{add, remove}`) · `GET /api/gallery/tags` · `PATCH /api/gallery/tags/:name` (`{name}`) · `DELETE /api/gallery/tags/:name`
+- Trash (`capabilities.gallery.trash = { enabled, retention_days }`): `POST /api/gallery/trash` / `POST /api/gallery/trash/restore` (`{filenames}`; restore is `409 GALLERY_RESTORE_CONFLICT` when a live print holds the name) · `DELETE /api/gallery/trash` → `{purged}` · `POST /api/gallery/trash/sweep` → `{purged, remaining}`; rows from `?view=trash` carry `trashed_at` / `purge_at`. SSE adds `gallery_updated`, `gallery_trashed`, `gallery_restored`, `gallery_collections_changed`; purge reuses `gallery_removed`
 - `GET/POST /api/downloads` · `DELETE /api/downloads/:id` · `GET /api/downloads/stream` — bounded-parallel model pulls (two active per host); listings expose `active_jobs` plus legacy first-job `active`; cancel works for queued and active jobs. Desktop keeps one host-keyed stream per selected download target — active pulls pin to the top of the Models view with a source glyph and target host — so progress, completion refresh, and cancellation stay routed to the correct server.
 - `POST /api/upscale` · `POST /api/upscale/stream`
 - `GET /api/queue` — authoritative server-side listing plus additive scheduler `plan` (per-device lanes, timing estimates, blocked reasons, plan/replan versions). The plan is advisory until the worker revalidates its exact execution fingerprint and frozen artifacts.
@@ -1107,6 +1137,7 @@ Metrics include: HTTP request rates/latency, generation duration, queue depth, m
 | `MOLD_MODELS_DIR`                     | `$MOLD_HOME/models`               | Model storage path                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `MOLD_OUTPUT_DIR`                     | `~/.mold/output`                  | Image output directory (set empty to disable)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `MOLD_THUMBNAIL_WARMUP`               | unset                             | Set `1` to prebuild gallery thumbnails at server startup                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `MOLD_GALLERY_TRASH_RETENTION_DAYS`   | `30`                              | Env override of `gallery.trash_retention_days`: days a trashed print stays in `<output_dir>/.trash/` before the sweep purges it; `0` keeps trashed prints forever, max 3650                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | `MOLD_PORT`                           | `7680`                            | Server port                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `MOLD_LOG`                            | `warn`                            | Log level (trace/debug/info/warn/error)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `MOLD_DISTRIBUTION_IMAGE_VERSION`     | `latest`                          | Release-build-only input: official stable builds embed the exact release and resolve its target `@sha256` manifest; rolling/source/Nix builds use mutable `latest*`. Do not treat it as a runtime routing override.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
