@@ -10,7 +10,8 @@ export interface ToastAction {
 export interface Toast {
   id: number;
   message: string;
-  kind: "info" | "error";
+  /** Severity: green success, yellow warning, red error; info stays neutral. */
+  kind: "info" | "success" | "warning" | "error";
   /** Optional supporting copy rendered below the primary message. */
   description?: string;
   /** Optional trailing action button (Undo, View…). Running it dismisses the toast. */

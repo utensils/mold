@@ -78,6 +78,7 @@
     --halide: #3f6570;
     --safelight: #9b4d00;
     --success: #2f7d4f;
+    --warning: #8a5300;
     --stop: #a93629;
     --on-accent: #ffffff;
     --grad: linear-gradient(96deg, #9b4d00, #b4562a 55%, #9c3f6b);
@@ -95,6 +96,7 @@
   --halide: #3f6570;
   --safelight: #9b4d00;
   --success: #2f7d4f;
+  --warning: #8a5300;
   --stop: #a93629;
   --on-accent: #ffffff;
   --grad: linear-gradient(96deg, #9b4d00, #b4562a 55%, #9c3f6b);
@@ -113,6 +115,7 @@
   --halide: #5cd0ff;
   --safelight: #e879f9;
   --success: #6ee7a5;
+  --warning: #fbbf24;
   --stop: #fb7185;
   --on-accent: #150f1e;
   --grad: linear-gradient(96deg, #89dceb, #89b4fa 45%, #cba6f7);
@@ -132,6 +135,7 @@
     --halide: #0e7490;
     --safelight: #a21caf;
     --success: #0f8a54;
+    --warning: #8a5a00;
     --stop: #b4233b;
     --on-accent: #ffffff;
     --grad: linear-gradient(96deg, #0e7490, #6d43d1 55%, #b4468f);
@@ -149,6 +153,7 @@
   --halide: #0e7490;
   --safelight: #a21caf;
   --success: #0f8a54;
+  --warning: #8a5a00;
   --stop: #b4233b;
   --on-accent: #ffffff;
   --grad: linear-gradient(96deg, #0e7490, #6d43d1 55%, #b4468f);

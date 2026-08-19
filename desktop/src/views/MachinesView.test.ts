@@ -132,6 +132,20 @@ beforeEach(() => {
 });
 
 describe("MachinesView overview", () => {
+  it("tells the user an unreachable machine is reconnecting on its own", async () => {
+    const wrapper = await mountView((hosts) => {
+      const remote = hosts.extras.find((h) => h.id === "hal9000-7680")!;
+      remote.status = "error";
+      remote.error = "connection refused";
+    });
+
+    const notes = wrapper.findAll("[data-test='host-reconnecting']");
+    expect(notes).toHaveLength(1);
+    expect(notes[0]!.text()).toBe("reconnecting…");
+    // A reachable machine says nothing.
+    expect(notes[0]!.classes()).toContain("text-warning");
+  });
+
   it("offers common context-menu actions for connected, remembered, and discovered hosts", async () => {
     const wrapper = await mountView();
 

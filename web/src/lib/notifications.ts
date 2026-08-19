@@ -6,16 +6,23 @@
  *       that lights an accent dot on the Gallery nav pill until you visit it;
  *   (b) a model pull finishing or failing → a toast (the Downloads button keeps
  *       its own count badge);
- *   (c) a registered remote host going unreachable → a sticky error toast, once
- *       per offline transition, plus a stop-tinted dot on the Machines pill
- *       while any registered host is offline.
+ *   (c) a registered remote host going unreachable → a sticky WARNING toast,
+ *       once per offline transition, plus a stop-tinted dot on the Machines
+ *       pill while any registered host is offline. The poll keeps retrying, so
+ *       the machine reconnects on its own; when it answers again the warning is
+ *       withdrawn and a green "Reconnected to …" toast confirms it.
  *
  * The nav (AppNav) reads the two badge signals through `useNotificationSignals`
  * and clears the fresh-prints count with `markGalleryVisited` on entering the
  * Gallery route. `installNotifications` is mounted once from App.vue.
  */
 import { computed, ref, watch, type Ref } from "vue";
-import { toast } from "./toasts";
+import { dismissToast, toast } from "./toasts";
+import {
+  HOST_OFFLINE_DESCRIPTION,
+  hostOfflineTitle,
+  hostReconnectedTitle,
+} from "@studio/lib/hostConnectivity";
 import { listStoredHosts } from "./hostRegistry";
 import { hostStatus } from "../components/machines/hostClient";
 import type { Job } from "../composables/useGenerateStream";
@@ -105,13 +112,23 @@ export function installNotifications(deps: NotificationDeps): () => void {
     },
   );
 
-  // (c) Remote host reachability.
+  // (c) Remote host reachability. Every listed host is re-probed on the timer,
+  // so reconnection is automatic — these toasts only narrate the two edges.
   const wasOffline = new Set<string>();
+  /** hostId → the sticky offline toast, withdrawn once the host answers. */
+  const offlineToastIds = new Map<string, string>();
   let hostTimer: ReturnType<typeof setInterval> | null = null;
+
+  function clearOfflineToast(id: string): void {
+    const toastId = offlineToastIds.get(id);
+    if (toastId) dismissToast(toastId);
+    offlineToastIds.delete(id);
+  }
 
   async function pollHosts(): Promise<void> {
     const hosts = listStoredHosts();
     if (hosts.length === 0) {
+      for (const id of [...offlineToastIds.keys()]) clearOfflineToast(id);
       wasOffline.clear();
       if (offlineHostIds.value.size) offlineHostIds.value = new Set();
       return;
@@ -120,20 +137,33 @@ export function installNotifications(deps: NotificationDeps): () => void {
       hosts.map(async (host) => {
         try {
           await hostStatus(host);
-          wasOffline.delete(host.id);
+          if (wasOffline.delete(host.id)) {
+            // It came back on its own: drop the stale warning and say so.
+            clearOfflineToast(host.id);
+            toast("success", hostReconnectedTitle(host.name));
+          }
         } catch {
           if (!wasOffline.has(host.id)) {
             wasOffline.add(host.id);
-            toast("error", `can't reach ${host.name} — check machines`, {
-              timeout: 0,
-            });
+            offlineToastIds.set(
+              host.id,
+              toast("warning", hostOfflineTitle(host.name), {
+                description: HOST_OFFLINE_DESCRIPTION,
+                timeout: 0,
+              }),
+            );
           }
         }
       }),
     );
     // Drop ids for hosts that were removed while offline so a stale dot clears.
     const known = new Set(hosts.map((h) => h.id));
-    for (const id of [...wasOffline]) if (!known.has(id)) wasOffline.delete(id);
+    for (const id of [...wasOffline]) {
+      if (!known.has(id)) {
+        wasOffline.delete(id);
+        clearOfflineToast(id);
+      }
+    }
     offlineHostIds.value = new Set(wasOffline);
   }
 

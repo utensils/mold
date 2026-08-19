@@ -17,9 +17,19 @@ describe("desktop host bootstrap", () => {
   });
 
   it("keeps offline hosts actionable from the compact toast", () => {
-    expect(source).toContain("It stays listed for reconnect.");
+    // The copy itself lives in the shared studio policy so web says the same.
+    expect(source).toContain("HOST_OFFLINE_DESCRIPTION");
     expect(source).toContain('label: "Open Machines"');
     expect(source).toContain('router.push("/machines")');
     expect(source).toContain("sticky: true");
+  });
+
+  it("warns on a drop and confirms the automatic reconnect in green", () => {
+    // A host that stays listed and is re-probed every poll is a warning, not a
+    // failure; the recovery withdraws that toast and reports success.
+    expect(source).toContain('toasts.push(hostOfflineTitle(host.label), "warning"');
+    expect(source).toContain('toasts.push(hostReconnectedTitle(host.label), "success")');
+    expect(source).toContain("detectReconnectTransitions(hostStatusSnapshot, current)");
+    expect(source).toContain("toasts.dismiss(stale)");
   });
 });

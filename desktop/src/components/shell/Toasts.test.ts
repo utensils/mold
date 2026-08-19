@@ -95,3 +95,38 @@ describe("Toasts a11y roles", () => {
     expect(toasts.items).toHaveLength(0);
   });
 });
+
+describe("Toasts severity tones", () => {
+  it("tints success green, warning yellow, and error red", async () => {
+    const wrapper = mount(Toasts);
+    const toasts = useToastStore();
+    toasts.push("Reconnected to plato", "success");
+    toasts.push("Can't reach plato", "warning");
+    toasts.push("Generation failed", "error");
+    await wrapper.vm.$nextTick();
+
+    const chips = wrapper.findAll("[data-test='toast-status-icon']");
+    const byKind = Object.fromEntries(
+      chips.map((chip) => [chip.attributes("data-kind"), chip.classes().join(" ")]),
+    );
+    expect(byKind.success).toContain("text-success");
+    expect(byKind.warning).toContain("text-warning");
+    expect(byKind.error).toContain("bg-stop");
+    // Info stays deliberately neutral so the three severities keep meaning.
+    toasts.push("Queued", "info");
+    await wrapper.vm.$nextTick();
+    const info = wrapper
+      .findAll("[data-test='toast-status-icon']")
+      .find((chip) => chip.attributes("data-kind") === "info");
+    expect(info?.classes().join(" ")).toContain("text-halide");
+  });
+
+  it("names the severity for screen readers, never color alone", async () => {
+    const wrapper = mount(Toasts);
+    const toasts = useToastStore();
+    toasts.push("Can't reach plato", "warning");
+    await wrapper.vm.$nextTick();
+
+    expect(wrapper.get(".sr-only").text()).toBe("Warning");
+  });
+});

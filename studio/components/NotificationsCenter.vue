@@ -6,6 +6,7 @@ import {
   useNotificationsStore,
   type NotificationEntry,
 } from "../stores/notifications";
+import { mostSevereKind, notificationTone } from "../lib/notificationTone";
 
 /*
  * The notifications bell — the durable record behind transient toasts. A long
@@ -20,10 +21,28 @@ const unreadLabel = computed(() =>
   store.unreadCount > 99 ? "99+" : String(store.unreadCount),
 );
 
+/* The badge takes the worst unread severity: red for an error, yellow for a
+ * warning, green when only good news is waiting. */
+const badgeTone = computed(() =>
+  notificationTone(
+    mostSevereKind(
+      store.entries.filter((entry) => !entry.read).map((entry) => entry.kind),
+    ),
+  ),
+);
+
 function toggle() {
   const next = !open.value;
   open.value = next;
   if (next) store.markAllRead();
+}
+
+function toneStyle(entry: NotificationEntry) {
+  return { background: notificationTone(entry.kind).color };
+}
+
+function toneLabel(entry: NotificationEntry): string {
+  return notificationTone(entry.kind).label;
 }
 
 function timeLabel(entry: NotificationEntry): string {
@@ -50,6 +69,10 @@ function timeLabel(entry: NotificationEntry): string {
           v-if="store.unreadCount > 0"
           class="notifications-bell__badge"
           data-test="notifications-unread"
+          :style="{
+            background: badgeTone.color,
+            color: 'var(--on-accent, #fff)',
+          }"
         >
           {{ unreadLabel }}
         </span>
@@ -77,7 +100,13 @@ function timeLabel(entry: NotificationEntry): string {
           :key="entry.id"
           :data-kind="entry.kind"
         >
-          <span class="notifications-panel__dot" aria-hidden="true" />
+          <span
+            class="notifications-panel__dot"
+            data-test="notifications-dot"
+            :style="toneStyle(entry)"
+            aria-hidden="true"
+          />
+          <span class="notifications-panel__tone">{{ toneLabel(entry) }}</span>
           <div class="notifications-panel__copy">
             <p class="notifications-panel__text">
               {{ entry.text }}
@@ -127,7 +156,7 @@ function timeLabel(entry: NotificationEntry): string {
   padding: 0 3px;
   border-radius: 999px;
   background: var(--stop, #b42318);
-  color: #fff;
+  color: var(--on-accent, #fff);
   font-size: 9px;
   font-weight: 700;
   line-height: 15px;
@@ -189,12 +218,17 @@ function timeLabel(entry: NotificationEntry): string {
   background: var(--ink-3, #98a2b3);
 }
 
-.notifications-panel li[data-kind="error"] .notifications-panel__dot {
-  background: var(--stop, #b42318);
-}
-
-.notifications-panel li[data-kind="success"] .notifications-panel__dot {
-  background: var(--safelight, #067647);
+/* Severity is never color alone — the tone name ships as assistive text. */
+.notifications-panel__tone {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
 }
 
 .notifications-panel__copy {

@@ -134,6 +134,10 @@ describe("MachinesPage", () => {
     const w = mountPage();
     await nextTick();
     expect(w.find('[data-test="host-offline"]').exists()).toBe(true);
+    // The poll keeps retrying on its own — the card says so.
+    expect(w.get('[data-test="host-reconnecting"]').text()).toBe(
+      "reconnecting…",
+    );
     await w.get('[data-test="host-retry"]').trigger("click");
     expect(poll.refresh).toHaveBeenCalled();
   });

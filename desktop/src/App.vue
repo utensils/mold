@@ -11,7 +11,11 @@ import { dockBadgeValue } from "./lib/dockBadge";
 import { ipc } from "./lib/ipc";
 import { appIsBackground } from "./lib/notify";
 import {
+  HOST_OFFLINE_DESCRIPTION,
   detectOfflineTransitions,
+  detectReconnectTransitions,
+  hostOfflineTitle,
+  hostReconnectedTitle,
   newlyCompletedJobs,
   shouldToastGenerationComplete,
   snapshotHostStatuses,
@@ -107,24 +111,42 @@ watch(
   },
 );
 
-// A connected host dropping offline (ready → error) raises a sticky error toast
-// once per transition, regardless of the active workspace.
+// Host reachability, once per edge, regardless of the active workspace. The
+// status poll keeps probing every listed host, so an unreachable machine
+// reconnects on its own: dropping offline is a WARNING (sticky, because the
+// condition persists), and coming back withdraws it and confirms in green.
 let hostStatusSnapshot: Record<string, string> = {};
+/** hostId → the sticky offline toast, withdrawn the moment the host answers. */
+const offlineToastIds = new Map<string, number>();
 watch(
   () => hostsStore.all.map((h) => `${h.id}:${h.status}`).join("|"),
   () => {
     const current = hostsStore.all.map((h) => ({ id: h.id, label: h.label, status: h.status }));
     for (const host of detectOfflineTransitions(hostStatusSnapshot, current)) {
-      toasts.push(`Can't reach ${host.label}`, "error", {
-        description: "It stays listed for reconnect.",
-        action: {
-          label: "Open Machines",
-          run: () => void router.push("/machines"),
-        },
-        sticky: true,
-      });
+      offlineToastIds.set(
+        host.id,
+        toasts.push(hostOfflineTitle(host.label), "warning", {
+          description: HOST_OFFLINE_DESCRIPTION,
+          action: {
+            label: "Open Machines",
+            run: () => void router.push("/machines"),
+          },
+          sticky: true,
+        }),
+      );
     }
-    hostStatusSnapshot = snapshotHostStatuses(current);
+    for (const host of detectReconnectTransitions(hostStatusSnapshot, current)) {
+      const stale = offlineToastIds.get(host.id);
+      if (stale !== undefined) toasts.dismiss(stale);
+      offlineToastIds.delete(host.id);
+      toasts.push(hostReconnectedTitle(host.label), "success");
+    }
+    // Forgotten hosts must not strand an id in the map.
+    const known = new Set(current.map((host) => host.id));
+    for (const id of [...offlineToastIds.keys()]) {
+      if (!known.has(id)) offlineToastIds.delete(id);
+    }
+    hostStatusSnapshot = snapshotHostStatuses(current, hostStatusSnapshot);
   },
   { immediate: true },
 );

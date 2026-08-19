@@ -1,8 +1,36 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import { useToastStore } from "../../stores/toasts";
+import { useToastStore, type Toast } from "../../stores/toasts";
 
 const toasts = useToastStore();
+
+/*
+ * Severity reads as green (success) / yellow (warning) / red (error), with
+ * plain info left cool and neutral. The glyph is decorative, so each tone also
+ * carries a name for assistive tech — severity is never color alone.
+ */
+const TONES: Record<Toast["kind"], { glyph: string; label: string; chip: string }> = {
+  info: {
+    glyph: "i",
+    label: "Info",
+    chip: "bg-[color-mix(in_srgb,var(--halide)_18%,transparent)] text-halide",
+  },
+  success: {
+    glyph: "✓",
+    label: "Success",
+    chip: "bg-[color-mix(in_srgb,var(--success)_20%,transparent)] text-success",
+  },
+  warning: {
+    glyph: "!",
+    label: "Warning",
+    chip: "bg-[color-mix(in_srgb,var(--warning)_22%,transparent)] text-warning",
+  },
+  error: { glyph: "!", label: "Error", chip: "bg-stop text-[var(--desk)]" },
+};
+
+function tone(kind: Toast["kind"]) {
+  return TONES[kind] ?? TONES.info;
+}
 
 // The store appends, so the newest toast is last; the shelf shows it first and
 // pushes the older ones down.
@@ -32,14 +60,11 @@ const ordered = computed(() => [...toasts.items].reverse());
         <span
           data-test="toast-status-icon"
           aria-hidden="true"
+          :data-kind="toast.kind"
           class="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full font-semibold"
-          :class="
-            toast.kind === 'error'
-              ? 'bg-stop text-[var(--desk)]'
-              : 'bg-[color-mix(in_srgb,var(--halide)_18%,transparent)] text-halide'
-          "
+          :class="tone(toast.kind).chip"
         >
-          {{ toast.kind === "error" ? "!" : "i" }}
+          {{ tone(toast.kind).glyph }}
         </span>
         <button
           type="button"
@@ -47,6 +72,7 @@ const ordered = computed(() => [...toasts.items].reverse());
           :title="toast.onClick ? undefined : 'Dismiss'"
           @click="toasts.click(toast.id)"
         >
+          <span class="sr-only">{{ tone(toast.kind).label }}</span>
           <span data-test="toast-title" class="block font-semibold text-ink">
             {{ toast.message }}
           </span>

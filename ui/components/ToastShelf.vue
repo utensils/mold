@@ -23,7 +23,17 @@ const emit = defineEmits<{ dismiss: [id: string]; action: [id: string] }>();
 const GLYPHS: Record<Toast["kind"], string> = {
   info: "•",
   success: "✓",
+  warning: "!",
   error: "✕",
+};
+
+/* Severity is never color alone — the glyph is decorative, so the tone name
+ * ships as assistive text ahead of the message. */
+const TONE_LABELS: Record<Toast["kind"], string> = {
+  info: "Info",
+  success: "Success",
+  warning: "Warning",
+  error: "Error",
 };
 </script>
 
@@ -40,6 +50,7 @@ const GLYPHS: Record<Toast["kind"], string> = {
         <span class="ms-toast__glyph" aria-hidden="true">
           {{ GLYPHS[toast.kind] }}
         </span>
+        <span class="ms-toast__tone">{{ TONE_LABELS[toast.kind] }}</span>
         <span class="ms-toast__text">{{ toast.text }}</span>
         <button
           v-if="toast.actionLabel"
@@ -135,6 +146,26 @@ const GLYPHS: Record<Toast["kind"], string> = {
   border-color: color-mix(in srgb, var(--stop) 50%, transparent);
 }
 
+.ms-toast--warning {
+  border-color: color-mix(in srgb, var(--warning) 50%, transparent);
+}
+
+.ms-toast--success {
+  border-color: color-mix(in srgb, var(--success) 45%, transparent);
+}
+
+.ms-toast__tone {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
 .ms-toast__glyph {
   flex: 0 0 auto;
   font-size: 12px;
@@ -147,6 +178,10 @@ const GLYPHS: Record<Toast["kind"], string> = {
 
 .ms-toast--info .ms-toast__glyph {
   color: var(--halide);
+}
+
+.ms-toast--warning .ms-toast__glyph {
+  color: var(--warning);
 }
 
 .ms-toast--error .ms-toast__glyph {

@@ -91,6 +91,29 @@ describe("ToastShelf", () => {
     expect(wrapper.emitted("dismiss")).toEqual([["t2"]]);
   });
 
+  it("renders warnings with the yellow tone class, glyph, and label", () => {
+    const wrapper = make([
+      { id: "w", kind: "warning", text: "Can't reach plato" },
+    ]);
+    const toast = wrapper.get(".ms-toast");
+    expect(toast.classes()).toContain("ms-toast--warning");
+    expect(toast.classes()).not.toContain("ms-toast--error");
+    expect(wrapper.get(".ms-toast__glyph").text()).toBe("!");
+    expect(wrapper.get(".ms-toast__tone").text()).toBe("Warning");
+  });
+
+  it("tints each severity from its own token, never a shared color", () => {
+    const glyphRules = [
+      ...shelfSource.matchAll(
+        /\.ms-toast--(\w+) \.ms-toast__glyph \{([^}]*)\}/g,
+      ),
+    ];
+    const byKind = Object.fromEntries(glyphRules.map((m) => [m[1]!, m[2]!]));
+    expect(byKind.success).toContain("var(--success)");
+    expect(byKind.warning).toContain("var(--warning)");
+    expect(byKind.error).toContain("var(--stop)");
+  });
+
   it("labels every dismiss button for screen readers", () => {
     const wrapper = make();
     for (const btn of wrapper.findAll(".ms-toast__dismiss")) {

@@ -16,6 +16,7 @@ import ConnectMachineModal from "../components/machines/ConnectMachineModal.vue"
 import QueueColumn from "../components/machines/QueueColumn.vue";
 import PodCostMeter from "../components/machines/PodCostMeter.vue";
 import ConfirmDialog from "../components/shell/ConfirmDialog.vue";
+import { HOST_RECONNECTING_LABEL } from "@studio/lib/hostConnectivity";
 import { ipc, type DiscoveredHost, type SavedHost } from "../lib/ipc";
 import { gpuFleetLabel, gpuSnapshotsFromWorkers } from "../lib/api/gpuStatus";
 import { addressLabel, prepareHosts, versionLabel } from "../lib/discovery";
@@ -363,6 +364,16 @@ async function onConnected() {
                 {{ hardwareLine(host) }}
               </span>
               <Icon name="chevron-right" :size="16" :stroke-width="2" class="shrink-0 text-ink-3" />
+            </div>
+            <!-- The 10 s status poll keeps probing an unreachable machine, so
+                 it comes back on its own; say so rather than leaving a bare
+                 red dot that reads as "gone". -->
+            <div
+              v-if="host.status === 'error'"
+              class="mt-2 text-caption text-warning"
+              data-test="host-reconnecting"
+            >
+              {{ HOST_RECONNECTING_LABEL }}
             </div>
             <div
               v-if="memoryLabel(host)"

@@ -79,3 +79,57 @@ describe("NotificationsCenter", () => {
     wrapper.unmount();
   });
 });
+
+describe("NotificationsCenter severity colors", () => {
+  it("dots each entry green / yellow / red by severity", async () => {
+    const store = useNotificationsStore();
+    store.record({ kind: "success", text: "Reconnected to plato", atMs: 3 });
+    store.record({ kind: "warning", text: "Can't reach plato", atMs: 2 });
+    store.record({ kind: "error", text: "Generation failed", atMs: 1 });
+
+    const wrapper = mountCenter();
+    await wrapper.get('[data-test="notifications-bell"]').trigger("click");
+    await flushPromises();
+
+    const dots = [
+      ...document.body.querySelectorAll<HTMLElement>(
+        '[data-test="notifications-dot"]',
+      ),
+    ].map((dot) => dot.style.background);
+    // Newest first: error, warning, success.
+    expect(dots).toEqual(["var(--stop)", "var(--warning)", "var(--success)"]);
+    wrapper.unmount();
+  });
+
+  it("names the severity in assistive text, never color alone", async () => {
+    const store = useNotificationsStore();
+    store.record({ kind: "warning", text: "Can't reach plato", atMs: 1 });
+
+    const wrapper = mountCenter();
+    await wrapper.get('[data-test="notifications-bell"]').trigger("click");
+    await flushPromises();
+
+    expect(
+      document.body.querySelector('[data-test="notifications-panel"]')
+        ?.textContent,
+    ).toContain("Warning");
+    wrapper.unmount();
+  });
+
+  it("colors the unread badge with the worst unread severity", async () => {
+    const store = useNotificationsStore();
+    store.record({ kind: "success", text: "Reconnected to plato", atMs: 1 });
+
+    const wrapper = mountCenter();
+    expect(
+      wrapper.get('[data-test="notifications-unread"]').attributes("style"),
+    ).toContain("var(--success)");
+
+    store.record({ kind: "error", text: "Generation failed", atMs: 2 });
+    await flushPromises();
+    expect(
+      wrapper.get('[data-test="notifications-unread"]').attributes("style"),
+    ).toContain("var(--stop)");
+    wrapper.unmount();
+  });
+});
