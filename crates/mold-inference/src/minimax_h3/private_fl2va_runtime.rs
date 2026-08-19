@@ -1069,6 +1069,75 @@ where
     Ok(H3PrivateBoundExecution { execution, device })
 }
 
+/// The second authenticated VAE open, retained from admission so both VAEs
+/// can be parked across the whole denoise and reconstructed before visual
+/// decode.
+///
+/// Reconstruction must never re-resolve a replaceable pathname, so this
+/// authority carries its own opened source descriptors and privately staged
+/// copies from the moment admission authenticated them. Its
+/// artifact-validation identity — the one VAE-open identity defined for
+/// comparing independently reopened artifacts — is pinned to the primary
+/// open's, so a reload can only ever construct the same authenticated bytes
+/// the attempt was admitted against.
+pub(crate) struct H3PrivateRetainedVaeReload {
+    authority: H3AuthenticatedComfyVaeAuthority,
+    artifact_validation_identity_sha256: String,
+    artifact_plan_identity_sha256: String,
+}
+
+impl H3PrivateRetainedVaeReload {
+    pub(crate) fn bind(
+        authority: H3AuthenticatedComfyVaeAuthority,
+        primary: &H3AuthenticatedComfyVaeAuthority,
+    ) -> Result<Self> {
+        authority.validate()?;
+        primary.validate()?;
+        let retained = Self {
+            artifact_validation_identity_sha256: authority
+                .artifact_validation_identity_sha256()
+                .into(),
+            artifact_plan_identity_sha256: authority.artifact_plan_identity_sha256().into(),
+            authority,
+        };
+        if retained.artifact_validation_identity_sha256
+            != primary.artifact_validation_identity_sha256()
+            || retained.artifact_plan_identity_sha256 != primary.artifact_plan_identity_sha256()
+            || retained.authority.task() != primary.task()
+            || retained.authority.canonical_model() != primary.canonical_model()
+        {
+            bail!("private H3 retained VAE reload authority opened different artifacts")
+        }
+        Ok(retained)
+    }
+
+    fn authority(&self) -> &H3AuthenticatedComfyVaeAuthority {
+        &self.authority
+    }
+
+    fn validate(&self, admitted: &H3PrivateFl2VaFactoryAuthority) -> Result<()> {
+        self.authority.validate()?;
+        if self.authority.artifact_validation_identity_sha256()
+            != self.artifact_validation_identity_sha256
+            || self.authority.artifact_plan_identity_sha256() != self.artifact_plan_identity_sha256
+            || self.artifact_plan_identity_sha256 != admitted.vae_artifact_plan_identity_sha256
+            || self.authority.task() != Task::Fl2va
+            || self.authority.canonical_model() != contract::FL2VA_COMFY
+        {
+            bail!("private H3 retained VAE reload authority differs from the admitted attempt")
+        }
+        Ok(())
+    }
+
+    fn into_authority(
+        self,
+        admitted: &H3PrivateFl2VaFactoryAuthority,
+    ) -> Result<H3AuthenticatedComfyVaeAuthority> {
+        self.validate(admitted)?;
+        Ok(self.authority)
+    }
+}
+
 /// One consuming scheduler-to-runtime handoff. It owns every opened artifact,
 /// lease, prepared tensor, and typed factory record needed by one attempt.
 /// Neither this root nor the retained overlap record implements `Clone`.
@@ -1087,6 +1156,7 @@ pub(crate) struct H3PrivatePhaseRuntimeOwner<C, E, A> {
     qwen_support: H3PrivateQwenSupport,
     opened_qwen: H3AuthenticatedQwenNvfp4Authority,
     opened_vae: H3AuthenticatedComfyVaeAuthority,
+    reload_vae: H3PrivateRetainedVaeReload,
     bound_transformer: H3PrivateBoundComfyStream,
     stream_authority: H3PrivateComfyStreamAuthority,
     qwen_artifact_authority: H3PrivateQwenArtifactAuthority,
@@ -1108,6 +1178,7 @@ pub(crate) fn bind_private_comfy_fl2va_phase_owner<C, E, A>(
     opened_transformer: H3ComfyOpenedInt8Checkpoint,
     opened_qwen: H3AuthenticatedQwenNvfp4Authority,
     opened_vae: H3AuthenticatedComfyVaeAuthority,
+    reload_vae: H3PrivateRetainedVaeReload,
     attention: H3AttentionRuntimeAuthority,
     conditioner_lease: C,
     execution_lease: E,
@@ -1129,6 +1200,15 @@ where
         &opened_qwen,
         &opened_vae,
     )?;
+    // The reload authority is proved to belong to the same hidden storage
+    // here, while the components its containment check needs are still owned.
+    storage.validate_opened_components(
+        &qwen_support,
+        &opened_transformer,
+        &opened_qwen,
+        reload_vae.authority(),
+    )?;
+    reload_vae.validate(&admitted)?;
     let qwen_artifact_authority =
         H3PrivateQwenArtifactAuthority::capture(&qwen_support, &opened_qwen)?;
     validate_prepared_overlap_binding(&authority, &admitted, &prepared, &memory_overlap)?;
@@ -1175,6 +1255,7 @@ where
         qwen_support,
         opened_qwen,
         opened_vae,
+        reload_vae,
         bound_transformer,
         stream_authority,
         qwen_artifact_authority,
@@ -1222,7 +1303,7 @@ fn validate_prepared_overlap_binding(
         || overlap.visual_decode_peak_device_bytes != budget.visual_decode_phase_device_bytes
         || overlap.normalized_endpoint_host_bytes != budget.normalized_endpoint_host_bytes
         || budget.load_drop_policy
-            != H3FactoryTargetLoadDropPolicy::LoadVaesLoadQwenEncodeTransferDropQwenEncodeConditionsAllocateNoiseLoadTransformerDenoiseDropTransformerDecodeVisualAudioDropVaesMux
+            != H3FactoryTargetLoadDropPolicy::LoadVaesLoadQwenEncodeTransferDropQwenEncodeConditionsParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux
     {
         bail!("private H3 prepared attempt, target budget, and overlap authority differ before VAE allocation")
     }
@@ -1482,8 +1563,10 @@ enum H3PrivatePhaseState {
     QwenLoaded,
     QwenDropped,
     ConditionsEncoded,
+    VaesParked,
     TransformerLoaded,
     TransformerDropped,
+    VaesReloaded,
     VisualDecoded,
     Empty,
 }
@@ -1557,20 +1640,36 @@ impl H3PrivatePhaseLedger {
         )
     }
 
-    fn transformer_loaded(&mut self) -> Result<()> {
+    fn vaes_parked(&mut self) -> Result<()> {
         self.transition(
             &[
                 H3PrivatePhaseState::QwenDropped,
                 H3PrivatePhaseState::ConditionsEncoded,
             ],
+            H3PrivatePhaseState::VaesParked,
+            "VAE park",
+        )
+    }
+
+    fn transformer_loaded(&mut self) -> Result<()> {
+        self.transition(
+            &[H3PrivatePhaseState::VaesParked],
             H3PrivatePhaseState::TransformerLoaded,
             "transformer load",
         )
     }
 
-    fn visual_decoded(&mut self) -> Result<()> {
+    fn vaes_reloaded(&mut self) -> Result<()> {
         self.transition(
             &[H3PrivatePhaseState::TransformerDropped],
+            H3PrivatePhaseState::VaesReloaded,
+            "VAE reload",
+        )
+    }
+
+    fn visual_decoded(&mut self) -> Result<()> {
+        self.transition(
+            &[H3PrivatePhaseState::VaesReloaded],
             H3PrivatePhaseState::VisualDecoded,
             "visual decode",
         )
@@ -1619,6 +1718,7 @@ where
     vae: Option<H3ComfyVaeRuntimeBundle>,
     denoiser: Option<H3PrivatePhaseDenoiser<E, A>>,
     opened_vae: Option<H3AuthenticatedComfyVaeAuthority>,
+    reload_vae: Option<H3PrivateRetainedVaeReload>,
     opened_qwen: Option<H3AuthenticatedQwenNvfp4Authority>,
     qwen_support: Option<H3PrivateQwenSupport>,
     conditioner_lease: Option<C>,
@@ -1667,6 +1767,7 @@ where
             qwen_support,
             opened_qwen,
             opened_vae,
+            reload_vae,
             bound_transformer,
             stream_authority,
             qwen_artifact_authority,
@@ -1701,6 +1802,7 @@ where
             vae: None,
             denoiser: None,
             opened_vae: Some(opened_vae),
+            reload_vae: Some(reload_vae),
             opened_qwen: Some(opened_qwen),
             qwen_support: Some(qwen_support),
             conditioner_lease: Some(conditioner_lease),
@@ -1764,12 +1866,78 @@ where
         Ok(())
     }
 
+    /// Construct both VAEs on the execution device from one consumed
+    /// authenticated authority. The initial load and the post-denoise reload
+    /// share this path so a reconstructed pair is authenticated, progress
+    /// reported, and authority checked exactly as the first pair was.
+    fn construct_vaes(
+        &mut self,
+        opened_vae: H3AuthenticatedComfyVaeAuthority,
+        checkpoint: &mut dyn H3PipelineCheckpoint,
+    ) -> Result<()> {
+        checkpoint.checkpoint(H3PipelineEvent {
+            phase: H3PipelinePhase::VaeLoad,
+            completed: 0,
+            total: 1,
+        })?;
+        let vae = {
+            let authority = &self.authority;
+            let activation_evidence = &self.activation_evidence;
+            let admitted = &self.admitted;
+            let stream_authority = &self.stream_authority;
+            let qwen_artifact_authority = &self.qwen_artifact_authority;
+            let storage = &self.storage;
+            let retention = &self.retention;
+            let memory_overlap = &self.memory_overlap;
+            let continuing_execution = &self.continuing_execution;
+            let continuing_artifacts = &self.continuing_artifacts;
+            let attempt = &self.attempt;
+            let mut vae_observer = H3PrivateVaeLoadCheckpoint::new(
+                checkpoint,
+                || {
+                    validate_private_continuing_authority(
+                        authority,
+                        activation_evidence,
+                        admitted,
+                        stream_authority,
+                        qwen_artifact_authority,
+                        storage,
+                        retention,
+                        memory_overlap,
+                        continuing_execution,
+                        continuing_artifacts,
+                        attempt,
+                    )
+                    .map(|_| ())
+                },
+                &self.allocation_commit,
+            );
+            let loaded = load_h3_comfy_vae_runtime_from_authority(
+                opened_vae,
+                continuing_execution.device(),
+                &mut vae_observer,
+            );
+            vae_observer.finish(loaded)?
+        };
+        if !self.allocation_commit.is_committed() {
+            bail!("private H3 VAE construction returned without an allocation commitment")
+        }
+        self.vae = Some(vae);
+        checkpoint.checkpoint(H3PipelineEvent {
+            phase: H3PipelinePhase::VaeLoad,
+            completed: 1,
+            total: 1,
+        })?;
+        self.validate_continuing_authority()
+    }
+
     fn into_empty(self) -> Result<H3PrivateTerminalAttempt<E, A>> {
         self.validate_continuing_authority()?;
         if !self.ledger.is_terminal()
             || self.vae.is_some()
             || self.denoiser.is_some()
             || self.opened_vae.is_some()
+            || self.reload_vae.is_some()
             || self.opened_qwen.is_some()
             || self.qwen_support.is_some()
             || self.conditioner_lease.is_some()
@@ -1784,6 +1952,7 @@ where
             vae: _,
             denoiser: _,
             opened_vae: _,
+            reload_vae: _,
             opened_qwen: _,
             qwen_support: _,
             conditioner_lease: _,
@@ -1830,6 +1999,7 @@ where
             || self.vae.is_some()
             || self.denoiser.is_some()
             || self.opened_vae.is_some()
+            || self.reload_vae.is_some()
             || self.opened_qwen.is_some()
             || self.qwen_support.is_some()
             || self.conditioner_lease.is_some()
@@ -1904,62 +2074,11 @@ where
     ) -> Result<H3TextConditioning> {
         self.validate_continuing_authority()?;
         self.ledger.vaes_loaded()?;
-        checkpoint.checkpoint(H3PipelineEvent {
-            phase: H3PipelinePhase::VaeLoad,
-            completed: 0,
-            total: 1,
-        })?;
         let opened_vae = self
             .opened_vae
             .take()
             .ok_or_else(|| anyhow::anyhow!("private H3 VAE authority was already consumed"))?;
-        let authority = &self.authority;
-        let activation_evidence = &self.activation_evidence;
-        let admitted = &self.admitted;
-        let stream_authority = &self.stream_authority;
-        let qwen_artifact_authority = &self.qwen_artifact_authority;
-        let storage = &self.storage;
-        let retention = &self.retention;
-        let memory_overlap = &self.memory_overlap;
-        let continuing_execution = &self.continuing_execution;
-        let continuing_artifacts = &self.continuing_artifacts;
-        let attempt = &self.attempt;
-        let mut vae_observer = H3PrivateVaeLoadCheckpoint::new(
-            checkpoint,
-            || {
-                validate_private_continuing_authority(
-                    authority,
-                    activation_evidence,
-                    admitted,
-                    stream_authority,
-                    qwen_artifact_authority,
-                    storage,
-                    retention,
-                    memory_overlap,
-                    continuing_execution,
-                    continuing_artifacts,
-                    attempt,
-                )
-                .map(|_| ())
-            },
-            &self.allocation_commit,
-        );
-        let loaded = load_h3_comfy_vae_runtime_from_authority(
-            opened_vae,
-            self.continuing_execution.device(),
-            &mut vae_observer,
-        );
-        let vae = vae_observer.finish(loaded)?;
-        if !self.allocation_commit.is_committed() {
-            bail!("private H3 VAE construction returned without an allocation commitment")
-        }
-        self.vae = Some(vae);
-        checkpoint.checkpoint(H3PipelineEvent {
-            phase: H3PipelinePhase::VaeLoad,
-            completed: 1,
-            total: 1,
-        })?;
-        self.validate_continuing_authority()?;
+        self.construct_vaes(opened_vae, checkpoint)?;
 
         self.ledger.qwen_loaded()?;
         checkpoint.checkpoint(H3PipelineEvent {
@@ -2045,6 +2164,20 @@ where
         Ok(result)
     }
 
+    fn park_condition_components(
+        &mut self,
+        _checkpoint: &mut dyn H3PipelineCheckpoint,
+    ) -> Result<()> {
+        // Validate before releasing: a revoked authority leaves the resident
+        // pair alone, mirroring the fatal-CUDA retention rule below. Nothing
+        // between here and visual decode reads a VAE, so their ~5.8 GB is
+        // removed from the transformer's own peak rather than added to it.
+        self.validate_continuing_authority()?;
+        drop(self.vae.take());
+        self.ledger.vaes_parked()?;
+        self.validate_continuing_authority()
+    }
+
     fn denoise(
         &mut self,
         input: H3ForwardInput<'_>,
@@ -2104,6 +2237,17 @@ where
         checkpoint: &mut dyn H3PipelineCheckpoint,
     ) -> Result<()> {
         self.validate_continuing_authority()?;
+        if self.vae.is_none() {
+            let reload = self
+                .reload_vae
+                .take()
+                .ok_or_else(|| {
+                    anyhow::anyhow!("private H3 VAE reload authority was already consumed")
+                })?
+                .into_authority(&self.admitted)?;
+            self.construct_vaes(reload, checkpoint)?;
+            self.ledger.vaes_reloaded()?;
+        }
         self.ledger.visual_decoded()?;
         self.vae
             .as_ref()
@@ -2559,6 +2703,8 @@ mod tests {
             qwen_host_resident_parameter_bytes: 2_048,
             qwen_device_resident_parameter_bytes: 0,
             qwen_activation_workspace_bytes: 1_024,
+            qwen_maximum_tensor_staging_bytes: 512,
+            qwen_retained_raw_header_bytes: 64,
             qwen_output_text_rows: 1,
             qwen_vision_rows: if condition_visual_rows == 0 { 0 } else { 64 },
             condition_visual_rows,
@@ -4107,6 +4253,16 @@ mod tests {
         ledger.conditions_encoded().unwrap();
         ledger.conditions_encoded().unwrap();
 
+        // The transformer may not load while either VAE is still resident.
+        assert!(ledger.transformer_loaded().is_err());
+        drop(vae);
+        ledger.vaes_parked().unwrap();
+        assert_eq!(*events.lock().unwrap(), ["qwen", "vae"]);
+        assert!(ledger.vaes_parked().is_err());
+        assert!(ledger.conditions_encoded().is_err());
+        assert!(ledger.vaes_reloaded().is_err());
+        assert!(try_mux(&ledger, &mux_calls).is_err());
+
         let transformer = DropCount {
             name: "transformer",
             events: Arc::clone(&events),
@@ -4114,19 +4270,34 @@ mod tests {
         ledger.transformer_loaded().unwrap();
         assert!(!ledger.denoise_completed().unwrap());
         assert!(!ledger.denoise_completed().unwrap());
-        assert_eq!(*events.lock().unwrap(), ["qwen"]);
+        // Denoise runs with neither VAE resident: only "qwen" and "vae" have
+        // been released, and no reload has happened yet.
+        assert_eq!(*events.lock().unwrap(), ["qwen", "vae"]);
+        assert!(ledger.vaes_reloaded().is_err());
         assert!(ledger.visual_decoded().is_err());
         assert!(try_mux(&ledger, &mux_calls).is_err());
 
         assert!(ledger.denoise_completed().unwrap());
         drop(transformer);
-        assert_eq!(*events.lock().unwrap(), ["qwen", "transformer"]);
+        assert_eq!(*events.lock().unwrap(), ["qwen", "vae", "transformer"]);
         assert!(ledger.denoise_completed().is_err());
+
+        // Visual decode requires the reconstructed pair, never the parked one.
+        assert!(ledger.visual_decoded().is_err());
+        let reloaded_vae = DropCount {
+            name: "reloaded-vae",
+            events: Arc::clone(&events),
+        };
+        ledger.vaes_reloaded().unwrap();
+        assert!(ledger.vaes_reloaded().is_err());
         ledger.visual_decoded().unwrap();
         assert!(try_mux(&ledger, &mux_calls).is_err());
 
-        drop(vae);
-        assert_eq!(*events.lock().unwrap(), ["qwen", "transformer", "vae"]);
+        drop(reloaded_vae);
+        assert_eq!(
+            *events.lock().unwrap(),
+            ["qwen", "vae", "transformer", "reloaded-vae"]
+        );
         ledger.vaes_dropped().unwrap();
         assert!(ledger.is_terminal());
         assert!(ledger.vaes_dropped().is_err());

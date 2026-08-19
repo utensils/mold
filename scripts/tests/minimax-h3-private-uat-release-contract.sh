@@ -496,18 +496,22 @@ fi
 runtime_source=crates/mold-inference/src/minimax_h3/private_fl2va_runtime.rs
 vae_load_line=$(grep -nF 'let loaded = load_h3_comfy_vae_runtime_from_authority(' "$runtime_source" | cut -d: -f1)
 qwen_load_line=$(grep -nF 'let qwen = H3PrivateQwenAdapter::load_authorized_from_opened(' "$runtime_source" | cut -d: -f1)
+vae_park_line=$(grep -nF 'drop(self.vae.take());' "$runtime_source" | head -n 1 | cut -d: -f1)
 transformer_load_line=$(grep -nF 'let stream = load_and_pair_private_comfy_stream(' "$runtime_source" | cut -d: -f1)
 transformer_drop_line=$(grep -nF 'drop(self.denoiser.take());' "$runtime_source" | cut -d: -f1)
-vae_drop_line=$(grep -nF 'drop(self.vae.take());' "$runtime_source" | head -n 1 | cut -d: -f1)
+vae_reload_line=$(grep -nF 'self.construct_vaes(reload, checkpoint)?;' "$runtime_source" | cut -d: -f1)
+vae_drop_line=$(grep -nF 'drop(self.vae.take());' "$runtime_source" | tail -n 1 | cut -d: -f1)
 terminal_line=$(grep -nF 'let identity_echo = backend.terminal_identity_echo()?;' "$runtime_source" | cut -d: -f1)
 mux_line=$(grep -nF 'let output = super::pipeline::finalize_av(' "$runtime_source" | cut -d: -f1)
 if [[ -z "$vae_load_line" || -z "$qwen_load_line" || -z "$transformer_load_line" \
-  || -z "$transformer_drop_line" || -z "$vae_drop_line" || -z "$terminal_line" \
-  || -z "$mux_line" ]] \
-  || (( vae_load_line >= qwen_load_line || qwen_load_line >= transformer_load_line \
-    || transformer_load_line >= transformer_drop_line || transformer_drop_line >= vae_drop_line \
+  || -z "$vae_park_line" || -z "$transformer_drop_line" || -z "$vae_reload_line" \
+  || -z "$vae_drop_line" || -z "$terminal_line" || -z "$mux_line" ]] \
+  || (( vae_load_line >= qwen_load_line || qwen_load_line >= vae_park_line \
+    || vae_park_line >= transformer_load_line \
+    || transformer_load_line >= transformer_drop_line \
+    || transformer_drop_line >= vae_reload_line || vae_reload_line >= vae_drop_line \
     || vae_drop_line >= terminal_line || terminal_line >= mux_line )); then
-  fail "private H3 phase runtime no longer loads and drops components before terminal-only mux"
+  fail "private H3 phase runtime no longer parks, reloads, and drops components before terminal-only mux"
 fi
 require_text "$runtime_source" \
   'pub(crate) struct H3PrivatePhaseIdentityEcho {' \

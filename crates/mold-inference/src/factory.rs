@@ -799,6 +799,8 @@ mod tests {
             qwen_host_resident_parameter_bytes: 2048,
             qwen_device_resident_parameter_bytes: 0,
             qwen_activation_workspace_bytes: 1024,
+            qwen_maximum_tensor_staging_bytes: 512,
+            qwen_retained_raw_header_bytes: 64,
             qwen_output_text_rows: 1,
             qwen_vision_rows: 0,
             condition_visual_rows: 0,

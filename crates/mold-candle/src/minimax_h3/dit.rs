@@ -1386,6 +1386,7 @@ impl H3TokenRefinerBlock {
             self.attention
                 .forward(&self.norm1.forward(hidden)?, None, attention_plan)?;
         let hidden = hidden.broadcast_add(&attention)?;
+        drop(attention);
         let mlp = self.mlp.forward(&self.norm2.forward(&hidden)?)?;
         hidden.broadcast_add(&mlp)
     }
@@ -1745,16 +1746,23 @@ impl H3ComfyInt8TransformerBlockWeights {
             [Tensor; 6] = parameters.try_into().map_err(|_| {
                 candle::Error::Msg("MiniMax H3 block AdaLN must produce six tensors".into())
             })?;
-        let normalized = modulate(
-            &self.norm1.forward(hidden)?,
-            &shift_attention,
-            &scale_attention,
-            adaln_indices,
-        )?;
-        let update = self
-            .attention
-            .forward(&normalized, rotary, attention_plan)?;
+        // Attention-phase hidden-sized tensors must be dead before the MLP
+        // allocates: the admission ledger charges the attention and FFN
+        // workspaces as max-not-sum plus a bounded count of live hidden-sized
+        // activations, so a shadowed binding surviving into `mlp.forward`
+        // would silently exceed that bound.
+        let update = {
+            let normalized = modulate(
+                &self.norm1.forward(hidden)?,
+                &shift_attention,
+                &scale_attention,
+                adaln_indices,
+            )?;
+            self.attention
+                .forward(&normalized, rotary, attention_plan)?
+        };
         let hidden = gated_residual(hidden, &update, &gate_attention, adaln_indices)?;
+        drop(update);
         let normalized = modulate(
             &self.norm2.forward(&hidden)?,
             &shift_mlp,
@@ -1762,6 +1770,7 @@ impl H3ComfyInt8TransformerBlockWeights {
             adaln_indices,
         )?;
         let update = self.mlp.forward(&normalized)?;
+        drop(normalized);
         gated_residual(&hidden, &update, &gate_mlp, adaln_indices)
     }
 }
@@ -1877,16 +1886,29 @@ impl H3TransformerBlockWeights {
             [Tensor; 6] = parameters.try_into().map_err(|_| {
                 candle::Error::Msg("MiniMax H3 block AdaLN must produce six tensors".into())
             })?;
-        let normalized = modulate(
-            &self.norm1.forward(hidden)?,
-            &shift_attention,
-            &scale_attention,
-            adaln_indices,
-        )?;
-        let attention =
+        // Mirror the compact block's liveness discipline: the attention
+        // projection and its normalized input must be dead before the MLP
+        // allocates (max-not-sum workspace ledger). Conformance captures are
+        // retained deliberately — that path never runs under the ledger.
+        let attention = {
+            let normalized = modulate(
+                &self.norm1.forward(hidden)?,
+                &shift_attention,
+                &scale_attention,
+                adaln_indices,
+            )?;
             self.attention
-                .forward_impl(&normalized, Some(rotary), attention_plan, capture)?;
+                .forward_impl(&normalized, Some(rotary), attention_plan, capture)?
+        };
         let hidden = gated_residual(hidden, &attention.output, &gate_attention, adaln_indices)?;
+        let H3AttentionMaybeCapture {
+            output: attention_output,
+            normalized_q,
+            normalized_k,
+            rotated_q,
+            rotated_k,
+        } = attention;
+        drop(attention_output);
         let normalized = modulate(
             &self.norm2.forward(&hidden)?,
             &shift_mlp,
@@ -1894,6 +1916,7 @@ impl H3TransformerBlockWeights {
             adaln_indices,
         )?;
         let update = self.mlp.forward(&normalized)?;
+        drop(normalized);
         let output = gated_residual(&hidden, &update, &gate_mlp, adaln_indices)?;
         let adaln = if capture {
             Some(Tensor::cat(
@@ -1912,10 +1935,10 @@ impl H3TransformerBlockWeights {
         };
         Ok(H3TransformerBlockMaybeCapture {
             output,
-            normalized_q: attention.normalized_q,
-            normalized_k: attention.normalized_k,
-            rotated_q: attention.rotated_q,
-            rotated_k: attention.rotated_k,
+            normalized_q,
+            normalized_k,
+            rotated_q,
+            rotated_k,
             adaln,
         })
     }
