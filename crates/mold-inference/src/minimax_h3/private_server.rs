@@ -1144,6 +1144,8 @@ fn prepare_reviewed_h3_private_fl2va_admission(
             qwen_activation_workspace_bytes: runtime_qualification
                 .bounds()
                 .qwen_activation_workspace_bytes,
+            qwen_maximum_tensor_staging_bytes: qwen_memory.maximum_tensor_staging_bytes,
+            qwen_retained_raw_header_bytes: qwen_memory.retained_raw_header_bytes,
             qwen_output_text_rows: admission_request.request.rows.qwen_output_text_rows,
             qwen_vision_rows: admission_request.request.rows.qwen_vision_rows,
             condition_visual_rows: admission_request.request.rows.condition_visual_rows,
@@ -5061,6 +5063,8 @@ mod tests {
             qwen_host_resident_parameter_bytes: 10,
             qwen_device_resident_parameter_bytes: 0,
             qwen_activation_workspace_bytes: 10,
+            qwen_maximum_tensor_staging_bytes: 8,
+            qwen_retained_raw_header_bytes: 4,
             qwen_output_text_rows: 1,
             qwen_vision_rows: 0,
             condition_visual_rows: 0,

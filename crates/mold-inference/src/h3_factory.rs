@@ -159,6 +159,10 @@ pub struct H3FactoryRawCheckpointInput {
     pub raw_content_sha256: String,
     pub verified_file_bytes: u64,
     pub raw_header_identity_sha256: String,
+    /// Parsed safetensors header the opened checkpoint retains for the whole
+    /// stream lifetime. Anonymous host bytes, unlike the tensor payload the
+    /// stream reads through a bounded buffer.
+    pub retained_header_host_bytes: u64,
     pub opened_checkpoint_identity_sha256: String,
     pub quantization_policy_identity_sha256: String,
     pub config_identity_sha256: String,
@@ -303,6 +307,21 @@ pub struct H3FactoryTargetBudgetInput {
     pub waveform_host_bytes: u64,
     pub mux_output_host_bytes_bound: u64,
     pub aac_mux_staging_host_bytes: u64,
+    pub qwen_host_load_staging_bytes: u64,
+    pub qwen_retained_header_host_bytes: u64,
+    pub transformer_retained_header_host_bytes: u64,
+    pub vae_retained_config_host_bytes: u64,
+    pub vae_load_phase_host_bytes: u64,
+    pub qwen_encode_phase_host_bytes: u64,
+    pub qwen_transfer_phase_host_bytes: u64,
+    pub condition_encode_phase_host_bytes: u64,
+    pub noise_allocation_phase_host_bytes: u64,
+    pub transformer_load_phase_host_bytes: u64,
+    pub denoise_phase_host_bytes: u64,
+    pub visual_decode_phase_host_bytes: u64,
+    pub audio_decode_phase_host_bytes: u64,
+    pub waveform_transfer_phase_host_bytes: u64,
+    pub mux_phase_host_bytes: u64,
     pub predicted_host_increment_bytes: u64,
     pub fixed_runtime_device_bytes: u64,
     pub fixed_transformer_device_bytes: u64,
@@ -388,6 +407,21 @@ impl H3FactoryTargetBudgetInput {
             waveform_host_bytes,
             mux_output_host_bytes_bound,
             aac_mux_staging_host_bytes,
+            qwen_host_load_staging_bytes,
+            qwen_retained_header_host_bytes,
+            transformer_retained_header_host_bytes,
+            vae_retained_config_host_bytes,
+            vae_load_phase_host_bytes,
+            qwen_encode_phase_host_bytes,
+            qwen_transfer_phase_host_bytes,
+            condition_encode_phase_host_bytes,
+            noise_allocation_phase_host_bytes,
+            transformer_load_phase_host_bytes,
+            denoise_phase_host_bytes,
+            visual_decode_phase_host_bytes,
+            audio_decode_phase_host_bytes,
+            waveform_transfer_phase_host_bytes,
+            mux_phase_host_bytes,
             predicted_host_increment_bytes,
             fixed_runtime_device_bytes,
             fixed_transformer_device_bytes,
@@ -479,6 +513,21 @@ impl H3FactoryTargetBudgetInput {
             waveform_host_bytes,
             mux_output_host_bytes_bound,
             aac_mux_staging_host_bytes,
+            qwen_host_load_staging_bytes,
+            qwen_retained_header_host_bytes,
+            transformer_retained_header_host_bytes,
+            vae_retained_config_host_bytes,
+            vae_load_phase_host_bytes,
+            qwen_encode_phase_host_bytes,
+            qwen_transfer_phase_host_bytes,
+            condition_encode_phase_host_bytes,
+            noise_allocation_phase_host_bytes,
+            transformer_load_phase_host_bytes,
+            denoise_phase_host_bytes,
+            visual_decode_phase_host_bytes,
+            audio_decode_phase_host_bytes,
+            waveform_transfer_phase_host_bytes,
+            mux_phase_host_bytes,
             predicted_host_increment_bytes,
             fixed_runtime_device_bytes,
             fixed_transformer_device_bytes,
@@ -668,6 +717,11 @@ pub struct H3FactoryAuthorityInput {
     pub qwen_host_resident_parameter_bytes: u64,
     pub qwen_device_resident_parameter_bytes: u64,
     pub qwen_activation_workspace_bytes: u64,
+    /// Largest single tensor the NVFP4 loader reads, and the raw header it
+    /// retains. Both are opened-loader facts, pinned to the released runtime
+    /// memory facts at the same seam that pins parameter residency.
+    pub qwen_maximum_tensor_staging_bytes: u64,
+    pub qwen_retained_raw_header_bytes: u64,
     pub qwen_output_text_rows: u64,
     pub qwen_vision_rows: u64,
     pub condition_visual_rows: u64,
@@ -711,6 +765,8 @@ pub struct FrozenH3FactoryAuthority {
     qwen_host_resident_parameter_bytes: u64,
     qwen_device_resident_parameter_bytes: u64,
     qwen_activation_workspace_bytes: u64,
+    qwen_maximum_tensor_staging_bytes: u64,
+    qwen_retained_raw_header_bytes: u64,
     qwen_output_text_rows: u64,
     qwen_vision_rows: u64,
     condition_visual_rows: u64,
@@ -784,6 +840,8 @@ struct H3FactoryPreparedAttemptProjection<'a> {
     resident_block_count: u32,
     prefetch_depth: u32,
     qwen_activation_workspace_bytes: u64,
+    qwen_maximum_tensor_staging_bytes: u64,
+    qwen_retained_raw_header_bytes: u64,
     qwen_device_parameter_bytes: u64,
     qwen_host_parameter_bytes: u64,
     conditioner_placement: H3FactoryConditionerPlacement,
@@ -825,6 +883,16 @@ impl H3FactoryPreparedAttemptAuthority {
             || self.target_budget.qwen_device_parameter_bytes
                 != projection.qwen_device_parameter_bytes
             || self.target_budget.qwen_host_parameter_bytes != projection.qwen_host_parameter_bytes
+            // The loader holds the largest tensor twice while reading it: the
+            // `Vec` and its `from_raw_buffer` copy. Bound to the opened loader
+            // fact, never a caller-chosen number.
+            || self.target_budget.qwen_host_load_staging_bytes
+                != projection
+                    .qwen_maximum_tensor_staging_bytes
+                    .checked_mul(2)
+                    .ok_or_else(|| anyhow!("H3 Qwen host load staging overflow"))?
+            || self.target_budget.qwen_retained_header_host_bytes
+                != projection.qwen_retained_raw_header_bytes
             || match projection.conditioner_placement {
                 H3FactoryConditionerPlacement::AssignedCudaThenDrop => {
                     self.target_budget.qwen_activation_device_bytes
@@ -1010,6 +1078,7 @@ fn validate_raw_checkpoint(checkpoint: &H3FactoryRawCheckpointInput) -> Result<(
         require_sha256(value, label)?;
     }
     if checkpoint.blocks.len() != 50
+        || checkpoint.retained_header_host_bytes == 0
         || checkpoint.verified_file_bytes == 0
         || checkpoint.fixed_transformer_encoded_host_bytes == 0
         || checkpoint.fixed_transformer_protected_device_bytes == 0
@@ -1159,32 +1228,202 @@ fn validate_target_budget(
         .into_iter()
         .max()
         .unwrap_or(0);
-    let predicted_host = checked_u64_sum(
+    // One dense non-block tensor at a time reaches host memory during the
+    // fixed transformer load, and it lands on the device before the next is
+    // read (`comfy_dit.rs:1410-1447`: read `Vec` -> `from_raw_buffer` CPU copy
+    // -> optional `to_dtype` upcast -> `to_device`). The bound is therefore two
+    // encoded copies of the largest tensor plus its widened form, NOT the sum
+    // of every fixed tensor's bytes — those are device-resident weights that
+    // `fixed_transformer_device_bytes` already charges.
+    let fixed_transformer_host_staging = checked_u64_sum(
         [
-            memory.artifact_host_bytes,
+            checkpoint.fixed_transformer_max_host_read_staging_bytes,
+            checkpoint.fixed_transformer_max_host_read_staging_bytes,
+            checkpoint.fixed_transformer_max_device_weight_staging_bytes,
+        ],
+        "H3 fixed transformer host staging",
+    )?;
+    // Host demand is a per-phase max, exactly as the device peak above is, and
+    // it counts only ANONYMOUS bytes. Two whole classes are deliberately absent
+    // from every phase sum:
+    //
+    // * `artifact_host_bytes` — the sum of every artifact's FILE size. Nothing
+    //   in this pipeline holds a whole artifact in host RAM: the Qwen and the
+    //   transformer stream through bounded `Vec`s with seek+read_exact
+    //   (`qwen_nvfp4.rs:820-856`, `comfy_dit.rs:1373-1407`), and the VAEs are
+    //   mmap'd. Charging ~42 GB of file bytes as anonymous demand is the #1108
+    //   LTX-2 bug class verbatim.
+    // * `vae_peak_host_mapped_file_bytes` — a genuine mapping
+    //   (`visual_weights.rs:178`, `audio_weights.rs:413`), but file-backed and
+    //   reclaimable, and `MemAvailable` — this ledger's own input via
+    //   `h3_admission::current_h3_host_memory` — already counts those pages as
+    //   available. See `ltx2_cpu_gemma_streams_from_mmap` for the precedent.
+    //
+    // `vae_peak_staging_disk_bytes` was already excluded: it is disk, fenced
+    // separately by `ensure_staging_capacity`.
+    let attempt_host = checked_u64_sum(
+        [
             memory.fixed_runtime_host_bytes,
-            memory.qwen_host_workspace_bytes,
-            memory.condition_backing_host_bytes,
             memory.endpoint_encoded_host_bytes,
             memory.normalized_endpoint_host_bytes,
-            memory.schedule_host_bytes,
+        ],
+        "H3 attempt-long host demand",
+    )?;
+    // Opened-component metadata each authority retains alongside the payload
+    // it streams. Small, but genuinely anonymous, so the phase sums carry it
+    // for exactly as long as its authority is alive: the Qwen raw header until
+    // the conditioner is dropped after encode, the transformer's parsed header
+    // until the transformer is dropped after denoise, and the VAE authorities'
+    // two config buffers until the post-denoise reload consumes the second one.
+    let qwen_alive_metadata_host = checked_u64_sum(
+        [
+            memory.qwen_retained_header_host_bytes,
+            memory.transformer_retained_header_host_bytes,
+            memory.vae_retained_config_host_bytes,
+        ],
+        "H3 opened metadata host demand",
+    )?;
+    let transformer_alive_metadata_host = checked_u64_sum(
+        [
+            memory.transformer_retained_header_host_bytes,
+            memory.vae_retained_config_host_bytes,
+        ],
+        "H3 post-Qwen metadata host demand",
+    )?;
+    let vae_alive_metadata_host = memory.vae_retained_config_host_bytes;
+    let vae_load_host = checked_u64_sum(
+        [
+            attempt_host,
+            qwen_alive_metadata_host,
+            memory.vae_peak_host_io_buffer_bytes,
+        ],
+        "H3 VAE load host phase",
+    )?;
+    let qwen_encode_host = checked_u64_sum(
+        [
+            attempt_host,
+            qwen_alive_metadata_host,
+            memory.qwen_host_workspace_bytes,
+            memory.qwen_host_load_staging_bytes,
+            memory.text_modality_tags_host_bytes,
+        ],
+        "H3 Qwen encode host phase",
+    )?;
+    let qwen_transfer_host = checked_u64_sum(
+        [
+            attempt_host,
+            qwen_alive_metadata_host,
+            memory.qwen_host_workspace_bytes,
+            memory.text_modality_tags_host_bytes,
+        ],
+        "H3 Qwen transfer host phase",
+    )?;
+    let condition_encode_host = checked_u64_sum(
+        [
+            attempt_host,
+            transformer_alive_metadata_host,
+            memory.condition_backing_host_bytes,
             memory.packed_layout_host_bytes,
             memory.packed_layout_construction_staging_host_bytes,
             memory.packed_layout_freeze_staging_host_bytes,
             memory.text_modality_tags_host_bytes,
             memory.noise_cpu_staging_host_bytes,
-            memory.vae_peak_host_io_buffer_bytes,
-            memory.vae_peak_host_mapped_file_bytes,
-            memory.max_streamed_block_host_overlap_bytes,
+        ],
+        "H3 condition encode host phase",
+    )?;
+    let noise_allocation_host = checked_u64_sum(
+        [
+            attempt_host,
+            transformer_alive_metadata_host,
+            memory.condition_backing_host_bytes,
+            memory.packed_layout_host_bytes,
+            memory.text_modality_tags_host_bytes,
+            memory.schedule_host_bytes,
+            memory.noise_cpu_staging_host_bytes,
+        ],
+        "H3 noise allocation host phase",
+    )?;
+    let transformer_load_host = checked_u64_sum(
+        [
+            attempt_host,
+            transformer_alive_metadata_host,
+            memory.condition_backing_host_bytes,
+            memory.packed_layout_host_bytes,
+            memory.text_modality_tags_host_bytes,
+            memory.schedule_host_bytes,
             memory.fixed_transformer_load_host_staging_bytes,
+        ],
+        "H3 transformer load host phase",
+    )?;
+    let denoise_host = checked_u64_sum(
+        [
+            attempt_host,
+            transformer_alive_metadata_host,
+            memory.condition_backing_host_bytes,
+            memory.packed_layout_host_bytes,
+            memory.text_modality_tags_host_bytes,
+            memory.schedule_host_bytes,
+            memory.max_streamed_block_host_overlap_bytes,
+        ],
+        "H3 denoise host phase",
+    )?;
+    let visual_decode_host = checked_u64_sum(
+        [
+            attempt_host,
+            vae_alive_metadata_host,
+            memory.packed_layout_host_bytes,
+            memory.vae_peak_host_io_buffer_bytes,
+            memory.encoded_video_host_bytes_bound,
+            memory.thumbnail_host_bytes_bound,
+        ],
+        "H3 visual decode host phase",
+    )?;
+    let audio_decode_host = checked_u64_sum(
+        [
+            attempt_host,
+            memory.packed_layout_host_bytes,
+            memory.encoded_video_host_bytes_bound,
+            memory.thumbnail_host_bytes_bound,
+            memory.waveform_host_bytes,
+        ],
+        "H3 audio decode host phase",
+    )?;
+    let waveform_transfer_host = checked_u64_sum(
+        [
+            attempt_host,
+            memory.encoded_video_host_bytes_bound,
+            memory.thumbnail_host_bytes_bound,
+            memory.waveform_host_bytes,
+        ],
+        "H3 waveform transfer host phase",
+    )?;
+    let mux_host = checked_u64_sum(
+        [
+            attempt_host,
             memory.encoded_video_host_bytes_bound,
             memory.thumbnail_host_bytes_bound,
             memory.waveform_host_bytes,
             memory.mux_output_host_bytes_bound,
             memory.aac_mux_staging_host_bytes,
         ],
-        "H3 host increment",
+        "H3 mux host phase",
     )?;
+    let predicted_host = [
+        vae_load_host,
+        qwen_encode_host,
+        qwen_transfer_host,
+        condition_encode_host,
+        noise_allocation_host,
+        transformer_load_host,
+        denoise_host,
+        visual_decode_host,
+        audio_decode_host,
+        waveform_transfer_host,
+        mux_host,
+    ]
+    .into_iter()
+    .max()
+    .unwrap_or_default();
     let qwen_host_workspace = memory
         .qwen_host_parameter_bytes
         .checked_add(memory.qwen_host_activation_bytes)
@@ -1449,13 +1688,24 @@ fn validate_target_budget(
         || memory.max_device_weight_staging_bytes != max_device_staging
         || memory.max_host_read_staging_bytes != max_host_staging
         || memory.max_streamed_block_host_overlap_bytes != max_streamed_block_host_overlap
-        || memory.fixed_transformer_load_host_staging_bytes
-            != checkpoint
-                .fixed_transformer_encoded_host_bytes
-                .checked_add(checkpoint.fixed_transformer_max_host_read_staging_bytes)
-                .ok_or_else(|| anyhow!("H3 fixed transformer host staging overflow"))?
+        || memory.fixed_transformer_load_host_staging_bytes != fixed_transformer_host_staging
         || memory.fixed_transformer_load_device_staging_bytes
             != checkpoint.fixed_transformer_max_device_weight_staging_bytes
+        || memory.vae_load_phase_host_bytes != vae_load_host
+        || memory.qwen_encode_phase_host_bytes != qwen_encode_host
+        || memory.qwen_transfer_phase_host_bytes != qwen_transfer_host
+        || memory.condition_encode_phase_host_bytes != condition_encode_host
+        || memory.noise_allocation_phase_host_bytes != noise_allocation_host
+        || memory.transformer_load_phase_host_bytes != transformer_load_host
+        || memory.denoise_phase_host_bytes != denoise_host
+        || memory.visual_decode_phase_host_bytes != visual_decode_host
+        || memory.audio_decode_phase_host_bytes != audio_decode_host
+        || memory.waveform_transfer_phase_host_bytes != waveform_transfer_host
+        || memory.mux_phase_host_bytes != mux_host
+        || memory.transformer_retained_header_host_bytes != checkpoint.retained_header_host_bytes
+        // The VAE's retained config bytes are bound by the same opened memory
+        // evidence identity every other VAE-derived field is bound by.
+        || memory.vae_retained_config_host_bytes == 0
         || memory.predicted_host_increment_bytes != predicted_host
         || memory.vae_load_phase_device_bytes != vae_load
         || memory.qwen_encode_phase_device_bytes != qwen_encode
@@ -1687,6 +1937,7 @@ pub fn expected_h3_factory_raw_checkpoint_identity(
     hash.update(checkpoint.raw_content_sha256.as_bytes());
     hash.update(checkpoint.verified_file_bytes.to_le_bytes());
     hash.update(checkpoint.raw_header_identity_sha256.as_bytes());
+    hash.update(checkpoint.retained_header_host_bytes.to_le_bytes());
     hash.update(checkpoint.opened_checkpoint_identity_sha256.as_bytes());
     hash.update(checkpoint.quantization_policy_identity_sha256.as_bytes());
     hash.update(checkpoint.config_identity_sha256.as_bytes());
@@ -1865,6 +2116,8 @@ impl FrozenH3FactoryAuthority {
                 .checked_add(input.qwen_device_resident_parameter_bytes)
                 .is_none_or(|bytes| bytes == 0)
             || input.qwen_activation_workspace_bytes == 0
+            || input.qwen_maximum_tensor_staging_bytes == 0
+            || input.qwen_retained_raw_header_bytes == 0
             || input.qwen_output_text_rows == 0
         {
             bail!("MiniMax H3 factory authority requires exact nonzero Qwen memory facts");
@@ -1922,6 +2175,9 @@ impl FrozenH3FactoryAuthority {
                             resident_block_count: input.resident_block_count,
                             prefetch_depth: input.prefetch_depth,
                             qwen_activation_workspace_bytes: input.qwen_activation_workspace_bytes,
+                            qwen_maximum_tensor_staging_bytes: input
+                                .qwen_maximum_tensor_staging_bytes,
+                            qwen_retained_raw_header_bytes: input.qwen_retained_raw_header_bytes,
                             qwen_device_parameter_bytes: input
                                 .qwen_device_resident_parameter_bytes,
                             qwen_host_parameter_bytes: input.qwen_host_resident_parameter_bytes,
@@ -2040,6 +2296,8 @@ impl FrozenH3FactoryAuthority {
             qwen_host_resident_parameter_bytes: input.qwen_host_resident_parameter_bytes,
             qwen_device_resident_parameter_bytes: input.qwen_device_resident_parameter_bytes,
             qwen_activation_workspace_bytes: input.qwen_activation_workspace_bytes,
+            qwen_maximum_tensor_staging_bytes: input.qwen_maximum_tensor_staging_bytes,
+            qwen_retained_raw_header_bytes: input.qwen_retained_raw_header_bytes,
             qwen_output_text_rows: input.qwen_output_text_rows,
             qwen_vision_rows: input.qwen_vision_rows,
             condition_visual_rows: input.condition_visual_rows,
@@ -2099,6 +2357,8 @@ impl FrozenH3FactoryAuthority {
                 prefetch_depth: u32::try_from(self.backend_plan.block_streaming().prefetch_depth)
                     .map_err(|_| anyhow!("private H3 prefetch depth exceeds u32"))?,
                 qwen_activation_workspace_bytes: self.qwen_activation_workspace_bytes,
+                qwen_maximum_tensor_staging_bytes: self.qwen_maximum_tensor_staging_bytes,
+                qwen_retained_raw_header_bytes: self.qwen_retained_raw_header_bytes,
                 qwen_device_parameter_bytes: self.qwen_device_resident_parameter_bytes,
                 qwen_host_parameter_bytes: self.qwen_host_resident_parameter_bytes,
                 conditioner_placement: self.conditioner_placement,
@@ -2406,6 +2666,14 @@ impl FrozenH3FactoryAuthority {
         self.qwen_activation_workspace_bytes
     }
 
+    pub const fn qwen_maximum_tensor_staging_bytes(&self) -> u64 {
+        self.qwen_maximum_tensor_staging_bytes
+    }
+
+    pub const fn qwen_retained_raw_header_bytes(&self) -> u64 {
+        self.qwen_retained_raw_header_bytes
+    }
+
     pub const fn qwen_output_text_rows(&self) -> u64 {
         self.qwen_output_text_rows
     }
@@ -2496,6 +2764,8 @@ impl FrozenH3FactoryAuthority {
                 .checked_add(self.qwen_device_resident_parameter_bytes)
                 .is_none_or(|bytes| bytes == 0)
             || self.qwen_activation_workspace_bytes == 0
+            || self.qwen_maximum_tensor_staging_bytes == 0
+            || self.qwen_retained_raw_header_bytes == 0
             || self.qwen_output_text_rows == 0
         {
             bail!("MiniMax H3 factory attention or offload authority changed after admission");
@@ -2543,6 +2813,8 @@ impl FrozenH3FactoryAuthority {
                     prefetch_depth: u32::try_from(self.prefetch_depth())
                         .map_err(|_| anyhow!("H3 prefetch depth exceeds u32"))?,
                     qwen_activation_workspace_bytes: self.qwen_activation_workspace_bytes,
+                    qwen_maximum_tensor_staging_bytes: self.qwen_maximum_tensor_staging_bytes,
+                    qwen_retained_raw_header_bytes: self.qwen_retained_raw_header_bytes,
                     qwen_device_parameter_bytes: self.qwen_device_resident_parameter_bytes,
                     qwen_host_parameter_bytes: self.qwen_host_resident_parameter_bytes,
                     conditioner_placement: self.conditioner_placement,
@@ -2626,6 +2898,8 @@ fn frozen_identity(authority: &FrozenH3FactoryAuthority) -> String {
     hash.update(authority.qwen_host_resident_parameter_bytes.to_le_bytes());
     hash.update(authority.qwen_device_resident_parameter_bytes.to_le_bytes());
     hash.update(authority.qwen_activation_workspace_bytes.to_le_bytes());
+    hash.update(authority.qwen_maximum_tensor_staging_bytes.to_le_bytes());
+    hash.update(authority.qwen_retained_raw_header_bytes.to_le_bytes());
     hash.update(authority.qwen_output_text_rows.to_le_bytes());
     hash.update(authority.qwen_vision_rows.to_le_bytes());
     hash.update(authority.condition_visual_rows.to_le_bytes());
@@ -2688,6 +2962,15 @@ fn require_sha256(value: &str, label: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Opened-loader facts the fixture stands in for. The budget's staging and
+    /// retained-metadata terms are DERIVED from these, exactly as production
+    /// derives them from the authenticated runtime facts, so a test cannot
+    /// invent a value the validator would then have to accept.
+    const FIXTURE_QWEN_MAX_TENSOR_STAGING_BYTES: u64 = 350;
+    const FIXTURE_QWEN_RETAINED_HEADER_BYTES: u64 = 40;
+    const FIXTURE_TRANSFORMER_RETAINED_HEADER_BYTES: u64 = 60;
+    const FIXTURE_VAE_RETAINED_CONFIG_BYTES: u64 = 20;
 
     fn sha(byte: char) -> String {
         std::iter::repeat_n(byte, 64).collect()
@@ -2778,6 +3061,7 @@ mod tests {
                 .map(|block| block.encoded_host_bytes)
                 .sum::<u64>();
         let mut checkpoint = H3FactoryRawCheckpointInput {
+            retained_header_host_bytes: FIXTURE_TRANSFORMER_RETAINED_HEADER_BYTES,
             identity_sha256: String::new(),
             raw_content_sha256: sha('3'),
             verified_file_bytes,
@@ -2995,32 +3279,121 @@ mod tests {
             .map(|block| block.encoded_host_bytes + block.max_host_read_staging_bytes)
             .max()
             .unwrap();
-        let fixed_transformer_load_host_staging_bytes = checkpoint
-            .fixed_transformer_encoded_host_bytes
-            + checkpoint.fixed_transformer_max_host_read_staging_bytes;
-        let predicted_host_increment_bytes = sum(&[
-            artifact_host_bytes,
+        let fixed_transformer_load_host_staging_bytes = 2 * checkpoint
+            .fixed_transformer_max_host_read_staging_bytes
+            + checkpoint.fixed_transformer_max_device_weight_staging_bytes;
+        let qwen_host_load_staging_bytes = 2 * FIXTURE_QWEN_MAX_TENSOR_STAGING_BYTES;
+        let qwen_retained_header_host_bytes = FIXTURE_QWEN_RETAINED_HEADER_BYTES;
+        let transformer_retained_header_host_bytes = checkpoint.retained_header_host_bytes;
+        let vae_retained_config_host_bytes = FIXTURE_VAE_RETAINED_CONFIG_BYTES;
+        let qwen_alive_metadata_host_bytes = sum(&[
+            qwen_retained_header_host_bytes,
+            transformer_retained_header_host_bytes,
+            vae_retained_config_host_bytes,
+        ]);
+        let transformer_alive_metadata_host_bytes = sum(&[
+            transformer_retained_header_host_bytes,
+            vae_retained_config_host_bytes,
+        ]);
+        // Anonymous host demand that outlives every phase: the process RSS
+        // baseline and the request-owned endpoint buffers.
+        let attempt_host_bytes = sum(&[
             100,
-            qwen_host_workspace_bytes,
-            condition_backing_host_bytes,
             endpoint_encoded_host_bytes,
             normalized_endpoint_host_bytes,
-            schedule_host_bytes,
+        ]);
+        let vae_load_phase_host_bytes = attempt_host_bytes + qwen_alive_metadata_host_bytes + 1_000;
+        let qwen_encode_phase_host_bytes = sum(&[
+            attempt_host_bytes,
+            qwen_alive_metadata_host_bytes,
+            qwen_host_workspace_bytes,
+            qwen_host_load_staging_bytes,
+            text_modality_tags_host_bytes,
+        ]);
+        let qwen_transfer_phase_host_bytes = sum(&[
+            attempt_host_bytes,
+            qwen_alive_metadata_host_bytes,
+            qwen_host_workspace_bytes,
+            text_modality_tags_host_bytes,
+        ]);
+        let condition_encode_phase_host_bytes = sum(&[
+            attempt_host_bytes,
+            transformer_alive_metadata_host_bytes,
+            condition_backing_host_bytes,
             packed_layout_host_bytes,
             packed_layout_construction_staging_host_bytes,
             packed_layout_freeze_staging_host_bytes,
             text_modality_tags_host_bytes,
             noise_cpu_staging_host_bytes,
-            1_000,
-            2_000,
-            max_streamed_block_host_overlap_bytes,
+        ]);
+        let noise_allocation_phase_host_bytes = sum(&[
+            attempt_host_bytes,
+            transformer_alive_metadata_host_bytes,
+            condition_backing_host_bytes,
+            packed_layout_host_bytes,
+            text_modality_tags_host_bytes,
+            schedule_host_bytes,
+            noise_cpu_staging_host_bytes,
+        ]);
+        let transformer_load_phase_host_bytes = sum(&[
+            attempt_host_bytes,
+            transformer_alive_metadata_host_bytes,
+            condition_backing_host_bytes,
+            packed_layout_host_bytes,
+            text_modality_tags_host_bytes,
+            schedule_host_bytes,
             fixed_transformer_load_host_staging_bytes,
+        ]);
+        let denoise_phase_host_bytes = sum(&[
+            attempt_host_bytes,
+            transformer_alive_metadata_host_bytes,
+            condition_backing_host_bytes,
+            packed_layout_host_bytes,
+            text_modality_tags_host_bytes,
+            schedule_host_bytes,
+            max_streamed_block_host_overlap_bytes,
+        ]);
+        let visual_decode_phase_host_bytes = sum(&[
+            attempt_host_bytes,
+            vae_retained_config_host_bytes,
+            packed_layout_host_bytes,
+            1_000,
+            5_000,
+            1_000,
+        ]);
+        let audio_decode_phase_host_bytes = sum(&[
+            attempt_host_bytes,
+            packed_layout_host_bytes,
+            5_000,
+            1_000,
+            waveform_host_bytes,
+        ]);
+        let waveform_transfer_phase_host_bytes =
+            sum(&[attempt_host_bytes, 5_000, 1_000, waveform_host_bytes]);
+        let mux_phase_host_bytes = sum(&[
+            attempt_host_bytes,
             5_000,
             1_000,
             waveform_host_bytes,
             10_000,
             2_000,
         ]);
+        let predicted_host_increment_bytes = *[
+            vae_load_phase_host_bytes,
+            qwen_encode_phase_host_bytes,
+            qwen_transfer_phase_host_bytes,
+            condition_encode_phase_host_bytes,
+            noise_allocation_phase_host_bytes,
+            transformer_load_phase_host_bytes,
+            denoise_phase_host_bytes,
+            visual_decode_phase_host_bytes,
+            audio_decode_phase_host_bytes,
+            waveform_transfer_phase_host_bytes,
+            mux_phase_host_bytes,
+        ]
+        .iter()
+        .max()
+        .unwrap();
         let mut budget = H3FactoryTargetBudgetInput {
             identity_sha256: String::new(),
             load_drop_policy: H3FactoryTargetLoadDropPolicy::LoadVaesLoadQwenEncodeTransferDropQwenEncodeConditionsParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux,
@@ -3051,6 +3424,21 @@ mod tests {
             waveform_host_bytes,
             mux_output_host_bytes_bound: 10_000,
             aac_mux_staging_host_bytes: 2_000,
+            qwen_host_load_staging_bytes,
+            qwen_retained_header_host_bytes,
+            transformer_retained_header_host_bytes,
+            vae_retained_config_host_bytes,
+            vae_load_phase_host_bytes,
+            qwen_encode_phase_host_bytes,
+            qwen_transfer_phase_host_bytes,
+            condition_encode_phase_host_bytes,
+            noise_allocation_phase_host_bytes,
+            transformer_load_phase_host_bytes,
+            denoise_phase_host_bytes,
+            visual_decode_phase_host_bytes,
+            audio_decode_phase_host_bytes,
+            waveform_transfer_phase_host_bytes,
+            mux_phase_host_bytes,
             predicted_host_increment_bytes,
             fixed_runtime_device_bytes,
             fixed_transformer_device_bytes,
@@ -3194,6 +3582,8 @@ mod tests {
             qwen_host_resident_parameter_bytes: 2048,
             qwen_device_resident_parameter_bytes: 0,
             qwen_activation_workspace_bytes: 1024,
+            qwen_maximum_tensor_staging_bytes: FIXTURE_QWEN_MAX_TENSOR_STAGING_BYTES,
+            qwen_retained_raw_header_bytes: FIXTURE_QWEN_RETAINED_HEADER_BYTES,
             qwen_output_text_rows: 1,
             qwen_vision_rows: 64,
             condition_visual_rows: 384,
@@ -3226,7 +3616,6 @@ mod tests {
         input.qwen_device_resident_parameter_bytes = input.qwen_parameter_bytes;
 
         let budget = &mut input.prepared_attempt.as_mut().unwrap().target_budget;
-        let prior_qwen_host_workspace_bytes = budget.qwen_host_workspace_bytes;
         budget.qwen_host_activation_bytes = 0;
         budget.qwen_host_output_state_bytes = 0;
         budget.qwen_host_workspace_bytes = budget.qwen_host_parameter_bytes;
@@ -3241,12 +3630,49 @@ mod tests {
             budget.qwen_output_state_device_bytes,
         ]);
         budget.qwen_transfer_phase_device_bytes = 0;
-        budget.predicted_host_increment_bytes = budget
-            .predicted_host_increment_bytes
-            .checked_sub(prior_qwen_host_workspace_bytes)
-            .unwrap()
-            .checked_add(budget.qwen_host_workspace_bytes)
-            .unwrap();
+        // Only the Qwen-bearing host phases move: the CUDA route keeps its
+        // packed weights on the host but allocates no host activation or
+        // output state, so the per-phase max must be re-taken rather than
+        // patched by a delta.
+        let attempt_host_bytes = sum(&[
+            budget.fixed_runtime_host_bytes,
+            budget.endpoint_encoded_host_bytes,
+            budget.normalized_endpoint_host_bytes,
+        ]);
+        let qwen_alive_metadata_host_bytes = sum(&[
+            budget.qwen_retained_header_host_bytes,
+            budget.transformer_retained_header_host_bytes,
+            budget.vae_retained_config_host_bytes,
+        ]);
+        budget.qwen_encode_phase_host_bytes = sum(&[
+            attempt_host_bytes,
+            qwen_alive_metadata_host_bytes,
+            budget.qwen_host_workspace_bytes,
+            budget.qwen_host_load_staging_bytes,
+            budget.text_modality_tags_host_bytes,
+        ]);
+        budget.qwen_transfer_phase_host_bytes = sum(&[
+            attempt_host_bytes,
+            qwen_alive_metadata_host_bytes,
+            budget.qwen_host_workspace_bytes,
+            budget.text_modality_tags_host_bytes,
+        ]);
+        budget.predicted_host_increment_bytes = [
+            budget.vae_load_phase_host_bytes,
+            budget.qwen_encode_phase_host_bytes,
+            budget.qwen_transfer_phase_host_bytes,
+            budget.condition_encode_phase_host_bytes,
+            budget.noise_allocation_phase_host_bytes,
+            budget.transformer_load_phase_host_bytes,
+            budget.denoise_phase_host_bytes,
+            budget.visual_decode_phase_host_bytes,
+            budget.audio_decode_phase_host_bytes,
+            budget.waveform_transfer_phase_host_bytes,
+            budget.mux_phase_host_bytes,
+        ]
+        .into_iter()
+        .max()
+        .unwrap();
         budget.predicted_device_peak_bytes = [
             budget.vae_load_phase_device_bytes,
             budget.qwen_encode_phase_device_bytes,
@@ -3799,6 +4225,21 @@ mod tests {
             waveform_host_bytes,
             mux_output_host_bytes_bound,
             aac_mux_staging_host_bytes,
+            qwen_host_load_staging_bytes,
+            qwen_retained_header_host_bytes,
+            transformer_retained_header_host_bytes,
+            vae_retained_config_host_bytes,
+            vae_load_phase_host_bytes,
+            qwen_encode_phase_host_bytes,
+            qwen_transfer_phase_host_bytes,
+            condition_encode_phase_host_bytes,
+            noise_allocation_phase_host_bytes,
+            transformer_load_phase_host_bytes,
+            denoise_phase_host_bytes,
+            visual_decode_phase_host_bytes,
+            audio_decode_phase_host_bytes,
+            waveform_transfer_phase_host_bytes,
+            mux_phase_host_bytes,
             predicted_host_increment_bytes,
             fixed_runtime_device_bytes,
             fixed_transformer_device_bytes,
@@ -3888,6 +4329,95 @@ mod tests {
             expected_h3_factory_target_budget_identity(&evidence),
             baseline
         );
+    }
+
+    #[test]
+    fn host_demand_is_a_per_phase_max_of_anonymous_bytes_only() {
+        let request = prepared_request();
+        let checkpoint = raw_checkpoint();
+        let budget = target_budget(&request, &checkpoint);
+        let phases = [
+            budget.vae_load_phase_host_bytes,
+            budget.qwen_encode_phase_host_bytes,
+            budget.qwen_transfer_phase_host_bytes,
+            budget.condition_encode_phase_host_bytes,
+            budget.noise_allocation_phase_host_bytes,
+            budget.transformer_load_phase_host_bytes,
+            budget.denoise_phase_host_bytes,
+            budget.visual_decode_phase_host_bytes,
+            budget.audio_decode_phase_host_bytes,
+            budget.waveform_transfer_phase_host_bytes,
+            budget.mux_phase_host_bytes,
+        ];
+
+        // The prediction is the peak phase, never everything ever allocated.
+        assert_eq!(
+            budget.predicted_host_increment_bytes,
+            phases.into_iter().max().unwrap()
+        );
+        assert!(budget.predicted_host_increment_bytes < phases.into_iter().sum::<u64>());
+
+        // The peak phase is named term by term, so the two classes that must
+        // never be anonymous demand — whole-artifact file bytes and the
+        // file-backed VAE mapping — are visibly absent from it.
+        let attempt_host = budget.fixed_runtime_host_bytes
+            + budget.endpoint_encoded_host_bytes
+            + budget.normalized_endpoint_host_bytes;
+        // Retained opened-component metadata is anonymous too, and lives for
+        // exactly as long as its own authority.
+        let qwen_alive_metadata = budget.qwen_retained_header_host_bytes
+            + budget.transformer_retained_header_host_bytes
+            + budget.vae_retained_config_host_bytes;
+        let transformer_alive_metadata =
+            budget.transformer_retained_header_host_bytes + budget.vae_retained_config_host_bytes;
+        assert_eq!(
+            budget.qwen_encode_phase_host_bytes,
+            attempt_host
+                + qwen_alive_metadata
+                + budget.qwen_host_workspace_bytes
+                + budget.qwen_host_load_staging_bytes
+                + budget.text_modality_tags_host_bytes
+        );
+        // The Qwen header goes when the conditioner does; the VAE configs
+        // outlive the transformer because the reload authority still holds one
+        // copy until visual decode.
+        assert_eq!(
+            budget.visual_decode_phase_host_bytes
+                - budget.vae_retained_config_host_bytes
+                - budget.packed_layout_host_bytes
+                - budget.vae_peak_host_io_buffer_bytes
+                - budget.encoded_video_host_bytes_bound
+                - budget.thumbnail_host_bytes_bound,
+            attempt_host
+        );
+        assert_eq!(budget.mux_phase_host_bytes.min(attempt_host), attempt_host);
+
+        // The Qwen is dropped before conditions are encoded, so its ~20 GB of
+        // packed CPU parameters belong to no later phase. Denoise additionally
+        // holds exactly one live packed block, never the whole checkpoint.
+        assert_eq!(
+            budget.denoise_phase_host_bytes,
+            attempt_host
+                + transformer_alive_metadata
+                + budget.condition_backing_host_bytes
+                + budget.packed_layout_host_bytes
+                + budget.text_modality_tags_host_bytes
+                + budget.schedule_host_bytes
+                + budget.max_streamed_block_host_overlap_bytes
+        );
+
+        // A larger file-backed VAE mapping is reclaimable page cache that
+        // `MemAvailable` already counts as free, so it must not change the
+        // prediction — and the validator must still accept the budget.
+        let mut mapped = exact_input();
+        mapped
+            .prepared_attempt
+            .as_mut()
+            .unwrap()
+            .target_budget
+            .vae_peak_host_mapped_file_bytes += 4 * 1024 * 1024 * 1024;
+        refresh_nested_identities(&mut mapped);
+        assert!(FrozenH3FactoryAuthority::new_contract_only(mapped).is_ok());
     }
 
     #[test]
@@ -4006,6 +4536,10 @@ mod tests {
         }
         assert_rejected_fields!(
             artifact_host_bytes,
+            qwen_host_load_staging_bytes,
+            qwen_retained_header_host_bytes,
+            transformer_retained_header_host_bytes,
+            vae_retained_config_host_bytes,
             qwen_host_output_state_bytes,
             qwen_host_workspace_bytes,
             endpoint_encoded_host_bytes,

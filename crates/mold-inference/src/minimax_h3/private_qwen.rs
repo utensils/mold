@@ -57,6 +57,12 @@ pub struct H3PrivateQwenLoaderMemoryAuthority {
     pub source_parameter_bytes: u64,
     pub host_resident_parameter_bytes: u64,
     pub device_resident_parameter_bytes: u64,
+    /// Largest single tensor the loader reads, and the raw header it retains.
+    /// Both are anonymous host bytes the target budget must derive from here
+    /// rather than choose; `validate_parameter_memory` re-pins them against
+    /// the authenticated runtime facts before any tensor is allocated.
+    pub maximum_tensor_staging_bytes: u64,
+    pub retained_raw_header_bytes: u64,
 }
 
 /// Payload-free authority for authenticating the private Qwen checkpoint
@@ -198,6 +204,8 @@ pub fn released_h3_private_qwen_loader_memory_authority(
         source_parameter_bytes: facts.effective_parameter_bytes,
         host_resident_parameter_bytes: facts.host_resident_parameter_bytes,
         device_resident_parameter_bytes: facts.device_resident_parameter_bytes,
+        maximum_tensor_staging_bytes: facts.maximum_tensor_staging_bytes,
+        retained_raw_header_bytes: facts.retained_raw_header_bytes,
     })
 }
 
@@ -994,6 +1002,23 @@ fn validate_parameter_memory(
             authority.qwen_device_resident_parameter_bytes(),
             facts.host_resident_parameter_bytes,
             facts.device_resident_parameter_bytes
+        )
+    }
+    // The host ledger charges the loader's own transients and retained
+    // metadata. Bind both to the authenticated runtime facts here, at the same
+    // seam that pins parameter residency, so a target budget cannot invent
+    // them: `maximum_tensor_staging_bytes` is the largest single tensor the
+    // loader reads (held twice, as the read `Vec` and its `from_raw_buffer`
+    // copy) and `retained_raw_header_bytes` is the parsed header it keeps.
+    if authority.qwen_maximum_tensor_staging_bytes() != facts.maximum_tensor_staging_bytes
+        || authority.qwen_retained_raw_header_bytes() != facts.retained_raw_header_bytes
+    {
+        bail!(
+            "private H3 Qwen frozen loader staging/header authority is {}/{}, authenticated runtime requires exactly {}/{} bytes",
+            authority.qwen_maximum_tensor_staging_bytes(),
+            authority.qwen_retained_raw_header_bytes(),
+            facts.maximum_tensor_staging_bytes,
+            facts.retained_raw_header_bytes
         )
     }
     let residency_is_bound = match authority.conditioner_placement() {
@@ -1821,6 +1846,8 @@ mod tests {
             qwen_host_resident_parameter_bytes: runtime_facts.host_resident_parameter_bytes,
             qwen_device_resident_parameter_bytes: runtime_facts.device_resident_parameter_bytes,
             qwen_activation_workspace_bytes,
+            qwen_maximum_tensor_staging_bytes: runtime_facts.maximum_tensor_staging_bytes,
+            qwen_retained_raw_header_bytes: runtime_facts.retained_raw_header_bytes,
             qwen_output_text_rows,
             qwen_vision_rows,
             condition_visual_rows: 0,
@@ -2927,6 +2954,8 @@ mod tests {
             qwen_host_resident_parameter_bytes: memory_facts.host_resident_parameter_bytes,
             qwen_device_resident_parameter_bytes: memory_facts.device_resident_parameter_bytes,
             qwen_activation_workspace_bytes: activation_floor,
+            qwen_maximum_tensor_staging_bytes: memory_facts.maximum_tensor_staging_bytes,
+            qwen_retained_raw_header_bytes: memory_facts.retained_raw_header_bytes,
             qwen_output_text_rows,
             qwen_vision_rows,
             condition_visual_rows: 0,
