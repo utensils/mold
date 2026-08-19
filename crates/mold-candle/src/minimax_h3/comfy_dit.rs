@@ -74,7 +74,14 @@ const PUBLISHED_INT8_COMFY_QUANT_COUNT: usize = 200;
 const PUBLISHED_INT8_COMFY_QUANT_PAYLOAD: &[u8; PUBLISHED_INT8_COMFY_QUANT_BYTES] =
     br#"{"format": "int8_tensorwise", "convrot": true, "convrot_groupsize": 256}"#;
 pub(super) const FILE_READ_CHUNK_BYTES: usize = 8 * 1024 * 1024;
-const QUANTIZED_BLOCK_WEIGHT_SUFFIXES: &[&str] = &[
+/// The four large matrix weights inside every H3 transformer block.
+///
+/// This is the single authority for "which linear inside a block is a
+/// conversion target". Both the published INT8 quantization policy and the
+/// Turbo LoRA adapter contract derive their target set from it via
+/// [`h3_block_linear_targets`], so a newly targeted linear cannot reach one
+/// consumer while silently skipping the other.
+pub(super) const H3_BLOCK_LINEAR_WEIGHT_SUFFIXES: &[&str] = &[
     "attn.qkv_proj.weight",
     "attn.out_proj.weight",
     "mlp.fc1.weight",
@@ -1649,7 +1656,7 @@ fn calculate_block_memory(
         }
         let bytes = tensor.data_offsets[1] - tensor.data_offsets[0];
         max_host_read_staging_bytes = max_host_read_staging_bytes.max(bytes);
-        let quantized = QUANTIZED_BLOCK_WEIGHT_SUFFIXES
+        let quantized = H3_BLOCK_LINEAR_WEIGHT_SUFFIXES
             .iter()
             .any(|suffix| name == &format!("{prefix}{suffix}"));
         let scale = name.ends_with(".weight_scale");
@@ -2277,32 +2284,98 @@ fn detect_format(
     }
 }
 
+/// Which block stack a [`H3BlockLinearTarget`] belongs to. The published INT8
+/// conversion quantizes only the denoising blocks; the Turbo LoRA adapters
+/// additionally overlay the BF16 token refiner.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) enum H3BlockLinearScope {
+    MainBlock,
+    TokenRefinerBlock,
+}
+
+/// One block linear that published conversions target, resolved against the
+/// checkpoint's own weight specs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct H3BlockLinearTarget {
+    pub(super) scope: H3BlockLinearScope,
+    pub(super) index: usize,
+    /// Suffix from [`H3_BLOCK_LINEAR_WEIGHT_SUFFIXES`], `.weight` trimmed.
+    pub(super) suffix: &'static str,
+    /// Module path, e.g. `blocks.0.attn.qkv_proj`.
+    pub(super) module: String,
+    /// Weight tensor name, e.g. `blocks.0.attn.qkv_proj.weight`.
+    pub(super) weight_name: String,
+    pub(super) out_features: usize,
+    pub(super) in_features: usize,
+}
+
+/// Enumerate every targeted block linear for the requested scopes, in a stable
+/// order, validating each against the base checkpoint's own specs.
+///
+/// This is the shared derivation both the quantization policy and the Turbo
+/// adapter expectation consume; neither may rebuild the block/suffix product
+/// on its own.
+pub(super) fn h3_block_linear_targets(
+    config: &H3TransformerConfig,
+    base: &BTreeMap<String, super::dit::H3TensorSpec>,
+    scopes: &[H3BlockLinearScope],
+) -> InspectionResult<Vec<H3BlockLinearTarget>> {
+    let mut targets = Vec::new();
+    for scope in scopes {
+        let (count, prefix) = match scope {
+            H3BlockLinearScope::MainBlock => (config.num_layers, "blocks"),
+            H3BlockLinearScope::TokenRefinerBlock => {
+                (config.token_refiner_num_layers, "token_refiner.blocks")
+            }
+        };
+        for index in 0..count {
+            for suffix in H3_BLOCK_LINEAR_WEIGHT_SUFFIXES {
+                let weight_name = format!("{prefix}.{index}.{suffix}");
+                let spec = base.get(&weight_name).ok_or_else(|| {
+                    failure(
+                        H3ComfyCheckpointErrorCode::ConfigMismatch,
+                        format!(
+                            "H3 block linear authority references missing weight {weight_name:?}"
+                        ),
+                    )
+                })?;
+                if spec.dtype != DType::BF16 || spec.shape.len() != 2 {
+                    return Err(failure(
+                        H3ComfyCheckpointErrorCode::ConfigMismatch,
+                        format!("H3 block linear authority requires a BF16 matrix {weight_name:?}"),
+                    ));
+                }
+                let module = weight_name
+                    .strip_suffix(".weight")
+                    .expect("every targeted suffix ends in .weight")
+                    .to_owned();
+                targets.push(H3BlockLinearTarget {
+                    scope: *scope,
+                    index,
+                    suffix: suffix
+                        .strip_suffix(".weight")
+                        .expect("every targeted suffix ends in .weight"),
+                    module,
+                    weight_name,
+                    out_features: spec.shape[0],
+                    in_features: spec.shape[1],
+                });
+            }
+        }
+    }
+    Ok(targets)
+}
+
 fn published_quantized_layers(
     config: &H3TransformerConfig,
     base: &BTreeMap<String, super::dit::H3TensorSpec>,
 ) -> InspectionResult<BTreeSet<String>> {
-    (0..config.num_layers)
-        .flat_map(|index| {
-            QUANTIZED_BLOCK_WEIGHT_SUFFIXES
-                .iter()
-                .map(move |suffix| format!("blocks.{index}.{suffix}"))
-        })
-        .map(|weight| {
-            let spec = base.get(&weight).ok_or_else(|| {
-                failure(
-                    H3ComfyCheckpointErrorCode::ConfigMismatch,
-                    format!("H3 Comfy quantization policy references missing weight {weight:?}"),
-                )
-            })?;
-            if spec.dtype != DType::BF16 || spec.shape.len() != 2 {
-                return Err(failure(
-                    H3ComfyCheckpointErrorCode::ConfigMismatch,
-                    format!("H3 Comfy quantization policy requires BF16 matrix {weight:?}"),
-                ));
-            }
-            Ok(weight.trim_end_matches(".weight").to_owned())
-        })
-        .collect()
+    Ok(
+        h3_block_linear_targets(config, base, &[H3BlockLinearScope::MainBlock])?
+            .into_iter()
+            .map(|target| target.module)
+            .collect(),
+    )
 }
 
 fn expected_schema(
@@ -2667,6 +2740,55 @@ mod tests {
 
     use super::*;
     use crate::minimax_h3::interpolate_h3_adaln_curve;
+
+    /// The published INT8 quantization policy and the Turbo LoRA adapter
+    /// contract must select their targets through the SAME derivation, so a
+    /// linear added to `H3_BLOCK_LINEAR_WEIGHT_SUFFIXES` cannot reach one and
+    /// silently skip the other. This pins the quantization half; the adapter
+    /// half is pinned by `turbo_lora::tests`.
+    #[test]
+    fn the_quantization_policy_derives_from_the_shared_block_linear_authority() {
+        for config in [H3TransformerConfig::default(), runtime_config()] {
+            let base = expected_h3_weight_specs(
+                &config,
+                H3AdaLnMode::Full,
+                H3PrecisionProfile::OfficialMixedBf16F32,
+            )
+            .unwrap();
+            let shared = h3_block_linear_targets(&config, &base, &[H3BlockLinearScope::MainBlock])
+                .unwrap()
+                .into_iter()
+                .map(|target| target.module)
+                .collect::<BTreeSet<_>>();
+            assert_eq!(published_quantized_layers(&config, &base).unwrap(), shared);
+            assert_eq!(
+                shared.len(),
+                config.num_layers * H3_BLOCK_LINEAR_WEIGHT_SUFFIXES.len()
+            );
+
+            // The token refiner is deliberately outside the quantized set but
+            // inside the shared authority, which is what lets the Turbo
+            // contract reach it without relaxing the quantization policy.
+            let with_refiner = h3_block_linear_targets(
+                &config,
+                &base,
+                &[
+                    H3BlockLinearScope::MainBlock,
+                    H3BlockLinearScope::TokenRefinerBlock,
+                ],
+            )
+            .unwrap();
+            assert_eq!(
+                with_refiner.len(),
+                (config.num_layers + config.token_refiner_num_layers)
+                    * H3_BLOCK_LINEAR_WEIGHT_SUFFIXES.len()
+            );
+            assert!(with_refiner
+                .iter()
+                .filter(|target| target.scope == H3BlockLinearScope::TokenRefinerBlock)
+                .all(|target| !shared.contains(&target.module)));
+        }
+    }
 
     #[test]
     fn opened_content_hash_cache_reuses_only_identical_identities() {
@@ -3259,7 +3381,7 @@ mod tests {
                 .and_then(|rest| rest.split_once('.'))
                 .is_some_and(|(index, suffix)| {
                     index.parse::<usize>().is_ok_and(|index| index < 50)
-                        && QUANTIZED_BLOCK_WEIGHT_SUFFIXES
+                        && H3_BLOCK_LINEAR_WEIGHT_SUFFIXES
                             .iter()
                             .any(|expected| suffix == expected.trim_end_matches(".weight"))
                 })

@@ -30,9 +30,10 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use super::comfy_dit::{
-    safetensors_dtype_size, sha256_hex, strict_json_value, H3ComfyInt8Cancellation,
-    H3OpenedFileIdentity, FILE_READ_CHUNK_BYTES, MAX_HEADER_BYTES, MAX_TENSORS,
-    MAX_TENSOR_KEY_BYTES, MAX_TENSOR_RANK,
+    h3_block_linear_targets, safetensors_dtype_size, sha256_hex, strict_json_value,
+    H3BlockLinearScope, H3ComfyInt8Cancellation, H3OpenedFileIdentity, FILE_READ_CHUNK_BYTES,
+    H3_BLOCK_LINEAR_WEIGHT_SUFFIXES, MAX_HEADER_BYTES, MAX_TENSORS, MAX_TENSOR_KEY_BYTES,
+    MAX_TENSOR_RANK,
 };
 use super::dit::{
     expected_h3_weight_specs, H3AdaLnMode, H3PrecisionProfile, H3TransformerConfig,
@@ -74,6 +75,10 @@ pub const H3_TURBO_LORA_WEIGHT_DTYPE: &str = "BF16";
 /// Published `alpha` storage dtype; every entry is a rank-0 scalar.
 pub const H3_TURBO_LORA_ALPHA_DTYPE: &str = "F32";
 
+/// Mirrors [`H3_BLOCK_LINEAR_WEIGHT_SUFFIXES`] with `.weight` trimmed, purely
+/// so [`H3TurboLoraModuleKind`] can be a `const` enum. A contract test pins
+/// the two together, and module derivation resolves every kind through the
+/// shared authority so an unmapped suffix fails closed instead of vanishing.
 const MODULE_SUFFIXES: [&str; 4] = ["attn.qkv_proj", "attn.out_proj", "mlp.fc1", "mlp.fc2"];
 const LORA_A_SUFFIX: &str = ".lora_A.weight";
 const LORA_B_SUFFIX: &str = ".lora_B.weight";
@@ -82,8 +87,17 @@ const ALPHA_SUFFIX: &str = ".alpha";
 /// presence means a merged or quantized checkpoint was supplied in place of one.
 const BASE_SIDECAR_SUFFIXES: [&str; 2] = [".weight_scale", ".comfy_quant"];
 const ALPHA_BYTES: u64 = 4;
+/// Upper bound on `num_layers + token_refiner_num_layers` any expectation may
+/// describe. The published geometry is 52; the bound only has to keep
+/// caller-supplied arithmetic away from overflow.
+const MAX_TURBO_BLOCKS: usize = 4_096;
+/// Upper bound on `training_rank`. The published tiers train at 128.
+const MAX_TURBO_TRAINING_RANK: usize = 65_536;
 const STRUCTURE_IDENTITY_DOMAIN: &[u8] = b"mold.minimax-h3.turbo-lora-structure.v1\0";
-const ADAPTER_IDENTITY_DOMAIN: &[u8] = b"mold.minimax-h3.turbo-lora-adapter.v1\0";
+/// Header + structure only. Deliberately NOT an artifact identity.
+const CONTRACT_IDENTITY_DOMAIN: &[u8] = b"mold.minimax-h3.turbo-lora-contract.v1\0";
+/// Binds the verified content digest; this is the artifact identity.
+const ADAPTER_IDENTITY_DOMAIN: &[u8] = b"mold.minimax-h3.turbo-lora-adapter.v2\0";
 
 /// One of the three reviewed published Turbo adapters. Detection never uses a
 /// filename: the independently parsed header must agree with this authority.
@@ -235,12 +249,87 @@ impl H3TurboLoraExpectation {
         self.training_alpha / self.training_rank as f32
     }
 
-    pub fn module_count(&self) -> usize {
-        (self.config.num_layers + self.config.token_refiner_num_layers) * MODULE_SUFFIXES.len()
+    /// Refuse a geometry whose arithmetic could overflow or whose training
+    /// constants are not usable, before any file is touched. Callers may
+    /// supply an expectation, so nothing downstream may assume the published
+    /// numbers.
+    pub fn validate(&self) -> H3TurboLoraResult<()> {
+        self.config.validate().map_err(|error| {
+            failure(
+                H3TurboLoraErrorCode::ConfigMismatch,
+                format!("H3 Turbo expectation carries an invalid transformer config: {error}"),
+            )
+        })?;
+        let blocks = self
+            .config
+            .num_layers
+            .checked_add(self.config.token_refiner_num_layers)
+            .ok_or_else(|| {
+                failure(
+                    H3TurboLoraErrorCode::ConfigMismatch,
+                    "H3 Turbo expectation block count overflows",
+                )
+            })?;
+        if blocks == 0 || blocks > MAX_TURBO_BLOCKS {
+            return Err(failure(
+                H3TurboLoraErrorCode::ConfigMismatch,
+                format!(
+                    "H3 Turbo expectation describes {blocks} blocks, bound is {MAX_TURBO_BLOCKS}"
+                ),
+            ));
+        }
+        if self.training_rank == 0 || self.training_rank > MAX_TURBO_TRAINING_RANK {
+            return Err(failure(
+                H3TurboLoraErrorCode::ConfigMismatch,
+                format!(
+                    "H3 Turbo training rank {} is outside 1..={MAX_TURBO_TRAINING_RANK}",
+                    self.training_rank
+                ),
+            ));
+        }
+        if !self.training_alpha.is_finite() || self.training_alpha <= 0.0 {
+            return Err(failure(
+                H3TurboLoraErrorCode::ConfigMismatch,
+                format!(
+                    "H3 Turbo training alpha {} must be finite and positive",
+                    self.training_alpha
+                ),
+            ));
+        }
+        if !self.scale().is_finite() || self.scale() <= 0.0 {
+            return Err(failure(
+                H3TurboLoraErrorCode::ConfigMismatch,
+                "H3 Turbo training alpha/rank must resolve to a finite positive scale",
+            ));
+        }
+        // Both counts and the widest rank must be representable.
+        self.tensor_count()?;
+        for kind in H3TurboLoraModuleKind::ALL {
+            kind.checked_rank(self.training_rank)?;
+        }
+        Ok(())
     }
 
-    pub fn tensor_count(&self) -> usize {
-        self.module_count() * 3
+    pub fn module_count(&self) -> H3TurboLoraResult<usize> {
+        self.config
+            .num_layers
+            .checked_add(self.config.token_refiner_num_layers)
+            .and_then(|blocks| blocks.checked_mul(H3_BLOCK_LINEAR_WEIGHT_SUFFIXES.len()))
+            .ok_or_else(|| {
+                failure(
+                    H3TurboLoraErrorCode::ConfigMismatch,
+                    "H3 Turbo expectation module count overflows",
+                )
+            })
+    }
+
+    pub fn tensor_count(&self) -> H3TurboLoraResult<usize> {
+        self.module_count()?.checked_mul(3).ok_or_else(|| {
+            failure(
+                H3TurboLoraErrorCode::ConfigMismatch,
+                "H3 Turbo expectation tensor count overflows",
+            )
+        })
     }
 }
 
@@ -255,6 +344,8 @@ pub enum H3TurboLoraErrorCode {
     SourceSizeMismatch,
     HeaderIdentityMismatch,
     ContentDigestMismatch,
+    /// `authenticate_*` was asked to run without a source-pinned digest.
+    MissingContentPin,
     FileIdentityChanged,
     TensorCountMismatch,
     UnknownModule,
@@ -327,13 +418,20 @@ impl H3TurboLoraModuleKind {
         Self::ALL.into_iter().find(|kind| kind.suffix() == suffix)
     }
 
-    /// Rank of this module's `lora_A` / `lora_B` pair.
-    pub const fn rank(self, training_rank: usize) -> usize {
-        if self.fuses_qkv() {
-            training_rank * H3_TURBO_LORA_FUSED_QKV_MULTIPLE
-        } else {
-            training_rank
+    /// Rank of this module's `lora_A` / `lora_B` pair, refusing an overflowing
+    /// caller-supplied training rank.
+    pub fn checked_rank(self, training_rank: usize) -> H3TurboLoraResult<usize> {
+        if !self.fuses_qkv() {
+            return Ok(training_rank);
         }
+        training_rank
+            .checked_mul(H3_TURBO_LORA_FUSED_QKV_MULTIPLE)
+            .ok_or_else(|| {
+                failure(
+                    H3TurboLoraErrorCode::ConfigMismatch,
+                    format!("H3 Turbo fused rank overflows at training rank {training_rank}"),
+                )
+            })
     }
 
     /// Exact `alpha` scalar this module must carry.
@@ -410,21 +508,20 @@ pub struct H3TurboLoraModule {
     pub alpha_tensor: H3TurboLoraTensorRef,
 }
 
-/// A fully validated adapter contract. Holding one proves the header, module
-/// map, shapes, dtypes, and alphas agreed with the expectation; it grants no
-/// execution authority and loads no tensor data.
+/// The result of a header-only inspection.
+///
+/// This is **not** an authority. Its payload bytes were never read, so
+/// arbitrary `lora_A` / `lora_B` contents that happen to preserve the header,
+/// the size, and the alpha scalars produce a perfectly valid inspection. It
+/// deliberately carries no tier and no content digest, and no loader may
+/// accept it in place of an [`H3TurboLoraContract`].
 #[derive(Clone, Debug, PartialEq)]
-pub struct H3TurboLoraContract {
-    /// `None` when validated against a bespoke expectation rather than one of
-    /// the published tiers.
-    pub tier: Option<H3TurboLoraTier>,
+pub struct H3TurboLoraInspection {
     pub task: H3TransformerTask,
     pub source_repository_revision: String,
     pub file_bytes: u64,
     pub header_len: u64,
     pub header_identity_sha256: String,
-    /// Present only after full-content authentication.
-    pub content_sha256: Option<String>,
     pub tensor_count: usize,
     pub training_rank: usize,
     pub training_alpha: f32,
@@ -434,13 +531,19 @@ pub struct H3TurboLoraContract {
     pub metadata: BTreeMap<String, String>,
     pub modules: BTreeMap<String, H3TurboLoraModule>,
     /// SHA-256 over the sorted validated structure: module names, kinds,
-    /// ranks, in/out features, and alpha bits.
+    /// ranks, in/out features, and alpha bits. Structural only — it says
+    /// nothing about the payload bytes.
     pub structure_identity_sha256: String,
-    /// SHA-256 binding the tier, task, header identity, and structure identity.
-    pub adapter_identity_sha256: String,
+    /// SHA-256 over the header identity and the structure identity.
+    ///
+    /// This identifies the *shape of the contract*, never the artifact. It
+    /// must never be used as an artifact, cache, or provenance identity; use
+    /// [`H3TurboLoraContract::adapter_identity_sha256`], which binds the
+    /// verified content digest.
+    pub contract_identity_sha256: String,
 }
 
-impl H3TurboLoraContract {
+impl H3TurboLoraInspection {
     pub fn module_count(&self) -> usize {
         self.modules.len()
     }
@@ -476,6 +579,73 @@ impl H3TurboLoraContract {
     }
 }
 
+/// An authenticated published Turbo adapter.
+///
+/// Every field is private and there is no public constructor, so the only way
+/// to obtain one is [`authenticate_h3_turbo_lora_adapter`] — which reads the
+/// complete file behind a descriptor-identity fence and verifies the
+/// source-pinned content digest. An inspection can therefore never be
+/// substituted for this type.
+#[derive(Clone, Debug, PartialEq)]
+pub struct H3TurboLoraContract {
+    tier: H3TurboLoraTier,
+    content_sha256: String,
+    adapter_identity_sha256: String,
+    inspection: H3TurboLoraInspection,
+}
+
+impl H3TurboLoraContract {
+    /// The reviewed tier whose pinned size and digest this file matched.
+    pub fn tier(&self) -> H3TurboLoraTier {
+        self.tier
+    }
+
+    /// SHA-256 of the complete verified file.
+    pub fn content_sha256(&self) -> &str {
+        &self.content_sha256
+    }
+
+    /// The artifact identity: tier, task, header identity, validated
+    /// structure, **and** the verified content digest. Safe as a cache,
+    /// provenance, or frozen-plan identity.
+    pub fn adapter_identity_sha256(&self) -> &str {
+        &self.adapter_identity_sha256
+    }
+
+    /// The validated structure this authority was minted from.
+    pub fn inspection(&self) -> &H3TurboLoraInspection {
+        &self.inspection
+    }
+
+    pub fn task(&self) -> H3TransformerTask {
+        self.inspection.task
+    }
+
+    pub fn scale(&self) -> f32 {
+        self.inspection.scale
+    }
+
+    pub fn modules(&self) -> &BTreeMap<String, H3TurboLoraModule> {
+        &self.inspection.modules
+    }
+
+    pub fn module_count(&self) -> usize {
+        self.inspection.module_count()
+    }
+
+    pub fn main_block_modules(&self, index: usize) -> Vec<&H3TurboLoraModule> {
+        self.inspection.main_block_modules(index)
+    }
+
+    pub fn token_refiner_modules(&self, index: usize) -> Vec<&H3TurboLoraModule> {
+        self.inspection.token_refiner_modules(index)
+    }
+
+    pub fn scope_delta_bytes(&self, scope: H3TurboLoraModuleScope) -> u64 {
+        self.inspection.scope_delta_bytes(scope)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct TurboHeaderTensor {
     dtype: String,
@@ -502,35 +672,27 @@ struct RawTurboTensor {
 
 /// Parse and validate one adapter header against the published tier contract.
 ///
-/// This reads the JSON header plus the 4-byte `alpha` scalars. It does not
-/// verify the full-content digest — see
-/// [`authenticate_h3_turbo_lora_adapter`] for that.
+/// The result is deliberately an [`H3TurboLoraInspection`] and **not** an
+/// authority: the payload bytes are never read, so this cannot distinguish the
+/// reviewed weights from arbitrary contents that preserve the header, the
+/// size, and the alpha scalars. Use [`authenticate_h3_turbo_lora_adapter`] for
+/// anything that acts on the weights.
 pub fn inspect_h3_turbo_lora_adapter(
     path: &Path,
     tier: H3TurboLoraTier,
-) -> H3TurboLoraResult<H3TurboLoraContract> {
-    inspect_h3_turbo_lora_adapter_against(path, &tier.expectation(), Some(tier))
+) -> H3TurboLoraResult<H3TurboLoraInspection> {
+    inspect_h3_turbo_lora_adapter_against(path, &tier.expectation())
 }
 
 /// Parse and validate one adapter header against an explicit expectation.
-pub fn inspect_h3_turbo_lora_adapter_against(
+///
+/// Crate-internal: a caller-supplied expectation can relax every published pin,
+/// so it is not part of the public surface.
+pub(crate) fn inspect_h3_turbo_lora_adapter_against(
     path: &Path,
     expectation: &H3TurboLoraExpectation,
-    tier: Option<H3TurboLoraTier>,
-) -> H3TurboLoraResult<H3TurboLoraContract> {
-    if let Some(tier) = tier {
-        if tier.task() != expectation.task {
-            return Err(failure(
-                H3TurboLoraErrorCode::TaskAuthorityMismatch,
-                format!(
-                    "H3 Turbo tier {:?} expects task {:?}, not {:?}",
-                    tier,
-                    tier.task(),
-                    expectation.task
-                ),
-            ));
-        }
-    }
+) -> H3TurboLoraResult<H3TurboLoraInspection> {
+    expectation.validate()?;
     let mut file = File::open(path).map_err(|error| {
         failure(
             H3TurboLoraErrorCode::Io,
@@ -538,7 +700,7 @@ pub fn inspect_h3_turbo_lora_adapter_against(
         )
     })?;
     let parsed = read_turbo_header(&mut file)?;
-    build_contract(&mut file, parsed, expectation, tier, None)
+    build_inspection(&mut file, parsed, expectation)
 }
 
 /// Open and fully authenticate one published Turbo adapter.
@@ -553,29 +715,39 @@ pub fn authenticate_h3_turbo_lora_adapter(
     tier: H3TurboLoraTier,
     cancellation: &dyn H3ComfyInt8Cancellation,
 ) -> H3TurboLoraResult<H3TurboLoraContract> {
-    authenticate_h3_turbo_lora_adapter_against(path, &tier.expectation(), Some(tier), cancellation)
+    authenticate_h3_turbo_lora_adapter_against(path, &tier.expectation(), tier, cancellation)
 }
 
 /// Open and fully authenticate one adapter against an explicit expectation.
-pub fn authenticate_h3_turbo_lora_adapter_against(
+///
+/// Crate-internal for the same reason as
+/// [`inspect_h3_turbo_lora_adapter_against`], and it still refuses to run
+/// without a source-pinned content digest — "authenticate" always means the
+/// bytes were checked against a pin.
+pub(crate) fn authenticate_h3_turbo_lora_adapter_against(
     path: &Path,
     expectation: &H3TurboLoraExpectation,
-    tier: Option<H3TurboLoraTier>,
+    tier: H3TurboLoraTier,
     cancellation: &dyn H3ComfyInt8Cancellation,
 ) -> H3TurboLoraResult<H3TurboLoraContract> {
-    if let Some(tier) = tier {
-        if tier.task() != expectation.task {
-            return Err(failure(
-                H3TurboLoraErrorCode::TaskAuthorityMismatch,
-                format!(
-                    "H3 Turbo tier {:?} expects task {:?}, not {:?}",
-                    tier,
-                    tier.task(),
-                    expectation.task
-                ),
-            ));
-        }
+    expectation.validate()?;
+    if tier.task() != expectation.task {
+        return Err(failure(
+            H3TurboLoraErrorCode::TaskAuthorityMismatch,
+            format!(
+                "H3 Turbo tier {:?} expects task {:?}, not {:?}",
+                tier,
+                tier.task(),
+                expectation.task
+            ),
+        ));
     }
+    let Some(expected_digest) = expectation.content_sha256.clone() else {
+        return Err(failure(
+            H3TurboLoraErrorCode::MissingContentPin,
+            "H3 Turbo authentication requires a source-pinned content digest",
+        ));
+    };
     cancellation_boundary(cancellation)?;
     let symlink_metadata = std::fs::symlink_metadata(path).map_err(|error| {
         failure(
@@ -626,23 +798,15 @@ pub fn authenticate_h3_turbo_lora_adapter_against(
         }
     }
     let content_sha256 = hash_open_adapter(&mut file, cancellation)?;
-    if let Some(expected) = expectation.content_sha256.as_deref() {
-        if content_sha256 != expected {
-            return Err(failure(
-                H3TurboLoraErrorCode::ContentDigestMismatch,
-                format!(
-                    "H3 Turbo adapter content digest {content_sha256} does not match source-pinned {expected}"
-                ),
-            ));
-        }
+    if content_sha256 != expected_digest {
+        return Err(failure(
+            H3TurboLoraErrorCode::ContentDigestMismatch,
+            format!(
+                "H3 Turbo adapter content digest {content_sha256} does not match source-pinned {expected_digest}"
+            ),
+        ));
     }
-    let contract = build_contract(
-        &mut file,
-        parsed,
-        expectation,
-        tier,
-        Some(content_sha256.clone()),
-    )?;
+    let inspection = build_inspection(&mut file, parsed, expectation)?;
     let final_identity = H3OpenedFileIdentity::from_metadata(
         &file
             .metadata()
@@ -654,7 +818,19 @@ pub fn authenticate_h3_turbo_lora_adapter_against(
             "H3 Turbo adapter changed during content verification",
         ));
     }
-    Ok(contract)
+    let adapter_identity_sha256 = turbo_adapter_identity(
+        tier,
+        inspection.task,
+        &inspection.header_identity_sha256,
+        &inspection.structure_identity_sha256,
+        &content_sha256,
+    );
+    Ok(H3TurboLoraContract {
+        tier,
+        content_sha256,
+        adapter_identity_sha256,
+        inspection,
+    })
 }
 
 fn cancellation_boundary(cancellation: &dyn H3ComfyInt8Cancellation) -> H3TurboLoraResult<()> {
@@ -695,13 +871,11 @@ fn hash_open_adapter(
     Ok(sha256_hex(digest.finalize()))
 }
 
-fn build_contract(
+fn build_inspection(
     file: &mut File,
     parsed: TurboParsedHeader,
     expectation: &H3TurboLoraExpectation,
-    tier: Option<H3TurboLoraTier>,
-    content_sha256: Option<String>,
-) -> H3TurboLoraResult<H3TurboLoraContract> {
+) -> H3TurboLoraResult<H3TurboLoraInspection> {
     if let Some(expected) = expectation.file_bytes {
         if parsed.file_len != expected {
             return Err(failure(
@@ -742,21 +916,18 @@ fn build_contract(
     let alphas = read_turbo_alphas(file, &parsed)?;
     let modules = assemble_turbo_modules(&expected, seen, &alphas, expectation)?;
     let structure_identity_sha256 = turbo_structure_identity(&modules);
-    let adapter_identity_sha256 = turbo_adapter_identity(
-        tier,
+    let contract_identity_sha256 = turbo_contract_identity(
         expectation.task,
         &parsed.header_identity_sha256,
         &structure_identity_sha256,
     );
     let payload_bytes = parsed.file_len - parsed.header_len - 8;
-    Ok(H3TurboLoraContract {
-        tier,
+    Ok(H3TurboLoraInspection {
         task: expectation.task,
         source_repository_revision: H3_TURBO_LORA_SOURCE_REVISION.to_owned(),
         file_bytes: parsed.file_len,
         header_len: parsed.header_len,
         header_identity_sha256: parsed.header_identity_sha256,
-        content_sha256,
         tensor_count: parsed.tensors.len(),
         training_rank: expectation.training_rank,
         training_alpha: expectation.training_alpha,
@@ -765,7 +936,7 @@ fn build_contract(
         metadata: parsed.metadata,
         modules,
         structure_identity_sha256,
-        adapter_identity_sha256,
+        contract_identity_sha256,
     })
 }
 
@@ -801,7 +972,19 @@ fn read_turbo_header(file: &mut File) -> H3TurboLoraResult<TurboParsedHeader> {
             format!("failed to read H3 Turbo safetensors header: {error}"),
         )
     })?;
-    let root = strict_json_value(&bytes, "H3 Turbo safetensors header").map_err(|message| {
+    parse_turbo_header(length, &bytes, file_len)
+}
+
+/// Parse an already-read safetensors header. Split out from
+/// [`read_turbo_header`] so the checked-in published headers can be validated
+/// against their declared file length without their two-gigabyte payload.
+fn parse_turbo_header(
+    length: [u8; 8],
+    bytes: &[u8],
+    file_len: u64,
+) -> H3TurboLoraResult<TurboParsedHeader> {
+    let header_len = u64::from_le_bytes(length);
+    let root = strict_json_value(bytes, "H3 Turbo safetensors header").map_err(|message| {
         failure(
             H3TurboLoraErrorCode::InvalidHeader,
             format!("invalid H3 Turbo safetensors header: {message}"),
@@ -918,7 +1101,7 @@ fn read_turbo_header(file: &mut File) -> H3TurboLoraResult<TurboParsedHeader> {
     }
     let mut identity = Sha256::new();
     identity.update(length);
-    identity.update(&bytes);
+    identity.update(bytes);
     Ok(TurboParsedHeader {
         metadata,
         tensors,
@@ -1068,8 +1251,15 @@ struct ExpectedModule {
     alpha: f32,
 }
 
-/// Derive the exact expected module set from the base checkpoint's own weight
-/// specs, so the adapter contract can never drift from the checkpoint contract.
+/// Derive the exact expected module set from the shared block-linear target
+/// authority in `comfy_dit`.
+///
+/// The block/suffix product is NOT rebuilt here: `h3_block_linear_targets` is
+/// the same derivation the published INT8 quantization policy consumes, so a
+/// linear newly added to `H3_BLOCK_LINEAR_WEIGHT_SUFFIXES` reaches this
+/// contract too. If such a target has no [`H3TurboLoraModuleKind`], the
+/// contract fails closed with `ConfigMismatch` rather than silently omitting
+/// an overlay the base checkpoint expects.
 fn expected_turbo_modules(
     expectation: &H3TurboLoraExpectation,
 ) -> H3TurboLoraResult<(BTreeMap<String, ExpectedModule>, BTreeSet<String>)> {
@@ -1085,41 +1275,58 @@ fn expected_turbo_modules(
         )
     })?;
     let base_names = specs.keys().cloned().collect::<BTreeSet<_>>();
-    let scopes = (0..expectation.config.num_layers)
-        .map(H3TurboLoraModuleScope::MainBlock)
-        .chain(
-            (0..expectation.config.token_refiner_num_layers)
-                .map(H3TurboLoraModuleScope::TokenRefinerBlock),
-        );
+    let targets = h3_block_linear_targets(
+        &expectation.config,
+        &specs,
+        &[
+            H3BlockLinearScope::MainBlock,
+            H3BlockLinearScope::TokenRefinerBlock,
+        ],
+    )
+    .map_err(|error| {
+        failure(
+            H3TurboLoraErrorCode::ConfigMismatch,
+            format!("H3 Turbo adapter contract could not derive block linear targets: {error}"),
+        )
+    })?;
     let mut expected = BTreeMap::new();
-    for scope in scopes {
-        for kind in H3TurboLoraModuleKind::ALL {
-            let base_prefix = scope.base_prefix();
-            let base_weight_name = format!("{base_prefix}.{}.weight", kind.suffix());
-            let spec = specs.get(&base_weight_name).ok_or_else(|| {
-                failure(
-                    H3TurboLoraErrorCode::ConfigMismatch,
-                    format!("H3 base checkpoint has no weight {base_weight_name:?}"),
-                )
-            })?;
-            let [out_features, in_features] = spec.shape[..] else {
-                return Err(failure(
-                    H3TurboLoraErrorCode::ConfigMismatch,
-                    format!("H3 base weight {base_weight_name:?} is not a rank-2 linear"),
-                ));
-            };
-            expected.insert(
-                format!("{H3_TURBO_LORA_KEY_PREFIX}{base_prefix}.{}", kind.suffix()),
-                ExpectedModule {
-                    scope,
-                    kind,
-                    base_weight_name,
-                    rank: kind.rank(expectation.training_rank),
-                    in_features,
-                    out_features,
-                    alpha: kind.alpha(expectation.training_alpha),
-                },
-            );
+    for target in targets {
+        let kind = H3TurboLoraModuleKind::from_suffix(target.suffix).ok_or_else(|| {
+            failure(
+                H3TurboLoraErrorCode::ConfigMismatch,
+                format!(
+                    "H3 block linear {:?} has no Turbo adapter module kind; the shared target \
+                     authority and H3TurboLoraModuleKind have diverged",
+                    target.suffix
+                ),
+            )
+        })?;
+        let scope = match target.scope {
+            H3BlockLinearScope::MainBlock => H3TurboLoraModuleScope::MainBlock(target.index),
+            H3BlockLinearScope::TokenRefinerBlock => {
+                H3TurboLoraModuleScope::TokenRefinerBlock(target.index)
+            }
+        };
+        let previous = expected.insert(
+            format!("{H3_TURBO_LORA_KEY_PREFIX}{}", target.module),
+            ExpectedModule {
+                scope,
+                kind,
+                base_weight_name: target.weight_name,
+                rank: kind.checked_rank(expectation.training_rank)?,
+                in_features: target.in_features,
+                out_features: target.out_features,
+                alpha: kind.alpha(expectation.training_alpha),
+            },
+        );
+        if previous.is_some() {
+            return Err(failure(
+                H3TurboLoraErrorCode::ConfigMismatch,
+                format!(
+                    "H3 block linear authority yielded duplicate target {:?}",
+                    target.module
+                ),
+            ));
         }
     }
     Ok((expected, base_names))
@@ -1135,13 +1342,13 @@ fn classify_turbo_tensors(
     BTreeMap<String, ExpectedModule>,
     BTreeMap<String, ModuleSlots>,
 )> {
-    if parsed.tensors.len() != expectation.tensor_count() {
+    let expected_tensors = expectation.tensor_count()?;
+    if parsed.tensors.len() != expected_tensors {
         return Err(failure(
             H3TurboLoraErrorCode::TensorCountMismatch,
             format!(
-                "H3 Turbo adapter carries {} tensors, expected {}",
+                "H3 Turbo adapter carries {} tensors, expected {expected_tensors}",
                 parsed.tensors.len(),
-                expectation.tensor_count()
             ),
         ));
     }
@@ -1333,28 +1540,59 @@ fn turbo_structure_identity(modules: &BTreeMap<String, H3TurboLoraModule>) -> St
     sha256_hex(digest.finalize())
 }
 
-fn turbo_adapter_identity(
-    tier: Option<H3TurboLoraTier>,
+/// Identity of the contract *shape*: header plus validated structure. It binds
+/// no payload bytes and must never be used as an artifact or cache identity.
+fn turbo_contract_identity(
     task: H3TransformerTask,
     header_identity_sha256: &str,
     structure_identity_sha256: &str,
 ) -> String {
     let mut digest = Sha256::new();
-    digest.update(ADAPTER_IDENTITY_DOMAIN);
-    digest.update(
-        tier.map(H3TurboLoraTier::stable_id)
-            .unwrap_or("minimax-h3.turbo-lora.unpinned")
-            .as_bytes(),
-    );
+    digest.update(CONTRACT_IDENTITY_DOMAIN);
     digest.update([0, task as u8]);
     digest.update(header_identity_sha256.as_bytes());
     digest.update(structure_identity_sha256.as_bytes());
     sha256_hex(digest.finalize())
 }
 
+/// Identity of the authenticated artifact. The verified full-content digest is
+/// folded in, so two files sharing a header and a structure but differing in
+/// one `lora_B` byte never collide.
+fn turbo_adapter_identity(
+    tier: H3TurboLoraTier,
+    task: H3TransformerTask,
+    header_identity_sha256: &str,
+    structure_identity_sha256: &str,
+    content_sha256: &str,
+) -> String {
+    let mut digest = Sha256::new();
+    digest.update(ADAPTER_IDENTITY_DOMAIN);
+    digest.update(tier.stable_id().as_bytes());
+    digest.update([0, task as u8]);
+    digest.update(header_identity_sha256.as_bytes());
+    digest.update(structure_identity_sha256.as_bytes());
+    digest.update(content_sha256.as_bytes());
+    sha256_hex(digest.finalize())
+}
+
+#[cfg(test)]
+impl H3TurboLoraTier {
+    /// Repository-relative path of the checked-in golden: the exact published
+    /// eight-byte length prefix followed by the exact published JSON header.
+    fn header_fixture_path(self) -> std::path::PathBuf {
+        let name = match self {
+            Self::Fl2v8StepV10 => "fl2v-8step-v1.0.header",
+            Self::Fl2v768p4StepV10 => "fl2v-4step-768p-v1.0.header",
+            Self::Ref2v4StepV10 => "ref2v-4step-v0.1.header",
+        };
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("testdata/minimax_h3/turbo")
+            .join(name)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
     use std::io::Write;
 
     use serde_json::{Map, Value};
@@ -1483,14 +1721,14 @@ mod tests {
     }
 
     /// Re-lay the tensor data so offsets stay contiguous after a mutation.
-    fn relayout(header: &mut Value, data_len_hint: usize) -> Vec<u8> {
+    fn relayout(header: &mut Value) -> Vec<u8> {
         let object = header.as_object_mut().unwrap();
         let names = object
             .keys()
             .filter(|name| *name != "__metadata__")
             .cloned()
             .collect::<Vec<_>>();
-        let mut data = Vec::with_capacity(data_len_hint);
+        let mut data = Vec::new();
         for name in names {
             let entry = object.get_mut(&name).unwrap();
             let dtype = entry["dtype"].as_str().unwrap().to_owned();
@@ -1515,32 +1753,377 @@ mod tests {
         assert!(object.insert(to.to_owned(), value).is_none());
     }
 
-    fn inspect_fixture(header: &Value, data: &[u8]) -> H3TurboLoraResult<H3TurboLoraContract> {
+    fn inspect_fixture(header: &Value, data: &[u8]) -> H3TurboLoraResult<H3TurboLoraInspection> {
         let (_directory, path) = write_adapter(header, data);
-        inspect_h3_turbo_lora_adapter_against(&path, &fixture_expectation(), None)
+        inspect_h3_turbo_lora_adapter_against(&path, &fixture_expectation())
     }
 
-    fn expect_code(result: H3TurboLoraResult<H3TurboLoraContract>) -> H3TurboLoraErrorCode {
+    fn expect_code(result: H3TurboLoraResult<H3TurboLoraInspection>) -> H3TurboLoraErrorCode {
         result.expect_err("adapter must be rejected").code
     }
+
+    fn read_header_fixture(tier: H3TurboLoraTier) -> (Vec<u8>, [u8; 8], Vec<u8>) {
+        let blob = std::fs::read(tier.header_fixture_path()).unwrap();
+        let mut prefix = [0u8; 8];
+        prefix.copy_from_slice(&blob[..8]);
+        let json = blob[8..].to_vec();
+        (blob, prefix, json)
+    }
+
+    // ----------------------------------------------------------------- tiers
+
+    #[test]
+    fn published_tier_pins_are_recomputed_from_the_checked_in_headers() {
+        for tier in H3TurboLoraTier::ALL {
+            let (blob, prefix, json) = read_header_fixture(tier);
+
+            // Header length and identity are DERIVED from the golden bytes,
+            // not restated: the fixture is exactly `length prefix || JSON`.
+            let derived_len = u64::from_le_bytes(prefix);
+            assert_eq!(derived_len, tier.header_len(), "{tier:?}");
+            assert_eq!(json.len() as u64, derived_len, "{tier:?}");
+            assert_eq!(
+                sha256_hex(Sha256::digest(&blob)),
+                tier.header_identity_sha256(),
+                "{tier:?}"
+            );
+
+            // The payload is derived from the header's own offsets, and the
+            // pinned file size is the sum of its three parts.
+            let parsed = parse_turbo_header(prefix, &json, tier.file_bytes()).unwrap();
+            let payload = parsed
+                .tensors
+                .values()
+                .map(|tensor| tensor.data_offsets[1])
+                .max()
+                .unwrap();
+            assert_eq!(payload, H3_TURBO_LORA_PAYLOAD_BYTES, "{tier:?}");
+            assert_eq!(tier.file_bytes(), 8 + derived_len + payload, "{tier:?}");
+            assert_eq!(parsed.tensors.len(), H3_TURBO_LORA_TENSOR_COUNT, "{tier:?}");
+
+            // The alpha/scale/rank pins are read out of the file's own
+            // declared training metadata rather than restated.
+            let metadata_number =
+                |key: &str| -> f32 { parsed.metadata.get(key).unwrap().parse::<f32>().unwrap() };
+            assert_eq!(metadata_number("training_alpha"), tier.training_alpha());
+            assert_eq!(metadata_number("training_scale"), tier.training_scale());
+            assert_eq!(
+                parsed
+                    .metadata
+                    .get("training_rank")
+                    .unwrap()
+                    .parse::<usize>()
+                    .unwrap(),
+                H3_TURBO_LORA_TRAINING_RANK,
+                "{tier:?}"
+            );
+            assert_eq!(
+                parsed.metadata.get("target_format").unwrap(),
+                H3_TURBO_LORA_TARGET_FORMAT,
+                "{tier:?}"
+            );
+            assert_eq!(
+                tier.training_scale(),
+                tier.expectation().scale(),
+                "{tier:?}"
+            );
+            assert_eq!(
+                tier.repository_path(),
+                format!("loras/{}", tier.file_name())
+            );
+        }
+
+        assert_eq!(
+            H3_TURBO_LORA_SOURCE_REVISION,
+            "dc559027db79c174125df4d827db55cd11178860"
+        );
+        assert_eq!(H3_TURBO_LORA_REPOSITORY, "Comfy-Org/MiniMax-H3");
+        assert_eq!(H3_TURBO_LORA_TENSOR_COUNT, H3_TURBO_LORA_MODULE_COUNT * 3);
+    }
+
+    /// The content digest is the one fact no local artifact can derive — it is
+    /// the published blob's own SHA-256 and stays a literal pin.
+    #[test]
+    fn tier_identities_and_digests_are_distinct() {
+        let mut ids = BTreeSet::new();
+        let mut digests = BTreeSet::new();
+        let mut headers = BTreeSet::new();
+        let mut files = BTreeSet::new();
+        for tier in H3TurboLoraTier::ALL {
+            assert!(ids.insert(tier.stable_id()));
+            assert!(digests.insert(tier.content_sha256()));
+            assert!(headers.insert(tier.header_identity_sha256()));
+            assert!(files.insert(tier.file_name()));
+            assert_eq!(tier.content_sha256().len(), 64);
+            assert!(tier
+                .content_sha256()
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()));
+        }
+    }
+
+    #[test]
+    fn published_expectation_matches_the_shipped_checkpoint_geometry() {
+        for tier in H3TurboLoraTier::ALL {
+            let expectation = tier.expectation();
+            expectation.validate().unwrap();
+            assert_eq!(
+                expectation.module_count().unwrap(),
+                H3_TURBO_LORA_MODULE_COUNT
+            );
+            assert_eq!(
+                expectation.tensor_count().unwrap(),
+                H3_TURBO_LORA_TENSOR_COUNT
+            );
+            assert_eq!(expectation.training_rank, H3_TURBO_LORA_TRAINING_RANK);
+            assert_eq!(expectation.task, tier.task());
+            assert_eq!(
+                expectation.content_sha256.as_deref(),
+                Some(tier.content_sha256())
+            );
+        }
+    }
+
+    // ------------------------------------------------ shared target authority
+
+    #[test]
+    fn module_kinds_mirror_the_shared_block_linear_authority() {
+        let shared = H3_BLOCK_LINEAR_WEIGHT_SUFFIXES
+            .iter()
+            .map(|suffix| suffix.strip_suffix(".weight").unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(shared, MODULE_SUFFIXES.to_vec());
+        for suffix in shared {
+            assert!(
+                H3TurboLoraModuleKind::from_suffix(suffix).is_some(),
+                "{suffix:?} has no Turbo module kind"
+            );
+        }
+        assert_eq!(
+            H3TurboLoraModuleKind::ALL.len(),
+            H3_BLOCK_LINEAR_WEIGHT_SUFFIXES.len()
+        );
+    }
+
+    #[test]
+    fn the_turbo_module_set_is_exactly_the_shared_target_authority() {
+        for config in [H3TransformerConfig::default(), fixture_config()] {
+            let expectation = H3TurboLoraExpectation {
+                config: config.clone(),
+                ..fixture_expectation()
+            };
+            let specs = expected_h3_weight_specs(
+                &config,
+                H3AdaLnMode::Full,
+                H3PrecisionProfile::OfficialMixedBf16F32,
+            )
+            .unwrap();
+            let targets = h3_block_linear_targets(
+                &config,
+                &specs,
+                &[
+                    H3BlockLinearScope::MainBlock,
+                    H3BlockLinearScope::TokenRefinerBlock,
+                ],
+            )
+            .unwrap();
+
+            let (derived, _) = expected_turbo_modules(&expectation).unwrap();
+            // Full set equality, not a sample: every target becomes exactly one
+            // module and no module exists without a target.
+            let from_authority = targets
+                .iter()
+                .map(|target| format!("{H3_TURBO_LORA_KEY_PREFIX}{}", target.module))
+                .collect::<BTreeSet<_>>();
+            assert_eq!(
+                derived.keys().cloned().collect::<BTreeSet<_>>(),
+                from_authority
+            );
+            assert_eq!(derived.len(), targets.len());
+
+            for target in &targets {
+                let module = derived
+                    .get(&format!("{H3_TURBO_LORA_KEY_PREFIX}{}", target.module))
+                    .unwrap();
+                assert_eq!(module.base_weight_name, target.weight_name);
+                assert_eq!(module.in_features, target.in_features);
+                assert_eq!(module.out_features, target.out_features);
+                assert_eq!(module.kind.suffix(), target.suffix);
+                assert_eq!(module.scope.index(), target.index);
+            }
+        }
+    }
+
+    #[test]
+    fn the_published_geometry_matches_every_shape_read_from_the_real_headers() {
+        let expectation = H3TurboLoraTier::Fl2v8StepV10.expectation();
+        let (derived, base_names) = expected_turbo_modules(&expectation).unwrap();
+        assert_eq!(derived.len(), H3_TURBO_LORA_MODULE_COUNT);
+
+        // Exactly the four shape signatures read from the published headers,
+        // asserted against ALL 208 modules rather than a sample.
+        let published: BTreeMap<&str, (usize, usize, usize)> = BTreeMap::from([
+            ("attn.qkv_proj", (384_usize, 5_376_usize, 21_504_usize)),
+            ("attn.out_proj", (128, 7_168, 5_376)),
+            ("mlp.fc1", (128, 5_376, 28_672)),
+            ("mlp.fc2", (128, 14_336, 5_376)),
+        ]);
+        let mut main_blocks = BTreeSet::new();
+        let mut refiner_blocks = BTreeSet::new();
+        for (key, module) in &derived {
+            let (rank, in_features, out_features) = published[module.kind.suffix()];
+            assert_eq!(module.rank, rank, "{key}");
+            assert_eq!(module.in_features, in_features, "{key}");
+            assert_eq!(module.out_features, out_features, "{key}");
+            assert_eq!(module.alpha, module.kind.alpha(8.0), "{key}");
+            assert!(base_names.contains(&module.base_weight_name), "{key}");
+            match module.scope {
+                H3TurboLoraModuleScope::MainBlock(index) => {
+                    main_blocks.insert(index);
+                }
+                H3TurboLoraModuleScope::TokenRefinerBlock(index) => {
+                    refiner_blocks.insert(index);
+                }
+            }
+        }
+        assert_eq!(main_blocks, (0..50).collect::<BTreeSet<_>>());
+        assert_eq!(refiner_blocks, (0..2).collect::<BTreeSet<_>>());
+    }
+
+    #[test]
+    fn every_published_header_satisfies_the_derived_contract() {
+        for tier in H3TurboLoraTier::ALL {
+            let (_, prefix, json) = read_header_fixture(tier);
+            let parsed = parse_turbo_header(prefix, &json, tier.file_bytes()).unwrap();
+            let expectation = tier.expectation();
+            expectation.validate().unwrap();
+            validate_turbo_metadata(&parsed.metadata, &expectation).unwrap();
+
+            // Every one of the 624 real tensors binds to a derived module slot
+            // with the derived dtype and shape.
+            let (expected, seen) = classify_turbo_tensors(&parsed, &expectation).unwrap();
+            assert_eq!(expected.len(), H3_TURBO_LORA_MODULE_COUNT, "{tier:?}");
+            assert_eq!(seen.len(), H3_TURBO_LORA_MODULE_COUNT, "{tier:?}");
+            for (key, slots) in &seen {
+                assert!(
+                    slots.iter().all(Option::is_some),
+                    "{tier:?} {key} is incomplete"
+                );
+            }
+            assert_eq!(
+                seen.keys().cloned().collect::<BTreeSet<_>>(),
+                expected.keys().cloned().collect::<BTreeSet<_>>(),
+                "{tier:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn fused_qkv_triples_rank_and_alpha_so_the_scale_is_uniform() {
+        for kind in H3TurboLoraModuleKind::ALL {
+            let rank = kind.checked_rank(H3_TURBO_LORA_TRAINING_RANK).unwrap();
+            let alpha = kind.alpha(8.0);
+            assert_eq!(alpha / rank as f32, 0.0625);
+            if kind.fuses_qkv() {
+                assert_eq!(rank, 384);
+                assert_eq!(alpha, 24.0);
+            } else {
+                assert_eq!(rank, 128);
+                assert_eq!(alpha, 8.0);
+            }
+            assert_eq!(
+                H3TurboLoraModuleKind::from_suffix(kind.suffix()),
+                Some(kind)
+            );
+        }
+        assert_eq!(H3TurboLoraModuleKind::from_suffix("attn.q_norm"), None);
+        assert!(H3TurboLoraModuleKind::AttnQkvProj
+            .checked_rank(usize::MAX)
+            .is_err());
+    }
+
+    #[test]
+    fn module_scopes_name_base_checkpoint_prefixes() {
+        assert_eq!(
+            H3TurboLoraModuleScope::MainBlock(49).base_prefix(),
+            "blocks.49"
+        );
+        assert_eq!(
+            H3TurboLoraModuleScope::TokenRefinerBlock(1).base_prefix(),
+            "token_refiner.blocks.1"
+        );
+        assert_eq!(H3TurboLoraModuleScope::MainBlock(7).index(), 7);
+    }
+
+    // ---------------------------------------------------- expectation bounds
+
+    #[test]
+    fn an_out_of_bounds_expectation_is_refused_before_any_file_is_touched() {
+        let mut huge = fixture_expectation();
+        huge.config.num_layers = MAX_TURBO_BLOCKS;
+        huge.config.token_refiner_num_layers = 1;
+        assert_eq!(
+            huge.validate().unwrap_err().code,
+            H3TurboLoraErrorCode::ConfigMismatch
+        );
+
+        let mut ranked = fixture_expectation();
+        ranked.training_rank = MAX_TURBO_TRAINING_RANK + 1;
+        assert_eq!(
+            ranked.validate().unwrap_err().code,
+            H3TurboLoraErrorCode::ConfigMismatch
+        );
+
+        let mut zero = fixture_expectation();
+        zero.training_rank = 0;
+        assert_eq!(
+            zero.validate().unwrap_err().code,
+            H3TurboLoraErrorCode::ConfigMismatch
+        );
+
+        for alpha in [0.0_f32, -1.0, f32::NAN, f32::INFINITY] {
+            let mut bad = fixture_expectation();
+            bad.training_alpha = alpha;
+            assert_eq!(
+                bad.validate().unwrap_err().code,
+                H3TurboLoraErrorCode::ConfigMismatch,
+                "{alpha}"
+            );
+        }
+
+        // The bound is enforced at the entry point, not only in validate().
+        let (header, data) = fixture_adapter(&fixture_expectation());
+        let (_directory, path) = write_adapter(&header, &data);
+        let mut unranked = fixture_expectation();
+        unranked.training_rank = 0;
+        assert_eq!(
+            inspect_h3_turbo_lora_adapter_against(&path, &unranked)
+                .unwrap_err()
+                .code,
+            H3TurboLoraErrorCode::ConfigMismatch
+        );
+    }
+
+    // -------------------------------------------------------- header parsing
 
     #[test]
     fn synthetic_adapter_validates_every_module_and_reads_its_alphas() {
         let expectation = fixture_expectation();
         let (header, data) = fixture_adapter(&expectation);
-        let contract = inspect_fixture(&header, &data).unwrap();
+        let inspection = inspect_fixture(&header, &data).unwrap();
 
-        assert_eq!(contract.module_count(), expectation.module_count());
-        assert_eq!(contract.tensor_count, expectation.tensor_count());
-        assert_eq!(contract.tier, None);
-        assert_eq!(contract.scale, 0.0625);
-        assert_eq!(contract.payload_bytes, data.len() as u64);
-        assert_eq!(contract.header_identity_sha256.len(), 64);
-        assert_eq!(contract.structure_identity_sha256.len(), 64);
-        assert_eq!(contract.adapter_identity_sha256.len(), 64);
-        assert_eq!(contract.content_sha256, None);
+        assert_eq!(
+            inspection.module_count(),
+            expectation.module_count().unwrap()
+        );
+        assert_eq!(inspection.tensor_count, expectation.tensor_count().unwrap());
+        assert_eq!(inspection.scale, 0.0625);
+        assert_eq!(inspection.payload_bytes, data.len() as u64);
+        assert_eq!(inspection.header_identity_sha256.len(), 64);
+        assert_eq!(inspection.structure_identity_sha256.len(), 64);
+        assert_eq!(inspection.contract_identity_sha256.len(), 64);
 
-        let qkv = contract
+        let qkv = inspection
             .modules
             .get("diffusion_model.blocks.0.attn.qkv_proj")
             .unwrap();
@@ -1550,11 +2133,11 @@ mod tests {
         // Fused Q/K/V: rank and alpha are both tripled, so the scale holds.
         assert_eq!(qkv.rank, 12);
         assert_eq!(qkv.alpha, 0.75);
-        assert_eq!(qkv.scale, contract.scale);
+        assert_eq!(qkv.scale, inspection.scale);
         assert_eq!(qkv.lora_a.shape, vec![12, 256]);
         assert_eq!(qkv.lora_b.shape, vec![768, 12]);
 
-        let fc1 = contract
+        let fc1 = inspection
             .modules
             .get("diffusion_model.token_refiner.blocks.0.mlp.fc1")
             .unwrap();
@@ -1564,43 +2147,14 @@ mod tests {
         assert_eq!(fc1.lora_a.shape, vec![4, 256]);
         assert_eq!(fc1.lora_b.shape, vec![512, 4]);
 
-        assert_eq!(contract.main_block_modules(0).len(), 4);
-        assert_eq!(contract.token_refiner_modules(0).len(), 4);
-        let block_bytes = contract.scope_delta_bytes(H3TurboLoraModuleScope::MainBlock(0));
+        assert_eq!(inspection.main_block_modules(0).len(), 4);
+        assert_eq!(inspection.token_refiner_modules(0).len(), 4);
+        let block_bytes = inspection.scope_delta_bytes(H3TurboLoraModuleScope::MainBlock(0));
         assert!(block_bytes > 0);
         assert_eq!(
             block_bytes,
-            contract.scope_delta_bytes(H3TurboLoraModuleScope::MainBlock(1))
+            inspection.scope_delta_bytes(H3TurboLoraModuleScope::MainBlock(1))
         );
-    }
-
-    #[test]
-    fn identity_tracks_the_validated_structure_and_the_header() {
-        let expectation = fixture_expectation();
-        let (header, data) = fixture_adapter(&expectation);
-        let first = inspect_fixture(&header, &data).unwrap();
-        let second = inspect_fixture(&header, &data).unwrap();
-        assert_eq!(
-            first.structure_identity_sha256,
-            second.structure_identity_sha256
-        );
-        assert_eq!(
-            first.adapter_identity_sha256,
-            second.adapter_identity_sha256
-        );
-
-        // A different alpha is a different overlay even at identical shapes.
-        let mut louder = expectation.clone();
-        louder.training_alpha = 0.5;
-        let (other_header, other_data) = fixture_adapter(&louder);
-        let (_directory, path) = write_adapter(&other_header, &other_data);
-        let other = inspect_h3_turbo_lora_adapter_against(&path, &louder, None).unwrap();
-        assert_ne!(
-            first.structure_identity_sha256,
-            other.structure_identity_sha256
-        );
-        assert_ne!(first.adapter_identity_sha256, other.adapter_identity_sha256);
-        assert_eq!(other.scale, 0.125);
     }
 
     #[test]
@@ -1611,7 +2165,7 @@ mod tests {
             .unwrap()
             .remove("diffusion_model.blocks.1.mlp.fc2.alpha")
             .unwrap();
-        let data = relayout(&mut header, 0);
+        let data = relayout(&mut header);
         assert_eq!(
             expect_code(inspect_fixture(&header, &data)),
             H3TurboLoraErrorCode::TensorCountMismatch
@@ -1626,7 +2180,7 @@ mod tests {
             "diffusion_model.blocks.1.mlp.fc2.lora_A.weight",
             "diffusion_model.blocks.1.attn.q_norm.lora_A.weight",
         );
-        let data = relayout(&mut header, 0);
+        let data = relayout(&mut header);
         assert_eq!(
             expect_code(inspect_fixture(&header, &data)),
             H3TurboLoraErrorCode::UnknownModule
@@ -1643,7 +2197,7 @@ mod tests {
                 &format!("diffusion_model.blocks.9.mlp.fc2{suffix}"),
             );
         }
-        let data = relayout(&mut header, 0);
+        let data = relayout(&mut header);
         assert_eq!(
             expect_code(inspect_fixture(&header, &data)),
             H3TurboLoraErrorCode::UnknownModule
@@ -1655,7 +2209,7 @@ mod tests {
         let (mut header, _) = fixture_adapter(&fixture_expectation());
         header["diffusion_model.blocks.0.mlp.fc1.lora_A.weight"]["shape"] =
             serde_json::json!([8, 256]);
-        let data = relayout(&mut header, 0);
+        let data = relayout(&mut header);
         assert_eq!(
             expect_code(inspect_fixture(&header, &data)),
             H3TurboLoraErrorCode::ShapeMismatch
@@ -1667,7 +2221,7 @@ mod tests {
         let (mut header, _) = fixture_adapter(&fixture_expectation());
         header["diffusion_model.blocks.0.mlp.fc1.lora_B.weight"]["dtype"] =
             serde_json::json!("F32");
-        let data = relayout(&mut header, 0);
+        let data = relayout(&mut header);
         assert_eq!(
             expect_code(inspect_fixture(&header, &data)),
             H3TurboLoraErrorCode::DTypeMismatch
@@ -1708,7 +2262,7 @@ mod tests {
             "diffusion_model.blocks.0.attn.qkv_proj.lora_A.weight",
             "diffusion_model.blocks.0.attn.qkv_proj.weight",
         );
-        let data = relayout(&mut header, 0);
+        let data = relayout(&mut header);
         assert_eq!(
             expect_code(inspect_fixture(&header, &data)),
             H3TurboLoraErrorCode::BaseContractConflict
@@ -1724,7 +2278,7 @@ mod tests {
                 "diffusion_model.blocks.0.attn.out_proj.lora_A.weight",
                 &format!("diffusion_model.blocks.0.attn.out_proj{sidecar}"),
             );
-            let data = relayout(&mut header, 0);
+            let data = relayout(&mut header);
             assert_eq!(
                 expect_code(inspect_fixture(&header, &data)),
                 H3TurboLoraErrorCode::BaseContractConflict,
@@ -1741,18 +2295,90 @@ mod tests {
         bytes[..8].copy_from_slice(&(MAX_HEADER_BYTES + 1).to_le_bytes());
         std::fs::write(&path, &bytes).unwrap();
         let error =
-            inspect_h3_turbo_lora_adapter_against(&path, &fixture_expectation(), None).unwrap_err();
+            inspect_h3_turbo_lora_adapter_against(&path, &fixture_expectation()).unwrap_err();
         assert_eq!(error.code, H3TurboLoraErrorCode::InvalidHeader);
         assert!(error.message.contains("header length"), "{}", error.message);
     }
 
     #[test]
-    fn trailing_and_non_contiguous_tensor_data_is_refused() {
+    fn a_gap_between_tensor_ranges_is_refused() {
+        let (mut header, data) = fixture_adapter(&fixture_expectation());
+        // Push everything after the first tensor forward by two bytes and grow
+        // the payload to match, leaving an unclaimed two-byte hole.
+        let names = header
+            .as_object()
+            .unwrap()
+            .keys()
+            .filter(|name| *name != "__metadata__")
+            .cloned()
+            .collect::<Vec<_>>();
+        let first_end = header[&names[0]]["data_offsets"][1].as_u64().unwrap();
+        for name in &names {
+            let start = header[name]["data_offsets"][0].as_u64().unwrap();
+            let end = header[name]["data_offsets"][1].as_u64().unwrap();
+            if start >= first_end {
+                header[name]["data_offsets"] = serde_json::json!([start + 2, end + 2]);
+            }
+        }
+        let mut holed = data.clone();
+        holed.extend_from_slice(&[0, 0]);
+        let error = inspect_fixture(&header, &holed).unwrap_err();
+        assert_eq!(error.code, H3TurboLoraErrorCode::InvalidHeader);
+        assert!(
+            error.message.contains("non-contiguous"),
+            "{}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn overlapping_tensor_ranges_are_refused() {
+        let (mut header, data) = fixture_adapter(&fixture_expectation());
+        let names = header
+            .as_object()
+            .unwrap()
+            .keys()
+            .filter(|name| *name != "__metadata__")
+            .cloned()
+            .collect::<Vec<_>>();
+        // Slide every range from one alpha scalar onward back by four bytes so
+        // it overlaps its predecessor, shrinking the payload to match.
+        let victim = names
+            .iter()
+            .find(|name| {
+                name.ends_with(ALPHA_SUFFIX)
+                    && header[*name]["data_offsets"][0].as_u64().unwrap() >= 4
+            })
+            .cloned()
+            .unwrap();
+        let victim_start = header[&victim]["data_offsets"][0].as_u64().unwrap();
+        for name in &names {
+            let start = header[name]["data_offsets"][0].as_u64().unwrap();
+            let end = header[name]["data_offsets"][1].as_u64().unwrap();
+            if start >= victim_start {
+                header[name]["data_offsets"] = serde_json::json!([start - 4, end - 4]);
+            }
+        }
+        let shortened = data[..data.len() - 4].to_vec();
+        let error = inspect_fixture(&header, &shortened).unwrap_err();
+        assert_eq!(error.code, H3TurboLoraErrorCode::InvalidHeader);
+        assert!(
+            error.message.contains("non-contiguous"),
+            "{}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn trailing_tensor_data_is_refused() {
         let (header, mut data) = fixture_adapter(&fixture_expectation());
         data.push(0);
-        assert_eq!(
-            expect_code(inspect_fixture(&header, &data)),
-            H3TurboLoraErrorCode::InvalidHeader
+        let error = inspect_fixture(&header, &data).unwrap_err();
+        assert_eq!(error.code, H3TurboLoraErrorCode::InvalidHeader);
+        assert!(
+            error.message.contains("unclaimed trailing"),
+            "{}",
+            error.message
         );
     }
 
@@ -1783,28 +2409,14 @@ mod tests {
         assert_eq!(error.code, H3TurboLoraErrorCode::SourceSizeMismatch);
 
         let mut sized = expectation.clone();
-        sized.file_bytes = None;
         sized.header_len = Some(1);
-        let error = inspect_h3_turbo_lora_adapter_against(&path, &sized, None).unwrap_err();
+        let error = inspect_h3_turbo_lora_adapter_against(&path, &sized).unwrap_err();
         assert_eq!(error.code, H3TurboLoraErrorCode::InvalidHeader);
 
         let mut identified = expectation.clone();
         identified.header_identity_sha256 = Some("0".repeat(64));
-        let error = inspect_h3_turbo_lora_adapter_against(&path, &identified, None).unwrap_err();
+        let error = inspect_h3_turbo_lora_adapter_against(&path, &identified).unwrap_err();
         assert_eq!(error.code, H3TurboLoraErrorCode::HeaderIdentityMismatch);
-    }
-
-    #[test]
-    fn a_tier_whose_task_disagrees_with_the_expectation_is_refused() {
-        let (header, data) = fixture_adapter(&fixture_expectation());
-        let (_directory, path) = write_adapter(&header, &data);
-        let error = inspect_h3_turbo_lora_adapter_against(
-            &path,
-            &fixture_expectation(),
-            Some(H3TurboLoraTier::Ref2v4StepV10),
-        )
-        .unwrap_err();
-        assert_eq!(error.code, H3TurboLoraErrorCode::TaskAuthorityMismatch);
     }
 
     #[test]
@@ -1813,11 +2425,11 @@ mod tests {
         let (expected, _) = expected_turbo_modules(&expectation).unwrap();
         let (header, data) = fixture_adapter(&expectation);
         let (_directory, path) = write_adapter(&header, &data);
-        let contract = inspect_h3_turbo_lora_adapter_against(&path, &expectation, None).unwrap();
+        let inspection = inspect_h3_turbo_lora_adapter_against(&path, &expectation).unwrap();
 
         let mut seen = BTreeMap::new();
         let mut alphas = BTreeMap::new();
-        for (key, module) in &contract.modules {
+        for (key, module) in &inspection.modules {
             let slots = if key.ends_with("blocks.1.mlp.fc2") {
                 [
                     Some(module.lora_a.clone()),
@@ -1838,6 +2450,86 @@ mod tests {
         assert_eq!(error.code, H3TurboLoraErrorCode::MissingModule);
     }
 
+    // ------------------------------------------------------------ identities
+
+    #[test]
+    fn the_contract_identity_is_structural_and_never_an_artifact_identity() {
+        let expectation = fixture_expectation();
+        let (header, data) = fixture_adapter(&expectation);
+        let first = inspect_fixture(&header, &data).unwrap();
+        let second = inspect_fixture(&header, &data).unwrap();
+        assert_eq!(
+            first.structure_identity_sha256,
+            second.structure_identity_sha256
+        );
+        assert_eq!(
+            first.contract_identity_sha256,
+            second.contract_identity_sha256
+        );
+
+        // Same header, same structure, DIFFERENT weight bytes: the contract
+        // identity cannot tell them apart, which is exactly why it must never
+        // stand in for an artifact identity.
+        let mut tampered = data.clone();
+        let weight = &header["diffusion_model.blocks.0.mlp.fc1.lora_A.weight"]["data_offsets"];
+        let start = weight[0].as_u64().unwrap() as usize;
+        tampered[start] ^= 0xff;
+        let other = inspect_fixture(&header, &tampered).unwrap();
+        assert_eq!(
+            first.contract_identity_sha256,
+            other.contract_identity_sha256
+        );
+
+        // The authenticated identity does tell them apart.
+        let (_a, path_a) = write_adapter(&header, &data);
+        let (_b, path_b) = write_adapter(&header, &tampered);
+        let mut pinned_a = expectation.clone();
+        pinned_a.content_sha256 = Some(sha256_hex(Sha256::digest(std::fs::read(&path_a).unwrap())));
+        let authentic_a = authenticate_h3_turbo_lora_adapter_against(
+            &path_a,
+            &pinned_a,
+            H3TurboLoraTier::Fl2v8StepV10,
+            &H3ComfyNeverCancel,
+        )
+        .unwrap();
+        let mut pinned_b = expectation.clone();
+        pinned_b.content_sha256 = Some(sha256_hex(Sha256::digest(std::fs::read(&path_b).unwrap())));
+        let authentic_b = authenticate_h3_turbo_lora_adapter_against(
+            &path_b,
+            &pinned_b,
+            H3TurboLoraTier::Fl2v8StepV10,
+            &H3ComfyNeverCancel,
+        )
+        .unwrap();
+        assert_ne!(
+            authentic_a.adapter_identity_sha256(),
+            authentic_b.adapter_identity_sha256()
+        );
+        assert_eq!(
+            authentic_a.inspection().contract_identity_sha256,
+            authentic_b.inspection().contract_identity_sha256
+        );
+        // And it is not the contract identity under another name.
+        assert_ne!(
+            authentic_a.adapter_identity_sha256(),
+            authentic_a.inspection().contract_identity_sha256
+        );
+
+        // A different alpha is a different overlay even at identical shapes.
+        let mut louder = expectation.clone();
+        louder.training_alpha = 0.5;
+        let (other_header, other_data) = fixture_adapter(&louder);
+        let (_directory, path) = write_adapter(&other_header, &other_data);
+        let louder_inspection = inspect_h3_turbo_lora_adapter_against(&path, &louder).unwrap();
+        assert_ne!(
+            first.structure_identity_sha256,
+            louder_inspection.structure_identity_sha256
+        );
+        assert_eq!(louder_inspection.scale, 0.125);
+    }
+
+    // -------------------------------------------------------- authentication
+
     #[derive(Default)]
     struct CancelAfter {
         remaining: std::sync::atomic::AtomicUsize,
@@ -1855,77 +2547,108 @@ mod tests {
         }
     }
 
-    #[test]
-    fn authentication_verifies_the_content_digest_and_reports_it() {
+    fn pinned_fixture() -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        H3TurboLoraExpectation,
+    ) {
         let expectation = fixture_expectation();
         let (header, data) = fixture_adapter(&expectation);
-        let (_directory, path) = write_adapter(&header, &data);
-        let bytes = std::fs::read(&path).unwrap();
-        let digest = sha256_hex(Sha256::digest(&bytes));
+        let (directory, path) = write_adapter(&header, &data);
+        let mut pinned = expectation;
+        pinned.content_sha256 = Some(sha256_hex(Sha256::digest(std::fs::read(&path).unwrap())));
+        (directory, path, pinned)
+    }
 
-        let mut pinned = expectation.clone();
-        pinned.content_sha256 = Some(digest.clone());
-        let contract =
-            authenticate_h3_turbo_lora_adapter_against(&path, &pinned, None, &H3ComfyNeverCancel)
-                .unwrap();
-        assert_eq!(contract.content_sha256.as_deref(), Some(digest.as_str()));
-        // Authentication must agree with inspection on everything else.
-        let inspected = inspect_h3_turbo_lora_adapter_against(&path, &pinned, None).unwrap();
-        assert_eq!(
-            contract.adapter_identity_sha256,
-            inspected.adapter_identity_sha256
-        );
-        assert_eq!(contract.modules, inspected.modules);
+    #[test]
+    fn authentication_verifies_the_content_digest_and_reports_it() {
+        let (_directory, path, pinned) = pinned_fixture();
+        let digest = pinned.content_sha256.clone().unwrap();
+        let contract = authenticate_h3_turbo_lora_adapter_against(
+            &path,
+            &pinned,
+            H3TurboLoraTier::Fl2v8StepV10,
+            &H3ComfyNeverCancel,
+        )
+        .unwrap();
+        assert_eq!(contract.content_sha256(), digest);
+        assert_eq!(contract.tier(), H3TurboLoraTier::Fl2v8StepV10);
+        assert_eq!(contract.task(), H3TransformerTask::T2VaFl2Va);
+        assert_eq!(contract.module_count(), 12);
+        assert_eq!(contract.scale(), 0.0625);
 
-        let mut wrong = expectation.clone();
+        // Authentication agrees with inspection on the whole structure.
+        let inspected = inspect_h3_turbo_lora_adapter_against(&path, &pinned).unwrap();
+        assert_eq!(contract.inspection(), &inspected);
+        assert_eq!(contract.modules(), &inspected.modules);
+
+        let mut wrong = pinned.clone();
         wrong.content_sha256 = Some("0".repeat(64));
-        let error =
-            authenticate_h3_turbo_lora_adapter_against(&path, &wrong, None, &H3ComfyNeverCancel)
-                .unwrap_err();
+        let error = authenticate_h3_turbo_lora_adapter_against(
+            &path,
+            &wrong,
+            H3TurboLoraTier::Fl2v8StepV10,
+            &H3ComfyNeverCancel,
+        )
+        .unwrap_err();
         assert_eq!(error.code, H3TurboLoraErrorCode::ContentDigestMismatch);
     }
 
     #[test]
-    fn authentication_refuses_a_symlinked_adapter() {
-        let expectation = fixture_expectation();
-        let (header, data) = fixture_adapter(&expectation);
-        let (directory, path) = write_adapter(&header, &data);
-        let link = directory.path().join("linked.safetensors");
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&path, &link).unwrap();
-        #[cfg(not(unix))]
-        std::fs::copy(&path, &link).unwrap();
-        let result = authenticate_h3_turbo_lora_adapter_against(
-            &link,
-            &expectation,
-            None,
+    fn authentication_refuses_to_run_without_a_content_pin() {
+        let (_directory, path, mut pinned) = pinned_fixture();
+        pinned.content_sha256 = None;
+        let error = authenticate_h3_turbo_lora_adapter_against(
+            &path,
+            &pinned,
+            H3TurboLoraTier::Fl2v8StepV10,
             &H3ComfyNeverCancel,
-        );
-        #[cfg(unix)]
-        assert_eq!(
-            result.unwrap_err().code,
-            H3TurboLoraErrorCode::FileIdentityChanged
-        );
-        #[cfg(not(unix))]
-        assert!(result.is_ok());
+        )
+        .unwrap_err();
+        assert_eq!(error.code, H3TurboLoraErrorCode::MissingContentPin);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn authentication_refuses_a_symlinked_adapter() {
+        let (directory, path, pinned) = pinned_fixture();
+        let link = directory.path().join("linked.safetensors");
+        std::os::unix::fs::symlink(&path, &link).unwrap();
+        let error = authenticate_h3_turbo_lora_adapter_against(
+            &link,
+            &pinned,
+            H3TurboLoraTier::Fl2v8StepV10,
+            &H3ComfyNeverCancel,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, H3TurboLoraErrorCode::FileIdentityChanged);
+        // The same bytes through the real path still authenticate.
+        assert!(authenticate_h3_turbo_lora_adapter_against(
+            &path,
+            &pinned,
+            H3TurboLoraTier::Fl2v8StepV10,
+            &H3ComfyNeverCancel,
+        )
+        .is_ok());
     }
 
     #[test]
     fn authentication_stops_at_a_cancellation_boundary() {
-        let expectation = fixture_expectation();
-        let (header, data) = fixture_adapter(&expectation);
-        let (_directory, path) = write_adapter(&header, &data);
+        let (_directory, path, pinned) = pinned_fixture();
         let cancellation = CancelAfter::default();
-        let error =
-            authenticate_h3_turbo_lora_adapter_against(&path, &expectation, None, &cancellation)
-                .unwrap_err();
+        let error = authenticate_h3_turbo_lora_adapter_against(
+            &path,
+            &pinned,
+            H3TurboLoraTier::Fl2v8StepV10,
+            &cancellation,
+        )
+        .unwrap_err();
         assert_eq!(error.code, H3TurboLoraErrorCode::Cancelled);
     }
 
     #[test]
     fn authentication_rejects_a_file_that_is_not_the_pinned_tier() {
-        let (header, data) = fixture_adapter(&fixture_expectation());
-        let (_directory, path) = write_adapter(&header, &data);
+        let (_directory, path, _) = pinned_fixture();
         let error = authenticate_h3_turbo_lora_adapter(
             &path,
             H3TurboLoraTier::Fl2v768p4StepV10,
@@ -1938,156 +2661,15 @@ mod tests {
     }
 
     #[test]
-    fn the_published_geometry_derives_from_the_shipped_checkpoint_specs() {
-        let expectation = H3TurboLoraTier::Fl2v8StepV10.expectation();
-        let (expected, base_names) = expected_turbo_modules(&expectation).unwrap();
-        assert_eq!(expected.len(), H3_TURBO_LORA_MODULE_COUNT);
-
-        // Exactly the shapes read from the published headers.
-        let published = [
-            ("attn.qkv_proj", 384_usize, 5_376_usize, 21_504_usize),
-            ("attn.out_proj", 128, 7_168, 5_376),
-            ("mlp.fc1", 128, 5_376, 28_672),
-            ("mlp.fc2", 128, 14_336, 5_376),
-        ];
-        for (suffix, rank, in_features, out_features) in published {
-            for prefix in ["blocks.0", "blocks.49", "token_refiner.blocks.1"] {
-                let module = expected
-                    .get(&format!("{H3_TURBO_LORA_KEY_PREFIX}{prefix}.{suffix}"))
-                    .unwrap_or_else(|| panic!("{prefix}.{suffix}"));
-                assert_eq!(module.rank, rank, "{prefix}.{suffix}");
-                assert_eq!(module.in_features, in_features, "{prefix}.{suffix}");
-                assert_eq!(module.out_features, out_features, "{prefix}.{suffix}");
-                assert!(base_names.contains(&module.base_weight_name));
-            }
-        }
-        assert!(!expected.contains_key("diffusion_model.blocks.50.mlp.fc1"));
-        assert!(!expected.contains_key("diffusion_model.token_refiner.blocks.2.mlp.fc1"));
-    }
-
-    #[test]
-    fn published_tier_constants_stay_pinned_to_the_reviewed_revision() {
-        assert_eq!(
-            H3_TURBO_LORA_SOURCE_REVISION,
-            "dc559027db79c174125df4d827db55cd11178860"
-        );
-        assert_eq!(H3_TURBO_LORA_REPOSITORY, "Comfy-Org/MiniMax-H3");
-        assert_eq!(H3_TURBO_LORA_TENSOR_COUNT, H3_TURBO_LORA_MODULE_COUNT * 3);
-        assert_eq!(H3_TURBO_LORA_MODULE_COUNT, 208);
-
-        let pinned = [
-            (
-                H3TurboLoraTier::Fl2v8StepV10,
-                "minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors",
-                1_956_193_000_u64,
-                "2339acdf19bfe123f46b971ea35d367a84adb85de43627e1eceafa5a5b2b111e",
-                73_632_u64,
-                "eadcdb12138db967789252da26d2abe41905b2579e1cf07b866a573e88d298fd",
-                8.0_f32,
-                0.0625_f32,
-                H3TransformerTask::T2VaFl2Va,
-            ),
-            (
-                H3TurboLoraTier::Fl2v768p4StepV10,
-                "minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors",
-                1_956_192_992,
-                "c396a9a06f58399e9df9754b18299818d84a2ddd371724ba48fe4a41221437dc",
-                73_624,
-                "3db9fe99ff46229525c43cbe6ba5bafc8d96bdeb22ee69949ef61d4d58d561d8",
-                128.0,
-                1.0,
-                H3TransformerTask::T2VaFl2Va,
-            ),
-            (
-                H3TurboLoraTier::Ref2v4StepV10,
-                "minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors",
-                1_956_193_000,
-                "5b9ab5ade15d0775676d01a907268a69a1468dc6033b3b0d3ded5502f3ebb84c",
-                73_632,
-                "53370bff715f074018793b9ebc71fa0ecd8bdfd8c5554a716ccf7bf5e6a6f745",
-                8.0,
-                0.0625,
-                H3TransformerTask::Ref2Va,
-            ),
-        ];
-
-        assert_eq!(pinned.len(), H3TurboLoraTier::ALL.len());
-        for (tier, file_name, bytes, sha, header_len, header_sha, alpha, scale, task) in pinned {
-            assert_eq!(tier.file_name(), file_name);
-            assert_eq!(tier.repository_path(), format!("loras/{file_name}"));
-            assert_eq!(tier.file_bytes(), bytes);
-            assert_eq!(tier.content_sha256(), sha);
-            assert_eq!(tier.header_len(), header_len);
-            assert_eq!(tier.header_identity_sha256(), header_sha);
-            assert_eq!(tier.training_alpha(), alpha);
-            assert_eq!(tier.training_scale(), scale);
-            assert_eq!(tier.task(), task);
-            // The published payload is byte-identical across tiers; only the
-            // JSON header length moves the total.
-            assert_eq!(
-                tier.file_bytes(),
-                8 + tier.header_len() + H3_TURBO_LORA_PAYLOAD_BYTES
-            );
-            assert_eq!(tier.training_scale(), tier.expectation().scale());
-        }
-    }
-
-    #[test]
-    fn tier_identities_and_digests_are_distinct() {
-        let mut ids = BTreeSet::new();
-        let mut digests = BTreeSet::new();
-        let mut headers = BTreeSet::new();
-        for tier in H3TurboLoraTier::ALL {
-            assert!(ids.insert(tier.stable_id()));
-            assert!(digests.insert(tier.content_sha256()));
-            assert!(headers.insert(tier.header_identity_sha256()));
-            assert_eq!(tier.content_sha256().len(), 64);
-            assert_eq!(tier.header_identity_sha256().len(), 64);
-        }
-    }
-
-    #[test]
-    fn published_expectation_matches_the_shipped_checkpoint_geometry() {
-        for tier in H3TurboLoraTier::ALL {
-            let expectation = tier.expectation();
-            assert_eq!(expectation.module_count(), H3_TURBO_LORA_MODULE_COUNT);
-            assert_eq!(expectation.tensor_count(), H3_TURBO_LORA_TENSOR_COUNT);
-            assert_eq!(expectation.training_rank, H3_TURBO_LORA_TRAINING_RANK);
-            assert_eq!(expectation.task, tier.task());
-        }
-    }
-
-    #[test]
-    fn fused_qkv_triples_rank_and_alpha_so_the_scale_is_uniform() {
-        for kind in H3TurboLoraModuleKind::ALL {
-            let rank = kind.rank(H3_TURBO_LORA_TRAINING_RANK);
-            let alpha = kind.alpha(8.0);
-            assert_eq!(alpha / rank as f32, 0.0625);
-            if kind.fuses_qkv() {
-                assert_eq!(rank, 384);
-                assert_eq!(alpha, 24.0);
-            } else {
-                assert_eq!(rank, 128);
-                assert_eq!(alpha, 8.0);
-            }
-            assert_eq!(
-                H3TurboLoraModuleKind::from_suffix(kind.suffix()),
-                Some(kind)
-            );
-        }
-        assert_eq!(H3TurboLoraModuleKind::from_suffix("attn.q_norm"), None);
-    }
-
-    #[test]
-    fn module_scopes_name_base_checkpoint_prefixes() {
-        assert_eq!(
-            H3TurboLoraModuleScope::MainBlock(49).base_prefix(),
-            "blocks.49"
-        );
-        assert_eq!(
-            H3TurboLoraModuleScope::TokenRefinerBlock(1).base_prefix(),
-            "token_refiner.blocks.1"
-        );
-        assert_eq!(H3TurboLoraModuleScope::MainBlock(7).index(), 7);
+    fn authentication_refuses_a_tier_whose_task_disagrees_with_the_expectation() {
+        let (_directory, path, pinned) = pinned_fixture();
+        let error = authenticate_h3_turbo_lora_adapter_against(
+            &path,
+            &pinned,
+            H3TurboLoraTier::Ref2v4StepV10,
+            &H3ComfyNeverCancel,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, H3TurboLoraErrorCode::TaskAuthorityMismatch);
     }
 }

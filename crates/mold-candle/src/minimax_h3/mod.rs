@@ -159,11 +159,10 @@ pub use qwen_quant::{
     H3_QWEN_INT8_QUANTIZED_LINEAR_COUNT, H3_QWEN_INT8_WEIGHT_ONLY_STABLE_ID,
 };
 pub use turbo_lora::{
-    authenticate_h3_turbo_lora_adapter, authenticate_h3_turbo_lora_adapter_against,
-    inspect_h3_turbo_lora_adapter, inspect_h3_turbo_lora_adapter_against, H3TurboLoraContract,
-    H3TurboLoraError, H3TurboLoraErrorCode, H3TurboLoraExpectation, H3TurboLoraModule,
-    H3TurboLoraModuleKind, H3TurboLoraModuleScope, H3TurboLoraResult, H3TurboLoraTensorRef,
-    H3TurboLoraTier, H3_TURBO_LORA_ALPHA_DTYPE, H3_TURBO_LORA_DIRECTORY,
+    authenticate_h3_turbo_lora_adapter, inspect_h3_turbo_lora_adapter, H3TurboLoraContract,
+    H3TurboLoraError, H3TurboLoraErrorCode, H3TurboLoraExpectation, H3TurboLoraInspection,
+    H3TurboLoraModule, H3TurboLoraModuleKind, H3TurboLoraModuleScope, H3TurboLoraResult,
+    H3TurboLoraTensorRef, H3TurboLoraTier, H3_TURBO_LORA_ALPHA_DTYPE, H3_TURBO_LORA_DIRECTORY,
     H3_TURBO_LORA_FUSED_QKV_MULTIPLE, H3_TURBO_LORA_KEY_PREFIX, H3_TURBO_LORA_MODULE_COUNT,
     H3_TURBO_LORA_PAYLOAD_BYTES, H3_TURBO_LORA_REPOSITORY, H3_TURBO_LORA_SOURCE_FORMAT,
     H3_TURBO_LORA_SOURCE_REVISION, H3_TURBO_LORA_TARGET_FORMAT, H3_TURBO_LORA_TENSOR_COUNT,
