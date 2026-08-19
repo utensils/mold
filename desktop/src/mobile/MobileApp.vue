@@ -815,6 +815,23 @@ const selectedTarget = computed<ApiTarget | null>(() => {
   const host = selectedHost.value;
   return host ? mobileHostTarget(host) : null;
 });
+/**
+ * Where model-scoped read-only lookups go — chain limits, LoRAs, control
+ * adapters, source preprocessing, and the estimate. The browsed machine
+ * answers whenever it has the model (the stable, pinned-path answer); under an
+ * automatic policy a model that lives only on a peer is asked of the machine
+ * that policy would route it to, so the union picker cannot show a model whose
+ * own capabilities nothing can read.
+ */
+const generationTargetHost = computed<MobileHost | null>(() => {
+  const browsed = selectedHost.value ?? null;
+  if (!automaticRouting.value || !form.model) return browsed;
+  if (browsed && modelHostIds(form.model).includes(browsed.id)) return browsed;
+  return provisionalAutomaticHost(form.model, form.family) ?? browsed;
+});
+const generationTarget = computed<ApiTarget | null>(() =>
+  generationTargetHost.value ? mobileHostTarget(generationTargetHost.value) : null,
+);
 const controlAdapters = ref<Ltx2ControlAdapterInfo[]>([]);
 const cameraControls = ref<Ltx2CameraControlInfo[]>([]);
 const cameraControlsLoaded = ref(false);
@@ -830,8 +847,8 @@ watch(
     controlAdapters.value = [];
     cameraControls.value = [];
     cameraControlsLoaded.value = false;
-    const target = selectedTarget.value;
-    if (!target || !selectedHost.value?.online || form.family !== "ltx2" || !form.model) {
+    const target = generationTarget.value;
+    if (!target || !generationTargetHost.value?.online || form.family !== "ltx2" || !form.model) {
       form.icLoraControl = null;
       return;
     }
@@ -2939,7 +2956,7 @@ function setOutputMode(mode: string | number): void {
 let chainLimitsFetch = 0;
 async function loadChainLimits(): Promise<void> {
   const version = ++chainLimitsFetch;
-  const host = selectedHost.value;
+  const host = generationTargetHost.value;
   const entry = selectedGenerationModel.value;
   if (!host || !entry) {
     chainLimits.value = null;
@@ -6137,7 +6154,7 @@ onBeforeUnmount(() => {
               :form="form"
               :upscalers="upscalers"
               :chain-limits="chainLimits"
-              :target="selectedTarget"
+              :target="generationTarget"
               :shared="sequenceParams(form, selectedGenerationModel)"
               :fps="form.fps"
               :submitting="sequenceStarting"
@@ -6378,7 +6395,7 @@ onBeforeUnmount(() => {
               <MobileSourceControls
                 :form="form"
                 :model="selectedGenerationModel"
-                :target="selectedTarget"
+                :target="generationTarget"
                 :control-models="controlModels"
                 :upscalers="upscalers"
                 @validity-change="sourceValid = $event"
@@ -6455,7 +6472,7 @@ onBeforeUnmount(() => {
             >
               <MobileGenerateParameters
                 :form="form"
-                :target="selectedTarget"
+                :target="generationTarget"
                 :upscalers="upscalers"
                 :selected-model="selectedGenerationModel"
                 :control-adapters="controlAdapters"
@@ -6485,9 +6502,9 @@ onBeforeUnmount(() => {
                 </small>
               </label>
               <MobileLoraControls
-                v-if="selectedTarget"
+                v-if="generationTarget"
                 :form="form"
-                :target="selectedTarget"
+                :target="generationTarget"
                 :model="selectedGenerationModel"
                 @append-word="appendPromptWord"
               />
@@ -7056,7 +7073,7 @@ onBeforeUnmount(() => {
         data-test="mobile-develop-blocker"
       />
       <div class="mobile-estimate">
-        <EstimateBadge :request="estimateRequest" :target="selectedTarget" />
+        <EstimateBadge :request="estimateRequest" :target="generationTarget" />
       </div>
       <button
         class="primary-button"
