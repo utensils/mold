@@ -145,6 +145,13 @@ cancelled or reported as the interrupted print.
 Library merges prints from every saved host, newest first. Unavailable hosts
 are reported without hiding media from hosts that did respond.
 
+Pinch the grid with two fingers to resize the thumbnails, between two across
+(largest) and five across (smallest). This is the iPhone equivalent of the
+thumbnail-size slider in the web and desktop Library. The size is remembered on
+the device and starts at three across; it is stored separately from the desktop
+and web setting, so resizing on your phone never changes the grid on your Mac.
+One-finger scrolling through the grid is unaffected.
+
 Press and hold an image to open the native iOS image menu for Share, Save to
 Photos, Copy, Copy Subject, and Look Up. Tap **Select** to select multiple
 prints; the action bar can select all loaded prints, clear the selection, or
@@ -269,8 +276,8 @@ recolor generated photos or videos.
 
 The app intentionally prevents WebKit input-focus and double-tap page
 magnification and suppresses rubber-band scrolling. The Library's horizontal
-swipe navigation remains enabled. iOS system-level accessibility Zoom is
-separate from WebView page zoom.
+swipe navigation and its grid pinch-to-resize gesture remain enabled. iOS
+system-level accessibility Zoom is separate from WebView page zoom.
 
 ## Updates and current boundaries
 
