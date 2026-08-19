@@ -55,7 +55,8 @@ pushed screen opened from the header.
   is the union of every reachable machine's installed models, tagged with the
   machine that has one when they differ, and Develop fans
   `POST /api/generate/placement-preview` out to the candidate machines (each
-  with its own Keychain key) before choosing — Auto by soonest predicted
+  with its own Keychain key) before choosing, keeping slower machines in the
+  race only until one of them answers with a plan — Auto by soonest predicted
   completion including round trip, Most capable by that machine's reported
   `gpu_info.backend`. The winner is frozen into the same immutable route record
   a pinned machine uses (host id, URL, Keychain key, instance id), so prepared
