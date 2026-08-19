@@ -18,6 +18,19 @@ image-to-video, audio-to-video, keyframe, retake, lip dub, public IC-LoRA,
 spatial upscale (`x1.5` / `x2` where published), and temporal upscale (`x2`).
 :::
 
+::: info Implementation provenance
+The LTX-2 runtime is a pure-Rust port of
+[Lightricks/LTX-2](https://github.com/Lightricks/LTX-2) (the reference for
+every pipeline, sampler, guidance, and conditioning question). Its video
+transformer and video VAE were adapted from mold's legacy LTX-Video model,
+which was ported from
+[FerrisMind/candle-video](https://github.com/FerrisMind/candle-video)
+(Copyright 2025 FerrisMind,
+[Apache License 2.0](https://github.com/FerrisMind/candle-video/blob/main/LICENSE)),
+so those two files retain Apache-2.0 portions — see the repository's
+`THIRD_PARTY_NOTICES.md`.
+:::
+
 ## Supported Models
 
 | Model                        | Path      | Notes                                         |
