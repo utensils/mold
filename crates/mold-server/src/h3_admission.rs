@@ -24,7 +24,18 @@ const H3_QWEN_OUTPUT_WIDTH: u64 = 5_120;
 const H3_QWEN_OUTPUT_DTYPE_BYTES: u64 = 2;
 pub(crate) const H3_MAX_PREFETCH_DEPTH: usize = 2;
 pub(crate) const H3_TINY_MATH_MAX_PACKED_ROWS: u64 = 4_096;
-pub(crate) const H3_CURATED_HOST_RAM_RECOMMENDATION_BYTES: u64 = 128 * GIB;
+/// Advisory host-RAM tier. Admission always gates on the exact per-attempt
+/// budget, never on this figure.
+///
+/// The corrected per-phase host ledger puts the peak in the Qwen phases at the
+/// qualified envelope: ~20.26 GB of packed CPU parameters + 3.76 GB activation
+/// workspace + ~1.56 GB load staging + the ~0.67 GB fixed runtime baseline,
+/// about 26.3 GB. The old flat sum reached ~74 GB only by charging 42.5 GB of
+/// artifact FILE bytes and a 5.2 GB file-backed VAE mapping as anonymous
+/// demand. A 32 GiB host still fails — 26.3 GB plus the 8 GiB minimum floor
+/// exceeds it — so 64 GiB is the smallest honest recommendation. The old
+/// 128 GiB figure was L40S-era and derived from that same flat sum.
+pub(crate) const H3_CURATED_HOST_RAM_RECOMMENDATION_BYTES: u64 = 64 * GIB;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -2673,7 +2684,9 @@ mod tests {
             enormous.safety_floor_bytes(),
             (u64::MAX / 100) * 15 + ((u64::MAX % 100) * 15 / 100)
         );
-        assert_eq!(H3_CURATED_HOST_RAM_RECOMMENDATION_BYTES, 128 * GIB);
+        // The corrected per-phase host ledger peaks at ~26.3 GB in the Qwen
+        // phases; 32 GiB cannot hold that plus the 8 GiB minimum floor.
+        assert_eq!(H3_CURATED_HOST_RAM_RECOMMENDATION_BYTES, 64 * GIB);
 
         let inventory = landed_inventory(minimax_h3::FL2VA_OFFICIAL);
         let checkpoint = checkpoint(&inventory);
