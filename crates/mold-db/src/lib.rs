@@ -15,6 +15,7 @@ pub mod generation_queue;
 pub mod metadata_io;
 pub mod migrations;
 mod model_prefs;
+pub mod organization;
 pub mod paired_clients;
 mod path;
 pub mod persist;
@@ -24,17 +25,22 @@ mod record;
 pub mod scan;
 mod scheduler_estimates;
 pub mod settings;
+pub mod trash;
 
 pub use db::MetadataDb;
 pub use device_preferences::{DevicePreference, DevicePreferences};
 pub use migrations::SCHEMA_VERSION;
 pub use model_prefs::ModelPrefs;
+pub use organization::{
+    BulkOrganize, CollectionRow, OrgResult, OrganizationError, PrintOrganization, TagCountRow,
+};
 pub use path::{canonical_dir, canonical_dir_string};
 pub use prompt_history::{HistoryEntry, PromptHistory};
 pub use reconcile::ReconcileStats;
 pub use record::{GenerationRecord, RecordSource};
 pub use scheduler_estimates::{SchedulerEstimateRecord, SchedulerEstimates};
 pub use settings::{resolve_active_profile, Settings, ValueType, DEFAULT_PROFILE};
+pub use trash::{purge_at_ms, tombstone_path, trash_dir, Tombstone};
 
 use std::path::PathBuf;
 use std::sync::OnceLock;

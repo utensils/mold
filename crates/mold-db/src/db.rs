@@ -19,7 +19,24 @@ pub(crate) struct PathSnapshot {
     pub filename: String,
     pub file_mtime_ms: Option<i64>,
     pub file_size_bytes: Option<i64>,
+    pub trashed_at_ms: Option<i64>,
 }
+
+/// Which rows a gallery listing should return with respect to the trash.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TrashFilter {
+    All,
+    LiveOnly,
+    TrashedOnly,
+}
+
+/// The column projection [`row_to_record`] expects, in order. Every
+/// `SELECT` that feeds `row_to_record` must use exactly this list.
+pub(crate) const GENERATION_SELECT_COLUMNS: &str = "SELECT id, filename, output_dir, \
+    created_at_ms, file_mtime_ms, file_size_bytes, format, model, prompt, negative_prompt, \
+    original_prompt, seed, steps, guidance, width, height, strength, scheduler, lora, \
+    lora_scale, frames, fps, metadata_version, generation_time_ms, backend, hostname, \
+    source, metadata_synthetic, metadata_json, title, favorite, trashed_at_ms";
 
 /// Configure connection-level pragmas at open time. Pragmas that fail to
 /// apply are logged at warn level — concurrent-writer performance degrades
@@ -380,7 +397,7 @@ impl MetadataDb {
                     format, model, prompt, negative_prompt, original_prompt, seed, steps,
                     guidance, width, height, strength, scheduler, lora, lora_scale, frames,
                     fps, metadata_version, generation_time_ms, backend, hostname, source,
-                    metadata_synthetic, metadata_json
+                    metadata_synthetic, metadata_json, title, favorite, trashed_at_ms
              FROM generations
              WHERE output_dir = ?1 AND filename = ?2",
         )?;
@@ -397,9 +414,35 @@ impl MetadataDb {
 
     /// List rows for a specific `output_dir` (or all dirs when `None`),
     /// ordered newest-first by `file_mtime_ms` (falling back to `created_at_ms`).
+    ///
+    /// Returns EVERY row, trashed ones included — callers that only want
+    /// the live library filter on [`GenerationRecord::trashed_at_ms`] or use
+    /// [`Self::list_live`] / [`Self::list_trashed`]. Keeping the full view
+    /// here means the reconcile and TUI paths that predate the trash keep
+    /// observing the whole table.
     pub fn list(&self, output_dir: Option<&Path>) -> Result<Vec<GenerationRecord>> {
+        self.list_filtered(output_dir, TrashFilter::All)
+    }
+
+    /// Like [`Self::list`] but only rows that are NOT in the trash
+    /// (`trashed_at_ms IS NULL`).
+    pub fn list_live(&self, output_dir: Option<&Path>) -> Result<Vec<GenerationRecord>> {
+        self.list_filtered(output_dir, TrashFilter::LiveOnly)
+    }
+
+    /// Like [`Self::list`] but only rows that ARE in the trash
+    /// (`trashed_at_ms IS NOT NULL`).
+    pub fn list_trashed(&self, output_dir: Option<&Path>) -> Result<Vec<GenerationRecord>> {
+        self.list_filtered(output_dir, TrashFilter::TrashedOnly)
+    }
+
+    fn list_filtered(
+        &self,
+        output_dir: Option<&Path>,
+        filter: TrashFilter,
+    ) -> Result<Vec<GenerationRecord>> {
         let epoch = self.recovery_epoch.load(Ordering::Acquire);
-        match self.list_once(output_dir) {
+        match self.list_once(output_dir, filter) {
             Ok(rows) => Ok(rows),
             Err(error) if is_corruption_error(&error) => {
                 self.rebuild_after_corruption(epoch, &error)?;
@@ -419,32 +462,46 @@ impl MetadataDb {
                         "metadata DB rebuilt from gallery after query-time corruption"
                     );
                 }
-                self.list_once(output_dir)
+                self.list_once(output_dir, filter)
                     .context("retrying gallery query after metadata DB rebuild")
             }
             Err(error) => Err(error),
         }
     }
 
-    fn list_once(&self, output_dir: Option<&Path>) -> Result<Vec<GenerationRecord>> {
+    fn list_once(
+        &self,
+        output_dir: Option<&Path>,
+        filter: TrashFilter,
+    ) -> Result<Vec<GenerationRecord>> {
         let conn = self.conn.lock().expect("metadata db mutex poisoned");
         let order_clause = "ORDER BY COALESCE(file_mtime_ms, created_at_ms) DESC";
-        let select = "SELECT id, filename, output_dir, created_at_ms, file_mtime_ms, \
-            file_size_bytes, format, model, prompt, negative_prompt, original_prompt, seed, \
-            steps, guidance, width, height, strength, scheduler, lora, lora_scale, frames, \
-            fps, metadata_version, generation_time_ms, backend, hostname, source, \
-            metadata_synthetic, metadata_json FROM generations";
+        let select = format!("{GENERATION_SELECT_COLUMNS} FROM generations");
+        let trash_clause = match filter {
+            TrashFilter::All => "",
+            TrashFilter::LiveOnly => "trashed_at_ms IS NULL",
+            TrashFilter::TrashedOnly => "trashed_at_ms IS NOT NULL",
+        };
         let mut out = Vec::new();
         if let Some(dir) = output_dir {
             let dir_key = canonical_dir_string(dir);
-            let mut stmt =
-                conn.prepare(&format!("{select} WHERE output_dir = ?1 {order_clause}"))?;
+            let sql = if trash_clause.is_empty() {
+                format!("{select} WHERE output_dir = ?1 {order_clause}")
+            } else {
+                format!("{select} WHERE output_dir = ?1 AND {trash_clause} {order_clause}")
+            };
+            let mut stmt = conn.prepare(&sql)?;
             let mut rows = stmt.query(params![dir_key])?;
             while let Some(row) = rows.next()? {
                 out.push(row_to_record(row)?);
             }
         } else {
-            let mut stmt = conn.prepare(&format!("{select} {order_clause}"))?;
+            let sql = if trash_clause.is_empty() {
+                format!("{select} {order_clause}")
+            } else {
+                format!("{select} WHERE {trash_clause} {order_clause}")
+            };
+            let mut stmt = conn.prepare(&sql)?;
             let mut rows = stmt.query([])?;
             while let Some(row) = rows.next()? {
                 out.push(row_to_record(row)?);
@@ -520,7 +577,8 @@ impl MetadataDb {
     pub(crate) fn snapshot_paths(&self) -> Result<Vec<PathSnapshot>> {
         let conn = self.conn.lock().expect("metadata db mutex poisoned");
         let mut stmt = conn.prepare(
-            "SELECT output_dir, filename, file_mtime_ms, file_size_bytes FROM generations",
+            "SELECT output_dir, filename, file_mtime_ms, file_size_bytes, trashed_at_ms
+             FROM generations",
         )?;
         let rows = stmt.query_map([], |r| {
             Ok(PathSnapshot {
@@ -528,6 +586,7 @@ impl MetadataDb {
                 filename: r.get::<_, String>(1)?,
                 file_mtime_ms: r.get::<_, Option<i64>>(2)?,
                 file_size_bytes: r.get::<_, Option<i64>>(3)?,
+                trashed_at_ms: r.get::<_, Option<i64>>(4)?,
             })
         })?;
         let mut out = Vec::new();
@@ -544,6 +603,34 @@ impl MetadataDb {
         let r = f(&tx)?;
         tx.commit()?;
         Ok(r)
+    }
+
+    /// Run `f` inside a single IMMEDIATE transaction with a caller-typed
+    /// error. Used by the organization module so its typed `NotFound` /
+    /// `Conflict` / `Invalid` outcomes survive the transaction boundary
+    /// instead of being flattened into `anyhow`.
+    pub(crate) fn transact_typed<R, E>(
+        &self,
+        f: impl FnOnce(&Connection) -> std::result::Result<R, E>,
+    ) -> std::result::Result<R, E>
+    where
+        E: From<rusqlite::Error>,
+    {
+        let mut conn = self.conn.lock().expect("metadata db mutex poisoned");
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let result = f(&tx)?;
+        tx.commit()?;
+        Ok(result)
+    }
+
+    /// Read-only twin of [`Self::transact_typed`]: run `f` against the
+    /// locked connection with a caller-typed error.
+    pub(crate) fn with_conn_typed<R, E>(
+        &self,
+        f: impl FnOnce(&Connection) -> std::result::Result<R, E>,
+    ) -> std::result::Result<R, E> {
+        let conn = self.conn.lock().expect("metadata db mutex poisoned");
+        f(&conn)
     }
 
     /// Run `f` in an IMMEDIATE transaction. This takes SQLite's writer
@@ -586,18 +673,24 @@ pub(crate) fn upsert_with_conn(conn: &Connection, rec: &GenerationRecord) -> Res
         .map(scheduler_to_str)
         .map(str::to_string);
     let metadata_json = serde_json::to_string(&rec.metadata)?;
+    // `title`, `favorite`, and `trashed_at_ms` are user-owned: `title` is
+    // seeded on insert and kept on conflict (an existing title always wins
+    // over the incoming one), while `favorite` / `trashed_at_ms` are only
+    // ever written by the organization and trash modules. A reconcile refresh
+    // or a re-publication must never reset them.
     conn.execute(
         "INSERT INTO generations (
             filename, output_dir, created_at_ms, file_mtime_ms, file_size_bytes, format,
             model, prompt, negative_prompt, original_prompt, seed, steps, guidance,
             width, height, strength, scheduler, lora, lora_scale, frames, fps,
             metadata_version, generation_time_ms, backend, hostname, source, metadata_synthetic,
-            metadata_json
+            metadata_json, title, favorite, trashed_at_ms
          ) VALUES (
             ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
-            ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28
+            ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31
          )
          ON CONFLICT(output_dir, filename) DO UPDATE SET
+            title = COALESCE(generations.title, excluded.title),
             created_at_ms = excluded.created_at_ms,
             file_mtime_ms = excluded.file_mtime_ms,
             file_size_bytes = excluded.file_size_bytes,
@@ -653,6 +746,9 @@ pub(crate) fn upsert_with_conn(conn: &Connection, rec: &GenerationRecord) -> Res
             rec.source.as_str(),
             rec.metadata_synthetic as i64,
             metadata_json,
+            rec.title,
+            rec.favorite as i64,
+            rec.trashed_at_ms,
         ],
     )?;
     let id = conn.query_row(
@@ -675,7 +771,7 @@ pub(crate) fn delete_with_conn(
     Ok(n > 0)
 }
 
-fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<GenerationRecord> {
+pub(crate) fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<GenerationRecord> {
     let format_s: String = row.get(6)?;
     let filename: String = row.get(1)?;
     // A stored string this build's enum doesn't know must not become `Png` —
@@ -750,6 +846,9 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<GenerationRecord> 
     let source_s: String = row.get(26)?;
     let synthetic_i: i64 = row.get(27)?;
     let metadata_json: Option<String> = row.get(28)?;
+    let title: Option<String> = row.get(29)?;
+    let favorite_i: i64 = row.get(30)?;
+    let trashed_at_ms: Option<i64> = row.get(31)?;
     let metadata = metadata_json
         .as_deref()
         .and_then(|json| serde_json::from_str::<OutputMetadata>(json).ok())
@@ -768,6 +867,9 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<GenerationRecord> 
         hostname: row.get(25)?,
         source: RecordSource::parse(&source_s),
         metadata_synthetic: synthetic_i != 0,
+        title,
+        favorite: favorite_i != 0,
+        trashed_at_ms,
     })
 }
 
@@ -928,6 +1030,9 @@ mod tests {
             hostname: Some("hal9000".into()),
             source: RecordSource::Server,
             metadata_synthetic: false,
+            title: None,
+            favorite: false,
+            trashed_at_ms: None,
         }
     }
 
@@ -1127,6 +1232,108 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(got.metadata.prompt, "a different cat");
+    }
+
+    /// The user-owned columns survive a conflicting upsert (reconcile
+    /// refresh, re-publication): `title` keeps the existing value, and
+    /// `favorite` / `trashed_at_ms` are never written from the incoming row.
+    #[test]
+    fn upsert_preserves_title_favorite_and_trashed_on_conflict() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        let mut first = rec();
+        first.title = Some("Owl study".into());
+        db.upsert(&first).unwrap();
+        db.set_favorite(Path::new("/tmp/out"), &first.filename, true)
+            .unwrap();
+        assert!(db
+            .mark_trashed(Path::new("/tmp/out"), &first.filename, 77)
+            .unwrap());
+
+        // A backfill refresh carries neither a title nor the flags.
+        let mut refresh = rec();
+        refresh.metadata.prompt = "refreshed".into();
+        refresh.title = Some("Reconciled title that must lose".into());
+        db.upsert(&refresh).unwrap();
+
+        let got = db
+            .get(Path::new("/tmp/out"), &first.filename)
+            .unwrap()
+            .unwrap();
+        assert_eq!(got.metadata.prompt, "refreshed");
+        assert_eq!(got.title.as_deref(), Some("Owl study"));
+        assert!(got.favorite);
+        assert_eq!(got.trashed_at_ms, Some(77));
+    }
+
+    /// A row inserted without a title takes the title from the first upsert
+    /// that carries one (the COALESCE arm), since `NULL` means "never set".
+    #[test]
+    fn upsert_seeds_title_when_existing_row_has_none() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        db.upsert(&rec()).unwrap();
+        let mut titled = rec();
+        titled.title = Some("Late title".into());
+        db.upsert(&titled).unwrap();
+        let got = db
+            .get(Path::new("/tmp/out"), &titled.filename)
+            .unwrap()
+            .unwrap();
+        assert_eq!(got.title.as_deref(), Some("Late title"));
+    }
+
+    #[test]
+    fn insert_seeds_title_and_round_trips_organization_columns() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        let mut r = rec();
+        r.title = Some("Seeded".into());
+        r.favorite = true;
+        r.trashed_at_ms = Some(5);
+        db.upsert(&r).unwrap();
+        let got = db.get(Path::new("/tmp/out"), &r.filename).unwrap().unwrap();
+        assert_eq!(got.title.as_deref(), Some("Seeded"));
+        assert!(got.favorite);
+        assert_eq!(got.trashed_at_ms, Some(5));
+    }
+
+    #[test]
+    fn list_live_excludes_trashed_rows_and_list_keeps_everything() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        let mut live = rec();
+        live.filename = "live.png".into();
+        let mut trashed = rec();
+        trashed.filename = "trashed.png".into();
+        db.upsert(&live).unwrap();
+        db.upsert(&trashed).unwrap();
+        assert!(db
+            .mark_trashed(Path::new("/tmp/out"), "trashed.png", 123)
+            .unwrap());
+
+        let dir = Path::new("/tmp/out");
+        let all: Vec<_> = db
+            .list(Some(dir))
+            .unwrap()
+            .into_iter()
+            .map(|r| r.filename)
+            .collect();
+        assert_eq!(all.len(), 2, "list() returns everything: {all:?}");
+        let live_only: Vec<_> = db
+            .list_live(Some(dir))
+            .unwrap()
+            .into_iter()
+            .map(|r| r.filename)
+            .collect();
+        assert_eq!(live_only, vec!["live.png"]);
+        let trashed_only: Vec<_> = db
+            .list_trashed(Some(dir))
+            .unwrap()
+            .into_iter()
+            .map(|r| r.filename)
+            .collect();
+        assert_eq!(trashed_only, vec!["trashed.png"]);
+        // The unscoped variants filter the same way.
+        assert_eq!(db.list_live(None).unwrap().len(), 1);
+        assert_eq!(db.list_trashed(None).unwrap().len(), 1);
+        assert_eq!(db.list(None).unwrap().len(), 2);
     }
 
     #[test]

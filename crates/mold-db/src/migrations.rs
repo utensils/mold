@@ -461,6 +461,56 @@ const V19_GENERATION_QUEUE_DEVICE_PIN: &str = r#"
 ALTER TABLE generation_queue ADD COLUMN target_device_id TEXT;
 "#;
 
+/// v20 → library organization: titles, favorites, tags, collections, trash.
+///
+/// `title`, `favorite`, and `trashed_at_ms` are user-owned columns on
+/// `generations`. The upsert path seeds `title` on insert and otherwise
+/// leaves all three alone on conflict, so a reconcile refresh can never
+/// reset them. Side tables FK `generations(id) ON DELETE CASCADE`, so a
+/// hard delete drops tag and collection membership with the row.
+///
+/// A trashed row keeps its `(output_dir, filename)` identity; the bytes move
+/// to `<output_dir>/.trash/<filename>` and `trashed_at_ms` records when.
+const V20_LIBRARY_ORGANIZATION: &str = r#"
+ALTER TABLE generations ADD COLUMN title TEXT;
+ALTER TABLE generations ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE generations ADD COLUMN trashed_at_ms INTEGER;
+CREATE INDEX IF NOT EXISTS idx_gen_trashed ON generations(trashed_at_ms);
+CREATE INDEX IF NOT EXISTS idx_gen_favorite ON generations(favorite);
+
+CREATE TABLE tags (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    name          TEXT    NOT NULL UNIQUE COLLATE NOCASE,
+    created_at_ms INTEGER NOT NULL
+);
+
+CREATE TABLE generation_tags (
+    generation_id INTEGER NOT NULL REFERENCES generations(id) ON DELETE CASCADE,
+    tag_id        INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+    PRIMARY KEY (generation_id, tag_id)
+);
+CREATE INDEX IF NOT EXISTS idx_generation_tags_tag ON generation_tags(tag_id);
+
+CREATE TABLE collections (
+    id             TEXT    PRIMARY KEY,
+    name           TEXT    NOT NULL,
+    slug           TEXT    NOT NULL UNIQUE COLLATE NOCASE,
+    description    TEXT,
+    cover_filename TEXT,
+    created_at_ms  INTEGER NOT NULL,
+    updated_at_ms  INTEGER NOT NULL
+);
+
+CREATE TABLE collection_items (
+    collection_id TEXT    NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
+    generation_id INTEGER NOT NULL REFERENCES generations(id) ON DELETE CASCADE,
+    position      INTEGER NOT NULL,
+    added_at_ms   INTEGER NOT NULL,
+    PRIMARY KEY (collection_id, generation_id)
+);
+CREATE INDEX IF NOT EXISTS idx_collection_items_generation ON collection_items(generation_id);
+"#;
+
 /// Ordered list of schema migrations. Version numbers must be strictly
 /// increasing — [`apply_pending`] validates this at startup.
 pub(crate) const MIGRATIONS: &[Migration] = &[
@@ -540,11 +590,15 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         version: 19,
         kind: MigrationKind::Sql(V19_GENERATION_QUEUE_DEVICE_PIN),
     },
+    Migration {
+        version: 20,
+        kind: MigrationKind::Sql(V20_LIBRARY_ORGANIZATION),
+    },
 ];
 
 /// The highest migration version this build ships. Exposed publicly so
 /// operators / tests can assert what schema level they're running against.
-pub const SCHEMA_VERSION: i64 = 19;
+pub const SCHEMA_VERSION: i64 = 20;
 
 /// v1 → v2: rewrite every `output_dir` value to its canonical form so
 /// rows written by the v0.8.x release (which keyed on raw paths) keep
@@ -920,7 +974,7 @@ mod tests {
             SCHEMA_VERSION,
             "fresh DB must end at the latest SCHEMA_VERSION",
         );
-        assert_eq!(SCHEMA_VERSION, 19);
+        assert_eq!(SCHEMA_VERSION, 20);
         assert!(table_exists(&conn, "device_preferences"));
         assert_eq!(
             column_names(&conn, "device_preferences"),
@@ -1073,8 +1127,8 @@ mod tests {
 
         apply_pending(&mut conn).unwrap();
 
-        assert_eq!(current_version(&conn).unwrap(), 19);
-        assert_eq!(SCHEMA_VERSION, 19);
+        assert_eq!(current_version(&conn).unwrap(), 20);
+        assert_eq!(SCHEMA_VERSION, 20);
         assert!(table_exists(&conn, "generation_queue"));
         let columns = column_names(&conn, "generation_queue");
         for expected in [
@@ -1107,6 +1161,89 @@ mod tests {
             )
             .unwrap();
         assert_eq!(kept, 1, "the upgrade must not disturb existing rows");
+    }
+
+    /// v20: a v19 database gains the organization columns, side tables, and
+    /// indexes while every existing gallery row survives with the
+    /// user-owned columns at their neutral defaults.
+    #[test]
+    fn v20_upgrade_adds_library_organization_and_preserves_existing_rows() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        let tx = conn.transaction().unwrap();
+        for migration in MIGRATIONS
+            .iter()
+            .filter(|migration| migration.version <= 19)
+        {
+            match &migration.kind {
+                MigrationKind::Sql(sql) => tx.execute_batch(sql).unwrap(),
+                MigrationKind::Rust(run) => run(&tx).unwrap(),
+            }
+        }
+        tx.execute_batch("PRAGMA user_version = 19;").unwrap();
+        tx.commit().unwrap();
+        conn.execute(
+            "INSERT INTO generations
+                (filename, output_dir, created_at_ms, format, model, prompt)
+             VALUES ('kept.png', '/gallery', 1, 'png', 'flux-dev:q4', 'a cat')",
+            [],
+        )
+        .unwrap();
+
+        apply_pending(&mut conn).unwrap();
+
+        assert_eq!(current_version(&conn).unwrap(), 20);
+        assert_eq!(SCHEMA_VERSION, 20);
+        let columns = column_names(&conn, "generations");
+        for expected in ["title", "favorite", "trashed_at_ms"] {
+            assert!(
+                columns.iter().any(|column| column == expected),
+                "generations must carry {expected}, got {columns:?}"
+            );
+        }
+        for table in ["tags", "generation_tags", "collections", "collection_items"] {
+            assert!(table_exists(&conn, table), "missing table {table}");
+        }
+        for index in [
+            "idx_gen_trashed",
+            "idx_gen_favorite",
+            "idx_generation_tags_tag",
+            "idx_collection_items_generation",
+        ] {
+            assert!(index_exists(&conn, index), "missing index {index}");
+        }
+        let (prompt, title, favorite, trashed): (String, Option<String>, i64, Option<i64>) = conn
+            .query_row(
+                "SELECT prompt, title, favorite, trashed_at_ms
+                 FROM generations WHERE filename = 'kept.png'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(prompt, "a cat");
+        assert_eq!(title, None);
+        assert_eq!(favorite, 0);
+        assert_eq!(trashed, None);
+
+        // Side tables cascade from the gallery row.
+        conn.execute(
+            "INSERT INTO tags (name, created_at_ms) VALUES ('owls', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO generation_tags (generation_id, tag_id)
+             SELECT g.id, t.id FROM generations g, tags t
+             WHERE g.filename = 'kept.png' AND t.name = 'owls'",
+            [],
+        )
+        .unwrap();
+        conn.execute("DELETE FROM generations WHERE filename = 'kept.png'", [])
+            .unwrap();
+        let links: i64 = conn
+            .query_row("SELECT COUNT(*) FROM generation_tags", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(links, 0, "generation_tags must cascade with the row");
     }
 
     #[test]
@@ -1315,7 +1452,7 @@ mod v9_tests {
 
     #[test]
     fn schema_version_is_current() {
-        assert_eq!(SCHEMA_VERSION, 19);
+        assert_eq!(SCHEMA_VERSION, 20);
     }
 
     #[test]
@@ -1380,6 +1517,8 @@ mod v15_tests {
     #[test]
     fn v14_runtime_migration_preserves_old_rows_with_null_runtime() {
         let mut conn = Connection::open_in_memory().unwrap();
+        // Every real v14 database carries the gallery table; v20 alters it.
+        conn.execute_batch(V1_INITIAL_SCHEMA).unwrap();
         conn.execute_batch(V13_SCHEDULER_ESTIMATES).unwrap();
         conn.execute_batch(V14_SCHEDULER_ESTIMATE_EVIDENCE).unwrap();
         conn.execute(
@@ -1416,6 +1555,8 @@ mod v17_tests {
     #[test]
     fn v16_av_phase_migration_preserves_legacy_vae_evidence() {
         let mut conn = Connection::open_in_memory().unwrap();
+        // Every real v16 database carries the gallery table; v20 alters it.
+        conn.execute_batch(V1_INITIAL_SCHEMA).unwrap();
         conn.execute_batch(V13_SCHEDULER_ESTIMATES).unwrap();
         conn.execute_batch(V14_SCHEDULER_ESTIMATE_EVIDENCE).unwrap();
         conn.execute_batch(V15_SCHEDULER_ESTIMATE_RUNTIME).unwrap();
