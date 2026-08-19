@@ -130,12 +130,23 @@ describe("NotificationsCenter severity colors", () => {
 
   it("colors the unread badge with the worst unread severity", async () => {
     const store = useNotificationsStore();
-    store.record({ kind: "success", text: "Reconnected to plato", atMs: 1 });
+    store.record({
+      kind: "info",
+      text: "Generated — saved to Library",
+      atMs: 1,
+    });
 
     const wrapper = mountCenter();
+    // Only notices waiting: the bell reads green, not red.
     expect(
       wrapper.get('[data-test="notifications-unread"]').attributes("style"),
     ).toContain("var(--success)");
+
+    store.record({ kind: "warning", text: "Can't reach plato", atMs: 2 });
+    await flushPromises();
+    expect(
+      wrapper.get('[data-test="notifications-unread"]').attributes("style"),
+    ).toContain("var(--warning)");
 
     store.record({ kind: "error", text: "Generation failed", atMs: 2 });
     await flushPromises();

@@ -229,10 +229,10 @@ surface powers it, so anything the app does maps to a documented endpoint.
   badge. Toasts stay transient, but the bell opens the durable session history
   of every toast — complete untruncated messages and error bodies, per-host
   context where known, timestamps, and collapsed ×N repeats (newest first,
-  capped at 100). Severity is color-coded — green for success, yellow for a
-  warning, red for an error, neutral for plain information — with the severity
-  also named for screen readers and carried by a per-severity glyph, and the
-  unread badge takes the worst unread entry's color. Each row has a **Copy**
+  capped at 100). Severity is color-coded — green for an ordinary notice or a
+  success, yellow for a warning, red for an error — with the severity also named
+  for screen readers and carried by its own glyph, and the unread badge takes
+  the worst unread entry's color, so a bell holding only notices reads green. Each row has a **Copy**
   button that puts the message, its full body, and the machine/time line on the
   clipboard — the app chrome is not selectable, so that button is how a long
   server error leaves the app. Opening the panel marks everything read; Clear

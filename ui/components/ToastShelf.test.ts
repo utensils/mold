@@ -25,12 +25,19 @@ describe("ToastShelf", () => {
     expect(wrapper.findAll(".ms-toast")).toHaveLength(0);
   });
 
-  it("uses role=status for success and info, role=alert for error", () => {
+  it("uses role=status for success and info, role=alert for error and warning", () => {
     const wrapper = make();
     expect(wrapper.findAll("[role=status]")).toHaveLength(2);
     const alerts = wrapper.findAll("[role=alert]");
     expect(alerts).toHaveLength(1);
     expect(alerts[0]!.text()).toContain("Host unreachable");
+
+    // A warning here is the sticky "your machine is gone" — as time-sensitive
+    // as an error, so it must not wait for a polite region to be read.
+    const warned = make([
+      { id: "w", kind: "warning", text: "Can't reach plato" },
+    ]);
+    expect(warned.findAll("[role=alert]")).toHaveLength(1);
   });
 
   it("renders the newest toast first", () => {
@@ -112,6 +119,8 @@ describe("ToastShelf", () => {
     expect(byKind.success).toContain("var(--success)");
     expect(byKind.warning).toContain("var(--warning)");
     expect(byKind.error).toContain("var(--stop)");
+    // An ordinary notice is green as well; its glyph is what sets it apart.
+    expect(byKind.info).toContain("var(--success)");
   });
 
   it("labels every dismiss button for screen readers", () => {

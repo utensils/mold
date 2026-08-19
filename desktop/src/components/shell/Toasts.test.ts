@@ -112,13 +112,13 @@ describe("Toasts severity tones", () => {
     expect(byKind.success).toContain("text-success");
     expect(byKind.warning).toContain("text-warning");
     expect(byKind.error).toContain("bg-stop");
-    // Info stays deliberately neutral so the three severities keep meaning.
+    // An ordinary notice is green too — only warnings and errors stand out.
     toasts.push("Queued", "info");
     await wrapper.vm.$nextTick();
     const info = wrapper
       .findAll("[data-test='toast-status-icon']")
       .find((chip) => chip.attributes("data-kind") === "info");
-    expect(info?.classes().join(" ")).toContain("text-halide");
+    expect(info?.classes().join(" ")).toContain("text-success");
   });
 
   it("names the severity for screen readers, never color alone", async () => {

@@ -24,7 +24,10 @@ export interface SeverityMark {
 }
 
 export const SEVERITY_MARKS: Record<NotificationSeverity, SeverityMark> = {
-  info: { glyph: "•", label: "Info", color: "var(--ink-3)" },
+  // Green covers everything that is not a warning or an error: an ordinary
+  // notice and a success both mean "nothing is wrong". The glyph, not the hue,
+  // separates them.
+  info: { glyph: "•", label: "Info", color: "var(--success)" },
   success: { glyph: "✓", label: "Success", color: "var(--success)" },
   warning: { glyph: "!", label: "Warning", color: "var(--warning)" },
   error: { glyph: "✕", label: "Error", color: "var(--stop)" },

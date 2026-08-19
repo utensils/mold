@@ -1,9 +1,10 @@
 - **Notification severity is color-coded green / yellow / red.** The
-  notifications bell and the toast shelf on desktop and web now tint success
-  green, warnings yellow, and errors red (plain information stays neutral), with
-  the severity also named for screen readers and the unread badge taking the
-  worst unread entry's color. `--warning` gained proper light-mode and Mold-family
-  values so the yellow stays readable in every theme.
+  notifications bell and the toast shelf on desktop and web now tint ordinary
+  notices and successes green, warnings yellow, and errors red, with the
+  severity also named for screen readers and the unread bell badge taking the
+  worst unread entry's color — so a bell holding only notices reads green rather
+  than alarming red. `--warning` gained proper light-mode and Mold-family values
+  so the yellow stays readable in every theme.
 - **Unreachable machines say they are reconnecting.** Desktop and web already
   keep polling a machine that drops, so it comes back on its own; that is now
   visible. Losing a machine raises a yellow "Can't reach `<machine>` — retrying

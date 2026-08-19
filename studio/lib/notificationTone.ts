@@ -15,16 +15,17 @@ import type { NotificationKind } from "../stores/notifications";
 /** A severity mark (glyph, label, color) plus the badge fill the bell needs. */
 export interface NotificationTone extends SeverityMark {
   /**
-   * Solid fill for a counted badge. Never `--ink-3`: that is a translucent ink
-   * meant for hint text, and printing a count on it has no predictable
-   * contrast. Text on any of these reads with `--on-status`.
+   * Solid fill for a counted badge. Never a translucent hint ink such as
+   * `--ink-3`: printing a count on one has no predictable contrast. Text on
+   * any of these reads with `--on-status`.
    */
   badge: string;
 }
 
-/** Badge fills, keyed to the shared marks — info borrows the cool accent. */
+/** Badge fills, keyed to the shared marks. Green for anything that is not a
+ *  warning or an error, so a bell carrying only notices reads as "all fine". */
 const BADGE_FILLS: Record<NotificationKind, string> = {
-  info: "var(--halide)",
+  info: "var(--success)",
   success: "var(--success)",
   warning: "var(--warning)",
   error: "var(--stop)",

@@ -8,11 +8,11 @@ const toasts = useToastStore();
 /*
  * Glyphs and severity names come from the one shared table
  * (@ui/lib/notificationSeverity); only the Tailwind chip classes are local.
- * Severity reads as green (success) / yellow (warning) / red (error), with
- * plain info left cool and neutral — and never by color alone.
+ * Severity reads as green (an ordinary notice or a success) / yellow (warning)
+ * / red (error) — and never by color alone.
  */
 const CHIPS: Record<Toast["kind"], string> = {
-  info: "bg-[color-mix(in_srgb,var(--halide)_18%,transparent)] text-halide",
+  info: "bg-[color-mix(in_srgb,var(--success)_20%,transparent)] text-success",
   success: "bg-[color-mix(in_srgb,var(--success)_20%,transparent)] text-success",
   warning: "bg-[color-mix(in_srgb,var(--warning)_22%,transparent)] text-warning",
   error: "bg-stop text-[var(--on-status)]",

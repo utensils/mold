@@ -168,7 +168,7 @@ const urgent = severityIsUrgent;
 }
 
 .ms-toast--info .ms-toast__glyph {
-  color: var(--halide);
+  color: var(--success);
 }
 
 .ms-toast--warning .ms-toast__glyph {

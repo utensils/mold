@@ -13,8 +13,13 @@ describe("notificationTone", () => {
     expect(notificationTone("error").color).toBe("var(--stop)");
   });
 
-  it("keeps plain info neutral so severity colors stay meaningful", () => {
-    expect(notificationTone("info").color).toBe("var(--ink-3)");
+  it("reads an ordinary notice as green — only warnings and errors stand out", () => {
+    expect(notificationTone("info").color).toBe("var(--success)");
+    expect(notificationTone("info").badge).toBe("var(--success)");
+    // The glyph, not the hue, separates a notice from a success.
+    expect(notificationTone("info").glyph).not.toBe(
+      notificationTone("success").glyph,
+    );
   });
 
   it("carries a text label so severity is never color alone", () => {
@@ -41,10 +46,8 @@ describe("notificationTone", () => {
   });
 
   it("fills a counted badge with an opaque token, never translucent hint ink", () => {
-    // --ink-3 is a color-mix with transparency: a count printed on it has no
-    // predictable contrast, so info borrows the informational accent instead.
-    expect(notificationTone("info").badge).toBe("var(--halide)");
-    expect(notificationTone("info").color).toBe("var(--ink-3)");
+    // A translucent ink such as --ink-3 is a color-mix: a count printed on it
+    // has no predictable contrast against whatever sits behind the badge.
     for (const tone of Object.values(NOTIFICATION_TONES)) {
       expect(tone.badge).not.toContain("ink-3");
     }
