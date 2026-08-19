@@ -595,6 +595,12 @@ fn zimage_offload_decision(
 }
 
 impl ZImageEngine {
+    /// The Z-Image VAE (FLUX autoencoder) encodes RGB in [-1, 1]; its decode
+    /// side returns [-1, 1] and `postprocess_image` maps that to pixels.
+    fn img2img_source_normalize_range() -> img_utils::NormalizeRange {
+        img_utils::NormalizeRange::MinusOneToOne
+    }
+
     pub fn new(
         model_name: String,
         paths: ModelPaths,
@@ -1336,7 +1342,7 @@ impl ZImageEngine {
                 source_bytes,
                 req.width,
                 req.height,
-                img_utils::NormalizeRange::ZeroToOne,
+                Self::img2img_source_normalize_range(),
                 &encode_vae_device,
                 encode_vae_dtype,
             )?;
@@ -1804,7 +1810,7 @@ impl ZImageEngine {
                 source_bytes,
                 req.width,
                 req.height,
-                img_utils::NormalizeRange::ZeroToOne,
+                Self::img2img_source_normalize_range(),
                 vae_encode_device,
                 vae_encode_dtype,
             )?;
@@ -2684,6 +2690,19 @@ mod tests {
         assert!(threshold < 15_000_000_000);
     }
 
+    // The Z-Image VAE is FLUX's autoencoder: encode expects RGB in [-1, 1]
+    // (candle z_image::vae.rs encode contract; diffusers ZImageImg2ImgPipeline
+    // preprocesses with VaeImageProcessor do_normalize=True). Feeding [0, 1]
+    // anchors the denoise on a half-contrast, brightness-shifted latent and
+    // renders washed-out img2img output.
+    #[test]
+    fn zimage_img2img_uses_minus_one_to_one_source_normalization() {
+        assert_eq!(
+            ZImageEngine::img2img_source_normalize_range(),
+            img_utils::NormalizeRange::MinusOneToOne
+        );
+    }
+
     #[test]
     fn zimage_scheduler_uses_shifted_reference_sigmas() {
         let image_seq_len = 1024;
@@ -2713,7 +2732,7 @@ mod tests {
     }
 
     #[test]
-    fn zimage_img2img_source_decode_uses_vae_native_zero_to_one_range() {
+    fn zimage_img2img_source_decode_routes_through_normalize_contract() {
         let source = include_str!("pipeline.rs")
             .split("#[cfg(test)]\nmod tests")
             .next()
@@ -2730,12 +2749,12 @@ mod tests {
                 .next()
                 .expect("source decode call should terminate");
             assert!(
-                args.contains("img_utils::NormalizeRange::ZeroToOne"),
-                "Z-Image source-image encoding must use the VAE-native [0, 1] range"
+                args.contains("Self::img2img_source_normalize_range()"),
+                "Z-Image source-image encoding must use the shared normalize contract"
             );
             assert!(
-                !args.contains("img_utils::NormalizeRange::MinusOneToOne"),
-                "Z-Image source-image encoding must not use [-1, 1] normalization"
+                !args.contains("img_utils::NormalizeRange::ZeroToOne"),
+                "Z-Image source-image encoding must not hardcode [0, 1] normalization"
             );
         }
     }
