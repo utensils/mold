@@ -62,10 +62,10 @@ pub const H3_COMFY_PUBLISHED_INT8_HEADER_SHA256: &str =
 /// entry to subtract.
 pub const H3_COMFY_PUBLISHED_INT8_TENSOR_COUNT: usize = 932;
 
-const MAX_HEADER_BYTES: u64 = 8 * 1024 * 1024;
-const MAX_TENSORS: usize = 4_096;
-const MAX_TENSOR_KEY_BYTES: usize = 4_096;
-const MAX_TENSOR_RANK: usize = 8;
+pub(super) const MAX_HEADER_BYTES: u64 = 8 * 1024 * 1024;
+pub(super) const MAX_TENSORS: usize = 4_096;
+pub(super) const MAX_TENSOR_KEY_BYTES: usize = 4_096;
+pub(super) const MAX_TENSOR_RANK: usize = 8;
 const CONVROT_GROUP_SIZE: usize = 256;
 const PUBLISHED_INT8_CURVE_GRID: usize = 1_025;
 const PUBLISHED_INT8_CURVE_BASIS: usize = 8;
@@ -73,7 +73,7 @@ const PUBLISHED_INT8_COMFY_QUANT_BYTES: usize = 72;
 const PUBLISHED_INT8_COMFY_QUANT_COUNT: usize = 200;
 const PUBLISHED_INT8_COMFY_QUANT_PAYLOAD: &[u8; PUBLISHED_INT8_COMFY_QUANT_BYTES] =
     br#"{"format": "int8_tensorwise", "convrot": true, "convrot_groupsize": 256}"#;
-const FILE_READ_CHUNK_BYTES: usize = 8 * 1024 * 1024;
+pub(super) const FILE_READ_CHUNK_BYTES: usize = 8 * 1024 * 1024;
 const QUANTIZED_BLOCK_WEIGHT_SUFFIXES: &[&str] = &[
     "attn.qkv_proj.weight",
     "attn.out_proj.weight",
@@ -2633,6 +2633,21 @@ impl<'de> Visitor<'de> for StrictJsonVisitor {
         }
         Ok(StrictJsonValue(Value::Object(values)))
     }
+}
+
+/// Strict JSON value parsing shared with the sibling H3 artifact contracts.
+/// Duplicate object keys and trailing data are rejected.
+pub(super) fn strict_json_value(bytes: &[u8], context: &str) -> Result<Value, String> {
+    parse_strict_json(bytes, context).map_err(|error| error.message)
+}
+
+/// Safetensors dtype width shared with the sibling H3 artifact contracts.
+pub(super) fn safetensors_dtype_size(dtype: &str) -> Option<u64> {
+    dtype_size(dtype).ok()
+}
+
+pub(super) fn sha256_hex(bytes: impl AsRef<[u8]>) -> String {
+    hex_digest(bytes)
 }
 
 fn hex_digest(bytes: impl AsRef<[u8]>) -> String {
