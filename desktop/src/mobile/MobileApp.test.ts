@@ -7033,7 +7033,11 @@ describe("MobileApp host and catalog coordination", () => {
       "value",
       "render-id",
     );
-    expect(wrapper.get(".mobile-header .host-chip").text()).toBe("Studio");
+    // Browsing another machine's catalog leaves the generation target alone;
+    // with two machines reachable that target is the Auto policy, which is
+    // what the header chip names.
+    expect(wrapper.get(".mobile-header .host-chip").text()).toBe("Auto");
+    expect(localStorage.getItem("mold.mobile.generate-target.v1")).toBeNull();
     expect(wrapper.get("[data-test='mobile-tab-catalog']").attributes("aria-current")).toBe("page");
   });
 

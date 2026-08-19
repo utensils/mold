@@ -90,6 +90,7 @@ import {
   MOBILE_AUTO_ROUTING_HINT,
   MOBILE_CAPABLE_ROUTING_HINT,
   loadMobileGenerateTarget,
+  mobileGenerateTargetLabel,
   mobileAutoRoutingAvailable,
   mobileModelAvailabilityTag,
   mobileRoutingHosts,
@@ -762,6 +763,12 @@ const routingHint = computed(() =>
   generateTarget.value === CAPABLE_TARGET_ID
     ? MOBILE_CAPABLE_ROUTING_HINT
     : MOBILE_AUTO_ROUTING_HINT,
+);
+/** The header chip names where work lands: a machine, or the active policy. */
+const headerTargetLabel = computed(() =>
+  automaticRouting.value
+    ? mobileGenerateTargetLabel(generateTarget.value, connectedHosts.value)
+    : (selectedHost.value?.name ?? "Remote only"),
 );
 const developOnNote = computed(() => {
   if (!automaticRouting.value) return `Develop on ${selectedHost.value?.name ?? "this machine"}`;
@@ -5956,7 +5963,7 @@ onBeforeUnmount(() => {
     <header v-else class="mobile-header">
       <div class="mobile-wordmark">Mold</div>
       <div class="mobile-header-actions">
-        <div class="host-chip">{{ selectedHost?.name ?? "Remote only" }}</div>
+        <div class="host-chip">{{ headerTargetLabel }}</div>
         <button
           ref="settingsButton"
           class="mobile-settings-button"
