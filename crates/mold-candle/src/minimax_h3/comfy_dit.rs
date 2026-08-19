@@ -778,7 +778,7 @@ struct ParsedHeader {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct H3OpenedFileIdentity {
+pub(super) struct H3OpenedFileIdentity {
     len: u64,
     #[cfg(unix)]
     device: u64,
@@ -797,7 +797,7 @@ struct H3OpenedFileIdentity {
 }
 
 impl H3OpenedFileIdentity {
-    fn from_metadata(metadata: &Metadata) -> Self {
+    pub(super) fn from_metadata(metadata: &Metadata) -> Self {
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;

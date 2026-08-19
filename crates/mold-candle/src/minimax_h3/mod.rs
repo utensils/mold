@@ -159,6 +159,7 @@ pub use qwen_quant::{
     H3_QWEN_INT8_QUANTIZED_LINEAR_COUNT, H3_QWEN_INT8_WEIGHT_ONLY_STABLE_ID,
 };
 pub use turbo_lora::{
+    authenticate_h3_turbo_lora_adapter, authenticate_h3_turbo_lora_adapter_against,
     inspect_h3_turbo_lora_adapter, inspect_h3_turbo_lora_adapter_against, H3TurboLoraContract,
     H3TurboLoraError, H3TurboLoraErrorCode, H3TurboLoraExpectation, H3TurboLoraModule,
     H3TurboLoraModuleKind, H3TurboLoraModuleScope, H3TurboLoraResult, H3TurboLoraTensorRef,

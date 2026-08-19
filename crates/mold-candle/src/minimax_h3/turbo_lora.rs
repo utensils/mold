@@ -30,7 +30,8 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use super::comfy_dit::{
-    safetensors_dtype_size, sha256_hex, strict_json_value, MAX_HEADER_BYTES, MAX_TENSORS,
+    safetensors_dtype_size, sha256_hex, strict_json_value, H3ComfyInt8Cancellation,
+    H3OpenedFileIdentity, FILE_READ_CHUNK_BYTES, MAX_HEADER_BYTES, MAX_TENSORS,
     MAX_TENSOR_KEY_BYTES, MAX_TENSOR_RANK,
 };
 use super::dit::{
@@ -538,6 +539,160 @@ pub fn inspect_h3_turbo_lora_adapter_against(
     })?;
     let parsed = read_turbo_header(&mut file)?;
     build_contract(&mut file, parsed, expectation, tier, None)
+}
+
+/// Open and fully authenticate one published Turbo adapter.
+///
+/// Unlike [`inspect_h3_turbo_lora_adapter`], this refuses anything but a
+/// regular non-symlink file, fences the retained descriptor's identity before
+/// and after the read, and verifies the complete source-pinned content digest.
+/// It still grants no execution authority: nothing here reaches a runtime
+/// factory, capability, catalog entry, or download.
+pub fn authenticate_h3_turbo_lora_adapter(
+    path: &Path,
+    tier: H3TurboLoraTier,
+    cancellation: &dyn H3ComfyInt8Cancellation,
+) -> H3TurboLoraResult<H3TurboLoraContract> {
+    authenticate_h3_turbo_lora_adapter_against(path, &tier.expectation(), Some(tier), cancellation)
+}
+
+/// Open and fully authenticate one adapter against an explicit expectation.
+pub fn authenticate_h3_turbo_lora_adapter_against(
+    path: &Path,
+    expectation: &H3TurboLoraExpectation,
+    tier: Option<H3TurboLoraTier>,
+    cancellation: &dyn H3ComfyInt8Cancellation,
+) -> H3TurboLoraResult<H3TurboLoraContract> {
+    if let Some(tier) = tier {
+        if tier.task() != expectation.task {
+            return Err(failure(
+                H3TurboLoraErrorCode::TaskAuthorityMismatch,
+                format!(
+                    "H3 Turbo tier {:?} expects task {:?}, not {:?}",
+                    tier,
+                    tier.task(),
+                    expectation.task
+                ),
+            ));
+        }
+    }
+    cancellation_boundary(cancellation)?;
+    let symlink_metadata = std::fs::symlink_metadata(path).map_err(|error| {
+        failure(
+            H3TurboLoraErrorCode::Io,
+            format!("failed to inspect H3 Turbo adapter: {error}"),
+        )
+    })?;
+    if symlink_metadata.file_type().is_symlink() || !symlink_metadata.is_file() {
+        return Err(failure(
+            H3TurboLoraErrorCode::FileIdentityChanged,
+            "H3 Turbo adapter authority must be opened from a regular non-symlink file",
+        ));
+    }
+    let canonical_path = std::fs::canonicalize(path).map_err(|error| {
+        failure(
+            H3TurboLoraErrorCode::Io,
+            format!("failed to canonicalize H3 Turbo adapter: {error}"),
+        )
+    })?;
+    let mut file = File::open(&canonical_path).map_err(|error| {
+        failure(
+            H3TurboLoraErrorCode::Io,
+            format!("failed to open H3 Turbo adapter: {error}"),
+        )
+    })?;
+    let requested_identity = H3OpenedFileIdentity::from_metadata(&symlink_metadata);
+    let opened_metadata = file
+        .metadata()
+        .map_err(|error| failure(H3TurboLoraErrorCode::Io, error.to_string()))?;
+    let identity = H3OpenedFileIdentity::from_metadata(&opened_metadata);
+    if identity != requested_identity {
+        return Err(failure(
+            H3TurboLoraErrorCode::FileIdentityChanged,
+            "H3 Turbo adapter changed while its descriptor was opened",
+        ));
+    }
+    let parsed = read_turbo_header(&mut file)?;
+    // Refuse a wrongly sized file before paying to hash it.
+    if let Some(expected) = expectation.file_bytes {
+        if parsed.file_len != expected {
+            return Err(failure(
+                H3TurboLoraErrorCode::SourceSizeMismatch,
+                format!(
+                    "H3 Turbo adapter size {} does not match source-pinned {expected}",
+                    parsed.file_len
+                ),
+            ));
+        }
+    }
+    let content_sha256 = hash_open_adapter(&mut file, cancellation)?;
+    if let Some(expected) = expectation.content_sha256.as_deref() {
+        if content_sha256 != expected {
+            return Err(failure(
+                H3TurboLoraErrorCode::ContentDigestMismatch,
+                format!(
+                    "H3 Turbo adapter content digest {content_sha256} does not match source-pinned {expected}"
+                ),
+            ));
+        }
+    }
+    let contract = build_contract(
+        &mut file,
+        parsed,
+        expectation,
+        tier,
+        Some(content_sha256.clone()),
+    )?;
+    let final_identity = H3OpenedFileIdentity::from_metadata(
+        &file
+            .metadata()
+            .map_err(|error| failure(H3TurboLoraErrorCode::Io, error.to_string()))?,
+    );
+    if final_identity != identity {
+        return Err(failure(
+            H3TurboLoraErrorCode::FileIdentityChanged,
+            "H3 Turbo adapter changed during content verification",
+        ));
+    }
+    Ok(contract)
+}
+
+fn cancellation_boundary(cancellation: &dyn H3ComfyInt8Cancellation) -> H3TurboLoraResult<()> {
+    if cancellation.is_cancelled() {
+        return Err(failure(
+            H3TurboLoraErrorCode::Cancelled,
+            "MiniMax H3 Turbo adapter read was cancelled",
+        ));
+    }
+    Ok(())
+}
+
+fn hash_open_adapter(
+    file: &mut File,
+    cancellation: &dyn H3ComfyInt8Cancellation,
+) -> H3TurboLoraResult<String> {
+    file.seek(SeekFrom::Start(0)).map_err(|error| {
+        failure(
+            H3TurboLoraErrorCode::Io,
+            format!("failed to seek H3 Turbo adapter for hashing: {error}"),
+        )
+    })?;
+    let mut digest = Sha256::new();
+    let mut buffer = vec![0u8; FILE_READ_CHUNK_BYTES];
+    loop {
+        cancellation_boundary(cancellation)?;
+        let read = file.read(&mut buffer).map_err(|error| {
+            failure(
+                H3TurboLoraErrorCode::Io,
+                format!("failed to read H3 Turbo adapter for hashing: {error}"),
+            )
+        })?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok(sha256_hex(digest.finalize()))
 }
 
 fn build_contract(
@@ -1204,6 +1359,7 @@ mod tests {
 
     use serde_json::{Map, Value};
 
+    use super::super::comfy_dit::H3ComfyNeverCancel;
     use super::*;
 
     /// A valid but tiny transformer geometry, mirroring `comfy_dit`'s runtime
@@ -1680,6 +1836,105 @@ mod tests {
         }
         let error = assemble_turbo_modules(&expected, seen, &alphas, &expectation).unwrap_err();
         assert_eq!(error.code, H3TurboLoraErrorCode::MissingModule);
+    }
+
+    #[derive(Default)]
+    struct CancelAfter {
+        remaining: std::sync::atomic::AtomicUsize,
+    }
+
+    impl H3ComfyInt8Cancellation for CancelAfter {
+        fn is_cancelled(&self) -> bool {
+            self.remaining
+                .fetch_update(
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                    |value| Some(value.saturating_sub(1)),
+                )
+                .is_ok_and(|value| value == 0)
+        }
+    }
+
+    #[test]
+    fn authentication_verifies_the_content_digest_and_reports_it() {
+        let expectation = fixture_expectation();
+        let (header, data) = fixture_adapter(&expectation);
+        let (_directory, path) = write_adapter(&header, &data);
+        let bytes = std::fs::read(&path).unwrap();
+        let digest = sha256_hex(Sha256::digest(&bytes));
+
+        let mut pinned = expectation.clone();
+        pinned.content_sha256 = Some(digest.clone());
+        let contract =
+            authenticate_h3_turbo_lora_adapter_against(&path, &pinned, None, &H3ComfyNeverCancel)
+                .unwrap();
+        assert_eq!(contract.content_sha256.as_deref(), Some(digest.as_str()));
+        // Authentication must agree with inspection on everything else.
+        let inspected = inspect_h3_turbo_lora_adapter_against(&path, &pinned, None).unwrap();
+        assert_eq!(
+            contract.adapter_identity_sha256,
+            inspected.adapter_identity_sha256
+        );
+        assert_eq!(contract.modules, inspected.modules);
+
+        let mut wrong = expectation.clone();
+        wrong.content_sha256 = Some("0".repeat(64));
+        let error =
+            authenticate_h3_turbo_lora_adapter_against(&path, &wrong, None, &H3ComfyNeverCancel)
+                .unwrap_err();
+        assert_eq!(error.code, H3TurboLoraErrorCode::ContentDigestMismatch);
+    }
+
+    #[test]
+    fn authentication_refuses_a_symlinked_adapter() {
+        let expectation = fixture_expectation();
+        let (header, data) = fixture_adapter(&expectation);
+        let (directory, path) = write_adapter(&header, &data);
+        let link = directory.path().join("linked.safetensors");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&path, &link).unwrap();
+        #[cfg(not(unix))]
+        std::fs::copy(&path, &link).unwrap();
+        let result = authenticate_h3_turbo_lora_adapter_against(
+            &link,
+            &expectation,
+            None,
+            &H3ComfyNeverCancel,
+        );
+        #[cfg(unix)]
+        assert_eq!(
+            result.unwrap_err().code,
+            H3TurboLoraErrorCode::FileIdentityChanged
+        );
+        #[cfg(not(unix))]
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn authentication_stops_at_a_cancellation_boundary() {
+        let expectation = fixture_expectation();
+        let (header, data) = fixture_adapter(&expectation);
+        let (_directory, path) = write_adapter(&header, &data);
+        let cancellation = CancelAfter::default();
+        let error =
+            authenticate_h3_turbo_lora_adapter_against(&path, &expectation, None, &cancellation)
+                .unwrap_err();
+        assert_eq!(error.code, H3TurboLoraErrorCode::Cancelled);
+    }
+
+    #[test]
+    fn authentication_rejects_a_file_that_is_not_the_pinned_tier() {
+        let (header, data) = fixture_adapter(&fixture_expectation());
+        let (_directory, path) = write_adapter(&header, &data);
+        let error = authenticate_h3_turbo_lora_adapter(
+            &path,
+            H3TurboLoraTier::Fl2v768p4StepV10,
+            &H3ComfyNeverCancel,
+        )
+        .unwrap_err();
+        // A wrongly sized file is refused before it is hashed, so a stand-in
+        // never reaches module validation under a published pin.
+        assert_eq!(error.code, H3TurboLoraErrorCode::SourceSizeMismatch);
     }
 
     #[test]
