@@ -74,9 +74,7 @@ pub fn build_saved_output_record(
         mold_core::time::now_epoch_ms(),
     );
     rec.stat_from_disk(on_disk);
-    // TODO(phase1-merge): seed title from metadata.title once
-    // `OutputMetadata.title` lands (`rec.title = params.metadata.title.clone()`).
-    rec.title = None;
+    rec.title = params.metadata.title.clone();
     rec.favorite = false;
     rec.trashed_at_ms = None;
     rec.generation_time_ms = params.generation_time_ms;

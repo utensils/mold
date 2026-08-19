@@ -101,15 +101,18 @@ impl GenerationRecord {
             file_mtime_ms: None,
             file_size_bytes: None,
             format,
-            metadata,
             generation_time_ms: None,
             backend: None,
             hostname: None,
             source,
             metadata_synthetic: false,
-            title: None,
+            // The user-editable title starts as the creation-time title the
+            // request carried (embedded in `mold:parameters`), so mirrors and
+            // reconcile-from-disk recover it; later edits live on the row only.
+            title: metadata.title.clone(),
             favorite: false,
             trashed_at_ms: None,
+            metadata,
         }
     }
 
@@ -148,11 +151,14 @@ impl GenerationRecord {
             format: Some(self.format),
             size_bytes: self.file_size_bytes.map(|n| n as u64),
             metadata_synthetic: self.metadata_synthetic,
-            title: self.metadata.title.clone(),
+            // Row title (user-editable) wins over the creation-time metadata
+            // title; tags/collections/purge_at are applied by the server's
+            // post-overlay enrichment, never here.
+            title: self.title.clone().or_else(|| self.metadata.title.clone()),
             tags: Vec::new(),
-            favorite: false,
+            favorite: self.favorite,
             collections: Vec::new(),
-            trashed_at: None,
+            trashed_at: self.trashed_at_ms.map(|ms| (ms / 1000) as u64),
             purge_at: None,
         }
     }
