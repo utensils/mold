@@ -6085,6 +6085,55 @@ async fn import_gallery_file(
     let gallery_writer = state.gallery_publication_gate.write().await;
     let db = state.metadata_db.clone();
     let events = state.events.clone();
+    // An import of a name that is currently in the trash republishes it
+    // live. Purge the trashed copy first (bytes, tombstone, row, retirement
+    // projection) so the fresh publication never coexists with a row that
+    // says "trashed" or with stale `.trash/` bytes; the reconcile and the
+    // sweeper both key on the row, so the old copy would otherwise linger.
+    {
+        let db_for_trash = db.clone();
+        let gate_for_trash = state.gallery_publication_gate.clone();
+        let dir_for_trash = output_dir.clone();
+        let name_for_trash = filename.clone();
+        let purged = tokio::task::spawn_blocking(move || -> Result<bool, ApiError> {
+            let Some(db) = db_for_trash.as_ref().as_ref() else {
+                return Ok(false);
+            };
+            let trashed = db
+                .get(&dir_for_trash, &name_for_trash)
+                .map_err(|error| {
+                    ApiError::internal(format!(
+                        "failed to inspect trashed gallery metadata before import: {error:#}"
+                    ))
+                })?
+                .is_some_and(|row| row.trashed_at_ms.is_some());
+            if !trashed {
+                return Ok(false);
+            }
+            crate::gallery_trash::purge_trashed_print_blocking(
+                &dir_for_trash,
+                &name_for_trash,
+                db,
+                &gate_for_trash,
+            )?;
+            Ok(true)
+        })
+        .await
+        .map_err(|error| {
+            ApiError::internal(format!("gallery import trash purge task failed: {error}"))
+        })?;
+        match purged {
+            Ok(true) => {
+                tracing::info!(file = %filename, "gallery import replaced a trashed print");
+            }
+            Ok(false) => {}
+            Err(error) => {
+                let _ =
+                    tokio::task::spawn_blocking(move || transaction.rollback_unpublished()).await;
+                return Err(error);
+            }
+        }
+    }
     let db_for_existing = db.clone();
     let archive_for_existing = state.gallery_publication_gate.clone();
     let filename_for_task = filename.clone();

@@ -13340,4 +13340,60 @@ mod tests {
         assert_eq!(rows[0]["title"], "Smurf village");
         assert_eq!(rows[0]["metadata"]["title"], "Smurf village");
     }
+
+    /// Importing a filename that is currently in the trash republishes it
+    /// live: the trashed copy is purged first so the row, the `.trash/` bytes,
+    /// and the tombstone never disagree with the freshly published file.
+    #[tokio::test]
+    async fn gallery_import_over_trashed_name_republishes_live() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, db) = organized_state(dir.path());
+        seed_print(&db, dir.path(), "again.png", Some("First"));
+        let app = app_with_state(state);
+        let resp = app
+            .clone()
+            .oneshot(empty_request("DELETE", "/api/gallery/image/again.png"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let trash = mold_db::trash_dir(dir.path());
+        assert!(trash.join("again.png").is_file());
+
+        let mut metadata = output_metadata("again");
+        metadata.title = Some("Second".into());
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::put("/api/gallery/import/again.png")
+                    .header("content-type", "application/vnd.mold.gallery-import")
+                    .body(Body::from(gallery_import_body(
+                        Some(&metadata),
+                        &minimal_png(),
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        assert!(dir.path().join("again.png").is_file(), "published live");
+        assert!(!trash.join("again.png").exists(), "trashed copy purged");
+        assert!(
+            !mold_db::tombstone_path(&trash, "again.png").exists(),
+            "tombstone removed"
+        );
+        let row = db
+            .as_ref()
+            .as_ref()
+            .unwrap()
+            .get(dir.path(), "again.png")
+            .unwrap()
+            .unwrap();
+        assert!(row.trashed_at_ms.is_none(), "row is live again");
+        assert_eq!(row.title.as_deref(), Some("Second"));
+        assert_eq!(gallery_rows(&app, "/api/gallery").await.len(), 1);
+        assert!(gallery_rows(&app, "/api/gallery?view=trash")
+            .await
+            .is_empty());
+    }
 }
