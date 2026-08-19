@@ -85,7 +85,6 @@ import {
   resolveExpansionRoute,
   type ExpansionCandidate,
 } from "@studio/lib/expansionRouting";
-import { planModelInstall } from "@studio/lib/modelInstallTargets";
 import { useAppPrefsStore } from "../stores/appPrefs";
 import { useHostModelsStore } from "../stores/hostModels";
 import { strongestRoutableGpu, useHostsStore, type FeasibleRouteResult } from "../stores/hosts";

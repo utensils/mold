@@ -195,7 +195,6 @@ import {
   type FeasibilityResult,
   type InfeasibleHost,
 } from "../composables/useHostRouting";
-import { useModelInstallTargets } from "../composables/useModelInstallTargets";
 import { usePullResume } from "../composables/usePullResume";
 import ModelInstallTargetDialog from "../components/models/ModelInstallTargetDialog.vue";
 import { profileConflictMessage } from "@studio/lib/profileFleet";
@@ -313,7 +312,6 @@ const composerError = ref<string | null>(null);
 // which case it re-ranks the eligible machines that positively have it — the
 // shared policy in `@studio/lib/expansionRouting`, ranked by this surface's
 // own routers. The print itself never follows.
-const installTargets = useModelInstallTargets();
 const expansionPull = ref<{
   model: string;
   target: InstallTarget | null;
