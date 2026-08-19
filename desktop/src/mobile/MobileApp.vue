@@ -181,6 +181,7 @@ import {
 } from "../lib/generateValidation";
 import { blobToBase64, isStillImageFile } from "../lib/image";
 import { parseMissingExpandModel } from "../lib/expandErrors";
+import { resolveExpansionRoute } from "@studio/lib/expansionRouting";
 import {
   expansionPullJobMatchesModel,
   resolveExpansionPullStatus,
@@ -2673,6 +2674,36 @@ function sameFrozenHost(route: HostRoute, host: MobileHost | undefined): boolean
   return mobileHostMatchesRoute(route, host);
 }
 
+/**
+ * The host prompt expansion runs on (shared policy, issue #1162 §5).
+ *
+ * iPhone pins exactly ONE machine, so the candidate list is that machine and
+ * the answer is always the generation route — including when it lacks the
+ * expander, where the existing 422 → pull recovery still owns the outcome.
+ * The call is shaped so mobile Auto / Most capable (#1163) can hand a real
+ * candidate list and ranker here without moving the policy.
+ */
+function expansionRouteFor(route: HostRoute): HostRoute {
+  const capability = expandCapabilities[route.hostId];
+  const decision = resolveExpansionRoute(
+    { kind: "pinned", hostId: route.hostId },
+    { hostId: route.hostId },
+    [
+      {
+        hostId: route.hostId,
+        ready: true,
+        ...(capability
+          ? { modelPresent: capability.model_present, configured: capability.configured }
+          : {}),
+      },
+    ],
+    () => null,
+  );
+  if (decision.kind !== "reroute") return route;
+  const host = hosts.value.find((candidate) => candidate.id === decision.hostId);
+  return host ? routeForMobileHost(host) : route;
+}
+
 interface ReplacementFocusOwnership {
   preparedRoot: HTMLElement | null;
   pullRoot: HTMLElement | null;
@@ -2894,6 +2925,7 @@ async function expandForCurrentBatch(
     clearExpansionRecovery();
     return;
   }
+  const expandOn = expansionRouteFor(route);
 
   clearExpansionRecovery();
   submissionGuard.invalidate();
@@ -2912,7 +2944,7 @@ async function expandForCurrentBatch(
         task: inputs.task,
         ...(styleDirective ? { style: styleDirective } : {}),
       },
-      route.target,
+      expandOn.target,
     );
     if (!preparationGuard.isCurrent(token)) return;
     const prompts = validateExpandedPrompts(response.expanded, count);

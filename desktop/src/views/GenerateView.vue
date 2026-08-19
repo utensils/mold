@@ -72,10 +72,22 @@ import {
 import { routeForModel } from "../lib/sequenceRoute";
 import { sequenceParams } from "../lib/sequenceParams";
 import { fetchChainLimits } from "../lib/api/chains";
-import { normalizeTargetHost, readyHostSignature } from "../lib/hosts";
+import {
+  normalizeTargetHost,
+  pickAutoHost,
+  pickMostCapableHost,
+  readyHostSignature,
+} from "../lib/hosts";
+import {
+  expandModelId,
+  expansionPolicyForSelection,
+  resolveExpansionRoute,
+  type ExpansionCandidate,
+} from "@studio/lib/expansionRouting";
+import { planModelInstall } from "@studio/lib/modelInstallTargets";
 import { useAppPrefsStore } from "../stores/appPrefs";
 import { useHostModelsStore } from "../stores/hostModels";
-import { useHostsStore, type FeasibleRouteResult } from "../stores/hosts";
+import { strongestRoutableGpu, useHostsStore, type FeasibleRouteResult } from "../stores/hosts";
 import { useConnectionStore } from "../stores/connection";
 import {
   useGenerationStore,
@@ -643,10 +655,58 @@ const effectiveBatchSize = computed(() =>
     : Math.max(1, Math.floor(form.batchSize)),
 );
 
-/** Expansion always resolves a concrete host, even in the one-host case. */
-const currentExpansionRoute = computed<HostRoute | null>(() =>
+/** Where the print itself would go. Expansion starts here and only leaves it
+ *  for a machine that positively has the expand model. */
+const generationRoute = computed<HostRoute | null>(() =>
   hosts.resolveRoute(stickyTarget.value, form.model || null),
 );
+
+const expansionPolicy = computed(() => expansionPolicyForSelection(stickyTarget.value));
+
+/** One row per machine: readiness plus what its `/api/capabilities.expand`
+ *  says. An unread host contributes no `modelPresent` — unknown, not absent. */
+const expansionCandidates = computed<ExpansionCandidate[]>(() =>
+  hosts.all.map((host) => {
+    const expand = hosts.capabilities[host.id]?.expand;
+    return {
+      hostId: host.id,
+      ready: host.status === "ready",
+      ...(expand ? { modelPresent: expand.model_present, configured: expand.configured } : {}),
+    };
+  }),
+);
+
+/** Rank an eligible subset with the generation router's own ordering. */
+function rankExpansionHosts(hostIds: readonly string[]): string | null {
+  const pool = hosts.all.filter((host) => hostIds.includes(host.id));
+  if (stickyTarget.value === "capable") {
+    return (
+      pickMostCapableHost(
+        pool.map((host) => ({ ...host, gpu: strongestRoutableGpu(hosts.telemetry[host.id]) })),
+        null,
+      )?.id ?? null
+    );
+  }
+  return pickAutoHost(pool)?.id ?? null;
+}
+
+const expansionRouteDecision = computed(() =>
+  resolveExpansionRoute(
+    expansionPolicy.value,
+    generationRoute.value,
+    expansionCandidates.value,
+    rankExpansionHosts,
+  ),
+);
+
+/** Expansion always resolves a concrete host, even in the one-host case. */
+const currentExpansionRoute = computed<HostRoute | null>(() => {
+  const decision = expansionRouteDecision.value;
+  if (decision.kind === "reroute") {
+    return hosts.resolveRoute(decision.hostId) ?? generationRoute.value;
+  }
+  return generationRoute.value;
+});
 const expansionHostLabel = computed(() => currentExpansionRoute.value?.label ?? null);
 
 const preparedStaleReasons = computed(() => {
@@ -1852,6 +1912,9 @@ async function remixForCurrentPrompt(replacePrepared = false) {
   if (!form.prompt.trim() || !form.model || expansionRunning.value) return;
   submissionGuard.invalidate();
   const route = currentExpansionRoute.value;
+  // Frozen before the request: an Auto rerank mid-flight must not move the
+  // print's machine out from under the reviewed set.
+  const printRoute = generationRoute.value;
   if (!route) {
     expansionError.value = unavailableExpansionHostMessage();
     return;
@@ -1912,7 +1975,8 @@ async function remixForCurrentPrompt(replacePrepared = false) {
         task,
         stylePreset,
         selectedHostPolicy: stickyTarget.value,
-        route: { ...route, target: { ...route.target } },
+        route: frozenGenerationRoute(printRoute, route),
+        ...expansionRouteProvenance(printRoute, route),
         promptTransform: {
           operation: "remix",
           ...(response.root_prompt ? { root_prompt: response.root_prompt } : {}),
@@ -1942,10 +2006,11 @@ async function remixForCurrentPrompt(replacePrepared = false) {
         stylePreset,
         selectedHostPolicy: stickyTarget.value,
       },
-      route,
+      frozenGenerationRoute(printRoute, route),
       variants.map((variant) => variant.prompt),
       token,
     );
+    Object.assign(batch, expansionRouteProvenance(printRoute, route));
     batch.prompts.forEach((prompt, index) => {
       prompt.dimensions = variants[index]?.dimensions ?? [];
     });
@@ -1968,14 +2033,63 @@ function unavailableExpansionHostMessage(): string {
   return "No generation host is reachable. Connect the selected host before expanding.";
 }
 
+/**
+ * The route prepared/quick work freezes for the PRINT. Expansion may run on a
+ * peer that has the expander; the generation itself never follows it there.
+ *
+ * `captured` is read BEFORE the request, never after: telemetry can rerank
+ * Auto / Most capable while expansion is in flight, and freezing whatever
+ * `generationRoute` says on return would hand the reviewed set to a machine
+ * the user never resolved.
+ */
+function frozenGenerationRoute(captured: HostRoute | null, expansionRoute: HostRoute): HostRoute {
+  const frozen = captured ?? expansionRoute;
+  return { ...frozen, target: { ...frozen.target } };
+}
+
+/** Record the expansion host only when it left the captured generation route. */
+function expansionRouteProvenance(
+  captured: HostRoute | null,
+  expansionRoute: HostRoute,
+): { expansionRoute?: HostRoute } {
+  if (!captured || captured.hostId === expansionRoute.hostId) return {};
+  return { expansionRoute: { ...expansionRoute, target: { ...expansionRoute.target } } };
+}
+
+/**
+ * Where to pull a missing expander. Every reachable machine is a legitimate
+ * target (`planModelInstall` is the one policy), but a prepared batch must
+ * freeze ONE route, so the machine the expansion just tried wins whenever it
+ * is a target at all.
+ */
+function expansionPullRoute(attempted: HostRoute): HostRoute {
+  const reachable = hosts.all.filter((host) => host.status === "ready" && host.baseUrl);
+  const owners = reachable
+    .filter((host) => hosts.capabilities[host.id]?.expand?.model_present === true)
+    .map((host) => host.id);
+  const plan = planModelInstall(reachable, owners, {
+    inventoryKnown: (host) => hosts.capabilities[host.id]?.expand != null,
+  });
+  const preferred =
+    plan.targets.find((target) => target.host.id === attempted.hostId) ?? plan.targets[0];
+  if (!preferred) return attempted;
+  return hosts.resolveRoute(preferred.host.id) ?? attempted;
+}
+
+function offerExpansionPull(model: string, attempted: HostRoute): string {
+  const route = expansionPullRoute(attempted);
+  expansionMissingModel.value = { model, route };
+  expansionPullAttempt.value = null;
+  return `The expansion model ${model} isn't installed on ${route.label}.`;
+}
+
 function describeExpansionError(error: unknown, route: HostRoute): string {
   const message = error instanceof Error ? error.message : String(error);
   const missingModel = parseMissingExpandModel(message);
-  expansionMissingModel.value = missingModel ? { model: missingModel, route } : null;
+  if (missingModel) return offerExpansionPull(missingModel, route);
+  expansionMissingModel.value = null;
   expansionPullAttempt.value = null;
-  return missingModel
-    ? `The expansion model ${missingModel} isn't installed on ${route.label}.`
-    : `Expansion failed on ${route.label}: ${message}`;
+  return `Expansion failed on ${route.label}: ${message}`;
 }
 
 /**
@@ -2011,6 +2125,8 @@ async function expandForCurrentBatch(
   submissionGuard.invalidate();
 
   const route = routeOverride ?? currentExpansionRoute.value;
+  // Frozen before the request, for the same reason as remix above.
+  const printRoute = generationRoute.value;
   if (!route) {
     expansionAttemptHostLabel.value = null;
     expansionError.value = unavailableExpansionHostMessage();
@@ -2022,6 +2138,18 @@ async function expandForCurrentBatch(
   if (capability?.configured === false) {
     expansionError.value = `Prompt expansion isn't configured on ${route.label}. Configure that host before retrying.`;
     expansionMissingModel.value = null;
+    return;
+  }
+  // No eligible machine has the expander and this one is KNOWN to lack it:
+  // offer the pull instead of a request the host has already said it refuses.
+  // A retry after a pull (`routeOverride`) always goes to the wire — the
+  // capability snapshot lags the download that just completed.
+  if (
+    !routeOverride &&
+    expansionRouteDecision.value.kind === "missing" &&
+    capability?.model_present === false
+  ) {
+    expansionError.value = offerExpansionPull(expandModelId(capability), route);
     return;
   }
 
@@ -2077,7 +2205,8 @@ async function expandForCurrentBatch(
         task: inputs.task,
         stylePreset: inputs.stylePreset,
         selectedHostPolicy: inputs.selectedHostPolicy,
-        route: { ...route, target: { ...route.target } },
+        route: frozenGenerationRoute(printRoute, route),
+        ...expansionRouteProvenance(printRoute, route),
       };
       // Bake-and-clear: the rewrite absorbed the style (the server received
       // it as a directive), so the chip clears here — leaving it lit would
@@ -2097,7 +2226,15 @@ async function expandForCurrentBatch(
       }
       return;
     }
-    preparedBatch.value = createPreparedExpansionBatch(inputs, route, prompts, token);
+    preparedBatch.value = Object.assign(
+      createPreparedExpansionBatch(
+        inputs,
+        frozenGenerationRoute(printRoute, route),
+        prompts,
+        token,
+      ),
+      expansionRouteProvenance(printRoute, route),
+    );
     quickExpansionSnapshot.value = null;
   } catch (error) {
     if (!preparationGuard.isCurrent(token)) return;

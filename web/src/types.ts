@@ -231,6 +231,16 @@ export interface ServerCapabilities {
      * servers that predate the durable queue. */
     durable_queue?: boolean;
   };
+  /** Prompt expansion. `model_present` is the routing input: a host that is
+   * known to lack the expander is the one case expansion leaves the
+   * generation route. `model` names what to pull; absent on older servers. */
+  expand?: {
+    configured?: boolean;
+    model_present?: boolean | null;
+    backend?: "local" | "api";
+    remix?: boolean;
+    model?: string | null;
+  } | null;
 }
 
 export function inferFormatFromName(filename: string): OutputFormat | null {
