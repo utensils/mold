@@ -2596,6 +2596,16 @@ function automaticRoutingCandidates(
   const owners = modelHostIds(model);
   const candidates =
     owners.length > 0 ? allowed.filter((host) => owners.includes(host.id)) : allowed;
+  // Owners exist but none of them survived the access filter. Say so instead
+  // of handing the fan-out an empty candidate set.
+  if (candidates.length === 0) {
+    return {
+      hosts: [],
+      error:
+        restrictions[0] ??
+        `No connected machine can run ${model}. Choose another model or machine. Nothing was queued.`,
+    };
+  }
   const conflict = profileHashConflict(
     modelsByHost.value,
     model,
@@ -2725,6 +2735,8 @@ async function routeAutomaticGeneration(options: {
       }
     })();
   });
+  // Nothing to wait for: the settle promise is only ever resolved by a probe.
+  if (pending === 0) resolveAllSettled();
   // A phone must not sit on a stalled machine once another one can run the
   // print — but it must not manufacture a dead end either, so the settle
   // window only starts once some machine has actually answered `planned`.
