@@ -7389,4 +7389,48 @@ describe("mobile Library pinch-to-resize", () => {
 
     expect(columnsOf(app)).toBe("3");
   });
+
+  it("a pinch never opens the print WKWebView delivers a delayed click for", async () => {
+    const app = await openLibrary();
+    const tile = app.get("[data-test='gallery-item']");
+
+    // The resting finger lands on a tile; the other one does the spreading.
+    touchDown(tile.element, 71, 0);
+    touchDown(app.get("[data-test='mobile-gallery-grid']").element, 72, 200);
+    touchMove(72, 340);
+    touchUp(72);
+    touchUp(71);
+    await app.vm.$nextTick();
+    expect(columnsOf(app)).toBe("2");
+
+    // WKWebView now dispatches the compatibility click for the resting finger.
+    await tile.trigger("click", { detail: 1 });
+
+    expect(app.find("[data-test='gallery-viewer']").exists()).toBe(false);
+
+    // A later, deliberate tap still opens the print.
+    await tile.trigger("click", { detail: 1 });
+    await flushPromises();
+    expect(app.find("[data-test='gallery-viewer']").exists()).toBe(true);
+  });
+
+  it("a pinch in select mode does not toggle the tile it started on", async () => {
+    const app = await openLibrary();
+    await app.get("[data-test='mobile-gallery-select']").trigger("click");
+    const tile = app.get("[data-test='gallery-item']");
+
+    touchDown(tile.element, 71, 0);
+    await app.vm.$nextTick();
+    expect(app.get("[data-test='mobile-gallery-actions']").text()).toContain("1 selected");
+    touchDown(app.get("[data-test='mobile-gallery-grid']").element, 72, 200);
+    touchMove(72, 340);
+    touchUp(72);
+    touchUp(71);
+    await app.vm.$nextTick();
+
+    await tile.trigger("click", { detail: 1 });
+
+    expect(columnsOf(app)).toBe("2");
+    expect(app.get("[data-test='mobile-gallery-actions']").text()).toContain("1 selected");
+  });
 });

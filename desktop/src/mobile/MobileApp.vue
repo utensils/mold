@@ -633,6 +633,7 @@ let galleryDragClientX = 0;
 let galleryDragClientY = 0;
 let galleryDragFrame: number | null = null;
 let galleryDragPendingClicks = 0;
+let galleryPinchPendingClicks = 0;
 const galleryDragVisited = new Set<string>();
 const GALLERY_DRAG_SCROLL_EDGE = 72;
 const GALLERY_DRAG_SCROLL_MAX = 18;
@@ -4755,6 +4756,10 @@ function setGallerySelectMode(next: boolean): void {
     finishGallerySelectionDrag();
     galleryDragPendingClicks = 0;
   }
+  // Entering or leaving the mode is a deliberate tap boundary: a click still
+  // owed to an earlier pinch is stale and must not swallow the next real one.
+  galleryPinchPendingClicks = 0;
+  resetPinch(galleryZoom, galleryColumns.value);
   gallerySelectMode.value = next;
   galleryDeleteConfirming.value = false;
   if (!next) gallerySelection.value = new Set();
@@ -4915,6 +4920,11 @@ function moveGalleryPinch(event: PointerEvent): void {
 }
 
 function endGalleryPinch(event: PointerEvent): void {
+  // A lifted finger that was pinching can still earn a WKWebView compatibility
+  // click on whatever tile it rested on. Claim one per finger so resizing the
+  // grid never opens a print or flips a selection. `pointercancel` earns none:
+  // no click follows it.
+  if (event.type === "pointerup" && isPinching(galleryZoom)) galleryPinchPendingClicks += 1;
   pinchPointerUp(galleryZoom, event.pointerId);
 }
 
@@ -4924,6 +4934,10 @@ function selectAllGalleryPrints(): void {
 }
 
 function handleGalleryTileClick(event: MouseEvent, print: GalleryPrint): void {
+  if (galleryPinchPendingClicks > 0 && event.detail !== 0) {
+    galleryPinchPendingClicks -= 1;
+    return;
+  }
   // WKWebView may delay compatibility clicks until after another tap has
   // already completed. Consume one click for every pointer gesture instead
   // of keeping a single flag that the first delayed click can clear.
