@@ -1273,6 +1273,10 @@ fn build_canonical_private_fl2va_target_budget(
         .and_then(|samples| samples.checked_mul(4))
         .ok_or_else(|| anyhow!("private H3 waveform bytes overflow"))?;
     let vae_memory = vae.memory();
+    // Charged on either side of denoise but never across it: the runtime parks
+    // both VAEs once conditions are encoded and reconstructs them after the
+    // transformer is dropped. The visual-decode phase therefore also carries
+    // the construction workspace that reload stages through.
     let retained_vaes = vae_memory.resident_device_weight_bytes;
     let max_device_weight_staging_bytes = checkpoint
         .blocks
@@ -1379,7 +1383,6 @@ fn build_canonical_private_fl2va_target_budget(
     ])?;
     let noise_allocation_phase_device_bytes = checked_sum([
         bounds.fixed_runtime_device_bytes,
-        retained_vaes,
         qwen_output_state_device_bytes,
         condition_latent_backing_device_bytes,
         condition_latent_backing_device_bytes,
@@ -1393,7 +1396,6 @@ fn build_canonical_private_fl2va_target_budget(
     ])?;
     let transformer_load_phase_device_bytes = checked_sum([
         bounds.fixed_runtime_device_bytes,
-        retained_vaes,
         checkpoint.fixed_transformer_protected_device_bytes,
         qwen_output_state_device_bytes,
         condition_latent_backing_device_bytes,
@@ -1404,7 +1406,6 @@ fn build_canonical_private_fl2va_target_budget(
     ])?;
     let denoise_phase_device_bytes = checked_sum([
         bounds.fixed_runtime_device_bytes,
-        retained_vaes,
         checkpoint.fixed_transformer_protected_device_bytes,
         qwen_output_state_device_bytes,
         condition_latent_backing_device_bytes,
@@ -1422,6 +1423,7 @@ fn build_canonical_private_fl2va_target_budget(
     let visual_decode_phase_device_bytes = checked_sum([
         bounds.fixed_runtime_device_bytes,
         retained_vaes,
+        bounds.vae_construction_device_workspace_bytes,
         packed_video_state_device_bytes,
         packed_audio_state_device_bytes,
         target_video_latent_device_bytes,

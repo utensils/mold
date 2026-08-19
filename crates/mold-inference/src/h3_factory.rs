@@ -1064,6 +1064,12 @@ fn validate_target_budget(
     if resident_count != 0 || prefetch_depth != 0 {
         bail!("MiniMax H3 target budget requires fully streamed blocks without prefetch");
     }
+    // Both VAEs are resident from their load through condition encoding, and
+    // again from their post-denoise reload through the mux. The load/drop
+    // policy parks them for everything in between, so the noise-allocation,
+    // transformer-load, and denoise phases below charge no VAE weights —
+    // charging them there priced ~5.8 GB inside the transformer's own peak
+    // for memory the runtime has already released.
     let retained_vaes = memory
         .visual_vae_resident_device_bytes
         .checked_add(memory.audio_vae_resident_device_bytes)
@@ -1300,7 +1306,6 @@ fn validate_target_budget(
     let noise_allocation = checked_u64_sum(
         [
             memory.fixed_runtime_device_bytes,
-            retained_vaes,
             memory.qwen_output_state_device_bytes,
             memory.condition_latent_backing_device_bytes,
             memory.condition_latent_backing_device_bytes,
@@ -1317,7 +1322,6 @@ fn validate_target_budget(
     let transformer_load = checked_u64_sum(
         [
             memory.fixed_runtime_device_bytes,
-            retained_vaes,
             memory.fixed_transformer_device_bytes,
             memory.qwen_output_state_device_bytes,
             memory.condition_latent_backing_device_bytes,
@@ -1337,7 +1341,6 @@ fn validate_target_budget(
     let denoise = checked_u64_sum(
         [
             memory.fixed_runtime_device_bytes,
-            retained_vaes,
             memory.fixed_transformer_device_bytes,
             memory.qwen_output_state_device_bytes,
             memory.condition_latent_backing_device_bytes,
@@ -1360,6 +1363,7 @@ fn validate_target_budget(
         [
             memory.fixed_runtime_device_bytes,
             retained_vaes,
+            memory.vae_construction_device_workspace_bytes,
             memory.packed_video_state_device_bytes,
             memory.packed_audio_state_device_bytes,
             memory.target_video_latent_device_bytes,
@@ -2767,6 +2771,17 @@ mod tests {
         request: &H3FactoryPreparedRequestInput,
         checkpoint: &H3FactoryRawCheckpointInput,
     ) -> H3FactoryTargetBudgetInput {
+        target_budget_with_vae_residency(request, checkpoint, 400, 500)
+    }
+
+    /// The VAE residency is a parameter so a test can vary only that and read
+    /// which phases the resident pair is charged in.
+    fn target_budget_with_vae_residency(
+        request: &H3FactoryPreparedRequestInput,
+        checkpoint: &H3FactoryRawCheckpointInput,
+        visual_vae_resident_device_bytes: u64,
+        audio_vae_resident_device_bytes: u64,
+    ) -> H3FactoryTargetBudgetInput {
         let artifacts = vec![
             H3FactoryArtifactHostInput {
                 role: H3FactoryArtifactHostRole::Conditioner,
@@ -2811,7 +2826,7 @@ mod tests {
             (packed_video_state_device_bytes + packed_audio_state_device_bytes) * 9;
         let waveform_host_bytes =
             request.audio_samples_per_channel * u64::from(contract::AUDIO_CHANNELS) * 4;
-        let retained_vaes = 900;
+        let retained_vaes = visual_vae_resident_device_bytes + audio_vae_resident_device_bytes;
         let fixed_runtime_device_bytes = 100;
         let fixed_transformer_device_bytes = checkpoint.fixed_transformer_protected_device_bytes;
         let condition_vae_workspace_device_bytes = 300;
@@ -2847,7 +2862,6 @@ mod tests {
         ]);
         let noise_allocation_phase_device_bytes = sum(&[
             fixed_runtime_device_bytes,
-            retained_vaes,
             qwen_output_state_device_bytes,
             condition_latent_backing_device_bytes,
             condition_latent_backing_device_bytes,
@@ -2861,7 +2875,6 @@ mod tests {
         ]);
         let transformer_load_phase_device_bytes = sum(&[
             fixed_runtime_device_bytes,
-            retained_vaes,
             fixed_transformer_device_bytes,
             qwen_output_state_device_bytes,
             condition_latent_backing_device_bytes,
@@ -2872,7 +2885,6 @@ mod tests {
         ]);
         let denoise_phase_device_bytes = sum(&[
             fixed_runtime_device_bytes,
-            retained_vaes,
             fixed_transformer_device_bytes,
             qwen_output_state_device_bytes,
             condition_latent_backing_device_bytes,
@@ -2890,6 +2902,7 @@ mod tests {
         let visual_decode_phase_device_bytes = sum(&[
             fixed_runtime_device_bytes,
             retained_vaes,
+            100,
             packed_video_state_device_bytes,
             packed_audio_state_device_bytes,
             target_video_latent_device_bytes,
@@ -3012,8 +3025,8 @@ mod tests {
             predicted_host_increment_bytes,
             fixed_runtime_device_bytes,
             fixed_transformer_device_bytes,
-            visual_vae_resident_device_bytes: 400,
-            audio_vae_resident_device_bytes: 500,
+            visual_vae_resident_device_bytes,
+            audio_vae_resident_device_bytes,
             attempt_resident_vae_device_bytes: retained_vaes,
             vae_construction_device_workspace_bytes: 100,
             vae_memory_evidence_identity_sha256: sha('e'),
@@ -3845,6 +3858,101 @@ mod tests {
         assert_ne!(
             expected_h3_factory_target_budget_identity(&evidence),
             baseline
+        );
+    }
+
+    #[test]
+    fn parked_vaes_are_charged_around_denoise_but_never_across_it() {
+        let request = prepared_request();
+        let checkpoint = raw_checkpoint();
+        let base = target_budget_with_vae_residency(&request, &checkpoint, 400, 500);
+        let heavier = target_budget_with_vae_residency(&request, &checkpoint, 401, 501);
+        let delta =
+            heavier.attempt_resident_vae_device_bytes - base.attempt_resident_vae_device_bytes;
+        assert_eq!(delta, 2);
+
+        // The load/drop policy parks both VAEs from the moment conditions are
+        // encoded until the transformer is dropped, so heavier weights cannot
+        // move a phase that runs while they are parked.
+        for (phase, base_bytes, heavier_bytes) in [
+            (
+                "noise allocation",
+                base.noise_allocation_phase_device_bytes,
+                heavier.noise_allocation_phase_device_bytes,
+            ),
+            (
+                "transformer load",
+                base.transformer_load_phase_device_bytes,
+                heavier.transformer_load_phase_device_bytes,
+            ),
+            (
+                "denoise",
+                base.denoise_phase_device_bytes,
+                heavier.denoise_phase_device_bytes,
+            ),
+        ] {
+            assert_eq!(
+                base_bytes, heavier_bytes,
+                "{phase} still charges the parked VAE pair"
+            );
+        }
+
+        for (phase, base_bytes, heavier_bytes) in [
+            (
+                "VAE load",
+                base.vae_load_phase_device_bytes,
+                heavier.vae_load_phase_device_bytes,
+            ),
+            (
+                "Qwen encode",
+                base.qwen_encode_phase_device_bytes,
+                heavier.qwen_encode_phase_device_bytes,
+            ),
+            (
+                "Qwen transfer",
+                base.qwen_transfer_phase_device_bytes,
+                heavier.qwen_transfer_phase_device_bytes,
+            ),
+            (
+                "condition encode",
+                base.condition_encode_phase_device_bytes,
+                heavier.condition_encode_phase_device_bytes,
+            ),
+            (
+                "visual decode",
+                base.visual_decode_phase_device_bytes,
+                heavier.visual_decode_phase_device_bytes,
+            ),
+            (
+                "audio decode",
+                base.audio_decode_phase_device_bytes,
+                heavier.audio_decode_phase_device_bytes,
+            ),
+            (
+                "waveform transfer",
+                base.waveform_transfer_phase_device_bytes,
+                heavier.waveform_transfer_phase_device_bytes,
+            ),
+        ] {
+            assert_eq!(
+                heavier_bytes - base_bytes,
+                delta,
+                "{phase} must charge the resident VAE pair"
+            );
+        }
+
+        // Reload stages through the same construction workspace the first load
+        // does, and only the visual-decode phase carries it after the park.
+        assert_eq!(
+            base.visual_decode_phase_device_bytes,
+            base.fixed_runtime_device_bytes
+                + base.attempt_resident_vae_device_bytes
+                + base.vae_construction_device_workspace_bytes
+                + base.packed_video_state_device_bytes
+                + base.packed_audio_state_device_bytes
+                + base.target_video_latent_device_bytes
+                + base.target_audio_latent_device_bytes
+                + base.decoder_tile_workspace_device_bytes
         );
     }
 
