@@ -123,6 +123,39 @@ pub(crate) fn save_image_to_dir(
     );
 }
 
+/// Gallery filename for one saved output: the legacy
+/// `mold-{model}-{ts}[-{idx}]` stem, then an optional `-{suffix}` (original /
+/// upscaled), then the title slug as `~{slug}` so it is always the LAST stem
+/// component (`mold_core::strip_title_slug` cuts at the final `~`), then the
+/// extension. Untitled, unsuffixed prints are byte-identical to
+/// `mold_core::default_output_filename`.
+pub(crate) fn titled_output_filename(
+    model: &str,
+    timestamp_ms: u64,
+    ext: &str,
+    batch_size: u32,
+    index: u32,
+    suffix: Option<&str>,
+    title_slug: Option<&str>,
+) -> String {
+    let legacy = mold_core::default_output_filename(model, timestamp_ms, ext, batch_size, index);
+    let dot_ext = format!(".{ext}");
+    let mut stem = legacy
+        .strip_suffix(dot_ext.as_str())
+        .unwrap_or(legacy.as_str())
+        .to_string();
+    if let Some(suffix) = suffix {
+        stem = format!("{stem}-{suffix}");
+    }
+    match title_slug.filter(|slug| !slug.is_empty()) {
+        Some(slug) => format!(
+            "{stem}{}{slug}{dot_ext}",
+            mold_core::print_title::TITLE_SLUG_SEPARATOR
+        ),
+        None => format!("{stem}{dot_ext}"),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn save_image_to_dir_with_suffix(
     dir: &std::path::Path,
@@ -142,14 +175,21 @@ fn save_image_to_dir_with_suffix(
     }
     let timestamp_ms = mold_core::time::now_epoch_ms_u64();
     let ext = img.format.to_string();
-    let mut filename =
-        mold_core::default_output_filename(model, timestamp_ms, &ext, batch_size, img.index);
-    if let Some(suffix) = suffix {
-        filename = format!(
-            "{}-{suffix}.{ext}",
-            filename.trim_end_matches(&format!(".{ext}"))
-        );
-    }
+    // A titled print carries a lossy `~slug` in its stem
+    // (`mold-{model}-{ts}[-{idx}]~{slug}.{ext}`); untitled prints keep the
+    // byte-identical legacy name. `synthesize_from_filename` strips the slug.
+    let title_slug = metadata
+        .and_then(|meta| meta.title.as_deref())
+        .and_then(mold_core::title_slug);
+    let filename = titled_output_filename(
+        model,
+        timestamp_ms,
+        &ext,
+        batch_size,
+        img.index,
+        suffix,
+        title_slug.as_deref(),
+    );
     let (filename, path, reservation) =
         match write_gallery_bytes_no_replace(dir, &filename, &img.data) {
             Ok(saved) => saved,
@@ -4265,6 +4305,82 @@ mod tests {
             name.contains("-3.jpeg"),
             "expected batch index suffix: {name}"
         );
+    }
+
+    #[test]
+    fn titled_output_filename_places_slug_last_in_the_stem() {
+        assert_eq!(
+            titled_output_filename("flux-dev:q4", 1_700_000_000_000, "png", 1, 0, None, None),
+            mold_core::default_output_filename("flux-dev:q4", 1_700_000_000_000, "png", 1, 0),
+            "untitled prints keep the byte-identical legacy name"
+        );
+        assert_eq!(
+            titled_output_filename(
+                "flux-dev:q4",
+                1_700_000_000_000,
+                "png",
+                1,
+                0,
+                None,
+                Some("smurf-04")
+            ),
+            "mold-flux-dev-q4-1700000000000~smurf-04.png"
+        );
+        assert_eq!(
+            titled_output_filename(
+                "flux-dev:q4",
+                1_700_000_000_000,
+                "png",
+                4,
+                2,
+                Some("upscaled"),
+                Some("smurf-04")
+            ),
+            "mold-flux-dev-q4-1700000000000-2-upscaled~smurf-04.png",
+            "suffix variants carry the slug after the suffix"
+        );
+        // The stem round-trips through the synthesizer: the slug is cut
+        // before the model is recovered.
+        let synthesized = mold_db::metadata_io::synthesize_from_filename(
+            "mold-flux-dev-q4-1700000000000~smurf-04.png",
+            0,
+        );
+        assert_eq!(synthesized.model, "flux-dev-q4");
+    }
+
+    #[test]
+    fn save_image_to_dir_folds_title_into_filename_and_seeds_row_title() {
+        let tmp = TempDir::new().unwrap();
+        let db = MetadataDb::open_in_memory().unwrap();
+        let mut req = fake_request("flux-dev:q4");
+        req.title = Some("Smurf 04!".to_string());
+        let meta = OutputMetadata::from_generate_request(&req, 42, None, "test-version");
+        assert_eq!(meta.title.as_deref(), Some("Smurf 04!"));
+
+        save_image_to_dir(
+            tmp.path(),
+            &fake_image(),
+            "flux-dev:q4",
+            1,
+            Some(&meta),
+            Some(1234),
+            Some(&db),
+            None,
+        );
+
+        let rows = db.list(Some(tmp.path())).unwrap();
+        assert_eq!(rows.len(), 1);
+        let rec = &rows[0];
+        assert!(
+            rec.filename.ends_with("~smurf-04.png"),
+            "titled filename carries the slug: {}",
+            rec.filename
+        );
+        assert!(tmp.path().join(&rec.filename).is_file());
+        assert_eq!(rec.title.as_deref(), Some("Smurf 04!"), "row title seeded");
+        assert_eq!(rec.metadata.title.as_deref(), Some("Smurf 04!"));
+        let image = rec.to_gallery_image();
+        assert_eq!(image.title.as_deref(), Some("Smurf 04!"));
     }
 
     #[test]

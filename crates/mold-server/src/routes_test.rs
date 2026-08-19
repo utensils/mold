@@ -10477,12 +10477,14 @@ mod tests {
         drop(_lock);
     }
 
-    /// `DELETE /api/gallery/image/:filename` must remove the matching DB
-    /// row in addition to the file on disk so the next list call doesn't
-    /// resurrect a stale entry from cache.
+    /// `DELETE /api/gallery/image/:filename?permanent=true` must remove the
+    /// matching DB row in addition to the file on disk so the next list call
+    /// doesn't resurrect a stale entry from cache. (Without `permanent` the
+    /// DB-backed delete moves to the trash and keeps the row — see
+    /// `gallery_delete_moves_to_trash_when_db_available`.)
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
-    async fn gallery_delete_drops_metadata_row() {
+    async fn gallery_permanent_delete_drops_metadata_row() {
         use mold_db::{GenerationRecord, MetadataDb, RecordSource};
 
         let dir = tempfile::tempdir().unwrap();
@@ -10580,7 +10582,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("DELETE")
-                    .uri("/api/gallery/image/doomed.png")
+                    .uri("/api/gallery/image/doomed.png?permanent=true")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -11844,5 +11846,1498 @@ mod tests {
         assert_eq!(headers["x-mold-video-pipeline"], "two-stage-hq");
         assert_eq!(headers["x-mold-video-has-audio"], "1");
         assert_eq!(headers["x-mold-video-audio-sample-rate"], "48000");
+    }
+
+    // ── Library organization + trash ────────────────────────────────────────
+    //
+    // Fixtures: an in-memory metadata DB wired into an otherwise empty
+    // AppState whose output dir is a tempdir. `seed_print` writes a valid
+    // PNG and its `generations` row so the DB-backed listing path is taken.
+
+    fn organized_state(dir: &std::path::Path) -> (AppState, Arc<Option<mold_db::MetadataDb>>) {
+        let db = mold_db::MetadataDb::open_in_memory().unwrap();
+        let config = mold_core::Config {
+            output_dir: Some(dir.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let mut state = AppState::empty(
+            config,
+            crate::state::QueueHandle::new(tx),
+            AppState::empty_gpu_pool_for_test(),
+            200,
+        );
+        state.metadata_db = Arc::new(Some(db));
+        let db = state.metadata_db.clone();
+        (state, db)
+    }
+
+    fn seed_print(
+        db: &Arc<Option<mold_db::MetadataDb>>,
+        dir: &std::path::Path,
+        name: &str,
+        title: Option<&str>,
+    ) {
+        let path = dir.join(name);
+        std::fs::write(&path, minimal_png()).unwrap();
+        let mut metadata = output_metadata(&format!("prompt for {name}"));
+        metadata.title = title.map(str::to_string);
+        let mut record = mold_db::GenerationRecord::from_save(
+            dir,
+            name,
+            mold_core::OutputFormat::Png,
+            metadata,
+            mold_db::RecordSource::Server,
+            mold_core::time::now_epoch_ms(),
+        );
+        record.stat_from_disk(&path);
+        db.as_ref().as_ref().unwrap().upsert(&record).unwrap();
+    }
+
+    fn json_request(method: &str, uri: &str, body: serde_json::Value) -> Request<Body> {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    fn empty_request(method: &str, uri: &str) -> Request<Body> {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    async fn gallery_rows(app: &axum::Router, uri: &str) -> Vec<serde_json::Value> {
+        let resp = app
+            .clone()
+            .oneshot(empty_request("GET", uri))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "{uri}");
+        json_body(resp).await.as_array().unwrap().clone()
+    }
+
+    fn drain_events(
+        rx: &mut tokio::sync::broadcast::Receiver<mold_core::ServerEvent>,
+    ) -> Vec<mold_core::ServerEvent> {
+        let mut out = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            out.push(event);
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn gallery_list_view_excludes_trashed_rows_and_trash_view_lists_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, db) = organized_state(dir.path());
+        seed_print(&db, dir.path(), "live.png", None);
+        seed_print(&db, dir.path(), "binned.png", Some("Binned"));
+        // Trash `binned.png` the way the primitive does: bytes into `.trash/`
+        // plus the row flag — without going through HTTP, so the listing
+        // filter is tested on its own.
+        let trash = mold_db::trash_dir(dir.path());
+        std::fs::create_dir_all(&trash).unwrap();
+        std::fs::rename(dir.path().join("binned.png"), trash.join("binned.png")).unwrap();
+        let trashed_at_ms = 1_700_000_000_000_i64;
+        db.as_ref()
+            .as_ref()
+            .unwrap()
+            .mark_trashed(dir.path(), "binned.png", trashed_at_ms)
+            .unwrap();
+        let app = app_with_state(state);
+
+        let library = gallery_rows(&app, "/api/gallery").await;
+        assert_eq!(
+            library
+                .iter()
+                .map(|r| r["filename"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["live.png"],
+            "the default (library) view must exclude trashed rows"
+        );
+        assert!(library[0].get("trashed_at").is_none());
+
+        let explicit = gallery_rows(&app, "/api/gallery?view=library").await;
+        assert_eq!(explicit.len(), 1);
+
+        let trashed = gallery_rows(&app, "/api/gallery?view=trash").await;
+        assert_eq!(trashed.len(), 1);
+        assert_eq!(trashed[0]["filename"], "binned.png");
+        assert_eq!(trashed[0]["title"], "Binned");
+        assert_eq!(trashed[0]["trashed_at"], (trashed_at_ms / 1000) as u64);
+        // Default retention is 30 days.
+        assert_eq!(
+            trashed[0]["purge_at"],
+            (trashed_at_ms / 1000 + 30 * 24 * 60 * 60) as u64
+        );
+
+        let bogus = app
+            .clone()
+            .oneshot(empty_request("GET", "/api/gallery?view=attic"))
+            .await
+            .unwrap();
+        assert_eq!(bogus.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn gallery_list_enriches_rows_with_title_tags_favorite_and_collections() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, db) = organized_state(dir.path());
+        seed_print(&db, dir.path(), "owl.png", Some("Creation title"));
+        seed_print(&db, dir.path(), "plain.png", None);
+        let mdb = db.as_ref().as_ref().unwrap();
+        mdb.set_title(dir.path(), "owl.png", Some("Edited title"))
+            .unwrap();
+        mdb.set_favorite(dir.path(), "owl.png", true).unwrap();
+        mdb.add_tags(dir.path(), "owl.png", &["Night".into(), "birds".into()])
+            .unwrap();
+        let collection = mdb.create_collection("Owls", None).unwrap();
+        mdb.collection_add(&collection.id, dir.path(), &["owl.png".into()])
+            .unwrap();
+        let app = app_with_state(state);
+
+        let rows = gallery_rows(&app, "/api/gallery").await;
+        let owl = rows.iter().find(|r| r["filename"] == "owl.png").unwrap();
+        assert_eq!(
+            owl["title"], "Edited title",
+            "row title wins over metadata title"
+        );
+        assert_eq!(owl["favorite"], true);
+        assert_eq!(owl["tags"], serde_json::json!(["birds", "Night"]));
+        assert_eq!(owl["collections"], serde_json::json!([collection.id]));
+        let plain = rows.iter().find(|r| r["filename"] == "plain.png").unwrap();
+        assert!(plain.get("title").is_none());
+        assert!(
+            plain.get("tags").is_none(),
+            "empty tags are omitted on the wire"
+        );
+        assert!(plain.get("favorite").is_none());
+    }
+
+    #[tokio::test]
+    async fn gallery_scan_fallback_ignores_the_trash_subdirectory() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("live.png"), minimal_png()).unwrap();
+        let trash = mold_db::trash_dir(dir.path());
+        std::fs::create_dir_all(&trash).unwrap();
+        std::fs::write(trash.join("binned.png"), minimal_png()).unwrap();
+        let config = mold_core::Config {
+            output_dir: Some(dir.path().to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let state = AppState::empty(
+            config,
+            crate::state::QueueHandle::new(tx),
+            AppState::empty_gpu_pool_for_test(),
+            200,
+        );
+        let app = app_with_state(state);
+
+        let rows = gallery_rows(&app, "/api/gallery").await;
+        assert_eq!(
+            rows.iter()
+                .map(|r| r["filename"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["live.png"]
+        );
+        // No DB ⇒ no trash index: the trash view is empty rather than an error.
+        assert!(gallery_rows(&app, "/api/gallery?view=trash")
+            .await
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn gallery_patch_edits_title_favorite_tags_and_publishes_updated_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, db) = organized_state(dir.path());
+        seed_print(&db, dir.path(), "owl.png", None);
+        let mut events = state.events.subscribe();
+        let app = app_with_state(state);
+
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "PATCH",
+                "/api/gallery/image/owl.png",
+                serde_json::json!({
+                    "title": "  Smurf village  ",
+                    "favorite": true,
+                    "tags": ["teal", "Night"]
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = json_body(resp).await;
+        assert_eq!(body["filename"], "owl.png");
+        assert_eq!(body["title"], "Smurf village", "title is trimmed");
+        assert_eq!(body["favorite"], true);
+        assert_eq!(body["tags"], serde_json::json!(["Night", "teal"]));
+        match events.try_recv().unwrap() {
+            mold_core::ServerEvent::GalleryUpdated { filename, image } => {
+                assert_eq!(filename, "owl.png");
+                let image = image.expect("patch carries the refreshed row");
+                assert_eq!(image.title.as_deref(), Some("Smurf village"));
+                assert!(image.favorite);
+            }
+            other => panic!("expected gallery_updated, got {other:?}"),
+        }
+
+        // add/remove without `tags`, and an empty title clears it.
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "PATCH",
+                "/api/gallery/image/owl.png",
+                serde_json::json!({"title": "", "add_tags": ["owls"], "remove_tags": ["teal"]}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = json_body(resp).await;
+        assert!(
+            body.get("title").is_none(),
+            "empty title clears the row title"
+        );
+        assert_eq!(body["tags"], serde_json::json!(["Night", "owls"]));
+        // Still a favorite: untouched fields stay put.
+        assert_eq!(body["favorite"], true);
+
+        // Invalid title → 422, nothing changed.
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "PATCH",
+                "/api/gallery/image/owl.png",
+                serde_json::json!({"title": "bad\u{0007}title"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        // Unknown print → 404.
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "PATCH",
+                "/api/gallery/image/nope.png",
+                serde_json::json!({"favorite": true}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        // Listing reflects the edits.
+        let rows = gallery_rows(&app, "/api/gallery").await;
+        assert_eq!(rows[0]["tags"], serde_json::json!(["Night", "owls"]));
+    }
+
+    #[tokio::test]
+    async fn gallery_organize_applies_bulk_edits_in_one_transaction() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, db) = organized_state(dir.path());
+        seed_print(&db, dir.path(), "a.png", None);
+        seed_print(&db, dir.path(), "b.png", None);
+        let collection = db
+            .as_ref()
+            .as_ref()
+            .unwrap()
+            .create_collection("Bulk", None)
+            .unwrap();
+        let mut events = state.events.subscribe();
+        let app = app_with_state(state);
+
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/gallery/organize",
+                serde_json::json!({
+                    "filenames": ["a.png", "b.png"],
+                    "favorite": true,
+                    "add_tags": ["batch"],
+                    "add_to_collections": [collection.id]
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let published = drain_events(&mut events);
+        let updated: Vec<_> = published
+            .iter()
+            .filter_map(|e| match e {
+                mold_core::ServerEvent::GalleryUpdated { filename, image } => {
+                    assert!(image.is_none(), "bulk edits publish without the row");
+                    Some(filename.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(updated, vec!["a.png", "b.png"]);
+        assert!(published
+            .iter()
+            .any(|e| matches!(e, mold_core::ServerEvent::GalleryCollectionsChanged {})));
+        let rows = gallery_rows(&app, "/api/gallery").await;
+        for row in &rows {
+            assert_eq!(row["favorite"], true);
+            assert_eq!(row["tags"], serde_json::json!(["batch"]));
+            assert_eq!(row["collections"], serde_json::json!([collection.id]));
+        }
+
+        // Unknown filename → 404 naming it, nothing applied.
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/gallery/organize",
+                serde_json::json!({"filenames": ["a.png", "ghost.png"], "favorite": false}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert!(json_body(resp).await["error"]
+            .as_str()
+            .unwrap()
+            .contains("ghost.png"));
+        let rows = gallery_rows(&app, "/api/gallery").await;
+        assert!(rows.iter().all(|r| r["favorite"] == true));
+
+        // Unknown collection → 404.
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/gallery/organize",
+                serde_json::json!({"filenames": ["a.png"], "remove_from_collections": ["missing"]}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        // Empty filename list → 422.
+        let resp = app
+            .oneshot(json_request(
+                "POST",
+                "/api/gallery/organize",
+                serde_json::json!({"filenames": [], "favorite": true}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn gallery_collections_crud_and_membership_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, db) = organized_state(dir.path());
+        seed_print(&db, dir.path(), "a.png", None);
+        seed_print(&db, dir.path(), "b.png", None);
+        let mut events = state.events.subscribe();
+        let app = app_with_state(state);
+
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/gallery/collections",
+                serde_json::json!({"name": "Smurf Village", "description": "blue"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let created = json_body(resp).await;
+        let id = created["id"].as_str().unwrap().to_string();
+        assert_eq!(created["name"], "Smurf Village");
+        assert_eq!(created["slug"], "smurf-village");
+        assert_eq!(created["description"], "blue");
+        assert_eq!(created["count"], 0);
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            mold_core::ServerEvent::GalleryCollectionsChanged {}
+        ));
+
+        // Same slug → 409; empty name → 422.
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/gallery/collections",
+                serde_json::json!({"name": "smurf   village"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/gallery/collections",
+                serde_json::json!({"name": "   "}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        // Items: add two, then remove one; unknown filename → 404 untouched.
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "PUT",
+                &format!("/api/gallery/collections/{id}/items"),
+                serde_json::json!({"add": ["a.png", "b.png"]}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(json_body(resp).await["count"], 2);
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "PUT",
+                &format!("/api/gallery/collections/{id}/items"),
+                serde_json::json!({"add": ["ghost.png"]}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "PUT",
+                &format!("/api/gallery/collections/{id}/items"),
+                serde_json::json!({"remove": ["a.png"]}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(json_body(resp).await["count"], 1);
+
+        // Detail carries the ordered filenames.
+        let resp = app
+            .clone()
+            .oneshot(empty_request(
+                "GET",
+                &format!("/api/gallery/collections/{id}"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let detail = json_body(resp).await;
+        assert_eq!(detail["collection"]["id"], id);
+        assert_eq!(detail["filenames"], serde_json::json!(["b.png"]));
+
+        // Rename + cover.
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "PATCH",
+                &format!("/api/gallery/collections/{id}"),
+                serde_json::json!({"name": "Gargamel", "cover_filename": "b.png"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let updated = json_body(resp).await;
+        assert_eq!(updated["slug"], "gargamel");
+        assert_eq!(updated["cover_filename"], "b.png");
+        // A cover that is not a member → 422.
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "PATCH",
+                &format!("/api/gallery/collections/{id}"),
+                serde_json::json!({"cover_filename": "a.png"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        // Listing shows the collection; the print's row names it.
+        let listed = gallery_rows(&app, "/api/gallery/collections").await;
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0]["name"], "Gargamel");
+        let rows = gallery_rows(&app, "/api/gallery").await;
+        let b = rows.iter().find(|r| r["filename"] == "b.png").unwrap();
+        assert_eq!(b["collections"], serde_json::json!([id]));
+
+        // Delete never touches prints; a second delete is 404.
+        let resp = app
+            .clone()
+            .oneshot(empty_request(
+                "DELETE",
+                &format!("/api/gallery/collections/{id}"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let resp = app
+            .clone()
+            .oneshot(empty_request(
+                "DELETE",
+                &format!("/api/gallery/collections/{id}"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert!(gallery_rows(&app, "/api/gallery/collections")
+            .await
+            .is_empty());
+        assert_eq!(gallery_rows(&app, "/api/gallery").await.len(), 2);
+        assert!(dir.path().join("b.png").is_file());
+        let changed = drain_events(&mut events)
+            .into_iter()
+            .filter(|e| matches!(e, mold_core::ServerEvent::GalleryCollectionsChanged {}))
+            .count();
+        assert!(
+            changed >= 4,
+            "every collection mutation announces itself: {changed}"
+        );
+    }
+
+    #[tokio::test]
+    async fn gallery_tags_list_rename_merge_and_delete() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, db) = organized_state(dir.path());
+        seed_print(&db, dir.path(), "a.png", None);
+        seed_print(&db, dir.path(), "b.png", None);
+        let mdb = db.as_ref().as_ref().unwrap();
+        mdb.add_tags(dir.path(), "a.png", &["teal".into(), "owls".into()])
+            .unwrap();
+        mdb.add_tags(dir.path(), "b.png", &["Teal".into(), "birds".into()])
+            .unwrap();
+        let mut events = state.events.subscribe();
+        let app = app_with_state(state);
+
+        let tags = gallery_rows(&app, "/api/gallery/tags").await;
+        assert_eq!(
+            tags.iter()
+                .map(|t| (
+                    t["name"].as_str().unwrap().to_string(),
+                    t["count"].as_u64().unwrap()
+                ))
+                .collect::<Vec<_>>(),
+            vec![("birds".into(), 1), ("owls".into(), 1), ("teal".into(), 2)]
+        );
+
+        // Rename owls → birds merges.
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "PATCH",
+                "/api/gallery/tags/owls",
+                serde_json::json!({"name": "birds"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let merged = json_body(resp).await;
+        assert_eq!(merged["name"], "birds");
+        assert_eq!(merged["count"], 2);
+        let updated: Vec<_> = drain_events(&mut events)
+            .into_iter()
+            .filter_map(|e| match e {
+                mold_core::ServerEvent::GalleryUpdated { filename, .. } => Some(filename),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            updated,
+            vec!["a.png"],
+            "only prints that carried the tag are announced"
+        );
+
+        // Unknown tag → 404; empty new name → 422.
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "PATCH",
+                "/api/gallery/tags/ghost",
+                serde_json::json!({"name": "x"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "PATCH",
+                "/api/gallery/tags/teal",
+                serde_json::json!({"name": "  "}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        // Delete teal everywhere.
+        let resp = app
+            .clone()
+            .oneshot(empty_request("DELETE", "/api/gallery/tags/teal"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let mut updated: Vec<_> = drain_events(&mut events)
+            .into_iter()
+            .filter_map(|e| match e {
+                mold_core::ServerEvent::GalleryUpdated { filename, .. } => Some(filename),
+                _ => None,
+            })
+            .collect();
+        updated.sort();
+        assert_eq!(updated, vec!["a.png", "b.png"]);
+        let resp = app
+            .clone()
+            .oneshot(empty_request("DELETE", "/api/gallery/tags/teal"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let tags = gallery_rows(&app, "/api/gallery/tags").await;
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0]["name"], "birds");
+    }
+
+    #[tokio::test]
+    async fn organization_routes_answer_501_without_the_metadata_db() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = mold_core::Config {
+            output_dir: Some(dir.path().to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let state = AppState::empty(
+            config,
+            crate::state::QueueHandle::new(tx),
+            AppState::empty_gpu_pool_for_test(),
+            200,
+        );
+        let app = app_with_state(state);
+        for (method, uri) in [
+            ("GET", "/api/gallery/collections"),
+            ("GET", "/api/gallery/tags"),
+            ("POST", "/api/gallery/trash/sweep"),
+            ("DELETE", "/api/gallery/trash"),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(empty_request(method, uri))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED, "{method} {uri}");
+        }
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "PATCH",
+                "/api/gallery/image/x.png",
+                serde_json::json!({"favorite": true}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+        let caps = app
+            .oneshot(empty_request("GET", "/api/capabilities"))
+            .await
+            .unwrap();
+        let caps = json_body(caps).await;
+        assert_eq!(caps["gallery"]["can_delete"], true);
+        assert_eq!(caps["gallery"]["trash"]["enabled"], false);
+        assert!(caps["gallery"].get("organize").is_none());
+    }
+
+    #[tokio::test]
+    async fn capabilities_advertise_trash_and_organize_with_the_metadata_db() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, _db) = organized_state(dir.path());
+        let app = app_with_state(state);
+        let caps = app
+            .oneshot(empty_request("GET", "/api/capabilities"))
+            .await
+            .unwrap();
+        let caps = json_body(caps).await;
+        assert_eq!(caps["gallery"]["can_delete"], true);
+        assert_eq!(caps["gallery"]["trash"]["enabled"], true);
+        assert_eq!(caps["gallery"]["trash"]["retention_days"], 30);
+        assert_eq!(caps["gallery"]["organize"], true);
+    }
+
+    /// `DELETE /api/gallery/image/:filename` moves to the trash when the
+    /// metadata DB is available: bytes land in `.trash/`, a tombstone sits
+    /// beside them, the row is flagged (not dropped), and `gallery_trashed`
+    /// is announced.
+    #[tokio::test]
+    async fn gallery_delete_moves_to_trash_when_db_available() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, db) = organized_state(dir.path());
+        seed_print(&db, dir.path(), "doomed.png", Some("Doomed"));
+        let mdb = db.as_ref().as_ref().unwrap();
+        mdb.add_tags(dir.path(), "doomed.png", &["keep".into()])
+            .unwrap();
+        let mut events = state.events.subscribe();
+        let app = app_with_state(state);
+
+        let resp = app
+            .clone()
+            .oneshot(empty_request("DELETE", "/api/gallery/image/doomed.png"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let trash = mold_db::trash_dir(dir.path());
+        assert!(!dir.path().join("doomed.png").exists(), "live bytes moved");
+        assert!(trash.join("doomed.png").is_file(), "bytes are in .trash/");
+        let tombstone =
+            mold_db::trash::read_tombstone(&mold_db::tombstone_path(&trash, "doomed.png")).unwrap();
+        assert_eq!(tombstone.title.as_deref(), Some("Doomed"));
+        assert_eq!(tombstone.tags, vec!["keep".to_string()]);
+        let row = mdb.get(dir.path(), "doomed.png").unwrap().unwrap();
+        assert!(row.trashed_at_ms.is_some(), "row is flagged, not dropped");
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            mold_core::ServerEvent::GalleryTrashed { filename } if filename == "doomed.png"
+        ));
+
+        // Listing: gone from the library, present in the trash with purge_at.
+        assert!(gallery_rows(&app, "/api/gallery").await.is_empty());
+        let trashed = gallery_rows(&app, "/api/gallery?view=trash").await;
+        assert_eq!(trashed.len(), 1);
+        assert_eq!(trashed[0]["tags"], serde_json::json!(["keep"]));
+        assert!(
+            trashed[0]["purge_at"].as_u64().unwrap() > trashed[0]["trashed_at"].as_u64().unwrap()
+        );
+
+        // Trashing again is idempotent and silent.
+        let resp = app
+            .clone()
+            .oneshot(empty_request("DELETE", "/api/gallery/image/doomed.png"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert!(events.try_recv().is_err());
+
+        // A print that exists nowhere → 404 (the DB-less path keeps 204).
+        let resp = app
+            .oneshot(empty_request("DELETE", "/api/gallery/image/ghost.png"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn gallery_delete_permanent_purges_trashed_and_hard_deletes_live() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, db) = organized_state(dir.path());
+        seed_print(&db, dir.path(), "binned.png", None);
+        seed_print(&db, dir.path(), "live.png", None);
+        let mdb = db.as_ref().as_ref().unwrap();
+        let mut events = state.events.subscribe();
+        let app = app_with_state(state);
+
+        // Trash, then purge.
+        let resp = app
+            .clone()
+            .oneshot(empty_request("DELETE", "/api/gallery/image/binned.png"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let trash = mold_db::trash_dir(dir.path());
+        assert!(trash.join("binned.png").is_file());
+        drain_events(&mut events);
+        let resp = app
+            .clone()
+            .oneshot(empty_request(
+                "DELETE",
+                "/api/gallery/image/binned.png?permanent=true",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert!(!trash.join("binned.png").exists());
+        assert!(!mold_db::tombstone_path(&trash, "binned.png").exists());
+        assert!(mdb.get(dir.path(), "binned.png").unwrap().is_none());
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            mold_core::ServerEvent::GalleryRemoved { filename } if filename == "binned.png"
+        ));
+
+        // Permanent on a live print is today's hard delete.
+        let resp = app
+            .clone()
+            .oneshot(empty_request(
+                "DELETE",
+                "/api/gallery/image/live.png?permanent=true",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert!(!dir.path().join("live.png").exists());
+        assert!(!trash.join("live.png").exists());
+        assert!(mdb.get(dir.path(), "live.png").unwrap().is_none());
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            mold_core::ServerEvent::GalleryRemoved { filename } if filename == "live.png"
+        ));
+        assert!(gallery_rows(&app, "/api/gallery?view=trash")
+            .await
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn gallery_trash_bulk_and_restore_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, db) = organized_state(dir.path());
+        seed_print(&db, dir.path(), "a.png", Some("Alpha"));
+        seed_print(&db, dir.path(), "b.png", None);
+        let mdb = db.as_ref().as_ref().unwrap();
+        let mut events = state.events.subscribe();
+        let app = app_with_state(state);
+
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/gallery/trash",
+                serde_json::json!({"filenames": ["a.png", "b.png"]}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let trashed: Vec<_> = drain_events(&mut events)
+            .into_iter()
+            .filter_map(|e| match e {
+                mold_core::ServerEvent::GalleryTrashed { filename } => Some(filename),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(trashed, vec!["a.png", "b.png"]);
+        assert_eq!(gallery_rows(&app, "/api/gallery?view=trash").await.len(), 2);
+        assert!(gallery_rows(&app, "/api/gallery").await.is_empty());
+
+        // Bulk with an unknown name stops there, naming it; earlier ones stand.
+        seed_print(&db, dir.path(), "c.png", None);
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/gallery/trash",
+                serde_json::json!({"filenames": ["c.png", "ghost.png"]}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert!(json_body(resp).await["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("ghost.png"));
+        assert!(mold_db::trash_dir(dir.path()).join("c.png").is_file());
+        drain_events(&mut events);
+
+        // Restore `a.png`: live again, row un-flagged, tombstone gone,
+        // gallery_restored carries the enriched row.
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/gallery/trash/restore",
+                serde_json::json!({"filenames": ["a.png"]}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert!(dir.path().join("a.png").is_file());
+        let trash = mold_db::trash_dir(dir.path());
+        assert!(!trash.join("a.png").exists());
+        assert!(!mold_db::tombstone_path(&trash, "a.png").exists());
+        assert!(mdb
+            .get(dir.path(), "a.png")
+            .unwrap()
+            .unwrap()
+            .trashed_at_ms
+            .is_none());
+        match events.try_recv().unwrap() {
+            mold_core::ServerEvent::GalleryRestored { filename, image } => {
+                assert_eq!(filename, "a.png");
+                let image = image.expect("restore carries the row");
+                assert_eq!(image.title.as_deref(), Some("Alpha"));
+                assert!(image.trashed_at.is_none());
+            }
+            other => panic!("expected gallery_restored, got {other:?}"),
+        }
+        let library = gallery_rows(&app, "/api/gallery").await;
+        assert_eq!(library.len(), 1);
+        assert_eq!(library[0]["filename"], "a.png");
+        assert_eq!(library[0]["title"], "Alpha");
+
+        // Restoring a live print → 409; restoring over a live file → 409.
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/gallery/trash/restore",
+                serde_json::json!({"filenames": ["a.png"]}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        std::fs::write(dir.path().join("b.png"), b"someone else's b").unwrap();
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/gallery/trash/restore",
+                serde_json::json!({"filenames": ["b.png"]}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        assert_eq!(json_body(resp).await["code"], "GALLERY_RESTORE_CONFLICT");
+        assert!(
+            trash.join("b.png").is_file(),
+            "conflict leaves the trash untouched"
+        );
+    }
+
+    /// A print published through the committed archive (the import route)
+    /// keeps its identity through trash and restore: the archive retires the
+    /// exact entry on trash, listings never resurrect it, and restore re-homes
+    /// the same provenance (non-synthetic metadata) rather than re-scanning.
+    #[tokio::test]
+    async fn gallery_trash_and_restore_preserve_committed_archive_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, db) = organized_state(dir.path());
+        let gate = state.gallery_publication_gate.clone();
+        let app = app_with_state(state);
+        let bytes = minimal_png();
+        let metadata = output_metadata("archived provenance");
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::put("/api/gallery/import/print.png")
+                    .header("content-type", "application/vnd.mold.gallery-import")
+                    .body(Body::from(gallery_import_body(Some(&metadata), &bytes)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let index = gate.committed_archive_index(dir.path()).unwrap();
+        assert!(
+            index.get("print.png").is_some(),
+            "import publishes into the archive"
+        );
+
+        let resp = app
+            .clone()
+            .oneshot(empty_request("DELETE", "/api/gallery/image/print.png"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let index = gate.committed_archive_index(dir.path()).unwrap();
+        assert!(index.get("print.png").is_none());
+        assert!(
+            index.is_retired("print.png"),
+            "trash retires the archive entry"
+        );
+        assert!(
+            index.retired_entries.contains_key("print.png"),
+            "the retired identity is retained for restore"
+        );
+        assert!(mold_db::trash_dir(dir.path()).join("print.png").is_file());
+        assert!(gallery_rows(&app, "/api/gallery").await.is_empty());
+        let trashed = gallery_rows(&app, "/api/gallery?view=trash").await;
+        assert_eq!(trashed.len(), 1);
+        assert_eq!(trashed[0]["metadata"]["prompt"], "archived provenance");
+
+        // A restart must not resurrect or unlink the trashed print.
+        let (restarted, _) = organized_state(dir.path());
+        let restarted_gate = restarted.gallery_publication_gate.clone();
+        crate::batch_transaction::recover_transactions(dir.path(), &restarted_gate, Arc::new(None))
+            .await
+            .unwrap();
+        let index = restarted_gate.committed_archive_index(dir.path()).unwrap();
+        assert!(index.is_retired("print.png"));
+        assert!(mold_db::trash_dir(dir.path()).join("print.png").is_file());
+
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/gallery/trash/restore",
+                serde_json::json!({"filenames": ["print.png"]}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let index = gate.committed_archive_index(dir.path()).unwrap();
+        assert!(
+            index.get("print.png").is_some(),
+            "restore re-homes the entry"
+        );
+        assert!(!index.is_retired("print.png"));
+        assert!(!index.retired_entries.contains_key("print.png"));
+        assert_eq!(std::fs::read(dir.path().join("print.png")).unwrap(), bytes);
+        let library = gallery_rows(&app, "/api/gallery").await;
+        assert_eq!(library.len(), 1);
+        assert_eq!(library[0]["metadata"]["prompt"], "archived provenance");
+        assert_ne!(library[0]["metadata_synthetic"], true);
+        assert!(db
+            .as_ref()
+            .as_ref()
+            .unwrap()
+            .get(dir.path(), "print.png")
+            .unwrap()
+            .unwrap()
+            .trashed_at_ms
+            .is_none());
+
+        // Trashed bytes that were tampered with are refused on restore.
+        let resp = app
+            .clone()
+            .oneshot(empty_request("DELETE", "/api/gallery/image/print.png"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        std::fs::write(
+            mold_db::trash_dir(dir.path()).join("print.png"),
+            b"tampered while trashed",
+        )
+        .unwrap();
+        let resp = app
+            .oneshot(json_request(
+                "POST",
+                "/api/gallery/trash/restore",
+                serde_json::json!({"filenames": ["print.png"]}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        assert_eq!(json_body(resp).await["code"], "GALLERY_RESTORE_CONFLICT");
+    }
+
+    #[tokio::test]
+    async fn gallery_trash_sweep_and_empty_honor_retention() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, db) = organized_state(dir.path());
+        seed_print(&db, dir.path(), "old.png", None);
+        seed_print(&db, dir.path(), "fresh.png", None);
+        seed_print(&db, dir.path(), "live.png", None);
+        let mdb = db.as_ref().as_ref().unwrap();
+        let mut events = state.events.subscribe();
+        let app = app_with_state(state.clone());
+
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/gallery/trash",
+                serde_json::json!({"filenames": ["old.png", "fresh.png"]}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        // Age `old.png` past the 30-day default.
+        let ancient = mold_core::time::now_epoch_ms() - 31 * mold_db::trash::DAY_MS;
+        mdb.mark_trashed(dir.path(), "old.png", ancient).unwrap();
+        drain_events(&mut events);
+
+        let resp = app
+            .clone()
+            .oneshot(empty_request("POST", "/api/gallery/trash/sweep"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let sweep = json_body(resp).await;
+        assert_eq!(sweep["purged"], 1);
+        assert_eq!(sweep["remaining"], 1);
+        let trash = mold_db::trash_dir(dir.path());
+        assert!(!trash.join("old.png").exists());
+        assert!(!mold_db::tombstone_path(&trash, "old.png").exists());
+        assert!(trash.join("fresh.png").is_file());
+        assert!(mdb.get(dir.path(), "old.png").unwrap().is_none());
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            mold_core::ServerEvent::GalleryRemoved { filename } if filename == "old.png"
+        ));
+
+        // Retention 0 keeps forever: even an ancient row survives a sweep.
+        mdb.mark_trashed(dir.path(), "fresh.png", ancient).unwrap();
+        state.config.write().await.gallery.trash_retention_days = 0;
+        let result = crate::gallery_trash::sweep_trash_once(&state)
+            .await
+            .unwrap();
+        assert_eq!(result.purged, 0);
+        assert_eq!(result.remaining, 1);
+        assert!(trash.join("fresh.png").is_file());
+        // And the capability reflects the live value.
+        let caps = json_body(
+            app.clone()
+                .oneshot(empty_request("GET", "/api/capabilities"))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(caps["gallery"]["trash"]["retention_days"], 0);
+        assert!(
+            gallery_rows(&app, "/api/gallery?view=trash").await[0]
+                .get("purge_at")
+                .is_none(),
+            "keep-forever rows advertise no purge date"
+        );
+
+        // Empty trash purges everything trashed and nothing live.
+        let resp = app
+            .clone()
+            .oneshot(empty_request("DELETE", "/api/gallery/trash"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(json_body(resp).await["purged"], 1);
+        assert!(!trash.join("fresh.png").exists());
+        assert!(dir.path().join("live.png").is_file());
+        assert!(gallery_rows(&app, "/api/gallery?view=trash")
+            .await
+            .is_empty());
+        assert_eq!(gallery_rows(&app, "/api/gallery").await.len(), 1);
+    }
+
+    /// The sweeper and reconcile must agree: after a trash + restart-style
+    /// reconcile, the row is still trashed (not dropped, not resurrected) and
+    /// the sweeper still purges it once expired.
+    #[tokio::test]
+    async fn trash_sweeper_agrees_with_reconcile_after_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, db) = organized_state(dir.path());
+        seed_print(&db, dir.path(), "old.png", None);
+        let mdb = db.as_ref().as_ref().unwrap();
+        let app = app_with_state(state.clone());
+        let resp = app
+            .clone()
+            .oneshot(empty_request("DELETE", "/api/gallery/image/old.png"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let ancient = mold_core::time::now_epoch_ms() - 31 * mold_db::trash::DAY_MS;
+        mdb.mark_trashed(dir.path(), "old.png", ancient).unwrap();
+
+        let stats = mdb.reconcile(dir.path()).unwrap();
+        assert_eq!(
+            stats.removed, 0,
+            "reconcile keeps trashed rows whose bytes sit in .trash/"
+        );
+        assert_eq!(stats.trashed_kept, 1);
+        assert!(mdb
+            .get(dir.path(), "old.png")
+            .unwrap()
+            .unwrap()
+            .trashed_at_ms
+            .is_some());
+
+        let result = crate::gallery_trash::sweep_trash_once(&state)
+            .await
+            .unwrap();
+        assert_eq!(result.purged, 1);
+        assert_eq!(result.remaining, 0);
+        assert!(mdb.get(dir.path(), "old.png").unwrap().is_none());
+        let stats = mdb.reconcile(dir.path()).unwrap();
+        assert_eq!(stats.trashed_imported, 0, "nothing orphaned in .trash/");
+    }
+
+    /// The sweeper task runs its first pass once `ready` resolves and stops
+    /// when its token is cancelled.
+    #[tokio::test]
+    async fn trash_sweeper_task_runs_after_ready_and_stops_on_cancel() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, db) = organized_state(dir.path());
+        seed_print(&db, dir.path(), "old.png", None);
+        let mdb = db.as_ref().as_ref().unwrap();
+        let app = app_with_state(state.clone());
+        let resp = app
+            .oneshot(empty_request("DELETE", "/api/gallery/image/old.png"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let ancient = mold_core::time::now_epoch_ms() - 31 * mold_db::trash::DAY_MS;
+        mdb.mark_trashed(dir.path(), "old.png", ancient).unwrap();
+
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let handle = crate::gallery_trash::spawn_trash_sweeper(
+            state.clone(),
+            shutdown.clone(),
+            Some(ready_rx),
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            mdb.get(dir.path(), "old.png").unwrap().is_some(),
+            "no pass before reconcile reports ready"
+        );
+        ready_tx.send(()).unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while mdb.get(dir.path(), "old.png").unwrap().is_some() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "startup pass never ran"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("sweeper exits on cancel")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn gallery_media_routes_resolve_trashed_prints() {
+        let _mold_home =
+            EnvVarGuard::set("MOLD_HOME", tempfile::tempdir().unwrap().path().as_os_str());
+        let dir = tempfile::tempdir().unwrap();
+        let (state, db) = organized_state(dir.path());
+        seed_print(&db, dir.path(), "binned.png", None);
+        let bytes = std::fs::read(dir.path().join("binned.png")).unwrap();
+        let app = app_with_state(state);
+        let resp = app
+            .clone()
+            .oneshot(empty_request("DELETE", "/api/gallery/image/binned.png"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        let resp = app
+            .clone()
+            .oneshot(empty_request("GET", "/api/gallery/image/binned.png"))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "a trashed print still streams"
+        );
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        assert_eq!(body.as_ref(), bytes.as_slice());
+
+        let resp = app
+            .clone()
+            .oneshot(empty_request("GET", "/api/gallery/thumbnail/binned.png"))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "a trashed print still has a thumbnail"
+        );
+
+        // Purged → gone everywhere.
+        let resp = app
+            .clone()
+            .oneshot(empty_request(
+                "DELETE",
+                "/api/gallery/image/binned.png?permanent=true",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let resp = app
+            .oneshot(empty_request("GET", "/api/gallery/image/binned.png"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// Every new organization/trash mutator and listing must wait behind
+    /// the atomic publication writer exactly like the historical routes.
+    #[tokio::test]
+    async fn every_organization_and_trash_route_waits_for_atomic_publication_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, db) = organized_state(dir.path());
+        seed_print(&db, dir.path(), "a.png", None);
+        let gate = state.gallery_publication_gate.clone();
+        let writer = gate.write().await;
+        let app = app_with_state(state);
+        let cases = [
+            (
+                json_request(
+                    "PATCH",
+                    "/api/gallery/image/a.png",
+                    serde_json::json!({"favorite": true}),
+                ),
+                StatusCode::OK,
+            ),
+            (
+                json_request(
+                    "POST",
+                    "/api/gallery/organize",
+                    serde_json::json!({"filenames": ["a.png"], "favorite": true}),
+                ),
+                StatusCode::NO_CONTENT,
+            ),
+            (
+                empty_request("GET", "/api/gallery/collections"),
+                StatusCode::OK,
+            ),
+            (
+                json_request(
+                    "POST",
+                    "/api/gallery/collections",
+                    serde_json::json!({"name": "Gate"}),
+                ),
+                StatusCode::CREATED,
+            ),
+            (
+                empty_request("GET", "/api/gallery/collections/nope"),
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                json_request(
+                    "PATCH",
+                    "/api/gallery/collections/nope",
+                    serde_json::json!({"name": "x"}),
+                ),
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                empty_request("DELETE", "/api/gallery/collections/nope"),
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                json_request(
+                    "PUT",
+                    "/api/gallery/collections/nope/items",
+                    serde_json::json!({"add": ["a.png"]}),
+                ),
+                StatusCode::NOT_FOUND,
+            ),
+            (empty_request("GET", "/api/gallery/tags"), StatusCode::OK),
+            (
+                json_request(
+                    "PATCH",
+                    "/api/gallery/tags/nope",
+                    serde_json::json!({"name": "x"}),
+                ),
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                empty_request("DELETE", "/api/gallery/tags/nope"),
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                empty_request("GET", "/api/gallery?view=trash"),
+                StatusCode::OK,
+            ),
+            (
+                json_request(
+                    "POST",
+                    "/api/gallery/trash",
+                    serde_json::json!({"filenames": ["ghost.png"]}),
+                ),
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                json_request(
+                    "POST",
+                    "/api/gallery/trash/restore",
+                    serde_json::json!({"filenames": ["ghost.png"]}),
+                ),
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                empty_request("DELETE", "/api/gallery/trash"),
+                StatusCode::OK,
+            ),
+            (
+                empty_request("POST", "/api/gallery/trash/sweep"),
+                StatusCode::OK,
+            ),
+            (
+                empty_request("DELETE", "/api/gallery/image/a.png?permanent=false"),
+                StatusCode::NO_CONTENT,
+            ),
+        ];
+        let mut requests: Vec<_> = cases
+            .into_iter()
+            .map(|(request, expected)| {
+                let app = app.clone();
+                (
+                    expected,
+                    tokio::spawn(async move { app.oneshot(request).await.unwrap() }),
+                )
+            })
+            .collect();
+        for (_, request) in &mut requests {
+            assert!(
+                tokio::time::timeout(Duration::from_millis(20), request)
+                    .await
+                    .is_err(),
+                "an organization/trash route ran while the publication writer was held"
+            );
+        }
+        drop(writer);
+        for (expected, request) in requests {
+            let response = tokio::time::timeout(Duration::from_secs(5), request)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(response.status(), expected, "{:?}", response);
+        }
+    }
+
+    /// A titled request refuses control characters before any model work.
+    #[test]
+    fn generate_request_title_is_validated_at_admission() {
+        let mut req: GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"a cat","model":"flux-dev:q4","width":512,"height":512,"steps":4}"#,
+        )
+        .unwrap();
+        req.title = Some("bad\u{0007}title".into());
+        assert!(crate::routes::validate_generate_request(&req, None).is_err());
+        req.title = Some("Smurf village".into());
+        assert!(crate::routes::validate_generate_request(&req, None).is_ok());
+    }
+
+    /// The desktop auto-save mirror (`PUT /api/gallery/import/:filename`)
+    /// seeds the row title from the imported metadata, so a mirrored titled
+    /// print is titled on every host.
+    #[tokio::test]
+    async fn gallery_import_seeds_row_title_from_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, db) = organized_state(dir.path());
+        let app = app_with_state(state);
+        let mut metadata = output_metadata("mirrored");
+        metadata.title = Some("Smurf village".into());
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::put(
+                    "/api/gallery/import/mold-flux-dev-q4-1700000000000~smurf-village.png",
+                )
+                .header("content-type", "application/vnd.mold.gallery-import")
+                .body(Body::from(gallery_import_body(
+                    Some(&metadata),
+                    &minimal_png(),
+                )))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let row = db
+            .as_ref()
+            .as_ref()
+            .unwrap()
+            .get(
+                dir.path(),
+                "mold-flux-dev-q4-1700000000000~smurf-village.png",
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.title.as_deref(), Some("Smurf village"));
+        let rows = gallery_rows(&app, "/api/gallery").await;
+        assert_eq!(rows[0]["title"], "Smurf village");
+        assert_eq!(rows[0]["metadata"]["title"], "Smurf village");
     }
 }

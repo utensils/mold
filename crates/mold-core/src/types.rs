@@ -6974,7 +6974,8 @@ pub struct Collection {
     /// the newest member.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cover_filename: Option<String>,
-    /// Number of live (non-trashed) prints in the collection.
+    /// Number of prints in the collection (trashed members included; they
+    /// keep their membership until purged).
     pub count: u64,
     /// Unix seconds.
     pub created_at: u64,
@@ -6982,7 +6983,19 @@ pub struct Collection {
     pub updated_at: u64,
 }
 
-/// One tag and how many live prints carry it, from `GET /api/gallery/tags`.
+/// `GET /api/gallery/collections/:id`: the collection plus its member
+/// gallery filenames in collection order (insertion order). Additive shape:
+/// clients that only need the summary read `collection`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct CollectionDetail {
+    pub collection: Collection,
+    /// Gallery filenames in the collection, ordered by position.
+    #[serde(default)]
+    pub filenames: Vec<String>,
+}
+
+/// One tag and how many prints carry it (trashed prints included), from
+/// `GET /api/gallery/tags`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct TagCount {
     pub name: String,

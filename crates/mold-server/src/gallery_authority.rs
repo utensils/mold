@@ -657,8 +657,18 @@ pub(crate) fn current_file_matches(
     root: &Path,
     entry: &CommittedArchiveEntry,
 ) -> anyhow::Result<bool> {
-    let path = root.join(&entry.identity.final_name);
-    let metadata = match fs::symlink_metadata(&path) {
+    file_matches_entry_at(&root.join(&entry.identity.final_name), entry)
+}
+
+/// Whether the regular file at `path` carries exactly the committed identity
+/// of `entry` (size, then retained facts or a fresh checksum). Used at the
+/// live path by [`current_file_matches`] and at `<dir>/.trash/<name>` when a
+/// trashed print is restored.
+pub(crate) fn file_matches_entry_at(
+    path: &Path,
+    entry: &CommittedArchiveEntry,
+) -> anyhow::Result<bool> {
+    let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Ok(_) => return Ok(false),
@@ -671,10 +681,8 @@ pub(crate) fn current_file_matches(
     if entry.facts.as_ref().is_some_and(|prior| prior == &facts) {
         return Ok(true);
     }
-    Ok(
-        crate::batch_transaction::checksum_file_for_authority(&path)?
-            == entry.identity.checksum_sha256,
-    )
+    Ok(crate::batch_transaction::checksum_file_for_authority(path)?
+        == entry.identity.checksum_sha256)
 }
 
 #[cfg(test)]
