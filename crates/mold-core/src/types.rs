@@ -1229,6 +1229,14 @@ pub struct GenerateRequest {
     /// `original_prompt` so older hosts retain the root/source prompt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_transform: Option<PromptTransformProvenance>,
+    /// User-authored print title. Validated by
+    /// [`crate::validate_print_title`] at admission, embedded into
+    /// `OutputMetadata.title`, seeded into the gallery row, and folded into
+    /// the output filename as a lossy slug (`crate::title_slug`). Additive;
+    /// absent means untitled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(example = "Smurf village at dusk")]
+    pub title: Option<String>,
     /// Durable client-generated identifier shared by prepared batch siblings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batch_id: Option<String>,
@@ -1987,6 +1995,12 @@ pub enum GenerationOutputMode {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct OutputMetadata {
     pub prompt: String,
+    /// User-authored print title as it was at creation. Embedded so mirrors
+    /// and imports carry it; the gallery row (`generations.title`) is the
+    /// editable authority once the print exists. Additive; absent on every
+    /// untitled and legacy print.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub negative_prompt: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2196,6 +2210,7 @@ impl OutputMetadata {
         });
         Self {
             prompt: req.prompt.clone(),
+            title: req.title.clone(),
             negative_prompt: req.negative_prompt.clone(),
             original_prompt: req.original_prompt.clone(),
             prompt_transform: req.prompt_transform.clone(),
@@ -4461,6 +4476,7 @@ mod tests {
     #[test]
     fn generate_request_serde_roundtrip() {
         let req = GenerateRequest {
+            title: None,
             source_fit: None,
             hdr_exr_dir: None,
             hdr_exr_full_float: false,
@@ -4661,6 +4677,7 @@ mod tests {
     #[test]
     fn generate_request_negative_prompt_roundtrip() {
         let req = GenerateRequest {
+            title: None,
             source_fit: None,
             hdr_exr_dir: None,
             hdr_exr_full_float: false,
@@ -4728,6 +4745,7 @@ mod tests {
     #[test]
     fn generate_request_negative_prompt_omitted_when_none() {
         let req = GenerateRequest {
+            title: None,
             source_fit: None,
             hdr_exr_dir: None,
             hdr_exr_full_float: false,
@@ -4847,6 +4865,7 @@ mod tests {
     #[test]
     fn output_metadata_omits_strength_without_source_image() {
         let req = GenerateRequest {
+            title: None,
             source_fit: None,
             hdr_exr_dir: None,
             hdr_exr_full_float: false,
@@ -4926,6 +4945,7 @@ mod tests {
     #[test]
     fn output_metadata_records_source_image_provenance() {
         let mut req = GenerateRequest {
+            title: None,
             source_fit: None,
             hdr_exr_dir: None,
             hdr_exr_full_float: false,
@@ -5159,6 +5179,7 @@ mod tests {
     #[test]
     fn output_metadata_includes_negative_prompt_when_provided() {
         let req = GenerateRequest {
+            title: None,
             source_fit: None,
             hdr_exr_dir: None,
             hdr_exr_full_float: false,
@@ -5223,6 +5244,7 @@ mod tests {
     #[test]
     fn output_metadata_includes_strength_and_scheduler_when_applicable() {
         let req = GenerateRequest {
+            title: None,
             source_fit: None,
             hdr_exr_dir: None,
             hdr_exr_full_float: false,
@@ -5290,6 +5312,7 @@ mod tests {
     #[test]
     fn output_metadata_preserves_recreate_knobs() {
         let req = GenerateRequest {
+            title: None,
             source_fit: None,
             hdr_exr_dir: None,
             hdr_exr_full_float: false,
@@ -5928,6 +5951,7 @@ mod tests {
         // Minimal PNG-like bytes for testing
         let image_bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
         let req = GenerateRequest {
+            title: None,
             source_fit: None,
             hdr_exr_dir: None,
             hdr_exr_full_float: false,
@@ -5998,6 +6022,7 @@ mod tests {
         let image_a = vec![0x89, 0x50, 0x4E, 0x47];
         let image_b = vec![0xFF, 0xD8, 0xFF, 0xE0];
         let req = GenerateRequest {
+            title: None,
             source_fit: None,
             hdr_exr_dir: None,
             hdr_exr_full_float: false,
@@ -6081,6 +6106,7 @@ mod tests {
     #[test]
     fn generate_request_source_image_omitted_in_json_when_none() {
         let req = GenerateRequest {
+            title: None,
             source_fit: None,
             hdr_exr_dir: None,
             hdr_exr_full_float: false,
@@ -6149,6 +6175,7 @@ mod tests {
     fn generate_request_control_image_base64_roundtrip() {
         let control_bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
         let req = GenerateRequest {
+            title: None,
             source_fit: None,
             hdr_exr_dir: None,
             hdr_exr_full_float: false,
@@ -6280,6 +6307,7 @@ mod tests {
         let mask_bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
         let source_bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
         let req = GenerateRequest {
+            title: None,
             source_fit: None,
             hdr_exr_dir: None,
             hdr_exr_full_float: false,
@@ -6903,10 +6931,179 @@ pub struct GalleryImage {
     /// True when `metadata` was synthesized (no mold:parameters chunk found).
     #[serde(default, skip_serializing_if = "is_false")]
     pub metadata_synthetic: bool,
+    /// Editable print title from the gallery row (`generations.title`).
+    /// Additive; older servers omit it and clients fall back to
+    /// `metadata.title`, then a prompt excerpt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Tag names attached to this print on the serving host, sorted
+    /// case-insensitively. Additive; empty/absent means untagged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    /// Favorite flag on the serving host. Additive; absent means `false`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub favorite: bool,
+    /// Ids of the collections (on the serving host) that contain this print.
+    /// Additive; empty/absent means no collection membership.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub collections: Vec<String>,
+    /// Unix seconds at which the print was moved to the trash. Present only
+    /// on `GET /api/gallery?view=trash` rows; live rows omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trashed_at: Option<u64>,
+    /// Unix seconds at which the retention sweeper will purge this trashed
+    /// print. Absent when retention is "keep forever" or the row is live.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purge_at: Option<u64>,
 }
 
 fn is_false(b: &bool) -> bool {
     !*b
+}
+
+/// A manual collection of prints on one host. Collections merge across
+/// hosts by `slug` (the normalized name); `id` is host-local.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct Collection {
+    pub id: String,
+    pub name: String,
+    pub slug: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Gallery filename used as the cover tile; `None` lets clients pick
+    /// the newest member.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cover_filename: Option<String>,
+    /// Number of prints in the collection (trashed members included; they
+    /// keep their membership until purged).
+    pub count: u64,
+    /// Unix seconds.
+    pub created_at: u64,
+    /// Unix seconds.
+    pub updated_at: u64,
+}
+
+/// `GET /api/gallery/collections/:id`: the collection plus its member
+/// gallery filenames in collection order (insertion order). Additive shape:
+/// clients that only need the summary read `collection`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct CollectionDetail {
+    pub collection: Collection,
+    /// Gallery filenames in the collection, ordered by position.
+    #[serde(default)]
+    pub filenames: Vec<String>,
+}
+
+/// One tag and how many prints carry it (trashed prints included), from
+/// `GET /api/gallery/tags`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct TagCount {
+    pub name: String,
+    pub count: u64,
+}
+
+/// Trash support advertised under `capabilities.gallery.trash`.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct GalleryTrashCapabilities {
+    /// Whether `DELETE /api/gallery/image/:filename` moves to the trash
+    /// (true) or hard-deletes as on older servers (false).
+    pub enabled: bool,
+    /// Effective `gallery.trash_retention_days` (0 = keep forever).
+    pub retention_days: u32,
+}
+
+/// Per-print edits for `PATCH /api/gallery/image/:filename`. Every field is
+/// optional; absent fields are untouched. `tags` replaces the whole set and
+/// wins over `add_tags` / `remove_tags` when both are present.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct GalleryPatchRequest {
+    /// New title; an empty string clears it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub favorite: Option<bool>,
+    /// Replace the full tag set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub add_tags: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remove_tags: Option<Vec<String>>,
+}
+
+/// Bulk organization edits for `POST /api/gallery/organize`. Applies the
+/// same mutation to every listed filename on the serving host.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct GalleryOrganizeRequest {
+    pub filenames: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub favorite: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub add_tags: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remove_tags: Option<Vec<String>>,
+    /// Collection ids to add every filename to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub add_to_collections: Option<Vec<String>>,
+    /// Collection ids to remove every filename from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remove_from_collections: Option<Vec<String>>,
+}
+
+/// Body of `POST /api/gallery/collections`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct CollectionCreateRequest {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// Body of `PATCH /api/gallery/collections/:id`. Absent fields are untouched.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct CollectionUpdateRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cover_filename: Option<String>,
+}
+
+/// Body of `PUT /api/gallery/collections/:id/items` — gallery filenames to
+/// add to / remove from the collection.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct CollectionItemsRequest {
+    #[serde(default)]
+    pub add: Vec<String>,
+    #[serde(default)]
+    pub remove: Vec<String>,
+}
+
+/// Body of `POST /api/gallery/trash` and `POST /api/gallery/trash/restore`.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct TrashFilenamesRequest {
+    pub filenames: Vec<String>,
+}
+
+/// Result of `POST /api/gallery/trash/sweep`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct TrashSweepResult {
+    /// Trashed prints purged because they exceeded retention.
+    pub purged: u64,
+    /// Trashed prints still waiting for their purge date.
+    pub remaining: u64,
+}
+
+/// Result of `DELETE /api/gallery/trash` (empty trash).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct EmptyTrashResult {
+    pub purged: u64,
+}
+
+/// Body of `PATCH /api/gallery/tags/:name`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct TagRenameRequest {
+    pub name: String,
 }
 
 /// One server-assisted DNS-SD result returned by `GET /api/discovery/peers`.
@@ -6936,6 +7133,17 @@ pub struct GalleryCapabilities {
     /// server. Always `true` on current builds; kept as a capability field
     /// so older clients that still check it continue to work.
     pub can_delete: bool,
+    /// Trash support. Absent on older servers (delete is permanent there)
+    /// and when the metadata DB is disabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trash: Option<GalleryTrashCapabilities>,
+    /// Whether titles, favorites, tags, and collections can be edited on
+    /// this server (`PATCH /api/gallery/image/:filename`,
+    /// `POST /api/gallery/organize`, `/api/gallery/collections`,
+    /// `/api/gallery/tags`). False on older servers and when the metadata
+    /// DB is disabled.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub organize: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -7880,10 +8088,34 @@ pub enum ServerEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         image: Option<Box<GalleryImage>>,
     },
-    /// An output was deleted via `DELETE /api/gallery/image/:filename`.
+    /// An output was deleted via `DELETE /api/gallery/image/:filename`
+    /// (permanently — also emitted when a trashed print is purged).
     GalleryRemoved {
         filename: String,
     },
+    /// A gallery row's organization state changed (title, favorite, tags,
+    /// or collection membership). `image` carries the refreshed row when the
+    /// DB recorded it; `None` means refetch `/api/gallery`.
+    GalleryUpdated {
+        filename: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        image: Option<Box<GalleryImage>>,
+    },
+    /// An output was moved to the trash. It leaves the live listing and
+    /// appears under `GET /api/gallery?view=trash`.
+    GalleryTrashed {
+        filename: String,
+    },
+    /// A trashed output was restored to the live gallery. `image` carries
+    /// the restored row when the DB recorded it; `None` means refetch.
+    GalleryRestored {
+        filename: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        image: Option<Box<GalleryImage>>,
+    },
+    /// A collection was created, renamed, re-covered, deleted, or had its
+    /// membership changed. Clients refetch `GET /api/gallery/collections`.
+    GalleryCollectionsChanged {},
     /// A durable chain job entered the queue — created, resumed, retaken,
     /// or amended. Never emitted for the ephemeral legacy-shim jobs.
     /// Distinct from [`Self::JobQueued`] on purpose: old clients ignore
@@ -8087,6 +8319,12 @@ mod server_event_tests {
                 format: Some(OutputFormat::Png),
                 size_bytes: Some(123),
                 metadata_synthetic: false,
+                title: None,
+                tags: Vec::new(),
+                favorite: false,
+                collections: Vec::new(),
+                trashed_at: None,
+                purge_at: None,
             })),
         };
         let wire = serde_json::to_string(&ev).unwrap();
@@ -8101,6 +8339,289 @@ mod server_event_tests {
             }
             other => panic!("expected gallery_added with image, got {other:?}"),
         }
+    }
+
+    fn organized_gallery_image() -> GalleryImage {
+        let metadata: OutputMetadata = serde_json::from_str(
+            r#"{"prompt":"a cat","title":"Smurf village","model":"flux-dev:q4","seed":7,"steps":4,"guidance":3.5,"width":1024,"height":1024,"version":"test"}"#,
+        )
+        .unwrap();
+        GalleryImage {
+            filename: "mold-flux-dev-q4-1700000000000~smurf-village.png".into(),
+            metadata,
+            timestamp: 1_700_000_000,
+            format: Some(OutputFormat::Png),
+            size_bytes: Some(123),
+            metadata_synthetic: false,
+            title: Some("Smurf village".into()),
+            tags: vec!["blue".into(), "cartoon".into()],
+            favorite: true,
+            collections: vec!["col-1".into()],
+            trashed_at: None,
+            purge_at: None,
+        }
+    }
+
+    #[test]
+    fn gallery_image_organization_fields_are_additive() {
+        // An older server's row carries none of the organization fields.
+        let legacy: GalleryImage = serde_json::from_str(
+            r#"{"filename":"cat.png","metadata":{"prompt":"a cat","model":"flux-dev:q4","seed":7,"steps":4,"guidance":3.5,"width":1024,"height":1024,"version":"test"},"timestamp":1700000000}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.title, None);
+        assert!(legacy.tags.is_empty());
+        assert!(!legacy.favorite);
+        assert!(legacy.collections.is_empty());
+        assert_eq!(legacy.trashed_at, None);
+        assert_eq!(legacy.purge_at, None);
+        assert_eq!(legacy.metadata.title, None);
+
+        // Untouched rows serialize without the new keys at all.
+        let wire = serde_json::to_value(&legacy).unwrap();
+        for key in [
+            "title",
+            "tags",
+            "favorite",
+            "collections",
+            "trashed_at",
+            "purge_at",
+        ] {
+            assert!(wire.get(key).is_none(), "{key} should be omitted: {wire}");
+        }
+        assert!(wire["metadata"].get("title").is_none());
+
+        // Organized rows round-trip every field.
+        let organized = organized_gallery_image();
+        let wire = serde_json::to_value(&organized).unwrap();
+        assert_eq!(wire["title"], "Smurf village");
+        assert_eq!(wire["tags"], serde_json::json!(["blue", "cartoon"]));
+        assert_eq!(wire["favorite"], true);
+        assert_eq!(wire["collections"], serde_json::json!(["col-1"]));
+        assert_eq!(wire["metadata"]["title"], "Smurf village");
+        let back: GalleryImage = serde_json::from_value(wire).unwrap();
+        assert_eq!(back.tags, organized.tags);
+        assert!(back.favorite);
+        assert_eq!(back.collections, organized.collections);
+    }
+
+    #[test]
+    fn trashed_gallery_image_carries_trash_timestamps() {
+        let mut trashed = organized_gallery_image();
+        trashed.trashed_at = Some(1_700_000_100);
+        trashed.purge_at = Some(1_700_000_100 + 30 * 86_400);
+        let wire = serde_json::to_value(&trashed).unwrap();
+        assert_eq!(wire["trashed_at"], 1_700_000_100);
+        assert_eq!(wire["purge_at"], 1_702_592_100);
+        let back: GalleryImage = serde_json::from_value(wire).unwrap();
+        assert_eq!(back.trashed_at, Some(1_700_000_100));
+        assert_eq!(back.purge_at, Some(1_702_592_100));
+    }
+
+    #[test]
+    fn generate_request_title_is_additive_and_flows_into_metadata() {
+        let without: GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"a cat","model":"flux-dev:q4","width":1024,"height":1024,"steps":4}"#,
+        )
+        .unwrap();
+        assert_eq!(without.title, None);
+        let metadata = OutputMetadata::from_generate_request(&without, 7, None, "test");
+        assert_eq!(metadata.title, None);
+
+        let with: GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"a cat","title":"Smurf village","model":"flux-dev:q4","width":1024,"height":1024,"steps":4}"#,
+        )
+        .unwrap();
+        assert_eq!(with.title.as_deref(), Some("Smurf village"));
+        let metadata = OutputMetadata::from_generate_request(&with, 7, None, "test");
+        assert_eq!(metadata.title.as_deref(), Some("Smurf village"));
+        let wire = serde_json::to_value(&metadata).unwrap();
+        assert_eq!(wire["title"], "Smurf village");
+    }
+
+    #[test]
+    fn gallery_updated_round_trips_with_image_row() {
+        let ev = ServerEvent::GalleryUpdated {
+            filename: "cat.png".into(),
+            image: Some(Box::new(organized_gallery_image())),
+        };
+        let wire = serde_json::to_string(&ev).unwrap();
+        assert!(wire.starts_with(r#"{"type":"gallery_updated","#), "{wire}");
+        let back: ServerEvent = serde_json::from_str(&wire).unwrap();
+        match back {
+            ServerEvent::GalleryUpdated {
+                filename,
+                image: Some(img),
+            } => {
+                assert_eq!(filename, "cat.png");
+                assert!(img.favorite);
+                assert_eq!(img.title.as_deref(), Some("Smurf village"));
+            }
+            other => panic!("expected gallery_updated with image, got {other:?}"),
+        }
+
+        let no_row = ServerEvent::GalleryUpdated {
+            filename: "cat.png".into(),
+            image: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&no_row).unwrap(),
+            r#"{"type":"gallery_updated","filename":"cat.png"}"#
+        );
+    }
+
+    #[test]
+    fn gallery_trashed_and_restored_round_trip() {
+        let trashed = ServerEvent::GalleryTrashed {
+            filename: "cat.png".into(),
+        };
+        assert_eq!(
+            serde_json::to_string(&trashed).unwrap(),
+            r#"{"type":"gallery_trashed","filename":"cat.png"}"#
+        );
+
+        let restored = ServerEvent::GalleryRestored {
+            filename: "cat.png".into(),
+            image: Some(Box::new(organized_gallery_image())),
+        };
+        let wire = serde_json::to_string(&restored).unwrap();
+        assert!(wire.starts_with(r#"{"type":"gallery_restored","#), "{wire}");
+        match serde_json::from_str::<ServerEvent>(&wire).unwrap() {
+            ServerEvent::GalleryRestored {
+                filename,
+                image: Some(img),
+            } => {
+                assert_eq!(filename, "cat.png");
+                assert_eq!(img.timestamp, 1_700_000_000);
+            }
+            other => panic!("expected gallery_restored with image, got {other:?}"),
+        }
+        let bare = ServerEvent::GalleryRestored {
+            filename: "cat.png".into(),
+            image: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&bare).unwrap(),
+            r#"{"type":"gallery_restored","filename":"cat.png"}"#
+        );
+    }
+
+    #[test]
+    fn gallery_collections_changed_serializes_as_bare_tagged_object() {
+        let wire = serde_json::to_string(&ServerEvent::GalleryCollectionsChanged {}).unwrap();
+        assert_eq!(wire, r#"{"type":"gallery_collections_changed"}"#);
+        assert!(matches!(
+            serde_json::from_str::<ServerEvent>(&wire).unwrap(),
+            ServerEvent::GalleryCollectionsChanged {}
+        ));
+    }
+
+    #[test]
+    fn gallery_capabilities_trash_and_organize_are_additive() {
+        // Older server: only can_delete.
+        let caps: ServerCapabilities = serde_json::from_str(
+            r#"{"gallery":{"can_delete":true},"catalog":{"available":false,"families":[]}}"#,
+        )
+        .unwrap();
+        assert!(caps.gallery.can_delete);
+        assert_eq!(caps.gallery.trash, None);
+        assert!(!caps.gallery.organize);
+        let wire = serde_json::to_value(&caps.gallery).unwrap();
+        assert_eq!(wire, serde_json::json!({"can_delete": true}));
+
+        // Current server advertises both.
+        let full = GalleryCapabilities {
+            can_delete: true,
+            trash: Some(GalleryTrashCapabilities {
+                enabled: true,
+                retention_days: 30,
+            }),
+            organize: true,
+        };
+        let wire = serde_json::to_value(&full).unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({
+                "can_delete": true,
+                "trash": {"enabled": true, "retention_days": 30},
+                "organize": true
+            })
+        );
+        let back: GalleryCapabilities = serde_json::from_value(wire).unwrap();
+        assert_eq!(back.trash.unwrap().retention_days, 30);
+        assert!(back.organize);
+    }
+
+    #[test]
+    fn collection_and_tag_count_round_trip() {
+        let collection = Collection {
+            id: "c1".into(),
+            name: "Smurfs".into(),
+            slug: "smurfs".into(),
+            description: None,
+            cover_filename: Some("cat.png".into()),
+            count: 3,
+            created_at: 1_700_000_000,
+            updated_at: 1_700_000_050,
+        };
+        let wire = serde_json::to_value(&collection).unwrap();
+        assert!(wire.get("description").is_none());
+        assert_eq!(wire["cover_filename"], "cat.png");
+        let back: Collection = serde_json::from_value(wire).unwrap();
+        assert_eq!(back, collection);
+
+        let tag = TagCount {
+            name: "blue".into(),
+            count: 2,
+        };
+        let back: TagCount = serde_json::from_str(&serde_json::to_string(&tag).unwrap()).unwrap();
+        assert_eq!(back, tag);
+    }
+
+    #[test]
+    fn organization_request_bodies_default_absent_fields() {
+        let patch: GalleryPatchRequest = serde_json::from_str(r#"{"favorite":true}"#).unwrap();
+        assert_eq!(patch.favorite, Some(true));
+        assert_eq!(patch.title, None);
+        assert_eq!(patch.tags, None);
+        assert_eq!(patch.add_tags, None);
+        let cleared: GalleryPatchRequest = serde_json::from_str(r#"{"title":""}"#).unwrap();
+        assert_eq!(cleared.title.as_deref(), Some(""));
+
+        let organize: GalleryOrganizeRequest =
+            serde_json::from_str(r#"{"filenames":["a.png","b.png"],"add_tags":["x"]}"#).unwrap();
+        assert_eq!(organize.filenames.len(), 2);
+        assert_eq!(organize.add_tags.as_deref(), Some(&["x".to_string()][..]));
+        assert_eq!(organize.add_to_collections, None);
+        assert!(serde_json::from_str::<GalleryOrganizeRequest>(r#"{}"#).is_err());
+
+        let create: CollectionCreateRequest = serde_json::from_str(r#"{"name":"Smurfs"}"#).unwrap();
+        assert_eq!(create.description, None);
+        let update: CollectionUpdateRequest =
+            serde_json::from_str(r#"{"cover_filename":"cat.png"}"#).unwrap();
+        assert_eq!(update.name, None);
+        assert_eq!(update.cover_filename.as_deref(), Some("cat.png"));
+        let items: CollectionItemsRequest = serde_json::from_str(r#"{"add":["cat.png"]}"#).unwrap();
+        assert_eq!(items.add, vec!["cat.png".to_string()]);
+        assert!(items.remove.is_empty());
+        let trash: TrashFilenamesRequest =
+            serde_json::from_str(r#"{"filenames":["cat.png"]}"#).unwrap();
+        assert_eq!(trash.filenames, vec!["cat.png".to_string()]);
+        let rename: TagRenameRequest = serde_json::from_str(r#"{"name":"teal"}"#).unwrap();
+        assert_eq!(rename.name, "teal");
+
+        let sweep = TrashSweepResult {
+            purged: 2,
+            remaining: 5,
+        };
+        assert_eq!(
+            serde_json::to_string(&sweep).unwrap(),
+            r#"{"purged":2,"remaining":5}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&EmptyTrashResult { purged: 7 }).unwrap(),
+            r#"{"purged":7}"#
+        );
     }
 
     #[test]

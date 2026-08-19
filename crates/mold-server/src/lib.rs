@@ -26,6 +26,8 @@ pub mod dispatch_mode;
 pub mod downloads;
 pub mod events;
 pub mod execution_plan;
+mod gallery_organization;
+mod gallery_trash;
 pub mod generation_cancel;
 pub mod gpu_pool;
 pub mod gpu_worker;
@@ -939,6 +941,11 @@ pub async fn run_server(
     // authority) until both finite tasks have joined.
     let mut thumbnail_warmup_handle = None;
     let mut gallery_reconcile_handle = None;
+    // Retention sweeper for the gallery trash: first pass after reconcile
+    // settles the trash index, then hourly. Cancelled through a child of the
+    // scheduler token (`begin_runtime_shutdown` cancels it) and joined after
+    // the HTTP server drains like the other gallery observers.
+    let mut trash_sweeper_handle = None;
 
     // Ensure output directory exists and pre-generate thumbnails.
     {
@@ -962,6 +969,7 @@ pub async fn run_server(
                 let db_arc = state.metadata_db.clone();
                 let dir = output_dir.clone();
                 let gallery_gate = state.gallery_publication_gate.clone();
+                let (reconciled_tx, reconciled_rx) = tokio::sync::oneshot::channel::<()>();
                 gallery_reconcile_handle = Some(tokio::spawn(async move {
                     // Reconcile mutates SQLite but only observes gallery
                     // files. The shared side keeps publication atomic while
@@ -981,12 +989,21 @@ pub async fn run_server(
                             updated = stats.updated,
                             removed = stats.removed,
                             kept = stats.kept,
+                            trashed_kept = stats.trashed_kept,
+                            trashed_imported = stats.trashed_imported,
+                            trashed_restored = stats.trashed_restored,
                             "metadata DB reconciled with gallery directory"
                         ),
                         Ok(Err(e)) => tracing::warn!("metadata DB reconcile failed: {e:#}"),
                         Err(e) => tracing::warn!("metadata DB reconcile task join error: {e}"),
                     }
+                    let _ = reconciled_tx.send(());
                 }));
+                trash_sweeper_handle = Some(gallery_trash::spawn_trash_sweeper(
+                    state.clone(),
+                    scheduler_shutdown.child_token(),
+                    Some(reconciled_rx),
+                ));
             }
         }
     }
@@ -1237,6 +1254,11 @@ pub async fn run_server(
         let _ = handle.await;
     }
     scheduler_shutdown.cancel();
+    if let Some(handle) = trash_sweeper_handle {
+        // Its token is a child of `scheduler_shutdown`, so the loop exits on
+        // the cancel above; a pass already inside `spawn_blocking` finishes.
+        let _ = handle.await;
+    }
     if let Some(generation_worker_handle) = generation_worker_handle {
         if !uses_cooperative_gpu_dispatch {
             // The CPU/legacy worker predates the coordinator cancellation

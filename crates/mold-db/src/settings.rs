@@ -83,6 +83,15 @@ pub const SCHEDULER_WARM_WAIT_MAX_MS: &str = "scheduler.warm_wait_max_ms";
 pub const CHAIN_JOBS_ARTIFACT_TTL_DAYS: &str = "chain.jobs_artifact_ttl_days";
 pub const CHAIN_JOBS_ARTIFACT_TTL_DEFAULT: i64 = 7;
 
+// Gallery — profile-scoped library behaviour. Unlike the chain TTL above,
+// this key is registered in `mold_core::config_keys::ALL_KEYS` (section
+// Gallery) so `mold config` and `/api/config` can reach it; the trash
+// sweeper reads it fresh from here on every pass.
+pub const GALLERY_TRASH_RETENTION_DAYS: &str =
+    mold_core::config_keys::GALLERY_TRASH_RETENTION_DAYS_KEY;
+/// Days a trashed print is retained before purge; `0` keeps it forever.
+pub const GALLERY_TRASH_RETENTION_DEFAULT: i64 = 30;
+
 // Config — migration sentinel for the one-shot `config.toml → DB` pass.
 pub const CONFIG_MIGRATED_FROM_TOML: &str = "config.migrated_from_toml";
 

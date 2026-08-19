@@ -118,6 +118,11 @@ impl ApiError {
         }
     }
 
+    /// The HTTP status this error renders with.
+    pub fn status(&self) -> StatusCode {
+        self.status
+    }
+
     pub fn queue_job_not_found(msg: impl Into<String>) -> Self {
         Self::with_code(msg, "QUEUE_JOB_NOT_FOUND", StatusCode::NOT_FOUND)
     }
@@ -216,6 +221,22 @@ use crate::queue::clean_error_message;
         list_paired_clients,
         revoke_paired_client,
         import_gallery_file,
+        crate::gallery_organization::patch_gallery_image,
+        crate::gallery_organization::organize_gallery,
+        crate::gallery_organization::list_collections,
+        crate::gallery_organization::create_collection,
+        crate::gallery_organization::get_collection,
+        crate::gallery_organization::update_collection,
+        crate::gallery_organization::delete_collection,
+        crate::gallery_organization::put_collection_items,
+        crate::gallery_organization::list_tags,
+        crate::gallery_organization::rename_tag,
+        crate::gallery_organization::delete_tag,
+        crate::gallery_trash::delete_gallery_image,
+        crate::gallery_trash::trash_gallery_files,
+        crate::gallery_trash::restore_gallery_files,
+        crate::gallery_trash::empty_gallery_trash,
+        crate::gallery_trash::sweep_gallery_trash,
         server_status,
         list_devices,
         patch_device,
@@ -373,6 +394,18 @@ use crate::queue::clean_error_message;
         GalleryExportFormat,
         GalleryGifPlayback,
         GalleryGifRepeat,
+        mold_core::GalleryPatchRequest,
+        mold_core::GalleryOrganizeRequest,
+        mold_core::Collection,
+        mold_core::CollectionDetail,
+        mold_core::CollectionCreateRequest,
+        mold_core::CollectionUpdateRequest,
+        mold_core::CollectionItemsRequest,
+        mold_core::TagCount,
+        mold_core::TagRenameRequest,
+        mold_core::TrashFilenamesRequest,
+        mold_core::TrashSweepResult,
+        mold_core::EmptyTrashResult,
     )),
     tags(
         (name = "generation", description = "Image generation"),
@@ -491,6 +524,48 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/gallery/media-token", post(create_gallery_media_token))
         .route("/api/gallery/export-options", get(gallery_export_options))
         .route("/api/gallery/export/:filename", post(export_gallery_video))
+        // ─── Library organization + trash ───────────────────────────────
+        .route(
+            "/api/gallery/organize",
+            post(crate::gallery_organization::organize_gallery),
+        )
+        .route(
+            "/api/gallery/collections",
+            get(crate::gallery_organization::list_collections)
+                .post(crate::gallery_organization::create_collection),
+        )
+        .route(
+            "/api/gallery/collections/:id",
+            get(crate::gallery_organization::get_collection)
+                .patch(crate::gallery_organization::update_collection)
+                .delete(crate::gallery_organization::delete_collection),
+        )
+        .route(
+            "/api/gallery/collections/:id/items",
+            put(crate::gallery_organization::put_collection_items),
+        )
+        .route(
+            "/api/gallery/tags",
+            get(crate::gallery_organization::list_tags),
+        )
+        .route(
+            "/api/gallery/tags/:name",
+            patch(crate::gallery_organization::rename_tag)
+                .delete(crate::gallery_organization::delete_tag),
+        )
+        .route(
+            "/api/gallery/trash",
+            post(crate::gallery_trash::trash_gallery_files)
+                .delete(crate::gallery_trash::empty_gallery_trash),
+        )
+        .route(
+            "/api/gallery/trash/restore",
+            post(crate::gallery_trash::restore_gallery_files),
+        )
+        .route(
+            "/api/gallery/trash/sweep",
+            post(crate::gallery_trash::sweep_gallery_trash),
+        )
         .route("/api/pairing/sessions", post(create_pairing_session))
         .route("/api/pairing/claim", post(claim_pairing_session))
         .route("/api/pairing/clients", get(list_paired_clients))
@@ -508,7 +583,9 @@ pub fn create_router(state: AppState) -> Router {
         )
         .route(
             "/api/gallery/image/:filename",
-            get(get_gallery_image).delete(delete_gallery_image),
+            get(get_gallery_image)
+                .delete(crate::gallery_trash::delete_gallery_image)
+                .patch(crate::gallery_organization::patch_gallery_image),
         )
         .route(
             "/api/gallery/thumbnail/:filename",
@@ -2103,10 +2180,16 @@ pub(crate) fn batch_generate_response(response: mold_core::BatchGenerateResponse
     Json(response).into_response()
 }
 
-fn validate_generate_request(
+pub(crate) fn validate_generate_request(
     req: &mold_core::GenerateRequest,
     family_hint: Option<&str>,
 ) -> Result<(), String> {
+    // The print title is embedded into provenance and folded into the output
+    // filename, so refuse control characters / over-long titles before any
+    // model work is paid for. An empty title means "untitled", not an error.
+    if let Some(title) = req.title.as_deref() {
+        mold_core::validate_print_title(title)?;
+    }
     mold_core::validate_generate_request_with_family(req, family_hint)
 }
 
@@ -5123,9 +5206,21 @@ async fn server_capabilities(
     // makes it a systematic over-promise rather than an edge case, and clients
     // read this to decide whether to keep polling a job whose stream died.
     let durable_queue = state.queue_journal.is_enabled() && !state.is_output_disabled(&config);
+    // Trash and organization both live in the metadata DB; trash additionally
+    // needs somewhere to move bytes to. With the DB disabled, DELETE stays a
+    // hard delete and the organization routes answer 501.
+    let db_available = state.metadata_db.is_some();
+    let gallery = mold_core::GalleryCapabilities {
+        can_delete: true,
+        trash: Some(mold_core::GalleryTrashCapabilities {
+            enabled: db_available && !state.is_output_disabled(&config),
+            retention_days: config.gallery.effective_trash_retention_days(),
+        }),
+        organize: db_available,
+    };
     Json(mold_core::ServerCapabilities {
         generation_profile_v1: true,
-        gallery: mold_core::GalleryCapabilities { can_delete: true },
+        gallery,
         catalog: mold_core::CatalogCapabilities {
             available: catalog_available,
             families: mold_catalog::families::active_families()
@@ -5990,6 +6085,55 @@ async fn import_gallery_file(
     let gallery_writer = state.gallery_publication_gate.write().await;
     let db = state.metadata_db.clone();
     let events = state.events.clone();
+    // An import of a name that is currently in the trash republishes it
+    // live. Purge the trashed copy first (bytes, tombstone, row, retirement
+    // projection) so the fresh publication never coexists with a row that
+    // says "trashed" or with stale `.trash/` bytes; the reconcile and the
+    // sweeper both key on the row, so the old copy would otherwise linger.
+    {
+        let db_for_trash = db.clone();
+        let gate_for_trash = state.gallery_publication_gate.clone();
+        let dir_for_trash = output_dir.clone();
+        let name_for_trash = filename.clone();
+        let purged = tokio::task::spawn_blocking(move || -> Result<bool, ApiError> {
+            let Some(db) = db_for_trash.as_ref().as_ref() else {
+                return Ok(false);
+            };
+            let trashed = db
+                .get(&dir_for_trash, &name_for_trash)
+                .map_err(|error| {
+                    ApiError::internal(format!(
+                        "failed to inspect trashed gallery metadata before import: {error:#}"
+                    ))
+                })?
+                .is_some_and(|row| row.trashed_at_ms.is_some());
+            if !trashed {
+                return Ok(false);
+            }
+            crate::gallery_trash::purge_trashed_print_blocking(
+                &dir_for_trash,
+                &name_for_trash,
+                db,
+                &gate_for_trash,
+            )?;
+            Ok(true)
+        })
+        .await
+        .map_err(|error| {
+            ApiError::internal(format!("gallery import trash purge task failed: {error}"))
+        })?;
+        match purged {
+            Ok(true) => {
+                tracing::info!(file = %filename, "gallery import replaced a trashed print");
+            }
+            Ok(false) => {}
+            Err(error) => {
+                let _ =
+                    tokio::task::spawn_blocking(move || transaction.rollback_unpublished()).await;
+                return Err(error);
+            }
+        }
+    }
     let db_for_existing = db.clone();
     let archive_for_existing = state.gallery_publication_gate.clone();
     let filename_for_task = filename.clone();
@@ -6721,6 +6865,34 @@ async fn export_gallery_video(
         .expect("static export response headers are valid"))
 }
 
+/// `?view=` on `GET /api/gallery`. Absent means the live library.
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct GalleryListQuery {
+    #[serde(default)]
+    pub(crate) view: Option<String>,
+}
+
+/// Which gallery listing a client asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GalleryView {
+    /// Live prints (default) — trashed rows are excluded.
+    Library,
+    /// Trashed prints only, newest-trashed first.
+    Trash,
+}
+
+impl GalleryView {
+    pub(crate) fn parse(raw: Option<&str>) -> Result<Self, ApiError> {
+        match raw.map(str::trim) {
+            None | Some("") | Some("library") => Ok(Self::Library),
+            Some("trash") => Ok(Self::Trash),
+            Some(other) => Err(ApiError::validation(format!(
+                "unknown gallery view '{other}'; expected 'library' or 'trash'"
+            ))),
+        }
+    }
+}
+
 /// List gallery images from the server's output directory.
 ///
 /// Prefers the SQLite metadata DB when available so listings stay fast on
@@ -6728,18 +6900,28 @@ async fn export_gallery_video(
 /// filesystem scan when the DB is disabled, can't be opened, or — as a
 /// safety net — has no rows for this directory yet (e.g. the reconciliation
 /// background task has not finished on first startup).
+///
+/// Organization state (title, tags, favorite, collections, trash) is folded
+/// in AFTER the committed-archive overlay, keyed by filename, so an archive
+/// record can never resurrect a trashed print or hide a user's edits.
+/// `?view=trash` lists only trashed rows; the DB-less filesystem fallback
+/// has no trash index and returns the live scan (library) or nothing
+/// (trash).
 async fn list_gallery(
     State(state): State<AppState>,
+    Query(query): Query<GalleryListQuery>,
 ) -> Result<Json<Vec<mold_core::GalleryImage>>, ApiError> {
     // Query-time DB recovery is serialized by the DB recovery lock. The
     // shared gallery side excludes an atomic batch publication without
     // needlessly serializing ordinary listings and media reads.
     let _gallery_reader = state.gallery_publication_gate.read().await;
+    let view = GalleryView::parse(query.view.as_deref())?;
     let config = state.config.read().await;
     if state.is_output_disabled(&config) {
         return Ok(Json(Vec::new()));
     }
     let output_dir = config.effective_output_dir();
+    let retention_days = config.gallery.effective_trash_retention_days();
     drop(config);
 
     if !output_dir.is_dir() {
@@ -6751,23 +6933,58 @@ async fn list_gallery(
         let dir = output_dir.clone();
         let gallery_archive = state.gallery_publication_gate.clone();
         let listed = tokio::task::spawn_blocking(move || {
-            let rows = db_arc
-                .as_ref()
-                .as_ref()
-                .map(|db| db.list(Some(&dir)))
-                .transpose()?;
-            let archive = gallery_archive.committed_archive_index(&dir)?;
-            Ok::<_, anyhow::Error>((rows, archive))
+            let Some(db) = db_arc.as_ref().as_ref() else {
+                return Ok::<_, anyhow::Error>(None);
+            };
+            let organization = db
+                .organization_for_dir(&dir)
+                .map_err(|e| anyhow::anyhow!("gallery organization query failed: {e}"))?;
+            match view {
+                GalleryView::Trash => {
+                    let mut images = db
+                        .list_trashed(Some(&dir))?
+                        .iter()
+                        .map(|row| {
+                            let mut image = row.to_gallery_image();
+                            crate::gallery_organization::apply_organization(
+                                &mut image,
+                                organization.get(&row.filename),
+                                retention_days,
+                            );
+                            image
+                        })
+                        .collect::<Vec<_>>();
+                    images.sort_by_key(|image| {
+                        std::cmp::Reverse((image.trashed_at.unwrap_or(0), image.timestamp))
+                    });
+                    Ok(Some(images))
+                }
+                GalleryView::Library => {
+                    let rows = db.list(Some(&dir))?;
+                    if rows.is_empty() {
+                        return Ok(None);
+                    }
+                    let archive = gallery_archive.committed_archive_index(&dir)?;
+                    let images = archive.overlay_db_gallery(&rows);
+                    Ok(Some(crate::gallery_organization::enrich_library_listing(
+                        images,
+                        &organization,
+                        retention_days,
+                    )))
+                }
+            }
         })
         .await
         .map_err(|e| ApiError::internal(format!("gallery DB query failed: {e}")))?
         .map_err(|e| ApiError::internal(format!("gallery DB query failed: {e:#}")))?;
-        if let (Some(rows), archive) = listed {
-            if !rows.is_empty() {
-                let images = archive.overlay_db_gallery(&rows);
-                return Ok(Json(images));
-            }
+        if let Some(images) = listed {
+            return Ok(Json(images));
         }
+    }
+
+    if view == GalleryView::Trash {
+        // No trash index without the metadata DB.
+        return Ok(Json(Vec::new()));
     }
 
     let gallery_archive = state.gallery_publication_gate.clone();
@@ -6814,7 +7031,9 @@ async fn get_gallery_image(
         return Err(ApiError::validation("invalid filename"));
     }
 
-    let path = output_dir.join(&clean_name);
+    // A trashed print still streams: resolve the live path first, then
+    // `<dir>/.trash/<name>`, so the trash view and a restore preview render.
+    let path = crate::gallery_trash::resolve_gallery_media_source(&output_dir, &clean_name);
     let content_type = content_type_for_filename(&clean_name);
     serve_media_file(&path, &headers, content_type, "image not found").await
 }
@@ -6962,131 +7181,6 @@ fn content_type_for_filename(name: &str) -> &'static str {
     }
 }
 
-/// Delete a gallery image and its server-side thumbnail.
-///
-/// Destructive, but always enabled — pair with the `MOLD_API_KEY` middleware
-/// when the server is exposed beyond localhost.
-async fn delete_gallery_image(
-    State(state): State<AppState>,
-    axum::extract::Path(filename): axum::extract::Path<String>,
-) -> Result<impl IntoResponse, ApiError> {
-    let _gallery_writer = state.gallery_publication_gate.write().await;
-    let config = state.config.read().await;
-    if state.is_output_disabled(&config) {
-        return Err(ApiError::not_found("image output is disabled"));
-    }
-    let output_dir = config.effective_output_dir();
-    drop(config);
-
-    let clean_name = std::path::Path::new(&filename)
-        .file_name()
-        .map(|f| f.to_string_lossy().to_string())
-        .unwrap_or_default();
-
-    if clean_name.is_empty() || clean_name != filename {
-        return Err(ApiError::validation("invalid filename"));
-    }
-
-    // File removal + DB delete are blocking syscalls / a synchronous SQLite
-    // call — run the whole batch on the blocking pool so a slow disk can't
-    // stall an async worker thread mid-generation.
-    let db = state.metadata_db.clone();
-    let archive = state.gallery_publication_gate.clone();
-    let name = clean_name.clone();
-    let dir = output_dir.clone();
-    tokio::task::spawn_blocking(move || -> Result<(), ApiError> {
-        let path = dir.join(&name);
-        let archive_disposition =
-            crate::batch_transaction::tombstone_committed_archive_filename(
-                &dir, &name, &archive,
-            )
-            .map_err(|error| {
-                ApiError::internal(format!(
-                    "failed to retire committed gallery metadata before delete: {error:#}"
-                ))
-            })?;
-        if archive_disposition
-            == crate::batch_transaction::ArchiveDeleteDisposition::PreservedReplacement
-        {
-            return Err(ApiError::with_code(
-                "gallery file changed since publication; the replacement was preserved and quarantined",
-                "GALLERY_DELETE_IDENTITY_CHANGED",
-                StatusCode::CONFLICT,
-            ));
-        }
-        if path.is_file() {
-            std::fs::remove_file(&path)
-                .map_err(|e| ApiError::internal(format!("failed to delete image: {e}")))?;
-            crate::batch_transaction::sync_ordinary_gallery_directory(&dir).map_err(|error| {
-                ApiError::internal(format!(
-                    "failed to make gallery deletion durable: {error:#}"
-                ))
-            })?;
-        }
-        if archive_disposition
-            == crate::batch_transaction::ArchiveDeleteDisposition::NoArchive
-        {
-            archive.retire_committed_filename(&name);
-        }
-
-        // Also remove server-side thumbnail (both legacy no-suffix and current
-        // `.png`-suffixed cache layouts) and the animated preview sidecar so
-        // `/api/gallery/preview/:filename` doesn't keep serving the GIF after
-        // the source MP4 is gone.
-        let thumb_dir = server_thumbnail_dir();
-        let _ = std::fs::remove_file(thumb_dir.join(&name));
-        let _ = std::fs::remove_file(thumb_dir.join(format!("{name}.png")));
-        let _ = std::fs::remove_file(
-            server_preview_gif_dir().join(mold_core::media_paths::preview_gif_filename(&name)),
-        );
-
-        // Drop the matching metadata row if the DB is enabled. Errors here are
-        // logged — they don't roll back the disk delete since the file is the
-        // source of truth and reconciliation will re-sync on the next restart.
-        let projection_complete = if let Some(db) = db.as_ref().as_ref() {
-            match db.delete(&dir, &name) {
-                Ok(true) => true,
-                Ok(false) => {
-                    tracing::debug!("delete: no metadata row for {}", dir.join(&name).display());
-                    true
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "metadata DB delete failed for {}: {e:#}",
-                        dir.join(&name).display()
-                    );
-                    false
-                }
-            }
-        } else {
-            true
-        };
-        if projection_complete
-            && archive_disposition
-                == crate::batch_transaction::ArchiveDeleteDisposition::SafeToUnlink
-        {
-            archive
-                .acknowledge_retirement_projections(&dir, [name.clone()])
-                .map_err(|error| {
-                    ApiError::internal(format!(
-                        "failed to checkpoint gallery deletion projection: {error:#}"
-                    ))
-                })?;
-        }
-        Ok(())
-    })
-    .await
-    .map_err(|e| ApiError::internal(format!("gallery delete task failed: {e}")))??;
-
-    state
-        .events
-        .publish(mold_core::ServerEvent::GalleryRemoved {
-            filename: clean_name,
-        });
-
-    Ok(StatusCode::NO_CONTENT)
-}
-
 /// Serve a thumbnail for a gallery image. Generated on-demand and cached
 /// at ~/.mold/cache/thumbnails/ on the server side.
 async fn get_gallery_thumbnail(
@@ -7110,7 +7204,7 @@ async fn get_gallery_thumbnail(
         return Err(ApiError::validation("invalid filename"));
     }
 
-    let source_path = output_dir.join(&clean_name);
+    let source_path = crate::gallery_trash::resolve_gallery_media_source(&output_dir, &clean_name);
     if !source_path.is_file() {
         return Err(ApiError::not_found(format!(
             "image not found: {clean_name}"
@@ -7252,7 +7346,7 @@ async fn get_gallery_preview(
     // orphaned and must not be served.
     // Check the source file first and 404 before touching the cache so a
     // stale `.preview.gif` never leaks deleted content.
-    let source_path = output_dir.join(&clean_name);
+    let source_path = crate::gallery_trash::resolve_gallery_media_source(&output_dir, &clean_name);
     if !tokio::fs::metadata(&source_path)
         .await
         .map(|m| m.is_file())
@@ -7293,7 +7387,7 @@ async fn get_gallery_preview(
 /// writes to (`crates/mold-tui/src/thumbnails.rs::preview_dir`) so a
 /// single preview.gif authored on either side is reachable via this
 /// endpoint.
-fn server_preview_gif_dir() -> std::path::PathBuf {
+pub(crate) fn server_preview_gif_dir() -> std::path::PathBuf {
     mold_core::Config::mold_dir()
         .unwrap_or_else(|| std::path::PathBuf::from(".mold"))
         .join("cache")
@@ -7301,7 +7395,7 @@ fn server_preview_gif_dir() -> std::path::PathBuf {
 }
 
 /// Server-side thumbnail cache directory.
-fn server_thumbnail_dir() -> std::path::PathBuf {
+pub(crate) fn server_thumbnail_dir() -> std::path::PathBuf {
     mold_core::Config::mold_dir()
         .unwrap_or_else(|| std::path::PathBuf::from(".mold"))
         .join("cache")
@@ -7505,6 +7599,12 @@ fn scan_gallery_dir_with_archive(
                 format: Some(file.format),
                 size_bytes: Some(size_bytes),
                 metadata_synthetic: synthetic,
+                title: None,
+                tags: Vec::new(),
+                favorite: false,
+                collections: Vec::new(),
+                trashed_at: None,
+                purge_at: None,
             })
         })
         .collect();

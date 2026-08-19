@@ -12,11 +12,12 @@
 //!   `Config` so downstream consumers read the authoritative values
 //!   without knowing about the DB.
 //! - [`save_expand_to_db`] / [`save_generate_globals_to_db`] /
-//!   [`save_scheduler_to_db`] — used by the CLI `mold config set` dispatcher
-//!   for expand.* / generate.* / scheduler.* keys.
+//!   [`save_scheduler_to_db`] / [`save_gallery_to_db`] — used by the CLI
+//!   `mold config set` dispatcher for expand.* / generate.* / scheduler.* /
+//!   gallery.* keys.
 
 use anyhow::{Context, Result};
-use mold_core::config::{Config, ModelConfig, SchedulerSettings};
+use mold_core::config::{Config, GallerySettings, ModelConfig, SchedulerSettings};
 use mold_core::expand::ExpandSettings;
 use std::path::Path;
 use std::sync::OnceLock;
@@ -198,6 +199,46 @@ pub fn hydrate_scheduler_from_db(
     Ok(applied)
 }
 
+/// Persist the gallery slice (`gallery.trash_retention_days`) into
+/// `settings`. Out-of-range values are rejected here too so a direct caller
+/// cannot store what `mold_core::config_keys::set_value` would refuse.
+pub fn save_gallery_to_db(db: &MetadataDb, gallery: GallerySettings) -> Result<()> {
+    anyhow::ensure!(
+        gallery.trash_retention_days <= mold_core::config::GALLERY_TRASH_RETENTION_MAX_DAYS,
+        "{} must be between 0 and {}",
+        keys::GALLERY_TRASH_RETENTION_DAYS,
+        mold_core::config::GALLERY_TRASH_RETENTION_MAX_DAYS
+    );
+    Settings::new(db).set_int(
+        keys::GALLERY_TRASH_RETENTION_DAYS,
+        i64::from(gallery.trash_retention_days),
+    )
+}
+
+/// Overlay the stored gallery slice onto `gallery`. A row outside the valid
+/// range (hand-edited DB) is ignored with a warning rather than poisoning
+/// every config load. Returns true if a row applied.
+pub fn hydrate_gallery_from_db(db: &MetadataDb, gallery: &mut GallerySettings) -> Result<bool> {
+    let s = Settings::new(db);
+    let Some(value) = s.get_int(keys::GALLERY_TRASH_RETENTION_DAYS)? else {
+        return Ok(false);
+    };
+    match u32::try_from(value) {
+        Ok(days) if days <= mold_core::config::GALLERY_TRASH_RETENTION_MAX_DAYS => {
+            gallery.trash_retention_days = days;
+            Ok(true)
+        }
+        _ => {
+            tracing::warn!(
+                "ignoring out-of-range {} = {value} in settings DB (expected 0..={})",
+                keys::GALLERY_TRASH_RETENTION_DAYS,
+                mold_core::config::GALLERY_TRASH_RETENTION_MAX_DAYS
+            );
+            Ok(false)
+        }
+    }
+}
+
 /// Snapshot the user-editable per-model generation defaults out of a
 /// `ModelConfig` into a `ModelPrefs` row (the path fields stay in TOML).
 fn model_prefs_from_config(mc: &ModelConfig) -> ModelPrefs {
@@ -277,6 +318,12 @@ pub fn migrate_config_toml_to_db(db: &MetadataDb, cfg: &Config) -> Result<bool> 
     save_expand_to_db(db, &cfg.expand)?;
     save_generate_globals_to_db(db, cfg)?;
     save_scheduler_to_db(db, cfg.scheduler)?;
+    // A hand-written `[gallery]` section imports once like `[scheduler]`;
+    // the compiled default is not persisted so a later default change
+    // still reaches untouched installs.
+    if cfg.gallery != GallerySettings::default() {
+        save_gallery_to_db(db, cfg.gallery)?;
+    }
 
     // Per-model user prefs. Skip rows that carry nothing but paths — we
     // want a ModelPrefs row only when the user has set at least one
@@ -409,6 +456,7 @@ pub fn hydrate_config_from_db(db: &MetadataDb, cfg: &mut Config) -> Result<()> {
     hydrate_expand_from_db(db, &mut cfg.expand)?;
     hydrate_generate_globals_from_db(db, cfg)?;
     hydrate_scheduler_from_db(db, &mut cfg.scheduler)?;
+    hydrate_gallery_from_db(db, &mut cfg.gallery)?;
 
     // Pass 1: overlay prefs for each model already in cfg.models. Keyed
     // on the canonical resolution so `flux-dev` and `flux-dev:q4` hit
@@ -535,6 +583,10 @@ pub fn persist_config_key(db: &MetadataDb, config: &Config, key: &str) -> Result
         save_scheduler_to_db(db, config.scheduler)?;
         return Ok(());
     }
+    if key.starts_with("gallery.") {
+        save_gallery_to_db(db, config.gallery)?;
+        return Ok(());
+    }
     // All the global generation defaults ride one writer — cheap and
     // keeps the two halves of a `--width --height` pair consistent.
     save_generate_globals_to_db(db, config)?;
@@ -589,6 +641,8 @@ pub fn reset_global_key(db: &MetadataDb, profile: &str, key: &str) -> Result<()>
         s.reset_scheduler_timing_atomic(db_key)?;
         return Ok(());
     }
+    // gallery.* rows are independent scalars: a plain delete restores the
+    // compiled default (30 days) on the next hydrate.
     s.delete(db_key)?;
     Ok(())
 }
@@ -713,6 +767,129 @@ mod tests {
         assert_eq!(target.default_negative_prompt.as_deref(), Some("ugly"));
         assert_eq!(target.t5_variant.as_deref(), Some("q8"));
         assert_eq!(target.qwen3_variant.as_deref(), Some("bf16"));
+    }
+
+    #[test]
+    fn gallery_retention_roundtrip_via_db() {
+        let db = db();
+        let mut target = GallerySettings::default();
+        assert!(!hydrate_gallery_from_db(&db, &mut target).unwrap());
+        assert_eq!(target.trash_retention_days, 30);
+
+        save_gallery_to_db(
+            &db,
+            GallerySettings {
+                trash_retention_days: 0,
+            },
+        )
+        .unwrap();
+        assert!(hydrate_gallery_from_db(&db, &mut target).unwrap());
+        assert_eq!(target.trash_retention_days, 0);
+
+        let error = save_gallery_to_db(
+            &db,
+            GallerySettings {
+                trash_retention_days: 3651,
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("between 0 and 3650"), "{error}");
+        // The rejected write left the stored row untouched.
+        let mut again = GallerySettings::default();
+        assert!(hydrate_gallery_from_db(&db, &mut again).unwrap());
+        assert_eq!(again.trash_retention_days, 0);
+    }
+
+    #[test]
+    fn gallery_retention_hydrate_ignores_out_of_range_rows() {
+        let db = db();
+        let s = Settings::new(&db);
+        s.set_int(keys::GALLERY_TRASH_RETENTION_DAYS, -5).unwrap();
+        let mut target = GallerySettings::default();
+        assert!(!hydrate_gallery_from_db(&db, &mut target).unwrap());
+        assert_eq!(target.trash_retention_days, 30);
+        s.set_int(keys::GALLERY_TRASH_RETENTION_DAYS, 99_999)
+            .unwrap();
+        assert!(!hydrate_gallery_from_db(&db, &mut target).unwrap());
+        assert_eq!(target.trash_retention_days, 30);
+    }
+
+    #[test]
+    fn persist_and_reset_route_gallery_key_through_settings() {
+        let db = db();
+        let mut cfg = Config::default();
+        mold_core::config_keys::set_value(
+            &mut cfg,
+            mold_core::config_keys::GALLERY_TRASH_RETENTION_DAYS_KEY,
+            "90",
+        )
+        .unwrap();
+        persist_config_key(
+            &db,
+            &cfg,
+            mold_core::config_keys::GALLERY_TRASH_RETENTION_DAYS_KEY,
+        )
+        .unwrap();
+        assert_eq!(
+            Settings::new(&db)
+                .get_int(keys::GALLERY_TRASH_RETENTION_DAYS)
+                .unwrap(),
+            Some(90)
+        );
+
+        // hydrate_config_from_db overlays it like every other DB slice.
+        let mut hydrated = Config::default();
+        hydrate_config_from_db(&db, &mut hydrated).unwrap();
+        assert_eq!(hydrated.gallery.trash_retention_days, 90);
+
+        // The generate.* writer was NOT invoked for a gallery key.
+        assert_eq!(
+            Settings::new(&db)
+                .get_int(keys::GENERATE_DEFAULT_WIDTH)
+                .unwrap(),
+            None
+        );
+
+        reset_global_key(
+            &db,
+            keys::DEFAULT_PROFILE,
+            mold_core::config_keys::GALLERY_TRASH_RETENTION_DAYS_KEY,
+        )
+        .unwrap();
+        assert_eq!(
+            Settings::new(&db)
+                .get_int(keys::GALLERY_TRASH_RETENTION_DAYS)
+                .unwrap(),
+            None
+        );
+        let mut reset = Config::default();
+        hydrate_config_from_db(&db, &mut reset).unwrap();
+        assert_eq!(reset.gallery.trash_retention_days, 30);
+    }
+
+    #[test]
+    fn migration_imports_hand_written_gallery_section_only_when_set() {
+        let db = db();
+        let cfg = Config::default();
+        assert!(migrate_config_toml_to_db(&db, &cfg).unwrap());
+        assert_eq!(
+            Settings::new(&db)
+                .get_int(keys::GALLERY_TRASH_RETENTION_DAYS)
+                .unwrap(),
+            None,
+            "default gallery settings must not be pinned into the DB"
+        );
+
+        let db = MetadataDb::open_in_memory().unwrap();
+        let mut cfg = Config::default();
+        cfg.gallery.trash_retention_days = 7;
+        assert!(migrate_config_toml_to_db(&db, &cfg).unwrap());
+        assert_eq!(
+            Settings::new(&db)
+                .get_int(keys::GALLERY_TRASH_RETENTION_DAYS)
+                .unwrap(),
+            Some(7)
+        );
     }
 
     #[test]

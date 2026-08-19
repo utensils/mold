@@ -25,6 +25,7 @@ pub mod runpod;
 pub mod serve;
 pub mod server;
 pub mod stats;
+pub mod trash;
 pub mod unload;
 pub mod update;
 pub mod upscale;

@@ -54,6 +54,23 @@ pub fn parse_duration(s: &str) -> Result<Duration> {
     Ok(Duration::from_secs(secs))
 }
 
+/// The gallery trash (`<output_dir>/.trash/`) is owned by the server's
+/// retention sweeper: its files carry tombstones and DB rows, so `mold clean
+/// --older-than` must not reach in and unlink them out from under it.
+fn is_gallery_trash_dir(entry: &walkdir::DirEntry) -> bool {
+    entry.file_type().is_dir() && entry.file_name() == mold_db::trash::TRASH_DIR_NAME
+}
+
+/// Walk `dir` for old-output cleanup: every entry except the gallery trash
+/// subtree.
+fn walk_output_dir(dir: &std::path::Path) -> impl Iterator<Item = walkdir::DirEntry> {
+    walkdir::WalkDir::new(dir)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|entry| !is_gallery_trash_dir(entry))
+        .flatten()
+}
+
 /// Scan output directory for images older than the given age.
 /// Returns (count, bytes).
 fn scan_old_output_images(dir: &std::path::Path, age: Duration) -> (u64, u64) {
@@ -62,11 +79,7 @@ fn scan_old_output_images(dir: &std::path::Path, age: Duration) -> (u64, u64) {
     }
     let mut count = 0u64;
     let mut bytes = 0u64;
-    for entry in walkdir::WalkDir::new(dir)
-        .follow_links(false)
-        .into_iter()
-        .flatten()
-    {
+    for entry in walk_output_dir(dir) {
         if !entry.file_type().is_file() {
             continue;
         }
@@ -93,11 +106,7 @@ fn remove_old_output_images(dir: &std::path::Path, age: Duration) -> (u64, u64) 
     }
     let mut count = 0u64;
     let mut bytes = 0u64;
-    for entry in walkdir::WalkDir::new(dir)
-        .follow_links(false)
-        .into_iter()
-        .flatten()
-    {
+    for entry in walk_output_dir(dir) {
         if !entry.file_type().is_file() {
             continue;
         }
@@ -250,6 +259,33 @@ fn plural(n: u64, word: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `mold clean --older-than` must never reach into the gallery trash:
+    /// those bytes belong to the server's retention sweeper (tombstones +
+    /// DB rows), and unlinking them here would orphan both.
+    #[test]
+    fn old_output_cleanup_skips_the_gallery_trash() {
+        let dir = tempfile::tempdir().unwrap();
+        let trash = mold_db::trash_dir(dir.path());
+        std::fs::create_dir_all(&trash).unwrap();
+        let live = dir.path().join("old-live.png");
+        let trashed = trash.join("old-trashed.png");
+        std::fs::write(&live, b"live").unwrap();
+        std::fs::write(&trashed, b"trashed").unwrap();
+        // Both files were written just now; an age of zero makes them "old".
+        let age = Duration::from_secs(0);
+
+        let (count, bytes) = scan_old_output_images(dir.path(), age);
+        assert_eq!((count, bytes), (1, 4), "only the live print is counted");
+
+        let (count, _) = remove_old_output_images(dir.path(), age);
+        assert_eq!(count, 1);
+        assert!(!live.exists(), "the live print was removed");
+        assert!(
+            trashed.is_file(),
+            "the trashed print is left for the sweeper"
+        );
+    }
 
     #[test]
     fn parse_duration_days() {

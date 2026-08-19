@@ -68,6 +68,18 @@ pub struct GenerationRecord {
     /// True when [`metadata`] was synthesized from the filename (no embedded
     /// `mold:parameters` chunk). Mirrors [`mold_core::GalleryImage::metadata_synthetic`].
     pub metadata_synthetic: bool,
+    /// User-owned display title. Seeded from the generation request on
+    /// insert and editable afterwards; a reconcile refresh never resets it.
+    #[serde(default)]
+    pub title: Option<String>,
+    /// User-owned favorite flag. Survives reconcile refreshes.
+    #[serde(default)]
+    pub favorite: bool,
+    /// When the print was moved to `<output_dir>/.trash/`; `None` for a
+    /// live print. The row keeps its `(output_dir, filename)` identity while
+    /// trashed. Survives reconcile refreshes.
+    #[serde(default)]
+    pub trashed_at_ms: Option<i64>,
 }
 
 impl GenerationRecord {
@@ -89,13 +101,24 @@ impl GenerationRecord {
             file_mtime_ms: None,
             file_size_bytes: None,
             format,
-            metadata,
             generation_time_ms: None,
             backend: None,
             hostname: None,
             source,
             metadata_synthetic: false,
+            // The user-editable title starts as the creation-time title the
+            // request carried (embedded in `mold:parameters`), so mirrors and
+            // reconcile-from-disk recover it; later edits live on the row only.
+            title: metadata.title.clone(),
+            favorite: false,
+            trashed_at_ms: None,
+            metadata,
         }
+    }
+
+    /// True when the print is live (not in the trash).
+    pub fn is_live(&self) -> bool {
+        self.trashed_at_ms.is_none()
     }
 
     /// Update [`Self::file_mtime_ms`] and [`Self::file_size_bytes`] from a
@@ -128,6 +151,15 @@ impl GenerationRecord {
             format: Some(self.format),
             size_bytes: self.file_size_bytes.map(|n| n as u64),
             metadata_synthetic: self.metadata_synthetic,
+            // Row title (user-editable) wins over the creation-time metadata
+            // title; tags/collections/purge_at are applied by the server's
+            // post-overlay enrichment, never here.
+            title: self.title.clone().or_else(|| self.metadata.title.clone()),
+            tags: Vec::new(),
+            favorite: self.favorite,
+            collections: Vec::new(),
+            trashed_at: self.trashed_at_ms.map(|ms| (ms / 1000) as u64),
+            purge_at: None,
         }
     }
 }
@@ -138,6 +170,7 @@ mod tests {
 
     fn meta() -> OutputMetadata {
         OutputMetadata {
+            title: None,
             source_fit: None,
             guidance_overrides: None,
             sample_shift: None,
@@ -226,6 +259,31 @@ mod tests {
         assert_eq!(rec.output_dir, "/tmp/out");
         assert_eq!(rec.source, RecordSource::Cli);
         assert!(!rec.metadata_synthetic);
+    }
+
+    /// Rows serialized before v20 (e.g. a server snapshot written by an
+    /// older build) carry none of the organization fields; they must
+    /// deserialize with neutral defaults instead of failing.
+    #[test]
+    fn organization_fields_default_when_absent_from_serialized_record() {
+        let rec = GenerationRecord::from_save(
+            Path::new("/o"),
+            "f.png",
+            OutputFormat::Png,
+            meta(),
+            RecordSource::Server,
+            5_000,
+        );
+        let mut value = serde_json::to_value(&rec).unwrap();
+        let obj = value.as_object_mut().unwrap();
+        obj.remove("title");
+        obj.remove("favorite");
+        obj.remove("trashed_at_ms");
+        let back: GenerationRecord = serde_json::from_value(value).unwrap();
+        assert_eq!(back.title, None);
+        assert!(!back.favorite);
+        assert_eq!(back.trashed_at_ms, None);
+        assert!(back.is_live());
     }
 
     #[test]

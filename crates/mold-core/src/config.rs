@@ -15,8 +15,9 @@ static RUNTIME_MODELS_DIR_OVERRIDE: OnceLock<PathBuf> = OnceLock::new();
 const BOOTSTRAP_ONLY_BANNER: &str = "\
 # mold config — bootstrap-only surface.
 #
-# User preferences (expand.*, scheduler.*, generate.default_*, per-model generation
-# defaults, LoRA, and generation scheduler) live in SQLite at <MOLD_HOME>/mold.db.
+# User preferences (expand.*, scheduler.*, gallery.*, generate.default_*, per-model
+# generation defaults, LoRA, and generation scheduler) live in SQLite at
+# <MOLD_HOME>/mold.db.
 # Edit them via:
 #   mold config set <key> <value>
 #   mold config get <key>
@@ -41,6 +42,7 @@ const STRIPPED_GLOBAL_KEYS: &[&str] = &[
     "qwen3_variant",
     "expand",
     "scheduler",
+    "gallery",
 ];
 
 const STRIPPED_MODEL_KEYS: &[&str] = &[
@@ -600,6 +602,12 @@ pub struct Config {
     #[serde(default)]
     pub scheduler: SchedulerSettings,
 
+    /// Profile-scoped gallery behavior (trash retention). Persisted in
+    /// `mold.db` like `scheduler`; the serialized field exists only for
+    /// one-shot import of a hand-written `[gallery]` TOML section.
+    #[serde(default)]
+    pub gallery: GallerySettings,
+
     /// Logging configuration.
     #[serde(default)]
     pub logging: LoggingConfig,
@@ -649,6 +657,57 @@ pub struct LoggingConfig {
 }
 
 pub const SCHEDULER_TIMING_MAX_MS: u32 = 30_000;
+
+/// Upper bound for `gallery.trash_retention_days` (ten years).
+pub const GALLERY_TRASH_RETENTION_MAX_DAYS: u32 = 3650;
+
+/// Gallery behaviour that is a user preference rather than bootstrap state.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+pub struct GallerySettings {
+    /// Days a trashed print survives in `<output_dir>/.trash/` before the
+    /// retention sweeper purges it. `0` keeps trashed prints forever.
+    /// Default 30. Env override: `MOLD_GALLERY_TRASH_RETENTION_DAYS`.
+    #[serde(default = "default_trash_retention_days")]
+    pub trash_retention_days: u32,
+}
+
+const fn default_trash_retention_days() -> u32 {
+    30
+}
+
+impl Default for GallerySettings {
+    fn default() -> Self {
+        Self {
+            trash_retention_days: default_trash_retention_days(),
+        }
+    }
+}
+
+impl GallerySettings {
+    /// Name of the env var that overrides `trash_retention_days`.
+    pub const TRASH_RETENTION_DAYS_ENV: &'static str = "MOLD_GALLERY_TRASH_RETENTION_DAYS";
+
+    /// Effective retention in days: the `MOLD_GALLERY_TRASH_RETENTION_DAYS`
+    /// env var when it holds a valid value in `0..=3650`, else the stored
+    /// setting. Invalid env values warn once per call and fall through, the
+    /// same contract `Config::effective_embed_metadata` keeps.
+    pub fn effective_trash_retention_days(&self) -> u32 {
+        match std::env::var(Self::TRASH_RETENTION_DAYS_ENV) {
+            Ok(value) => match value.trim().parse::<u32>() {
+                Ok(days) if days <= GALLERY_TRASH_RETENTION_MAX_DAYS => days,
+                _ => {
+                    eprintln!(
+                        "warning: invalid {} value '{value}' (expected 0..={}) — using config/default",
+                        Self::TRASH_RETENTION_DAYS_ENV,
+                        GALLERY_TRASH_RETENTION_MAX_DAYS
+                    );
+                    self.trash_retention_days
+                }
+            },
+            Err(_) => self.trash_retention_days,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
 pub struct SchedulerSettings {
@@ -796,6 +855,7 @@ impl Default for Config {
             default_negative_prompt: None,
             expand: ExpandSettings::default(),
             scheduler: SchedulerSettings::default(),
+            gallery: GallerySettings::default(),
             logging: LoggingConfig::default(),
             runpod: crate::runpod::RunPodSettings::default(),
             lambda: crate::lambda::LambdaSettings::default(),

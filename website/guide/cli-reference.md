@@ -68,6 +68,7 @@ other run, including img2img on an image family, still errors with
 | `--lora <PATH>`, `--lora-scale <FLOAT>`                                                      | LoRA adapter path and scale; `--lora` is repeatable; suffix `@high`/`@low` binds an adapter to one Wan 2.2 A14B expert      |
 | `--upscale <MODEL>`                                                                          | Apply a Real-ESRGAN upscaler after generation                                                                               |
 | `--no-metadata`                                                                              | Disable embedded PNG metadata for this run                                                                                  |
+| `--title <TEXT>`                                                                             | Print title (≤ 120 chars): embedded in metadata, seeded into the gallery row, slugged into the default filename             |
 | `--preview`                                                                                  | Display output inline in the terminal                                                                                       |
 | `--expand`, `--no-expand`, `--expand-backend <URL>`, `--expand-model <MODEL>`                | Prompt expansion controls                                                                                                   |
 | `--local`                                                                                    | Skip the server and run local inference                                                                                     |
@@ -135,6 +136,29 @@ Durable chain jobs store checkpoints under `MOLD_HOME/jobs/<job_id>`.
 `mold jobs gc` mirrors `POST /api/chain-jobs/gc`, pruning successful ephemeral
 shim jobs and explicitly discarding completed jobs' editable scene caches.
 Automatic maintenance leaves durable scene caches intact.
+
+## `mold trash`
+
+Inspect, restore, or empty the gallery trash on a running `mold serve`
+instance. Deleting a print from any surface moves it to the host's trash
+(`<output_dir>/.trash/`) instead of removing it; the server purges trashed
+prints after `gallery.trash_retention_days` (default 30, `0` keeps them
+forever — see [Configuration](/guide/configuration#library-trash)). The
+commands use `MOLD_HOST` and send `MOLD_API_KEY` when configured; there is no
+local fallback, because the trash belongs to that host's gallery.
+
+```bash
+mold trash list [--json]          # filename, title, trashed, purges, size
+mold trash restore <FILENAME>...  # back to the live gallery (409 if a live print took the name)
+mold trash empty [--yes]          # purge everything; confirms unless --yes
+mold trash sweep                  # run the retention sweep now
+```
+
+`mold trash list` shows each print's purge countdown as `in 27d`, `kept`
+when retention is keep-forever, or `due` when the next sweep will remove it.
+`--json` prints the raw `GET /api/gallery?view=trash` rows. `mold trash
+empty` and `mold trash sweep` mirror `DELETE /api/gallery/trash` and
+`POST /api/gallery/trash/sweep`.
 
 ## `mold expand`
 
@@ -291,6 +315,7 @@ mold config edit
 | --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | General   | `default_model`, `models_dir`, `output_dir`, `server_port`, `default_width`, `default_height`, `default_steps`, `embed_metadata`, `t5_variant`, `qwen3_variant`, `umt5_variant`, `default_negative_prompt`                         |
 | Expand    | `expand.enabled`, `expand.backend`, `expand.model`, `expand.api_model`, `expand.temperature`, `expand.top_p`, `expand.max_tokens`, `expand.thinking`                                                                               |
+| Gallery   | `gallery.trash_retention_days` (days a trashed print is kept before the sweeper purges it; `0` = forever, default 30, stored in `mold.db`)                                                                                         |
 | Logging   | `logging.level`, `logging.file`, `logging.dir`, `logging.max_days`                                                                                                                                                                 |
 | RunPod    | `runpod.api_key`, `runpod.default_gpu`, `runpod.default_datacenter`, `runpod.default_network_volume_id`, `runpod.auto_teardown`, `runpod.auto_teardown_idle_mins`, `runpod.cost_alert_usd`, `runpod.endpoint`                      |
 | Lambda    | `lambda.api_key`, `lambda.endpoint`, `lambda.image_repository`, `lambda.ssh_key_name`, `lambda.ssh_private_key_path`, `lambda.filesystem_prefix`, `lambda.filesystem_mount_path`, `lambda.confirm_hourly_usd`, `lambda.local_port` |

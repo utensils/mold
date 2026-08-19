@@ -4867,6 +4867,7 @@ mod tests {
     #[test]
     fn activation_hint_from_request_classifies_correctly() {
         let mut req = GenerateRequest {
+            title: None,
             source_fit: None,
             hdr_exr_dir: None,
             hdr_exr_full_float: false,

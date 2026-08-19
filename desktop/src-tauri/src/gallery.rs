@@ -156,6 +156,12 @@ fn scan(dir: &std::path::Path) -> Vec<mold_core::GalleryImage> {
                 format: Some(file.format),
                 size_bytes: Some(size_bytes),
                 metadata_synthetic: synthetic,
+                title: None,
+                tags: Vec::new(),
+                favorite: false,
+                collections: Vec::new(),
+                trashed_at: None,
+                purge_at: None,
             }
         })
         .collect();

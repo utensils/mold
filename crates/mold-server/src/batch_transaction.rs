@@ -172,6 +172,23 @@ impl GalleryPublicationGate {
         }
     }
 
+    /// In-memory counterpart of [`Self::retire_committed_filename`] for a
+    /// trashed name that had no committed archive entry: the restore put the
+    /// bytes back, so stop hiding the name from listings. A name that still
+    /// has a durable retired entry is left alone — only
+    /// `restore_trashed_archive_filename` may un-retire those.
+    pub(crate) fn unretire_committed_filename(&self, filename: &str) {
+        let mut current = self
+            .committed_archive_index
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some((_, index)) = current.as_mut() {
+            if !index.retired_entries.contains_key(filename) {
+                index.retired_names.remove(filename);
+            }
+        }
+    }
+
     pub(crate) fn acknowledge_retirement_projections(
         &self,
         output_dir: &Path,
@@ -5656,6 +5673,243 @@ pub(crate) fn tombstone_committed_archive_filename(
     }
     gate.install_committed_archive_index(next_generation, index);
     Ok(disposition)
+}
+
+/// Outcome of moving a committed archive child into the gallery trash.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TrashArchiveDisposition {
+    /// The filename has no live committed archive entry; the caller moves
+    /// the bytes itself and retires the name in memory.
+    NoArchive,
+    /// The exact committed identity was moved to `<dir>/.trash/<filename>`
+    /// and durably retired (retained in `retired_entries` with no projection
+    /// epoch, so it is never collected and a restore can re-home it with its
+    /// provenance intact).
+    Moved,
+    /// The live file no longer matches the committed identity; nothing was
+    /// moved and the replacement was quarantined.
+    PreservedReplacement,
+}
+
+/// Move the exact committed archive child claiming `filename` into the
+/// gallery trash directory. Mirrors [`tombstone_committed_archive_filename`]'s
+/// `SafeToUnlink` index mutation but renames the bytes into `<dir>/.trash/`
+/// instead of unlinking them. The bytes move BEFORE the retirement commits:
+/// if the rename fails nothing changed, and if the commit fails the rename
+/// is undone best-effort. A crash between the two leaves a live entry whose
+/// file is missing, which startup validation quarantines while the bytes
+/// stay recoverable in `.trash/` (reconcile re-flags the row from the file).
+pub(crate) fn trash_committed_archive_filename(
+    output_dir: &Path,
+    filename: &str,
+    gate: &GalleryPublicationGate,
+) -> anyhow::Result<TrashArchiveDisposition> {
+    validate_component(filename, "gallery trash filename")?;
+    let bookkeeping = acquire_gallery_bookkeeping_lock(output_dir)?;
+    let canonical_output_dir = bookkeeping.canonical_root().to_path_buf();
+    let output_dir = canonical_output_dir.as_path();
+    let mut index = gate.committed_archive_index_while_locked(output_dir, &bookkeeping)?;
+    let Some(entry) = index.entries.get(filename).cloned() else {
+        return Ok(TrashArchiveDisposition::NoArchive);
+    };
+    let current_matches = crate::gallery_authority::current_file_matches(output_dir, &entry)?;
+    let generation = crate::gallery_authority::read_generation(output_dir, &bookkeeping)?
+        .context("gallery authority generation is missing")?;
+    if !current_matches {
+        index.quarantined_names.insert(filename.to_owned());
+        let next_generation = crate::gallery_authority::commit_snapshot(
+            output_dir,
+            &bookkeeping,
+            generation,
+            &mut index,
+            "trash_replacement_quarantine",
+            vec![filename.to_owned()],
+        )?;
+        gate.install_committed_archive_index(next_generation, index);
+        return Ok(TrashArchiveDisposition::PreservedReplacement);
+    }
+    let live_path = output_dir.join(filename);
+    let trash_path = move_gallery_file_to_trash(output_dir, &live_path, filename)?;
+    index.entries.remove(filename);
+    index.quarantined_names.remove(filename);
+    index.retired_names.insert(filename.to_owned());
+    index.retired_entries.insert(filename.to_owned(), entry);
+    index
+        .retirement_epochs
+        .insert(filename.to_owned(), generation.saturating_add(1));
+    index.retirement_projection_epochs.remove(filename);
+    let next_generation = match crate::gallery_authority::commit_snapshot(
+        output_dir,
+        &bookkeeping,
+        generation,
+        &mut index,
+        "user_trash",
+        vec![filename.to_owned()],
+    ) {
+        Ok(generation) => generation,
+        Err(error) => {
+            // Best-effort: put the bytes back so the live entry stays valid.
+            let _ = fs::rename(&trash_path, &live_path);
+            let _ = sync_ordinary_gallery_directory(output_dir);
+            let _ = sync_ordinary_gallery_directory(&gallery_trash_dir(output_dir));
+            return Err(error);
+        }
+    };
+    gate.install_committed_archive_index(next_generation, index);
+    Ok(TrashArchiveDisposition::Moved)
+}
+
+/// Outcome of restoring a trashed filename into the committed archive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RestoreArchiveDisposition {
+    /// The name has no retired committed entry; the caller moves the bytes
+    /// back itself and un-retires the name in memory.
+    NoArchive,
+    /// The retired identity was re-homed as a live entry and the bytes were
+    /// moved back to the live path.
+    Restored,
+    /// The bytes in `.trash/` no longer match the retired identity; nothing
+    /// changed.
+    Conflict,
+}
+
+/// Restore the retired committed archive child `filename` from
+/// `trash_path`. The index is committed FIRST (un-retiring exactly as
+/// `record_committed_manifest` does for a re-publication) and the bytes are
+/// renamed back afterwards. That ordering is deliberate: a crash between the
+/// two leaves a live entry whose file is missing, which startup validation
+/// merely quarantines while the bytes stay recoverable in `.trash/`. The
+/// reverse ordering could leave a live file that the authority still records
+/// as retired — exactly the shape `validate_snapshot_files` finishes as a
+/// crash-interrupted delete by unlinking it.
+pub(crate) fn restore_trashed_archive_filename(
+    output_dir: &Path,
+    filename: &str,
+    gate: &GalleryPublicationGate,
+    trash_path: &Path,
+) -> anyhow::Result<RestoreArchiveDisposition> {
+    validate_component(filename, "gallery restore filename")?;
+    let bookkeeping = acquire_gallery_bookkeeping_lock(output_dir)?;
+    let canonical_output_dir = bookkeeping.canonical_root().to_path_buf();
+    let output_dir = canonical_output_dir.as_path();
+    let mut index = gate.committed_archive_index_while_locked(output_dir, &bookkeeping)?;
+    let Some(entry) = index.retired_entries.get(filename).cloned() else {
+        return Ok(RestoreArchiveDisposition::NoArchive);
+    };
+    ensure!(
+        !index.entries.contains_key(filename),
+        "a live committed archive entry already claims gallery filename {filename}"
+    );
+    if !crate::gallery_authority::file_matches_entry_at(trash_path, &entry)? {
+        return Ok(RestoreArchiveDisposition::Conflict);
+    }
+    let generation = crate::gallery_authority::read_generation(output_dir, &bookkeeping)?
+        .context("gallery authority generation is missing")?;
+    index.retired_names.remove(filename);
+    index.retired_entries.remove(filename);
+    index.retirement_epochs.remove(filename);
+    index.retirement_projection_epochs.remove(filename);
+    index.quarantined_names.remove(filename);
+    // Facts are captured at the trash path; the rename below changes the
+    // inode's ctime, so the next validation re-hashes once and refreshes them.
+    index.entries.insert(
+        filename.to_owned(),
+        CommittedArchiveEntry {
+            identity: entry.identity,
+            record: entry.record,
+            facts: Some(ArchiveFileFacts::from_path(trash_path)?),
+        },
+    );
+    let next_generation = crate::gallery_authority::commit_snapshot(
+        output_dir,
+        &bookkeeping,
+        generation,
+        &mut index,
+        "user_restore",
+        vec![filename.to_owned()],
+    )?;
+    gate.install_committed_archive_index(next_generation, index);
+    let live_path = output_dir.join(filename);
+    fs::rename(trash_path, &live_path).with_context(|| {
+        format!(
+            "restoring {} from the gallery trash to {}",
+            trash_path.display(),
+            live_path.display()
+        )
+    })?;
+    sync_ordinary_gallery_directory(output_dir)?;
+    sync_ordinary_gallery_directory(&gallery_trash_dir(output_dir))?;
+    Ok(RestoreArchiveDisposition::Restored)
+}
+
+/// `<output_dir>/.trash` — the gallery trash directory shared with mold-db.
+pub(crate) fn gallery_trash_dir(output_dir: &Path) -> PathBuf {
+    mold_db::trash_dir(output_dir)
+}
+
+/// Ensure `<output_dir>/.trash` exists as a real directory (never a
+/// symlink). Created with default permissions like the gallery itself: the
+/// desktop's offline path and mold-db's tombstone writer create the same
+/// directory with `create_dir_all`, and trashed media is user media, not a
+/// private staging area.
+pub(crate) fn ensure_gallery_trash_dir(output_dir: &Path) -> anyhow::Result<PathBuf> {
+    let trash = gallery_trash_dir(output_dir);
+    match fs::symlink_metadata(&trash) {
+        Ok(metadata) => {
+            ensure!(
+                metadata.is_dir() && !metadata.file_type().is_symlink(),
+                "gallery trash path is not a directory: {}",
+                trash.display()
+            );
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir_all(&trash)
+                .with_context(|| format!("creating gallery trash {}", trash.display()))?;
+        }
+        Err(error) => return Err(error.into()),
+    }
+    Ok(trash)
+}
+
+/// Rename a live gallery file into `<output_dir>/.trash/<filename>` and
+/// make both directories durable. Returns the trash path.
+pub(crate) fn move_gallery_file_to_trash(
+    output_dir: &Path,
+    live_path: &Path,
+    filename: &str,
+) -> anyhow::Result<PathBuf> {
+    let trash = ensure_gallery_trash_dir(output_dir)?;
+    let trash_path = trash.join(filename);
+    fs::rename(live_path, &trash_path).with_context(|| {
+        format!(
+            "moving {} to the gallery trash at {}",
+            live_path.display(),
+            trash_path.display()
+        )
+    })?;
+    sync_ordinary_gallery_directory(output_dir)?;
+    sync_ordinary_gallery_directory(&trash)?;
+    Ok(trash_path)
+}
+
+/// Rename `<output_dir>/.trash/<filename>` back to the live path and make
+/// both directories durable.
+pub(crate) fn move_gallery_file_from_trash(
+    output_dir: &Path,
+    trash_path: &Path,
+    filename: &str,
+) -> anyhow::Result<PathBuf> {
+    let live_path = output_dir.join(filename);
+    fs::rename(trash_path, &live_path).with_context(|| {
+        format!(
+            "restoring {} from the gallery trash to {}",
+            trash_path.display(),
+            live_path.display()
+        )
+    })?;
+    sync_ordinary_gallery_directory(output_dir)?;
+    sync_ordinary_gallery_directory(&gallery_trash_dir(output_dir))?;
+    Ok(live_path)
 }
 
 /// Finish any delete whose durable archive-child tombstone reached disk

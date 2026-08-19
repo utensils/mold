@@ -2854,4 +2854,81 @@ qwen3_variant = "iq4"
         std::env::remove_var("MOLD_MODELS_DIR");
         let _ = std::fs::remove_dir_all(dir);
     }
+
+    #[test]
+    fn gallery_settings_default_to_thirty_days_and_parse_toml() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert_eq!(cfg.gallery.trash_retention_days, 30);
+        assert_eq!(Config::default().gallery.trash_retention_days, 30);
+
+        let cfg: Config = toml::from_str("[gallery]\ntrash_retention_days = 7\n").unwrap();
+        assert_eq!(cfg.gallery.trash_retention_days, 7);
+
+        let defaults: crate::config::GallerySettings = toml::from_str("").unwrap();
+        assert_eq!(defaults, crate::config::GallerySettings::default());
+    }
+
+    #[test]
+    fn bootstrap_only_toml_strips_gallery_section() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!(
+            "mold-gallery-strip-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        let mut cfg = Config::default();
+        cfg.gallery.trash_retention_days = 7;
+        cfg.save_bootstrap_only_to(&path).unwrap();
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(!body.contains("[gallery]"), "{body}");
+        assert!(!body.contains("trash_retention_days"), "{body}");
+        assert!(
+            body.contains("gallery.*"),
+            "banner should name the DB-owned slice: {body}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn effective_trash_retention_days_honours_valid_env_and_ignores_invalid() {
+        use crate::config::GallerySettings;
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let settings = GallerySettings {
+            trash_retention_days: 30,
+        };
+
+        std::env::remove_var(GallerySettings::TRASH_RETENTION_DAYS_ENV);
+        assert_eq!(settings.effective_trash_retention_days(), 30);
+
+        std::env::set_var(GallerySettings::TRASH_RETENTION_DAYS_ENV, "0");
+        assert_eq!(settings.effective_trash_retention_days(), 0);
+
+        std::env::set_var(GallerySettings::TRASH_RETENTION_DAYS_ENV, " 365 ");
+        assert_eq!(settings.effective_trash_retention_days(), 365);
+
+        for invalid in ["3651", "-1", "soon", ""] {
+            std::env::set_var(GallerySettings::TRASH_RETENTION_DAYS_ENV, invalid);
+            assert_eq!(
+                settings.effective_trash_retention_days(),
+                30,
+                "{invalid:?} should fall through to the stored value"
+            );
+        }
+        std::env::remove_var(GallerySettings::TRASH_RETENTION_DAYS_ENV);
+
+        // The registry reports the same env var as an override source.
+        std::env::set_var(GallerySettings::TRASH_RETENTION_DAYS_ENV, "5");
+        let (var, value) = crate::config_keys::env_override_for(
+            crate::config_keys::GALLERY_TRASH_RETENTION_DAYS_KEY,
+        )
+        .expect("env override detected");
+        assert_eq!(var, GallerySettings::TRASH_RETENTION_DAYS_ENV);
+        assert_eq!(value, "5");
+        std::env::remove_var(GallerySettings::TRASH_RETENTION_DAYS_ENV);
+    }
 }

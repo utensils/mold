@@ -70,12 +70,19 @@ pub fn read_or_synthesize(
 }
 
 /// Build a best-effort `OutputMetadata` from a filename like
-/// `mold-<model>-<unix>[-<idx>].<ext>`.
+/// `mold-<model>-<unix>[-<idx>][~<slug>].<ext>`.
+///
+/// A trailing `~<slug>` (the lossy title slug appended by
+/// `mold_core::default_output_filename_titled`) is stripped before the
+/// model is recovered. The slug is never promoted back into `title` — it is
+/// lowercase ASCII with punctuation collapsed, so the authoritative title
+/// can only come from embedded metadata or the gallery row.
 pub fn synthesize_from_filename(filename: &str, timestamp_secs: u64) -> OutputMetadata {
     let stem = std::path::Path::new(filename)
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("");
+    let stem = mold_core::strip_title_slug(stem);
     let model = stem
         .strip_prefix("mold-")
         .and_then(|rest| {
@@ -97,6 +104,7 @@ pub fn synthesize_from_filename(filename: &str, timestamp_secs: u64) -> OutputMe
         .unwrap_or_else(|| "unknown".to_string());
 
     OutputMetadata {
+        title: None,
         source_fit: None,
         guidance_overrides: None,
         sample_shift: None,
@@ -426,6 +434,44 @@ mod tests {
         assert_eq!(m.model, "flux-dev-q4");
         let batch = synthesize_from_filename("mold-sdxl-1700000000000-2.png", 1700000000);
         assert_eq!(batch.model, "sdxl");
+    }
+
+    /// Titled prints append `~<slug>` to the stem; the slug must be stripped
+    /// before the model is recovered and must never be promoted to a title.
+    #[test]
+    fn synthesize_strips_trailing_title_slug() {
+        let m = synthesize_from_filename("mold-flux-dev-q4-1700000000000~smurf-04.png", 1700000000);
+        assert_eq!(m.model, "flux-dev-q4");
+        assert_eq!(m.title, None);
+        let batch = synthesize_from_filename("mold-sdxl-1700000000000-2~river.png", 1700000000);
+        assert_eq!(batch.model, "sdxl");
+        assert_eq!(batch.title, None);
+        // A slug that is itself all digits must not be mistaken for the
+        // timestamp / batch index.
+        let digits = synthesize_from_filename("mold-sdxl-1700000000000~2024.png", 1700000000);
+        assert_eq!(digits.model, "sdxl");
+        // Untitled filenames are unaffected.
+        let plain = synthesize_from_filename("mold-flux-dev-q4-1700000000000.png", 1700000000);
+        assert_eq!(plain.model, "flux-dev-q4");
+    }
+
+    /// The gallery-validity guard is about bytes, not names: a `~` in the
+    /// stem must not exclude a titled print from reconcile.
+    #[test]
+    fn titled_filename_passes_gallery_validity_guard() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir
+            .path()
+            .join("mold-flux-dev-q4-1700000000000~smurf-04.png");
+        let img = image::RgbImage::from_fn(64, 64, |x, y| {
+            image::Rgb([(x * 4) as u8, (y * 4) as u8, ((x ^ y) * 4) as u8])
+        });
+        let mut buf = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut buf, image::ImageFormat::Png).unwrap();
+        std::fs::write(&p, buf.into_inner()).unwrap();
+        let size = std::fs::metadata(&p).unwrap().len();
+        assert_eq!(format_from_path(&p), Some(OutputFormat::Png));
+        assert!(is_valid_gallery_file(&p, OutputFormat::Png, size));
     }
 
     #[test]
