@@ -306,6 +306,8 @@ const missingModelTargets = ref<{
   model: string;
   targets: ModelInstallTarget<HostView>[];
   submission: MissingModelSubmission;
+  /** Exact route per machine, preferring what the placement probe proved. */
+  routeFor: (hostId: string) => HostRoute | null;
 } | null>(null);
 
 /**
@@ -357,22 +359,37 @@ function offerMissingModelPull(
     // not have read them yet.
     inventoryKnown: () => true,
   }).targets;
-  return presentMissingModelPull(targets, submission);
+  return presentMissingModelPull(
+    targets,
+    submission,
+    (hostId) =>
+      ordered.find((failure) => failure.hostId === hostId)?.route ?? hosts.resolveRoute(hostId),
+  );
 }
 
-/** One machine skips the picker; several open the shared host picker. */
+/**
+ * One machine skips the picker; several open the shared host picker.
+ * `routeFor` prefers the route the placement probe already proved, falling
+ * back to the store for a machine that was never probed.
+ */
 function presentMissingModelPull(
   targets: ModelInstallTarget<HostView>[],
   submission: MissingModelSubmission,
+  routeFor: (hostId: string) => HostRoute | null,
 ): boolean {
   if (targets.length === 0) return false;
   if (targets.length === 1) {
-    const route = hosts.resolveRoute(targets[0]!.host.id);
+    const route = routeFor(targets[0]!.host.id);
     if (!route) return false;
     missingModel.value = { ...submission, route };
     return true;
   }
-  missingModelTargets.value = { model: submission.model, targets, submission };
+  missingModelTargets.value = {
+    model: submission.model,
+    targets,
+    submission,
+    routeFor,
+  };
   return true;
 }
 
@@ -402,7 +419,7 @@ async function offerPullForSelectedModel(model: string) {
     chainRouting: null,
     requestOptions: {},
   };
-  if (!presentMissingModelPull(targets, submission)) {
+  if (!presentMissingModelPull(targets, submission, (hostId) => hosts.resolveRoute(hostId))) {
     toasts.push(
       `No connected machine can download ${model} right now. Connect a machine under Machines, then try again.`,
       "error",
@@ -415,7 +432,7 @@ function chooseMissingModelHost(host: HostView) {
   const pending = missingModelTargets.value;
   missingModelTargets.value = null;
   if (!pending) return;
-  const route = hosts.resolveRoute(host.id);
+  const route = pending.routeFor(host.id);
   if (!route) {
     toasts.push(`${host.label} is no longer reachable. Nothing was queued.`, "error");
     return;
