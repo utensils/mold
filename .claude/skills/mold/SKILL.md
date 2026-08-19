@@ -628,7 +628,7 @@ Default model if none specified: `flux2-klein:q8`
 
 Flash runs its own packaged scheduler — `use_dynamic_shifting=false`, `shift=3.0`, `shift_terminal=null` — not the base model's resolution-dependent schedule. Every other Qwen checkpoint (including the Distill-Full and Lightning merges, which are transformer-only exports) keeps the base contract.
 
-**LTX Video**: `ltx-video-0.9.6:bf16`, `ltx-video-0.9.6-distilled:bf16`, `ltx-video-0.9.8-2b-distilled:bf16`, `ltx-video-0.9.8-13b-dev:bf16`, `ltx-video-0.9.8-13b-distilled:bf16`
+**LTX Video**: `ltx-video-0.9.6:bf16`, `ltx-video-0.9.6-distilled:bf16`, `ltx-video-0.9.8-2b-distilled:bf16`, `ltx-video-0.9.8-13b-dev:bf16`, `ltx-video-0.9.8-13b-distilled:bf16` (the 13B BF16 tiers need a 40 GB-class GPU — no offload path; LTX-2 supersedes them on 24 GB cards)
 
 **LTX-2 / LTX-2.3**: `ltx-2-19b-dev:fp8`, `ltx-2-19b-distilled:fp8`, `ltx-2.3-22b-dev:fp8`, `ltx-2.3-22b-distilled:fp8`
 **Qwen-Image text encoder controls**:
