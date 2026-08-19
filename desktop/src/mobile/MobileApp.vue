@@ -236,6 +236,18 @@ import {
   storeCachedGallery,
   storeCachedGalleryMedia,
 } from "./galleryCache";
+import {
+  MOBILE_GALLERY_COLUMNS_MAX,
+  MOBILE_GALLERY_COLUMNS_MIN,
+  createPinchZoom,
+  isPinching,
+  loadMobileGalleryColumns,
+  pinchPointerDown,
+  pinchPointerMove,
+  pinchPointerUp,
+  resetPinch,
+  saveMobileGalleryColumns,
+} from "./galleryZoom";
 import MobileAdvancedSheet from "./MobileAdvancedSheet.vue";
 import MobileCatalogView from "./MobileCatalogView.vue";
 import MobileExpansionPullStatus from "./MobileExpansionPullStatus.vue";
@@ -589,6 +601,10 @@ const gallerySentinelVisible = ref(false);
 const gallerySelectMode = ref(false);
 const gallerySelection = ref<Set<string>>(new Set());
 const galleryDeleteConfirming = ref(false);
+/** Library thumbnail size, driven by the pinch gesture below. */
+const galleryColumns = ref(loadMobileGalleryColumns());
+const galleryZoom = createPinchZoom(galleryColumns.value);
+const galleryZoomAnnouncement = ref("");
 const galleryDeleting = ref(false);
 const selectedPrint = ref<GalleryPrint | null>(null);
 const generatedViewerOpen = ref(false);
@@ -4868,6 +4884,40 @@ function finishGallerySelectionDrag(event?: PointerEvent): void {
   galleryDragFrame = null;
 }
 
+/**
+ * Pinch over the Library grid to resize thumbnails, the iPhone counterpart to
+ * the web/desktop thumbnail-size slider. It deliberately shares no state with
+ * the gallery viewer's own gestures and owns only the grid element.
+ */
+function beginGalleryPinch(event: PointerEvent): void {
+  if (event.pointerType === "mouse") return;
+  pinchPointerDown(galleryZoom, event);
+  if (!isPinching(galleryZoom)) return;
+  // A second finger means a pinch, never a selection swath: abandon whatever
+  // the first finger had started so the drag does not paint while resizing.
+  if (galleryDragPointerId !== null) finishGallerySelectionDrag();
+  event.preventDefault();
+}
+
+function moveGalleryPinch(event: PointerEvent): void {
+  const next = pinchPointerMove(galleryZoom, event);
+  if (isPinching(galleryZoom)) event.preventDefault();
+  if (next === null) return;
+  galleryColumns.value = next;
+  saveMobileGalleryColumns(next);
+  const bound =
+    next === MOBILE_GALLERY_COLUMNS_MIN
+      ? " Largest."
+      : next === MOBILE_GALLERY_COLUMNS_MAX
+        ? " Smallest."
+        : "";
+  galleryZoomAnnouncement.value = `Thumbnails ${next} across.${bound}`;
+}
+
+function endGalleryPinch(event: PointerEvent): void {
+  pinchPointerUp(galleryZoom, event.pointerId);
+}
+
 function selectAllGalleryPrints(): void {
   gallerySelection.value = new Set(gallery.value.map(galleryPrintKey));
   galleryDeleteConfirming.value = false;
@@ -5252,6 +5302,11 @@ onMounted(async () => {
   window.addEventListener("pointermove", moveGallerySelectionDrag, { passive: false });
   window.addEventListener("pointerup", finishGallerySelectionDrag);
   window.addEventListener("pointercancel", finishGallerySelectionDrag);
+  // The pinch tracks globally so a finger that slides off the grid mid-gesture
+  // still reports, and so a lift outside the grid always ends it.
+  window.addEventListener("pointermove", moveGalleryPinch, { passive: false });
+  window.addEventListener("pointerup", endGalleryPinch);
+  window.addEventListener("pointercancel", endGalleryPinch);
   window.visualViewport?.addEventListener("resize", syncVisualViewportOffset);
   window.visualViewport?.addEventListener("scroll", syncVisualViewportOffset);
   syncVisualViewportOffset();
@@ -5314,6 +5369,10 @@ onBeforeUnmount(() => {
   window.removeEventListener("pointerup", finishGallerySelectionDrag);
   window.removeEventListener("pointercancel", finishGallerySelectionDrag);
   finishGallerySelectionDrag();
+  window.removeEventListener("pointermove", moveGalleryPinch);
+  window.removeEventListener("pointerup", endGalleryPinch);
+  window.removeEventListener("pointercancel", endGalleryPinch);
+  resetPinch(galleryZoom, galleryColumns.value);
   window.visualViewport?.removeEventListener("resize", syncVisualViewportOffset);
   window.visualViewport?.removeEventListener("scroll", syncVisualViewportOffset);
   document.documentElement.style.removeProperty("--mobile-visual-viewport-page-top");
@@ -5412,6 +5471,9 @@ onBeforeUnmount(() => {
     </p>
     <p class="sr-only" aria-live="polite" aria-atomic="true">
       {{ generationAnnouncement }}
+    </p>
+    <p class="sr-only" aria-live="polite" aria-atomic="true" data-test="mobile-gallery-zoom-status">
+      {{ galleryZoomAnnouncement }}
     </p>
 
     <section ref="mobileContent" class="mobile-content">
@@ -6143,7 +6205,7 @@ onBeforeUnmount(() => {
               {{
                 gallerySelectMode
                   ? `${gallerySelection.size} selected`
-                  : "Prints from every connected host · Tap Select for multiple"
+                  : "Prints from every connected host · Pinch to resize · Tap Select for multiple"
               }}
             </p>
           </div>
@@ -6163,6 +6225,11 @@ onBeforeUnmount(() => {
           v-else-if="gallery.length"
           class="gallery-grid"
           :class="{ 'is-selecting': gallerySelectMode }"
+          :style="{ '--mobile-gallery-columns': galleryColumns }"
+          :aria-label="`Prints, ${galleryColumns} across. Pinch to resize.`"
+          :data-gallery-columns="galleryColumns"
+          data-test="mobile-gallery-grid"
+          @pointerdown="beginGalleryPinch"
         >
           <button
             v-for="print in gallery"

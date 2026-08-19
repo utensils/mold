@@ -2519,8 +2519,11 @@ button:disabled {
 
 .gallery-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(var(--mobile-gallery-columns, 3), minmax(0, 1fr));
   gap: 6px;
+  /* Keep one-finger scrolling while the two-finger pinch stays ours. The shell
+     already blocks page zoom, so nothing above this element wants the pinch. */
+  touch-action: pan-y;
 }
 
 .gallery-grid.is-selecting .gallery-item {
@@ -4264,6 +4267,6 @@ button:disabled {
   }
 
   .gallery-grid {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(var(--mobile-gallery-columns, 3), minmax(0, 1fr));
   }
 }

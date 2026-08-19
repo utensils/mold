@@ -20,6 +20,26 @@ describe("mobile viewport scaling", () => {
   });
 });
 
+describe("mobile Library thumbnail sizing", () => {
+  it("drives every gallery column count from the pinch variable", () => {
+    const rules = [...css.matchAll(/\.gallery-grid\s*\{([^}]*)\}/gs)].map((match) => match[1]);
+
+    expect(rules.length).toBeGreaterThan(0);
+    for (const rule of rules) {
+      expect(rule).toMatch(
+        /grid-template-columns:\s*repeat\(var\(--mobile-gallery-columns,\s*3\),/,
+      );
+      expect(rule).not.toMatch(/grid-template-columns:\s*repeat\(\d/);
+    }
+  });
+
+  it("reserves the two-finger pinch while one-finger scrolling still works", () => {
+    const base = css.match(/\.gallery-grid\s*\{([^}]*)\}/s);
+
+    expect(base?.[1]).toMatch(/touch-action:\s*pan-y\s*;/);
+  });
+});
+
 describe("mobile editable controls", () => {
   it("keeps every editable control at the iOS no-focus-zoom size", () => {
     const editables = css.match(

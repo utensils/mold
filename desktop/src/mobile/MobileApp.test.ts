@@ -7242,3 +7242,151 @@ describe("MobileApp machines telemetry", () => {
     expect(saved[0]).toMatchObject({ connected: true });
   });
 });
+
+describe("mobile Library pinch-to-resize", () => {
+  async function openLibrary(): Promise<VueWrapper> {
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await vi.waitFor(() => expect(wrapper?.find("[data-test='gallery-item']").exists()).toBe(true));
+    return wrapper;
+  }
+
+  function touchDown(target: Element, pointerId: number, clientX: number, clientY = 0): void {
+    target.dispatchEvent(
+      new PointerEvent("pointerdown", {
+        pointerId,
+        pointerType: "touch",
+        isPrimary: pointerId % 2 === 1,
+        clientX,
+        clientY,
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+  }
+
+  function touchMove(pointerId: number, clientX: number, clientY = 0): void {
+    window.dispatchEvent(
+      new PointerEvent("pointermove", {
+        pointerId,
+        pointerType: "touch",
+        clientX,
+        clientY,
+        cancelable: true,
+      }),
+    );
+  }
+
+  function touchUp(pointerId: number): void {
+    window.dispatchEvent(new PointerEvent("pointerup", { pointerId, pointerType: "touch" }));
+  }
+
+  async function pinch(app: VueWrapper, from: number, to: number): Promise<void> {
+    const grid = app.get("[data-test='mobile-gallery-grid']").element;
+    touchDown(grid, 71, 0);
+    touchDown(grid, 72, from);
+    touchMove(72, to);
+    touchUp(72);
+    touchUp(71);
+    await app.vm.$nextTick();
+  }
+
+  function columnsOf(app: VueWrapper): string | undefined {
+    return app.get("[data-test='mobile-gallery-grid']").attributes("data-gallery-columns");
+  }
+
+  it("renders the saved three-across grid before any gesture", async () => {
+    const app = await openLibrary();
+    const grid = app.get("[data-test='mobile-gallery-grid']");
+
+    expect(grid.attributes("data-gallery-columns")).toBe("3");
+    expect(grid.attributes("style")).toContain("--mobile-gallery-columns: 3");
+    expect(app.get(".mobile-library-heading .section-note").text()).toContain("Pinch to resize");
+  });
+
+  it("spreading two fingers enlarges the thumbnails and persists the choice", async () => {
+    const app = await openLibrary();
+
+    await pinch(app, 200, 340);
+
+    const grid = app.get("[data-test='mobile-gallery-grid']");
+    expect(grid.attributes("data-gallery-columns")).toBe("2");
+    expect(grid.attributes("style")).toContain("--mobile-gallery-columns: 2");
+    expect(localStorage.getItem("mold.mobile.galleryColumns.v1")).toBe("2");
+    expect(app.get("[data-test='mobile-gallery-zoom-status']").text()).toContain("2 across");
+  });
+
+  it("pinching two fingers together shrinks the thumbnails", async () => {
+    const app = await openLibrary();
+
+    await pinch(app, 300, 210);
+
+    expect(columnsOf(app)).toBe("4");
+    expect(localStorage.getItem("mold.mobile.galleryColumns.v1")).toBe("4");
+  });
+
+  it("restores the persisted size on the next visit", async () => {
+    localStorage.setItem("mold.mobile.galleryColumns.v1", "5");
+
+    const app = await openLibrary();
+
+    expect(columnsOf(app)).toBe("5");
+  });
+
+  it("a one-finger drag never resizes the grid", async () => {
+    const app = await openLibrary();
+
+    touchDown(app.get("[data-test='mobile-gallery-grid']").element, 80, 20, 20);
+    touchMove(80, 320);
+    await app.vm.$nextTick();
+
+    expect(columnsOf(app)).toBe("3");
+  });
+
+  it("a pinch in select mode resizes without painting a selection swath", async () => {
+    const app = await openLibrary();
+    await app.get("[data-test='mobile-gallery-select']").trigger("click");
+
+    await app.get("[data-test='gallery-item']").trigger("pointerdown", {
+      pointerId: 91,
+      pointerType: "touch",
+      isPrimary: true,
+      clientX: 0,
+      clientY: 0,
+    });
+    expect(app.get("[data-test='mobile-gallery-actions']").text()).toContain("1 selected");
+
+    // The second finger converts the gesture; the drag must stop extending.
+    touchDown(app.get("[data-test='mobile-gallery-grid']").element, 92, 200);
+    touchMove(91, 0, 900);
+    touchMove(92, 340);
+    await app.vm.$nextTick();
+
+    expect(columnsOf(app)).toBe("2");
+    expect(app.get("[data-test='mobile-gallery-actions']").text()).toContain("1 selected");
+  });
+
+  it("ignores a mouse pointer so desktop-class input never starts a pinch", async () => {
+    const app = await openLibrary();
+    const grid = app.get("[data-test='mobile-gallery-grid']").element;
+
+    for (const pointerId of [95, 96]) {
+      grid.dispatchEvent(
+        new PointerEvent("pointerdown", {
+          pointerId,
+          pointerType: "mouse",
+          clientX: pointerId * 2,
+          clientY: 0,
+          bubbles: true,
+        }),
+      );
+    }
+    window.dispatchEvent(
+      new PointerEvent("pointermove", { pointerId: 96, pointerType: "mouse", clientX: 900 }),
+    );
+    await app.vm.$nextTick();
+
+    expect(columnsOf(app)).toBe("3");
+  });
+});
