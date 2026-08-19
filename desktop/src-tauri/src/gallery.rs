@@ -15,11 +15,19 @@ use crate::commands::{AppState, LocalServer, LocalServerInfo, SettingsStore};
 const MAX_SOURCE_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_GALLERY_THUMBNAIL_BYTES: usize = 8 * 1024 * 1024;
 const MAX_CONCURRENT_GALLERY_THUMBNAILS: usize = 16;
+/// Full-size gallery media (the Library lightbox, the source picker) also
+/// travels through the native client — see `fetch_gallery_media`. The cap
+/// bounds what one open print may hold in memory; larger files fall back to
+/// the webview's streaming path.
+const MAX_GALLERY_MEDIA_BYTES: usize = 256 * 1024 * 1024;
+const MAX_CONCURRENT_GALLERY_MEDIA: usize = 3;
 const GALLERY_IMPORT_CONTENT_TYPE: &str = "application/vnd.mold.gallery-import";
 
 static GALLERY_THUMBNAIL_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 static GALLERY_THUMBNAIL_PERMITS: Semaphore =
     Semaphore::const_new(MAX_CONCURRENT_GALLERY_THUMBNAILS);
+static GALLERY_MEDIA_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+static GALLERY_MEDIA_PERMITS: Semaphore = Semaphore::const_new(MAX_CONCURRENT_GALLERY_MEDIA);
 
 #[derive(Debug, Serialize)]
 pub struct ImportedSourceImage {
@@ -532,6 +540,54 @@ pub struct NativeGalleryThumbnail {
     content_type: String,
 }
 
+/// Fetch one bounded gallery file through the native HTTP client. WebKit's
+/// per-host connection pool is shared with every held-open generation SSE
+/// stream to that host, so media elements pointed straight at a busy remote
+/// host can queue indefinitely; the native client sidesteps the webview's
+/// pool entirely (the same route `fetch_gallery_thumbnail` took in #1132).
+async fn fetch_gallery_bytes(
+    client: &reqwest::Client,
+    target: &MediaSaveTarget,
+    api_path: &str,
+    max_bytes: usize,
+    what: &str,
+) -> Result<(Vec<u8>, String), String> {
+    let url = format!("{}{api_path}", target.base_url.trim_end_matches('/'));
+    let mut request = client.get(url);
+    if let Some(key) = target.api_key.as_deref().filter(|key| !key.is_empty()) {
+        request = request.header("X-Api-Key", key);
+    }
+    let response = request
+        .send()
+        .await
+        .map_err(|error| format!("Couldn't reach the gallery host: {error}"))?;
+    if !response.status().is_success() {
+        return Err(response_error(response).await);
+    }
+    if response
+        .content_length()
+        .is_some_and(|length| length > max_bytes as u64)
+    {
+        return Err(format!("The gallery {what} is unexpectedly large."));
+    }
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_string();
+    let mut bytes = Vec::with_capacity(response.content_length().unwrap_or(0) as usize);
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| format!("The {what} transfer failed: {error}"))?;
+        if bytes.len().saturating_add(chunk.len()) > max_bytes {
+            return Err(format!("The gallery {what} is unexpectedly large."));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok((bytes, content_type))
+}
+
 #[tauri::command]
 pub async fn fetch_gallery_thumbnail(
     target: MediaSaveTarget,
@@ -548,54 +604,69 @@ pub async fn fetch_gallery_thumbnail(
         .map_err(|_| "The gallery thumbnail service is unavailable.".to_string())?;
     let encoded =
         percent_encoding::utf8_percent_encode(&filename, percent_encoding::NON_ALPHANUMERIC);
-    let url = format!(
-        "{}/api/gallery/thumbnail/{encoded}",
-        target.base_url.trim_end_matches('/')
-    );
     let client = GALLERY_THUMBNAIL_CLIENT.get_or_init(|| {
         reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(15))
+            // The per-host key must never follow a redirect off the host.
+            .redirect(reqwest::redirect::Policy::none())
             .pool_max_idle_per_host(MAX_CONCURRENT_GALLERY_THUMBNAILS)
             .build()
             .expect("static gallery HTTP client settings must be valid")
     });
-    let mut request = client.get(url);
-    if let Some(key) = target.api_key.filter(|key| !key.is_empty()) {
-        request = request.header("X-Api-Key", key);
-    }
-    let response = request
-        .send()
-        .await
-        .map_err(|error| format!("Couldn't reach the gallery host: {error}"))?;
-    if !response.status().is_success() {
-        return Err(response_error(response).await);
-    }
-    if response
-        .content_length()
-        .is_some_and(|length| length > MAX_GALLERY_THUMBNAIL_BYTES as u64)
-    {
-        return Err("The gallery thumbnail is unexpectedly large.".into());
-    }
-    let content_type = response
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("application/octet-stream")
-        .to_string();
-    let mut bytes = Vec::new();
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|error| format!("The thumbnail transfer failed: {error}"))?;
-        if bytes.len().saturating_add(chunk.len()) > MAX_GALLERY_THUMBNAIL_BYTES {
-            return Err("The gallery thumbnail is unexpectedly large.".into());
-        }
-        bytes.extend_from_slice(&chunk);
-    }
+    let (bytes, content_type) = fetch_gallery_bytes(
+        client,
+        &target,
+        &format!("/api/gallery/thumbnail/{encoded}"),
+        MAX_GALLERY_THUMBNAIL_BYTES,
+        "thumbnail",
+    )
+    .await?;
     Ok(NativeGalleryThumbnail {
         base64: base64::engine::general_purpose::STANDARD.encode(bytes),
         content_type,
     })
+}
+
+/// Full-size gallery media for a host-backed print, returned as raw bytes
+/// (`tauri::ipc::Response` → an `ArrayBuffer` in the webview, no base64).
+/// The frontend turns it into an object URL; the file's MIME type rides on
+/// the filename extension there. Too-large files and transport failures
+/// surface as errors so the caller can fall back to the streaming URL.
+#[tauri::command]
+pub async fn fetch_gallery_media(
+    target: MediaSaveTarget,
+    filename: String,
+) -> Result<tauri::ipc::Response, String> {
+    if !valid_filename(&filename) {
+        return Err("Invalid gallery filename.".into());
+    }
+    // A short wait: the caller falls back to the streaming URL, so the print
+    // the user is looking at must not queue behind stale prev/next fetches.
+    let _permit = tokio::time::timeout(Duration::from_secs(5), GALLERY_MEDIA_PERMITS.acquire())
+        .await
+        .map_err(|_| "The gallery media queue is busy; retrying may help.".to_string())?
+        .map_err(|_| "The gallery media service is unavailable.".to_string())?;
+    let encoded =
+        percent_encoding::utf8_percent_encode(&filename, percent_encoding::NON_ALPHANUMERIC);
+    let client = GALLERY_MEDIA_CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(120))
+            .redirect(reqwest::redirect::Policy::none())
+            .pool_max_idle_per_host(MAX_CONCURRENT_GALLERY_MEDIA)
+            .build()
+            .expect("static gallery HTTP client settings must be valid")
+    });
+    let (bytes, _content_type) = fetch_gallery_bytes(
+        client,
+        &target,
+        &format!("/api/gallery/image/{encoded}"),
+        MAX_GALLERY_MEDIA_BYTES,
+        "file",
+    )
+    .await?;
+    Ok(tauri::ipc::Response::new(bytes))
 }
 
 #[derive(Debug, Serialize)]

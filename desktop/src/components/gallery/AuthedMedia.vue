@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref, watch } from "vue";
-import { authedMediaUrl, streamableMediaUrl } from "../../lib/gallery/media";
+import { authedMediaUrl, fullSizeMediaUrl } from "../../lib/gallery/media";
 import type { ApiTarget } from "../../lib/api/client";
 
 const props = withDefaults(
@@ -38,15 +38,18 @@ async function load() {
         ...(props.target ? { target: props.target } : {}),
         ...(props.cacheKey ? { cacheKey: props.cacheKey } : {}),
       };
-      // Full-size remote media must stay streamable. Fetching it into a blob
-      // blocks the viewer until the entire file crosses WebKit and prevents
-      // video seeking; authenticated hosts instead mint a short-lived,
-      // exact-path ticket that the media element can load directly.
+      // Thumbnails and full-size stills/audio go native-first in the desktop
+      // app (#1132's rationale: a media element pointed straight at a host
+      // shares WebKit's per-host connection pool with every held-open
+      // generation/download stream to that host). Video keeps the ticketed
+      // or direct streaming URL so it can seek without buffering; outside
+      // Tauri, or when the native route refuses, stills fall back to it too.
       const url = props.path.startsWith("/api/gallery/thumbnail/")
         ? await authedMediaUrl(props.path, options)
-        : await streamableMediaUrl(props.path, {
+        : await fullSizeMediaUrl(props.path, {
             ...options,
             allowLegacyBlob: !props.video && !props.audio,
+            video: props.video,
           });
       if (epoch === loadEpoch) src.value = url;
       return;
@@ -58,7 +61,17 @@ async function load() {
   if (epoch === loadEpoch) failed.value = true;
 }
 
-watch(() => [props.path, props.cacheKey, props.target?.baseUrl, props.target?.apiKey], load);
+// Watch the route's VALUES, never a freshly built array: a getter returning
+// `[...]` yields a new array on every parent re-render, and Vue compares the
+// source by identity, so each re-render (selecting a tile, a poll landing)
+// re-ran `load()`, nulled `src`, and swapped the <img> for the shimmer. Parents
+// build `target` per render, so that swap happened between the two clicks of
+// a double-click on every remote tile — the lightbox never opened for
+// remote-only prints. The multi-source form compares each value on its own.
+watch(
+  [() => props.path, () => props.cacheKey, () => props.target?.baseUrl, () => props.target?.apiKey],
+  load,
+);
 onMounted(load);
 onUnmounted(() => {
   loadEpoch += 1;

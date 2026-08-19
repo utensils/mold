@@ -5,7 +5,11 @@ import {
   authedMediaUrl,
   evictHostMedia,
   evictMedia,
+  fetchGalleryMediaBytes,
+  fullSizeMediaUrl,
+  galleryFilenameOfPath,
   galleryMediaPath,
+  mediaMimeType,
   streamableMediaUrl,
 } from "./media";
 
@@ -17,7 +21,7 @@ vi.mock("../api/client", async (importOriginal) => ({
 }));
 vi.mock("../ipc", () => ({
   inTauri: vi.fn(),
-  ipc: { fetchGalleryThumbnail: vi.fn() },
+  ipc: { fetchGalleryThumbnail: vi.fn(), fetchGalleryMedia: vi.fn() },
 }));
 
 const blobResponse = () =>
@@ -41,6 +45,7 @@ beforeEach(() => {
   vi.mocked(currentTarget).mockReturnValue({ baseUrl: "http://primary:7680", apiKey: null });
   vi.mocked(inTauri).mockReturnValue(false);
   vi.mocked(ipc.fetchGalleryThumbnail).mockReset();
+  vi.mocked(ipc.fetchGalleryMedia).mockReset();
   revoked.length = 0;
   URL.createObjectURL = vi.fn(() => `blob:mock-${++objectUrlSeq}`);
   URL.revokeObjectURL = vi.fn((url: string) => void revoked.push(url));
@@ -158,6 +163,163 @@ describe("streamableMediaUrl", () => {
     await expect(
       streamableMediaUrl("/api/gallery/image/clip.mp4", { target, cacheKey: "old" }),
     ).rejects.toThrow("Update this Mold host");
+  });
+});
+
+describe("fullSizeMediaUrl", () => {
+  const target = { baseUrl: "http://hal9000:7680", apiKey: null };
+
+  it("fetches desktop full-size media through native HTTP so held streams cannot starve it", async () => {
+    vi.mocked(inTauri).mockReturnValue(true);
+    vi.mocked(ipc.fetchGalleryMedia).mockResolvedValue(new Uint8Array([1, 2, 3]).buffer);
+
+    const url = await fullSizeMediaUrl("/api/gallery/image/mold%20print.png", {
+      target,
+      cacheKey: "hal9000-7680",
+    });
+
+    expect(url).toMatch(/^blob:mock-/);
+    expect(ipc.fetchGalleryMedia).toHaveBeenCalledWith(target, "mold print.png");
+    // Never pointed the media element straight at the host.
+    expect(apiFetchTo).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
+    const blob = vi.mocked(URL.createObjectURL).mock.calls[0]?.[0] as Blob;
+    expect(blob.type).toBe("image/png");
+  });
+
+  it("caches the native object URL per host bucket and path", async () => {
+    vi.mocked(inTauri).mockReturnValue(true);
+    vi.mocked(ipc.fetchGalleryMedia).mockResolvedValue(new Uint8Array([1]).buffer);
+
+    const first = await fullSizeMediaUrl("/api/gallery/image/a.png", { target, cacheKey: "h" });
+    const second = await fullSizeMediaUrl("/api/gallery/image/a.png", { target, cacheKey: "h" });
+    const other = await fullSizeMediaUrl("/api/gallery/image/a.png", { target, cacheKey: "g" });
+
+    expect(first).toBe(second);
+    expect(other).not.toBe(first);
+    expect(ipc.fetchGalleryMedia).toHaveBeenCalledTimes(2);
+  });
+
+  it("falls back to the streaming URL when the native route refuses", async () => {
+    vi.mocked(inTauri).mockReturnValue(true);
+    vi.mocked(ipc.fetchGalleryMedia).mockRejectedValue(
+      new Error("The gallery file is unexpectedly large."),
+    );
+
+    await expect(
+      fullSizeMediaUrl("/api/gallery/image/huge.png", { target, cacheKey: "h" }),
+    ).resolves.toBe("http://hal9000:7680/api/gallery/image/huge.png");
+    // A refused fetch must not poison the cache for the next attempt.
+    vi.mocked(ipc.fetchGalleryMedia).mockResolvedValue(new Uint8Array([1]).buffer);
+    await expect(
+      fullSizeMediaUrl("/api/gallery/image/huge.png", { target, cacheKey: "h" }),
+    ).resolves.toMatch(/^blob:mock-/);
+  });
+
+  it("keeps video on the Range-friendly streaming URL instead of buffering it natively", async () => {
+    vi.mocked(inTauri).mockReturnValue(true);
+    await expect(
+      fullSizeMediaUrl("/api/gallery/image/clip.mp4", { target, cacheKey: "h" }),
+    ).resolves.toBe("http://hal9000:7680/api/gallery/image/clip.mp4");
+    expect(ipc.fetchGalleryMedia).not.toHaveBeenCalled();
+  });
+
+  it("uses the streaming route outside Tauri and for mold-local paths", async () => {
+    vi.mocked(inTauri).mockReturnValue(false);
+    await expect(
+      fullSizeMediaUrl("/api/gallery/image/a.png", { target, cacheKey: "h" }),
+    ).resolves.toBe("http://hal9000:7680/api/gallery/image/a.png");
+    expect(ipc.fetchGalleryMedia).not.toHaveBeenCalled();
+
+    vi.mocked(inTauri).mockReturnValue(true);
+    await expect(fullSizeMediaUrl("mold-local://localhost/a.png", { target })).resolves.toBe(
+      "mold-local://localhost/a.png",
+    );
+    expect(ipc.fetchGalleryMedia).not.toHaveBeenCalled();
+  });
+
+  it("reads raw bytes natively and falls back to authenticated HTTP when refused", async () => {
+    vi.mocked(inTauri).mockReturnValue(true);
+    vi.mocked(ipc.fetchGalleryMedia).mockResolvedValue(new Uint8Array([7, 8]).buffer);
+    await expect(fetchGalleryMediaBytes("/api/gallery/image/a.png", target)).resolves.toEqual(
+      new Uint8Array([7, 8]),
+    );
+    expect(apiFetchTo).not.toHaveBeenCalled();
+
+    vi.mocked(ipc.fetchGalleryMedia).mockRejectedValue(new Error("refused"));
+    vi.mocked(apiFetchTo).mockResolvedValue(
+      new Response(new Uint8Array([9]), { status: 200 }) as unknown as Response,
+    );
+    await expect(fetchGalleryMediaBytes("/api/gallery/image/a.png", target)).resolves.toEqual(
+      new Uint8Array([9]),
+    );
+    expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/gallery/image/a.png");
+  });
+
+  it("honours the caller's video flag over the filename extension", async () => {
+    vi.mocked(inTauri).mockReturnValue(true);
+    vi.mocked(ipc.fetchGalleryMedia).mockResolvedValue(new Uint8Array([1]).buffer);
+    await expect(
+      fullSizeMediaUrl("/api/gallery/image/anim.webp", { target, cacheKey: "h", video: true }),
+    ).resolves.toBe("http://hal9000:7680/api/gallery/image/anim.webp");
+    expect(ipc.fetchGalleryMedia).not.toHaveBeenCalled();
+  });
+
+  it("accepts postMessage-fallback number arrays as native bytes", async () => {
+    vi.mocked(inTauri).mockReturnValue(true);
+    vi.mocked(ipc.fetchGalleryMedia).mockResolvedValue([1, 2, 3]);
+    await expect(
+      fullSizeMediaUrl("/api/gallery/image/arr.png", { target, cacheKey: "h" }),
+    ).resolves.toMatch(/^blob:mock-/);
+    const blob = vi.mocked(URL.createObjectURL).mock.calls.at(-1)?.[0] as Blob;
+    expect(blob.size).toBe(3);
+    await expect(fetchGalleryMediaBytes("/api/gallery/image/arr.png", target)).resolves.toEqual(
+      new Uint8Array([1, 2, 3]),
+    );
+  });
+
+  it("keeps only a bounded LRU of full-size blobs and revokes the evicted ones", async () => {
+    vi.mocked(inTauri).mockReturnValue(true);
+    vi.mocked(ipc.fetchGalleryMedia).mockResolvedValue(new Uint8Array([1]).buffer);
+    const urls: string[] = [];
+    for (let i = 0; i < 10; i++) {
+      urls.push(
+        await fullSizeMediaUrl(`/api/gallery/image/lru-${i}.png`, { target, cacheKey: "lru" }),
+      );
+    }
+    // The two oldest were evicted and revoked; the newest eight are retained.
+    expect(revoked).toEqual(expect.arrayContaining([urls[0]!, urls[1]!]));
+    expect(revoked).not.toContain(urls[9]!);
+    const calls = vi.mocked(ipc.fetchGalleryMedia).mock.calls.length;
+    await fullSizeMediaUrl("/api/gallery/image/lru-9.png", { target, cacheKey: "lru" });
+    expect(vi.mocked(ipc.fetchGalleryMedia).mock.calls.length).toBe(calls);
+    await fullSizeMediaUrl("/api/gallery/image/lru-0.png", { target, cacheKey: "lru" });
+    expect(vi.mocked(ipc.fetchGalleryMedia).mock.calls.length).toBe(calls + 1);
+  });
+
+  it("evictMedia and evictHostMedia drop full-size blobs too", async () => {
+    vi.mocked(inTauri).mockReturnValue(true);
+    vi.mocked(ipc.fetchGalleryMedia).mockResolvedValue(new Uint8Array([1]).buffer);
+    const a = await fullSizeMediaUrl("/api/gallery/image/ev-a.png", { target, cacheKey: "ev" });
+    const b = await fullSizeMediaUrl("/api/gallery/image/ev-b.png", { target, cacheKey: "ev" });
+    evictMedia("/api/gallery/image/ev-a.png", "ev");
+    await Promise.resolve();
+    expect(revoked).toContain(a);
+    expect(revoked).not.toContain(b);
+    evictHostMedia("ev");
+    await Promise.resolve();
+    expect(revoked).toContain(b);
+  });
+
+  it("derives the gallery filename and MIME type from the media path", () => {
+    expect(galleryFilenameOfPath("/api/gallery/image/a%20b.PNG")).toBe("a b.PNG");
+    expect(galleryFilenameOfPath("/api/gallery/thumbnail/a.png")).toBeNull();
+    expect(galleryFilenameOfPath("/api/gallery/image/")).toBeNull();
+    expect(galleryFilenameOfPath("/api/gallery/image/a/b.png")).toBeNull();
+    expect(mediaMimeType("a b.PNG")).toBe("image/png");
+    expect(mediaMimeType("clip.mp4")).toBe("video/mp4");
+    expect(mediaMimeType("tone.wav")).toBe("audio/wav");
+    expect(mediaMimeType("mystery.bin")).toBe("application/octet-stream");
   });
 });
 

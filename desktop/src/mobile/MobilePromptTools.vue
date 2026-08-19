@@ -100,16 +100,13 @@ function useHistory(entry: HistoryEntry): void {
   historyOpen.value = false;
 }
 
-watch(
-  () => [props.target.baseUrl, props.target.apiKey] as const,
-  () => {
-    historyToken += 1;
-    loadingHistory.value = false;
-    history.value = [];
-    error.value = "";
-    if (historyOpen.value) void loadHistory();
-  },
-);
+watch([() => props.target.baseUrl, () => props.target.apiKey] as const, () => {
+  historyToken += 1;
+  loadingHistory.value = false;
+  history.value = [];
+  error.value = "";
+  if (historyOpen.value) void loadHistory();
+});
 </script>
 
 <template>
