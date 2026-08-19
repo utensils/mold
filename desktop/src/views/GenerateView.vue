@@ -1912,6 +1912,9 @@ async function remixForCurrentPrompt(replacePrepared = false) {
   if (!form.prompt.trim() || !form.model || expansionRunning.value) return;
   submissionGuard.invalidate();
   const route = currentExpansionRoute.value;
+  // Frozen before the request: an Auto rerank mid-flight must not move the
+  // print's machine out from under the reviewed set.
+  const printRoute = generationRoute.value;
   if (!route) {
     expansionError.value = unavailableExpansionHostMessage();
     return;
@@ -1972,8 +1975,8 @@ async function remixForCurrentPrompt(replacePrepared = false) {
         task,
         stylePreset,
         selectedHostPolicy: stickyTarget.value,
-        route: frozenGenerationRoute(route),
-        ...expansionRouteProvenance(route),
+        route: frozenGenerationRoute(printRoute, route),
+        ...expansionRouteProvenance(printRoute, route),
         promptTransform: {
           operation: "remix",
           ...(response.root_prompt ? { root_prompt: response.root_prompt } : {}),
@@ -2003,11 +2006,11 @@ async function remixForCurrentPrompt(replacePrepared = false) {
         stylePreset,
         selectedHostPolicy: stickyTarget.value,
       },
-      frozenGenerationRoute(route),
+      frozenGenerationRoute(printRoute, route),
       variants.map((variant) => variant.prompt),
       token,
     );
-    Object.assign(batch, expansionRouteProvenance(route));
+    Object.assign(batch, expansionRouteProvenance(printRoute, route));
     batch.prompts.forEach((prompt, index) => {
       prompt.dimensions = variants[index]?.dimensions ?? [];
     });
@@ -2033,16 +2036,23 @@ function unavailableExpansionHostMessage(): string {
 /**
  * The route prepared/quick work freezes for the PRINT. Expansion may run on a
  * peer that has the expander; the generation itself never follows it there.
+ *
+ * `captured` is read BEFORE the request, never after: telemetry can rerank
+ * Auto / Most capable while expansion is in flight, and freezing whatever
+ * `generationRoute` says on return would hand the reviewed set to a machine
+ * the user never resolved.
  */
-function frozenGenerationRoute(expansionRoute: HostRoute): HostRoute {
-  const frozen = generationRoute.value ?? expansionRoute;
+function frozenGenerationRoute(captured: HostRoute | null, expansionRoute: HostRoute): HostRoute {
+  const frozen = captured ?? expansionRoute;
   return { ...frozen, target: { ...frozen.target } };
 }
 
-/** Record the expansion host only when it left the generation route. */
-function expansionRouteProvenance(expansionRoute: HostRoute): { expansionRoute?: HostRoute } {
-  const frozen = generationRoute.value;
-  if (!frozen || frozen.hostId === expansionRoute.hostId) return {};
+/** Record the expansion host only when it left the captured generation route. */
+function expansionRouteProvenance(
+  captured: HostRoute | null,
+  expansionRoute: HostRoute,
+): { expansionRoute?: HostRoute } {
+  if (!captured || captured.hostId === expansionRoute.hostId) return {};
   return { expansionRoute: { ...expansionRoute, target: { ...expansionRoute.target } } };
 }
 
@@ -2115,6 +2125,8 @@ async function expandForCurrentBatch(
   submissionGuard.invalidate();
 
   const route = routeOverride ?? currentExpansionRoute.value;
+  // Frozen before the request, for the same reason as remix above.
+  const printRoute = generationRoute.value;
   if (!route) {
     expansionAttemptHostLabel.value = null;
     expansionError.value = unavailableExpansionHostMessage();
@@ -2193,8 +2205,8 @@ async function expandForCurrentBatch(
         task: inputs.task,
         stylePreset: inputs.stylePreset,
         selectedHostPolicy: inputs.selectedHostPolicy,
-        route: frozenGenerationRoute(route),
-        ...expansionRouteProvenance(route),
+        route: frozenGenerationRoute(printRoute, route),
+        ...expansionRouteProvenance(printRoute, route),
       };
       // Bake-and-clear: the rewrite absorbed the style (the server received
       // it as a directive), so the chip clears here — leaving it lit would
@@ -2215,8 +2227,13 @@ async function expandForCurrentBatch(
       return;
     }
     preparedBatch.value = Object.assign(
-      createPreparedExpansionBatch(inputs, frozenGenerationRoute(route), prompts, token),
-      expansionRouteProvenance(route),
+      createPreparedExpansionBatch(
+        inputs,
+        frozenGenerationRoute(printRoute, route),
+        prompts,
+        token,
+      ),
+      expansionRouteProvenance(printRoute, route),
     );
     quickExpansionSnapshot.value = null;
   } catch (error) {

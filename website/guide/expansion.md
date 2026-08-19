@@ -74,9 +74,10 @@ route unless the machine reports it does not have the expansion model
 installed: under **Auto** or **Most capable** the rewrite then runs on the
 best-ranked reachable machine that does have it, using the same ranking the
 generation router uses, while the print itself still goes where it was routed.
-A pinned machine is never left. When no eligible machine has the model, Create
-offers to pull it and names the machine — the machine expansion would have used
-— instead of failing. iPhone pins one machine, so expansion always runs there.
+A pinned machine is never left, and Remix follows the same rule because it runs
+on the same model. When no eligible machine has the model, Create offers to
+pull it and names the machine — the one expansion would have used — instead of
+failing. iPhone pins one machine, so expansion always runs there.
 Large expansions are assembled from bounded
 four-prompt model calls with position-aware instructions and per-chunk token
 budgets. Missing or duplicate positions are retried, and Mold rejects any

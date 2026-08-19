@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { enableAutoUnmount, flushPromises, mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
+import { nextTick } from "vue";
 import GenerateView from "./GenerateView.vue";
 import ExpandControl from "../components/generate/ExpandControl.vue";
 import PreparedExpansionBatch from "../components/generate/PreparedExpansionBatch.vue";
@@ -191,6 +192,39 @@ describe("GenerateView expansion routing", () => {
     // machine that merely rewrote the prompt.
     expect(batch.route.hostId).toBe("local");
     expect(batch.expansionRoute?.hostId).toBe("hal9000-7680");
+  });
+
+  it("freezes the generation route resolved before the request, not after", async () => {
+    addRemoteHost();
+    const hosts = useHostsStore();
+    hosts.capabilities.local = expandCapability(true);
+    hosts.capabilities["hal9000-7680"] = expandCapability(true);
+    let release!: (value: { original: string; expanded: string[] }) => void;
+    vi.mocked(expandPrompt).mockReturnValue(
+      new Promise((resolve) => {
+        release = resolve;
+      }),
+    );
+
+    const wrapper = mountView();
+    await flushPromises();
+    wrapper.findComponent(ExpandControl).vm.$emit("expand");
+    await flushPromises();
+
+    // Auto reranks while the rewrite is still in flight.
+    hosts.telemetry.local = { queueDepth: 9, queueCapacity: 8, version: "0.23.3" };
+    hosts.telemetry["hal9000-7680"] = { queueDepth: 0, queueCapacity: 8, version: "0.23.3" };
+    await nextTick();
+
+    release({
+      original: "a lighthouse at dusk",
+      expanded: ["storm light", "sea mist", "aerial coast"],
+    });
+    await flushPromises();
+
+    // The reviewed set belongs to the machine resolved when the user asked,
+    // not to whichever one the poll happened to favour on return.
+    expect(wrapper.findComponent(PreparedExpansionBatch).props("batch").route.hostId).toBe("local");
   });
 
   it("keeps the generation route when its expand capability was never read", async () => {

@@ -3324,6 +3324,97 @@ describe("CreatePage host routing", () => {
     ).toEqual({ baseUrl: "http://localhost:3000" });
   });
 
+  it("keeps the print on the generation machine after a rerouted quick expansion", async () => {
+    const studio = addHost({
+      url: "http://studio:7680",
+      name: "Studio",
+      apiKey: "sk-studio",
+    });
+    hostModelsMock.mockResolvedValue([flux]);
+    hostCapabilitiesMock.mockImplementation(
+      expandCapabilityFor({ [ORIGIN_HOST_ID]: false, [studio.id]: true }),
+    );
+
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = "flux-dev:q4";
+    form.state.value.modelFamily = "flux";
+    form.state.value.prompt = "a lighthouse";
+    await nextTick();
+
+    await wrapper.get("[data-test='composer-expand']").trigger("click");
+    await flushPromises();
+    expect(
+      wrapper.getComponent({ name: "ExpandModal" }).props("target"),
+    ).toEqual({ baseUrl: "http://studio:7680", apiKey: "sk-studio" });
+
+    wrapper
+      .getComponent({ name: "ExpandModal" })
+      .vm.$emit("apply-prompt", "storm light over the harbor");
+    await nextTick();
+    await wrapper.get("[data-test='composer-submit']").trigger("click");
+    await flushPromises();
+
+    // Rewritten on Studio, printed here: the quick snapshot must freeze the
+    // generation route, which for the origin stays relative dispatch.
+    expect(submitMock).toHaveBeenCalledTimes(1);
+    expect(submitMock.mock.calls[0]?.[2]).toBeNull();
+  });
+
+  it("routes Remix through the same expansion policy", async () => {
+    const studio = addHost({
+      url: "http://studio:7680",
+      name: "Studio",
+      apiKey: "sk-studio",
+    });
+    hostModelsMock.mockResolvedValue([flux]);
+    hostCapabilitiesMock.mockImplementation(
+      expandCapabilityFor({ [ORIGIN_HOST_ID]: false, [studio.id]: true }),
+    );
+
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = "flux-dev:q4";
+    form.state.value.modelFamily = "flux";
+    form.state.value.prompt = "a lighthouse";
+    await nextTick();
+
+    wrapper.getComponent({ name: "ComposerCard" }).vm.$emit("remix");
+    await flushPromises();
+
+    // `/api/remix` runs on the same expander, so it follows the same rule.
+    expect(
+      wrapper.getComponent({ name: "RemixModal" }).props("target"),
+    ).toEqual({ baseUrl: "http://studio:7680", apiKey: "sk-studio" });
+  });
+
+  it("offers the expander pull on a single-host install", async () => {
+    hostModelsMock.mockResolvedValue([flux]);
+    hostCapabilitiesMock.mockImplementation(
+      expandCapabilityFor({ [ORIGIN_HOST_ID]: false }),
+    );
+
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = "flux-dev:q4";
+    form.state.value.modelFamily = "flux";
+    form.state.value.prompt = "a lighthouse";
+    await nextTick();
+
+    await wrapper.get("[data-test='composer-expand']").trigger("click");
+    await flushPromises();
+
+    expect(wrapper.getComponent({ name: "ExpandModal" }).props("open")).toBe(
+      false,
+    );
+    expect(wrapper.get("[data-test='web-expansion-pull']").text()).toContain(
+      "qwen3-expand:q8",
+    );
+  });
+
   it("offers the expander pull on a pinned machine instead of leaving it", async () => {
     const studio = addHost({
       url: "http://studio:7680",
