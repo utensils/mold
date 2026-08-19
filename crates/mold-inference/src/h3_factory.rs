@@ -1341,8 +1341,10 @@ fn validate_target_budget(
             memory.packed_video_state_device_bytes,
             memory.packed_audio_state_device_bytes,
             memory.denoise_tensor_copy_workspace_device_bytes,
-            memory.attention_workspace_device_bytes,
-            memory.ffn_workspace_device_bytes,
+            denoise_transient_workspace_device_bytes(
+                memory.attention_workspace_device_bytes,
+                memory.ffn_workspace_device_bytes,
+            ),
             resident_blocks,
             streamed_block_overlap,
             expected_prefetch,
@@ -1558,6 +1560,21 @@ fn checked_u64_sum(values: impl IntoIterator<Item = u64>, label: &'static str) -
         sum.checked_add(value)
             .ok_or_else(|| anyhow!("{label} overflow"))
     })
+}
+
+/// The attention and FFN workspace bounds never coexist on the device: within
+/// one transformer block the attention call's transients (QKV projection,
+/// kernel auxiliaries, output-projection staging) are locals dropped when
+/// `H3Attention::forward` returns, and only hidden-sized tensors — charged
+/// separately as packed state and denoise copy workspace — survive into the
+/// strictly-sequential MLP call (`mold_candle::minimax_h3::dit`, block
+/// forward). The denoise phase therefore charges the larger of the two
+/// per-workspace bounds, never their sum.
+pub(crate) fn denoise_transient_workspace_device_bytes(
+    attention_workspace_device_bytes: u64,
+    ffn_workspace_device_bytes: u64,
+) -> u64 {
+    attention_workspace_device_bytes.max(ffn_workspace_device_bytes)
 }
 
 pub fn expected_h3_factory_prepared_request_identity(
@@ -2859,8 +2876,10 @@ mod tests {
             packed_video_state_device_bytes,
             packed_audio_state_device_bytes,
             denoise_tensor_copy_workspace_device_bytes,
-            attention_workspace_device_bytes,
-            ffn_workspace_device_bytes,
+            denoise_transient_workspace_device_bytes(
+                attention_workspace_device_bytes,
+                ffn_workspace_device_bytes,
+            ),
             streamed_block_device_overlap_bytes,
             max_device_weight_staging_bytes,
         ]);

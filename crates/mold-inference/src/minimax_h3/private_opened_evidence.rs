@@ -1412,8 +1412,10 @@ fn build_canonical_private_fl2va_target_budget(
         packed_video_state_device_bytes,
         packed_audio_state_device_bytes,
         denoise_tensor_copy_workspace_device_bytes,
-        bounds.attention_workspace_device_bytes,
-        bounds.ffn_workspace_device_bytes,
+        crate::h3_factory::denoise_transient_workspace_device_bytes(
+            bounds.attention_workspace_device_bytes,
+            bounds.ffn_workspace_device_bytes,
+        ),
         streamed_block_device_overlap_bytes,
         max_device_weight_staging_bytes,
     ])?;
