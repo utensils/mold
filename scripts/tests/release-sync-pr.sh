@@ -154,6 +154,20 @@ grep -q '^version = "0.15.0"$' "$tmp/apps/mobile/src-tauri/Cargo.toml" || fail "
 awk '/^name = "mold-mobile"$/{getline; exit ($0 == "version = \"0.15.0\"") ? 0 : 1}' "$tmp/apps/mobile/src-tauri/Cargo.lock" || fail "mobile Cargo.lock version not synced"
 grep -q '"version": "0.15.0"' "$tmp/apps/mobile/src-tauri/tauri.conf.json" || fail "mobile tauri config version not synced"
 
+# Ordering: in a git checkout fragments are assembled newest-first by the
+# commit that added them, regardless of filename (CRLF is normalised away).
+gitfx=$(mktemp -d)
+cp -R "$tmp/." "$gitfx"
+rm -f "$gitfx/changelog.d/"*.md
+( cd "$gitfx" && git init -q -b main && git config user.email t@x && git config user.name t \
+  && printf -- '- **Zulu first.** oldest commit\r\n' > changelog.d/zulu.md && git add -A && git commit -qm one \
+  && printf -- '- **Alpha second.** newest commit\n' > changelog.d/alpha.md && git add -A && git commit -qm two \
+  && GIT_COMMITTER_DATE="$(date -u -d '+1 hour' +%Y-%m-%dT%H:%M:%S 2>/dev/null || date -u -v+1H +%Y-%m-%dT%H:%M:%S)" git commit -q --amend --no-edit )
+"$script" "$gitfx" > /dev/null
+awk '/Alpha second/{a=NR} /Zulu first/{z=NR} END{exit (a && z && a < z) ? 0 : 1}' "$gitfx/CHANGELOG.md" || fail "fragments not ordered newest-added first"
+if grep -q $'\r' "$gitfx/CHANGELOG.md"; then fail "CRLF fragment leaked a carriage return into CHANGELOG.md"; fi
+rm -rf "$gitfx"
+
 # Idempotency: second run must not change anything.
 cp -R "$tmp" "$tmp.before"
 "$script" "$tmp" > /dev/null
@@ -230,6 +244,7 @@ grep -Fq -- '--commit "$GITHUB_SHA"' "$workflow" || fail "release tag job does n
 # shellcheck disable=SC2016
 grep -Fq 'select(.name == \"$job_name\")' "$workflow" || fail "release tag job gates on whole workflows instead of Apple delivery jobs"
 grep -q 'bash scripts/tests/release-sync-pr.sh' "$ci_workflow" || fail "CI does not exercise release PR synchronization"
+grep -Fq 'Refuse to tag with unassembled changelog fragments' "$workflow" || fail "release tag job does not refuse leftover changelog.d fragments"
 # The bot commit deletes consumed changelog.d fragments, so the trusted
 # release-PR file-scope check must accept D for exactly that path.
 grep -Fq 'changelog.d/*.md' "$ci_workflow" || fail "trusted release PR scope does not allow changelog.d fragment deletions"

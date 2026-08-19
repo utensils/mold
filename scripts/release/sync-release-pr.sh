@@ -52,7 +52,7 @@ if [ "${#fragments[@]}" -gt 0 ]; then
   assembled=$(mktemp)
   for f in "${fragments[@]}"; do
     # Normalise: strip leading/trailing blank lines, guarantee one trailing newline.
-    awk 'NF{p=1} p{buf=buf $0 "\n"} END{sub(/\n+$/,"\n",buf); printf "%s", buf}' "$f" >> "$assembled"
+    awk '{sub(/\r$/,"")} NF{p=1} p{buf=buf $0 "\n"} END{sub(/\n+$/,"\n",buf); printf "%s", buf}' "$f" >> "$assembled"
   done
   awk -v file="$assembled" '
     /^## \[Unreleased\]$/ {

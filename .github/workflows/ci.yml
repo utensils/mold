@@ -365,7 +365,6 @@ jobs:
             # generated commit may delete exactly changelog.d/*.md and nothing
             # else; every other change must be a modification.
             if [[ "$status" == D ]]; then
-              # shellcheck disable=SC2254
               case "$path" in
                 changelog.d/*.md)
                   [[ "$path" != changelog.d/README.md ]] || {

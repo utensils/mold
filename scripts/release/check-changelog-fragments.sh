@@ -14,20 +14,34 @@
 #   3. When the diff touches shipped source, the PR adds at least one fragment
 #      — unless SKIP_CHANGELOG=true (the `skip-changelog` PR label).
 #
-# Usage: check-changelog-fragments.sh <base-sha> <head-sha>   (run at repo root)
+# Usage: check-changelog-fragments.sh <base-sha> <head-sha>   (run at repo root,
+# full history available — the checkout must not be shallow)
 set -euo pipefail
 
-base=${1:?base sha}
+base_ref=${1:?base sha}
 head=${2:?head sha}
 skip=${SKIP_CHANGELOG:-false}
 status=0
 
+# GitHub's pull_request.base.sha is the base branch TIP, not the fork point.
+# A PR that branched before main moved (or before a release emptied
+# [Unreleased]) must be judged against what it actually changed, so every
+# comparison below uses the merge base.
+base=$(git merge-base "$base_ref" "$head" 2>/dev/null || echo "$base_ref")
+
 err() { echo "::error::$1" >&2; status=1; }
 
-# 1. Fragment shape.
+# 1. Fragment shape — only fragments this PR added or modified, so one bad
+#    file already on main does not fail every unrelated PR. Paths are read
+#    unquoted (core.quotePath=false) so non-ASCII slugs are still seen.
 while IFS= read -r f; do
   [ -n "$f" ] || continue
   [ "$(basename "$f")" = "README.md" ] && continue
+  case "$f" in
+    changelog.d/*/*) err "$f is nested; fragments must live directly in changelog.d/ (the release script only assembles changelog.d/*.md)"; continue ;;
+    *.md) ;;
+    *) err "$f is not a .md fragment" ; continue ;;
+  esac
   content=$(git show "$head:$f" 2>/dev/null || true)
   first=$(printf '%s\n' "$content" | awk 'NF{print; exit}')
   case "$first" in
@@ -37,7 +51,11 @@ while IFS= read -r f; do
   if printf '%s\n' "$content" | grep -Eq '^(<<<<<<<|=======|>>>>>>>)'; then
     err "$f contains merge-conflict markers"
   fi
-done < <(git ls-tree -r --name-only "$head" -- changelog.d 2>/dev/null | grep -E '\.md$' || true)
+  if printf '%s\n' "$content" | grep -q $'\r'; then
+    err "$f has CRLF line endings; use LF"
+  fi
+done < <(git -c core.quotePath=false diff --name-status --find-renames "$base" "$head" -- changelog.d \
+  | awk '$1 ~ /^(A|M|R)/ {print $NF}')
 
 # 2. [Unreleased] is bot-owned.
 unreleased() {
@@ -49,9 +67,11 @@ if [ "$(unreleased "$base")" != "$(unreleased "$head")" ]; then
 fi
 
 # 3. Shipped source changes carry a note.
-changed=$(git diff --name-only "$base" "$head")
-added_fragments=$(git diff --name-status "$base" "$head" -- changelog.d \
-  | awk '$1 ~ /^(A|R)/ && $NF ~ /\.md$/ && $NF !~ /README\.md$/ {print $NF}')
+changed=$(git -c core.quotePath=false diff --name-only "$base" "$head")
+# Only a genuinely new fragment counts — renaming one that already lives on
+# main would reuse another PR's note.
+added_fragments=$(git -c core.quotePath=false diff --name-status --find-renames "$base" "$head" -- changelog.d \
+  | awk '$1 == "A" && $NF ~ /^changelog\.d\/[^\/]+\.md$/ && $NF !~ /README\.md$/ {print $NF}')
 if [ "$skip" != "true" ] \
   && printf '%s\n' "$changed" | grep -Eq '^(crates/|web/src/|desktop/src/|desktop/src-tauri/src/|apps/mobile/src/|apps/mobile/src-tauri/src/|studio/|ui/)' \
   && [ -z "$added_fragments" ]; then
