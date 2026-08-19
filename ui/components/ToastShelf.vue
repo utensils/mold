@@ -2,10 +2,16 @@
 /*
  * Toast shelf — top-right presenter inside the app frame (spec G11/G12).
  * The host owns the toast list and timers; this component renders it and
- * reports dismiss(id) / action(id). Errors are alerts with a stop-tinted
- * border; success/info are polite status rows. Optional action button (undo).
+ * reports dismiss(id) / action(id). Errors and warnings are alerts with a
+ * tinted border — a warning here is the sticky "your machine is gone", not an
+ * aside; success/info are polite status rows. Optional action button (undo).
  */
 import { computed } from "vue";
+import {
+  severityIsUrgent,
+  severityMark,
+  severityTint,
+} from "../lib/notificationSeverity";
 import type { Toast } from "./types";
 
 export type { Toast };
@@ -20,11 +26,16 @@ const ordered = computed(() => [...props.toasts].reverse());
 
 const emit = defineEmits<{ dismiss: [id: string]; action: [id: string] }>();
 
-const GLYPHS: Record<Toast["kind"], string> = {
-  info: "•",
-  success: "✓",
-  error: "✕",
-};
+/* Glyphs and severity names come from the one shared table so this shelf, the
+ * desktop shelf, and the bell can never drift apart. */
+const mark = severityMark;
+const urgent = severityIsUrgent;
+
+/* Border tint is derived from the same color rather than restated in CSS —
+ * a per-kind stylesheet rule is how the tables drifted in the first place. */
+function borderStyle(kind: Toast["kind"]) {
+  return kind === "info" ? {} : { borderColor: severityTint(kind, 50) };
+}
 </script>
 
 <template>
@@ -35,11 +46,17 @@ const GLYPHS: Record<Toast["kind"], string> = {
         :key="toast.id"
         class="ms-toast"
         :class="`ms-toast--${toast.kind}`"
-        :role="toast.kind === 'error' ? 'alert' : 'status'"
+        :style="borderStyle(toast.kind)"
+        :role="urgent(toast.kind) ? 'alert' : 'status'"
       >
-        <span class="ms-toast__glyph" aria-hidden="true">
-          {{ GLYPHS[toast.kind] }}
+        <span
+          class="ms-toast__glyph"
+          :style="{ color: mark(toast.kind).color }"
+          aria-hidden="true"
+        >
+          {{ mark(toast.kind).glyph }}
         </span>
+        <span class="ms-toast__tone">{{ mark(toast.kind).label }}</span>
         <span class="ms-toast__text">{{ toast.text }}</span>
         <button
           v-if="toast.actionLabel"
@@ -131,26 +148,22 @@ const GLYPHS: Record<Toast["kind"], string> = {
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
 }
 
-.ms-toast--error {
-  border-color: color-mix(in srgb, var(--stop) 50%, transparent);
+.ms-toast__tone {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
 }
 
 .ms-toast__glyph {
   flex: 0 0 auto;
   font-size: 12px;
   line-height: 1;
-}
-
-.ms-toast--success .ms-toast__glyph {
-  color: var(--success);
-}
-
-.ms-toast--info .ms-toast__glyph {
-  color: var(--halide);
-}
-
-.ms-toast--error .ms-toast__glyph {
-  color: var(--stop);
 }
 
 .ms-toast__text {

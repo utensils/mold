@@ -1,11 +1,20 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, nextTick, onUnmounted, ref } from "vue";
 import Icon from "@ui/components/Icon.vue";
 import Popover from "@ui/components/Popover.vue";
 import {
   useNotificationsStore,
   type NotificationEntry,
 } from "../stores/notifications";
+import {
+  NOTIFICATION_BADGE_INK,
+  mostSevereKind,
+  notificationTone,
+} from "../lib/notificationTone";
+import {
+  copyTextToClipboard,
+  notificationClipboardText,
+} from "../lib/notificationClipboard";
 
 /*
  * The notifications bell — the durable record behind transient toasts. A long
@@ -20,11 +29,92 @@ const unreadLabel = computed(() =>
   store.unreadCount > 99 ? "99+" : String(store.unreadCount),
 );
 
+/* The badge takes the worst unread severity: red for an error, yellow for a
+ * warning, green when only good news is waiting. */
+const badgeTone = computed(() =>
+  notificationTone(
+    mostSevereKind(
+      store.entries.filter((entry) => !entry.read).map((entry) => entry.kind),
+    ),
+  ),
+);
+
 function toggle() {
   const next = !open.value;
   open.value = next;
   if (next) store.markAllRead();
 }
+
+function toneStyle(entry: NotificationEntry) {
+  return { color: notificationTone(entry.kind).color };
+}
+
+function toneGlyph(entry: NotificationEntry): string {
+  return notificationTone(entry.kind).glyph;
+}
+
+function toneLabel(entry: NotificationEntry): string {
+  return notificationTone(entry.kind).label;
+}
+
+/*
+ * Copying a notification out. The app shells disable text selection on their
+ * chrome, so a long server error body is unreachable without a real control —
+ * and the bell exists precisely to keep that text readable after the toast is
+ * gone. The row reports the outcome instead of assuming it worked; an insecure
+ * origin or a denied permission is a normal case, not an edge.
+ */
+const copyState = ref<{ id: number; ok: boolean } | null>(null);
+let copyResetTimer: ReturnType<typeof setTimeout> | null = null;
+/** Rising token: only the newest click may paint the outcome. Clicking one row
+ *  then another must not settle "Copied" on whichever promise resolves last. */
+let copyEpoch = 0;
+
+async function copyEntry(entry: NotificationEntry) {
+  const epoch = ++copyEpoch;
+  const ok = await copyTextToClipboard(
+    notificationClipboardText(entry, timeLabel(entry)),
+  );
+  if (epoch !== copyEpoch) return;
+  copyState.value = { id: entry.id, ok };
+  await announceCopy(
+    ok
+      ? "Notification copied to the clipboard"
+      : "Could not copy the notification",
+  );
+  if (copyResetTimer) clearTimeout(copyResetTimer);
+  copyResetTimer = setTimeout(() => {
+    copyState.value = null;
+    copyAnnouncement.value = "";
+    copyResetTimer = null;
+  }, 2000);
+}
+
+function copyLabel(entry: NotificationEntry): string {
+  if (copyState.value?.id !== entry.id) return "Copy";
+  return copyState.value.ok ? "Copied" : "Copy failed";
+}
+
+/* The button's accessible name cannot change under the user's fingers, so the
+ * outcome goes to a live region instead — otherwise a failed copy on a plain
+ * http origin is announced as nothing at all and the text was never taken. */
+const copyAnnouncement = ref("");
+
+/**
+ * A live region only speaks when its text actually changes, so re-setting the
+ * same sentence is silence — and pressing Copy twice is exactly what someone
+ * unsure whether the first one worked does. Clear it, let that render, then
+ * write the outcome so every press is announced.
+ */
+async function announceCopy(message: string) {
+  copyAnnouncement.value = "";
+  await nextTick();
+  copyAnnouncement.value = message;
+}
+
+onUnmounted(() => {
+  if (copyResetTimer) clearTimeout(copyResetTimer);
+});
 
 function timeLabel(entry: NotificationEntry): string {
   return new Date(entry.atMs).toLocaleTimeString([], {
@@ -50,6 +140,10 @@ function timeLabel(entry: NotificationEntry): string {
           v-if="store.unreadCount > 0"
           class="notifications-bell__badge"
           data-test="notifications-unread"
+          :style="{
+            background: badgeTone.badge,
+            color: NOTIFICATION_BADGE_INK,
+          }"
         >
           {{ unreadLabel }}
         </span>
@@ -57,6 +151,14 @@ function timeLabel(entry: NotificationEntry): string {
     </template>
 
     <div class="notifications-panel" data-test="notifications-panel">
+      <p
+        class="notifications-panel__sr"
+        role="status"
+        aria-live="polite"
+        data-test="notifications-copy-status"
+      >
+        {{ copyAnnouncement }}
+      </p>
       <header>
         <strong>Notifications</strong>
         <button
@@ -77,7 +179,16 @@ function timeLabel(entry: NotificationEntry): string {
           :key="entry.id"
           :data-kind="entry.kind"
         >
-          <span class="notifications-panel__dot" aria-hidden="true" />
+          <!-- Glyph, not a bare dot: severity must survive a color-vision
+               deficiency, and the mark differs per kind. -->
+          <span
+            class="notifications-panel__dot"
+            data-test="notifications-dot"
+            :style="toneStyle(entry)"
+            aria-hidden="true"
+            >{{ toneGlyph(entry) }}</span
+          >
+          <span class="notifications-panel__sr">{{ toneLabel(entry) }}</span>
           <div class="notifications-panel__copy">
             <p class="notifications-panel__text">
               {{ entry.text }}
@@ -94,6 +205,15 @@ function timeLabel(entry: NotificationEntry): string {
               >{{ timeLabel(entry) }}
             </p>
           </div>
+          <button
+            type="button"
+            class="notifications-panel__copy-action"
+            data-test="notifications-copy"
+            :aria-label="`Copy notification: ${entry.text}`"
+            @click="copyEntry(entry)"
+          >
+            {{ copyLabel(entry) }}
+          </button>
         </li>
       </ul>
     </div>
@@ -127,7 +247,7 @@ function timeLabel(entry: NotificationEntry): string {
   padding: 0 3px;
   border-radius: 999px;
   background: var(--stop, #b42318);
-  color: #fff;
+  color: var(--on-status, #fff);
   font-size: 9px;
   font-weight: 700;
   line-height: 15px;
@@ -181,25 +301,55 @@ function timeLabel(entry: NotificationEntry): string {
 }
 
 .notifications-panel__dot {
-  width: 7px;
-  height: 7px;
+  width: 12px;
   flex: none;
-  margin-top: 5px;
-  border-radius: 999px;
-  background: var(--ink-3, #98a2b3);
+  margin-top: 1px;
+  font-size: 11px;
+  line-height: 1.5;
+  text-align: center;
+  color: var(--ink-3, #98a2b3);
 }
 
-.notifications-panel li[data-kind="error"] .notifications-panel__dot {
-  background: var(--stop, #b42318);
-}
-
-.notifications-panel li[data-kind="success"] .notifications-panel__dot {
-  background: var(--safelight, #067647);
+/* Visually-hidden utility: the severity name next to each glyph, and the
+ * copy-outcome live region. Both are text only assistive tech needs. */
+.notifications-panel__sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
 }
 
 .notifications-panel__copy {
   min-width: 0;
   flex: 1;
+  /* The desktop shell disables selection app-wide; notification text is
+     content, so it stays selectable for a manual drag-copy too. */
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.notifications-panel__copy-action {
+  flex: none;
+  align-self: flex-start;
+  margin-top: 1px;
+  padding: 1px 5px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: none;
+  color: var(--ink-3, #98a2b3);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.notifications-panel li:hover .notifications-panel__copy-action,
+.notifications-panel__copy-action:focus-visible {
+  border-color: var(--ce, var(--edge, #d0d5dd));
+  color: var(--ink, currentColor);
 }
 
 .notifications-panel__copy p {

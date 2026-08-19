@@ -68,12 +68,35 @@ import {
 import { h3BoundariesNeedingMedia } from "@studio/lib/h3BoundaryRestore";
 import {
   classifyPlacementPreview,
+  comparePlacementPreviews,
   previewChainPlacement,
   previewGenerationPlacement,
   previewRequestForSiblingFanout,
   requiresAuthoritativePlacement,
   type GenerationPlacementPreview,
 } from "@studio/api/generationPlacement";
+import {
+  AUTO_TARGET_ID,
+  CAPABLE_TARGET_ID,
+  chooseRoutedHost,
+  hostIdsForModel,
+  isAutomaticTarget,
+  pickAutoHost,
+  pickMostCapableHost,
+  unionModelsByName,
+} from "@studio/lib/hostRouting";
+import { profileConflictMessage, profileHashConflict } from "@studio/lib/profileFleet";
+import {
+  MOBILE_AUTO_ROUTING_HINT,
+  MOBILE_CAPABLE_ROUTING_HINT,
+  loadMobileGenerateTarget,
+  mobileGenerateTargetLabel,
+  mobileAutoRoutingAvailable,
+  mobileModelAvailabilityTag,
+  mobileRoutingHosts,
+  resolveMobileGenerateTarget,
+  saveMobileGenerateTarget,
+} from "./generateTarget";
 import {
   activityAnnouncement,
   activityCountLabel,
@@ -181,6 +204,7 @@ import {
 } from "../lib/generateValidation";
 import { blobToBase64, isStillImageFile } from "../lib/image";
 import { parseMissingExpandModel } from "../lib/expandErrors";
+import { resolveExpansionRoute } from "@studio/lib/expansionRouting";
 import {
   expansionPullJobMatchesModel,
   resolveExpansionPullStatus,
@@ -406,6 +430,10 @@ const LIBRARY_VISITED_KEY = "mold.mobile.library-visited.v1";
 const SEQUENCE_RECOVERY_KEY = "mold.mobile.sequence-job.v1";
 const LIVE_ACTIVITY_KEY = "mold.mobile.live-activity.v1";
 const HOST_PROBE_TIMEOUT_MS = 9_000;
+/** How long automatic routing keeps waiting for slower machines once one has
+ *  answered `planned`. Nothing is abandoned before that first plan exists —
+ *  a deadline that fires with no route would manufacture a dead end. */
+const MOBILE_PLACEMENT_SETTLE_MS = 1_500;
 const GALLERY_HOST_TIMEOUT_MS = 9_000;
 const OUTPUT_OPTIONS = [
   { value: "single" as const, label: "One shot" },
@@ -465,6 +493,12 @@ let stopPairingDeepLinks: (() => void) | null = null;
 const hostError = ref("");
 const models = ref<ModelEntry[]>([]);
 const modelsHostId = ref("");
+/** Per-machine `/api/models` snapshots, the input to model-aware routing and
+ *  to the union picker the automatic policies need. The browsed machine's copy
+ *  is written by `refreshModels`; peers are filled in by `refreshRoutingModels`. */
+const modelsByHost = ref<Record<string, ModelEntry[]>>({});
+/** Persisted generation target: a machine id, `auto`, or `capable`. */
+const generateTargetPolicy = ref(loadMobileGenerateTarget());
 const loadingModels = ref(false);
 const modelLoadError = ref("");
 const sequenceJob = ref<ChainJobDetail | null>(null);
@@ -675,6 +709,10 @@ interface HostTelemetry {
   vramUsedMb: number | null;
   vramTotalMb: number | null;
   queueDepth: number | null;
+  /** `gpu_info.backend` as this machine reported it; null on servers ≤ 0.16,
+   *  where the routing ladder falls back to inferring it from the GPU name. */
+  gpuBackend: string | null;
+  gpuName: string | null;
 }
 const hostTelemetry = reactive<Record<string, HostTelemetry>>({});
 
@@ -700,12 +738,70 @@ function captureHostTelemetry(hostId: string, status: ServerStatus): void {
     vramUsedMb: memory?.usedMb ?? null,
     vramTotalMb: memory?.totalMb ?? null,
     queueDepth: status.queue_depth ?? null,
+    gpuBackend: status.gpu_info?.backend ?? null,
+    gpuName: status.gpu_info?.name ?? null,
   };
 }
 
 const selectedHost = computed(() =>
   connectedHosts.value.find((host) => host.id === selectedHostId.value),
 );
+
+// --- Generation routing -----------------------------------------------------
+// The phone is remote-only: Auto and Most capable choose between CONNECTED
+// machines and never fall back to a local engine. Both are offered only while
+// at least two machines are reachable; with one machine the picker keeps
+// today's single-host behaviour exactly.
+const routingHosts = computed(() => mobileRoutingHosts(connectedHosts.value));
+const autoRoutingAvailable = computed(() => mobileAutoRoutingAvailable(connectedHosts.value));
+const generateTarget = computed(() =>
+  resolveMobileGenerateTarget(
+    generateTargetPolicy.value,
+    connectedHosts.value,
+    selectedHostId.value,
+  ),
+);
+const automaticRouting = computed(
+  () => autoRoutingAvailable.value && isAutomaticTarget(generateTarget.value),
+);
+const routingHint = computed(() =>
+  generateTarget.value === CAPABLE_TARGET_ID
+    ? MOBILE_CAPABLE_ROUTING_HINT
+    : MOBILE_AUTO_ROUTING_HINT,
+);
+/** The header chip names where work lands: a machine, or the active policy. */
+const headerTargetLabel = computed(() =>
+  automaticRouting.value
+    ? mobileGenerateTargetLabel(generateTarget.value, connectedHosts.value)
+    : (selectedHost.value?.name ?? "Remote only"),
+);
+const developOnNote = computed(() => {
+  if (!automaticRouting.value) return `Develop on ${selectedHost.value?.name ?? "this machine"}`;
+  return generateTarget.value === CAPABLE_TARGET_ID
+    ? "Develop on the most capable machine"
+    : "Develop on the least busy machine";
+});
+/** Where the Create empty states say a model is (or is not) installed. */
+const modelScopeLabel = computed(() =>
+  automaticRouting.value ? "your connected machines" : (selectedHost.value?.name ?? "this machine"),
+);
+
+/** The routing view of one machine: the phone has no home host, so the
+ *  pickers see status/queue/GPU only and break dead heats on the id. */
+function routingHostView(host: MobileHost) {
+  const telemetry = hostTelemetry[host.id];
+  return {
+    id: host.id,
+    status: "ready" as const,
+    queueDepth: telemetry?.queueDepth ?? null,
+    gpu: {
+      backend: telemetry?.gpuBackend ?? null,
+      name: telemetry?.gpuName ?? null,
+      vramTotalMb: telemetry?.vramTotalMb ?? null,
+    },
+    host,
+  };
+}
 const hostDetail = computed(() => hosts.value.find((host) => host.id === hostDetailId.value));
 const selectedPrintIndex = computed(() => {
   const selected = selectedPrint.value;
@@ -724,6 +820,32 @@ const selectedTarget = computed<ApiTarget | null>(() => {
   const host = selectedHost.value;
   return host ? mobileHostTarget(host) : null;
 });
+/**
+ * Where model-scoped read-only lookups go — chain limits, LoRAs, control
+ * adapters, source preprocessing, and the estimate. The browsed machine
+ * answers whenever it has the model (the stable, pinned-path answer); under an
+ * automatic policy a model that lives only on a peer is asked of the machine
+ * that policy would route it to, so the union picker cannot show a model whose
+ * own capabilities nothing can read.
+ */
+const generationTargetHost = computed<MobileHost | null>(() => {
+  const browsed = selectedHost.value ?? null;
+  if (!automaticRouting.value || !form.model) return browsed;
+  const owners = modelHostIds(form.model);
+  if (!browsed || !owners.includes(browsed.id)) {
+    // Deliberately NOT the Auto pick: these answers are identical on every
+    // owner, and depending on live queue depth here would hand children a new
+    // target object on every telemetry tick.
+    const owner = routingHosts.value
+      .filter((host) => owners.includes(host.id))
+      .sort((left, right) => left.id.localeCompare(right.id))[0];
+    if (owner) return owner;
+  }
+  return browsed;
+});
+const generationTarget = computed<ApiTarget | null>(() =>
+  generationTargetHost.value ? mobileHostTarget(generationTargetHost.value) : null,
+);
 const controlAdapters = ref<Ltx2ControlAdapterInfo[]>([]);
 const cameraControls = ref<Ltx2CameraControlInfo[]>([]);
 const cameraControlsLoaded = ref(false);
@@ -739,8 +861,8 @@ watch(
     controlAdapters.value = [];
     cameraControls.value = [];
     cameraControlsLoaded.value = false;
-    const target = selectedTarget.value;
-    if (!target || !selectedHost.value?.online || form.family !== "ltx2" || !form.model) {
+    const target = generationTarget.value;
+    if (!target || !generationTargetHost.value?.online || form.family !== "ltx2" || !form.model) {
       form.icLoraControl = null;
       return;
     }
@@ -884,6 +1006,14 @@ function carryQuickTransformToHost(hostId: string): void {
 watch(selectedHostId, (hostId, previous) => {
   if (hostId && hostId !== previous) carryQuickTransformToHost(hostId);
 });
+// Keep the peer model snapshots current while an automatic policy is in force:
+// the reachable set changes as machines wake, sleep, and are added.
+watch(
+  [automaticRouting, () => routingHosts.value.map((host) => host.id).join(",")],
+  ([automatic]) => {
+    if (automatic) void refreshRoutingModels();
+  },
+);
 const expansionMissingModel = computed(() => {
   const recovery = expansionRecovery.value;
   return recovery ? { model: recovery.model, route: recovery.route, host: recovery.host } : null;
@@ -973,9 +1103,30 @@ const remixStaleReasons = computed(() => {
     reasons.push(`${review.route.label}'s connection details changed.`);
   return reasons;
 });
-const generationModels = computed(() =>
-  models.value.filter((model) => model.downloaded && isGenerationModel(model)),
-);
+/** Under an automatic policy the picker is the union across every reachable
+ *  machine — a model installed on any of them is routable — while a pinned
+ *  machine keeps showing exactly what it has. */
+const generationModels = computed(() => {
+  const entries = automaticRouting.value
+    ? unionModelsByName(
+        modelsByHost.value,
+        routingHosts.value.map((host) => host.id),
+      )
+    : models.value;
+  return entries.filter((model) => model.downloaded && isGenerationModel(model));
+});
+/** Which reachable machines hold a model, for the picker's availability tag. */
+function modelHostIds(name: string): string[] {
+  return hostIdsForModel(
+    modelsByHost.value,
+    name,
+    routingHosts.value.map((host) => host.id),
+  );
+}
+function modelAvailabilityTag(name: string): string | null {
+  if (!automaticRouting.value) return null;
+  return mobileModelAvailabilityTag(modelHostIds(name), connectedHosts.value);
+}
 const isSequence = computed(() => draft.output === "sequence");
 const sequenceModels = computed(() => modelsForOutput(generationModels.value, "sequence"));
 /** Sequence output narrows the picker to chain-capable video models. */
@@ -1028,7 +1179,7 @@ const outputFormats = computed(
 );
 const selectedModelAvailable = computed(
   () =>
-    modelsHostId.value === selectedHostId.value &&
+    (automaticRouting.value || modelsHostId.value === selectedHostId.value) &&
     generationModels.value.some((model) => model.name === form.model),
 );
 const selectedGenerationModel = computed(
@@ -1036,10 +1187,10 @@ const selectedGenerationModel = computed(
 );
 
 function generationProfileHashForHost(hostId: string, model: string): string | null {
-  if (modelsHostId.value !== hostId) return null;
+  const entries = modelsByHost.value[hostId];
+  if (!entries) return null;
   return (
-    generationModels.value.find((candidate) => candidate.name === model)?.generation_profile
-      ?.profile_hash ?? null
+    entries.find((candidate) => candidate.name === model)?.generation_profile?.profile_hash ?? null
   );
 }
 
@@ -2152,6 +2303,7 @@ function browseSequenceModels(): void {
 
 function catalogModelsChanged(hostId: string): void {
   if (hostId === selectedHostId.value) void refreshModels();
+  else if (automaticRouting.value) void refreshRoutingModels();
 }
 
 async function refreshModels(): Promise<boolean> {
@@ -2190,6 +2342,7 @@ async function refreshModels(): Promise<boolean> {
     // become the active generation model.
     models.value = filterRestrictedModels(entries, capabilities);
     modelsHostId.value = hostId;
+    modelsByHost.value = { ...modelsByHost.value, [hostId]: models.value };
     const selectedEntry = generationModels.value.find((model) => model.name === form.model);
     if (selectedEntry) {
       reconcileModelCapabilities(form, selectedEntry);
@@ -2209,6 +2362,82 @@ async function refreshModels(): Promise<boolean> {
   } finally {
     if (epoch === modelLoadEpoch && selectedHostId.value === hostId) loadingModels.value = false;
   }
+}
+
+/**
+ * Read `/api/models` (and capabilities) from every reachable machine other
+ * than the browsed one, so an automatic policy can see which machines hold the
+ * model. A machine that refuses keeps its previous snapshot rather than
+ * dropping out of routing on one bad poll; a forgotten machine is pruned.
+ */
+async function refreshRoutingModels(): Promise<void> {
+  const peers = routingHosts.value.filter((host) => host.id !== selectedHostId.value);
+  const snapshots = await Promise.all(
+    peers.map(async (host) => {
+      try {
+        const target = mobileHostTarget(host);
+        const [entries, capabilities] = await Promise.all([
+          apiJsonTo<ModelEntry[]>(target, "/api/models"),
+          apiJsonTo<ServerCapabilities>(target, "/api/capabilities").catch(() => null),
+        ]);
+        if (capabilities !== null) {
+          expandCapabilities[host.id] = capabilities.expand;
+          serverCapabilities[host.id] = capabilities;
+        }
+        return [host.id, filterRestrictedModels(entries, capabilities)] as const;
+      } catch {
+        return null;
+      }
+    }),
+  );
+  if (unmounted) return;
+  const connected = new Set(connectedHosts.value.map((host) => host.id));
+  const next: Record<string, ModelEntry[]> = {};
+  for (const [id, entries] of Object.entries(modelsByHost.value)) {
+    if (connected.has(id)) next[id] = entries;
+  }
+  for (const snapshot of snapshots) {
+    if (snapshot) next[snapshot[0]] = snapshot[1];
+  }
+  modelsByHost.value = next;
+  // The union just grew: a machine other than the browsed one may hold the
+  // only generation model in the fleet, and the picker must land on it the
+  // same way `refreshModels` lands on the browsed machine's first model.
+  if (!automaticRouting.value) return;
+  const selectedEntry = generationModels.value.find((entry) => entry.name === form.model);
+  if (selectedEntry) reconcileModelCapabilities(form, selectedEntry);
+  else if (generationModels.value[0]) applyModelDefaults(form, generationModels.value[0]);
+}
+
+/**
+ * A concrete policy IS the browsed machine. Restore flows (a queue row, a
+ * print, a removed machine) move the browsed machine directly, so a pinned
+ * target follows them; otherwise the picker could display one machine while
+ * work went to another. An automatic policy is untouched by browsing.
+ */
+watch(selectedHostId, (id) => {
+  if (!id || isAutomaticTarget(generateTargetPolicy.value)) return;
+  if (generateTargetPolicy.value === id) return;
+  generateTargetPolicy.value = id;
+  saveMobileGenerateTarget(id);
+});
+
+/** The explicit "Use for generations" action: browse that machine and pin the
+ *  generation target to it, whatever the previous policy was. */
+async function useHostForGenerations(id: string): Promise<void> {
+  await selectGenerateTarget(id);
+}
+
+/** Persist the generation-target policy. A concrete machine also becomes the
+ *  browsed machine, which is what the pinned path has always meant. */
+async function selectGenerateTarget(value: string): Promise<void> {
+  generateTargetPolicy.value = value;
+  saveMobileGenerateTarget(value);
+  if (value === AUTO_TARGET_ID || value === CAPABLE_TARGET_ID) {
+    await refreshRoutingModels();
+    return;
+  }
+  await selectHost(value);
 }
 
 /** Retire the transport but KEEP the row: a settled job still offers Resume
@@ -2313,23 +2542,295 @@ watch(
   },
 );
 
+/** One machine's answer to the automatic-routing fan-out. */
+interface MobilePlacementProbe {
+  host: MobileHost;
+  /** The machine's exact route as it stood when the probe was ISSUED. A slow
+   *  preview must never authorize one endpoint and then submit to another. */
+  route: HostRoute;
+  roundTripMs: number;
+  preview: GenerationPlacementPreview | null;
+  error: unknown;
+  legacyUnsupported: boolean;
+}
+
+type MobileAutomaticRoute =
+  | {
+      kind: "route";
+      host: MobileHost;
+      route: HostRoute;
+      placement: GenerationPlacementPreview | null;
+      legacyUnsupported: boolean;
+    }
+  | { kind: "error"; message: string }
+  | { kind: "abandoned" };
+
+/**
+ * The machines an automatic policy may dispatch to: reachable, allowed to run
+ * the model, and — when any of them already holds it — narrowed to the owners,
+ * which is what makes Auto model-aware. Owners spanning incompatible major
+ * Mold versions stop automatic routing exactly as they do on desktop; the user
+ * picks a machine instead.
+ */
+function automaticRoutingCandidates(
+  model: string,
+  family: string,
+): { hosts: MobileHost[]; error: string | null } {
+  const restrictions: string[] = [];
+  const allowed = routingHosts.value.filter((host) => {
+    const restriction = modelAccessRestrictionFor(serverCapabilities[host.id], {
+      model,
+      family,
+      generation_profile_sha256: generationProfileHashForHost(host.id, model),
+    });
+    if (restriction) restrictions.push(restriction.message);
+    return !restriction;
+  });
+  if (allowed.length === 0) {
+    return {
+      hosts: [],
+      error:
+        restrictions[0] ??
+        "No connected machine is reachable right now. Reconnect a machine and try again. Nothing was queued.",
+    };
+  }
+  const owners = modelHostIds(model);
+  const candidates =
+    owners.length > 0 ? allowed.filter((host) => owners.includes(host.id)) : allowed;
+  // Owners exist but none of them survived the access filter. Say so instead
+  // of handing the fan-out an empty candidate set.
+  if (candidates.length === 0) {
+    return {
+      hosts: [],
+      error:
+        restrictions[0] ??
+        `No connected machine can run ${model}. Choose another model or machine. Nothing was queued.`,
+    };
+  }
+  const conflict = profileHashConflict(
+    modelsByHost.value,
+    model,
+    candidates.map((host) => host.id),
+    Object.fromEntries(candidates.map((host) => [host.id, host.version ?? null])),
+  );
+  if (conflict) {
+    return {
+      hosts: [],
+      error: profileConflictMessage(
+        conflict.hostIds.map((hostId) => ({
+          label: hosts.value.find((host) => host.id === hostId)?.name ?? hostId,
+          profileHash: conflict.hashesByHost[hostId] ?? null,
+          version: hosts.value.find((host) => host.id === hostId)?.version ?? null,
+        })),
+      ),
+    };
+  }
+  return { hosts: candidates, error: null };
+}
+
+/** The machine an automatic policy would pick from telemetry alone. Used for
+ *  the provisional target of source preparation, before any machine has been
+ *  asked for a placement plan. */
+function provisionalAutomaticHost(model: string, family: string): MobileHost | null {
+  const { hosts: candidates } = automaticRoutingCandidates(model, family);
+  const views = (candidates.length > 0 ? candidates : routingHosts.value).map(routingHostView);
+  const chosen =
+    generateTarget.value === CAPABLE_TARGET_ID
+      ? pickMostCapableHost(views, null, { lowestIdWins: true })
+      : pickAutoHost(views, { lowestIdWins: true });
+  return chosen?.host ?? null;
+}
+
+function mobileFleetPlacementFailure(
+  probes: readonly MobilePlacementProbe[],
+  subject: "print" | "sequence",
+): string {
+  if (probes.length === 1 && probes[0]!.preview) {
+    return mobilePlacementFailure(probes[0]!.preview, probes[0]!.host.name, subject);
+  }
+  const detail = probes
+    .map((probe) =>
+      probe.preview
+        ? mobilePlacementFailure(probe.preview, probe.host.name, subject).replace(
+            " Nothing was queued.",
+            "",
+          )
+        : `${probe.host.name} did not answer: ${describeTransportError(probe.error, probe.host.name)}`,
+    )
+    .join(" ");
+  return `No connected machine could run this ${subject}. ${detail} Nothing was queued.`;
+}
+
+/**
+ * Ask every candidate machine for a placement plan and choose one.
+ *
+ * Auto takes the soonest predicted completion (round trip included); Most
+ * capable takes the strongest GPU among the machines that answered `planned`,
+ * using each machine's own `gpu_info.backend`. The winner is returned as a
+ * complete route so the caller can freeze it — host id, URL, Keychain key, and
+ * instance id — exactly as the pinned path does.
+ */
+async function routeAutomaticGeneration(options: {
+  request: Record<string, unknown>;
+  chain: boolean;
+  copies: number;
+  model: string;
+  family: string;
+  subject: "print" | "sequence";
+  requireAuthoritative: boolean;
+  isCurrent?: () => boolean;
+}): Promise<MobileAutomaticRoute> {
+  const isCurrent = options.isCurrent ?? (() => true);
+  const { hosts: candidates, error } = automaticRoutingCandidates(options.model, options.family);
+  if (error) return { kind: "error", message: error };
+  const probes: MobilePlacementProbe[] = [];
+  const controllers = candidates.map(() => new AbortController());
+  let pending = candidates.length;
+  let resolveAllSettled!: () => void;
+  let resolveFirstPlanned!: () => void;
+  const allSettled = new Promise<void>((resolve) => (resolveAllSettled = resolve));
+  const firstPlanned = new Promise<void>((resolve) => (resolveFirstPlanned = resolve));
+  candidates.forEach((host, index) => {
+    void (async () => {
+      const started = performance.now();
+      const elapsed = () => Math.max(0, performance.now() - started);
+      const probeOptions = { signal: controllers[index]!.signal };
+      // Frozen before the request leaves: the winner carries this snapshot, so
+      // a URL, key, or instance that changed mid-flight is caught by the
+      // caller's connection fence instead of silently replacing the endpoint
+      // the plan was authorized for.
+      const route = routeForMobileHost(host);
+      const probeTarget = { ...route.target };
+      try {
+        const preview = options.chain
+          ? await previewChainPlacement(probeTarget, options.request, options.copies, probeOptions)
+          : await previewGenerationPlacement(
+              probeTarget,
+              options.request,
+              options.copies,
+              probeOptions,
+            );
+        probes.push({
+          host,
+          route,
+          roundTripMs: elapsed(),
+          preview,
+          error: null,
+          legacyUnsupported: false,
+        });
+        if (classifyPlacementPreview(preview) === "planned") resolveFirstPlanned();
+      } catch (probeError) {
+        probes.push({
+          host,
+          route,
+          roundTripMs: elapsed(),
+          preview: null,
+          error: probeError,
+          legacyUnsupported:
+            probeError instanceof ApiError &&
+            (probeError.status === 404 || probeError.status === 405),
+        });
+      } finally {
+        pending -= 1;
+        if (pending === 0) resolveAllSettled();
+      }
+    })();
+  });
+  // Nothing to wait for: the settle promise is only ever resolved by a probe.
+  if (pending === 0) resolveAllSettled();
+  // A phone must not sit on a stalled machine once another one can run the
+  // print — but it must not manufacture a dead end either, so the settle
+  // window only starts once some machine has actually answered `planned`.
+  await Promise.race([
+    allSettled,
+    ...(candidates.length > 1
+      ? [
+          firstPlanned.then(
+            () => new Promise<void>((resolve) => setTimeout(resolve, MOBILE_PLACEMENT_SETTLE_MS)),
+          ),
+        ]
+      : []),
+  ]);
+  if (pending > 0) for (const controller of controllers) controller.abort();
+  if (unmounted || !isCurrent()) return { kind: "abandoned" };
+  // Route on the snapshot that met the settle window; a late cancellation row
+  // must not join the decision.
+  const settledProbes = probes.slice();
+  const planned = settledProbes.flatMap((probe) =>
+    probe.preview && classifyPlacementPreview(probe.preview) === "planned"
+      ? [{ host: routingHostView(probe.host), roundTripMs: probe.roundTripMs, probe }]
+      : [],
+  );
+  const chosen = chooseRoutedHost(
+    planned.map((entry) => ({
+      host: entry.host,
+      roundTripMs: entry.roundTripMs,
+      preview: entry.probe.preview!,
+    })),
+    generateTarget.value,
+    comparePlacementPreviews,
+    { lowestIdWins: true },
+  );
+  if (chosen) {
+    const winner = planned.find((entry) => entry.host.id === chosen.id)!;
+    return {
+      kind: "route",
+      host: winner.probe.host,
+      route: winner.probe.route,
+      placement: winner.probe.preview,
+      legacyUnsupported: false,
+    };
+  }
+  // Servers that predate the authoritative preview still route, unless the
+  // request itself requires that authority (reference media).
+  const legacy = settledProbes.filter(
+    (probe) => probe.legacyUnsupported || classifyPlacementPreview(probe.preview) === "unsupported",
+  );
+  if (!options.requireAuthoritative && legacy.length > 0) {
+    const views = legacy.map((probe) => routingHostView(probe.host));
+    const fallback =
+      generateTarget.value === CAPABLE_TARGET_ID
+        ? pickMostCapableHost(views, null, { lowestIdWins: true })
+        : pickAutoHost(views, { lowestIdWins: true });
+    if (fallback) {
+      const probe = legacy.find((entry) => entry.host.id === fallback.id)!;
+      return {
+        kind: "route",
+        host: probe.host,
+        route: probe.route,
+        placement: null,
+        legacyUnsupported: true,
+      };
+    }
+  }
+  return { kind: "error", message: mobileFleetPlacementFailure(settledProbes, options.subject) };
+}
+
 async function submitMobileSequence(): Promise<void> {
-  const host = selectedHost.value;
-  const restriction = host
-    ? modelAccessRestrictionFor(serverCapabilities[host.id], {
-        model: form.model,
-        family: form.family,
-        generation_profile_sha256: generationProfileHashForHost(host.id, form.model),
-      })
-    : null;
+  const automatic = automaticRouting.value;
+  // Under an automatic policy the machine is provisional until the placement
+  // fan-out answers; source fitting only ever uses it for an optional upscale,
+  // so the built request stays machine-independent.
+  const initialHost = automatic
+    ? provisionalAutomaticHost(form.model, form.family)
+    : selectedHost.value;
+  const restriction =
+    initialHost && !automatic
+      ? modelAccessRestrictionFor(serverCapabilities[initialHost.id], {
+          model: form.model,
+          family: form.family,
+          generation_profile_sha256: generationProfileHashForHost(initialHost.id, form.model),
+        })
+      : null;
   if (restriction) {
     sequenceError.value = restriction.message;
     return;
   }
   const entry = selectedGenerationModel.value;
-  if (!host || !entry || sequenceStarting.value) return;
-  const target = { ...mobileHostTarget(host) };
-  const frozenRoute: HostRoute = {
+  if (!initialHost || !entry || sequenceStarting.value) return;
+  let host: MobileHost = initialHost;
+  let target = { ...mobileHostTarget(host) };
+  let frozenRoute: HostRoute = {
     hostId: host.id,
     label: host.name,
     kind: "remote",
@@ -2378,20 +2879,47 @@ async function submitMobileSequence(): Promise<void> {
     });
     let preview: GenerationPlacementPreview | null = null;
     let legacyUnsupported = false;
-    try {
-      preview = await previewChainPlacement(target, request as unknown as Record<string, unknown>);
-    } catch (error) {
-      if (error instanceof ApiError && (error.status === 404 || error.status === 405)) {
-        legacyUnsupported = true;
-      } else {
-        throw error;
+    if (automatic) {
+      const routed = await routeAutomaticGeneration({
+        request: request as unknown as Record<string, unknown>,
+        chain: true,
+        copies: 1,
+        model: entry.name,
+        family: form.family,
+        subject: "sequence",
+        requireAuthoritative: false,
+      });
+      if (routed.kind === "abandoned") return;
+      if (routed.kind === "error") throw new Error(routed.message);
+      // Freeze the machine the fan-out chose: this exact route is what the
+      // durable sequence is recovered against.
+      host = routed.host;
+      target = { ...mobileHostTarget(host) };
+      frozenRoute = routed.route;
+      preview = routed.placement;
+      legacyUnsupported = routed.legacyUnsupported;
+    } else {
+      try {
+        preview = await previewChainPlacement(
+          target,
+          request as unknown as Record<string, unknown>,
+        );
+      } catch (error) {
+        if (error instanceof ApiError && (error.status === 404 || error.status === 405)) {
+          legacyUnsupported = true;
+        } else {
+          throw error;
+        }
       }
     }
     const classification: string = classifyPlacementPreview(preview);
     if (!legacyUnsupported && classification !== "unsupported" && classification !== "planned") {
       throw new Error(mobilePlacementFailure(preview, host.name, "sequence"));
     }
-    if (!sameFrozenHost(frozenRoute, selectedHost.value)) {
+    const fenceHost = automatic
+      ? hosts.value.find((candidate) => candidate.id === frozenRoute.hostId)
+      : selectedHost.value;
+    if (!sameFrozenHost(frozenRoute, fenceHost)) {
       throw new Error("The selected host changed while checking this sequence.");
     }
     const response = await apiJsonTo<CreateChainJobResponse>(target, "/api/chain-jobs", {
@@ -2521,7 +3049,7 @@ function setOutputMode(mode: string | number): void {
 let chainLimitsFetch = 0;
 async function loadChainLimits(): Promise<void> {
   const version = ++chainLimitsFetch;
-  const host = selectedHost.value;
+  const host = generationTargetHost.value;
   const entry = selectedGenerationModel.value;
   if (!host || !entry) {
     chainLimits.value = null;
@@ -2671,6 +3199,36 @@ function remixInputs(sourceKind: RemixSourceKind = remixSource.value): {
 
 function sameFrozenHost(route: HostRoute, host: MobileHost | undefined): boolean {
   return mobileHostMatchesRoute(route, host);
+}
+
+/**
+ * The host prompt expansion runs on (shared policy, issue #1162 §5).
+ *
+ * iPhone pins exactly ONE machine, so the candidate list is that machine and
+ * the answer is always the generation route — including when it lacks the
+ * expander, where the existing 422 → pull recovery still owns the outcome.
+ * The call is shaped so mobile Auto / Most capable (#1163) can hand a real
+ * candidate list and ranker here without moving the policy.
+ */
+function expansionRouteFor(route: HostRoute): HostRoute {
+  const capability = expandCapabilities[route.hostId];
+  const decision = resolveExpansionRoute(
+    { kind: "pinned", hostId: route.hostId },
+    { hostId: route.hostId },
+    [
+      {
+        hostId: route.hostId,
+        ready: true,
+        ...(capability
+          ? { modelPresent: capability.model_present, configured: capability.configured }
+          : {}),
+      },
+    ],
+    () => null,
+  );
+  if (decision.kind !== "reroute") return route;
+  const host = hosts.value.find((candidate) => candidate.id === decision.hostId);
+  return host ? routeForMobileHost(host) : route;
 }
 
 interface ReplacementFocusOwnership {
@@ -2894,6 +3452,7 @@ async function expandForCurrentBatch(
     clearExpansionRecovery();
     return;
   }
+  const expandOn = expansionRouteFor(route);
 
   clearExpansionRecovery();
   submissionGuard.invalidate();
@@ -2912,7 +3471,7 @@ async function expandForCurrentBatch(
         task: inputs.task,
         ...(styleDirective ? { style: styleDirective } : {}),
       },
-      route.target,
+      expandOn.target,
     );
     if (!preparationGuard.isCurrent(token)) return;
     const prompts = validateExpandedPrompts(response.expanded, count);
@@ -3731,20 +4290,39 @@ async function generate(): Promise<void> {
         }
       : null
     : null;
+  // Prepared and quick work keeps the machine it was frozen on. An ordinary
+  // submission under Auto / Most capable starts on a provisional machine — the
+  // placement fan-out below replaces it before anything is queued.
+  const automaticOrdinary = automaticRouting.value && !preparedSubmission && !quickSubmission;
+  const provisionalHost = automaticOrdinary
+    ? provisionalAutomaticHost(form.model, form.family)
+    : null;
   const host = preparedSubmission
     ? hosts.value.find((candidate) => candidate.id === preparedSubmission.route.hostId)
     : quickSubmission
       ? hosts.value.find((candidate) => candidate.id === quickSubmission.route.hostId)
-      : selectedHost.value;
-  const route = preparedSubmission?.route ?? quickSubmission?.route ?? selectedRoute.value;
-  const target = route?.target ?? null;
-  const restriction = route
-    ? modelAccessRestrictionFor(serverCapabilities[route.hostId], {
-        model: form.model,
-        family: form.family,
-        generation_profile_sha256: generationProfileHashForHost(route.hostId, form.model),
-      })
-    : null;
+      : automaticOrdinary
+        ? provisionalHost
+        : selectedHost.value;
+  const initialRoute =
+    preparedSubmission?.route ??
+    quickSubmission?.route ??
+    (automaticOrdinary
+      ? provisionalHost
+        ? routeForMobileHost(provisionalHost)
+        : null
+      : selectedRoute.value);
+  const target = initialRoute?.target ?? null;
+  // Automatic routing filters restricted machines out of its candidate set, so
+  // only an explicit machine is checked up front.
+  const restriction =
+    initialRoute && !automaticOrdinary
+      ? modelAccessRestrictionFor(serverCapabilities[initialRoute.hostId], {
+          model: form.model,
+          family: form.family,
+          generation_profile_sha256: generationProfileHashForHost(initialRoute.hostId, form.model),
+        })
+      : null;
   if (restriction) {
     setGenerationStatus(restriction.message, true);
     generationAnnouncement.value = `${restriction.message} Nothing was queued.`;
@@ -3752,7 +4330,7 @@ async function generate(): Promise<void> {
   }
   if (
     !host ||
-    !route ||
+    !initialRoute ||
     !target ||
     promptMissing.value ||
     !selectedModelAvailable.value ||
@@ -3768,6 +4346,9 @@ async function generate(): Promise<void> {
   )
     return;
 
+  // Replaced by the fan-out winner under Auto / Most capable; frozen from here
+  // on for every other path.
+  let route: HostRoute = initialRoute;
   const draft = cloneGenerateForm(form);
   const originalSource = draft.sourceImage
     ? {
@@ -3869,6 +4450,9 @@ async function generate(): Promise<void> {
     return;
   }
   if (
+    // The provisional machine of an automatic submission is not frozen work —
+    // it is replaced by the fan-out winner a few lines below.
+    !automaticOrdinary &&
     !sameFrozenHost(
       route,
       hosts.value.find((candidate) => candidate.id === route.hostId),
@@ -3921,44 +4505,65 @@ async function generate(): Promise<void> {
   );
   let placement: GenerationPlacementPreview | null = null;
   let legacyUnsupported = false;
-  try {
-    placement =
-      chainRouting.kind === "chain"
-        ? await previewChainPlacement(
-            target,
-            previewRequestForSiblingFanout(
-              buildAutoChainRequest(request, chainRouting) as unknown as Record<string, unknown>,
-              batchSize,
-            ),
-            batchSize,
-          )
-        : await previewGenerationPlacement(
-            target,
-            previewRequestForSiblingFanout(
-              request as unknown as Record<string, unknown>,
-              batchSize,
-            ),
-            batchSize,
-          );
-  } catch (error) {
-    if (!submissionGuard.isCurrent(token)) {
+  const previewRequest =
+    chainRouting.kind === "chain"
+      ? previewRequestForSiblingFanout(
+          buildAutoChainRequest(request, chainRouting) as unknown as Record<string, unknown>,
+          batchSize,
+        )
+      : previewRequestForSiblingFanout(request as unknown as Record<string, unknown>, batchSize);
+  if (automaticOrdinary) {
+    const routed = await routeAutomaticGeneration({
+      request: previewRequest,
+      chain: chainRouting.kind === "chain",
+      copies: batchSize,
+      model: request.model,
+      family: draft.family,
+      subject: "print",
+      requireAuthoritative: requireAuthoritativePlacement,
+      isCurrent: () => submissionGuard.isCurrent(token),
+    });
+    if (routed.kind === "abandoned") {
       releasePreparedSubmission();
       return;
     }
-    if (error instanceof ApiError && (error.status === 404 || error.status === 405)) {
-      if (requireAuthoritativePlacement) {
-        setGenerationStatus(
-          `${route.label} does not provide the authoritative placement preview required for reference media. Nothing was queued.`,
-          true,
-        );
+    if (routed.kind === "error") {
+      setGenerationStatus(routed.message, true);
+      generationAnnouncement.value = routed.message;
+      releasePreparedSubmission();
+      return;
+    }
+    // The chosen machine is frozen here: every later step — submission,
+    // recovery, and the connection fence — reads this exact route.
+    route = routed.route;
+    placement = routed.placement;
+    legacyUnsupported = routed.legacyUnsupported;
+  } else {
+    try {
+      placement =
+        chainRouting.kind === "chain"
+          ? await previewChainPlacement(target, previewRequest, batchSize)
+          : await previewGenerationPlacement(target, previewRequest, batchSize);
+    } catch (error) {
+      if (!submissionGuard.isCurrent(token)) {
         releasePreparedSubmission();
         return;
       }
-      legacyUnsupported = true;
-    } else {
-      setGenerationStatus(describeTransportError(error, route.label), true);
-      releasePreparedSubmission();
-      return;
+      if (error instanceof ApiError && (error.status === 404 || error.status === 405)) {
+        if (requireAuthoritativePlacement) {
+          setGenerationStatus(
+            `${route.label} does not provide the authoritative placement preview required for reference media. Nothing was queued.`,
+            true,
+          );
+          releasePreparedSubmission();
+          return;
+        }
+        legacyUnsupported = true;
+      } else {
+        setGenerationStatus(describeTransportError(error, route.label), true);
+        releasePreparedSubmission();
+        return;
+      }
     }
   }
   if (!submissionGuard.isCurrent(token)) {
@@ -5389,6 +5994,9 @@ onMounted(async () => {
         .filter((host) => host.id !== selectedHostId.value)
         .map((host) => probeHost(host)),
     ]);
+    // Peers answer /api/models only after their probe lands, which is what
+    // makes the automatic policies model-aware on the first Develop.
+    if (automaticRouting.value) void refreshRoutingModels();
     void refreshMobileActivity();
   } else {
     tab.value = "hosts";
@@ -5496,7 +6104,7 @@ onBeforeUnmount(() => {
     <header v-else class="mobile-header">
       <div class="mobile-wordmark">Mold</div>
       <div class="mobile-header-actions">
-        <div class="host-chip">{{ selectedHost?.name ?? "Remote only" }}</div>
+        <div class="host-chip">{{ headerTargetLabel }}</div>
         <button
           ref="settingsButton"
           class="mobile-settings-button"
@@ -5553,20 +6161,31 @@ onBeforeUnmount(() => {
               ↺ Reset
             </button>
           </div>
-          <p class="section-note">Develop on {{ selectedHost.name }}</p>
+          <p class="section-note">{{ developOnNote }}</p>
           <label v-if="connectedHosts.length > 1" class="field">
             <span>Host</span>
             <select
               class="control"
-              :value="selectedHostId"
+              :value="generateTarget"
               data-test="mobile-generate-host"
-              @change="selectHost(($event.target as HTMLSelectElement).value)"
+              @change="selectGenerateTarget(($event.target as HTMLSelectElement).value)"
             >
+              <!-- Automatic policies appear only with two or more reachable
+                   machines; with one there is nothing to choose between. -->
+              <option v-if="autoRoutingAvailable" :value="AUTO_TARGET_ID">Auto</option>
+              <option v-if="autoRoutingAvailable" :value="CAPABLE_TARGET_ID">Most capable</option>
               <option v-for="host in connectedHosts" :key="host.id" :value="host.id">
                 {{ host.name }}{{ host.online ? "" : " · offline" }}
               </option>
             </select>
           </label>
+          <p
+            v-if="autoRoutingAvailable && automaticRouting"
+            class="section-note"
+            data-test="mobile-routing-hint"
+          >
+            {{ routingHint }}
+          </p>
           <!-- Output is a FIELD of the Create form, not a mode pair pinned
                above it: One shot and Sequence share this whole stack. -->
           <div class="mobile-output-mode" data-test="mobile-output-mode">
@@ -5598,7 +6217,10 @@ onBeforeUnmount(() => {
                 {{ modelLabel(form.model) }} · not installed
               </option>
               <option v-for="model in pickerModels" :key="model.name" :value="model.name">
-                {{ modelDisplayName(model) }}
+                {{ modelDisplayName(model)
+                }}{{
+                  modelAvailabilityTag(model.name) ? ` · ${modelAvailabilityTag(model.name)}` : ""
+                }}
               </option>
             </select>
           </label>
@@ -5624,7 +6246,7 @@ onBeforeUnmount(() => {
             class="mobile-model-state"
             data-test="mobile-model-empty"
           >
-            <p>No downloaded generation model is available on {{ selectedHost.name }}.</p>
+            <p>No downloaded generation model is available on {{ modelScopeLabel }}.</p>
             <button class="secondary-button" type="button" @click="openCatalog(selectedHost.id)">
               Open Catalog
             </button>
@@ -5639,7 +6261,7 @@ onBeforeUnmount(() => {
               <strong>Sequences need a video model</strong>
               <p>
                 Pull a chain-capable LTX Video or distilled LTX-2 checkpoint on
-                {{ selectedHost.name }}.
+                {{ modelScopeLabel }}.
               </p>
               <button
                 class="secondary-button"
@@ -5656,7 +6278,7 @@ onBeforeUnmount(() => {
               :form="form"
               :upscalers="upscalers"
               :chain-limits="chainLimits"
-              :target="selectedTarget"
+              :target="generationTarget"
               :shared="sequenceParams(form, selectedGenerationModel)"
               :fps="form.fps"
               :submitting="sequenceStarting"
@@ -5897,7 +6519,7 @@ onBeforeUnmount(() => {
               <MobileSourceControls
                 :form="form"
                 :model="selectedGenerationModel"
-                :target="selectedTarget"
+                :target="generationTarget"
                 :control-models="controlModels"
                 :upscalers="upscalers"
                 @validity-change="sourceValid = $event"
@@ -5974,7 +6596,7 @@ onBeforeUnmount(() => {
             >
               <MobileGenerateParameters
                 :form="form"
-                :target="selectedTarget"
+                :target="generationTarget"
                 :upscalers="upscalers"
                 :selected-model="selectedGenerationModel"
                 :control-adapters="controlAdapters"
@@ -6004,9 +6626,9 @@ onBeforeUnmount(() => {
                 </small>
               </label>
               <MobileLoraControls
-                v-if="selectedTarget"
+                v-if="generationTarget"
                 :form="form"
-                :target="selectedTarget"
+                :target="generationTarget"
                 :model="selectedGenerationModel"
                 @append-word="appendPromptWord"
               />
@@ -6398,7 +7020,7 @@ onBeforeUnmount(() => {
           :host="hostDetail"
           :active="hostDetail.id === selectedHostId"
           @back="hostDetailId = ''"
-          @select="selectHost"
+          @select="useHostForGenerations"
           @rename="renameHost"
           @disconnect="disconnectHost"
           @reconnect="reconnectHost"
@@ -6409,6 +7031,18 @@ onBeforeUnmount(() => {
         <template v-else>
           <h1 class="section-title">Machines</h1>
           <p class="section-note">LAN discovery, Tailscale MagicDNS, or an address</p>
+          <!-- One line each: the Create picker offers these only while two or
+               more machines are reachable. -->
+          <p v-if="autoRoutingAvailable" class="section-note" data-test="mobile-machines-auto-hint">
+            {{ MOBILE_AUTO_ROUTING_HINT }}
+          </p>
+          <p
+            v-if="autoRoutingAvailable"
+            class="section-note"
+            data-test="mobile-machines-capable-hint"
+          >
+            {{ MOBILE_CAPABLE_ROUTING_HINT }}
+          </p>
           <button
             class="primary-button mobile-pair-button"
             type="button"
@@ -6524,7 +7158,7 @@ onBeforeUnmount(() => {
                 class="secondary-button"
                 type="button"
                 :disabled="host.connected === false || host.id === selectedHostId"
-                @click="selectHost(host.id)"
+                @click="useHostForGenerations(host.id)"
               >
                 {{
                   host.connected === false
@@ -6563,7 +7197,7 @@ onBeforeUnmount(() => {
         data-test="mobile-develop-blocker"
       />
       <div class="mobile-estimate">
-        <EstimateBadge :request="estimateRequest" :target="selectedTarget" />
+        <EstimateBadge :request="estimateRequest" :target="generationTarget" />
       </div>
       <button
         class="primary-button"

@@ -1,8 +1,28 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import { useToastStore } from "../../stores/toasts";
+import { severityIsUrgent, severityMark, severityTint } from "@ui/lib/notificationSeverity";
+import { useToastStore, type Toast } from "../../stores/toasts";
 
 const toasts = useToastStore();
+
+/*
+ * Glyphs, severity names, and hues all come from the one shared table
+ * (@ui/lib/notificationSeverity) — restating a color here is exactly how the
+ * surfaces drifted before. Severity reads as green (an ordinary notice or a
+ * success) / yellow (warning) / red (error), and never by color alone.
+ */
+function tone(kind: Toast["kind"]) {
+  const mark = severityMark(kind);
+  return {
+    ...mark,
+    // An error is the one filled chip; the rest are washed so the shelf does
+    // not read as a wall of alarm.
+    chip:
+      kind === "error"
+        ? { background: mark.color, color: "var(--on-status)" }
+        : { background: severityTint(kind, 20), color: mark.color },
+  };
+}
 
 // The store appends, so the newest toast is last; the shelf shows it first and
 // pushes the older ones down.
@@ -25,21 +45,18 @@ const ordered = computed(() => [...toasts.items].reverse());
         v-for="toast in ordered"
         :key="toast.id"
         class="border-edge pointer-events-auto grid w-[min(25rem,calc(100vw-2rem))] grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-x-3 gap-y-2 rounded-[var(--radius-card)] border bg-bench px-4 py-3 text-body shadow-[0_10px_28px_rgba(0,0,0,0.28)]"
-        :role="toast.kind === 'error' ? 'alert' : 'status'"
-        :aria-live="toast.kind === 'error' ? 'assertive' : 'polite'"
+        :role="severityIsUrgent(toast.kind) ? 'alert' : 'status'"
+        :aria-live="severityIsUrgent(toast.kind) ? 'assertive' : 'polite'"
         @click.self="toasts.click(toast.id)"
       >
         <span
           data-test="toast-status-icon"
           aria-hidden="true"
+          :data-kind="toast.kind"
           class="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full font-semibold"
-          :class="
-            toast.kind === 'error'
-              ? 'bg-stop text-[var(--desk)]'
-              : 'bg-[color-mix(in_srgb,var(--halide)_18%,transparent)] text-halide'
-          "
+          :style="tone(toast.kind).chip"
         >
-          {{ toast.kind === "error" ? "!" : "i" }}
+          {{ tone(toast.kind).glyph }}
         </span>
         <button
           type="button"
@@ -47,6 +64,7 @@ const ordered = computed(() => [...toasts.items].reverse());
           :title="toast.onClick ? undefined : 'Dismiss'"
           @click="toasts.click(toast.id)"
         >
+          <span class="sr-only">{{ tone(toast.kind).label }}</span>
           <span data-test="toast-title" class="block font-semibold text-ink">
             {{ toast.message }}
           </span>

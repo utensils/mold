@@ -171,11 +171,79 @@ describe("notifications — host offline (G11c)", () => {
     });
     await flushPromises();
 
-    expect(
-      toasts().filter((t) => t.text.includes("can't reach Studio")).length,
-    ).toBe(1);
+    const offline = toasts().filter((t) => t.text === "Can't reach Studio");
+    expect(offline).toHaveLength(1);
+    expect(offline[0]!.kind).toBe("warning");
     expect(useNotificationSignals().hasOfflineHost.value).toBe(true);
     stop();
+  });
+
+  it("withdraws the warning and confirms the automatic reconnect", async () => {
+    vi.useFakeTimers();
+    listStoredHosts.mockReturnValue([
+      { id: "h1", name: "Studio", url: "http://studio:7680" },
+    ]);
+    hostStatus
+      .mockRejectedValueOnce(new Error("unreachable"))
+      .mockResolvedValue({});
+
+    const stop = installNotifications({
+      jobs: ref<Job[]>([]),
+      downloads: fakeDownloads([]),
+      currentRouteName: () => "models",
+      hostPollMs: 1_000,
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(toasts().some((t) => t.text === "Can't reach Studio")).toBe(true);
+
+    // The poll keeps retrying; the next successful probe is the reconnect.
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(toasts().some((t) => t.text === "Can't reach Studio")).toBe(false);
+    const back = toasts().filter((t) => t.text === "Reconnected to Studio");
+    expect(back).toHaveLength(1);
+    expect(back[0]!.kind).toBe("success");
+    expect(useNotificationSignals().hasOfflineHost.value).toBe(false);
+
+    // A host that never dropped must not be congratulated on every poll.
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(
+      toasts().filter((t) => t.text === "Reconnected to Studio"),
+    ).toHaveLength(1);
+    stop();
+    vi.useRealTimers();
+  });
+
+  it("discards a probe that settles after a later poll already reported", async () => {
+    vi.useFakeTimers();
+    listStoredHosts.mockReturnValue([
+      { id: "h1", name: "Studio", url: "http://studio:7680" },
+    ]);
+    // Poll 1 hangs past its own interval; poll 2 succeeds. The stale rejection
+    // must not resurrect the offline warning for a host that is up.
+    const rejecters: ((reason: Error) => void)[] = [];
+    hostStatus
+      .mockImplementationOnce(
+        () =>
+          new Promise((_resolve, reject) => {
+            rejecters.push(reject);
+          }),
+      )
+      .mockResolvedValue({});
+
+    const stop = installNotifications({
+      jobs: ref<Job[]>([]),
+      downloads: fakeDownloads([]),
+      currentRouteName: () => "models",
+      hostPollMs: 1_000,
+    });
+    await vi.advanceTimersByTimeAsync(1_000);
+    rejecters[0]?.(new Error("timed out"));
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(toasts().some((t) => t.text === "Can't reach Studio")).toBe(false);
+    expect(useNotificationSignals().hasOfflineHost.value).toBe(false);
+    stop();
+    vi.useRealTimers();
   });
 
   it("does nothing when no remote hosts are registered", async () => {

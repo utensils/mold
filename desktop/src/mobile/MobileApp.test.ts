@@ -7033,7 +7033,11 @@ describe("MobileApp host and catalog coordination", () => {
       "value",
       "render-id",
     );
-    expect(wrapper.get(".mobile-header .host-chip").text()).toBe("Studio");
+    // Browsing another machine's catalog leaves the generation target alone;
+    // with two machines reachable that target is the Auto policy, which is
+    // what the header chip names.
+    expect(wrapper.get(".mobile-header .host-chip").text()).toBe("Auto");
+    expect(localStorage.getItem("mold.mobile.generate-target.v1")).toBeNull();
     expect(wrapper.get("[data-test='mobile-tab-catalog']").attributes("aria-current")).toBe("page");
   });
 
@@ -7547,5 +7551,456 @@ describe("mobile Library pinch-to-resize", () => {
     await app.vm.$nextTick();
 
     expect(columnsOf(app)).toBe("3");
+  });
+});
+
+describe("MobileApp automatic generation routing", () => {
+  const renderTarget = {
+    baseUrl: "http://render.tailnet.ts.net:7680",
+    apiKey: "render-secret",
+  };
+
+  function twoHosts(): void {
+    localStorage.setItem(
+      "mold.mobile.hosts.v1",
+      JSON.stringify([
+        {
+          id: "studio-id",
+          name: "Studio",
+          baseUrl: target.baseUrl,
+          hostname: "studio",
+          instanceId: "studio-id",
+        },
+        {
+          id: "render-id",
+          name: "Render",
+          baseUrl: renderTarget.baseUrl,
+          hostname: "render",
+          instanceId: "render-id",
+        },
+      ]),
+    );
+    invoke.mockImplementation((command: string, args?: { hostId?: string }) =>
+      Promise.resolve(
+        command === "keychain_get_api_key"
+          ? args?.hostId === "render-id"
+            ? renderTarget.apiKey
+            : target.apiKey
+          : null,
+      ),
+    );
+  }
+
+  /** `/api/status`, `/api/models` and friends for a two-machine fleet. */
+  function fleetApi(options: {
+    studioGpu?: Record<string, unknown>;
+    renderGpu?: Record<string, unknown>;
+    studioModels?: ModelEntry[];
+    renderModels?: ModelEntry[];
+  }): void {
+    apiJsonTo.mockImplementation((route: { baseUrl: string }, path: string) => {
+      const render = route.baseUrl === renderTarget.baseUrl;
+      if (path === "/api/status")
+        return Promise.resolve({
+          ...status,
+          hostname: render ? "render" : "studio",
+          instance_id: render ? "render-id" : "studio-id",
+          gpu_info: render ? options.renderGpu : options.studioGpu,
+        });
+      if (path === "/api/models")
+        return Promise.resolve(
+          render ? (options.renderModels ?? [model]) : (options.studioModels ?? [model]),
+        );
+      if (path === "/api/capabilities") return Promise.resolve({});
+      if (path === "/api/gallery") return Promise.resolve([]);
+      if (path === "/api/activity")
+        return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+  }
+
+  /** A `planned` preview whose predicted completion decides Auto. */
+  function plannedIn(completionMs: number) {
+    const preview = plannedPlacement();
+    preview.candidate.predicted_completion_after_ms = completionMs;
+    return preview;
+  }
+
+  function hostOptions(): string[] {
+    return wrapper!
+      .get("[data-test='mobile-generate-host']")
+      .findAll("option")
+      .map((option) => option.attributes("value") ?? "");
+  }
+
+  async function develop(prompt = "a routed lighthouse"): Promise<void> {
+    await fieldControl("Prompt").setValue(prompt);
+    await wrapper!.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+  }
+
+  it("keeps one machine on today's behaviour with no automatic options", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    // A single saved machine renders no Host field at all, and nothing
+    // promises a choice that does not exist.
+    expect(wrapper.find("[data-test='mobile-generate-host']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='mobile-routing-hint']").exists()).toBe(false);
+    await develop();
+    expect(openStreams[0]?.options.target).toEqual(target);
+  });
+
+  it("offers Auto and Most capable once two machines are reachable", async () => {
+    twoHosts();
+    fleetApi({});
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    expect(hostOptions()).toEqual(["auto", "capable", "studio-id", "render-id"]);
+    expect(
+      (wrapper.get("[data-test='mobile-generate-host']").element as HTMLSelectElement).value,
+    ).toBe("auto");
+    expect(wrapper.get("[data-test='mobile-routing-hint']").text()).toContain("least busy");
+
+    await wrapper.get("[data-test='mobile-generate-host']").setValue("capable");
+    await flushPromises();
+    expect(localStorage.getItem("mold.mobile.generate-target.v1")).toBe("capable");
+    expect(wrapper.get("[data-test='mobile-routing-hint']").text()).toContain("strongest GPU");
+  });
+
+  it("hides the automatic options again while only one machine answers", async () => {
+    twoHosts();
+    apiJsonTo.mockImplementation((route: { baseUrl: string }, path: string) => {
+      if (route.baseUrl === renderTarget.baseUrl) return Promise.reject(new Error("offline"));
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/capabilities") return Promise.resolve({});
+      if (path === "/api/gallery") return Promise.resolve([]);
+      if (path === "/api/activity")
+        return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    expect(hostOptions()).toEqual(["studio-id", "render-id"]);
+    expect(wrapper.find("[data-test='mobile-routing-hint']").exists()).toBe(false);
+    await develop();
+    expect(openStreams[0]?.options.target).toEqual(target);
+  });
+
+  it("Auto asks every candidate and freezes the soonest plan's machine", async () => {
+    twoHosts();
+    fleetApi({});
+    previewGenerationPlacement.mockImplementation((probe: { baseUrl: string }) =>
+      Promise.resolve(plannedIn(probe.baseUrl === renderTarget.baseUrl ? 100 : 9_000)),
+    );
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    await develop();
+
+    const probed = previewGenerationPlacement.mock.calls.map(
+      (call: unknown[]) => (call[0] as { baseUrl: string }).baseUrl,
+    );
+    expect([...probed].sort()).toEqual([renderTarget.baseUrl, target.baseUrl].sort());
+    // The frozen route carries the winner's URL and its Keychain key.
+    expect(openStreams[0]?.options.target).toEqual(renderTarget);
+  });
+
+  it("Most capable prefers the CUDA machine even when it plans later", async () => {
+    twoHosts();
+    fleetApi({
+      studioGpu: {
+        name: "Apple M3 Max",
+        vram_total_mb: 128_000,
+        vram_used_mb: 0,
+        backend: "metal",
+      },
+      renderGpu: {
+        name: "NVIDIA GeForce RTX 4090",
+        vram_total_mb: 24_000,
+        vram_used_mb: 0,
+        backend: "cuda",
+      },
+    });
+    previewGenerationPlacement.mockImplementation((probe: { baseUrl: string }) =>
+      Promise.resolve(plannedIn(probe.baseUrl === renderTarget.baseUrl ? 9_000 : 100)),
+    );
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-generate-host']").setValue("capable");
+    await flushPromises();
+
+    await develop();
+    expect(openStreams[0]?.options.target).toEqual(renderTarget);
+  });
+
+  it("routes only to machines that already have the model", async () => {
+    const renderOnly: ModelEntry = { ...model, name: "z-image-turbo:q6", family: "zimage" };
+    twoHosts();
+    fleetApi({ studioModels: [], renderModels: [renderOnly] });
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    // The union picker offers the model even though the browsed machine
+    // lacks it, tagged with the machine that has it.
+    const modelOptions = fieldControl("Model")
+      .findAll("option")
+      .map((option) => option.text());
+    expect(modelOptions.some((label) => label.includes("Render"))).toBe(true);
+
+    await develop();
+    const probed = previewGenerationPlacement.mock.calls.map(
+      (call: unknown[]) => (call[0] as { baseUrl: string }).baseUrl,
+    );
+    expect(probed).toEqual([renderTarget.baseUrl]);
+    expect(openStreams[0]?.options.target).toEqual(renderTarget);
+  });
+
+  it("queues nothing and names every machine when none can run the print", async () => {
+    twoHosts();
+    fleetApi({});
+    previewGenerationPlacement.mockImplementation((probe: { baseUrl: string }) =>
+      Promise.resolve({
+        version: 1,
+        authoritative: true,
+        state_version: 1,
+        plan_version: 1,
+        outcome: "infeasible",
+        reason:
+          probe.baseUrl === renderTarget.baseUrl
+            ? "not enough VRAM"
+            : "no concrete local artifacts",
+      }),
+    );
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    await develop();
+    expect(openStreams).toHaveLength(0);
+    const failure = wrapper.get("[data-test='mobile-generation-error']").text();
+    expect(failure).toContain("Studio");
+    expect(failure).toContain("Render");
+    expect(failure).toContain("Nothing was queued.");
+  });
+});
+
+describe("MobileApp automatic sequence routing", () => {
+  const renderTarget = {
+    baseUrl: "http://render.tailnet.ts.net:7680",
+    apiKey: "render-secret",
+  };
+  const sequenceModel: ModelEntry = {
+    ...model,
+    name: "ltx-video-0.9.8-2b-distilled:bf16",
+    family: "ltx-video",
+    default_steps: 7,
+    default_guidance: 1,
+  };
+
+  it("freezes the fan-out winner as the sequence's recovery host", async () => {
+    localStorage.setItem("mold.mobile.create-mode.v1", "sequence");
+    localStorage.setItem(
+      "mold.mobile.hosts.v1",
+      JSON.stringify([
+        {
+          id: "studio-id",
+          name: "Studio",
+          baseUrl: target.baseUrl,
+          hostname: "studio",
+          instanceId: "studio-id",
+        },
+        {
+          id: "render-id",
+          name: "Render",
+          baseUrl: renderTarget.baseUrl,
+          hostname: "render",
+          instanceId: "render-id",
+        },
+      ]),
+    );
+    invoke.mockImplementation((command: string, args?: { hostId?: string }) =>
+      Promise.resolve(
+        command === "keychain_get_api_key"
+          ? args?.hostId === "render-id"
+            ? renderTarget.apiKey
+            : target.apiKey
+          : null,
+      ),
+    );
+    apiJsonTo.mockImplementation((route: { baseUrl: string }, path: string, init?: RequestInit) => {
+      const render = route.baseUrl === renderTarget.baseUrl;
+      if (path === "/api/status")
+        return Promise.resolve({
+          ...status,
+          hostname: render ? "render" : "studio",
+          instance_id: render ? "render-id" : "studio-id",
+        });
+      if (path === "/api/models") return Promise.resolve([sequenceModel]);
+      if (path === "/api/capabilities") return Promise.resolve({});
+      if (path === "/api/gallery") return Promise.resolve([]);
+      if (path === "/api/activity")
+        return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
+      if (path.startsWith("/api/capabilities/chain-limits")) {
+        return Promise.resolve({
+          model: sequenceModel.name,
+          frames_per_clip_cap: 97,
+          frames_per_clip_recommended: 97,
+          max_stages: 8,
+          max_total_frames: 777,
+          fade_frames_max: 32,
+          transition_modes: ["smooth", "cut", "fade"],
+          quantization_family: "bf16",
+          supports_audio: false,
+        });
+      }
+      if (path === "/api/chain-jobs" && init?.method === "POST")
+        return Promise.resolve({ job_id: "sequence-job-1" });
+      if (path === "/api/chain-jobs/sequence-job-1") return new Promise(() => {});
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    previewChainPlacement.mockImplementation((probe: { baseUrl: string }) => {
+      const preview = plannedPlacement();
+      preview.candidate.predicted_completion_after_ms =
+        probe.baseUrl === renderTarget.baseUrl ? 100 : 9_000;
+      return Promise.resolve(preview);
+    });
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    const prompts = wrapper.findAll("[data-test='mobile-sequence-clip'] textarea");
+    await prompts[0]!.setValue("A paper boat crosses a moonlit pond");
+    await prompts[1]!.setValue("Fireflies gather as the sky brightens");
+    await wrapper.get("[data-test='mobile-generate-sequence']").trigger("click");
+    await flushPromises();
+
+    const created = apiJsonTo.mock.calls.filter(
+      (call: unknown[]) =>
+        call[1] === "/api/chain-jobs" && (call[2] as RequestInit)?.method === "POST",
+    );
+    expect(created).toHaveLength(1);
+    expect(created[0]![0]).toEqual(renderTarget);
+    const recovery = localStorage.getItem("mold.mobile.sequence-job.v1");
+    expect(JSON.parse(recovery ?? "null")).toEqual({
+      hostId: "render-id",
+      baseUrl: renderTarget.baseUrl,
+      instanceId: "render-id",
+      jobId: "sequence-job-1",
+    });
+    expect(recovery).not.toContain(renderTarget.apiKey);
+  });
+});
+
+describe("MobileApp routing target consistency", () => {
+  const renderTarget = {
+    baseUrl: "http://render.tailnet.ts.net:7680",
+    apiKey: "render-secret",
+  };
+
+  function twoHosts(): void {
+    localStorage.setItem(
+      "mold.mobile.hosts.v1",
+      JSON.stringify([
+        {
+          id: "studio-id",
+          name: "Studio",
+          baseUrl: target.baseUrl,
+          hostname: "studio",
+          instanceId: "studio-id",
+        },
+        {
+          id: "render-id",
+          name: "Render",
+          baseUrl: renderTarget.baseUrl,
+          hostname: "render",
+          instanceId: "render-id",
+        },
+      ]),
+    );
+    invoke.mockImplementation((command: string, args?: { hostId?: string }) =>
+      Promise.resolve(
+        command === "keychain_get_api_key"
+          ? args?.hostId === "render-id"
+            ? renderTarget.apiKey
+            : target.apiKey
+          : null,
+      ),
+    );
+    apiJsonTo.mockImplementation((route: { baseUrl: string }, path: string) => {
+      const render = route.baseUrl === renderTarget.baseUrl;
+      if (path === "/api/status")
+        return Promise.resolve({
+          ...status,
+          hostname: render ? "render" : "studio",
+          instance_id: render ? "render-id" : "studio-id",
+        });
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/capabilities") return Promise.resolve({});
+      if (path === "/api/gallery") return Promise.resolve([]);
+      if (path === "/api/queue") return Promise.resolve({ entries: [] });
+      if (path === "/api/activity")
+        return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+  }
+
+  async function develop(): Promise<void> {
+    await fieldControl("Prompt").setValue("a consistent lighthouse");
+    await wrapper!.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+  }
+
+  it("keeps a pinned target and the browsed machine in step", async () => {
+    twoHosts();
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    // Pin Studio in Create, then use Render for generations from Machines.
+    await wrapper.get("[data-test='mobile-generate-host']").setValue("studio-id");
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-hosts']").trigger("click");
+    const renderRow = wrapper
+      .findAll(".host-row")
+      .find((row) => row.find(".host-name").text() === "Render");
+    if (!renderRow) throw new Error("Missing Render host row");
+    const useForGenerations = renderRow
+      .findAll("button")
+      .find((button) => button.text() === "Use host");
+    if (!useForGenerations) throw new Error("Missing use-for-generations action");
+    await useForGenerations.trigger("click");
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-generate']").trigger("click");
+    await flushPromises();
+
+    // The picker must never show one machine while work goes to another.
+    expect(
+      (wrapper.get("[data-test='mobile-generate-host']").element as HTMLSelectElement).value,
+    ).toBe("render-id");
+    expect(localStorage.getItem("mold.mobile.generate-target.v1")).toBe("render-id");
+    await develop();
+    expect(openStreams[0]?.options.target).toEqual(renderTarget);
+  });
+
+  it("stops waiting on a stalled machine once another one has a plan", async () => {
+    twoHosts();
+    previewGenerationPlacement.mockImplementation((probe: { baseUrl: string }) => {
+      if (probe.baseUrl === target.baseUrl) return new Promise(() => {});
+      return Promise.resolve(plannedPlacement());
+    });
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    vi.useFakeTimers();
+    try {
+      await develop();
+      expect(openStreams).toHaveLength(0);
+      await vi.advanceTimersByTimeAsync(2_000);
+      await flushPromises();
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(openStreams[0]?.options.target).toEqual(renderTarget);
   });
 });

@@ -5430,6 +5430,9 @@ fn expand_capabilities(
             model_present: Some(model_present),
             backend: mold_core::ExpandBackend::Local,
             remix: true,
+            // Naming the model is what lets a client offer to pull it without
+            // hard-coding the manifest id; a custom `expand.model` is honoured.
+            model: Some(settings.model.trim().to_string()).filter(|m| !m.is_empty()),
         }
     } else {
         mold_core::ExpandCapabilities {
@@ -5437,6 +5440,7 @@ fn expand_capabilities(
             model_present: None,
             backend: mold_core::ExpandBackend::Api,
             remix: true,
+            model: None,
         }
     }
 }
@@ -8577,6 +8581,18 @@ mod tests {
         assert_eq!(present.configured, cfg!(feature = "expand"));
         assert_eq!(present.model_present, Some(true));
         assert!(present.remix);
+        // Clients pull what the host names, never a hard-coded manifest id.
+        assert_eq!(present.model.as_deref(), Some(settings.model.as_str()));
+        assert_eq!(missing.model.as_deref(), Some(settings.model.as_str()));
+
+        let custom = mold_core::expand::ExpandSettings {
+            model: "qwen3-expand:q4".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            expand_capabilities(&custom, true).model.as_deref(),
+            Some("qwen3-expand:q4")
+        );
     }
 
     #[test]
@@ -8590,6 +8606,8 @@ mod tests {
         assert_eq!(capability.backend, mold_core::ExpandBackend::Api);
         assert!(capability.configured);
         assert_eq!(capability.model_present, None);
+        // An API backend runs someone else's weights; there is nothing to pull.
+        assert_eq!(capability.model, None);
 
         let unconfigured = mold_core::expand::ExpandSettings {
             backend: "   ".into(),

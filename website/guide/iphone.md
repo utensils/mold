@@ -52,7 +52,24 @@ ACLs, DNS, or certificates.
 
 ## Create
 
-Choose a host and one of its installed generation models. The form adapts to
+Choose where the print develops and one of the installed generation models. With
+a single connected machine the Host control works as it always has. Once two or
+more connected machines are reachable it also offers:
+
+- **Auto** — the least busy machine that already has the selected model.
+- **Most capable** — the strongest GPU that has it: CUDA before Metal, then
+  VRAM, then queue depth.
+
+Under either policy the model list is the union of every reachable machine's
+installed models, and a model that is not on all of them is tagged with the
+machine that has it. Mold asks each candidate machine for a placement plan
+before queueing, then freezes the machine it chose for that print, so recovery,
+prepared expansion, and durable sequences all stay on the exact machine that ran
+the work. If no machine can run the print, nothing is queued and the message
+names each machine. Your choice is remembered; it falls back to the browsed
+machine while only one is reachable.
+
+The form adapts to
 the selected model family and uses the same request contract and model defaults
 as desktop. The primary controls stay on the main screen; deeper options open in
 a full-screen **Advanced** sheet, and prompt **style** presets compose at submit

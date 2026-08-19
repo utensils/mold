@@ -88,6 +88,10 @@ export interface ExpandCapabilities {
   configured: boolean;
   model_present: boolean | null;
   backend: ExpandBackend;
+  /** The manifest model local expansion resolves. Additive: absent on API
+   * backends and on servers that predate the field, where clients fall back
+   * to `DEFAULT_EXPAND_MODEL`. */
+  model?: string | null;
 }
 
 export interface ServerCapabilities {

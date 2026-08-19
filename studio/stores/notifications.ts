@@ -9,7 +9,9 @@ import { computed, ref } from "vue";
  * log. Every surface records through here; none renders a second policy.
  */
 
-export type NotificationKind = "info" | "success" | "error";
+/** Severity, rendered green (success) / yellow (warning) / red (error);
+ *  plain info stays neutral. See `lib/notificationTone.ts`. */
+export type NotificationKind = "info" | "success" | "warning" | "error";
 
 export interface NotificationEntry {
   id: number;

@@ -5,7 +5,8 @@
  * line, a memory + queue mono row, and a memory bar. The primary origin uses
  * the accent memory tone; remotes use halide. While the first poll is in
  * flight the card is a shimmer skeleton; an offline host shows a stop dot,
- * last-seen text, and a Retry that forces a fresh poll.
+ * last-seen text, a "reconnecting…" note (the poll retries on its own), and a
+ * Retry that forces a fresh poll immediately.
  */
 import { computed } from "vue";
 import CardSurface from "@ui/components/CardSurface.vue";
@@ -13,6 +14,7 @@ import ProgressBar from "@ui/components/ProgressBar.vue";
 import StatusDot from "./StatusDot.vue";
 import { useHostPoll } from "./hostClient";
 import { deriveHostCardGpu, formatGb } from "./machineTelemetry";
+import { HOST_RECONNECTING_LABEL } from "@studio/lib/hostConnectivity";
 import type { HostEntry } from "../../lib/hostRegistry";
 
 const props = defineProps<{ host: HostEntry; primary?: boolean }>();
@@ -154,6 +156,11 @@ function openContextMenu(event: MouseEvent) {
         <div class="hc__offline">
           <span class="hc__offline-text" data-test="host-offline">
             {{ lastSeenLabel }}
+            <!-- The card keeps polling, so the machine comes back on its own;
+                 say so rather than implying Retry is the only way back. -->
+            <span class="hc__reconnecting" data-test="host-reconnecting">{{
+              HOST_RECONNECTING_LABEL
+            }}</span>
           </span>
           <button
             type="button"
@@ -232,6 +239,11 @@ function openContextMenu(event: MouseEvent) {
   font-family: var(--f-mono);
   font-size: 11px;
   color: var(--ink-3);
+}
+
+.hc__reconnecting {
+  display: block;
+  color: var(--warning);
 }
 
 .hc__retry {

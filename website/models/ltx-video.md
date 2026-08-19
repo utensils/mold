@@ -32,13 +32,13 @@ _"Underwater footage of a jellyfish pulsing through deep blue water, bioluminesc
 
 ## Variants
 
-| Model                                | Steps | Approx total pull | Notes                                        |
-| ------------------------------------ | ----- | ----------------- | -------------------------------------------- |
-| `ltx-video-0.9.6:bf16`               | 40    | ~17.4 GB          | Higher-quality 2B path, 30 FPS defaults      |
-| `ltx-video-0.9.6-distilled:bf16`     | 8     | ~17.4 GB          | Fast default single-pass path                |
-| `ltx-video-0.9.8-2b-distilled:bf16`  | 7+3   | ~17.8 GB          | 0.9.8 checkpoint plus spatial upscaler asset |
+| Model                                | Steps | Approx total pull | Notes                                                                 |
+| ------------------------------------ | ----- | ----------------- | --------------------------------------------------------------------- |
+| `ltx-video-0.9.6:bf16`               | 40    | ~17.4 GB          | Higher-quality 2B path, 30 FPS defaults                               |
+| `ltx-video-0.9.6-distilled:bf16`     | 8     | ~17.4 GB          | Fast default single-pass path                                         |
+| `ltx-video-0.9.8-2b-distilled:bf16`  | 7+3   | ~17.8 GB          | 0.9.8 checkpoint plus spatial upscaler asset                          |
 | `ltx-video-0.9.8-13b-dev:bf16`       | 30    | ~38.5 GB          | Highest-quality 13B multiscale dev path — 40 GB-class GPU, no offload |
-| `ltx-video-0.9.8-13b-distilled:bf16` | 7+3   | ~38.5 GB          | Faster 13B checkpoint — 40 GB-class GPU, no offload |
+| `ltx-video-0.9.8-13b-distilled:bf16` | 7+3   | ~38.5 GB          | Faster 13B checkpoint — 40 GB-class GPU, no offload                   |
 
 The 0.9.8 variants require the published spatial upscaler asset. mold pulls and
 tracks that file explicitly.

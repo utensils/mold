@@ -113,6 +113,12 @@ describe("shared theme contrast", () => {
         for (const semantic of ["halide", "safelight", "stop"]) {
           expect(contrast(theme[semantic]!, background!), semantic).toBeGreaterThanOrEqual(4.5);
         }
+        // Status colors (green success / yellow warning) fill dots, glyphs and
+        // bars rather than body text, so the non-text 3:1 bar applies — but
+        // they must never wash out on either chrome plane in any theme.
+        for (const status of ["success", "warning"]) {
+          expect(contrast(token(theme, status), background!), status).toBeGreaterThanOrEqual(3);
+        }
         // Tertiary ink is hint-only: large-text / non-text 3:1 is the bar.
         const ink3 = composite(theme.rebate!, background!, percent(theme["ink-3"]!));
         expect(contrast(ink3, background!), "tertiary ink").toBeGreaterThanOrEqual(3);
@@ -137,6 +143,15 @@ describe("shared theme contrast", () => {
         contrast(theme["on-accent"]!, theme.stop!),
         "destructive action",
       ).toBeGreaterThanOrEqual(4.5);
+      // Counts and labels printed ON a status fill (the notifications badge)
+      // read against one per-theme ink, so every status hue must clear AA
+      // against it — light themes carry deep hues, dark themes bright ones.
+      for (const status of ["success", "warning", "stop", "halide"]) {
+        expect(
+          contrast(token(theme, "on-status"), token(theme, status)),
+          `${status} badge ink`,
+        ).toBeGreaterThanOrEqual(4.5);
+      }
     });
   }
 

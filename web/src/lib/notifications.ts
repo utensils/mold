@@ -6,16 +6,24 @@
  *       that lights an accent dot on the Gallery nav pill until you visit it;
  *   (b) a model pull finishing or failing → a toast (the Downloads button keeps
  *       its own count badge);
- *   (c) a registered remote host going unreachable → a sticky error toast, once
- *       per offline transition, plus a stop-tinted dot on the Machines pill
- *       while any registered host is offline.
+ *   (c) a registered remote host going unreachable → a sticky WARNING toast,
+ *       once per offline transition, plus a stop-tinted dot on the Machines
+ *       pill while any registered host is offline. The poll keeps retrying, so
+ *       the machine reconnects on its own; when it answers again the warning is
+ *       withdrawn and a green "Reconnected to …" toast confirms it.
  *
  * The nav (AppNav) reads the two badge signals through `useNotificationSignals`
  * and clears the fresh-prints count with `markGalleryVisited` on entering the
  * Gallery route. `installNotifications` is mounted once from App.vue.
  */
 import { computed, ref, watch, type Ref } from "vue";
-import { toast } from "./toasts";
+import { dismissToast, toast } from "./toasts";
+import {
+  HOST_OFFLINE_DESCRIPTION,
+  hostOfflineTitle,
+  hostReconnectedTitle,
+  reconcileHostConnectivity,
+} from "@studio/lib/hostConnectivity";
 import { listStoredHosts } from "./hostRegistry";
 import { hostStatus } from "../components/machines/hostClient";
 import type { Job } from "../composables/useGenerateStream";
@@ -105,36 +113,90 @@ export function installNotifications(deps: NotificationDeps): () => void {
     },
   );
 
-  // (c) Remote host reachability.
-  const wasOffline = new Set<string>();
+  // (c) Remote host reachability. Every listed host is re-probed on the timer,
+  // so reconnection is automatic — these toasts only narrate the two edges, and
+  // the edge policy itself is the shared reconciler desktop reads too.
+  /** hostId → the sticky offline toast, withdrawn once the host answers. */
+  const offlineToastIds = new Map<string, string>();
+  /** Last settled reachability per host, carried between polls. */
+  let reachability: Record<string, string> = {};
+  /** Rising counter so a slow probe from an earlier tick cannot land late. */
+  let pollEpoch = 0;
   let hostTimer: ReturnType<typeof setInterval> | null = null;
 
+  function retireOfflineToast(id: string): void {
+    const toastId = offlineToastIds.get(id);
+    if (toastId) dismissToast(toastId);
+    offlineToastIds.delete(id);
+  }
+
+  /**
+   * Abort a probe before its own tick comes round again, rather than letting it
+   * settle after a later one already reported the opposite. The deadline sits
+   * deliberately INSIDE the interval: at exactly `pollMs` the abort rejection
+   * (a microtask) still drains ahead of the next interval callback, so the
+   * stale poll would report anyway and the epoch guard would never see it.
+   */
+  const probeDeadlineMs = Math.max(1_000, Math.floor(pollMs * 0.8));
+
+  function pollSignal(): { signal: AbortSignal; done: () => void } {
+    if (typeof AbortSignal?.timeout === "function") {
+      return { signal: AbortSignal.timeout(probeDeadlineMs), done: () => {} };
+    }
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), probeDeadlineMs);
+    return { signal: controller.signal, done: () => clearTimeout(timer) };
+  }
+
   async function pollHosts(): Promise<void> {
+    const epoch = ++pollEpoch;
     const hosts = listStoredHosts();
     if (hosts.length === 0) {
-      wasOffline.clear();
+      for (const id of [...offlineToastIds.keys()]) retireOfflineToast(id);
+      reachability = {};
       if (offlineHostIds.value.size) offlineHostIds.value = new Set();
       return;
     }
-    await Promise.all(
+    const probe = pollSignal();
+    const current = await Promise.all(
       hosts.map(async (host) => {
         try {
-          await hostStatus(host);
-          wasOffline.delete(host.id);
+          await hostStatus(host, probe.signal);
+          return { id: host.id, label: host.name, status: "ready" };
         } catch {
-          if (!wasOffline.has(host.id)) {
-            wasOffline.add(host.id);
-            toast("error", `can't reach ${host.name} — check machines`, {
-              timeout: 0,
-            });
-          }
+          return { id: host.id, label: host.name, status: "error" };
         }
       }),
-    );
-    // Drop ids for hosts that were removed while offline so a stale dot clears.
-    const known = new Set(hosts.map((h) => h.id));
-    for (const id of [...wasOffline]) if (!known.has(id)) wasOffline.delete(id);
-    offlineHostIds.value = new Set(wasOffline);
+    ).finally(probe.done);
+    // A tick that started later has already reported; discard this one whole
+    // rather than flapping the user between "reconnected" and "can't reach".
+    if (epoch !== pollEpoch) return;
+    const changes = reconcileHostConnectivity({
+      previous: reachability,
+      current,
+      warned: offlineToastIds.keys(),
+      // Unlike desktop, a registered machine that does not answer on the very
+      // first probe is news here: the browser has no Machines row already
+      // showing it as errored at that moment.
+      warnOnFirstContact: true,
+    });
+    for (const host of changes.offline) {
+      offlineToastIds.set(
+        host.id,
+        toast("warning", hostOfflineTitle(host.label), {
+          description: HOST_OFFLINE_DESCRIPTION,
+          timeout: 0,
+        }),
+      );
+    }
+    for (const host of changes.reconnected) {
+      retireOfflineToast(host.id);
+      toast("success", hostReconnectedTitle(host.label));
+    }
+    // Drop notices for hosts removed while offline so a stale dot clears.
+    for (const id of changes.retired) retireOfflineToast(id);
+    reachability = changes.next;
+    offlineHostIds.value = new Set(offlineToastIds.keys());
   }
 
   void pollHosts();
