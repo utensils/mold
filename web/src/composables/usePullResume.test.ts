@@ -107,6 +107,31 @@ describe("usePullResume", () => {
     );
   });
 
+  it("resumes a pull that finished before the watch was armed", async () => {
+    const resume = vi.fn();
+    const pullResume = usePullResume();
+    hostDownloadsMock.mockResolvedValue(listing([]));
+    // Captured BEFORE the POST — the pull then completes inside the window
+    // between starting it and arming the watch.
+    const baseline = await pullResume.captureBaseline("hal9000-7680");
+    hostDownloadsMock.mockResolvedValue(
+      listing([{ id: "a", model: "z-image-turbo:q6", status: "completed" }]),
+    );
+    await pullResume.arm(
+      {
+        model: "z-image-turbo:q6",
+        jobId: null,
+        hostId: "hal9000-7680",
+        hostLabel: "hal9000",
+        resume,
+      },
+      baseline,
+    );
+
+    expect(resume).toHaveBeenCalledTimes(1);
+    expect(pullResume.pending.value).toBeNull();
+  });
+
   it("keeps waiting when the machine cannot be read", async () => {
     const resume = vi.fn();
     hostDownloadsMock.mockRejectedValue(new Error("unreachable"));

@@ -3532,6 +3532,116 @@ describe("CreatePage host routing", () => {
     expect(toasts.some((t) => /can't run this print/.test(t.text))).toBe(false);
   });
 
+  // The pull is only ever offered on a machine that reported the model
+  // absent; one that refused for capacity would refuse again after a repair.
+  it("never offers a machine that refused for capacity as a pull target", async () => {
+    const studio = addHost({ url: "http://studio:7680", name: "Studio" });
+    hostModelsMock.mockImplementation(async (host: { id: string }) =>
+      host.id === ORIGIN_HOST_ID ? [] : [{ ...flux, name: "z-image-turbo:q6" }],
+    );
+    placementPreviewMock.mockImplementation(
+      async (...args: unknown[]): Promise<Record<string, unknown>> => {
+        const target = args[0] as { baseUrl: string };
+        return target.baseUrl.includes("studio")
+          ? {
+              version: 1,
+              authoritative: true,
+              state_version: 1,
+              plan_version: 1,
+              outcome: "infeasible",
+              reason: "no device can host this generation: needs 48.0 GB",
+            }
+          : {
+              version: 1,
+              authoritative: true,
+              state_version: 1,
+              plan_version: 1,
+              outcome: "infeasible",
+              reason:
+                "model 'z-image-turbo:q6' has no concrete local artifacts",
+              missing_components: [
+                {
+                  kind: "transformer",
+                  name: "transformer",
+                  present: false,
+                  repair_model: "z-image-turbo:q6",
+                },
+              ],
+            };
+      },
+    );
+    postDownloadMock.mockClear();
+    postCatalogDownloadMock.mockClear();
+
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = "z-image-turbo:q6";
+    form.state.value.modelFamily = "zimage";
+    form.state.value.prompt = "a lighthouse at dusk";
+    await nextTick();
+
+    await wrapper.get("[data-test='composer-submit']").trigger("click");
+    await flushPromises();
+
+    // Only the origin lacks it, so no picker: the download lands there and
+    // Studio (which has it and cannot fit it) is never touched.
+    expect(postDownloadMock).toHaveBeenCalledWith("z-image-turbo:q6");
+    expect(
+      useNotifications().toasts.some((t) =>
+        new RegExp(`Pulling z-image-turbo:q6 on `).test(t.text),
+      ),
+    ).toBe(true);
+    expect(studio.id).toBeTruthy();
+  });
+
+  // A source-conditioned print is fitted against the chosen machine AFTER
+  // routing, so the pre-routing request is not what would render. Download it,
+  // but do not promise a resume that would use different conditioning.
+  it("downloads without promising a resume for a source-conditioned print", async () => {
+    hostModelsMock.mockResolvedValue([]);
+    placementPreviewMock.mockResolvedValue({
+      version: 1,
+      authoritative: true,
+      state_version: 1,
+      plan_version: 1,
+      outcome: "infeasible",
+      reason: "model 'flux-dev:q8' has no concrete local artifacts",
+      missing_components: [
+        {
+          kind: "transformer",
+          name: "transformer",
+          present: false,
+          repair_model: "flux-dev:q8",
+        },
+      ],
+    });
+    postDownloadMock.mockClear();
+
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = "flux-dev:q8";
+    form.state.value.modelFamily = "flux";
+    form.state.value.prompt = "a lighthouse at dusk";
+    form.state.value.imageAttachments = [
+      { kind: "upload", filename: "open.png", base64: "FIRST" },
+    ];
+    await nextTick();
+
+    await wrapper.get("[data-test='composer-submit']").trigger("click");
+    await flushPromises();
+
+    expect(postDownloadMock).toHaveBeenCalledWith("flux-dev:q8");
+    const toasts = useNotifications().toasts;
+    expect(
+      toasts.some((t) => /press Generate again once it's ready/.test(t.text)),
+    ).toBe(true);
+    expect(
+      toasts.some((t) => /generation starts when it's ready/.test(t.text)),
+    ).toBe(false);
+  });
+
   it("keeps the dead-end message when the machine simply cannot fit it", async () => {
     hostModelsMock.mockResolvedValue([flux]);
     placementPreviewMock.mockResolvedValue({

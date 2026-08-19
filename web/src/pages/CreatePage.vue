@@ -2700,12 +2700,13 @@ async function resolveFeasibleSubmitRoute(
   request: GenerateRequestWire,
   copies = 1,
   decision?: ReturnType<typeof decideGenerateRequestRouting>,
+  quick: unknown = null,
 ): Promise<HostRoute | false> {
   const result = await routing.resolveFeasible(request, copies);
   if (result.kind !== "route") {
     if (
       !decision ||
-      !(await offerMissingModelPull(result, request, decision))
+      !(await offerMissingModelPull(result, request, decision, quick))
     ) {
       toast("error", feasibilityMessage(result, "this print"));
     }
@@ -2755,17 +2756,56 @@ function routeForHostId(hostId: string): HostRoute | null {
  * the exact frozen request there once the download lands. Returns false when
  * there is nothing to offer, so the caller keeps its failure message.
  */
+/**
+ * A frozen request may only be resumed verbatim when nothing downstream of
+ * routing would still change it. Source media is fitted against the chosen
+ * machine after routing (`prepareStillSourceToRequest`), and a quick
+ * expansion stamps its provenance there too — resuming the pre-finalization
+ * request would render different conditioning than the user submitted. Those
+ * requests still get the download; they just do not get the promise.
+ */
+function frozenRequestIsFinal(
+  request: GenerateRequestWire,
+  quick: unknown,
+): boolean {
+  if (quick) return false;
+  const fields = request as unknown as Record<string, unknown>;
+  const carriesMedia = [
+    "source_image",
+    "mask_image",
+    "control_image",
+    "source_video",
+    "audio_file",
+  ].some((field) => fields[field] !== undefined && fields[field] !== null);
+  const carriesLists = ["edit_images", "keyframes", "references"].some(
+    (field) => {
+      const value = fields[field];
+      return Array.isArray(value) && value.length > 0;
+    },
+  );
+  return !carriesMedia && !carriesLists;
+}
+
 async function offerMissingModelPull(
   result: Exclude<FeasibilityResult, { kind: "route" }>,
   request: GenerateRequestWire,
   decision: ReturnType<typeof decideGenerateRequestRouting>,
+  quick: unknown = null,
 ): Promise<boolean> {
   const failures = missingModelFailures(result);
   if (failures.length === 0) return false;
   const model = failures[0]!.missingModel!.model;
+  // Only the machines that actually reported the model absent are pull
+  // targets: one that refused for capacity or policy would refuse again after
+  // the download, and repairing it there would be pure waste.
+  const candidateIds = failures.map((failure) => failure.hostId);
+  if (installTargets.planFor(model, false, candidateIds).targets.length === 0) {
+    return false;
+  }
   const choice = await installTargets.chooseInstallTarget({
     modelId: model,
     displayName: modelDisplayNameForId(model, models.value),
+    restrictToHostIds: candidateIds,
   });
   // An explicit cancel is an answer: nothing was queued, and the dead-end
   // error toast would only restate what the user just dismissed.
@@ -2773,8 +2813,13 @@ async function offerMissingModelPull(
   const target = choice.target;
   const hostId = target?.host.id ?? ORIGIN_HOST_ID;
   const hostLabel = target?.host.label ?? "this server";
+  // Capture what had already finished BEFORE the POST: a pull that completes
+  // inside that window would otherwise land in the baseline and be ignored
+  // forever.
+  const baseline = await pullResume.captureBaseline(hostId);
+  let jobId: string | null = null;
   try {
-    await installTargets.startDownloadOn(target, model);
+    jobId = await installTargets.startDownloadOn(target, model);
   } catch (error) {
     toast(
       "error",
@@ -2784,16 +2829,27 @@ async function offerMissingModelPull(
     );
     return true;
   }
+  if (!frozenRequestIsFinal(request, quick)) {
+    toast(
+      "info",
+      `Pulling ${model} on ${hostLabel} — press Generate again once it's ready.`,
+    );
+    return true;
+  }
   const resumeRoute = routing.multiHost.value ? routeForHostId(hostId) : null;
-  await pullResume.arm({
-    model,
-    // Neither download route reports a job id to the browser, so the watch
-    // matches by model against a snapshot of what was already terminal.
-    jobId: null,
-    hostId,
-    hostLabel,
-    resume: () => submitRequestCopies(request, decision, resumeRoute),
-  });
+  await pullResume.arm(
+    {
+      model,
+      // A catalog download reports its queue id on both routes; a plain
+      // manifest-name POST answers with no body, so that watch matches by
+      // model against the pre-POST terminal snapshot.
+      jobId,
+      hostId,
+      hostLabel,
+      resume: () => submitRequestCopies(request, decision, resumeRoute),
+    },
+    baseline,
+  );
   toast(
     "info",
     `Pulling ${model} on ${hostLabel} — generation starts when it's ready`,
@@ -2999,7 +3055,12 @@ async function onSubmitInner(allowStaleQuick = false) {
             copies,
           )
         : await routing.revalidateFeasible(route, currentRequest, copies)
-      : await resolveFeasibleSubmitRoute(currentRequest, copies, decision);
+      : await resolveFeasibleSubmitRoute(
+          currentRequest,
+          copies,
+          decision,
+          quick,
+        );
     if (result === false) return;
     if ("kind" in result && result.kind !== "route") {
       toast("error", feasibilityMessage(result, "this prepared print"));
@@ -3023,7 +3084,9 @@ async function onSubmitInner(allowStaleQuick = false) {
           )
         : await routing.resolveFeasible(currentRequest, copies);
     if (result.kind !== "route") {
-      if (!(await offerMissingModelPull(result, currentRequest, decision))) {
+      if (
+        !(await offerMissingModelPull(result, currentRequest, decision, quick))
+      ) {
         toast("error", feasibilityMessage(result, "this print"));
       }
       return;

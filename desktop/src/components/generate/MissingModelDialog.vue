@@ -13,6 +13,12 @@ const props = defineProps<{
   /** Known weights size, when the model exists on another host. */
   sizeGb?: number | null;
   models?: DisplayableModel[] | undefined;
+  /**
+   * False when the print cannot be resumed verbatim after the download (its
+   * source still has to be fitted against the chosen machine). Offer the
+   * download without promising the generation.
+   */
+  resumeAfterPull?: boolean;
 }>();
 const modelLabel = () => modelDisplayNameForId(props.model, props.models ?? []);
 const emit = defineEmits<{ (e: "confirm"): void; (e: "close"): void }>();
@@ -41,8 +47,14 @@ onMounted(() => cancelBtn.value?.focus());
         <p class="mt-2 text-body text-ink-2">
           <span class="data-mono text-ink">{{ modelLabel() }}</span>
           isn't installed on {{ hostLabel
-          }}<template v-if="sizeGb"> ({{ sizeGb.toFixed(1) }} GB)</template>. Download it there and
-          run this generation automatically once it's ready?
+          }}<template v-if="sizeGb"> ({{ sizeGb.toFixed(1) }} GB)</template>.
+          <template v-if="resumeAfterPull === false">
+            Download it there? This print needs its source fitted on that machine, so press Generate
+            again once the download is ready.
+          </template>
+          <template v-else>
+            Download it there and run this generation automatically once it's ready?
+          </template>
         </p>
         <div class="mt-4 flex justify-end gap-2">
           <button
@@ -60,7 +72,7 @@ onMounted(() => cancelBtn.value?.focus());
             data-test="missing-model-pull"
             @click="emit('confirm')"
           >
-            Download and generate
+            {{ resumeAfterPull === false ? "Download" : "Download and generate" }}
           </button>
         </div>
       </div>

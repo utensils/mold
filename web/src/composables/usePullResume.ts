@@ -37,7 +37,14 @@ export interface PendingPull {
 
 export interface UsePullResume {
   pending: Ref<PendingPull | null>;
-  arm: (next: PendingPull) => Promise<void>;
+  /**
+   * `baseline` is the machine's already-terminal job ids, captured BEFORE the
+   * download was started. Capturing it afterwards is a hang: a pull that
+   * finishes inside that window lands in the baseline and is then excluded
+   * forever. Pass `captureBaseline(hostId)`'s result.
+   */
+  arm: (next: PendingPull, baseline?: readonly string[]) => Promise<void>;
+  captureBaseline: (hostId: string) => Promise<string[]>;
   cancel: () => void;
   /** Test seam: run one poll now instead of waiting for the interval. */
   check: () => Promise<void>;
@@ -107,12 +114,17 @@ async function check(): Promise<void> {
 export function usePullResume(): UsePullResume {
   return {
     pending,
-    async arm(next: PendingPull) {
-      seenTerminal = terminalPullJobIds(await jobsFor(next.hostId));
+    async arm(next: PendingPull, baseline?: readonly string[]) {
+      seenTerminal = [
+        ...(baseline ?? terminalPullJobIds(await jobsFor(next.hostId))),
+      ];
       pending.value = next;
       stop();
       timer = setInterval(() => void check(), POLL_INTERVAL_MS);
       await check();
+    },
+    async captureBaseline(hostId: string) {
+      return terminalPullJobIds(await jobsFor(hostId));
     },
     cancel() {
       pending.value = null;

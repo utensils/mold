@@ -273,6 +273,9 @@ const missingModel = ref<{
   batch: number;
   chainRouting: ChainRoutingDecision | null;
   requestOptions: BatchRequestOptions;
+  /** False when the frozen request still has to be finalized against the
+   *  chosen machine — download only, never a resume promise. */
+  resumeAfterPull?: boolean;
 } | null>(null);
 
 const missingModelHostLabel = computed(
@@ -299,6 +302,13 @@ interface MissingModelSubmission {
   batch: number;
   chainRouting: ChainRoutingDecision | null;
   requestOptions: BatchRequestOptions;
+  /**
+   * False when the frozen request is not yet the one that would render —
+   * a source that still has to be fitted against the chosen machine
+   * (`upscale-then-fit`). The download is still offered; the promise to
+   * generate is not, because resuming would use different conditioning.
+   */
+  resumeAfterPull?: boolean;
 }
 
 /** An open machine picker for a pre-submit pull (more than one candidate). */
@@ -474,18 +484,27 @@ async function pullMissingModel() {
     );
     return;
   }
+  const resumes = info.resumeAfterPull !== false;
   try {
     // Watch the EXACT job the server enqueues; a stale completed pull of the
     // same model in history can then never trigger a premature resume.
     const jobId = await startCatalogDownload(info.model, route?.target, route?.kind === "remote");
-    pullResume.arm({ ...armed, jobId });
-    toasts.push(`Pulling ${info.model} on ${label} — generation starts when it's ready`);
+    if (resumes) pullResume.arm({ ...armed, jobId });
+    toasts.push(
+      resumes
+        ? `Pulling ${info.model} on ${label} — generation starts when it's ready`
+        : `Pulling ${info.model} on ${label} — press Generate again once it's ready.`,
+    );
   } catch (err) {
     if (err instanceof ApiError && err.status === 409) {
       // Already downloading (another client or an earlier click) — watch by
       // model; the running job is live, not terminal, so it can't be stale.
-      pullResume.arm({ ...armed, jobId: null });
-      toasts.push(`${info.model} is already downloading on ${label} — will generate when ready`);
+      if (resumes) pullResume.arm({ ...armed, jobId: null });
+      toasts.push(
+        resumes
+          ? `${info.model} is already downloading on ${label} — will generate when ready`
+          : `${info.model} is already downloading on ${label} — press Generate again once it's ready.`,
+      );
     } else if (/unknown model/i.test(String(err))) {
       toasts.push(
         `${label} can't pull ${info.model} by name — pull it from the Catalog there, then generate again.`,
@@ -2949,15 +2968,16 @@ async function generate() {
         // model itself, offer the pull instead of a dead-end toast — but only
         // once the source is final, so the resumed request is the exact one
         // the user submitted.
-        const offered =
-          sourcePreprocessed &&
-          offerMissingModelPull(feasibility, {
-            model: preliminaryRequest.model,
-            request: pullResumeRequest(preliminaryRequest),
-            batch,
-            chainRouting: preliminaryRouting.kind === "chain" ? preliminaryRouting : null,
-            requestOptions: {},
-          });
+        const offered = offerMissingModelPull(feasibility, {
+          model: preliminaryRequest.model,
+          request: pullResumeRequest(preliminaryRequest),
+          batch,
+          chainRouting: preliminaryRouting.kind === "chain" ? preliminaryRouting : null,
+          requestOptions: {},
+          // The source still has to be fitted against the machine that runs
+          // it, so this request is not the one that would render.
+          resumeAfterPull: sourcePreprocessed,
+        });
         if (!offered) toasts.push(placementFailureMessage(feasibility), "error");
         return;
       }
@@ -4098,6 +4118,7 @@ onBeforeUnmount(() => {
       :host-label="missingModelHostLabel"
       :size-gb="missingModelSizeGb"
       :models="hostModels.unionInstalled"
+      :resume-after-pull="missingModel.resumeAfterPull !== false"
       @confirm="pullMissingModel"
       @close="missingModel = null"
     />

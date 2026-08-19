@@ -290,6 +290,48 @@ describe("GenerateView missing-model pull before submit", () => {
     expect(wrapper.exists()).toBe(true);
   });
 
+  // The source is fitted against the machine that runs it, so a request that
+  // has not been preprocessed yet is not the one that would render: download,
+  // but never promise the generation.
+  it("downloads without promising a resume when the source still needs fitting", async () => {
+    const hosts = useHostsStore();
+    vi.spyOn(hosts, "resolveFeasible").mockResolvedValue({
+      kind: "infeasible",
+      perHost: [missingModelFailure(localRoute)],
+    } as FeasibleRouteResult);
+    vi.spyOn(useGenerationStore(), "submitBatch").mockReturnValue({
+      jobs: [],
+      settled: Promise.resolve([]),
+    });
+    const downloads = useDownloadsStore();
+    vi.spyOn(downloads, "subscribe").mockResolvedValue(undefined);
+    const form = useGenerateFormStore().form;
+    form.family = "flux";
+    form.model = model.name;
+    form.sourceImage = "SOURCE";
+    form.sourceFit = {
+      mode: "upscale-then-fit",
+      upscalerModel: "realesrgan-x4",
+      fit: { mode: "pad-repaint" },
+    };
+    const wrapper = mountView();
+    await flushPromises();
+
+    await wrapper.get('[data-test="generate-button"]').trigger("click");
+    await flushPromises();
+
+    const dialog = wrapper.findComponent(MissingModelDialog);
+    expect(dialog.exists()).toBe(true);
+    expect(dialog.props("resumeAfterPull")).toBe(false);
+
+    dialog.vm.$emit("confirm");
+    await flushPromises();
+
+    expect(startCatalogDownload).toHaveBeenCalled();
+    expect(usePullResumeStore().pending).toBeNull();
+    expect(useToastStore().items.at(-1)?.message).toContain("press Generate again");
+  });
+
   it("never offers a pull for a machine that simply cannot fit the print", async () => {
     const hosts = useHostsStore();
     vi.spyOn(hosts, "resolveFeasible").mockResolvedValue({
