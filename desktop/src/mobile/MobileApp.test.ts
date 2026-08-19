@@ -7786,3 +7786,109 @@ describe("MobileApp automatic generation routing", () => {
     expect(failure).toContain("Nothing was queued.");
   });
 });
+
+describe("MobileApp automatic sequence routing", () => {
+  const renderTarget = {
+    baseUrl: "http://render.tailnet.ts.net:7680",
+    apiKey: "render-secret",
+  };
+  const sequenceModel: ModelEntry = {
+    ...model,
+    name: "ltx-video-0.9.8-2b-distilled:bf16",
+    family: "ltx-video",
+    default_steps: 7,
+    default_guidance: 1,
+  };
+
+  it("freezes the fan-out winner as the sequence's recovery host", async () => {
+    localStorage.setItem("mold.mobile.create-mode.v1", "sequence");
+    localStorage.setItem(
+      "mold.mobile.hosts.v1",
+      JSON.stringify([
+        {
+          id: "studio-id",
+          name: "Studio",
+          baseUrl: target.baseUrl,
+          hostname: "studio",
+          instanceId: "studio-id",
+        },
+        {
+          id: "render-id",
+          name: "Render",
+          baseUrl: renderTarget.baseUrl,
+          hostname: "render",
+          instanceId: "render-id",
+        },
+      ]),
+    );
+    invoke.mockImplementation((command: string, args?: { hostId?: string }) =>
+      Promise.resolve(
+        command === "keychain_get_api_key"
+          ? args?.hostId === "render-id"
+            ? renderTarget.apiKey
+            : target.apiKey
+          : null,
+      ),
+    );
+    apiJsonTo.mockImplementation((route: { baseUrl: string }, path: string, init?: RequestInit) => {
+      const render = route.baseUrl === renderTarget.baseUrl;
+      if (path === "/api/status")
+        return Promise.resolve({
+          ...status,
+          hostname: render ? "render" : "studio",
+          instance_id: render ? "render-id" : "studio-id",
+        });
+      if (path === "/api/models") return Promise.resolve([sequenceModel]);
+      if (path === "/api/capabilities") return Promise.resolve({});
+      if (path === "/api/gallery") return Promise.resolve([]);
+      if (path === "/api/activity")
+        return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
+      if (path.startsWith("/api/capabilities/chain-limits")) {
+        return Promise.resolve({
+          model: sequenceModel.name,
+          frames_per_clip_cap: 97,
+          frames_per_clip_recommended: 97,
+          max_stages: 8,
+          max_total_frames: 777,
+          fade_frames_max: 32,
+          transition_modes: ["smooth", "cut", "fade"],
+          quantization_family: "bf16",
+          supports_audio: false,
+        });
+      }
+      if (path === "/api/chain-jobs" && init?.method === "POST")
+        return Promise.resolve({ job_id: "sequence-job-1" });
+      if (path === "/api/chain-jobs/sequence-job-1") return new Promise(() => {});
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    previewChainPlacement.mockImplementation((probe: { baseUrl: string }) => {
+      const preview = plannedPlacement();
+      preview.candidate.predicted_completion_after_ms =
+        probe.baseUrl === renderTarget.baseUrl ? 100 : 9_000;
+      return Promise.resolve(preview);
+    });
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    const prompts = wrapper.findAll("[data-test='mobile-sequence-clip'] textarea");
+    await prompts[0]!.setValue("A paper boat crosses a moonlit pond");
+    await prompts[1]!.setValue("Fireflies gather as the sky brightens");
+    await wrapper.get("[data-test='mobile-generate-sequence']").trigger("click");
+    await flushPromises();
+
+    const created = apiJsonTo.mock.calls.filter(
+      (call: unknown[]) =>
+        call[1] === "/api/chain-jobs" && (call[2] as RequestInit)?.method === "POST",
+    );
+    expect(created).toHaveLength(1);
+    expect(created[0]![0]).toEqual(renderTarget);
+    const recovery = localStorage.getItem("mold.mobile.sequence-job.v1");
+    expect(JSON.parse(recovery ?? "null")).toEqual({
+      hostId: "render-id",
+      baseUrl: renderTarget.baseUrl,
+      instanceId: "render-id",
+      jobId: "sequence-job-1",
+    });
+    expect(recovery).not.toContain(renderTarget.apiKey);
+  });
+});
