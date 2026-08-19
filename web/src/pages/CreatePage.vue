@@ -2281,12 +2281,18 @@ function onResetSettings() {
   // never mutated and can be handed straight back on undo.
   const previous = form.state.value;
   const previousSequenceAudio = sequenceMode.value ? draft.enableAudio : null;
+  // The canvas is part of what Reset restores, so its authority resets with
+  // it — otherwise the next model change would re-snap the reset canvas back
+  // onto the attached source (#1166).
+  const previousIntent = canvasIntent.value;
   form.resetSettings(currentModel.value ?? null);
+  canvasIntent.value = "model-default";
   if (sequenceMode.value) draft.enableAudio = false;
   undoableAction({
     text: "Settings reset to model defaults",
     undo: () => {
       form.state.value = previous;
+      canvasIntent.value = previousIntent;
       if (previousSequenceAudio !== null)
         draft.enableAudio = previousSequenceAudio;
     },
@@ -4780,6 +4786,7 @@ onBeforeUnmount(() => {
           @clear-end-frame="onClearEndFrame"
           @open-mask="showMask = true"
           @append-prompt="onAppendPromptPhrase"
+          @canvas-intent="setCanvasIntent"
         />
       </div>
     </div>
@@ -4809,6 +4816,7 @@ onBeforeUnmount(() => {
         @clear-end-frame="onClearEndFrame"
         @open-mask="showMask = true"
         @append-prompt="onAppendPromptPhrase"
+        @canvas-intent="setCanvasIntent"
       />
     </div>
 

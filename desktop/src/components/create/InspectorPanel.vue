@@ -503,6 +503,10 @@ const batchMax = computed(() => (batchLocked.value ? 1 : MAX_BATCH_SIZE));
 // the prompt, the model, and any prepared batch size survive.
 function resetSettings() {
   resetFormToModelDefaults(props.form, selectedModel.value);
+  // The canvas is part of what Reset restores, so its authority resets with
+  // it — otherwise the next model change would re-snap the reset canvas back
+  // onto the attached source (#1166).
+  emit("canvas-intent", "model-default");
   if (isSequence.value) draft.enableAudio = false;
 }
 </script>

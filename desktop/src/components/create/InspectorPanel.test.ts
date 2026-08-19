@@ -575,6 +575,22 @@ describe("InspectorPanel — reset to model defaults", () => {
     expect(form.height).toBe(768);
   });
 
+  it("returns the canvas authority to the model on reset (#1166)", async () => {
+    const form = formFor("flux");
+    form.sourceImage = "SRC";
+    form.sourceImageWidth = 1024;
+    form.sourceImageHeight = 1024;
+    const wrapper = mount(InspectorPanel, {
+      props: { form, canvasIntent: "source" },
+    });
+
+    await wrapper.get('[data-test="settings-reset"]').trigger("click");
+
+    // Without this, the next model change would re-snap the reset canvas
+    // back onto the attached source.
+    expect(wrapper.emitted("canvas-intent")?.at(-1)).toEqual(["model-default"]);
+  });
+
   it("resets sequence audio as part of the full Settings reset", async () => {
     const draft = useSequenceDraftStore();
     draft.output = "sequence";

@@ -79,6 +79,7 @@ const resolved = computed(() => {
       :options="segments"
       :label="label"
       :disabled="disabled"
+      :wrap="segments.length > 3"
       @update:model-value="emit('update:modelValue', $event)"
     />
     <div class="ms-res__resolved">

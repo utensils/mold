@@ -201,6 +201,7 @@ function matchSource(): void {
       <span class="mobile-resolution-label">Size</span>
       <SegmentedControl
         data-test="mobile-resolution-tier"
+        wrap
         :model-value="outputShape.selectedSizeId"
         :options="sizeSegments"
         label="Size"

@@ -571,6 +571,10 @@ function closeAdvancedSheet(): void {
  * inspector's Reset — the sheet's scoped reset below is deliberately narrower. */
 function resetCreateSettings(): void {
   resetFormToModelDefaults(form, selectedGenerationModel.value);
+  // The canvas is part of what Reset restores, so its authority resets with
+  // it — otherwise the next model change would re-snap the reset canvas back
+  // onto the attached source (#1166).
+  canvasIntent.value = "model-default";
   if (isSequence.value) draft.enableAudio = false;
 }
 
@@ -578,6 +582,8 @@ function resetCreateSettings(): void {
  * while preserving the prompt, selected model, batch, and staged source media. */
 function resetAdvancedSettings(): void {
   resetAdvancedToModelDefaults(form, selectedGenerationModel.value);
+  // The canvas comes back to the model's default, so its authority does too.
+  canvasIntent.value = "model-default";
 }
 const preparingGeneration = ref(false);
 const generationSubmissionPhase = ref<"preparing" | "placement" | null>(null);

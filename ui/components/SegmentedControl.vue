@@ -21,8 +21,14 @@ const props = withDefaults(
     disabled?: boolean;
     /** Tighter segment padding for dense chrome (e.g. 52px header rows). */
     compact?: boolean;
+    /**
+     * Let segments flow onto more than one row. A size ladder can be five or
+     * six pixel-labelled options, which cannot fit one row in a 340 px
+     * inspector or on a phone; 2–4 option controls keep the single row.
+     */
+    wrap?: boolean;
   }>(),
-  { disabled: false, compact: false },
+  { disabled: false, compact: false, wrap: false },
 );
 
 const emit = defineEmits<{ "update:modelValue": [value: T] }>();
@@ -58,7 +64,7 @@ function onKeydown(event: KeyboardEvent) {
 <template>
   <div
     class="ms-seg"
-    :class="{ 'ms-seg--compact': compact }"
+    :class="{ 'ms-seg--compact': compact, 'ms-seg--wrap': wrap }"
     role="radiogroup"
     :aria-label="label"
     :aria-disabled="disabled || undefined"
@@ -113,6 +119,19 @@ function onKeydown(event: KeyboardEvent) {
 
 .ms-seg--compact .ms-seg__btn {
   padding: 4px 12px;
+}
+
+.ms-seg--wrap {
+  flex-wrap: wrap;
+}
+
+/* A wrapped row keeps each segment at its own content width — equal 1/N
+ * columns would shrink a six-entry ladder below its own pixel label. */
+.ms-seg--wrap .ms-seg__btn {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 44px;
+  justify-content: center;
 }
 
 .ms-seg__btn:hover:not([data-on="true"]):not(:disabled) {

@@ -459,6 +459,8 @@ function snapFramesField() {
 // inspector's top-level Reset keeps the deliberate wholesale clear. ─────────
 function reset() {
   resetAdvancedToModelDefaults(props.form, props.selectedModel);
+  // The canvas comes back to the model's default, so its authority does too.
+  emit("canvas-intent", "model-default");
 }
 </script>
 

@@ -494,6 +494,17 @@ describe("AdvancedDrawer always-open sections", () => {
     expect(w.find("[data-test='section-lora']").exists()).toBe(false);
     expect(w.find("[data-test='cfg-plus']").exists()).toBe(true);
   });
+
+  it("records a typed exact size as a manual canvas intent (#1166)", async () => {
+    const w = factory("flux");
+    const width = w.get("[data-test='exact-width']");
+    await width.setValue("896");
+    await width.trigger("change");
+    expect(w.emitted("canvas-intent")?.at(-1)).toEqual(["manual"]);
+    expect(
+      (w.emitted("update:modelValue")?.at(-1)?.[0] as { width: number }).width,
+    ).toBe(896);
+  });
 });
 
 describe("AdvancedDrawer video suite", () => {
