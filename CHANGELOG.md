@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.3] - 2026-08-19
+
 - **Tapping an iPhone Library tile in Select mode no longer selects and immediately deselects it.** Mold now consumes every delayed compatibility click emitted by WKWebView after touch selection, including overlapping clicks from rapid taps, while preserving drag-to-select, drag-to-deselect, pointer cancellation, and keyboard activation.
 
 ## [0.23.2] - 2026-08-18
@@ -1869,7 +1871,8 @@ Initial public release on [crates.io](https://crates.io/crates/mold-ai).
 | [`mold-ai-inference`](https://crates.io/crates/mold-ai-inference) | Candle-based inference engine           |
 | [`mold-ai-server`](https://crates.io/crates/mold-ai-server)       | Axum HTTP inference server              |
 
-[Unreleased]: https://github.com/utensils/mold/compare/v0.23.2...HEAD
+[Unreleased]: https://github.com/utensils/mold/compare/v0.23.3...HEAD
+[0.23.3]: https://github.com/utensils/mold/compare/v0.23.2...v0.23.3
 [0.23.2]: https://github.com/utensils/mold/compare/v0.23.1...v0.23.2
 [0.23.1]: https://github.com/utensils/mold/compare/v0.23.0...v0.23.1
 [0.23.0]: https://github.com/utensils/mold/compare/v0.22.3...v0.23.0
