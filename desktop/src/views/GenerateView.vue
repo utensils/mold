@@ -412,10 +412,12 @@ async function offerPullForSelectedModel(model: string) {
   const targets = planModelInstall(readyHosts, hostModels.hostsFor(model), {
     inventoryKnown: (host) => (hostModels.byHost[host.id]?.fetchedAt ?? 0) > 0,
   }).targets;
+  const caps = generationCapabilitiesForFamily(form.family, form.model);
   const submission: MissingModelSubmission = {
     model,
     request: pullResumeRequest(buildRequest(cloneGenerateForm(form))),
-    batch: 1,
+    // Same rule Generate uses: Batch N submits N ordinary siblings.
+    batch: caps.forcesBatchSizeOne ? 1 : form.batchSize,
     chainRouting: null,
     requestOptions: {},
   };
