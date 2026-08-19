@@ -156,6 +156,31 @@ describe("event routing", () => {
     expect(gallery.buckets["local"]!.items).toHaveLength(0);
   });
 
+  it("routes the Library organization frames to the gallery store", () => {
+    const events = useEventsStore();
+    const gallery = connectWithBucket();
+    const applyUpdated = vi.spyOn(gallery, "applyUpdated").mockImplementation(() => {});
+    const applyTrashed = vi.spyOn(gallery, "applyTrashed").mockImplementation(() => {});
+    const applyRestored = vi.spyOn(gallery, "applyRestored").mockImplementation(() => {});
+    const applyCollectionsChanged = vi
+      .spyOn(gallery, "applyCollectionsChanged")
+      .mockImplementation(() => {});
+
+    const updated = { type: "gallery_updated", filename: "a.png", image: null } as const;
+    events.apply(updated);
+    expect(applyUpdated).toHaveBeenCalledWith(updated);
+
+    events.apply({ type: "gallery_trashed", filename: "a.png" });
+    expect(applyTrashed).toHaveBeenCalledWith("a.png");
+
+    const restored = { type: "gallery_restored", filename: "a.png", image: null } as const;
+    events.apply(restored);
+    expect(applyRestored).toHaveBeenCalledWith(restored);
+
+    events.apply({ type: "gallery_collections_changed" });
+    expect(applyCollectionsChanged).toHaveBeenCalledTimes(1);
+  });
+
   it("ignores job lifecycle frames", () => {
     const events = useEventsStore();
     // Must not throw; generation tracking stays on the per-job streams.

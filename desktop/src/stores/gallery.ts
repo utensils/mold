@@ -11,16 +11,93 @@ import {
 import { ipc } from "../lib/ipc";
 import { PLATFORM_UI } from "../lib/platform";
 import { useHostsStore, type HostView } from "./hosts";
-import type { GalleryImage, ServerEvent } from "../lib/api/types";
+import type { Collection, GalleryImage, ServerEvent, TagCount } from "../lib/api/types";
 import {
   GALLERY_IDENTITY_WINDOW_SECS,
   galleryPrintIdentity,
   sameLogicalGalleryPrint,
 } from "@studio/lib/galleryPrintIdentity";
+import {
+  collectionSlug as slugOfCollection,
+  collectionSlugResolver,
+  mergeCollectionsAcrossHosts,
+  normalizeTagName,
+  planOrganizationFanout,
+  sortTags,
+  tagKey,
+  unionOrganization,
+  type MergedCollection,
+  type OrganizationFanoutOp,
+  type OrganizationMutation,
+  type OrganizationTarget,
+  type OrganizationUnion,
+} from "@studio/lib/libraryOrganization";
+import {
+  createCollection as createCollectionOn,
+  deleteCollection as deleteCollectionOn,
+  emptyTrash as emptyTrashOn,
+  listCollections,
+  listTags,
+  listTrash,
+  organizeGallery,
+  patchGalleryImage,
+  restoreTrashed,
+  sweepTrash as sweepTrashOn,
+  updateCollection,
+} from "@studio/api/galleryOrganization";
+
+export type {
+  MergedCollection,
+  OrganizationMutation,
+  OrganizationUnion,
+} from "@studio/lib/libraryOrganization";
 
 /** Collapse a burst of row-less gallery_added events into one refetch. */
 const REFETCH_DEBOUNCE_MS = 500;
 let refetchTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** Library header scope (V3 "Shelf"): the grid, the collections shelf, or
+ *  the trash. Never a sixth workspace — it lives inside Library. */
+export type LibraryScope = "prints" | "collections" | "trash";
+
+/** One host's collections listing. */
+export interface CollectionsBucket {
+  items: Collection[];
+  loading: boolean;
+  error: string | null;
+  loaded: boolean;
+}
+
+/** One host's tag counts. */
+export interface TagsBucket {
+  items: TagCount[];
+  loaded: boolean;
+}
+
+/** A physical copy of a logical print: which bucket holds which row. */
+export interface GalleryCopy {
+  sourceKey: string;
+  item: GalleryImage;
+}
+
+/** Per-host trash retention, for the Trash banner (`trashRetentionSummary`). */
+export interface RetentionHostEntry {
+  key: string;
+  label: string;
+  retentionDays: number;
+}
+
+/** Outcome of a fan-out mutation over every copy of the selected prints. */
+export interface FanoutResult {
+  /** Per-host operations that succeeded. */
+  applied: number;
+  /** Per-host operations that failed. */
+  failed: number;
+  /** Bucket keys whose operation failed (already refetched). */
+  failedHosts: string[];
+  /** First failure message, for the toast. */
+  error: string | null;
+}
 
 /** One host's (or this Mac's) slice of the unified gallery. */
 export interface GalleryBucket {
@@ -52,6 +129,10 @@ export interface MergedPrint {
   hostLabel: string;
   /** Every gallery bucket that contains this filename. */
   availableOn: GallerySourceRef[];
+  /** Every physical row this logical print merged (one per bucket) — the
+   *  input to `organizationOf`. Optional so single-bucket views and tests
+   *  that build entries by hand keep working. */
+  copies?: GalleryCopy[];
 }
 
 export interface GalleryChip {
@@ -107,6 +188,104 @@ export function withinIdentityWindow(a: GalleryImage, b: GalleryImage): boolean 
 }
 
 /**
+ * Merge every bucket into one newest-first list of logical prints. Matching
+ * filenames are one print (saved remote results retain their filename when
+ * copied locally); seed + byte size (`printIdentity`) collapses copies whose
+ * filenames diverged. The local copy is preferred for media and actions
+ * while every location is retained for display. Shared by the live grid and
+ * the trash so the two can never disagree on what "one print" means.
+ */
+function mergeBuckets(
+  sources: GallerySourceRef[],
+  buckets: Record<string, GalleryBucket>,
+  pendingDeletions: Set<string>,
+): MergedPrint[] {
+  const byFilename = new Map<string, MergedPrint>();
+  const byIdentity = new Map<string, MergedPrint>();
+  const prints: MergedPrint[] = [];
+  for (const source of sources) {
+    const bucket = buckets[source.key];
+    if (!bucket) continue;
+    for (const item of bucket.items) {
+      if (pendingDeletions.has(`${source.key}::${item.filename}`)) continue;
+      const identity = printIdentity(item);
+      let existing = byFilename.get(item.filename);
+      if (!existing && identity) {
+        const candidate = byIdentity.get(identity);
+        if (candidate && withinIdentityWindow(candidate.item, item)) existing = candidate;
+      }
+      if (!existing) {
+        const print: MergedPrint = {
+          item,
+          sourceKey: source.key,
+          hostLabel: source.label,
+          availableOn: [source],
+          copies: [{ sourceKey: source.key, item }],
+        };
+        byFilename.set(item.filename, print);
+        if (identity) byIdentity.set(identity, print);
+        prints.push(print);
+        continue;
+      }
+      // A copy under a different name still joins the print, and its
+      // name is indexed too so further copies under either name merge.
+      byFilename.set(item.filename, existing);
+      if (identity && !byIdentity.has(identity)) byIdentity.set(identity, existing);
+      if (!existing.availableOn.some((s) => s.key === source.key)) {
+        existing.availableOn.push(source);
+      }
+      existing.copies!.push({ sourceKey: source.key, item });
+      if (source.key === "local" && existing.sourceKey !== "local") {
+        existing.item = item;
+        existing.sourceKey = source.key;
+        existing.hostLabel = source.label;
+      }
+    }
+  }
+  return prints.sort((a, b) => b.item.timestamp - a.item.timestamp);
+}
+
+/** Every copy's filename → its merged print, for O(1) union lookups. */
+function indexCopies(prints: MergedPrint[]): Map<string, MergedPrint> {
+  const index = new Map<string, MergedPrint>();
+  for (const print of prints) {
+    for (const copy of print.copies ?? []) index.set(copy.item.filename, print);
+    index.set(print.item.filename, print);
+  }
+  return index;
+}
+
+function errorMessage(reason: unknown): string {
+  return reason instanceof Error ? reason.message : String(reason);
+}
+
+/** Replace a bucket row in place (same index) so the grid keeps its order. */
+function replaceRow(bucket: GalleryBucket | undefined, image: GalleryImage): boolean {
+  if (!bucket) return false;
+  const at = bucket.items.findIndex((i) => i.filename === image.filename);
+  if (at === -1) return false;
+  bucket.items.splice(at, 1, image);
+  return true;
+}
+
+/** Insert newest-first, deduped by filename. */
+function insertRow(bucket: GalleryBucket, image: GalleryImage) {
+  if (bucket.items.some((i) => i.filename === image.filename)) return;
+  const at = bucket.items.findIndex((i) => i.timestamp < image.timestamp);
+  if (at === -1) bucket.items.push(image);
+  else bucket.items.splice(at, 0, image);
+}
+
+function takeRow(bucket: GalleryBucket | undefined, filename: string): GalleryImage | null {
+  if (!bucket) return null;
+  const at = bucket.items.findIndex((i) => i.filename === filename);
+  if (at === -1) return null;
+  return bucket.items.splice(at, 1)[0] ?? null;
+}
+
+const nowSecs = () => Math.floor(Date.now() / 1000);
+
+/**
  * Unified multi-host gallery: one bucket per origin, merged into a single
  * date-sorted grid. Buckets are keyed by "local" (This Mac via native IPC)
  * or a host id from the hosts store; API targets are always resolved at
@@ -136,6 +315,24 @@ export const useGalleryStore = defineStore("gallery", {
      *  the moment delete is pressed, restored by undo, and only DELETEd on
      *  commit. */
     pendingDeletions: new Set<string>(),
+    /** Library header scope: Prints grid, Collections shelf, or Trash. */
+    scope: "prints" as LibraryScope,
+    /** ♥ chip — only favorites (union over every copy). */
+    favoritesOnly: false,
+    /** Tag chips (tag keys, AND). */
+    tagFilter: [] as string[],
+    /** Collections drill-in: the open collection's slug, or null (the shelf). */
+    collectionSlug: null as string | null,
+    /** Per-host trashed prints (`GET /api/gallery?view=trash`). Same keys
+     *  as `buckets`; fetched on demand by the Trash scope. */
+    trashBuckets: {} as Record<string, GalleryBucket>,
+    /** Per-host collections listings, merged by slug in `mergedCollections`. */
+    collectionsByHost: {} as Record<string, CollectionsBucket>,
+    /** Per-host tag counts, merged by case-insensitive name in `mergedTags`. */
+    tagsByHost: {} as Record<string, TagsBucket>,
+    /** Per-host `{ collectionId → ordered filenames }` from
+     *  `GET /api/gallery/collections/:id`; orders a drill-in when present. */
+    collectionItemsByHost: {} as Record<string, Record<string, string[]>>,
   }),
   getters: {
     /**
@@ -173,50 +370,162 @@ export const useGalleryStore = defineStore("gallery", {
      * and actions, while retaining every location for display.
      */
     merged(): MergedPrint[] {
-      const byFilename = new Map<string, MergedPrint>();
       // Second-level identity (seed + byte size) collapses copies whose
       // filenames diverged — auto-saves from before the server shipped its
       // gallery filename on the complete event minted their own names.
-      const byIdentity = new Map<string, MergedPrint>();
-      const prints: MergedPrint[] = [];
+      return mergeBuckets(this.sources, this.buckets, this.pendingDeletions);
+    },
+    /** Every live copy's filename → its merged print. */
+    mergedIndex(): Map<string, MergedPrint> {
+      return indexCopies(this.merged);
+    },
+    /** The trash, merged across hosts with the very same identity rules. */
+    trashMerged(): MergedPrint[] {
+      return mergeBuckets(this.sources, this.trashBuckets, this.pendingDeletions);
+    },
+    trashIndex(): Map<string, MergedPrint> {
+      return indexCopies(this.trashMerged);
+    },
+    /** Logical prints in the trash across every host. */
+    trashCount(): number {
+      return this.trashMerged.length;
+    },
+    /** Trash grid: host chip → kind → query, like `filtered`. */
+    trashFiltered(): MergedPrint[] {
+      let entries = this.trashMerged;
+      if (this.filter !== "all" && this.sources.some((s) => s.key === this.filter)) {
+        entries = entries.filter((e) => e.availableOn.some((s) => s.key === this.filter));
+      }
+      return this.narrowByKindAndQuery(entries);
+    },
+    // ── Organization capability (from /api/capabilities) ──────────────────
+    /** Titles / favorites / tags / collections can be edited on this bucket's
+     *  host. The "local" key is the built-in engine (host id "local"); with
+     *  the server Off there is no capability snapshot, so the native IPC
+     *  bucket reads as not organize-capable. */
+    organizeCapable(): (hostKey: string) => boolean {
+      const caps = useHostsStore().capabilities;
+      return (hostKey) => caps[hostKey]?.gallery?.organize === true;
+    },
+    /** Delete moves to the trash on this bucket's host (else hard-deletes). */
+    trashCapable(): (hostKey: string) => boolean {
+      const caps = useHostsStore().capabilities;
+      return (hostKey) => caps[hostKey]?.gallery?.trash?.enabled === true;
+    },
+    anyOrganizeCapable(): boolean {
+      return this.sources.some((s) => this.organizeCapable(s.key));
+    },
+    anyTrashCapable(): boolean {
+      return this.sources.some((s) => this.trashCapable(s.key));
+    },
+    /** Per-host retention for the Trash banner; trash-capable hosts only,
+     *  This device first (it sets the sentence). */
+    retentionByHost(): RetentionHostEntry[] {
+      const caps = useHostsStore().capabilities;
+      const out: RetentionHostEntry[] = [];
       for (const source of this.sources) {
-        const bucket = this.buckets[source.key];
-        if (!bucket) continue;
-        for (const item of bucket.items) {
-          if (this.pendingDeletions.has(`${source.key}::${item.filename}`)) continue;
-          const identity = printIdentity(item);
-          let existing = byFilename.get(item.filename);
-          if (!existing && identity) {
-            const candidate = byIdentity.get(identity);
-            if (candidate && withinIdentityWindow(candidate.item, item)) existing = candidate;
-          }
-          if (!existing) {
-            const print: MergedPrint = {
-              item,
-              sourceKey: source.key,
-              hostLabel: source.label,
-              availableOn: [source],
-            };
-            byFilename.set(item.filename, print);
-            if (identity) byIdentity.set(identity, print);
-            prints.push(print);
-            continue;
-          }
-          // A copy under a different name still joins the print, and its
-          // name is indexed too so further copies under either name merge.
-          byFilename.set(item.filename, existing);
-          if (identity && !byIdentity.has(identity)) byIdentity.set(identity, existing);
-          if (!existing.availableOn.some((s) => s.key === source.key)) {
-            existing.availableOn.push(source);
-          }
-          if (source.key === "local" && existing.sourceKey !== "local") {
-            existing.item = item;
-            existing.sourceKey = source.key;
-            existing.hostLabel = source.label;
-          }
+        const trash = caps[source.key]?.gallery?.trash;
+        if (!trash?.enabled) continue;
+        out.push({ key: source.key, label: source.label, retentionDays: trash.retention_days });
+      }
+      return out;
+    },
+    // ── Collections + tags ────────────────────────────────────────────────
+    /** Collections across every loaded host, merged by slug (name-sorted). */
+    mergedCollections(): MergedCollection[] {
+      return mergeCollectionsAcrossHosts(
+        this.sources
+          .filter((s) => this.collectionsByHost[s.key]?.loaded)
+          .map((s) => ({
+            hostId: s.key,
+            hostLabel: s.label,
+            collections: this.collectionsByHost[s.key]!.items,
+          })),
+      );
+    },
+    /** `(hostKey, collectionId) → slug` over every loaded listing. */
+    collectionResolver(): (hostKey: string, collectionId: string) => string | null | undefined {
+      return collectionSlugResolver(
+        Object.entries(this.collectionsByHost)
+          .filter(([, bucket]) => bucket.loaded)
+          .map(([hostId, bucket]) => ({ hostId, collections: bucket.items })),
+      );
+    },
+    /** Tags across every loaded host, merged case-insensitively with counts
+     *  summed, count-desc then name. */
+    mergedTags(): TagCount[] {
+      const byKey = new Map<string, TagCount>();
+      for (const source of this.sources) {
+        const bucket = this.tagsByHost[source.key];
+        if (!bucket?.loaded) continue;
+        for (const tag of bucket.items) {
+          const name = normalizeTagName(tag.name);
+          if (!name) continue;
+          const key = name.toLowerCase();
+          const existing = byKey.get(key);
+          if (existing) existing.count += tag.count;
+          else byKey.set(key, { name, count: tag.count });
         }
       }
-      return prints.sort((a, b) => b.item.timestamp - a.item.timestamp);
+      return sortTags([...byKey.values()]);
+    },
+    /**
+     * One logical print's organization across every physical copy (union:
+     * any-favorite, tag union, collections resolved to slugs, local title
+     * preferred). Live copies win over trashed ones; an entry that matches
+     * no merged print (hand-built, or mid-refetch) reads its own row.
+     */
+    organizationOf(): (entry: MergedPrint) => OrganizationUnion {
+      const resolve = this.collectionResolver;
+      const live = this.mergedIndex;
+      const trash = this.trashIndex;
+      return (entry) => {
+        const print = live.get(entry.item.filename) ?? trash.get(entry.item.filename);
+        const copies = print?.copies ??
+          entry.copies ?? [{ sourceKey: entry.sourceKey, item: entry.item }];
+        return unionOrganization(
+          copies.map((copy) => ({ hostId: copy.sourceKey, item: copy.item })),
+          { localHostId: "local", resolveCollectionSlug: resolve },
+        );
+      };
+    },
+    /** Logical prints per collection slug, over the merged live grid — the
+     *  count a shelf card shows (a mirrored print counts once). */
+    collectionCounts(): (slug: string) => number {
+      const counts = new Map<string, number>();
+      for (const entry of this.merged) {
+        for (const slug of this.organizationOf(entry).collections) {
+          counts.set(slug, (counts.get(slug) ?? 0) + 1);
+        }
+      }
+      return (slug) => counts.get(slug) ?? 0;
+    },
+    /** Kind + text narrowing shared by the live grid and the trash. */
+    narrowByKindAndQuery(): (entries: MergedPrint[]) => MergedPrint[] {
+      const mediaKind = this.mediaKind;
+      const q = this.query.trim().toLowerCase();
+      return (input) => {
+        let entries = input;
+        if (mediaKind !== "all") {
+          // Three disjoint kinds, not a video/not-video split: an audio print
+          // has no frames and must not fall into the Images bucket.
+          entries = entries.filter((e) => {
+            if (isAudioItem(e.item)) return mediaKind === "audio";
+            if (isVideoItem(e.item)) return mediaKind === "video";
+            return mediaKind === "image";
+          });
+        }
+        if (q) {
+          entries = entries.filter(
+            (e) =>
+              e.item.filename.toLowerCase().includes(q) ||
+              e.item.metadata.model.toLowerCase().includes(q) ||
+              e.item.metadata.prompt.toLowerCase().includes(q) ||
+              (e.item.title ?? "").toLowerCase().includes(q),
+          );
+        }
+        return entries;
+      };
     },
     /**
      * `merged` in All; an individual host remains its complete raw bucket so
@@ -259,29 +568,63 @@ export const useGalleryStore = defineStore("gallery", {
         );
       };
     },
-    /** What the Gallery grid renders: host chip → media kind → text query. */
+    /**
+     * What the Gallery grid renders: host chip → media kind → text query →
+     * ♥ favorites → tag chips (AND over the union tags) → the open
+     * collection (Collections scope drill-in only). Inside a collection the
+     * origin's recorded order wins when its item list has loaded; otherwise
+     * newest first.
+     */
     filtered(): MergedPrint[] {
-      let entries = this.hostFiltered;
-      if (this.mediaKind !== "all") {
-        // Three disjoint kinds, not a video/not-video split: an audio print
-        // has no frames and must not fall into the Images bucket.
-        const kind = this.mediaKind;
-        entries = entries.filter((e) => {
-          if (isAudioItem(e.item)) return kind === "audio";
-          if (isVideoItem(e.item)) return kind === "video";
-          return kind === "image";
-        });
-      }
-      const q = this.query.trim().toLowerCase();
-      if (q) {
-        entries = entries.filter(
-          (e) =>
-            e.item.filename.toLowerCase().includes(q) ||
-            e.item.metadata.model.toLowerCase().includes(q) ||
-            e.item.metadata.prompt.toLowerCase().includes(q),
-        );
+      let entries = this.narrowByKindAndQuery(this.hostFiltered);
+      const wantsFavorites = this.favoritesOnly;
+      const tagKeys = this.tagFilter.map((t) => tagKey(t)).filter((k) => k.length > 0);
+      const slug = this.scope === "collections" ? this.collectionSlug : null;
+      if (!wantsFavorites && tagKeys.length === 0 && !slug) return entries;
+      const organizationOf = this.organizationOf;
+      entries = entries.filter((entry) => {
+        const org = organizationOf(entry);
+        if (wantsFavorites && !org.favorite) return false;
+        if (tagKeys.length > 0) {
+          const have = new Set(org.tags.map((t) => t.toLowerCase()));
+          if (!tagKeys.every((k) => have.has(k))) return false;
+        }
+        if (slug && !org.collections.includes(slug)) return false;
+        return true;
+      });
+      if (slug) {
+        const order = this.collectionOrder(slug);
+        if (order) {
+          const rank = (entry: MergedPrint): number => {
+            let best = Number.POSITIVE_INFINITY;
+            const copies = entry.copies ?? [{ sourceKey: entry.sourceKey, item: entry.item }];
+            for (const copy of copies) {
+              const at = order.get(copy.item.filename);
+              if (at !== undefined && at < best) best = at;
+            }
+            return best;
+          };
+          entries = [...entries].sort((a, b) => rank(a) - rank(b));
+        }
       }
       return entries;
+    },
+    /** `filename → position` for a collection's origin order (local host
+     *  preferred, else the first host whose item list has loaded). */
+    collectionOrder(): (slug: string) => Map<string, number> | null {
+      return (slug) => {
+        const merged = this.mergedCollections.find((c) => c.slug === slug);
+        if (!merged) return null;
+        const hosts = [...merged.hosts].sort((a, b) =>
+          a.hostId === "local" ? -1 : b.hostId === "local" ? 1 : 0,
+        );
+        for (const host of hosts) {
+          const filenames = this.collectionItemsByHost[host.hostId]?.[host.id];
+          if (!filenames) continue;
+          return new Map(filenames.map((filename, index) => [filename, index]));
+        }
+        return null;
+      };
     },
     /** Per-kind counts for the All/Images/Video/Audio chips. Computed over
      *  the host-chip-filtered set only, so chip labels stay stable while the
@@ -396,6 +739,18 @@ export const useGalleryStore = defineStore("gallery", {
         delete this.buckets[key];
         evictHostMedia(key);
       }
+      for (const key of Object.keys(this.trashBuckets)) {
+        if (!keys.has(key)) delete this.trashBuckets[key];
+      }
+      for (const key of Object.keys(this.collectionsByHost)) {
+        if (!keys.has(key)) delete this.collectionsByHost[key];
+      }
+      for (const key of Object.keys(this.tagsByHost)) {
+        if (!keys.has(key)) delete this.tagsByHost[key];
+      }
+      for (const key of Object.keys(this.collectionItemsByHost)) {
+        if (!keys.has(key)) delete this.collectionItemsByHost[key];
+      }
       if (this.filter !== "all" && !keys.has(this.filter)) this.filter = "all";
     },
     /** Fetch one bucket. Errors land on the bucket, never on siblings. */
@@ -477,15 +832,19 @@ export const useGalleryStore = defineStore("gallery", {
      * that minted a different filename.
      */
     locationsOf(entry: MergedPrint): GalleryLocation[] {
-      const locations: GalleryLocation[] = [];
-      for (const [sourceKey, bucket] of Object.entries(this.buckets)) {
-        for (const item of bucket.items) {
-          if (sameLogicalGalleryPrint(entry.item, item)) {
-            locations.push({ sourceKey, filename: item.filename });
-          }
-        }
+      return locationsIn(this.buckets, entry);
+    },
+    /** Every loaded trashed copy of one logical print. */
+    trashLocationsOf(entry: MergedPrint): GalleryLocation[] {
+      return locationsIn(this.trashBuckets, entry);
+    },
+    /** Live and trashed copies together — organization edits reach both. */
+    allLocationsOf(entry: MergedPrint): GalleryLocation[] {
+      const unique = new Map<string, GalleryLocation>();
+      for (const location of [...this.locationsOf(entry), ...this.trashLocationsOf(entry)]) {
+        unique.set(`${location.sourceKey}::${location.filename}`, location);
       }
-      return locations;
+      return [...unique.values()];
     },
     /** Optimistically hide a print from every view, pending commit or undo. */
     beginDelete(sourceKey: string, filename: string) {
@@ -521,6 +880,7 @@ export const useGalleryStore = defineStore("gallery", {
       } finally {
         this.pendingDeletions.delete(key);
       }
+      await this.refreshTrash([sourceKey]);
     },
     async commitDeleteEverywhere(
       locations: GalleryLocation[],
@@ -539,6 +899,7 @@ export const useGalleryStore = defineStore("gallery", {
         if (result.status === "rejected") failedOrigins.add(locations[index]!.sourceKey);
       });
       await Promise.all([...failedOrigins].map((key) => this.refreshHost(key)));
+      await this.refreshTrash(locations.map((l) => l.sourceKey));
       const failed = results.filter((result) => result.status === "rejected").length;
       const rejection = results.find(
         (result): result is PromiseRejectedResult => result.status === "rejected",
@@ -553,21 +914,44 @@ export const useGalleryStore = defineStore("gallery", {
           : null,
       };
     },
-    /** Delete a print where it lives, evicting only that origin's media. */
-    async remove(sourceKey: string, filename: string) {
+    /**
+     * Delete a print where it lives. On a trash-capable host the plain
+     * DELETE moves the print to that host's trash (the row hops into the
+     * trash bucket and its cached media survives — thumbnails do too); on an
+     * older host it is gone for good. `permanent` bypasses (or purges from)
+     * the trash on every host. The host-less This-device bucket routes
+     * through the native commands, which make the same decision offline.
+     */
+    async remove(sourceKey: string, filename: string, options: { permanent?: boolean } = {}) {
+      const permanent = options.permanent === true;
       const target = this.targetOf(sourceKey);
       if (target) {
-        await apiFetchTo(target, `/api/gallery/image/${encodeURIComponent(filename)}`, {
+        const suffix = permanent ? "?permanent=true" : "";
+        await apiFetchTo(target, `/api/gallery/image/${encodeURIComponent(filename)}${suffix}`, {
           method: "DELETE",
         });
       } else if (sourceKey === "local") {
-        await ipc.localGalleryDelete(filename);
+        if (permanent) await ipc.localGalleryDeleteForever(filename);
+        else await ipc.localGalleryDelete(filename);
       } else {
         throw new Error("Host is not connected.");
       }
+      const row = takeRow(this.buckets[sourceKey], filename);
+      if (!permanent && this.trashCapable(sourceKey)) {
+        const trash = this.trashBuckets[sourceKey];
+        if (row && trash?.loaded) {
+          const retention = useHostsStore().capabilities[sourceKey]?.gallery?.trash?.retention_days;
+          const trashedAt = nowSecs();
+          insertRow(trash, {
+            ...row,
+            trashed_at: trashedAt,
+            purge_at: retention && retention > 0 ? trashedAt + retention * 86_400 : null,
+          });
+        }
+        return;
+      }
+      takeRow(this.trashBuckets[sourceKey], filename);
       this.evictItemMedia(sourceKey, filename);
-      const bucket = this.buckets[sourceKey];
-      if (bucket) bucket.items = bucket.items.filter((i) => i.filename !== filename);
     },
     /**
      * Bulk delete. Each print is deleted exactly like the single-delete
@@ -590,6 +974,7 @@ export const useGalleryStore = defineStore("gallery", {
         else failedOrigins.add(items[idx]!.sourceKey);
       });
       await Promise.all([...failedOrigins].map((key) => this.refreshHost(key)));
+      await this.refreshTrash(items.map((i) => i.sourceKey));
       return { deleted, failed: results.length - deleted };
     },
     /**
@@ -622,6 +1007,7 @@ export const useGalleryStore = defineStore("gallery", {
         failedOrigins.add(location.sourceKey);
       });
       await Promise.all([...failedOrigins].map((key) => this.refreshHost(key)));
+      await this.refreshTrash(locations.map((l) => l.sourceKey));
       const failedPrints = groups.filter((group) =>
         group.some((location) => failedKeys.has(`${location.sourceKey}::${location.filename}`)),
       ).length;
@@ -654,36 +1040,762 @@ export const useGalleryStore = defineStore("gallery", {
       const bucket = key ? this.buckets[key] : undefined;
       if (!key || !bucket?.loaded) return;
       if (!ev.image) {
-        if (refetchTimer) clearTimeout(refetchTimer);
-        refetchTimer = setTimeout(() => {
-          refetchTimer = null;
-          // Re-check at fire time: the primary may have changed, or a fetch
-          // may already be in flight — re-debounce rather than racing it.
-          const nowKey = useHostsStore().primaryHost?.id ?? null;
-          const nowBucket = nowKey ? this.buckets[nowKey] : undefined;
-          if (!nowKey || !nowBucket?.loaded) return;
-          if (nowBucket.loading) {
-            this.applyAdded(ev);
-            return;
-          }
-          void this.fetchBucket(nowKey);
-        }, REFETCH_DEBOUNCE_MS);
+        this.schedulePrimaryRefetch();
         return;
       }
-      if (bucket.items.some((i) => i.filename === ev.filename)) return;
-      const image = ev.image;
-      const at = bucket.items.findIndex((i) => i.timestamp < image.timestamp);
-      if (at === -1) bucket.items.push(image);
-      else bucket.items.splice(at, 0, image);
+      insertRow(bucket, ev.image);
     },
-    /** A `gallery_removed` frame — drop the primary's tile and its media. */
+    /** Debounced refetch of the primary's live bucket for row-less frames. */
+    schedulePrimaryRefetch() {
+      if (refetchTimer) clearTimeout(refetchTimer);
+      refetchTimer = setTimeout(() => {
+        refetchTimer = null;
+        // Re-check at fire time: the primary may have changed, or a fetch
+        // may already be in flight — re-debounce rather than racing it.
+        const nowKey = useHostsStore().primaryHost?.id ?? null;
+        const nowBucket = nowKey ? this.buckets[nowKey] : undefined;
+        if (!nowKey || !nowBucket?.loaded) return;
+        if (nowBucket.loading) {
+          this.schedulePrimaryRefetch();
+          return;
+        }
+        void this.fetchBucket(nowKey);
+      }, REFETCH_DEBOUNCE_MS);
+    },
+    /**
+     * A `gallery_updated` frame — a primary row's title / favorite / tags /
+     * collections changed. Replace the row in place (live or trash bucket);
+     * without a row, refetch like `applyAdded`.
+     */
+    applyUpdated(ev: Extract<ServerEvent, { type: "gallery_updated" }>) {
+      const key = useHostsStore().primaryHost?.id ?? null;
+      const bucket = key ? this.buckets[key] : undefined;
+      if (!key || !bucket?.loaded) return;
+      const image = ev.image ?? null;
+      if (!image) {
+        this.schedulePrimaryRefetch();
+        return;
+      }
+      if (replaceRow(bucket, image)) return;
+      if (replaceRow(this.trashBuckets[key], image)) return;
+      // Unknown filename: the row was added out-of-band (or is trashed and
+      // the trash never loaded). A live row lands in the grid; a trashed
+      // one is only inserted when the trash is loaded.
+      if (image.trashed_at != null) {
+        const trash = this.trashBuckets[key];
+        if (trash?.loaded) insertRow(trash, image);
+        return;
+      }
+      insertRow(bucket, image);
+    },
+    /** A `gallery_trashed` frame — the primary's row hops into its trash. */
+    applyTrashed(filename: string) {
+      const key = useHostsStore().primaryHost?.id ?? null;
+      const bucket = key ? this.buckets[key] : undefined;
+      if (!key || !bucket?.loaded) return;
+      const row = takeRow(bucket, filename);
+      const trash = this.trashBuckets[key];
+      if (!trash?.loaded) return;
+      if (trash.items.some((i) => i.filename === filename)) return;
+      if (!row) return; // trashed before we ever listed it; the next trash fetch has it
+      const retention = useHostsStore().capabilities[key]?.gallery?.trash?.retention_days;
+      const trashedAt = nowSecs();
+      insertRow(trash, {
+        ...row,
+        trashed_at: trashedAt,
+        purge_at: retention && retention > 0 ? trashedAt + retention * 86_400 : null,
+      });
+    },
+    /** A `gallery_restored` frame — back from the trash into the live grid. */
+    applyRestored(ev: Extract<ServerEvent, { type: "gallery_restored" }>) {
+      const key = useHostsStore().primaryHost?.id ?? null;
+      const bucket = key ? this.buckets[key] : undefined;
+      if (!key || !bucket?.loaded) return;
+      const trashed = takeRow(this.trashBuckets[key], ev.filename);
+      const image = ev.image ?? null;
+      if (image) {
+        insertRow(bucket, { ...image, trashed_at: null, purge_at: null });
+        return;
+      }
+      if (trashed) {
+        insertRow(bucket, { ...trashed, trashed_at: null, purge_at: null });
+        return;
+      }
+      this.schedulePrimaryRefetch();
+    },
+    /** A `gallery_collections_changed` frame — refetch the primary's listing. */
+    applyCollectionsChanged() {
+      const key = useHostsStore().primaryHost?.id ?? null;
+      if (!key || !this.collectionsByHost[key]?.loaded) return;
+      void this.fetchCollections(key);
+    },
+    /** A `gallery_removed` frame — drop the primary's tile (live or trashed:
+     *  a purge reuses this frame) and its media. */
     applyRemoved(filename: string) {
       const key = useHostsStore().primaryHost?.id ?? null;
       const bucket = key ? this.buckets[key] : undefined;
       if (!key || !bucket?.loaded) return;
-      if (!bucket.items.some((i) => i.filename === filename)) return;
+      const live = takeRow(bucket, filename);
+      const trashed = takeRow(this.trashBuckets[key], filename);
+      if (!live && !trashed) return;
       this.evictItemMedia(key, filename);
-      bucket.items = bucket.items.filter((i) => i.filename !== filename);
+    },
+
+    // ── Organization: fetch ──────────────────────────────────────────────
+    ensureCollectionsBucket(key: string): CollectionsBucket {
+      if (!this.collectionsByHost[key]) {
+        this.collectionsByHost[key] = { items: [], loading: false, error: null, loaded: false };
+      }
+      return this.collectionsByHost[key]!;
+    },
+    ensureTagsBucket(key: string): TagsBucket {
+      if (!this.tagsByHost[key]) this.tagsByHost[key] = { items: [], loaded: false };
+      return this.tagsByHost[key]!;
+    },
+    ensureTrashBucket(key: string): GalleryBucket {
+      if (!this.trashBuckets[key]) this.trashBuckets[key] = emptyBucket();
+      return this.trashBuckets[key]!;
+    },
+    /** Fetch one host's collections; non-capable hosts settle empty. */
+    async fetchCollections(hostKey?: string) {
+      if (hostKey === undefined) {
+        await Promise.all(this.sources.map((s) => this.fetchCollections(s.key)));
+        return;
+      }
+      const bucket = this.ensureCollectionsBucket(hostKey);
+      if (bucket.loading) return;
+      const target = this.targetOf(hostKey);
+      if (!target || !this.organizeCapable(hostKey)) {
+        bucket.items = [];
+        bucket.error = null;
+        bucket.loaded = true;
+        return;
+      }
+      bucket.loading = true;
+      bucket.error = null;
+      try {
+        bucket.items = await listCollections(target);
+        bucket.loaded = true;
+      } catch (err) {
+        bucket.error = String(err);
+      } finally {
+        bucket.loading = false;
+      }
+    },
+    /** Fetch one host's tag counts; non-capable hosts settle empty. */
+    async fetchTags(hostKey?: string) {
+      if (hostKey === undefined) {
+        await Promise.all(this.sources.map((s) => this.fetchTags(s.key)));
+        return;
+      }
+      const bucket = this.ensureTagsBucket(hostKey);
+      const target = this.targetOf(hostKey);
+      if (!target || !this.organizeCapable(hostKey)) {
+        bucket.items = [];
+        bucket.loaded = true;
+        return;
+      }
+      try {
+        bucket.items = await listTags(target);
+        bucket.loaded = true;
+      } catch {
+        // Tag chips are advisory — keep the last listing.
+      }
+    },
+    /**
+     * Fetch one host's trash. The bare "local" key reads through the native
+     * command (authenticated HTTP while the local server runs, the `.trash/`
+     * listing when the lifecycle proves it Off); hosts that do not advertise
+     * a trash settle empty rather than misreading `/api/gallery`.
+     */
+    async fetchTrash(hostKey?: string) {
+      if (hostKey === undefined) {
+        await Promise.all(this.sources.map((s) => this.fetchTrash(s.key)));
+        return;
+      }
+      const bucket = this.ensureTrashBucket(hostKey);
+      if (bucket.loading) return;
+      bucket.loading = true;
+      bucket.error = null;
+      try {
+        let items: GalleryImage[] = [];
+        let authorityTarget: ApiTarget | null = null;
+        if (hostKey === "local" && (this.trashCapable("local") || !this.hostFor("local"))) {
+          const snapshot = await ipc.localGalleryTrashList();
+          items = snapshot.images;
+          authorityTarget = snapshot.target;
+        } else {
+          const target = this.targetOf(hostKey);
+          if (target && this.trashCapable(hostKey)) {
+            items = await listTrash<GalleryImage>(target);
+            authorityTarget = target;
+          }
+        }
+        bucket.authorityTarget = authorityTarget;
+        bucket.authorityResolved = true;
+        bucket.items = items.sort((a, b) => b.timestamp - a.timestamp);
+        bucket.loaded = true;
+      } catch (err) {
+        bucket.error = String(err);
+      } finally {
+        bucket.loading = false;
+      }
+    },
+    /** Refetch already-loaded trash buckets after a mutation landed there. */
+    async refreshTrash(hostKeys: string[]) {
+      const keys = [...new Set(hostKeys)].filter((key) => this.trashBuckets[key]?.loaded);
+      await Promise.all(keys.map((key) => this.fetchTrash(key)));
+    },
+    /** Collections, tags, and trash for every current source. */
+    async fetchOrganization() {
+      this.syncBuckets();
+      await Promise.all([this.fetchCollections(), this.fetchTags(), this.fetchTrash()]);
+    },
+    /** `GET /api/gallery/collections/:id` on every host holding the slug —
+     *  records the origin order used inside a drill-in. */
+    async fetchCollectionItems(slug: string) {
+      const merged = this.mergedCollections.find((c) => c.slug === slug);
+      if (!merged) return;
+      await Promise.all(
+        merged.hosts.map(async (host) => {
+          const target = this.targetOf(host.hostId);
+          if (!target) return;
+          try {
+            const detail = await apiJsonTo<{ filenames?: string[] }>(
+              target,
+              `/api/gallery/collections/${encodeURIComponent(host.id)}`,
+            );
+            const filenames = Array.isArray(detail?.filenames) ? detail.filenames : [];
+            const byHost = this.collectionItemsByHost[host.hostId] ?? {};
+            byHost[host.id] = filenames;
+            this.collectionItemsByHost[host.hostId] = byHost;
+          } catch {
+            // Order is a nicety; the drill-in falls back to newest first.
+          }
+        }),
+      );
+    },
+
+    // ── Organization: mutate ─────────────────────────────────────────────
+    /** Organize-capable per-host targets for a set of copies. Hosts that
+     *  cannot organize (old servers, the offline IPC bucket) are skipped,
+     *  never failed — the union still shows the edit from the hosts that
+     *  took it. */
+    organizeTargetsFor(entries: MergedPrint[]): OrganizationTarget[] {
+      const unique = new Map<string, OrganizationTarget>();
+      for (const entry of entries) {
+        for (const location of this.allLocationsOf(entry)) {
+          if (!this.organizeCapable(location.sourceKey) || !this.targetOf(location.sourceKey)) {
+            continue;
+          }
+          unique.set(`${location.sourceKey}::${location.filename}`, {
+            hostId: location.sourceKey,
+            filename: location.filename,
+          });
+        }
+      }
+      return [...unique.values()];
+    },
+    /** Find the bucket row (live or trash) a mutation should update. */
+    rowOf(hostKey: string, filename: string): GalleryImage | null {
+      return (
+        this.buckets[hostKey]?.items.find((i) => i.filename === filename) ??
+        this.trashBuckets[hostKey]?.items.find((i) => i.filename === filename) ??
+        null
+      );
+    },
+    /** Apply a server-echoed row in place of whichever bucket holds it. */
+    absorbRow(hostKey: string, image: GalleryImage) {
+      if (replaceRow(this.buckets[hostKey], image)) return;
+      replaceRow(this.trashBuckets[hostKey], image);
+    },
+    /** Adjust a host's tag counts after an add/remove landed. */
+    adjustTagCounts(hostKey: string, tag: string, delta: number) {
+      const bucket = this.ensureTagsBucket(hostKey);
+      const key = tagKey(tag);
+      const at = bucket.items.findIndex((t) => tagKey(t.name) === key);
+      if (at === -1) {
+        if (delta > 0) bucket.items.push({ name: normalizeTagName(tag), count: delta });
+        return;
+      }
+      const next = bucket.items[at]!.count + delta;
+      if (next <= 0) bucket.items.splice(at, 1);
+      else bucket.items[at]!.count = next;
+    },
+    /** Collection on a host by slug, creating it by name when `name` is given
+     *  and none exists. */
+    async ensureCollectionOn(
+      hostKey: string,
+      slug: string,
+      name: string | null,
+    ): Promise<Collection | null> {
+      const bucket = this.ensureCollectionsBucket(hostKey);
+      const existing = bucket.items.find((c) => (c.slug || slugOfCollection(c.name)) === slug);
+      if (existing) return existing;
+      if (!name) return null;
+      const target = this.targetOf(hostKey);
+      if (!target) throw new Error("Host is not connected.");
+      const created = await createCollectionOn(target, { name });
+      bucket.items.push(created);
+      bucket.loaded = true;
+      return created;
+    },
+    /** Run one per-host fan-out op, updating that host's rows optimistically. */
+    async runOrganizationOp(op: OrganizationFanoutOp) {
+      const target = this.targetOf(op.hostId);
+      if (!target) throw new Error("Host is not connected.");
+      switch (op.kind) {
+        case "setTitle": {
+          for (const filename of op.filenames) {
+            const echoed = await patchGalleryImage<GalleryImage>(target, filename, {
+              title: op.title ?? "",
+            });
+            if (echoed) this.absorbRow(op.hostId, echoed);
+            else {
+              const row = this.rowOf(op.hostId, filename);
+              if (row) row.title = op.title;
+            }
+          }
+          return;
+        }
+        case "setFavorite": {
+          await organizeGallery(target, { filenames: op.filenames, favorite: op.favorite });
+          for (const filename of op.filenames) {
+            const row = this.rowOf(op.hostId, filename);
+            if (row) row.favorite = op.favorite;
+          }
+          return;
+        }
+        case "addTags": {
+          const tags = op.tags.map(normalizeTagName).filter((t) => t.length > 0);
+          if (tags.length === 0) return;
+          await organizeGallery(target, { filenames: op.filenames, add_tags: tags });
+          for (const filename of op.filenames) {
+            const row = this.rowOf(op.hostId, filename);
+            if (!row) continue;
+            const have = new Set((row.tags ?? []).map(tagKey));
+            for (const tag of tags) {
+              if (have.has(tagKey(tag))) continue;
+              have.add(tagKey(tag));
+              row.tags = [...(row.tags ?? []), tag];
+              this.adjustTagCounts(op.hostId, tag, 1);
+            }
+          }
+          return;
+        }
+        case "removeTags": {
+          const keys = new Set(op.tags.map(tagKey).filter((k) => k.length > 0));
+          if (keys.size === 0) return;
+          await organizeGallery(target, { filenames: op.filenames, remove_tags: op.tags });
+          for (const filename of op.filenames) {
+            const row = this.rowOf(op.hostId, filename);
+            if (!row?.tags) continue;
+            const kept: string[] = [];
+            for (const tag of row.tags) {
+              if (keys.has(tagKey(tag))) this.adjustTagCounts(op.hostId, tag, -1);
+              else kept.push(tag);
+            }
+            row.tags = kept;
+          }
+          return;
+        }
+        case "addToCollection": {
+          const collection = await this.ensureCollectionOn(
+            op.hostId,
+            op.ensureCollection.slug,
+            op.ensureCollection.name,
+          );
+          if (!collection) return;
+          await organizeGallery(target, {
+            filenames: op.filenames,
+            add_to_collections: [collection.id],
+          });
+          for (const filename of op.filenames) {
+            const row = this.rowOf(op.hostId, filename);
+            if (!row) continue;
+            if ((row.collections ?? []).includes(collection.id)) continue;
+            row.collections = [...(row.collections ?? []), collection.id];
+            collection.count += 1;
+          }
+          return;
+        }
+        case "removeFromCollection": {
+          const collection = await this.ensureCollectionOn(op.hostId, op.slug, null);
+          if (!collection) return; // this host never had it
+          await organizeGallery(target, {
+            filenames: op.filenames,
+            remove_from_collections: [collection.id],
+          });
+          for (const filename of op.filenames) {
+            const row = this.rowOf(op.hostId, filename);
+            if (!row?.collections?.includes(collection.id)) continue;
+            row.collections = row.collections.filter((id) => id !== collection.id);
+            collection.count = Math.max(0, collection.count - 1);
+          }
+          return;
+        }
+        case "trash":
+        case "restore":
+        case "deleteForever":
+          throw new Error(`${op.kind} is not an organize mutation; use the trash actions.`);
+      }
+    },
+    /**
+     * One organization mutation over every copy of the given prints: plan
+     * per host (`planOrganizationFanout`), run each host's op, refetch the
+     * origins that failed so the grid reconverges with the server.
+     */
+    async organizeMany(
+      entries: MergedPrint[],
+      mutation: OrganizationMutation,
+    ): Promise<FanoutResult> {
+      const ops = planOrganizationFanout(this.organizeTargetsFor(entries), mutation);
+      const results = await Promise.allSettled(ops.map((op) => this.runOrganizationOp(op)));
+      const failedHosts: string[] = [];
+      let error: string | null = null;
+      results.forEach((result, index) => {
+        if (result.status !== "rejected") return;
+        failedHosts.push(ops[index]!.hostId);
+        if (error === null) error = errorMessage(result.reason);
+      });
+      await Promise.all(
+        failedHosts.map((key) =>
+          Promise.all([
+            this.refreshHost(key),
+            this.refreshTrash([key]),
+            this.fetchCollections(key),
+          ]),
+        ),
+      );
+      return {
+        applied: ops.length - failedHosts.length,
+        failed: failedHosts.length,
+        failedHosts,
+        error,
+      };
+    },
+    setTitle(entry: MergedPrint, title: string | null): Promise<FanoutResult> {
+      const value = title?.trim() ?? "";
+      return this.organizeMany([entry], { kind: "setTitle", title: value.length ? value : null });
+    },
+    setFavorite(entry: MergedPrint | MergedPrint[], value: boolean): Promise<FanoutResult> {
+      const entries = Array.isArray(entry) ? entry : [entry];
+      return this.organizeMany(entries, { kind: "setFavorite", favorite: value });
+    },
+    addTags(entry: MergedPrint | MergedPrint[], names: string[]): Promise<FanoutResult> {
+      const entries = Array.isArray(entry) ? entry : [entry];
+      return this.organizeMany(entries, { kind: "addTags", tags: names });
+    },
+    removeTags(entry: MergedPrint | MergedPrint[], names: string[]): Promise<FanoutResult> {
+      const entries = Array.isArray(entry) ? entry : [entry];
+      return this.organizeMany(entries, { kind: "removeTags", tags: names });
+    },
+    /** Add prints to a collection by slug (an existing one) or by name (a
+     *  new one, created on every host that lacks the slug). */
+    addToCollection(
+      entries: MergedPrint | MergedPrint[],
+      collection: { slug?: string; name: string },
+    ): Promise<FanoutResult> {
+      const list = Array.isArray(entries) ? entries : [entries];
+      const mutation: OrganizationMutation = {
+        kind: "addToCollection",
+        name: collection.name,
+        ...(collection.slug ? { slug: collection.slug } : {}),
+      };
+      return this.organizeMany(list, mutation);
+    },
+    removeFromCollection(
+      entries: MergedPrint | MergedPrint[],
+      slug: string,
+    ): Promise<FanoutResult> {
+      const list = Array.isArray(entries) ? entries : [entries];
+      return this.organizeMany(list, { kind: "removeFromCollection", slug });
+    },
+
+    // ── Collections CRUD ─────────────────────────────────────────────────
+    /** Hosts a collection action fans out to by default: every source that
+     *  can organize right now. */
+    organizeCapableKeys(): string[] {
+      return this.sources
+        .filter((s) => this.organizeCapable(s.key) && this.targetOf(s.key))
+        .map((s) => s.key);
+    },
+    /** Create a collection (by name) on the given hosts — all organize-capable
+     *  ones by default; hosts already holding the slug are left alone. */
+    async createCollection(
+      name: string,
+      hostKeys?: string[],
+    ): Promise<FanoutResult & { slug: string }> {
+      const trimmed = name.trim();
+      const slug = slugOfCollection(trimmed);
+      if (!slug)
+        return { slug, applied: 0, failed: 0, failedHosts: [], error: "Name a collection." };
+      const keys = [...new Set(hostKeys ?? this.organizeCapableKeys())];
+      const results = await Promise.allSettled(
+        keys.map((key) => this.ensureCollectionOn(key, slug, trimmed)),
+      );
+      return { slug, ...this.settleHosts(keys, results) };
+    },
+    /** Rename on every host holding the slug (the slug may change with it). */
+    async renameCollection(slug: string, name: string): Promise<FanoutResult> {
+      const trimmed = name.trim();
+      if (!trimmed) return { applied: 0, failed: 0, failedHosts: [], error: "Name a collection." };
+      const merged = this.mergedCollections.find((c) => c.slug === slug);
+      if (!merged)
+        return { applied: 0, failed: 0, failedHosts: [], error: "Collection not found." };
+      const keys = merged.hosts.map((h) => h.hostId);
+      const results = await Promise.allSettled(
+        merged.hosts.map(async (host) => {
+          const target = this.targetOf(host.hostId);
+          if (!target) throw new Error("Host is not connected.");
+          const updated = await updateCollection(target, host.id, { name: trimmed });
+          const bucket = this.ensureCollectionsBucket(host.hostId);
+          const at = bucket.items.findIndex((c) => c.id === host.id);
+          if (at === -1) bucket.items.push(updated);
+          else bucket.items.splice(at, 1, updated);
+        }),
+      );
+      const outcome = this.settleHosts(keys, results);
+      if (this.collectionSlug === slug && outcome.failed === 0) {
+        this.collectionSlug = slugOfCollection(trimmed) || slug;
+      }
+      return outcome;
+    },
+    /** Delete the collection on every host (never its prints). */
+    async deleteCollection(slug: string): Promise<FanoutResult> {
+      const merged = this.mergedCollections.find((c) => c.slug === slug);
+      if (!merged)
+        return { applied: 0, failed: 0, failedHosts: [], error: "Collection not found." };
+      const keys = merged.hosts.map((h) => h.hostId);
+      const results = await Promise.allSettled(
+        merged.hosts.map(async (host) => {
+          const target = this.targetOf(host.hostId);
+          if (!target) throw new Error("Host is not connected.");
+          await deleteCollectionOn(target, host.id);
+          const bucket = this.ensureCollectionsBucket(host.hostId);
+          bucket.items = bucket.items.filter((c) => c.id !== host.id);
+          for (const store of [this.buckets[host.hostId], this.trashBuckets[host.hostId]]) {
+            for (const row of store?.items ?? []) {
+              if (row.collections?.includes(host.id)) {
+                row.collections = row.collections.filter((id) => id !== host.id);
+              }
+            }
+          }
+          const items = this.collectionItemsByHost[host.hostId];
+          if (items) delete items[host.id];
+        }),
+      );
+      const outcome = this.settleHosts(keys, results);
+      if (this.collectionSlug === slug && outcome.failed === 0) this.collectionSlug = null;
+      return outcome;
+    },
+    /** Set the cover on every host that holds both the slug and a copy. */
+    async setCollectionCover(slug: string, entry: MergedPrint): Promise<FanoutResult> {
+      const merged = this.mergedCollections.find((c) => c.slug === slug);
+      if (!merged)
+        return { applied: 0, failed: 0, failedHosts: [], error: "Collection not found." };
+      const copies = this.allLocationsOf(entry);
+      const plan = merged.hosts
+        .map((host) => ({
+          host,
+          copy: copies.find((c) => c.sourceKey === host.hostId) ?? null,
+        }))
+        .filter(
+          (p): p is { host: (typeof merged.hosts)[number]; copy: GalleryLocation } =>
+            p.copy !== null,
+        );
+      const keys = plan.map((p) => p.host.hostId);
+      const results = await Promise.allSettled(
+        plan.map(async ({ host, copy }) => {
+          const target = this.targetOf(host.hostId);
+          if (!target) throw new Error("Host is not connected.");
+          const updated = await updateCollection(target, host.id, {
+            cover_filename: copy.filename,
+          });
+          const bucket = this.ensureCollectionsBucket(host.hostId);
+          const at = bucket.items.findIndex((c) => c.id === host.id);
+          if (at === -1) bucket.items.push(updated);
+          else bucket.items.splice(at, 1, updated);
+        }),
+      );
+      return this.settleHosts(keys, results);
+    },
+    /** Turn per-host settled promises into a `FanoutResult`, refetching the
+     *  collections listing of every host that failed. */
+    settleHosts(keys: string[], results: PromiseSettledResult<unknown>[]): FanoutResult {
+      const failedHosts: string[] = [];
+      let error: string | null = null;
+      results.forEach((result, index) => {
+        if (result.status !== "rejected") return;
+        failedHosts.push(keys[index]!);
+        if (error === null) error = errorMessage(result.reason);
+      });
+      for (const key of failedHosts) void this.fetchCollections(key);
+      return {
+        applied: keys.length - failedHosts.length,
+        failed: failedHosts.length,
+        failedHosts,
+        error,
+      };
+    },
+
+    // ── Trash ────────────────────────────────────────────────────────────
+    /** Bring trashed prints back, on every host holding a trashed copy. A
+     *  409 (the live filename is taken again) is reported, never retried. */
+    async restore(entries: MergedPrint[]): Promise<FanoutResult & { restored: number }> {
+      const byHost = new Map<string, string[]>();
+      for (const entry of entries) {
+        for (const location of this.trashLocationsOf(entry)) {
+          const list = byHost.get(location.sourceKey) ?? [];
+          if (!list.includes(location.filename)) list.push(location.filename);
+          byHost.set(location.sourceKey, list);
+        }
+      }
+      const keys = [...byHost.keys()];
+      let restored = 0;
+      const results = await Promise.allSettled(
+        keys.map(async (key) => {
+          const filenames = byHost.get(key)!;
+          const target = this.targetOf(key);
+          if (target) await restoreTrashed(target, filenames);
+          else if (key === "local") {
+            for (const filename of filenames) await ipc.localGalleryRestore(filename);
+          } else throw new Error("Host is not connected.");
+          const live = this.buckets[key];
+          for (const filename of filenames) {
+            const row = takeRow(this.trashBuckets[key], filename);
+            if (row && live?.loaded) insertRow(live, { ...row, trashed_at: null, purge_at: null });
+            restored += 1;
+          }
+        }),
+      );
+      const failedHosts: string[] = [];
+      let error: string | null = null;
+      results.forEach((result, index) => {
+        if (result.status !== "rejected") return;
+        failedHosts.push(keys[index]!);
+        if (error === null) error = errorMessage(result.reason);
+      });
+      await Promise.all(
+        failedHosts.map((key) => Promise.all([this.refreshHost(key), this.refreshTrash([key])])),
+      );
+      return {
+        applied: keys.length - failedHosts.length,
+        failed: failedHosts.length,
+        failedHosts,
+        error,
+        restored,
+      };
+    },
+    /** Hard-delete every copy (live or trashed) of the given prints. */
+    async deleteForever(entries: MergedPrint[]): Promise<{
+      deletedPrints: number;
+      failedPrints: number;
+      deletedCopies: number;
+      error: string | null;
+    }> {
+      const groups = entries.map((entry) => this.allLocationsOf(entry));
+      const unique = new Map<string, GalleryLocation>();
+      for (const group of groups) {
+        for (const location of group)
+          unique.set(`${location.sourceKey}::${location.filename}`, location);
+      }
+      const locations = [...unique.values()];
+      const results = await Promise.allSettled(
+        locations.map((location) =>
+          this.remove(location.sourceKey, location.filename, { permanent: true }),
+        ),
+      );
+      const failedKeys = new Set<string>();
+      const failedOrigins = new Set<string>();
+      let error: string | null = null;
+      results.forEach((result, index) => {
+        if (result.status === "fulfilled") return;
+        const location = locations[index]!;
+        failedKeys.add(`${location.sourceKey}::${location.filename}`);
+        failedOrigins.add(location.sourceKey);
+        if (error === null) error = errorMessage(result.reason);
+      });
+      await Promise.all(
+        [...failedOrigins].map((key) =>
+          Promise.all([this.refreshHost(key), this.refreshTrash([key])]),
+        ),
+      );
+      const failedPrints = groups.filter((group) =>
+        group.some((location) => failedKeys.has(`${location.sourceKey}::${location.filename}`)),
+      ).length;
+      return {
+        deletedPrints: entries.length - failedPrints,
+        failedPrints,
+        deletedCopies: results.length - failedKeys.size,
+        error,
+      };
+    },
+    /** Purge the trash on the given hosts (every trash-capable one by default). */
+    async emptyTrash(hostKeys?: string[]): Promise<FanoutResult & { purged: number }> {
+      const keys =
+        hostKeys ??
+        this.sources
+          .filter((s) => this.trashCapable(s.key) || (s.key === "local" && !this.hostFor("local")))
+          .map((s) => s.key);
+      let purged = 0;
+      const results = await Promise.allSettled(
+        keys.map(async (key) => {
+          const target = this.targetOf(key);
+          const trash = this.trashBuckets[key];
+          if (target) {
+            const result = await emptyTrashOn(target);
+            purged += result.purged;
+          } else if (key === "local") {
+            // Offline: the native command purges one file at a time.
+            for (const row of trash?.items ?? []) {
+              await ipc.localGalleryDeleteForever(row.filename);
+              purged += 1;
+            }
+          } else throw new Error("Host is not connected.");
+          for (const row of trash?.items ?? []) this.evictItemMedia(key, row.filename);
+          if (trash) trash.items = [];
+        }),
+      );
+      const failedHosts: string[] = [];
+      let error: string | null = null;
+      results.forEach((result, index) => {
+        if (result.status !== "rejected") return;
+        failedHosts.push(keys[index]!);
+        if (error === null) error = errorMessage(result.reason);
+      });
+      await this.refreshTrash(failedHosts);
+      return {
+        applied: keys.length - failedHosts.length,
+        failed: failedHosts.length,
+        failedHosts,
+        error,
+        purged,
+      };
+    },
+    /** Purge what has passed its retention on one host, then refetch. */
+    async sweepTrash(hostKey: string): Promise<{ purged: number; remaining: number }> {
+      const target = this.targetOf(hostKey);
+      if (!target) throw new Error("Host is not connected.");
+      const result = await sweepTrashOn(target);
+      await this.refreshTrash([hostKey]);
+      return result;
     },
   },
 });
+
+/** Every copy of a logical print inside one bucket map. */
+function locationsIn(
+  buckets: Record<string, GalleryBucket>,
+  entry: MergedPrint,
+): GalleryLocation[] {
+  const locations: GalleryLocation[] = [];
+  for (const [sourceKey, bucket] of Object.entries(buckets)) {
+    for (const item of bucket.items) {
+      if (sameLogicalGalleryPrint(entry.item, item)) {
+        locations.push({ sourceKey, filename: item.filename });
+      }
+    }
+  }
+  return locations;
+}

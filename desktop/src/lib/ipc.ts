@@ -70,6 +70,14 @@ export interface NativeGalleryThumbnail {
   contentType: string;
 }
 
+/** This device's gallery listing (live or trash) plus the authority that
+ * produced it: the running local server's target, or `null` when the
+ * lifecycle lock proved the server Off and the filesystem was read. */
+export interface LocalGallerySnapshot {
+  images: GalleryImage[];
+  target: ApiTarget | null;
+}
+
 /** A remote host the app has connected to before (most recent first). */
 export interface SavedHost {
   /** URL-derived slug; its API key lives at secret `remote-api-key.<id>`. */
@@ -277,13 +285,32 @@ export const ipc = {
     if (!inTauri()) return Promise.resolve();
     return invoke<void>("reveal_output_file", { filename });
   },
-  localGalleryList(): Promise<{ images: GalleryImage[]; target: ApiTarget | null }> {
+  localGalleryList(): Promise<LocalGallerySnapshot> {
     if (!inTauri()) return Promise.resolve({ images: [], target: null });
-    return invoke<{ images: GalleryImage[]; target: ApiTarget | null }>("local_gallery_list");
+    return invoke<LocalGallerySnapshot>("local_gallery_list");
   },
+  /** Delete (or, on a trash-capable engine, move to the trash) a print in
+   * this device's gallery. Routes through the running local server when the
+   * lifecycle proves one is up; otherwise the native offline path. */
   localGalleryDelete(filename: string): Promise<void> {
     if (!inTauri()) return Promise.resolve();
     return invoke<void>("local_gallery_delete", { filename });
+  },
+  /** This device's trashed prints (`GET /api/gallery?view=trash` while the
+   * local server runs; the native `.trash/` listing when it is Off). */
+  localGalleryTrashList(): Promise<LocalGallerySnapshot> {
+    if (!inTauri()) return Promise.resolve({ images: [], target: null });
+    return invoke<LocalGallerySnapshot>("local_gallery_trash_list");
+  },
+  /** Put a trashed print back in place. */
+  localGalleryRestore(filename: string): Promise<void> {
+    if (!inTauri()) return Promise.resolve();
+    return invoke<void>("local_gallery_restore", { filename });
+  },
+  /** Hard-delete a print, bypassing (or purging from) the trash. */
+  localGalleryDeleteForever(filename: string): Promise<void> {
+    if (!inTauri()) return Promise.resolve();
+    return invoke<void>("local_gallery_delete_forever", { filename });
   },
   /** Fetch a bounded gallery thumbnail through native HTTP. Long-lived
    * generation SSE requests can exhaust WebKit's per-host connection pool;

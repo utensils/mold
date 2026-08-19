@@ -63,3 +63,97 @@ describe("ContextMenu a11y roles", () => {
     wrapper.unmount();
   });
 });
+
+describe("ContextMenu submenus + checkable items", () => {
+  function openTree() {
+    const menu = useContextMenuStore();
+    menu.$patch({
+      visible: true,
+      x: 10,
+      y: 10,
+      entries: [
+        { label: "Reuse settings", action: () => {} },
+        {
+          label: "Tags",
+          children: [
+            { label: "blue", checked: true, action: () => {} },
+            { label: "keep", checked: false, action: () => {} },
+          ],
+        },
+        { label: "Delete", danger: true, action: () => {} },
+      ],
+    });
+    return menu;
+  }
+
+  it("marks a parent item with aria-haspopup and a chevron, no check column without checkable roots", async () => {
+    const wrapper = mount(ContextMenu, { attachTo: document.body });
+    openTree();
+    await wrapper.vm.$nextTick();
+    const items = Array.from(document.body.querySelectorAll("[role='menuitem']"));
+    const tags = items.find((el) => el.textContent?.includes("Tags"))!;
+    expect(tags.getAttribute("aria-haspopup")).toBe("menu");
+    expect(tags.getAttribute("aria-expanded")).toBe("false");
+    expect(tags.querySelector("[data-test='menu-chevron']")).not.toBeNull();
+    expect(document.body.querySelector("[data-test='menu-check']")).toBeNull();
+    expect(document.body.querySelector("[data-test='submenu']")).toBeNull();
+    wrapper.unmount();
+  });
+
+  it("hovering a parent opens its submenu with checkbox roles and a ✓ column", async () => {
+    const wrapper = mount(ContextMenu, { attachTo: document.body });
+    const menu = openTree();
+    await wrapper.vm.$nextTick();
+    const tags = Array.from(document.body.querySelectorAll<HTMLElement>("[role='menuitem']")).find(
+      (el) => el.textContent?.includes("Tags"),
+    )!;
+    tags.dispatchEvent(new MouseEvent("mouseenter"));
+    await wrapper.vm.$nextTick();
+
+    expect(menu.submenu?.parentIndex).toBe(1);
+    expect(tags.getAttribute("aria-expanded")).toBe("true");
+    const submenu = document.body.querySelector("[data-test='submenu']")!;
+    expect(submenu.getAttribute("role")).toBe("menu");
+    expect(submenu.getAttribute("aria-label")).toBe("Tags");
+    const boxes = Array.from(submenu.querySelectorAll("[role='menuitemcheckbox']"));
+    expect(boxes.map((b) => b.getAttribute("aria-checked"))).toEqual(["true", "false"]);
+    const checks = Array.from(submenu.querySelectorAll("[data-test='menu-check']"));
+    expect(checks.map((c) => c.textContent?.trim())).toEqual(["✓", ""]);
+
+    // Hovering a leaf closes it again.
+    const reuse = Array.from(document.body.querySelectorAll<HTMLElement>("[role='menuitem']")).find(
+      (el) => el.textContent?.includes("Reuse"),
+    )!;
+    reuse.dispatchEvent(new MouseEvent("mouseenter"));
+    await wrapper.vm.$nextTick();
+    expect(menu.submenu).toBeNull();
+    wrapper.unmount();
+  });
+
+  it("keyboard: ArrowRight opens, ArrowLeft closes, Escape closes the submenu before the menu", async () => {
+    const wrapper = mount(ContextMenu, { attachTo: document.body });
+    const menu = openTree();
+    await wrapper.vm.$nextTick();
+    const key = (k: string) =>
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true }));
+
+    key("ArrowDown");
+    key("ArrowDown");
+    expect(menu.highlighted).toBe(1);
+    key("ArrowRight");
+    expect(menu.submenu?.parentIndex).toBe(1);
+    expect(menu.submenu?.highlighted).toBe(0);
+    key("ArrowLeft");
+    expect(menu.submenu).toBeNull();
+    expect(menu.highlighted).toBe(1);
+
+    key("ArrowRight");
+    expect(menu.submenu).not.toBeNull();
+    key("Escape");
+    expect(menu.submenu).toBeNull();
+    expect(menu.visible).toBe(true);
+    key("Escape");
+    expect(menu.visible).toBe(false);
+    wrapper.unmount();
+  });
+});
