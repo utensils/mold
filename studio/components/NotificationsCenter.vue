@@ -1,12 +1,20 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, onUnmounted, ref } from "vue";
 import Icon from "@ui/components/Icon.vue";
 import Popover from "@ui/components/Popover.vue";
 import {
   useNotificationsStore,
   type NotificationEntry,
 } from "../stores/notifications";
-import { mostSevereKind, notificationTone } from "../lib/notificationTone";
+import {
+  NOTIFICATION_BADGE_INK,
+  mostSevereKind,
+  notificationTone,
+} from "../lib/notificationTone";
+import {
+  copyTextToClipboard,
+  notificationClipboardText,
+} from "../lib/notificationClipboard";
 
 /*
  * The notifications bell — the durable record behind transient toasts. A long
@@ -38,12 +46,47 @@ function toggle() {
 }
 
 function toneStyle(entry: NotificationEntry) {
-  return { background: notificationTone(entry.kind).color };
+  return { color: notificationTone(entry.kind).color };
+}
+
+function toneGlyph(entry: NotificationEntry): string {
+  return notificationTone(entry.kind).glyph;
 }
 
 function toneLabel(entry: NotificationEntry): string {
   return notificationTone(entry.kind).label;
 }
+
+/*
+ * Copying a notification out. The app shells disable text selection on their
+ * chrome, so a long server error body is unreachable without a real control —
+ * and the bell exists precisely to keep that text readable after the toast is
+ * gone. The row reports the outcome instead of assuming it worked; an insecure
+ * origin or a denied permission is a normal case, not an edge.
+ */
+const copyState = ref<{ id: number; ok: boolean } | null>(null);
+let copyResetTimer: ReturnType<typeof setTimeout> | null = null;
+
+async function copyEntry(entry: NotificationEntry) {
+  const ok = await copyTextToClipboard(
+    notificationClipboardText(entry, timeLabel(entry)),
+  );
+  copyState.value = { id: entry.id, ok };
+  if (copyResetTimer) clearTimeout(copyResetTimer);
+  copyResetTimer = setTimeout(() => {
+    copyState.value = null;
+    copyResetTimer = null;
+  }, 2000);
+}
+
+function copyLabel(entry: NotificationEntry): string {
+  if (copyState.value?.id !== entry.id) return "Copy";
+  return copyState.value.ok ? "Copied" : "Copy failed";
+}
+
+onUnmounted(() => {
+  if (copyResetTimer) clearTimeout(copyResetTimer);
+});
 
 function timeLabel(entry: NotificationEntry): string {
   return new Date(entry.atMs).toLocaleTimeString([], {
@@ -70,8 +113,8 @@ function timeLabel(entry: NotificationEntry): string {
           class="notifications-bell__badge"
           data-test="notifications-unread"
           :style="{
-            background: badgeTone.color,
-            color: 'var(--on-accent, #fff)',
+            background: badgeTone.badge,
+            color: NOTIFICATION_BADGE_INK,
           }"
         >
           {{ unreadLabel }}
@@ -100,12 +143,15 @@ function timeLabel(entry: NotificationEntry): string {
           :key="entry.id"
           :data-kind="entry.kind"
         >
+          <!-- Glyph, not a bare dot: severity must survive a color-vision
+               deficiency, and the mark differs per kind. -->
           <span
             class="notifications-panel__dot"
             data-test="notifications-dot"
             :style="toneStyle(entry)"
             aria-hidden="true"
-          />
+            >{{ toneGlyph(entry) }}</span
+          >
           <span class="notifications-panel__tone">{{ toneLabel(entry) }}</span>
           <div class="notifications-panel__copy">
             <p class="notifications-panel__text">
@@ -123,6 +169,15 @@ function timeLabel(entry: NotificationEntry): string {
               >{{ timeLabel(entry) }}
             </p>
           </div>
+          <button
+            type="button"
+            class="notifications-panel__copy-action"
+            data-test="notifications-copy"
+            :aria-label="`Copy notification: ${entry.text}`"
+            @click="copyEntry(entry)"
+          >
+            {{ copyLabel(entry) }}
+          </button>
         </li>
       </ul>
     </div>
@@ -156,7 +211,7 @@ function timeLabel(entry: NotificationEntry): string {
   padding: 0 3px;
   border-radius: 999px;
   background: var(--stop, #b42318);
-  color: var(--on-accent, #fff);
+  color: var(--on-status, #fff);
   font-size: 9px;
   font-weight: 700;
   line-height: 15px;
@@ -210,12 +265,13 @@ function timeLabel(entry: NotificationEntry): string {
 }
 
 .notifications-panel__dot {
-  width: 7px;
-  height: 7px;
+  width: 12px;
   flex: none;
-  margin-top: 5px;
-  border-radius: 999px;
-  background: var(--ink-3, #98a2b3);
+  margin-top: 1px;
+  font-size: 11px;
+  line-height: 1.5;
+  text-align: center;
+  color: var(--ink-3, #98a2b3);
 }
 
 /* Severity is never color alone — the tone name ships as assistive text. */
@@ -234,6 +290,29 @@ function timeLabel(entry: NotificationEntry): string {
 .notifications-panel__copy {
   min-width: 0;
   flex: 1;
+  /* The desktop shell disables selection app-wide; notification text is
+     content, so it stays selectable for a manual drag-copy too. */
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.notifications-panel__copy-action {
+  flex: none;
+  align-self: flex-start;
+  margin-top: 1px;
+  padding: 1px 5px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: none;
+  color: var(--ink-3, #98a2b3);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.notifications-panel li:hover .notifications-panel__copy-action,
+.notifications-panel__copy-action:focus-visible {
+  border-color: var(--ce, var(--edge, #d0d5dd));
+  color: var(--ink, currentColor);
 }
 
 .notifications-panel__copy p {

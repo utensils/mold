@@ -231,8 +231,12 @@ surface powers it, so anything the app does maps to a documented endpoint.
   context where known, timestamps, and collapsed ×N repeats (newest first,
   capped at 100). Severity is color-coded — green for success, yellow for a
   warning, red for an error, neutral for plain information — with the severity
-  also named for screen readers, and the unread badge takes the worst unread
-  entry's color. Opening the panel marks everything read; Clear empties it.
+  also named for screen readers and carried by a per-severity glyph, and the
+  unread badge takes the worst unread entry's color. Each row has a **Copy**
+  button that puts the message, its full body, and the machine/time line on the
+  clipboard — the app chrome is not selectable, so that button is how a long
+  server error leaves the app. Opening the panel marks everything read; Clear
+  empties it.
 - **Native desktop integration** — platform menus and shortcuts, Linux native
   window decorations, macOS overlay chrome, and background notifications on
   generation, chain, and pull completion. macOS uses UserNotifications so a

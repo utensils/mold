@@ -143,6 +143,15 @@ describe("shared theme contrast", () => {
         contrast(theme["on-accent"]!, theme.stop!),
         "destructive action",
       ).toBeGreaterThanOrEqual(4.5);
+      // Counts and labels printed ON a status fill (the notifications badge)
+      // read against one per-theme ink, so every status hue must clear AA
+      // against it — light themes carry deep hues, dark themes bright ones.
+      for (const status of ["success", "warning", "stop", "halide"]) {
+        expect(
+          contrast(token(theme, "on-status"), token(theme, status)),
+          `${status} badge ink`,
+        ).toBeGreaterThanOrEqual(4.5);
+      }
     });
   }
 

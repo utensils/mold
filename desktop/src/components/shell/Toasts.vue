@@ -25,7 +25,9 @@ const TONES: Record<Toast["kind"], { glyph: string; label: string; chip: string 
     label: "Warning",
     chip: "bg-[color-mix(in_srgb,var(--warning)_22%,transparent)] text-warning",
   },
-  error: { glyph: "!", label: "Error", chip: "bg-stop text-[var(--desk)]" },
+  // Warning and error must differ by more than hue — "!" vs "✕" — so severity
+  // survives a color-vision deficiency.
+  error: { glyph: "✕", label: "Error", chip: "bg-stop text-[var(--on-status)]" },
 };
 
 function tone(kind: Toast["kind"]) {

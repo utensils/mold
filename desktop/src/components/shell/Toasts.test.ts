@@ -129,4 +129,20 @@ describe("Toasts severity tones", () => {
 
     expect(wrapper.get(".sr-only").text()).toBe("Warning");
   });
+
+  it("marks warning and error with different glyphs, not just different hues", async () => {
+    const wrapper = mount(Toasts);
+    const toasts = useToastStore();
+    toasts.push("Can't reach plato", "warning");
+    toasts.push("Generation failed", "error");
+    await wrapper.vm.$nextTick();
+
+    const glyphs = Object.fromEntries(
+      wrapper
+        .findAll("[data-test='toast-status-icon']")
+        .map((chip) => [chip.attributes("data-kind"), chip.text()]),
+    );
+    expect(glyphs.warning).toBe("!");
+    expect(glyphs.error).toBe("✕");
+  });
 });

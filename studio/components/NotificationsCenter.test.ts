@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { flushPromises, mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import NotificationsCenter from "./NotificationsCenter.vue";
@@ -95,9 +95,15 @@ describe("NotificationsCenter severity colors", () => {
       ...document.body.querySelectorAll<HTMLElement>(
         '[data-test="notifications-dot"]',
       ),
-    ].map((dot) => dot.style.background);
+    ];
     // Newest first: error, warning, success.
-    expect(dots).toEqual(["var(--stop)", "var(--warning)", "var(--success)"]);
+    expect(dots.map((dot) => dot.style.color)).toEqual([
+      "var(--stop)",
+      "var(--warning)",
+      "var(--success)",
+    ]);
+    // Each severity also carries its own mark, so color is never the only cue.
+    expect(dots.map((dot) => dot.textContent?.trim())).toEqual(["✕", "!", "✓"]);
     wrapper.unmount();
   });
 
@@ -127,9 +133,72 @@ describe("NotificationsCenter severity colors", () => {
 
     store.record({ kind: "error", text: "Generation failed", atMs: 2 });
     await flushPromises();
+    const badge = wrapper.get('[data-test="notifications-unread"]');
+    expect(badge.attributes("style")).toContain("var(--stop)");
+    // The count itself sits on that fill with the per-theme status ink.
+    expect(badge.attributes("style")).toContain("var(--on-status)");
+    wrapper.unmount();
+  });
+});
+
+describe("NotificationsCenter copying", () => {
+  it("copies the full message, body, and origin line to the clipboard", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal("navigator", { clipboard: { writeText } });
+    const store = useNotificationsStore();
+    const long = "Server error: ".padEnd(400, "x");
+    store.record({
+      kind: "error",
+      text: "Generation failed",
+      description: long,
+      hostLabel: "plato",
+      atMs: Date.UTC(2026, 0, 2, 9, 19),
+    });
+
+    const wrapper = mountCenter();
+    await wrapper.get('[data-test="notifications-bell"]').trigger("click");
+    await flushPromises();
+
+    const copy = document.body.querySelector<HTMLButtonElement>(
+      '[data-test="notifications-copy"]',
+    );
+    expect(copy?.textContent?.trim()).toBe("Copy");
+    copy?.click();
+    await flushPromises();
+
+    expect(writeText).toHaveBeenCalledTimes(1);
+    const copied = writeText.mock.calls[0]![0] as string;
+    expect(copied.startsWith("Generation failed\n")).toBe(true);
+    expect(copied).toContain(long);
+    expect(copied).toContain("plato · ");
     expect(
-      wrapper.get('[data-test="notifications-unread"]').attributes("style"),
-    ).toContain("var(--stop)");
+      document.body
+        .querySelector('[data-test="notifications-copy"]')
+        ?.textContent?.trim(),
+    ).toBe("Copied");
+    wrapper.unmount();
+  });
+
+  it("says so when the copy could not happen instead of claiming success", async () => {
+    vi.stubGlobal("navigator", {});
+    Object.assign(document, { execCommand: vi.fn().mockReturnValue(false) });
+    const store = useNotificationsStore();
+    store.record({ kind: "warning", text: "Can't reach plato", atMs: 1 });
+
+    const wrapper = mountCenter();
+    await wrapper.get('[data-test="notifications-bell"]').trigger("click");
+    await flushPromises();
+
+    document.body
+      .querySelector<HTMLButtonElement>('[data-test="notifications-copy"]')
+      ?.click();
+    await flushPromises();
+    expect(
+      document.body
+        .querySelector('[data-test="notifications-copy"]')
+        ?.textContent?.trim(),
+    ).toBe("Copy failed");
+    vi.unstubAllGlobals();
     wrapper.unmount();
   });
 });

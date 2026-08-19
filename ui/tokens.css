@@ -27,6 +27,10 @@
   --warning: #f5a623;
   --stop: #e5715a;
   --on-accent: #1a1206;
+  /* Ink for text sitting ON a status fill (--success/--warning/--stop/--halide).
+     Dark themes carry bright status hues, light themes carry deep ones, so the
+     safe foreground is per-theme rather than per-color. */
+  --on-status: #0a0805;
   --grad: linear-gradient(96deg, #f0b429, #f0743f 55%, #d96b8f);
   --card-hi: rgba(255, 244, 230, 0.05);
 
@@ -81,6 +85,7 @@
     --warning: #8a5300;
     --stop: #a93629;
     --on-accent: #ffffff;
+    --on-status: #ffffff;
     --grad: linear-gradient(96deg, #9b4d00, #b4562a 55%, #9c3f6b);
     --card-hi: rgba(255, 255, 255, 0.7);
     --ce: color-mix(in srgb, var(--rebate) 38%, transparent);
@@ -99,6 +104,7 @@
   --warning: #8a5300;
   --stop: #a93629;
   --on-accent: #ffffff;
+  --on-status: #ffffff;
   --grad: linear-gradient(96deg, #9b4d00, #b4562a 55%, #9c3f6b);
   --card-hi: rgba(255, 255, 255, 0.7);
   --ce: color-mix(in srgb, var(--rebate) 38%, transparent);
@@ -118,6 +124,7 @@
   --warning: #fbbf24;
   --stop: #fb7185;
   --on-accent: #150f1e;
+  --on-status: #08060f;
   --grad: linear-gradient(96deg, #89dceb, #89b4fa 45%, #cba6f7);
   --card-hi: rgba(255, 255, 255, 0.055);
   --ce: color-mix(in srgb, var(--rebate) 30%, transparent);
@@ -134,10 +141,11 @@
     --rebate: #221430;
     --halide: #0e7490;
     --safelight: #a21caf;
-    --success: #0f8a54;
+    --success: #0b6f43;
     --warning: #8a5a00;
     --stop: #b4233b;
     --on-accent: #ffffff;
+    --on-status: #ffffff;
     --grad: linear-gradient(96deg, #0e7490, #6d43d1 55%, #b4468f);
     --card-hi: rgba(255, 255, 255, 0.65);
     --ce: color-mix(in srgb, var(--rebate) 38%, transparent);
@@ -152,10 +160,11 @@
   --rebate: #221430;
   --halide: #0e7490;
   --safelight: #a21caf;
-  --success: #0f8a54;
+  --success: #0b6f43;
   --warning: #8a5a00;
   --stop: #b4233b;
   --on-accent: #ffffff;
+  --on-status: #ffffff;
   --grad: linear-gradient(96deg, #0e7490, #6d43d1 55%, #b4468f);
   --card-hi: rgba(255, 255, 255, 0.65);
   --ce: color-mix(in srgb, var(--rebate) 38%, transparent);

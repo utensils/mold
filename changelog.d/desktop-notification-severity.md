@@ -10,3 +10,7 @@
   automatically" notice instead of a red error, the Machines card marks the row
   _reconnecting…_, and when the machine answers again the warning is withdrawn
   and a green "Reconnected to `<machine>`" confirms it.
+- **Notifications can be copied.** Every row in the notifications bell has a
+  Copy button that puts the message, its full untruncated body, and the
+  machine/time line on the clipboard, and the notification text itself is
+  selectable again even though the surrounding app chrome is not.
