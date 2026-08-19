@@ -52,7 +52,16 @@ import { ApiHttpError } from "../api";
 
 vi.mock("../components/machines/hostClient", () => ({
   hostDeleteGalleryImage: vi.fn(),
-  hostGallery: vi.fn(),
+  hostGallery: vi.fn(async () => []),
+  hostCapabilities: vi.fn(async () => ({ gallery: { can_delete: true } })),
+  hostApiTarget: (host: { url: string; apiKey?: string }) => ({
+    baseUrl: host.url,
+    apiKey: host.apiKey ?? null,
+  }),
+}));
+vi.mock("@studio/api/galleryOrganization", () => ({
+  listCollections: vi.fn(async () => []),
+  listTags: vi.fn(async () => []),
 }));
 vi.mock("../lib/galleryMedia", () => ({ fetchGalleryBlob: vi.fn() }));
 vi.mock("../lib/multiHostGallery", async () => {

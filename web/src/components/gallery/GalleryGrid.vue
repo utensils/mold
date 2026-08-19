@@ -13,14 +13,14 @@
  */
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import MediaTile from "@ui/components/MediaTile.vue";
-import { thumbnailUrl } from "../../api";
-import { getHost } from "../../lib/hostRegistry";
-import { resolveThumbnailSrc } from "../../lib/galleryMedia";
+import Icon from "@ui/components/Icon.vue";
 import { printKey } from "../../lib/multiHostGallery";
+import { useThumbnailSources } from "../../composables/useThumbnailSources";
 import type { GalleryImage } from "../../types";
 import type { ModelInfoExtended } from "../../types";
 import { mediaKind } from "../../types";
 import { modelDisplayNameForId } from "@studio/lib/modelDisplay";
+import { purgeCountdownFromPurgeAt } from "@studio/lib/libraryOrganization";
 
 const props = withDefaults(
   defineProps<{
@@ -33,6 +33,11 @@ const props = withDefaults(
     selection?: Set<string>;
     /** Print keys that arrived this session — badged NEW. */
     fresh?: Set<string>;
+    /** Trash scope: tiles wear a purge countdown and hover Restore /
+     * Delete forever actions instead of opening on click alone. */
+    trash?: boolean;
+    /** Wall clock for the purge countdown (injectable for tests). */
+    now?: number;
   }>(),
   {
     selectMode: false,
@@ -40,6 +45,8 @@ const props = withDefaults(
     fresh: () => new Set<string>(),
     models: () => [],
     thumbnailSize: 220,
+    trash: false,
+    now: undefined,
   },
 );
 const modelLabel = (name: string) => modelDisplayNameForId(name, props.models);
@@ -55,7 +62,18 @@ const emit = defineEmits<{
     e: "context-menu",
     payload: { item: GalleryImage; x: number; y: number },
   ): void;
+  (e: "restore", item: GalleryImage): void;
+  (e: "delete-forever", item: GalleryImage): void;
 }>();
+
+function purgeLabel(entry: GalleryImage): string {
+  return purgeCountdownFromPurgeAt(entry.purge_at, props.now ?? Date.now())
+    .label;
+}
+function purgeKind(entry: GalleryImage): string {
+  return purgeCountdownFromPurgeAt(entry.purge_at, props.now ?? Date.now())
+    .kind;
+}
 
 // ── Chunked rendering ──────────────────────────────────────────────────────
 // Grid tiles pack densely so we render a large-ish chunk and grow it as the
@@ -120,17 +138,9 @@ function isMotion(entry: GalleryImage): boolean {
 function isAudio(entry: GalleryImage): boolean {
   return tileKind(entry) === "audio";
 }
-// The grid always shows the cached thumbnail (fast, poster-friendly for video).
-// A merged entry carries the host it came from: resolving every tile against
-// the origin 404s every remote print, because the file lives on that machine.
-// Keyless hosts (including the origin) resolve synchronously to a direct URL;
-// an authenticated host needs a blob fetch, so its tile fills in once resolved.
-const remoteSrc = ref(new Map<string, string>());
-
-function hostOf(entry: GalleryImage) {
-  const id = (entry as { hostId?: string }).hostId;
-  return id ? getHost(id) : null;
-}
+// The grid always shows the cached thumbnail (fast, poster-friendly for video),
+// addressed on the host that owns the print (see useThumbnailSources).
+const { srcFor: tileSrc } = useThumbnailSources();
 
 function hostLabel(entry: GalleryImage): string {
   return (entry as { hostLabel?: string }).hostLabel ?? "";
@@ -141,20 +151,11 @@ function keyOf(entry: GalleryImage): string {
   return printKey(entry as { hostId?: string; filename: string });
 }
 
-function tileSrc(entry: GalleryImage): string {
-  const host = hostOf(entry);
-  if (!host) return thumbnailUrl(entry.filename);
-  const key = keyOf(entry);
-  const resolved = remoteSrc.value.get(key);
-  if (resolved) return resolved;
-  void resolveThumbnailSrc(host, entry.filename)
-    .then((url) => {
-      remoteSrc.value = new Map(remoteSrc.value).set(key, url);
-    })
-    .catch(() => {
-      /* a tile that can't resolve keeps the browser's broken-image state */
-    });
-  return resolved ?? "";
+/** Hover strip: `title · model · S seed` — the title leads when one exists. */
+function stripLabel(entry: GalleryImage): string {
+  const base = `${modelLabel(entry.metadata.model)} · S ${entry.metadata.seed}`;
+  const title = entry.title?.trim();
+  return title ? `${title} · ${base}` : base;
 }
 function durationLabel(entry: GalleryImage): string {
   const frames = entry.metadata.frames;
@@ -343,6 +344,25 @@ onBeforeUnmount(() => {
           </MediaTile>
 
           <span
+            v-if="entry.favorite"
+            class="gg__fav"
+            data-test="favorite-badge"
+            title="Favorite"
+            aria-label="Favorite"
+          >
+            <Icon name="heart" :size="13" :stroke-width="2" />
+          </span>
+
+          <span
+            v-if="trash"
+            class="gg__purge"
+            :data-kind="purgeKind(entry)"
+            data-test="purge-chip"
+          >
+            {{ purgeLabel(entry) }}
+          </span>
+
+          <span
             v-if="hostLabel(entry)"
             class="gg__host"
             data-test="host-badge"
@@ -351,11 +371,34 @@ onBeforeUnmount(() => {
             {{ hostLabel(entry) }}
           </span>
           <span
+            v-if="trash && !selectMode"
+            class="gg__trash-actions"
+            data-test="trash-actions"
+          >
+            <button
+              type="button"
+              class="gg__ta"
+              data-test="tile-restore"
+              @click.stop="emit('restore', entry)"
+            >
+              Restore
+            </button>
+            <button
+              type="button"
+              class="gg__ta gg__ta--danger"
+              data-test="tile-delete-forever"
+              @click.stop="emit('delete-forever', entry)"
+            >
+              Delete forever
+            </button>
+          </span>
+          <span
+            v-else
             class="gg__metadata"
             data-test="print-metadata"
-            :title="`${modelLabel(entry.metadata.model)} · Seed ${entry.metadata.seed}`"
+            :title="stripLabel(entry)"
           >
-            {{ modelLabel(entry.metadata.model) }} · S {{ entry.metadata.seed }}
+            {{ stripLabel(entry) }}
           </span>
 
           <!-- Selection hit layer (select mode only). Sits above the tile so a
@@ -530,6 +573,99 @@ onBeforeUnmount(() => {
 .gg__cell:hover .gg__metadata,
 .gg__cell:focus-within .gg__metadata {
   transform: translateY(0);
+}
+
+/* Favorite heart — bottom-right, filled with the accent; never color-only
+ * since the glyph itself carries the meaning. */
+.gg__fav {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.55);
+  color: var(--safelight);
+  pointer-events: none;
+}
+.gg__fav :deep(svg) {
+  fill: currentColor;
+}
+.gg__cell:hover .gg__fav,
+.gg__cell:focus-within .gg__fav {
+  bottom: 30px;
+}
+
+/* Trash: purge countdown (top-left; the NEW slot is unused there) with the
+ * warning tone on the chip only. */
+.gg__purge {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 1;
+  max-width: calc(100% - 16px);
+  padding: 2px 7px;
+  border-radius: var(--radius-pill);
+  background: rgba(0, 0, 0, 0.62);
+  color: var(--on-media);
+  font-family: var(--f-mono);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.4;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+}
+.gg__purge[data-kind="purges"],
+.gg__purge[data-kind="today"] {
+  color: var(--warning);
+}
+
+/* Restore / Delete forever slide up on hover like the metadata strip. */
+.gg__trash-actions {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 2;
+  display: flex;
+  gap: 6px;
+  padding: 6px 7px;
+  background: rgba(0, 0, 0, 0.62);
+  transform: translateY(100%);
+  transition: transform var(--dur-quick) var(--ease);
+}
+.gg__cell:hover .gg__trash-actions,
+.gg__cell:focus-within .gg__trash-actions {
+  transform: translateY(0);
+}
+.gg__ta {
+  flex: 1;
+  min-height: 28px;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  border-radius: var(--radius-control-sm);
+  background: rgba(255, 255, 255, 0.12);
+  color: var(--on-media);
+  font-family: var(--f-body);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.gg__ta:hover {
+  background: rgba(255, 255, 255, 0.22);
+}
+.gg__ta--danger {
+  color: var(--stop);
+  border-color: color-mix(in srgb, var(--stop) 60%, transparent);
+}
+.gg__ta:focus-visible {
+  outline: 2px solid var(--safelight);
+  outline-offset: -2px;
 }
 
 .gg__hit {

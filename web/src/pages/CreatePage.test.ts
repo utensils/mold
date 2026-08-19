@@ -921,6 +921,37 @@ describe("CreatePage layout and behavior", () => {
     expect(submitMock).toHaveBeenCalled();
   });
 
+  it("carries the print title field into the generate request and validates it inline", async () => {
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    const form = useGenerateForm();
+    form.state.value.model = "flux-dev:q4";
+    form.state.value.modelFamily = "flux";
+    form.state.value.prompt = "a cat";
+    await nextTick();
+
+    const title = wrapper.get("[data-test='print-title']");
+    expect(title.attributes("placeholder")).toBe("Untitled print");
+    await title.setValue("  Smurf 04  ");
+    expect(form.state.value.title).toBe("  Smurf 04  ");
+    expect(wrapper.find("[data-test='print-title-error']").exists()).toBe(
+      false,
+    );
+
+    await wrapper.get("[data-test='composer-submit']").trigger("click");
+    await flushPromises();
+    expect(submitMock.mock.calls[0]?.[0]).toMatchObject({ title: "Smurf 04" });
+
+    await title.setValue("x".repeat(121));
+    expect(wrapper.get("[data-test='print-title-error']").text()).toContain(
+      "120",
+    );
+    submitMock.mockClear();
+    await wrapper.get("[data-test='composer-submit']").trigger("click");
+    await flushPromises();
+    // An invalid title never reaches the wire; the request still goes.
+    expect(submitMock.mock.calls[0]?.[0]?.title).toBeUndefined();
+  });
+
   it("still blocks a malformed non-integer size", async () => {
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     const form = useGenerateForm();

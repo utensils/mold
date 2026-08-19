@@ -371,12 +371,38 @@ function onRecreate(evt: Event) {
         {{ kind === "video" ? "video" : kind === "audio" ? "audio" : "anim" }}
       </div>
 
-      <!-- Format chip (top-right) -->
+      <!-- Format chip (top-right) + favorite heart beside it -->
       <div
-        v-if="item.format"
-        class="absolute right-3 top-3 rounded-full bg-black/60 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wider text-white/85 backdrop-blur"
+        class="absolute right-3 top-3 flex items-center gap-1.5"
+        aria-hidden="false"
       >
-        {{ item.format }}
+        <span
+          v-if="item.favorite"
+          class="inline-flex h-6 w-6 items-center justify-center rounded-full bg-black/60 text-safelight backdrop-blur"
+          data-test="card-favorite"
+          title="Favorite"
+          aria-label="Favorite"
+        >
+          <svg
+            class="h-3.5 w-3.5"
+            viewBox="0 0 24 24"
+            fill="currentColor"
+            stroke="currentColor"
+            stroke-width="1.6"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <path
+              d="M12 20.3S4.5 15.6 4.5 10.2A4 4 0 0112 7.7a4 4 0 017.5 2.5c0 5.4-7.5 10.1-7.5 10.1z"
+            />
+          </svg>
+        </span>
+        <div
+          v-if="item.format"
+          class="rounded-full bg-black/60 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wider text-white/85 backdrop-blur"
+        >
+          {{ item.format }}
+        </div>
       </div>
 
       <button
@@ -429,6 +455,13 @@ function onRecreate(evt: Event) {
               <span class="h-1.5 w-1.5 shrink-0 rounded-full bg-safelight" />
               <span class="truncate">{{ modelLabel }}</span>
             </div>
+            <p
+              v-if="item.title"
+              class="mt-1 truncate text-[13px] font-semibold leading-snug text-white"
+              data-test="card-title"
+            >
+              {{ item.title }}
+            </p>
             <p
               v-if="item.metadata.prompt"
               class="mt-1 line-clamp-2 text-[12.5px] leading-snug text-white/90 opacity-0 transition-opacity duration-200 group-hover:opacity-100"
@@ -484,6 +517,13 @@ function onRecreate(evt: Event) {
           {{ relative }}
         </time>
       </div>
+      <p
+        v-if="item.title"
+        class="font-display text-[16px] font-semibold leading-snug text-rebate"
+        data-test="card-title"
+      >
+        {{ item.title }}
+      </p>
       <p
         v-if="item.metadata.prompt"
         class="line-clamp-3 text-[15px] leading-relaxed text-rebate"

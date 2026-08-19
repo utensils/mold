@@ -66,6 +66,23 @@ vi.mock("@studio/api/devices", async (importOriginal) => ({
 const subscribeToDeviceSnapshots = vi.hoisted(() => vi.fn());
 const hostCapabilitiesCall = vi.hoisted(() => vi.fn());
 const hostQueueCall = vi.hoisted(() => vi.fn());
+const hostConfigValueCall = vi.hoisted(() =>
+  vi.fn<(...args: unknown[]) => Promise<unknown>>(async () => 30),
+);
+const hostWriteConfigCall = vi.hoisted(() =>
+  vi.fn<(...args: unknown[]) => Promise<void>>(async () => undefined),
+);
+const hostGalleryCall = vi.hoisted(() =>
+  vi.fn<(...args: unknown[]) => Promise<unknown[]>>(async () => []),
+);
+const emptyTrashCall = vi.hoisted(() =>
+  vi.fn<(...args: unknown[]) => Promise<{ purged: number }>>(async () => ({
+    purged: 2,
+  })),
+);
+vi.mock("@studio/api/galleryOrganization", () => ({
+  emptyTrash: (...a: unknown[]) => emptyTrashCall(...a),
+}));
 
 vi.mock("../lib/toasts", () => ({
   toast: toastMock,
@@ -102,6 +119,13 @@ vi.mock("../components/machines/hostClient", () => ({
   pauseHostQueue: (...a: unknown[]) => pauseHostQueue(...a),
   resumeHostQueue: (...a: unknown[]) => resumeHostQueue(...a),
   cancelAllHostQueue: (...a: unknown[]) => cancelAllHostQueue(...a),
+  hostConfigValue: (...a: unknown[]) => hostConfigValueCall(...a),
+  hostWriteConfig: (...a: unknown[]) => hostWriteConfigCall(...a),
+  hostGallery: (...a: unknown[]) => hostGalleryCall(...a),
+  hostApiTarget: (host: { url: string; apiKey?: string }) => ({
+    baseUrl: host.url,
+    apiKey: host.apiKey ?? null,
+  }),
 }));
 
 function makeStatus(over: Partial<HostStatus> = {}): HostStatus {
@@ -257,6 +281,10 @@ beforeEach(() => {
   hostQueueCall
     .mockReset()
     .mockImplementation(() => Promise.resolve({ entries: queueEntries }));
+  hostConfigValueCall.mockReset().mockResolvedValue(30);
+  hostWriteConfigCall.mockReset().mockResolvedValue(undefined);
+  hostGalleryCall.mockReset().mockResolvedValue([]);
+  emptyTrashCall.mockReset().mockResolvedValue({ purged: 2 });
   poll = {
     status: ref<HostStatus | null>(makeStatus()),
     devices: ref<DeviceInfo[] | null>(null),
@@ -886,5 +914,59 @@ describe("HostDetailPage — models", () => {
     // Only the downloaded model is installed.
     expect(w.findAll('[data-test="model-row"]')).toHaveLength(1);
     expect(w.find('[data-test="model-loaded"]').exists()).toBe(true);
+  });
+});
+
+describe("HostDetailPage — library", () => {
+  it("hides the Library card when the host has no trash", async () => {
+    const w = await mountDetail();
+    expect(w.find('[data-test="library-card"]').exists()).toBe(false);
+  });
+
+  it("shows the host's retention and trash count, writes retention with the host key, and empties with a plain confirm", async () => {
+    caps = {
+      ...caps,
+      gallery: {
+        can_delete: true,
+        organize: true,
+        trash: { enabled: true, retention_days: 7 },
+      },
+    };
+    hostConfigValueCall.mockResolvedValue(7);
+    hostGalleryCall.mockResolvedValue([
+      { filename: "a.png", trashed_at: 1 },
+      { filename: "b.png", trashed_at: 2 },
+    ]);
+    const w = await mountDetail();
+    const card = w.get('[data-test="library-card"]');
+    const select = card.get<HTMLSelectElement>(
+      '[data-test="library-retention"]',
+    );
+    expect(select.element.value).toBe("7");
+    expect(card.get('[data-test="library-trash-count"]').text()).toContain("2");
+
+    await select.setValue("30");
+    await flushPromises();
+    expect(hostWriteConfigCall).toHaveBeenCalledWith(
+      expect.objectContaining({ apiKey: "secret" }),
+      "gallery.trash_retention_days",
+      30,
+    );
+
+    await card.get('[data-test="library-empty-trash"]').trigger("click");
+    await flushPromises();
+    const options = (
+      requestConfirm.mock.calls as unknown as Array<
+        [{ title: string; body: string; typedPhrase?: string }]
+      >
+    )[0]![0];
+    expect(options.body).toBe(
+      "Delete 2 prints in the trash on Studio forever? This can't be undone.",
+    );
+    expect(options.typedPhrase).toBeUndefined();
+    expect(emptyTrashCall).toHaveBeenCalledWith({
+      baseUrl: "http://192.168.1.20:7680",
+      apiKey: "secret",
+    });
   });
 });

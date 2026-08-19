@@ -25,10 +25,14 @@ import QueueCard from "../components/machines/QueueCard.vue";
 import {
   cancelQueueJob,
   cancelAllHostQueue,
+  hostApiTarget,
   hostCapabilities,
+  hostConfigValue,
   hostDownloads,
+  hostGallery,
   hostModels,
   hostQueue,
+  hostWriteConfig,
   moveQueueJob,
   pauseHostQueue,
   resumeHostQueue,
@@ -36,6 +40,11 @@ import {
   useHostPoll,
   type HostCapabilities,
 } from "../components/machines/hostClient";
+import { emptyTrash } from "@studio/api/galleryOrganization";
+import {
+  RETENTION_OPTIONS,
+  retentionLabel,
+} from "@studio/lib/libraryOrganization";
 import { deriveTelemetry } from "../components/machines/machineTelemetry";
 import {
   ORIGIN_HOST_ID,
@@ -278,11 +287,104 @@ async function reloadAll(
   signal?: AbortSignal,
 ) {
   await Promise.all([
-    reloadCapabilities(entry, epoch, signal),
+    reloadCapabilities(entry, epoch, signal).then(() =>
+      reloadLibrary(entry, epoch, signal),
+    ),
     reloadQueue(entry, epoch, signal),
     reloadModels(entry, epoch, signal),
     reloadDownloads(entry, epoch, signal),
   ]);
+}
+
+// ── Library (trash retention + trash count) ────────────────────────────────
+// Shown only when the host advertises `gallery.trash`; the retention value is
+// that host's own `gallery.trash_retention_days`, read and written with its
+// key (per-host, like every other setting on this page).
+const RETENTION_KEY = "gallery.trash_retention_days";
+const trashCapable = computed(() => !!caps.value?.gallery?.trash);
+const trashRetentionDays = ref<number | null>(null);
+const trashCount = ref<number | null>(null);
+const savingRetention = ref(false);
+const retentionChoices = computed(() => {
+  const current = trashRetentionDays.value;
+  const options = [...RETENTION_OPTIONS];
+  if (current !== null && !options.includes(current)) options.push(current);
+  return options.map((days) => ({ value: days, label: retentionLabel(days) }));
+});
+
+async function reloadLibrary(
+  entry = host.value,
+  epoch = sessionEpoch,
+  signal?: AbortSignal,
+) {
+  if (!entry || !isCurrentSession(entry, epoch)) return;
+  if (!caps.value?.gallery?.trash) {
+    trashRetentionDays.value = null;
+    trashCount.value = null;
+    return;
+  }
+  const [retention, trashed] = await Promise.all([
+    hostConfigValue(entry, RETENTION_KEY, signal).catch(() => null),
+    hostGallery(entry, signal, "trash").catch(() => null),
+  ]);
+  if (!isCurrentSession(entry, epoch)) return;
+  const value =
+    typeof retention === "number"
+      ? retention
+      : typeof retention === "string" && retention.trim() !== ""
+        ? Number(retention)
+        : null;
+  trashRetentionDays.value =
+    value !== null && Number.isFinite(value)
+      ? value
+      : (caps.value?.gallery?.trash?.retention_days ?? null);
+  trashCount.value = trashed ? trashed.length : null;
+}
+
+async function onRetentionChange(raw: string) {
+  const entry = host.value;
+  if (!entry) return;
+  const days = Number(raw);
+  if (!Number.isFinite(days)) return;
+  savingRetention.value = true;
+  try {
+    await hostWriteConfig(entry, RETENTION_KEY, days);
+    trashRetentionDays.value = days;
+    toast(
+      "success",
+      `Trash retention on ${hostName.value}: ${retentionLabel(days)}`,
+    );
+    await reloadCapabilities();
+    await reloadLibrary();
+  } catch (e) {
+    toast("error", `Couldn't change trash retention: ${errMsg(e)}`);
+  } finally {
+    savingRetention.value = false;
+  }
+}
+
+async function onEmptyTrash() {
+  const entry = host.value;
+  if (!entry) return;
+  const count = trashCount.value ?? 0;
+  const accepted = await requestConfirm({
+    title: "Empty trash?",
+    body: `Delete ${count} ${count === 1 ? "print" : "prints"} in the trash on ${hostName.value} forever? This can't be undone.`,
+    confirmLabel: "Delete forever",
+    danger: true,
+  });
+  if (!accepted) return;
+  try {
+    const result = await emptyTrash(hostApiTarget(entry));
+    toast(
+      "success",
+      `Emptied the trash on ${hostName.value} (${result.purged} purged)`,
+    );
+    trashCount.value = 0;
+    await reloadLibrary();
+  } catch (e) {
+    toast("error", `Couldn't empty the trash: ${errMsg(e)}`);
+  }
 }
 
 async function reloadCapabilities(
@@ -694,6 +796,56 @@ onBeforeUnmount(() => {
             </div>
           </div>
         </CardSurface>
+
+        <CardSurface
+          v-if="trashCapable"
+          class="md-library"
+          data-test="library-card"
+        >
+          <div class="md-label">Library</div>
+          <div class="md-library__row">
+            <label class="md-library__k" for="library-retention"
+              >Trash retention</label
+            >
+            <select
+              id="library-retention"
+              class="md-library__select"
+              data-test="library-retention"
+              :value="String(trashRetentionDays ?? '')"
+              :disabled="savingRetention || !online"
+              @change="
+                onRetentionChange(($event.target as HTMLSelectElement).value)
+              "
+            >
+              <option
+                v-for="choice in retentionChoices"
+                :key="choice.value"
+                :value="String(choice.value)"
+              >
+                {{ choice.label }}
+              </option>
+            </select>
+          </div>
+          <p class="md-library__help">
+            Prints moved to the trash are deleted forever after this long.
+            Forever keeps them until you empty the trash.
+          </p>
+          <div class="md-library__row">
+            <span class="md-library__k">Prints in trash</span>
+            <span class="md-library__v" data-test="library-trash-count">{{
+              trashCount ?? "—"
+            }}</span>
+            <button
+              type="button"
+              class="md-library__empty"
+              :disabled="!trashCount || !online"
+              data-test="library-empty-trash"
+              @click="onEmptyTrash"
+            >
+              <Icon name="trash" :size="13" /> Empty trash
+            </button>
+          </div>
+        </CardSurface>
       </div>
 
       <div class="md-queue" :data-dimmed="offline ? 'true' : undefined">
@@ -888,16 +1040,78 @@ onBeforeUnmount(() => {
   min-width: 280px;
 }
 
-.md-models {
+.md-models,
+.md-library {
   width: 300px;
   flex: 0 0 300px;
 }
 
 @media (max-width: 640px) {
-  .md-models {
+  .md-models,
+  .md-library {
     width: 100%;
     flex: 1 1 100%;
   }
+}
+
+.md-library__row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 32px;
+}
+.md-library__row + .md-library__row {
+  margin-top: 8px;
+}
+.md-library__k {
+  flex: 1;
+  font-size: 12.5px;
+  color: var(--ink-2);
+}
+.md-library__v {
+  font-family: var(--f-mono);
+  font-size: 12px;
+  color: var(--rebate);
+}
+.md-library__select {
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--ce);
+  border-radius: var(--radius-control);
+  background: var(--bath);
+  color: var(--rebate);
+  font-family: var(--f-body);
+  font-size: 12.5px;
+}
+.md-library__help {
+  margin: 6px 0 10px;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--ink-3);
+}
+.md-library__empty {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid color-mix(in srgb, var(--stop) 50%, transparent);
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--stop);
+  font-family: var(--f-body);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.md-library__empty:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.md-library__empty:focus-visible,
+.md-library__select:focus-visible {
+  outline: 2px solid var(--safelight);
+  outline-offset: 2px;
 }
 
 .md-label {

@@ -1,3 +1,8 @@
+import {
+  RETENTION_OPTIONS,
+  retentionLabel,
+} from "@studio/lib/libraryOrganization";
+
 export type ConfigValue = string | number | boolean | null;
 export type ConfigSource = "db" | "file" | "env" | "default";
 
@@ -72,7 +77,11 @@ export async function switchProfile(name: string): Promise<void> {
 }
 
 export type ConfigSection =
-  "Storage & server" | "Generation" | "Prompt expansion" | "Advanced";
+  | "Storage & server"
+  | "Generation"
+  | "Library"
+  | "Prompt expansion"
+  | "Advanced";
 export type EditorKind = "toggle" | "number" | "select" | "text";
 
 export interface ConfigSchema {
@@ -85,6 +94,11 @@ export interface ConfigSchema {
   max?: number;
   step?: number;
   options?: string[];
+  /** Display labels for `options` (by option value); falls back to the raw
+   * value (and "auto" for the empty string). */
+  optionLabels?: Record<string, string>;
+  /** `select` editors submit strings; a numeric key coerces on save. */
+  valueType?: "number";
   /** Visible over the live API but only editable before `mold serve` starts. */
   liveReadOnly?: boolean;
   needsEngineRestart?: boolean;
@@ -93,9 +107,14 @@ export interface ConfigSchema {
 export const CONFIG_SECTIONS: ConfigSection[] = [
   "Storage & server",
   "Generation",
+  "Library",
   "Prompt expansion",
   "Advanced",
 ];
+
+/** Settings ▸ Library copy, shared verbatim with the desktop app. */
+export const TRASH_RETENTION_HELP =
+  "Prints moved to the trash are deleted forever after this long. Forever keeps them until you empty the trash.";
 
 export const CONFIG_SCHEMAS: ConfigSchema[] = [
   {
@@ -187,6 +206,18 @@ export const CONFIG_SCHEMAS: ConfigSchema[] = [
     help: "Quantization for the Flux.2 and Z-Image Qwen3 encoder.",
     editor: "select",
     options: ["", "bf16", "q8_0", "q5_k_m", "q4_k_m"],
+  },
+  {
+    key: "gallery.trash_retention_days",
+    section: "Library",
+    label: "Trash retention",
+    help: TRASH_RETENTION_HELP,
+    editor: "select",
+    valueType: "number",
+    options: RETENTION_OPTIONS.map(String),
+    optionLabels: Object.fromEntries(
+      RETENTION_OPTIONS.map((days) => [String(days), retentionLabel(days)]),
+    ),
   },
   {
     key: "expand.enabled",
@@ -323,6 +354,7 @@ export function canResetConfig(key: string): boolean {
   if (
     key.startsWith("expand.") ||
     key.startsWith("generate.") ||
+    key.startsWith("gallery.") ||
     key.startsWith("scheduler.") ||
     key.startsWith("model_prefs.")
   ) {

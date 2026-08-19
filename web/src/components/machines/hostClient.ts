@@ -32,7 +32,9 @@ import {
   looksLikeCatalogId,
   type CatalogDownloadResponse,
 } from "../../api";
-import { parseCurrentServerStatus } from "@studio/api/client";
+import { parseCurrentServerStatus, type ApiTarget } from "@studio/api/client";
+import type { GalleryView } from "@studio/lib/api/galleryOrganization";
+import type { ConfigValue } from "../../lib/settingsConfig";
 import {
   listDevices,
   setDeviceEnabled,
@@ -129,13 +131,55 @@ export function hostDiscoveryPeers(host: HostEntry, signal?: AbortSignal) {
   return getJson<DiscoveryPeer[]>(host, "/api/discovery/peers", signal);
 }
 
-/** One host's gallery (`GET /api/gallery`), with its `x-api-key`. Used by the
- * multi-host gallery merge. Works for the origin too (empty `host.url`). */
-export function hostGallery(host: HostEntry, signal?: AbortSignal) {
+/** The studio `ApiTarget` for a web host entry: the explicit-target helpers
+ * in `@studio/api/*` take this shape and send the key as `x-api-key`. */
+export function hostApiTarget(host: HostEntry): ApiTarget {
+  return { baseUrl: host.url, apiKey: host.apiKey ?? null };
+}
+
+/** One host's gallery (`GET /api/gallery[?view=trash]`), with its
+ * `x-api-key`. Used by the multi-host gallery merge. Works for the origin
+ * too (empty `host.url`). The default `library` view keeps the bare path so
+ * older hosts, which know no `view` parameter, behave exactly as before. */
+export function hostGallery(
+  host: HostEntry,
+  signal?: AbortSignal,
+  view: GalleryView = "library",
+) {
   return getJson<import("../../types").GalleryImage[]>(
     host,
-    "/api/gallery",
+    view === "library" ? "/api/gallery" : `/api/gallery?view=${view}`,
     signal,
+  );
+}
+
+/** One effective config row on a host (`GET /api/config/:key`). */
+export async function hostConfigValue(
+  host: HostEntry,
+  key: string,
+  signal?: AbortSignal,
+): Promise<ConfigValue> {
+  const row = await getJson<{ value?: ConfigValue }>(
+    host,
+    `/api/config/${encodeURIComponent(key)}`,
+    signal,
+  );
+  return row.value ?? null;
+}
+
+/** Write one config key on a host (`PUT /api/config/:key`). A 404 is a real
+ * failure here (unknown key / older host), never "already done". */
+export function hostWriteConfig(
+  host: HostEntry,
+  key: string,
+  value: ConfigValue,
+): Promise<void> {
+  return send(
+    host,
+    `/api/config/${encodeURIComponent(key)}`,
+    "PUT",
+    { value },
+    false,
   );
 }
 

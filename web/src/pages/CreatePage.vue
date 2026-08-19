@@ -48,6 +48,7 @@ import type { DevelopPhase } from "@ui/lib/grain";
 import type { ClipRailMedia } from "@ui/components/types";
 import { SourceFitPreprocessCache } from "@ui/lib/sourceFitPreprocessCache";
 import { createUuid } from "@studio/lib/id";
+import { validatePrintTitle } from "@studio/lib/libraryOrganization";
 import { applyAuthoredPrompt } from "@studio/lib/promptProvenance";
 import { requestNeedsReferenceUpload } from "@studio/api/referenceUploads";
 import {
@@ -304,6 +305,15 @@ const showAdvanced = ref(false);
 const showTemplates = ref(false);
 const templatesHost = ref<HTMLElement | null>(null);
 const composerError = ref<string | null>(null);
+/** Inline validation for the print title field (`validatePrintTitle`). An
+ * invalid title never reaches the wire — `toRequest` drops it — so the error
+ * here is the only place the user learns why. */
+const titleError = ref("");
+function onTitleInput(value: string) {
+  form.state.value.title = value;
+  const result = validatePrintTitle(value);
+  titleError.value = result.ok ? "" : result.reason;
+}
 
 // ── Expansion routing (issue #1162 §5) ────────────────────────────────
 // The generation router is model-aware about the CHECKPOINT and knows nothing
@@ -4225,7 +4235,35 @@ onBeforeUnmount(() => {
         />
 
         <div class="flex items-center gap-2">
-          <div class="flex-1" />
+          <!-- Print title (D5): a real field bound to the form, not a
+               constant. Rides every one-shot request as `title`; empty is
+               untitled (placeholder, never a literal). Sequences carry no
+               title slot on the wire yet, so the field steps aside there. -->
+          <label
+            v-if="!sequenceMode"
+            class="flex min-w-0 flex-1 items-center gap-2"
+            data-test="print-title-field"
+          >
+            <span class="sr-only">Print title</span>
+            <input
+              :value="form.state.value.title ?? ''"
+              type="text"
+              maxlength="160"
+              placeholder="Untitled print"
+              aria-label="Print title"
+              class="w-full min-w-0 max-w-[28rem] rounded-control border border-transparent bg-transparent px-2 py-1 font-display text-[15px] font-semibold text-ink outline-none transition placeholder:font-medium placeholder:text-ink-3 hover:border-ce focus:border-safelight"
+              data-test="print-title"
+              @input="onTitleInput(($event.target as HTMLInputElement).value)"
+            />
+            <span
+              v-if="titleError"
+              class="shrink-0 text-[11px] text-stop"
+              role="alert"
+              data-test="print-title-error"
+              >{{ titleError }}</span
+            >
+          </label>
+          <div v-else class="flex-1" />
           <div ref="templatesHost" class="relative">
             <button
               type="button"

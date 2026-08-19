@@ -20,10 +20,39 @@ const { listGalleryMock, deleteMock, fetchModelsMock } = vi.hoisted(() => ({
   deleteMock: vi.fn(),
   fetchModelsMock: vi.fn(),
 }));
-const { hostDeleteMock, fetchBlobMock } = vi.hoisted(() => ({
-  hostDeleteMock: vi.fn(),
-  fetchBlobMock: vi.fn(),
+const { hostDeleteMock, fetchBlobMock, hostCapabilitiesMock, hostGalleryMock } =
+  vi.hoisted(() => ({
+    hostDeleteMock: vi.fn(),
+    fetchBlobMock: vi.fn(),
+    hostCapabilitiesMock: vi.fn(),
+    hostGalleryMock: vi.fn(),
+  }));
+// The organization routes (studio explicit-target helpers) never touch the
+// network in these tests; each spec asserts on the exact target + body.
+const orgApi = vi.hoisted(() => ({
+  patchGalleryImage: vi.fn(async () => null),
+  organizeGallery: vi.fn(async () => undefined),
+  createCollection: vi.fn(async (_t: unknown, body: { name: string }) => ({
+    id: `id-${body.name}`,
+    name: body.name,
+    slug: body.name.toLowerCase().replace(/[^a-z0-9]+/g, "-"),
+    description: null,
+    cover_filename: null,
+    count: 0,
+    created_at: 0,
+    updated_at: 0,
+  })),
+  updateCollection: vi.fn(async () => ({})),
+  deleteCollection: vi.fn(async () => undefined),
+  setCollectionItems: vi.fn(async () => null),
+  trashMany: vi.fn(async () => undefined),
+  restoreTrashed: vi.fn(async () => undefined),
+  deleteGalleryImageForever: vi.fn(async () => undefined),
+  emptyTrash: vi.fn(async () => ({ purged: 1 })),
+  listCollections: vi.fn(async () => []),
+  listTags: vi.fn(async () => []),
 }));
+vi.mock("@studio/api/galleryOrganization", () => orgApi);
 const { pushMock, replaceMock } = vi.hoisted(() => ({
   pushMock: vi.fn(),
   replaceMock: vi.fn(),
@@ -44,7 +73,12 @@ vi.mock("../api", () => ({
 
 vi.mock("../components/machines/hostClient", () => ({
   hostDeleteGalleryImage: hostDeleteMock,
-  hostGallery: vi.fn(),
+  hostGallery: hostGalleryMock,
+  hostCapabilities: hostCapabilitiesMock,
+  hostApiTarget: (host: { url: string; apiKey?: string }) => ({
+    baseUrl: host.url,
+    apiKey: host.apiKey ?? null,
+  }),
 }));
 
 vi.mock("../lib/galleryMedia", () => ({
@@ -205,6 +239,11 @@ describe("LibraryPage", () => {
     ]);
     deleteMock.mockReset().mockResolvedValue(undefined);
     hostDeleteMock.mockReset().mockResolvedValue(undefined);
+    hostCapabilitiesMock.mockReset().mockResolvedValue({
+      gallery: { can_delete: true },
+    });
+    hostGalleryMock.mockReset().mockResolvedValue([]);
+    for (const fn of Object.values(orgApi)) fn.mockClear();
     fetchBlobMock.mockReset().mockResolvedValue(new Blob(["bytes"]));
     restoreSourceMock.mockReset().mockResolvedValue(null);
     pushMock.mockReset();
@@ -483,7 +522,7 @@ describe("LibraryPage", () => {
     expect(wrapper.find("[data-test='grid-count']").text()).toBe("2");
   });
 
-  it("bulk delete-all still honors the typed confirm and deletes every print", async () => {
+  it("bulk delete-all asks a plain confirm — never a typed phrase — and deletes every print", async () => {
     const wrapper = await mounted();
     await wrapper.find("[data-test='gallery-select']").trigger("click");
     await wrapper.vm.$nextTick();
@@ -495,9 +534,9 @@ describe("LibraryPage", () => {
     await deleteAll!.trigger("click");
     await flushPromises();
 
-    expect(vi.mocked(requestConfirm).mock.calls[0]![0]).toMatchObject({
-      typedPhrase: "delete",
-    });
+    const options = vi.mocked(requestConfirm).mock.calls[0]![0];
+    expect(options).toMatchObject({ danger: true, confirmLabel: "Delete" });
+    expect(options.typedPhrase).toBeUndefined();
     expect(deleteMock).toHaveBeenCalledWith("cat.png");
     expect(deleteMock).toHaveBeenCalledWith("dog.png");
   });
@@ -546,6 +585,11 @@ describe("LibraryPage multi-host identity", () => {
     listGalleryMock.mockReset().mockResolvedValue([theirs, mine]);
     deleteMock.mockReset().mockResolvedValue(undefined);
     hostDeleteMock.mockReset().mockResolvedValue(undefined);
+    hostCapabilitiesMock.mockReset().mockResolvedValue({
+      gallery: { can_delete: true },
+    });
+    hostGalleryMock.mockReset().mockResolvedValue([]);
+    for (const fn of Object.values(orgApi)) fn.mockClear();
     fetchBlobMock.mockReset().mockResolvedValue(new Blob(["bytes"]));
     pushMock.mockReset();
     replaceMock.mockReset();

@@ -15,6 +15,10 @@
  */
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import VideoExportDialog from "@ui/components/VideoExportDialog.vue";
+import PrintOrganizer from "../library/PrintOrganizer.vue";
+import type { CollectionPickerRow } from "../library/CollectionPicker.vue";
+import { purgeCountdownFromPurgeAt } from "@studio/lib/libraryOrganization";
+import { downloadFilename } from "../../lib/libraryOrganization";
 import { imageUrl, thumbnailUrl } from "../../api";
 import { getHost } from "../../lib/hostRegistry";
 import {
@@ -25,7 +29,7 @@ import {
   resolveStreamableSrc,
   resolveThumbnailSrc,
 } from "../../lib/galleryMedia";
-import type { GalleryImage, ModelInfoExtended } from "../../types";
+import type { GalleryImage, ModelInfoExtended, TagCount } from "../../types";
 import { mediaKind } from "../../types";
 import { formatResolution, shortModel } from "../../util/format";
 import {
@@ -51,6 +55,17 @@ const props = defineProps<{
   isSequence?: boolean;
   /** Its producing job is (without probing) still on its origin host. */
   canEditSequence?: boolean;
+  /** Some copy of this print lives on a host with `gallery.organize`:
+   * title / favorite / tags / collections are editable. */
+  canOrganize?: boolean;
+  /** Some copy lives on a host with `gallery.trash`: Delete reads Trash. */
+  canTrash?: boolean;
+  /** Viewing the Trash scope: Restore / Delete forever replace Delete. */
+  inTrash?: boolean;
+  /** Merged collections with this print's membership state. */
+  collections?: CollectionPickerRow[];
+  /** Merged cross-host tag vocabulary for autocomplete. */
+  tagSuggestions?: TagCount[];
 }>();
 
 const emit = defineEmits<{
@@ -62,7 +77,43 @@ const emit = defineEmits<{
   (e: "upscale", item: GalleryImage): void;
   (e: "delete", item: GalleryImage): void;
   (e: "edit-sequence", item: GalleryImage): void;
+  (e: "rename", item: GalleryImage, title: string | null): void;
+  (e: "favorite", item: GalleryImage, favorite: boolean): void;
+  (e: "add-tag", item: GalleryImage, tag: string): void;
+  (e: "remove-tag", item: GalleryImage, tag: string): void;
+  (
+    e: "set-collection",
+    item: GalleryImage,
+    slug: string,
+    member: boolean,
+  ): void;
+  (e: "new-collection", item: GalleryImage): void;
+  (e: "restore", item: GalleryImage): void;
+  (e: "delete-forever", item: GalleryImage): void;
 }>();
+
+const organizer = ref<InstanceType<typeof PrintOrganizer> | null>(null);
+const purgeLabel = computed(() =>
+  props.item?.trashed_at != null
+    ? purgeCountdownFromPurgeAt(props.item.purge_at, Date.now()).label
+    : "",
+);
+const downloadName = computed(() =>
+  props.item ? downloadFilename(props.item.title, props.item.filename) : "",
+);
+function onRestore() {
+  menuOpen.value = false;
+  if (props.item) emit("restore", props.item);
+}
+function onDeleteForever() {
+  menuOpen.value = false;
+  if (props.item) emit("delete-forever", props.item);
+}
+/** Page-level keyboard shortcuts reach the organizer through these. */
+defineExpose({
+  focusTags: () => organizer.value?.focusTags(),
+  beginTitleEdit: () => organizer.value?.beginEdit(),
+});
 
 const menuOpen = ref(false);
 const exportOpen = ref(false);
@@ -483,14 +534,26 @@ async function performVideoExport(options: VideoExportOptions) {
                   @click="menuOpen = false"
                 ></button>
                 <div class="lb__menu" role="menu">
-                  <button role="menuitem" @click="onUpscale">Upscale…</button>
-                  <button
-                    role="menuitem"
-                    class="lb__menu-danger"
-                    @click="onDelete"
-                  >
-                    Delete
-                  </button>
+                  <template v-if="inTrash">
+                    <button role="menuitem" @click="onRestore">Restore</button>
+                    <button
+                      role="menuitem"
+                      class="lb__menu-danger"
+                      @click="onDeleteForever"
+                    >
+                      Delete forever
+                    </button>
+                  </template>
+                  <template v-else>
+                    <button role="menuitem" @click="onUpscale">Upscale…</button>
+                    <button
+                      role="menuitem"
+                      class="lb__menu-danger"
+                      @click="onDelete"
+                    >
+                      {{ canTrash ? "Trash" : "Delete" }}
+                    </button>
+                  </template>
                 </div>
               </template>
             </div>
@@ -507,6 +570,30 @@ async function performVideoExport(options: VideoExportOptions) {
               </svg>
             </button>
           </div>
+
+          <PrintOrganizer
+            ref="organizer"
+            :item="item"
+            :can-organize="!!canOrganize"
+            :collections="collections ?? []"
+            :tag-suggestions="tagSuggestions ?? []"
+            @rename="(title) => emit('rename', item!, title)"
+            @favorite="(favorite) => emit('favorite', item!, favorite)"
+            @add-tag="(tag) => emit('add-tag', item!, tag)"
+            @remove-tag="(tag) => emit('remove-tag', item!, tag)"
+            @set-collection="
+              (slug, member) => emit('set-collection', item!, slug, member)
+            "
+            @new-collection="emit('new-collection', item!)"
+          />
+
+          <p
+            v-if="inTrash && purgeLabel"
+            class="lb__purge"
+            data-test="lightbox-purge"
+          >
+            {{ purgeLabel }}
+          </p>
 
           <div v-if="prompt" class="lb__prompt-wrap">
             <p class="lb__prompt">{{ prompt }}</p>
@@ -580,39 +667,57 @@ async function performVideoExport(options: VideoExportOptions) {
 
           <span class="lb__flex"></span>
 
-          <button
-            class="lb__reuse"
-            data-test="lightbox-primary-action"
-            @click="onPrimaryAction"
-          >
-            <svg
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              aria-hidden="true"
+          <template v-if="inTrash">
+            <button
+              class="lb__reuse"
+              data-test="lightbox-restore"
+              @click="onRestore"
             >
-              <path d="M3 12a9 9 0 019-9 9 9 0 016.7 3M21 3v6h-6" />
-              <path d="M21 12a9 9 0 01-9 9 9 9 0 01-6.7-3M3 21v-6h6" />
-            </svg>
-            {{
-              isSequence
-                ? canEditSequence
-                  ? "Edit sequence"
-                  : "Duplicate as new"
-                : "Reuse these settings"
-            }}
-          </button>
-          <button
-            v-if="canEditSequence"
-            class="lb__quiet lb__edit-sequence"
-            data-test="lightbox-duplicate-sequence"
-            @click="onReuse"
-          >
-            Duplicate as new
-          </button>
+              Restore
+            </button>
+            <button
+              class="lb__quiet lb__quiet--danger lb__edit-sequence"
+              data-test="lightbox-delete-forever"
+              @click="onDeleteForever"
+            >
+              Delete forever
+            </button>
+          </template>
+          <template v-else>
+            <button
+              class="lb__reuse"
+              data-test="lightbox-primary-action"
+              @click="onPrimaryAction"
+            >
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+              >
+                <path d="M3 12a9 9 0 019-9 9 9 0 016.7 3M21 3v6h-6" />
+                <path d="M21 12a9 9 0 01-9 9 9 9 0 01-6.7-3M3 21v-6h6" />
+              </svg>
+              {{
+                isSequence
+                  ? canEditSequence
+                    ? "Edit sequence"
+                    : "Duplicate as new"
+                  : "Reuse these settings"
+              }}
+            </button>
+            <button
+              v-if="canEditSequence"
+              class="lb__quiet lb__edit-sequence"
+              data-test="lightbox-duplicate-sequence"
+              @click="onReuse"
+            >
+              Duplicate as new
+            </button>
+          </template>
           <div class="lb__pair">
             <button class="lb__quiet" @click="onUseSource">
               Use as source
@@ -621,7 +726,7 @@ async function performVideoExport(options: VideoExportOptions) {
               v-if="mediaSrc"
               class="lb__quiet"
               :href="mediaSrc"
-              :download="item.filename"
+              :download="downloadName"
               role="button"
             >
               Download
@@ -662,7 +767,7 @@ async function performVideoExport(options: VideoExportOptions) {
             v-if="mediaSrc"
             class="lb__circle"
             :href="mediaSrc"
-            :download="item.filename"
+            :download="downloadName"
             aria-label="Save"
           >
             <svg
@@ -699,14 +804,26 @@ async function performVideoExport(options: VideoExportOptions) {
                 @click="menuOpen = false"
               ></button>
               <div class="lb__menu lb__menu--right" role="menu">
-                <button role="menuitem" @click="onUpscale">Upscale…</button>
-                <button
-                  role="menuitem"
-                  class="lb__menu-danger"
-                  @click="onDelete"
-                >
-                  Delete
-                </button>
+                <template v-if="inTrash">
+                  <button role="menuitem" @click="onRestore">Restore</button>
+                  <button
+                    role="menuitem"
+                    class="lb__menu-danger"
+                    @click="onDeleteForever"
+                  >
+                    Delete forever
+                  </button>
+                </template>
+                <template v-else>
+                  <button role="menuitem" @click="onUpscale">Upscale…</button>
+                  <button
+                    role="menuitem"
+                    class="lb__menu-danger"
+                    @click="onDelete"
+                  >
+                    {{ canTrash ? "Trash" : "Delete" }}
+                  </button>
+                </template>
               </div>
             </template>
           </div>
@@ -780,6 +897,23 @@ async function performVideoExport(options: VideoExportOptions) {
         </div>
 
         <div class="lb__sheet">
+          <PrintOrganizer
+            :item="item"
+            :can-organize="!!canOrganize"
+            :collections="collections ?? []"
+            :tag-suggestions="tagSuggestions ?? []"
+            @rename="(title) => emit('rename', item!, title)"
+            @favorite="(favorite) => emit('favorite', item!, favorite)"
+            @add-tag="(tag) => emit('add-tag', item!, tag)"
+            @remove-tag="(tag) => emit('remove-tag', item!, tag)"
+            @set-collection="
+              (slug, member) => emit('set-collection', item!, slug, member)
+            "
+            @new-collection="emit('new-collection', item!)"
+          />
+          <p v-if="inTrash && purgeLabel" class="lb__purge">
+            {{ purgeLabel }}
+          </p>
           <div v-if="prompt" class="lb__prompt-wrap">
             <p class="lb__prompt">{{ prompt }}</p>
             <button
@@ -823,39 +957,50 @@ async function performVideoExport(options: VideoExportOptions) {
           <p v-if="loraLabel" class="lb__mobile-meta">
             <b>LoRA:</b> {{ loraLabel }}
           </p>
-          <button
-            class="lb__reuse"
-            data-test="lightbox-primary-action"
-            @click="onPrimaryAction"
-          >
-            <svg
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              aria-hidden="true"
+          <template v-if="inTrash">
+            <button class="lb__reuse" @click="onRestore">Restore</button>
+            <button
+              class="lb__quiet lb__quiet--danger lb__edit-sequence"
+              @click="onDeleteForever"
             >
-              <path d="M3 12a9 9 0 019-9 9 9 0 016.7 3M21 3v6h-6" />
-              <path d="M21 12a9 9 0 01-9 9 9 9 0 01-6.7-3M3 21v-6h6" />
-            </svg>
-            {{
-              isSequence
-                ? canEditSequence
-                  ? "Edit sequence"
-                  : "Duplicate as new"
-                : "Reuse these settings"
-            }}
-          </button>
-          <button
-            v-if="canEditSequence"
-            class="lb__quiet lb__edit-sequence"
-            data-test="lightbox-duplicate-sequence"
-            @click="onReuse"
-          >
-            Duplicate as new
-          </button>
+              Delete forever
+            </button>
+          </template>
+          <template v-else>
+            <button
+              class="lb__reuse"
+              data-test="lightbox-primary-action"
+              @click="onPrimaryAction"
+            >
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+              >
+                <path d="M3 12a9 9 0 019-9 9 9 0 016.7 3M21 3v6h-6" />
+                <path d="M21 12a9 9 0 01-9 9 9 9 0 01-6.7-3M3 21v-6h6" />
+              </svg>
+              {{
+                isSequence
+                  ? canEditSequence
+                    ? "Edit sequence"
+                    : "Duplicate as new"
+                  : "Reuse these settings"
+              }}
+            </button>
+            <button
+              v-if="canEditSequence"
+              class="lb__quiet lb__edit-sequence"
+              data-test="lightbox-duplicate-sequence"
+              @click="onReuse"
+            >
+              Duplicate as new
+            </button>
+          </template>
           <div class="lb__pair">
             <button class="lb__quiet" @click="onUseSource">
               Use as source
@@ -864,7 +1009,7 @@ async function performVideoExport(options: VideoExportOptions) {
               v-if="mediaSrc"
               class="lb__quiet"
               :href="mediaSrc"
-              :download="item.filename"
+              :download="downloadName"
               role="button"
             >
               Save
@@ -1263,6 +1408,20 @@ async function performVideoExport(options: VideoExportOptions) {
 .lb__quiet:focus-visible {
   outline: 2px solid var(--safelight);
   outline-offset: 2px;
+}
+.lb__quiet--danger {
+  color: var(--stop);
+  border-color: color-mix(in srgb, var(--stop) 50%, transparent);
+}
+.lb__quiet--danger:hover {
+  color: var(--stop);
+  background: color-mix(in srgb, var(--stop) 10%, transparent);
+}
+.lb__purge {
+  margin: 0 0 14px;
+  font-family: var(--f-mono);
+  font-size: 11px;
+  color: var(--warning);
 }
 
 /* ── Mobile full-screen ───────────────────────────────────────────────── */

@@ -131,6 +131,25 @@ describe("ActivityStrip", () => {
     expect(wrapper.text()).toContain("50%");
   });
 
+  it("prefers the print title over the prompt, and falls back to Untitled print", () => {
+    const titled = makeJob({
+      request: {
+        ...makeJob().request,
+        title: "Smurf 04",
+      } as GenerateRequestWire,
+    });
+    const wrapper = mount(ActivityStrip, { props: { jobs: [titled] } });
+    expect(wrapper.text()).toContain("Smurf 04");
+    expect(wrapper.text()).not.toContain("a cat");
+
+    const blank = makeJob({
+      id: "job-2",
+      request: { ...makeJob().request, prompt: "   " } as GenerateRequestWire,
+    });
+    const fallback = mount(ActivityStrip, { props: { jobs: [blank] } });
+    expect(fallback.text()).toContain("Untitled print");
+  });
+
   it("opens a running job on click", async () => {
     const job = makeJob();
     const wrapper = mount(ActivityStrip, { props: { jobs: [job] } });

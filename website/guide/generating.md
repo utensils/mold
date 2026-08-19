@@ -484,6 +484,37 @@ such as `/generate` and `/catalog` render Page Not Found:
   guidance, scheduler, LoRAs, prompts, file details, and copyable prompt/seed.
   **Upscale...** returns the print to Create with the installed default
   upscaler selected.
+- Library organization (on hosts that advertise it — see below): the Library
+  header carries a **Prints | Collections | Trash** scope control with counts,
+  synced to `?scope=` (plus `?c=<collection>`, `?tag=a,b`, `?fav=1`).
+  **Prints** is the grid plus a filter-chip row — ♥ Favorites, tag chips with
+  counts (the long tail behind **More tags…**), and the host chips — and its
+  search also matches titles and tags. **Collections** is a shelf of cover
+  cards merged across hosts by name, with a dashed **New collection** card and
+  a breadcrumb drill-in whose **Edit** menu renames, sets the cover from a
+  selection, removes selected prints, or deletes the collection (its prints
+  stay in the Library). **Trash** shows trashed prints with a retention
+  banner, a per-tile **Purges in N d** countdown, hover **Restore** / **Delete
+  forever**, and a header **Empty trash**. Every edit happens in the print
+  viewer's aside: the editable title leads (click, Enter commits, Escape
+  reverts; the raw filename drops to a mono detail row), ♥ beside it, a tag
+  chip editor with autocomplete, and an **In collections** checklist with
+  **New…**. Select mode's bar gains **Add to collection**, **Tag**,
+  **♥ Favorite**, and **Trash**. Titles typed in Create's title field travel
+  with the request and name the download (`title-slug.png`).
+- Shortcuts: **F** favorite · **T** tag · **⌘⇧N** new collection · **⌫** trash
+  (undo for 6 s) · **⌘⌫** delete forever (confirm).
+- Destructive copy stays plain: **Empty trash**, **Delete forever**, and
+  **Delete collection** use the app confirm dialog with a danger button and
+  never a typed phrase; single and selected Trash are optimistic with a 6 s
+  undo toast.
+- Trash retention is a per-host server setting (`gallery.trash_retention_days`,
+  `0` = forever): **Settings ▸ Library** edits the serving host's value and
+  **Machines ▸ host** edits any connected host's, next to its
+  **Prints in trash: N · Empty trash** row. A host whose `/api/capabilities`
+  lacks `gallery.organize` / `gallery.trash` (an older server, or
+  `MOLD_DB_DISABLE=1`) shows none of this and keeps the permanent-delete
+  wording.
 - Prompt expansion modal offers live preview + variation picker (requires
   `qwen3-expand` installed on the server).
 - Prompt, model, size, steps, guidance, and batch persist in `localStorage`.

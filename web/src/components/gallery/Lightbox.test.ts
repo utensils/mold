@@ -204,6 +204,154 @@ describe("Lightbox (desktop two-pane)", () => {
   });
 });
 
+describe("Lightbox organization (title · ♥ · tags · collections · trash)", () => {
+  beforeEach(() => setViewportWidth(1200));
+
+  it("leads with the editable title and demotes the filename to a mono row", () => {
+    const wrapper = mountWide({
+      item: { ...item, title: "Lighthouse, v2" },
+      canOrganize: true,
+    });
+    expect(wrapper.get("[data-test='title-text']").text()).toBe(
+      "Lighthouse, v2",
+    );
+    expect(wrapper.get("[data-test='print-filename']").text()).toBe(
+      "print.png",
+    );
+  });
+
+  it("falls back to the prompt excerpt as the title placeholder", () => {
+    const wrapper = mountWide({ canOrganize: true });
+    expect(wrapper.get("[data-test='title-text']").text()).toBe(
+      "a lighthouse at dusk",
+    );
+  });
+
+  it("commits a title on Enter and reverts on Escape", async () => {
+    const wrapper = mountWide({ canOrganize: true });
+    await wrapper.get("[data-test='title-edit']").trigger("click");
+    const input = wrapper.get<HTMLInputElement>("[data-test='title-input']");
+    await input.setValue("  Harbor light  ");
+    await input.trigger("keydown", { key: "Enter" });
+    expect(wrapper.emitted("rename")?.[0]).toEqual([item, "Harbor light"]);
+
+    await wrapper.get("[data-test='title-edit']").trigger("click");
+    const again = wrapper.get<HTMLInputElement>("[data-test='title-input']");
+    await again.setValue("discarded");
+    await again.trigger("keydown", { key: "Escape" });
+    expect(wrapper.emitted("rename")).toHaveLength(1);
+    expect(wrapper.find("[data-test='title-input']").exists()).toBe(false);
+    // Escape inside the title never closes the viewer.
+    expect(wrapper.emitted("close")).toBeUndefined();
+  });
+
+  it("refuses an over-long title inline instead of emitting it", async () => {
+    const wrapper = mountWide({ canOrganize: true });
+    await wrapper.get("[data-test='title-edit']").trigger("click");
+    const input = wrapper.get<HTMLInputElement>("[data-test='title-input']");
+    await input.setValue("x".repeat(121));
+    await input.trigger("keydown", { key: "Enter" });
+    expect(wrapper.emitted("rename")).toBeUndefined();
+    expect(wrapper.get("[data-test='title-error']").text()).toContain("120");
+  });
+
+  it("toggles the favorite and edits tags and collections through emits", async () => {
+    const tagged = { ...item, favorite: false, tags: ["blue"] };
+    const wrapper = mountWide({
+      item: tagged,
+      canOrganize: true,
+      tagSuggestions: [
+        { name: "outdoor", count: 3 },
+        { name: "blue", count: 2 },
+      ],
+      collections: [
+        { slug: "smurfs", name: "Smurfs", checked: true },
+        { slug: "rivers", name: "Rivers", checked: false },
+      ],
+    });
+    await wrapper.get("[data-test='favorite-toggle']").trigger("click");
+    expect(wrapper.emitted("favorite")?.[0]).toEqual([tagged, true]);
+
+    const tagInput = wrapper.get<HTMLInputElement>("[data-test='tag-input']");
+    await tagInput.trigger("focus");
+    // Suggestions skip tags the print already has.
+    expect(
+      wrapper.findAll("[data-test='tag-suggestion']").map((b) => b.text()),
+    ).toEqual(["outdoor3"]);
+    await tagInput.setValue("#Keep");
+    await tagInput.trigger("keydown", { key: "Enter" });
+    expect(wrapper.emitted("add-tag")?.[0]).toEqual([tagged, "Keep"]);
+    await wrapper.get("[data-test='tag-remove']").trigger("click");
+    expect(wrapper.emitted("remove-tag")?.[0]).toEqual([tagged, "blue"]);
+
+    const toggles = wrapper.findAll("[data-test='collection-toggle']");
+    await toggles[1]!.setValue(true);
+    expect(wrapper.emitted("set-collection")?.[0]).toEqual([
+      tagged,
+      "rivers",
+      true,
+    ]);
+    await wrapper.get("[data-test='collection-new']").trigger("click");
+    expect(wrapper.emitted("new-collection")).toHaveLength(1);
+  });
+
+  it("hides every organization control on a host that cannot organize", () => {
+    const wrapper = mountWide({ canOrganize: false });
+    expect(wrapper.find("[data-test='title-edit']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='favorite-toggle']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='tag-input']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='collection-toggle']").exists()).toBe(
+      false,
+    );
+  });
+
+  it("names the download after the title slug", () => {
+    const wrapper = mountWide({
+      item: { ...item, title: "Harbor Light!", hostId: "origin" },
+      canOrganize: true,
+    });
+    expect(wrapper.get("a[download]").attributes("download")).toBe(
+      "harbor-light.png",
+    );
+  });
+
+  it("labels the overflow action Trash on a trash-capable host", async () => {
+    const wrapper = mountWide({ canTrash: true });
+    await wrapper.find(".lb__morebtn").trigger("click");
+    expect(wrapper.findAll(".lb__menu button").map((b) => b.text())).toEqual([
+      "Upscale…",
+      "Trash",
+    ]);
+  });
+
+  it("in the trash offers Restore and Delete forever with the purge countdown", async () => {
+    const wrapper = mountWide({
+      item: {
+        ...item,
+        trashed_at: 1_700_000_000,
+        purge_at: Math.floor(Date.now() / 1000) + 5 * 86_400,
+      },
+      inTrash: true,
+      canTrash: true,
+      canOrganize: true,
+    });
+    expect(wrapper.text()).toContain("Purges in 5 d");
+    expect(wrapper.find("[data-test='lightbox-primary-action']").exists()).toBe(
+      false,
+    );
+    await wrapper.get("[data-test='lightbox-restore']").trigger("click");
+    expect(wrapper.emitted("restore")?.[0]?.[0]).toMatchObject({
+      filename: "print.png",
+    });
+    await wrapper.get("[data-test='lightbox-delete-forever']").trigger("click");
+    expect(wrapper.emitted("delete-forever")?.[0]?.[0]).toMatchObject({
+      filename: "print.png",
+    });
+    // Title / tags stay editable in the trash; nothing destructive hides.
+    expect(wrapper.find("[data-test='title-edit']").exists()).toBe(true);
+  });
+});
+
 describe("Lightbox (mobile full-screen)", () => {
   it("renders the full-screen viewer with metadata chips", () => {
     setViewportWidth(480);

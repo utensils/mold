@@ -39,6 +39,10 @@ const sectionPresentation: Record<
     icon: "image",
     summary: "Defaults for new image and video jobs",
   },
+  Library: {
+    icon: "library",
+    summary: "Trash retention for prints on this host",
+  },
   "Prompt expansion": {
     icon: "sparkle",
     summary: "Rewrite behavior, model, and sampling controls",
@@ -85,7 +89,8 @@ const grouped = computed(() =>
 
 function typedDraft(row: ConfigRow): ConfigValue {
   const value = drafts[row.key];
-  if (schemaForRow(row).editor === "number") {
+  const schema = schemaForRow(row);
+  if (schema.editor === "number" || schema.valueType === "number") {
     if (value === "" || value === null) {
       throw new Error(`${schemaForRow(row).label} requires a number`);
     }
@@ -266,7 +271,7 @@ onMounted(load);
                   :key="option"
                   :value="option"
                 >
-                  {{ option || "auto" }}
+                  {{ schema.optionLabels?.[option] ?? (option || "auto") }}
                 </option>
               </select>
               <input

@@ -127,6 +127,55 @@ describe("ConfigSettingsPanel", () => {
     });
   });
 
+  it("renders trash retention as labelled choices and writes it back as a number", async () => {
+    rows.push({
+      key: "gallery.trash_retention_days",
+      value: 30,
+      source: "db",
+      profile: "default",
+    });
+    try {
+      const wrapper = mount(ConfigSettingsPanel);
+      await flushPromises();
+      const select = wrapper.get<HTMLSelectElement>(
+        '[data-test="config-gallery.trash_retention_days"]',
+      );
+      expect(select.element.tagName).toBe("SELECT");
+      const labels = select.findAll("option").map((o) => o.text());
+      expect(labels).toEqual([
+        "1 day",
+        "7 days",
+        "30 days",
+        "90 days",
+        "1 year",
+        "Forever",
+      ]);
+      expect(wrapper.text()).toContain("Prints moved to the trash");
+      expect(
+        wrapper
+          .get('[data-test="reset-gallery.trash_retention_days"]')
+          .attributes("disabled"),
+      ).toBeUndefined();
+
+      await select.setValue("0");
+      await wrapper
+        .get('[data-test="save-gallery.trash_retention_days"]')
+        .trigger("click");
+      await flushPromises();
+      const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/config/gallery.trash_retention_days",
+        {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ value: 0 }),
+        },
+      );
+    } finally {
+      rows.pop();
+    }
+  });
+
   it("does not coerce an empty numeric draft to zero", async () => {
     const wrapper = mount(ConfigSettingsPanel);
     await flushPromises();

@@ -195,6 +195,15 @@ complete workflows.
   details show it when present; older and non-LTX prints simply omit the row.
 - LTX-2 is performance-qualified on CUDA and Apple Metal (19B/22B distilled
   FP8 tiers, checkpoint-backed); CPU stays correctness-only.
+- Library organization — titles, ♥ favorites, tags, collections, and a trash
+  with per-host retention (`gallery.trash_retention_days`) — is stored per
+  host in that host's `mold.db` and merged across hosts by every client. The
+  web Library exposes it as the **Prints | Collections | Trash** scope
+  control, the filter-chip row, the print viewer's editable aside, and the
+  selection bar's Add to collection / Tag / Favorite / Trash actions; Settings
+  ▸ Library and Machines ▸ host edit retention. Hosts that do not advertise
+  `gallery.organize` / `gallery.trash` show none of it and keep permanent
+  deletes. See [Generating ▸ Browser UI](/guide/generating#browser-ui).
 
 For model size and VRAM fit, see [Models Overview](/models/). For usage
 examples, see [Generating Images](/guide/generating).
