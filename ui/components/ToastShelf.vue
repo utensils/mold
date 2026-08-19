@@ -7,7 +7,11 @@
  * aside; success/info are polite status rows. Optional action button (undo).
  */
 import { computed } from "vue";
-import { severityIsUrgent, severityMark } from "../lib/notificationSeverity";
+import {
+  severityIsUrgent,
+  severityMark,
+  severityTint,
+} from "../lib/notificationSeverity";
 import type { Toast } from "./types";
 
 export type { Toast };
@@ -26,6 +30,12 @@ const emit = defineEmits<{ dismiss: [id: string]; action: [id: string] }>();
  * desktop shelf, and the bell can never drift apart. */
 const mark = severityMark;
 const urgent = severityIsUrgent;
+
+/* Border tint is derived from the same color rather than restated in CSS —
+ * a per-kind stylesheet rule is how the tables drifted in the first place. */
+function borderStyle(kind: Toast["kind"]) {
+  return kind === "info" ? {} : { borderColor: severityTint(kind, 50) };
+}
 </script>
 
 <template>
@@ -36,9 +46,14 @@ const urgent = severityIsUrgent;
         :key="toast.id"
         class="ms-toast"
         :class="`ms-toast--${toast.kind}`"
+        :style="borderStyle(toast.kind)"
         :role="urgent(toast.kind) ? 'alert' : 'status'"
       >
-        <span class="ms-toast__glyph" aria-hidden="true">
+        <span
+          class="ms-toast__glyph"
+          :style="{ color: mark(toast.kind).color }"
+          aria-hidden="true"
+        >
           {{ mark(toast.kind).glyph }}
         </span>
         <span class="ms-toast__tone">{{ mark(toast.kind).label }}</span>
@@ -133,18 +148,6 @@ const urgent = severityIsUrgent;
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
 }
 
-.ms-toast--error {
-  border-color: color-mix(in srgb, var(--stop) 50%, transparent);
-}
-
-.ms-toast--warning {
-  border-color: color-mix(in srgb, var(--warning) 50%, transparent);
-}
-
-.ms-toast--success {
-  border-color: color-mix(in srgb, var(--success) 45%, transparent);
-}
-
 .ms-toast__tone {
   position: absolute;
   width: 1px;
@@ -161,22 +164,6 @@ const urgent = severityIsUrgent;
   flex: 0 0 auto;
   font-size: 12px;
   line-height: 1;
-}
-
-.ms-toast--success .ms-toast__glyph {
-  color: var(--success);
-}
-
-.ms-toast--info .ms-toast__glyph {
-  color: var(--success);
-}
-
-.ms-toast--warning .ms-toast__glyph {
-  color: var(--warning);
-}
-
-.ms-toast--error .ms-toast__glyph {
-  color: var(--stop);
 }
 
 .ms-toast__text {

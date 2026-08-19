@@ -46,3 +46,15 @@ export function severityMark(kind: NotificationSeverity): SeverityMark {
 export function severityIsUrgent(kind: NotificationSeverity): boolean {
   return kind === "error" || kind === "warning";
 }
+
+/**
+ * Presentation derived from the one color, so no surface restates a hue.
+ * `tint` is the translucent wash a chip or border uses; `solid` is the filled
+ * treatment an error chip takes, whose text reads with `--on-status`.
+ */
+export function severityTint(
+  kind: NotificationSeverity,
+  percent: number,
+): string {
+  return `color-mix(in srgb, ${severityMark(kind).color} ${percent}%, transparent)`;
+}

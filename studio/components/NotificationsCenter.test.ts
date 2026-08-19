@@ -196,6 +196,52 @@ describe("NotificationsCenter copying", () => {
     wrapper.unmount();
   });
 
+  it("announces every copy, including a repeat of the same outcome", async () => {
+    // A live region only speaks when its text changes, and pressing Copy twice
+    // is exactly what someone unsure the first one worked does.
+    vi.stubGlobal("navigator", {
+      clipboard: { writeText: vi.fn().mockResolvedValue(undefined) },
+    });
+    const store = useNotificationsStore();
+    store.record({ kind: "info", text: "Queued", atMs: 1 });
+
+    const wrapper = mountCenter();
+    await wrapper.get('[data-test="notifications-bell"]').trigger("click");
+    await flushPromises();
+    const region = () =>
+      document.body.querySelector('[data-test="notifications-copy-status"]');
+    const copy = () =>
+      document.body.querySelector<HTMLButtonElement>(
+        '[data-test="notifications-copy"]',
+      );
+
+    copy()?.click();
+    await flushPromises();
+    expect(region()?.textContent?.trim()).toBe(
+      "Notification copied to the clipboard",
+    );
+
+    // The region is cleared before the identical message is written back, so
+    // the second press is a real DOM change rather than silence.
+    const cleared: string[] = [];
+    const observer = new MutationObserver(() =>
+      cleared.push(region()?.textContent?.trim() ?? ""),
+    );
+    observer.observe(region()!, {
+      childList: true,
+      characterData: true,
+      subtree: true,
+    });
+    copy()?.click();
+    await flushPromises();
+    observer.disconnect();
+    expect(cleared).toContain("");
+    expect(region()?.textContent?.trim()).toBe(
+      "Notification copied to the clipboard",
+    );
+    wrapper.unmount();
+  });
+
   it("says so when the copy could not happen instead of claiming success", async () => {
     vi.stubGlobal("navigator", {});
     Object.assign(document, { execCommand: vi.fn().mockReturnValue(false) });

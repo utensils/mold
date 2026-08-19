@@ -1,15 +1,21 @@
 /*
- * Host reachability transitions, shared by web and desktop (spec §08 G11).
+ * Host reachability, shared by web and desktop (spec §08 G11).
  *
  * Both surfaces poll every listed host on a timer, so an unreachable machine
  * reconnects on its own the moment it answers again — nothing about that is a
- * user action. These helpers are the one policy for narrating it: a host that
- * drops raises a WARNING (it is retrying, the entry stays listed), and one that
- * comes back raises a SUCCESS. Both fire exactly once per edge.
+ * user action. `reconcileHostConnectivity` is the one policy for narrating it:
+ * a host that drops raises a WARNING (it is retrying, the entry stays listed),
+ * and one that comes back raises a SUCCESS.
  *
- * "connecting" is a probe, never evidence of reachability, so the snapshot
- * carries the last settled status forward — otherwise the manual Retry path
- * (error → connecting → ready) would silently swallow its own recovery.
+ * Two rules make it honest, and both are load-bearing:
+ *
+ * - A recovery is reported only for a host in the caller's `warned` set. The
+ *   error → ready edge alone is not enough: desktop's boot probe errors
+ *   quietly, so a machine that was merely asleep at launch would otherwise
+ *   produce a green "Reconnected to …" for a drop nobody was ever told about.
+ * - "connecting" is a probe, never evidence of reachability, so the snapshot
+ *   carries the last settled status forward — otherwise the manual Retry path
+ *   (error → connecting → ready) would silently swallow its own recovery.
  */
 
 export interface HostStatusSnapshot {
@@ -50,29 +56,6 @@ export function snapshotHostStatuses(
       host.status === "connecting" && settled ? settled : host.status;
   }
   return out;
-}
-
-/** Hosts that just went reachable → offline (ready → error). */
-export function detectOfflineTransitions(
-  previous: Readonly<Record<string, string>>,
-  current: readonly HostStatusSnapshot[],
-): HostStatusSnapshot[] {
-  return current.filter(
-    (host) => host.status === "error" && previous[host.id] === "ready",
-  );
-}
-
-/**
- * Hosts that just came back (error → ready). A first successful connection is
- * not a recovery — only a host we already reported unreachable qualifies.
- */
-export function detectReconnectTransitions(
-  previous: Readonly<Record<string, string>>,
-  current: readonly HostStatusSnapshot[],
-): HostStatusSnapshot[] {
-  return current.filter(
-    (host) => host.status === "ready" && previous[host.id] === "error",
-  );
 }
 
 export interface HostConnectivityInput {

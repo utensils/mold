@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
+import { SEVERITY_MARKS } from "@ui/lib/notificationSeverity";
 import Toasts from "./Toasts.vue";
 import { useToastStore } from "../../stores/toasts";
 
@@ -107,18 +108,19 @@ describe("Toasts severity tones", () => {
 
     const chips = wrapper.findAll("[data-test='toast-status-icon']");
     const byKind = Object.fromEntries(
-      chips.map((chip) => [chip.attributes("data-kind"), chip.classes().join(" ")]),
+      chips.map((chip) => [chip.attributes("data-kind"), chip.attributes("style") ?? ""]),
     );
-    expect(byKind.success).toContain("text-success");
-    expect(byKind.warning).toContain("text-warning");
-    expect(byKind.error).toContain("bg-stop");
+    // Every hue resolves through the shared table rather than a local class.
+    expect(byKind.success).toContain(SEVERITY_MARKS.success.color);
+    expect(byKind.warning).toContain(SEVERITY_MARKS.warning.color);
+    expect(byKind.error).toContain(SEVERITY_MARKS.error.color);
     // An ordinary notice is green too — only warnings and errors stand out.
     toasts.push("Queued", "info");
     await wrapper.vm.$nextTick();
     const info = wrapper
       .findAll("[data-test='toast-status-icon']")
       .find((chip) => chip.attributes("data-kind") === "info");
-    expect(info?.classes().join(" ")).toContain("text-success");
+    expect(info?.attributes("style")).toContain(SEVERITY_MARKS.info.color);
   });
 
   it("names the severity for screen readers, never color alone", async () => {

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onUnmounted, ref } from "vue";
+import { computed, nextTick, onUnmounted, ref } from "vue";
 import Icon from "@ui/components/Icon.vue";
 import Popover from "@ui/components/Popover.vue";
 import {
@@ -77,9 +77,15 @@ async function copyEntry(entry: NotificationEntry) {
   );
   if (epoch !== copyEpoch) return;
   copyState.value = { id: entry.id, ok };
+  await announceCopy(
+    ok
+      ? "Notification copied to the clipboard"
+      : "Could not copy the notification",
+  );
   if (copyResetTimer) clearTimeout(copyResetTimer);
   copyResetTimer = setTimeout(() => {
     copyState.value = null;
+    copyAnnouncement.value = "";
     copyResetTimer = null;
   }, 2000);
 }
@@ -92,12 +98,19 @@ function copyLabel(entry: NotificationEntry): string {
 /* The button's accessible name cannot change under the user's fingers, so the
  * outcome goes to a live region instead — otherwise a failed copy on a plain
  * http origin is announced as nothing at all and the text was never taken. */
-const copyAnnouncement = computed(() => {
-  if (!copyState.value) return "";
-  return copyState.value.ok
-    ? "Notification copied to the clipboard"
-    : "Could not copy the notification";
-});
+const copyAnnouncement = ref("");
+
+/**
+ * A live region only speaks when its text actually changes, so re-setting the
+ * same sentence is silence — and pressing Copy twice is exactly what someone
+ * unsure whether the first one worked does. Clear it, let that render, then
+ * write the outcome so every press is announced.
+ */
+async function announceCopy(message: string) {
+  copyAnnouncement.value = "";
+  await nextTick();
+  copyAnnouncement.value = message;
+}
 
 onUnmounted(() => {
   if (copyResetTimer) clearTimeout(copyResetTimer);
@@ -139,7 +152,7 @@ function timeLabel(entry: NotificationEntry): string {
 
     <div class="notifications-panel" data-test="notifications-panel">
       <p
-        class="notifications-panel__tone"
+        class="notifications-panel__sr"
         role="status"
         aria-live="polite"
         data-test="notifications-copy-status"
@@ -175,7 +188,7 @@ function timeLabel(entry: NotificationEntry): string {
             aria-hidden="true"
             >{{ toneGlyph(entry) }}</span
           >
-          <span class="notifications-panel__tone">{{ toneLabel(entry) }}</span>
+          <span class="notifications-panel__sr">{{ toneLabel(entry) }}</span>
           <div class="notifications-panel__copy">
             <p class="notifications-panel__text">
               {{ entry.text }}
@@ -297,8 +310,9 @@ function timeLabel(entry: NotificationEntry): string {
   color: var(--ink-3, #98a2b3);
 }
 
-/* Severity is never color alone — the tone name ships as assistive text. */
-.notifications-panel__tone {
+/* Visually-hidden utility: the severity name next to each glyph, and the
+ * copy-outcome live region. Both are text only assistive tech needs. */
+.notifications-panel__sr {
   position: absolute;
   width: 1px;
   height: 1px;

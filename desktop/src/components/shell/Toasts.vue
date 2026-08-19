@@ -1,25 +1,27 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import { severityIsUrgent, severityMark } from "@ui/lib/notificationSeverity";
+import { severityIsUrgent, severityMark, severityTint } from "@ui/lib/notificationSeverity";
 import { useToastStore, type Toast } from "../../stores/toasts";
 
 const toasts = useToastStore();
 
 /*
- * Glyphs and severity names come from the one shared table
- * (@ui/lib/notificationSeverity); only the Tailwind chip classes are local.
- * Severity reads as green (an ordinary notice or a success) / yellow (warning)
- * / red (error) — and never by color alone.
+ * Glyphs, severity names, and hues all come from the one shared table
+ * (@ui/lib/notificationSeverity) — restating a color here is exactly how the
+ * surfaces drifted before. Severity reads as green (an ordinary notice or a
+ * success) / yellow (warning) / red (error), and never by color alone.
  */
-const CHIPS: Record<Toast["kind"], string> = {
-  info: "bg-[color-mix(in_srgb,var(--success)_20%,transparent)] text-success",
-  success: "bg-[color-mix(in_srgb,var(--success)_20%,transparent)] text-success",
-  warning: "bg-[color-mix(in_srgb,var(--warning)_22%,transparent)] text-warning",
-  error: "bg-stop text-[var(--on-status)]",
-};
-
 function tone(kind: Toast["kind"]) {
-  return { ...severityMark(kind), chip: CHIPS[kind] ?? CHIPS.info };
+  const mark = severityMark(kind);
+  return {
+    ...mark,
+    // An error is the one filled chip; the rest are washed so the shelf does
+    // not read as a wall of alarm.
+    chip:
+      kind === "error"
+        ? { background: mark.color, color: "var(--on-status)" }
+        : { background: severityTint(kind, 20), color: mark.color },
+  };
 }
 
 // The store appends, so the newest toast is last; the shelf shows it first and
@@ -52,7 +54,7 @@ const ordered = computed(() => [...toasts.items].reverse());
           aria-hidden="true"
           :data-kind="toast.kind"
           class="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full font-semibold"
-          :class="tone(toast.kind).chip"
+          :style="tone(toast.kind).chip"
         >
           {{ tone(toast.kind).glyph }}
         </span>

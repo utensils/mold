@@ -130,15 +130,22 @@ export function installNotifications(deps: NotificationDeps): () => void {
     offlineToastIds.delete(id);
   }
 
-  /** Abort a probe that outlives its own poll interval rather than letting it
-   *  settle after a later tick already reported the opposite. */
-  function pollSignal(): AbortSignal | undefined {
+  /**
+   * Abort a probe before its own tick comes round again, rather than letting it
+   * settle after a later one already reported the opposite. The deadline sits
+   * deliberately INSIDE the interval: at exactly `pollMs` the abort rejection
+   * (a microtask) still drains ahead of the next interval callback, so the
+   * stale poll would report anyway and the epoch guard would never see it.
+   */
+  const probeDeadlineMs = Math.max(1_000, Math.floor(pollMs * 0.8));
+
+  function pollSignal(): { signal: AbortSignal; done: () => void } {
     if (typeof AbortSignal?.timeout === "function") {
-      return AbortSignal.timeout(pollMs);
+      return { signal: AbortSignal.timeout(probeDeadlineMs), done: () => {} };
     }
     const controller = new AbortController();
-    setTimeout(() => controller.abort(), pollMs);
-    return controller.signal;
+    const timer = setTimeout(() => controller.abort(), probeDeadlineMs);
+    return { signal: controller.signal, done: () => clearTimeout(timer) };
   }
 
   async function pollHosts(): Promise<void> {
@@ -150,17 +157,17 @@ export function installNotifications(deps: NotificationDeps): () => void {
       if (offlineHostIds.value.size) offlineHostIds.value = new Set();
       return;
     }
-    const signal = pollSignal();
+    const probe = pollSignal();
     const current = await Promise.all(
       hosts.map(async (host) => {
         try {
-          await hostStatus(host, signal);
+          await hostStatus(host, probe.signal);
           return { id: host.id, label: host.name, status: "ready" };
         } catch {
           return { id: host.id, label: host.name, status: "error" };
         }
       }),
-    );
+    ).finally(probe.done);
     // A tick that started later has already reported; discard this one whole
     // rather than flapping the user between "reconnected" and "can't reach".
     if (epoch !== pollEpoch) return;

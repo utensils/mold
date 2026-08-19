@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { mount } from "@vue/test-utils";
 import ToastShelf from "./ToastShelf.vue";
 import shelfSource from "./ToastShelf.vue?raw";
+import { SEVERITY_MARKS } from "../lib/notificationSeverity";
 import type { Toast } from "./types";
 
 const TOASTS: readonly Toast[] = [
@@ -109,18 +110,24 @@ describe("ToastShelf", () => {
     expect(wrapper.get(".ms-toast__tone").text()).toBe("Warning");
   });
 
-  it("tints each severity from its own token, never a shared color", () => {
-    const glyphRules = [
-      ...shelfSource.matchAll(
-        /\.ms-toast--(\w+) \.ms-toast__glyph \{([^}]*)\}/g,
-      ),
-    ];
-    const byKind = Object.fromEntries(glyphRules.map((m) => [m[1]!, m[2]!]));
-    expect(byKind.success).toContain("var(--success)");
-    expect(byKind.warning).toContain("var(--warning)");
-    expect(byKind.error).toContain("var(--stop)");
-    // An ordinary notice is green as well; its glyph is what sets it apart.
-    expect(byKind.info).toContain("var(--success)");
+  it("tints each severity from the shared table, never a local copy", () => {
+    const wrapper = make([
+      { id: "i", kind: "info", text: "Queued" },
+      { id: "s", kind: "success", text: "Saved" },
+      { id: "w", kind: "warning", text: "Can't reach plato" },
+      { id: "e", kind: "error", text: "Failed" },
+    ]);
+    // Newest first.
+    expect(
+      wrapper.findAll(".ms-toast__glyph").map((g) => g.attributes("style")),
+    ).toEqual([
+      `color: ${SEVERITY_MARKS.error.color};`,
+      `color: ${SEVERITY_MARKS.warning.color};`,
+      `color: ${SEVERITY_MARKS.success.color};`,
+      `color: ${SEVERITY_MARKS.info.color};`,
+    ]);
+    // No stylesheet rule may restate a hue — that is how the surfaces drifted.
+    expect(shelfSource).not.toMatch(/\.ms-toast--\w+ \.ms-toast__glyph/);
   });
 
   it("labels every dismiss button for screen readers", () => {
