@@ -139,3 +139,14 @@ Core contributors:
 [Jeffrey Dilley](mailto:jeff.dilley@gmail.com).
 
 Licensed under the [MIT License](LICENSE).
+
+**Third-party code.** The LTX-Video transformer, 3D causal VAE, and flow-match
+scheduler (`crates/mold-candle/src/ltx_video/`), and the LTX-2 video
+transformer and VAE derived from them, were ported from
+[candle-video](https://github.com/FerrisMind/candle-video) by FerrisMind
+(Copyright 2025 FerrisMind), licensed under the
+[Apache License 2.0](https://github.com/FerrisMind/candle-video/blob/main/LICENSE)
+— itself a Rust port of Hugging Face
+[diffusers](https://github.com/huggingface/diffusers). Those files remain
+Apache-2.0; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for this and
+every other third-party notice.

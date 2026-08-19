@@ -1,5 +1,12 @@
 #![allow(clippy::large_enum_variant)]
 
+// LTX-2 video VAE — adapted from Mold's LTX Video 3D causal VAE, which was
+// ported from FerrisMind/candle-video (Apache 2.0, Copyright 2025 FerrisMind,
+// https://github.com/FerrisMind/candle-video). Portions (`cat_dim`,
+// `pad_time_replicate`, `maybe_inject_noise`, the Conv3d-like config) remain
+// that code under the Apache License, Version 2.0. See THIRD_PARTY_NOTICES.md
+// at the repo root.
+
 use candle_core::{bail, DType, IndexOp, Result, Tensor};
 use candle_nn::{group_norm, ops, Conv2d, Conv2dConfig, GroupNorm, VarBuilder};
 use std::collections::HashMap;
