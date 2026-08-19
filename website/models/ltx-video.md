@@ -14,6 +14,15 @@ _"Underwater footage of a jellyfish pulsing through deep blue water, bioluminesc
 - **License**: LTXV Open Weights License (custom, revenue-gated at $10M)
 - **HuggingFace**:
   [Lightricks/LTX-Video](https://huggingface.co/Lightricks/LTX-Video)
+- **Implementation**: mold's LTX-Video transformer, 3D causal VAE, and
+  flow-match scheduler were ported from
+  [FerrisMind/candle-video](https://github.com/FerrisMind/candle-video)
+  (Copyright 2025 FerrisMind,
+  [Apache License 2.0](https://github.com/FerrisMind/candle-video/blob/main/LICENSE)),
+  itself a Rust port of Hugging Face
+  [diffusers](https://github.com/huggingface/diffusers). Those files stay
+  Apache-2.0 inside mold's MIT codebase — see the repository's
+  `THIRD_PARTY_NOTICES.md`.
 
 > **Note**: Video output defaults to MP4. Also supports GIF, WebP, and APNG
 > via `--format`. (Builds compiled without the `mp4` feature fall back to
