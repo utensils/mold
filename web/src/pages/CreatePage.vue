@@ -219,7 +219,26 @@ import {
   modelDisplayName,
   modelDisplayNameForId,
 } from "@studio/lib/modelDisplay";
-import { sameHostRoute, type HostRoute } from "../lib/hostRouting";
+import {
+  AUTO_TARGET_ID,
+  CAPABLE_TARGET_ID,
+  pickAutoHost,
+  pickMostCapableHost,
+  resolveRoute,
+  sameHostRoute,
+  type HostRoute,
+} from "../lib/hostRouting";
+import {
+  expandModelId,
+  expansionPolicyForSelection,
+  parseMissingExpandModel,
+  resolveExpansionRoute,
+  type ExpansionCandidate,
+} from "@studio/lib/expansionRouting";
+import {
+  useModelInstallTargets,
+  type InstallTarget,
+} from "../composables/useModelInstallTargets";
 import type {
   ExpandFormState,
   GalleryImage,
@@ -278,6 +297,125 @@ const showAdvanced = ref(false);
 const showTemplates = ref(false);
 const templatesHost = ref<HTMLElement | null>(null);
 const composerError = ref<string | null>(null);
+
+// ── Expansion routing (issue #1162 §5) ────────────────────────────────
+// The generation router is model-aware about the CHECKPOINT and knows nothing
+// about the expansion LLM, so under Auto / Most capable a print can land on a
+// machine that has the checkpoint and not the expander. Expansion follows the
+// generation route unless that machine is known to lack the expand model, in
+// which case it re-ranks the eligible machines that positively have it — the
+// shared policy in `@studio/lib/expansionRouting`, ranked by this surface's
+// own routers. The print itself never follows.
+const installTargets = useModelInstallTargets();
+const expansionPull = ref<{
+  model: string;
+  target: InstallTarget | null;
+  label: string;
+} | null>(null);
+const expansionPullBusy = ref(false);
+
+const expansionCandidates = computed<ExpansionCandidate[]>(() =>
+  routing.hosts.value.map((host) => {
+    const expand = routing.capabilitiesByHost.value[host.id]?.expand;
+    return {
+      hostId: host.id,
+      ready: host.status === "ready",
+      ...(expand
+        ? { modelPresent: expand.model_present, configured: expand.configured }
+        : {}),
+    };
+  }),
+);
+
+/** Rank an eligible subset with the generation router's own ordering. */
+function rankExpansionHosts(hostIds: readonly string[]): string | null {
+  const pool = routing.hosts.value.filter((host) => hostIds.includes(host.id));
+  const chosen =
+    routing.targetId.value === CAPABLE_TARGET_ID
+      ? pickMostCapableHost(pool, null)
+      : pickAutoHost(pool);
+  return chosen?.id ?? null;
+}
+
+/**
+ * Where a missing expander gets pulled. Every reachable machine is a
+ * legitimate target (`planModelInstall` is the one policy), but the machine
+ * the expansion would have used wins so prepared work freezes ONE route. The
+ * machine picker is mounted by the Models page, so Create names its choice
+ * instead of opening it — the same rule the ⌘K palette follows.
+ */
+function offerExpansionPull(model: string, route: HostRoute | null): void {
+  const plan = installTargets.planFor(model);
+  const target =
+    plan.targets.find((entry) => entry.host.id === route?.hostId) ??
+    plan.targets[0] ??
+    null;
+  expansionPull.value = {
+    model,
+    target,
+    label: target?.host.label ?? route?.label ?? "this machine",
+  };
+}
+
+/**
+ * The host expansion runs on. Side effect by design: a fleet where nothing has
+ * the expander raises the pull offer, which is the point of routing expansion
+ * separately from the print.
+ */
+function expansionRouteFor(generation: HostRoute | null): HostRoute | null {
+  if (!routing.multiHost.value) return generation;
+  const decision = resolveExpansionRoute(
+    expansionPolicyForSelection(routing.targetId.value, {
+      auto: AUTO_TARGET_ID,
+      capable: CAPABLE_TARGET_ID,
+    }),
+    generation,
+    expansionCandidates.value,
+    rankExpansionHosts,
+  );
+  if (decision.kind === "reroute") {
+    expansionPull.value = null;
+    return resolveRoute(routing.hosts.value, decision.hostId) ?? generation;
+  }
+  if (decision.kind === "missing") {
+    const named = generation
+      ? routing.capabilitiesByHost.value[generation.hostId]?.expand
+      : null;
+    offerExpansionPull(expandModelId(named), generation);
+  } else {
+    expansionPull.value = null;
+  }
+  return generation;
+}
+
+/** True once the routed machine has positively reported it lacks the model. */
+function expansionBlockedByMissingModel(route: HostRoute | null): boolean {
+  if (!expansionPull.value) return false;
+  const expand = route
+    ? routing.capabilitiesByHost.value[route.hostId]?.expand
+    : null;
+  return expand?.model_present === false;
+}
+
+async function pullExpansionModel(): Promise<void> {
+  const pending = expansionPull.value;
+  if (!pending || expansionPullBusy.value) return;
+  expansionPullBusy.value = true;
+  try {
+    await installTargets.startDownloadOn(pending.target, pending.model);
+    toast("success", installTargets.queuedMessage(pending.target));
+    expansionPull.value = null;
+  } catch (error) {
+    toast(
+      "error",
+      error instanceof Error
+        ? error.message
+        : `Couldn't pull ${pending.model} on ${pending.label}.`,
+    );
+  } finally {
+    expansionPullBusy.value = false;
+  }
+}
 const preprocessingStatus = ref<string | null>(null);
 const submitStatus = computed(
   () =>
@@ -3041,6 +3179,7 @@ async function onExpand() {
     const baseRequest = form.toRequest(currentModel.value);
     const task = expansionTaskForCurrentOutput(baseRequest);
     preparingVariations.value = true;
+    let expandOn: HostRoute | null = null;
     try {
       const result =
         decision.kind === "chain"
@@ -3054,7 +3193,11 @@ async function onExpand() {
         return;
       }
       const route = result.route;
-      const submitRoute = normalizeSubmitRoute(route);
+      // Expansion may run on a peer that has the expander; the reviewed set is
+      // still frozen to `route`, where every sibling is submitted.
+      expandOn = expansionRouteFor(route);
+      if (expansionBlockedByMissingModel(expandOn)) return;
+      const submitRoute = normalizeSubmitRoute(expandOn);
       const style = styleHint(form.state.value.stylePreset ?? "");
       composerError.value = null;
       const response = await expandPrompt(
@@ -3082,8 +3225,12 @@ async function onExpand() {
         route: cloneRoute(route)!,
       };
     } catch (error) {
-      composerError.value =
-        error instanceof Error ? error.message : String(error);
+      const message = error instanceof Error ? error.message : String(error);
+      // The engine's 422 embeds its own fix; turn it into the same pull offer
+      // the pre-flight capability check raises.
+      const missing = parseMissingExpandModel(message);
+      if (missing) offerExpansionPull(missing, expandOn);
+      composerError.value = message;
     } finally {
       preparingVariations.value = false;
     }
@@ -3092,7 +3239,9 @@ async function onExpand() {
   // batch = 1: server enrichment via the Expand modal, applied in place.
   const route = resolveSubmitRoute();
   if (route === false) return;
-  expandRoute.value = cloneRoute(route);
+  const expandOn = expansionRouteFor(route);
+  if (expansionBlockedByMissingModel(expandOn)) return;
+  expandRoute.value = cloneRoute(expandOn);
   expandTask.value = expansionTaskForCurrentOutput(
     form.toRequest(currentModel.value),
   );
@@ -3206,7 +3355,9 @@ async function prepareRemixBatch(response: RemixResponseWire) {
 function onExpandClip(clipId: string, prompt: string) {
   const route = resolveSubmitRoute();
   if (route === false) return;
-  expandRoute.value = cloneRoute(route);
+  const expandOn = expansionRouteFor(route);
+  if (expansionBlockedByMissingModel(expandOn)) return;
+  expandRoute.value = cloneRoute(expandOn);
   expandClipId.value = clipId;
   expandStagePrompt.value = prompt;
   const index = draft.clips.findIndex((clip) => clip.id === clipId);
@@ -4230,6 +4381,36 @@ onBeforeUnmount(() => {
                 @click="undoExpand"
               >
                 Restore original
+              </button>
+            </div>
+          </div>
+
+          <div
+            v-else-if="expansionPull"
+            class="rounded-control border border-stop/45 bg-stop/10 px-3 py-2.5 text-sm leading-relaxed text-stop"
+            role="alert"
+            data-test="web-expansion-pull"
+          >
+            <p class="min-w-0">
+              The expansion model {{ expansionPull.model }} isn't installed on
+              {{ expansionPull.label }}.
+            </p>
+            <div class="mt-2 flex flex-wrap gap-2">
+              <button
+                type="button"
+                data-test="web-expansion-pull-action"
+                class="rounded-control bg-stop px-3 py-1.5 font-semibold text-on-accent disabled:opacity-60"
+                :disabled="expansionPullBusy"
+                @click="pullExpansionModel"
+              >
+                Pull {{ expansionPull.model }} on {{ expansionPull.label }}
+              </button>
+              <button
+                type="button"
+                class="rounded-control px-3 py-1.5 text-ink-2 hover:text-ink"
+                @click="expansionPull = null"
+              >
+                Dismiss
               </button>
             </div>
           </div>

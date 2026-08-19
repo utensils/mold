@@ -7035,6 +7035,11 @@ pub struct ExpandCapabilities {
     /// Subject-preserving Remix is available through `POST /api/remix`.
     #[serde(default)]
     pub remix: bool,
+    /// The manifest model local expansion resolves. Additive: clients that
+    /// see it stop hard-coding `qwen3-expand` when offering to pull it.
+    /// Absent for API backends and for servers that predate the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 // ── Device inventory ────────────────────────────────────────────────────────
@@ -8165,12 +8170,14 @@ mod server_event_tests {
             model_present: Some(false),
             backend: ExpandBackend::Local,
             remix: true,
+            model: Some("qwen3-expand".into()),
         };
         let api = ExpandCapabilities {
             configured: true,
             model_present: None,
             backend: ExpandBackend::Api,
             remix: true,
+            model: None,
         };
 
         assert_eq!(
@@ -8179,7 +8186,8 @@ mod server_event_tests {
                 "configured": true,
                 "model_present": false,
                 "backend": "local",
-                "remix": true
+                "remix": true,
+                "model": "qwen3-expand"
             })
         );
         assert_eq!(

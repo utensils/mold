@@ -97,7 +97,7 @@ export interface HostView {
   instanceId: string | null;
 }
 
-interface HostTelemetry {
+export interface HostTelemetry {
   queueDepth: number | null;
   queueCapacity: number | null;
   predictedCompletionMs?: number | null;
@@ -119,7 +119,9 @@ interface HostTelemetry {
   hostname?: string | null;
 }
 
-function strongestRoutableGpu(telemetry: HostTelemetry | undefined) {
+/** Exported so a view can rank an arbitrary subset of hosts (expansion
+ *  routing) with the same GPU summary this store's own routers use. */
+export function strongestRoutableGpu(telemetry: HostTelemetry | undefined) {
   if (telemetry?.devices != null) {
     const devices = telemetry.devices.filter(
       (device) => device.schedulable && device.ordinal !== null,

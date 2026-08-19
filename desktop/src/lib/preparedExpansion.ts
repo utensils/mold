@@ -33,7 +33,12 @@ export interface PreparedExpansionPrompt {
 
 export interface PreparedExpansionBatch extends PreparedExpansionInputs {
   batchId: string;
+  /** The frozen GENERATION authority — where every sibling is submitted. */
   route: HostRoute;
+  /** Recorded only when expansion ran somewhere else (the generation host
+   * lacked the expand model). Provenance and the retry target; it is never
+   * where the print is queued. */
+  expansionRoute?: HostRoute;
   prompts: PreparedExpansionPrompt[];
 }
 
@@ -48,7 +53,10 @@ export interface QuickExpansionSnapshot {
    * apply clears the live chip, and undo restores it from here. */
   stylePreset: string | null;
   selectedHostPolicy: HostSelectionPolicy;
+  /** The frozen GENERATION authority — where the print is submitted. */
   route: HostRoute;
+  /** Recorded only when expansion ran on a different machine. */
+  expansionRoute?: HostRoute;
   promptTransform?: PromptTransformProvenance;
 }
 

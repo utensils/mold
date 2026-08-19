@@ -69,7 +69,15 @@ prompt anyway** as an explicit current-route override, or **Restore original**.
 The notice uses readable model names, larger error copy, and a copy button.
 
 Mold resolves the selected Create host before expansion and keeps that exact
-route for every sibling. Large expansions are assembled from bounded
+route for every sibling. On desktop and web, expansion follows that generation
+route unless the machine reports it does not have the expansion model
+installed: under **Auto** or **Most capable** the rewrite then runs on the
+best-ranked reachable machine that does have it, using the same ranking the
+generation router uses, while the print itself still goes where it was routed.
+A pinned machine is never left. When no eligible machine has the model, Create
+offers to pull it and names the machine — the machine expansion would have used
+— instead of failing. iPhone pins one machine, so expansion always runs there.
+Large expansions are assembled from bounded
 four-prompt model calls with position-aware instructions and per-chunk token
 budgets. Missing or duplicate positions are retried, and Mold rejects any
 result that is not exactly N distinct, non-empty prompts. Changing the source

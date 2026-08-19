@@ -223,10 +223,18 @@ const hostModelsMock = vi.hoisted(() =>
   vi.fn(async (_host: { id: string }): Promise<unknown[]> => []),
 );
 
+const hostCapabilitiesMock = vi.hoisted(() =>
+  vi.fn(
+    async (_host: { id: string }): Promise<Record<string, unknown>> => ({}),
+  ),
+);
+const hostModelDownloadMock = vi.hoisted(() => vi.fn(async () => null));
+
 vi.mock("../components/machines/hostClient", () => ({
   hostStatus: hostStatusMock,
   hostModels: hostModelsMock,
-  hostCapabilities: () => Promise.resolve({}),
+  hostModelDownload: hostModelDownloadMock,
+  hostCapabilities: hostCapabilitiesMock,
   hostQueue: () => Promise.resolve({ entries: [], plan: null }),
   hostDevices: () => Promise.reject(new Error("legacy server in tests")),
   hostModelComponents: (_host: unknown, model: string) =>
@@ -339,6 +347,9 @@ describe("CreatePage layout and behavior", () => {
     hostStatusMock.mockClear();
     hostModelsMock.mockClear();
     hostModelsMock.mockResolvedValue([]);
+    hostCapabilitiesMock.mockClear();
+    hostCapabilitiesMock.mockResolvedValue({});
+    hostModelDownloadMock.mockClear();
     vi.stubGlobal("prompt", vi.fn());
   });
 
@@ -3241,6 +3252,116 @@ describe("CreatePage host routing", () => {
       referenceUploads: null,
       target: { baseUrl: "http://studio:7680", apiKey: "sk-studio" },
     });
+  });
+
+  // ── Expansion routing (issue #1162 §5) ──────────────────────────────
+  function expandCapabilityFor(present: Record<string, boolean>) {
+    return async (host: { id: string }) => ({
+      gallery: { can_delete: true },
+      expand: {
+        configured: true,
+        model_present: present[host.id] ?? null,
+        backend: "local",
+        model: "qwen3-expand:q8",
+      },
+    });
+  }
+
+  it("expands on a machine that has the expander while the print stays put", async () => {
+    const studio = addHost({
+      url: "http://studio:7680",
+      name: "Studio",
+      apiKey: "sk-studio",
+    });
+    hostModelsMock.mockResolvedValue([flux]);
+    hostCapabilitiesMock.mockImplementation(
+      expandCapabilityFor({ [ORIGIN_HOST_ID]: false, [studio.id]: true }),
+    );
+
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = "flux-dev:q4";
+    form.state.value.modelFamily = "flux";
+    form.state.value.prompt = "a lighthouse";
+    await nextTick();
+
+    await wrapper.get("[data-test='composer-expand']").trigger("click");
+    await flushPromises();
+
+    const modal = wrapper.getComponent({ name: "ExpandModal" });
+    expect(modal.props("open")).toBe(true);
+    expect(modal.props("target")).toEqual({
+      baseUrl: "http://studio:7680",
+      apiKey: "sk-studio",
+    });
+    expect(wrapper.find("[data-test='web-expansion-pull']").exists()).toBe(
+      false,
+    );
+  });
+
+  it("keeps the generation route when its expand capability is unknown", async () => {
+    const studio = addHost({ url: "http://studio:7680", name: "Studio" });
+    hostModelsMock.mockResolvedValue([flux]);
+    hostCapabilitiesMock.mockImplementation(
+      expandCapabilityFor({ [studio.id]: true }),
+    );
+
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = "flux-dev:q4";
+    form.state.value.modelFamily = "flux";
+    form.state.value.prompt = "a lighthouse";
+    await nextTick();
+
+    await wrapper.get("[data-test='composer-expand']").trigger("click");
+    await flushPromises();
+
+    // Unknown is never "missing": the route the generation earned is kept.
+    expect(
+      wrapper.getComponent({ name: "ExpandModal" }).props("target"),
+    ).toEqual({ baseUrl: "http://localhost:3000" });
+  });
+
+  it("offers the expander pull on a pinned machine instead of leaving it", async () => {
+    const studio = addHost({
+      url: "http://studio:7680",
+      name: "Studio",
+      apiKey: "sk-studio",
+    });
+    localStorage.setItem("mold.web.generateTarget.v1", studio.id);
+    hostModelsMock.mockResolvedValue([flux]);
+    hostCapabilitiesMock.mockImplementation(
+      expandCapabilityFor({ [ORIGIN_HOST_ID]: true, [studio.id]: false }),
+    );
+
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = "flux-dev:q4";
+    form.state.value.modelFamily = "flux";
+    form.state.value.prompt = "a lighthouse";
+    await nextTick();
+
+    await wrapper.get("[data-test='composer-expand']").trigger("click");
+    await flushPromises();
+
+    expect(wrapper.getComponent({ name: "ExpandModal" }).props("open")).toBe(
+      false,
+    );
+    const notice = wrapper.get("[data-test='web-expansion-pull']");
+    expect(notice.text()).toContain("qwen3-expand:q8");
+    expect(notice.text()).toContain("Studio");
+
+    await wrapper
+      .get("[data-test='web-expansion-pull-action']")
+      .trigger("click");
+    await flushPromises();
+    expect(hostModelDownloadMock).toHaveBeenCalledWith(
+      expect.objectContaining({ id: studio.id }),
+      "qwen3-expand:q8",
+    );
   });
 
   it("refuses to reroute when the pinned machine is unreachable", async () => {
