@@ -730,6 +730,22 @@ pub(crate) fn authenticate_h3_turbo_lora_adapter_against(
     tier: H3TurboLoraTier,
     cancellation: &dyn H3ComfyInt8Cancellation,
 ) -> H3TurboLoraResult<H3TurboLoraContract> {
+    authenticate_h3_turbo_lora_adapter_retaining(path, expectation, tier, cancellation)
+        .map(|(contract, _)| contract)
+}
+
+/// Authenticate and hand back the retained descriptor that was hashed.
+///
+/// A runtime loader must read the adapter tensors from the *same* open file
+/// the content digest was computed over; re-opening by path would reintroduce
+/// the swap the descriptor fence exists to prevent, and re-hashing two
+/// gigabytes to close that window again would double the load cost.
+pub(crate) fn authenticate_h3_turbo_lora_adapter_retaining(
+    path: &Path,
+    expectation: &H3TurboLoraExpectation,
+    tier: H3TurboLoraTier,
+    cancellation: &dyn H3ComfyInt8Cancellation,
+) -> H3TurboLoraResult<(H3TurboLoraContract, File)> {
     expectation.validate()?;
     if tier.task() != expectation.task {
         return Err(failure(
@@ -825,12 +841,15 @@ pub(crate) fn authenticate_h3_turbo_lora_adapter_against(
         &inspection.structure_identity_sha256,
         &content_sha256,
     );
-    Ok(H3TurboLoraContract {
-        tier,
-        content_sha256,
-        adapter_identity_sha256,
-        inspection,
-    })
+    Ok((
+        H3TurboLoraContract {
+            tier,
+            content_sha256,
+            adapter_identity_sha256,
+            inspection,
+        },
+        file,
+    ))
 }
 
 fn cancellation_boundary(cancellation: &dyn H3ComfyInt8Cancellation) -> H3TurboLoraResult<()> {
@@ -1241,14 +1260,14 @@ fn read_turbo_alphas(
     Ok(alphas)
 }
 
-struct ExpectedModule {
-    scope: H3TurboLoraModuleScope,
-    kind: H3TurboLoraModuleKind,
-    base_weight_name: String,
-    rank: usize,
-    in_features: usize,
-    out_features: usize,
-    alpha: f32,
+pub(super) struct ExpectedModule {
+    pub(super) scope: H3TurboLoraModuleScope,
+    pub(super) kind: H3TurboLoraModuleKind,
+    pub(super) base_weight_name: String,
+    pub(super) rank: usize,
+    pub(super) in_features: usize,
+    pub(super) out_features: usize,
+    pub(super) alpha: f32,
 }
 
 /// Derive the exact expected module set from the shared block-linear target
@@ -1260,7 +1279,7 @@ struct ExpectedModule {
 /// contract too. If such a target has no [`H3TurboLoraModuleKind`], the
 /// contract fails closed with `ConfigMismatch` rather than silently omitting
 /// an overlay the base checkpoint expects.
-fn expected_turbo_modules(
+pub(super) fn expected_turbo_modules(
     expectation: &H3TurboLoraExpectation,
 ) -> H3TurboLoraResult<(BTreeMap<String, ExpectedModule>, BTreeSet<String>)> {
     let specs = expected_h3_weight_specs(
@@ -1575,34 +1594,20 @@ fn turbo_adapter_identity(
     sha256_hex(digest.finalize())
 }
 
+/// Synthetic adapter builders shared by the parser tests and the runtime
+/// tests, so both exercise the same file shape.
 #[cfg(test)]
-impl H3TurboLoraTier {
-    /// Repository-relative path of the checked-in golden: the exact published
-    /// eight-byte length prefix followed by the exact published JSON header.
-    fn header_fixture_path(self) -> std::path::PathBuf {
-        let name = match self {
-            Self::Fl2v8StepV10 => "fl2v-8step-v1.0.header",
-            Self::Fl2v768p4StepV10 => "fl2v-4step-768p-v1.0.header",
-            Self::Ref2v4StepV10 => "ref2v-4step-v0.1.header",
-        };
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("testdata/minimax_h3/turbo")
-            .join(name)
-    }
-}
-
-#[cfg(test)]
-mod tests {
+pub(super) mod fixtures {
     use std::io::Write;
 
     use serde_json::{Map, Value};
+    use sha2::{Digest, Sha256};
 
-    use super::super::comfy_dit::H3ComfyNeverCancel;
     use super::*;
 
     /// A valid but tiny transformer geometry, mirroring `comfy_dit`'s runtime
     /// fixture so the synthetic adapter overlays a real base weight set.
-    fn fixture_config() -> H3TransformerConfig {
+    pub(in crate::minimax_h3) fn config() -> H3TransformerConfig {
         H3TransformerConfig {
             hidden_size: 256,
             num_layers: 2,
@@ -1624,9 +1629,9 @@ mod tests {
         }
     }
 
-    fn fixture_expectation() -> H3TurboLoraExpectation {
+    pub(in crate::minimax_h3) fn expectation() -> H3TurboLoraExpectation {
         H3TurboLoraExpectation {
-            config: fixture_config(),
+            config: config(),
             task: H3TransformerTask::T2VaFl2Va,
             training_rank: 4,
             training_alpha: 0.25,
@@ -1637,9 +1642,19 @@ mod tests {
         }
     }
 
+    /// Deterministic weight element, keyed by tensor name and index so a
+    /// consumer can rebuild the exact same matrix without reading the file.
+    pub(in crate::minimax_h3) fn weight_value(name: &str, index: usize) -> f32 {
+        let seed = name.bytes().fold(0u32, |sum, byte| {
+            sum.wrapping_mul(31).wrapping_add(u32::from(byte))
+        });
+        let raw = seed.wrapping_add((index as u32).wrapping_mul(2_654_435_761)) % 257;
+        (raw as f32 / 128.0 - 1.0) * 0.25
+    }
+
     /// Build a complete synthetic adapter for an expectation: the exact module
-    /// set, shapes, dtypes, and alpha scalars the contract requires.
-    fn fixture_adapter(expectation: &H3TurboLoraExpectation) -> (Value, Vec<u8>) {
+    /// set, shapes, dtypes, deterministic BF16 weights, and alpha scalars.
+    pub(in crate::minimax_h3) fn adapter(expectation: &H3TurboLoraExpectation) -> (Value, Vec<u8>) {
         let (expected, _) = expected_turbo_modules(expectation).unwrap();
         let mut entries = BTreeMap::<String, (&'static str, Vec<usize>, Option<f32>)>::new();
         for (module_key, module) in &expected {
@@ -1668,11 +1683,15 @@ mod tests {
         let mut data = Vec::new();
         for (name, (dtype, shape, alpha)) in entries {
             let elements = shape.iter().product::<usize>();
-            let bytes = elements * safetensors_dtype_size(dtype).unwrap() as usize;
             let start = data.len() as u64;
             match alpha {
                 Some(value) => data.extend_from_slice(&value.to_le_bytes()),
-                None => data.resize(data.len() + bytes, 0),
+                None => {
+                    for index in 0..elements {
+                        let value = half::bf16::from_f32(weight_value(&name, index));
+                        data.extend_from_slice(&value.to_bits().to_le_bytes());
+                    }
+                }
             }
             header.insert(
                 name,
@@ -1708,7 +1727,10 @@ mod tests {
         (Value::Object(header), data)
     }
 
-    fn write_adapter(header: &Value, data: &[u8]) -> (tempfile::TempDir, std::path::PathBuf) {
+    pub(in crate::minimax_h3) fn write(
+        header: &Value,
+        data: &[u8],
+    ) -> (tempfile::TempDir, std::path::PathBuf) {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("turbo.safetensors");
         let encoded = serde_json::to_vec(header).unwrap();
@@ -1718,6 +1740,63 @@ mod tests {
         file.write_all(&encoded).unwrap();
         file.write_all(data).unwrap();
         (directory, path)
+    }
+
+    /// A written fixture plus an expectation carrying its real content digest,
+    /// which is what `authenticate` requires.
+    pub(in crate::minimax_h3) fn pinned() -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        H3TurboLoraExpectation,
+    ) {
+        let expectation = expectation();
+        let (header, data) = adapter(&expectation);
+        let (directory, path) = write(&header, &data);
+        let mut pinned = expectation;
+        pinned.content_sha256 = Some(sha256_hex(Sha256::digest(std::fs::read(&path).unwrap())));
+        (directory, path, pinned)
+    }
+}
+
+#[cfg(test)]
+impl H3TurboLoraTier {
+    /// Repository-relative path of the checked-in golden: the exact published
+    /// eight-byte length prefix followed by the exact published JSON header.
+    fn header_fixture_path(self) -> std::path::PathBuf {
+        let name = match self {
+            Self::Fl2v8StepV10 => "fl2v-8step-v1.0.header",
+            Self::Fl2v768p4StepV10 => "fl2v-4step-768p-v1.0.header",
+            Self::Ref2v4StepV10 => "ref2v-4step-v0.1.header",
+        };
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("testdata/minimax_h3/turbo")
+            .join(name)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::Value;
+
+    use super::super::comfy_dit::H3ComfyNeverCancel;
+    use super::*;
+
+    use super::fixtures;
+
+    fn fixture_config() -> H3TransformerConfig {
+        fixtures::config()
+    }
+
+    fn fixture_expectation() -> H3TurboLoraExpectation {
+        fixtures::expectation()
+    }
+
+    fn fixture_adapter(expectation: &H3TurboLoraExpectation) -> (Value, Vec<u8>) {
+        fixtures::adapter(expectation)
+    }
+
+    fn write_adapter(header: &Value, data: &[u8]) -> (tempfile::TempDir, std::path::PathBuf) {
+        fixtures::write(header, data)
     }
 
     /// Re-lay the tensor data so offsets stay contiguous after a mutation.
@@ -2552,12 +2631,7 @@ mod tests {
         std::path::PathBuf,
         H3TurboLoraExpectation,
     ) {
-        let expectation = fixture_expectation();
-        let (header, data) = fixture_adapter(&expectation);
-        let (directory, path) = write_adapter(&header, &data);
-        let mut pinned = expectation;
-        pinned.content_sha256 = Some(sha256_hex(Sha256::digest(std::fs::read(&path).unwrap())));
-        (directory, path, pinned)
+        fixtures::pinned()
     }
 
     #[test]

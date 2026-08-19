@@ -44,6 +44,7 @@ use super::dit::{
     H3PrecisionProfile, H3QkvLayout, H3StreamedTransformer, H3StreamedTransformerIdentity,
     H3TransformerConfig, H3TransformerTask,
 };
+use super::turbo_runtime::H3TurboLoraRuntime;
 
 pub const H3_COMFYUI_SOURCE_REVISION: &str = "a464ac33588ae182f81a090d910cfbf21e255b73";
 pub const H3_COMFY_ORG_SOURCE_REVISION: &str = "eb8a16107c595128b3a578f82d2ce2f75920c355";
@@ -504,6 +505,23 @@ impl H3ComfyOpenedInt8Checkpoint {
         attention: H3AttentionRuntimeAuthority,
         cancellation: Arc<dyn H3ComfyInt8Cancellation>,
     ) -> candle::Result<(H3StreamedTransformer, H3ComfyInt8BlockLoader)> {
+        self.load_with_turbo_adapter(device, attention, cancellation, None)
+    }
+
+    /// Load with an authenticated Turbo LoRA adapter overlaid as a parallel
+    /// low-rank branch on all 208 adapted linears.
+    ///
+    /// The adapter's deltas are already device-resident; the eight BF16
+    /// token-refiner deltas attach to the resident core here, and the 200 INT8
+    /// block deltas ride along with the exact-block loader. Passing `None` is
+    /// bit-identical to [`Self::load_with_attention_and_cancellation`].
+    pub fn load_with_turbo_adapter(
+        self,
+        device: &Device,
+        attention: H3AttentionRuntimeAuthority,
+        cancellation: Arc<dyn H3ComfyInt8Cancellation>,
+        turbo: Option<Arc<H3TurboLoraRuntime>>,
+    ) -> candle::Result<(H3StreamedTransformer, H3ComfyInt8BlockLoader)> {
         cancellation_boundary(cancellation.as_ref())?;
         let backend = H3ComfyOpenedBackend {
             source: self.source.clone(),
@@ -528,6 +546,7 @@ impl H3ComfyOpenedInt8Checkpoint {
             vb.clone(),
             attention,
             self.checkpoint_identity_sha256.clone(),
+            turbo.as_deref(),
         )?;
         cancellation_boundary(cancellation.as_ref())?;
         let loader = H3ComfyInt8BlockLoader {
@@ -538,6 +557,7 @@ impl H3ComfyOpenedInt8Checkpoint {
             vb,
             identity: transformer.streamed_identity(),
             cancellation,
+            turbo,
         };
         Ok((transformer, loader))
     }
@@ -1523,6 +1543,9 @@ pub struct H3ComfyInt8BlockLoader {
     vb: VarBuilder<'static>,
     identity: Arc<H3StreamedTransformerIdentity>,
     cancellation: Arc<dyn H3ComfyInt8Cancellation>,
+    /// Device-resident Turbo deltas for all fifty main blocks, shared with the
+    /// resident core that carries the token-refiner deltas.
+    turbo: Option<Arc<H3TurboLoraRuntime>>,
 }
 
 impl fmt::Debug for H3ComfyInt8BlockLoader {
@@ -1616,6 +1639,20 @@ impl H3ComfyInt8BlockLoader {
             out: linear("attn.out_proj")?,
             fc1: linear("mlp.fc1")?,
             fc2: linear("mlp.fc2")?,
+            // The adapter is device-resident for the whole denoise, so the
+            // streamed block only clones four handles here; the one-live-block
+            // invariant is untouched.
+            turbo: self
+                .turbo
+                .as_ref()
+                .map(|turbo| {
+                    turbo.main_block(index).cloned().ok_or_else(|| {
+                        candle::Error::Msg(format!(
+                            "MiniMax H3 Turbo adapter has no delta for main block {index}"
+                        ))
+                    })
+                })
+                .transpose()?,
         };
         cancellation_boundary(self.cancellation.as_ref())?;
         H3LoadedTransformerBlock::new_comfy_int8(
