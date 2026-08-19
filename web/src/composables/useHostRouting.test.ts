@@ -281,6 +281,7 @@ describe("useHostRouting", () => {
           label: "this server",
           reason: "MiniMax H3 is not activated.",
           missingComponents: [],
+          missingModel: null,
         },
       ],
     });
@@ -1177,6 +1178,7 @@ describe("useHostRouting", () => {
           label: "Studio",
           reason: "insufficient_vram",
           missingComponents: [],
+          missingModel: null,
         },
       ],
     });
@@ -1244,12 +1246,26 @@ describe("useHostRouting", () => {
               repair_model: "flux-dev:q4",
             },
           ],
+          // The absent component names THIS model as its repair, so pulling
+          // it here is the fix — that is a missing-model refusal.
+          missingModel: {
+            model: "flux-dev:q4",
+            missingComponents: [
+              {
+                kind: "vae",
+                name: "ae.safetensors",
+                present: false,
+                repair_model: "flux-dev:q4",
+              },
+            ],
+          },
         },
         {
           hostId: studio.id,
           label: "Studio",
           reason: "stale device pin cuda:gone",
           missingComponents: [],
+          missingModel: null,
         },
       ],
     });
@@ -1296,6 +1312,7 @@ describe("useHostRouting", () => {
           label: "this server",
           reason: "required VAE is absent",
           missingComponents: [],
+          missingModel: null,
         },
       ],
       unreachable: [

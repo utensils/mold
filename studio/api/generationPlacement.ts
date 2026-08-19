@@ -202,6 +202,62 @@ export function classifyPlacementPreview(
   return "planned";
 }
 
+/** The server's own wording when a model's primary artifacts are absent
+ * (`variant_dependencies.rs` builds it before placement is ever computed). */
+const NO_LOCAL_ARTIFACTS = /has no concrete local artifacts/i;
+
+/** Component kinds that ARE the model, as opposed to a companion encoder,
+ * VAE, or adapter that carries its own `repair_model`. */
+const PRIMARY_COMPONENT_KINDS = new Set([
+  "transformer",
+  "checkpoint",
+  "unet",
+  "diffusion-model",
+]);
+
+export interface MissingModelPlacement {
+  /** The exact id to pull so this machine could run the request. Always the
+   * requested model — a companion component names its own `repair_model` and
+   * is deliberately NOT reported here. */
+  model: string;
+  /** Whatever the server said was absent, already filtered to `present:false`. */
+  missingComponents: PlacementMissingComponent[];
+}
+
+/**
+ * Tell "this machine does not have the model" apart from every other reason a
+ * placement is infeasible (it does not fit, a companion is missing, a policy
+ * refuses it). Only the first is recoverable by pulling the model, so only the
+ * first may offer a pull — which is why this is one shared classifier rather
+ * than a per-surface string match.
+ *
+ * Evidence is either the server's own "no concrete local artifacts" reason or
+ * a missing component that IS the primary checkpoint. A capacity refusal
+ * carries neither.
+ */
+export function classifyMissingModel(
+  preview: GenerationPlacementPreview | null | undefined,
+  requestedModel: string,
+): MissingModelPlacement | null {
+  if (!preview || !requestedModel) return null;
+  if (classifyPlacementPreview(preview) !== "infeasible") return null;
+  const missingComponents = (preview.missing_components ?? []).filter(
+    (component) => !component.present,
+  );
+  const primaryComponent = missingComponents.some(
+    (component) =>
+      component.repair_model === requestedModel ||
+      (PRIMARY_COMPONENT_KINDS.has(component.kind) &&
+        (component.repair_model === undefined ||
+          component.repair_model === null)),
+  );
+  const reasonNamesPrimary =
+    typeof preview.reason === "string" &&
+    NO_LOCAL_ARTIFACTS.test(preview.reason);
+  if (!primaryComponent && !reasonNamesPrimary) return null;
+  return { model: requestedModel, missingComponents };
+}
+
 /** A prepared Batch N is submitted as N independent one-image requests.
  * Keep the reviewed request immutable, but preview the exact sibling shape
  * instead of multiplying its original batch_size by copies a second time. */

@@ -4,12 +4,14 @@ import { profileHashConflict } from "@studio/lib/profileFleet";
 import { listDevices, type DeviceInfo } from "@studio/api/devices";
 import { listQueue, predictedCompletionUnixMs } from "@studio/api/queuePlan";
 import {
+  classifyMissingModel,
   comparePlacementPreviews,
   classifyPlacementPreview,
   previewChainPlacement,
   previewGenerationPlacement,
   previewRequestForSiblingFanout,
   requiresAuthoritativePlacement,
+  type MissingModelPlacement,
   type PlacementMissingComponent,
 } from "@studio/api/generationPlacement";
 import { ApiError, apiJsonTo, type ApiTarget } from "../lib/api/client";
@@ -49,6 +51,15 @@ const AUTO_PLACEMENT_SETTLE_MS = 250;
  * A pinned machine may legitimately spend minutes authenticating cold weights;
  * Auto instead fails closed and tells the user to retry or pin that machine. */
 const AUTO_PLACEMENT_DEADLINE_MS = 5_000;
+/**
+ * The deadline must never MANUFACTURE a dead end (#1162). While no candidate
+ * has answered `planned`, every machine still in flight is the only thing that
+ * might yet plan this print, so reporting it as "did not answer" — and turning
+ * a homogeneous infeasible answer into `mixed` — describes a check that never
+ * finished as a machine that refused. Auto extends the wait exactly once in
+ * that case, then fails closed as #1107 intends.
+ */
+const AUTO_PLACEMENT_EXTENSION_MS = 15_000;
 
 /**
  * Serialize this store's settings read-modify-writes: `app_settings_set`
@@ -177,6 +188,13 @@ export interface HostPlacementFailure {
   route: HostRoute;
   reason: string;
   missingComponents: PlacementMissingComponent[];
+  /**
+   * Non-null when this machine refused ONLY because it does not have the
+   * model — the one infeasibility a pull can fix. Capacity refusals and
+   * missing companions stay null so they can never be answered with a
+   * download (`@studio/api/generationPlacement.classifyMissingModel`).
+   */
+  missingModel: MissingModelPlacement | null;
 }
 
 export interface HostProbeFailure {
@@ -678,6 +696,8 @@ export const useHostsStore = defineStore("hosts", {
                   route,
                   reason: restriction.message,
                   missingComponents: [],
+                  // A policy refusal is never answered by a download.
+                  missingModel: null,
                 },
               ]
             : [];
@@ -748,6 +768,8 @@ export const useHostsStore = defineStore("hosts", {
         const probes: PlacementProbe[] = [];
         const controllers = candidates.map(() => new AbortController());
         let pendingProbes = candidates.length;
+        /** True once ANY candidate has an authoritative route in hand. */
+        let anyPlanned = false;
         let resolveAllProbes!: () => void;
         let resolveFirstPlanned!: () => void;
         const allProbesSettled = new Promise<void>((resolve) => (resolveAllProbes = resolve));
@@ -784,7 +806,10 @@ export const useHostsStore = defineStore("hosts", {
                 legacyUnsupported: false,
                 roundTripMs: Math.max(0, performance.now() - started),
               });
-              if (classifyPlacementPreview(preview) === "planned") resolveFirstPlanned();
+              if (classifyPlacementPreview(preview) === "planned") {
+                anyPlanned = true;
+                resolveFirstPlanned();
+              }
             } catch (error) {
               probes.push({
                 host,
@@ -802,23 +827,32 @@ export const useHostsStore = defineStore("hosts", {
         });
         const responsiveAuto = selection === null;
         let autoDeadlineReached = false;
+        let autoDeadlineMs = AUTO_PLACEMENT_DEADLINE_MS;
         if (responsiveAuto) {
-          let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
-          const deadline = new Promise<void>((resolve) => {
-            deadlineTimer = setTimeout(() => {
-              autoDeadlineReached = true;
-              resolve();
-            }, AUTO_PLACEMENT_DEADLINE_MS);
-          });
           const firstRouteWindow = firstPlanned.then(
             () => new Promise<void>((resolve) => setTimeout(resolve, AUTO_PLACEMENT_SETTLE_MS)),
           );
-          await Promise.race([
-            allProbesSettled,
-            deadline,
-            ...(candidates.length > 1 ? [firstRouteWindow] : []),
-          ]);
-          clearTimeout(deadlineTimer);
+          const waitFor = async (ms: number) => {
+            let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+            const deadline = new Promise<"deadline">((resolve) => {
+              deadlineTimer = setTimeout(() => resolve("deadline"), ms);
+            });
+            const outcome = await Promise.race<"settled" | "planned" | "deadline">([
+              allProbesSettled.then(() => "settled" as const),
+              deadline,
+              ...(candidates.length > 1 ? [firstRouteWindow.then(() => "planned" as const)] : []),
+            ]);
+            clearTimeout(deadlineTimer);
+            return outcome;
+          };
+          let outcome = await waitFor(AUTO_PLACEMENT_DEADLINE_MS);
+          if (outcome === "deadline" && !anyPlanned && pendingProbes > 0) {
+            // Nothing can route yet and a machine is still checking: extend
+            // once instead of reporting it as a machine that did not answer.
+            autoDeadlineMs += AUTO_PLACEMENT_EXTENSION_MS;
+            outcome = await waitFor(AUTO_PLACEMENT_EXTENSION_MS);
+          }
+          autoDeadlineReached = outcome === "deadline";
           if (pendingProbes > 0) controllers.forEach((controller) => controller.abort());
         } else {
           await allProbesSettled;
@@ -834,10 +868,10 @@ export const useHostsStore = defineStore("hosts", {
               host,
               preview: null,
               error: new Error(
-                "Auto placement timed out after 5 seconds; retry or select this machine explicitly for a longer cold check",
+                `Auto placement timed out after ${Math.round(autoDeadlineMs / 1000)} seconds; retry or select this machine explicitly for a longer cold check`,
               ),
               legacyUnsupported: false,
-              roundTripMs: AUTO_PLACEMENT_DEADLINE_MS,
+              roundTripMs: autoDeadlineMs,
             });
           }
         }
@@ -958,6 +992,7 @@ export const useHostsStore = defineStore("hosts", {
                     ? probe.preview.reason.trim()
                     : "the server reported that this request is infeasible",
                 missingComponents: probe.preview.missing_components ?? [],
+                missingModel: classifyMissingModel(probe.preview, request.model),
               },
             ];
           }

@@ -49,6 +49,7 @@ import {
   type QueueStatusIndex,
 } from "@studio/lib/queuePosition";
 import {
+  classifyMissingModel,
   comparePlacementPreviews,
   classifyPlacementPreview,
   previewChainPlacement,
@@ -56,6 +57,7 @@ import {
   previewRequestForSiblingFanout,
   requiresAuthoritativePlacement,
   type GenerationPlacementPreview,
+  type MissingModelPlacement,
   type PlacementMissingComponent,
 } from "@studio/api/generationPlacement";
 import {
@@ -163,6 +165,12 @@ export interface InfeasibleHost {
   label: string;
   reason: string;
   missingComponents: PlacementMissingComponent[];
+  /**
+   * Non-null when this machine refused ONLY because it does not have the
+   * model — the one infeasibility a pull can fix. Capacity refusals and
+   * missing companions stay null (`classifyMissingModel`).
+   */
+  missingModel: MissingModelPlacement | null;
 }
 
 export interface UnreachableHost {
@@ -650,6 +658,8 @@ async function resolveFeasibleWithPreview(
             label: candidate.label,
             reason: restriction.message,
             missingComponents: [],
+            // A policy refusal is never answered by a download.
+            missingModel: null,
           },
         ]
       : [];
@@ -840,6 +850,7 @@ async function resolveFeasibleWithPreview(
         label: probe.candidate.label,
         reason: probe.preview.reason!,
         missingComponents: probe.preview.missing_components ?? [],
+        missingModel: classifyMissingModel(probe.preview, model),
       },
     ];
   });
@@ -958,6 +969,8 @@ async function revalidateFeasibleWithPreview(
           label: route.label,
           reason: restriction.message,
           missingComponents: [],
+          // A policy refusal is never answered by a download.
+          missingModel: null,
         },
       ],
     };
@@ -1053,6 +1066,7 @@ async function revalidateFeasibleWithPreview(
           label: route.label,
           reason: preview!.reason!,
           missingComponents: preview!.missing_components ?? [],
+          missingModel: classifyMissingModel(preview!, model),
         },
       ],
     };
