@@ -32,4 +32,14 @@ describe("desktop host bootstrap", () => {
     expect(source).toContain("detectReconnectTransitions(hostStatusSnapshot, current)");
     expect(source).toContain("toasts.dismiss(stale)");
   });
+
+  it("retires an offline warning when its host leaves the list", () => {
+    // A disconnected or forgotten host stops being polled, so nothing could
+    // ever withdraw its sticky warning — it must go with the entry.
+    const cleanup = source.slice(source.indexOf("offlineToastIds.entries()"));
+    const dismiss = cleanup.indexOf("toasts.dismiss(toastId)");
+    const drop = cleanup.indexOf("offlineToastIds.delete(id)");
+    expect(dismiss).toBeGreaterThan(-1);
+    expect(drop).toBeGreaterThan(dismiss);
+  });
 });

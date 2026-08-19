@@ -61,6 +61,18 @@ describe("copyTextToClipboard", () => {
     expect(await copyTextToClipboard("hello")).toBe(true);
   });
 
+  it("never strands the staging textarea, even when execCommand throws", async () => {
+    vi.stubGlobal("navigator", {});
+    Object.assign(document, {
+      execCommand: vi.fn(() => {
+        throw new Error("unsupported");
+      }),
+    });
+    expect(await copyTextToClipboard("hello")).toBe(false);
+    expect(await copyTextToClipboard("hello")).toBe(false);
+    expect(document.querySelectorAll("textarea")).toHaveLength(0);
+  });
+
   it("reports failure rather than pretending, and never copies nothing", async () => {
     vi.stubGlobal("navigator", {});
     Object.assign(document, { execCommand: vi.fn().mockReturnValue(false) });

@@ -41,8 +41,8 @@ export async function copyTextToClipboard(text: string): Promise<boolean> {
   } catch {
     // Fall through to the textarea path.
   }
+  const area = document.createElement("textarea");
   try {
-    const area = document.createElement("textarea");
     area.value = text;
     // Off-screen but focusable; readOnly keeps the mobile keyboard away.
     area.setAttribute("readonly", "");
@@ -51,10 +51,12 @@ export async function copyTextToClipboard(text: string): Promise<boolean> {
     area.style.opacity = "0";
     document.body.appendChild(area);
     area.select();
-    const ok = document.execCommand?.("copy") ?? false;
-    document.body.removeChild(area);
-    return ok;
+    return document.execCommand?.("copy") ?? false;
   } catch {
     return false;
+  } finally {
+    // A throwing execCommand must not strand the staging node in the document;
+    // every failed Copy would otherwise add another invisible textarea.
+    area.remove();
   }
 }

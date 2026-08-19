@@ -141,10 +141,14 @@ watch(
       offlineToastIds.delete(host.id);
       toasts.push(hostReconnectedTitle(host.label), "success");
     }
-    // Forgotten hosts must not strand an id in the map.
+    // A host that is disconnected or forgotten while offline stops being
+    // polled, so nothing can ever withdraw its sticky warning — retire the
+    // toast with the entry rather than only dropping the id.
     const known = new Set(current.map((host) => host.id));
-    for (const id of [...offlineToastIds.keys()]) {
-      if (!known.has(id)) offlineToastIds.delete(id);
+    for (const [id, toastId] of [...offlineToastIds.entries()]) {
+      if (known.has(id)) continue;
+      toasts.dismiss(toastId);
+      offlineToastIds.delete(id);
     }
     hostStatusSnapshot = snapshotHostStatuses(current, hostStatusSnapshot);
   },
