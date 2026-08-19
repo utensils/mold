@@ -59,6 +59,7 @@ import {
   restoredNegativePrompt,
 } from "@studio/lib/negativePrompt";
 import { pipelineForControlId } from "@studio/lib/ltx2Control";
+import { validatePrintTitle } from "@studio/lib/libraryOrganization";
 import { firstLastFrameKeyframes } from "@studio/lib/sourceImageCapability";
 import { effectiveGenerationGuidance, isWanFamily } from "@studio/lib/generationCapabilities";
 import { stripAudioOnlyIncompatibleFields } from "@studio/lib/ltx2Pipeline";
@@ -113,6 +114,12 @@ export interface GenerateForm {
   prompt: string;
   /** Original prompt before an expand; sent as `original_prompt` and used for undo. */
   originalPrompt: string | null;
+  /** User-authored print title (Create header). Ships as `title` on every
+   * request built from this form — one-shot, Batch N siblings, prepared
+   * variations — after `validatePrintTitle`; `""` = untitled. Generating
+   * never clears it (a named session wants its siblings and re-rolls to share
+   * the name); only the explicit ⌘N "new print" (`clearComposer`) does. */
+  title: string;
   model: string;
   family: string;
   width: number;
@@ -225,6 +232,7 @@ export function newGenerateForm(): GenerateForm {
   return {
     prompt: "",
     originalPrompt: null,
+    title: "",
     model: "",
     family: "",
     width: 1024,
@@ -783,6 +791,11 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
   if (req.prompt && form.originalPrompt && form.originalPrompt !== req.prompt) {
     req.original_prompt = form.originalPrompt;
   }
+  // Additive and validated client-side exactly as the server validates it;
+  // an invalid title is dropped rather than failing the whole submit (the
+  // header refuses to commit one, so this only guards stale snapshots).
+  const title = validatePrintTitle(form.title ?? "");
+  if (title.ok && title.value) req.title = title.value;
   if (caps.supportsNegativePrompt) {
     // Tri-state (#787): text equal to the advertised default stays absent
     // (older servers behave identically), a cleared defaulted field ships
@@ -979,6 +992,7 @@ export function applyMetadataToForm(
 
   form.prompt = metadata.prompt ?? "";
   form.originalPrompt = metadata.original_prompt ?? null;
+  form.title = metadata.title ?? "";
   // Absence predates truthful recording: on a defaulted model it means the
   // default conditioned the render, so restore shows it rather than
   // silently flipping the reuse into an explicit empty-uncond opt-out.
@@ -1110,6 +1124,7 @@ export function applyRequestToForm(
   if (model) applyModelDefaults(form, model);
   form.prompt = request.prompt;
   form.originalPrompt = request.original_prompt ?? null;
+  form.title = request.title ?? "";
   form.negativePrompt = restoredNegativePrompt(request.negative_prompt, form.negativePromptDefault);
   form.negativeExplicitClear = restoredNegativeExplicitClear(request.negative_prompt);
   form.model = request.model;

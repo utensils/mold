@@ -17,6 +17,7 @@ vi.mock("../components/settings/HostsSection.vue", () => stub("stub-hosts"));
 vi.mock("../components/settings/PerformanceSection.vue", () => stub("stub-performance"));
 vi.mock("../components/settings/GenerationSection.vue", () => stub("stub-generation"));
 vi.mock("../components/settings/MediaSection.vue", () => stub("stub-media"));
+vi.mock("../components/settings/LibrarySection.vue", () => stub("stub-library"));
 vi.mock("../components/settings/ExpansionSection.vue", () => stub("stub-expansion"));
 vi.mock("../components/settings/AccountsSection.vue", () => stub("stub-accounts"));
 vi.mock("../components/settings/ProfilesSection.vue", () => stub("stub-profiles"));
@@ -61,6 +62,7 @@ describe("SettingsView shell", () => {
       "performance",
       "generation",
       "media",
+      "library",
       "expansion",
       "accounts",
       "profiles",
@@ -74,7 +76,7 @@ describe("SettingsView shell", () => {
     const wrapper = await mountView();
     const accordions = wrapper.findAllComponents(AccordionSection);
 
-    expect(accordions).toHaveLength(7);
+    expect(accordions).toHaveLength(8);
     for (const accordion of accordions) {
       expect(accordion.props("icon")).toBeTruthy();
       expect(accordion.props("summary")).toBeTruthy();
@@ -88,6 +90,7 @@ describe("SettingsView shell", () => {
       "performance",
       "generation",
       "media",
+      "library",
       "expansion",
       "accounts",
       "profiles",
@@ -131,6 +134,16 @@ describe("SettingsView shell", () => {
     await typeSearch(wrapper, "civitai");
     expect(wrapper.find("[data-test='stub-accounts']").exists()).toBe(true);
     expect(wrapper.find("[data-test='accordion-expansion']").exists()).toBe(false);
+  });
+
+  it("opens the Library accordion for trash / retention searches", async () => {
+    const wrapper = await mountView();
+    await typeSearch(wrapper, "trash");
+    expect(wrapper.find("[data-test='accordion-library']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='stub-library']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='accordion-expansion']").exists()).toBe(false);
+    await typeSearch(wrapper, "retention");
+    expect(wrapper.find("[data-test='stub-library']").exists()).toBe(true);
   });
 
   it("reports when a search matches nothing", async () => {

@@ -87,3 +87,15 @@ describe("generateForm store", () => {
     expect(captured.model).toBe("");
   });
 });
+
+describe("generateForm store — print title", () => {
+  it("keeps the title across generations but ⌘N clears it with the composer", () => {
+    const store = useGenerateFormStore();
+    store.form.title = "Smurf village";
+    // Generating never touches the form, so batch siblings and re-rolls in
+    // one session share the name; only the explicit "new print" clears it.
+    expect(store.form.title).toBe("Smurf village");
+    store.clearComposer();
+    expect(store.form.title).toBe("");
+  });
+});

@@ -12,6 +12,8 @@ import { setQueueDevicePin } from "@studio/api/queuePlan";
 import { queuePlanOnlyWork } from "@studio/lib/queuePlanPresentation";
 import { modelKindLabel, modelKindValue } from "@studio/lib/modelMetadata";
 import { setDeviceEnabled } from "@studio/api/devices";
+import { emptyTrash, listTrash } from "@studio/api/galleryOrganization";
+import { RETENTION_OPTIONS, retentionLabel } from "@studio/lib/libraryOrganization";
 import CatalogDetailDrawer from "../components/models/CatalogDetailDrawer.vue";
 import DownloadsTray from "../components/models/DownloadsTray.vue";
 import HostQueuePanel from "../components/machines/HostQueuePanel.vue";
@@ -21,6 +23,7 @@ import ConfirmDialog from "../components/shell/ConfirmDialog.vue";
 import { startCatalogDownload } from "../lib/api/catalog";
 import { unloadModel } from "../lib/api/models";
 import { ApiError, apiJsonTo, type ApiTarget } from "../lib/api/client";
+import { fetchHostConfigKey, setHostConfigKey } from "../lib/api/hostConfig";
 import { gpuSnapshotsFromWorkers } from "../lib/api/gpuStatus";
 import { installedModelToEntry } from "../lib/catalogDetail";
 import { sseStream } from "../lib/api/sse";
@@ -37,7 +40,13 @@ import {
 } from "../lib/models";
 import { modelSource } from "../lib/modelSource";
 import { ipc } from "../lib/ipc";
-import type { GpuSnapshot, ModelEntry, ResourceSnapshot, ServerStatus } from "../lib/api/types";
+import type {
+  ConfigRow,
+  GpuSnapshot,
+  ModelEntry,
+  ResourceSnapshot,
+  ServerStatus,
+} from "../lib/api/types";
 import { useAppPrefsStore } from "../stores/appPrefs";
 import { useDownloadsStore } from "../stores/downloads";
 import { useHostModelsStore } from "../stores/hostModels";
@@ -165,7 +174,140 @@ function startReadyServices() {
     // the download stream; reconnect retries are owned by the SSE helper.
   });
   void hostModels.refresh(true);
+  void refreshStorage();
 }
+
+// ── Storage: this host's Library trash (retention + count) ────────────────
+//
+// Organization state lives per host in that host's mold.db (D1), so retention
+// is THAT host's `gallery.trash_retention_days` — edited here through the
+// per-host `/api/config` helper, never through the primary-only settings
+// store. Hidden entirely when the host's capabilities lack `gallery.trash`
+// (older servers keep today's hard-delete wording everywhere).
+
+const TRASH_RETENTION_KEY = "gallery.trash_retention_days";
+
+const trashCapability = computed(() => hosts.capabilities[hostId.value]?.gallery?.trash ?? null);
+const storageAvailable = computed(() => trashCapability.value?.enabled === true);
+const retentionRow = ref<ConfigRow | null>(null);
+const retentionSaving = ref(false);
+const trashCount = ref<number | null>(null);
+const trashLoadError = ref<string | null>(null);
+const emptyTrashOpen = ref(false);
+const emptyingTrash = ref(false);
+let storageAbort: AbortController | null = null;
+
+/** The retention the select shows: the host's config row, else the value
+ *  its capabilities advertised, else the engine default. */
+const retentionDays = computed(() => {
+  const raw = retentionRow.value?.value;
+  const fromRow =
+    typeof raw === "number" ? raw : raw != null && raw !== "" ? Number(raw) : Number.NaN;
+  if (Number.isFinite(fromRow) && fromRow >= 0) return Math.floor(fromRow);
+  return trashCapability.value?.retention_days ?? 30;
+});
+const retentionLocked = computed(() => retentionRow.value?.source === "env");
+/** Curated choices plus the current value when it is not one of them, so the
+ *  select always tells the truth about the host. */
+const retentionOptions = computed(() => {
+  const days = retentionDays.value;
+  const values = RETENTION_OPTIONS.includes(days)
+    ? [...RETENTION_OPTIONS]
+    : [...RETENTION_OPTIONS.filter((d) => d !== 0), days, 0];
+  return values.map((value) => ({ value, label: retentionLabel(value) }));
+});
+
+async function refreshStorage() {
+  storageAbort?.abort();
+  const abort = new AbortController();
+  storageAbort = abort;
+  const target = hostTarget();
+  if (!target || !storageAvailable.value) return;
+  const [row, trashed] = await Promise.allSettled([
+    fetchHostConfigKey(target, TRASH_RETENTION_KEY, abort.signal),
+    listTrash(target, abort.signal),
+  ]);
+  if (abort.signal.aborted) return;
+  if (row.status === "fulfilled") retentionRow.value = row.value;
+  if (trashed.status === "fulfilled") {
+    trashCount.value = trashed.value.length;
+    trashLoadError.value = null;
+  } else {
+    trashLoadError.value =
+      trashed.reason instanceof Error ? trashed.reason.message : String(trashed.reason);
+  }
+}
+
+async function onRetentionChange(event: Event) {
+  const target = hostTarget();
+  const h = host.value;
+  if (!target || !h) return;
+  const select = event.target as HTMLSelectElement;
+  const days = Number(select.value);
+  if (!Number.isFinite(days) || days < 0) return;
+  retentionSaving.value = true;
+  try {
+    await setHostConfigKey(target, TRASH_RETENTION_KEY, days);
+    retentionRow.value = {
+      key: TRASH_RETENTION_KEY,
+      source: "db",
+      ...(retentionRow.value ?? {}),
+      value: days,
+    } as ConfigRow;
+    toasts.push(`Trash retention on ${h.label}: ${retentionLabel(days)}`);
+    void refreshStorage();
+  } catch (error) {
+    toasts.push(
+      `Couldn't change trash retention on ${h.label}: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+      "error",
+    );
+    // Put the select back on the host's truth.
+    select.value = String(retentionDays.value);
+  } finally {
+    retentionSaving.value = false;
+  }
+}
+
+const emptyTrashMessage = computed(() => {
+  const n = trashCount.value ?? 0;
+  const label = host.value?.label ?? "this machine";
+  return `Delete ${n} ${n === 1 ? "print" : "prints"} in the trash on ${label} forever? This can't be undone.`;
+});
+
+async function confirmEmptyTrash() {
+  const target = hostTarget();
+  const h = host.value;
+  if (!target || !h) return;
+  emptyingTrash.value = true;
+  try {
+    const result = await emptyTrash(target);
+    emptyTrashOpen.value = false;
+    trashCount.value = 0;
+    toasts.push(
+      `Emptied the trash on ${h.label} — ${result.purged} ${
+        result.purged === 1 ? "print" : "prints"
+      } deleted forever`,
+    );
+    void refreshStorage();
+  } catch (error) {
+    toasts.push(
+      `Couldn't empty the trash on ${h.label}: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+      "error",
+    );
+  } finally {
+    emptyingTrash.value = false;
+  }
+}
+
+// Capabilities often arrive after the identity watch's first run (the hosts
+// store polls them); the card appears — and loads — as soon as they do.
+watch(storageAvailable, (available) => {
+  if (available) void refreshStorage();
+});
 
 // Clicking a model row opens the shared detail drawer against THIS host.
 // Declared before the identity watch so its immediate run can reset it.
@@ -194,6 +336,10 @@ watch(
     if (hostChanged) {
       detailModel.value = null;
       recentlyUnloaded.value.clear();
+      retentionRow.value = null;
+      trashCount.value = null;
+      trashLoadError.value = null;
+      emptyTrashOpen.value = false;
     }
     startResourceStream(hostChanged);
     startDeviceEvents();
@@ -219,6 +365,8 @@ watch(
   },
 );
 onUnmounted(() => {
+  storageAbort?.abort();
+  storageAbort = null;
   resourceAbort?.abort();
   resourceAbort = null;
   deviceEventsAbort?.abort();
@@ -860,6 +1008,66 @@ async function forget() {
               </p>
             </CardSurface>
 
+            <!-- Storage — this host's Library trash. Per-host retention (the
+                 host's own gallery.trash_retention_days) and the trash count
+                 with Empty trash behind the shared confirm (no typed phrase). -->
+            <CardSurface v-if="storageAvailable" large data-test="host-storage">
+              <div class="mb-3 flex items-center gap-2">
+                <h2 class="edge-code">STORAGE</h2>
+                <div class="border-edge h-px flex-1 border-t" />
+              </div>
+              <div class="flex flex-col gap-3">
+                <div class="flex items-center gap-3">
+                  <label for="host-trash-retention" class="min-w-0 flex-1 text-body text-ink">
+                    Trash retention
+                    <span class="block text-caption text-ink-3">
+                      Deleted prints are purged after this long on {{ host.label }}.
+                    </span>
+                  </label>
+                  <select
+                    id="host-trash-retention"
+                    data-test="host-trash-retention"
+                    class="border-edge h-8 shrink-0 rounded-control border bg-bench px-2 text-body text-ink disabled:opacity-50"
+                    :value="String(retentionDays)"
+                    :disabled="retentionLocked || retentionSaving || host.status !== 'ready'"
+                    :title="
+                      retentionLocked
+                        ? `Set by ${retentionRow?.env_var ?? 'the environment'} on ${host.label}`
+                        : undefined
+                    "
+                    aria-label="Trash retention"
+                    @change="onRetentionChange"
+                  >
+                    <option
+                      v-for="option in retentionOptions"
+                      :key="option.value"
+                      :value="String(option.value)"
+                    >
+                      {{ option.label }}
+                    </option>
+                  </select>
+                </div>
+                <div class="flex items-center gap-3">
+                  <span class="min-w-0 flex-1 text-body text-ink" data-test="host-trash-count">
+                    Prints in trash:
+                    <span class="data-mono">{{ trashCount ?? "—" }}</span>
+                    <span v-if="trashLoadError" class="block text-caption text-stop">
+                      {{ trashLoadError }}
+                    </span>
+                  </span>
+                  <button
+                    type="button"
+                    data-test="host-empty-trash"
+                    class="border-edge h-8 shrink-0 rounded-control border px-2.5 text-body text-ink-2 transition-colors hover:text-stop disabled:opacity-40"
+                    :disabled="!trashCount || emptyingTrash || host.status !== 'ready'"
+                    @click="emptyTrashOpen = true"
+                  >
+                    Empty trash
+                  </button>
+                </div>
+              </div>
+            </CardSurface>
+
             <div v-if="host.kind === 'remote'" class="flex gap-2">
               <button
                 type="button"
@@ -901,6 +1109,17 @@ async function forget() {
           :initial="host.label"
           @save="onRenameSave"
           @cancel="renameOpen = false"
+        />
+
+        <ConfirmDialog
+          :open="emptyTrashOpen"
+          title="Empty trash?"
+          :message="emptyTrashMessage"
+          confirm-label="Delete forever"
+          danger
+          :busy="emptyingTrash"
+          @confirm="confirmEmptyTrash"
+          @cancel="emptyTrashOpen = false"
         />
 
         <ConfirmDialog

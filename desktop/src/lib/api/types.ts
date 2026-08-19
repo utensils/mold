@@ -483,6 +483,10 @@ export interface GenerateRequest {
   lora?: LoraWeight;
   expand?: boolean;
   original_prompt?: string;
+  /** User-authored print title (Library organization, D5). Additive: the
+   * server embeds it into `OutputMetadata.title`, seeds the gallery row, and
+   * folds a lossy slug into the output filename. Absent = untitled. */
+  title?: string;
   /** Durable prepared-batch provenance. Index is one-based. */
   batch_id?: string;
   batch_index?: number;
@@ -637,6 +641,8 @@ export interface OutputMetadata {
   /** User-facing authoring mode; independent of internal auto-chaining. */
   output_mode?: "one-shot" | "sequence" | null;
   prompt: string;
+  /** Creation-time print title; the gallery row is the editable authority. */
+  title?: string | null;
   negative_prompt?: string | null;
   original_prompt?: string | null;
   batch_id?: string | null;

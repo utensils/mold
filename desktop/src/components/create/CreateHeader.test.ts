@@ -77,6 +77,76 @@ describe("CreateHeader", () => {
     expect(wrapper.get(".ms-header__summary").text()).toBe("16:9 · 1216×704 · 2 clips · 24 fps");
   });
 
+  describe("editable print title", () => {
+    it("shows the form title in place of the placeholder", () => {
+      readyLocal();
+      const titled = form();
+      titled.title = "Smurf village";
+      const wrapper = mount(CreateHeader, { props: { form: titled } });
+      expect(wrapper.get("[data-test='print-title']").text()).toBe("Smurf village");
+      expect(wrapper.get("[data-test='print-title']").attributes("aria-label")).toBe("Print title");
+    });
+
+    it("opens an input on click, commits on Enter, and writes the trimmed title", async () => {
+      readyLocal();
+      const f = form();
+      const wrapper = mount(CreateHeader, { props: { form: f }, attachTo: document.body });
+      await wrapper.get("[data-test='print-title']").trigger("click");
+      const input = wrapper.get<HTMLInputElement>("[data-test='print-title-input']");
+      expect(input.attributes("aria-label")).toBe("Print title");
+      expect(input.attributes("placeholder")).toBe("Untitled print");
+      expect(input.attributes("maxlength")).toBe("120");
+      await input.setValue("  Smurf village  ");
+      await input.trigger("keydown", { key: "Enter" });
+      expect(f.title).toBe("Smurf village");
+      expect(wrapper.find("[data-test='print-title-input']").exists()).toBe(false);
+      expect(wrapper.get("[data-test='print-title']").text()).toBe("Smurf village");
+    });
+
+    it("commits on blur and reverts on Escape", async () => {
+      readyLocal();
+      const f = form();
+      f.title = "Before";
+      const wrapper = mount(CreateHeader, { props: { form: f }, attachTo: document.body });
+      await wrapper.get("[data-test='print-title']").trigger("click");
+      let input = wrapper.get<HTMLInputElement>("[data-test='print-title-input']");
+      await input.setValue("Typed then escaped");
+      await input.trigger("keydown", { key: "Escape" });
+      expect(f.title).toBe("Before");
+      expect(wrapper.find("[data-test='print-title-input']").exists()).toBe(false);
+
+      await wrapper.get("[data-test='print-title']").trigger("click");
+      input = wrapper.get<HTMLInputElement>("[data-test='print-title-input']");
+      await input.setValue("After");
+      await input.trigger("blur");
+      expect(f.title).toBe("After");
+    });
+
+    it("refuses an invalid title, keeping the editor open with the reason", async () => {
+      readyLocal();
+      const f = form();
+      const wrapper = mount(CreateHeader, { props: { form: f }, attachTo: document.body });
+      await wrapper.get("[data-test='print-title']").trigger("click");
+      const input = wrapper.get<HTMLInputElement>("[data-test='print-title-input']");
+      await input.setValue("bad\u0007title");
+      await input.trigger("keydown", { key: "Enter" });
+      expect(f.title).toBe("");
+      expect(wrapper.find("[data-test='print-title-input']").exists()).toBe(true);
+      expect(input.attributes("aria-invalid")).toBe("true");
+      expect(wrapper.get("[data-test='print-title-error']").text()).toContain("control");
+    });
+
+    it("uses the sequence placeholder for a sequence draft", async () => {
+      readyLocal();
+      useSequenceDraftStore().output = "sequence";
+      const wrapper = mount(CreateHeader, { props: { form: form() }, attachTo: document.body });
+      await wrapper.get("[data-test='print-title']").trigger("click");
+      expect(wrapper.get("[data-test='print-title-input']").attributes("placeholder")).toBe(
+        "Untitled sequence",
+      );
+    });
+  });
+
   it("does not open a routing menu with a single host", async () => {
     readyLocal();
     const wrapper = mount(CreateHeader, { props: { form: form() }, attachTo: document.body });

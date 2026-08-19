@@ -22,6 +22,9 @@ export const useGenerateFormStore = defineStore("generateForm", {
     clearComposer() {
       this.form.prompt = "";
       this.form.originalPrompt = null;
+      // A fresh print is untitled. This is the ONLY place the title is
+      // cleared implicitly — generating keeps it so siblings share the name.
+      this.form.title = "";
       // A cleared composer starts from the model's advertised default
       // negative (wan), never the explicit empty opt-out.
       this.form.negativePrompt = this.form.negativePromptDefault;
