@@ -395,8 +395,11 @@ fn ltx_video_transformer_residency_guard(
         return Ok(());
     }
 
+    // #599: this legacy family is superseded by LTX-2 and deliberately has no
+    // offload path — the 13B BF16 tiers need a 40 GB-class GPU. Say so
+    // plainly instead of promising an implementation that is not coming.
     bail!(
-        "legacy LTX-Video 13B BF16 requires full transformer residency ({} weights + {} runtime headroom) but only {} usable VRAM is available. MOLD_OFFLOAD is not implemented for this legacy transformer yet; use ltx-video-0.9.8-2b-distilled, lower --width/--height/--frames, or use an LTX-2 FP8 model with adaptive offload.",
+        "legacy LTX-Video 13B BF16 needs the whole transformer resident ({} weights + {} runtime headroom, a 40 GB-class GPU) but only {} usable VRAM is available. This legacy family has no offload path; on 24 GB cards use an LTX-2 FP8 model (adaptive offload) or ltx-video-0.9.8-2b-distilled, or lower --width/--height/--frames.",
         fmt_gb(transformer_bytes),
         fmt_gb(LTX_VIDEO_FULL_RESIDENT_RUNTIME_HEADROOM),
         fmt_gb(usable_vram_bytes),
@@ -2043,7 +2046,19 @@ mod tests {
         .unwrap_err()
         .to_string();
 
-        assert!(err.contains("MOLD_OFFLOAD"));
+        // #599: the message names the real requirement and the supported
+        // alternatives; it no longer promises an offload path that is not
+        // coming for this superseded family.
+        assert!(err.contains("40 GB"), "must name the VRAM class: {err}");
+        assert!(
+            err.contains("no offload path"),
+            "must state no offload: {err}"
+        );
+        assert!(
+            !err.contains("yet"),
+            "must not promise future offload: {err}"
+        );
+        assert!(err.contains("LTX-2"));
         assert!(err.contains("ltx-video-0.9.8-2b-distilled"));
         assert!(err.contains("--width/--height/--frames"));
     }
