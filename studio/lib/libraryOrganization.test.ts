@@ -133,6 +133,13 @@ describe("validatePrintTitle", () => {
     expect(validatePrintTitle(" ".repeat(10) + "x".repeat(120)).ok).toBe(true);
   });
 
+  it("counts Unicode code points like the Rust validator, not UTF-16 units", () => {
+    // 120 astral-plane emoji are 240 UTF-16 code units but 120 characters;
+    // the server (`.chars().count()`) accepts them, so must the client.
+    expect(validatePrintTitle("🧪".repeat(120)).ok).toBe(true);
+    expect(validatePrintTitle("🧪".repeat(121)).ok).toBe(false);
+  });
+
   it("rejects control characters but keeps unicode", () => {
     const bad = validatePrintTitle("tab\there");
     expect(bad.ok).toBe(false);

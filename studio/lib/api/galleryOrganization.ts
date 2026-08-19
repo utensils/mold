@@ -146,11 +146,13 @@ export type GalleryView = "library" | "trash";
 // ── SSE ─────────────────────────────────────────────────────────────────────
 
 /** A print's organization fields changed (title / favorite / tags /
- * collections). `image: null` means "refetch `/api/gallery`". */
+ * collections). The server omits `image` (Rust `Option::None` is skipped,
+ * never `null`) when the row is not carried — bulk organize, tag renames —
+ * which means "refetch `/api/gallery`"; always test with a nullish check. */
 export interface GalleryUpdatedEvent<TImage = GalleryEntryWire> {
   type: "gallery_updated";
   filename: string;
-  image: TImage | null;
+  image?: TImage | null;
 }
 
 /** A print moved to the trash. */
@@ -163,7 +165,8 @@ export interface GalleryTrashedEvent {
 export interface GalleryRestoredEvent<TImage = GalleryEntryWire> {
   type: "gallery_restored";
   filename: string;
-  image: TImage | null;
+  /** Omitted (not `null`) when the server could not enrich the row. */
+  image?: TImage | null;
 }
 
 /** Collections were created / renamed / deleted / re-covered; refetch

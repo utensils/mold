@@ -90,7 +90,9 @@ export function validatePrintTitle(raw: string): PrintTitleValidation {
   if (CONTROL_CHARS.test(value)) {
     return { ok: false, reason: "Titles cannot contain control characters." };
   }
-  if (value.length > PRINT_TITLE_MAX_LEN) {
+  // Count Unicode scalar values like Rust's `.chars().count()`, not UTF-16
+  // code units — 120 emoji are 120 characters on both sides.
+  if (Array.from(value).length > PRINT_TITLE_MAX_LEN) {
     return {
       ok: false,
       reason: `Titles are at most ${PRINT_TITLE_MAX_LEN} characters.`,
