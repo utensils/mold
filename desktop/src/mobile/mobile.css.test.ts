@@ -22,14 +22,18 @@ describe("mobile viewport scaling", () => {
 
 describe("mobile Library thumbnail sizing", () => {
   it("drives every gallery column count from the pinch variable", () => {
-    const rules = [...css.matchAll(/\.gallery-grid\s*\{([^}]*)\}/gs)].map((match) => match[1]);
+    // Match every `.gallery-grid` selector, nested or at top level, so a
+    // hard-coded count reintroduced inside an at-rule cannot slip past.
+    const gridRules = [...css.matchAll(/\.gallery-grid[^{}]*\{([^}]*)\}/gs)];
 
-    expect(rules.length).toBeGreaterThan(0);
-    for (const rule of rules) {
-      expect(rule).toMatch(
-        /grid-template-columns:\s*repeat\(var\(--mobile-gallery-columns,\s*3\),/,
-      );
-      expect(rule).not.toMatch(/grid-template-columns:\s*repeat\(\d/);
+    expect(gridRules.length).toBeGreaterThan(0);
+    const columnDeclarations = gridRules
+      .map((rule) => (rule[1] ?? "").match(/grid-template-columns:[^;]*;/)?.[0])
+      .filter((declaration): declaration is string => declaration !== undefined);
+
+    expect(columnDeclarations.length).toBeGreaterThan(0);
+    for (const declaration of columnDeclarations) {
+      expect(declaration).toMatch(/repeat\(var\(--mobile-gallery-columns,\s*3\),/);
     }
   });
 

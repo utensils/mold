@@ -4265,8 +4265,4 @@ button:disabled {
     box-sizing: border-box;
     justify-self: center;
   }
-
-  .gallery-grid {
-    grid-template-columns: repeat(var(--mobile-gallery-columns, 3), minmax(0, 1fr));
-  }
 }

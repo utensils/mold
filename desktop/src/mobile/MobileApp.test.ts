@@ -7252,18 +7252,25 @@ describe("mobile Library pinch-to-resize", () => {
     return wrapper;
   }
 
+  /**
+   * A touch is primary only while no other finger is already down, which is
+   * what makes the first finger — and only the first — able to start a drag.
+   */
+  let touchesDown = 0;
+
   function touchDown(target: Element, pointerId: number, clientX: number, clientY = 0): void {
     target.dispatchEvent(
       new PointerEvent("pointerdown", {
         pointerId,
         pointerType: "touch",
-        isPrimary: pointerId % 2 === 1,
+        isPrimary: touchesDown === 0,
         clientX,
         clientY,
         bubbles: true,
         cancelable: true,
       }),
     );
+    touchesDown += 1;
   }
 
   function touchMove(pointerId: number, clientX: number, clientY = 0): void {
@@ -7280,7 +7287,12 @@ describe("mobile Library pinch-to-resize", () => {
 
   function touchUp(pointerId: number): void {
     window.dispatchEvent(new PointerEvent("pointerup", { pointerId, pointerType: "touch" }));
+    touchesDown = Math.max(0, touchesDown - 1);
   }
+
+  beforeEach(() => {
+    touchesDown = 0;
+  });
 
   async function pinch(app: VueWrapper, from: number, to: number): Promise<void> {
     const grid = app.get("[data-test='mobile-gallery-grid']").element;
@@ -7344,10 +7356,11 @@ describe("mobile Library pinch-to-resize", () => {
     expect(columnsOf(app)).toBe("3");
   });
 
-  it("a pinch in select mode resizes without painting a selection swath", async () => {
+  it("a pinch in select mode resizes and unpaints the tile it started on", async () => {
     const app = await openLibrary();
     await app.get("[data-test='mobile-gallery-select']").trigger("click");
 
+    // The first finger paints its tile before any movement proves intent.
     await app.get("[data-test='gallery-item']").trigger("pointerdown", {
       pointerId: 91,
       pointerType: "touch",
@@ -7357,10 +7370,33 @@ describe("mobile Library pinch-to-resize", () => {
     });
     expect(app.get("[data-test='mobile-gallery-actions']").text()).toContain("1 selected");
 
-    // The second finger converts the gesture; the drag must stop extending.
+    // The second finger makes it a pinch, so that paint was never intended.
     touchDown(app.get("[data-test='mobile-gallery-grid']").element, 92, 200);
     touchMove(91, 0, 900);
     touchMove(92, 340);
+    await app.vm.$nextTick();
+
+    expect(columnsOf(app)).toBe("2");
+    expect(app.get("[data-test='mobile-gallery-actions']").text()).toContain("0 selected");
+  });
+
+  it("a pinch leaves an existing selection exactly as the user left it", async () => {
+    const app = await openLibrary();
+    await app.get("[data-test='mobile-gallery-select']").trigger("click");
+    const tile = app.get("[data-test='gallery-item']");
+    await tile.trigger("click", { detail: 1 });
+    expect(app.get("[data-test='mobile-gallery-actions']").text()).toContain("1 selected");
+
+    // Starting the pinch on an already-selected tile must not deselect it.
+    await tile.trigger("pointerdown", {
+      pointerId: 93,
+      pointerType: "touch",
+      isPrimary: true,
+      clientX: 0,
+      clientY: 0,
+    });
+    touchDown(app.get("[data-test='mobile-gallery-grid']").element, 94, 200);
+    touchMove(94, 340);
     await app.vm.$nextTick();
 
     expect(columnsOf(app)).toBe("2");
@@ -7414,23 +7450,102 @@ describe("mobile Library pinch-to-resize", () => {
     expect(app.find("[data-test='gallery-viewer']").exists()).toBe(true);
   });
 
-  it("a pinch in select mode does not toggle the tile it started on", async () => {
+  it("a deliberate tap after a pinch opens the print on the first try", async () => {
+    // WebKit usually synthesizes NO compatibility click once a second touch
+    // lands, so the claim above is provisional. A fresh touch sequence must
+    // discard it, or every pinch would cost the user a dead tap.
     const app = await openLibrary();
-    await app.get("[data-test='mobile-gallery-select']").trigger("click");
     const tile = app.get("[data-test='gallery-item']");
 
     touchDown(tile.element, 71, 0);
-    await app.vm.$nextTick();
-    expect(app.get("[data-test='mobile-gallery-actions']").text()).toContain("1 selected");
     touchDown(app.get("[data-test='mobile-gallery-grid']").element, 72, 200);
     touchMove(72, 340);
     touchUp(72);
     touchUp(71);
     await app.vm.$nextTick();
+    expect(columnsOf(app)).toBe("2");
+
+    // No compatibility click ever arrived; the user simply taps a print.
+    touchDown(tile.element, 73, 10, 10);
+    touchUp(73);
+    await tile.trigger("click", { detail: 1 });
+    await flushPromises();
+
+    expect(app.find("[data-test='gallery-viewer']").exists()).toBe(true);
+  });
+
+  it("pumping one finger cannot stockpile swallowed taps", async () => {
+    const app = await openLibrary();
+    const tile = app.get("[data-test='gallery-item']");
+    const grid = app.get("[data-test='mobile-gallery-grid']").element;
+
+    touchDown(tile.element, 71, 0);
+    for (const id of [72, 73, 74]) {
+      touchDown(grid, id, 200);
+      touchMove(id, 210);
+      touchUp(id);
+    }
+    touchUp(71);
+    await app.vm.$nextTick();
+
+    // At most one click is ever owed, so the second tap must land.
+    await tile.trigger("click", { detail: 1 });
+    await tile.trigger("click", { detail: 1 });
+    await flushPromises();
+    expect(app.find("[data-test='gallery-viewer']").exists()).toBe(true);
+  });
+
+  it("a pointerup from elsewhere in the app never claims a tap", async () => {
+    const app = await openLibrary();
+    const tile = app.get("[data-test='gallery-item']");
+    const grid = app.get("[data-test='mobile-gallery-grid']").element;
+
+    touchDown(tile.element, 71, 0);
+    touchDown(grid, 72, 200);
+    touchMove(72, 340);
+    // A finger the gesture never tracked lifts somewhere else entirely.
+    touchUp(60);
+    touchUp(72);
+    touchUp(71);
+    await app.vm.$nextTick();
 
     await tile.trigger("click", { detail: 1 });
+    await tile.trigger("click", { detail: 1 });
+    await flushPromises();
+    expect(app.find("[data-test='gallery-viewer']").exists()).toBe(true);
+  });
 
-    expect(columnsOf(app)).toBe("2");
-    expect(app.get("[data-test='mobile-gallery-actions']").text()).toContain("1 selected");
+  it("a cancelled pinch claims no tap at all", async () => {
+    const app = await openLibrary();
+    const tile = app.get("[data-test='gallery-item']");
+
+    touchDown(tile.element, 71, 0);
+    touchDown(app.get("[data-test='mobile-gallery-grid']").element, 72, 200);
+    touchMove(72, 340);
+    for (const pointerId of [72, 71]) {
+      window.dispatchEvent(new PointerEvent("pointercancel", { pointerId, pointerType: "touch" }));
+    }
+    await app.vm.$nextTick();
+
+    await tile.trigger("click", { detail: 1 });
+    await flushPromises();
+    expect(app.find("[data-test='gallery-viewer']").exists()).toBe(true);
+  });
+
+  it("a finger stranded by a suspend cannot make the next touch resize", async () => {
+    const app = await openLibrary();
+    const grid = app.get("[data-test='mobile-gallery-grid']").element;
+
+    // The app is backgrounded mid-touch, so this pointerup never arrives.
+    touchDown(grid, 71, 0);
+    document.dispatchEvent(new Event("visibilitychange"));
+    await flushPromises();
+
+    // A single finger scrolling the grid must not read as a second pinch point.
+    touchDown(grid, 72, 200);
+    touchMove(72, 340);
+    await app.vm.$nextTick();
+
+    expect(columnsOf(app)).toBe("3");
   });
 });

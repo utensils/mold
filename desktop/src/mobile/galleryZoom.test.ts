@@ -11,7 +11,9 @@ import {
   pinchPointerDown,
   pinchPointerMove,
   pinchPointerUp,
+  resetPinch,
   saveMobileGalleryColumns,
+  tracksPointer,
 } from "./galleryZoom";
 
 interface FakeStorage {
@@ -159,5 +161,65 @@ describe("mobile gallery pinch gesture", () => {
     pinchPointerUp(state, 2);
     expect(isPinching(state)).toBe(false);
     expect(pinchTo(340)).toBeNull();
+  });
+
+  it("resetPinch drops a gesture stranded without its pointerup", () => {
+    startPinch(200);
+    expect(pinchTo(340)).toBe(2);
+
+    resetPinch(state, 4);
+
+    expect(isPinching(state)).toBe(false);
+    expect(tracksPointer(state, 1)).toBe(false);
+    expect(state.columns).toBe(4);
+    // The stranded finger is gone, so one new finger cannot form a pair.
+    pinchPointerDown(state, { pointerId: 5, clientX: 0, clientY: 0 });
+    expect(isPinching(state)).toBe(false);
+    expect(pinchPointerMove(state, { pointerId: 5, clientX: 900, clientY: 0 })).toBeNull();
+  });
+
+  it("resetPinch keeps the rendered size when no replacement is named", () => {
+    startPinch(200);
+    expect(pinchTo(340)).toBe(2);
+    resetPinch(state);
+    expect(state.columns).toBe(2);
+  });
+
+  it("reports which fingers it is tracking", () => {
+    expect(tracksPointer(state, 1)).toBe(false);
+    startPinch(200);
+    expect(tracksPointer(state, 1)).toBe(true);
+    expect(tracksPointer(state, 2)).toBe(true);
+    expect(tracksPointer(state, 3)).toBe(false);
+    pinchPointerUp(state, 2);
+    expect(tracksPointer(state, 2)).toBe(false);
+  });
+
+  it("holds a step against wobble in the shrink direction too", () => {
+    startPinch(300);
+    expect(pinchTo(210)).toBe(4);
+    // 3.5 columns is the midpoint below the committed four; hysteresis holds.
+    expect(pinchTo(257)).toBeNull();
+    expect(pinchTo(255)).toBeNull();
+  });
+
+  it("re-measures at a limit so reversing an overshoot responds at once", () => {
+    startPinch(100);
+    expect(pinchTo(900)).toBe(MOBILE_GALLERY_COLUMNS_MIN);
+
+    // Without re-baselining, undoing the 9x overshoot would move nothing until
+    // the fingers travelled most of the way back.
+    expect(pinchTo(500)).toBe(4);
+  });
+
+  it("adopts a scale when both fingers land on the same point", () => {
+    pinchPointerDown(state, { pointerId: 1, clientX: 40, clientY: 40 });
+    pinchPointerDown(state, { pointerId: 2, clientX: 40, clientY: 40 });
+    expect(isPinching(state)).toBe(false);
+
+    // The first move that separates them becomes the baseline, not a dead end.
+    expect(pinchPointerMove(state, { pointerId: 2, clientX: 240, clientY: 40 })).toBeNull();
+    expect(isPinching(state)).toBe(true);
+    expect(pinchPointerMove(state, { pointerId: 2, clientX: 380, clientY: 40 })).toBe(2);
   });
 });

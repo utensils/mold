@@ -111,6 +111,11 @@ function rebaseline(state: PinchZoomState): void {
   state.baselineColumns = state.columns;
 }
 
+/** True while this pointer is one of the fingers the gesture is tracking. */
+export function tracksPointer(state: PinchZoomState, pointerId: number): boolean {
+  return state.points.has(pointerId);
+}
+
 export function pinchPointerDown(state: PinchZoomState, point: PinchPoint): void {
   // A third finger never joins: the pair that started the gesture keeps it, so
   // an accidental palm touch cannot jerk the grid mid-pinch.
@@ -132,10 +137,17 @@ export function pinchPointerMove(state: PinchZoomState, point: PinchPoint): numb
   if (!tracked) return null;
   tracked.x = point.clientX;
   tracked.y = point.clientY;
-  if (!isPinching(state)) return null;
+  if (state.points.size !== 2) return null;
 
   const distance = separation(state);
   if (distance <= 0) return null;
+  if (state.baselineDistance <= 0) {
+    // Two fingers landed on the same coordinate, so the gesture had no scale to
+    // measure from. Adopt the first separation they resolve to instead of
+    // staying dead until one of them lifts.
+    rebaseline(state);
+    return null;
+  }
 
   const target = state.baselineColumns / (distance / state.baselineDistance);
   const next = normalizeMobileGalleryColumns(target);
@@ -145,6 +157,12 @@ export function pinchPointerMove(state: PinchZoomState, point: PinchPoint): numb
   if (Math.abs(target - state.columns) < 0.5 + PINCH_HYSTERESIS_COLUMNS) return null;
 
   state.columns = next;
+  // At a limit the mapping would otherwise keep accumulating unreachable
+  // travel, so reversing the pinch does nothing until the overshoot is undone.
+  // Re-measure from here, as Photos.app does, and the reverse responds at once.
+  if (next === MOBILE_GALLERY_COLUMNS_MIN || next === MOBILE_GALLERY_COLUMNS_MAX) {
+    rebaseline(state);
+  }
   return next;
 }
 

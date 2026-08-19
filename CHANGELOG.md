@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- **iPhone Library thumbnails now resize, closing the parity gap with the web and desktop thumbnail-size slider.** Pinching the Library grid moves it between two and five columns the way Photos.app does, instead of a slider that a phone-width layout cannot use. The gesture is scoped to the grid so one-finger scrolling and the viewer's horizontal swipe are untouched, a second finger converts an in-progress multi-select drag into a resize rather than painting a selection swath, hysteresis keeps a resting finger from flickering the layout, and VoiceOver hears the new size announced. The choice persists per device under its own key, so resizing on iPhone never rewrites a Mac's grid.
+- **iPhone Library thumbnails now resize, closing the parity gap with the web and desktop thumbnail-size slider.** Pinching the Library grid moves it between two and five columns the way Photos.app does, instead of a slider that a phone-width layout cannot use. The gesture is scoped to the grid so one-finger scrolling and the viewer's horizontal swipe are untouched, a second finger converts an in-progress multi-select drag into a resize and restores the selection exactly as it was before the first finger landed, resizing never opens the print a finger was resting on, hysteresis keeps a resting finger from flickering the layout, and VoiceOver hears the new size announced. The choice persists per device under its own key, so resizing on iPhone never rewrites a Mac's grid.
 
 ## [0.23.3] - 2026-08-19
 
