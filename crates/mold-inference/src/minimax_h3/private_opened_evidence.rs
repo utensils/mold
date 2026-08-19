@@ -1417,6 +1417,7 @@ fn build_canonical_private_fl2va_target_budget(
             bounds.attention_workspace_device_bytes,
             bounds.ffn_workspace_device_bytes,
         ),
+        crate::h3_factory::denoise_hidden_activation_device_bytes(request.rows.total_packed_rows)?,
         streamed_block_device_overlap_bytes,
         max_device_weight_staging_bytes,
     ])?;

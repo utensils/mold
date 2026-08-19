@@ -1352,6 +1352,7 @@ fn validate_target_budget(
                 memory.attention_workspace_device_bytes,
                 memory.ffn_workspace_device_bytes,
             ),
+            denoise_hidden_activation_device_bytes(request.rows.total_packed_rows)?,
             resident_blocks,
             streamed_block_overlap,
             expected_prefetch,
@@ -1572,17 +1573,44 @@ fn checked_u64_sum(values: impl IntoIterator<Item = u64>, label: &'static str) -
 
 /// The attention and FFN workspace bounds never coexist on the device: within
 /// one transformer block the attention call's transients (QKV projection,
-/// kernel auxiliaries, output-projection staging) are locals dropped when
-/// `H3Attention::forward` returns, and only hidden-sized tensors — charged
-/// separately as packed state and denoise copy workspace — survive into the
-/// strictly-sequential MLP call (`mold_candle::minimax_h3::dit`, block
-/// forward). The denoise phase therefore charges the larger of the two
-/// per-workspace bounds, never their sum.
+/// kernel auxiliaries, output-projection staging) are explicitly dropped
+/// before the strictly-sequential MLP call allocates
+/// (`mold_candle::minimax_h3::dit`, block forwards). The denoise phase
+/// therefore charges the larger of the two per-workspace bounds, never their
+/// sum. The hidden-sized tensors that DO stay live across that boundary are
+/// charged by `denoise_hidden_activation_device_bytes`, not here.
 pub(crate) fn denoise_transient_workspace_device_bytes(
     attention_workspace_device_bytes: u64,
     ffn_workspace_device_bytes: u64,
 ) -> u64 {
     attention_workspace_device_bytes.max(ffn_workspace_device_bytes)
+}
+
+/// The transformer's hidden width, pinned to the released config the
+/// qualification path validates (`private_qualification.rs`,
+/// `validate_transformer_config`: `hidden_size: 5_376`).
+const H3_HIDDEN_SIZE: u64 = 5_376;
+
+/// Hidden-sized (`rows x 5376` BF16) activations that remain live while the
+/// denoise transient workspace peaks. With the explicit drops in the block
+/// forwards, at most three such tensors coexist inside a block — the block's
+/// residual hidden, the active normalized input, and the in-flight
+/// projection — plus the caller's running sequence tensor across the block
+/// boundary, where the returned output and the previous hidden overlap.
+/// Charged as four, which also absorbs the six per-modality AdaLN parameter
+/// tensors (orders of magnitude smaller than one hidden tensor).
+const H3_DENOISE_LIVE_HIDDEN_ACTIVATIONS: u64 = 4;
+
+/// Baseline device charge for the transformer's live hidden activations
+/// during denoise. These are neither in the attention/FFN workspace bounds
+/// (whose authority excludes borrowed inputs) nor in the packed-state terms
+/// (which are latent-sized, 96/32 bytes per row, not `hidden_size`-sized).
+pub(crate) fn denoise_hidden_activation_device_bytes(total_packed_rows: u64) -> Result<u64> {
+    total_packed_rows
+        .checked_mul(H3_HIDDEN_SIZE)
+        .and_then(|elements| elements.checked_mul(2))
+        .and_then(|bytes| bytes.checked_mul(H3_DENOISE_LIVE_HIDDEN_ACTIVATIONS))
+        .ok_or_else(|| anyhow!("MiniMax H3 denoise hidden-activation budget overflow"))
 }
 
 pub fn expected_h3_factory_prepared_request_identity(
@@ -2896,6 +2924,7 @@ mod tests {
                 attention_workspace_device_bytes,
                 ffn_workspace_device_bytes,
             ),
+            denoise_hidden_activation_device_bytes(request.rows.total_packed_rows).unwrap(),
             streamed_block_device_overlap_bytes,
             max_device_weight_staging_bytes,
         ]);
