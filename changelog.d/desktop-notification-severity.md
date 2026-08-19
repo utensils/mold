@@ -10,6 +10,11 @@
   automatically" notice instead of a red error, the Machines card marks the row
   _reconnecting…_, and when the machine answers again the warning is withdrawn
   and a green "Reconnected to `<machine>`" confirms it.
+- **Severity is announced, not just tinted.** Warnings now share the error
+  toast's assertive live region — the sticky "your machine is gone" notice no
+  longer waits for a screen-reader user to go idle — and every surface reads one
+  shared severity table, so the same event can no longer show one glyph in a
+  toast and a different one in the bell.
 - **Notifications can be copied.** Every row in the notifications bell has a
   Copy button that puts the message, its full untruncated body, and the
   machine/time line on the clipboard, and the notification text itself is

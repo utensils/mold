@@ -66,11 +66,16 @@ function toneLabel(entry: NotificationEntry): string {
  */
 const copyState = ref<{ id: number; ok: boolean } | null>(null);
 let copyResetTimer: ReturnType<typeof setTimeout> | null = null;
+/** Rising token: only the newest click may paint the outcome. Clicking one row
+ *  then another must not settle "Copied" on whichever promise resolves last. */
+let copyEpoch = 0;
 
 async function copyEntry(entry: NotificationEntry) {
+  const epoch = ++copyEpoch;
   const ok = await copyTextToClipboard(
     notificationClipboardText(entry, timeLabel(entry)),
   );
+  if (epoch !== copyEpoch) return;
   copyState.value = { id: entry.id, ok };
   if (copyResetTimer) clearTimeout(copyResetTimer);
   copyResetTimer = setTimeout(() => {
@@ -83,6 +88,16 @@ function copyLabel(entry: NotificationEntry): string {
   if (copyState.value?.id !== entry.id) return "Copy";
   return copyState.value.ok ? "Copied" : "Copy failed";
 }
+
+/* The button's accessible name cannot change under the user's fingers, so the
+ * outcome goes to a live region instead — otherwise a failed copy on a plain
+ * http origin is announced as nothing at all and the text was never taken. */
+const copyAnnouncement = computed(() => {
+  if (!copyState.value) return "";
+  return copyState.value.ok
+    ? "Notification copied to the clipboard"
+    : "Could not copy the notification";
+});
 
 onUnmounted(() => {
   if (copyResetTimer) clearTimeout(copyResetTimer);
@@ -123,6 +138,14 @@ function timeLabel(entry: NotificationEntry): string {
     </template>
 
     <div class="notifications-panel" data-test="notifications-panel">
+      <p
+        class="notifications-panel__tone"
+        role="status"
+        aria-live="polite"
+        data-test="notifications-copy-status"
+      >
+        {{ copyAnnouncement }}
+      </p>
       <header>
         <strong>Notifications</strong>
         <button

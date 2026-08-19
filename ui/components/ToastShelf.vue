@@ -2,10 +2,12 @@
 /*
  * Toast shelf — top-right presenter inside the app frame (spec G11/G12).
  * The host owns the toast list and timers; this component renders it and
- * reports dismiss(id) / action(id). Errors are alerts with a stop-tinted
- * border; success/info are polite status rows. Optional action button (undo).
+ * reports dismiss(id) / action(id). Errors and warnings are alerts with a
+ * tinted border — a warning here is the sticky "your machine is gone", not an
+ * aside; success/info are polite status rows. Optional action button (undo).
  */
 import { computed } from "vue";
+import { severityIsUrgent, severityMark } from "../lib/notificationSeverity";
 import type { Toast } from "./types";
 
 export type { Toast };
@@ -20,21 +22,10 @@ const ordered = computed(() => [...props.toasts].reverse());
 
 const emit = defineEmits<{ dismiss: [id: string]; action: [id: string] }>();
 
-const GLYPHS: Record<Toast["kind"], string> = {
-  info: "•",
-  success: "✓",
-  warning: "!",
-  error: "✕",
-};
-
-/* Severity is never color alone — the glyph is decorative, so the tone name
- * ships as assistive text ahead of the message. */
-const TONE_LABELS: Record<Toast["kind"], string> = {
-  info: "Info",
-  success: "Success",
-  warning: "Warning",
-  error: "Error",
-};
+/* Glyphs and severity names come from the one shared table so this shelf, the
+ * desktop shelf, and the bell can never drift apart. */
+const mark = severityMark;
+const urgent = severityIsUrgent;
 </script>
 
 <template>
@@ -45,12 +36,12 @@ const TONE_LABELS: Record<Toast["kind"], string> = {
         :key="toast.id"
         class="ms-toast"
         :class="`ms-toast--${toast.kind}`"
-        :role="toast.kind === 'error' ? 'alert' : 'status'"
+        :role="urgent(toast.kind) ? 'alert' : 'status'"
       >
         <span class="ms-toast__glyph" aria-hidden="true">
-          {{ GLYPHS[toast.kind] }}
+          {{ mark(toast.kind).glyph }}
         </span>
-        <span class="ms-toast__tone">{{ TONE_LABELS[toast.kind] }}</span>
+        <span class="ms-toast__tone">{{ mark(toast.kind).label }}</span>
         <span class="ms-toast__text">{{ toast.text }}</span>
         <button
           v-if="toast.actionLabel"

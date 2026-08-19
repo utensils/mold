@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { flushPromises, mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import NotificationsCenter from "./NotificationsCenter.vue";
@@ -7,6 +7,12 @@ import { useNotificationsStore } from "../stores/notifications";
 beforeEach(() => {
   setActivePinia(createPinia());
   document.body.innerHTML = "";
+});
+
+afterEach(() => {
+  // The copy tests stub navigator; leaking that into a later file would make
+  // failures depend on test order.
+  vi.unstubAllGlobals();
 });
 
 function mountCenter() {
@@ -198,7 +204,6 @@ describe("NotificationsCenter copying", () => {
         .querySelector('[data-test="notifications-copy"]')
         ?.textContent?.trim(),
     ).toBe("Copy failed");
-    vi.unstubAllGlobals();
     wrapper.unmount();
   });
 });

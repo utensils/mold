@@ -22,6 +22,7 @@ import {
   HOST_OFFLINE_DESCRIPTION,
   hostOfflineTitle,
   hostReconnectedTitle,
+  reconcileHostConnectivity,
 } from "@studio/lib/hostConnectivity";
 import { listStoredHosts } from "./hostRegistry";
 import { hostStatus } from "../components/machines/hostClient";
@@ -113,58 +114,82 @@ export function installNotifications(deps: NotificationDeps): () => void {
   );
 
   // (c) Remote host reachability. Every listed host is re-probed on the timer,
-  // so reconnection is automatic — these toasts only narrate the two edges.
-  const wasOffline = new Set<string>();
+  // so reconnection is automatic — these toasts only narrate the two edges, and
+  // the edge policy itself is the shared reconciler desktop reads too.
   /** hostId → the sticky offline toast, withdrawn once the host answers. */
   const offlineToastIds = new Map<string, string>();
+  /** Last settled reachability per host, carried between polls. */
+  let reachability: Record<string, string> = {};
+  /** Rising counter so a slow probe from an earlier tick cannot land late. */
+  let pollEpoch = 0;
   let hostTimer: ReturnType<typeof setInterval> | null = null;
 
-  function clearOfflineToast(id: string): void {
+  function retireOfflineToast(id: string): void {
     const toastId = offlineToastIds.get(id);
     if (toastId) dismissToast(toastId);
     offlineToastIds.delete(id);
   }
 
+  /** Abort a probe that outlives its own poll interval rather than letting it
+   *  settle after a later tick already reported the opposite. */
+  function pollSignal(): AbortSignal | undefined {
+    if (typeof AbortSignal?.timeout === "function") {
+      return AbortSignal.timeout(pollMs);
+    }
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), pollMs);
+    return controller.signal;
+  }
+
   async function pollHosts(): Promise<void> {
+    const epoch = ++pollEpoch;
     const hosts = listStoredHosts();
     if (hosts.length === 0) {
-      for (const id of [...offlineToastIds.keys()]) clearOfflineToast(id);
-      wasOffline.clear();
+      for (const id of [...offlineToastIds.keys()]) retireOfflineToast(id);
+      reachability = {};
       if (offlineHostIds.value.size) offlineHostIds.value = new Set();
       return;
     }
-    await Promise.all(
+    const signal = pollSignal();
+    const current = await Promise.all(
       hosts.map(async (host) => {
         try {
-          await hostStatus(host);
-          if (wasOffline.delete(host.id)) {
-            // It came back on its own: drop the stale warning and say so.
-            clearOfflineToast(host.id);
-            toast("success", hostReconnectedTitle(host.name));
-          }
+          await hostStatus(host, signal);
+          return { id: host.id, label: host.name, status: "ready" };
         } catch {
-          if (!wasOffline.has(host.id)) {
-            wasOffline.add(host.id);
-            offlineToastIds.set(
-              host.id,
-              toast("warning", hostOfflineTitle(host.name), {
-                description: HOST_OFFLINE_DESCRIPTION,
-                timeout: 0,
-              }),
-            );
-          }
+          return { id: host.id, label: host.name, status: "error" };
         }
       }),
     );
-    // Drop ids for hosts that were removed while offline so a stale dot clears.
-    const known = new Set(hosts.map((h) => h.id));
-    for (const id of [...wasOffline]) {
-      if (!known.has(id)) {
-        wasOffline.delete(id);
-        clearOfflineToast(id);
-      }
+    // A tick that started later has already reported; discard this one whole
+    // rather than flapping the user between "reconnected" and "can't reach".
+    if (epoch !== pollEpoch) return;
+    const changes = reconcileHostConnectivity({
+      previous: reachability,
+      current,
+      warned: offlineToastIds.keys(),
+      // Unlike desktop, a registered machine that does not answer on the very
+      // first probe is news here: the browser has no Machines row already
+      // showing it as errored at that moment.
+      warnOnFirstContact: true,
+    });
+    for (const host of changes.offline) {
+      offlineToastIds.set(
+        host.id,
+        toast("warning", hostOfflineTitle(host.label), {
+          description: HOST_OFFLINE_DESCRIPTION,
+          timeout: 0,
+        }),
+      );
     }
-    offlineHostIds.value = new Set(wasOffline);
+    for (const host of changes.reconnected) {
+      retireOfflineToast(host.id);
+      toast("success", hostReconnectedTitle(host.label));
+    }
+    // Drop notices for hosts removed while offline so a stale dot clears.
+    for (const id of changes.retired) retireOfflineToast(id);
+    reachability = changes.next;
+    offlineHostIds.value = new Set(offlineToastIds.keys());
   }
 
   void pollHosts();

@@ -1,37 +1,25 @@
 <script setup lang="ts">
 import { computed } from "vue";
+import { severityIsUrgent, severityMark } from "@ui/lib/notificationSeverity";
 import { useToastStore, type Toast } from "../../stores/toasts";
 
 const toasts = useToastStore();
 
 /*
+ * Glyphs and severity names come from the one shared table
+ * (@ui/lib/notificationSeverity); only the Tailwind chip classes are local.
  * Severity reads as green (success) / yellow (warning) / red (error), with
- * plain info left cool and neutral. The glyph is decorative, so each tone also
- * carries a name for assistive tech — severity is never color alone.
+ * plain info left cool and neutral — and never by color alone.
  */
-const TONES: Record<Toast["kind"], { glyph: string; label: string; chip: string }> = {
-  info: {
-    glyph: "i",
-    label: "Info",
-    chip: "bg-[color-mix(in_srgb,var(--halide)_18%,transparent)] text-halide",
-  },
-  success: {
-    glyph: "✓",
-    label: "Success",
-    chip: "bg-[color-mix(in_srgb,var(--success)_20%,transparent)] text-success",
-  },
-  warning: {
-    glyph: "!",
-    label: "Warning",
-    chip: "bg-[color-mix(in_srgb,var(--warning)_22%,transparent)] text-warning",
-  },
-  // Warning and error must differ by more than hue — "!" vs "✕" — so severity
-  // survives a color-vision deficiency.
-  error: { glyph: "✕", label: "Error", chip: "bg-stop text-[var(--on-status)]" },
+const CHIPS: Record<Toast["kind"], string> = {
+  info: "bg-[color-mix(in_srgb,var(--halide)_18%,transparent)] text-halide",
+  success: "bg-[color-mix(in_srgb,var(--success)_20%,transparent)] text-success",
+  warning: "bg-[color-mix(in_srgb,var(--warning)_22%,transparent)] text-warning",
+  error: "bg-stop text-[var(--on-status)]",
 };
 
 function tone(kind: Toast["kind"]) {
-  return TONES[kind] ?? TONES.info;
+  return { ...severityMark(kind), chip: CHIPS[kind] ?? CHIPS.info };
 }
 
 // The store appends, so the newest toast is last; the shelf shows it first and
@@ -55,8 +43,8 @@ const ordered = computed(() => [...toasts.items].reverse());
         v-for="toast in ordered"
         :key="toast.id"
         class="border-edge pointer-events-auto grid w-[min(25rem,calc(100vw-2rem))] grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-x-3 gap-y-2 rounded-[var(--radius-card)] border bg-bench px-4 py-3 text-body shadow-[0_10px_28px_rgba(0,0,0,0.28)]"
-        :role="toast.kind === 'error' ? 'alert' : 'status'"
-        :aria-live="toast.kind === 'error' ? 'assertive' : 'polite'"
+        :role="severityIsUrgent(toast.kind) ? 'alert' : 'status'"
+        :aria-live="severityIsUrgent(toast.kind) ? 'assertive' : 'polite'"
         @click.self="toasts.click(toast.id)"
       >
         <span

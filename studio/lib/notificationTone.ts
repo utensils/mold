@@ -1,25 +1,19 @@
 /*
- * One severity palette for every notification surface (bell, toasts): green
- * for success, yellow for a warning, red for an error, neutral for plain
- * information. The colors are design tokens (`ui/tokens.css`), never hexes, so
- * every theme family and light/dark pair stays consistent.
- *
- * Each tone also carries a text label. Severity is never communicated by color
- * alone — the label ships as assistive text next to the dot.
+ * Notification tones for the bell: the shared severity marks (`@ui/lib/
+ * notificationSeverity`, the one table every surface reads) plus the badge
+ * fill only a counted badge needs. Green success, yellow warning, red error,
+ * neutral info — always as design tokens, never hexes, so every theme family
+ * and light/dark pair stays consistent.
  */
+import {
+  SEVERITY_MARKS,
+  severityMark,
+  type SeverityMark,
+} from "@ui/lib/notificationSeverity";
 import type { NotificationKind } from "../stores/notifications";
 
-export interface NotificationTone {
-  /** CSS color for the glyph — a token reference, resolved by the theme. */
-  color: string;
-  /**
-   * Distinct visible mark per severity. Color is the fast signal, but it is
-   * never the only one: a viewer with a color-vision deficiency separates the
-   * four kinds by glyph alone.
-   */
-  glyph: string;
-  /** Assistive-text severity name. */
-  label: string;
+/** A severity mark (glyph, label, color) plus the badge fill the bell needs. */
+export interface NotificationTone extends SeverityMark {
   /**
    * Solid fill for a counted badge. Never `--ink-3`: that is a translucent ink
    * meant for hint text, and printing a count on it has no predictable
@@ -28,38 +22,29 @@ export interface NotificationTone {
   badge: string;
 }
 
+/** Badge fills, keyed to the shared marks — info borrows the cool accent. */
+const BADGE_FILLS: Record<NotificationKind, string> = {
+  info: "var(--halide)",
+  success: "var(--success)",
+  warning: "var(--warning)",
+  error: "var(--stop)",
+};
+
 export const NOTIFICATION_TONES: Record<NotificationKind, NotificationTone> = {
-  info: {
-    color: "var(--ink-3)",
-    glyph: "•",
-    label: "Info",
-    badge: "var(--halide)",
-  },
-  success: {
-    color: "var(--success)",
-    glyph: "✓",
-    label: "Success",
-    badge: "var(--success)",
-  },
-  warning: {
-    color: "var(--warning)",
-    glyph: "!",
-    label: "Warning",
-    badge: "var(--warning)",
-  },
-  error: {
-    color: "var(--stop)",
-    glyph: "✕",
-    label: "Error",
-    badge: "var(--stop)",
-  },
+  info: { ...SEVERITY_MARKS.info, badge: BADGE_FILLS.info },
+  success: { ...SEVERITY_MARKS.success, badge: BADGE_FILLS.success },
+  warning: { ...SEVERITY_MARKS.warning, badge: BADGE_FILLS.warning },
+  error: { ...SEVERITY_MARKS.error, badge: BADGE_FILLS.error },
 };
 
 /** Ink that stays legible on any `badge` fill (defined per theme). */
 export const NOTIFICATION_BADGE_INK = "var(--on-status)";
 
 export function notificationTone(kind: NotificationKind): NotificationTone {
-  return NOTIFICATION_TONES[kind] ?? NOTIFICATION_TONES.info;
+  return {
+    ...severityMark(kind),
+    badge: BADGE_FILLS[kind] ?? BADGE_FILLS.info,
+  };
 }
 
 /** Highest-severity-wins order for a summary affordance (the bell badge). */

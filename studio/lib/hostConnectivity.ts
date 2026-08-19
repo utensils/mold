@@ -74,3 +74,62 @@ export function detectReconnectTransitions(
     (host) => host.status === "ready" && previous[host.id] === "error",
   );
 }
+
+export interface HostConnectivityInput {
+  /** Last settled status per host id, from a previous `changes.next`. */
+  previous: Readonly<Record<string, string>>;
+  current: readonly HostStatusSnapshot[];
+  /** Host ids currently carrying an offline notice that was never withdrawn. */
+  warned: Iterable<string>;
+  /**
+   * Whether a host that has never been reachable counts as a drop. Web says
+   * yes: a registered machine that does not answer on the first probe is news.
+   * Desktop says no: its boot probe is deliberately quiet because the Machines
+   * workspace already shows the errored row.
+   */
+  warnOnFirstContact?: boolean;
+}
+
+export interface HostConnectivityChanges {
+  /** Raise an offline notice for these. */
+  offline: HostStatusSnapshot[];
+  /** Withdraw the notice and confirm recovery for these. */
+  reconnected: HostStatusSnapshot[];
+  /**
+   * Warned ids that are gone from `current` — disconnected or forgotten while
+   * offline. Nothing will ever poll them again, so their notice must be
+   * retired with the entry rather than left to hang forever.
+   */
+  retired: string[];
+  /** The snapshot to carry into the next pass. */
+  next: Record<string, string>;
+}
+
+/**
+ * The whole host-reachability policy in one place, for both surfaces.
+ *
+ * A recovery is reported only for a host we actually warned about — the edge
+ * alone is not enough. Otherwise a machine that was already asleep at launch
+ * (quietly errored, never announced) produces a green "Reconnected to …" for a
+ * drop the user was never told about.
+ */
+export function reconcileHostConnectivity(
+  input: HostConnectivityInput,
+): HostConnectivityChanges {
+  const warned = new Set(input.warned);
+  const present = new Set(input.current.map((host) => host.id));
+  const offline = input.current.filter((host) => {
+    if (host.status !== "error" || warned.has(host.id)) return false;
+    const before = input.previous[host.id];
+    if (before === "ready") return true;
+    return input.warnOnFirstContact === true && before === undefined;
+  });
+  return {
+    offline,
+    reconnected: input.current.filter(
+      (host) => host.status === "ready" && warned.has(host.id),
+    ),
+    retired: [...warned].filter((id) => !present.has(id)),
+    next: snapshotHostStatuses(input.current, input.previous),
+  };
+}

@@ -12,13 +12,11 @@ import { ipc } from "./lib/ipc";
 import { appIsBackground } from "./lib/notify";
 import {
   HOST_OFFLINE_DESCRIPTION,
-  detectOfflineTransitions,
-  detectReconnectTransitions,
+  applyHostConnectivity,
   hostOfflineTitle,
   hostReconnectedTitle,
   newlyCompletedJobs,
   shouldToastGenerationComplete,
-  snapshotHostStatuses,
 } from "./lib/notifications";
 import {
   allowsNativeContextMenu,
@@ -115,6 +113,8 @@ watch(
 // status poll keeps probing every listed host, so an unreachable machine
 // reconnects on its own: dropping offline is a WARNING (sticky, because the
 // condition persists), and coming back withdraws it and confirms in green.
+// The policy and the id bookkeeping live in applyHostConnectivity; this only
+// supplies the shelf effects.
 let hostStatusSnapshot: Record<string, string> = {};
 /** hostId → the sticky offline toast, withdrawn the moment the host answers. */
 const offlineToastIds = new Map<string, number>();
@@ -122,9 +122,8 @@ watch(
   () => hostsStore.all.map((h) => `${h.id}:${h.status}`).join("|"),
   () => {
     const current = hostsStore.all.map((h) => ({ id: h.id, label: h.label, status: h.status }));
-    for (const host of detectOfflineTransitions(hostStatusSnapshot, current)) {
-      offlineToastIds.set(
-        host.id,
+    hostStatusSnapshot = applyHostConnectivity(hostStatusSnapshot, current, offlineToastIds, {
+      warn: (host) =>
         toasts.push(hostOfflineTitle(host.label), "warning", {
           description: HOST_OFFLINE_DESCRIPTION,
           action: {
@@ -133,24 +132,9 @@ watch(
           },
           sticky: true,
         }),
-      );
-    }
-    for (const host of detectReconnectTransitions(hostStatusSnapshot, current)) {
-      const stale = offlineToastIds.get(host.id);
-      if (stale !== undefined) toasts.dismiss(stale);
-      offlineToastIds.delete(host.id);
-      toasts.push(hostReconnectedTitle(host.label), "success");
-    }
-    // A host that is disconnected or forgotten while offline stops being
-    // polled, so nothing can ever withdraw its sticky warning — retire the
-    // toast with the entry rather than only dropping the id.
-    const known = new Set(current.map((host) => host.id));
-    for (const [id, toastId] of [...offlineToastIds.entries()]) {
-      if (known.has(id)) continue;
-      toasts.dismiss(toastId);
-      offlineToastIds.delete(id);
-    }
-    hostStatusSnapshot = snapshotHostStatuses(current, hostStatusSnapshot);
+      announceRecovery: (host) => toasts.push(hostReconnectedTitle(host.label), "success"),
+      dismiss: (toastId) => toasts.dismiss(toastId),
+    });
   },
   { immediate: true },
 );

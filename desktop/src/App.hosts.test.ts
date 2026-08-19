@@ -24,22 +24,11 @@ describe("desktop host bootstrap", () => {
     expect(source).toContain("sticky: true");
   });
 
-  it("warns on a drop and confirms the automatic reconnect in green", () => {
-    // A host that stays listed and is re-probed every poll is a warning, not a
-    // failure; the recovery withdraws that toast and reports success.
+  it("routes every reachability edge through the shared policy", () => {
+    // The behaviour is covered by applyHostConnectivity's own test; this only
+    // pins that the shell reads that policy instead of restating one.
+    expect(source).toContain("applyHostConnectivity(");
     expect(source).toContain('toasts.push(hostOfflineTitle(host.label), "warning"');
     expect(source).toContain('toasts.push(hostReconnectedTitle(host.label), "success")');
-    expect(source).toContain("detectReconnectTransitions(hostStatusSnapshot, current)");
-    expect(source).toContain("toasts.dismiss(stale)");
-  });
-
-  it("retires an offline warning when its host leaves the list", () => {
-    // A disconnected or forgotten host stops being polled, so nothing could
-    // ever withdraw its sticky warning — it must go with the entry.
-    const cleanup = source.slice(source.indexOf("offlineToastIds.entries()"));
-    const dismiss = cleanup.indexOf("toasts.dismiss(toastId)");
-    const drop = cleanup.indexOf("offlineToastIds.delete(id)");
-    expect(dismiss).toBeGreaterThan(-1);
-    expect(drop).toBeGreaterThan(dismiss);
   });
 });

@@ -41,6 +41,9 @@ export async function copyTextToClipboard(text: string): Promise<boolean> {
   } catch {
     // Fall through to the textarea path.
   }
+  // Selecting the staging node steals focus, and removing it would then strand
+  // focus on <body> — restoring it keeps a keyboard user's place in the list.
+  const previouslyFocused = document.activeElement;
   const area = document.createElement("textarea");
   try {
     area.value = text;
@@ -58,5 +61,6 @@ export async function copyTextToClipboard(text: string): Promise<boolean> {
     // A throwing execCommand must not strand the staging node in the document;
     // every failed Copy would otherwise add another invisible textarea.
     area.remove();
+    if (previouslyFocused instanceof HTMLElement) previouslyFocused.focus();
   }
 }

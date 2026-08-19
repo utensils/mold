@@ -1,3 +1,4 @@
+import { reconcileHostConnectivity, type HostStatusSnapshot } from "@studio/lib/hostConnectivity";
 import type { Job } from "./generationJob";
 
 /**
@@ -27,14 +28,58 @@ export function shouldToastGenerationComplete(routePath: string): boolean {
  */
 export {
   HOST_OFFLINE_DESCRIPTION,
-  HOST_RECONNECTING_LABEL,
-  detectOfflineTransitions,
-  detectReconnectTransitions,
   hostOfflineTitle,
   hostReconnectedTitle,
-  snapshotHostStatuses,
   type HostStatusSnapshot,
 } from "@studio/lib/hostConnectivity";
+
+export interface HostConnectivityEffects {
+  /** Raise the sticky offline warning; returns the toast id to retain. */
+  warn: (host: HostStatusSnapshot) => number;
+  /** Confirm a recovery for a host we previously warned about. */
+  announceRecovery: (host: HostStatusSnapshot) => void;
+  /** Withdraw a retained toast (a no-op if it is already gone). */
+  dismiss: (toastId: number) => void;
+}
+
+/**
+ * Apply one pass of the shared reachability policy to the desktop toast shelf
+ * and return the snapshot for the next pass. The retained toast ids live in
+ * `warned`, which this mutates: a warning is remembered until the host answers
+ * or leaves the list, and both of those withdraw it.
+ *
+ * Extracted from App.vue so the id bookkeeping is testable without mounting
+ * the whole shell.
+ */
+export function applyHostConnectivity(
+  previous: Readonly<Record<string, string>>,
+  current: readonly HostStatusSnapshot[],
+  warned: Map<string, number>,
+  effects: HostConnectivityEffects,
+): Record<string, string> {
+  const changes = reconcileHostConnectivity({
+    previous,
+    current,
+    warned: warned.keys(),
+    // The boot probe is deliberately quiet; the Machines workspace already
+    // shows an errored row for a host that was never reachable.
+    warnOnFirstContact: false,
+  });
+  const retire = (id: string) => {
+    const toastId = warned.get(id);
+    if (toastId !== undefined) effects.dismiss(toastId);
+    warned.delete(id);
+  };
+  for (const host of changes.offline) warned.set(host.id, effects.warn(host));
+  for (const host of changes.reconnected) {
+    retire(host.id);
+    effects.announceRecovery(host);
+  }
+  // A host disconnected or forgotten while offline stops being polled, so
+  // nothing could ever withdraw its warning — retire it with the entry.
+  for (const id of changes.retired) retire(id);
+  return changes.next;
+}
 
 /** Cap a badge count so the nav pill stays legible. */
 export function badgeCount(n: number): string | number | undefined {

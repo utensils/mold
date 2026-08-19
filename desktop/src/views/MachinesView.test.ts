@@ -139,10 +139,11 @@ describe("MachinesView overview", () => {
       remote.error = "connection refused";
     });
 
+    // Exactly one: the errored remote. The reachable This-device card and the
+    // ready rows say nothing.
     const notes = wrapper.findAll("[data-test='host-reconnecting']");
     expect(notes).toHaveLength(1);
     expect(notes[0]!.text()).toBe("reconnecting…");
-    // A reachable machine says nothing.
     expect(notes[0]!.classes()).toContain("text-warning");
   });
 
