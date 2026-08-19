@@ -37,11 +37,20 @@ _"Underwater footage of a jellyfish pulsing through deep blue water, bioluminesc
 | `ltx-video-0.9.6:bf16`               | 40    | ~17.4 GB          | Higher-quality 2B path, 30 FPS defaults      |
 | `ltx-video-0.9.6-distilled:bf16`     | 8     | ~17.4 GB          | Fast default single-pass path                |
 | `ltx-video-0.9.8-2b-distilled:bf16`  | 7+3   | ~17.8 GB          | 0.9.8 checkpoint plus spatial upscaler asset |
-| `ltx-video-0.9.8-13b-dev:bf16`       | 30    | ~38.5 GB          | Highest-quality 13B multiscale dev path      |
-| `ltx-video-0.9.8-13b-distilled:bf16` | 7+3   | ~38.5 GB          | Faster 13B checkpoint                        |
+| `ltx-video-0.9.8-13b-dev:bf16`       | 30    | ~38.5 GB          | Highest-quality 13B multiscale dev path — 40 GB-class GPU, no offload |
+| `ltx-video-0.9.8-13b-distilled:bf16` | 7+3   | ~38.5 GB          | Faster 13B checkpoint — 40 GB-class GPU, no offload |
 
 The 0.9.8 variants require the published spatial upscaler asset. mold pulls and
 tracks that file explicitly.
+
+::: warning 13B BF16 tiers need a 40 GB-class GPU
+The two 13B BF16 checkpoints keep the whole ~28.6 GB transformer resident on
+the GPU (plus ~2 GB runtime headroom). This legacy family has no block-offload
+path and is not getting one — it is superseded by [LTX-2](./ltx2.md), whose FP8
+tiers run on 24 GB cards with adaptive offload. On a 24 GB card mold refuses the
+13B tiers up front with an error naming these alternatives; use an LTX-2 model
+or `ltx-video-0.9.8-2b-distilled:bf16` instead.
+:::
 
 These sizes are approximate full-download totals, including the shared T5
 encoder, tokenizer, VAE, and the `0.9.8` spatial upscaler where applicable.

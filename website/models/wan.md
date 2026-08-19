@@ -281,7 +281,7 @@ decodes on a 24 GB card; the denoise is the memory wall.
 
 ### FlashAttention on Wan
 
-A `--features cuda,flash-attn` build routes the Wan DiT's self- and cross-attention through candle-flash-attn v2 and defaults `MOLD_ATTN` to `flash`. Measured on an RTX 4090 with the same binary, only the backend varying (`wan22-t2v-a14b:q5`, 53 frames at 832x480):
+A `--features cuda,flash-attn` build can route the Wan DiT's self- and cross-attention through candle-flash-attn v2; set `MOLD_ATTN=flash` to opt in (the default is `math` in every build, see [#736](https://github.com/utensils/mold/issues/736)). Measured on an RTX 4090 with the same binary, only the backend varying (`wan22-t2v-a14b:q5`, 53 frames at 832x480):
 
 | Backend | Peak VRAM  | Wall clock |
 | ------- | ---------- | ---------- |

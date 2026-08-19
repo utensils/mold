@@ -397,18 +397,6 @@ export const ENV_KNOB_SCHEMAS: KeySchema[] = [
     needsEngineRestart: true,
   },
   {
-    key: "env.MOLD_ATTN",
-    section: "performance",
-    label: "Attention backend",
-    help: "math is the portable default. flash needs a CUDA build with the flash-attn feature, which the built-in engine is not — it falls back to math here.",
-    editor: "select",
-    options: [
-      { value: "", label: "math (default)" },
-      { value: "flash", label: "flash" },
-    ],
-    needsEngineRestart: true,
-  },
-  {
     key: "env.MOLD_QUEUE_SIZE",
     section: "performance",
     label: "Queue capacity",
