@@ -949,14 +949,21 @@ describe("hosts store", () => {
 
       const pending = hosts.resolveFeasible(null, placementRequest);
       await vi.waitFor(() => expect(previewGenerationPlacement).toHaveBeenCalledTimes(1));
+      // Nothing can route yet, so the first deadline extends once instead of
+      // reporting a machine that is still checking as one that did not answer.
       await vi.advanceTimersByTimeAsync(5_000);
+      let settled = false;
+      void pending.then(() => (settled = true));
+      await Promise.resolve();
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(15_000);
 
       await expect(pending).resolves.toEqual({
         kind: "unreachable",
         perHost: [
           expect.objectContaining({
             hostId: "local",
-            error: expect.stringContaining("Auto placement timed out after 5 seconds"),
+            error: expect.stringContaining("Auto placement timed out after 20 seconds"),
           }),
         ],
       });
@@ -964,6 +971,100 @@ describe("hosts store", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("keeps waiting past the Auto deadline for the only machine that might still plan", async () => {
+    vi.useFakeTimers();
+    try {
+      const hosts = useHostsStore();
+      hosts.extras.push({
+        id: hal.id,
+        label: "hal9000",
+        url: hal.url,
+        apiKey: "hal-key",
+        status: "ready",
+        error: null,
+        instanceId: "hal-instance",
+      });
+      const slow = deferred<ReturnType<typeof plannedPlacement>>();
+      previewGenerationPlacement.mockImplementation((target: { baseUrl: string }) =>
+        target.baseUrl.includes("hal9000")
+          ? slow.promise
+          : Promise.resolve({
+              ...plannedPlacement(),
+              outcome: "infeasible",
+              candidate: null,
+              reason: "model 'flux-dev:q4' has no concrete local artifacts",
+              missing_components: [
+                {
+                  kind: "transformer",
+                  name: "transformer",
+                  present: false,
+                  repair_model: "flux-dev:q4",
+                },
+              ],
+            }),
+      );
+
+      const pending = hosts.resolveFeasible(null, placementRequest);
+      await vi.waitFor(() => expect(previewGenerationPlacement).toHaveBeenCalledTimes(2));
+      await vi.advanceTimersByTimeAsync(5_000);
+      let settled = false;
+      void pending.then(() => (settled = true));
+      await Promise.resolve();
+      expect(settled).toBe(false);
+
+      slow.resolve(plannedPlacement("cuda:remote"));
+      await expect(pending).resolves.toMatchObject({
+        kind: "route",
+        route: { hostId: hal.id },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reports a missing model apart from a machine that simply cannot fit it", async () => {
+    const hosts = useHostsStore();
+    hosts.extras.push({
+      id: hal.id,
+      label: "hal9000",
+      url: hal.url,
+      apiKey: "hal-key",
+      status: "ready",
+      error: null,
+      instanceId: "hal-instance",
+    });
+    previewGenerationPlacement
+      .mockResolvedValueOnce({
+        ...plannedPlacement(),
+        outcome: "infeasible",
+        candidate: null,
+        reason: "model 'flux-dev:q4' has no concrete local artifacts",
+        missing_components: [
+          {
+            kind: "transformer",
+            name: "transformer",
+            present: false,
+            repair_model: "flux-dev:q4",
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        ...plannedPlacement(),
+        outcome: "infeasible",
+        candidate: null,
+        reason: "no device can host this generation: needs 48.0 GB",
+      });
+
+    const result = await hosts.resolveFeasible(null, placementRequest);
+    expect(result).toMatchObject({ kind: "infeasible" });
+    const perHost = (result as { perHost: Array<Record<string, unknown>> }).perHost;
+    expect(perHost[0]).toMatchObject({
+      hostId: "local",
+      missingModel: { model: "flux-dev:q4" },
+    });
+    expect(perHost[1]).toMatchObject({ hostId: hal.id, missingModel: null });
   });
 
   it("waits for every Most capable probe instead of using Auto's early route window", async () => {

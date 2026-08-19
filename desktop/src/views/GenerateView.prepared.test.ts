@@ -569,6 +569,7 @@ describe("GenerateView prepared expansion batches", () => {
                       repair_model: "flux-dev:q4",
                     },
                   ],
+                  missingModel: null,
                 },
               ],
             }
@@ -589,6 +590,7 @@ describe("GenerateView prepared expansion batches", () => {
                       repair_model: "flux-dev:q4",
                     },
                   ],
+                  missingModel: null,
                 },
                 {
                   kind: "unreachable",

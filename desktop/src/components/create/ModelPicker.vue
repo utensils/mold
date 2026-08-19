@@ -3,7 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import type { ModelEntry } from "../../lib/api/types";
 import { modelAvailabilityTag } from "../../lib/hosts";
-import { modelDisplayName } from "../../lib/models";
+import { modelDisplayName, modelDisplayNameForId } from "../../lib/models";
 import { modelSource } from "../../lib/modelSource";
 import { formatGB } from "../../lib/format";
 import { useHostModelsStore } from "../../stores/hostModels";
@@ -27,16 +27,24 @@ const props = withDefaults(
     disabledReason?: ((m: ModelEntry) => string | null) | null;
     browseTarget?: string;
     browseLabel?: string;
+    /**
+     * A model id the form carries that no machine has installed — a restored
+     * print, a template, or a deleted checkpoint. It renders as the selected
+     * entry with a Not installed tag instead of reading "Choose a model",
+     * which made the restore look like it had silently dropped the model.
+     */
+    missingModel?: string | null;
   }>(),
   {
     showAvailability: true,
     disabledReason: null,
     browseTarget: "/models",
     browseLabel: "Browse all models →",
+    missingModel: null,
   },
 );
 
-const emit = defineEmits<{ pick: [model: ModelEntry] }>();
+const emit = defineEmits<{ pick: [model: ModelEntry]; "pick-missing": [model: string] }>();
 
 const hostModels = useHostModelsStore();
 const hosts = useHostsStore();
@@ -44,6 +52,19 @@ const router = useRouter();
 
 const pickerEl = ref<HTMLDivElement | null>(null);
 const open = ref(false);
+
+/** The phantom entry is only shown when nothing real is selected. */
+const phantom = computed(() => (props.selected ? null : (props.missingModel ?? null)));
+const phantomLabel = computed(() =>
+  phantom.value ? modelDisplayNameForId(phantom.value, props.models) : "",
+);
+
+function pickMissing() {
+  const name = phantom.value;
+  if (!name) return;
+  open.value = false;
+  emit("pick-missing", name);
+}
 
 const families = computed<Map<string, ModelEntry[]>>(() => {
   const byName = new Map<string, ModelEntry>();
@@ -101,13 +122,32 @@ onBeforeUnmount(() => {
   <div ref="pickerEl" class="ms-model">
     <button type="button" :aria-expanded="open" class="ms-model__button" @click="open = !open">
       <span data-test="selected-model-name" class="min-w-0 break-all text-left">{{
-        selected ? modelDisplayName(selected) : "Choose a model"
+        selected ? modelDisplayName(selected) : phantom ? phantomLabel : "Choose a model"
       }}</span>
       <span v-if="selected?.disk_usage_bytes" class="data-mono ms-model__size">
         {{ formatGB(selected.disk_usage_bytes) }}
       </span>
+      <span v-else-if="phantom" data-test="selected-model-missing" class="edge-code shrink-0">
+        Not installed
+      </span>
     </button>
     <div v-if="open" data-test="model-picker-menu" class="ms-model__menu">
+      <!-- The model the form actually carries, kept visible so a restored
+           print never reads as "no model". Picking it offers the pull. -->
+      <button
+        v-if="phantom"
+        type="button"
+        data-test="model-option-missing"
+        class="ms-model__option"
+        @click="pickMissing"
+      >
+        <span class="min-w-0 flex-1">
+          <span class="block break-all text-ink" :title="phantomLabel">{{ phantomLabel }}</span>
+          <span class="edge-code mt-0.5 block break-all whitespace-normal">
+            Not installed — download it
+          </span>
+        </span>
+      </button>
       <template v-for="[family, list] in families" :key="family">
         <div class="ms-model__group">{{ family.toUpperCase() }}</div>
         <button

@@ -40,6 +40,10 @@ export interface PendingInstallChoice {
 export interface InstallChoiceRequest {
   modelId: string;
   displayName: string;
+  /** Narrow the plan to these machines. Create's missing-model pull passes the
+   * machines that actually reported the model absent, so a machine that
+   * refused for capacity or policy can never be offered as a pull target. */
+  restrictToHostIds?: readonly string[];
   /** True when the serving host is known to already hold it (a Discover row's
    * `installed` flag, or a row from the origin's installed shelf) — positive
    * knowledge that lands before the per-host poll does. */
@@ -67,15 +71,19 @@ export interface ModelInstallTargets {
   planFor: (
     modelId: string,
     ownedByOrigin?: boolean,
+    restrictToHostIds?: readonly string[],
   ) => ModelInstallPlan<RoutableHost>;
   /** Resolve where an install goes, asking the user only when it is ambiguous. */
   chooseInstallTarget: (req: InstallChoiceRequest) => Promise<InstallChoice>;
   choose: (target: InstallTarget) => void;
   cancel: () => void;
+  /** Starts the download and returns the server's job id when it reports one
+   * (catalog ids do; a manifest-name POST does not), so a caller watching for
+   * that exact pull can be precise instead of matching by model name. */
   startDownloadOn: (
     target: InstallTarget | null,
     modelId: string,
-  ) => Promise<void>;
+  ) => Promise<string | null>;
   queuedMessage: (
     target: InstallTarget | null,
     fallbackAction?: ModelInstallAction,
@@ -89,11 +97,16 @@ export function useModelInstallTargets(): ModelInstallTargets {
   function planFor(
     modelId: string,
     ownedByOrigin = false,
+    restrictToHostIds?: readonly string[],
   ): ModelInstallPlan<RoutableHost> {
     // Only a machine that answered its status poll can accept a download. A
     // connecting or errored one is neither an install target nor evidence that
     // the model is missing there.
-    const reachable = routing.hosts.value.filter((h) => h.status === "ready");
+    const reachable = routing.hosts.value.filter(
+      (h) =>
+        h.status === "ready" &&
+        (!restrictToHostIds || restrictToHostIds.includes(h.id)),
+    );
     const owners = new Set(routing.modelOwnerIds(modelId));
     if (ownedByOrigin) owners.add(ORIGIN_HOST_ID);
     return planModelInstall(reachable, owners, {
@@ -104,7 +117,7 @@ export function useModelInstallTargets(): ModelInstallTargets {
   async function chooseInstallTarget(
     req: InstallChoiceRequest,
   ): Promise<InstallChoice> {
-    const plan = planFor(req.modelId, req.ownedByOrigin);
+    const plan = planFor(req.modelId, req.ownedByOrigin, req.restrictToHostIds);
     if (plan.targets.length === 0) return { kind: "target", target: null };
     if (plan.targets.length === 1) {
       return { kind: "target", target: plan.targets[0] };
@@ -125,19 +138,19 @@ export function useModelInstallTargets(): ModelInstallTargets {
   async function startDownloadOn(
     target: InstallTarget | null,
     modelId: string,
-  ): Promise<void> {
+  ): Promise<string | null> {
     if (!target || target.host.id === ORIGIN_HOST_ID) {
       // Keep the origin on the catalog composable: it routes by id shape and
       // repaints the downloads centre immediately instead of waiting on the
       // SSE `enqueued` event.
-      await cat.startDownload(modelId);
-      return;
+      return await cat.startDownload(modelId);
     }
     const entry = getHost(target.host.id);
     if (!entry) {
       throw new Error(`${target.host.label} is no longer a connected machine`);
     }
-    await hostModelDownload(entry, modelId);
+    const enqueued = await hostModelDownload(entry, modelId);
+    return enqueued?.primary_job_id ?? null;
   }
 
   function queuedMessage(
