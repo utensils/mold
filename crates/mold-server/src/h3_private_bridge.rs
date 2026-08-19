@@ -486,9 +486,14 @@ fn build_fl2va_capability(models_root: &std::path::Path) -> Option<mold_core::Mi
             backend: "cuda".into(),
             metal_supported: false,
             minimum_host_ram_bytes: crate::h3_admission::H3_CURATED_HOST_RAM_RECOMMENDATION_BYTES,
-            // The reviewed 38.7 GB peak is advertised as a conservative 40 GiB
-            // hardware tier rather than as false byte-level precision.
-            minimum_vram_bytes: 40 * 1024 * 1024 * 1024,
+            // The corrected phase ledger (max-not-sum workspaces, parked
+            // VAEs, explicit hidden-activation baseline) predicts a ~19.4 GB
+            // denoise peak at the qualified envelope; advertise a 24 GiB
+            // hardware tier rather than false byte-level precision. The old
+            // 40 GiB figure came from an uncommitted L40S-era review and
+            // double-charged sequential phases. Admission still gates on the
+            // exact per-attempt budget, never on this advisory tier.
+            minimum_vram_bytes: 24 * 1024 * 1024 * 1024,
             attention_profile: "FlashAttention v2 BF16 on exact CUDA SM89".into(),
             quantization_profile: "Comfy pruned INT8-convrot + Qwen NVFP4-AWQ".into(),
         },
@@ -497,7 +502,7 @@ fn build_fl2va_capability(models_root: &std::path::Path) -> Option<mold_core::Mi
             model: mold_core::minimax_h3::FL2VA_COMFY.into(),
             display_name: "MiniMax H3 FL2VA".into(),
             runtime_available: true,
-            tier: "Compact 40 GiB VRAM".into(),
+            tier: "Compact 24 GiB VRAM".into(),
             component_ids,
             request: Some(mold_core::MiniMaxH3RequestCapability {
                 width: mold_core::minimax_h3::DEFAULT_WIDTH,
