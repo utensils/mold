@@ -24,7 +24,7 @@ retain attribution, identify their changes in each file header (standalone
 models without the upstream pipeline traits, flash-attn gates and debug output
 removed, LTX-2 positional-embedding and config changes), and are distributed
 under Apache-2.0 alongside Mold's MIT license; the complete license text is
-included in ``LICENSE-APACHE-2.0` in this crate and in the published
+included in `LICENSE-APACHE-2.0` in this crate and in the published
 `mold-ai-candle` crate. Mold's own LTX-Video pipeline, single-file loaders,
 latent upsampler, and the rest of the LTX-2 runtime are original work.
 
