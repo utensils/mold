@@ -179,7 +179,10 @@ function resolveSources() {
     });
 }
 
-watch(() => [props.item.filename, hostEntry.value?.id], resolveSources, {
+// Multi-source form on purpose: a getter returning a fresh `[...]` re-fires on
+// every `props.item` identity change (the page's 10 s refresh replaces every
+// entry object), blanking the tile and re-minting media tickets per card.
+watch([() => props.item.filename, () => hostEntry.value?.id], resolveSources, {
   immediate: true,
 });
 

@@ -19,7 +19,12 @@ import HistoryDrawer from "../components/library/HistoryDrawer.vue";
 import EmptyState from "../components/shell/EmptyState.vue";
 import HostFilterChips from "../components/shell/HostFilterChips.vue";
 import { layoutJustifiedRows } from "../lib/gallery/layout";
-import { galleryMediaPath, isAudioItem, isVideoItem } from "../lib/gallery/media";
+import {
+  fetchGalleryMediaBytes,
+  galleryMediaPath,
+  isAudioItem,
+  isVideoItem,
+} from "../lib/gallery/media";
 import { applySelectionClick } from "../lib/gallery/selection";
 import {
   planSequenceReuse,
@@ -27,7 +32,7 @@ import {
   sequenceGoneMessage,
   sequenceHostUnreachableMessage,
 } from "@studio/lib/sequenceReuse";
-import { ApiError, apiFetchTo, type ApiTarget } from "../lib/api/client";
+import { ApiError, type ApiTarget } from "../lib/api/client";
 import {
   useGalleryStore,
   type GalleryKindFilter,
@@ -578,12 +583,7 @@ async function copyImage(entry: MergedPrint) {
     const target = targetFor(entry);
     await copyImageBytesToClipboard(
       path,
-      target
-        ? {
-            fetchImage: async (p) =>
-              new Uint8Array(await (await apiFetchTo(target, p)).arrayBuffer()),
-          }
-        : undefined,
+      target ? { fetchImage: (p) => fetchGalleryMediaBytes(p, target) } : undefined,
     );
     toasts.push("Image copied");
   } catch (error) {

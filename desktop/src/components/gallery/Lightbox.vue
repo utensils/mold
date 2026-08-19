@@ -4,7 +4,11 @@ import { useRouter } from "vue-router";
 import Icon from "@ui/components/Icon.vue";
 import VideoExportDialog from "@ui/components/VideoExportDialog.vue";
 import AuthedMedia from "./AuthedMedia.vue";
-import { galleryMediaPath, type GallerySource } from "../../lib/gallery/media";
+import {
+  fetchGalleryMediaBytes,
+  galleryMediaPath,
+  type GallerySource,
+} from "../../lib/gallery/media";
 import { ipc } from "../../lib/ipc";
 import { useComposerStore } from "../../stores/composer";
 import { useToastStore } from "../../stores/toasts";
@@ -169,14 +173,7 @@ async function copyImage() {
     const target = props.target;
     await copyImageBytesToClipboard(
       galleryMediaPath(props.item.filename, props.source),
-      target
-        ? {
-            fetchImage: async (p) => {
-              const { apiFetchTo } = await import("../../lib/api/client");
-              return new Uint8Array(await (await apiFetchTo(target, p)).arrayBuffer());
-            },
-          }
-        : undefined,
+      target ? { fetchImage: (p) => fetchGalleryMediaBytes(p, target) } : undefined,
     );
     toasts.push("Image copied");
   } catch (error) {

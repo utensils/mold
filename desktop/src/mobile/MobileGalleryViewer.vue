@@ -286,14 +286,14 @@ function handleViewerKeydown(event: KeyboardEvent): void {
 }
 
 watch(
-  () => [
-    props.item.filename,
-    props.item.format,
-    !!props.item.metadata.video_frames,
-    props.target.baseUrl,
-    props.target.apiKey,
-    props.cacheKey,
-    props.mediaUrlOverride,
+  [
+    () => props.item.filename,
+    () => props.item.format,
+    () => !!props.item.metadata.video_frames,
+    () => props.target.baseUrl,
+    () => props.target.apiKey,
+    () => props.cacheKey,
+    () => props.mediaUrlOverride,
   ],
   () => {
     if (mounted) reloadMedia();

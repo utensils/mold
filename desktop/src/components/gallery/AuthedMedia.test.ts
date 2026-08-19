@@ -1,17 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { flushPromises, mount } from "@vue/test-utils";
 import AuthedMedia from "./AuthedMedia.vue";
-import { authedMediaUrl, streamableMediaUrl } from "../../lib/gallery/media";
+import { authedMediaUrl, fullSizeMediaUrl } from "../../lib/gallery/media";
 
 vi.mock("../../lib/gallery/media", () => ({
   authedMediaUrl: vi.fn().mockResolvedValue("blob:video"),
-  streamableMediaUrl: vi.fn().mockResolvedValue("http://remote/media?ticket=one-use"),
+  fullSizeMediaUrl: vi.fn().mockResolvedValue("http://remote/media?ticket=one-use"),
 }));
 
 beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(authedMediaUrl).mockResolvedValue("blob:video");
-  vi.mocked(streamableMediaUrl).mockResolvedValue("http://remote/media?ticket=one-use");
+  vi.mocked(fullSizeMediaUrl).mockResolvedValue("http://remote/media?ticket=one-use");
 });
 
 afterEach(() => vi.useRealTimers());
@@ -35,10 +35,11 @@ describe("AuthedMedia", () => {
       });
       await vi.waitFor(() => expect(wrapper.find(element).exists()).toBe(true));
 
-      expect(streamableMediaUrl).toHaveBeenCalledWith(`/api/gallery/image/${filename}`, {
+      expect(fullSizeMediaUrl).toHaveBeenCalledWith(`/api/gallery/image/${filename}`, {
         target,
         cacheKey: "plato-7680",
         allowLegacyBlob,
+        video,
       });
       expect(authedMediaUrl).not.toHaveBeenCalled();
       expect(wrapper.get(element).attributes("src")).toBe("http://remote/media?ticket=one-use");
@@ -75,14 +76,14 @@ describe("AuthedMedia", () => {
 
   it("does not retry an unbounded full-media fetch", async () => {
     vi.useFakeTimers();
-    vi.mocked(streamableMediaUrl).mockRejectedValue(new Error("video transfer failed"));
+    vi.mocked(fullSizeMediaUrl).mockRejectedValue(new Error("video transfer failed"));
     const wrapper = mount(AuthedMedia, {
       props: { path: "/api/gallery/image/large-video.mp4", video: true },
     });
     await flushPromises();
     await vi.advanceTimersByTimeAsync(2_000);
 
-    expect(streamableMediaUrl).toHaveBeenCalledTimes(1);
+    expect(fullSizeMediaUrl).toHaveBeenCalledTimes(1);
     expect(wrapper.text()).toContain("UNREADABLE");
   });
 
@@ -113,5 +114,50 @@ describe("AuthedMedia", () => {
         target: { baseUrl: "http://local:7680", apiKey: "new-key" },
       }),
     );
+  });
+});
+
+describe("AuthedMedia target identity", () => {
+  it("keeps the rendered element when a re-render passes an equal but new target object", async () => {
+    // The Library builds `target` per render (`{ baseUrl, apiKey }`), so any
+    // parent re-render — selecting a tile — hands every remote tile a fresh
+    // object. Reloading on that swaps the <img> for the shimmer between the
+    // two clicks of a double-click, which is why remote-only prints would not
+    // open while This-Mac prints (a stable authority object) did.
+    const wrapper = mount(AuthedMedia, {
+      props: {
+        path: "/api/gallery/thumbnail/remote.png",
+        target: { baseUrl: "http://hal9000:7680", apiKey: null },
+        cacheKey: "hal9000-7680",
+      },
+    });
+    await vi.waitFor(() => expect(wrapper.find("img").exists()).toBe(true));
+    const firstImg = wrapper.get("img").element;
+    expect(authedMediaUrl).toHaveBeenCalledTimes(1);
+
+    await wrapper.setProps({ target: { baseUrl: "http://hal9000:7680", apiKey: null } });
+    await flushPromises();
+
+    expect(authedMediaUrl).toHaveBeenCalledTimes(1);
+    expect(wrapper.get("img").element).toBe(firstImg);
+  });
+
+  it("reloads when the target's URL or key actually changes", async () => {
+    const wrapper = mount(AuthedMedia, {
+      props: {
+        path: "/api/gallery/thumbnail/remote.png",
+        target: { baseUrl: "http://hal9000:7680", apiKey: null },
+        cacheKey: "hal9000-7680",
+      },
+    });
+    await vi.waitFor(() => expect(wrapper.find("img").exists()).toBe(true));
+
+    await wrapper.setProps({ target: { baseUrl: "http://hal9000:7680", apiKey: "rotated" } });
+    await flushPromises();
+    expect(authedMediaUrl).toHaveBeenCalledTimes(2);
+
+    await wrapper.setProps({ target: { baseUrl: "http://hal9000.local:7680", apiKey: "rotated" } });
+    await flushPromises();
+    expect(authedMediaUrl).toHaveBeenCalledTimes(3);
   });
 });
