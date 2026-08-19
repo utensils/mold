@@ -244,7 +244,7 @@ describe("InspectorPanel — shape + resolution projection", () => {
 
     const wrapper = mount(InspectorPanel, { props: { form } });
     const shape = wrapper.getComponent(ShapePicker);
-    expect(shape.props("modelValue")).toBe("7:4");
+    expect(shape.props("modelValue")).toBe("16:9");
     expect(shape.props("approximate")).toBe(true);
 
     // The exact bucket clears the mark.
@@ -276,8 +276,8 @@ describe("InspectorPanel — shape + resolution projection", () => {
     const wrapper = mount(InspectorPanel, { props: { form } });
 
     expect(wrapper.getComponent(ShapePicker).props("options")).toEqual([
-      expect.objectContaining({ id: "26:15", label: "26:15" }),
-      expect.objectContaining({ id: "15:26", label: "15:26" }),
+      expect.objectContaining({ id: "16:9", label: "16:9" }),
+      expect.objectContaining({ id: "9:16", label: "9:16" }),
     ]);
   });
 
@@ -325,15 +325,15 @@ describe("InspectorPanel — shape + resolution projection", () => {
     const shape = wrapper.getComponent(ShapePicker);
     expect(shape.props("options")).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ id: "square", label: "1:1" }),
-        expect.objectContaining({ id: "landscape", label: "4:3" }),
-        expect.objectContaining({ id: "portrait", label: "3:4" }),
-        expect.objectContaining({ id: "wide", label: "16:9" }),
-        expect.objectContaining({ id: "tall", label: "9:16" }),
+        expect.objectContaining({ id: "1:1", label: "1:1" }),
+        expect.objectContaining({ id: "4:3", label: "4:3" }),
+        expect.objectContaining({ id: "3:4", label: "3:4" }),
+        expect.objectContaining({ id: "16:9", label: "16:9" }),
+        expect.objectContaining({ id: "9:16", label: "9:16" }),
       ]),
     );
 
-    shape.vm.$emit("update:modelValue", "wide");
+    shape.vm.$emit("update:modelValue", "16:9");
     await flushPromises();
     expect([form.width, form.height]).toEqual([1664, 928]);
   });
@@ -343,33 +343,36 @@ describe("InspectorPanel — shape + resolution projection", () => {
     form.width = 1024;
     form.height = 1024;
     const wrapper = mount(InspectorPanel, { props: { form } });
-    expect(wrapper.findComponent(ShapePicker).props("modelValue")).toBe("square");
-    wrapper.findComponent(ShapePicker).vm.$emit("update:modelValue", "wide");
+    expect(wrapper.findComponent(ShapePicker).props("modelValue")).toBe("1:1");
+    wrapper.findComponent(ShapePicker).vm.$emit("update:modelValue", "16:9");
     await flushPromises();
     expect(aspectIdFor(form.width, form.height)).toBe("wide");
     expect(form.width % 16).toBe(0);
     expect(form.height % 16).toBe(0);
   });
 
-  it("reprojects the form onto a new megapixel budget", async () => {
+  it("selects an exact size from the family's pixel ladder", async () => {
     const form = formFor("flux");
     form.width = 1024;
     form.height = 1024;
     const wrapper = mount(InspectorPanel, { props: { form } });
-    wrapper
-      .findComponent(ResolutionSelector)
-      .vm.$emit("update:modelValue", (768 * 768) / 1_000_000);
+    const selector = wrapper.findComponent(ResolutionSelector);
+    expect(selector.props("modelValue")).toBe("1024x1024");
+    expect(selector.props("options")).toEqual([
+      expect.objectContaining({ id: "768x768", label: "768×768" }),
+      expect.objectContaining({ id: "1024x1024", label: "1024×1024" }),
+    ]);
+    selector.vm.$emit("update:modelValue", "768x768");
     await flushPromises();
-    expect(form.width * form.height).toBeLessThan(1024 * 1024);
-    expect(form.width).toBe(form.height); // square ratio preserved
+    expect([form.width, form.height]).toEqual([768, 768]);
   });
 
-  it("labels a model's only runnable bucket as Native", () => {
+  it("labels sizes by pixels and megapixels, never by list position", () => {
     const wrapper = mount(InspectorPanel, {
       props: { form: formFor("wuerstchen") },
     });
     expect(wrapper.findComponent(ResolutionSelector).props("options")).toEqual([
-      expect.objectContaining({ sub: "Native" }),
+      expect.objectContaining({ label: "1024×1024", sub: "1 MP" }),
     ]);
   });
 });
@@ -781,7 +784,7 @@ describe("InspectorPanel — source media in the primary form", () => {
       expect.arrayContaining([expect.objectContaining({ id: "source" })]),
     );
     expect(wrapper.getComponent(ResolutionSelector).props("customLabel")).toBeUndefined();
-    expect(wrapper.getComponent(ResolutionSelector).props("status")).toBeUndefined();
+    expect(wrapper.getComponent(ResolutionSelector).props("status")).not.toContain("source");
     expect(wrapper.find("[data-test='match-source-resolution']").exists()).toBe(false);
     expect(form.sourceImage).toBe("PARKED");
     expect(form.sourceImageName).toBe("previous.png");
@@ -871,7 +874,7 @@ describe("InspectorPanel — source media in the primary form", () => {
     expect(wrapper.getComponent(ShapePicker).props("options")).not.toEqual(
       expect.arrayContaining([expect.objectContaining({ id: "source" })]),
     );
-    expect(wrapper.getComponent(ResolutionSelector).props("status")).toBeUndefined();
+    expect(wrapper.getComponent(ResolutionSelector).props("status")).not.toContain("source");
     expect(wrapper.find("[data-test='match-source-resolution']").exists()).toBe(false);
     expect(draft.openingImage?.base64).toBe("PARKED");
   });
@@ -905,13 +908,56 @@ describe("InspectorPanel — model aspect vs source tie", () => {
 
     shape.vm.$emit("update:modelValue", "source");
     await flushPromises();
+    expect(wrapper.emitted("canvas-intent")?.at(-1)).toEqual(["source"]);
+
+    // The parent owns the intent; once it flows back the Source chip wins
+    // over the canonical family that matches the same canvas.
+    await wrapper.setProps({ canvasIntent: "source" });
     expect(shape.props("modelValue")).toBe("source");
-    expect(wrapper.emitted("source-canvas-mode")?.at(-1)).toEqual(["source"]);
 
     wrapper.unmount();
     const remounted = mount(InspectorPanel, {
-      props: { form, sourceCanvasMode: "source" },
+      props: { form, canvasIntent: "source" },
     });
     expect(remounted.getComponent(ShapePicker).props("modelValue")).toBe("source");
+  });
+
+  it("never badges a manual canvas as source-derived", async () => {
+    const model = {
+      name: "wan22-ti2v-5b:fp16",
+      family: "wan",
+      downloaded: true,
+      default_width: 1280,
+      default_height: 704,
+      dimension_alignment: 16,
+      recommended_dimensions: [
+        { width: 1280, height: 704 },
+        { width: 704, height: 704 },
+      ],
+    } as ModelEntry;
+    useModelStore().all = [model];
+    const form = formFor("wan");
+    form.model = model.name;
+    form.sourceImage = "SRC";
+    form.sourceImageWidth = 1024;
+    form.sourceImageHeight = 1024;
+    form.width = 1024;
+    form.height = 576;
+
+    const wrapper = mount(InspectorPanel, {
+      props: { form, canvasIntent: "manual" },
+    });
+    const selector = wrapper.getComponent(ResolutionSelector);
+    expect(selector.props("customLabel")).toBe("Manual");
+    expect(selector.props("status")).toContain("1024×576");
+    expect(selector.props("status")).not.toContain("Matches source");
+    expect(wrapper.find("[data-test='match-source-resolution']").exists()).toBe(true);
+
+    wrapper.find("[data-test='match-source-resolution']").trigger("click");
+    await flushPromises();
+    expect(wrapper.emitted("canvas-intent")?.at(-1)).toEqual(["source-exact"]);
+    await wrapper.setProps({ canvasIntent: "source-exact" });
+    expect(selector.props("customLabel")).toBe("Source");
+    expect(selector.props("status")).toContain("Matches source");
   });
 });

@@ -68,6 +68,7 @@ import {
   type SourceDimensions,
   type SourceResolutionResult,
 } from "@studio/lib/sourceResolution";
+import type { CanvasIntent } from "@studio/lib/outputShape";
 import { copyableError, describeTransportError } from "@studio/lib/errors";
 import { normalizeCameraMotionLoraState } from "@studio/lib/cameraMotion";
 import {
@@ -1288,14 +1289,14 @@ let previousStillAutomaticResolution: SourceDimensions | null = null;
 let previousOpeningSource = "";
 let previousOpeningResolution: SourceResolutionResult | null = null;
 let previousOpeningAutomaticResolution: SourceDimensions | null = null;
-const sourceCanvasMode = ref<"automatic" | "source" | "manual">("manual");
+const canvasIntent = ref<CanvasIntent>("model-default");
 let preservedSourceReplacement = "";
-function setSourceCanvasMode(mode: "source" | "manual") {
-  sourceCanvasMode.value = mode;
+function setCanvasIntent(intent: CanvasIntent) {
+  canvasIntent.value = intent;
 }
 function preserveRestoredSourceCanvas(base64: string) {
   preservedSourceReplacement = base64;
-  sourceCanvasMode.value = "manual";
+  canvasIntent.value = "manual";
 }
 
 function syncSourceCanvas(
@@ -1341,10 +1342,6 @@ function syncSourceCanvas(
     form.state.value.pipeline,
   );
   const replaced = image.base64 !== previous.base64;
-  const canvas = {
-    width: form.state.value.width,
-    height: form.state.value.height,
-  };
   const isReferenceConditioning = isFlux2DevModel(
     currentModel.value?.name ?? form.state.value.model,
   );
@@ -1352,20 +1349,17 @@ function syncSourceCanvas(
     const preserveReplacement =
       replaced && preservedSourceReplacement === image.base64;
     const nextResolution = resolveSourceCanvasTransition({
-      current: canvas,
-      previousSource: previous.resolution,
-      previousAutomatic: previous.automaticResolution,
       source: resolution,
       automatic: automaticResolution,
       replaced,
-      mode: sourceCanvasMode.value,
+      intent: canvasIntent.value,
       preserveReplacement,
     });
     if (replaced) {
       preservedSourceReplacement = "";
-      if (preserveReplacement) sourceCanvasMode.value = "manual";
-      else if (sourceCanvasMode.value !== "source")
-        sourceCanvasMode.value = "automatic";
+      if (preserveReplacement) canvasIntent.value = "manual";
+      else if (canvasIntent.value !== "source-exact")
+        canvasIntent.value = "source";
     }
     if (nextResolution) {
       form.state.value.width = nextResolution.width;
@@ -4132,7 +4126,7 @@ onBeforeUnmount(() => {
               :model="currentModel"
               :routing-request="durationRoutingRequest"
               :source-dimensions="activeSourceDimensions"
-              :source-canvas-mode="sourceCanvasMode"
+              :canvas-intent="canvasIntent"
               :adv-count="advCount"
               :mobile="true"
               :last-seed="lastSeedUsed"
@@ -4142,7 +4136,7 @@ onBeforeUnmount(() => {
               @update:output="setOutput"
               @open-advanced="openAdvanced"
               @reset-settings="onResetSettings"
-              @source-canvas-mode="setSourceCanvasMode"
+              @canvas-intent="setCanvasIntent"
             />
           </template>
           <SequenceComposer
@@ -4336,7 +4330,7 @@ onBeforeUnmount(() => {
                   :model="currentModel"
                   :routing-request="durationRoutingRequest"
                   :source-dimensions="activeSourceDimensions"
-                  :source-canvas-mode="sourceCanvasMode"
+                  :canvas-intent="canvasIntent"
                   :adv-count="advCount"
                   :mobile="true"
                   :last-seed="lastSeedUsed"
@@ -4345,7 +4339,7 @@ onBeforeUnmount(() => {
                   @update:output="setOutput"
                   @open-advanced="openAdvanced"
                   @reset-settings="onResetSettings"
-                  @source-canvas-mode="setSourceCanvasMode"
+                  @canvas-intent="setCanvasIntent"
                 />
                 <SourceMediaPanel
                   v-if="!sequenceMode"
@@ -4553,7 +4547,7 @@ onBeforeUnmount(() => {
           :model="currentModel"
           :routing-request="durationRoutingRequest"
           :source-dimensions="activeSourceDimensions"
-          :source-canvas-mode="sourceCanvasMode"
+          :canvas-intent="canvasIntent"
           :adv-count="advCount"
           :mobile="false"
           :last-seed="lastSeedUsed"
@@ -4562,7 +4556,7 @@ onBeforeUnmount(() => {
           @update:output="setOutput"
           @open-advanced="openAdvanced"
           @reset-settings="onResetSettings"
-          @source-canvas-mode="setSourceCanvasMode"
+          @canvas-intent="setCanvasIntent"
         />
         <!-- Source media in the primary form: the model dictates whether
              (and how) it renders, exactly like resolutions. -->

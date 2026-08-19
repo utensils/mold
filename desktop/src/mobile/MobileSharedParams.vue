@@ -16,6 +16,7 @@ import VideoDurationSlider from "@ui/components/VideoDurationSlider.vue";
 import { generationCapabilitiesForFamily } from "../lib/capabilities";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import { effectiveGenerationRecipe } from "@studio/lib/generationProfile";
+import type { CanvasIntent } from "@studio/lib/outputShape";
 
 const props = withDefaults(
   defineProps<{
@@ -29,7 +30,7 @@ const props = withDefaults(
     showFps?: boolean;
     stepsError?: string | null;
     guidanceError?: string | null;
-    sourceCanvasMode?: "automatic" | "source" | "manual";
+    canvasIntent?: CanvasIntent;
   }>(),
   {
     disabled: false,
@@ -38,14 +39,14 @@ const props = withDefaults(
     guidanceError: null,
     model: null,
     durationModel: null,
-    sourceCanvasMode: "manual",
+    canvasIntent: "model-default",
   },
 );
 
 const emit = defineEmits<{
   "resolution-validity": [valid: boolean];
   "seed-validity": [valid: boolean];
-  "source-canvas-mode": [mode: "source" | "manual"];
+  "canvas-intent": [intent: CanvasIntent];
 }>();
 
 const fpsError = computed(() => (props.showFps ? fpsValidationError(props.form.fps) : null));
@@ -97,10 +98,10 @@ const sourceDimensions = computed(() => {
     :model="model"
     :pipeline="form.pipeline"
     :source-dimensions="sourceDimensions"
-    :source-canvas-mode="sourceCanvasMode"
+    :canvas-intent="canvasIntent"
     :disabled="disabled"
     @validity-change="emit('resolution-validity', $event)"
-    @source-canvas-mode="emit('source-canvas-mode', $event)"
+    @canvas-intent="emit('canvas-intent', $event)"
   />
   <VideoDurationSlider
     v-if="supportsVideo && !showFps"

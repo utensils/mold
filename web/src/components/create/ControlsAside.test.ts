@@ -156,12 +156,14 @@ describe("ControlsAside", () => {
 
   it("projects the current pixels onto Shape and Resolution", () => {
     const wrapper = factory({ width: 1024, height: 1024 });
-    expect(wrapper.getComponent(ShapePicker).props("modelValue")).toBe(
-      "square",
-    );
+    expect(wrapper.getComponent(ShapePicker).props("modelValue")).toBe("1:1");
     expect(wrapper.getComponent(ResolutionSelector).props("modelValue")).toBe(
-      (1024 * 1024) / 1_000_000,
+      "1024x1024",
     );
+    expect(wrapper.getComponent(ResolutionSelector).props("options")).toEqual([
+      expect.objectContaining({ label: "768×768", sub: "0.6 MP" }),
+      expect.objectContaining({ label: "1024×1024", sub: "1 MP" }),
+    ]);
   });
 
   it("exposes and applies Qwen Image aspect ratios on web", async () => {
@@ -177,15 +179,15 @@ describe("ControlsAside", () => {
     const shape = wrapper.getComponent(ShapePicker);
     expect(shape.props("options")).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ id: "square", label: "1:1" }),
-        expect.objectContaining({ id: "landscape", label: "4:3" }),
-        expect.objectContaining({ id: "portrait", label: "3:4" }),
-        expect.objectContaining({ id: "wide", label: "16:9" }),
-        expect.objectContaining({ id: "tall", label: "9:16" }),
+        expect.objectContaining({ id: "1:1", label: "1:1" }),
+        expect.objectContaining({ id: "4:3", label: "4:3" }),
+        expect.objectContaining({ id: "3:4", label: "3:4" }),
+        expect.objectContaining({ id: "16:9", label: "16:9" }),
+        expect.objectContaining({ id: "9:16", label: "9:16" }),
       ]),
     );
 
-    shape.vm.$emit("update:modelValue", "wide");
+    shape.vm.$emit("update:modelValue", "16:9");
     await wrapper.vm.$nextTick();
     expect(wrapper.emitted("update:modelValue")?.at(-1)?.[0]).toMatchObject({
       width: 1664,
@@ -204,14 +206,12 @@ describe("ControlsAside", () => {
       },
     });
 
-    expect(wrapper.getComponent(ShapePicker).props("modelValue")).toBe(
-      "portrait",
-    );
+    expect(wrapper.getComponent(ShapePicker).props("modelValue")).toBe("3:4");
     expect(wrapper.getComponent(ResolutionSelector).props()).toMatchObject({
       resolvedWidth: 896,
       resolvedHeight: 1152,
       customLabel: "Source",
-      status: "Matches source · 896×1152",
+      status: "896×1152 · Matches source",
     });
     expect(wrapper.find("[data-test='match-source-resolution']").exists()).toBe(
       false,
@@ -219,9 +219,13 @@ describe("ControlsAside", () => {
 
     await wrapper.setProps({
       modelValue: baseForm({ width: 1024, height: 1024 }),
+      canvasIntent: "manual",
     });
     expect(wrapper.getComponent(ResolutionSelector).props("status")).toContain(
-      "manual output",
+      "Manual",
+    );
+    expect(wrapper.getComponent(ResolutionSelector).props("customLabel")).toBe(
+      "Manual",
     );
     await wrapper.get("[data-test='match-source-resolution']").trigger("click");
     const [next] = wrapper.emitted("update:modelValue")!.at(-1) as [
@@ -279,9 +283,7 @@ describe("ControlsAside", () => {
 
   it("applies the projected dims when a shape is picked", async () => {
     const wrapper = factory({ width: 1024, height: 1024 });
-    wrapper
-      .getComponent(ShapePicker)
-      .vm.$emit("update:modelValue", "landscape");
+    wrapper.getComponent(ShapePicker).vm.$emit("update:modelValue", "4:3");
     await wrapper.vm.$nextTick();
     const [next] = wrapper.emitted("update:modelValue")!.at(-1) as [
       GenerateFormState,
@@ -315,8 +317,8 @@ describe("ControlsAside", () => {
     });
 
     expect(wrapper.getComponent(ShapePicker).props("options")).toEqual([
-      expect.objectContaining({ id: "26:15", label: "26:15" }),
-      expect.objectContaining({ id: "15:26", label: "15:26" }),
+      expect.objectContaining({ id: "16:9", label: "16:9" }),
+      expect.objectContaining({ id: "9:16", label: "9:16" }),
     ]);
   });
 
@@ -372,11 +374,11 @@ describe("ControlsAside", () => {
     });
   });
 
-  it("applies the projected dims when resolution changes", async () => {
+  it("applies the exact pixels of the picked size", async () => {
     const wrapper = factory({ width: 1024, height: 1024 }, "flux");
     wrapper
       .getComponent(ResolutionSelector)
-      .vm.$emit("update:modelValue", (768 * 768) / 1_000_000);
+      .vm.$emit("update:modelValue", "768x768");
     await wrapper.vm.$nextTick();
     const [next] = wrapper.emitted("update:modelValue")!.at(-1) as [
       GenerateFormState,
@@ -385,10 +387,10 @@ describe("ControlsAside", () => {
     expect(next.height).toBe(768);
   });
 
-  it("labels a model's only runnable bucket as Native", () => {
+  it("labels sizes by pixels and megapixels, never by list position", () => {
     const wrapper = factory({ width: 1024, height: 1024 }, "wuerstchen");
     expect(wrapper.getComponent(ResolutionSelector).props("options")).toEqual([
-      expect.objectContaining({ sub: "Native" }),
+      expect.objectContaining({ label: "1024×1024", sub: "1 MP" }),
     ]);
   });
 
@@ -667,8 +669,9 @@ describe("ControlsAside — model aspect vs source tie", () => {
         modelValue: emitted.at(-1)![0] as GenerateFormState,
       });
     }
+    expect(wrapper.emitted("canvas-intent")?.at(-1)).toEqual(["source"]);
+    await wrapper.setProps({ canvasIntent: "source" });
     expect(shape.props("modelValue")).toBe("source");
-    expect(wrapper.emitted("source-canvas-mode")?.at(-1)).toEqual(["source"]);
 
     const remounted = mount(ControlsAside, {
       props: {
@@ -676,7 +679,7 @@ describe("ControlsAside — model aspect vs source tie", () => {
         family: "flux",
         advCount: 0,
         sourceDimensions,
-        sourceCanvasMode: "source",
+        canvasIntent: "source",
       },
     });
     expect(remounted.getComponent(ShapePicker).props("modelValue")).toBe(
@@ -718,7 +721,7 @@ describe("ControlsAside — model aspect vs source tie", () => {
       },
     });
     const shape = wrapper.getComponent(ShapePicker);
-    expect(shape.props("modelValue")).toBe("7:4");
+    expect(shape.props("modelValue")).toBe("16:9");
     expect(shape.props("approximate")).toBe(true);
   });
 });

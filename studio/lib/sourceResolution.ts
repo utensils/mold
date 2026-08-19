@@ -6,6 +6,7 @@ import {
   type ModelResolutionContract,
 } from "./resolutions";
 import { effectiveGenerationRecipe } from "./generationProfile";
+import type { CanvasIntent } from "./outputShape";
 
 export interface SourceDimensions {
   width: number;
@@ -33,13 +34,10 @@ export interface SourceResolutionStatus {
 }
 
 export interface SourceCanvasTransition {
-  current: SourceDimensions;
-  previousSource: SourceResolutionResult | null;
-  previousAutomatic: SourceDimensions | null;
   source: SourceResolutionResult;
   automatic: SourceDimensions;
   replaced: boolean;
-  mode: "automatic" | "source" | "manual";
+  intent: CanvasIntent;
   preserveReplacement?: boolean;
 }
 
@@ -47,32 +45,24 @@ export interface SourceCanvasTransition {
  * Preserve authored/restored canvases while keeping source-driven defaults
  * live across model changes. All Create controllers use this transition so a
  * programmatic Reuse/edit import is never mistaken for a fresh drag.
+ *
+ * The decision is the recorded {@link CanvasIntent} and nothing else. It used
+ * to also require the live canvas to still equal the value this function last
+ * returned, which no surface can honour: selecting a model runs
+ * `applyModelDefaults` — writing the new model's default width/height —
+ * *before* the source watcher runs, so the comparison always failed and the
+ * canvas stopped following the source on the first model switch (#1166).
  */
 export function resolveSourceCanvasTransition({
-  current,
-  previousSource,
-  previousAutomatic,
   source,
   automatic,
   replaced,
-  mode,
+  intent,
   preserveReplacement = false,
 }: SourceCanvasTransition): SourceDimensions | null {
-  if (mode === "source") return source.output;
+  if (intent === "source-exact") return source.output;
   if (replaced) return preserveReplacement ? null : automatic;
-  if (
-    mode === "automatic" &&
-    previousAutomatic &&
-    current.width === previousAutomatic.width &&
-    current.height === previousAutomatic.height
-  ) {
-    return automatic;
-  }
-  if (mode === "manual") return null;
-  return previousSource &&
-    canvasMatchesSourceResolution(current, previousSource)
-    ? source.output
-    : null;
+  return intent === "source" ? automatic : null;
 }
 
 /**

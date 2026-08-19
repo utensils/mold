@@ -31,6 +31,7 @@ import {
 } from "../../lib/capabilities";
 import { schedulerLabel } from "@studio/lib/generationCapabilities";
 import { effectiveGenerationRecipe } from "@studio/lib/generationProfile";
+import type { CanvasIntent } from "@studio/lib/outputShape";
 import {
   MAX_WAN_DISTILL_STRENGTH,
   emptyWanRecipe,
@@ -121,7 +122,10 @@ const props = withDefaults(
   },
 );
 
-const emit = defineEmits<{ "append-word": [word: string] }>();
+const emit = defineEmits<{
+  "append-word": [word: string];
+  "canvas-intent": [intent: CanvasIntent];
+}>();
 
 const caps = computed(() =>
   generationCapabilitiesForFamily(
@@ -194,14 +198,19 @@ const snapDimension = (v: number) => {
   const alignment = resolutionAlignment.value;
   return Math.max(64, Math.round(v / alignment) * alignment);
 };
+// Typing an exact size is the user taking the canvas over: without recording
+// that intent, the next model switch would re-resolve it back to the source.
 function snapWidth() {
   props.form.width = snapDimension(props.form.width);
+  emit("canvas-intent", "manual");
 }
 function snapHeight() {
   props.form.height = snapDimension(props.form.height);
+  emit("canvas-intent", "manual");
 }
 function swapSize() {
   [props.form.width, props.form.height] = [props.form.height, props.form.width];
+  emit("canvas-intent", "manual");
 }
 const seedFixed = computed(() => seedMode(props.form.seed) === "fixed");
 

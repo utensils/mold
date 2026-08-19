@@ -2,36 +2,21 @@
 import { computed, ref, watch } from "vue";
 import ShapePicker from "@ui/components/ShapePicker.vue";
 import SegmentedControl from "@ui/components/SegmentedControl.vue";
-import { aspectsSupportedByPresets } from "@ui/lib/resolution";
 import { resolutionValidationError, resolutionValidationWarning } from "../lib/generateValidation";
-import {
-  aspectIdFor,
-  aspectRatioLabel,
-  matchPreset,
-  orientationLabel,
-  presetsForAspectGroup,
-  presetsForModel,
-  presetsNearRatio,
-  type ResolutionPreset,
-} from "../lib/resolutions";
+import { orientationLabel } from "../lib/resolutions";
 import type { ModelEntry } from "../lib/api/types";
+import { resolveSourceResolution, type SourceDimensions } from "@studio/lib/sourceResolution";
+import { effectiveGenerationRecipe } from "@studio/lib/generationProfile";
 import {
-  canvasMatchesSourceResolution,
-  resolveSourceResolution,
-  sourceResolutionStatus,
-  type SourceDimensions,
-} from "@studio/lib/sourceResolution";
-import {
-  closestProfileAspect,
-  effectiveGenerationRecipe,
-  profileAspectOptions,
-} from "@studio/lib/generationProfile";
-import {
-  closestResolutionPreset,
-  resolutionTierLabel,
-  snapMobileDimension,
-  sortedResolutionTiers,
-} from "./resolutionPicker";
+  intentForCanvas,
+  resolveOutputShape,
+  sizeForFamily,
+  SOURCE_FAMILY_ID,
+  type CanvasIntent,
+  type OutputShapeInput,
+  type OutputShapeSize,
+} from "@studio/lib/outputShape";
+import { snapMobileDimension } from "./resolutionPicker";
 
 const props = withDefaults(
   defineProps<{
@@ -40,7 +25,8 @@ const props = withDefaults(
     /** The user's explicit LTX-2 pipeline; a non-refining one lowers the ceiling. */
     pipeline?: string | null;
     sourceDimensions?: SourceDimensions | null;
-    sourceCanvasMode?: "automatic" | "source" | "manual";
+    /** Why the canvas holds its current size — the shape resolver's authority. */
+    canvasIntent?: CanvasIntent;
     disabled?: boolean;
   }>(),
   {
@@ -48,7 +34,7 @@ const props = withDefaults(
     model: null,
     pipeline: null,
     sourceDimensions: null,
-    sourceCanvasMode: "manual",
+    canvasIntent: "model-default",
   },
 );
 
@@ -56,7 +42,7 @@ const width = defineModel<number>("width", { required: true });
 const height = defineModel<number>("height", { required: true });
 const emit = defineEmits<{
   "validity-change": [valid: boolean];
-  "source-canvas-mode": [mode: "source" | "manual"];
+  "canvas-intent": [intent: CanvasIntent];
 }>();
 
 const manualOpen = ref(false);
@@ -64,15 +50,27 @@ const recipe = computed(() => effectiveGenerationRecipe(props.model, props.pipel
 const alignment = computed(
   () => recipe.value?.resolution.alignment ?? props.model?.dimension_alignment ?? 16,
 );
-const presets = computed(() => presetsForModel(props.model ?? props.family, props.pipeline));
-const currentPreset = computed(() =>
-  matchPreset(width.value, height.value, props.model ?? props.family, props.pipeline),
-);
+/** One resolver drives the chips, the pills, the badge and the sentence. */
+const shapeInput = computed<OutputShapeInput>(() => ({
+  model: props.model ?? null,
+  family: props.family,
+  pipeline: props.pipeline,
+  width: width.value,
+  height: height.value,
+  source: props.sourceDimensions ?? null,
+  intent: props.canvasIntent,
+}));
+const outputShape = computed(() => resolveOutputShape(shapeInput.value));
 const currentOrientation = computed(() => orientationLabel(width.value, height.value));
-const currentAspect = computed(() =>
-  aspectRatioLabel(width.value, height.value, props.model ?? props.family, props.pipeline),
+const currentAspect = computed(() => outputShape.value.family.label);
+/** The active family has authored sizes; a lone custom entry is not a ladder. */
+const hasLadder = computed(() => outputShape.value.sizes.some((size) => size.tier !== "custom"));
+const onLadder = computed(() =>
+  outputShape.value.sizes.some(
+    (size) => size.width === width.value && size.height === height.value && size.tier !== "custom",
+  ),
 );
-const customVisible = computed(() => manualOpen.value || !currentPreset.value);
+const customVisible = computed(() => manualOpen.value || !onLadder.value);
 const resolutionError = computed(() =>
   resolutionValidationError(width.value, height.value, props.model, props.pipeline),
 );
@@ -87,93 +85,40 @@ const sourceResolution = computed(() =>
 );
 const followsSource = computed(
   () =>
-    sourceResolution.value !== null &&
-    canvasMatchesSourceResolution(
-      { width: width.value, height: height.value },
-      sourceResolution.value,
-    ),
-);
-const sourceStatus = computed(() =>
-  sourceResolution.value ? sourceResolutionStatus(sourceResolution.value) : null,
+    outputShape.value.state === "follows-source" || outputShape.value.state === "matches-source",
 );
 watch(resolutionError, (next) => emit("validity-change", !next), { immediate: true });
-const canonicalShapeOptions = computed(() => {
-  return props.model
-    ? profileAspectOptions(props.model, props.pipeline)
-    : aspectsSupportedByPresets(presets.value);
-});
-const shapeOptions = computed(() => {
-  const source = sourceResolution.value;
-  return source
-    ? [
-        ...canonicalShapeOptions.value,
-        { id: "source", label: "Source", ratio: source.output.width / source.output.height },
-      ]
-    : canonicalShapeOptions.value;
-});
-const closestShape = computed(() =>
-  props.model ? closestProfileAspect(props.model, props.pipeline, width.value, height.value) : null,
-);
-const canonicalShapeId = computed(
-  () => closestShape.value?.id ?? aspectIdFor(width.value, height.value) ?? "",
-);
-const explicitShapeId = ref<string | null>(null);
-const shapeId = computed(() => {
-  const explicit = explicitShapeId.value;
-  if ((props.sourceCanvasMode === "source" || explicit === "source") && followsSource.value)
-    return "source";
-  if (explicit && explicit !== "source" && canonicalShapeId.value === explicit) return explicit;
-  return canonicalShapeId.value || (followsSource.value ? "source" : "");
-});
-const shapeApproximate = computed(
-  () => shapeId.value !== "source" && shapeId.value !== "" && closestShape.value?.exact === false,
-);
-const tierOptions = computed(() =>
-  currentPreset.value ? sortedResolutionTiers(presets.value, currentPreset.value.aspect) : [],
-);
+const shapeOptions = computed(() => outputShape.value.families);
+const shapeId = computed(() => outputShape.value.selectedFamilyId);
+const shapeApproximate = computed(() => outputShape.value.approximate);
 
-function applyResolution(preset: ResolutionPreset | null): void {
-  if (!preset) return;
-  width.value = preset.width;
-  height.value = preset.height;
+function applyResolution(size: SourceDimensions | null): void {
+  if (!size) return;
+  width.value = size.width;
+  height.value = size.height;
   manualOpen.value = false;
 }
 
 function setShape(id: string): void {
-  explicitShapeId.value = id;
-  if (id === "source") {
-    matchSource();
-    return;
-  }
-  const shape = shapeOptions.value.find((option) => option.id === id);
-  if (!shape) return;
-  emit("source-canvas-mode", "manual");
-  const exactGroup = presetsForAspectGroup(props.model, props.pipeline, id);
-  applyResolution(
-    closestResolutionPreset(
-      exactGroup.length > 0 ? exactGroup : presetsNearRatio(presets.value, shape.ratio),
-      width.value,
-      height.value,
-    ),
-  );
+  const size = sizeForFamily(id, shapeInput.value);
+  if (!size) return;
+  emit("canvas-intent", id === SOURCE_FAMILY_ID ? "source" : "manual");
+  applyResolution(size);
 }
 
-function setTier(label: string): void {
-  emit("source-canvas-mode", "manual");
-  applyResolution(tierOptions.value.find((preset) => preset.label === label) ?? null);
+function setSize(id: string | number): void {
+  const size = outputShape.value.sizes.find((candidate) => candidate.id === id);
+  if (!size) return;
+  emit("canvas-intent", intentForCanvas(shapeInput.value, size));
+  applyResolution(size);
 }
 
-/** "0.6 MP" with the web treatment's trailing-.0 strip ("1.0" → "1 MP"). */
-function tierMegapixels(preset: ResolutionPreset): string {
-  const megapixels = ((preset.width * preset.height) / 1_000_000).toFixed(1).replace(/\.0$/, "");
-  return `${megapixels} MP`;
-}
-
-const tierSegments = computed(() =>
-  tierOptions.value.map((preset, index) => ({
-    value: preset.label,
-    label: tierMegapixels(preset),
-    sub: resolutionTierLabel(index, tierOptions.value.length),
+/** Pixels are the label; megapixels and any authored mark stay secondary. */
+const sizeSegments = computed(() =>
+  outputShape.value.sizes.map((size: OutputShapeSize) => ({
+    value: size.id,
+    label: size.label,
+    sub: size.mark ? `${size.megapixels} · ${size.mark}` : size.megapixels,
   })),
 );
 
@@ -182,25 +127,24 @@ function changedDimension(event: Event): number {
 }
 
 function snapWidth(event: Event): void {
-  emit("source-canvas-mode", "manual");
+  emit("canvas-intent", "manual");
   width.value = changedDimension(event);
 }
 
 function snapHeight(event: Event): void {
-  emit("source-canvas-mode", "manual");
+  emit("canvas-intent", "manual");
   height.value = changedDimension(event);
 }
 
 function swapDimensions(): void {
-  emit("source-canvas-mode", "manual");
+  emit("canvas-intent", "manual");
   [width.value, height.value] = [height.value, width.value];
 }
 
 function matchSource(): void {
   const source = sourceResolution.value;
   if (!source) return;
-  explicitShapeId.value = "source";
-  emit("source-canvas-mode", "source");
+  emit("canvas-intent", "source-exact");
   width.value = source.output.width;
   height.value = source.output.height;
   manualOpen.value = true;
@@ -222,17 +166,13 @@ function matchSource(): void {
     </p>
 
     <div
-      v-if="sourceStatus"
+      v-if="sourceResolution"
       class="mobile-resolution-source"
       data-test="mobile-source-resolution-status"
       role="status"
     >
-      <strong>{{ followsSource ? sourceStatus.label : "Manual" }}</strong>
-      <span>{{
-        followsSource
-          ? sourceStatus.detail
-          : `${sourceStatus.detail} · output is ${width}×${height}`
-      }}</span>
+      <strong>{{ outputShape.badge }}</strong>
+      <span>{{ outputShape.status }}</span>
       <button
         v-if="!followsSource"
         type="button"
@@ -257,22 +197,22 @@ function matchSource(): void {
       />
     </div>
 
-    <div v-if="currentPreset" class="mobile-resolution-group mobile-resolution-tier">
-      <span class="mobile-resolution-label">Resolution tier</span>
+    <div v-if="hasLadder" class="mobile-resolution-group mobile-resolution-tier">
+      <span class="mobile-resolution-label">Size</span>
       <SegmentedControl
         data-test="mobile-resolution-tier"
-        :model-value="currentPreset.label"
-        :options="tierSegments"
-        label="Resolution tier"
-        @update:model-value="setTier"
+        :model-value="outputShape.selectedSizeId"
+        :options="sizeSegments"
+        label="Size"
+        @update:model-value="setSize"
       />
       <p class="mobile-resolution-tier-dims" data-test="mobile-resolution-tier-dims">
-        {{ currentPreset.width }} × {{ currentPreset.height }} px
+        {{ width }} × {{ height }} px
       </p>
     </div>
 
     <button
-      v-if="currentPreset"
+      v-if="onLadder"
       type="button"
       class="secondary-button mobile-resolution-custom-toggle"
       data-test="mobile-resolution-custom-toggle"

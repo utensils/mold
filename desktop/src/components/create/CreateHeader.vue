@@ -2,7 +2,7 @@
 import { computed } from "vue";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import type { GenerateForm } from "../../lib/generateForm";
-import { aspectRatioLabel } from "../../lib/resolutions";
+import { outputFamilyLabel } from "@studio/lib/outputShape";
 import HostChip from "./HostChip.vue";
 
 /**
@@ -19,8 +19,8 @@ const isSequence = computed(() => draft.output === "sequence");
 const title = computed(() => (isSequence.value ? "Untitled sequence" : "Untitled print"));
 
 const summary = computed(() => {
-  const { width, height, steps, family } = props.form;
-  const aspect = aspectRatioLabel(width, height, family);
+  const { width, height, steps } = props.form;
+  const aspect = outputFamilyLabel(width, height);
   if (isSequence.value) {
     return `${aspect} · ${width}×${height} · ${draft.clips.length} clips · ${props.form.fps} fps`;
   }

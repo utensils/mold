@@ -4778,8 +4778,8 @@ describe("MobileApp wan source conditioning", () => {
       wrapper
         .findAll("[data-test='mobile-resolution-shape'] button")
         .map((button) => button.text()),
-    ).toEqual(["7:4", "4:3", "1:1", "3:4"]);
-    expect(wrapper.get("[data-shape='7:4']").attributes("aria-checked")).toBe("true");
+    ).toEqual(["1:1", "4:3", "3:4", "16:9"]);
+    expect(wrapper.get("[data-shape='16:9']").attributes("aria-checked")).toBe("true");
 
     const liveForm = wrapper.getComponent(MobileLoraControls).props("form") as GenerateForm;
     liveForm.h3Authoring = {

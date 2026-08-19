@@ -7,7 +7,7 @@
  * Advanced → Output & seed), Batch is a stepper, and the Advanced button
  * surfaces the "N on" badge and opens the drawer.
  */
-import { computed, ref } from "vue";
+import { computed } from "vue";
 import { useRouter } from "vue-router";
 import ShapePicker from "@ui/components/ShapePicker.vue";
 import ResolutionSelector from "@ui/components/ResolutionSelector.vue";
@@ -18,29 +18,24 @@ import Stepper from "@ui/components/Stepper.vue";
 import SwitchToggle from "@ui/components/SwitchToggle.vue";
 import BadgePill from "@ui/components/BadgePill.vue";
 import Icon from "@ui/components/Icon.vue";
-import { aspectsSupportedByPresets } from "@ui/lib/resolution";
 import {
   effectiveGenerationRecipe,
   resolutionProfileFinding,
-  closestProfileAspect,
-  profileAspectOptions,
 } from "@studio/lib/generationProfile";
 import type { GenerateFormState, ModelInfoExtended } from "../../types";
-import {
-  closestResolutionPreset,
-  megapixelLabel,
-  presetsForAspectGroup,
-  presetsForModel,
-  presetsNearRatio,
-} from "@studio/lib/resolutions";
 import type { OutputMode } from "@studio/lib/sequence";
 import type { GenerateRoutingRequest } from "@studio/lib/chainRouting";
 import { generationCapabilitiesForFamily } from "../../lib/generateCapabilities";
-import { projectResolution } from "./resolutionProjection";
 import {
-  canvasMatchesSourceResolution,
+  intentForCanvas,
+  resolveOutputShape,
+  sizeForFamily,
+  SOURCE_FAMILY_ID,
+  type CanvasIntent,
+  type OutputShapeInput,
+} from "@studio/lib/outputShape";
+import {
   resolveSourceResolution,
-  sourceResolutionStatus,
   type SourceDimensions,
 } from "@studio/lib/sourceResolution";
 import HostRoutingPicker from "./HostRoutingPicker.vue";
@@ -54,7 +49,8 @@ const props = withDefaults(
     family: string;
     model?: ModelInfoExtended | null;
     sourceDimensions?: SourceDimensions | null;
-    sourceCanvasMode?: "automatic" | "source" | "manual";
+    /** Why the canvas holds its current size — the shape resolver's authority. */
+    canvasIntent?: CanvasIntent;
     /** Count of active advanced fields (drives the badge). */
     advCount?: number;
     /** Phone surface: the Advanced sheet button shows here; on tablet+ the
@@ -78,7 +74,7 @@ const props = withDefaults(
     clipCount: 0,
     model: null,
     sourceDimensions: null,
-    sourceCanvasMode: "manual",
+    canvasIntent: "model-default",
   },
 );
 
@@ -89,7 +85,7 @@ const emit = defineEmits<{
   /* The rail only knows the form, not the catalog row behind it, so the page
    * owns the actual reset (model defaults + the undo offer). */
   "reset-settings": [];
-  "source-canvas-mode": [mode: "source" | "manual"];
+  "canvas-intent": [intent: CanvasIntent];
 }>();
 
 // The fifth argument is the selected row's advertised source-image contract
@@ -173,10 +169,6 @@ function openMachines() {
   void router?.push("/machines");
 }
 
-const projection = computed(() =>
-  projectResolution(props.modelValue.width, props.modelValue.height),
-);
-
 const sourceResolution = computed(() =>
   props.sourceDimensions
     ? resolveSourceResolution(
@@ -186,88 +178,26 @@ const sourceResolution = computed(() =>
       )
     : null,
 );
+/** One resolver drives the chips, the pills, the badge and the sentence. */
+const shapeInput = computed<OutputShapeInput>(() => ({
+  model: props.model ?? null,
+  family: props.family,
+  pipeline: props.modelValue.pipeline,
+  width: props.modelValue.width,
+  height: props.modelValue.height,
+  source: props.sourceDimensions ?? null,
+  intent: props.canvasIntent,
+}));
+const outputShape = computed(() => resolveOutputShape(shapeInput.value));
 const followsSource = computed(
   () =>
-    sourceResolution.value !== null &&
-    canvasMatchesSourceResolution(
-      {
-        width: props.modelValue.width,
-        height: props.modelValue.height,
-      },
-      sourceResolution.value,
-    ),
+    outputShape.value.state === "follows-source" ||
+    outputShape.value.state === "matches-source",
 );
-const sourceStatus = computed(() =>
-  sourceResolution.value
-    ? sourceResolutionStatus(sourceResolution.value)
-    : null,
-);
-const canonicalShapeOptions = computed(() => {
-  return props.model
-    ? profileAspectOptions(props.model, props.modelValue.pipeline)
-    : aspectsSupportedByPresets(presetsForModel(props.family));
-});
-const shapeOptions = computed(() => {
-  const source = sourceResolution.value;
-  return source
-    ? [
-        ...canonicalShapeOptions.value,
-        {
-          id: "source",
-          label: "Source",
-          ratio: source.output.width / source.output.height,
-        },
-      ]
-    : canonicalShapeOptions.value;
-});
-/** Always answers, any domain: an exact preset keeps `exact: true`, a custom
- * size from Advanced maps to the nearest group so a chip still lights up —
- * marked approximate ("≈") rather than left blank. */
-const closestAspect = computed(() =>
-  props.model
-    ? closestProfileAspect(
-        props.model,
-        props.modelValue.pipeline,
-        props.modelValue.width,
-        props.modelValue.height,
-      )
-    : null,
-);
-const canonicalAspectId = computed(
-  () =>
-    (props.model ? closestAspect.value?.id : projection.value.aspectId) ?? "",
-);
-/** An explicit Source pick wins when a canvas also matches a canonical
- * bucket. Otherwise the model-authored aspect is the natural default. */
-const explicitAspectId = ref<string | null>(null);
-const aspectId = computed(() => {
-  const explicit = explicitAspectId.value;
-  if (
-    (props.sourceCanvasMode === "source" || explicit === "source") &&
-    followsSource.value
-  )
-    return "source";
-  if (
-    explicit &&
-    explicit !== "source" &&
-    canonicalAspectId.value === explicit
-  ) {
-    return explicit;
-  }
-  return canonicalAspectId.value || (followsSource.value ? "source" : "");
-});
-/** The active chip approximates a custom size (never the Source chip). */
-const aspectApproximate = computed(
-  () =>
-    aspectId.value !== "source" &&
-    aspectId.value !== "" &&
-    closestAspect.value?.exact === false,
-);
-const mp = computed(() => projection.value.mp);
-
+const shapeOptions = computed(() => outputShape.value.families);
+const aspectId = computed(() => outputShape.value.selectedFamilyId);
+const aspectApproximate = computed(() => outputShape.value.approximate);
 const currentRatio = computed(() => {
-  const a = shapeOptions.value.find((x) => x.id === aspectId.value);
-  if (a) return a.ratio;
   const { width, height } = props.modelValue;
   return height ? width / height : 1;
 });
@@ -276,121 +206,37 @@ function patch(patch: Partial<GenerateFormState>) {
   emit("update:modelValue", { ...props.modelValue, ...patch });
 }
 
-const resolutionPresets = computed(() => {
-  const exactGroup = presetsForAspectGroup(
-    props.model,
-    props.modelValue.pipeline,
-    aspectId.value,
-  );
-  return exactGroup.length > 0
-    ? exactGroup
-    : presetsNearRatio(
-        presetsForModel(props.model ?? props.family, props.modelValue.pipeline),
-        currentRatio.value,
-      );
-});
-const resolutionOptions = computed(() => {
-  const presets = resolutionPresets.value.map((preset, index, all) => ({
-    mp: (preset.width * preset.height) / 1_000_000,
-    label: megapixelLabel(preset.width, preset.height),
-    sub:
-      all.length === 1
-        ? "Native"
-        : index === 0
-          ? "Small"
-          : index === all.length - 1
-            ? "Native"
-            : "Standard",
-    width: preset.width,
-    height: preset.height,
-  }));
-  const exact = presets.some(
-    (option) =>
-      option.width === props.modelValue.width &&
-      option.height === props.modelValue.height,
-  );
-  if (exact) return presets;
-  const currentMp =
-    (props.modelValue.width * props.modelValue.height) / 1_000_000;
-  return [
-    {
-      mp: currentMp,
-      label: followsSource.value
-        ? (sourceStatus.value?.label ?? "Source")
-        : "Custom",
-      sub: followsSource.value ? "Matched" : "Manual",
-      width: props.modelValue.width,
-      height: props.modelValue.height,
-    },
-    ...presets.filter(
-      (option) => Math.abs(option.mp - currentMp) > Number.EPSILON,
-    ),
-  ];
-});
-const selectedMp = computed(() => {
-  const exact = resolutionOptions.value.find(
-    (option) =>
-      option.width === props.modelValue.width &&
-      option.height === props.modelValue.height,
-  );
-  if (exact) return exact.mp;
-  const current =
-    (props.modelValue.width * props.modelValue.height) / 1_000_000;
-  return (
-    [...resolutionOptions.value].sort(
-      (a, b) => Math.abs(a.mp - current) - Math.abs(b.mp - current),
-    )[0]?.mp ?? mp.value
-  );
-});
+const resolutionOptions = computed(() =>
+  outputShape.value.sizes.map((size) => ({
+    id: size.id,
+    mp: (size.width * size.height) / 1_000_000,
+    label: size.label,
+    sub: size.mark ? `${size.megapixels} · ${size.mark}` : size.megapixels,
+    width: size.width,
+    height: size.height,
+  })),
+);
+const selectedSizeId = computed(() => outputShape.value.selectedSizeId);
 
 function setAspect(id: string) {
-  explicitAspectId.value = id;
-  if (id === "source") {
-    matchSource();
-    return;
-  }
-  const a = shapeOptions.value.find((x) => x.id === id);
-  if (!a) return;
-  emit("source-canvas-mode", "manual");
-  const exactGroup = presetsForAspectGroup(
-    props.model,
-    props.modelValue.pipeline,
-    id,
-  );
-  const preset = closestResolutionPreset(
-    exactGroup.length > 0
-      ? exactGroup
-      : presetsNearRatio(
-          presetsForModel(
-            props.model ?? props.family,
-            props.modelValue.pipeline,
-          ),
-          a.ratio,
-        ),
-    props.modelValue.width,
-    props.modelValue.height,
-  );
-  if (preset) patch({ width: preset.width, height: preset.height });
+  const size = sizeForFamily(id, shapeInput.value);
+  if (!size) return;
+  emit("canvas-intent", id === SOURCE_FAMILY_ID ? "source" : "manual");
+  patch({ width: size.width, height: size.height });
 }
 
 function matchSource() {
-  // Matching the source is itself an explicit pick — without this, a source
-  // whose size is also a canonical bucket would re-light the earlier chip.
-  explicitAspectId.value = "source";
-  emit("source-canvas-mode", "source");
   const source = sourceResolution.value;
   if (!source) return;
+  emit("canvas-intent", "source-exact");
   patch({ width: source.output.width, height: source.output.height });
 }
 
-function setMp(nextMp: number) {
-  const preset = resolutionPresets.value.find(
-    (candidate) => (candidate.width * candidate.height) / 1_000_000 === nextMp,
-  );
-  if (preset) {
-    emit("source-canvas-mode", "manual");
-    patch({ width: preset.width, height: preset.height });
-  }
+function setSize(id: string | number) {
+  const size = outputShape.value.sizes.find((candidate) => candidate.id === id);
+  if (!size) return;
+  emit("canvas-intent", intentForCanvas(shapeInput.value, size));
+  patch({ width: size.width, height: size.height });
 }
 
 // Seed: Random / Fixed segments. "Fixed" covers the persisted static and
@@ -465,20 +311,14 @@ function lockLastSeed() {
     <div class="controls__group">
       <div class="controls__label">Resolution</div>
       <ResolutionSelector
-        :model-value="selectedMp"
+        :model-value="selectedSizeId"
         :ratio="currentRatio"
         :options="resolutionOptions"
         :resolved-width="modelValue.width"
         :resolved-height="modelValue.height"
-        :custom-label="sourceStatus?.label"
-        :status="
-          sourceStatus
-            ? followsSource
-              ? sourceStatus.detail
-              : `${sourceStatus.detail} · manual output`
-            : undefined
-        "
-        @update:model-value="setMp"
+        :custom-label="sourceResolution ? outputShape.badge : undefined"
+        :status="outputShape.status"
+        @update:model-value="setSize"
       />
       <button
         v-if="sourceResolution && !followsSource"
