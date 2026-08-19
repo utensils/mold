@@ -17,9 +17,18 @@ describe("desktop host bootstrap", () => {
   });
 
   it("keeps offline hosts actionable from the compact toast", () => {
-    expect(source).toContain("It stays listed for reconnect.");
+    // The copy itself lives in the shared studio policy so web says the same.
+    expect(source).toContain("HOST_OFFLINE_DESCRIPTION");
     expect(source).toContain('label: "Open Machines"');
     expect(source).toContain('router.push("/machines")');
     expect(source).toContain("sticky: true");
+  });
+
+  it("routes every reachability edge through the shared policy", () => {
+    // The behaviour is covered by applyHostConnectivity's own test; this only
+    // pins that the shell reads that policy instead of restating one.
+    expect(source).toContain("applyHostConnectivity(");
+    expect(source).toContain('toasts.push(hostOfflineTitle(host.label), "warning"');
+    expect(source).toContain('toasts.push(hostReconnectedTitle(host.label), "success")');
   });
 });

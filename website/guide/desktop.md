@@ -229,7 +229,14 @@ surface powers it, so anything the app does maps to a documented endpoint.
   badge. Toasts stay transient, but the bell opens the durable session history
   of every toast — complete untruncated messages and error bodies, per-host
   context where known, timestamps, and collapsed ×N repeats (newest first,
-  capped at 100). Opening the panel marks everything read; Clear empties it.
+  capped at 100). Severity is color-coded — green for an ordinary notice or a
+  success, yellow for a warning, red for an error — with the severity also named
+  for screen readers and carried by its own glyph, and the unread badge takes
+  the worst unread entry's color, so a bell holding only notices reads green. Each row has a **Copy**
+  button that puts the message, its full body, and the machine/time line on the
+  clipboard — the app chrome is not selectable, so that button is how a long
+  server error leaves the app. Opening the panel marks everything read; Clear
+  empties it.
 - **Native desktop integration** — platform menus and shortcuts, Linux native
   window decorations, macOS overlay chrome, and background notifications on
   generation, chain, and pull completion. macOS uses UserNotifications so a
@@ -449,7 +456,12 @@ wire types as the CLI and web UI:
   exits; enabling starts a fresh owner thread.
 - **Launch reconnect** — every remembered host is attempted immediately on
   every app launch, in parallel with This Mac. An unreachable host stays in
-  the Machines workspace as an errored row and periodic polling lets it self-heal.
+  the Machines workspace as an errored row marked _reconnecting…_, and the
+  10-second status poll keeps probing it so it self-heals without any action
+  from you. A machine that drops raises a yellow warning notification saying it
+  is retrying; when it answers again that warning is withdrawn and a green
+  **Reconnected to `<machine>`** notification confirms it. The web UI behaves
+  the same way.
 
 ## Development
 

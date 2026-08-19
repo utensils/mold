@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { mount } from "@vue/test-utils";
 import ToastShelf from "./ToastShelf.vue";
 import shelfSource from "./ToastShelf.vue?raw";
+import { SEVERITY_MARKS } from "../lib/notificationSeverity";
 import type { Toast } from "./types";
 
 const TOASTS: readonly Toast[] = [
@@ -25,12 +26,19 @@ describe("ToastShelf", () => {
     expect(wrapper.findAll(".ms-toast")).toHaveLength(0);
   });
 
-  it("uses role=status for success and info, role=alert for error", () => {
+  it("uses role=status for success and info, role=alert for error and warning", () => {
     const wrapper = make();
     expect(wrapper.findAll("[role=status]")).toHaveLength(2);
     const alerts = wrapper.findAll("[role=alert]");
     expect(alerts).toHaveLength(1);
     expect(alerts[0]!.text()).toContain("Host unreachable");
+
+    // A warning here is the sticky "your machine is gone" — as time-sensitive
+    // as an error, so it must not wait for a polite region to be read.
+    const warned = make([
+      { id: "w", kind: "warning", text: "Can't reach plato" },
+    ]);
+    expect(warned.findAll("[role=alert]")).toHaveLength(1);
   });
 
   it("renders the newest toast first", () => {
@@ -89,6 +97,37 @@ describe("ToastShelf", () => {
     const wrapper = make();
     await wrapper.findAll(".ms-toast__dismiss")[1]!.trigger("click");
     expect(wrapper.emitted("dismiss")).toEqual([["t2"]]);
+  });
+
+  it("renders warnings with the yellow tone class, glyph, and label", () => {
+    const wrapper = make([
+      { id: "w", kind: "warning", text: "Can't reach plato" },
+    ]);
+    const toast = wrapper.get(".ms-toast");
+    expect(toast.classes()).toContain("ms-toast--warning");
+    expect(toast.classes()).not.toContain("ms-toast--error");
+    expect(wrapper.get(".ms-toast__glyph").text()).toBe("!");
+    expect(wrapper.get(".ms-toast__tone").text()).toBe("Warning");
+  });
+
+  it("tints each severity from the shared table, never a local copy", () => {
+    const wrapper = make([
+      { id: "i", kind: "info", text: "Queued" },
+      { id: "s", kind: "success", text: "Saved" },
+      { id: "w", kind: "warning", text: "Can't reach plato" },
+      { id: "e", kind: "error", text: "Failed" },
+    ]);
+    // Newest first.
+    expect(
+      wrapper.findAll(".ms-toast__glyph").map((g) => g.attributes("style")),
+    ).toEqual([
+      `color: ${SEVERITY_MARKS.error.color};`,
+      `color: ${SEVERITY_MARKS.warning.color};`,
+      `color: ${SEVERITY_MARKS.success.color};`,
+      `color: ${SEVERITY_MARKS.info.color};`,
+    ]);
+    // No stylesheet rule may restate a hue — that is how the surfaces drifted.
+    expect(shelfSource).not.toMatch(/\.ms-toast--\w+ \.ms-toast__glyph/);
   });
 
   it("labels every dismiss button for screen readers", () => {

@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
+import { SEVERITY_MARKS } from "@ui/lib/notificationSeverity";
 import Toasts from "./Toasts.vue";
 import { useToastStore } from "../../stores/toasts";
 
@@ -93,5 +94,57 @@ describe("Toasts a11y roles", () => {
 
     expect(onClick).not.toHaveBeenCalled();
     expect(toasts.items).toHaveLength(0);
+  });
+});
+
+describe("Toasts severity tones", () => {
+  it("tints success green, warning yellow, and error red", async () => {
+    const wrapper = mount(Toasts);
+    const toasts = useToastStore();
+    toasts.push("Reconnected to plato", "success");
+    toasts.push("Can't reach plato", "warning");
+    toasts.push("Generation failed", "error");
+    await wrapper.vm.$nextTick();
+
+    const chips = wrapper.findAll("[data-test='toast-status-icon']");
+    const byKind = Object.fromEntries(
+      chips.map((chip) => [chip.attributes("data-kind"), chip.attributes("style") ?? ""]),
+    );
+    // Every hue resolves through the shared table rather than a local class.
+    expect(byKind.success).toContain(SEVERITY_MARKS.success.color);
+    expect(byKind.warning).toContain(SEVERITY_MARKS.warning.color);
+    expect(byKind.error).toContain(SEVERITY_MARKS.error.color);
+    // An ordinary notice is green too — only warnings and errors stand out.
+    toasts.push("Queued", "info");
+    await wrapper.vm.$nextTick();
+    const info = wrapper
+      .findAll("[data-test='toast-status-icon']")
+      .find((chip) => chip.attributes("data-kind") === "info");
+    expect(info?.attributes("style")).toContain(SEVERITY_MARKS.info.color);
+  });
+
+  it("names the severity for screen readers, never color alone", async () => {
+    const wrapper = mount(Toasts);
+    const toasts = useToastStore();
+    toasts.push("Can't reach plato", "warning");
+    await wrapper.vm.$nextTick();
+
+    expect(wrapper.get(".sr-only").text()).toBe("Warning");
+  });
+
+  it("marks warning and error with different glyphs, not just different hues", async () => {
+    const wrapper = mount(Toasts);
+    const toasts = useToastStore();
+    toasts.push("Can't reach plato", "warning");
+    toasts.push("Generation failed", "error");
+    await wrapper.vm.$nextTick();
+
+    const glyphs = Object.fromEntries(
+      wrapper
+        .findAll("[data-test='toast-status-icon']")
+        .map((chip) => [chip.attributes("data-kind"), chip.text()]),
+    );
+    expect(glyphs.warning).toBe("!");
+    expect(glyphs.error).toBe("✕");
   });
 });

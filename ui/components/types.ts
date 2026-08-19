@@ -13,7 +13,8 @@
 /** One entry on the toast shelf. The host owns the list and its timers. */
 export interface Toast {
   id: string;
-  kind: "info" | "success" | "error";
+  /** Severity: green success, yellow warning, red error; info stays neutral. */
+  kind: "info" | "success" | "warning" | "error";
   text: string;
   actionLabel?: string;
 }

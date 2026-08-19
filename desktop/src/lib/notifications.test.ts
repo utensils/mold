@@ -1,10 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  applyHostConnectivity,
   badgeCount,
-  detectOfflineTransitions,
   newlyCompletedJobs,
   shouldToastGenerationComplete,
-  snapshotHostStatuses,
   type HostStatusSnapshot,
 } from "./notifications";
 import type { Job } from "./generationJob";
@@ -33,36 +32,103 @@ describe("shouldToastGenerationComplete", () => {
   });
 });
 
-describe("detectOfflineTransitions", () => {
-  const hosts = (...rows: Array<[string, string]>): HostStatusSnapshot[] =>
-    rows.map(([id, status]) => ({ id, label: id, status }));
-
-  it("fires only on the ready → error edge", () => {
-    const prev = snapshotHostStatuses(hosts(["a", "ready"], ["b", "ready"]));
-    const offline = detectOfflineTransitions(prev, hosts(["a", "error"], ["b", "ready"]));
-    expect(offline.map((h) => h.id)).toEqual(["a"]);
-  });
-
-  it("does not re-fire while the host stays offline", () => {
-    const prev = snapshotHostStatuses(hosts(["a", "error"]));
-    expect(detectOfflineTransitions(prev, hosts(["a", "error"]))).toHaveLength(0);
-  });
-
-  it("ignores a host that boots straight into error (not a transition)", () => {
-    expect(detectOfflineTransitions({}, hosts(["a", "error"]))).toHaveLength(0);
-  });
-
-  it("ignores connecting → error (a reconnect attempt, not a live host dropping)", () => {
-    const prev = snapshotHostStatuses(hosts(["a", "connecting"]));
-    expect(detectOfflineTransitions(prev, hosts(["a", "error"]))).toHaveLength(0);
-  });
-});
-
 describe("badgeCount", () => {
   it("hides at zero, shows a number, and caps at 99+", () => {
     expect(badgeCount(0)).toBeUndefined();
     expect(badgeCount(-1)).toBeUndefined();
     expect(badgeCount(3)).toBe(3);
     expect(badgeCount(150)).toBe("99+");
+  });
+});
+
+describe("applyHostConnectivity", () => {
+  function harness() {
+    const warned = new Map<string, number>();
+    const events: string[] = [];
+    let nextToastId = 1;
+    const live = new Set<number>();
+    const effects = {
+      warn: (host: HostStatusSnapshot) => {
+        const id = nextToastId++;
+        live.add(id);
+        events.push(`warn:${host.id}:${id}`);
+        return id;
+      },
+      announceRecovery: (host: HostStatusSnapshot) => void events.push(`recovered:${host.id}`),
+      dismiss: (toastId: number) => {
+        events.push(`dismiss:${toastId}${live.has(toastId) ? "" : ":gone"}`);
+        live.delete(toastId);
+      },
+    };
+    return { warned, events, effects, live };
+  }
+
+  const hosts = (...rows: [string, string][]) =>
+    rows.map(([id, status]) => ({ id, label: id, status }));
+
+  it("warns once on a drop and withdraws it on the recovery", () => {
+    const h = harness();
+    let snapshot = applyHostConnectivity({}, hosts(["a", "ready"]), h.warned, h.effects);
+    snapshot = applyHostConnectivity(snapshot, hosts(["a", "error"]), h.warned, h.effects);
+    snapshot = applyHostConnectivity(snapshot, hosts(["a", "error"]), h.warned, h.effects);
+    expect(h.events).toEqual(["warn:a:1"]);
+
+    snapshot = applyHostConnectivity(snapshot, hosts(["a", "ready"]), h.warned, h.effects);
+    expect(h.events).toEqual(["warn:a:1", "dismiss:1", "recovered:a"]);
+    expect(h.warned.size).toBe(0);
+  });
+
+  it("never celebrates a recovery it never warned about", () => {
+    // A machine asleep at launch is errored but unannounced (the boot probe is
+    // deliberately quiet); it waking up is not news.
+    const h = harness();
+    const snapshot = applyHostConnectivity({}, hosts(["a", "error"]), h.warned, h.effects);
+    applyHostConnectivity(snapshot, hosts(["a", "ready"]), h.warned, h.effects);
+    expect(h.events).toEqual([]);
+  });
+
+  it("retires a warning whose host leaves the list", () => {
+    const h = harness();
+    let snapshot = applyHostConnectivity({}, hosts(["a", "ready"]), h.warned, h.effects);
+    snapshot = applyHostConnectivity(snapshot, hosts(["a", "error"]), h.warned, h.effects);
+    snapshot = applyHostConnectivity(snapshot, [], h.warned, h.effects);
+    expect(h.events).toEqual(["warn:a:1", "dismiss:1"]);
+    expect(h.warned.size).toBe(0);
+    // The host coming back later must not resurrect anything.
+    applyHostConnectivity(snapshot, hosts(["a", "ready"]), h.warned, h.effects);
+    expect(h.events).toEqual(["warn:a:1", "dismiss:1"]);
+  });
+
+  it("tolerates a user-dismissed warning at recovery time", () => {
+    const h = harness();
+    let snapshot = applyHostConnectivity({}, hosts(["a", "ready"]), h.warned, h.effects);
+    snapshot = applyHostConnectivity(snapshot, hosts(["a", "error"]), h.warned, h.effects);
+    h.live.delete(1); // the user closed it by hand
+    applyHostConnectivity(snapshot, hosts(["a", "ready"]), h.warned, h.effects);
+    expect(h.events).toEqual(["warn:a:1", "dismiss:1:gone", "recovered:a"]);
+  });
+
+  it("keeps each host's warning separate", () => {
+    const h = harness();
+    let snapshot = applyHostConnectivity(
+      {},
+      hosts(["a", "ready"], ["b", "ready"]),
+      h.warned,
+      h.effects,
+    );
+    snapshot = applyHostConnectivity(
+      snapshot,
+      hosts(["a", "error"], ["b", "error"]),
+      h.warned,
+      h.effects,
+    );
+    snapshot = applyHostConnectivity(
+      snapshot,
+      hosts(["a", "ready"], ["b", "error"]),
+      h.warned,
+      h.effects,
+    );
+    expect(h.events).toEqual(["warn:a:1", "warn:b:2", "dismiss:1", "recovered:a"]);
+    expect([...h.warned.keys()]).toEqual(["b"]);
   });
 });

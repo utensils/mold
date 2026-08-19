@@ -11,10 +11,12 @@ import { dockBadgeValue } from "./lib/dockBadge";
 import { ipc } from "./lib/ipc";
 import { appIsBackground } from "./lib/notify";
 import {
-  detectOfflineTransitions,
+  HOST_OFFLINE_DESCRIPTION,
+  applyHostConnectivity,
+  hostOfflineTitle,
+  hostReconnectedTitle,
   newlyCompletedJobs,
   shouldToastGenerationComplete,
-  snapshotHostStatuses,
 } from "./lib/notifications";
 import {
   allowsNativeContextMenu,
@@ -107,24 +109,32 @@ watch(
   },
 );
 
-// A connected host dropping offline (ready → error) raises a sticky error toast
-// once per transition, regardless of the active workspace.
+// Host reachability, once per edge, regardless of the active workspace. The
+// status poll keeps probing every listed host, so an unreachable machine
+// reconnects on its own: dropping offline is a WARNING (sticky, because the
+// condition persists), and coming back withdraws it and confirms in green.
+// The policy and the id bookkeeping live in applyHostConnectivity; this only
+// supplies the shelf effects.
 let hostStatusSnapshot: Record<string, string> = {};
+/** hostId → the sticky offline toast, withdrawn the moment the host answers. */
+const offlineToastIds = new Map<string, number>();
 watch(
   () => hostsStore.all.map((h) => `${h.id}:${h.status}`).join("|"),
   () => {
     const current = hostsStore.all.map((h) => ({ id: h.id, label: h.label, status: h.status }));
-    for (const host of detectOfflineTransitions(hostStatusSnapshot, current)) {
-      toasts.push(`Can't reach ${host.label}`, "error", {
-        description: "It stays listed for reconnect.",
-        action: {
-          label: "Open Machines",
-          run: () => void router.push("/machines"),
-        },
-        sticky: true,
-      });
-    }
-    hostStatusSnapshot = snapshotHostStatuses(current);
+    hostStatusSnapshot = applyHostConnectivity(hostStatusSnapshot, current, offlineToastIds, {
+      warn: (host) =>
+        toasts.push(hostOfflineTitle(host.label), "warning", {
+          description: HOST_OFFLINE_DESCRIPTION,
+          action: {
+            label: "Open Machines",
+            run: () => void router.push("/machines"),
+          },
+          sticky: true,
+        }),
+      announceRecovery: (host) => toasts.push(hostReconnectedTitle(host.label), "success"),
+      dismiss: (toastId) => toasts.dismiss(toastId),
+    });
   },
   { immediate: true },
 );

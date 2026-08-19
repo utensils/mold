@@ -9,7 +9,8 @@ import { useNotificationsStore } from "@studio/stores/notifications";
  * undo window), and confirm helpers rendered by App-level modals.
  */
 
-export type ToastKind = "info" | "success" | "error";
+/** Severity: green success, yellow warning, red error; info stays neutral. */
+export type ToastKind = "info" | "success" | "warning" | "error";
 
 export interface Toast {
   id: string;
@@ -75,6 +76,8 @@ export function dismissToast(id: string): void {
 }
 
 export interface ToastOptions {
+  /** Supporting copy kept in the notifications bell (the shelf stays one line). */
+  description?: string;
   actionLabel?: string;
   onAction?: () => void;
   onDismiss?: () => void;
@@ -92,14 +95,22 @@ export function toast(
   // long error the user never caught in time stays readable in full. Best
   // effort — a toast raised before pinia installs must not throw.
   if (getActivePinia()) {
-    useNotificationsStore().record({ kind, text });
+    useNotificationsStore().record({
+      kind,
+      text,
+      description: options.description ?? null,
+    });
   }
   const entry: Toast = { id, kind, text };
   if (options.actionLabel) entry.actionLabel = options.actionLabel;
   if (options.onAction) entry.onAction = options.onAction;
   if (options.onDismiss) entry.onDismiss = options.onDismiss;
   state.toasts.push(entry);
-  const timeout = options.timeout ?? (kind === "error" ? 0 : 5000);
+  // Errors are sticky (0); a warning lingers longer than a plain confirmation
+  // because it usually describes a condition the user has not resolved yet.
+  const timeout =
+    options.timeout ??
+    (kind === "error" ? 0 : kind === "warning" ? 8000 : 5000);
   if (timeout > 0) {
     timers.set(
       id,
