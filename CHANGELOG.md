@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Desktop Library now opens remote-only prints on double-click.** Every Library re-render handed remote tiles a freshly built host target, which made their media element reload and briefly unmount between the two clicks of a double-click, so the lightbox never opened for prints that live only on another machine (This-Mac prints were unaffected). Media elements now reload only when the route's URL, key, bucket, or path actually changes. Full-size stills and audio, clipboard copies, and source reuse for host-backed prints are also fetched through the native HTTP client (with a streaming-URL fallback), so held-open generation and download streams to a host can no longer starve them in WebKit's per-host connection pool; video keeps its Range-friendly streaming URL.
+
 ## [0.23.3] - 2026-08-19
 
 - **Tapping an iPhone Library tile in Select mode no longer selects and immediately deselects it.** Mold now consumes every delayed compatibility click emitted by WKWebView after touch selection, including overlapping clicks from rapid taps, while preserving drag-to-select, drag-to-deselect, pointer cancellation, and keyboard activation.

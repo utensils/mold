@@ -296,6 +296,16 @@ export const ipc = {
     if (!inTauri()) return Promise.resolve(null);
     return invoke<NativeGalleryThumbnail>("fetch_gallery_thumbnail", { target, filename });
   },
+  /** Fetch one full-size gallery file through native HTTP as raw bytes —
+   * the Library lightbox and source picker for host-backed prints. Same
+   * rationale as the thumbnail route: a media element pointed straight at a
+   * remote host shares WebKit's per-host pool with every held-open stream
+   * to that host. Null outside Tauri; rejects when the host refuses or the
+   * file exceeds the native cap so the caller can fall back. */
+  fetchGalleryMedia(target: ApiTarget, filename: string): Promise<ArrayBuffer | null> {
+    if (!inTauri()) return Promise.resolve(null);
+    return invoke<ArrayBuffer>("fetch_gallery_media", { target, filename });
+  },
   /** Read a native OS-dropped PNG/JPEG plus any embedded Mold metadata. */
   importSourceImage(path: string): Promise<DesktopImageImport> {
     if (!inTauri()) return Promise.reject(new Error("Native file drops require the desktop app."));

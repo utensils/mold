@@ -16,6 +16,7 @@ const img = (filename: string, timestamp: number): GalleryImage => ({
 });
 
 vi.mock("../../lib/ipc", () => ({
+  inTauri: () => false,
   ipc: {
     localGalleryList: vi.fn(),
     localGalleryDelete: vi.fn(),

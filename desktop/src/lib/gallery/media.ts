@@ -129,6 +129,95 @@ export async function streamableMediaUrl(
   }
 }
 
+const GALLERY_IMAGE_PREFIX = "/api/gallery/image/";
+
+/** The gallery filename behind a `/api/gallery/image/<encoded>` path, or null. */
+export function galleryFilenameOfPath(path: string): string | null {
+  if (!path.startsWith(GALLERY_IMAGE_PREFIX)) return null;
+  const encoded = path.slice(GALLERY_IMAGE_PREFIX.length);
+  if (!encoded || encoded.includes("/") || encoded.includes("?")) return null;
+  try {
+    return decodeURIComponent(encoded);
+  } catch {
+    return null;
+  }
+}
+
+const MEDIA_MIME_BY_EXTENSION: Record<string, string> = {
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  webp: "image/webp",
+  gif: "image/gif",
+  apng: "image/apng",
+  mp4: "video/mp4",
+  webm: "video/webm",
+  wav: "audio/wav",
+};
+
+/** MIME type for a gallery filename — native byte fetches carry no header. */
+export function mediaMimeType(filename: string): string {
+  const extension = filename.toLowerCase().split(".").pop() ?? "";
+  return MEDIA_MIME_BY_EXTENSION[extension] ?? "application/octet-stream";
+}
+
+/**
+ * Full-size media for a media element, native-first. In the desktop app a
+ * host-backed still or audio print is fetched by the Rust HTTP client and
+ * served as an object URL, because an `<img>` pointed straight at the host
+ * shares WebKit's per-host connection pool with every held-open generation
+ * and download stream to that host — the same starvation that moved
+ * thumbnails native in #1132. Video deliberately stays on
+ * `streamableMediaUrl` (Range-friendly ticket/direct URL) so it can seek
+ * without buffering the whole file. Outside Tauri, for `mold-local:` paths,
+ * and when the native route refuses (too large, unreachable), stills fall
+ * back to `streamableMediaUrl` as well.
+ */
+export async function fullSizeMediaUrl(
+  path: string,
+  opts: StreamableMediaOptions = {},
+): Promise<string> {
+  if (path.startsWith("mold-local:")) return path;
+  const target = opts.target;
+  const filename = galleryFilenameOfPath(path);
+  if (target && filename !== null && inTauri() && !mediaMimeType(filename).startsWith("video/")) {
+    const key = keyOf(path, target, opts.cacheKey);
+    let url = cache.get(key);
+    if (!url) {
+      url = ipc.fetchGalleryMedia(target, filename).then((bytes) => {
+        if (!bytes) throw new Error("Native gallery media is unavailable.");
+        return URL.createObjectURL(new Blob([bytes], { type: mediaMimeType(filename) }));
+      });
+      cache.set(key, url);
+      url.catch(() => cache.delete(key));
+    }
+    try {
+      return await url;
+    } catch {
+      // Fall through to the webview's own route (ticketed or direct URL).
+    }
+  }
+  return streamableMediaUrl(path, opts);
+}
+
+/**
+ * Raw bytes for one host-backed gallery file (clipboard copy, source reuse),
+ * native-first for the same pool reason as `fullSizeMediaUrl`; a refused
+ * native read falls back to the webview's authenticated HTTP route.
+ */
+export async function fetchGalleryMediaBytes(path: string, target: ApiTarget): Promise<Uint8Array> {
+  const filename = galleryFilenameOfPath(path);
+  if (filename !== null && inTauri()) {
+    try {
+      const bytes = await ipc.fetchGalleryMedia(target, filename);
+      if (bytes) return new Uint8Array(bytes);
+    } catch {
+      // Fall through to the webview's authenticated HTTP route.
+    }
+  }
+  return new Uint8Array(await (await apiFetchTo(target, path)).arrayBuffer());
+}
+
 export function evictMedia(path: string, cacheKey?: string): void {
   const prefix = `${cacheKey ?? "primary"}|${path}|`;
   for (const [key, cached] of [...cache]) {
