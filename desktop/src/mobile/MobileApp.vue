@@ -826,8 +826,17 @@ const selectedTarget = computed<ApiTarget | null>(() => {
 const generationTargetHost = computed<MobileHost | null>(() => {
   const browsed = selectedHost.value ?? null;
   if (!automaticRouting.value || !form.model) return browsed;
-  if (browsed && modelHostIds(form.model).includes(browsed.id)) return browsed;
-  return provisionalAutomaticHost(form.model, form.family) ?? browsed;
+  const owners = modelHostIds(form.model);
+  if (!browsed || !owners.includes(browsed.id)) {
+    // Deliberately NOT the Auto pick: these answers are identical on every
+    // owner, and depending on live queue depth here would hand children a new
+    // target object on every telemetry tick.
+    const owner = routingHosts.value
+      .filter((host) => owners.includes(host.id))
+      .sort((left, right) => left.id.localeCompare(right.id))[0];
+    if (owner) return owner;
+  }
+  return browsed;
 });
 const generationTarget = computed<ApiTarget | null>(() =>
   generationTargetHost.value ? mobileHostTarget(generationTargetHost.value) : null,
