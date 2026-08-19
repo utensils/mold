@@ -24,6 +24,19 @@ fn output_format_parser(formats: &'static [&'static str]) -> clap::builder::Valu
     clap::builder::ValueParser::new(parser)
 }
 
+/// Value parser for `--title`: applies the shared print-title contract
+/// (trim, no control characters, at most 120 characters) at parse time so a
+/// bad title is refused before any server or GPU work. An empty or
+/// whitespace-only title is a parse error too — `--title ""` is a mistake, not
+/// an untitled print.
+fn print_title_parser(raw: &str) -> Result<String, String> {
+    match mold_core::validate_print_title(raw) {
+        Ok(Some(title)) => Ok(title),
+        Ok(None) => Err("title must not be empty".to_string()),
+        Err(error) => Err(error),
+    }
+}
+
 #[derive(Clone, clap::ValueEnum)]
 enum LogFormat {
     Text,
@@ -599,6 +612,38 @@ pub enum RetakeModeArg {
     Splice,
 }
 
+#[derive(clap::Subcommand)]
+pub enum TrashAction {
+    /// List trashed prints with their purge countdowns
+    ///
+    /// Columns: filename, title, when the print was trashed, when the
+    /// retention sweep purges it (`kept` = retention is keep-forever,
+    /// `due` = the next sweep removes it), and size.
+    List {
+        /// Print the raw `GET /api/gallery?view=trash` rows as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Restore trashed prints to the live gallery
+    Restore {
+        /// Gallery filenames as shown by `mold trash list`
+        #[arg(required = true, value_name = "FILENAME")]
+        filenames: Vec<String>,
+    },
+    /// Permanently delete every trashed print on the server
+    Empty {
+        /// Skip the confirmation prompt
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
+    /// Run the retention sweep now
+    ///
+    /// Purges trashed prints older than the host's
+    /// `gallery.trash_retention_days` and reports how many remain. The
+    /// server also sweeps hourly and at startup.
+    Sweep,
+}
+
 #[derive(Subcommand)]
 #[allow(clippy::large_enum_variant)]
 enum Commands {
@@ -633,6 +678,12 @@ Examples:
         /// Disable embedded generation metadata in PNG output for this run
         #[arg(long, help_heading = "Output")]
         no_metadata: bool,
+
+        /// Print title (up to 120 characters). Embedded in the output
+        /// metadata, seeded into the gallery row, and folded into the default
+        /// filename as a slug: mold-<model>-<timestamp>~<slug>.<ext>
+        #[arg(long, help_heading = "Output", value_name = "TEXT", value_parser = print_title_parser)]
+        title: Option<String>,
 
         /// Display generated image(s) inline in the terminal after generation
         #[arg(long, env = "MOLD_PREVIEW", help_heading = "Output")]
@@ -1164,6 +1215,23 @@ Examples:
     Jobs {
         #[command(subcommand)]
         action: JobsAction,
+    },
+
+    /// Inspect, restore, or empty the gallery trash on a running server
+    #[command(after_long_help = "\
+Examples:
+  mold trash list                      Trashed prints with purge countdowns
+  mold trash restore mold-flux-dev-q4-1700000000000.png
+  mold trash empty --yes               Purge everything without confirming
+  mold trash sweep                     Run the retention sweep now
+
+Talks to the server at MOLD_HOST (MOLD_API_KEY when configured). There is
+no local fallback: the trash belongs to that host's gallery. Retention is
+the host's `gallery.trash_retention_days` config key (default 30; 0 keeps
+trashed prints forever).")]
+    Trash {
+        #[command(subcommand)]
+        action: TrashAction,
     },
 
     /// Download model weights via the running server, or locally if no server is reachable
@@ -1813,6 +1881,7 @@ async fn run() -> anyhow::Result<()> {
             host,
             format,
             no_metadata,
+            title,
             preview,
             local,
             prompt,
@@ -1853,6 +1922,14 @@ async fn run() -> anyhow::Result<()> {
             upscale: _upscale, // TODO: wire into generate pipeline for post-generation upscaling
         } => {
             apply_spatial_tile_override(spatial_tile.as_deref());
+
+            // A chain request has no title slot yet; refuse rather than
+            // silently dropping the flag.
+            if title.is_some() && (script.is_some() || prompt.len() > 1) {
+                anyhow::bail!(
+                    "--title applies to single-clip runs; chain scripts and multi-prompt sequences do not carry a title yet"
+                );
+            }
 
             if let Some(ref path) = script {
                 return commands::chain::run_from_script(
@@ -1989,6 +2066,7 @@ async fn run() -> anyhow::Result<()> {
                 host,
                 format,
                 no_metadata,
+                title,
                 preview,
                 local,
                 gpus,
@@ -2144,6 +2222,9 @@ async fn run() -> anyhow::Result<()> {
         Commands::Jobs { action } => {
             let config = mold_core::Config::load_or_default();
             commands::jobs::run(action, &config).await?;
+        }
+        Commands::Trash { action } => {
+            commands::trash::run(action).await?;
         }
         Commands::Pull { model, skip_verify } => {
             let opts = mold_core::download::PullOptions { skip_verify };
@@ -3132,6 +3213,105 @@ mod tests {
             Commands::Stats { json } => assert!(json),
             _ => panic!("expected Stats"),
         }
+    }
+
+    // ── trash tests ─────────────────────────────────────────────────────
+
+    #[test]
+    fn trash_list_parses_with_and_without_json() {
+        let cli = parse(&["trash", "list"]);
+        match cli.command {
+            Commands::Trash {
+                action: TrashAction::List { json },
+            } => assert!(!json),
+            _ => panic!("expected Trash list"),
+        }
+        let cli = parse(&["trash", "list", "--json"]);
+        match cli.command {
+            Commands::Trash {
+                action: TrashAction::List { json },
+            } => assert!(json),
+            _ => panic!("expected Trash list --json"),
+        }
+    }
+
+    #[test]
+    fn trash_restore_takes_one_or_more_filenames() {
+        let cli = parse(&["trash", "restore", "a.png", "b.mp4"]);
+        match cli.command {
+            Commands::Trash {
+                action: TrashAction::Restore { filenames },
+            } => assert_eq!(filenames, vec!["a.png", "b.mp4"]),
+            _ => panic!("expected Trash restore"),
+        }
+        assert!(
+            try_parse(&["trash", "restore"]).is_err(),
+            "restore without filenames must be a usage error"
+        );
+    }
+
+    #[test]
+    fn trash_empty_confirms_unless_yes() {
+        let cli = parse(&["trash", "empty"]);
+        match cli.command {
+            Commands::Trash {
+                action: TrashAction::Empty { yes },
+            } => assert!(!yes),
+            _ => panic!("expected Trash empty"),
+        }
+        for args in [["trash", "empty", "--yes"], ["trash", "empty", "-y"]] {
+            let cli = parse(&args);
+            match cli.command {
+                Commands::Trash {
+                    action: TrashAction::Empty { yes },
+                } => assert!(yes),
+                _ => panic!("expected Trash empty --yes"),
+            }
+        }
+    }
+
+    #[test]
+    fn trash_sweep_parses() {
+        let cli = parse(&["trash", "sweep"]);
+        assert!(matches!(
+            cli.command,
+            Commands::Trash {
+                action: TrashAction::Sweep
+            }
+        ));
+        assert!(try_parse(&["trash"]).is_err(), "trash needs a subcommand");
+    }
+
+    // ── --title tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn run_title_flag_is_trimmed_and_defaults_to_none() {
+        let cli = parse(&[
+            "run",
+            "flux-schnell",
+            "a cat",
+            "--title",
+            "  Smurf village  ",
+        ]);
+        match cli.command {
+            Commands::Run { title, .. } => assert_eq!(title.as_deref(), Some("Smurf village")),
+            _ => panic!("expected Run"),
+        }
+        let cli = parse(&["run", "a cat"]);
+        match cli.command {
+            Commands::Run { title, .. } => assert!(title.is_none()),
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn run_title_flag_rejects_empty_control_and_overlong_titles() {
+        assert!(try_parse(&["run", "a cat", "--title", "   "]).is_err());
+        assert!(try_parse(&["run", "a cat", "--title", "bad\ntitle"]).is_err());
+        let long = "x".repeat(mold_core::PRINT_TITLE_MAX_CHARS + 1);
+        assert!(try_parse(&["run", "a cat", "--title", &long]).is_err());
+        let max = "x".repeat(mold_core::PRINT_TITLE_MAX_CHARS);
+        assert!(try_parse(&["run", "a cat", "--title", &max]).is_ok());
     }
 
     // ── clean tests ─────────────────────────────────────────────────────

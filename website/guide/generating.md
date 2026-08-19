@@ -389,6 +389,32 @@ mold run "a cat" --no-metadata
 MOLD_EMBED_METADATA=0 mold run "a cat"
 ```
 
+## Titles and the Library
+
+Give a print a name at creation with `--title` (up to 120 characters):
+
+```bash
+mold run flux-dev:q4 "a village of blue houses at dusk" --title "Smurf village"
+# → mold-flux-dev-q4-1700000000000~smurf-village.png
+```
+
+The title is embedded in the output metadata, seeded into the gallery row
+on the serving host, and folded into the default filename as a lossy slug:
+`mold-{model}-{timestamp}[-{index}]~{slug}.{ext}`, where the slug is the
+title lowercased to `[a-z0-9-]` and capped at 40 characters (untitled prints
+keep the legacy `mold-{model}-{timestamp}.{ext}` name). The filename is never
+rewritten afterwards — renaming a print in the Library edits the row title
+only, and an explicit `--output` path is always used verbatim. `--title`
+applies to single-clip runs; chain scripts and multi-prompt sequences do not
+carry a title yet.
+
+The Library organizes prints per host with titles, favorites, tags, and
+manual collections (`PATCH /api/gallery/image/:filename`,
+`POST /api/gallery/organize`, `/api/gallery/collections`,
+`/api/gallery/tags`), and deleting a print moves it to a per-host trash with
+configurable retention — see [`mold trash`](/guide/cli-reference#mold-trash)
+and [Library trash](/guide/configuration#library-trash).
+
 ## Piping
 
 mold is pipe-friendly in both directions. When stdout is not a terminal, raw
