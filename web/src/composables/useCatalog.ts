@@ -472,7 +472,7 @@ function build() {
     return entry.supported;
   }
 
-  async function startDownload(id: string) {
+  async function startDownload(id: string): Promise<string | null> {
     // The downloads composable owns id-shape routing, and both endpoints are
     // strict: `/api/downloads` validates against the manifest registry and
     // 400s on a `cv:` / `hf:` id, while `/api/catalog/:id/download` 400s on a
@@ -480,7 +480,7 @@ function build() {
     // and the installed shelf are made of. It also forces the downloads drawer
     // to repaint immediately rather than waiting for the SSE `enqueued`
     // events, which lag in a background tab or right after an SSE reconnect.
-    await useDownloads().enqueue(id);
+    return await useDownloads().enqueue(id);
   }
 
   return {

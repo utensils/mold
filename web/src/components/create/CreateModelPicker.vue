@@ -11,19 +11,40 @@ import { computed } from "vue";
 import { RouterLink } from "vue-router";
 import Icon from "@ui/components/Icon.vue";
 import type { ModelInfoExtended } from "../../types";
-import { modelDisplayName } from "@studio/lib/modelDisplay";
+import {
+  modelDisplayName,
+  modelDisplayNameForId,
+} from "@studio/lib/modelDisplay";
 
 const props = defineProps<{
   models: ModelInfoExtended[];
   model: string;
   browseTo?: string;
   emptyLabel?: string;
+  /**
+   * The form's model when NO reachable machine has it (the parent knows the
+   * whole fleet's inventory; this list may be narrowed by output mode). It
+   * renders as a disabled option so a restored print's model stays visible
+   * instead of leaving a blank `<select>`.
+   */
+  missingModel?: string | null;
 }>();
 
 const emit = defineEmits<{ select: [model: ModelInfoExtended] }>();
 
 const current = computed(
   () => props.models.find((m) => m.name === props.model) ?? null,
+);
+
+/**
+ * A `<select>` whose value matches no option renders BLANK, which read as
+ * "no model" for a restored print whose checkpoint is gone. Keep the id
+ * visible instead — it is exactly what the request will carry.
+ */
+const missingOption = computed(() =>
+  props.missingModel && props.missingModel === props.model && !current.value
+    ? props.missingModel
+    : "",
 );
 
 // Group installed models by family for the <optgroup> headers.
@@ -65,12 +86,20 @@ function onChange(event: Event) {
     <select
       class="mp__select"
       data-test="model-select"
-      :value="groups.length === 0 ? '' : model"
+      :value="groups.length === 0 && !missingOption ? '' : model"
       aria-label="Model"
       @change="onChange"
     >
-      <option v-if="groups.length === 0" value="" disabled>
+      <option v-if="groups.length === 0 && !missingOption" value="" disabled>
         {{ emptyLabel ?? "No models installed" }}
+      </option>
+      <option
+        v-if="missingOption"
+        :value="missingOption"
+        disabled
+        data-test="model-option-missing"
+      >
+        {{ modelDisplayNameForId(missingOption, models) }} · not installed
       </option>
       <optgroup
         v-for="group in groups"

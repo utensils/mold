@@ -961,3 +961,37 @@ describe("InspectorPanel — model aspect vs source tie", () => {
     expect(selector.props("status")).toContain("Matches source");
   });
 });
+
+describe("InspectorPanel — a restored model no machine has", () => {
+  it("keeps the recorded model visible with a Not installed tag", async () => {
+    useModelStore().all = [];
+    const form = formFor("zimage");
+    form.model = "z-image-turbo:q6";
+    const wrapper = mount(InspectorPanel, { props: { form } });
+    await flushPromises();
+
+    expect(wrapper.get('[data-test="selected-model-name"]').text()).toBe("z-image-turbo:q6");
+    expect(wrapper.get('[data-test="selected-model-missing"]').text()).toBe("Not installed");
+  });
+
+  it("offers the pull for that exact id when its picker row is chosen", async () => {
+    useModelStore().all = [];
+    const form = formFor("zimage");
+    form.model = "z-image-turbo:q6";
+    const wrapper = mount(InspectorPanel, { props: { form } });
+    await flushPromises();
+
+    await wrapper.get(".ms-model__button").trigger("click");
+    await wrapper.get('[data-test="model-option-missing"]').trigger("click");
+
+    expect(wrapper.emitted("pull-missing-model")).toEqual([["z-image-turbo:q6"]]);
+    // The raw id is what the form and the request keep carrying.
+    expect(form.model).toBe("z-image-turbo:q6");
+  });
+
+  it("shows Choose a model only when nothing is selected at all", () => {
+    const wrapper = mount(InspectorPanel, { props: { form: formFor("flux") } });
+    expect(wrapper.get('[data-test="selected-model-name"]').text()).toBe("Choose a model");
+    expect(wrapper.find('[data-test="selected-model-missing"]').exists()).toBe(false);
+  });
+});

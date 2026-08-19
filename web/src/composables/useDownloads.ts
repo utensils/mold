@@ -229,7 +229,10 @@ export interface UseDownloads {
   queued: Ref<DownloadJobWire[]>;
   history: Ref<DownloadJobWire[]>;
   ratesByJob: Ref<Record<string, Array<{ ts: number; bytes: number }>>>;
-  enqueue: (model: string) => Promise<void>;
+  /** Returns the server's queue id for the primary artifact when it reports
+   *  one (catalog ids do; `/api/downloads` answers with no body), so a caller
+   *  can watch that exact job instead of matching by model name. */
+  enqueue: (model: string) => Promise<string | null>;
   cancel: (id: string) => Promise<void>;
   /// Force-fetch the current downloads listing. Use after any caller
   /// triggers an action that's expected to alter the queue (e.g. catalog
@@ -427,20 +430,22 @@ function buildSingleton(): UseDownloads {
     }
   }
 
-  async function enqueue(model: string): Promise<void> {
+  async function enqueue(model: string): Promise<string | null> {
     // Catalog rows (`cv:` / `hf:`) carry their canonical id in `job.model`,
     // but `/api/downloads` only validates against the manifest registry —
     // so retrying a failed catalog download by re-POSTing that id 400s.
     // Route catalog-shaped ids through `/api/catalog/:id/download`, which
     // owns the recipe-payload + companion-pull flow.
+    let jobId: string | null = null;
     if (looksLikeCatalogId(model)) {
-      await postCatalogDownload(model);
+      jobId = (await postCatalogDownload(model))?.primary_job_id ?? null;
     } else {
       await postDownload(model);
     }
     // Belt-and-suspenders against SSE lag. `applyListing` is idempotent
     // with the SSE-driven mutations so the worst case is a no-op write.
     void refresh();
+    return jobId;
   }
 
   async function cancel(id: string): Promise<void> {

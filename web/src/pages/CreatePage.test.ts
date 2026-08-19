@@ -105,7 +105,7 @@ const streamSelectedJobRef = vi.hoisted(() => ({
 }));
 const streamSelectMock = vi.hoisted(() => vi.fn());
 const placementPreviewMock = vi.hoisted(() =>
-  vi.fn(async () => ({
+  vi.fn(async (): Promise<Record<string, unknown>> => ({
     version: 1,
     authoritative: true,
     state_version: 1,
@@ -154,12 +154,25 @@ const gcChainJobsMock = vi.hoisted(() =>
 );
 const amendChainJobMock = vi.hoisted(() => vi.fn());
 const cancelPrintMock = vi.hoisted(() => vi.fn(async () => undefined));
+const postDownloadMock = vi.hoisted(() => vi.fn(async () => undefined));
+const postCatalogDownloadMock = vi.hoisted(() => vi.fn(async () => ({})));
 
 vi.mock("../api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../api")>();
   return {
     // Real error class so `instanceof ApiHttpError` branches stay honest.
     ApiHttpError: actual.ApiHttpError,
+    looksLikeCatalogId: actual.looksLikeCatalogId,
+    postDownload: postDownloadMock,
+    postCatalogDownload: postCatalogDownloadMock,
+    fetchDownloads: vi.fn(async () => ({
+      active: null,
+      active_jobs: [],
+      queued: [],
+      history: [],
+    })),
+    downloadsStreamUrl: () => "/api/downloads/events",
+    cancelDownload: vi.fn(async () => undefined),
     createChainJob: createChainJobMock,
     expandPrompt: expandPromptMock,
     fetchModels: vi.fn(async () => []),
@@ -3666,10 +3679,11 @@ describe("CreatePage host routing", () => {
     ).toEqual(["z-image:bf16"]);
   });
 
-  // Regression: a persisted model the server no longer has left the <select>
-  // with no matching <option>, which renders BLANK — the picker looked empty
-  // even though models were installed.
-  it("re-homes the form when the persisted model isn't installed", async () => {
+  // Regression (#1162): a persisted or restored model the fleet no longer has
+  // used to be silently swapped for `installedModels[0]` — along with that
+  // model's size/steps/guidance. The id is kept and disclosed instead, and the
+  // picker renders it as a not-installed option so the <select> is never blank.
+  it("keeps a restored model the fleet doesn't have and discloses it", async () => {
     const form = useGenerateForm();
     form.state.value.model = "flux-dev:q8";
     form.state.value.modelFamily = "flux";
@@ -3679,10 +3693,210 @@ describe("CreatePage host routing", () => {
     await flushPromises();
     await nextTick();
 
-    expect(form.state.value.model).toBe("flux2-klein:q4");
+    expect(form.state.value.model).toBe("flux-dev:q8");
+    const picker = wrapper.getComponent({ name: "CreateModelPicker" });
+    expect(picker.props("model")).toBe("flux-dev:q8");
+    expect(picker.props("missingModel")).toBe("flux-dev:q8");
     expect(
-      wrapper.getComponent({ name: "CreateModelPicker" }).props("model"),
-    ).toBe("flux2-klein:q4");
+      useNotifications().toasts.some((t) => /isn't installed/.test(t.text)),
+    ).toBe(true);
+  });
+
+  // #1162: Auto must never dead-end. Nobody has the model, so the pull is the
+  // recovery — the print is not queued, and the resume waits on the download.
+  it("offers the pull when no machine has the model instead of dead-ending", async () => {
+    hostModelsMock.mockResolvedValue([flux]);
+    placementPreviewMock.mockResolvedValue({
+      version: 1,
+      authoritative: true,
+      state_version: 1,
+      plan_version: 1,
+      outcome: "infeasible",
+      reason: "model 'z-image-turbo:q6' has no concrete local artifacts",
+      missing_components: [
+        {
+          kind: "transformer",
+          name: "transformer",
+          present: false,
+          repair_model: "z-image-turbo:q6",
+        },
+      ],
+    });
+    postDownloadMock.mockClear();
+
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = "z-image-turbo:q6";
+    form.state.value.modelFamily = "zimage";
+    form.state.value.prompt = "a lighthouse at dusk";
+    await nextTick();
+
+    await wrapper.get("[data-test='composer-submit']").trigger("click");
+    await flushPromises();
+
+    expect(submitMock).not.toHaveBeenCalled();
+    expect(postDownloadMock).toHaveBeenCalledWith("z-image-turbo:q6");
+    const toasts = useNotifications().toasts;
+    expect(toasts.some((t) => /Pulling z-image-turbo:q6/.test(t.text))).toBe(
+      true,
+    );
+    expect(toasts.some((t) => /can't run this print/.test(t.text))).toBe(false);
+  });
+
+  // The pull is only ever offered on a machine that reported the model
+  // absent; one that refused for capacity would refuse again after a repair.
+  it("never offers a machine that refused for capacity as a pull target", async () => {
+    const studio = addHost({ url: "http://studio:7680", name: "Studio" });
+    hostModelsMock.mockImplementation(async (host: { id: string }) =>
+      host.id === ORIGIN_HOST_ID ? [] : [{ ...flux, name: "z-image-turbo:q6" }],
+    );
+    placementPreviewMock.mockImplementation(
+      async (...args: unknown[]): Promise<Record<string, unknown>> => {
+        const target = args[0] as { baseUrl: string };
+        return target.baseUrl.includes("studio")
+          ? {
+              version: 1,
+              authoritative: true,
+              state_version: 1,
+              plan_version: 1,
+              outcome: "infeasible",
+              reason: "no device can host this generation: needs 48.0 GB",
+            }
+          : {
+              version: 1,
+              authoritative: true,
+              state_version: 1,
+              plan_version: 1,
+              outcome: "infeasible",
+              reason:
+                "model 'z-image-turbo:q6' has no concrete local artifacts",
+              missing_components: [
+                {
+                  kind: "transformer",
+                  name: "transformer",
+                  present: false,
+                  repair_model: "z-image-turbo:q6",
+                },
+              ],
+            };
+      },
+    );
+    postDownloadMock.mockClear();
+    postCatalogDownloadMock.mockClear();
+
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = "z-image-turbo:q6";
+    form.state.value.modelFamily = "zimage";
+    form.state.value.prompt = "a lighthouse at dusk";
+    await nextTick();
+
+    await wrapper.get("[data-test='composer-submit']").trigger("click");
+    await flushPromises();
+
+    // Only the origin lacks it, so no picker: the download lands there and
+    // Studio (which has it and cannot fit it) is never touched.
+    expect(postDownloadMock).toHaveBeenCalledWith("z-image-turbo:q6");
+    expect(
+      useNotifications().toasts.some((t) =>
+        new RegExp(`Pulling z-image-turbo:q6 on `).test(t.text),
+      ),
+    ).toBe(true);
+    expect(studio.id).toBeTruthy();
+  });
+
+  // A source-conditioned print is fitted against the chosen machine AFTER
+  // routing, so the pre-routing request is not what would render. Download it,
+  // but do not promise a resume that would use different conditioning.
+  it("downloads without promising a resume for a source-conditioned print", async () => {
+    hostModelsMock.mockResolvedValue([]);
+    placementPreviewMock.mockResolvedValue({
+      version: 1,
+      authoritative: true,
+      state_version: 1,
+      plan_version: 1,
+      outcome: "infeasible",
+      reason: "model 'flux-dev:q8' has no concrete local artifacts",
+      missing_components: [
+        {
+          kind: "transformer",
+          name: "transformer",
+          present: false,
+          repair_model: "flux-dev:q8",
+        },
+      ],
+    });
+    postDownloadMock.mockClear();
+
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = "flux-dev:q8";
+    form.state.value.modelFamily = "flux";
+    form.state.value.prompt = "a lighthouse at dusk";
+    form.state.value.imageAttachments = [
+      { kind: "upload", filename: "open.png", base64: "FIRST" },
+    ];
+    await nextTick();
+
+    await wrapper.get("[data-test='composer-submit']").trigger("click");
+    await flushPromises();
+
+    expect(postDownloadMock).toHaveBeenCalledWith("flux-dev:q8");
+    const toasts = useNotifications().toasts;
+    expect(
+      toasts.some((t) => /press Generate again once it's ready/.test(t.text)),
+    ).toBe(true);
+    expect(
+      toasts.some((t) => /generation starts when it's ready/.test(t.text)),
+    ).toBe(false);
+  });
+
+  it("keeps the dead-end message when the machine simply cannot fit it", async () => {
+    hostModelsMock.mockResolvedValue([flux]);
+    placementPreviewMock.mockResolvedValue({
+      version: 1,
+      authoritative: true,
+      state_version: 1,
+      plan_version: 1,
+      outcome: "infeasible",
+      reason: "no device can host this generation: needs 48.0 GB",
+    });
+    postDownloadMock.mockClear();
+
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = "flux2-klein:q4";
+    form.state.value.modelFamily = "flux2";
+    form.state.value.prompt = "a lighthouse at dusk";
+    await nextTick();
+
+    await wrapper.get("[data-test='composer-submit']").trigger("click");
+    await flushPromises();
+
+    expect(submitMock).not.toHaveBeenCalled();
+    expect(postDownloadMock).not.toHaveBeenCalled();
+    expect(
+      useNotifications().toasts.some((t) =>
+        /can't run this print/.test(t.text),
+      ),
+    ).toBe(true);
+  });
+
+  it("still re-homes a genuinely unset model onto an installed one", async () => {
+    const form = useGenerateForm();
+    form.state.value.model = "";
+    form.state.value.modelFamily = "";
+    hostModelsMock.mockResolvedValue([flux]);
+
+    mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    await nextTick();
+
+    expect(form.state.value.model).toBe("flux2-klein:q4");
   });
 
   it("leaves the selection alone when the persisted model is installed", async () => {
@@ -3811,7 +4025,7 @@ function pageStubs() {
     },
     CreateModelPicker: {
       name: "CreateModelPicker",
-      props: ["models", "model", "browseTo", "emptyLabel"],
+      props: ["models", "model", "browseTo", "emptyLabel", "missingModel"],
       template: "<div data-test='model-picker-stub' />",
     },
     ControlsAside: {

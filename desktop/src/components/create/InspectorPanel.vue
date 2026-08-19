@@ -83,6 +83,8 @@ const props = withDefaults(
 const emit = defineEmits<{
   "append-word": [word: string];
   "canvas-intent": [intent: CanvasIntent];
+  /** The picker's "Not installed" row: offer the pull for this exact id. */
+  "pull-missing-model": [model: string];
 }>();
 const durationRoutingRequest = computed(() => buildRequest(props.form));
 
@@ -261,6 +263,16 @@ const stickyTarget = computed<string | null>(() =>
 
 const selectedModel = computed<ModelEntry | null>(() =>
   hostModels.installedEntryForTarget(props.form.model, stickyTarget.value),
+);
+
+/**
+ * The form's model when no machine has it installed. Restoring a print whose
+ * checkpoint is gone must keep the id visible with a Not installed tag rather
+ * than reading "Choose a model" — the raw id stays in `form.model` and in the
+ * request either way.
+ */
+const missingModelId = computed<string | null>(() =>
+  props.form.model && !selectedModel.value ? props.form.model : null,
 );
 
 const pickerModels = computed<ModelEntry[]>(() => {
@@ -525,9 +537,11 @@ function resetSettings() {
         <ModelPicker
           :models="pickerModels"
           :selected="selectedModel"
+          :missing-model="missingModelId"
           :show-availability="!stickyTarget || stickyTarget === 'capable'"
           :browse-target="caps.supportsVideo ? '/models?type=video' : '/models'"
           @pick="pickModel"
+          @pick-missing="emit('pull-missing-model', $event)"
         />
         <p v-if="modelDescription" class="ms-field__hint">{{ modelDescription }}</p>
         <p v-if="stickyHostMissingModel" class="ms-field__hint">

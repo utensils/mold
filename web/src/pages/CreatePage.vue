@@ -194,7 +194,10 @@ import { useStatusPoll } from "../composables/useStatusPoll";
 import {
   useHostRouting,
   type FeasibilityResult,
+  type InfeasibleHost,
 } from "../composables/useHostRouting";
+import { usePullResume } from "../composables/usePullResume";
+import ModelInstallTargetDialog from "../components/models/ModelInstallTargetDialog.vue";
 import { profileConflictMessage } from "@studio/lib/profileFleet";
 import { generationCapabilitiesForFamily } from "../lib/generateCapabilities";
 import {
@@ -265,6 +268,8 @@ const router = useRouter();
 const { status } = useStatusPoll();
 const queue = useQueue();
 const routing = useHostRouting();
+const installTargets = useModelInstallTargets();
+const pullResume = usePullResume();
 const liveActivity = useLiveActivity(routing);
 const openLiveWork = useOpenLiveWork(routing);
 // The model list follows the routing target: a pinned machine shows its own
@@ -308,7 +313,6 @@ const composerError = ref<string | null>(null);
 // which case it re-ranks the eligible machines that positively have it — the
 // shared policy in `@studio/lib/expansionRouting`, ranked by this surface's
 // own routers. The print itself never follows.
-const installTargets = useModelInstallTargets();
 const expansionPull = ref<{
   model: string;
   target: InstallTarget | null;
@@ -1601,16 +1605,25 @@ function selectModel(model: ModelInfoExtended) {
 }
 
 // The persisted model can name something the routing target doesn't have — it
-// was deleted, or the user pinned a machine that never installed it. A <select>
-// whose value matches no option renders BLANK, which reads as "this server has
-// no models" even when it has several. Re-home the form onto a model that is
-// actually there instead.
+// was deleted, or the user pinned a machine that never installed it. Only a
+// GENUINELY unset model is re-homed onto an installed one: a named model is
+// the user's own restored print or template, and silently swapping it (plus
+// its size/steps/guidance/LoRAs, through `applyModelDefaults`) rewrote work
+// nobody asked to change. The picker renders the named id with a
+// "not installed" option instead, and Generate offers the pull (#1162).
+const disclosedMissingModels = new Set<string>();
+/** The form's model when no machine in the fleet has it (#1162). */
+const missingModelId = computed(() => {
+  const name = form.state.value.model;
+  if (!name || !modelsLoaded.value) return null;
+  return installedModels.value.some((entry) => entry.name === name)
+    ? null
+    : name;
+});
 watch(
   [installedModels, modelsLoaded],
   () => {
     if (!modelsLoaded.value) return;
-    const first = installedModels.value[0];
-    if (!first) return;
     const current = form.state.value.model;
     const currentRow = current
       ? installedModels.value.find((m) => m.name === current)
@@ -1623,7 +1636,19 @@ watch(
       form.reconcileNegativeDefault(currentRow);
       return;
     }
-    form.applyModelDefaults(first);
+    if (current) {
+      // Disclose once per id, not on every poll that re-runs this watcher.
+      if (!disclosedMissingModels.has(current)) {
+        disclosedMissingModels.add(current);
+        toast(
+          "info",
+          `${modelDisplayNameForId(current, models.value)} isn't installed — Generate offers to download it.`,
+        );
+      }
+      return;
+    }
+    const first = installedModels.value[0];
+    if (first) form.applyModelDefaults(first);
   },
   { immediate: true },
 );
@@ -2825,13 +2850,162 @@ function resolveSubmitRoute(): HostRoute | null | false {
 async function resolveFeasibleSubmitRoute(
   request: GenerateRequestWire,
   copies = 1,
+  decision?: ReturnType<typeof decideGenerateRequestRouting>,
+  quick: unknown = null,
 ): Promise<HostRoute | false> {
   const result = await routing.resolveFeasible(request, copies);
   if (result.kind !== "route") {
-    toast("error", feasibilityMessage(result, "this print"));
+    if (
+      !decision ||
+      !(await offerMissingModelPull(result, request, decision, quick))
+    ) {
+      toast("error", feasibilityMessage(result, "this print"));
+    }
     return false;
   }
   return result.route;
+}
+
+/**
+ * Machines that refused ONLY for want of the model (#1162). A capacity
+ * refusal, a policy block, or a missing companion is never fixed by a pull,
+ * so only `missingModel` rows count — including the ones a transient or
+ * unreachable result carries alongside its primary reason.
+ */
+function missingModelFailures(
+  result: Exclude<FeasibilityResult, { kind: "route" }>,
+): InfeasibleHost[] {
+  const rows =
+    result.kind === "infeasible"
+      ? result.perHost
+      : result.kind === "transient" || result.kind === "unreachable"
+        ? (result.infeasible ?? [])
+        : [];
+  return rows.filter((row) => row.missingModel !== null);
+}
+
+/** The exact host route for one registry machine, for a frozen resume. */
+function routeForHostId(hostId: string): HostRoute | null {
+  const host = routing.hosts.value.find((entry) => entry.id === hostId);
+  if (!host) return null;
+  const target: HostRoute["target"] = { baseUrl: host.url };
+  if (host.apiKey) target.apiKey = host.apiKey;
+  return {
+    hostId: host.id,
+    label: host.label,
+    target,
+    instanceId: host.instanceId ?? null,
+    referenceUploads:
+      routing.capabilitiesByHost.value[host.id]?.reference_uploads ?? null,
+  };
+}
+
+/**
+ * Auto / Most capable must never dead-end. When nothing can run this print
+ * because no machine has the model, offer the pull on a machine that could —
+ * the same `planModelInstall` policy the Models workspace uses — and resume
+ * the exact frozen request there once the download lands. Returns false when
+ * there is nothing to offer, so the caller keeps its failure message.
+ */
+/**
+ * A frozen request may only be resumed verbatim when nothing downstream of
+ * routing would still change it. Source media is fitted against the chosen
+ * machine after routing (`prepareStillSourceToRequest`), and a quick
+ * expansion stamps its provenance there too — resuming the pre-finalization
+ * request would render different conditioning than the user submitted. Those
+ * requests still get the download; they just do not get the promise.
+ */
+function frozenRequestIsFinal(
+  request: GenerateRequestWire,
+  quick: unknown,
+): boolean {
+  if (quick) return false;
+  const fields = request as unknown as Record<string, unknown>;
+  const carriesMedia = [
+    "source_image",
+    "mask_image",
+    "control_image",
+    "source_video",
+    "audio_file",
+  ].some((field) => fields[field] !== undefined && fields[field] !== null);
+  const carriesLists = ["edit_images", "keyframes", "references"].some(
+    (field) => {
+      const value = fields[field];
+      return Array.isArray(value) && value.length > 0;
+    },
+  );
+  return !carriesMedia && !carriesLists;
+}
+
+async function offerMissingModelPull(
+  result: Exclude<FeasibilityResult, { kind: "route" }>,
+  request: GenerateRequestWire,
+  decision: ReturnType<typeof decideGenerateRequestRouting>,
+  quick: unknown = null,
+): Promise<boolean> {
+  const failures = missingModelFailures(result);
+  if (failures.length === 0) return false;
+  const model = failures[0]!.missingModel!.model;
+  // Only the machines that actually reported the model absent are pull
+  // targets: one that refused for capacity or policy would refuse again after
+  // the download, and repairing it there would be pure waste.
+  const candidateIds = failures.map((failure) => failure.hostId);
+  if (installTargets.planFor(model, false, candidateIds).targets.length === 0) {
+    return false;
+  }
+  const choice = await installTargets.chooseInstallTarget({
+    modelId: model,
+    displayName: modelDisplayNameForId(model, models.value),
+    restrictToHostIds: candidateIds,
+  });
+  // An explicit cancel is an answer: nothing was queued, and the dead-end
+  // error toast would only restate what the user just dismissed.
+  if (choice.kind === "cancelled") return true;
+  const target = choice.target;
+  const hostId = target?.host.id ?? ORIGIN_HOST_ID;
+  const hostLabel = target?.host.label ?? "this server";
+  // Capture what had already finished BEFORE the POST: a pull that completes
+  // inside that window would otherwise land in the baseline and be ignored
+  // forever.
+  const baseline = await pullResume.captureBaseline(hostId);
+  let jobId: string | null = null;
+  try {
+    jobId = await installTargets.startDownloadOn(target, model);
+  } catch (error) {
+    toast(
+      "error",
+      `Couldn't start the download of ${model} on ${hostLabel}: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+    return true;
+  }
+  if (!frozenRequestIsFinal(request, quick)) {
+    toast(
+      "info",
+      `Pulling ${model} on ${hostLabel} — press Generate again once it's ready.`,
+    );
+    return true;
+  }
+  const resumeRoute = routing.multiHost.value ? routeForHostId(hostId) : null;
+  await pullResume.arm(
+    {
+      model,
+      // A catalog download reports its queue id on both routes; a plain
+      // manifest-name POST answers with no body, so that watch matches by
+      // model against the pre-POST terminal snapshot.
+      jobId,
+      hostId,
+      hostLabel,
+      resume: () => submitRequestCopies(request, decision, resumeRoute),
+    },
+    baseline,
+  );
+  toast(
+    "info",
+    `Pulling ${model} on ${hostLabel} — generation starts when it's ready`,
+  );
+  return true;
 }
 
 function terminalPunctuation(value: string): string {
@@ -3032,7 +3206,12 @@ async function onSubmitInner(allowStaleQuick = false) {
             copies,
           )
         : await routing.revalidateFeasible(route, currentRequest, copies)
-      : await resolveFeasibleSubmitRoute(currentRequest, copies);
+      : await resolveFeasibleSubmitRoute(
+          currentRequest,
+          copies,
+          decision,
+          quick,
+        );
     if (result === false) return;
     if ("kind" in result && result.kind !== "route") {
       toast("error", feasibilityMessage(result, "this prepared print"));
@@ -3056,7 +3235,11 @@ async function onSubmitInner(allowStaleQuick = false) {
           )
         : await routing.resolveFeasible(currentRequest, copies);
     if (result.kind !== "route") {
-      toast("error", feasibilityMessage(result, "this print"));
+      if (
+        !(await offerMissingModelPull(result, currentRequest, decision, quick))
+      ) {
+        toast("error", feasibilityMessage(result, "this print"));
+      }
       return;
     }
     route = result.route;
@@ -4114,6 +4297,7 @@ onBeforeUnmount(() => {
             <CreateModelPicker
               :models="sequenceModels"
               :model="form.state.value.model"
+              :missing-model="missingModelId"
               :browse-to="sequenceBrowsePath"
               empty-label="No sequence models installed"
               @select="selectModel"
@@ -4320,6 +4504,7 @@ onBeforeUnmount(() => {
                 <CreateModelPicker
                   :models="composerModels"
                   :model="form.state.value.model"
+                  :missing-model="missingModelId"
                   browse-to="/models"
                   empty-label="No models installed"
                   @select="selectModel"
@@ -4533,6 +4718,7 @@ onBeforeUnmount(() => {
         <CreateModelPicker
           :models="composerModels"
           :model="form.state.value.model"
+          :missing-model="missingModelId"
           :browse-to="sequenceMode ? sequenceBrowsePath : '/models'"
           :empty-label="
             sequenceMode
@@ -4731,5 +4917,9 @@ onBeforeUnmount(() => {
       @upscale="onLightboxUpscale"
       @delete="handleDelete"
     />
+
+    <!-- The machine picker for a pre-submit missing-model pull. The Models
+         page mounts the same dialog; only one route is mounted at a time. -->
+    <ModelInstallTargetDialog />
   </div>
 </template>

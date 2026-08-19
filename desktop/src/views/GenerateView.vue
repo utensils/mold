@@ -20,6 +20,7 @@ import ExpansionPullStatus from "../components/generate/ExpansionPullStatus.vue"
 import PreparedExpansionBatch from "../components/generate/PreparedExpansionBatch.vue";
 import GenerateErrorNotice from "../components/generate/GenerateErrorNotice.vue";
 import MissingModelDialog from "../components/generate/MissingModelDialog.vue";
+import DownloadTargetDialog from "../components/models/DownloadTargetDialog.vue";
 import CreateHeader from "../components/create/CreateHeader.vue";
 import ActivityStrip from "../components/create/ActivityStrip.vue";
 import ComposerCard from "../components/create/ComposerCard.vue";
@@ -85,7 +86,6 @@ import {
   resolveExpansionRoute,
   type ExpansionCandidate,
 } from "@studio/lib/expansionRouting";
-import { planModelInstall } from "@studio/lib/modelInstallTargets";
 import { useAppPrefsStore } from "../stores/appPrefs";
 import { useHostModelsStore } from "../stores/hostModels";
 import { strongestRoutableGpu, useHostsStore, type FeasibleRouteResult } from "../stores/hosts";
@@ -149,7 +149,13 @@ import {
   promptSource,
   validateRemixVariants,
 } from "@studio/lib/promptTransform";
-import type { HostRoute } from "../stores/hosts";
+import type {
+  HostFeasibilityFailure,
+  HostPlacementFailure,
+  HostRoute,
+  HostView,
+} from "../stores/hosts";
+import { planModelInstall, type ModelInstallTarget } from "@studio/lib/modelInstallTargets";
 import {
   formatTemplateMediaReferences,
   hydrateGenerationTemplate,
@@ -279,6 +285,9 @@ const missingModel = ref<{
   batch: number;
   chainRouting: ChainRoutingDecision | null;
   requestOptions: BatchRequestOptions;
+  /** False when the frozen request still has to be finalized against the
+   *  chosen machine — download only, never a resume promise. */
+  resumeAfterPull?: boolean;
 } | null>(null);
 
 const missingModelHostLabel = computed(
@@ -290,6 +299,170 @@ const missingModelSizeGb = computed(() => {
   if (!name) return null;
   return installedModels.value.find((m) => m.name === name)?.size_gb ?? null;
 });
+
+/** Freeze the exact request a resumed submit will send, including the quick
+ * expansion's prompt provenance (`submit()` applies it after routing). */
+function pullResumeRequest(request: GenerateRequest): GenerateRequest {
+  const transform = quickExpansionSnapshot.value?.promptTransform;
+  return transform ? { ...request, prompt_transform: transform } : request;
+}
+
+/** The work a missing-model pull would resume, frozen before the dialog opens. */
+interface MissingModelSubmission {
+  model: string;
+  request: GenerateRequest;
+  batch: number;
+  chainRouting: ChainRoutingDecision | null;
+  requestOptions: BatchRequestOptions;
+  /**
+   * False when the frozen request is not yet the one that would render —
+   * a source that still has to be fitted against the chosen machine
+   * (`upscale-then-fit`). The download is still offered; the promise to
+   * generate is not, because resuming would use different conditioning.
+   */
+  resumeAfterPull?: boolean;
+}
+
+/** An open machine picker for a pre-submit pull (more than one candidate). */
+const missingModelTargets = ref<{
+  model: string;
+  targets: ModelInstallTarget<HostView>[];
+  submission: MissingModelSubmission;
+  /** Exact route per machine, preferring what the placement probe proved. */
+  routeFor: (hostId: string) => HostRoute | null;
+} | null>(null);
+
+/**
+ * Machines that refused ONLY for want of the model. Auto / Most capable must
+ * never dead-end (#1162): when nothing can route because nobody has the
+ * model, a pull is the recovery — but a machine that cannot fit the print, or
+ * that a policy refuses, is never a pull target.
+ */
+function missingModelFailures(
+  result: Exclude<FeasibleRouteResult, { kind: "route" }>,
+): HostPlacementFailure[] {
+  if (result.kind !== "infeasible" && result.kind !== "mixed") return [];
+  const perHost: HostFeasibilityFailure[] = result.perHost;
+  return perHost.filter(
+    (failure): failure is HostPlacementFailure =>
+      failure.kind === "infeasible" && failure.missingModel !== null,
+  );
+}
+
+/**
+ * Offer the pull instead of a toast. One candidate skips the machine picker
+ * (the same rule `chooseInstallTarget` uses); several open the shared
+ * `DownloadTargetDialog`, defaulting to whichever machine the current routing
+ * policy would have picked. Returns false when there is nothing to offer, so
+ * the caller keeps its existing failure message.
+ */
+function offerMissingModelPull(
+  result: Exclude<FeasibleRouteResult, { kind: "route" }>,
+  submission: MissingModelSubmission,
+): boolean {
+  const failures = missingModelFailures(result);
+  if (failures.length === 0) return false;
+  const preferredId =
+    hosts.resolveRoute(appPrefs.settings?.generateTargetHost ?? null)?.hostId ?? null;
+  const ordered = [...failures].sort(
+    (left, right) => Number(right.hostId === preferredId) - Number(left.hostId === preferredId),
+  );
+  if (ordered.length === 1) {
+    missingModel.value = { ...submission, route: ordered[0]!.route };
+    return true;
+  }
+  const candidateHosts = ordered.flatMap((failure) => {
+    const host = hosts.all.find((entry) => entry.id === failure.hostId);
+    return host ? [host] : [];
+  });
+  const targets = planModelInstall(candidateHosts, hostModels.hostsFor(submission.model), {
+    // The placement preview IS the positive knowledge that these machines
+    // lack the model — stronger evidence than the inventory poll, which may
+    // not have read them yet.
+    inventoryKnown: () => true,
+  }).targets;
+  return presentMissingModelPull(
+    targets,
+    submission,
+    (hostId) =>
+      ordered.find((failure) => failure.hostId === hostId)?.route ?? hosts.resolveRoute(hostId),
+  );
+}
+
+/**
+ * One machine skips the picker; several open the shared host picker.
+ * `routeFor` prefers the route the placement probe already proved, falling
+ * back to the store for a machine that was never probed.
+ */
+function presentMissingModelPull(
+  targets: ModelInstallTarget<HostView>[],
+  submission: MissingModelSubmission,
+  routeFor: (hostId: string) => HostRoute | null,
+): boolean {
+  if (targets.length === 0) return false;
+  if (targets.length === 1) {
+    const route = routeFor(targets[0]!.host.id);
+    if (!route) return false;
+    missingModel.value = { ...submission, route };
+    return true;
+  }
+  missingModelTargets.value = {
+    model: submission.model,
+    targets,
+    submission,
+    routeFor,
+  };
+  return true;
+}
+
+/**
+ * The Create picker's "Not installed" row. There is no placement evidence
+ * here, so the machines come from the shared install-target policy: every
+ * reachable machine whose inventory has been read and does not have it.
+ */
+async function offerPullForSelectedModel(model: string) {
+  if (!model) return;
+  // Self-heal first: another client may already have pulled it.
+  await hostModels.refresh(true);
+  if (hostModels.hostsFor(model).length > 0) return;
+  const blocker = generationInputBlockerReason.value;
+  if (blocker) {
+    toasts.push(blocker, "error");
+    return;
+  }
+  const readyHosts = hosts.all.filter((host) => host.status === "ready" && host.baseUrl);
+  const targets = planModelInstall(readyHosts, hostModels.hostsFor(model), {
+    inventoryKnown: (host) => (hostModels.byHost[host.id]?.fetchedAt ?? 0) > 0,
+  }).targets;
+  const caps = generationCapabilitiesForFamily(form.family, form.model);
+  const submission: MissingModelSubmission = {
+    model,
+    request: pullResumeRequest(buildRequest(cloneGenerateForm(form))),
+    // Same rule Generate uses: Batch N submits N ordinary siblings.
+    batch: caps.forcesBatchSizeOne ? 1 : form.batchSize,
+    chainRouting: null,
+    requestOptions: {},
+  };
+  if (!presentMissingModelPull(targets, submission, (hostId) => hosts.resolveRoute(hostId))) {
+    toasts.push(
+      `No connected machine can download ${model} right now. Connect a machine under Machines, then try again.`,
+      "error",
+    );
+  }
+}
+
+/** The user picked a machine in the pre-submit picker: confirm the pull there. */
+function chooseMissingModelHost(host: HostView) {
+  const pending = missingModelTargets.value;
+  missingModelTargets.value = null;
+  if (!pending) return;
+  const route = pending.routeFor(host.id);
+  if (!route) {
+    toasts.push(`${host.label} is no longer reachable. Nothing was queued.`, "error");
+    return;
+  }
+  missingModel.value = { ...pending.submission, route };
+}
 
 /** Start the pull on the routed host and arm the auto-resume. */
 async function pullMissingModel() {
@@ -323,18 +496,27 @@ async function pullMissingModel() {
     );
     return;
   }
+  const resumes = info.resumeAfterPull !== false;
   try {
     // Watch the EXACT job the server enqueues; a stale completed pull of the
     // same model in history can then never trigger a premature resume.
     const jobId = await startCatalogDownload(info.model, route?.target, route?.kind === "remote");
-    pullResume.arm({ ...armed, jobId });
-    toasts.push(`Pulling ${info.model} on ${label} — generation starts when it's ready`);
+    if (resumes) pullResume.arm({ ...armed, jobId });
+    toasts.push(
+      resumes
+        ? `Pulling ${info.model} on ${label} — generation starts when it's ready`
+        : `Pulling ${info.model} on ${label} — press Generate again once it's ready.`,
+    );
   } catch (err) {
     if (err instanceof ApiError && err.status === 409) {
       // Already downloading (another client or an earlier click) — watch by
       // model; the running job is live, not terminal, so it can't be stale.
-      pullResume.arm({ ...armed, jobId: null });
-      toasts.push(`${info.model} is already downloading on ${label} — will generate when ready`);
+      if (resumes) pullResume.arm({ ...armed, jobId: null });
+      toasts.push(
+        resumes
+          ? `${info.model} is already downloading on ${label} — will generate when ready`
+          : `${info.model} is already downloading on ${label} — press Generate again once it's ready.`,
+      );
     } else if (/unknown model/i.test(String(err))) {
       toasts.push(
         `${label} can't pull ${info.model} by name — pull it from the Catalog there, then generate again.`,
@@ -477,10 +659,24 @@ let stopNativeImageDrop: (() => void) | null = null;
 let nativeImageDropUnmounted = false;
 let nativeImageDragCandidate = false;
 
+/**
+ * One-line disclosure when a restore lands on a model no machine has, mirroring
+ * the template loader's notice. The id stays in the form (the picker shows it
+ * with a Not installed tag) — silence here read as "the model was dropped".
+ */
+function discloseMissingRestoredModel() {
+  const name = form.model;
+  if (!name || findInstalledModel(installedModels.value, name)) return;
+  toasts.push(
+    `${modelDisplayNameForId(name, installedModels.value)} isn't installed — open the model list to download it.`,
+  );
+}
+
 async function importDroppedImage(path: string) {
   try {
     const image = await ipc.importSourceImage(path);
     const result = applyDesktopImageDrop(form, image, installedModels.value);
+    if (result.metadataApplied) discloseMissingRestoredModel();
     if (result.metadataApplied && result.attached) {
       toasts.push("Loaded generation settings and attached the image as source.");
     } else if (result.metadataApplied) {
@@ -2904,7 +3100,21 @@ async function generate() {
         batch,
       );
       if (feasibility.kind !== "route") {
-        toasts.push(placementFailureMessage(feasibility), "error");
+        // Nothing can run this print. When the only thing in the way is the
+        // model itself, offer the pull instead of a dead-end toast — but only
+        // once the source is final, so the resumed request is the exact one
+        // the user submitted.
+        const offered = offerMissingModelPull(feasibility, {
+          model: preliminaryRequest.model,
+          request: pullResumeRequest(preliminaryRequest),
+          batch,
+          chainRouting: preliminaryRouting.kind === "chain" ? preliminaryRouting : null,
+          requestOptions: {},
+          // The source still has to be fitted against the machine that runs
+          // it, so this request is not the one that would render.
+          resumeAfterPull: sourcePreprocessed,
+        });
+        if (!offered) toasts.push(placementFailureMessage(feasibility), "error");
         return;
       }
       route = feasibility.route;
@@ -2962,6 +3172,22 @@ async function generate() {
     }
     const finalizedPlanningRequest =
       chainRouting.kind === "chain" ? buildAutoChainRequest(request, chainRouting) : request;
+    // Submission options are a pure derivation of the prepared batch; resolve
+    // them before the finalized check so a pull offered there resumes the
+    // exact ordered prompts.
+    const requestOptions: BatchRequestOptions = preparedSubmission
+      ? {
+          prompts: preparedSubmission.prompts,
+          originalPrompt: preparedSubmission.originalPrompt,
+          batchId: preparedSubmission.batchId,
+          ...(preparedSubmission.promptTransform
+            ? { promptTransform: preparedSubmission.promptTransform }
+            : {}),
+          ...(preparedSubmission.promptTransforms
+            ? { promptTransforms: preparedSubmission.promptTransforms }
+            : {}),
+        }
+      : {};
     if (route && !routeResolvedAgainstFinalRequest) {
       const finalized = await hosts.resolveFeasible(route.hostId, finalizedPlanningRequest, batch);
       const finalizedRoute = finalized.kind === "route" ? finalized.route : null;
@@ -2972,6 +3198,18 @@ async function generate() {
         finalizedRoute.target.apiKey !== route.target.apiKey ||
         (finalizedRoute.instanceId ?? null) !== (route.instanceId ?? null)
       ) {
+        if (
+          finalized.kind !== "route" &&
+          offerMissingModelPull(finalized, {
+            model: request.model,
+            request,
+            batch,
+            chainRouting: chainRouting.kind === "chain" ? chainRouting : null,
+            requestOptions,
+          })
+        ) {
+          return;
+        }
         toasts.push(
           finalized.kind === "route"
             ? "The selected machine changed while the finalized source request was being checked. Nothing was queued."
@@ -2995,19 +3233,6 @@ async function generate() {
     }
     // Submitting while another print develops queues server-side; each job
     // snapshots its own model + params, so tweaking the form afterwards is safe.
-    const requestOptions = preparedSubmission
-      ? {
-          prompts: preparedSubmission.prompts,
-          originalPrompt: preparedSubmission.originalPrompt,
-          batchId: preparedSubmission.batchId,
-          ...(preparedSubmission.promptTransform
-            ? { promptTransform: preparedSubmission.promptTransform }
-            : {}),
-          ...(preparedSubmission.promptTransforms
-            ? { promptTransforms: preparedSubmission.promptTransforms }
-            : {}),
-        }
-      : {};
     const { settled } = generation.submitBatch(request, batch, route, chainRouting, requestOptions);
     const acceptedSubmissionId = ++latestAcceptedSubmissionId;
     missingModel.value = null;
@@ -3171,6 +3396,7 @@ function applyPrefill() {
     );
   }
   applyPrefillToForm(form, prefill, installedModels.value);
+  discloseMissingRestoredModel();
   if ("metadata" in prefill && prefill.metadata) {
     // A first/last-frame print restores every knob except its closing still:
     // saved metadata records each keyframe's name and digest, never the bytes
@@ -4012,14 +4238,23 @@ onBeforeUnmount(() => {
       :canvas-intent="canvasIntent"
       @append-word="appendPromptWord"
       @canvas-intent="setCanvasIntent"
+      @pull-missing-model="offerPullForSelectedModel"
     />
 
+    <DownloadTargetDialog
+      v-if="missingModelTargets"
+      :model-name="missingModelTargets.model"
+      :targets="missingModelTargets.targets"
+      @select="chooseMissingModelHost"
+      @close="missingModelTargets = null"
+    />
     <MissingModelDialog
       v-if="missingModel"
       :model="missingModel.model"
       :host-label="missingModelHostLabel"
       :size-gb="missingModelSizeGb"
       :models="hostModels.unionInstalled"
+      :resume-after-pull="missingModel.resumeAfterPull !== false"
       @confirm="pullMissingModel"
       @close="missingModel = null"
     />

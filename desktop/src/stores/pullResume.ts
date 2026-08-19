@@ -9,6 +9,11 @@
  */
 import { defineStore } from "pinia";
 import { watch } from "vue";
+import {
+  isTerminalPullJob,
+  pullResumeFailureMessage,
+  resolvePullResumeOutcome,
+} from "@studio/lib/pullResume";
 import { useDownloadsStore, type DownloadHostState } from "./downloads";
 import { useGenerationStore, type BatchRequestOptions } from "./generation";
 import { useToastStore } from "./toasts";
@@ -34,8 +39,7 @@ export interface PendingResume {
   requestOptions?: BatchRequestOptions;
 }
 
-const isTerminal = (job: DownloadJob) =>
-  job.status === "completed" || job.status === "failed" || job.status === "cancelled";
+const isTerminal = (job: DownloadJob) => isTerminalPullJob(job);
 
 export const usePullResumeStore = defineStore("pullResume", {
   state: () => ({
@@ -67,19 +71,18 @@ export const usePullResumeStore = defineStore("pullResume", {
       }
       return [...downloads.activeJobs, ...downloads.queued, ...downloads.history];
     },
-    /** Inspect the watched bucket; resume or give up on a NEW terminal job. */
+    /** Inspect the watched bucket; resume or give up on a NEW terminal job.
+     *  The which-job rule is shared with web (`@studio/lib/pullResume`). */
     check() {
       const pending = this.pending;
       if (!pending) return;
-      const fresh = this.jobsFor(pending.hostId)
-        .filter(isTerminal)
-        .filter((job) =>
-          pending.jobId
-            ? job.id === pending.jobId
-            : job.model === pending.model && !this.seenTerminal.includes(job.id),
-        );
-      const done = fresh.find((job) => job.status === "completed");
-      if (done) {
+      const outcome = resolvePullResumeOutcome(this.jobsFor(pending.hostId), {
+        model: pending.model,
+        jobId: pending.jobId ?? null,
+        seenTerminal: this.seenTerminal,
+      });
+      if (outcome.kind === "waiting") return;
+      if (outcome.kind === "ready") {
         this.pending = null;
         useToastStore().push(`${pending.model} is ready on ${pending.hostLabel} — generating`);
         // The resumed submit must not fail silently — the last thing the
@@ -110,14 +113,8 @@ export const usePullResumeStore = defineStore("pullResume", {
         });
         return;
       }
-      const failed = fresh.find((job) => job.status !== "completed");
-      if (failed) {
-        this.pending = null;
-        useToastStore().push(
-          `Download of ${pending.model} ${failed.status === "cancelled" ? "was cancelled" : "failed"}${failed.error ? ` — ${failed.error}` : ""}; generation not resumed.`,
-          "error",
-        );
-      }
+      this.pending = null;
+      useToastStore().push(pullResumeFailureMessage(pending.model, outcome.job), "error");
     },
     /** One reactive watcher per store instance over the downloads state. */
     ensureWatcher() {
