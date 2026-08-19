@@ -616,7 +616,7 @@ let galleryDragSelect = true;
 let galleryDragClientX = 0;
 let galleryDragClientY = 0;
 let galleryDragFrame: number | null = null;
-let galleryDragSuppressClick = false;
+let galleryDragPendingClicks = 0;
 const galleryDragVisited = new Set<string>();
 const GALLERY_DRAG_SCROLL_EDGE = 72;
 const GALLERY_DRAG_SCROLL_MAX = 18;
@@ -4735,7 +4735,10 @@ function allGalleryPrints(): Array<GalleryPrint | PendingGalleryPrint> {
 }
 
 function setGallerySelectMode(next: boolean): void {
-  if (!next) finishGallerySelectionDrag();
+  if (!next) {
+    finishGallerySelectionDrag();
+    galleryDragPendingClicks = 0;
+  }
   gallerySelectMode.value = next;
   galleryDeleteConfirming.value = false;
   if (!next) gallerySelection.value = new Set();
@@ -4840,7 +4843,6 @@ function beginGallerySelectionDrag(event: PointerEvent, print: GalleryPrint): vo
   galleryDragClientX = event.clientX;
   galleryDragClientY = event.clientY;
   galleryDragVisited.clear();
-  galleryDragSuppressClick = true;
   applyGalleryDragSelection(print);
   (event.currentTarget as HTMLElement | null)?.setPointerCapture?.(event.pointerId);
   if (galleryDragFrame === null) galleryDragFrame = requestAnimationFrame(runGalleryDragFrame);
@@ -4859,13 +4861,11 @@ function moveGallerySelectionDrag(event: PointerEvent): void {
 
 function finishGallerySelectionDrag(event?: PointerEvent): void {
   if (event && event.pointerId !== galleryDragPointerId) return;
+  if (event?.type === "pointerup") galleryDragPendingClicks += 1;
   galleryDragPointerId = null;
   galleryDragVisited.clear();
   if (galleryDragFrame !== null) cancelAnimationFrame(galleryDragFrame);
   galleryDragFrame = null;
-  setTimeout(() => {
-    galleryDragSuppressClick = false;
-  }, 0);
 }
 
 function selectAllGalleryPrints(): void {
@@ -4874,7 +4874,13 @@ function selectAllGalleryPrints(): void {
 }
 
 function handleGalleryTileClick(event: MouseEvent, print: GalleryPrint): void {
-  if (gallerySelectMode.value && galleryDragSuppressClick && event.detail !== 0) return;
+  // WKWebView may delay compatibility clicks until after another tap has
+  // already completed. Consume one click for every pointer gesture instead
+  // of keeping a single flag that the first delayed click can clear.
+  if (gallerySelectMode.value && galleryDragPendingClicks > 0 && event.detail !== 0) {
+    galleryDragPendingClicks -= 1;
+    return;
+  }
   if (gallerySelectMode.value) toggleGallerySelection(print);
   else openPrint(print);
 }

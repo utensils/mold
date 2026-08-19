@@ -5855,6 +5855,73 @@ describe("MobileApp gallery", () => {
     expect(wrapper.get("[data-test='mobile-gallery-selection-indicator']").text()).toBe("✓");
   });
 
+  it("keeps a tapped Library tile selected after iOS dispatches its delayed click", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await vi.waitFor(() => expect(wrapper?.find("[data-test='gallery-item']").exists()).toBe(true));
+
+    await wrapper.get("[data-test='mobile-gallery-select']").trigger("click");
+    const tile = wrapper.get("[data-test='gallery-item']");
+    await tile.trigger("pointerdown", {
+      pointerId: 40,
+      pointerType: "touch",
+      isPrimary: true,
+      clientX: 20,
+      clientY: 240,
+    });
+    window.dispatchEvent(
+      new PointerEvent("pointerup", {
+        pointerId: 40,
+        pointerType: "touch",
+        isPrimary: true,
+      }),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await tile.trigger("click", { detail: 1 });
+
+    expect(wrapper.get("[data-test='mobile-gallery-actions']").text()).toContain("1 selected");
+    expect(tile.attributes("aria-pressed")).toBe("true");
+
+    // Two more taps complete before WKWebView dispatches either compatibility
+    // click. Both delayed clicks must be consumed without changing the two
+    // pointerdown selections.
+    await tile.trigger("pointerdown", {
+      pointerId: 41,
+      pointerType: "touch",
+      isPrimary: true,
+      clientX: 20,
+      clientY: 240,
+    });
+    window.dispatchEvent(
+      new PointerEvent("pointerup", {
+        pointerId: 41,
+        pointerType: "touch",
+        isPrimary: true,
+      }),
+    );
+    await tile.trigger("pointerdown", {
+      pointerId: 42,
+      pointerType: "touch",
+      isPrimary: true,
+      clientX: 20,
+      clientY: 240,
+    });
+    window.dispatchEvent(
+      new PointerEvent("pointerup", {
+        pointerId: 42,
+        pointerType: "touch",
+        isPrimary: true,
+      }),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await tile.trigger("click", { detail: 1 });
+    await tile.trigger("click", { detail: 1 });
+
+    expect(wrapper.get("[data-test='mobile-gallery-actions']").text()).toContain("1 selected");
+    expect(tile.attributes("aria-pressed")).toBe("true");
+  });
+
   it("backs the native iOS image context menu with image data instead of a blob URL", async () => {
     isNativeIOSRuntime.mockReturnValue(true);
     apiFetchTo.mockResolvedValue({
