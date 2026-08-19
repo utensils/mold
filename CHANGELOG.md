@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Tapping an iPhone Library tile in Select mode no longer selects and immediately deselects it.** Mold now consumes every delayed compatibility click emitted by WKWebView after touch selection, including overlapping clicks from rapid taps, while preserving drag-to-select, drag-to-deselect, pointer cancellation, and keyboard activation.
+
 ## [0.23.2] - 2026-08-18
 
 - **Releases no longer make Apple users wait hours for unrelated Linux distribution work.** Release-plz now waits for the exact main revision's notarized macOS nightly and `VALID` TestFlight delivery before tagging; tagged releases then publish the signed, notarized, stapled macOS app and stable updater manifest first, add native CUDA archives after their independent builds, and attach lower-priority container digest/provenance metadata last. Hosted Nix distribution builds moved entirely off the release critical path into parallel Cachix-backed jobs, desktop nightlies build concurrently with their frontend and Rust gates while publication still requires all three, and TestFlight caches and verifies the pinned Tauri CLI instead of recompiling it on every upload. Main-push desktop runs are also independent, so an older multi-hour Linux build cannot hold the current commit's macOS Nightly in a workflow-level queue; serialized publication remains fenced to the exact live main SHA.
