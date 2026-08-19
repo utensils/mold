@@ -173,9 +173,13 @@ pub struct H3FactoryRawCheckpointInput {
 /// priced below. The current private composer does not yet implement it. This
 /// stack intentionally supports one policy only; adding another is a schema
 /// change.
+///
+/// Both VAEs are parked once conditions are encoded and reconstructed after
+/// the transformer is dropped, so the phase sums below charge their resident
+/// weights on either side of denoise but never across it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum H3FactoryTargetLoadDropPolicy {
-    LoadVaesLoadQwenEncodeTransferDropQwenEncodeConditionsAllocateNoiseLoadTransformerDenoiseDropTransformerDecodeVisualAudioDropVaesMux,
+    LoadVaesLoadQwenEncodeTransferDropQwenEncodeConditionsParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux,
     /// Test-only marker proving that the policy discriminator participates in
     /// the target-budget identity without advertising another executable plan.
     #[cfg(test)]
@@ -433,8 +437,8 @@ impl H3FactoryTargetBudgetInput {
         } = self;
 
         hash.update(match load_drop_policy {
-            H3FactoryTargetLoadDropPolicy::LoadVaesLoadQwenEncodeTransferDropQwenEncodeConditionsAllocateNoiseLoadTransformerDenoiseDropTransformerDecodeVisualAudioDropVaesMux => {
-                b"load-vaes-load-qwen-encode-transfer-drop-qwen-encode-conditions-allocate-noise-load-transformer-denoise-drop-transformer-decode-visual-audio-drop-vaes-mux".as_slice()
+            H3FactoryTargetLoadDropPolicy::LoadVaesLoadQwenEncodeTransferDropQwenEncodeConditionsParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux => {
+                b"load-vaes-load-qwen-encode-transfer-drop-qwen-encode-conditions-park-vaes-allocate-noise-load-transformer-denoise-drop-transformer-reload-vaes-decode-visual-audio-drop-vaes-mux".as_slice()
             }
             #[cfg(test)]
             H3FactoryTargetLoadDropPolicy::IdentityMutationSentinel => {
@@ -1405,7 +1409,7 @@ fn validate_target_budget(
         memory.condition_latent_backing_device_bytes,
     );
     if memory.load_drop_policy
-        != H3FactoryTargetLoadDropPolicy::LoadVaesLoadQwenEncodeTransferDropQwenEncodeConditionsAllocateNoiseLoadTransformerDenoiseDropTransformerDecodeVisualAudioDropVaesMux
+        != H3FactoryTargetLoadDropPolicy::LoadVaesLoadQwenEncodeTransferDropQwenEncodeConditionsParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux
         || memory.artifact_host_bytes != authenticated_artifact_bytes
         || memory.fixed_runtime_host_bytes == 0
         || memory.fixed_runtime_device_bytes == 0
@@ -2977,7 +2981,7 @@ mod tests {
         ]);
         let mut budget = H3FactoryTargetBudgetInput {
             identity_sha256: String::new(),
-            load_drop_policy: H3FactoryTargetLoadDropPolicy::LoadVaesLoadQwenEncodeTransferDropQwenEncodeConditionsAllocateNoiseLoadTransformerDenoiseDropTransformerDecodeVisualAudioDropVaesMux,
+            load_drop_policy: H3FactoryTargetLoadDropPolicy::LoadVaesLoadQwenEncodeTransferDropQwenEncodeConditionsParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux,
             artifacts,
             artifact_host_bytes,
             fixed_runtime_host_bytes: 100,

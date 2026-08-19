@@ -396,6 +396,21 @@ pub(crate) trait H3Fl2VaBackend {
         checkpoint: &mut dyn H3PipelineCheckpoint,
     ) -> Result<Tensor>;
 
+    /// Release every component that condition encoding was the last consumer
+    /// of, before the orchestrator allocates noise and the backend loads the
+    /// transformer. Nothing between here and visual decode reads a VAE, so a
+    /// backend that keeps both VAEs device-resident through denoise pays their
+    /// weights inside the transformer's own peak. Backends that hold no such
+    /// component keep the default no-op; a backend that parks here must be
+    /// able to reconstruct before `decode_video`.
+    fn park_condition_components(
+        &mut self,
+        checkpoint: &mut dyn H3PipelineCheckpoint,
+    ) -> Result<()> {
+        let _ = checkpoint;
+        Ok(())
+    }
+
     /// Borrowed inputs are call-scoped. Implementations must not clone or
     /// retain text states after returning; the orchestrator releases them
     /// immediately after the final forward to satisfy the frozen phase plan.
@@ -669,6 +684,10 @@ pub(crate) fn execute_staged(
             total: visual_total,
         })?;
     }
+
+    ensure_identity(backend, &frozen_identity, &device)?;
+    backend.park_condition_components(&mut control)?;
+    ensure_identity(backend, &frozen_identity, &device)?;
 
     let mut posterior_draws = conditions
         .iter()

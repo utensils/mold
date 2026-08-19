@@ -1482,7 +1482,7 @@ fn build_canonical_private_fl2va_target_budget(
     ])?;
     let mut budget = H3FactoryTargetBudgetInput {
         identity_sha256: String::new(),
-        load_drop_policy: H3FactoryTargetLoadDropPolicy::LoadVaesLoadQwenEncodeTransferDropQwenEncodeConditionsAllocateNoiseLoadTransformerDenoiseDropTransformerDecodeVisualAudioDropVaesMux,
+        load_drop_policy: H3FactoryTargetLoadDropPolicy::LoadVaesLoadQwenEncodeTransferDropQwenEncodeConditionsParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux,
         artifacts,
         artifact_host_bytes,
         fixed_runtime_host_bytes: bounds.fixed_runtime_host_bytes,

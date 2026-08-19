@@ -49,7 +49,7 @@ use super::pipeline::{H3PipelineCheckpoint, H3PipelineEvent};
 use super::private_fl2va_runtime::{
     bind_private_comfy_fl2va_phase_owner, issue_private_fl2va_memory_overlap,
     run_private_comfy_fl2va_attempt, H3PrivateFl2VaArtifactLease,
-    H3PrivateFl2VaMemoryOverlapAuthority, H3PrivatePhaseRuntimeOutput,
+    H3PrivateFl2VaMemoryOverlapAuthority, H3PrivatePhaseRuntimeOutput, H3PrivateRetainedVaeReload,
 };
 #[cfg(feature = "mp4")]
 use super::private_opened_evidence::{
@@ -2106,6 +2106,16 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
     let mut vae_observer = H3PrivatePreparationVaeObserver::new(progress);
     let opened_vae = open_h3_comfy_vae_authority(&vae_plan, &mut vae_observer);
     let opened_vae = vae_observer.finish(opened_vae)?;
+    // The runtime parks both VAEs for the whole denoise, so a second authority
+    // is authenticated here — while the sources are still being inspected —
+    // and retained with its own descriptors and staged copies. Reconstructing
+    // from a pathname at reload time would reintroduce exactly the replacement
+    // window the first open exists to close. The staged pair is process-cached,
+    // so this second open re-reads no weights from the model root.
+    let mut reload_vae_observer = H3PrivatePreparationVaeObserver::new(progress);
+    let reload_vae = open_h3_comfy_vae_authority(&vae_plan, &mut reload_vae_observer);
+    let reload_vae = reload_vae_observer.finish(reload_vae)?;
+    let reload_vae = H3PrivateRetainedVaeReload::bind(reload_vae, &opened_vae)?;
 
     let qwen_artifact = exact_qualified_qwen_artifact(&artifact_report)?;
     let qwen_header_identity = qwen_artifact
@@ -2273,6 +2283,7 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
         opened_transformer,
         opened_qwen,
         opened_vae,
+        reload_vae,
         attention,
         artifact_lease,
         memory_overlap,
@@ -2885,6 +2896,7 @@ struct H3PrivateConcretePreparedRunner {
     opened_transformer: H3ComfyOpenedInt8Checkpoint,
     opened_qwen: H3AuthenticatedQwenNvfp4Authority,
     opened_vae: H3AuthenticatedComfyVaeAuthority,
+    reload_vae: H3PrivateRetainedVaeReload,
     attention: H3AttentionRuntimeAuthority,
     artifact_lease: H3PrivateServerFl2VaArtifactLease,
     memory_overlap: H3PrivateFl2VaMemoryOverlapAuthority,
@@ -2946,6 +2958,7 @@ impl H3PrivateFl2VaPreparedRunner for H3PrivateConcretePreparedRunner {
             opened_transformer,
             opened_qwen,
             opened_vae,
+            reload_vae,
             attention,
             artifact_lease,
             memory_overlap,
@@ -3029,6 +3042,7 @@ impl H3PrivateFl2VaPreparedRunner for H3PrivateConcretePreparedRunner {
                 opened_transformer,
                 opened_qwen,
                 opened_vae,
+                reload_vae,
                 attention,
                 conditioner_lease,
                 execution_lease,
