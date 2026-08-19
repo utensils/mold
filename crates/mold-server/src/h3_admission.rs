@@ -370,6 +370,12 @@ impl H3QwenResidencyFacts {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub(crate) struct H3QwenCheckpointMemoryFacts {
     pub source_parameter_bytes: u64,
+    /// Largest single tensor the NVFP4 loader reads and the raw header it
+    /// retains. Both are anonymous host bytes the H3 target budget derives
+    /// from, so they travel with the residency facts rather than being
+    /// re-invented downstream.
+    pub maximum_tensor_staging_bytes: u64,
+    pub retained_raw_header_bytes: u64,
     pub cuda: H3QwenResidencyFacts,
     pub cpu: H3QwenResidencyFacts,
 }
@@ -378,6 +384,14 @@ impl H3QwenCheckpointMemoryFacts {
     fn validate(&self, artifacts: &H3ArtifactInventory) -> Result<(), H3AdmissionError> {
         let qwen_file_bytes =
             artifacts.role_bytes(|role| matches!(role, H3ArtifactRole::QwenShard(_)))?;
+        if self.maximum_tensor_staging_bytes == 0
+            || self.retained_raw_header_bytes == 0
+            || self.maximum_tensor_staging_bytes > qwen_file_bytes
+        {
+            return Err(H3AdmissionError::InvalidCheckpointFacts(
+                "H3 Qwen loader staging/header facts are absent or exceed the artifact".to_string(),
+            ));
+        }
         if self.source_parameter_bytes == 0 || self.source_parameter_bytes > qwen_file_bytes {
             return Err(H3AdmissionError::InvalidCheckpointFacts(format!(
                 "H3 Qwen source parameters {} exceed or omit the {qwen_file_bytes}-byte authenticated artifact payload",
@@ -406,6 +420,8 @@ impl H3QwenCheckpointMemoryFacts {
             source_parameter_bytes: self.source_parameter_bytes,
             host_resident_parameter_bytes: residency.host_resident_parameter_bytes,
             device_resident_parameter_bytes: residency.device_resident_parameter_bytes,
+            maximum_tensor_staging_bytes: self.maximum_tensor_staging_bytes,
+            retained_raw_header_bytes: self.retained_raw_header_bytes,
         }
     }
 }
@@ -415,6 +431,8 @@ pub(crate) struct H3FrozenQwenMemoryFacts {
     pub source_parameter_bytes: u64,
     pub host_resident_parameter_bytes: u64,
     pub device_resident_parameter_bytes: u64,
+    pub maximum_tensor_staging_bytes: u64,
+    pub retained_raw_header_bytes: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -1750,6 +1768,8 @@ pub(crate) fn bind_h3_factory_authority(
             qwen_host_resident_parameter_bytes: plan.qwen_memory.host_resident_parameter_bytes,
             qwen_device_resident_parameter_bytes: plan.qwen_memory.device_resident_parameter_bytes,
             qwen_activation_workspace_bytes: plan.memory.qwen_activation_bytes,
+            qwen_maximum_tensor_staging_bytes: plan.qwen_memory.maximum_tensor_staging_bytes,
+            qwen_retained_raw_header_bytes: plan.qwen_memory.retained_raw_header_bytes,
             qwen_output_text_rows: plan.shape.rows.qwen_output_text_rows,
             qwen_vision_rows: plan.shape.rows.qwen_vision_rows,
             condition_visual_rows: plan.shape.rows.condition_visual_rows,
@@ -2027,6 +2047,8 @@ mod tests {
 
     const MIB: u64 = 1024 * 1024;
     const COMFY_QWEN_SOURCE_PARAMETER_BYTES: u64 = 15_686_891_864;
+    const COMFY_QWEN_MAX_TENSOR_STAGING_BYTES: u64 = 777_912_320;
+    const COMFY_QWEN_RETAINED_HEADER_BYTES: u64 = 231_408;
     const COMFY_QWEN_CUDA_HOST_PARAMETER_BYTES: u64 = 19_066_444_664;
     const COMFY_QWEN_CUDA_DEVICE_PARAMETER_BYTES: u64 = 1_191_583_200;
     const COMFY_QWEN_CPU_HOST_PARAMETER_BYTES: u64 = 20_258_027_864;
@@ -2121,6 +2143,8 @@ mod tests {
             qwen: if quantized {
                 H3QwenCheckpointMemoryFacts {
                     source_parameter_bytes: COMFY_QWEN_SOURCE_PARAMETER_BYTES,
+                    maximum_tensor_staging_bytes: COMFY_QWEN_MAX_TENSOR_STAGING_BYTES,
+                    retained_raw_header_bytes: COMFY_QWEN_RETAINED_HEADER_BYTES,
                     cuda: H3QwenResidencyFacts {
                         host_resident_parameter_bytes: COMFY_QWEN_CUDA_HOST_PARAMETER_BYTES,
                         device_resident_parameter_bytes: COMFY_QWEN_CUDA_DEVICE_PARAMETER_BYTES,
@@ -2133,6 +2157,8 @@ mod tests {
             } else {
                 H3QwenCheckpointMemoryFacts {
                     source_parameter_bytes: qwen_bytes,
+                    maximum_tensor_staging_bytes: qwen_bytes / 16,
+                    retained_raw_header_bytes: 231_408,
                     cuda: H3QwenResidencyFacts {
                         host_resident_parameter_bytes: 0,
                         device_resident_parameter_bytes: qwen_bytes,
@@ -3255,6 +3281,8 @@ mod tests {
             checkpoint.qwen,
             H3QwenCheckpointMemoryFacts {
                 source_parameter_bytes: released_cuda.source_parameter_bytes,
+                maximum_tensor_staging_bytes: released_cuda.maximum_tensor_staging_bytes,
+                retained_raw_header_bytes: released_cuda.retained_raw_header_bytes,
                 cuda: H3QwenResidencyFacts {
                     host_resident_parameter_bytes: released_cuda.host_resident_parameter_bytes,
                     device_resident_parameter_bytes: released_cuda.device_resident_parameter_bytes,

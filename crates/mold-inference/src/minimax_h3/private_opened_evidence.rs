@@ -1105,6 +1105,10 @@ fn raw_checkpoint_input(
         raw_content_sha256: transformer.content_sha256().into(),
         verified_file_bytes: evidence.verified_file_bytes,
         raw_header_identity_sha256: transformer.candidate().header_identity_sha256.clone(),
+        // The parsed header stays resident for the whole stream lifetime; the
+        // tensor payload does not (comfy_dit.rs:1373-1407 reads it through a
+        // bounded buffer), so this is the checkpoint's only host residency.
+        retained_header_host_bytes: evidence.header_bytes,
         opened_checkpoint_identity_sha256: transformer.checkpoint_identity_sha256().into(),
         quantization_policy_identity_sha256: transformer
             .candidate()
@@ -1248,6 +1252,11 @@ fn build_canonical_private_fl2va_target_budget(
         .maximum_tensor_staging_bytes
         .checked_mul(2)
         .ok_or_else(|| anyhow!("private H3 Qwen host load staging overflow"))?;
+    // Metadata each opened authority retains beside the payload it streams:
+    // the Qwen's parsed raw header, the transformer's parsed safetensors
+    // header, and the VAE authorities' two decoded config buffers.
+    let qwen_retained_header_host_bytes = qwen_memory.retained_raw_header_bytes;
+    let transformer_retained_header_host_bytes = checkpoint.retained_header_host_bytes;
     let condition_latent_backing_device_bytes = request
         .rows
         .condition_visual_rows
@@ -1498,21 +1507,41 @@ fn build_canonical_private_fl2va_target_budget(
         endpoint_encoded_host_bytes,
         normalized_endpoint_host_bytes,
     ])?;
-    let vae_load_phase_host_bytes =
-        checked_sum([attempt_host_bytes, vae_memory.peak_host_io_buffer_bytes])?;
+    // Retained metadata lives exactly as long as its own authority: the Qwen
+    // header until the conditioner drops after encode, the transformer header
+    // until the transformer drops after denoise, and the VAE configs until the
+    // post-denoise reload authority is consumed before visual decode.
+    let vae_retained_config_host_bytes = vae_memory.config_bytes;
+    let qwen_alive_metadata_host_bytes = checked_sum([
+        qwen_retained_header_host_bytes,
+        transformer_retained_header_host_bytes,
+        vae_retained_config_host_bytes,
+    ])?;
+    let transformer_alive_metadata_host_bytes = checked_sum([
+        transformer_retained_header_host_bytes,
+        vae_retained_config_host_bytes,
+    ])?;
+    let vae_load_phase_host_bytes = checked_sum([
+        attempt_host_bytes,
+        qwen_alive_metadata_host_bytes,
+        vae_memory.peak_host_io_buffer_bytes,
+    ])?;
     let qwen_encode_phase_host_bytes = checked_sum([
         attempt_host_bytes,
+        qwen_alive_metadata_host_bytes,
         qwen_host_workspace_bytes,
         qwen_host_load_staging_bytes,
         text_modality_tags_host_bytes,
     ])?;
     let qwen_transfer_phase_host_bytes = checked_sum([
         attempt_host_bytes,
+        qwen_alive_metadata_host_bytes,
         qwen_host_workspace_bytes,
         text_modality_tags_host_bytes,
     ])?;
     let condition_encode_phase_host_bytes = checked_sum([
         attempt_host_bytes,
+        transformer_alive_metadata_host_bytes,
         condition_backing_host_bytes,
         packed_layout_host_bytes,
         packed_layout_construction_staging_host_bytes,
@@ -1522,6 +1551,7 @@ fn build_canonical_private_fl2va_target_budget(
     ])?;
     let noise_allocation_phase_host_bytes = checked_sum([
         attempt_host_bytes,
+        transformer_alive_metadata_host_bytes,
         condition_backing_host_bytes,
         packed_layout_host_bytes,
         text_modality_tags_host_bytes,
@@ -1530,6 +1560,7 @@ fn build_canonical_private_fl2va_target_budget(
     ])?;
     let transformer_load_phase_host_bytes = checked_sum([
         attempt_host_bytes,
+        transformer_alive_metadata_host_bytes,
         condition_backing_host_bytes,
         packed_layout_host_bytes,
         text_modality_tags_host_bytes,
@@ -1538,6 +1569,7 @@ fn build_canonical_private_fl2va_target_budget(
     ])?;
     let denoise_phase_host_bytes = checked_sum([
         attempt_host_bytes,
+        transformer_alive_metadata_host_bytes,
         condition_backing_host_bytes,
         packed_layout_host_bytes,
         text_modality_tags_host_bytes,
@@ -1546,6 +1578,7 @@ fn build_canonical_private_fl2va_target_budget(
     ])?;
     let visual_decode_phase_host_bytes = checked_sum([
         attempt_host_bytes,
+        vae_retained_config_host_bytes,
         packed_layout_host_bytes,
         vae_memory.peak_host_io_buffer_bytes,
         bounds.encoded_video_host_bytes_bound,
@@ -1619,6 +1652,9 @@ fn build_canonical_private_fl2va_target_budget(
         mux_output_host_bytes_bound: bounds.mux_output_host_bytes_bound,
         aac_mux_staging_host_bytes: bounds.aac_mux_staging_host_bytes,
         qwen_host_load_staging_bytes,
+        qwen_retained_header_host_bytes,
+        transformer_retained_header_host_bytes,
+        vae_retained_config_host_bytes,
         vae_load_phase_host_bytes,
         qwen_encode_phase_host_bytes,
         qwen_transfer_phase_host_bytes,
