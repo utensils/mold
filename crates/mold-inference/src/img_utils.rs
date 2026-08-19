@@ -7,9 +7,9 @@ use image::{DynamicImage, RgbImage};
 /// Normalization range for source images before VAE encoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NormalizeRange {
-    /// [-1, 1] for SD1.5, SDXL, FLUX, Flux.2, Qwen-Image, and SD3.
+    /// [-1, 1] for SD1.5, SDXL, FLUX, Flux.2, Qwen-Image, SD3, and Z-Image.
     MinusOneToOne,
-    /// [0, 1] for Z-Image and VQ/VAE families that natively operate in that range.
+    /// [0, 1] for ControlNet hint images and Wuerstchen's VQ-GAN encoder.
     ZeroToOne,
 }
 
