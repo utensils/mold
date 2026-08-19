@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# Pull-request changelog policy. Every PR ships its release note as a fragment
+# in changelog.d/<slug>.md; CHANGELOG.md's [Unreleased] section is assembled
+# from those fragments by scripts/release/sync-release-pr.sh on the release PR
+# and is never edited by hand (two in-flight PRs inserting at the same line is
+# what made every PR conflict on CHANGELOG.md).
+#
+# Checks, in order:
+#   1. Every fragment present at HEAD is well-formed (a Keep-a-Changelog
+#      bullet: first non-blank line starts with "- ", no conflict markers,
+#      README.md exempt).
+#   2. The [Unreleased] section of CHANGELOG.md is unchanged between BASE and
+#      HEAD.
+#   3. When the diff touches shipped source, the PR adds at least one fragment
+#      — unless SKIP_CHANGELOG=true (the `skip-changelog` PR label).
+#
+# Usage: check-changelog-fragments.sh <base-sha> <head-sha>   (run at repo root)
+set -euo pipefail
+
+base=${1:?base sha}
+head=${2:?head sha}
+skip=${SKIP_CHANGELOG:-false}
+status=0
+
+err() { echo "::error::$1" >&2; status=1; }
+
+# 1. Fragment shape.
+while IFS= read -r f; do
+  [ -n "$f" ] || continue
+  [ "$(basename "$f")" = "README.md" ] && continue
+  content=$(git show "$head:$f" 2>/dev/null || true)
+  first=$(printf '%s\n' "$content" | awk 'NF{print; exit}')
+  case "$first" in
+    "- "*) ;;
+    *) err "$f must start with a Keep-a-Changelog bullet ('- **Title.** body'); got: ${first:-<empty>}" ;;
+  esac
+  if printf '%s\n' "$content" | grep -Eq '^(<<<<<<<|=======|>>>>>>>)'; then
+    err "$f contains merge-conflict markers"
+  fi
+done < <(git ls-tree -r --name-only "$head" -- changelog.d 2>/dev/null | grep -E '\.md$' || true)
+
+# 2. [Unreleased] is bot-owned.
+unreleased() {
+  git show "$1:CHANGELOG.md" 2>/dev/null \
+    | awk '/^## \[Unreleased\]$/{s=1; next} s && /^## \[/{exit} s{print}'
+}
+if [ "$(unreleased "$base")" != "$(unreleased "$head")" ]; then
+  err "CHANGELOG.md [Unreleased] was edited directly; add changelog.d/<slug>.md instead (the release PR assembles fragments, and hand edits conflict between PRs)"
+fi
+
+# 3. Shipped source changes carry a note.
+changed=$(git diff --name-only "$base" "$head")
+added_fragments=$(git diff --name-status "$base" "$head" -- changelog.d \
+  | awk '$1 ~ /^(A|R)/ && $NF ~ /\.md$/ && $NF !~ /README\.md$/ {print $NF}')
+if [ "$skip" != "true" ] \
+  && printf '%s\n' "$changed" | grep -Eq '^(crates/|web/src/|desktop/src/|desktop/src-tauri/src/|apps/mobile/src/|apps/mobile/src-tauri/src/|studio/|ui/)' \
+  && [ -z "$added_fragments" ]; then
+  err "this PR changes shipped source but adds no changelog.d/<slug>.md fragment; add one (see changelog.d/README.md) or apply the skip-changelog label"
+fi
+
+if [ "$status" -eq 0 ]; then
+  echo "changelog policy: OK"
+fi
+exit "$status"
