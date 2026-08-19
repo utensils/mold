@@ -203,6 +203,7 @@ jobs:
               - 'scripts/tests/desktop-candle-lock-sync.sh'
               - 'scripts/tests/desktop-candle-nix-source-hash.sh'
               - 'scripts/tests/release-sync-pr.sh'
+              - 'scripts/tests/changelog-fragments-contract.sh'
               - 'scripts/tests/crates-publish-contract.sh'
               - '.github/actionlint.yaml'
               - '.github/workflows/**'
@@ -213,6 +214,30 @@ jobs:
               - '.github/actionlint.yaml'
               - '.github/workflows/**'
               - 'scripts/tests/ci-routing-contract.sh'
+
+  # Advisory (not a required status check): every PR carries its release note
+  # as a changelog.d/<slug>.md fragment and never edits CHANGELOG.md's
+  # [Unreleased] section by hand — see changelog.d/README.md. The trusted
+  # release-plz PR is exempt: its bot commit is the one writer of that section.
+  changelog:
+    needs: changes
+    if: >-
+      github.event_name == 'pull_request' &&
+      needs.changes.result == 'success' &&
+      needs.changes.outputs.trusted_release_pr != 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Check changelog fragment policy
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          SKIP_CHANGELOG: ${{ contains(github.event.pull_request.labels.*.name, 'skip-changelog') }}
+        run: bash scripts/release/check-changelog-fragments.sh "$BASE_SHA" "$HEAD_SHA"
 
   docs:
     needs: changes
@@ -336,6 +361,21 @@ jobs:
           set -euo pipefail
           changed_count=0
           while IFS= read -r -d '' status && IFS= read -r -d '' path; do
+            # The sync script consumes per-PR changelog fragments, so the
+            # generated commit may delete exactly changelog.d/*.md and nothing
+            # else; every other change must be a modification.
+            if [[ "$status" == D ]]; then
+              case "$path" in
+                changelog.d/*.md)
+                  [[ "$path" != changelog.d/README.md ]] || {
+                    echo "::error::Generated release PR must not delete changelog.d/README.md"
+                    exit 1
+                  }
+                  ((changed_count += 1))
+                  continue
+                  ;;
+              esac
+            fi
             [[ "$status" == M ]] || {
               echo "::error::Generated release PR may only modify tracked files, got $status for $path"
               exit 1
@@ -383,6 +423,7 @@ jobs:
         run: |
           nix run nixpkgs#actionlint -- .github/workflows/*.yml
           bash scripts/tests/release-sync-pr.sh
+          bash scripts/tests/changelog-fragments-contract.sh
           bash scripts/tests/crates-publish-contract.sh
           bash scripts/tests/ci-coverage-disk-guard.sh
           bash scripts/tests/ci-routing-contract.sh

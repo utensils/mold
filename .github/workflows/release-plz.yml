@@ -141,6 +141,23 @@ jobs:
             echo "pending=true" >> "$GITHUB_OUTPUT"
           fi
 
+      # A fragment merged between the release PR's last sync and its merge
+      # (main is non-strict, so that merge is clean) would ship its code in
+      # this version while its note silently waits for the next one. Refuse
+      # to tag until a follow-up PR folds it into the promoted section; this
+      # job re-runs on that push because the tag is still absent.
+      - name: Refuse to tag with unassembled changelog fragments
+        if: steps.candidate.outputs.pending == 'true'
+        run: |
+          set -euo pipefail
+          leftover=$(find changelog.d -maxdepth 1 -name '*.md' ! -name README.md 2>/dev/null | sort)
+          if [[ -n "$leftover" ]]; then
+            echo "::error::changelog.d still holds fragments not assembled into CHANGELOG.md for this release:"
+            while IFS= read -r f; do echo "::error::  $f"; done <<< "$leftover"
+            echo "::error::Move each note under the promoted version heading in CHANGELOG.md, delete the fragment, merge, and this job will re-run."
+            exit 1
+          fi
+
       - name: Wait for exact Apple candidate delivery
         if: steps.candidate.outputs.pending == 'true'
         env:

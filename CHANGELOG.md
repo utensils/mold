@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+Pull requests do not edit the `[Unreleased]` section directly: each adds a
+`changelog.d/<slug>.md` fragment, and the release PR assembles them here (see
+`changelog.d/README.md`).
+
 ## [Unreleased]
 
 - **LTX-Video attribution.** The legacy LTX-Video transformer, 3D causal VAE, and flow-match scheduler in `crates/mold-candle/src/ltx_video/` were ported from [FerrisMind/candle-video](https://github.com/FerrisMind/candle-video) (Copyright 2025 FerrisMind, Apache-2.0; itself a Rust port of Hugging Face diffusers), and the LTX-2 video transformer and VAE were adapted from that copy — but only the file headers said so. The README, `THIRD_PARTY_NOTICES.md` (root and `mold-ai-candle`), the LTX-Video and LTX-2 model pages, and the two LTX-2 file headers now carry the attribution, the license link, and the commit the port tracked; `mold-ai-inference` declares `MIT AND Apache-2.0` like `mold-ai-candle` already did.
