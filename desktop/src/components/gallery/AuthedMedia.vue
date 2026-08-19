@@ -49,6 +49,7 @@ async function load() {
         : await fullSizeMediaUrl(props.path, {
             ...options,
             allowLegacyBlob: !props.video && !props.audio,
+            video: props.video,
           });
       if (epoch === loadEpoch) src.value = url;
       return;

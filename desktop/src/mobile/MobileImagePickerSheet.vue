@@ -44,7 +44,7 @@ const stillEntries = computed(() =>
 );
 
 watch(
-  () => [props.open, props.target?.baseUrl ?? "", props.target?.apiKey ?? ""] as const,
+  [() => props.open, () => props.target?.baseUrl ?? "", () => props.target?.apiKey ?? ""] as const,
   async ([open], _previous, onCleanup) => {
     let active = true;
     onCleanup(() => {

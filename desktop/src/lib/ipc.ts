@@ -302,9 +302,15 @@ export const ipc = {
    * remote host shares WebKit's per-host pool with every held-open stream
    * to that host. Null outside Tauri; rejects when the host refuses or the
    * file exceeds the native cap so the caller can fall back. */
-  fetchGalleryMedia(target: ApiTarget, filename: string): Promise<ArrayBuffer | null> {
+  fetchGalleryMedia(
+    target: ApiTarget,
+    filename: string,
+  ): Promise<ArrayBuffer | ArrayLike<number> | null> {
     if (!inTauri()) return Promise.resolve(null);
-    return invoke<ArrayBuffer>("fetch_gallery_media", { target, filename });
+    // The custom-protocol IPC route delivers `tauri::ipc::Response` as an
+    // ArrayBuffer; Tauri's postMessage fallback serializes it as a number
+    // array. Callers normalize through `Uint8Array`.
+    return invoke<ArrayBuffer | ArrayLike<number>>("fetch_gallery_media", { target, filename });
   },
   /** Read a native OS-dropped PNG/JPEG plus any embedded Mold metadata. */
   importSourceImage(path: string): Promise<DesktopImageImport> {

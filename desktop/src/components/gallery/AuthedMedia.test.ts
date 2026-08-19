@@ -39,6 +39,7 @@ describe("AuthedMedia", () => {
         target,
         cacheKey: "plato-7680",
         allowLegacyBlob,
+        video,
       });
       expect(authedMediaUrl).not.toHaveBeenCalled();
       expect(wrapper.get(element).attributes("src")).toBe("http://remote/media?ticket=one-use");

@@ -30,6 +30,9 @@ export interface StreamableMediaOptions extends AuthedMediaOptions {
   /** Older hosts have no streaming-ticket endpoint. Images may safely fall
    * back to a blob; videos must not buffer an unbounded file on iPhone. */
   allowLegacyBlob?: boolean;
+  /** The caller's media kind (`isVideoItem`); video never buffers natively.
+   * Absent, the filename extension decides. */
+  video?: boolean;
 }
 
 const keyOf = (path: string, target: ApiTarget, cacheKey?: string) =>
@@ -173,6 +176,32 @@ export function mediaMimeType(filename: string): string {
  * and when the native route refuses (too large, unreachable), stills fall
  * back to `streamableMediaUrl` as well.
  */
+/**
+ * Full-size object URLs are tens of MB each, so unlike thumbnails they live
+ * in a small LRU rather than the session-lifetime cache: stepping through a
+ * remote gallery of 4K prints must not accumulate gigabytes of blobs.
+ * Insertion order is the recency order; a hit re-inserts.
+ */
+const FULL_SIZE_CACHE_ENTRIES = 8;
+const fullSizeCache = new Map<string, Promise<string>>();
+
+function rememberFullSize(key: string, url: Promise<string>): void {
+  fullSizeCache.delete(key);
+  fullSizeCache.set(key, url);
+  while (fullSizeCache.size > FULL_SIZE_CACHE_ENTRIES) {
+    const oldest = fullSizeCache.keys().next().value;
+    if (oldest === undefined) break;
+    const evicted = fullSizeCache.get(oldest);
+    fullSizeCache.delete(oldest);
+    void evicted?.then((u) => URL.revokeObjectURL(u)).catch(() => {});
+  }
+}
+
+/** Bytes from the native IPC bridge: an `ArrayBuffer` on the custom-protocol
+ * route, but a plain number array if Tauri ever falls back to postMessage. */
+export const nativeBytes = (bytes: ArrayBuffer | ArrayLike<number>): Uint8Array<ArrayBuffer> =>
+  bytes instanceof ArrayBuffer ? new Uint8Array(bytes) : Uint8Array.from(bytes);
+
 export async function fullSizeMediaUrl(
   path: string,
   opts: StreamableMediaOptions = {},
@@ -180,17 +209,22 @@ export async function fullSizeMediaUrl(
   if (path.startsWith("mold-local:")) return path;
   const target = opts.target;
   const filename = galleryFilenameOfPath(path);
-  if (target && filename !== null && inTauri() && !mediaMimeType(filename).startsWith("video/")) {
+  const isVideo = opts.video ?? (filename !== null && mediaMimeType(filename).startsWith("video/"));
+  if (target && filename !== null && inTauri() && !isVideo) {
     const key = keyOf(path, target, opts.cacheKey);
-    let url = cache.get(key);
+    let url = fullSizeCache.get(key);
     if (!url) {
       url = ipc.fetchGalleryMedia(target, filename).then((bytes) => {
         if (!bytes) throw new Error("Native gallery media is unavailable.");
-        return URL.createObjectURL(new Blob([bytes], { type: mediaMimeType(filename) }));
+        return URL.createObjectURL(
+          new Blob([nativeBytes(bytes)], { type: mediaMimeType(filename) }),
+        );
       });
-      cache.set(key, url);
-      url.catch(() => cache.delete(key));
+      url.catch(() => {
+        if (fullSizeCache.get(key) === url) fullSizeCache.delete(key);
+      });
     }
+    rememberFullSize(key, url);
     try {
       return await url;
     } catch {
@@ -210,7 +244,7 @@ export async function fetchGalleryMediaBytes(path: string, target: ApiTarget): P
   if (filename !== null && inTauri()) {
     try {
       const bytes = await ipc.fetchGalleryMedia(target, filename);
-      if (bytes) return new Uint8Array(bytes);
+      if (bytes) return nativeBytes(bytes);
     } catch {
       // Fall through to the webview's authenticated HTTP route.
     }
@@ -218,23 +252,23 @@ export async function fetchGalleryMediaBytes(path: string, target: ApiTarget): P
   return new Uint8Array(await (await apiFetchTo(target, path)).arrayBuffer());
 }
 
-export function evictMedia(path: string, cacheKey?: string): void {
-  const prefix = `${cacheKey ?? "primary"}|${path}|`;
-  for (const [key, cached] of [...cache]) {
-    if (!key.startsWith(prefix)) continue;
-    cache.delete(key);
-    void cached.then((u) => URL.revokeObjectURL(u)).catch(() => {});
+function evictPrefix(prefix: string): void {
+  for (const store of [cache, fullSizeCache]) {
+    for (const [key, cached] of [...store]) {
+      if (!key.startsWith(prefix)) continue;
+      store.delete(key);
+      void cached.then((u) => URL.revokeObjectURL(u)).catch(() => {});
+    }
   }
+}
+
+export function evictMedia(path: string, cacheKey?: string): void {
+  evictPrefix(`${cacheKey ?? "primary"}|${path}|`);
 }
 
 /** Drop every cached blob belonging to one origin (host bucket dropped). */
 export function evictHostMedia(cacheKey: string): void {
-  const prefix = `${cacheKey}|`;
-  for (const [key, cached] of [...cache]) {
-    if (!key.startsWith(prefix)) continue;
-    cache.delete(key);
-    void cached.then((u) => URL.revokeObjectURL(u)).catch(() => {});
-  }
+  evictPrefix(`${cacheKey}|`);
 }
 
 export const thumbnailPath = (filename: string) =>

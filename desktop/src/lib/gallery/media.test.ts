@@ -256,6 +256,61 @@ describe("fullSizeMediaUrl", () => {
     expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/gallery/image/a.png");
   });
 
+  it("honours the caller's video flag over the filename extension", async () => {
+    vi.mocked(inTauri).mockReturnValue(true);
+    vi.mocked(ipc.fetchGalleryMedia).mockResolvedValue(new Uint8Array([1]).buffer);
+    await expect(
+      fullSizeMediaUrl("/api/gallery/image/anim.webp", { target, cacheKey: "h", video: true }),
+    ).resolves.toBe("http://hal9000:7680/api/gallery/image/anim.webp");
+    expect(ipc.fetchGalleryMedia).not.toHaveBeenCalled();
+  });
+
+  it("accepts postMessage-fallback number arrays as native bytes", async () => {
+    vi.mocked(inTauri).mockReturnValue(true);
+    vi.mocked(ipc.fetchGalleryMedia).mockResolvedValue([1, 2, 3]);
+    await expect(
+      fullSizeMediaUrl("/api/gallery/image/arr.png", { target, cacheKey: "h" }),
+    ).resolves.toMatch(/^blob:mock-/);
+    const blob = vi.mocked(URL.createObjectURL).mock.calls.at(-1)?.[0] as Blob;
+    expect(blob.size).toBe(3);
+    await expect(fetchGalleryMediaBytes("/api/gallery/image/arr.png", target)).resolves.toEqual(
+      new Uint8Array([1, 2, 3]),
+    );
+  });
+
+  it("keeps only a bounded LRU of full-size blobs and revokes the evicted ones", async () => {
+    vi.mocked(inTauri).mockReturnValue(true);
+    vi.mocked(ipc.fetchGalleryMedia).mockResolvedValue(new Uint8Array([1]).buffer);
+    const urls: string[] = [];
+    for (let i = 0; i < 10; i++) {
+      urls.push(
+        await fullSizeMediaUrl(`/api/gallery/image/lru-${i}.png`, { target, cacheKey: "lru" }),
+      );
+    }
+    // The two oldest were evicted and revoked; the newest eight are retained.
+    expect(revoked).toEqual(expect.arrayContaining([urls[0]!, urls[1]!]));
+    expect(revoked).not.toContain(urls[9]!);
+    const calls = vi.mocked(ipc.fetchGalleryMedia).mock.calls.length;
+    await fullSizeMediaUrl("/api/gallery/image/lru-9.png", { target, cacheKey: "lru" });
+    expect(vi.mocked(ipc.fetchGalleryMedia).mock.calls.length).toBe(calls);
+    await fullSizeMediaUrl("/api/gallery/image/lru-0.png", { target, cacheKey: "lru" });
+    expect(vi.mocked(ipc.fetchGalleryMedia).mock.calls.length).toBe(calls + 1);
+  });
+
+  it("evictMedia and evictHostMedia drop full-size blobs too", async () => {
+    vi.mocked(inTauri).mockReturnValue(true);
+    vi.mocked(ipc.fetchGalleryMedia).mockResolvedValue(new Uint8Array([1]).buffer);
+    const a = await fullSizeMediaUrl("/api/gallery/image/ev-a.png", { target, cacheKey: "ev" });
+    const b = await fullSizeMediaUrl("/api/gallery/image/ev-b.png", { target, cacheKey: "ev" });
+    evictMedia("/api/gallery/image/ev-a.png", "ev");
+    await Promise.resolve();
+    expect(revoked).toContain(a);
+    expect(revoked).not.toContain(b);
+    evictHostMedia("ev");
+    await Promise.resolve();
+    expect(revoked).toContain(b);
+  });
+
   it("derives the gallery filename and MIME type from the media path", () => {
     expect(galleryFilenameOfPath("/api/gallery/image/a%20b.PNG")).toBe("a b.PNG");
     expect(galleryFilenameOfPath("/api/gallery/thumbnail/a.png")).toBeNull();

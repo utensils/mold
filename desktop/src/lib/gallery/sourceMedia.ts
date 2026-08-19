@@ -1,7 +1,7 @@
 import { blobToBase64 } from "@studio/lib/base64";
 import { apiFetch, apiFetchTo } from "../api/client";
 import { inTauri, ipc } from "../ipc";
-import { localMediaPath, mediaMimeType, mediaPath } from "./media";
+import { localMediaPath, mediaMimeType, mediaPath, nativeBytes } from "./media";
 import type { MergedPrint } from "../../stores/gallery";
 
 export interface GalleryMediaAuthority {
@@ -37,7 +37,9 @@ export async function readGalleryMediaBlob(
     if (target && inTauri()) {
       try {
         const bytes = await ipc.fetchGalleryMedia(target, entry.item.filename);
-        if (bytes) return new Blob([bytes], { type: mediaMimeType(entry.item.filename) });
+        if (bytes) {
+          return new Blob([nativeBytes(bytes)], { type: mediaMimeType(entry.item.filename) });
+        }
       } catch {
         // Fall through to the webview's authenticated HTTP route.
       }

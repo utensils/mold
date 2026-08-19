@@ -608,6 +608,8 @@ pub async fn fetch_gallery_thumbnail(
         reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(15))
+            // The per-host key must never follow a redirect off the host.
+            .redirect(reqwest::redirect::Policy::none())
             .pool_max_idle_per_host(MAX_CONCURRENT_GALLERY_THUMBNAILS)
             .build()
             .expect("static gallery HTTP client settings must be valid")
@@ -639,7 +641,9 @@ pub async fn fetch_gallery_media(
     if !valid_filename(&filename) {
         return Err("Invalid gallery filename.".into());
     }
-    let _permit = tokio::time::timeout(Duration::from_secs(30), GALLERY_MEDIA_PERMITS.acquire())
+    // A short wait: the caller falls back to the streaming URL, so the print
+    // the user is looking at must not queue behind stale prev/next fetches.
+    let _permit = tokio::time::timeout(Duration::from_secs(5), GALLERY_MEDIA_PERMITS.acquire())
         .await
         .map_err(|_| "The gallery media queue is busy; retrying may help.".to_string())?
         .map_err(|_| "The gallery media service is unavailable.".to_string())?;
@@ -649,6 +653,7 @@ pub async fn fetch_gallery_media(
         reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(120))
+            .redirect(reqwest::redirect::Policy::none())
             .pool_max_idle_per_host(MAX_CONCURRENT_GALLERY_MEDIA)
             .build()
             .expect("static gallery HTTP client settings must be valid")
