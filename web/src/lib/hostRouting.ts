@@ -10,16 +10,25 @@
  * The origin host plays desktop's "local" role in tie-breaks: same-origin
  * dispatch costs no network hop, so it wins a dead heat.
  */
+import {
+  AUTO_TARGET_ID,
+  CAPABLE_TARGET_ID,
+  backendRank as sharedBackendRank,
+  hostIdsForModel as sharedHostIdsForModel,
+  normalizeTargetId as sharedNormalizeTargetId,
+  pickAutoHost as sharedPickAutoHost,
+  pickMostCapableHost as sharedPickMostCapableHost,
+  unionModelsByName,
+  type HostRoutingStatus,
+} from "@studio/lib/hostRouting";
 import { ORIGIN_HOST_ID } from "./hostRegistry";
 import type { ModelInfoExtended } from "../types";
 import type { ReferenceUploadCapabilities } from "@studio/api/referenceUploads";
 
-/** Least-busy routing across every ready host. */
-export const AUTO_TARGET_ID = "auto";
-/** Strongest-GPU routing (desktop's `generateTargetHost = "capable"`). */
-export const CAPABLE_TARGET_ID = "capable";
-
-export type HostRoutingStatus = "connecting" | "ready" | "error";
+// The routing policy itself lives in `@studio/lib/hostRouting`, shared with
+// desktop and the iPhone app; this module binds it to the browser registry,
+// whose home host is the serving origin.
+export { AUTO_TARGET_ID, CAPABLE_TARGET_ID, type HostRoutingStatus };
 
 /** GPU summary as the current `/api/status` contract reports it. */
 export interface RoutableGpu {
@@ -79,10 +88,6 @@ function isOrigin(host: { id: string }): boolean {
   return host.id === ORIGIN_HOST_ID;
 }
 
-function depth(host: RoutableHost): number {
-  return host.queueDepth ?? Number.MAX_SAFE_INTEGER;
-}
-
 /**
  * Auto routing: when both hosts expose an authoritative plan, predicted
  * completion wins before raw queue depth. If either host is planless, queue
@@ -91,28 +96,12 @@ function depth(host: RoutableHost): number {
 export function pickAutoHost<T extends RoutableHost>(
   hosts: readonly T[],
 ): T | null {
-  const ready = hosts.filter((h) => h.status === "ready");
-  if (ready.length === 0) return null;
-  return ready.reduce((best, h) => {
-    const hFinish = h.predictedCompletionMs;
-    const bestFinish = best.predictedCompletionMs;
-    if (hFinish != null && bestFinish != null && hFinish !== bestFinish)
-      return hFinish < bestFinish ? h : best;
-    if (depth(h) < depth(best)) return h;
-    if (depth(h) > depth(best)) return best;
-    if (hFinish != null && bestFinish == null) return h;
-    if (hFinish == null && bestFinish != null) return best;
-    if (isOrigin(h) && !isOrigin(best)) return h;
-    if (h.id < best.id) return h;
-    return best;
-  });
+  return sharedPickAutoHost(hosts, { isHome: isOrigin, lowestIdWins: true });
 }
 
 /** Capability ladder: CUDA (2) > Metal (1) > CPU/unknown (0). */
 export function backendRank(backend: string | null): number {
-  if (backend === "cuda") return 2;
-  if (backend === "metal") return 1;
-  return 0;
+  return sharedBackendRank(backend);
 }
 
 /**
@@ -125,20 +114,9 @@ export function pickMostCapableHost<T extends RoutableHost>(
   hosts: readonly T[],
   modelHostIds: readonly string[] | null,
 ): T | null {
-  let ready = hosts.filter((h) => h.status === "ready");
-  if (modelHostIds !== null) {
-    const withModel = ready.filter((h) => modelHostIds.includes(h.id));
-    if (withModel.length > 0) ready = withModel;
-  }
-  if (ready.length === 0) return null;
-  const rank = (x: RoutableHost) => backendRank(x.gpu?.backend ?? null);
-  const vram = (x: RoutableHost) => x.gpu?.vramTotalMb ?? 0;
-  return ready.reduce((best, h) => {
-    if (rank(h) !== rank(best)) return rank(h) > rank(best) ? h : best;
-    if (vram(h) !== vram(best)) return vram(h) > vram(best) ? h : best;
-    if (depth(h) !== depth(best)) return depth(h) < depth(best) ? h : best;
-    if (isOrigin(h) && !isOrigin(best)) return h;
-    return best;
+  return sharedPickMostCapableHost(hosts, modelHostIds, {
+    isHome: isOrigin,
+    lowestIdWins: true,
   });
 }
 
@@ -152,9 +130,7 @@ export function normalizeTargetId(
   selection: string | null | undefined,
   hosts: ReadonlyArray<{ id: string }>,
 ): string {
-  if (!selection || selection === AUTO_TARGET_ID) return AUTO_TARGET_ID;
-  if (selection === CAPABLE_TARGET_ID) return CAPABLE_TARGET_ID;
-  return hosts.some((h) => h.id === selection) ? selection : AUTO_TARGET_ID;
+  return sharedNormalizeTargetId(selection, hosts);
 }
 
 /**
@@ -208,16 +184,7 @@ export function unionModels(
   modelsByHost: ModelsByHost,
   hostIds: readonly string[],
 ): ModelInfoExtended[] {
-  const byName = new Map<string, ModelInfoExtended>();
-  for (const id of hostIds) {
-    for (const model of modelsByHost[id] ?? []) {
-      const existing = byName.get(model.name);
-      if (!existing || (!existing.downloaded && model.downloaded)) {
-        byName.set(model.name, model);
-      }
-    }
-  }
-  return [...byName.values()];
+  return unionModelsByName(modelsByHost, hostIds);
 }
 
 /** Ids of the hosts that have `name` downloaded — the model-aware routing input. */
@@ -225,7 +192,5 @@ export function hostIdsForModel(
   modelsByHost: ModelsByHost,
   name: string,
 ): string[] {
-  return Object.entries(modelsByHost)
-    .filter(([, models]) => models.some((m) => m.name === name && m.downloaded))
-    .map(([id]) => id);
+  return sharedHostIdsForModel(modelsByHost, name);
 }

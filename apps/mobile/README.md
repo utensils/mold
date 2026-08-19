@@ -45,7 +45,27 @@ instead.
 The primary tabs are Create, Library, Models, and Machines. Settings is a
 pushed screen opened from the header.
 
-- **Create** supports model-aware image and video controls, Batch 1 quick
+- **Create** picks where work lands. With one connected machine the Host
+  control behaves exactly as before. Once two or more connected machines are
+  reachable it also offers **Auto** (the least busy machine that already has
+  the model) and **Most capable** (the strongest GPU that has it — CUDA before
+  Metal, then VRAM, then queue depth), persisted at
+  `mold.mobile.generate-target.v1` and resolved through
+  `desktop/src/mobile/generateTarget.ts`. Under either policy the model picker
+  is the union of every reachable machine's installed models, tagged with the
+  machine that has one when they differ, and Develop fans
+  `POST /api/generate/placement-preview` out to the candidate machines (each
+  with its own Keychain key) before choosing, keeping slower machines in the
+  race only until one of them answers with a plan — Auto by soonest predicted
+  completion including round trip, Most capable by that machine's reported
+  `gpu_info.backend`. The winner is frozen into the same immutable route record
+  a pinned machine uses (host id, URL, Keychain key, instance id), so prepared
+  and quick expansion keep their own machine, durable sequences restore on the
+  exact machine that ran them, and a fleet split across incompatible major Mold
+  versions stops automatic routing with the shared profile-conflict message
+  instead of guessing. Nothing is queued when no machine can run the print; the
+  failure names each machine. Create also supports model-aware image and video
+  controls, Batch 1 quick
   expansion/undo, Batch N prepared-variation review, remote prompt history,
   local templates, independently cancellable siblings, source/edit images,
   masks, ControlNet, LoRA, scheduler and CFG++, post-generation upscaling,

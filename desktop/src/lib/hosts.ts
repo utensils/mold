@@ -2,7 +2,19 @@
  * Pure multi-host helpers. `hostIdFromUrl` and `normalizeHostUrl` are TS
  * twins of `connection.rs::host_id` / `normalize_host_url` — per-host secret
  * names (`remote-api-key.<id>`) are derived on both sides and must agree.
+ *
+ * The routing policy itself (Auto, Most capable, the backend ladder, target
+ * normalization) lives in `@studio/lib/hostRouting` so desktop, web, and the
+ * iPhone app cannot drift; the wrappers below only bind desktop's home-host
+ * rule — the built-in engine wins a dead heat because it costs no network hop.
  */
+import {
+  backendRank as sharedBackendRank,
+  inferBackendFromGpuName as sharedInferBackendFromGpuName,
+  normalizeTargetHost as sharedNormalizeTargetHost,
+  pickAutoHost as sharedPickAutoHost,
+  pickMostCapableHost as sharedPickMostCapableHost,
+} from "@studio/lib/hostRouting";
 
 export function hostIdFromUrl(url: string): string {
   const stripped = url.replace(/^https?:\/\//, "");
@@ -138,21 +150,7 @@ export interface RoutableHost {
  * remains the deterministic backward-compatible fallback.
  */
 export function pickAutoHost<T extends RoutableHost>(hosts: T[]): T | null {
-  const ready = hosts.filter((h) => h.status === "ready");
-  if (ready.length === 0) return null;
-  return ready.reduce((best, h) => {
-    const depth = (x: RoutableHost) => x.queueDepth ?? Number.MAX_SAFE_INTEGER;
-    const hFinish = h.predictedCompletionMs;
-    const bestFinish = best.predictedCompletionMs;
-    if (hFinish != null && bestFinish != null && hFinish !== bestFinish)
-      return hFinish < bestFinish ? h : best;
-    if (depth(h) < depth(best)) return h;
-    if (depth(h) > depth(best)) return best;
-    if (hFinish != null && bestFinish == null) return h;
-    if (hFinish == null && bestFinish != null) return best;
-    if (h.kind === "local" && best.kind !== "local") return h;
-    return best;
-  });
+  return sharedPickAutoHost(hosts, { isHome: (host) => host.kind === "local" });
 }
 
 /**
@@ -161,10 +159,7 @@ export function pickAutoHost<T extends RoutableHost>(hosts: T[]): T | null {
  * field always wins.
  */
 export function inferBackendFromGpuName(name: string): "cuda" | "metal" | "cpu" {
-  const n = name.toLowerCase();
-  if (/nvidia|rtx|geforce|gtx|quadro|tesla|a100|h100|l40/.test(n)) return "cuda";
-  if (/apple|\bm[1-4]\b/.test(n)) return "metal";
-  return "cpu";
+  return sharedInferBackendFromGpuName(name);
 }
 
 /**
@@ -172,10 +167,7 @@ export function inferBackendFromGpuName(name: string): "cuda" | "metal" | "cpu" 
  * name inference when the wire backend is missing.
  */
 export function backendRank(backend: string | null | undefined, gpuName?: string | null): number {
-  const b = backend ?? (gpuName ? inferBackendFromGpuName(gpuName) : null);
-  if (b === "cuda") return 2;
-  if (b === "metal") return 1;
-  return 0;
+  return sharedBackendRank(backend, gpuName);
 }
 
 /** The slice of a host the "Most capable" router needs. */
@@ -201,21 +193,8 @@ export function pickMostCapableHost<T extends CapableHost>(
   hosts: T[],
   modelHostIds: string[] | null,
 ): T | null {
-  let ready = hosts.filter((h) => h.status === "ready");
-  if (modelHostIds !== null) {
-    const withModel = ready.filter((h) => modelHostIds.includes(h.id));
-    if (withModel.length > 0) ready = withModel;
-  }
-  if (ready.length === 0) return null;
-  const rank = (x: CapableHost) => backendRank(x.gpu?.backend, x.gpu?.name);
-  const vram = (x: CapableHost) => x.gpu?.vramTotalMb ?? 0;
-  const depth = (x: CapableHost) => x.queueDepth ?? Number.MAX_SAFE_INTEGER;
-  return ready.reduce((best, h) => {
-    if (rank(h) !== rank(best)) return rank(h) > rank(best) ? h : best;
-    if (vram(h) !== vram(best)) return vram(h) > vram(best) ? h : best;
-    if (depth(h) !== depth(best)) return depth(h) < depth(best) ? h : best;
-    if (h.kind === "local" && best.kind !== "local") return h;
-    return best;
+  return sharedPickMostCapableHost(hosts, modelHostIds, {
+    isHome: (host) => host.kind === "local",
   });
 }
 
@@ -230,9 +209,7 @@ export function normalizeTargetHost(
   sel: string | null | undefined,
   hosts: ReadonlyArray<{ id: string }>,
 ): string | null {
-  if (!sel) return null;
-  if (sel === "capable") return "capable";
-  return hosts.some((h) => h.id === sel) ? sel : null;
+  return sharedNormalizeTargetHost(sel, hosts);
 }
 
 /**
