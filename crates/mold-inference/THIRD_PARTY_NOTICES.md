@@ -24,22 +24,9 @@ retain attribution, identify their changes in each file header (standalone
 models without the upstream pipeline traits, flash-attn gates and debug output
 removed, LTX-2 positional-embedding and config changes), and are distributed
 under Apache-2.0 alongside Mold's MIT license; the complete license text is
-included in `crates/mold-candle/LICENSE-APACHE-2.0` and
-`crates/mold-inference/LICENSE-APACHE-2.0`, and ships in both published crates
-(`mold-ai-candle`, `mold-ai-inference`). Mold's own LTX-Video pipeline, single-file loaders,
+included in ``LICENSE-APACHE-2.0` in this crate and in the published
+`mold-ai-candle` crate. Mold's own LTX-Video pipeline, single-file loaders,
 latent upsampler, and the rest of the LTX-2 runtime are original work.
 
-## comfy-kitchen INT8 CUDA reference
-
-The MiniMax H3 native INT8 CUDA kernels and cuBLASLt operation layout are
-adapted from comfy-kitchen 0.2.26, commit
-`255a43879fe57bbcbecfdb273b46d772b00c5a90`, specifically
-`backends/cuda/ops/int8_linear.cu` and
-`backends/cuda/ops/cublas_gemm_int8.cu`.
-
-    Copyright (c) 2025 Comfy Org. All rights reserved.
-    Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-
-Those sources are licensed under the Apache License, Version 2.0. Mold's copy
-retains attribution and identifies its changes; the complete license text is
-included in `LICENSE-APACHE-2.0`.
+The complete repository-wide list lives in `THIRD_PARTY_NOTICES.md` at the
+mold repository root.
