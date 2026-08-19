@@ -7549,3 +7549,236 @@ describe("mobile Library pinch-to-resize", () => {
     expect(columnsOf(app)).toBe("3");
   });
 });
+
+describe("MobileApp automatic generation routing", () => {
+  const renderTarget = {
+    baseUrl: "http://render.tailnet.ts.net:7680",
+    apiKey: "render-secret",
+  };
+
+  function twoHosts(): void {
+    localStorage.setItem(
+      "mold.mobile.hosts.v1",
+      JSON.stringify([
+        {
+          id: "studio-id",
+          name: "Studio",
+          baseUrl: target.baseUrl,
+          hostname: "studio",
+          instanceId: "studio-id",
+        },
+        {
+          id: "render-id",
+          name: "Render",
+          baseUrl: renderTarget.baseUrl,
+          hostname: "render",
+          instanceId: "render-id",
+        },
+      ]),
+    );
+    invoke.mockImplementation((command: string, args?: { hostId?: string }) =>
+      Promise.resolve(
+        command === "keychain_get_api_key"
+          ? args?.hostId === "render-id"
+            ? renderTarget.apiKey
+            : target.apiKey
+          : null,
+      ),
+    );
+  }
+
+  /** `/api/status`, `/api/models` and friends for a two-machine fleet. */
+  function fleetApi(options: {
+    studioGpu?: Record<string, unknown>;
+    renderGpu?: Record<string, unknown>;
+    studioModels?: ModelEntry[];
+    renderModels?: ModelEntry[];
+  }): void {
+    apiJsonTo.mockImplementation((route: { baseUrl: string }, path: string) => {
+      const render = route.baseUrl === renderTarget.baseUrl;
+      if (path === "/api/status")
+        return Promise.resolve({
+          ...status,
+          hostname: render ? "render" : "studio",
+          instance_id: render ? "render-id" : "studio-id",
+          gpu_info: render ? options.renderGpu : options.studioGpu,
+        });
+      if (path === "/api/models")
+        return Promise.resolve(
+          render ? (options.renderModels ?? [model]) : (options.studioModels ?? [model]),
+        );
+      if (path === "/api/capabilities") return Promise.resolve({});
+      if (path === "/api/gallery") return Promise.resolve([]);
+      if (path === "/api/activity")
+        return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+  }
+
+  /** A `planned` preview whose predicted completion decides Auto. */
+  function plannedIn(completionMs: number) {
+    const preview = plannedPlacement();
+    preview.candidate.predicted_completion_after_ms = completionMs;
+    return preview;
+  }
+
+  function hostOptions(): string[] {
+    return wrapper!
+      .get("[data-test='mobile-generate-host']")
+      .findAll("option")
+      .map((option) => option.attributes("value") ?? "");
+  }
+
+  async function develop(prompt = "a routed lighthouse"): Promise<void> {
+    await fieldControl("Prompt").setValue(prompt);
+    await wrapper!.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+  }
+
+  it("keeps one machine on today's behaviour with no automatic options", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    // A single saved machine renders no Host field at all, and nothing
+    // promises a choice that does not exist.
+    expect(wrapper.find("[data-test='mobile-generate-host']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='mobile-routing-hint']").exists()).toBe(false);
+    await develop();
+    expect(openStreams[0]?.options.target).toEqual(target);
+  });
+
+  it("offers Auto and Most capable once two machines are reachable", async () => {
+    twoHosts();
+    fleetApi({});
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    expect(hostOptions()).toEqual(["auto", "capable", "studio-id", "render-id"]);
+    expect(
+      (wrapper.get("[data-test='mobile-generate-host']").element as HTMLSelectElement).value,
+    ).toBe("auto");
+    expect(wrapper.get("[data-test='mobile-routing-hint']").text()).toContain("least busy");
+
+    await wrapper.get("[data-test='mobile-generate-host']").setValue("capable");
+    await flushPromises();
+    expect(localStorage.getItem("mold.mobile.generate-target.v1")).toBe("capable");
+    expect(wrapper.get("[data-test='mobile-routing-hint']").text()).toContain("strongest GPU");
+  });
+
+  it("hides the automatic options again while only one machine answers", async () => {
+    twoHosts();
+    apiJsonTo.mockImplementation((route: { baseUrl: string }, path: string) => {
+      if (route.baseUrl === renderTarget.baseUrl) return Promise.reject(new Error("offline"));
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/capabilities") return Promise.resolve({});
+      if (path === "/api/gallery") return Promise.resolve([]);
+      if (path === "/api/activity")
+        return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    expect(hostOptions()).toEqual(["studio-id", "render-id"]);
+    expect(wrapper.find("[data-test='mobile-routing-hint']").exists()).toBe(false);
+    await develop();
+    expect(openStreams[0]?.options.target).toEqual(target);
+  });
+
+  it("Auto asks every candidate and freezes the soonest plan's machine", async () => {
+    twoHosts();
+    fleetApi({});
+    previewGenerationPlacement.mockImplementation((probe: { baseUrl: string }) =>
+      Promise.resolve(plannedIn(probe.baseUrl === renderTarget.baseUrl ? 100 : 9_000)),
+    );
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    await develop();
+
+    const probed = previewGenerationPlacement.mock.calls.map(
+      (call: unknown[]) => (call[0] as { baseUrl: string }).baseUrl,
+    );
+    expect([...probed].sort()).toEqual([renderTarget.baseUrl, target.baseUrl].sort());
+    // The frozen route carries the winner's URL and its Keychain key.
+    expect(openStreams[0]?.options.target).toEqual(renderTarget);
+  });
+
+  it("Most capable prefers the CUDA machine even when it plans later", async () => {
+    twoHosts();
+    fleetApi({
+      studioGpu: {
+        name: "Apple M3 Max",
+        vram_total_mb: 128_000,
+        vram_used_mb: 0,
+        backend: "metal",
+      },
+      renderGpu: {
+        name: "NVIDIA GeForce RTX 4090",
+        vram_total_mb: 24_000,
+        vram_used_mb: 0,
+        backend: "cuda",
+      },
+    });
+    previewGenerationPlacement.mockImplementation((probe: { baseUrl: string }) =>
+      Promise.resolve(plannedIn(probe.baseUrl === renderTarget.baseUrl ? 9_000 : 100)),
+    );
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-generate-host']").setValue("capable");
+    await flushPromises();
+
+    await develop();
+    expect(openStreams[0]?.options.target).toEqual(renderTarget);
+  });
+
+  it("routes only to machines that already have the model", async () => {
+    const renderOnly: ModelEntry = { ...model, name: "z-image-turbo:q6", family: "zimage" };
+    twoHosts();
+    fleetApi({ studioModels: [], renderModels: [renderOnly] });
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    // The union picker offers the model even though the browsed machine
+    // lacks it, tagged with the machine that has it.
+    const modelOptions = fieldControl("Model")
+      .findAll("option")
+      .map((option) => option.text());
+    expect(modelOptions.some((label) => label.includes("Render"))).toBe(true);
+
+    await develop();
+    const probed = previewGenerationPlacement.mock.calls.map(
+      (call: unknown[]) => (call[0] as { baseUrl: string }).baseUrl,
+    );
+    expect(probed).toEqual([renderTarget.baseUrl]);
+    expect(openStreams[0]?.options.target).toEqual(renderTarget);
+  });
+
+  it("queues nothing and names every machine when none can run the print", async () => {
+    twoHosts();
+    fleetApi({});
+    previewGenerationPlacement.mockImplementation((probe: { baseUrl: string }) =>
+      Promise.resolve({
+        version: 1,
+        authoritative: true,
+        state_version: 1,
+        plan_version: 1,
+        outcome: "infeasible",
+        reason:
+          probe.baseUrl === renderTarget.baseUrl
+            ? "not enough VRAM"
+            : "no concrete local artifacts",
+      }),
+    );
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    await develop();
+    expect(openStreams).toHaveLength(0);
+    const failure = wrapper.get("[data-test='mobile-generation-error']").text();
+    expect(failure).toContain("Studio");
+    expect(failure).toContain("Render");
+    expect(failure).toContain("Nothing was queued.");
+  });
+});

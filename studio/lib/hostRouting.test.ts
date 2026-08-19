@@ -17,11 +17,15 @@ import {
 } from "./hostRouting";
 import { comparePlacementPreviews } from "../api/generationPlacement";
 
-function routable(overrides: Partial<RoutableHostBase> & { id: string }): RoutableHostBase {
+function routable(
+  overrides: Partial<RoutableHostBase> & { id: string },
+): RoutableHostBase {
   return { status: "ready", queueDepth: 0, ...overrides };
 }
 
-function capable(overrides: Partial<CapableHostBase> & { id: string }): CapableHostBase {
+function capable(
+  overrides: Partial<CapableHostBase> & { id: string },
+): CapableHostBase {
   return { status: "ready", queueDepth: 0, gpu: null, ...overrides };
 }
 
@@ -73,14 +77,18 @@ describe("pickAutoHost", () => {
 
   it("counts an unknown queue depth as the busiest host", () => {
     expect(
-      pickAutoHost([routable({ id: "a", queueDepth: null }), routable({ id: "b", queueDepth: 7 })])
-        ?.id,
+      pickAutoHost([
+        routable({ id: "a", queueDepth: null }),
+        routable({ id: "b", queueDepth: 7 }),
+      ])?.id,
     ).toBe("b");
   });
 
   it("breaks a dead heat with the surface's home host", () => {
     const hosts = [routable({ id: "remote" }), routable({ id: "local" })];
-    expect(pickAutoHost(hosts, { isHome: (host) => host.id === "local" })?.id).toBe("local");
+    expect(
+      pickAutoHost(hosts, { isHome: (host) => host.id === "local" })?.id,
+    ).toBe("local");
     // No home rule: input order survives unless a lowest-id rule is asked for.
     expect(pickAutoHost(hosts)?.id).toBe("remote");
     expect(pickAutoHost(hosts, { lowestIdWins: true })?.id).toBe("local");
@@ -130,8 +138,16 @@ describe("pickMostCapableHost", () => {
 
     const idle = pickMostCapableHost(
       [
-        capable({ id: "busy", queueDepth: 3, gpu: { backend: "cuda", vramTotalMb: 24_000 } }),
-        capable({ id: "idle", queueDepth: 0, gpu: { backend: "cuda", vramTotalMb: 24_000 } }),
+        capable({
+          id: "busy",
+          queueDepth: 3,
+          gpu: { backend: "cuda", vramTotalMb: 24_000 },
+        }),
+        capable({
+          id: "idle",
+          queueDepth: 0,
+          gpu: { backend: "cuda", vramTotalMb: 24_000 },
+        }),
       ],
       null,
     );
@@ -151,8 +167,14 @@ describe("pickMostCapableHost", () => {
   it("uses the GPU name when the host predates gpu_info.backend", () => {
     const chosen = pickMostCapableHost(
       [
-        capable({ id: "mac", gpu: { name: "Apple M2 Ultra", vramTotalMb: 192_000 } }),
-        capable({ id: "rig", gpu: { name: "NVIDIA RTX 6000 Ada", vramTotalMb: 48_000 } }),
+        capable({
+          id: "mac",
+          gpu: { name: "Apple M2 Ultra", vramTotalMb: 192_000 },
+        }),
+        capable({
+          id: "rig",
+          gpu: { name: "NVIDIA RTX 6000 Ada", vramTotalMb: 48_000 },
+        }),
       ],
       null,
     );
@@ -199,21 +221,37 @@ describe("fleet model views", () => {
 
   it("unions by name and lets a downloaded copy win", () => {
     const union = unionModelsByName(modelsByHost, ["studio", "plato"]);
-    expect(union.map((model) => model.name).sort()).toEqual(["flux-dev:q8", "z-image-turbo:q6"]);
+    expect(union.map((model) => model.name).sort()).toEqual([
+      "flux-dev:q8",
+      "z-image-turbo:q6",
+    ]);
     expect(union.every((model) => model.downloaded)).toBe(true);
   });
 
   it("lists only the hosts that have a model downloaded", () => {
-    expect(hostIdsForModel(modelsByHost, "z-image-turbo:q6")).toEqual(["plato"]);
-    expect(hostIdsForModel(modelsByHost, "flux-dev:q8").sort()).toEqual(["plato", "studio"]);
-    expect(hostIdsForModel(modelsByHost, "flux-dev:q8", ["plato"])).toEqual(["plato"]);
+    expect(hostIdsForModel(modelsByHost, "z-image-turbo:q6")).toEqual([
+      "plato",
+    ]);
+    expect(hostIdsForModel(modelsByHost, "flux-dev:q8").sort()).toEqual([
+      "plato",
+      "studio",
+    ]);
+    expect(hostIdsForModel(modelsByHost, "flux-dev:q8", ["plato"])).toEqual([
+      "plato",
+    ]);
     expect(hostIdsForModel(modelsByHost, "missing")).toEqual([]);
   });
 });
 
 describe("chooseRoutedHost", () => {
-  const studio = capable({ id: "studio", gpu: { backend: "metal", vramTotalMb: 96_000 } });
-  const plato = capable({ id: "plato", gpu: { backend: "cuda", vramTotalMb: 48_000 } });
+  const studio = capable({
+    id: "studio",
+    gpu: { backend: "metal", vramTotalMb: 96_000 },
+  });
+  const plato = capable({
+    id: "plato",
+    gpu: { backend: "cuda", vramTotalMb: 48_000 },
+  });
 
   it("takes the soonest completion including round trip under Auto", () => {
     const chosen = chooseRoutedHost(
@@ -250,6 +288,8 @@ describe("chooseRoutedHost", () => {
   });
 
   it("returns null when no host planned", () => {
-    expect(chooseRoutedHost([], AUTO_TARGET_ID, comparePlacementPreviews)).toBeNull();
+    expect(
+      chooseRoutedHost([], AUTO_TARGET_ID, comparePlacementPreviews),
+    ).toBeNull();
   });
 });

@@ -93,7 +93,9 @@ function isOrigin(host: { id: string }): boolean {
  * completion wins before raw queue depth. If either host is planless, queue
  * depth is the deterministic backward-compatible fallback.
  */
-export function pickAutoHost<T extends RoutableHost>(hosts: readonly T[]): T | null {
+export function pickAutoHost<T extends RoutableHost>(
+  hosts: readonly T[],
+): T | null {
   return sharedPickAutoHost(hosts, { isHome: isOrigin, lowestIdWins: true });
 }
 
@@ -112,7 +114,10 @@ export function pickMostCapableHost<T extends RoutableHost>(
   hosts: readonly T[],
   modelHostIds: readonly string[] | null,
 ): T | null {
-  return sharedPickMostCapableHost(hosts, modelHostIds, { isHome: isOrigin, lowestIdWins: true });
+  return sharedPickMostCapableHost(hosts, modelHostIds, {
+    isHome: isOrigin,
+    lowestIdWins: true,
+  });
 }
 
 /**
@@ -183,6 +188,9 @@ export function unionModels(
 }
 
 /** Ids of the hosts that have `name` downloaded — the model-aware routing input. */
-export function hostIdsForModel(modelsByHost: ModelsByHost, name: string): string[] {
+export function hostIdsForModel(
+  modelsByHost: ModelsByHost,
+  name: string,
+): string[] {
   return sharedHostIdsForModel(modelsByHost, name);
 }

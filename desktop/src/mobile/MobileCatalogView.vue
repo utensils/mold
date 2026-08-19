@@ -63,6 +63,7 @@ import type {
   ServerCapabilities,
 } from "../lib/api/types";
 import { mobileHostTarget, type MobileHost } from "./hosts";
+import { MOBILE_AUTO_ROUTING_HINT, MOBILE_CAPABLE_ROUTING_HINT } from "./generateTarget";
 import {
   useMobileDownloadsStore,
   type MobileDownloadEventContext,
@@ -1764,6 +1765,19 @@ onBeforeUnmount(() => {
                   Only missing or damaged files for
                   {{ targetEntry.display_name ?? targetEntry.name }} will be fetched.
                 </template>
+              </p>
+              <!-- Where a model lands decides where Create can route it. -->
+              <p
+                v-if="(targetPlan?.targets.length ?? 0) > 1"
+                data-test="mobile-catalog-target-auto-hint"
+              >
+                {{ MOBILE_AUTO_ROUTING_HINT }}
+              </p>
+              <p
+                v-if="(targetPlan?.targets.length ?? 0) > 1"
+                data-test="mobile-catalog-target-capable-hint"
+              >
+                {{ MOBILE_CAPABLE_ROUTING_HINT }}
               </p>
             </div>
             <button

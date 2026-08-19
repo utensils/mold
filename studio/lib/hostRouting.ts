@@ -95,9 +95,12 @@ export function pickAutoHost<T extends RoutableHostBase>(
  * doesn't report `gpu_info.backend` (servers ≤ 0.16) — the explicit field
  * always wins.
  */
-export function inferBackendFromGpuName(name: string): "cuda" | "metal" | "cpu" {
+export function inferBackendFromGpuName(
+  name: string,
+): "cuda" | "metal" | "cpu" {
   const lowered = name.toLowerCase();
-  if (/nvidia|rtx|geforce|gtx|quadro|tesla|a100|h100|l40/.test(lowered)) return "cuda";
+  if (/nvidia|rtx|geforce|gtx|quadro|tesla|a100|h100|l40/.test(lowered))
+    return "cuda";
   if (/apple|\bm[1-4]\b/.test(lowered)) return "metal";
   return "cpu";
 }
@@ -110,7 +113,8 @@ export function backendRank(
   backend: string | null | undefined,
   gpuName?: string | null,
 ): number {
-  const resolved = backend ?? (gpuName ? inferBackendFromGpuName(gpuName) : null);
+  const resolved =
+    backend ?? (gpuName ? inferBackendFromGpuName(gpuName) : null);
   if (resolved === "cuda") return 2;
   if (resolved === "metal") return 1;
   return 0;
@@ -134,7 +138,8 @@ export function pickMostCapableHost<T extends CapableHostBase>(
     if (withModel.length > 0) ready = withModel;
   }
   if (ready.length === 0) return null;
-  const rank = (host: CapableHostBase) => backendRank(host.gpu?.backend, host.gpu?.name);
+  const rank = (host: CapableHostBase) =>
+    backendRank(host.gpu?.backend, host.gpu?.name);
   const vram = (host: CapableHostBase) => host.gpu?.vramTotalMb ?? 0;
   return ready.reduce((best, host) => {
     if (rank(host) !== rank(best)) return rank(host) > rank(best) ? host : best;
@@ -159,7 +164,9 @@ export function normalizeTargetId(
 ): string {
   if (!selection || selection === AUTO_TARGET_ID) return AUTO_TARGET_ID;
   if (selection === CAPABLE_TARGET_ID) return CAPABLE_TARGET_ID;
-  return hosts.some((host) => host.id === selection) ? selection : AUTO_TARGET_ID;
+  return hosts.some((host) => host.id === selection)
+    ? selection
+    : AUTO_TARGET_ID;
 }
 
 /**
@@ -175,8 +182,14 @@ export function normalizeTargetHost(
 }
 
 /** True for the two automatic policies; a concrete host id is explicit. */
-export function isAutomaticTarget(selection: string | null | undefined): boolean {
-  return !selection || selection === AUTO_TARGET_ID || selection === CAPABLE_TARGET_ID;
+export function isAutomaticTarget(
+  selection: string | null | undefined,
+): boolean {
+  return (
+    !selection ||
+    selection === AUTO_TARGET_ID ||
+    selection === CAPABLE_TARGET_ID
+  );
 }
 
 /** Minimal model row shape the fleet-union helpers reason over. */
@@ -198,7 +211,8 @@ export function unionModelsByName<T extends RoutableModel>(
   for (const id of hostIds) {
     for (const model of modelsByHost[id] ?? []) {
       const existing = byName.get(model.name);
-      if (!existing || (!existing.downloaded && model.downloaded)) byName.set(model.name, model);
+      if (!existing || (!existing.downloaded && model.downloaded))
+        byName.set(model.name, model);
     }
   }
   return [...byName.values()];
@@ -212,7 +226,9 @@ export function hostIdsForModel<T extends RoutableModel>(
 ): string[] {
   return Object.entries(modelsByHost)
     .filter(([id]) => !hostIds || hostIds.includes(id))
-    .filter(([, models]) => models.some((model) => model.name === name && model.downloaded))
+    .filter(([, models]) =>
+      models.some((model) => model.name === name && model.downloaded),
+    )
     .map(([id]) => id);
 }
 
@@ -250,8 +266,16 @@ export function chooseRoutedHost<T extends CapableHostBase, P>(
   }
   const sorted = [...planned].sort((left, right) =>
     compare(
-      { hostId: left.host.id, roundTripMs: left.roundTripMs, preview: left.preview },
-      { hostId: right.host.id, roundTripMs: right.roundTripMs, preview: right.preview },
+      {
+        hostId: left.host.id,
+        roundTripMs: left.roundTripMs,
+        preview: left.preview,
+      },
+      {
+        hostId: right.host.id,
+        roundTripMs: right.roundTripMs,
+        preview: right.preview,
+      },
     ),
   );
   return sorted[0]?.host ?? null;

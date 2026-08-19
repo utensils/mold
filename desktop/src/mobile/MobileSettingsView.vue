@@ -10,6 +10,7 @@ import { describeTransportError } from "../lib/api/errors";
 import { openExternal } from "../lib/openExternal";
 import type { Theme, ThemeFamily } from "../lib/theme";
 import { mobileHostTarget, type MobileHost } from "./hosts";
+import { MOBILE_AUTO_ROUTING_HINT, MOBILE_CAPABLE_ROUTING_HINT } from "./generateTarget";
 import type { MobileSettings } from "./settings";
 import { subscribeToDeviceSnapshots } from "../lib/api/deviceEvents";
 import { fetchServerCapabilities } from "../lib/api/serverCapabilities";
@@ -339,6 +340,14 @@ onBeforeUnmount(() => {
               ? "No hosts saved."
               : `${hostCount} host${hostCount === 1 ? "" : "s"} saved. API keys stay in your iPhone Keychain.`
           }}
+        </p>
+        <!-- Create only offers these while two or more machines are
+             reachable; one line each, so the choice is never a mystery. -->
+        <p v-if="hostCount > 1" data-test="mobile-settings-auto-hint">
+          {{ MOBILE_AUTO_ROUTING_HINT }}
+        </p>
+        <p v-if="hostCount > 1" data-test="mobile-settings-capable-hint">
+          {{ MOBILE_CAPABLE_ROUTING_HINT }}
         </p>
       </div>
       <button
