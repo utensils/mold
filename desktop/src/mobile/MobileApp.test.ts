@@ -7892,3 +7892,115 @@ describe("MobileApp automatic sequence routing", () => {
     expect(recovery).not.toContain(renderTarget.apiKey);
   });
 });
+
+describe("MobileApp routing target consistency", () => {
+  const renderTarget = {
+    baseUrl: "http://render.tailnet.ts.net:7680",
+    apiKey: "render-secret",
+  };
+
+  function twoHosts(): void {
+    localStorage.setItem(
+      "mold.mobile.hosts.v1",
+      JSON.stringify([
+        {
+          id: "studio-id",
+          name: "Studio",
+          baseUrl: target.baseUrl,
+          hostname: "studio",
+          instanceId: "studio-id",
+        },
+        {
+          id: "render-id",
+          name: "Render",
+          baseUrl: renderTarget.baseUrl,
+          hostname: "render",
+          instanceId: "render-id",
+        },
+      ]),
+    );
+    invoke.mockImplementation((command: string, args?: { hostId?: string }) =>
+      Promise.resolve(
+        command === "keychain_get_api_key"
+          ? args?.hostId === "render-id"
+            ? renderTarget.apiKey
+            : target.apiKey
+          : null,
+      ),
+    );
+    apiJsonTo.mockImplementation((route: { baseUrl: string }, path: string) => {
+      const render = route.baseUrl === renderTarget.baseUrl;
+      if (path === "/api/status")
+        return Promise.resolve({
+          ...status,
+          hostname: render ? "render" : "studio",
+          instance_id: render ? "render-id" : "studio-id",
+        });
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/capabilities") return Promise.resolve({});
+      if (path === "/api/gallery") return Promise.resolve([]);
+      if (path === "/api/queue") return Promise.resolve({ entries: [] });
+      if (path === "/api/activity")
+        return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+  }
+
+  async function develop(): Promise<void> {
+    await fieldControl("Prompt").setValue("a consistent lighthouse");
+    await wrapper!.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+  }
+
+  it("keeps a pinned target and the browsed machine in step", async () => {
+    twoHosts();
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    // Pin Studio in Create, then use Render for generations from Machines.
+    await wrapper.get("[data-test='mobile-generate-host']").setValue("studio-id");
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-hosts']").trigger("click");
+    const renderRow = wrapper
+      .findAll(".host-row")
+      .find((row) => row.find(".host-name").text() === "Render");
+    if (!renderRow) throw new Error("Missing Render host row");
+    const useForGenerations = renderRow
+      .findAll("button")
+      .find((button) => button.text() === "Use host");
+    if (!useForGenerations) throw new Error("Missing use-for-generations action");
+    await useForGenerations.trigger("click");
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-generate']").trigger("click");
+    await flushPromises();
+
+    // The picker must never show one machine while work goes to another.
+    expect(
+      (wrapper.get("[data-test='mobile-generate-host']").element as HTMLSelectElement).value,
+    ).toBe("render-id");
+    expect(localStorage.getItem("mold.mobile.generate-target.v1")).toBe("render-id");
+    await develop();
+    expect(openStreams[0]?.options.target).toEqual(renderTarget);
+  });
+
+  it("stops waiting on a stalled machine once another one has a plan", async () => {
+    twoHosts();
+    previewGenerationPlacement.mockImplementation((probe: { baseUrl: string }) => {
+      if (probe.baseUrl === target.baseUrl) return new Promise(() => {});
+      return Promise.resolve(plannedPlacement());
+    });
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    vi.useFakeTimers();
+    try {
+      await develop();
+      expect(openStreams).toHaveLength(0);
+      await vi.advanceTimersByTimeAsync(2_000);
+      await flushPromises();
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(openStreams[0]?.options.target).toEqual(renderTarget);
+  });
+});

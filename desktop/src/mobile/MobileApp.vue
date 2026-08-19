@@ -429,6 +429,10 @@ const LIBRARY_VISITED_KEY = "mold.mobile.library-visited.v1";
 const SEQUENCE_RECOVERY_KEY = "mold.mobile.sequence-job.v1";
 const LIVE_ACTIVITY_KEY = "mold.mobile.live-activity.v1";
 const HOST_PROBE_TIMEOUT_MS = 9_000;
+/** How long automatic routing keeps waiting for slower machines once one has
+ *  answered `planned`. Nothing is abandoned before that first plan exists —
+ *  a deadline that fires with no route would manufacture a dead end. */
+const MOBILE_PLACEMENT_SETTLE_MS = 1_500;
 const GALLERY_HOST_TIMEOUT_MS = 9_000;
 const OUTPUT_OPTIONS = [
   { value: "single" as const, label: "One shot" },
@@ -2404,6 +2408,25 @@ async function refreshRoutingModels(): Promise<void> {
   else if (generationModels.value[0]) applyModelDefaults(form, generationModels.value[0]);
 }
 
+/**
+ * A concrete policy IS the browsed machine. Restore flows (a queue row, a
+ * print, a removed machine) move the browsed machine directly, so a pinned
+ * target follows them; otherwise the picker could display one machine while
+ * work went to another. An automatic policy is untouched by browsing.
+ */
+watch(selectedHostId, (id) => {
+  if (!id || isAutomaticTarget(generateTargetPolicy.value)) return;
+  if (generateTargetPolicy.value === id) return;
+  generateTargetPolicy.value = id;
+  saveMobileGenerateTarget(id);
+});
+
+/** The explicit "Use for generations" action: browse that machine and pin the
+ *  generation target to it, whatever the previous policy was. */
+async function useHostForGenerations(id: string): Promise<void> {
+  await selectGenerateTarget(id);
+}
+
 /** Persist the generation-target policy. A concrete machine also becomes the
  *  browsed machine, which is what the pinned path has always meant. */
 async function selectGenerateTarget(value: string): Promise<void> {
@@ -2521,6 +2544,9 @@ watch(
 /** One machine's answer to the automatic-routing fan-out. */
 interface MobilePlacementProbe {
   host: MobileHost;
+  /** The machine's exact route as it stood when the probe was ISSUED. A slow
+   *  preview must never authorize one endpoint and then submit to another. */
+  route: HostRoute;
   roundTripMs: number;
   preview: GenerationPlacementPreview | null;
   error: unknown;
@@ -2646,34 +2672,78 @@ async function routeAutomaticGeneration(options: {
   const isCurrent = options.isCurrent ?? (() => true);
   const { hosts: candidates, error } = automaticRoutingCandidates(options.model, options.family);
   if (error) return { kind: "error", message: error };
-  const probes = await Promise.all(
-    candidates.map(async (host): Promise<MobilePlacementProbe> => {
+  const probes: MobilePlacementProbe[] = [];
+  const controllers = candidates.map(() => new AbortController());
+  let pending = candidates.length;
+  let resolveAllSettled!: () => void;
+  let resolveFirstPlanned!: () => void;
+  const allSettled = new Promise<void>((resolve) => (resolveAllSettled = resolve));
+  const firstPlanned = new Promise<void>((resolve) => (resolveFirstPlanned = resolve));
+  candidates.forEach((host, index) => {
+    void (async () => {
       const started = performance.now();
       const elapsed = () => Math.max(0, performance.now() - started);
+      const probeOptions = { signal: controllers[index]!.signal };
+      // Frozen before the request leaves: the winner carries this snapshot, so
+      // a URL, key, or instance that changed mid-flight is caught by the
+      // caller's connection fence instead of silently replacing the endpoint
+      // the plan was authorized for.
+      const route = routeForMobileHost(host);
+      const probeTarget = { ...route.target };
       try {
         const preview = options.chain
-          ? await previewChainPlacement(mobileHostTarget(host), options.request, options.copies)
+          ? await previewChainPlacement(probeTarget, options.request, options.copies, probeOptions)
           : await previewGenerationPlacement(
-              mobileHostTarget(host),
+              probeTarget,
               options.request,
               options.copies,
+              probeOptions,
             );
-        return { host, roundTripMs: elapsed(), preview, error: null, legacyUnsupported: false };
-      } catch (probeError) {
-        return {
+        probes.push({
           host,
+          route,
+          roundTripMs: elapsed(),
+          preview,
+          error: null,
+          legacyUnsupported: false,
+        });
+        if (classifyPlacementPreview(preview) === "planned") resolveFirstPlanned();
+      } catch (probeError) {
+        probes.push({
+          host,
+          route,
           roundTripMs: elapsed(),
           preview: null,
           error: probeError,
           legacyUnsupported:
             probeError instanceof ApiError &&
             (probeError.status === 404 || probeError.status === 405),
-        };
+        });
+      } finally {
+        pending -= 1;
+        if (pending === 0) resolveAllSettled();
       }
-    }),
-  );
+    })();
+  });
+  // A phone must not sit on a stalled machine once another one can run the
+  // print — but it must not manufacture a dead end either, so the settle
+  // window only starts once some machine has actually answered `planned`.
+  await Promise.race([
+    allSettled,
+    ...(candidates.length > 1
+      ? [
+          firstPlanned.then(
+            () => new Promise<void>((resolve) => setTimeout(resolve, MOBILE_PLACEMENT_SETTLE_MS)),
+          ),
+        ]
+      : []),
+  ]);
+  if (pending > 0) for (const controller of controllers) controller.abort();
   if (unmounted || !isCurrent()) return { kind: "abandoned" };
-  const planned = probes.flatMap((probe) =>
+  // Route on the snapshot that met the settle window; a late cancellation row
+  // must not join the decision.
+  const settledProbes = probes.slice();
+  const planned = settledProbes.flatMap((probe) =>
     probe.preview && classifyPlacementPreview(probe.preview) === "planned"
       ? [{ host: routingHostView(probe.host), roundTripMs: probe.roundTripMs, probe }]
       : [],
@@ -2693,14 +2763,14 @@ async function routeAutomaticGeneration(options: {
     return {
       kind: "route",
       host: winner.probe.host,
-      route: routeForMobileHost(winner.probe.host),
+      route: winner.probe.route,
       placement: winner.probe.preview,
       legacyUnsupported: false,
     };
   }
   // Servers that predate the authoritative preview still route, unless the
   // request itself requires that authority (reference media).
-  const legacy = probes.filter(
+  const legacy = settledProbes.filter(
     (probe) => probe.legacyUnsupported || classifyPlacementPreview(probe.preview) === "unsupported",
   );
   if (!options.requireAuthoritative && legacy.length > 0) {
@@ -2710,16 +2780,17 @@ async function routeAutomaticGeneration(options: {
         ? pickMostCapableHost(views, null, { lowestIdWins: true })
         : pickAutoHost(views, { lowestIdWins: true });
     if (fallback) {
+      const probe = legacy.find((entry) => entry.host.id === fallback.id)!;
       return {
         kind: "route",
-        host: fallback.host,
-        route: routeForMobileHost(fallback.host),
+        host: probe.host,
+        route: probe.route,
         placement: null,
         legacyUnsupported: true,
       };
     }
   }
-  return { kind: "error", message: mobileFleetPlacementFailure(probes, options.subject) };
+  return { kind: "error", message: mobileFleetPlacementFailure(settledProbes, options.subject) };
 }
 
 async function submitMobileSequence(): Promise<void> {
@@ -6905,7 +6976,7 @@ onBeforeUnmount(() => {
           :host="hostDetail"
           :active="hostDetail.id === selectedHostId"
           @back="hostDetailId = ''"
-          @select="selectHost"
+          @select="useHostForGenerations"
           @rename="renameHost"
           @disconnect="disconnectHost"
           @reconnect="reconnectHost"
@@ -7043,7 +7114,7 @@ onBeforeUnmount(() => {
                 class="secondary-button"
                 type="button"
                 :disabled="host.connected === false || host.id === selectedHostId"
-                @click="selectHost(host.id)"
+                @click="useHostForGenerations(host.id)"
               >
                 {{
                   host.connected === false
