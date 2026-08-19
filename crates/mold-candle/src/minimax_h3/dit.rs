@@ -1758,7 +1758,8 @@ impl H3ComfyInt8TransformerBlockWeights {
                 &scale_attention,
                 adaln_indices,
             )?;
-            self.attention.forward(&normalized, rotary, attention_plan)?
+            self.attention
+                .forward(&normalized, rotary, attention_plan)?
         };
         let hidden = gated_residual(hidden, &update, &gate_attention, adaln_indices)?;
         drop(update);
