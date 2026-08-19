@@ -128,6 +128,12 @@ impl GenerationRecord {
             format: Some(self.format),
             size_bytes: self.file_size_bytes.map(|n| n as u64),
             metadata_synthetic: self.metadata_synthetic,
+            title: self.metadata.title.clone(),
+            tags: Vec::new(),
+            favorite: false,
+            collections: Vec::new(),
+            trashed_at: None,
+            purge_at: None,
         }
     }
 }
@@ -138,6 +144,7 @@ mod tests {
 
     fn meta() -> OutputMetadata {
         OutputMetadata {
+            title: None,
             source_fit: None,
             guidance_overrides: None,
             sample_shift: None,

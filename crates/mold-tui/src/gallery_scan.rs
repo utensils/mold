@@ -484,6 +484,7 @@ mod tests {
 
     fn meta(prompt: &str, model: &str) -> mold_core::OutputMetadata {
         mold_core::OutputMetadata {
+            title: None,
             source_fit: None,
             guidance_overrides: None,
             sample_shift: None,

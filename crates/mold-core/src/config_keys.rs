@@ -24,6 +24,11 @@ pub enum ValueType {
     F64,
 }
 
+/// Days a trashed print stays in `<output_dir>/.trash/` before the sweeper
+/// purges it. `0` keeps trashed prints forever. Profile-scoped DB key.
+pub const GALLERY_TRASH_RETENTION_DAYS_KEY: &str = "gallery.trash_retention_days";
+pub const GALLERY_TRASH_RETENTION_DAYS_ENV: &str = "MOLD_GALLERY_TRASH_RETENTION_DAYS";
+
 pub struct ConfigKeyInfo {
     pub key: &'static str,
     pub value_type: ValueType,
@@ -172,6 +177,13 @@ pub const ALL_KEYS: &[ConfigKeyInfo] = &[
         value_type: ValueType::U32,
         env_var: None,
         section: "Scheduler",
+    },
+    // Gallery
+    ConfigKeyInfo {
+        key: GALLERY_TRASH_RETENTION_DAYS_KEY,
+        value_type: ValueType::U32,
+        env_var: Some(GALLERY_TRASH_RETENTION_DAYS_ENV),
+        section: "Gallery",
     },
     // Logging
     ConfigKeyInfo {
@@ -459,6 +471,8 @@ pub fn get_static_value(config: &Config, key: &str) -> Result<ConfigValue> {
         "scheduler.replan_debounce_ms" => ConfigValue::U32(config.scheduler.replan_debounce_ms),
         "scheduler.replan_max_delay_ms" => ConfigValue::U32(config.scheduler.replan_max_delay_ms),
         "scheduler.warm_wait_max_ms" => ConfigValue::U32(config.scheduler.warm_wait_max_ms),
+        // Gallery
+        GALLERY_TRASH_RETENTION_DAYS_KEY => ConfigValue::U32(config.gallery.trash_retention_days),
         // Logging
         "logging.level" => ConfigValue::String(config.logging.level.clone()),
         "logging.file" => ConfigValue::Bool(config.logging.file),
@@ -636,6 +650,12 @@ fn set_static_value(config: &mut Config, key: &str, raw: &str) -> Result<()> {
                 _ => unreachable!("scheduler key match is exhaustive"),
             }
             config.scheduler = scheduler.validate()?;
+        }
+        // Gallery
+        GALLERY_TRASH_RETENTION_DAYS_KEY => {
+            config.gallery.trash_retention_days =
+                parse_u32(raw, 0, crate::config::GALLERY_TRASH_RETENTION_MAX_DAYS, key)
+                    .map_err(|error| anyhow!("{error} Use 0 to keep trashed prints forever."))?;
         }
         // Logging
         "logging.level" => {
@@ -844,6 +864,7 @@ pub fn surface_for_key(key: &str) -> Surface {
         || key.starts_with("expand.")
         || key.starts_with("generate.")
         || key.starts_with("scheduler.")
+        || key.starts_with("gallery.")
         || key.starts_with("model_prefs.")
     {
         return Surface::Db;
@@ -916,6 +937,71 @@ mod tests {
         assert!(is_known_key("models.flux-dev:q4.default_steps"));
         assert!(!is_known_key("definitely.not.a.key"));
         assert!(!is_known_key("models.flux-dev:q4.bogus_field"));
+    }
+
+    #[test]
+    fn gallery_trash_retention_is_a_registered_db_surface_key() {
+        let info = find_static_key(GALLERY_TRASH_RETENTION_DAYS_KEY).expect("registered");
+        assert_eq!(info.value_type, ValueType::U32);
+        assert_eq!(info.env_var, Some(GALLERY_TRASH_RETENTION_DAYS_ENV));
+        assert_eq!(info.section, "Gallery");
+        assert!(is_known_key(GALLERY_TRASH_RETENTION_DAYS_KEY));
+        assert_eq!(
+            surface_for_key(GALLERY_TRASH_RETENTION_DAYS_KEY),
+            Surface::Db
+        );
+        assert_eq!(
+            effective_surface(GALLERY_TRASH_RETENTION_DAYS_KEY),
+            Surface::Db
+        );
+        // Unknown siblings under the prefix still route to the DB so a
+        // future gallery.* key can never split-brain against the sweeper.
+        assert_eq!(surface_for_key("gallery.something_else"), Surface::Db);
+    }
+
+    #[test]
+    fn gallery_trash_retention_round_trips_and_enforces_bounds() {
+        let mut config = Config::default();
+        assert!(matches!(
+            get_value(&config, GALLERY_TRASH_RETENTION_DAYS_KEY).unwrap(),
+            ConfigValue::U32(30)
+        ));
+
+        set_value(&mut config, GALLERY_TRASH_RETENTION_DAYS_KEY, "0").unwrap();
+        assert_eq!(config.gallery.trash_retention_days, 0);
+        assert!(matches!(
+            get_value(&config, GALLERY_TRASH_RETENTION_DAYS_KEY).unwrap(),
+            ConfigValue::U32(0)
+        ));
+
+        set_value(&mut config, GALLERY_TRASH_RETENTION_DAYS_KEY, "3650").unwrap();
+        assert_eq!(config.gallery.trash_retention_days, 3650);
+
+        let error = set_value(&mut config, GALLERY_TRASH_RETENTION_DAYS_KEY, "3651").unwrap_err();
+        assert!(error.to_string().contains("between 0 and 3650"), "{error}");
+        assert!(error.to_string().contains("forever"), "{error}");
+        assert_eq!(config.gallery.trash_retention_days, 3650);
+
+        let error = set_value(&mut config, GALLERY_TRASH_RETENTION_DAYS_KEY, "-1").unwrap_err();
+        assert!(error.to_string().contains("Must be a number"), "{error}");
+        let error = set_value(&mut config, GALLERY_TRASH_RETENTION_DAYS_KEY, "soon").unwrap_err();
+        assert!(error.to_string().contains("Must be a number"), "{error}");
+        assert_eq!(config.gallery.trash_retention_days, 3650);
+    }
+
+    #[test]
+    fn every_registered_key_reads_from_a_default_config() {
+        // Guards against a registry entry whose get/set arm was forgotten:
+        // `get_static_value` would return the unknown-key error.
+        //
+        // `umt5_variant` is a known pre-existing gap (#778 registered the key
+        // without get/set arms or a DB persistence slot); it is skipped here
+        // rather than silently widened by this guard.
+        let config = Config::default();
+        for info in ALL_KEYS.iter().filter(|info| info.key != "umt5_variant") {
+            get_static_value(&config, info.key)
+                .unwrap_or_else(|error| panic!("{} has no getter: {error}", info.key));
+        }
     }
 
     #[test]

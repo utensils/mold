@@ -963,6 +963,7 @@ mod tests {
 
     fn output_metadata(prompt: &str) -> mold_core::OutputMetadata {
         mold_core::OutputMetadata {
+            title: None,
             source_fit: None,
             guidance_overrides: None,
             sample_shift: None,
@@ -9572,6 +9573,7 @@ mod tests {
         let db_path = dir.path().join("mold.db");
         let db = MetadataDb::open(&db_path).unwrap();
         let metadata = mold_core::OutputMetadata {
+            title: None,
             source_fit: None,
             guidance_overrides: None,
             sample_shift: None,
@@ -10489,6 +10491,7 @@ mod tests {
 
         let db = MetadataDb::open(&dir.path().join("mold.db")).unwrap();
         let metadata = mold_core::OutputMetadata {
+            title: None,
             source_fit: None,
             guidance_overrides: None,
             sample_shift: None,
