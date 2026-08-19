@@ -5125,7 +5125,11 @@ async fn server_capabilities(
     let durable_queue = state.queue_journal.is_enabled() && !state.is_output_disabled(&config);
     Json(mold_core::ServerCapabilities {
         generation_profile_v1: true,
-        gallery: mold_core::GalleryCapabilities { can_delete: true },
+        gallery: mold_core::GalleryCapabilities {
+            can_delete: true,
+            trash: None,
+            organize: false,
+        },
         catalog: mold_core::CatalogCapabilities {
             available: catalog_available,
             families: mold_catalog::families::active_families()
@@ -7505,6 +7509,12 @@ fn scan_gallery_dir_with_archive(
                 format: Some(file.format),
                 size_bytes: Some(size_bytes),
                 metadata_synthetic: synthetic,
+                title: None,
+                tags: Vec::new(),
+                favorite: false,
+                collections: Vec::new(),
+                trashed_at: None,
+                purge_at: None,
             })
         })
         .collect();

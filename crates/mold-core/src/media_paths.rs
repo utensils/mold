@@ -193,4 +193,38 @@ mod tests {
             "mold-ltx2-1234.mp4.preview.gif"
         );
     }
+
+    /// Titled prints carry a `~<slug>` in the stem. Sidecar naming is a
+    /// plain suffix append, so the separator must survive untouched in both
+    /// the preview and thumbnail cache names.
+    #[test]
+    fn sidecar_names_preserve_title_slug_separator() {
+        let filename = "mold-ltx2-1700000000000~smurf-village.mp4";
+        assert_eq!(
+            preview_gif_filename(filename),
+            "mold-ltx2-1700000000000~smurf-village.mp4.preview.gif"
+        );
+        let dir = std::path::Path::new("/cache/thumbnails");
+        let [server, tui] = audio_waveform_thumbnail_paths(dir, filename);
+        assert_eq!(
+            server,
+            dir.join("mold-ltx2-1700000000000~smurf-village.mp4.png")
+        );
+        assert_eq!(
+            tui,
+            dir.join("mold-ltx2-1700000000000~smurf-village.mp4.thumb.png")
+        );
+        // `~` is an ordinary path character: no home expansion, one component.
+        assert_eq!(
+            server
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .matches('~')
+                .count(),
+            1
+        );
+        assert_eq!(expand_home(filename), PathBuf::from(filename));
+    }
 }

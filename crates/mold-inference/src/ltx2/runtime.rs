@@ -8412,6 +8412,7 @@ mod tests {
 
     fn req(model: &str, format: OutputFormat, enable_audio: Option<bool>) -> GenerateRequest {
         GenerateRequest {
+            title: None,
             source_fit: None,
             hdr_exr_dir: None,
             hdr_exr_full_float: false,

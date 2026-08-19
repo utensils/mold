@@ -2368,6 +2368,7 @@ mod tests {
 
     fn request() -> GenerateRequest {
         GenerateRequest {
+            title: None,
             source_fit: None,
             prompt: "a lighthouse in a storm".into(),
             negative_prompt: None,

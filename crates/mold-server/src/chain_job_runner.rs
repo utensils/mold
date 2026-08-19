@@ -3386,6 +3386,7 @@ pub(crate) fn build_stage_generate_request(
     idx: usize,
 ) -> GenerateRequest {
     GenerateRequest {
+        title: None,
         source_fit: None,
         hdr_exr_dir: None,
         hdr_exr_full_float: false,

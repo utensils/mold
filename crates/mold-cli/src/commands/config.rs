@@ -559,6 +559,7 @@ mod tests {
             default_negative_prompt: None,
             expand: mold_core::ExpandSettings::default(),
             scheduler: Default::default(),
+            gallery: Default::default(),
             logging: mold_core::LoggingConfig::default(),
             runpod: mold_core::runpod::RunPodSettings::default(),
             lambda: mold_core::lambda::LambdaSettings::default(),
@@ -621,9 +622,11 @@ mod tests {
 
     #[test]
     fn all_keys_count() {
-        // 12 General + 8 Expand + 4 Logging + 8 RunPod + 9 Lambda static keys.
-        // General gained `umt5_variant` with the Wan quantized encoder (#778).
-        assert_eq!(ALL_KEYS.len(), 44);
+        // 12 General + 8 Expand + 3 Scheduler + 1 Gallery + 4 Logging +
+        // 8 RunPod + 9 Lambda static keys.
+        // General gained `umt5_variant` with the Wan quantized encoder (#778);
+        // Gallery gained `trash_retention_days` with the Library trash.
+        assert_eq!(ALL_KEYS.len(), 45);
     }
 
     #[test]
