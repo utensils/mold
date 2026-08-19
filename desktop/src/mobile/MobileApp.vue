@@ -236,6 +236,19 @@ import {
   storeCachedGallery,
   storeCachedGalleryMedia,
 } from "./galleryCache";
+import {
+  MOBILE_GALLERY_COLUMNS_MAX,
+  MOBILE_GALLERY_COLUMNS_MIN,
+  createPinchZoom,
+  isPinching,
+  loadMobileGalleryColumns,
+  pinchPointerDown,
+  pinchPointerMove,
+  pinchPointerUp,
+  resetPinch,
+  saveMobileGalleryColumns,
+  tracksPointer,
+} from "./galleryZoom";
 import MobileAdvancedSheet from "./MobileAdvancedSheet.vue";
 import MobileCatalogView from "./MobileCatalogView.vue";
 import MobileExpansionPullStatus from "./MobileExpansionPullStatus.vue";
@@ -589,6 +602,11 @@ const gallerySentinelVisible = ref(false);
 const gallerySelectMode = ref(false);
 const gallerySelection = ref<Set<string>>(new Set());
 const galleryDeleteConfirming = ref(false);
+/** Library thumbnail size, driven by the pinch gesture below. */
+const galleryColumns = ref(loadMobileGalleryColumns());
+const galleryZoom = createPinchZoom(galleryColumns.value);
+const galleryZoomAnnouncement = ref("");
+const galleryGrid = ref<HTMLElement | null>(null);
 const galleryDeleting = ref(false);
 const selectedPrint = ref<GalleryPrint | null>(null);
 const generatedViewerOpen = ref(false);
@@ -617,6 +635,8 @@ let galleryDragClientX = 0;
 let galleryDragClientY = 0;
 let galleryDragFrame: number | null = null;
 let galleryDragPendingClicks = 0;
+let galleryPinchPendingClicks = 0;
+let galleryDragSelectionBaseline: Set<string> | null = null;
 const galleryDragVisited = new Set<string>();
 const GALLERY_DRAG_SCROLL_EDGE = 72;
 const GALLERY_DRAG_SCROLL_MAX = 18;
@@ -4739,6 +4759,12 @@ function setGallerySelectMode(next: boolean): void {
     finishGallerySelectionDrag();
     galleryDragPendingClicks = 0;
   }
+  // Entering or leaving the mode is a deliberate tap boundary: a click still
+  // owed to an earlier pinch is stale and must not swallow the next real one.
+  // The gesture itself is deliberately NOT reset here — an SSE-driven gallery
+  // refresh reaches this function, and killing a live pinch from it would drop
+  // the user's fingers mid-resize.
+  galleryPinchPendingClicks = 0;
   gallerySelectMode.value = next;
   galleryDeleteConfirming.value = false;
   if (!next) gallerySelection.value = new Set();
@@ -4839,6 +4865,10 @@ function beginGallerySelectionDrag(event: PointerEvent, print: GalleryPrint): vo
   }
   event.preventDefault();
   galleryDragPointerId = event.pointerId;
+  // The first tile is painted before any movement proves this is a drag. Keep
+  // the pre-drag selection so a second finger — which makes this a pinch, not a
+  // drag — can put it back exactly as the user left it.
+  galleryDragSelectionBaseline = new Set(gallerySelection.value);
   galleryDragSelect = !gallerySelection.value.has(galleryPrintKey(print));
   galleryDragClientX = event.clientX;
   galleryDragClientY = event.clientY;
@@ -4863,9 +4893,65 @@ function finishGallerySelectionDrag(event?: PointerEvent): void {
   if (event && event.pointerId !== galleryDragPointerId) return;
   if (event?.type === "pointerup") galleryDragPendingClicks += 1;
   galleryDragPointerId = null;
+  galleryDragSelectionBaseline = null;
   galleryDragVisited.clear();
   if (galleryDragFrame !== null) cancelAnimationFrame(galleryDragFrame);
   galleryDragFrame = null;
+}
+
+/**
+ * Pinch over the Library grid to resize thumbnails, the iPhone counterpart to
+ * the web/desktop thumbnail-size slider. It deliberately shares no state with
+ * the gallery viewer's own gestures and owns only the grid element.
+ */
+function beginGalleryPinch(event: PointerEvent): void {
+  if (event.pointerType === "mouse") return;
+  if (galleryZoom.points.size === 0) {
+    // A fresh touch sequence. WKWebView dispatches its compatibility click
+    // before any new finger lands, so a claim still outstanding here belongs to
+    // a click that never came and must not swallow this deliberate tap.
+    galleryPinchPendingClicks = 0;
+  }
+  pinchPointerDown(galleryZoom, event);
+  if (!isPinching(galleryZoom)) return;
+  // A second finger means a pinch, never a selection: undo the tile the first
+  // finger speculatively painted, then abandon the drag. `pan-y` would let the
+  // UA claim a drifting two-finger gesture as a scroll and cancel our pointers,
+  // so the grid holds `none` for as long as the pinch owns the fingers.
+  if (galleryDragPointerId !== null) {
+    if (galleryDragSelectionBaseline) gallerySelection.value = galleryDragSelectionBaseline;
+    finishGallerySelectionDrag();
+  }
+  galleryGrid.value?.style.setProperty("touch-action", "none");
+  event.preventDefault();
+}
+
+function moveGalleryPinch(event: PointerEvent): void {
+  const next = pinchPointerMove(galleryZoom, event);
+  if (isPinching(galleryZoom)) event.preventDefault();
+  if (next === null) return;
+  galleryColumns.value = next;
+  saveMobileGalleryColumns(next);
+  const bound =
+    next === MOBILE_GALLERY_COLUMNS_MIN
+      ? " Largest."
+      : next === MOBILE_GALLERY_COLUMNS_MAX
+        ? " Smallest."
+        : "";
+  galleryZoomAnnouncement.value = `Thumbnails ${next} across.${bound}`;
+}
+
+function endGalleryPinch(event: PointerEvent): void {
+  if (!tracksPointer(galleryZoom, event.pointerId)) return;
+  // A finger lifted from a pinch can still earn a WKWebView compatibility click
+  // on whatever tile it rested on, which would open that print or flip its
+  // selection. Claim exactly one, and only for the finger that ends the pinch;
+  // `pointercancel` claims none, since no compatibility click follows it. The
+  // claim is provisional — WebKit usually synthesizes no click at all once a
+  // second touch lands, so the next fresh touch sequence discards it.
+  if (event.type === "pointerup" && isPinching(galleryZoom)) galleryPinchPendingClicks = 1;
+  pinchPointerUp(galleryZoom, event.pointerId);
+  if (galleryZoom.points.size === 0) galleryGrid.value?.style.removeProperty("touch-action");
 }
 
 function selectAllGalleryPrints(): void {
@@ -4874,6 +4960,10 @@ function selectAllGalleryPrints(): void {
 }
 
 function handleGalleryTileClick(event: MouseEvent, print: GalleryPrint): void {
+  if (galleryPinchPendingClicks > 0 && event.detail !== 0) {
+    galleryPinchPendingClicks -= 1;
+    return;
+  }
   // WKWebView may delay compatibility clicks until after another tap has
   // already completed. Consume one click for every pointer gesture instead
   // of keeping a single flag that the first delayed click can clear.
@@ -5162,6 +5252,12 @@ watch(
  */
 function handleForegroundResume(): void {
   if (unmounted || document.visibilityState === "hidden") return;
+  // Suspending mid-touch never delivers the matching pointerup, and a phantom
+  // finger would make the next single touch read as a pinch — resizing the grid
+  // from a plain scroll. Nothing can still be held after a resume, so drop them.
+  galleryPinchPendingClicks = 0;
+  resetPinch(galleryZoom, galleryColumns.value);
+  galleryGrid.value?.style.removeProperty("touch-action");
   if ("__TAURI_INTERNALS__" in window) {
     void invoke("restore_mobile_viewport").catch(() => undefined);
   }
@@ -5252,6 +5348,11 @@ onMounted(async () => {
   window.addEventListener("pointermove", moveGallerySelectionDrag, { passive: false });
   window.addEventListener("pointerup", finishGallerySelectionDrag);
   window.addEventListener("pointercancel", finishGallerySelectionDrag);
+  // The pinch tracks globally so a finger that slides off the grid mid-gesture
+  // still reports, and so a lift outside the grid always ends it.
+  window.addEventListener("pointermove", moveGalleryPinch, { passive: false });
+  window.addEventListener("pointerup", endGalleryPinch);
+  window.addEventListener("pointercancel", endGalleryPinch);
   window.visualViewport?.addEventListener("resize", syncVisualViewportOffset);
   window.visualViewport?.addEventListener("scroll", syncVisualViewportOffset);
   syncVisualViewportOffset();
@@ -5314,6 +5415,10 @@ onBeforeUnmount(() => {
   window.removeEventListener("pointerup", finishGallerySelectionDrag);
   window.removeEventListener("pointercancel", finishGallerySelectionDrag);
   finishGallerySelectionDrag();
+  window.removeEventListener("pointermove", moveGalleryPinch);
+  window.removeEventListener("pointerup", endGalleryPinch);
+  window.removeEventListener("pointercancel", endGalleryPinch);
+  resetPinch(galleryZoom, galleryColumns.value);
   window.visualViewport?.removeEventListener("resize", syncVisualViewportOffset);
   window.visualViewport?.removeEventListener("scroll", syncVisualViewportOffset);
   document.documentElement.style.removeProperty("--mobile-visual-viewport-page-top");
@@ -5412,6 +5517,9 @@ onBeforeUnmount(() => {
     </p>
     <p class="sr-only" aria-live="polite" aria-atomic="true">
       {{ generationAnnouncement }}
+    </p>
+    <p class="sr-only" aria-live="polite" aria-atomic="true" data-test="mobile-gallery-zoom-status">
+      {{ galleryZoomAnnouncement }}
     </p>
 
     <section ref="mobileContent" class="mobile-content">
@@ -6143,7 +6251,7 @@ onBeforeUnmount(() => {
               {{
                 gallerySelectMode
                   ? `${gallerySelection.size} selected`
-                  : "Prints from every connected host · Tap Select for multiple"
+                  : "Prints from every connected host · Pinch to resize · Tap Select for multiple"
               }}
             </p>
           </div>
@@ -6163,6 +6271,13 @@ onBeforeUnmount(() => {
           v-else-if="gallery.length"
           class="gallery-grid"
           :class="{ 'is-selecting': gallerySelectMode }"
+          ref="galleryGrid"
+          :style="{ '--mobile-gallery-columns': galleryColumns }"
+          :aria-label="`Prints, ${galleryColumns} across. Pinch to resize.`"
+          :data-gallery-columns="galleryColumns"
+          role="group"
+          data-test="mobile-gallery-grid"
+          @pointerdown="beginGalleryPinch"
         >
           <button
             v-for="print in gallery"
