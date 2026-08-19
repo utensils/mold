@@ -13,10 +13,12 @@ publish = false
 # attaches the binaries, desktop DMG, and SHA256SUMS.
 git_release_enable = false
 
-# CHANGELOG.md is hand-maintained (Keep a Changelog): every PR adds entries
-# under [Unreleased]. The release PR gets a scripted follow-up commit that
-# promotes [Unreleased] to the new version and syncs the desktop app version —
-# see scripts/release/sync-release-pr.sh and .github/workflows/release-plz.yml.
+# CHANGELOG.md is hand-maintained (Keep a Changelog): every PR ships its note
+# as a changelog.d/<slug>.md fragment. The release PR gets a scripted
+# follow-up commit that assembles the fragments under [Unreleased], deletes
+# them, promotes [Unreleased] to the new version, and syncs the desktop app
+# version — see scripts/release/sync-release-pr.sh and
+# .github/workflows/release-plz.yml. release-plz never touches CHANGELOG.md.
 changelog_update = false
 
 # On 0.x versions release-plz bumps only the patch for feat: commits by

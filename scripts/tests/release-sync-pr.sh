@@ -42,6 +42,20 @@ cat > "$tmp/CHANGELOG.md" <<'EOF'
 [0.14.0]: https://github.com/utensils/mold/compare/v0.13.1...v0.14.0
 EOF
 
+# Per-PR changelog fragments: assembled into the promoted section, then deleted.
+# README.md is documentation, never a fragment.
+mkdir -p "$tmp/changelog.d"
+cat > "$tmp/changelog.d/README.md" <<'EOF'
+# fragments live here
+EOF
+cat > "$tmp/changelog.d/alpha-feature.md" <<'EOF'
+- **Alpha fragment.** Landed as a fragment.
+EOF
+cat > "$tmp/changelog.d/beta-fix.md" <<'EOF'
+- **Beta fragment.** Also a fragment,
+  with a continuation line.
+EOF
+
 cat > "$tmp/desktop/src-tauri/Cargo.toml" <<'EOF'
 [package]
 name = "mold-desktop"
@@ -116,6 +130,16 @@ grep -q '^\[0.15.0\]: https://github.com/utensils/mold/compare/v0.14.0...v0.15.0
 awk '/^## \[0.15.0\]/{s=1} s && /A new thing/{found=1} END{exit !found}' "$tmp/CHANGELOG.md" || fail "unreleased content not under promoted heading"
 # [Unreleased] section must be empty (next heading follows immediately).
 awk '/^## \[Unreleased\]$/{getline; getline; exit ($0 ~ /^## \[0.15.0\]/) ? 0 : 1}' "$tmp/CHANGELOG.md" || fail "[Unreleased] section not empty"
+# Fragments are assembled under the promoted heading (above any inline
+# [Unreleased] entries), consumed, and the directory README survives.
+awk '/^## \[0.15.0\]/{s=1} s && /Alpha fragment/{found=1} END{exit !found}' "$tmp/CHANGELOG.md" || fail "alpha fragment not under promoted heading"
+awk '/^## \[0.15.0\]/{s=1} s && /with a continuation line/{found=1} END{exit !found}' "$tmp/CHANGELOG.md" || fail "multi-line fragment body lost"
+awk '/Beta fragment/{b=NR} /A new thing/{n=NR} END{exit (b && n && b < n) ? 0 : 1}' "$tmp/CHANGELOG.md" || fail "fragments must precede inline [Unreleased] entries"
+awk '/^## \[0.14.0\]/{s=1} s && /fragment/{found=1} END{exit found}' "$tmp/CHANGELOG.md" || fail "fragments leaked into an older release section"
+test ! -e "$tmp/changelog.d/alpha-feature.md" || fail "assembled fragment not deleted"
+test ! -e "$tmp/changelog.d/beta-fix.md" || fail "assembled fragment not deleted"
+test -e "$tmp/changelog.d/README.md" || fail "changelog.d README was consumed as a fragment"
+test "$(grep -c 'Alpha fragment' "$tmp/CHANGELOG.md")" -eq 1 || fail "fragment duplicated"
 
 grep -q '^version = "0.15.0"$' "$tmp/desktop/src-tauri/Cargo.toml" || fail "desktop Cargo.toml version not synced"
 grep -q '^edition = "2021"$' "$tmp/desktop/src-tauri/Cargo.toml" || fail "desktop Cargo.toml collateral damage"
@@ -129,6 +153,20 @@ awk '/^name = "serde"$/{getline; exit ($0 == "version = \"1.0.0\"") ? 0 : 1}' "$
 grep -q '^version = "0.15.0"$' "$tmp/apps/mobile/src-tauri/Cargo.toml" || fail "mobile Cargo.toml version not synced"
 awk '/^name = "mold-mobile"$/{getline; exit ($0 == "version = \"0.15.0\"") ? 0 : 1}' "$tmp/apps/mobile/src-tauri/Cargo.lock" || fail "mobile Cargo.lock version not synced"
 grep -q '"version": "0.15.0"' "$tmp/apps/mobile/src-tauri/tauri.conf.json" || fail "mobile tauri config version not synced"
+
+# Ordering: in a git checkout fragments are assembled newest-first by the
+# commit that added them, regardless of filename (CRLF is normalised away).
+gitfx=$(mktemp -d)
+cp -R "$tmp/." "$gitfx"
+rm -f "$gitfx/changelog.d/"*.md
+( cd "$gitfx" && git init -q -b main && git config user.email t@x && git config user.name t \
+  && printf -- '- **Zulu first.** oldest commit\r\n' > changelog.d/zulu.md && git add -A && git commit -qm one \
+  && printf -- '- **Alpha second.** newest commit\n' > changelog.d/alpha.md && git add -A && git commit -qm two \
+  && GIT_COMMITTER_DATE="$(date -u -d '+1 hour' +%Y-%m-%dT%H:%M:%S 2>/dev/null || date -u -v+1H +%Y-%m-%dT%H:%M:%S)" git commit -q --amend --no-edit )
+"$script" "$gitfx" > /dev/null
+awk '/Alpha second/{a=NR} /Zulu first/{z=NR} END{exit (a && z && a < z) ? 0 : 1}' "$gitfx/CHANGELOG.md" || fail "fragments not ordered newest-added first"
+if grep -q $'\r' "$gitfx/CHANGELOG.md"; then fail "CRLF fragment leaked a carriage return into CHANGELOG.md"; fi
+rm -rf "$gitfx"
 
 # Idempotency: second run must not change anything.
 cp -R "$tmp" "$tmp.before"
@@ -206,5 +244,9 @@ grep -Fq -- '--commit "$GITHUB_SHA"' "$workflow" || fail "release tag job does n
 # shellcheck disable=SC2016
 grep -Fq 'select(.name == \"$job_name\")' "$workflow" || fail "release tag job gates on whole workflows instead of Apple delivery jobs"
 grep -q 'bash scripts/tests/release-sync-pr.sh' "$ci_workflow" || fail "CI does not exercise release PR synchronization"
+grep -Fq 'Refuse to tag with unassembled changelog fragments' "$workflow" || fail "release tag job does not refuse leftover changelog.d fragments"
+# The bot commit deletes consumed changelog.d fragments, so the trusted
+# release-PR file-scope check must accept D for exactly that path.
+grep -Fq 'changelog.d/*.md' "$ci_workflow" || fail "trusted release PR scope does not allow changelog.d fragment deletions"
 
 echo "PASS: release PR body sync"

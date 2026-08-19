@@ -104,6 +104,10 @@ pushed screen opened from the header.
   a desktop/web action until mobile has a chain-detail recovery route.
   Generated stills open the same viewer on tap. Press and hold an image to keep
   the native iOS Share, Save to Photos, Copy, Copy Subject, and Look Up menu.
+  Pinch the grid to resize thumbnails between two and five across — the iPhone
+  counterpart to the web/desktop thumbnail-size slider. The choice persists at
+  `mold.mobile.galleryColumns.v1`, separately from the shared pixel-target key
+  so a phone's zoom never rewrites a Mac's grid, and defaults to three across.
   Tap the 44pt **Select** control to enter multi-select, then select all, clear,
   or delete the chosen prints. Delete removes every matching copy from
   reachable saved hosts; a host failure leaves that copy visible and reports
@@ -160,7 +164,9 @@ pushed screen opened from the header.
   `https://utensils.io/mold/privacy` through the native external-browser opener.
 
 The app shell suppresses WebKit focus/double-tap page zoom and rubber-band
-overscroll. The Library viewer keeps its scoped horizontal swipe gesture.
+overscroll. The Library viewer keeps its scoped horizontal swipe gesture, and
+the Library grid keeps a scoped two-finger pinch (`touch-action: pan-y`) that
+resizes thumbnails while one-finger scrolling is unaffected.
 
 Prepared expansion always snapshots the selected remote host ID, endpoint,
 Keychain-provided key, and server instance. Batch is a directly editable

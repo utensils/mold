@@ -234,6 +234,12 @@ done
 release_change_allowed() {
   local status=$1
   local path=$2
+  if [[ "$status" == D ]]; then
+    case "$path" in
+      changelog.d/README.md) return 1 ;;
+      changelog.d/*.md) return 0 ;;
+    esac
+  fi
   [[ "$status" == M ]] || return 1
   case "$path" in
     CHANGELOG.md|Cargo.toml|Cargo.lock|desktop/package.json|desktop/src-tauri/Cargo.toml|desktop/src-tauri/Cargo.lock|apps/mobile/src-tauri/Cargo.toml|apps/mobile/src-tauri/Cargo.lock|apps/mobile/src-tauri/tauri.conf.json)
@@ -256,6 +262,17 @@ for forbidden_status in A D R100 C100; do
     fail "trusted release policy accepts $forbidden_status changes"
   fi
 done
+release_change_allowed D changelog.d/my-note.md \
+  || fail "trusted release policy rejects a consumed changelog fragment deletion"
+if release_change_allowed D changelog.d/README.md; then
+  fail "trusted release policy accepts deleting changelog.d/README.md"
+fi
+if release_change_allowed A changelog.d/my-note.md; then
+  fail "trusted release policy accepts a fragment addition on the release PR"
+fi
+if release_change_allowed D Cargo.toml; then
+  fail "trusted release policy accepts a non-fragment deletion"
+fi
 if release_change_allowed M src/production.rs; then
   fail "trusted release policy accepts a production-source modification"
 fi

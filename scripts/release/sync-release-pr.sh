@@ -2,9 +2,12 @@
 # Runs on the release-plz release-PR branch after release-plz has bumped the
 # workspace version. Finishes the two things release-plz cannot do here:
 #
-#   1. CHANGELOG.md is hand-maintained (Keep a Changelog), so promote the
-#      [Unreleased] section to the new version heading and refresh the
-#      compare-link references at the bottom of the file.
+#   1. CHANGELOG.md is hand-maintained (Keep a Changelog). Every PR ships its
+#      note as a fragment in changelog.d/<slug>.md (one file per PR, so two
+#      in-flight PRs never edit the same line). Assemble those fragments under
+#      [Unreleased], delete them, then promote the [Unreleased] section to the
+#      new version heading and refresh the compare-link references at the
+#      bottom of the file.
 #   2. The Tauri desktop and mobile apps are standalone cargo roots, so mirror
 #      the workspace version into their manifests, locks, and configs.
 #
@@ -23,6 +26,54 @@ if [ -z "$version" ]; then
 fi
 today=$(date -u +%Y-%m-%d)
 repo_url="https://github.com/utensils/mold"
+
+# --- 0. changelog.d fragments -> [Unreleased] -------------------------------
+# Newest fragment first (matches the hand-maintained "newest on top" order);
+# ordered by the commit that added each file, falling back to filename when
+# the tree is not a git checkout (the test fixture). README.md is docs.
+fragments=()
+if [ -d changelog.d ]; then
+  while IFS= read -r line; do
+    fragments+=("${line#* }")
+  done < <(
+    for f in changelog.d/*.md; do
+      [ -e "$f" ] || continue
+      [ "$(basename "$f")" = "README.md" ] && continue
+      ts=$(git log -1 --diff-filter=A --format=%ct -- "$f" 2>/dev/null || true)
+      printf '%s %s\n' "${ts:-0}" "$f"
+    done | sort -k1,1nr -k2,2
+  )
+fi
+if [ "${#fragments[@]}" -gt 0 ]; then
+  grep -q '^## \[Unreleased\]$' CHANGELOG.md || {
+    echo "error: CHANGELOG.md has no [Unreleased] heading to assemble fragments under" >&2
+    exit 1
+  }
+  assembled=$(mktemp)
+  for f in "${fragments[@]}"; do
+    # Normalise: strip leading/trailing blank lines, guarantee one trailing newline.
+    awk '{sub(/\r$/,"")} NF{p=1} p{buf=buf $0 "\n"} END{sub(/\n+$/,"\n",buf); printf "%s", buf}' "$f" >> "$assembled"
+  done
+  awk -v file="$assembled" '
+    /^## \[Unreleased\]$/ {
+      print; print ""
+      while ((getline line < file) > 0) print line
+      close(file)
+      # Swallow the blank line that followed the heading (we printed our own),
+      # but keep a blank before whatever heading or text comes next so an
+      # empty [Unreleased] section still separates from the version below.
+      if ((getline nxt) > 0) {
+        if (nxt != "") { print nxt }
+        else if ((getline nxt2) > 0) { if (nxt2 ~ /^#/) print ""; print nxt2 }
+      }
+      next
+    }
+    { print }
+  ' CHANGELOG.md > CHANGELOG.md.tmp && mv CHANGELOG.md.tmp CHANGELOG.md
+  rm -f "$assembled"
+  rm -f "${fragments[@]}"
+  echo "CHANGELOG.md: assembled ${#fragments[@]} changelog.d fragment(s) into [Unreleased]"
+fi
 
 # --- 1. CHANGELOG.md -------------------------------------------------------
 if ! grep -q "^## \[$version\]" CHANGELOG.md; then

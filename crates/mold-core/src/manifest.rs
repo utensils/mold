@@ -4564,7 +4564,7 @@ fn ltx_video_manifests() -> Vec<ModelManifest> {
         ModelManifest {
             name: "ltx-video-0.9.8-13b-dev:bf16".to_string(),
             family: "ltx-video".to_string(),
-            description: "LTX Video 0.9.8 13B dev BF16 — highest-quality LTX checkpoint"
+            description: "LTX Video 0.9.8 13B dev BF16 — highest-quality legacy LTX checkpoint; needs a 40 GB-class GPU (no offload path; LTX-2 supersedes it on 24 GB cards)"
                 .to_string(),
             files: {
                 let mut f = vec![
@@ -4588,7 +4588,7 @@ fn ltx_video_manifests() -> Vec<ModelManifest> {
         ModelManifest {
             name: "ltx-video-0.9.8-13b-distilled:bf16".to_string(),
             family: "ltx-video".to_string(),
-            description: "LTX Video 0.9.8 13B distilled BF16 — faster 13B-quality LTX video"
+            description: "LTX Video 0.9.8 13B distilled BF16 — faster legacy 13B LTX video; needs a 40 GB-class GPU (no offload path; LTX-2 supersedes it on 24 GB cards)"
                 .to_string(),
             files: {
                 let mut f = vec![

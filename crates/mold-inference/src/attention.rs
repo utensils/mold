@@ -12,7 +12,10 @@
 //!   warning only exists in a build without the feature).
 //!
 //! Selection is env-driven via `MOLD_ATTN={flash,math}` and cached in a
-//! `OnceLock` so we don't re-read the environment on every block.
+//! `OnceLock` so we don't re-read the environment on every block. The
+//! default is `Math` in every build — compiling `flash-attn` makes the kernel
+//! available but never switches it on (#736), so a shipped artifact cannot
+//! silently change seed reproducibility.
 //!
 //! [`attention_with_bias`] adds an optional additive `[B, H, Q, K]` bias for
 //! callers that must mask keys (Qwen-Image's joint stream when the two batched
@@ -57,8 +60,8 @@ impl AttentionBackend {
     ///
     /// Precedence:
     /// 1. `MOLD_ATTN` env (`flash` / `math`, case-insensitive).
-    /// 2. `flash-attn` cargo feature → default `Flash`.
-    /// 3. Otherwise → `Math`.
+    /// 2. Otherwise → `Math`, in every build. The `flash-attn` cargo feature
+    ///    only makes `flash` *available*; it never changes the default.
     pub fn resolve() -> AttentionBackend {
         static CACHED: OnceLock<AttentionBackend> = OnceLock::new();
         *CACHED.get_or_init(|| {
@@ -143,12 +146,16 @@ pub(crate) fn flash_fallback_warned() -> bool {
     FLASH_FALLBACK_WARNED.get().is_some()
 }
 
-#[cfg(feature = "flash-attn")]
-fn default_backend() -> AttentionBackend {
-    AttentionBackend::Flash
-}
-
-#[cfg(not(feature = "flash-attn"))]
+/// The backend used when `MOLD_ATTN` is unset or unparseable.
+///
+/// Always `Math`, in every build. Compiling the `flash-attn` feature makes
+/// the FlashAttention kernel *available*; it does not make it the default
+/// (#736). FA2 is mathematically equivalent to the math path but not
+/// bit-identical (fp32 online-softmax accumulator versus an input-dtype
+/// reduce), so a build-time default would change the image a CUDA user gets
+/// for a given seed based on which artifact they downloaded — against the
+/// cross-backend seed determinism the CPU-noise path exists to preserve.
+/// `MOLD_ATTN=flash` is the one opt-in.
 fn default_backend() -> AttentionBackend {
     AttentionBackend::Math
 }
@@ -861,16 +868,24 @@ mod tests {
         );
     }
 
+    /// The default is `Math` in every build, including one compiled with
+    /// `flash-attn` (#736). Compiling the kernel makes `flash` *available*;
+    /// only an explicit `MOLD_ATTN=flash` turns it on. Pinning this without
+    /// a `cfg` guard is the point: a future artifact that ships the kernel
+    /// must not silently change the image every CUDA user gets for a seed.
     #[test]
-    #[cfg(not(feature = "flash-attn"))]
-    fn test_resolve_default_without_feature() {
+    fn default_backend_is_math_regardless_of_feature() {
         assert_eq!(default_backend(), AttentionBackend::Math);
         assert_eq!(parse_backend_env(None), AttentionBackend::Math);
+        assert_eq!(parse_backend_env(Some("")), AttentionBackend::Math);
+        assert_eq!(parse_backend_env(Some("xformers")), AttentionBackend::Math);
     }
 
+    /// Opting in still works in both builds: the parser returns `Flash`, and
+    /// the dispatcher (not the parser) decides whether the kernel exists.
     #[test]
-    #[cfg(feature = "flash-attn")]
-    fn test_resolve_default_with_feature() {
-        assert_eq!(default_backend(), AttentionBackend::Flash);
+    fn flash_is_opt_in_via_env() {
+        assert_eq!(parse_backend_env(Some("flash")), AttentionBackend::Flash);
+        assert_eq!(parse_backend_env(Some(" Flash ")), AttentionBackend::Flash);
     }
 }

@@ -2,7 +2,10 @@
 name = "mold-ai-inference"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+# The LTX-2 video transformer/VAE retain Apache-2.0 portions ported from
+# FerrisMind/candle-video; see this crate's THIRD_PARTY_NOTICES.md and
+# LICENSE-APACHE-2.0 (both ship in the published package).
+license = "MIT AND Apache-2.0"
 repository.workspace = true
 rust-version.workspace = true
 readme.workspace = true

@@ -3,6 +3,12 @@
 // LTX-2 video transformer — adapted from Mold's LTX Video model.
 // This keeps the proven video-only denoiser structure but patches the positional
 // embedding path and config surface to match the native LTX-2 checkpoints.
+//
+// That LTX Video model was ported from FerrisMind/candle-video (Apache 2.0,
+// Copyright 2025 FerrisMind, https://github.com/FerrisMind/candle-video), so
+// portions of this file — the PixArt-Alpha timestep/caption embeddings, the
+// attention-mask bias, AdaLN gating, and block wiring — remain that code under
+// the Apache License, Version 2.0. See THIRD_PARTY_NOTICES.md at the repo root.
 
 use candle_core::{DType, Device, IndexOp, Result, Tensor, D};
 use candle_nn as nn;
