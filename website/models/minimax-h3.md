@@ -68,9 +68,14 @@ A Turbo tag stores its base stack in the base checkpoint's own directory
 (`minimax-h3-fl2va-comfy-pruned-int8/` plus the shared family bucket), so a
 machine that already has `minimax-h3-fl2va:comfy-pruned-int8` installed
 downloads only the ~1.96 GB adapter — and pulling a Turbo tag first means a
-later base pull downloads nothing. Removal ref-counts every file across the
-installed tags: removing a Turbo tag deletes only its adapter while the base
-is installed, and removing the base keeps every file a Turbo tag still uses.
+later base pull downloads nothing. Because the shared bytes genuinely
+constitute a complete base install, a Turbo-only pull also makes the base tag
+read as installed. Removal ref-counts every complete install: removing a
+Turbo tag deletes only its adapter while the base stack has another owner,
+and removing the base keeps every file a fully installed Turbo tag still
+uses (a Turbo tag missing its adapter owns nothing). Freeing everything is
+two removals — the Turbo tag, then the base — and each removal reports the
+kept files with the tags that still use them.
 
 Selecting a Turbo model resolves the base INT8 transformer, the tier's pinned
 adapter, and the tier's reviewed step count with no extra configuration. The

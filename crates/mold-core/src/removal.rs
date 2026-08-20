@@ -31,7 +31,19 @@ pub fn file_size(path: &str) -> u64 {
 pub fn build_ref_counts(config: &Config) -> HashMap<String, Vec<String>> {
     let mut refs: HashMap<String, Vec<String>> = HashMap::new();
     for (model_name, model_config) in &config.models {
-        for path in model_config.all_file_paths() {
+        let paths = model_config.all_file_paths();
+        // An owner must be complete on disk. A configured model missing any
+        // of its own files — an H3 Turbo tag whose adapter was deleted, a
+        // half-repaired install — is not runnable and must not hold shared
+        // components hostage when a sibling is removed. The model BEING
+        // removed is unaffected: `plan_removal` iterates its paths directly.
+        if paths
+            .iter()
+            .any(|path| !std::path::Path::new(path).exists())
+        {
+            continue;
+        }
+        for path in paths {
             refs.entry(path).or_default().push(model_name.clone());
         }
     }
@@ -305,10 +317,22 @@ mod tests {
         config
     }
 
+    fn materialize(paths: &[&std::path::Path]) {
+        for path in paths {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"weights").unwrap();
+        }
+    }
+
     #[test]
     fn build_ref_counts_counts_shared_files_across_models() {
         let tmp = tmp_dir("refs");
         let config = two_model_config(&tmp);
+        materialize(&[
+            &tmp.join("unique-a.gguf"),
+            &tmp.join("unique-b.gguf"),
+            &tmp.join("shared-vae.safetensors"),
+        ]);
         let refs = build_ref_counts(&config);
         let shared = tmp.join("shared-vae.safetensors");
         assert_eq!(refs[&shared.to_string_lossy().into_owned()].len(), 2);
@@ -316,12 +340,49 @@ mod tests {
             refs[&tmp.join("unique-a.gguf").to_string_lossy().into_owned()].len(),
             1
         );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A configured model missing any of its files on disk is not a
+    /// complete install and must not own shared components: a Turbo tag
+    /// whose adapter was deleted cannot strand the base stack it shares.
+    #[test]
+    fn incomplete_configured_models_do_not_own_shared_files() {
+        let tmp = tmp_dir("incomplete");
+        let config = two_model_config(&tmp);
+        // model-b's transformer is missing; only model-a is complete.
+        materialize(&[
+            &tmp.join("unique-a.gguf"),
+            &tmp.join("shared-vae.safetensors"),
+        ]);
+
+        let refs = build_ref_counts(&config);
+        let shared = tmp.join("shared-vae.safetensors");
+        assert_eq!(
+            refs[&shared.to_string_lossy().into_owned()],
+            vec!["model-a".to_string()],
+            "the half-installed model-b must not count as an owner"
+        );
+
+        let plan = plan_removal(&config, "model-a");
+        assert!(
+            plan.shared_files.is_empty(),
+            "nothing runnable still uses the VAE: {:?}",
+            plan.shared_files
+        );
+        assert_eq!(plan.unique_files.len(), 2, "transformer + VAE both unique");
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
     fn plan_classifies_unique_and_shared_files() {
         let tmp = tmp_dir("plan");
         let config = two_model_config(&tmp);
+        materialize(&[
+            &tmp.join("unique-a.gguf"),
+            &tmp.join("unique-b.gguf"),
+            &tmp.join("shared-vae.safetensors"),
+        ]);
 
         let plan = plan_removal(&config, "model-a");
         assert_eq!(plan.model, "model-a");
@@ -330,6 +391,7 @@ mod tests {
         assert_eq!(plan.shared_files.len(), 1, "the VAE is shared");
         assert!(plan.shared_files[0].0.ends_with("shared-vae.safetensors"));
         assert_eq!(plan.shared_files[0].1, vec!["model-b".to_string()]);
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
@@ -363,8 +425,13 @@ mod tests {
     #[test]
     fn execute_removal_reports_missing_files_as_warnings() {
         let tmp = tmp_dir("missing");
-        // Files never created — every unique path is already gone.
+        // model-a's unique transformer is already gone; model-b stays a
+        // complete install so the shared VAE keeps a real owner.
         let config = two_model_config(&tmp);
+        materialize(&[
+            &tmp.join("unique-b.gguf"),
+            &tmp.join("shared-vae.safetensors"),
+        ]);
         let plan = plan_removal(&config, "model-a");
         let outcome = execute_removal(&config, &plan);
 

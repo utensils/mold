@@ -130,6 +130,16 @@ pub fn base_compact_model(model: &str) -> Option<&'static str> {
 ///
 /// Takes the exact manifest name (already canonical inside `storage_path`),
 /// deliberately not `resolve_model_name`, so the mapping stays a pure lookup.
+///
+/// Deliberate consequence: after a Turbo-only pull, the base tag also reads
+/// as installed everywhere presence is the authority (models list, removal
+/// ownership, `AlreadyAvailable`), because its complete sha-verified file set
+/// genuinely is on disk. A Turbo-only install and an explicit base+Turbo
+/// install are byte-identical, so no rule can treat them differently without
+/// inventing a new installation-receipt mechanism; the honest reading is
+/// that the base IS installed and runnable. Full cleanup is therefore two
+/// removals — the Turbo tag, then the base — and each removal reports the
+/// kept files with the tags that still use them.
 pub fn storage_identity(name: &str) -> &str {
     if REVIEWED_TURBO_MANIFEST_TIERS
         .iter()
@@ -3716,13 +3726,15 @@ mod tests {
     /// Removal ref-counting must protect the shared base stack in both
     /// directions: removing a Turbo tag deletes only its adapter, and
     /// removing the base while a Turbo tag is installed keeps every shared
-    /// file, naming the tag that still uses it.
+    /// file, naming the tag that still uses it. A half-installed Turbo tag
+    /// (its adapter deleted) is not a complete install and owns nothing.
     #[test]
     fn turbo_removal_refcounts_protect_the_shared_base_stack() {
         use crate::removal::plan_removal;
         use crate::{Config, ModelConfig};
 
-        let root = std::path::Path::new("/models");
+        let root =
+            std::env::temp_dir().join(format!("mold-h3-turbo-removal-{}", std::process::id()));
         let base_manifest = find_manifest(FL2VA_COMFY).unwrap();
         let tier = &REVIEWED_TURBO_MANIFEST_TIERS[0];
         let turbo_manifest = find_manifest(tier.model).unwrap();
@@ -3737,11 +3749,19 @@ mod tests {
                 .to_string()
         };
 
+        let adapter_path = path_of(turbo_manifest, ModelComponent::DistilledLora);
+        let transformer_path = path_of(base_manifest, ModelComponent::Transformer);
+        for path in [&adapter_path, &transformer_path] {
+            let path = std::path::Path::new(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"weights").unwrap();
+        }
+
         let mut config = Config::default();
         config.models.insert(
             FL2VA_COMFY.to_string(),
             ModelConfig {
-                transformer: Some(path_of(base_manifest, ModelComponent::Transformer)),
+                transformer: Some(transformer_path.clone()),
                 ..ModelConfig::default()
             },
         );
@@ -3749,13 +3769,10 @@ mod tests {
             tier.model.to_string(),
             ModelConfig {
                 transformer: Some(path_of(turbo_manifest, ModelComponent::Transformer)),
-                distilled_lora: Some(path_of(turbo_manifest, ModelComponent::DistilledLora)),
+                distilled_lora: Some(adapter_path.clone()),
                 ..ModelConfig::default()
             },
         );
-
-        let adapter_path = path_of(turbo_manifest, ModelComponent::DistilledLora);
-        let transformer_path = path_of(base_manifest, ModelComponent::Transformer);
 
         let plan = plan_removal(&config, tier.model);
         let unique: Vec<&str> = plan
@@ -3780,6 +3797,22 @@ mod tests {
             .iter()
             .any(|(path, used_by)| path == &transformer_path
                 && used_by == &vec![tier.model.to_string()]));
+
+        // Delete the adapter: the Turbo tag is now half-installed and must
+        // stop owning the base stack — removing the base frees it.
+        std::fs::remove_file(&adapter_path).unwrap();
+        let plan = plan_removal(&config, FL2VA_COMFY);
+        assert!(
+            plan.shared_files.is_empty(),
+            "a Turbo tag without its adapter is not an owner: {:?}",
+            plan.shared_files
+        );
+        assert!(plan
+            .unique_files
+            .iter()
+            .any(|(path, _)| path == &transformer_path));
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
