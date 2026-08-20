@@ -214,28 +214,39 @@ mod tests {
 
     #[test]
     fn ref_counts_shared_file() {
+        // Ownership requires a complete install, so the files must exist.
+        let tmp = make_tmp_dir("ref-counts");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let unique_a = tmp.join("unique-a.gguf");
+        let unique_b = tmp.join("unique-b.gguf");
+        let shared_vae = tmp.join("shared-vae.safetensors");
+        for path in [&unique_a, &unique_b, &shared_vae] {
+            std::fs::write(path, b"weights").unwrap();
+        }
+
         let mut config = Config::default();
         config.models.insert(
             "model-a".into(),
             ModelConfig {
-                transformer: Some("/unique-a.gguf".into()),
-                vae: Some("/shared-vae.safetensors".into()),
+                transformer: Some(unique_a.to_string_lossy().into_owned()),
+                vae: Some(shared_vae.to_string_lossy().into_owned()),
                 ..Default::default()
             },
         );
         config.models.insert(
             "model-b".into(),
             ModelConfig {
-                transformer: Some("/unique-b.gguf".into()),
-                vae: Some("/shared-vae.safetensors".into()),
+                transformer: Some(unique_b.to_string_lossy().into_owned()),
+                vae: Some(shared_vae.to_string_lossy().into_owned()),
                 ..Default::default()
             },
         );
 
         let refs = build_ref_counts(&config);
-        assert_eq!(refs["/shared-vae.safetensors"].len(), 2);
-        assert_eq!(refs["/unique-a.gguf"].len(), 1);
-        assert_eq!(refs["/unique-b.gguf"].len(), 1);
+        assert_eq!(refs[&shared_vae.to_string_lossy().into_owned()].len(), 2);
+        assert_eq!(refs[&unique_a.to_string_lossy().into_owned()].len(), 1);
+        assert_eq!(refs[&unique_b.to_string_lossy().into_owned()].len(), 1);
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
@@ -775,6 +786,78 @@ mod tests {
                 "shared VAE should be referenced by at least 2 models, got: {vae_refs:?}"
             );
         }
+
+        std::env::remove_var("MOLD_MODELS_DIR");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A Turbo-only H3 pull leaves the base tag genuinely installed — the
+    /// complete sha-verified base stack is on disk at the base's own paths —
+    /// so removing the Turbo tag deletes only its adapter and reports the
+    /// stack as kept, used by the base. Removing the base afterwards frees
+    /// everything: the two states are byte-identical to an explicit
+    /// base+Turbo install, and deleting the stack on the first removal would
+    /// destroy an explicitly pulled base in that indistinguishable case.
+    #[test]
+    fn turbo_only_install_keeps_the_base_stack_until_the_base_is_removed() {
+        use crate::test_support::ENV_LOCK;
+
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = make_tmp_dir("turbo-only");
+
+        let tier = &mold_core::minimax_h3::REVIEWED_TURBO_MANIFEST_TIERS[0];
+        let turbo_manifest = mold_core::manifest::find_manifest(tier.model).unwrap();
+        let mut adapter_path = None;
+        for file in &turbo_manifest.files {
+            let path = tmp.join(mold_core::manifest::storage_path(turbo_manifest, file));
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(&path, b"test").unwrap();
+            mold_core::download::write_sha256_marker(&path, "deadbeef").unwrap();
+            if file.component == mold_core::manifest::ModelComponent::DistilledLora {
+                adapter_path = Some(path.to_string_lossy().into_owned());
+            }
+        }
+        let adapter_path = adapter_path.expect("the Turbo manifest pins an adapter");
+        std::env::set_var("MOLD_MODELS_DIR", &tmp);
+
+        let config = Config::default();
+        assert!(config.manifest_model_is_downloaded(tier.model));
+        assert!(
+            config.manifest_model_is_downloaded(mold_core::minimax_h3::FL2VA_COMFY),
+            "the shared bytes constitute a complete base install"
+        );
+
+        let plan = mold_core::removal::plan_removal(&config, tier.model);
+        let unique: Vec<&str> = plan
+            .unique_files
+            .iter()
+            .map(|(path, _)| path.as_str())
+            .collect();
+        assert_eq!(
+            unique,
+            vec![adapter_path.as_str()],
+            "the Turbo removal deletes only its adapter"
+        );
+        assert!(
+            plan.shared_files
+                .iter()
+                .all(|(_, used_by)| used_by
+                    .contains(&mold_core::minimax_h3::FL2VA_COMFY.to_string())),
+            "every kept file names the base as its owner"
+        );
+
+        // Removing the adapter (what executing the plan does) leaves the
+        // base as the sole install; removing it then frees the stack.
+        std::fs::remove_file(&adapter_path).unwrap();
+        let plan = mold_core::removal::plan_removal(&config, mold_core::minimax_h3::FL2VA_COMFY);
+        assert!(
+            plan.shared_files.is_empty(),
+            "no other install references the stack: {:?}",
+            plan.shared_files
+        );
+        assert!(!plan.unique_files.is_empty());
 
         std::env::remove_var("MOLD_MODELS_DIR");
         let _ = std::fs::remove_dir_all(&tmp);

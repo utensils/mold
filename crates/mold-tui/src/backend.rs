@@ -909,16 +909,15 @@ fn build_request(
 }
 
 /// Build a map of file_path -> list of model names that reference it.
+///
+/// Delegates to `mold_core::removal::build_ref_counts` so the TUI's removal
+/// flow shares the CLI/server ownership rules: manifest-backed installs
+/// without a config entry still count as owners, and a configured model
+/// missing files on disk does not.
 pub(crate) fn build_ref_counts(
     config: &mold_core::Config,
 ) -> std::collections::HashMap<String, Vec<String>> {
-    let mut refs: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
-    for (model_name, model_config) in &config.models {
-        for path in model_config.all_file_paths() {
-            refs.entry(path).or_default().push(model_name.clone());
-        }
-    }
-    refs
+    mold_core::removal::build_ref_counts(config)
 }
 
 /// Collect hf-hub cache blob paths for a model's unique files so we can delete them
@@ -1102,17 +1101,28 @@ mod tests {
 
     #[test]
     fn build_ref_counts_tracks_shared_files() {
+        // Ownership requires a complete install (the core rule this
+        // delegates to), so the referenced files must exist on disk.
+        let tmp = std::env::temp_dir().join(format!("mold-tui-refs-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let a_transformer = tmp.join("a-transformer.safetensors");
+        let b_transformer = tmp.join("b-transformer.safetensors");
+        let shared_vae = tmp.join("shared-vae.safetensors");
+        for path in [&a_transformer, &b_transformer, &shared_vae] {
+            std::fs::write(path, b"weights").unwrap();
+        }
+
         let mut config = mold_core::Config::default();
 
         let model_a = mold_core::ModelConfig {
-            transformer: Some("/models/a/transformer.safetensors".to_string()),
-            vae: Some("/models/shared/vae.safetensors".to_string()),
+            transformer: Some(a_transformer.to_string_lossy().into_owned()),
+            vae: Some(shared_vae.to_string_lossy().into_owned()),
             ..Default::default()
         };
 
         let model_b = mold_core::ModelConfig {
-            transformer: Some("/models/b/transformer.safetensors".to_string()),
-            vae: Some("/models/shared/vae.safetensors".to_string()),
+            transformer: Some(b_transformer.to_string_lossy().into_owned()),
+            vae: Some(shared_vae.to_string_lossy().into_owned()),
             ..Default::default()
         };
 
@@ -1122,22 +1132,31 @@ mod tests {
         let refs = build_ref_counts(&config);
 
         // Unique files should have exactly one reference
-        let a_refs = refs.get("/models/a/transformer.safetensors").unwrap();
+        let a_refs = refs
+            .get(&a_transformer.to_string_lossy().into_owned())
+            .unwrap();
         assert_eq!(a_refs.len(), 1);
         assert!(a_refs.contains(&"model-a".to_string()));
 
         // Shared files should have both models
-        let vae_refs = refs.get("/models/shared/vae.safetensors").unwrap();
+        let vae_refs = refs
+            .get(&shared_vae.to_string_lossy().into_owned())
+            .unwrap();
         assert_eq!(vae_refs.len(), 2);
         assert!(vae_refs.contains(&"model-a".to_string()));
         assert!(vae_refs.contains(&"model-b".to_string()));
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
     fn build_ref_counts_empty_config() {
         let config = mold_core::Config::default();
         let refs = build_ref_counts(&config);
-        assert!(refs.is_empty());
+        // No configured entries: any owners present come from manifest-backed
+        // installs discovered on this machine's disk, and every listed path
+        // must name at least one owner.
+        assert!(refs.values().all(|owners| !owners.is_empty()));
     }
 
     #[test]

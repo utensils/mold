@@ -329,7 +329,16 @@ fn is_model_specific_component(component: ModelComponent) -> bool {
 /// HF filename paths (e.g., `text_encoder/model-00001-of-00003.safetensors`) are preserved as-is,
 /// creating subdirectories under the target directory.
 pub fn storage_path(manifest: &ModelManifest, file: &ModelFile) -> PathBuf {
-    let sanitized_name = manifest.name.replace(':', "-");
+    // H3 Turbo tags are the base compact stack plus one shared adapter, so
+    // their model-specific files live in the base checkpoint's directory —
+    // a machine holding the base pulls only the adapter, and removal
+    // ref-counting protects the shared bytes in both directions.
+    let storage_name = if manifest.family == crate::minimax_h3::FAMILY {
+        crate::minimax_h3::storage_identity(&manifest.name)
+    } else {
+        manifest.name.as_str()
+    };
+    let sanitized_name = storage_name.replace(':', "-");
 
     // H3's official and Comfy transformers use the same task architecture
     // config. Keep one copy per task across layouts while the task-specific
