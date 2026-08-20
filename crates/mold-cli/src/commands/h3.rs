@@ -248,7 +248,13 @@ pub(crate) fn prepare_authoring(
     let (width, height) = match (width, height, inferred_dimensions) {
         (Some(width), Some(height), _) => (Some(width), Some(height)),
         (None, None, Some((source_width, source_height))) => {
-            let (width, height) = minimax_h3::recommended_dimensions(source_width, source_height);
+            // Compact layouts (base + Turbo tags) must submit the fixed
+            // reviewed envelope regardless of source aspect; only the
+            // official BF16 reference keeps the aspect-derived canvas. This
+            // promote path runs before `effective_dimensions`, so it must
+            // apply the same layout policy.
+            let (width, height) =
+                minimax_h3::source_fit_dimensions(model, source_width, source_height);
             (Some(width), Some(height))
         }
         (None, None, None) => (None, None),
@@ -767,6 +773,75 @@ mod tests {
         let keyframe = &prepared.keyframes.unwrap()[0];
         assert_eq!(keyframe.frame, 123);
         assert_eq!(keyframe.name.as_deref(), Some("closing.png"));
+    }
+
+    /// The authoring path promotes inferred dimensions to explicit values
+    /// before `effective_dimensions` runs, so it must apply the same layout
+    /// policy: a compact tag submits the fixed reviewed envelope regardless
+    /// of source aspect, and only the official BF16 reference keeps the
+    /// aspect-derived canvas.
+    #[test]
+    fn boundary_image_dimensions_keep_the_compact_envelope() {
+        let dir = tempfile::tempdir().unwrap();
+        let square = dir.path().join("square.png");
+        let mut png = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut png)
+            .write_image(
+                &[0_u8; 256 * 256 * 3],
+                256,
+                256,
+                image::ExtendedColorType::Rgb8,
+            )
+            .unwrap();
+        std::fs::write(&square, png).unwrap();
+
+        for model in [
+            minimax_h3::FL2VA_COMFY,
+            minimax_h3::FL2VA_COMFY_TURBO_8STEP,
+            minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P,
+        ] {
+            let prepared = prepare_authoring(
+                model,
+                minimax_h3::FAMILY,
+                Some(5.0),
+                None,
+                None,
+                None,
+                None,
+                Some(&square),
+                None,
+                None,
+                &[],
+                None,
+            )
+            .unwrap();
+            assert_eq!(
+                prepared.width.zip(prepared.height),
+                Some((minimax_h3::DEFAULT_WIDTH, minimax_h3::DEFAULT_HEIGHT)),
+                "{model}"
+            );
+        }
+
+        let prepared = prepare_authoring(
+            minimax_h3::FL2VA_OFFICIAL,
+            minimax_h3::FAMILY,
+            Some(5.0),
+            None,
+            None,
+            None,
+            None,
+            Some(&square),
+            None,
+            None,
+            &[],
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            prepared.width.zip(prepared.height),
+            Some(minimax_h3::recommended_dimensions(256, 256)),
+            "the official reference keeps the aspect-derived canvas"
+        );
     }
 
     #[test]
