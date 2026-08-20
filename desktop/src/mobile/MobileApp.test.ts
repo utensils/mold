@@ -5,7 +5,12 @@ import { IDBFactory } from "fake-indexeddb";
 import { installMemoryLocalStorage } from "../lib/testSupport/memoryLocalStorage";
 import type { GalleryImage, ModelEntry, ServerStatus } from "../lib/api/types";
 import { applyModelDefaults, type GenerateForm } from "../lib/generateForm";
-import { loadCachedGallery, storeCachedGallery, storeCachedGalleryMedia } from "./galleryCache";
+import {
+  loadCachedGallery,
+  storeCachedGallery,
+  storeCachedGalleryMedia,
+  storeCachedHostPresentation,
+} from "./galleryCache";
 
 const {
   invoke,
@@ -372,6 +377,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   wrapper?.unmount();
   wrapper = null;
   document.body.innerHTML = "";
@@ -5602,6 +5608,365 @@ describe("MobileApp primary navigation", () => {
 });
 
 describe("MobileApp gallery", () => {
+  it("reuses a cached print immediately while its host is offline", async () => {
+    Object.defineProperty(globalThis, "indexedDB", {
+      configurable: true,
+      value: new IDBFactory(),
+    });
+    localStorage.setItem(
+      "mold.mobile.hosts.v1",
+      JSON.stringify([
+        {
+          id: "url-derived-id",
+          instanceId: "studio-instance",
+          name: "Studio",
+          baseUrl: target.baseUrl,
+          online: false,
+        },
+      ]),
+    );
+    await storeCachedGallery("studio-instance", [print]);
+    await storeCachedHostPresentation({
+      hostId: "studio-instance",
+      updatedAt: 1,
+      instanceId: "studio-instance",
+      serverVersion: status.version,
+      models: [model],
+      capabilities: null,
+    });
+    await storeCachedGalleryMedia(
+      "studio-instance",
+      print.filename,
+      "thumbnail",
+      new Blob(["cached thumbnail"], { type: "image/webp" }),
+    );
+    apiJsonTo.mockRejectedValue(new Error("offline"));
+    apiFetchTo.mockRejectedValue(new Error("offline"));
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await vi.waitFor(() => expect(wrapper?.find("[data-test='gallery-item']").exists()).toBe(true));
+    await wrapper.get("[data-test='gallery-item']").trigger("click");
+    await wrapper.get("[data-test='gallery-viewer-reuse']").trigger("click");
+    await flushPromises();
+
+    await vi.waitFor(() =>
+      expect(wrapper?.find("[data-test='gallery-viewer']").exists()).toBe(false),
+    );
+    expect(wrapper.get("#mobile-prompt").element).toHaveProperty(
+      "value",
+      "a ship crossing violet lightning",
+    );
+    const reusedForm = wrapper.getComponent(MobileLoraControls).props("form") as GenerateForm;
+    expect(reusedForm).toMatchObject({ seed: "77", width: 768, height: 512, steps: 28 });
+  });
+
+  it("closes during a pending reuse and ignores its late host response", async () => {
+    Object.defineProperty(globalThis, "indexedDB", {
+      configurable: true,
+      value: new IDBFactory(),
+    });
+    localStorage.setItem(
+      "mold.mobile.hosts.v1",
+      JSON.stringify([
+        {
+          id: "url-derived-id",
+          instanceId: "studio-instance",
+          name: "Studio",
+          baseUrl: target.baseUrl,
+          online: false,
+        },
+      ]),
+    );
+    await storeCachedGallery("studio-instance", [print]);
+    await storeCachedGalleryMedia(
+      "studio-instance",
+      print.filename,
+      "thumbnail",
+      new Blob(["cached thumbnail"], { type: "image/webp" }),
+    );
+    const lateStatus = deferred<ServerStatus>();
+    const lateModels = deferred<ModelEntry[]>();
+    let statusCalls = 0;
+    let modelCalls = 0;
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") {
+        statusCalls += 1;
+        return statusCalls === 1 ? Promise.reject(new Error("offline")) : lateStatus.promise;
+      }
+      if (path === "/api/models") {
+        modelCalls += 1;
+        return modelCalls === 1 ? Promise.reject(new Error("offline")) : lateModels.promise;
+      }
+      if (path === "/api/capabilities") return Promise.resolve(null);
+      if (path === "/api/activity") {
+        return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
+      }
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    apiFetchTo.mockRejectedValue(new Error("offline"));
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await vi.waitFor(() => expect(wrapper?.find("[data-test='gallery-item']").exists()).toBe(true));
+    await wrapper.get("[data-test='gallery-item']").trigger("click");
+    await wrapper.get("[data-test='gallery-viewer-reuse']").trigger("click");
+    await vi.waitFor(() =>
+      expect(wrapper?.get("[data-test='gallery-viewer-reuse']").text()).toBe("Loading settings…"),
+    );
+
+    await wrapper.get("[data-test='gallery-viewer-close']").trigger("click");
+    expect(wrapper.find("[data-test='gallery-viewer']").exists()).toBe(false);
+    lateStatus.resolve({ ...status, instance_id: "studio-instance" });
+    lateModels.resolve([model]);
+    await flushPromises();
+
+    expect(wrapper.get("[data-test='mobile-tab-gallery']").attributes("aria-current")).toBe("page");
+    await wrapper.get("[data-test='mobile-tab-generate']").trigger("click");
+    expect(wrapper.get("#mobile-prompt").element).toHaveProperty("value", "");
+  });
+
+  it("closes during Use as source and ignores its late media response", async () => {
+    const still: GalleryImage = { ...print, filename: "source.png", format: "png" };
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/gallery") return Promise.resolve([still]);
+      if (path === "/api/activity") {
+        return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
+      }
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await vi.waitFor(() => expect(wrapper?.find("[data-test='gallery-item']").exists()).toBe(true));
+    await wrapper.get("[data-test='gallery-item']").trigger("click");
+    const lateMedia = deferred<Response>();
+    apiFetchTo.mockReturnValue(lateMedia.promise);
+
+    await wrapper.get("[data-test='gallery-viewer-use-source']").trigger("click");
+    await vi.waitFor(() =>
+      expect(wrapper?.get("[data-test='gallery-viewer-use-source']").text()).toBe(
+        "Loading source…",
+      ),
+    );
+    await wrapper.get("[data-test='gallery-viewer-close']").trigger("click");
+    lateMedia.resolve({
+      headers: new Headers(),
+      blob: () => Promise.resolve(new Blob(["late source"], { type: "image/png" })),
+    } as Response);
+    await flushPromises();
+
+    expect(wrapper.get("[data-test='mobile-tab-gallery']").attributes("aria-current")).toBe("page");
+    await wrapper.get("[data-test='mobile-tab-generate']").trigger("click");
+    const liveForm = wrapper.getComponent(MobileLoraControls).props("form") as GenerateForm;
+    expect(liveForm.sourceImage).toBeNull();
+  });
+
+  it("labels retained in-memory models as saved after the host goes offline", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await vi.waitFor(() => expect(wrapper?.find("[data-test='gallery-item']").exists()).toBe(true));
+    await wrapper.get("[data-test='gallery-item']").trigger("click");
+    const statusCalls = apiJsonTo.mock.calls.filter(([, path]) => path === "/api/status").length;
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") return Promise.reject(new Error("offline"));
+      if (path === "/api/activity") {
+        return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
+      }
+      return Promise.reject(new Error("offline"));
+    });
+    window.dispatchEvent(new Event("pageshow"));
+    await vi.waitFor(() =>
+      expect(
+        apiJsonTo.mock.calls.filter(([, path]) => path === "/api/status").length,
+      ).toBeGreaterThan(statusCalls),
+    );
+
+    await wrapper.get("[data-test='gallery-viewer-reuse']").trigger("click");
+    await vi.waitFor(() =>
+      expect(wrapper?.find("[data-test='gallery-viewer']").exists()).toBe(false),
+    );
+
+    expect(wrapper.get("[data-test='mobile-generation-summary']").text()).toContain(
+      "Saved model information was used and is refreshing in the background.",
+    );
+  });
+
+  it("times out a reuse even when the transport ignores AbortSignal", async () => {
+    Object.defineProperty(globalThis, "indexedDB", {
+      configurable: true,
+      value: new IDBFactory(),
+    });
+    localStorage.setItem(
+      "mold.mobile.hosts.v1",
+      JSON.stringify([
+        {
+          id: "url-derived-id",
+          instanceId: "studio-instance",
+          name: "Studio",
+          baseUrl: target.baseUrl,
+          online: false,
+        },
+      ]),
+    );
+    await storeCachedGallery("studio-instance", [print]);
+    await storeCachedGalleryMedia(
+      "studio-instance",
+      print.filename,
+      "thumbnail",
+      new Blob(["cached thumbnail"], { type: "image/webp" }),
+    );
+    apiJsonTo.mockRejectedValue(new Error("offline"));
+    apiFetchTo.mockRejectedValue(new Error("offline"));
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await vi.waitFor(() => expect(wrapper?.find("[data-test='gallery-item']").exists()).toBe(true));
+    await wrapper.get("[data-test='gallery-item']").trigger("click");
+    apiJsonTo.mockImplementation(() => new Promise(() => {}));
+    const realSetTimeout = globalThis.setTimeout;
+    const timeout = vi.spyOn(globalThis, "setTimeout").mockImplementation((handler, delay) => {
+      if (delay === 9_000) {
+        queueMicrotask(() => (handler as () => void)());
+        return 1 as unknown as ReturnType<typeof setTimeout>;
+      }
+      return realSetTimeout(handler, delay);
+    });
+
+    await wrapper.get("[data-test='gallery-viewer-reuse']").trigger("click");
+    await vi.waitFor(() =>
+      expect(wrapper?.get("[data-test='gallery-viewer-reuse']").text()).toBe("Reuse settings"),
+    );
+    timeout.mockRestore();
+
+    expect(wrapper.get("[role='alert']").text()).toContain(
+      "Loading saved settings from Studio timed out. Try again.",
+    );
+  });
+
+  it("finishes cached reuse when source restoration ignores AbortSignal", async () => {
+    Object.defineProperty(globalThis, "indexedDB", {
+      configurable: true,
+      value: new IDBFactory(),
+    });
+    localStorage.setItem(
+      "mold.mobile.hosts.v1",
+      JSON.stringify([
+        {
+          id: "url-derived-id",
+          instanceId: "studio-instance",
+          name: "Studio",
+          baseUrl: target.baseUrl,
+          online: false,
+        },
+      ]),
+    );
+    const conditioned = {
+      ...print,
+      metadata: { ...print.metadata, source_image_name: "missing-source.png" },
+    };
+    await storeCachedGallery("studio-instance", [conditioned]);
+    await storeCachedHostPresentation({
+      hostId: "studio-instance",
+      updatedAt: Date.now(),
+      instanceId: "studio-instance",
+      serverVersion: status.version,
+      models: [model],
+      capabilities: null,
+    });
+    await storeCachedGalleryMedia(
+      "studio-instance",
+      conditioned.filename,
+      "thumbnail",
+      new Blob(["cached thumbnail"], { type: "image/webp" }),
+    );
+    apiJsonTo.mockRejectedValue(new Error("offline"));
+    apiFetchTo.mockRejectedValue(new Error("offline"));
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await vi.waitFor(() => expect(wrapper?.find("[data-test='gallery-item']").exists()).toBe(true));
+    await wrapper.get("[data-test='gallery-item']").trigger("click");
+    apiFetchTo.mockImplementation(() => new Promise(() => {}));
+    const realSetTimeout = globalThis.setTimeout;
+    const timeout = vi.spyOn(globalThis, "setTimeout").mockImplementation((handler, delay) => {
+      if (delay === 9_000) {
+        queueMicrotask(() => (handler as () => void)());
+        return 1 as unknown as ReturnType<typeof setTimeout>;
+      }
+      return realSetTimeout(handler, delay);
+    });
+
+    await wrapper.get("[data-test='gallery-viewer-reuse']").trigger("click");
+    await vi.waitFor(() =>
+      expect(wrapper?.find("[data-test='gallery-viewer']").exists()).toBe(false),
+    );
+    timeout.mockRestore();
+
+    expect(wrapper.get("[data-test='mobile-generation-summary']").text()).toContain(
+      "The original source image is unavailable. Reattach it before developing.",
+    );
+  });
+
+  it("does not trust cached model data from a different known server version", async () => {
+    Object.defineProperty(globalThis, "indexedDB", {
+      configurable: true,
+      value: new IDBFactory(),
+    });
+    localStorage.setItem(
+      "mold.mobile.hosts.v1",
+      JSON.stringify([
+        {
+          id: "url-derived-id",
+          instanceId: "studio-instance",
+          name: "Studio",
+          baseUrl: target.baseUrl,
+          version: "2.0.0",
+          online: false,
+        },
+      ]),
+    );
+    await storeCachedGallery("studio-instance", [print]);
+    await storeCachedHostPresentation({
+      hostId: "studio-instance",
+      updatedAt: 1,
+      instanceId: "studio-instance",
+      serverVersion: "1.0.0",
+      models: [model],
+      capabilities: null,
+    });
+    await storeCachedGalleryMedia(
+      "studio-instance",
+      print.filename,
+      "thumbnail",
+      new Blob(["cached thumbnail"], { type: "image/webp" }),
+    );
+    apiJsonTo.mockRejectedValue(new Error("offline"));
+    apiFetchTo.mockRejectedValue(new Error("offline"));
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await vi.waitFor(() => expect(wrapper?.find("[data-test='gallery-item']").exists()).toBe(true));
+    await wrapper.get("[data-test='gallery-item']").trigger("click");
+    await wrapper.get("[data-test='gallery-viewer-reuse']").trigger("click");
+    await vi.waitFor(() =>
+      expect(wrapper?.find("[data-test='gallery-viewer-reuse']").attributes("aria-busy")).toBe(
+        "false",
+      ),
+    );
+
+    expect(wrapper.find("[data-test='gallery-viewer']").exists()).toBe(true);
+    expect(wrapper.get("[role='alert']").text()).toContain("Couldn’t load models from Studio");
+  });
+
   it("renders instance-scoped cached gallery metadata and thumbnails while its host is offline", async () => {
     Object.defineProperty(globalThis, "indexedDB", {
       configurable: true,
@@ -6439,7 +6804,11 @@ describe("MobileApp gallery", () => {
       ),
     );
 
-    expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/gallery/image/source%20print.png");
+    expect(apiFetchTo).toHaveBeenCalledWith(
+      target,
+      "/api/gallery/image/source%20print.png",
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
     expect(wrapper.get("[data-test='mobile-source-preview']").attributes("alt")).toBe(
       "source print.png",
     );

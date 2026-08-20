@@ -3,14 +3,18 @@ import { beforeEach, describe, expect, it } from "vitest";
 import type { GalleryImage } from "../lib/api/types";
 import type { MobileGalleryImage } from "./libraryOrganization";
 import {
+  captureCachedHostFence,
   loadCachedGallery,
   loadCachedGalleryMedia,
+  loadCachedHostPresentation,
   clearCachedGalleryHosts,
   patchCachedGalleryPrints,
   removeCachedGalleryPrints,
   storeCachedGallery,
   storeCachedGalleryMedia,
+  storeCachedHostPresentation,
 } from "./galleryCache";
+import type { ModelEntry } from "../lib/api/types";
 
 function print(filename: string, timestamp: number): GalleryImage {
   return {
@@ -58,6 +62,48 @@ describe("mobile gallery cache", () => {
     );
   });
 
+  it("persists non-secret model presentation data under the server identity", async () => {
+    const model = {
+      name: "flux-dev:q8",
+      family: "flux",
+      downloaded: true,
+    } as ModelEntry;
+    await storeCachedHostPresentation({
+      hostId: "instance-1",
+      updatedAt: 42,
+      instanceId: "instance-1",
+      serverVersion: "1.2.3",
+      models: [model],
+      capabilities: null,
+    });
+
+    const restored = await loadCachedHostPresentation("instance-1");
+    expect(restored).toMatchObject({
+      instanceId: "instance-1",
+      serverVersion: "1.2.3",
+      models: [model],
+    });
+    expect(JSON.stringify(restored)).not.toContain("apiKey");
+  });
+
+  it("does not resurrect a presentation when a host is cleared during refresh", async () => {
+    const fence = captureCachedHostFence("removed-instance");
+    await clearCachedGalleryHosts(["removed-instance"]);
+    await storeCachedHostPresentation(
+      {
+        hostId: "removed-instance",
+        updatedAt: 42,
+        instanceId: "removed-instance",
+        serverVersion: "1.2.3",
+        models: [],
+        capabilities: null,
+      },
+      fence,
+    );
+
+    expect(await loadCachedHostPresentation("removed-instance")).toBeNull();
+  });
+
   it("removes metadata and thumbnail bytes after a successful delete", async () => {
     await storeCachedGallery("studio", [print("keep.png", 2), print("delete.png", 1)]);
     await storeCachedGalleryMedia("studio", "delete.png", "thumbnail", new Blob(["thumb"]));
@@ -102,6 +148,14 @@ describe("mobile gallery cache", () => {
         }),
     } as Blob;
     const write = storeCachedGalleryMedia("old-instance", "old.png", "thumbnail", pendingBlob);
+    await storeCachedHostPresentation({
+      hostId: "old-instance",
+      updatedAt: 1,
+      instanceId: "old-instance",
+      serverVersion: "1.0.0",
+      models: [],
+      capabilities: null,
+    });
     await Promise.resolve();
 
     await clearCachedGalleryHosts(["old-instance"]);
@@ -110,6 +164,7 @@ describe("mobile gallery cache", () => {
 
     expect(await loadCachedGallery("old-instance")).toEqual([]);
     expect(await loadCachedGalleryMedia("old-instance", "old.png", "thumbnail")).toBeNull();
+    expect(await loadCachedHostPresentation("old-instance")).toBeNull();
   });
 });
 
