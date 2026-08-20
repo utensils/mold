@@ -1354,8 +1354,12 @@ fn build_canonical_private_fl2va_target_budget(
         checkpoint.fixed_transformer_max_device_weight_staging_bytes;
     // Both terms come from the authority that declared the adapter, so the
     // builder and `validate_target_budget` cannot disagree about its cost.
-    let turbo_adapter_device_bytes = turbo.map_or(0, |turbo| turbo.resident_device_bytes);
-    let turbo_adapter_host_staging_bytes = turbo.map_or(0, |turbo| turbo.host_staging_peak_bytes);
+    let turbo_adapter_device_bytes =
+        turbo.map_or(0, H3FactoryTurboAdapterAuthority::resident_device_bytes);
+    let turbo_adapter_device_staging_bytes =
+        turbo.map_or(0, H3FactoryTurboAdapterAuthority::device_staging_peak_bytes);
+    let turbo_adapter_host_staging_bytes =
+        turbo.map_or(0, H3FactoryTurboAdapterAuthority::host_staging_peak_bytes);
     let protected_block_device_bytes = checked_sum(
         checkpoint
             .blocks
@@ -1435,35 +1439,49 @@ fn build_canonical_private_fl2va_target_budget(
         packed_video_state_device_bytes,
         packed_audio_state_device_bytes,
     ])?;
-    let transformer_load_phase_device_bytes = checked_sum([
-        bounds.fixed_runtime_device_bytes,
-        checkpoint.fixed_transformer_protected_device_bytes,
-        qwen_output_state_device_bytes,
-        condition_latent_backing_device_bytes,
-        packed_layout_device_bytes,
-        packed_video_state_device_bytes,
-        packed_audio_state_device_bytes,
-        fixed_transformer_load_device_staging_bytes,
-        turbo_adapter_device_bytes,
-    ])?;
-    let denoise_phase_device_bytes = checked_sum([
-        bounds.fixed_runtime_device_bytes,
-        checkpoint.fixed_transformer_protected_device_bytes,
-        qwen_output_state_device_bytes,
-        condition_latent_backing_device_bytes,
-        packed_layout_device_bytes,
-        packed_video_state_device_bytes,
-        packed_audio_state_device_bytes,
-        denoise_tensor_copy_workspace_device_bytes,
-        crate::h3_factory::denoise_transient_workspace_device_bytes(
-            bounds.attention_workspace_device_bytes,
-            bounds.ffn_workspace_device_bytes,
-        ),
-        crate::h3_factory::denoise_hidden_activation_device_bytes(request.rows.total_packed_rows)?,
-        streamed_block_device_overlap_bytes,
-        max_device_weight_staging_bytes,
-        turbo_adapter_device_bytes,
-    ])?;
+    // Shared with `validate_target_budget`; see `H3TransformerLoadDeviceTerms`.
+    let transformer_load_phase_device_bytes =
+        crate::h3_factory::transformer_load_phase_device_bytes(
+            crate::h3_factory::H3TransformerLoadDeviceTerms {
+                fixed_runtime_device_bytes: bounds.fixed_runtime_device_bytes,
+                fixed_transformer_device_bytes: checkpoint.fixed_transformer_protected_device_bytes,
+                qwen_output_state_device_bytes,
+                condition_latent_backing_device_bytes,
+                packed_layout_device_bytes,
+                packed_video_state_device_bytes,
+                packed_audio_state_device_bytes,
+                // This path streams every block, so nothing is resident.
+                resident_block_device_bytes: 0,
+                fixed_transformer_load_device_staging_bytes,
+                turbo_adapter_device_bytes,
+                turbo_adapter_device_staging_bytes,
+            },
+        )?;
+    let denoise_phase_device_bytes =
+        crate::h3_factory::denoise_phase_device_bytes(crate::h3_factory::H3DenoiseDeviceTerms {
+            fixed_runtime_device_bytes: bounds.fixed_runtime_device_bytes,
+            fixed_transformer_device_bytes: checkpoint.fixed_transformer_protected_device_bytes,
+            qwen_output_state_device_bytes,
+            condition_latent_backing_device_bytes,
+            packed_layout_device_bytes,
+            packed_video_state_device_bytes,
+            packed_audio_state_device_bytes,
+            denoise_tensor_copy_workspace_device_bytes,
+            denoise_transient_workspace_device_bytes:
+                crate::h3_factory::denoise_transient_workspace_device_bytes(
+                    bounds.attention_workspace_device_bytes,
+                    bounds.ffn_workspace_device_bytes,
+                ),
+            denoise_hidden_activation_device_bytes:
+                crate::h3_factory::denoise_hidden_activation_device_bytes(
+                    request.rows.total_packed_rows,
+                )?,
+            resident_block_device_bytes: 0,
+            streamed_block_device_overlap_bytes,
+            prefetch_device_bytes: 0,
+            max_device_weight_staging_bytes,
+            turbo_adapter_device_bytes,
+        })?;
     let visual_decode_phase_device_bytes = checked_sum([
         bounds.fixed_runtime_device_bytes,
         retained_vaes,
@@ -1576,16 +1594,18 @@ fn build_canonical_private_fl2va_target_budget(
         schedule_host_bytes,
         noise_cpu_staging_host_bytes,
     ])?;
-    let transformer_load_phase_host_bytes = checked_sum([
-        attempt_host_bytes,
-        transformer_alive_metadata_host_bytes,
-        condition_backing_host_bytes,
-        packed_layout_host_bytes,
-        text_modality_tags_host_bytes,
-        schedule_host_bytes,
-        fixed_transformer_load_host_staging_bytes,
-        turbo_adapter_host_staging_bytes,
-    ])?;
+    let transformer_load_phase_host_bytes = crate::h3_factory::transformer_load_phase_host_bytes(
+        crate::h3_factory::H3TransformerLoadHostTerms {
+            attempt_host_bytes,
+            transformer_alive_metadata_host_bytes,
+            condition_backing_host_bytes,
+            packed_layout_host_bytes,
+            text_modality_tags_host_bytes,
+            schedule_host_bytes,
+            fixed_transformer_load_host_staging_bytes,
+            turbo_adapter_host_staging_bytes,
+        },
+    )?;
     let denoise_phase_host_bytes = checked_sum([
         attempt_host_bytes,
         transformer_alive_metadata_host_bytes,
@@ -1722,6 +1742,7 @@ fn build_canonical_private_fl2va_target_budget(
         max_device_weight_staging_bytes,
         fixed_transformer_load_device_staging_bytes,
         turbo_adapter_device_bytes,
+        turbo_adapter_device_staging_bytes,
         turbo_adapter_host_staging_bytes,
         vae_load_phase_device_bytes,
         qwen_encode_phase_device_bytes,

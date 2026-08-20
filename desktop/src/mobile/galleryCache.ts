@@ -1,4 +1,5 @@
 import type { GalleryImage } from "../lib/api/types";
+import type { MobileGalleryImage } from "./libraryOrganization";
 
 const DB_NAME = "mold-mobile-gallery-cache";
 const DB_VERSION = 2;
@@ -236,6 +237,30 @@ export async function removeCachedGalleryPrints(
       resolve();
     }
   });
+}
+
+/**
+ * Apply organization edits (title / favorite / tags / collections) to cached
+ * rows so an offline reopen shows what the user last saw. Bumps the host
+ * fence first, so a gallery listing fetched BEFORE the edit and still in
+ * flight cannot overwrite the patched record with its stale copy.
+ */
+export async function patchCachedGalleryPrints(
+  hostId: string,
+  patches: readonly { filename: string; patch: Partial<MobileGalleryImage> }[],
+): Promise<void> {
+  if (patches.length === 0) return;
+  hostMutationVersions.set(hostId, (hostMutationVersions.get(hostId) ?? 0) + 1);
+  const byFilename = new Map(patches.map(({ filename, patch }) => [filename, patch]));
+  const prints = await loadCachedGallery(hostId);
+  let changed = false;
+  const next = prints.map((print) => {
+    const patch = byFilename.get(print.filename);
+    if (!patch) return print;
+    changed = true;
+    return { ...print, ...patch };
+  });
+  if (changed) await storeCachedGallery(hostId, next);
 }
 
 export async function clearCachedGalleryHosts(hostIds: readonly string[]): Promise<void> {

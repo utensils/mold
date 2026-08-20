@@ -15,6 +15,7 @@ import { applyMetadataToForm, type GenerateForm } from "../lib/generateForm";
 import { emptyGuidanceOverrides } from "@studio/lib/guidanceOverrides";
 import { emptyWanRecipe } from "@studio/lib/wanRecipe";
 import { canonicalMinimaxH3ModelName, isMinimaxH3Identity } from "@studio/lib/minimaxH3Authoring";
+import { reusedPrintTitle } from "./libraryOrganization";
 
 /** The clip rail a sequence print reloads, plus what it could not give back. */
 export interface MobileSequenceReuse {
@@ -28,6 +29,9 @@ export interface MobileSequenceReuse {
 export interface MobileGalleryReuseResult {
   modelName: string;
   substitutedModel: boolean;
+  /** The print's saved title, restored into the Create title field (`""`
+   * when the print was untitled — restoring clears a stale title too). */
+  title: string;
   /** Non-null only for a print stitched from a sequence (`metadata.chain`). */
   sequence: MobileSequenceReuse | null;
   /** Present when durable metadata claims a sequence for a model partition
@@ -76,6 +80,7 @@ export function applyMobileGalleryMetadata(
     return {
       modelName: canonicalRecordedModel ?? metadata.model,
       substitutedModel: false,
+      title: reusedPrintTitle(metadata),
       sequence: null,
       sequenceUnsupportedReason:
         "This print records a MiniMax H3 checkpoint, which cannot render a clip sequence.",
@@ -162,6 +167,7 @@ export function applyMobileGalleryMetadata(
   return {
     modelName: form.model,
     substitutedModel,
+    title: reusedPrintTitle(metadata),
     sequence,
   };
 }

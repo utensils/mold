@@ -192,7 +192,7 @@ require_text crates/mold-inference/Cargo.toml \
   'name = "h3_runtime_qualification_record"' \
   "the private H3 runtime-record producer is not an explicit development binary"
 require_text crates/mold-inference/Cargo.toml \
-  'required-features = ["dev-bins", "h3"]' \
+  'required-features = ["dev-bins", "h3-cuda"]' \
   "the runtime-record producer does not bind the exact public H3 runtime identity"
 require_text crates/mold-inference/src/minimax_h3/private_runtime_qualification.rs \
   '"mold.minimax-h3.private-runtime-record-producer.v1"' \

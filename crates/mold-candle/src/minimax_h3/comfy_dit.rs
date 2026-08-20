@@ -35,9 +35,9 @@ use sha2::{Digest, Sha256};
 #[cfg(all(unix, test))]
 use std::os::unix::fs::PermissionsExt;
 
-use super::attention::{
-    H3AttentionDType, H3AttentionDevice, H3AttentionModelContract, H3AttentionRuntimeAuthority,
-};
+#[cfg(test)]
+use super::attention::H3AttentionDevice;
+use super::attention::{H3AttentionDType, H3AttentionModelContract, H3AttentionRuntimeAuthority};
 use super::comfy_quant::{H3ComfyInt8ConvRotLinear, H3_COMFY_PORTABLE_ROW_CHUNK};
 use super::dit::{
     expected_h3_weight_specs, H3AdaLnMode, H3ComfyInt8BlockMatrices, H3LoadedTransformerBlock,
@@ -491,11 +491,8 @@ impl H3ComfyOpenedInt8Checkpoint {
             )
             .map_err(|error| candle::Error::Msg(error.to_string()))?,
         };
-        let attention = H3AttentionRuntimeAuthority::bounded_synthetic_math(
-            H3AttentionDevice::from_candle(device),
-            contract,
-        )
-        .map_err(|error| candle::Error::Msg(error.to_string()))?;
+        let attention = H3AttentionRuntimeAuthority::correctness_for_device(device, contract)
+            .map_err(|error| candle::Error::Msg(error.to_string()))?;
         self.load_with_attention_and_cancellation(device, attention, Arc::new(H3ComfyNeverCancel))
     }
 

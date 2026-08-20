@@ -39,15 +39,18 @@ expand = []
 webp = ["webp-animation"]
 mp4 = ["dep:fdk-aac"]
 dev-bins = []
-# Public compact MiniMax H3 runtime. CUDA, the H3-scoped attention kernel, MP4
-# audio muxing, and the public core policy move as one feature edge.
+# Public compact MiniMax H3 runtime. MP4 audio muxing and the public core
+# policy move with the family; the DEVICE does not (#1164). A CUDA build pairs
+# `h3` with `cuda` + `h3-attention-rc`; a macOS build pairs it with `metal` and
+# takes the chunked dense correctness route. `h3` implying `cuda` made an Apple
+# Silicon H3 build inexpressible, since `cuda` cannot compile there at all.
 h3 = [
-    "cuda",
-    "h3-attention-rc",
     "mp4",
     "mold-candle/h3",
     "mold-core/h3",
 ]
+# The shipping CUDA H3 route: the family plus the SM89 attention kernel.
+h3-cuda = ["h3", "cuda", "h3-attention-rc"]
 # Development-only access to the authorization-bound MiniMax H3 artifact
 # qualifier. This feature is intentionally not forwarded by mold-ai or any
 # shipping surface; release verification rejects its embedded claim marker.
@@ -98,7 +101,7 @@ required-features = ["dev-bins", "h3-private-uat"]
 [[bin]]
 name = "h3_runtime_qualification_record"
 path = "src/bin/h3_runtime_qualification_record.rs"
-required-features = ["dev-bins", "h3"]
+required-features = ["dev-bins", "h3-cuda"]
 
 [build-dependencies]
 sha2 = "0.10"

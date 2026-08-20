@@ -57,16 +57,17 @@ pub use artifacts::{
 };
 pub use attention::{
     execute_h3_attention, execute_h3_attention_with_telemetry,
-    h3_attention_release_provenance_marker, H3AttentionActivation, H3AttentionBackend,
-    H3AttentionDType, H3AttentionDevice, H3AttentionError, H3AttentionErrorCode, H3AttentionKernel,
-    H3AttentionMask, H3AttentionModelContract, H3AttentionReleaseCandidateBuild,
-    H3AttentionReleaseRejection, H3AttentionReleaseRequirement, H3AttentionRequirement,
-    H3AttentionRuntimeAuthority, H3AttentionScope, H3AttentionTelemetry, H3AttentionWorkspace,
-    H3FrozenAttentionExecution, H3FrozenAttentionPlan, H3_ATTENTION_RC_CLAIM_MARKER,
-    H3_ATTENTION_RC_FEATURE, H3_ATTENTION_RC_SCHEMA, H3_ATTENTION_RELEASE_PROVENANCE_MARKER,
-    H3_ATTENTION_RELEASE_PROVENANCE_PREFIX, H3_DENSE_SYNTHETIC_MAX_SCORE_ELEMENTS,
-    H3_FLASH_ATTN_CRATE_SHA256, H3_FLASH_ATTN_PACKAGE_VERSION,
-    H3_FLASH_ATTN_QUALIFIED_COMPUTE_CAPABILITY,
+    h3_attention_release_provenance_marker, h3_query_chunk_rows, H3AttentionActivation,
+    H3AttentionBackend, H3AttentionDType, H3AttentionDevice, H3AttentionError,
+    H3AttentionErrorCode, H3AttentionKernel, H3AttentionMask, H3AttentionModelContract,
+    H3AttentionReleaseCandidateBuild, H3AttentionReleaseRejection, H3AttentionReleaseRequirement,
+    H3AttentionRequirement, H3AttentionRuntimeAuthority, H3AttentionScope, H3AttentionTelemetry,
+    H3AttentionWorkspace, H3FrozenAttentionExecution, H3FrozenAttentionPlan,
+    H3_ATTENTION_RC_CLAIM_MARKER, H3_ATTENTION_RC_FEATURE, H3_ATTENTION_RC_SCHEMA,
+    H3_ATTENTION_RELEASE_PROVENANCE_MARKER, H3_ATTENTION_RELEASE_PROVENANCE_PREFIX,
+    H3_DENSE_SYNTHETIC_MAX_SCORE_ELEMENTS, H3_FLASH_ATTN_CRATE_SHA256,
+    H3_FLASH_ATTN_PACKAGE_VERSION, H3_FLASH_ATTN_QUALIFIED_COMPUTE_CAPABILITY,
+    H3_METAL_DENSE_CHUNK_MAX_SCORE_ELEMENTS, H3_METAL_DENSE_MAX_QUERY_CHUNK_ROWS,
 };
 pub use comfy_dit::{
     inspect_h3_comfy_published_header, open_h3_comfy_published_int8_checkpoint,
@@ -82,9 +83,9 @@ pub use comfy_dit::{
     H3_COMFY_PUBLISHED_INT8_HEADER_SHA256, H3_COMFY_PUBLISHED_INT8_TENSOR_COUNT,
 };
 pub use comfy_quant::{
-    H3ComfyFp8ScaledLinear, H3ComfyInt8ConvRotLinear, H3ComfyInt8TensorwiseEmbedding,
-    H3ComfyNvfp4AwqLinear, H3_COMFY_CONVROT_GROUP_SIZE, H3_COMFY_NVFP4_BLOCK_SIZE,
-    H3_COMFY_PORTABLE_ROW_CHUNK,
+    select_h3_int8_linear_kind, H3ComfyFp8ScaledLinear, H3ComfyInt8ConvRotLinear,
+    H3ComfyInt8TensorwiseEmbedding, H3ComfyNvfp4AwqLinear, H3Int8LinearKind,
+    H3_COMFY_CONVROT_GROUP_SIZE, H3_COMFY_NVFP4_BLOCK_SIZE, H3_COMFY_PORTABLE_ROW_CHUNK,
 };
 pub use config::{
     H3ConditionerConfig, H3TextConfig, H3VisionConfig, H3_BF16_PARAMETER_BYTES,

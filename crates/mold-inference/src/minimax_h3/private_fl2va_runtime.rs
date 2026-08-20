@@ -806,10 +806,9 @@ where
             || H3BackendExecutionLease::execution_fingerprint(execution)
                 != self.admitted.execution_fingerprint
             || execution.backend()
-                != (H3CandleBackendDevice::Cuda {
-                    compute_capability: self.admitted.compute_capability,
-                })
-            || !(execution.device().is_cuda() || cfg!(test) && execution.device().is_cpu())
+                != H3CandleBackendDevice::from_compute_capability(self.admitted.compute_capability)
+            || !(execution.backend().matches_candle(execution.device())
+                || cfg!(test) && execution.device().is_cpu())
             || !artifacts.is_active()
             || artifacts.factory_identity_sha256() != self.admitted.factory_identity_sha256
             || artifacts.backend_plan_identity_sha256()
@@ -1029,17 +1028,18 @@ fn validate_private_execution_route_facts(
     actual: &H3PrivateExecutionRouteFacts,
     admitted: &H3PrivateFl2VaFactoryAuthority,
 ) -> Result<()> {
-    let expected_attention_device = H3AttentionDevice::Cuda {
-        compute_capability: Some(admitted.compute_capability),
+    let expected_attention_device = match admitted.compute_capability {
+        Some(compute_capability) => H3AttentionDevice::Cuda {
+            compute_capability: Some(compute_capability),
+        },
+        None => H3AttentionDevice::Metal,
     };
     if !actual.active
         || actual.lease_id.trim().is_empty()
         || actual.device_id != admitted.device_id
         || actual.execution_fingerprint != admitted.execution_fingerprint
         || actual.backend
-            != (H3CandleBackendDevice::Cuda {
-                compute_capability: admitted.compute_capability,
-            })
+            != H3CandleBackendDevice::from_compute_capability(admitted.compute_capability)
         || actual.location
             != (DeviceLocation::Cuda {
                 gpu_id: admitted.device_ordinal,
@@ -2410,9 +2410,7 @@ fn validate_private_continuing_execution_route_facts(
             || actual.device_id != admitted.device_id
             || actual.execution_fingerprint != admitted.execution_fingerprint
             || actual.backend
-                != (H3CandleBackendDevice::Cuda {
-                    compute_capability: admitted.compute_capability,
-                })
+                != H3CandleBackendDevice::from_compute_capability(admitted.compute_capability)
         {
             bail!("private MiniMax H3 continuing synthetic route differs from admission")
         }
@@ -2711,7 +2709,7 @@ mod tests {
             model: contract::FL2VA_COMFY.into(),
             device_id: "test-cpu".into(),
             device_ordinal: 0,
-            compute_capability: (8, 9),
+            compute_capability: Some((8, 9)),
             execution_fingerprint: EXECUTION.into(),
             conditioner_placement: H3FactoryConditionerPlacement::HostCpuThenDrop,
             qwen_parameter_bytes: 2_048,
@@ -2772,9 +2770,7 @@ mod tests {
             lease_id: "execution-lease".into(),
             device_id: admitted.device_id.clone(),
             execution_fingerprint: admitted.execution_fingerprint.clone(),
-            backend: H3CandleBackendDevice::Cuda {
-                compute_capability: admitted.compute_capability,
-            },
+            backend: H3CandleBackendDevice::from_compute_capability(admitted.compute_capability),
             location: candle_core::DeviceLocation::Cuda {
                 gpu_id: admitted.device_ordinal,
             },
@@ -2842,7 +2838,7 @@ mod tests {
         calls: Arc<AtomicUsize>,
         device_id: String,
         execution_fingerprint: String,
-        compute_capability: (u16, u16),
+        compute_capability: Option<(u16, u16)>,
     }
 
     impl H3BackendExecutionLease for AlternatingDeviceLease {
@@ -2855,9 +2851,7 @@ mod tests {
         }
 
         fn backend(&self) -> H3CandleBackendDevice {
-            H3CandleBackendDevice::Cuda {
-                compute_capability: self.compute_capability,
-            }
+            H3CandleBackendDevice::from_compute_capability(self.compute_capability)
         }
 
         fn execution_fingerprint(&self) -> &str {
@@ -2901,7 +2895,7 @@ mod tests {
             calls: Arc::clone(&calls),
             device_id: "synthetic-device".into(),
             execution_fingerprint: sha('a'),
-            compute_capability: (8, 9),
+            compute_capability: Some((8, 9)),
         };
         let retained_device = lease.device().clone();
         assert_eq!(calls.load(Ordering::SeqCst), 1);
@@ -2963,7 +2957,7 @@ mod tests {
         device: Device,
         device_id: String,
         execution_fingerprint: String,
-        compute_capability: (u16, u16),
+        compute_capability: Option<(u16, u16)>,
         active: Arc<AtomicBool>,
         events: Arc<Mutex<Vec<String>>>,
     }
@@ -2984,9 +2978,7 @@ mod tests {
         }
 
         fn backend(&self) -> H3CandleBackendDevice {
-            H3CandleBackendDevice::Cuda {
-                compute_capability: self.compute_capability,
-            }
+            H3CandleBackendDevice::from_compute_capability(self.compute_capability)
         }
 
         fn execution_fingerprint(&self) -> &str {
@@ -4035,7 +4027,7 @@ mod tests {
         admitted_device_id: String,
         changed_device_id: String,
         execution_fingerprint: String,
-        compute_capability: (u16, u16),
+        compute_capability: Option<(u16, u16)>,
     }
 
     impl H3BackendExecutionLease for MutableEchoExecution {
@@ -4052,9 +4044,7 @@ mod tests {
         }
 
         fn backend(&self) -> H3CandleBackendDevice {
-            H3CandleBackendDevice::Cuda {
-                compute_capability: self.compute_capability,
-            }
+            H3CandleBackendDevice::from_compute_capability(self.compute_capability)
         }
 
         fn execution_fingerprint(&self) -> &str {

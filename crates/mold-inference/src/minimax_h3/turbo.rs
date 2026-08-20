@@ -17,7 +17,7 @@ use mold_candle::minimax_h3::{
     H3TurboLoraRuntime, H3TurboLoraTier,
 };
 
-use crate::h3_factory::{H3FactorySamplerKind, H3FactoryTurboAdapterAuthority};
+use crate::h3_factory::H3FactoryTurboAdapterAuthority;
 
 use super::sampler::{H3SamplerKind, H3_TURBO_768P_VIDEO_SHIFT, H3_VIDEO_SHIFT};
 
@@ -63,6 +63,18 @@ pub(crate) const REVIEWED_TURBO_TIERS: &[H3TurboTierContract] = &[
         video_shift: H3_VIDEO_SHIFT,
     },
 ];
+
+/// Look one contract up by its stable id. This is the lookup the frozen
+/// factory authority uses, so the authority and the runtime can never disagree
+/// about a tier's distillation triple.
+pub(crate) fn reviewed_contract_for_stable_id(
+    tier_stable_id: &str,
+) -> Option<&'static H3TurboTierContract> {
+    let trimmed = tier_stable_id.trim();
+    REVIEWED_TURBO_TIERS
+        .iter()
+        .find(|contract| contract.tier.stable_id() == trimmed)
+}
 
 pub(crate) fn turbo_tier_contract(tier: H3TurboLoraTier) -> Result<&'static H3TurboTierContract> {
     REVIEWED_TURBO_TIERS
@@ -126,24 +138,23 @@ pub(crate) fn requested_turbo_selection() -> Result<Option<(std::path::PathBuf, 
 }
 
 /// Build the factory authority for an authenticated adapter contract.
+///
+/// Only the file's own facts are supplied; the distillation triple comes from
+/// the reviewed tier table inside the constructor.
 pub(crate) fn turbo_adapter_authority(
     contract: &H3TurboLoraContract,
-    host_staging_peak_bytes: u64,
     resident_device_bytes: u64,
+    device_staging_peak_bytes: u64,
+    host_staging_peak_bytes: u64,
 ) -> Result<H3FactoryTurboAdapterAuthority> {
-    let tier = contract.tier();
-    let tier_contract = turbo_tier_contract(tier)?;
-    let authority = H3FactoryTurboAdapterAuthority {
-        tier_stable_id: tier.stable_id().into(),
-        adapter_identity_sha256: contract.adapter_identity_sha256().into(),
-        adapter_content_sha256: contract.content_sha256().into(),
-        sampler_kind: H3FactorySamplerKind::from_runtime(tier_contract.sampler_kind),
-        grid_points: tier_contract.grid_points,
-        video_shift_bits: tier_contract.video_shift.to_bits(),
+    H3FactoryTurboAdapterAuthority::for_reviewed_tier(
+        contract.tier().stable_id(),
+        contract.adapter_identity_sha256(),
+        contract.content_sha256(),
         resident_device_bytes,
+        device_staging_peak_bytes,
         host_staging_peak_bytes,
-    };
-    Ok(authority)
+    )
 }
 
 /// Authenticate the requested adapter at admission and describe it.
@@ -169,19 +180,33 @@ pub(crate) fn resolve_requested_turbo_authority() -> Result<Option<H3FactoryTurb
     let inspection = contract.inspection();
     let mut resident_device_bytes = 0u64;
     let mut widest_matrix_bytes = 0u64;
+    let mut widest_module_bytes = 0u64;
     for module in inspection.modules.values() {
+        let mut module_bytes = 0u64;
         for reference in [&module.lora_a, &module.lora_b] {
             let bytes = reference.data_offsets[1] - reference.data_offsets[0];
             resident_device_bytes = resident_device_bytes
                 .checked_add(bytes)
                 .ok_or_else(|| anyhow!("MiniMax H3 Turbo resident byte count overflows"))?;
             widest_matrix_bytes = widest_matrix_bytes.max(bytes);
+            module_bytes = module_bytes
+                .checked_add(bytes)
+                .ok_or_else(|| anyhow!("MiniMax H3 Turbo module byte count overflows"))?;
         }
+        widest_module_bytes = widest_module_bytes.max(module_bytes);
     }
     let host_staging_peak_bytes = widest_matrix_bytes
         .checked_mul(2)
         .ok_or_else(|| anyhow!("MiniMax H3 Turbo host staging byte count overflows"))?;
-    turbo_adapter_authority(&contract, host_staging_peak_bytes, resident_device_bytes).map(Some)
+    turbo_adapter_authority(
+        &contract,
+        resident_device_bytes,
+        // The widest module's transposed copies live beside their originals
+        // during the upload; see `H3TurboLoraRuntime::device_staging_peak_bytes`.
+        widest_module_bytes,
+        host_staging_peak_bytes,
+    )
+    .map(Some)
 }
 
 /// Load the reviewed adapter's deltas onto the execution device.
@@ -198,29 +223,51 @@ pub(crate) fn load_reviewed_turbo_runtime(
     let Some((path, tier)) = requested_turbo_selection()? else {
         bail!("MiniMax H3 Turbo authority is present but no adapter selection is configured")
     };
-    if tier.stable_id() != authority.tier_stable_id {
+    if tier.stable_id() != authority.tier_stable_id() {
         bail!(
             "MiniMax H3 Turbo selection changed from {} to {} after admission",
-            authority.tier_stable_id,
+            authority.tier_stable_id(),
             tier.stable_id()
+        )
+    }
+    // The frozen authority's distillation triple must still be the reviewed
+    // one for this tier. The constructor derives it, so this catches a value
+    // mutated between admission and load rather than a bad build.
+    let reviewed = turbo_tier_contract(tier)?;
+    if authority.resolved_sampler_kind() != reviewed.sampler_kind
+        || authority.grid_points() != reviewed.grid_points
+        || authority.video_shift().to_bits() != reviewed.video_shift.to_bits()
+    {
+        bail!(
+            "MiniMax H3 Turbo authority for {} carries {}/{} steps/shift {}, reviewed is {}/{} steps/shift {}",
+            tier.stable_id(),
+            authority.resolved_sampler_kind().as_str(),
+            authority.grid_points(),
+            authority.video_shift(),
+            reviewed.sampler_kind.as_str(),
+            reviewed.grid_points,
+            reviewed.video_shift
         )
     }
     let runtime = H3TurboLoraRuntime::open(&path, tier, device, dtype, &H3ComfyNeverCancel)
         .map_err(|error| anyhow!("{error}"))?;
-    if runtime.adapter_identity_sha256() != authority.adapter_identity_sha256
-        || runtime.content_sha256() != authority.adapter_content_sha256
+    if runtime.adapter_identity_sha256() != authority.adapter_identity_sha256()
+        || runtime.content_sha256() != authority.adapter_content_sha256()
     {
         bail!("MiniMax H3 Turbo adapter changed between admission and transformer load")
     }
-    if runtime.device_bytes() != authority.resident_device_bytes
-        || runtime.host_staging_peak_bytes() != authority.host_staging_peak_bytes
+    if runtime.device_bytes() != authority.resident_device_bytes()
+        || runtime.device_staging_peak_bytes() != authority.device_staging_peak_bytes()
+        || runtime.host_staging_peak_bytes() != authority.host_staging_peak_bytes()
     {
         bail!(
-            "MiniMax H3 Turbo adapter costs {} resident / {} staging bytes, admission charged {} / {}",
+            "MiniMax H3 Turbo adapter costs {} resident / {} device staging / {} host staging bytes, admission charged {} / {} / {}",
             runtime.device_bytes(),
+            runtime.device_staging_peak_bytes(),
             runtime.host_staging_peak_bytes(),
-            authority.resident_device_bytes,
-            authority.host_staging_peak_bytes
+            authority.resident_device_bytes(),
+            authority.device_staging_peak_bytes(),
+            authority.host_staging_peak_bytes()
         )
     }
     Ok(runtime)
@@ -292,24 +339,57 @@ mod tests {
     }
 
     #[test]
-    fn the_authority_carries_its_tier_distillation_contract() {
-        // Build the authority shape directly; `resolve_requested_turbo_authority`
-        // needs a real adapter file, which the mold-candle tests own.
-        let contract = turbo_tier_contract(H3TurboLoraTier::Fl2v768p4StepV10).unwrap();
-        let authority = H3FactoryTurboAdapterAuthority {
-            tier_stable_id: H3TurboLoraTier::Fl2v768p4StepV10.stable_id().into(),
-            adapter_identity_sha256: "a".repeat(64),
-            adapter_content_sha256: H3TurboLoraTier::Fl2v768p4StepV10
-                .content_sha256()
-                .to_owned(),
-            sampler_kind: H3FactorySamplerKind::from_runtime(contract.sampler_kind),
-            grid_points: contract.grid_points,
-            video_shift_bits: contract.video_shift.to_bits(),
-            resident_device_bytes: 1_956_118_528,
-            host_staging_peak_bytes: 33_030_144,
-        };
-        assert_eq!(authority.grid_points, 5);
-        assert_eq!(authority.video_shift(), H3_TURBO_768P_VIDEO_SHIFT);
-        assert_eq!(authority.resolved_sampler_kind(), H3SamplerKind::ComfyEuler);
+    fn the_authority_derives_its_distillation_contract_from_the_reviewed_tier() {
+        for tier in H3TurboLoraTier::ALL {
+            let reviewed = turbo_tier_contract(tier).unwrap();
+            let authority = H3FactoryTurboAdapterAuthority::for_reviewed_tier(
+                tier.stable_id(),
+                &"a".repeat(64),
+                tier.content_sha256(),
+                1_956_118_528,
+                20_643_840,
+                33_030_144,
+            )
+            .unwrap();
+            // The caller never supplied any of these; they came from the table.
+            assert_eq!(authority.grid_points(), reviewed.grid_points);
+            assert_eq!(authority.video_shift(), reviewed.video_shift);
+            assert_eq!(authority.resolved_sampler_kind(), reviewed.sampler_kind);
+            assert_eq!(authority.tier_stable_id(), tier.stable_id());
+            assert_eq!(authority.resident_device_bytes(), 1_956_118_528);
+            assert_eq!(authority.device_staging_peak_bytes(), 20_643_840);
+            assert_eq!(authority.host_staging_peak_bytes(), 33_030_144);
+        }
+    }
+
+    #[test]
+    fn an_unreviewed_tier_can_never_mint_an_authority() {
+        let error = H3FactoryTurboAdapterAuthority::for_reviewed_tier(
+            "minimax-h3.turbo-lora.fl2v-2step.v1",
+            &"a".repeat(64),
+            &"b".repeat(64),
+            1,
+            1,
+            1,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("not a reviewed tier"), "{error}");
+    }
+
+    #[test]
+    fn a_reviewed_tiers_lookup_is_by_stable_id_only() {
+        for tier in H3TurboLoraTier::ALL {
+            assert_eq!(
+                reviewed_contract_for_stable_id(tier.stable_id())
+                    .unwrap()
+                    .tier,
+                tier
+            );
+            // The short alias is an interim convenience for the env knob, not
+            // an identity the frozen authority accepts.
+            assert!(reviewed_contract_for_stable_id(short_tier_alias(tier)).is_none());
+        }
+        assert!(reviewed_contract_for_stable_id("").is_none());
     }
 }

@@ -668,7 +668,13 @@ impl CausalAttention {
         let mask = causal_mask(rows, x.device())?;
         let probabilities = candle_nn::ops::softmax_last_dim(&scores.broadcast_add(&mask)?)?;
         let attended = probabilities.matmul(&value)?;
-        let mean_heads = attended.sum(1)?.affine(1.0 / self.heads as f64, 0.0)?;
+        // Rank-4 `[batch, heads, rows, head_dim]` averaged over the head axis:
+        // candle's Metal reduction is wrong for a rank > 3 tensor reduced over
+        // a non-final dim, and this head mean is the same shape class as the
+        // LTX-2 per-token RMS that silently rescaled a prompt embedding. Fold
+        // to rank 3 around the reduced axis first — a no-op reshape on CUDA and
+        // CPU. See `crate::metal_reduce`.
+        let mean_heads = crate::metal_reduce::mean_stable(&attended, 1)?;
         let pool = self.head_dim / self.out_dim;
         let pooled = mean_heads
             .reshape((batch, rows, self.out_dim, pool))?
