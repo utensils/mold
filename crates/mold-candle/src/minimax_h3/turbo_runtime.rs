@@ -332,6 +332,7 @@ pub struct H3TurboLoraRuntime {
     main_blocks: Vec<H3TurboBlockDeltas>,
     token_refiner_blocks: Vec<H3TurboBlockDeltas>,
     device_bytes: u64,
+    host_staging_peak_bytes: u64,
 }
 
 impl H3TurboLoraRuntime {
@@ -379,6 +380,17 @@ impl H3TurboLoraRuntime {
         self.device_bytes
     }
 
+    /// Transient host bytes the load peaks at.
+    ///
+    /// Tensors are read one at a time into a `Vec<u8>` and then materialized as
+    /// a CPU tensor before the device copy, so the peak is twice the largest
+    /// single `lora_A` / `lora_B` matrix — 33,030,144 bytes for the published
+    /// tiers, whose widest matrix is the fused `lora_B` at `[21504, 384]`.
+    /// Nothing else is staged, and the buffer is released per tensor.
+    pub const fn host_staging_peak_bytes(&self) -> u64 {
+        self.host_staging_peak_bytes
+    }
+
     /// Build from an authenticated contract plus the descriptor the digest was
     /// computed over.
     pub fn from_authenticated(
@@ -406,8 +418,13 @@ impl H3TurboLoraRuntime {
         let mut refiner =
             BTreeMap::<usize, BTreeMap<H3TurboLoraModuleKind, H3TurboLoraDelta>>::new();
         let mut device_bytes = 0u64;
+        let mut widest_matrix_bytes = 0u64;
         for module in inspection.modules.values() {
             cancellation_boundary(cancellation)?;
+            for reference in [&module.lora_a, &module.lora_b] {
+                widest_matrix_bytes =
+                    widest_matrix_bytes.max(reference.data_offsets[1] - reference.data_offsets[0]);
+            }
             let delta = load_module_delta(module, file, data_start, device, dtype, cancellation)?;
             device_bytes = device_bytes
                 .checked_add(delta.device_bytes())
@@ -439,6 +456,12 @@ impl H3TurboLoraRuntime {
             main_blocks: collect_contiguous_blocks(main, "main")?,
             token_refiner_blocks: collect_contiguous_blocks(refiner, "token refiner")?,
             device_bytes,
+            host_staging_peak_bytes: widest_matrix_bytes.checked_mul(2).ok_or_else(|| {
+                failure(
+                    H3TurboLoraErrorCode::ConfigMismatch,
+                    "H3 Turbo host staging byte count overflows",
+                )
+            })?,
         })
     }
 

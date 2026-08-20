@@ -22,11 +22,11 @@ use crate::minimax_h3::backend::{
 use crate::minimax_h3::offload::FrozenH3BlockStreamingPlan;
 #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 use crate::minimax_h3::private_server::H3PrivateFactoryActivationEvidence;
-use crate::minimax_h3::sampler::H3DualSchedule;
+use crate::minimax_h3::sampler::{H3DualSchedule, H3SamplerKind, H3_VIDEO_SHIFT};
 use crate::minimax_h3::vae_runtime::expected_h3_comfy_vae_artifact_plan_identity;
 use crate::minimax_h3::{FrozenH3ConditionerPlacement, H3ConditionerExecution};
 
-const H3_FACTORY_AUTHORITY_SCHEMA_VERSION: u32 = 5;
+const H3_FACTORY_AUTHORITY_SCHEMA_VERSION: u32 = 6;
 const H3_FACTORY_QWEN_MODEL_MAX_ROWS: u64 = 262_144;
 const H3_FACTORY_MAX_GRID_POINTS: u32 = 4_096;
 
@@ -356,6 +356,12 @@ pub struct H3FactoryTargetBudgetInput {
     pub streamed_block_device_overlap_bytes: u64,
     pub max_device_weight_staging_bytes: u64,
     pub fixed_transformer_load_device_staging_bytes: u64,
+    /// Resident device bytes of an authenticated Turbo LoRA adapter, charged
+    /// from the transformer load through the whole denoise. Zero without one.
+    pub turbo_adapter_device_bytes: u64,
+    /// Transient host bytes the Turbo adapter load peaks at while its deltas
+    /// are read and staged one matrix at a time. Zero without one.
+    pub turbo_adapter_host_staging_bytes: u64,
     pub vae_load_phase_device_bytes: u64,
     pub qwen_encode_phase_device_bytes: u64,
     pub qwen_transfer_phase_device_bytes: u64,
@@ -456,6 +462,8 @@ impl H3FactoryTargetBudgetInput {
             streamed_block_device_overlap_bytes,
             max_device_weight_staging_bytes,
             fixed_transformer_load_device_staging_bytes,
+            turbo_adapter_device_bytes,
+            turbo_adapter_host_staging_bytes,
             vae_load_phase_device_bytes,
             qwen_encode_phase_device_bytes,
             qwen_transfer_phase_device_bytes,
@@ -578,6 +586,8 @@ impl H3FactoryTargetBudgetInput {
             streamed_block_device_overlap_bytes,
             max_device_weight_staging_bytes,
             fixed_transformer_load_device_staging_bytes,
+            turbo_adapter_device_bytes,
+            turbo_adapter_host_staging_bytes,
             vae_load_phase_device_bytes,
             qwen_encode_phase_device_bytes,
             qwen_transfer_phase_device_bytes,
@@ -636,6 +646,155 @@ pub(crate) struct H3FactoryPreparedAttemptAuthority {
     pub(crate) identity_sha256: String,
 }
 
+/// Public mirror of the crate-private sampler kind, so a frozen authority can
+/// name its integrator without leaking the runtime type.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum H3FactorySamplerKind {
+    OfficialEuler,
+    ComfyResMultistep,
+    ComfyEuler,
+}
+
+impl H3FactorySamplerKind {
+    pub const fn as_str(self) -> &'static str {
+        self.runtime_kind().as_str()
+    }
+
+    pub(crate) const fn runtime_kind(self) -> H3SamplerKind {
+        match self {
+            Self::OfficialEuler => H3SamplerKind::OfficialEuler,
+            Self::ComfyResMultistep => H3SamplerKind::ComfyResMultistep,
+            Self::ComfyEuler => H3SamplerKind::ComfyEuler,
+        }
+    }
+
+    pub(crate) const fn from_runtime(kind: H3SamplerKind) -> Self {
+        match kind {
+            H3SamplerKind::OfficialEuler => Self::OfficialEuler,
+            H3SamplerKind::ComfyResMultistep => Self::ComfyResMultistep,
+            H3SamplerKind::ComfyEuler => Self::ComfyEuler,
+        }
+    }
+}
+
+/// Identity of one authenticated Turbo LoRA adapter overlaid on the compact
+/// INT8 checkpoint, together with the sampler contract its distillation
+/// implies.
+///
+/// The base checkpoint file is byte-identical with or without Turbo, so this is
+/// an *additive* artifact authority rather than a new checkpoint format. A
+/// frozen plan that carries one has recorded exactly which adapter weights ran,
+/// which integrator consumed them, and how many transformer evaluations the
+/// distillation was reviewed for.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct H3FactoryTurboAdapterAuthority {
+    /// `H3TurboLoraTier::stable_id` of the reviewed tier.
+    pub tier_stable_id: String,
+    /// `H3TurboLoraContract::adapter_identity_sha256` — binds the tier, task,
+    /// header, validated structure, and verified content digest.
+    pub adapter_identity_sha256: String,
+    /// SHA-256 of the complete verified adapter file.
+    pub adapter_content_sha256: String,
+    /// A Turbo tier must integrate over a Comfy sigma grid.
+    pub sampler_kind: H3FactorySamplerKind,
+    /// Terminal-inclusive grid points, i.e. transformer evaluations plus one.
+    pub grid_points: u32,
+    /// Exact float32 bits of the video shift the sigma grid was built with.
+    pub video_shift_bits: u32,
+    /// Resident device bytes of every `lora_A` / `lora_B` matrix.
+    pub resident_device_bytes: u64,
+    /// Transient host bytes peak while the deltas are read and staged.
+    pub host_staging_peak_bytes: u64,
+}
+
+impl H3FactoryTurboAdapterAuthority {
+    fn validate(&self) -> Result<()> {
+        if self.tier_stable_id.trim().is_empty() {
+            bail!("MiniMax H3 Turbo adapter authority needs a tier identity");
+        }
+        require_sha256(&self.adapter_identity_sha256, "H3 Turbo adapter identity")?;
+        require_sha256(&self.adapter_content_sha256, "H3 Turbo adapter content")?;
+        let kind = self.sampler_kind.runtime_kind();
+        if !kind.uses_comfy_simple_grid() {
+            bail!(
+                "MiniMax H3 Turbo distillations require a Comfy sigma grid, got {:?}",
+                self.sampler_kind
+            );
+        }
+        if !(2..=H3_FACTORY_MAX_GRID_POINTS).contains(&self.grid_points) {
+            bail!(
+                "MiniMax H3 Turbo adapter grid points must be 2..={H3_FACTORY_MAX_GRID_POINTS}, got {}",
+                self.grid_points
+            );
+        }
+        let shift = f32::from_bits(self.video_shift_bits);
+        if !shift.is_finite() || shift <= 0.0 {
+            bail!("MiniMax H3 Turbo adapter video shift must be finite and positive, got {shift}");
+        }
+        if self.resident_device_bytes == 0 || self.host_staging_peak_bytes == 0 {
+            bail!("MiniMax H3 Turbo adapter must charge nonzero resident and staging bytes");
+        }
+        // The schedule has to be buildable before any weight is loaded, and its
+        // evaluation count must not collapse below the reviewed step count.
+        let schedule = H3DualSchedule::new_for_sampler_with_video_shift(
+            usize::try_from(self.grid_points)
+                .map_err(|_| anyhow!("MiniMax H3 Turbo grid points exceed usize"))?,
+            kind,
+            shift,
+        )?;
+        let counts = schedule.counts();
+        if counts.effective_grid_points != counts.requested_grid_points {
+            bail!(
+                "MiniMax H3 Turbo schedule collapsed {} requested grid points to {}",
+                counts.requested_grid_points,
+                counts.effective_grid_points
+            );
+        }
+        Ok(())
+    }
+
+    /// Consumed by the gated private FL2VA runtime; without the `h3` /
+    /// `h3-private-uat` features only tests reach it.
+    #[cfg_attr(not(any(feature = "h3", feature = "h3-private-uat")), allow(dead_code))]
+    pub(crate) const fn resolved_sampler_kind(&self) -> H3SamplerKind {
+        self.sampler_kind.runtime_kind()
+    }
+
+    /// Consumed by the gated private FL2VA runtime; without the `h3` /
+    /// `h3-private-uat` features only tests reach it.
+    #[cfg_attr(not(any(feature = "h3", feature = "h3-private-uat")), allow(dead_code))]
+    pub(crate) fn video_shift(&self) -> f32 {
+        f32::from_bits(self.video_shift_bits)
+    }
+
+    fn update_identity(&self, hash: &mut Sha256) {
+        let Self {
+            tier_stable_id,
+            adapter_identity_sha256,
+            adapter_content_sha256,
+            sampler_kind,
+            grid_points,
+            video_shift_bits,
+            resident_device_bytes,
+            host_staging_peak_bytes,
+        } = self;
+        hash.update(b"turbo-adapter\0");
+        for field in [
+            tier_stable_id.as_str(),
+            adapter_identity_sha256.as_str(),
+            adapter_content_sha256.as_str(),
+            sampler_kind.as_str(),
+        ] {
+            hash.update(field.as_bytes());
+            hash.update([0]);
+        }
+        hash.update(grid_points.to_le_bytes());
+        hash.update(video_shift_bits.to_le_bytes());
+        hash.update(resident_device_bytes.to_le_bytes());
+        hash.update(host_staging_peak_bytes.to_le_bytes());
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum H3FactoryQuantizationAuthority {
     OfficialBf16,
@@ -643,6 +802,9 @@ pub enum H3FactoryQuantizationAuthority {
         transformer_policy_sha256: String,
         qwen_policy_sha256: String,
         pruned_adaln_table_sha256: String,
+        /// `None` for the reviewed 21-step baseline; `Some` only for an
+        /// authenticated Turbo tier.
+        turbo_adapter: Option<H3FactoryTurboAdapterAuthority>,
     },
 }
 
@@ -655,17 +817,29 @@ impl H3FactoryQuantizationAuthority {
                     transformer_policy_sha256,
                     qwen_policy_sha256,
                     pruned_adaln_table_sha256,
+                    turbo_adapter,
                 },
                 Layout::ComfyPrunedInt8ConvrotNvfp4Awq,
             ) => {
                 require_sha256(transformer_policy_sha256, "H3 transformer quantization")?;
                 require_sha256(qwen_policy_sha256, "H3 Qwen quantization")?;
-                require_sha256(pruned_adaln_table_sha256, "H3 pruned AdaLN table")
+                require_sha256(pruned_adaln_table_sha256, "H3 pruned AdaLN table")?;
+                if let Some(turbo_adapter) = turbo_adapter {
+                    turbo_adapter.validate()?;
+                }
+                Ok(())
             }
             _ => bail!("MiniMax H3 layout and quantization authorities disagree"),
         }
     }
 
+    /// Append every semantically authoritative field to `hash`.
+    ///
+    /// The exhaustive destructure is intentional and mirrors
+    /// [`H3FactoryTargetBudgetInput::update_identity`]: adding a variant field
+    /// must fail compilation here until its identity treatment is explicit.
+    /// Before Turbo this arm used `..`, so a new field would have been silently
+    /// absent from the frozen identity.
     fn update_identity(&self, hash: &mut Sha256) {
         match self {
             Self::OfficialBf16 => hash.update(b"official-bf16"),
@@ -673,6 +847,7 @@ impl H3FactoryQuantizationAuthority {
                 transformer_policy_sha256,
                 qwen_policy_sha256,
                 pruned_adaln_table_sha256,
+                turbo_adapter,
             } => {
                 hash.update(b"comfy-pruned-int8-convrot-nvfp4-awq\0");
                 hash.update(transformer_policy_sha256.as_bytes());
@@ -680,8 +855,61 @@ impl H3FactoryQuantizationAuthority {
                 hash.update(qwen_policy_sha256.as_bytes());
                 hash.update([0]);
                 hash.update(pruned_adaln_table_sha256.as_bytes());
+                match turbo_adapter {
+                    None => hash.update(b"\0no-turbo-adapter"),
+                    Some(turbo_adapter) => {
+                        hash.update([0]);
+                        turbo_adapter.update_identity(hash);
+                    }
+                }
             }
         }
+    }
+
+    /// The authenticated Turbo adapter overlaying this checkpoint, if any.
+    pub fn turbo_adapter(&self) -> Option<&H3FactoryTurboAdapterAuthority> {
+        match self {
+            Self::OfficialBf16 => None,
+            Self::ComfyPrunedInt8ConvrotNvfp4Awq { turbo_adapter, .. } => turbo_adapter.as_ref(),
+        }
+    }
+
+    /// The integrator a frozen plan built from this authority must run.
+    ///
+    /// Without a Turbo adapter the compact layout keeps its reviewed
+    /// RES-multistep rule; the official BF16 layout keeps first-order Euler.
+    /// Consumed by the gated private FL2VA runtime; without the `h3` /
+    /// `h3-private-uat` features only tests reach it.
+    #[cfg_attr(not(any(feature = "h3", feature = "h3-private-uat")), allow(dead_code))]
+    pub(crate) fn sampler_kind(&self) -> H3SamplerKind {
+        match self {
+            Self::OfficialBf16 => H3SamplerKind::OfficialEuler,
+            Self::ComfyPrunedInt8ConvrotNvfp4Awq { turbo_adapter, .. } => match turbo_adapter {
+                None => H3SamplerKind::ComfyResMultistep,
+                Some(turbo_adapter) => turbo_adapter.resolved_sampler_kind(),
+            },
+        }
+    }
+
+    /// The video shift the sigma grid must be built with.
+    /// Consumed by the gated private FL2VA runtime; without the `h3` /
+    /// `h3-private-uat` features only tests reach it.
+    #[cfg_attr(not(any(feature = "h3", feature = "h3-private-uat")), allow(dead_code))]
+    pub(crate) fn video_shift(&self) -> f32 {
+        self.turbo_adapter()
+            .map_or(H3_VIDEO_SHIFT, |turbo| turbo.video_shift())
+    }
+
+    /// Resident device bytes this authority's Turbo adapter charges.
+    pub fn turbo_adapter_device_bytes(&self) -> u64 {
+        self.turbo_adapter()
+            .map_or(0, |turbo| turbo.resident_device_bytes)
+    }
+
+    /// Transient host staging bytes this authority's Turbo adapter charges.
+    pub fn turbo_adapter_host_staging_bytes(&self) -> u64 {
+        self.turbo_adapter()
+            .map_or(0, |turbo| turbo.host_staging_peak_bytes)
     }
 }
 
@@ -1215,13 +1443,18 @@ fn validate_target_budget(
         .map(|block| block.max_host_read_staging_bytes)
         .max()
         .unwrap_or(0);
+    // The one live packed block, plus the tensor currently being read held
+    // twice: `read_tensor_bytes`' `Vec` and the `from_raw_buffer` CPU copy it
+    // is turned into (`comfy_dit.rs:1373-1407`, `:1451-1462`). Charging one
+    // copy undercounted every block load by its largest tensor.
     let max_streamed_block_host_overlap = checkpoint
         .blocks
         .iter()
         .map(|block| {
             block
-                .encoded_host_bytes
-                .checked_add(block.max_host_read_staging_bytes)
+                .max_host_read_staging_bytes
+                .checked_mul(2)
+                .and_then(|staging| staging.checked_add(block.encoded_host_bytes))
                 .ok_or_else(|| anyhow!("H3 streamed block host overlap overflow"))
         })
         .collect::<Result<Vec<_>>>()?
@@ -1352,6 +1585,7 @@ fn validate_target_budget(
             memory.text_modality_tags_host_bytes,
             memory.schedule_host_bytes,
             memory.fixed_transformer_load_host_staging_bytes,
+            memory.turbo_adapter_host_staging_bytes,
         ],
         "H3 transformer load host phase",
     )?;
@@ -1569,6 +1803,7 @@ fn validate_target_budget(
             memory.packed_audio_state_device_bytes,
             resident_blocks,
             memory.fixed_transformer_load_device_staging_bytes,
+            memory.turbo_adapter_device_bytes,
         ],
         "H3 transformer load phase",
     )?;
@@ -1596,6 +1831,9 @@ fn validate_target_budget(
             streamed_block_overlap,
             expected_prefetch,
             max_device_staging,
+            // The adapter never streams: it is loaded once at transformer load
+            // and stays device-resident for every evaluation.
+            memory.turbo_adapter_device_bytes,
         ],
         "H3 denoise phase",
     )?;
@@ -1967,7 +2205,7 @@ pub fn expected_h3_factory_raw_checkpoint_identity(
 
 pub fn expected_h3_factory_target_budget_identity(memory: &H3FactoryTargetBudgetInput) -> String {
     let mut hash = Sha256::new();
-    hash.update(b"mold.minimax-h3.target-attempt-budget.v1\0");
+    hash.update(b"mold.minimax-h3.target-attempt-budget.v2\0");
     memory.update_identity(&mut hash);
     format!("{:x}", hash.finalize())
 }
@@ -2202,11 +2440,40 @@ impl FrozenH3FactoryAuthority {
                         (
                             H3FactoryQuantizationAuthority::ComfyPrunedInt8ConvrotNvfp4Awq {
                                 transformer_policy_sha256,
+                                turbo_adapter,
                                 ..
                             },
                             Layout::ComfyPrunedInt8ConvrotNvfp4Awq,
                         ) if transformer_policy_sha256
-                            == &attempt.raw_checkpoint.quantization_policy_identity_sha256 => {}
+                            == &attempt.raw_checkpoint.quantization_policy_identity_sha256 =>
+                        {
+                            // The budget's Turbo terms are admissible only if
+                            // this authority declared an adapter, and they must
+                            // be exactly the bytes it declared.
+                            let declared_device = turbo_adapter
+                                .as_ref()
+                                .map_or(0, |turbo| turbo.resident_device_bytes);
+                            let declared_host = turbo_adapter
+                                .as_ref()
+                                .map_or(0, |turbo| turbo.host_staging_peak_bytes);
+                            if attempt.target_budget.turbo_adapter_device_bytes != declared_device
+                                || attempt.target_budget.turbo_adapter_host_staging_bytes
+                                    != declared_host
+                            {
+                                bail!(
+                                    "MiniMax H3 target budget Turbo adapter bytes disagree with the quantization authority"
+                                );
+                            }
+                            if let Some(turbo_adapter) = turbo_adapter {
+                                if attempt.request.grid_points != turbo_adapter.grid_points {
+                                    bail!(
+                                        "MiniMax H3 prepared request uses {} grid points but its Turbo tier is reviewed for {}",
+                                        attempt.request.grid_points,
+                                        turbo_adapter.grid_points
+                                    );
+                                }
+                            }
+                        }
                         (H3FactoryQuantizationAuthority::OfficialBf16, Layout::OfficialBf16) => {}
                         _ => bail!(
                         "MiniMax H3 raw checkpoint and factory quantization authorities disagree"
@@ -2878,7 +3145,7 @@ impl FrozenH3FactoryAuthority {
 
 fn frozen_identity(authority: &FrozenH3FactoryAuthority) -> String {
     let mut hash = Sha256::new();
-    hash.update(b"mold.minimax-h3.factory-authority.v5\0");
+    hash.update(b"mold.minimax-h3.factory-authority.v6\0");
     hash.update(authority.schema_version.to_le_bytes());
     hash.update(authority.backend_plan.identity_sha256().as_bytes());
     hash.update([0]);
@@ -3160,6 +3427,11 @@ mod tests {
             .unwrap();
         let fixed_transformer_load_device_staging_bytes =
             checkpoint.fixed_transformer_max_device_weight_staging_bytes;
+        // The reviewed baseline attempt carries no Turbo adapter, so both
+        // additive terms are zero here. `turbo_budget_terms_are_additive_...`
+        // flips them against a declared adapter.
+        let turbo_adapter_device_bytes = 0;
+        let turbo_adapter_host_staging_bytes = 0;
         let vae_load_phase_device_bytes = fixed_runtime_device_bytes + retained_vaes + 100;
         let qwen_encode_phase_device_bytes = fixed_runtime_device_bytes + retained_vaes;
         let qwen_transfer_phase_device_bytes =
@@ -3194,6 +3466,7 @@ mod tests {
             packed_video_state_device_bytes,
             packed_audio_state_device_bytes,
             fixed_transformer_load_device_staging_bytes,
+            turbo_adapter_device_bytes,
         ]);
         let denoise_phase_device_bytes = sum(&[
             fixed_runtime_device_bytes,
@@ -3211,6 +3484,7 @@ mod tests {
             denoise_hidden_activation_device_bytes(request.rows.total_packed_rows).unwrap(),
             streamed_block_device_overlap_bytes,
             max_device_weight_staging_bytes,
+            turbo_adapter_device_bytes,
         ]);
         let visual_decode_phase_device_bytes = sum(&[
             fixed_runtime_device_bytes,
@@ -3276,7 +3550,7 @@ mod tests {
         let max_streamed_block_host_overlap_bytes = checkpoint
             .blocks
             .iter()
-            .map(|block| block.encoded_host_bytes + block.max_host_read_staging_bytes)
+            .map(|block| block.encoded_host_bytes + 2 * block.max_host_read_staging_bytes)
             .max()
             .unwrap();
         let fixed_transformer_load_host_staging_bytes = 2 * checkpoint
@@ -3343,6 +3617,7 @@ mod tests {
             text_modality_tags_host_bytes,
             schedule_host_bytes,
             fixed_transformer_load_host_staging_bytes,
+            turbo_adapter_host_staging_bytes,
         ]);
         let denoise_phase_host_bytes = sum(&[
             attempt_host_bytes,
@@ -3481,6 +3756,8 @@ mod tests {
             streamed_block_device_overlap_bytes,
             max_device_weight_staging_bytes,
             fixed_transformer_load_device_staging_bytes,
+            turbo_adapter_device_bytes,
+            turbo_adapter_host_staging_bytes,
             vae_load_phase_device_bytes,
             qwen_encode_phase_device_bytes,
             qwen_transfer_phase_device_bytes,
@@ -3603,6 +3880,7 @@ mod tests {
                 transformer_policy_sha256: sha('d'),
                 qwen_policy_sha256: sha('c'),
                 pruned_adaln_table_sha256: sha('e'),
+                turbo_adapter: None,
             },
             prepared_attempt: Some(prepared_attempt),
             execution_budget_echo: Some(execution_budget_echo),
@@ -3732,6 +4010,262 @@ mod tests {
 
     fn authority() -> FrozenH3FactoryAuthority {
         FrozenH3FactoryAuthority::new_contract_only(exact_input()).unwrap()
+    }
+
+    /// Exact resident and staging cost of a published Turbo adapter, from the
+    /// mold-candle derivation: 1,956,118,528 BF16 matrix bytes (the published
+    /// payload minus its 208 F32 alphas), and twice the widest single matrix
+    /// (`lora_B` at `[21504, 384]`) staged on the host.
+    const TURBO_DEVICE_BYTES: u64 = 1_956_118_528;
+    const TURBO_HOST_STAGING_BYTES: u64 = 33_030_144;
+
+    fn turbo_authority(grid_points: u32) -> H3FactoryTurboAdapterAuthority {
+        H3FactoryTurboAdapterAuthority {
+            tier_stable_id: "minimax-h3.turbo-lora.fl2v-4step-768p-v1.0.comfyui-bf16.v1".into(),
+            adapter_identity_sha256: sha('7'),
+            adapter_content_sha256: sha('8'),
+            sampler_kind: H3FactorySamplerKind::ComfyEuler,
+            grid_points,
+            video_shift_bits: 6.0f32.to_bits(),
+            resident_device_bytes: TURBO_DEVICE_BYTES,
+            host_staging_peak_bytes: TURBO_HOST_STAGING_BYTES,
+        }
+    }
+
+    /// Widen a baseline budget by exactly one adapter's declared cost.
+    fn apply_turbo_budget(
+        input: &mut H3FactoryAuthorityInput,
+        turbo: &H3FactoryTurboAdapterAuthority,
+    ) {
+        let prepared = input.prepared_attempt.as_mut().unwrap();
+        let budget = &mut prepared.target_budget;
+        budget.turbo_adapter_device_bytes = turbo.resident_device_bytes;
+        budget.turbo_adapter_host_staging_bytes = turbo.host_staging_peak_bytes;
+        budget.transformer_load_phase_device_bytes += turbo.resident_device_bytes;
+        budget.denoise_phase_device_bytes += turbo.resident_device_bytes;
+        budget.transformer_load_phase_host_bytes += turbo.host_staging_peak_bytes;
+        budget.predicted_device_peak_bytes = [
+            budget.vae_load_phase_device_bytes,
+            budget.qwen_encode_phase_device_bytes,
+            budget.qwen_transfer_phase_device_bytes,
+            budget.condition_encode_phase_device_bytes,
+            budget.noise_allocation_phase_device_bytes,
+            budget.transformer_load_phase_device_bytes,
+            budget.denoise_phase_device_bytes,
+            budget.visual_decode_phase_device_bytes,
+            budget.audio_decode_phase_device_bytes,
+            budget.waveform_transfer_phase_device_bytes,
+            0,
+        ]
+        .into_iter()
+        .max()
+        .unwrap();
+        budget.predicted_host_increment_bytes = [
+            budget.vae_load_phase_host_bytes,
+            budget.qwen_encode_phase_host_bytes,
+            budget.qwen_transfer_phase_host_bytes,
+            budget.condition_encode_phase_host_bytes,
+            budget.noise_allocation_phase_host_bytes,
+            budget.transformer_load_phase_host_bytes,
+            budget.denoise_phase_host_bytes,
+            budget.visual_decode_phase_host_bytes,
+            budget.audio_decode_phase_host_bytes,
+            budget.waveform_transfer_phase_host_bytes,
+            budget.mux_phase_host_bytes,
+        ]
+        .into_iter()
+        .max()
+        .unwrap();
+        budget.identity_sha256 = expected_h3_factory_target_budget_identity(budget);
+        prepared.identity_sha256 = expected_h3_factory_prepared_attempt_identity(prepared);
+        let echo = H3FactoryExecutionBudgetEchoInput {
+            prepared_attempt_identity_sha256: prepared.identity_sha256.clone(),
+            device_peak_bytes: prepared.target_budget.predicted_device_peak_bytes,
+            host_increment_bytes: prepared.target_budget.predicted_host_increment_bytes,
+        };
+        input.execution_budget_echo = Some(echo);
+    }
+
+    fn with_turbo_adapter(
+        input: &mut H3FactoryAuthorityInput,
+        adapter: Option<H3FactoryTurboAdapterAuthority>,
+    ) {
+        input.quantization = H3FactoryQuantizationAuthority::ComfyPrunedInt8ConvrotNvfp4Awq {
+            transformer_policy_sha256: sha('d'),
+            qwen_policy_sha256: sha('c'),
+            pruned_adaln_table_sha256: sha('e'),
+            turbo_adapter: adapter,
+        };
+    }
+
+    #[test]
+    fn turbo_budget_terms_are_additive_and_bound_to_the_declaring_authority() {
+        let grid_points = exact_input()
+            .prepared_attempt
+            .as_ref()
+            .unwrap()
+            .request
+            .grid_points;
+        // The fixture already renders on a reviewed 4-step Turbo grid.
+        assert_eq!(grid_points, 5);
+        let turbo = turbo_authority(grid_points);
+
+        // A baseline attempt charges nothing and still validates.
+        let baseline = FrozenH3FactoryAuthority::new_contract_only(exact_input()).unwrap();
+        assert_eq!(baseline.quantization().turbo_adapter_device_bytes(), 0);
+        assert_eq!(baseline.quantization().turbo_adapter(), None);
+        let baseline_peak = exact_input()
+            .prepared_attempt
+            .unwrap()
+            .target_budget
+            .predicted_device_peak_bytes;
+
+        // Declaring the adapter and widening the budget by exactly its cost is
+        // admissible, and the device peak grows by exactly that cost.
+        let mut input = exact_input();
+        apply_turbo_budget(&mut input, &turbo);
+        with_turbo_adapter(&mut input, Some(turbo.clone()));
+        let frozen = FrozenH3FactoryAuthority::new_contract_only(input).unwrap();
+        assert_eq!(
+            frozen.quantization().turbo_adapter_device_bytes(),
+            TURBO_DEVICE_BYTES
+        );
+        assert_eq!(
+            frozen.quantization().turbo_adapter_host_staging_bytes(),
+            TURBO_HOST_STAGING_BYTES
+        );
+        assert_eq!(
+            frozen
+                .prepared_attempt
+                .as_ref()
+                .unwrap()
+                .target_budget
+                .predicted_device_peak_bytes,
+            baseline_peak + TURBO_DEVICE_BYTES
+        );
+        // A distilled tier also changes the integrator and the shift.
+        assert_eq!(
+            frozen.quantization().sampler_kind(),
+            H3SamplerKind::ComfyEuler
+        );
+        assert_eq!(frozen.quantization().video_shift(), 6.0);
+        // ...and the identity moves with it.
+        assert_ne!(frozen.identity_sha256(), baseline.identity_sha256());
+    }
+
+    #[test]
+    fn a_turbo_budget_term_without_a_declaring_authority_is_refused() {
+        let turbo = turbo_authority(5);
+
+        // Budget charges the adapter, authority declares none.
+        let mut input = exact_input();
+        apply_turbo_budget(&mut input, &turbo);
+        let error = FrozenH3FactoryAuthority::new_contract_only(input)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Turbo adapter bytes disagree"), "{error}");
+
+        // Authority declares the adapter, budget charges nothing.
+        let mut input = exact_input();
+        with_turbo_adapter(&mut input, Some(turbo.clone()));
+        let error = FrozenH3FactoryAuthority::new_contract_only(input)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Turbo adapter bytes disagree"), "{error}");
+
+        // Half-charging is caught even earlier, by the phase arithmetic: the
+        // host phase still carries the staging bytes the term now denies.
+        let mut input = exact_input();
+        apply_turbo_budget(&mut input, &turbo);
+        {
+            let prepared = input.prepared_attempt.as_mut().unwrap();
+            prepared.target_budget.turbo_adapter_host_staging_bytes = 0;
+            prepared.target_budget.identity_sha256 =
+                expected_h3_factory_target_budget_identity(&prepared.target_budget);
+            prepared.identity_sha256 = expected_h3_factory_prepared_attempt_identity(prepared);
+            input.execution_budget_echo = Some(H3FactoryExecutionBudgetEchoInput {
+                prepared_attempt_identity_sha256: prepared.identity_sha256.clone(),
+                device_peak_bytes: prepared.target_budget.predicted_device_peak_bytes,
+                host_increment_bytes: prepared.target_budget.predicted_host_increment_bytes,
+            });
+        }
+        with_turbo_adapter(&mut input, Some(turbo));
+        let error = FrozenH3FactoryAuthority::new_contract_only(input)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("target budget is internally inconsistent"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_turbo_attempt_must_use_its_tier_reviewed_step_count() {
+        let mut input = exact_input();
+        // The 8-step tier is 9 grid points; this fixture renders 5.
+        let turbo = turbo_authority(9);
+        apply_turbo_budget(&mut input, &turbo);
+        with_turbo_adapter(&mut input, Some(turbo));
+        let error = FrozenH3FactoryAuthority::new_contract_only(input)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Turbo tier is reviewed for 9"), "{error}");
+    }
+
+    #[test]
+    fn a_turbo_authority_is_validated_before_it_can_freeze_anything() {
+        let base = turbo_authority(5);
+        let cases: [(H3FactoryTurboAdapterAuthority, &str); 5] = [
+            (
+                H3FactoryTurboAdapterAuthority {
+                    tier_stable_id: "  ".into(),
+                    ..base.clone()
+                },
+                "tier identity",
+            ),
+            (
+                H3FactoryTurboAdapterAuthority {
+                    adapter_identity_sha256: "nope".into(),
+                    ..base.clone()
+                },
+                "H3 Turbo adapter identity",
+            ),
+            (
+                H3FactoryTurboAdapterAuthority {
+                    sampler_kind: H3FactorySamplerKind::OfficialEuler,
+                    ..base.clone()
+                },
+                "require a Comfy sigma grid",
+            ),
+            (
+                H3FactoryTurboAdapterAuthority {
+                    grid_points: 1,
+                    ..base.clone()
+                },
+                "grid points must be",
+            ),
+            (
+                H3FactoryTurboAdapterAuthority {
+                    resident_device_bytes: 0,
+                    ..base.clone()
+                },
+                "nonzero resident",
+            ),
+        ];
+        for (authority, expected) in cases {
+            let error = authority.validate().unwrap_err().to_string();
+            assert!(error.contains(expected), "{expected}: {error}");
+        }
+        base.validate().unwrap();
+
+        // A non-finite or non-positive shift never builds a grid.
+        for bits in [0.0f32.to_bits(), (-6.0f32).to_bits(), f32::NAN.to_bits()] {
+            let authority = H3FactoryTurboAdapterAuthority {
+                video_shift_bits: bits,
+                ..base.clone()
+            };
+            assert!(authority.validate().is_err());
+        }
     }
 
     #[test]
@@ -4272,6 +4806,8 @@ mod tests {
             streamed_block_device_overlap_bytes,
             max_device_weight_staging_bytes,
             fixed_transformer_load_device_staging_bytes,
+            turbo_adapter_device_bytes,
+            turbo_adapter_host_staging_bytes,
             vae_load_phase_device_bytes,
             qwen_encode_phase_device_bytes,
             qwen_transfer_phase_device_bytes,
@@ -4575,6 +5111,8 @@ mod tests {
             streamed_block_device_overlap_bytes,
             max_device_weight_staging_bytes,
             fixed_transformer_load_device_staging_bytes,
+            turbo_adapter_device_bytes,
+            turbo_adapter_host_staging_bytes,
             vae_load_phase_device_bytes,
             qwen_encode_phase_device_bytes,
             qwen_transfer_phase_device_bytes,

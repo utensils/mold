@@ -19,6 +19,12 @@ use candle_core::{DType, Tensor};
 pub(crate) const H3_DEFAULT_GRID_POINTS: usize = 50;
 pub(crate) const H3_VIDEO_SHIFT: f32 = 12.0;
 pub(crate) const H3_AUDIO_SHIFT: f32 = 3.0;
+/// Video shift for the published FL2V Turbo 4-step v1.0 768p tier, whose
+/// Diffusers documentation passes `--video-shift 6`. Every other reviewed tier
+/// keeps [`H3_VIDEO_SHIFT`].
+pub(crate) const H3_TURBO_768P_VIDEO_SHIFT: f32 = 6.0;
+/// Only meaningful for the RES-multistep carried-audio helpers, which is why a
+/// non-default video shift is refused for that integrator below.
 const H3_COMFY_AUDIO_SCALE: f32 = H3_VIDEO_SHIFT / H3_AUDIO_SHIFT;
 pub(crate) const H3_VISUAL_CONDITION_TIMESTEP: f32 = 0.999;
 pub(crate) const H3_CLEAN_TIMESTEP: f32 = 1.0;
@@ -33,6 +39,11 @@ pub(crate) enum H3SamplerKind {
     #[default]
     OfficialEuler,
     ComfyResMultistep,
+    /// The Turbo distillations keep ComfyUI's `BasicScheduler("simple")` sigma
+    /// table but integrate it with `KSamplerSelect: euler`, which is what every
+    /// published Turbo reference workflow selects. It is therefore exactly the
+    /// existing Comfy grid paired with the existing first-order integrator.
+    ComfyEuler,
 }
 
 impl H3SamplerKind {
@@ -40,7 +51,29 @@ impl H3SamplerKind {
         match self {
             Self::OfficialEuler => "official-euler",
             Self::ComfyResMultistep => "comfy-res-multistep",
+            Self::ComfyEuler => "comfy-euler",
         }
+    }
+
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        [
+            Self::OfficialEuler,
+            Self::ComfyResMultistep,
+            Self::ComfyEuler,
+        ]
+        .into_iter()
+        .find(|kind| kind.as_str() == value)
+    }
+
+    /// True when the sigma grid comes from Comfy's discrete 1000-entry table
+    /// rather than the official continuous linspace.
+    pub(crate) const fn uses_comfy_simple_grid(self) -> bool {
+        matches!(self, Self::ComfyResMultistep | Self::ComfyEuler)
+    }
+
+    /// True when the coupled update is the first-order data-ward Euler rule.
+    pub(crate) const fn uses_euler_update(self) -> bool {
+        matches!(self, Self::OfficialEuler | Self::ComfyEuler)
     }
 }
 
@@ -179,6 +212,9 @@ impl H3ModalitySchedule {
         if grid_points < 2 {
             bail!("MiniMax H3 schedule needs at least two grid points, got {grid_points}");
         }
+        if !shift.is_finite() || shift <= 0.0 {
+            bail!("MiniMax H3 schedule shift must be finite and positive, got {shift}");
+        }
         let evaluations = grid_points - 1;
         let shifted = (0..evaluations).map(|index| {
             // Comfy's BasicScheduler("simple") samples its 1000-entry flow
@@ -219,6 +255,7 @@ pub(crate) struct H3DualSchedule {
     requested_grid_points: usize,
     video: H3ModalitySchedule,
     audio: H3ModalitySchedule,
+    video_shift: f32,
 }
 
 impl H3DualSchedule {
@@ -238,18 +275,48 @@ impl H3DualSchedule {
             requested_grid_points: grid_points,
             video,
             audio,
+            video_shift: H3_VIDEO_SHIFT,
         })
     }
 
     pub fn new_for_sampler(grid_points: usize, kind: H3SamplerKind) -> Result<Self> {
-        if kind == H3SamplerKind::OfficialEuler {
+        Self::new_for_sampler_with_video_shift(grid_points, kind, H3_VIDEO_SHIFT)
+    }
+
+    /// Build the schedule for one sampler kind at an explicit video shift.
+    ///
+    /// Only the Turbo tiers vary the shift: the 768p 4-step checkpoint is
+    /// documented at `--video-shift 6` while every other reviewed tier stays at
+    /// [`H3_VIDEO_SHIFT`]. Audio keeps [`H3_AUDIO_SHIFT`] throughout.
+    pub fn new_for_sampler_with_video_shift(
+        grid_points: usize,
+        kind: H3SamplerKind,
+        video_shift: f32,
+    ) -> Result<Self> {
+        if !kind.uses_comfy_simple_grid() {
+            if video_shift.to_bits() != H3_VIDEO_SHIFT.to_bits() {
+                bail!(
+                    "MiniMax H3 official schedule has no per-tier video shift; refused {video_shift}"
+                );
+            }
             return Self::new(grid_points);
         }
-        let video = H3ModalitySchedule::new_comfy_simple(grid_points, H3_VIDEO_SHIFT)?;
+        if kind == H3SamplerKind::ComfyResMultistep
+            && video_shift.to_bits() != H3_VIDEO_SHIFT.to_bits()
+        {
+            // `H3_COMFY_AUDIO_SCALE` is baked from the default shift and is
+            // read by the carried-audio helpers this integrator uses, so a
+            // shifted RES-multistep grid would silently mis-scale audio.
+            bail!(
+                "MiniMax H3 Comfy RES multistep is pinned to video shift {H3_VIDEO_SHIFT}; refused {video_shift}"
+            );
+        }
+        let video = H3ModalitySchedule::new_comfy_simple(grid_points, video_shift)?;
         let audio = H3ModalitySchedule {
             // The released model derives native audio sigma from the already
             // rounded video-table sigma, rather than independently sampling a
-            // shift-3 table. Preserve that f32 inversion/reapplication order.
+            // shift-3 table. Preserve that f32 inversion/reapplication order,
+            // inverting whichever video shift built the grid.
             sigmas: video
                 .sigmas
                 .iter()
@@ -258,7 +325,7 @@ impl H3DualSchedule {
                     if sigma == 0.0 {
                         return 0.0;
                     }
-                    let base = sigma / (H3_VIDEO_SHIFT + sigma * (1.0 - H3_VIDEO_SHIFT));
+                    let base = sigma / (video_shift + sigma * (1.0 - video_shift));
                     H3_AUDIO_SHIFT * base / (1.0 + (H3_AUDIO_SHIFT - 1.0) * base)
                 })
                 .collect(),
@@ -270,7 +337,13 @@ impl H3DualSchedule {
             requested_grid_points: grid_points,
             video,
             audio,
+            video_shift,
         })
+    }
+
+    /// The video shift this grid was built with.
+    pub fn video_shift(&self) -> f32 {
+        self.video_shift
     }
 
     pub fn official_default() -> Self {
@@ -599,7 +672,7 @@ impl H3DualSampler {
                 step.evaluation_index
             );
         }
-        if self.kind == H3SamplerKind::OfficialEuler {
+        if self.kind.uses_euler_update() {
             let next = euler_step_pair(
                 video_sample,
                 audio_sample,
@@ -657,7 +730,7 @@ mod tests {
     use super::{
         euler_step, euler_step_pair, unique_consecutive, H3DualSampler, H3DualSchedule, H3FlowStep,
         H3SamplerKind, H3StepCount, H3_AUDIO_SHIFT, H3_CLEAN_TIMESTEP, H3_DEFAULT_GRID_POINTS,
-        H3_VIDEO_SHIFT, H3_VISUAL_CONDITION_TIMESTEP,
+        H3_TURBO_768P_VIDEO_SHIFT, H3_VIDEO_SHIFT, H3_VISUAL_CONDITION_TIMESTEP,
     };
 
     #[derive(Debug, Deserialize)]
@@ -921,6 +994,231 @@ mod tests {
                 .collect::<Vec<_>>(),
             expected_audio
         );
+    }
+
+    /// The Turbo grids, pinned to exact float32 bits.
+    ///
+    /// The 4-step shift-12 row is the Turbo README's own published worked
+    /// example — `[1, 0.9730, 0.9231, 0.8000] -> 0` — so this is an independent
+    /// oracle, not a restatement of mold's arithmetic. The 8-step rows sample
+    /// the identical 1000-entry table at the same indices the reviewed 21-point
+    /// schedule already pins, which is why 0.972973 (`0x3f7914c2`) and its audio
+    /// partner (`0x3f666665`) appear in both.
+    #[test]
+    fn turbo_comfy_euler_grids_match_their_published_float32_bits() {
+        let cases = [
+            (
+                9usize,
+                H3_VIDEO_SHIFT,
+                vec![
+                    0x3f800000u32,
+                    0x3f7cfcfd,
+                    0x3f7914c2,
+                    0x3f73cf3d,
+                    0x3f6c4ec5,
+                    0x3f60c7ce,
+                    0x3f4ccccd,
+                    0x3f21af28,
+                    0x00000000,
+                ],
+                vec![
+                    0x3f800000u32,
+                    0x3f745d19,
+                    0x3f666665,
+                    0x3f555557,
+                    0x3f3fffff,
+                    0x3f24924b,
+                    0x3f000001,
+                    0x3e999998,
+                    0x00000000,
+                ],
+            ),
+            (
+                5,
+                H3_VIDEO_SHIFT,
+                vec![0x3f800000, 0x3f7914c2, 0x3f6c4ec5, 0x3f4ccccd, 0x00000000],
+                vec![0x3f800000, 0x3f666665, 0x3f3fffff, 0x3f000001, 0x00000000],
+            ),
+            (
+                5,
+                H3_TURBO_768P_VIDEO_SHIFT,
+                vec![0x3f800000, 0x3f7286bd, 0x3f5b6db7, 0x3f2aaaab, 0x00000000],
+                vec![0x3f800000, 0x3f666668, 0x3f3fffff, 0x3f000001, 0x00000000],
+            ),
+        ];
+        for (grid_points, video_shift, expected_video, expected_audio) in cases {
+            let schedule = H3DualSchedule::new_for_sampler_with_video_shift(
+                grid_points,
+                H3SamplerKind::ComfyEuler,
+                video_shift,
+            )
+            .unwrap();
+            assert_eq!(schedule.video_shift(), video_shift);
+            assert_eq!(
+                schedule
+                    .video_sigmas()
+                    .iter()
+                    .map(|sigma| sigma.to_bits())
+                    .collect::<Vec<_>>(),
+                expected_video,
+                "video {grid_points}@{video_shift}"
+            );
+            assert_eq!(
+                schedule
+                    .audio_sigmas()
+                    .iter()
+                    .map(|sigma| sigma.to_bits())
+                    .collect::<Vec<_>>(),
+                expected_audio,
+                "audio {grid_points}@{video_shift}"
+            );
+
+            // No `unique_consecutive` collapse may shorten a Turbo render.
+            assert_eq!(
+                schedule.counts(),
+                H3StepCount {
+                    requested_grid_points: grid_points,
+                    effective_grid_points: grid_points,
+                    transformer_evaluations: grid_points - 1,
+                }
+            );
+        }
+    }
+
+    /// The published Turbo README states NFE = 4 gives sigma
+    /// `[1, 0.9730, 0.9231, 0.8000]` then terminal zero, for shift 12.
+    #[test]
+    fn turbo_four_evaluation_grid_matches_the_published_decimal_oracle() {
+        let schedule = H3DualSchedule::new_for_sampler(5, H3SamplerKind::ComfyEuler).unwrap();
+        let published = [1.0f32, 0.9730, 0.9231, 0.8000, 0.0];
+        assert_eq!(schedule.video_sigmas().len(), published.len());
+        for (observed, expected) in schedule.video_sigmas().iter().zip(published.iter()) {
+            assert!(
+                (observed - expected).abs() < 5e-5,
+                "{observed} vs {expected}"
+            );
+        }
+    }
+
+    /// mold's `steps` is the terminal-inclusive grid-point count, so a Turbo
+    /// "N-step" tier is `N + 1` steps and exactly N transformer evaluations.
+    #[test]
+    fn turbo_step_counts_are_terminal_inclusive_grid_points() {
+        for (comfy_steps, mold_steps) in [(8usize, 9usize), (4, 5), (20, 21)] {
+            let schedule =
+                H3DualSchedule::new_for_sampler(mold_steps, H3SamplerKind::ComfyEuler).unwrap();
+            assert_eq!(schedule.counts().transformer_evaluations, comfy_steps);
+            assert_eq!(schedule.steps().len(), comfy_steps);
+        }
+    }
+
+    #[test]
+    fn comfy_euler_shares_the_comfy_grid_and_the_official_integrator() {
+        // Same sigma table as RES multistep at the default shift...
+        let euler = H3DualSchedule::new_for_sampler(9, H3SamplerKind::ComfyEuler).unwrap();
+        let multistep =
+            H3DualSchedule::new_for_sampler(9, H3SamplerKind::ComfyResMultistep).unwrap();
+        assert_eq!(euler.video_sigmas(), multistep.video_sigmas());
+        assert_eq!(euler.audio_sigmas(), multistep.audio_sigmas());
+
+        // At 5, 9, and 21 grid points the discrete 1000-entry table lands
+        // exactly on the continuous linspace, because 4, 8, and 20 all divide
+        // 1000 — so no Turbo tier is exposed to the two grids disagreeing. A
+        // count that does not divide 1000 shows they are genuinely different
+        // constructions.
+        for grid_points in [5usize, 9, 21] {
+            assert_eq!(
+                H3DualSchedule::new_for_sampler(grid_points, H3SamplerKind::ComfyEuler)
+                    .unwrap()
+                    .video_sigmas(),
+                H3DualSchedule::new(grid_points).unwrap().video_sigmas(),
+                "{grid_points}"
+            );
+        }
+        assert_ne!(
+            H3DualSchedule::new_for_sampler(8, H3SamplerKind::ComfyEuler)
+                .unwrap()
+                .video_sigmas(),
+            H3DualSchedule::new(8).unwrap().video_sigmas()
+        );
+
+        assert!(H3SamplerKind::ComfyEuler.uses_comfy_simple_grid());
+        assert!(H3SamplerKind::ComfyEuler.uses_euler_update());
+        assert!(H3SamplerKind::ComfyResMultistep.uses_comfy_simple_grid());
+        assert!(!H3SamplerKind::ComfyResMultistep.uses_euler_update());
+        assert!(!H3SamplerKind::OfficialEuler.uses_comfy_simple_grid());
+        assert!(H3SamplerKind::OfficialEuler.uses_euler_update());
+
+        // The coupled update is bit-identical to the official Euler rule on the
+        // same descriptors, so nothing new is being integrated.
+        let device = Device::Cpu;
+        let sample = Tensor::new(&[0.25f32, -0.5, 1.0], &device).unwrap();
+        let velocity = Tensor::new(&[0.1f32, -0.2, 0.3], &device).unwrap();
+        let step = euler.steps().next().unwrap();
+        let mut sampler = H3DualSampler::new(H3SamplerKind::ComfyEuler);
+        let (video, audio) = sampler
+            .step_pair(&sample, &sample, &velocity, &velocity, step)
+            .unwrap();
+        let (reference_video, reference_audio) =
+            euler_step_pair(&sample, &sample, &velocity, &velocity, step).unwrap();
+        assert_eq!(
+            video.to_vec1::<f32>().unwrap(),
+            reference_video.to_vec1::<f32>().unwrap()
+        );
+        assert_eq!(
+            audio.to_vec1::<f32>().unwrap(),
+            reference_audio.to_vec1::<f32>().unwrap()
+        );
+    }
+
+    #[test]
+    fn a_non_default_video_shift_is_refused_where_it_would_be_unsound() {
+        // RES multistep reads `H3_COMFY_AUDIO_SCALE`, which is baked from the
+        // default shift, so a shifted grid is refused rather than mis-scaled.
+        let error = H3DualSchedule::new_for_sampler_with_video_shift(
+            5,
+            H3SamplerKind::ComfyResMultistep,
+            H3_TURBO_768P_VIDEO_SHIFT,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("RES multistep"), "{error}");
+
+        // The official continuous grid has no per-tier shift at all.
+        let error = H3DualSchedule::new_for_sampler_with_video_shift(
+            5,
+            H3SamplerKind::OfficialEuler,
+            H3_TURBO_768P_VIDEO_SHIFT,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("no per-tier video shift"), "{error}");
+
+        // And a nonsense shift never builds a grid.
+        for shift in [0.0f32, -1.0, f32::NAN] {
+            assert!(H3DualSchedule::new_for_sampler_with_video_shift(
+                5,
+                H3SamplerKind::ComfyEuler,
+                shift
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn sampler_kind_round_trips_through_its_stable_string() {
+        for kind in [
+            H3SamplerKind::OfficialEuler,
+            H3SamplerKind::ComfyResMultistep,
+            H3SamplerKind::ComfyEuler,
+        ] {
+            assert_eq!(H3SamplerKind::parse(kind.as_str()), Some(kind));
+        }
+        assert_eq!(
+            H3SamplerKind::parse("comfy-euler"),
+            Some(H3SamplerKind::ComfyEuler)
+        );
+        assert_eq!(H3SamplerKind::parse("nope"), None);
     }
 
     #[test]

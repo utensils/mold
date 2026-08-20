@@ -21,7 +21,7 @@ use mold_candle::minimax_h3::{
 };
 
 use crate::attention::{AttentionBackend, AttentionChunkPolicy};
-use crate::h3_factory::H3FactoryAttentionInput;
+use crate::h3_factory::{H3FactoryAttentionInput, H3FactoryTurboAdapterAuthority};
 use crate::progress::{InferenceCancellationObserver, InferenceCancelled, ProgressReporter};
 
 use super::engine::H3StreamedTransformerExecutor;
@@ -452,6 +452,9 @@ pub(crate) struct H3PrivateBoundComfyStream {
     device: Device,
     attention: H3AttentionRuntimeAuthority,
     authority: H3PrivateComfyStreamAuthority,
+    /// The reviewed Turbo adapter this attempt was admitted with, frozen at
+    /// bind time. `None` keeps the load byte-identical to the unadapted path.
+    turbo: Option<H3FactoryTurboAdapterAuthority>,
 }
 
 impl H3PrivateBoundComfyStream {
@@ -531,6 +534,7 @@ pub(crate) fn bind_private_comfy_stream(
     device: &Device,
     attention: H3AttentionRuntimeAuthority,
     expected: H3PrivateComfyBindingExpectation,
+    turbo: Option<H3FactoryTurboAdapterAuthority>,
 ) -> Result<H3PrivateBoundComfyStream> {
     let actual_device = H3AttentionDevice::from_candle(device);
     validate_private_attention_facts(
@@ -568,6 +572,7 @@ pub(crate) fn bind_private_comfy_stream(
         device: device.clone(),
         attention,
         authority,
+        turbo,
     })
 }
 
@@ -591,10 +596,29 @@ pub(crate) fn load_and_pair_private_comfy_stream(
         device,
         attention,
         authority,
+        turbo,
     } = bound;
+    // The adapter's deltas become device-resident here, inside the phase whose
+    // budget charges `turbo_adapter_device_bytes`. Loading it at admission
+    // instead would hold ~1.82 GiB across every earlier phase for nothing.
+    let turbo_runtime = turbo
+        .as_ref()
+        .map(|authority| {
+            super::turbo::load_reviewed_turbo_runtime(
+                authority,
+                &device,
+                opened
+                    .candidate()
+                    .strategy
+                    .dense_compute_precision
+                    .compute_dtype(),
+            )
+            .map(Arc::new)
+        })
+        .transpose()?;
     let cancellation_for_candle: Arc<dyn H3ComfyInt8Cancellation> = Arc::new(cancellation.clone());
     let (transformer, loader) = cancellation.run_candle_operation(|| {
-        opened.load_with_attention_and_cancellation(&device, attention, cancellation_for_candle)
+        opened.load_with_turbo_adapter(&device, attention, cancellation_for_candle, turbo_runtime)
     })?;
     if loader.content_sha256() != authority.transformer_content_sha256
         || loader.checkpoint_identity_sha256() != authority.checkpoint_identity_sha256

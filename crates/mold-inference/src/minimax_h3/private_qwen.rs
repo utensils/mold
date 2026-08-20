@@ -1869,6 +1869,7 @@ mod tests {
                 transformer_policy_sha256: sha('b'),
                 qwen_policy_sha256: H3_QWEN_NVFP4_AWQ_POLICY_SHA256.into(),
                 pruned_adaln_table_sha256: sha('c'),
+                turbo_adapter: None,
             },
             components,
         })
@@ -2977,6 +2978,7 @@ mod tests {
                 transformer_policy_sha256: sha('c'),
                 qwen_policy_sha256: H3_QWEN_NVFP4_AWQ_POLICY_SHA256.into(),
                 pruned_adaln_table_sha256: sha('d'),
+                turbo_adapter: None,
             },
             components,
         })

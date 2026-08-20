@@ -92,6 +92,8 @@ use super::H3ConditionerLease;
 #[cfg(feature = "mp4")]
 use crate::attention::{AttentionBackend, AttentionChunkPolicy};
 #[cfg(feature = "mp4")]
+use crate::h3_factory::H3FactoryTurboAdapterAuthority;
+#[cfg(feature = "mp4")]
 use crate::h3_factory::H3PrivateFl2VaFactoryAuthority;
 use crate::progress::ProgressReporter;
 use crate::{
@@ -239,13 +241,40 @@ pub(crate) struct H3PrivateRuntimeEnvelopeRecord {
 }
 
 impl H3PrivateRuntimeEnvelopeRecord {
+    /// Validate the reviewed compact-quality envelope.
+    ///
+    /// Kept as the no-adapter form so every existing caller is unchanged: the
+    /// step count must be exactly [`contract::COMFY_DEFAULT_STEPS`].
     pub(crate) fn validate(&self) -> Result<()> {
+        self.validate_with_reviewed_steps(None)
+    }
+
+    /// Validate the envelope against an optional authenticated Turbo adapter.
+    ///
+    /// The reviewed canvas is identical either way — same 1344x768, 124 frames,
+    /// 24 fps, one first-frame endpoint. The ONLY axis a Turbo tier moves is
+    /// the step count, and it may move it only to the count that tier's
+    /// distillation was reviewed for. Without an adapter the 21-step pin is
+    /// exactly as strict as before.
+    pub(crate) fn validate_with_reviewed_steps(&self, turbo_steps: Option<u32>) -> Result<()> {
+        let reviewed_steps = turbo_steps.unwrap_or(contract::COMFY_DEFAULT_STEPS);
+        if self.max_steps != reviewed_steps {
+            bail!(
+                "private H3 runtime qualification envelope allows {reviewed_steps} steps, not {}",
+                self.max_steps
+            )
+        }
+        self.validate_shape()
+    }
+
+    fn validate_shape(&self) -> Result<()> {
         if self.width != contract::DEFAULT_WIDTH
             || self.height != contract::DEFAULT_HEIGHT
             || self.frames != contract::MIN_FRAMES
             || self.fps != contract::FIXED_FPS
             || self.batch_size != 1
-            || self.max_steps != contract::COMFY_DEFAULT_STEPS
+            // The step axis is owned by `validate_with_turbo`, which is the
+            // only place a reviewed Turbo tier may move it.
             || self.endpoint_count != 1
             || self.endpoint_anchor != "first"
             || [
@@ -265,7 +294,16 @@ impl H3PrivateRuntimeEnvelopeRecord {
 
     #[cfg(feature = "mp4")]
     fn validate_prepared(&self, request: &H3FactoryPreparedRequestInput) -> Result<()> {
-        self.validate()?;
+        self.validate_prepared_with_reviewed_steps(request, None)
+    }
+
+    #[cfg(feature = "mp4")]
+    fn validate_prepared_with_reviewed_steps(
+        &self,
+        request: &H3FactoryPreparedRequestInput,
+        turbo_steps: Option<u32>,
+    ) -> Result<()> {
+        self.validate_with_reviewed_steps(turbo_steps)?;
         let endpoint = request.endpoints.first();
         if request.width != self.width
             || request.height != self.height
@@ -329,6 +367,73 @@ pub(crate) struct H3PrivateRuntimeBoundRecord {
     pub(crate) thumbnail_host_bytes_bound: u64,
     pub(crate) mux_output_host_bytes_bound: u64,
     pub(crate) aac_mux_staging_host_bytes: u64,
+}
+
+/// Device floor evaluated before any bulk artifact I/O.
+///
+/// Both terms appear in `denoise_phase_device_bytes`, and the predicted device
+/// peak is the max over every phase, so this is a provable lower bound of the
+/// exact figure the admission check compares. Every other term in that sum is
+/// non-negative and request-derived, and is deliberately left out: the point is
+/// to decline an impossible device in milliseconds rather than after hashing
+/// ~37 GB of weights, never to make a decision the exact check would not.
+#[cfg(feature = "mp4")]
+pub(crate) fn private_h3_admission_device_floor_bytes(
+    bounds: &H3PrivateRuntimeBoundRecord,
+) -> Result<u64> {
+    bounds
+        .fixed_runtime_device_bytes
+        .checked_add(crate::h3_factory::denoise_transient_workspace_device_bytes(
+            bounds.attention_workspace_device_bytes,
+            bounds.ffn_workspace_device_bytes,
+        ))
+        .ok_or_else(|| anyhow!("private H3 admission device floor overflow"))
+}
+
+/// Host floor evaluated before any bulk artifact I/O.
+///
+/// The Qwen phases charge `fixed_runtime_host_bytes` plus the conditioner's
+/// host-resident parameters. Which placement admission picks is not known yet,
+/// so this takes the smaller of the two published residencies — the floor must
+/// hold whichever way placement goes. Every other term in that phase sum is
+/// non-negative and omitted for the same reason as above.
+#[cfg(feature = "mp4")]
+pub(crate) fn private_h3_admission_host_floor_bytes(
+    bounds: &H3PrivateRuntimeBoundRecord,
+) -> Result<u64> {
+    let cpu =
+        released_h3_private_qwen_loader_memory_authority(H3PrivateQwenLoaderMemoryRoute::Cpu)?
+            .host_resident_parameter_bytes;
+    let accelerated =
+        released_h3_private_qwen_loader_memory_authority(H3PrivateQwenLoaderMemoryRoute::Cuda)?
+            .host_resident_parameter_bytes;
+    bounds
+        .fixed_runtime_host_bytes
+        .checked_add(cpu.min(accelerated))
+        .ok_or_else(|| anyhow!("private H3 admission host floor overflow"))
+}
+
+/// Refuse an attempt whose capacity sample cannot hold the floors above.
+///
+/// This runs before the artifact SHA-256 pass. It is one-directional by
+/// construction: a refusal here implies the exact per-attempt check would also
+/// refuse, so hoisting it can only turn a slow refusal into a fast one.
+#[cfg(feature = "mp4")]
+fn precheck_private_h3_admission_capacity(
+    bounds: &H3PrivateRuntimeBoundRecord,
+    available_device_bytes: u64,
+    available_host_headroom_bytes: u64,
+) -> Result<()> {
+    let device_floor = private_h3_admission_device_floor_bytes(bounds)?;
+    let host_floor = private_h3_admission_host_floor_bytes(bounds)?;
+    if device_floor > available_device_bytes || host_floor > available_host_headroom_bytes {
+        bail!(
+            "private H3 admission needs at least {device_floor} device and {host_floor} host \
+             bytes before any request-specific term, exceeding the {available_device_bytes} \
+             device and {available_host_headroom_bytes} host admission sample"
+        )
+    }
+    Ok(())
 }
 
 impl H3PrivateRuntimeBoundRecord {
@@ -994,6 +1099,20 @@ fn prepare_reviewed_h3_private_fl2va_admission(
         .record
         .attention_qualification_sha256
         .clone();
+    // Cheap capacity floors BEFORE the artifact pass below hashes ~37 GB.
+    // Refusing a hopeless device after several minutes of SHA-256 was the
+    // worst failure this path had; both floors are provable lower bounds of
+    // the exact per-attempt budget compared at the end of this function, so
+    // this can only ever turn a slow refusal into a fast one.
+    #[cfg(feature = "h3")]
+    let precheck_bounds = public_runtime_bounds();
+    #[cfg(not(feature = "h3"))]
+    let precheck_bounds = reviewed_runtime_qualification.record.bounds.clone();
+    precheck_private_h3_admission_capacity(
+        &precheck_bounds,
+        available_device_bytes,
+        available_host_headroom_bytes,
+    )?;
     let artifact_report = qualify_private_artifacts_with_control(
         paths.models_root,
         contract::FL2VA_COMFY,
@@ -1044,6 +1163,13 @@ fn prepare_reviewed_h3_private_fl2va_admission(
         &attention_qualification_sha256,
     )?;
     #[cfg(feature = "h3")]
+    // Authenticating here reads and digests the adapter but allocates no device
+    // memory; the deltas are materialized in the transformer-load phase, which
+    // is the phase whose budget charges them. It has to happen before the
+    // runtime qualification so the envelope can be minted at the tier's own
+    // reviewed step count.
+    let turbo_adapter = super::turbo::resolve_requested_turbo_authority()?;
+    let turbo_steps = turbo_adapter.as_ref().map(|turbo| turbo.grid_points);
     let runtime_qualification = public_runtime_qualification(
         &artifact_report,
         device_id,
@@ -1052,6 +1178,7 @@ fn prepare_reviewed_h3_private_fl2va_admission(
         attention.identity_sha256(),
         attention.kernel().identity(),
         &attention_qualification_sha256,
+        turbo_steps,
     )?;
     progress.checkpoint()?;
 
@@ -1165,6 +1292,7 @@ fn prepare_reviewed_h3_private_fl2va_admission(
                 transformer_policy_sha256,
                 qwen_policy_sha256: qwen_policy_identity.into(),
                 pruned_adaln_table_sha256,
+                turbo_adapter: turbo_adapter.clone(),
             },
             prepared_attempt: None,
             execution_budget_echo: None,
@@ -1198,6 +1326,7 @@ fn prepare_reviewed_h3_private_fl2va_admission(
         &opened_qwen,
         &opened_vae,
         runtime_qualification.bounds(),
+        turbo_adapter.as_ref(),
     )?;
     let predicted_device_peak_bytes = prepared_attempt.target_budget.predicted_device_peak_bytes;
     let predicted_host_increment_bytes = prepared_attempt
@@ -2084,6 +2213,11 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
         attention.identity_sha256(),
         attention.kernel().identity(),
         &attention_qualification_sha256,
+        // Whatever admission froze, not a fresh environment read.
+        frozen_factory
+            .quantization()
+            .turbo_adapter()
+            .map(|turbo| turbo.grid_points),
     )?;
     if runtime_qualification.identity_sha256() != owner_fence.runtime_qualification_identity_sha256
         || runtime_qualification.artifact_qualification_identity_sha256()
@@ -2173,6 +2307,9 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
     progress.checkpoint()?;
 
     let mut prepare_observer = H3EngineProgressObserver::new(progress);
+    // Admission froze which adapter (if any) this attempt runs; re-reading the
+    // environment here would let it change under a frozen plan.
+    let frozen_turbo = frozen_factory.quantization().turbo_adapter();
     let prepared_attempt = H3PrivatePreparedFl2VaAttempt::prepare(
         request,
         frozen_factory.execution_fingerprint(),
@@ -2182,13 +2319,15 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
         &opened_qwen,
         &opened_vae,
         runtime_qualification.bounds(),
+        frozen_turbo,
         progress,
         &mut prepare_observer,
     )?;
     let seed = prepared_attempt.seed();
     let prepared = prepared_attempt.into_factory_inputs();
     prepared.revalidate()?;
-    runtime_qualification.validate_prepared_envelope(prepared.prepared_request_input())?;
+    runtime_qualification
+        .validate_prepared_envelope_with_turbo(prepared.prepared_request_input(), frozen_turbo)?;
     let enriched_factory = frozen_factory.with_private_prepared_attempt(
         prepared.factory_attempt_input().clone(),
         prepared.budget_echo_input().clone(),
@@ -3747,7 +3886,26 @@ impl H3PrivateRuntimeQualificationAuthority {
 
     #[cfg(feature = "mp4")]
     fn validate_prepared_envelope(&self, request: &H3FactoryPreparedRequestInput) -> Result<()> {
-        self.record.envelope.validate_prepared(request)
+        self.validate_prepared_envelope_with_turbo(request, None)
+    }
+
+    #[cfg(feature = "mp4")]
+    fn reviewed_turbo_steps(turbo: Option<&H3FactoryTurboAdapterAuthority>) -> Option<u32> {
+        turbo.map(|turbo| turbo.grid_points)
+    }
+
+    /// Validate a prepared request against this qualification's envelope,
+    /// admitting a reviewed Turbo tier's own step count when an authenticated
+    /// adapter is present. `None` is byte-identical to the previous behaviour.
+    #[cfg(feature = "mp4")]
+    fn validate_prepared_envelope_with_turbo(
+        &self,
+        request: &H3FactoryPreparedRequestInput,
+        turbo: Option<&H3FactoryTurboAdapterAuthority>,
+    ) -> Result<()> {
+        self.record
+            .envelope
+            .validate_prepared_with_reviewed_steps(request, Self::reviewed_turbo_steps(turbo))
     }
 
     pub(crate) fn revalidate(&self) -> Result<()> {
@@ -3764,7 +3922,11 @@ enum RuntimeQualificationStorage {
     #[cfg(feature = "h3")]
     Embedded,
     #[cfg(feature = "h3")]
-    PublicCompiled,
+    /// The compiled public profile. It remembers the reviewed Turbo step count
+    /// it was minted with, so revalidation stays exactly as strict as minting.
+    PublicCompiled {
+        turbo_steps: Option<u32>,
+    },
 }
 
 impl RuntimeQualificationStorage {
@@ -3788,7 +3950,9 @@ impl RuntimeQualificationStorage {
                 record.bounds.validate()
             }
             #[cfg(feature = "h3")]
-            Self::PublicCompiled => validate_public_runtime_profile(record, record_file_sha256),
+            Self::PublicCompiled { turbo_steps } => {
+                validate_public_runtime_profile_with_turbo(record, record_file_sha256, *turbo_steps)
+            }
         }
     }
 }
@@ -3798,18 +3962,76 @@ const PUBLIC_RUNTIME_PROFILE_SCHEMA: &str = "mold.minimax-h3.public-runtime-prof
 #[cfg(feature = "h3")]
 const PUBLIC_RUNTIME_PROFILE_DECISION: &str = "supported-compact-fl2va-sm89";
 
+/// Margin applied to every measured workspace bound, then rounded up to
+/// [`PUBLIC_RUNTIME_BOUND_GRID_BYTES`].
+///
+/// One render is one sample. 15% covers allocator and driver variance plus the
+/// small shape headroom the envelope still allows — the qualifying render used
+/// 39,768 of the envelope's 39,776 packed rows and 1,050 of its 1,058 text
+/// rows, so it sat essentially at the ceiling and the margin does not have to
+/// absorb a much larger shape.
+#[cfg(feature = "h3")]
+const PUBLIC_RUNTIME_BOUND_MARGIN_PERCENT: u64 = 115;
+
+/// 64 MiB. Coarse enough that a re-measurement moves a bound only when it
+/// moves materially, fine enough that a 200 MB workspace is not rounded to
+/// three times its size.
+#[cfg(feature = "h3")]
+const PUBLIC_RUNTIME_BOUND_GRID_BYTES: u64 = 64 * 1024 * 1024;
+
+/// `ceil_to_grid(observed * margin)`, the one policy every measured bound below
+/// is derived by. Always at or above `observed`.
+#[cfg(feature = "h3")]
+const fn public_runtime_bound(observed_bytes: u64) -> u64 {
+    let with_margin = observed_bytes * PUBLIC_RUNTIME_BOUND_MARGIN_PERCENT / 100;
+    with_margin.next_multiple_of(PUBLIC_RUNTIME_BOUND_GRID_BYTES)
+}
+
+/// Compiled bounds for the reviewed compact FL2VA runtime.
+///
+/// Every workspace figure is `public_runtime_bound(observed)` over the first
+/// real FL2VA render: 2026-08-19 on hal9000 (RTX 4090, SM89, 24 GB), 1344x768,
+/// 124 frames at 24 fps, 21 steps, 1216 s, captured by
+/// `private_runtime_observer` and recorded on issue #827. The observations are
+/// named beside each value so a future re-measurement can be applied by
+/// changing one number and re-running the same policy.
+///
+/// The policy reproduces four of the previous L40S-era caps exactly
+/// (`fixed_runtime_device`, `condition_vae`, `decoder_tile`, `audio_decode`),
+/// which is the reason to trust it, and corrects the two that were guesses:
+/// attention fell 10.13 -> 7.11 GB and FFN 15.30 -> 8.79 GB. Two rose, because
+/// the old values carried less than this margin over what the hardware
+/// actually used; the policy is applied uniformly rather than only where it
+/// flatters the result.
+///
+/// The three host capacity bounds are NOT measurements — they are the
+/// pipeline's own allocation limits, so they stay tied to those constants. A
+/// render that legitimately produces a larger MP4 must still be charged for
+/// the buffer the pipeline is willing to allocate.
 #[cfg(feature = "h3")]
 fn public_runtime_bounds() -> H3PrivateRuntimeBoundRecord {
     H3PrivateRuntimeBoundRecord {
-        fixed_runtime_host_bytes: 671_088_640,
-        fixed_runtime_device_bytes: 603_979_776,
-        qwen_activation_workspace_bytes: 3_758_096_384,
+        // observed 659_701_760
+        fixed_runtime_host_bytes: public_runtime_bound(659_701_760),
+        // observed 477_298_688
+        fixed_runtime_device_bytes: public_runtime_bound(477_298_688),
+        // observed 3_400_171_520
+        qwen_activation_workspace_bytes: public_runtime_bound(3_400_171_520),
+        // Observed 0: the VAE construction transient never rose above the
+        // weights themselves in the qualifying render. A zero bound is not
+        // admissible (the reload stages through it and the validator refuses
+        // zero), so the previous 64 MiB allowance is retained as a floor.
         vae_construction_device_workspace_bytes: 67_108_864,
-        condition_vae_workspace_device_bytes: 469_762_048,
-        attention_workspace_device_bytes: 10_133_438_464,
-        ffn_workspace_device_bytes: 15_300_820_992,
-        decoder_tile_workspace_device_bytes: 1_543_503_872,
-        audio_decode_workspace_device_bytes: 268_435_456,
+        // observed 366_027_840
+        condition_vae_workspace_device_bytes: public_runtime_bound(366_027_840),
+        // observed 6_172_029_280
+        attention_workspace_device_bytes: public_runtime_bound(6_172_029_280),
+        // observed 7_641_748_832
+        ffn_workspace_device_bytes: public_runtime_bound(7_641_748_832),
+        // observed 1_338_688_660
+        decoder_tile_workspace_device_bytes: public_runtime_bound(1_338_688_660),
+        // observed 204_867_120
+        audio_decode_workspace_device_bytes: public_runtime_bound(204_867_120),
         encoded_video_host_bytes_bound: super::pipeline::SMALL_ENCODED_VIDEO_HOST_BYTES_BOUND,
         thumbnail_host_bytes_bound: super::pipeline::SMALL_THUMBNAIL_HOST_BYTES_BOUND,
         mux_output_host_bytes_bound: super::pipeline::SMALL_MUX_OUTPUT_HOST_BYTES_BOUND,
@@ -3819,13 +4041,24 @@ fn public_runtime_bounds() -> H3PrivateRuntimeBoundRecord {
 
 #[cfg(feature = "h3")]
 fn public_runtime_envelope() -> H3PrivateRuntimeEnvelopeRecord {
+    public_runtime_envelope_for_steps(contract::COMFY_DEFAULT_STEPS)
+}
+
+/// The reviewed public envelope at a given step count.
+///
+/// A Turbo tier renders the same canvas — 1344x768, 124 frames, 24 fps, one
+/// first-frame endpoint, identical row ceilings — and moves only the step
+/// count, which is the whole point of the distillation. Callers may only pass
+/// a count an authenticated adapter declares.
+#[cfg(feature = "h3")]
+fn public_runtime_envelope_for_steps(max_steps: u32) -> H3PrivateRuntimeEnvelopeRecord {
     H3PrivateRuntimeEnvelopeRecord {
         width: contract::DEFAULT_WIDTH,
         height: contract::DEFAULT_HEIGHT,
         frames: contract::MIN_FRAMES,
         fps: contract::FIXED_FPS,
         batch_size: 1,
-        max_steps: contract::COMFY_DEFAULT_STEPS,
+        max_steps,
         endpoint_count: 1,
         endpoint_anchor: "first".into(),
         max_qwen_output_text_rows: 1_058,
@@ -3842,7 +4075,18 @@ fn validate_public_runtime_profile(
     record: &H3PrivateRuntimeQualificationRecord,
     profile_sha256: &str,
 ) -> Result<()> {
-    record.envelope.validate()?;
+    validate_public_runtime_profile_with_turbo(record, profile_sha256, None)
+}
+
+/// Validate the public profile, admitting a reviewed Turbo tier's step count
+/// when an authenticated adapter declares it. `None` keeps the 21-step pin.
+#[cfg(feature = "h3")]
+fn validate_public_runtime_profile_with_turbo(
+    record: &H3PrivateRuntimeQualificationRecord,
+    profile_sha256: &str,
+    turbo_steps: Option<u32>,
+) -> Result<()> {
+    record.envelope.validate_with_reviewed_steps(turbo_steps)?;
     record.bounds.validate()?;
     if record.schema != PUBLIC_RUNTIME_PROFILE_SCHEMA
         || record.decision != PUBLIC_RUNTIME_PROFILE_DECISION
@@ -3867,6 +4111,7 @@ fn public_runtime_qualification(
     attention_runtime_identity_sha256: &str,
     attention_kernel_identity: &str,
     attention_qualification_sha256: &str,
+    turbo_steps: Option<u32>,
 ) -> Result<H3PrivateRuntimeQualificationAuthority> {
     if compute_capability != (8, 9)
         || artifact.canonical_model != contract::FL2VA_COMFY
@@ -3911,17 +4156,19 @@ fn public_runtime_qualification(
             cuda_driver_version: 0,
             cuda_toolkit_version: 0,
         },
-        envelope: public_runtime_envelope(),
+        envelope: public_runtime_envelope_for_steps(
+            turbo_steps.unwrap_or(contract::COMFY_DEFAULT_STEPS),
+        ),
         bounds: public_runtime_bounds(),
         evidence_artifacts: Vec::new(),
         identity_sha256: String::new(),
     };
     record.identity_sha256 = runtime_qualification_identity(&record);
     let profile_sha256 = record.identity_sha256.clone();
-    validate_public_runtime_profile(&record, &profile_sha256)?;
+    validate_public_runtime_profile_with_turbo(&record, &profile_sha256, turbo_steps)?;
     let bounds = record.bounds.clone().into_authority();
     Ok(H3PrivateRuntimeQualificationAuthority {
-        storage: RuntimeQualificationStorage::PublicCompiled,
+        storage: RuntimeQualificationStorage::PublicCompiled { turbo_steps },
         record_file_sha256: profile_sha256,
         record,
         bounds,
@@ -4614,6 +4861,107 @@ mod tests {
     #[cfg(feature = "mp4")]
     use crate::{H3FactoryEndpointInput, H3FactoryEndpointPreprocess, H3FactoryPreparedRowsInput};
 
+    fn reviewed_envelope(max_steps: u32) -> H3PrivateRuntimeEnvelopeRecord {
+        H3PrivateRuntimeEnvelopeRecord {
+            width: contract::DEFAULT_WIDTH,
+            height: contract::DEFAULT_HEIGHT,
+            frames: contract::MIN_FRAMES,
+            fps: contract::FIXED_FPS,
+            batch_size: 1,
+            max_steps,
+            endpoint_count: 1,
+            endpoint_anchor: "first".into(),
+            max_qwen_output_text_rows: 1_058,
+            max_qwen_vision_rows: 4_032,
+            max_condition_visual_rows: 1_008,
+            max_target_video_rows: 37_296,
+            max_target_audio_rows: 414,
+            max_total_packed_rows: 39_776,
+        }
+    }
+
+    /// Without an authenticated adapter the reviewed envelope is exactly as
+    /// strict as before: 21 steps and nothing else.
+    #[test]
+    fn the_envelope_step_pin_is_unchanged_without_a_turbo_adapter() {
+        reviewed_envelope(contract::COMFY_DEFAULT_STEPS)
+            .validate()
+            .unwrap();
+        for steps in [5u32, 9, 20, 22, 50, 0] {
+            let error = reviewed_envelope(steps).validate().unwrap_err().to_string();
+            assert!(
+                error.contains(&format!("allows {} steps", contract::COMFY_DEFAULT_STEPS)),
+                "{steps}: {error}"
+            );
+        }
+    }
+
+    /// A Turbo tier moves the step axis and ONLY the step axis, and only to the
+    /// count its own distillation was reviewed for.
+    #[test]
+    fn a_turbo_tier_moves_only_the_step_axis_of_the_reviewed_envelope() {
+        for reviewed_steps in [5u32, 9] {
+            reviewed_envelope(reviewed_steps)
+                .validate_with_reviewed_steps(Some(reviewed_steps))
+                .unwrap();
+
+            // Any other count, including the baseline 21, is refused for that
+            // tier: an adapter distilled for N steps may not run at M.
+            for wrong in [contract::COMFY_DEFAULT_STEPS, reviewed_steps + 1, 4] {
+                if wrong == reviewed_steps {
+                    continue;
+                }
+                let error = reviewed_envelope(wrong)
+                    .validate_with_reviewed_steps(Some(reviewed_steps))
+                    .unwrap_err()
+                    .to_string();
+                assert!(
+                    error.contains(&format!("allows {reviewed_steps} steps")),
+                    "{reviewed_steps}/{wrong}: {error}"
+                );
+            }
+
+            // And no other axis relaxes just because an adapter is present.
+            let mut widened = reviewed_envelope(reviewed_steps);
+            widened.width += 64;
+            assert!(widened
+                .validate_with_reviewed_steps(Some(reviewed_steps))
+                .is_err());
+            let mut longer = reviewed_envelope(reviewed_steps);
+            longer.frames += 4;
+            assert!(longer
+                .validate_with_reviewed_steps(Some(reviewed_steps))
+                .is_err());
+            let mut batched = reviewed_envelope(reviewed_steps);
+            batched.batch_size = 2;
+            assert!(batched
+                .validate_with_reviewed_steps(Some(reviewed_steps))
+                .is_err());
+            let mut anchored = reviewed_envelope(reviewed_steps);
+            anchored.endpoint_anchor = "last".into();
+            assert!(anchored
+                .validate_with_reviewed_steps(Some(reviewed_steps))
+                .is_err());
+            let mut zeroed = reviewed_envelope(reviewed_steps);
+            zeroed.max_total_packed_rows = 0;
+            assert!(zeroed
+                .validate_with_reviewed_steps(Some(reviewed_steps))
+                .is_err());
+        }
+    }
+
+    /// The reviewed Turbo step counts are exactly the ones the tier table
+    /// declares, so the envelope and the sampler cannot drift apart.
+    #[test]
+    fn reviewed_turbo_step_counts_come_from_the_tier_table() {
+        for contract_entry in super::super::turbo::REVIEWED_TURBO_TIERS {
+            reviewed_envelope(contract_entry.grid_points)
+                .validate_with_reviewed_steps(Some(contract_entry.grid_points))
+                .unwrap();
+            assert!(matches!(contract_entry.grid_points, 5 | 9));
+        }
+    }
+
     const DEVICE_0: &str = "cuda:00000000000000000000000000000000";
     const DEVICE_1: &str = "cuda:00000000000000000000000000000001";
 
@@ -5084,6 +5432,7 @@ mod tests {
                 transformer_policy_sha256: sha('6'),
                 qwen_policy_sha256: sha('7'),
                 pruned_adaln_table_sha256: sha('8'),
+                turbo_adapter: None,
             },
             prepared_attempt: None,
             execution_budget_echo: None,
@@ -5883,6 +6232,102 @@ mod tests {
         assert!(authenticate_h3_public_presentation(&[unsupported]).is_err());
     }
 
+    /// The pre-SHA capacity precheck must never refuse work the exact
+    /// per-attempt check would admit. That holds iff each floor is a lower
+    /// bound of the exact phase sum it stands in for, so this sweeps bound
+    /// records and both conditioner placements and asserts exactly that,
+    /// rebuilding the phase sums from the ledger's own arithmetic.
+    #[cfg(feature = "mp4")]
+    #[test]
+    fn admission_precheck_floors_never_exceed_the_exact_phase_sums() {
+        fn record(attention: u64, ffn: u64, device: u64, host: u64) -> H3PrivateRuntimeBoundRecord {
+            H3PrivateRuntimeBoundRecord {
+                fixed_runtime_host_bytes: host,
+                fixed_runtime_device_bytes: device,
+                qwen_activation_workspace_bytes: 3_959_422_976,
+                vae_construction_device_workspace_bytes: 67_108_864,
+                condition_vae_workspace_device_bytes: 469_762_048,
+                attention_workspace_device_bytes: attention,
+                ffn_workspace_device_bytes: ffn,
+                decoder_tile_workspace_device_bytes: 1_543_503_872,
+                audio_decode_workspace_device_bytes: 268_435_456,
+                encoded_video_host_bytes_bound:
+                    super::super::pipeline::SMALL_ENCODED_VIDEO_HOST_BYTES_BOUND,
+                thumbnail_host_bytes_bound:
+                    super::super::pipeline::SMALL_THUMBNAIL_HOST_BYTES_BOUND,
+                mux_output_host_bytes_bound:
+                    super::super::pipeline::SMALL_MUX_OUTPUT_HOST_BYTES_BOUND,
+                aac_mux_staging_host_bytes:
+                    super::super::pipeline::SMALL_AAC_MUX_STAGING_HOST_BYTES,
+            }
+        }
+
+        let sweep = [
+            record(1, 1, 1, 1),
+            record(7_113_539_584, 8_791_261_184, 603_979_776, 805_306_368),
+            record(15_300_820_992, 10_133_438_464, 603_979_776, 671_088_640),
+            record(u32::MAX.into(), 1, u32::MAX.into(), u32::MAX.into()),
+        ];
+        // Request-derived terms the exact sums add on top. Every one is
+        // non-negative, so the floor has to hold for the empty case too.
+        let request_extras = [0_u64, 1, 14_708_736, 1_710_342_144];
+
+        for bounds in &sweep {
+            let device_floor = private_h3_admission_device_floor_bytes(bounds).unwrap();
+            let host_floor = private_h3_admission_host_floor_bytes(bounds).unwrap();
+
+            for extra in request_extras {
+                // The exact denoise phase, rebuilt from the ledger's own
+                // helper, so switching the floor back to attention + FFN or
+                // dropping the fixed-runtime term breaks this.
+                let denoise_phase = bounds.fixed_runtime_device_bytes
+                    + crate::h3_factory::denoise_transient_workspace_device_bytes(
+                        bounds.attention_workspace_device_bytes,
+                        bounds.ffn_workspace_device_bytes,
+                    )
+                    + extra;
+                assert!(
+                    device_floor <= denoise_phase,
+                    "device floor {device_floor} exceeds the exact denoise phase {denoise_phase}"
+                );
+
+                // The exact Qwen host phase under EITHER placement. A floor
+                // built from the CPU residency would fail the accelerated case.
+                for route in [
+                    H3PrivateQwenLoaderMemoryRoute::Cpu,
+                    H3PrivateQwenLoaderMemoryRoute::Cuda,
+                ] {
+                    let qwen = released_h3_private_qwen_loader_memory_authority(route).unwrap();
+                    let qwen_phase = bounds.fixed_runtime_host_bytes
+                        + qwen.host_resident_parameter_bytes
+                        + extra;
+                    assert!(
+                        host_floor <= qwen_phase,
+                        "host floor {host_floor} exceeds the exact Qwen host phase {qwen_phase}"
+                    );
+                }
+            }
+
+            // The gate itself: it refuses exactly below each floor and admits
+            // at it, so a refusal always implies the exact sums cannot fit.
+            assert!(precheck_private_h3_admission_capacity(
+                bounds,
+                device_floor.saturating_sub(1),
+                u64::MAX
+            )
+            .is_err());
+            assert!(precheck_private_h3_admission_capacity(
+                bounds,
+                u64::MAX,
+                host_floor.saturating_sub(1)
+            )
+            .is_err());
+            assert!(
+                precheck_private_h3_admission_capacity(bounds, device_floor, host_floor).is_ok()
+            );
+        }
+    }
+
     #[cfg(feature = "h3")]
     #[test]
     fn public_runtime_authority_pins_every_bound_envelope_and_identity_axis() {
@@ -5895,6 +6340,7 @@ mod tests {
             &sha('d'),
             "flash-attention-v2-sm89",
             &sha('e'),
+            None,
         )
         .unwrap();
         authority.revalidate().unwrap();
@@ -5905,13 +6351,13 @@ mod tests {
         assert_eq!(
             H3PrivateFl2VaRuntimeBounds::from(authority.bounds()),
             H3PrivateFl2VaRuntimeBounds {
-                fixed_runtime_host_bytes: 671_088_640,
+                fixed_runtime_host_bytes: 805_306_368,
                 fixed_runtime_device_bytes: 603_979_776,
-                qwen_activation_workspace_bytes: 3_758_096_384,
+                qwen_activation_workspace_bytes: 3_959_422_976,
                 vae_construction_device_workspace_bytes: 67_108_864,
                 condition_vae_workspace_device_bytes: 469_762_048,
-                attention_workspace_device_bytes: 10_133_438_464,
-                ffn_workspace_device_bytes: 15_300_820_992,
+                attention_workspace_device_bytes: 7_113_539_584,
+                ffn_workspace_device_bytes: 8_791_261_184,
                 decoder_tile_workspace_device_bytes: 1_543_503_872,
                 audio_decode_workspace_device_bytes: 268_435_456,
                 encoded_video_host_bytes_bound:
@@ -5976,6 +6422,7 @@ mod tests {
                 &attention,
                 kernel,
                 &qualification,
+                None,
             )
             .is_err());
             crossed.task = "ref2va";
@@ -5987,6 +6434,7 @@ mod tests {
                 &sha('d'),
                 "flash-attention-v2-sm89",
                 &sha('e'),
+                None,
             )
             .is_err());
         }
@@ -6000,6 +6448,7 @@ mod tests {
             &sha('d'),
             "flash-attention-v2-sm89",
             &sha('e'),
+            None,
         )
         .is_err());
     }

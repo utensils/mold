@@ -33,6 +33,7 @@ pub(crate) mod private_server;
 pub(crate) mod private_vae_adapter;
 pub(crate) mod reference_media;
 pub(crate) mod sampler;
+pub(crate) mod turbo;
 pub(crate) mod vae_runtime;
 
 use anyhow::{anyhow, Result};

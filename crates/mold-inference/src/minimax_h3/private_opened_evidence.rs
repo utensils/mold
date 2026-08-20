@@ -42,6 +42,7 @@ use crate::h3_factory::{
     H3FactoryExecutionBudgetEchoInput, H3FactoryPreparedAttemptInput,
     H3FactoryPreparedRequestInput, H3FactoryPreparedRowsInput, H3FactoryRawCheckpointInput,
     H3FactoryTargetBudgetInput, H3FactoryTargetDenoiseCopyPolicy, H3FactoryTargetLoadDropPolicy,
+    H3FactoryTurboAdapterAuthority,
 };
 use crate::progress::ProgressReporter;
 
@@ -617,6 +618,7 @@ impl H3PrivatePreparedFl2VaAttempt {
         qwen: &H3AuthenticatedQwenNvfp4Authority,
         vae: &H3AuthenticatedComfyVaeAuthority,
         bounds: &H3PrivateQualifiedRuntimeBounds,
+        turbo: Option<&H3FactoryTurboAdapterAuthority>,
         progress: &ProgressReporter,
         observer: &mut dyn H3PipelineObserver,
     ) -> Result<Self> {
@@ -636,6 +638,7 @@ impl H3PrivatePreparedFl2VaAttempt {
             vae,
             &transformer_support,
             bounds,
+            turbo,
         )?;
         let mut factory_attempt = H3FactoryPreparedAttemptInput {
             identity_sha256: String::new(),
@@ -705,6 +708,7 @@ pub(crate) fn build_private_fl2va_admission_attempt(
     qwen: &H3AuthenticatedQwenNvfp4Authority,
     vae: &H3AuthenticatedComfyVaeAuthority,
     bounds: &H3PrivateQualifiedRuntimeBounds,
+    turbo: Option<&H3FactoryTurboAdapterAuthority>,
 ) -> Result<H3FactoryPreparedAttemptInput> {
     require_sha256(execution_fingerprint, "private H3 execution fingerprint")?;
     bounds.validate()?;
@@ -720,6 +724,7 @@ pub(crate) fn build_private_fl2va_admission_attempt(
         vae,
         &transformer_support,
         bounds,
+        turbo,
     )?;
     let mut attempt = H3FactoryPreparedAttemptInput {
         identity_sha256: String::new(),
@@ -1144,6 +1149,7 @@ fn validate_fl2va_vae_contract(task: Task, canonical_model: &str) -> Result<()> 
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_canonical_private_fl2va_target_budget(
     request: &H3FactoryPreparedRequestInput,
     checkpoint: &H3FactoryRawCheckpointInput,
@@ -1152,6 +1158,7 @@ fn build_canonical_private_fl2va_target_budget(
     vae: &H3AuthenticatedComfyVaeAuthority,
     transformer_support: &H3PrivateOpenedTaskConfigAuthority,
     bounds: &H3PrivateQualifiedRuntimeBounds,
+    turbo: Option<&H3FactoryTurboAdapterAuthority>,
 ) -> Result<H3FactoryTargetBudgetInput> {
     transformer_support.revalidate()?;
     let mut artifacts = support
@@ -1314,13 +1321,18 @@ fn build_canonical_private_fl2va_target_budget(
         .map(|block| block.protected_device_bytes)
         .max()
         .unwrap_or(0);
+    // The one live packed block, plus the tensor being read held twice: the
+    // `Vec` from `read_tensor_bytes` and the `from_raw_buffer` CPU copy built
+    // from it (`comfy_dit.rs:1373-1407`, `:1451-1462`). Both are alive until
+    // the loaded tensor replaces them.
     let max_streamed_block_host_overlap_bytes = checkpoint
         .blocks
         .iter()
         .map(|block| {
             block
-                .encoded_host_bytes
-                .checked_add(block.max_host_read_staging_bytes)
+                .max_host_read_staging_bytes
+                .checked_mul(2)
+                .and_then(|staging| staging.checked_add(block.encoded_host_bytes))
                 .ok_or_else(|| anyhow!("private H3 streamed host overlap overflow"))
         })
         .collect::<Result<Vec<_>>>()?
@@ -1340,6 +1352,10 @@ fn build_canonical_private_fl2va_target_budget(
     ])?;
     let fixed_transformer_load_device_staging_bytes =
         checkpoint.fixed_transformer_max_device_weight_staging_bytes;
+    // Both terms come from the authority that declared the adapter, so the
+    // builder and `validate_target_budget` cannot disagree about its cost.
+    let turbo_adapter_device_bytes = turbo.map_or(0, |turbo| turbo.resident_device_bytes);
+    let turbo_adapter_host_staging_bytes = turbo.map_or(0, |turbo| turbo.host_staging_peak_bytes);
     let protected_block_device_bytes = checked_sum(
         checkpoint
             .blocks
@@ -1428,6 +1444,7 @@ fn build_canonical_private_fl2va_target_budget(
         packed_video_state_device_bytes,
         packed_audio_state_device_bytes,
         fixed_transformer_load_device_staging_bytes,
+        turbo_adapter_device_bytes,
     ])?;
     let denoise_phase_device_bytes = checked_sum([
         bounds.fixed_runtime_device_bytes,
@@ -1445,6 +1462,7 @@ fn build_canonical_private_fl2va_target_budget(
         crate::h3_factory::denoise_hidden_activation_device_bytes(request.rows.total_packed_rows)?,
         streamed_block_device_overlap_bytes,
         max_device_weight_staging_bytes,
+        turbo_adapter_device_bytes,
     ])?;
     let visual_decode_phase_device_bytes = checked_sum([
         bounds.fixed_runtime_device_bytes,
@@ -1566,6 +1584,7 @@ fn build_canonical_private_fl2va_target_budget(
         text_modality_tags_host_bytes,
         schedule_host_bytes,
         fixed_transformer_load_host_staging_bytes,
+        turbo_adapter_host_staging_bytes,
     ])?;
     let denoise_phase_host_bytes = checked_sum([
         attempt_host_bytes,
@@ -1702,6 +1721,8 @@ fn build_canonical_private_fl2va_target_budget(
         streamed_block_device_overlap_bytes,
         max_device_weight_staging_bytes,
         fixed_transformer_load_device_staging_bytes,
+        turbo_adapter_device_bytes,
+        turbo_adapter_host_staging_bytes,
         vae_load_phase_device_bytes,
         qwen_encode_phase_device_bytes,
         qwen_transfer_phase_device_bytes,
