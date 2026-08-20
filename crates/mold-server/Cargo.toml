@@ -27,15 +27,22 @@ cuda = ["mold-inference/cuda", "nvml", "dep:cudarc"]
 metal = ["mold-inference/metal"]
 expand = ["mold-inference/expand"]
 mp4 = ["mold-inference/mp4"]
-# Public compact MiniMax H3 CUDA runtime. Unlike the qualification feature,
-# this carries no capture binaries or external authorization-record surface.
+# Public compact MiniMax H3 runtime. Device-agnostic (#1164): pair with `cuda`
+# for the shipping SM89 route or with `metal` for the Apple Silicon
+# correctness route. Unlike the qualification feature, this carries no capture
+# binaries or external authorization-record surface.
 h3 = [
-    "cuda",
     "h3-private-bridge",
     "mp4",
     "mold-core/h3",
     "mold-inference/h3",
 ]
+# The shipping CUDA H3 route. Every published SM89 recipe names THIS, never
+# `cuda,h3`: the reviewed public build graph requires it (see
+# `build_support/h3_server_features.rs`), so a recipe that drops back to
+# `cuda,h3` fails the build script instead of failing the post-build kernel
+# verifier at publication time.
+h3-cuda = ["h3", "cuda", "mold-inference/h3-cuda"]
 # Structural seam for opaque, one-shot H3 owner attempts. This compiles the
 # scheduler/server contract without making the private runtime runnable.
 h3-private-bridge = []

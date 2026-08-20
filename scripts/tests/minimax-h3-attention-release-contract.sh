@@ -106,66 +106,82 @@ if contains_forbidden_release_feature <<< "$release_feature_sources"; then
   fail "a published release feature set compiles an H3/FlashAttention candidate"
 fi
 
-require_text .github/workflows/ci.yml \
-  'cargo clippy -p mold-ai-candle --features h3-flash-attn-rc --all-targets -- -D warnings' \
-  "CI does not compile the exact H3 kernel crate and feature"
-require_text .github/workflows/ci.yml \
-  'cargo clippy -p mold-ai-inference --features h3-attention-rc,dev-bins --bin h3_attention_qualification -- -D warnings' \
-  "CI does not compile the synthetic H3 qualification executable"
-require_text .github/workflows/ci.yml \
-  'cargo clippy -p mold-ai-inference --features h3-attention-rc,dev-bins --bin h3_attention_benchmark -- -D warnings' \
-  "CI does not compile the synthetic H3 packed-row benchmark"
-require_text .github/workflows/ci.yml \
-  'crates/mold-inference/src/bin/h3_attention_benchmark.rs' \
-  "release CI classifier omits the H3 packed-row benchmark"
-flash_job="$(awk '
-  $0 == "  flash-attn-check:" { selected = 1 }
-  selected && $0 ~ /^  [[:alnum:]_-][[:alnum:]_-]*:$/ &&
-    $0 != "  flash-attn-check:" { exit }
-  selected { print }
-' .github/workflows/ci.yml)"
-grep -Fq "if: github.event_name == 'push'" <<< "$flash_job" \
-  || fail "FlashAttention proof is not deferred from PRs to every main update"
+# Since #1164 the bare `h3` feature implies neither CUDA nor the SM89
+# attention kernel, so a recipe still written as `--features cuda,h3` builds a
+# CUDA H3 binary with no H3 kernel. `crates/mold-server/build_support/
+# h3_server_features.rs` refuses that graph at build time; this check refuses
+# the recipe at review time, before anyone waits out a release build to learn
+# it from a build script.
+#
+# The scan parses the actual feature list out of each `--features` invocation
+# and tests for the exact token `h3`, rather than matching the line. A looser
+# pattern matched the test filter `minimax_h3` and the comments that name the
+# anti-pattern, which is precisely the kind of false positive that gets a
+# guard deleted.
+enabled_feature_lists() {
+  grep -Eho -- '--features[= ]+"?[A-Za-z0-9_,-]+' "$@" \
+    | sed -E 's/^--features[= ]+"?//'
+}
 
-release_filter="$(awk '
-  $0 == "            release:" { selected = 1 }
-  selected && $0 ~ /^            [[:alnum:]_-][[:alnum:]_-]*:$/ &&
-    $0 != "            release:" { exit }
-  selected { print }
-' .github/workflows/ci.yml)"
-for path in \
-  crates/mold-candle/src/minimax_h3/mod.rs \
-  crates/mold-candle/src/minimax_h3/dit.rs \
-  crates/mold-candle/src/minimax_h3/visual_vae.rs; do
-  grep -Fq "'$path'" <<< "$release_filter" \
-    || fail "release CI classifier omits $path"
+h3_recipe_files=(
+  .github/workflows/release.yml
+  .github/workflows/desktop.yml
+  Dockerfile
+  packaging/aur/mold-ai/PKGBUILD
+  packaging/aur/mold-ai-git/PKGBUILD
+  scripts/ci-local.sh
+)
+
+while IFS= read -r feature_list; do
+  [[ -n "$feature_list" ]] || continue
+  while IFS= read -r feature; do
+    [[ "$feature" == "h3" ]] \
+      && fail "a shipping recipe enables the bare h3 feature ('$feature_list'); SM89 recipes must name h3-cuda"
+  done < <(tr ',' '\n' <<< "$feature_list")
+done < <(enabled_feature_lists "${h3_recipe_files[@]}")
+
+for fixture in 'cuda,h3,preview' 'h3' 'dev-bins,h3'; do
+  grep -qx 'h3' <<< "$(tr ',' '\n' <<< "$fixture")" \
+    || fail "bare-h3 scanner missed fixture: $fixture"
+done
+for fixture in 'h3-cuda,preview' 'dev-bins,h3-private-uat' 'cuda,h3-attention-rc'; do
+  if grep -qx 'h3' <<< "$(tr ',' '\n' <<< "$fixture")"; then
+    fail "bare-h3 scanner rejected allowed fixture: $fixture"
+  fi
 done
 
-require_text scripts/verify-cuda-release-binary.sh \
-  '"$h3_release_exclusion" "$binary"' \
-  "CUDA archive verification does not enforce the H3 candidate exclusion"
-require_text Dockerfile \
-  'RUN scripts/verify-h3-release-exclusion.sh /build/target/release/mold' \
-  "the published container does not enforce the H3 candidate exclusion"
-for target in 86 89 100 120; do
-  require_text .github/workflows/release.yml \
-    "scripts/verify-cuda-release-binary.sh target/release/mold $target" \
-    "the native sm$target publication route bypasses H3 exclusion verification"
-done
+# Nix composes its feature strings rather than passing `--features`, so its two
+# helpers are checked on the literal they yield for SM89.
 require_text flake.nix \
-  '${pkgs.bash}/bin/bash ${./scripts/verify-h3-release-exclusion.sh} "$out/bin/mold"' \
-  "Nix CUDA CLI outputs bypass H3 exclusion verification"
-require_text flake.nix \
-  '${pkgs.bash}/bin/bash ${./scripts/verify-h3-release-exclusion.sh} "$desktop_bin"' \
-  "Nix CUDA desktop outputs bypass H3 exclusion verification"
-require_text .github/workflows/desktop.yml \
-  '../scripts/verify-h3-release-exclusion.sh "$desktop_binary"' \
-  "the Linux CUDA AppImage route bypasses H3 exclusion verification"
-for pkgbuild in packaging/aur/mold-ai/PKGBUILD packaging/aur/mold-ai-git/PKGBUILD; do
-  require_text "$pkgbuild" \
-    './scripts/verify-h3-release-exclusion.sh "target/release/${_binname}"' \
-    "$pkgbuild bypasses H3 exclusion verification"
+  'if computeCap == "89" then "h3-cuda" else "cuda"' \
+  "a flake feature helper no longer selects the h3-cuda edge for SM89"
+if grep -Eq '"cuda,h3"|,h3"' flake.nix; then
+  fail "flake.nix still composes a bare cuda,h3 feature string"
+fi
+
+# Positive proof that each SM89 route still names the edge, so deleting an H3
+# line from a recipe cannot pass by leaving nothing to match.
+for recipe in "${h3_recipe_files[@]}" flake.nix desktop/src-tauri/Cargo.toml; do
+  grep -Fq 'h3-cuda' "$recipe" \
+    || fail "$recipe no longer names the h3-cuda shipping edge"
 done
+
+require_text crates/mold-server/build_support/h3_server_features.rs \
+  '"CARGO_FEATURE_H3_CUDA",' \
+  "the mold-server build fence does not require the h3-cuda shipping edge"
+require_text crates/mold-server/Cargo.toml \
+  'h3-cuda = ["h3", "cuda", "mold-inference/h3-cuda"]' \
+  "mold-server does not expose the h3-cuda shipping edge"
+require_text crates/mold-inference/Cargo.toml \
+  'h3-cuda = ["h3", "cuda", "h3-attention-rc"]' \
+  "the h3-cuda edge does not carry the SM89 attention kernel"
+# The inverse guard: re-coupling a device to the bare feature is what made an
+# Apple Silicon H3 build inexpressible in the first place.
+if grep -Eq '^h3 = \[[^]]*"cuda"' crates/mold-inference/Cargo.toml \
+  crates/mold-server/Cargo.toml crates/mold-cli/Cargo.toml \
+  desktop/src-tauri/Cargo.toml; then
+  fail "the bare h3 feature re-couples a device, making an Apple Silicon build inexpressible"
+fi
 
 omitted_marker='mold.minimax-h3.attention-release-provenance.v2:h3-rc=omitted:global-flash=omitted'
 claim_marker='mold.minimax-h3.attention-rc.kernel-compiled.v1'

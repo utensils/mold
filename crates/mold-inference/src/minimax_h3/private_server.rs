@@ -1000,7 +1000,10 @@ impl H3PrivateFl2VaAdmissionEvidence {
             || self.base_factory_authority.task() != self.task
             || self.base_factory_authority.device_id() != self.device_id
             || self.base_factory_authority.device_ordinal() != self.device_ordinal
-            || self.base_factory_authority.compute_capability() != self.compute_capability
+            // The public runtime profile is CUDA SM89 only, so a Metal factory
+            // authority (which carries no compute capability) can never match
+            // here and fails closed without a separate branch.
+            || self.base_factory_authority.compute_capability() != Some(self.compute_capability)
             || self.base_factory_authority.execution_fingerprint() != self.execution_fingerprint
             || self.base_factory_authority.component_set_identity_sha256()
                 != self.component_set_identity_sha256
@@ -1271,7 +1274,10 @@ fn prepare_reviewed_h3_private_fl2va_admission(
             model: contract::FL2VA_COMFY.into(),
             device_id: device_id.into(),
             device_ordinal,
-            compute_capability,
+            // The public H3 runtime profile is CUDA SM89, so this is always a
+            // CUDA route; the factory input is optional only because a Metal
+            // plan carries no compute capability.
+            compute_capability: Some(compute_capability),
             execution_fingerprint: execution_fingerprint.clone(),
             conditioner_placement: H3FactoryConditionerPlacement::HostCpuThenDrop,
             qwen_parameter_bytes: qwen_memory.source_parameter_bytes,
@@ -1313,7 +1319,7 @@ fn prepare_reviewed_h3_private_fl2va_admission(
         &qwen_support,
         device_id,
         device_ordinal,
-        compute_capability,
+        Some(compute_capability),
         &qwen_artifact.sha256,
         qwen_header_identity,
         qwen_policy_identity,
@@ -2300,7 +2306,7 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
         &qwen_support,
         &owner_fence.device_id,
         owner_fence.device_ordinal,
-        owner_fence.compute_capability,
+        Some(owner_fence.compute_capability),
         &qwen_artifact.sha256,
         qwen_header_identity,
         qwen_policy_identity,
@@ -2453,7 +2459,7 @@ fn validate_base_factory(
         || factory.task() != Task::Fl2va
         || factory.device_id() != owner.device_id
         || factory.device_ordinal() != owner.device_ordinal
-        || factory.compute_capability() != owner.compute_capability
+        || factory.compute_capability() != Some(owner.compute_capability)
         || factory.prepared_target_attempt_identities().is_some()
         || !factory.attention_runtime_identity_sha256().is_empty()
         || factory.attention_backend() != AttentionBackend::Flash
@@ -2581,7 +2587,11 @@ impl H3PrivateQwenConditionerLease for H3PrivateServerConditionerLease {
 struct H3PrivateServerExecutionLease {
     lease_id: String,
     device_id: String,
-    compute_capability: (u16, u16),
+    /// Mirrors the factory's own optional capability: `None` is the Metal
+    /// route. The lease reports the class the factory froze rather than
+    /// asserting CUDA, so a crossed route is caught by the plan comparison
+    /// instead of by an unwrap here.
+    compute_capability: Option<(u16, u16)>,
     execution_fingerprint: String,
     device: Device,
     active: bool,
@@ -2623,9 +2633,7 @@ impl H3BackendExecutionLease for H3PrivateServerExecutionLease {
     }
 
     fn backend(&self) -> H3CandleBackendDevice {
-        H3CandleBackendDevice::Cuda {
-            compute_capability: self.compute_capability,
-        }
+        H3CandleBackendDevice::from_compute_capability(self.compute_capability)
     }
 
     fn execution_fingerprint(&self) -> &str {
@@ -5500,7 +5508,7 @@ mod tests {
             model: contract::FL2VA_COMFY.into(),
             device_id: DEVICE_0.into(),
             device_ordinal: 0,
-            compute_capability: (8, 9),
+            compute_capability: Some((8, 9)),
             execution_fingerprint: sha('4'),
             conditioner_placement: H3FactoryConditionerPlacement::HostCpuThenDrop,
             qwen_parameter_bytes: 10,

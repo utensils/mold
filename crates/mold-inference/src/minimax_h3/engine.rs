@@ -1284,7 +1284,7 @@ mod tests {
             model: model.into(),
             device_id: "gpu-0".into(),
             device_ordinal: 0,
-            compute_capability: (8, 9),
+            compute_capability: Some((8, 9)),
             execution_fingerprint: EXECUTION.into(),
             conditioner_placement: H3FactoryConditionerPlacement::HostCpuThenDrop,
             qwen_parameter_bytes: 2_048,

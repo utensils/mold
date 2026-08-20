@@ -19,12 +19,12 @@ use candle_nn as nn;
 use nn::{Module, VarBuilder};
 use serde::{Deserialize, Serialize};
 
-#[cfg(test)]
-use super::attention::H3AttentionBackend;
 use super::attention::{
-    execute_h3_attention, H3AttentionDType, H3AttentionDevice, H3AttentionModelContract,
-    H3AttentionRuntimeAuthority, H3FrozenAttentionExecution, H3FrozenAttentionPlan,
+    execute_h3_attention, H3AttentionDType, H3AttentionModelContract, H3AttentionRuntimeAuthority,
+    H3FrozenAttentionExecution, H3FrozenAttentionPlan,
 };
+#[cfg(test)]
+use super::attention::{H3AttentionBackend, H3AttentionDevice};
 use super::comfy_quant::{H3ComfyInt8ConvRotLinear, H3_COMFY_PORTABLE_ROW_CHUNK};
 use super::turbo_runtime::{
     apply_optional_turbo_delta, validate_turbo_block_shapes, H3TurboBlockDeltas, H3TurboLoraDelta,
@@ -2429,11 +2429,8 @@ fn capture_h3_private_transformer_primitives_with_precision(
         dtype: H3AttentionDType::from_candle(compute_dtype)
             .map_err(|error| candle::Error::Msg(error.to_string()))?,
     };
-    let authority = H3AttentionRuntimeAuthority::bounded_synthetic_math(
-        H3AttentionDevice::from_candle(device),
-        contract,
-    )
-    .map_err(|error| candle::Error::Msg(error.to_string()))?;
+    let authority = H3AttentionRuntimeAuthority::correctness_for_device(device, contract)
+        .map_err(|error| candle::Error::Msg(error.to_string()))?;
     let attention = authority
         .freeze_execution(batch, token_rows, packed_rows)
         .map_err(|error| candle::Error::Msg(error.to_string()))?;
@@ -2758,8 +2755,8 @@ impl H3StreamedTransformer {
             dtype: H3AttentionDType::from_candle(checkpoint.plan.precision.compute_dtype())
                 .map_err(|error| candle::Error::Msg(error.to_string()))?,
         };
-        let attention_runtime = H3AttentionRuntimeAuthority::bounded_synthetic_math(
-            H3AttentionDevice::from_candle(checkpoint.source.vb.device()),
+        let attention_runtime = H3AttentionRuntimeAuthority::correctness_for_device(
+            checkpoint.source.vb.device(),
             contract,
         )
         .map_err(|error| candle::Error::Msg(error.to_string()))?;

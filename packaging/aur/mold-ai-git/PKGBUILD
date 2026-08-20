@@ -74,11 +74,14 @@ build() {
   # --frozen + --offline pairs with `cargo fetch --locked` in prepare():
   #   --frozen  refuses to mutate Cargo.lock
   #   --offline refuses any network IO during build
-  local h3_feature=""
-  [[ "${CUDA_COMPUTE_CAP}" == "89" ]] && h3_feature=",h3"
+  # SM89 names `h3-cuda`, not `cuda,h3`: since #1164 the bare `h3` feature
+  # implies neither CUDA nor the SM89 attention kernel. `h3-cuda` implies
+  # `cuda`, so it replaces the device feature instead of appending to it.
+  local gpu_feature="cuda"
+  [[ "${CUDA_COMPUTE_CAP}" == "89" ]] && gpu_feature="h3-cuda"
   cargo build --release --frozen --offline \
     -p mold-ai \
-    --features "cuda${h3_feature},preview,expand,tui,webp,mp4,metrics,mdns"
+    --features "${gpu_feature},preview,expand,tui,webp,mp4,metrics,mdns"
 }
 
 check() {

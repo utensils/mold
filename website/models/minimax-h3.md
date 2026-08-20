@@ -9,10 +9,23 @@ Mold does not bundle or mirror the weights.
 ::: warning CUDA FL2VA is the first supported runtime
 Both compact variants can be downloaded on any Mold host. Mold's SM89 CUDA
 release can run the compact FL2VA model for the supported request profile below.
-Ref2VA execution and the Metal and CPU backends remain unavailable. Broader request shapes also
-remain unavailable until those paths are implemented and tested; Mold reports
-that limitation normally rather than treating it as a licensing or
-authorization failure.
+Ref2VA execution and the CPU backend remain unavailable. Broader request
+shapes also remain unavailable until those paths are implemented and
+tested; Mold reports that limitation normally rather than treating it as a
+licensing or authorization failure.
+:::
+
+::: info Apple Metal is a correctness-only path in progress
+The Apple Silicon execution path exists as of #1164 — family-scoped BF16, a
+folded audio-VAE reduction, chunked dense attention sized so the score matrix
+fits a Metal buffer, the portable INT8 ConvRot arm, and fp8-scaled weights
+refused by name because candle has no Metal fp8 widening kernel. It is
+advertised as **correctness-only**, the same tier Wan and LTX-2 landed on
+before their performance qualification. Metal is not yet a runnable H3 route:
+the public runtime profile is still SM89 CUDA, and Metal execution waits on
+qualification against real Apple Silicon hardware. Expect Metal to be slow when
+it lands — the reference MLX port measures minutes per step at 5 s — so this is
+a portability path, not a speed one.
 :::
 
 ## Compact variants

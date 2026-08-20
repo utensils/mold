@@ -97,7 +97,11 @@ default = []
 # CPU-only by default so CI runs without a GPU; desktop-dev/desktop-build
 # turn on the native GPU backend for real generation.
 cuda = ["mold-server/cuda", "nvml"]
-h3 = ["cuda", "mold-core/h3", "mold-server/h3"]
+# Device-free like the workspace's own `h3` (#1164). The Linux desktop
+# package names `h3-cuda`; `h3` + `cuda` is the graph that silently drops the
+# SM89 attention kernel and the mold-server build fence refuses it.
+h3 = ["mold-core/h3", "mold-server/h3"]
+h3-cuda = ["h3", "cuda", "mold-server/h3-cuda"]
 nvml = ["mold-server/nvml"]
 metal = ["mold-server/metal"]
 

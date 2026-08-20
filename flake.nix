@@ -209,8 +209,11 @@
             (lib.makeSearchPath "share/pkgconfig" (map lib.getDev desktopPkgConfigInputs))
           ];
 
+          # SM89 names `h3-cuda`, never `cuda,h3` -- since #1164 the bare `h3`
+          # feature implies neither CUDA nor the SM89 attention kernel, and
+          # `h3-cuda` implies `cuda` so it replaces the device feature.
           desktopFeatureFor =
-            computeCap: if isLinux then if computeCap == "89" then "cuda,h3" else "cuda" else "metal";
+            computeCap: if isLinux then if computeCap == "89" then "h3-cuda" else "cuda" else "metal";
           desktopFeature = desktopFeatureFor cudaComputeCap;
 
           gpuFeature =
@@ -227,8 +230,8 @@
           releaseFeaturesFor =
             computeCap:
             if isLinux then
-              "cuda${
-                lib.optionalString (computeCap == "89") ",h3"
+              "${
+                if computeCap == "89" then "h3-cuda" else "cuda"
               },preview,discord,expand,tui,webp,mp4,metrics,mdns"
             else if gpuFeature != "" then
               "${gpuFeature},preview,discord,expand,tui,webp,mp4,metrics,mdns"

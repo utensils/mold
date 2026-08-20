@@ -41,7 +41,7 @@ extract_filter() {
 
 rust_job=$(extract_job "$ci" rust)
 cuda_job=$(extract_job "$ci" cuda-check)
-producer_command='cargo clippy -p mold-ai-inference --features dev-bins,h3 --bin h3_runtime_qualification_record -- -D warnings'
+producer_command='cargo clippy -p mold-ai-inference --features dev-bins,h3-cuda --bin h3_runtime_qualification_record -- -D warnings'
 if grep -Fq -- "$producer_command" <<< "$rust_job"; then
   fail "the CUDA-backed H3 runtime-record producer runs in the CPU Rust job"
 fi

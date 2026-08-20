@@ -66,6 +66,15 @@ impl H3FactoryComponentAuthority {
     }
 }
 
+/// Where the scheduler placed the Qwen conditioner for one frozen attempt.
+///
+/// `AssignedCudaThenDrop` is CUDA-named on purpose and is NOT auto-mapped onto
+/// Apple Silicon. A Metal route reaches this enum with
+/// `compute_capability: None`, and silently reading a CUDA-named placement as
+/// `MetalResident` would freeze a plan whose recorded intent nobody wrote --
+/// so the pair is refused at construction instead (#1164). A Metal
+/// device-resident conditioner needs its own variant, added when Metal
+/// execution is qualified and something actually places one.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum H3FactoryConditionerPlacement {
     AssignedCudaThenDrop,
@@ -1052,7 +1061,13 @@ pub struct H3FactoryAuthorityInput {
     pub model: String,
     pub device_id: String,
     pub device_ordinal: usize,
-    pub compute_capability: (u16, u16),
+    /// The CUDA compute capability of the frozen route, or `None` for Metal.
+    ///
+    /// Metal has no per-architecture attention qualification — Apple Silicon
+    /// has one chunked dense correctness route — so `None` is the whole
+    /// statement, not a missing value. Callers that gate on SM89 must treat it
+    /// as "not a CUDA route" rather than substituting a default.
+    pub compute_capability: Option<(u16, u16)>,
     pub execution_fingerprint: String,
     pub conditioner_placement: H3FactoryConditionerPlacement,
     pub qwen_parameter_bytes: u64,
@@ -1157,7 +1172,7 @@ pub(crate) struct H3PrivateFl2VaFactoryAuthority {
     pub(crate) task: Task,
     pub(crate) device_id: String,
     pub(crate) device_ordinal: usize,
-    pub(crate) compute_capability: (u16, u16),
+    pub(crate) compute_capability: Option<(u16, u16)>,
     pub(crate) execution_fingerprint: String,
     pub(crate) condition_visual_rows: u64,
     pub(crate) block_streaming: FrozenH3BlockStreamingPlan,
@@ -2933,30 +2948,54 @@ fn update_string(hash: &mut Sha256, value: &str) {
     hash.update(value.as_bytes());
 }
 
+/// Validate the frozen attention tuple against the plan's own device class.
+///
+/// `compute_capability` is `Some` for a CUDA plan and `None` for Metal. The
+/// two routes are separate exact tuples, not a relaxation of one: CUDA
+/// requires the SM89 FlashAttention kernel, Metal requires the chunked dense
+/// correctness kernel, and neither device may present the other's.
 fn validate_attention(
     attention: &H3FactoryAttentionInput,
-    compute_capability: (u16, u16),
+    compute_capability: Option<(u16, u16)>,
 ) -> Result<()> {
     require_sha256(&attention.runtime_identity_sha256, "H3 attention runtime")?;
     require_sha256(
         &attention.qualification_sha256,
         "H3 attention qualification",
     )?;
-    if attention.generic_backend != AttentionBackend::Flash
-        || attention.generic_chunk != AttentionChunkPolicy::Off
-        || attention.runtime_backend != H3AttentionBackend::FlashAttentionV2
-        || attention.kernel != H3AttentionKernel::CandleFlashFwdHdim128Bf16Sm80V011
-        || attention.activation != H3AttentionActivation::ReleaseCandidateQualificationOnly
-        || attention.device
-            != (H3AttentionDevice::Cuda {
+    let expected_tuple = match compute_capability {
+        Some(compute_capability) => (
+            AttentionBackend::Flash,
+            H3AttentionBackend::FlashAttentionV2,
+            H3AttentionKernel::CandleFlashFwdHdim128Bf16Sm80V011,
+            H3AttentionActivation::ReleaseCandidateQualificationOnly,
+            H3AttentionDevice::Cuda {
                 compute_capability: Some(compute_capability),
-            })
+            },
+        ),
+        // H3 never routes through `crate::attention` on Metal — the frozen
+        // plan carries its own query chunk — so the generic backend stays at
+        // the process default and the generic chunk policy stays off.
+        None => (
+            AttentionBackend::Math,
+            H3AttentionBackend::MetalChunkedDenseMath,
+            H3AttentionKernel::CandleDenseChunkedF32V011,
+            H3AttentionActivation::MetalCorrectnessOnly,
+            H3AttentionDevice::Metal,
+        ),
+    };
+    if attention.generic_backend != expected_tuple.0
+        || attention.generic_chunk != AttentionChunkPolicy::Off
+        || attention.runtime_backend != expected_tuple.1
+        || attention.kernel != expected_tuple.2
+        || attention.activation != expected_tuple.3
+        || attention.device != expected_tuple.4
         || attention.model_contract != H3AttentionModelContract::released_bf16()
         || attention.qualification_kernel_identity != attention.kernel.identity()
         || !attention.full_noncausal
         || !attention.lossless
     {
-        bail!("MiniMax H3 factory requires one exact released CUDA attention tuple");
+        bail!("MiniMax H3 factory requires one exact released attention tuple for its device");
     }
     let expected = H3AttentionRuntimeAuthority::expected_identity_for(
         attention.runtime_backend,
@@ -2981,8 +3020,8 @@ impl FrozenH3FactoryAuthority {
                 "contract-only MiniMax H3 factory authority cannot be created for a runnable contract"
             );
         }
-        if input.device_id.trim().is_empty() || input.compute_capability.0 == 0 {
-            bail!("MiniMax H3 factory authority requires one concrete CUDA route");
+        if input.device_id.trim().is_empty() || matches!(input.compute_capability, Some((0, _))) {
+            bail!("MiniMax H3 factory authority requires one concrete device route");
         }
         require_sha256(&input.execution_fingerprint, "H3 scheduler execution")?;
         if input.qwen_parameter_bytes == 0
@@ -3150,6 +3189,19 @@ impl FrozenH3FactoryAuthority {
                 })
                 .collect::<Result<Vec<_>>>()?,
         )?;
+        // A CUDA-named placement on a route with no compute capability is a
+        // Metal route wearing a CUDA plan: the conditioner would freeze as
+        // `CudaResident`, hash into the authority identity as `qwen-cuda`, and
+        // then be validated only for device-id equality -- which a Metal
+        // device id satisfies. Refuse it rather than translate it.
+        if input.compute_capability.is_none()
+            && input.conditioner_placement == H3FactoryConditionerPlacement::AssignedCudaThenDrop
+        {
+            bail!(
+                "MiniMax H3 Metal route cannot freeze the CUDA-assigned conditioner placement; \
+                 Metal has no device-resident conditioner placement yet"
+            );
+        }
         let conditioner_execution = match input.conditioner_placement {
             H3FactoryConditionerPlacement::AssignedCudaThenDrop => {
                 H3ConditionerExecution::CudaResident
@@ -3179,8 +3231,9 @@ impl FrozenH3FactoryAuthority {
         let backend_plan = FrozenH3Fl2VaCandlePlan::new_unavailable(
             model_contract.canonical_model,
             input.device_id,
-            H3CandleBackendDevice::Cuda {
-                compute_capability: input.compute_capability,
+            match input.compute_capability {
+                Some(compute_capability) => H3CandleBackendDevice::Cuda { compute_capability },
+                None => H3CandleBackendDevice::Metal,
             },
             input.execution_fingerprint,
             conditioner_placement,
@@ -3375,11 +3428,24 @@ impl FrozenH3FactoryAuthority {
         let attention = match self.attention_runtime.as_ref() {
             Some(attention) => attention.clone(),
             None => {
-                let runtime_backend = H3AttentionBackend::FlashAttentionV2;
-                let kernel = H3AttentionKernel::CandleFlashFwdHdim128Bf16Sm80V011;
-                let activation = H3AttentionActivation::ReleaseCandidateQualificationOnly;
-                let device = H3AttentionDevice::Cuda {
-                    compute_capability: Some(self.compute_capability()),
+                // The default tuple mirrors the frozen device class: SM89
+                // FlashAttention on CUDA, chunked dense correctness on Metal.
+                let (runtime_backend, kernel, activation, device) = match self.compute_capability()
+                {
+                    Some(compute_capability) => (
+                        H3AttentionBackend::FlashAttentionV2,
+                        H3AttentionKernel::CandleFlashFwdHdim128Bf16Sm80V011,
+                        H3AttentionActivation::ReleaseCandidateQualificationOnly,
+                        H3AttentionDevice::Cuda {
+                            compute_capability: Some(compute_capability),
+                        },
+                    ),
+                    None => (
+                        H3AttentionBackend::MetalChunkedDenseMath,
+                        H3AttentionKernel::CandleDenseChunkedF32V011,
+                        H3AttentionActivation::MetalCorrectnessOnly,
+                        H3AttentionDevice::Metal,
+                    ),
                 };
                 let model_contract = H3AttentionModelContract::released_bf16();
                 H3FactoryAttentionInput {
@@ -3503,9 +3569,15 @@ impl FrozenH3FactoryAuthority {
         self.device_ordinal
     }
 
-    pub fn compute_capability(&self) -> (u16, u16) {
+    /// The CUDA compute capability this plan froze, if it is a CUDA plan.
+    ///
+    /// Metal has none — its one attention route is qualified by backend, not
+    /// by architecture — so callers that gate on SM89 must treat `None` as
+    /// "not a CUDA route" rather than substituting a default.
+    pub fn compute_capability(&self) -> Option<(u16, u16)> {
         match self.backend_plan.backend() {
-            H3CandleBackendDevice::Cuda { compute_capability } => compute_capability,
+            H3CandleBackendDevice::Cuda { compute_capability } => Some(compute_capability),
+            H3CandleBackendDevice::Metal => None,
         }
     }
 
@@ -4513,7 +4585,7 @@ mod tests {
             model: contract::FL2VA_COMFY.into(),
             device_id: "gpu-0".into(),
             device_ordinal: 0,
-            compute_capability: (8, 9),
+            compute_capability: Some((8, 9)),
             execution_fingerprint: sha('a'),
             conditioner_placement: H3FactoryConditionerPlacement::HostCpuThenDrop,
             qwen_parameter_bytes: 2048,
@@ -4547,6 +4619,90 @@ mod tests {
             execution_budget_echo: Some(execution_budget_echo),
             components: components(),
         }
+    }
+
+    /// A Metal route's attention tuple, which the factory requires to agree
+    /// with the absent compute capability.
+    fn metal_attention() -> H3FactoryAttentionInput {
+        let runtime_backend = H3AttentionBackend::MetalChunkedDenseMath;
+        let kernel = H3AttentionKernel::CandleDenseChunkedF32V011;
+        let activation = H3AttentionActivation::MetalCorrectnessOnly;
+        let device = H3AttentionDevice::Metal;
+        let model_contract = H3AttentionModelContract::released_bf16();
+        let runtime_identity_sha256 = H3AttentionRuntimeAuthority::expected_identity_for(
+            runtime_backend,
+            kernel,
+            activation,
+            device,
+            model_contract,
+        )
+        .unwrap();
+        H3FactoryAttentionInput {
+            generic_backend: AttentionBackend::Math,
+            generic_chunk: AttentionChunkPolicy::Off,
+            runtime_backend,
+            kernel,
+            activation,
+            device,
+            model_contract,
+            runtime_identity_sha256,
+            qualification_kernel_identity: kernel.identity().into(),
+            qualification_sha256: sha('b'),
+            full_noncausal: true,
+            lossless: true,
+        }
+    }
+
+    /// Move an otherwise-exact input onto the Metal route: no compute
+    /// capability, plus the Metal attention tuple the factory demands
+    /// alongside it. Everything else -- budgets included -- is left exactly as
+    /// the caller built it, so a test can isolate one disagreement.
+    fn onto_metal(mut input: H3FactoryAuthorityInput) -> H3FactoryAuthorityInput {
+        let attention = metal_attention();
+        input.compute_capability = None;
+        input.attention_backend = attention.generic_backend;
+        input.attention_kernel_identity = attention.qualification_kernel_identity.clone();
+        input.attention_runtime = Some(attention);
+        input
+    }
+
+    /// A Metal route carries no compute capability, so a CUDA-NAMED
+    /// conditioner placement is a contradiction rather than a translation
+    /// problem: it would freeze as `CudaResident`, hash into the authority
+    /// identity as `qwen-cuda`, and then pass a device-id-only check because
+    /// the Metal device id is the one it names. Refuse it at construction.
+    #[test]
+    fn a_metal_route_refuses_the_cuda_assigned_conditioner_placement() {
+        // `exact_cuda_input` is the fully consistent device-resident input, so
+        // the ONLY thing wrong here is the route it is placed on.
+        let input = onto_metal(exact_cuda_input());
+        assert_eq!(
+            input.conditioner_placement,
+            H3FactoryConditionerPlacement::AssignedCudaThenDrop
+        );
+        let error = FrozenH3FactoryAuthority::new_contract_only(input)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Metal"), "{error}");
+        assert!(error.contains("conditioner"), "{error}");
+
+        // And the same input on its own CUDA route is accepted, which is what
+        // proves the refusal is about the contradiction and not the fixture.
+        FrozenH3FactoryAuthority::new_contract_only(exact_cuda_input()).unwrap();
+    }
+
+    /// The refusal is specific to the device-resident pair. A Metal route with
+    /// a host-placed conditioner is not contradictory and must keep working,
+    /// or the guard would simply ban Metal instead of banning the mismatch.
+    #[test]
+    fn a_metal_route_still_accepts_the_host_conditioner_placement() {
+        let input = onto_metal(exact_input());
+        assert_eq!(
+            input.conditioner_placement,
+            H3FactoryConditionerPlacement::HostCpuThenDrop
+        );
+        let authority = FrozenH3FactoryAuthority::new_contract_only(input).unwrap();
+        assert_eq!(authority.compute_capability(), None);
     }
 
     fn exact_cuda_input() -> H3FactoryAuthorityInput {
@@ -5482,7 +5638,7 @@ mod tests {
                 input.attention_runtime.as_mut().unwrap().lossless = false;
             },
             |input| {
-                input.compute_capability = (9, 0);
+                input.compute_capability = Some((9, 0));
             },
             |input| {
                 let attention = input.attention_runtime.as_mut().unwrap();
