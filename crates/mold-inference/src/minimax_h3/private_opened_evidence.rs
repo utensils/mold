@@ -1314,13 +1314,18 @@ fn build_canonical_private_fl2va_target_budget(
         .map(|block| block.protected_device_bytes)
         .max()
         .unwrap_or(0);
+    // The one live packed block, plus the tensor being read held twice: the
+    // `Vec` from `read_tensor_bytes` and the `from_raw_buffer` CPU copy built
+    // from it (`comfy_dit.rs:1373-1407`, `:1451-1462`). Both are alive until
+    // the loaded tensor replaces them.
     let max_streamed_block_host_overlap_bytes = checkpoint
         .blocks
         .iter()
         .map(|block| {
             block
-                .encoded_host_bytes
-                .checked_add(block.max_host_read_staging_bytes)
+                .max_host_read_staging_bytes
+                .checked_mul(2)
+                .and_then(|staging| staging.checked_add(block.encoded_host_bytes))
                 .ok_or_else(|| anyhow!("private H3 streamed host overlap overflow"))
         })
         .collect::<Result<Vec<_>>>()?

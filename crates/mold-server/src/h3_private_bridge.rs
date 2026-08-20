@@ -486,13 +486,21 @@ fn build_fl2va_capability(models_root: &std::path::Path) -> Option<mold_core::Mi
             backend: "cuda".into(),
             metal_supported: false,
             minimum_host_ram_bytes: crate::h3_admission::H3_CURATED_HOST_RAM_RECOMMENDATION_BYTES,
-            // The corrected phase ledger (max-not-sum workspaces, parked
-            // VAEs, explicit hidden-activation baseline) predicts a ~19.4 GB
-            // denoise peak at the qualified envelope; advertise a 24 GiB
-            // hardware tier rather than false byte-level precision. The old
-            // 40 GiB figure came from an uncommitted L40S-era review and
-            // double-charged sequential phases. Admission still gates on the
-            // exact per-attempt budget, never on this advisory tier.
+            // Measured bounds from the first real FL2VA render (2026-08-19,
+            // hal9000 RTX 4090 SM89, 1216 s) cut the denoise workspace caps
+            // from guesses to `observed x 1.15` rounded to 64 MiB, dropping
+            // max(attention, FFN) 15.30 -> 8.79 GB. With the token refiner
+            // streamed as well, the predicted denoise peak falls from the
+            // ~19.4 GB this comment previously recorded to ~12.1 GB.
+            //
+            // The tier stays 24 GiB anyway. ~12.1 GB would clear a 16 GiB
+            // card, but no 16 GiB render has ever happened, and advertising a
+            // tier no hardware has qualified is exactly how the original
+            // 40 GiB L40S-era figure got here — in the other direction, where
+            // it merely refused work rather than promising a 42 GB download
+            // that admission then declines. Drop to 16 GiB when a 16 GiB card
+            // has actually rendered, not before. Admission gates on the exact
+            // per-attempt budget regardless; this tier is advisory.
             minimum_vram_bytes: 24 * 1024 * 1024 * 1024,
             attention_profile: "FlashAttention v2 BF16 on exact CUDA SM89".into(),
             quantization_profile: "Comfy pruned INT8-convrot + Qwen NVFP4-AWQ".into(),

@@ -1215,13 +1215,18 @@ fn validate_target_budget(
         .map(|block| block.max_host_read_staging_bytes)
         .max()
         .unwrap_or(0);
+    // The one live packed block, plus the tensor currently being read held
+    // twice: `read_tensor_bytes`' `Vec` and the `from_raw_buffer` CPU copy it
+    // is turned into (`comfy_dit.rs:1373-1407`, `:1451-1462`). Charging one
+    // copy undercounted every block load by its largest tensor.
     let max_streamed_block_host_overlap = checkpoint
         .blocks
         .iter()
         .map(|block| {
             block
-                .encoded_host_bytes
-                .checked_add(block.max_host_read_staging_bytes)
+                .max_host_read_staging_bytes
+                .checked_mul(2)
+                .and_then(|staging| staging.checked_add(block.encoded_host_bytes))
                 .ok_or_else(|| anyhow!("H3 streamed block host overlap overflow"))
         })
         .collect::<Result<Vec<_>>>()?
@@ -3276,7 +3281,7 @@ mod tests {
         let max_streamed_block_host_overlap_bytes = checkpoint
             .blocks
             .iter()
-            .map(|block| block.encoded_host_bytes + block.max_host_read_staging_bytes)
+            .map(|block| block.encoded_host_bytes + 2 * block.max_host_read_staging_bytes)
             .max()
             .unwrap();
         let fixed_transformer_load_host_staging_bytes = 2 * checkpoint

@@ -3798,18 +3798,76 @@ const PUBLIC_RUNTIME_PROFILE_SCHEMA: &str = "mold.minimax-h3.public-runtime-prof
 #[cfg(feature = "h3")]
 const PUBLIC_RUNTIME_PROFILE_DECISION: &str = "supported-compact-fl2va-sm89";
 
+/// Margin applied to every measured workspace bound, then rounded up to
+/// [`PUBLIC_RUNTIME_BOUND_GRID_BYTES`].
+///
+/// One render is one sample. 15% covers allocator and driver variance plus the
+/// small shape headroom the envelope still allows — the qualifying render used
+/// 39,768 of the envelope's 39,776 packed rows and 1,050 of its 1,058 text
+/// rows, so it sat essentially at the ceiling and the margin does not have to
+/// absorb a much larger shape.
+#[cfg(feature = "h3")]
+const PUBLIC_RUNTIME_BOUND_MARGIN_PERCENT: u64 = 115;
+
+/// 64 MiB. Coarse enough that a re-measurement moves a bound only when it
+/// moves materially, fine enough that a 200 MB workspace is not rounded to
+/// three times its size.
+#[cfg(feature = "h3")]
+const PUBLIC_RUNTIME_BOUND_GRID_BYTES: u64 = 64 * 1024 * 1024;
+
+/// `ceil_to_grid(observed * margin)`, the one policy every measured bound below
+/// is derived by. Always at or above `observed`.
+#[cfg(feature = "h3")]
+const fn public_runtime_bound(observed_bytes: u64) -> u64 {
+    let with_margin = observed_bytes * PUBLIC_RUNTIME_BOUND_MARGIN_PERCENT / 100;
+    with_margin.next_multiple_of(PUBLIC_RUNTIME_BOUND_GRID_BYTES)
+}
+
+/// Compiled bounds for the reviewed compact FL2VA runtime.
+///
+/// Every workspace figure is `public_runtime_bound(observed)` over the first
+/// real FL2VA render: 2026-08-19 on hal9000 (RTX 4090, SM89, 24 GB), 1344x768,
+/// 124 frames at 24 fps, 21 steps, 1216 s, captured by
+/// `private_runtime_observer` and recorded on issue #827. The observations are
+/// named beside each value so a future re-measurement can be applied by
+/// changing one number and re-running the same policy.
+///
+/// The policy reproduces four of the previous L40S-era caps exactly
+/// (`fixed_runtime_device`, `condition_vae`, `decoder_tile`, `audio_decode`),
+/// which is the reason to trust it, and corrects the two that were guesses:
+/// attention fell 10.13 -> 7.11 GB and FFN 15.30 -> 8.79 GB. Two rose, because
+/// the old values carried less than this margin over what the hardware
+/// actually used; the policy is applied uniformly rather than only where it
+/// flatters the result.
+///
+/// The three host capacity bounds are NOT measurements — they are the
+/// pipeline's own allocation limits, so they stay tied to those constants. A
+/// render that legitimately produces a larger MP4 must still be charged for
+/// the buffer the pipeline is willing to allocate.
 #[cfg(feature = "h3")]
 fn public_runtime_bounds() -> H3PrivateRuntimeBoundRecord {
     H3PrivateRuntimeBoundRecord {
-        fixed_runtime_host_bytes: 671_088_640,
-        fixed_runtime_device_bytes: 603_979_776,
-        qwen_activation_workspace_bytes: 3_758_096_384,
+        // observed 659_701_760
+        fixed_runtime_host_bytes: public_runtime_bound(659_701_760),
+        // observed 477_298_688
+        fixed_runtime_device_bytes: public_runtime_bound(477_298_688),
+        // observed 3_400_171_520
+        qwen_activation_workspace_bytes: public_runtime_bound(3_400_171_520),
+        // Observed 0: the VAE construction transient never rose above the
+        // weights themselves in the qualifying render. A zero bound is not
+        // admissible (the reload stages through it and the validator refuses
+        // zero), so the previous 64 MiB allowance is retained as a floor.
         vae_construction_device_workspace_bytes: 67_108_864,
-        condition_vae_workspace_device_bytes: 469_762_048,
-        attention_workspace_device_bytes: 10_133_438_464,
-        ffn_workspace_device_bytes: 15_300_820_992,
-        decoder_tile_workspace_device_bytes: 1_543_503_872,
-        audio_decode_workspace_device_bytes: 268_435_456,
+        // observed 366_027_840
+        condition_vae_workspace_device_bytes: public_runtime_bound(366_027_840),
+        // observed 6_172_029_280
+        attention_workspace_device_bytes: public_runtime_bound(6_172_029_280),
+        // observed 7_641_748_832
+        ffn_workspace_device_bytes: public_runtime_bound(7_641_748_832),
+        // observed 1_338_688_660
+        decoder_tile_workspace_device_bytes: public_runtime_bound(1_338_688_660),
+        // observed 204_867_120
+        audio_decode_workspace_device_bytes: public_runtime_bound(204_867_120),
         encoded_video_host_bytes_bound: super::pipeline::SMALL_ENCODED_VIDEO_HOST_BYTES_BOUND,
         thumbnail_host_bytes_bound: super::pipeline::SMALL_THUMBNAIL_HOST_BYTES_BOUND,
         mux_output_host_bytes_bound: super::pipeline::SMALL_MUX_OUTPUT_HOST_BYTES_BOUND,
@@ -5905,13 +5963,13 @@ mod tests {
         assert_eq!(
             H3PrivateFl2VaRuntimeBounds::from(authority.bounds()),
             H3PrivateFl2VaRuntimeBounds {
-                fixed_runtime_host_bytes: 671_088_640,
+                fixed_runtime_host_bytes: 805_306_368,
                 fixed_runtime_device_bytes: 603_979_776,
-                qwen_activation_workspace_bytes: 3_758_096_384,
+                qwen_activation_workspace_bytes: 3_959_422_976,
                 vae_construction_device_workspace_bytes: 67_108_864,
                 condition_vae_workspace_device_bytes: 469_762_048,
-                attention_workspace_device_bytes: 10_133_438_464,
-                ffn_workspace_device_bytes: 15_300_820_992,
+                attention_workspace_device_bytes: 7_113_539_584,
+                ffn_workspace_device_bytes: 8_791_261_184,
                 decoder_tile_workspace_device_bytes: 1_543_503_872,
                 audio_decode_workspace_device_bytes: 268_435_456,
                 encoded_video_host_bytes_bound:
