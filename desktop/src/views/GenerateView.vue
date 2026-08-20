@@ -161,7 +161,13 @@ import {
   hydrateGenerationTemplate,
   type GenerationTemplate,
 } from "../lib/generationTemplates";
-import { fetchHistoryAll, type HistoryHostTarget } from "../lib/api/history";
+import { fetchHistoryFrom } from "../lib/api/history";
+import {
+  availablePromptHistoryStorage,
+  PromptHistoryCoordinator,
+  promptHistoryHostSignature,
+  recordPromptHistoryCache,
+} from "@studio/lib/promptHistoryCache";
 import { randomSeed } from "../stores/generation";
 import type { CompleteEvent, GenerateRequest, OutputMetadata } from "../lib/api/types";
 import {
@@ -3255,7 +3261,14 @@ async function generate() {
     ) {
       quickExpansionSnapshot.value = null;
     }
-    composerRef.value?.record?.(preparedSubmission?.originalPrompt ?? request.prompt);
+    const recordedPrompt = preparedSubmission?.originalPrompt ?? request.prompt;
+    composerRef.value?.record?.(recordedPrompt);
+    recordPromptHistoryCache(
+      availablePromptHistoryStorage(),
+      hosts.all.map((host) => ({ hostId: host.id, hostLabel: host.label })),
+      route?.hostId ?? "local",
+      { prompt: recordedPrompt, model: request.model, used_at: Date.now() },
+    );
     void settled.then((done) => {
       void loadPromptHistory();
       const ok = done.filter((s) => s.status === "complete").length;
@@ -3306,21 +3319,20 @@ async function generate() {
   }
 }
 
+const promptHistoryCoordinator = new PromptHistoryCoordinator();
 async function loadPromptHistory() {
   try {
-    const targets: HistoryHostTarget[] = hosts.all.flatMap((host) =>
-      host.status === "ready" && host.baseUrl
-        ? [
-            {
-              hostId: host.id,
-              label: host.label,
-              target: { baseUrl: host.baseUrl, apiKey: host.apiKey },
-            },
-          ]
-        : [],
+    const history = await promptHistoryCoordinator.load(
+      availablePromptHistoryStorage(),
+      hosts.all.map((host) => ({
+        hostId: host.id,
+        hostLabel: host.label,
+        fetchable: host.status === "ready" && Boolean(host.baseUrl),
+        source: { baseUrl: host.baseUrl ?? "", apiKey: host.apiKey },
+      })),
+      (target) => fetchHistoryFrom(target),
     );
-    const history = await fetchHistoryAll(targets);
-    promptHistory.value = history.entries.map((entry) => entry.prompt);
+    if (history) promptHistory.value = history.map((entry) => entry.prompt);
   } catch {
     // No history API (older engine / DB off) — arrows just move the caret.
   }
@@ -3352,13 +3364,12 @@ watch(
   { immediate: true },
 );
 
-// The boot fetch usually races the remote hosts' reconnect and captures only
-// this device's prompts; refetch the merged history whenever the set of
-// ready hosts changes so ↑/↓ recall spans every connected machine.
+// Re-scope on every configured-host and reachability transition. Watching only
+// ready ids leaves a forgotten offline host's cached prompts behind forever.
 watch(
-  () => readyHostSignature(hosts.all),
+  () => promptHistoryHostSignature(hosts.all),
   () => {
-    if (conn.ready) void loadPromptHistory();
+    void loadPromptHistory();
   },
 );
 
@@ -3687,6 +3698,9 @@ watch(
 );
 
 onMounted(() => {
+  // Hydrate cached prompt history even when no engine is reachable. A later
+  // ready-host transition refreshes and replaces each live host's slice.
+  if (!import.meta.env.TEST) void loadPromptHistory();
   if (!import.meta.env.TEST) liveActivity.start();
   document.addEventListener("pointerdown", onDocumentPointerDown);
   document.addEventListener("keydown", onDocumentKeydown);
@@ -3700,6 +3714,7 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  promptHistoryCoordinator.invalidate();
   if (!import.meta.env.TEST) liveActivity.stop();
   preparationGuard.invalidate();
   submissionGuard.invalidate();
