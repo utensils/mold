@@ -634,7 +634,10 @@ pub struct H3PrivateFl2VaMediaContract {
 
 impl H3PrivateFl2VaMediaContract {
     fn validate(&self) -> Result<()> {
-        if self.canonical_model != contract::FL2VA_COMFY
+        // The request keeps its full reviewed identity — a Turbo tag included
+        // — while the engine partition it executes as must be compact FL2VA.
+        if contract::base_compact_model(&self.canonical_model) != Some(contract::FL2VA_COMFY)
+            || !contract::is_reviewed_compact_model(&self.canonical_model)
             || self.task != Task::Fl2va
             || self.mode == Mode::ReferenceToAudioVideo
             || self.width == 0
@@ -1158,8 +1161,11 @@ fn prepare_reviewed_h3_private_fl2va_admission(
     // memory; the deltas are materialized in the transformer-load phase, which
     // is the phase whose budget charges them. It has to happen before the
     // runtime qualification so the envelope can be minted at the tier's own
-    // reviewed step count.
-    let turbo_adapter = super::turbo::resolve_requested_turbo_authority()?;
+    // reviewed step count. Selection is by the request's model identity (a
+    // reviewed Turbo manifest tag); the env pair survives only as the
+    // capture-scope UAT override inside `resolve_turbo_selection`.
+    let turbo_adapter =
+        super::turbo::resolve_turbo_authority_for_request(&request.model, paths.models_root)?;
     #[cfg(not(feature = "h3"))]
     let runtime_qualification = reviewed_runtime_qualification.authenticate(
         &artifact_report,

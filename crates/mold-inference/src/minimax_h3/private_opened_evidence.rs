@@ -275,6 +275,13 @@ impl H3PrivateComfyStorageAuthority {
         &self.transformer
     }
 
+    /// Canonical, validated models root this authority resolved under. The
+    /// transformer-load phase uses it to resolve a manifest-selected Turbo
+    /// adapter without re-deriving storage from config.
+    pub(crate) fn models_root(&self) -> &Path {
+        &self.models_root
+    }
+
     pub(crate) fn qwen_weights_path(&self) -> &Path {
         &self.qwen_weights
     }

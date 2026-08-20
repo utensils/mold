@@ -124,7 +124,8 @@ pub use flux2::Flux2Engine;
 pub use h3_factory::{
     expected_h3_factory_prepared_attempt_identity, expected_h3_factory_prepared_request_identity,
     expected_h3_factory_raw_checkpoint_identity, expected_h3_factory_target_budget_identity,
-    h3_factory_activation_prerequisites, FrozenH3FactoryAuthority, H3FactoryActivationPrerequisite,
+    h3_factory_activation_prerequisites, media_model_matches_h3_authority,
+    FrozenH3FactoryAuthority, H3FactoryActivationPrerequisite,
     H3FactoryArtifactHostInput, H3FactoryArtifactHostRole, H3FactoryAttentionInput,
     H3FactoryAuthorityInput, H3FactoryBlockMemoryInput, H3FactoryComponentAuthority,
     H3FactoryComponentRole, H3FactoryConditionerPlacement, H3FactoryEndpointAnchor,

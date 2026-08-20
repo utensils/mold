@@ -1245,6 +1245,7 @@ where
         },
         // Frozen at admission; the load never re-reads the environment.
         admitted.quantization.turbo_adapter().cloned(),
+        storage.models_root().to_path_buf(),
     )?;
     let stream_authority = bound_transformer.authority().clone();
     validate_private_artifact_authority(

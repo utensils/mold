@@ -694,6 +694,33 @@ impl H3FactorySamplerKind {
     }
 }
 
+/// Whether one media-facts model identity is exactly the identity a frozen H3
+/// factory authority renders.
+///
+/// The frozen authority's `canonical_model` is the engine PARTITION (the base
+/// compact task), while the request — and therefore media facts and saved
+/// provenance — keeps the full reviewed identity, Turbo tag included. The
+/// pairing is strict in both directions: a Turbo tag requires the authority to
+/// have frozen exactly that tier's adapter, and a base identity requires no
+/// adapter — except under the capture-scope `h3-private-uat` feature, whose
+/// env override legitimately overlays an adapter on the base model.
+pub fn media_model_matches_h3_authority(
+    model: &str,
+    authority: &FrozenH3FactoryAuthority,
+) -> bool {
+    if mold_core::minimax_h3::base_compact_model(model) != Some(authority.canonical_model()) {
+        return false;
+    }
+    let adapter_tier = authority
+        .quantization()
+        .turbo_adapter()
+        .map(H3FactoryTurboAdapterAuthority::tier_stable_id);
+    match mold_core::minimax_h3::turbo_tier_for_model(model) {
+        Some(tier) => adapter_tier == Some(tier.tier_stable_id),
+        None => adapter_tier.is_none() || cfg!(feature = "h3-private-uat"),
+    }
+}
+
 /// Identity of one authenticated Turbo LoRA adapter overlaid on the compact
 /// INT8 checkpoint, together with the sampler contract its distillation
 /// implies.
