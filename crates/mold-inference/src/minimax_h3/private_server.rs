@@ -153,8 +153,15 @@ pub const fn reviewed_h3_private_runtime_available_for_task(task: Task) -> bool 
         Task::Fl2va => true,
         #[cfg(not(feature = "h3"))]
         Task::Fl2va => !REVIEWED_RUNTIME_QUALIFICATION_RECORD_SHA256.is_empty(),
-        // Ref2VA remains sealed until its own artifact and runtime campaign is
-        // reviewed. Do not infer authority from an FL2VA record.
+        // Ref2VA has no reviewed bounds and no qualified public route. It is
+        // reachable only from the developer-only campaign build, whose whole
+        // purpose is to measure the bounds a future reviewed record would
+        // carry, and which admits under explicitly provisional ceilings.
+        // Do not infer authority from an FL2VA record, and do not widen this
+        // to `feature = "h3"`: a shipping build must keep refusing Ref2VA.
+        #[cfg(feature = "h3-private-uat")]
+        Task::Ref2va => true,
+        #[cfg(not(feature = "h3-private-uat"))]
         Task::Ref2va => false,
     }
 }
@@ -257,6 +264,26 @@ impl H3PrivateRuntimeEnvelopeRecord {
     /// distillation was reviewed for. Without an adapter the 21-step pin is
     /// exactly as strict as before.
     pub(crate) fn validate_with_reviewed_steps(&self, turbo_steps: Option<u32>) -> Result<()> {
+        self.validate_for_task_with_reviewed_steps(Task::Fl2va, turbo_steps)
+    }
+
+    /// The record's serialized shape is task-neutral; what a task changes is
+    /// which conditioning fields are meaningful. FL2VA pins exactly one
+    /// first-frame endpoint and no condition audio, while Ref2VA carries no
+    /// endpoint at all and prices its conditioning from ordered references.
+    pub(crate) fn validate_for_task(&self, task: Task) -> Result<()> {
+        self.validate_for_task_with_reviewed_steps(task, None)
+    }
+
+    /// The general form. The step axis (a reviewed Turbo tier) and the
+    /// conditioning axis (the task) are orthogonal: a `ref2v-4step` tier moves
+    /// the step count on a Ref2VA envelope exactly as an `fl2v-4step` tier
+    /// moves it on an FL2VA one, and neither axis may reinterpret the other.
+    pub(crate) fn validate_for_task_with_reviewed_steps(
+        &self,
+        task: Task,
+        turbo_steps: Option<u32>,
+    ) -> Result<()> {
         let reviewed_steps = turbo_steps.unwrap_or(contract::COMFY_DEFAULT_STEPS);
         if self.max_steps != reviewed_steps {
             bail!(
@@ -264,19 +291,30 @@ impl H3PrivateRuntimeEnvelopeRecord {
                 self.max_steps
             )
         }
-        self.validate_shape()
+        self.validate_shape(task)
     }
 
-    fn validate_shape(&self) -> Result<()> {
+    fn validate_shape(&self, task: Task) -> Result<()> {
+        let conditioning_ok = match task {
+            Task::Fl2va => {
+                self.endpoint_count == 1
+                    && self.endpoint_anchor == "first"
+                    && self.max_condition_visual_rows > 0
+            }
+            Task::Ref2va => {
+                self.endpoint_count == 0
+                    && self.endpoint_anchor == "none"
+                    && self.max_condition_visual_rows > 0
+            }
+        };
         if self.width != contract::DEFAULT_WIDTH
             || self.height != contract::DEFAULT_HEIGHT
             || self.frames != contract::MIN_FRAMES
             || self.fps != contract::FIXED_FPS
             || self.batch_size != 1
-            // The step axis is owned by `validate_with_turbo`, which is the
-            // only place a reviewed Turbo tier may move it.
-            || self.endpoint_count != 1
-            || self.endpoint_anchor != "first"
+            // The step axis is owned by `validate_for_task_with_reviewed_steps`,
+            // which is the only place a reviewed Turbo tier may move it.
+            || !conditioning_ok
             || [
                 self.max_qwen_output_text_rows,
                 self.max_qwen_vision_rows,
@@ -303,23 +341,39 @@ impl H3PrivateRuntimeEnvelopeRecord {
         request: &H3FactoryPreparedRequestInput,
         turbo_steps: Option<u32>,
     ) -> Result<()> {
-        self.validate_with_reviewed_steps(turbo_steps)?;
+        // The request's own task selects the conditioning contract; the
+        // adapter, if any, selects the step count.
+        self.validate_for_task_with_reviewed_steps(request.task, turbo_steps)?;
         let endpoint = request.endpoints.first();
+        let conditioning_ok = match request.task {
+            Task::Fl2va => {
+                request.mode == Mode::FirstFrameToAudioVideo
+                    && endpoint
+                        .is_some_and(|endpoint| endpoint.anchor == H3FactoryEndpointAnchor::First)
+                    && request.rows.condition_audio_rows == 0
+            }
+            Task::Ref2va => {
+                request.mode == Mode::ReferenceToAudioVideo
+                    && endpoint.is_none()
+                    && !request.references.is_empty()
+                    // The reference soundtrack cap rides the target-audio cap:
+                    // both are 32 kHz stereo latents over the same duration.
+                    && request.rows.condition_audio_rows <= self.max_target_audio_rows
+            }
+        };
         if request.width != self.width
             || request.height != self.height
             || request.frames != self.frames
             || request.fps != self.fps
             || request.batch_size != self.batch_size
             || request.grid_points != self.max_steps
-            || request.mode != Mode::FirstFrameToAudioVideo
             || !request.synchronized_audio
             || !request.mp4_output
             || request.endpoints.len() != usize::try_from(self.endpoint_count)?
-            || !endpoint.is_some_and(|endpoint| endpoint.anchor == H3FactoryEndpointAnchor::First)
+            || !conditioning_ok
             || request.rows.qwen_output_text_rows > self.max_qwen_output_text_rows
             || request.rows.qwen_vision_rows > self.max_qwen_vision_rows
             || request.rows.condition_visual_rows > self.max_condition_visual_rows
-            || request.rows.condition_audio_rows != 0
             || request.rows.target_video_rows > self.max_target_video_rows
             || request.rows.target_audio_rows > self.max_target_audio_rows
             || request.rows.total_packed_rows > self.max_total_packed_rows
@@ -3946,6 +4000,13 @@ enum RuntimeQualificationStorage {
     PublicCompiled {
         turbo_steps: Option<u32>,
     },
+    /// Provisional, non-qualifying bounds that exist only to admit an
+    /// instrumented campaign run so it can measure the real ones. Constructible
+    /// only under the developer-only campaign feature; release verification
+    /// rejects that feature's marker, which is the backstop that keeps this
+    /// out of every shipping build.
+    #[cfg(feature = "h3-private-uat")]
+    CaptureCompiled,
 }
 
 impl RuntimeQualificationStorage {
@@ -3972,6 +4033,8 @@ impl RuntimeQualificationStorage {
             Self::PublicCompiled { turbo_steps } => {
                 validate_public_runtime_profile_with_turbo(record, record_file_sha256, *turbo_steps)
             }
+            #[cfg(feature = "h3-private-uat")]
+            Self::CaptureCompiled => validate_capture_runtime_profile(record, record_file_sha256),
         }
     }
 }
@@ -4120,6 +4183,240 @@ fn validate_public_runtime_profile_with_turbo(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Capture-scope Ref2VA profile.
+//
+// THESE BOUNDS ARE CEILINGS, NOT MEASUREMENTS. They exist for one purpose: an
+// instrumented Ref2VA run must be admitted before it can observe anything, and
+// admission's grant comes from a bounds record. Nothing here has been measured
+// on hardware, and nothing here may ever be transcribed into a public profile.
+// The reviewed record that eventually authorizes Ref2VA must transcribe the
+// campaign's OBSERVED values, which the capture report prints beside these
+// ceilings precisely so the two cannot be confused.
+// ---------------------------------------------------------------------------
+#[cfg(feature = "h3-private-uat")]
+const CAPTURE_RUNTIME_PROFILE_SCHEMA: &str = "mold.minimax-h3.capture-runtime-profile.v1";
+#[cfg(feature = "h3-private-uat")]
+const CAPTURE_RUNTIME_PROFILE_DECISION: &str =
+    "capture-scope-compact-ref2va-sm89-provisional-bounds";
+
+/// Ref2VA's compact campaign envelope.
+///
+/// Target geometry is FL2VA's — same canvas, duration, and step count — so the
+/// generated-side caps are identical and directly comparable. Conditioning is
+/// what differs, and its caps come from the released reference limits rather
+/// than from a measurement: at most [`contract::MAX_REFERENCE_FILES`] ordered
+/// references, each normalized onto its own canvas.
+#[cfg(feature = "h3-private-uat")]
+fn capture_runtime_envelope() -> H3PrivateRuntimeEnvelopeRecord {
+    let public = public_style_generated_caps();
+    // One 2048-square still is 4,096 rows and 4,096 vision pads — the largest
+    // single reference the contract admits. Twelve of them is the ceiling the
+    // reference count itself imposes.
+    let max_reference_rows = 4_096 * contract::MAX_REFERENCE_FILES as u64;
+    H3PrivateRuntimeEnvelopeRecord {
+        width: contract::DEFAULT_WIDTH,
+        height: contract::DEFAULT_HEIGHT,
+        frames: contract::MIN_FRAMES,
+        fps: contract::FIXED_FPS,
+        batch_size: 1,
+        max_steps: contract::COMFY_DEFAULT_STEPS,
+        // Ref2VA carries no boundary endpoint at all.
+        endpoint_count: 0,
+        endpoint_anchor: "none".into(),
+        max_qwen_output_text_rows: public.0,
+        max_qwen_vision_rows: max_reference_rows,
+        max_condition_visual_rows: max_reference_rows,
+        max_target_video_rows: public.1,
+        max_target_audio_rows: public.2,
+        max_total_packed_rows: public.0 + max_reference_rows + public.2 + public.1 + public.2,
+    }
+}
+
+/// The generated-side caps shared with the FL2VA compact envelope:
+/// `(qwen_output_text_rows, target_video_rows, target_audio_rows)`.
+#[cfg(feature = "h3-private-uat")]
+const fn public_style_generated_caps() -> (u64, u64, u64) {
+    (1_058, 37_296, 414)
+}
+
+/// Provisional device/host ceilings for one instrumented Ref2VA attempt.
+///
+/// Derived from FL2VA's corrected public bounds with one scaling argument per
+/// axis, all of them deliberately generous:
+///
+/// * Attention and FFN scale with the packed sequence. FL2VA's measured pair
+///   covers 39,776 rows; the capture envelope admits at most 88,022, which is
+///   2.22x. Attention's score matrix is quadratic in sequence length, so its
+///   ceiling takes 5x (2.22^2 rounded up) and the FFN's, which is linear in
+///   rows, takes 3x.
+/// * The condition-VAE workspace is per-encode, not per-sequence, but Ref2VA
+///   encodes a 2048-square canvas where FL2VA encodes 512x384 — 21x the pixels
+///   — so its ceiling takes 24x.
+/// * Everything else is either fixed runtime state or generated-side output
+///   whose geometry is identical to FL2VA's, and keeps FL2VA's own value.
+///
+/// The audio encoder is the one axis with no FL2VA analogue at all; it borrows
+/// the decoder's measured workspace, which runs the larger BigVGAN stack.
+#[cfg(feature = "h3-private-uat")]
+fn capture_runtime_bounds() -> H3PrivateRuntimeBoundRecord {
+    H3PrivateRuntimeBoundRecord {
+        fixed_runtime_host_bytes: 671_088_640,
+        fixed_runtime_device_bytes: 603_979_776,
+        qwen_activation_workspace_bytes: 3_758_096_384,
+        vae_construction_device_workspace_bytes: 67_108_864,
+        condition_vae_workspace_device_bytes: 469_762_048 * 24,
+        attention_workspace_device_bytes: 10_133_438_464 * 5,
+        ffn_workspace_device_bytes: 15_300_820_992 * 3,
+        decoder_tile_workspace_device_bytes: 1_543_503_872,
+        audio_decode_workspace_device_bytes: 268_435_456,
+        encoded_video_host_bytes_bound: super::pipeline::SMALL_ENCODED_VIDEO_HOST_BYTES_BOUND,
+        thumbnail_host_bytes_bound: super::pipeline::SMALL_THUMBNAIL_HOST_BYTES_BOUND,
+        mux_output_host_bytes_bound: super::pipeline::SMALL_MUX_OUTPUT_HOST_BYTES_BOUND,
+        aac_mux_staging_host_bytes: super::pipeline::SMALL_AAC_MUX_STAGING_HOST_BYTES,
+    }
+}
+
+#[cfg(feature = "h3-private-uat")]
+fn validate_capture_runtime_profile(
+    record: &H3PrivateRuntimeQualificationRecord,
+    profile_sha256: &str,
+) -> Result<()> {
+    record.envelope.validate_for_task(Task::Ref2va)?;
+    record.bounds.validate()?;
+    if record.schema != CAPTURE_RUNTIME_PROFILE_SCHEMA
+        || record.decision != CAPTURE_RUNTIME_PROFILE_DECISION
+        || record.canonical_model != contract::REF2VA_COMFY
+        || record.task != "ref2va"
+        || record.compute_capability != [8, 9]
+        || record.identity_sha256 != runtime_qualification_identity(record)
+        || profile_sha256 != record.identity_sha256
+    {
+        bail!("capture-scope H3 profile changed or is not the Ref2VA SM89 campaign profile")
+    }
+    Ok(())
+}
+
+/// Build the capture-scope authority for one instrumented Ref2VA attempt.
+///
+/// This deliberately mirrors `public_runtime_qualification`'s shape so the two
+/// are directly comparable in review, and differs from it in exactly the ways
+/// that matter: a different schema, a decision string that says the bounds are
+/// provisional, the Ref2VA task and model, and a storage variant that cannot
+/// exist in a shipping build.
+#[cfg(feature = "h3-private-uat")]
+#[allow(clippy::too_many_arguments)]
+fn capture_runtime_qualification(
+    artifact: &H3PrivateArtifactQualificationReport,
+    device_id: &str,
+    device_ordinal: usize,
+    compute_capability: (u16, u16),
+    attention_runtime_identity_sha256: &str,
+    attention_kernel_identity: &str,
+    attention_qualification_sha256: &str,
+) -> Result<H3PrivateRuntimeQualificationAuthority> {
+    if compute_capability != (8, 9)
+        || artifact.canonical_model != contract::REF2VA_COMFY
+        || artifact.task != "ref2va"
+        || !valid_sha256(attention_runtime_identity_sha256)
+        || !valid_sha256(attention_qualification_sha256)
+        || attention_kernel_identity.is_empty()
+    {
+        bail!("capture-scope H3 runtime requires the exact compact Ref2VA SM89 route")
+    }
+    let mut record = H3PrivateRuntimeQualificationRecord {
+        schema: CAPTURE_RUNTIME_PROFILE_SCHEMA.into(),
+        decision: CAPTURE_RUNTIME_PROFILE_DECISION.into(),
+        canonical_model: contract::REF2VA_COMFY.into(),
+        task: "ref2va".into(),
+        campaign_source_sha: exact_h3_runtime_build_source_sha()?.into(),
+        campaign_runtime_code_identity_sha256: super::PRIVATE_RUNTIME_CODE_IDENTITY_SHA256.into(),
+        campaign_bootstrap_record_sha256: sha256_domain("capture-profile-bootstrap"),
+        campaign_bootstrap_identity_sha256: sha256_domain("capture-profile-identity"),
+        measured_server_executable_relative_path: "capture-runtime-profile".into(),
+        measured_server_executable_sha256: sha256_domain("capture-runtime-executable"),
+        authorization_record_sha256: artifact.authorization_record_sha256.clone(),
+        authorization_source_document_sha256: artifact.authorization_source_document_sha256.clone(),
+        artifact_qualification_identity_sha256: artifact.qualification_identity_sha256.clone(),
+        artifact_total_bytes: artifact.total_bytes,
+        device_id: device_id.into(),
+        device_ordinal,
+        compute_capability: [8, 9],
+        attention_runtime_identity_sha256: attention_runtime_identity_sha256.into(),
+        attention_kernel_identity: attention_kernel_identity.into(),
+        attention_qualification_sha256: attention_qualification_sha256.into(),
+        campaign_process: H3PrivateRuntimeProcessObservation {
+            process_id: 0,
+            process_start_time_ticks: 0,
+            linux_boot_id_sha256: sha256_domain("capture-runtime-boot"),
+            executable_device: 0,
+            executable_inode: 0,
+            executable_bytes: 0,
+            executable_sha256: sha256_domain("capture-runtime-executable"),
+            launch_argv_sha256: sha256_domain("capture-runtime-argv"),
+            launch_environment_sha256: sha256_domain("capture-runtime-environment"),
+            cuda_driver_version: 0,
+            cuda_toolkit_version: 0,
+        },
+        envelope: capture_runtime_envelope(),
+        bounds: capture_runtime_bounds(),
+        evidence_artifacts: Vec::new(),
+        identity_sha256: String::new(),
+    };
+    record.identity_sha256 = runtime_qualification_identity(&record);
+    let profile_sha256 = record.identity_sha256.clone();
+    validate_capture_runtime_profile(&record, &profile_sha256)?;
+    let bounds = record.bounds.clone().into_authority();
+    Ok(H3PrivateRuntimeQualificationAuthority {
+        storage: RuntimeQualificationStorage::CaptureCompiled,
+        record_file_sha256: profile_sha256,
+        record,
+        bounds,
+        device_id: device_id.into(),
+        device_ordinal,
+        compute_capability,
+    })
+}
+
+/// Render one campaign bound as `observed / ceiling`, so the reviewer reading
+/// the capture transcribes the observation and never the ceiling.
+#[cfg(feature = "h3-private-uat")]
+pub fn h3_capture_bound_report(
+    observed: &[(&'static str, u64)],
+) -> Vec<(&'static str, u64, u64, f64)> {
+    let ceilings = capture_runtime_bounds();
+    let ceiling_for = |label: &str| match label {
+        "fixed_runtime_host_bytes" => ceilings.fixed_runtime_host_bytes,
+        "fixed_runtime_device_bytes" => ceilings.fixed_runtime_device_bytes,
+        "qwen_activation_workspace_bytes" => ceilings.qwen_activation_workspace_bytes,
+        "vae_construction_device_workspace_bytes" => {
+            ceilings.vae_construction_device_workspace_bytes
+        }
+        "condition_vae_workspace_device_bytes" => ceilings.condition_vae_workspace_device_bytes,
+        "attention_workspace_device_bytes" => ceilings.attention_workspace_device_bytes,
+        "ffn_workspace_device_bytes" => ceilings.ffn_workspace_device_bytes,
+        "decoder_tile_workspace_device_bytes" => ceilings.decoder_tile_workspace_device_bytes,
+        "audio_decode_workspace_device_bytes" => ceilings.audio_decode_workspace_device_bytes,
+        "encoded_video_host_bytes_bound" => ceilings.encoded_video_host_bytes_bound,
+        "thumbnail_host_bytes_bound" => ceilings.thumbnail_host_bytes_bound,
+        "mux_output_host_bytes_bound" => ceilings.mux_output_host_bytes_bound,
+        "aac_mux_staging_host_bytes" => ceilings.aac_mux_staging_host_bytes,
+        _ => 0,
+    };
+    observed
+        .iter()
+        .map(|(label, observed)| {
+            let ceiling = ceiling_for(label);
+            let headroom = if ceiling == 0 {
+                0.0
+            } else {
+                *observed as f64 / ceiling as f64
+            };
+            (*label, *observed, ceiling, headroom)
+        })
+        .collect()
+}
+
 #[cfg(feature = "h3")]
 #[allow(clippy::too_many_arguments)]
 fn public_runtime_qualification(
@@ -4197,7 +4494,7 @@ fn public_runtime_qualification(
     })
 }
 
-#[cfg(feature = "h3")]
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 fn sha256_domain(value: &str) -> String {
     format!("{:x}", Sha256::digest(value.as_bytes()))
 }
@@ -5695,9 +5992,50 @@ mod tests {
     fn reviewed_allowlist_is_scoped_to_fl2va() {
         assert!(reviewed_h3_private_runtime_available());
         assert!(reviewed_h3_private_runtime_available_for_task(Task::Fl2va));
-        assert!(!reviewed_h3_private_runtime_available_for_task(
-            Task::Ref2va
-        ));
+        // Ref2VA has no reviewed bounds. It is reachable only from the
+        // developer-only campaign build that exists to measure them, and a
+        // shipping build — public `h3` or otherwise — must keep refusing it.
+        assert_eq!(
+            reviewed_h3_private_runtime_available_for_task(Task::Ref2va),
+            cfg!(feature = "h3-private-uat")
+        );
+    }
+
+    /// The capture-scope profile must never be mistakable for a qualified one.
+    #[test]
+    #[cfg(feature = "h3-private-uat")]
+    fn capture_scope_profile_announces_that_its_bounds_are_provisional() {
+        assert!(CAPTURE_RUNTIME_PROFILE_DECISION.contains("provisional"));
+        assert!(CAPTURE_RUNTIME_PROFILE_DECISION.contains("capture-scope"));
+        assert_ne!(CAPTURE_RUNTIME_PROFILE_SCHEMA, RUNTIME_QUALIFICATION_SCHEMA);
+        assert_ne!(
+            CAPTURE_RUNTIME_PROFILE_DECISION,
+            RUNTIME_QUALIFICATION_DECISION
+        );
+
+        // Its envelope is Ref2VA-shaped: no boundary endpoint, and reference
+        // conditioning priced from the released reference limits.
+        let envelope = capture_runtime_envelope();
+        envelope.validate_for_task(Task::Ref2va).unwrap();
+        assert!(envelope.validate_for_task(Task::Fl2va).is_err());
+        assert_eq!(envelope.endpoint_count, 0);
+        assert_eq!(envelope.endpoint_anchor, "none");
+
+        // Every ceiling is at or above the FL2VA value it was scaled from, and
+        // the two sequence-dependent ones are strictly above it.
+        let ceilings = capture_runtime_bounds();
+        ceilings.validate().unwrap();
+        assert!(ceilings.attention_workspace_device_bytes > 10_133_438_464);
+        assert!(ceilings.ffn_workspace_device_bytes > 15_300_820_992);
+        assert!(ceilings.condition_vae_workspace_device_bytes > 469_762_048);
+
+        // The report renders observation against ceiling so a reviewer
+        // transcribes the measurement, never the ceiling.
+        let report = h3_capture_bound_report(&[("attention_workspace_device_bytes", 1_000_000)]);
+        assert_eq!(report.len(), 1);
+        assert_eq!(report[0].1, 1_000_000);
+        assert_eq!(report[0].2, ceilings.attention_workspace_device_bytes);
+        assert!(report[0].3 < 1.0);
     }
 
     #[test]
@@ -6066,8 +6404,14 @@ mod tests {
             .map(|offset| preflight_start + offset)
             .unwrap();
         assert!(!opened_evidence[preflight_start..preflight_end].contains("Device::new_cuda"));
-        assert!(opened_evidence.contains(
-            "vae_memory_evidence_identity_sha256: vae\n            .artifact_validation_identity_sha256()"
+        // The binding, not its line breaks: rustfmt reflows this expression
+        // whenever the surrounding builder changes shape.
+        let collapsed = opened_evidence
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect::<String>();
+        assert!(collapsed.contains(
+            "vae_memory_evidence_identity_sha256:vae.artifact_validation_identity_sha256()"
         ));
         let pipeline = include_str!("pipeline.rs");
         assert!(pipeline.contains("`Device::Cpu`; execution transfers happen only after CUDA"));

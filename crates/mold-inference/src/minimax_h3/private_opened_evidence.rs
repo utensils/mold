@@ -1653,7 +1653,134 @@ fn build_canonical_private_fl2va_target_budget(
         bounds.mux_output_host_bytes_bound,
         bounds.aac_mux_staging_host_bytes,
     ])?;
+    // Ref2VA's four leading phases. Everything above is task-neutral; these
+    // and the load/drop order are the whole difference, and they must agree
+    // exactly with `validate_target_budget`'s own derivation.
+    let ref2va = request.task == Task::Ref2va;
+    let reference_normalized_media_host_bytes = checked_sum(
+        request
+            .references
+            .iter()
+            .map(|reference| reference.normalized_host_bytes),
+    )?;
+    // One reference is decoded at a time, so the transient charge is the
+    // largest single staged file plus its decoded frames before normalization.
+    let reference_decode_staging_host_bytes = if ref2va {
+        request
+            .references
+            .iter()
+            .map(|reference| reference.normalized_host_bytes)
+            .max()
+            .unwrap_or(0)
+            .checked_mul(2)
+            .ok_or_else(|| anyhow!("private H3 reference decode staging overflow"))?
+    } else {
+        0
+    };
+    // A resize holds its source while it writes its destination, so the
+    // normalization transient is one frame of the largest canvas, twice.
+    let reference_preprocess_staging_host_bytes = if ref2va {
+        request
+            .references
+            .iter()
+            .filter_map(|reference| {
+                Some(
+                    u64::from(reference.normalized_width?)
+                        * u64::from(reference.normalized_height?)
+                        * 3,
+                )
+            })
+            .max()
+            .unwrap_or(0)
+            .checked_mul(2)
+            .ok_or_else(|| anyhow!("private H3 reference preprocess staging overflow"))?
+    } else {
+        0
+    };
+    // The audio encoder has no FL2VA analogue; it borrows the decoder's
+    // measured workspace, which runs the larger BigVGAN stack.
+    let reference_audio_encode_workspace_device_bytes = if ref2va {
+        bounds.audio_decode_workspace_device_bytes
+    } else {
+        0
+    };
+    let reference_decode_phase_host_bytes = if ref2va {
+        checked_sum([
+            attempt_host_bytes,
+            qwen_alive_metadata_host_bytes,
+            reference_normalized_media_host_bytes,
+            reference_decode_staging_host_bytes,
+        ])?
+    } else {
+        0
+    };
+    let reference_preprocess_phase_host_bytes = if ref2va {
+        checked_sum([
+            attempt_host_bytes,
+            qwen_alive_metadata_host_bytes,
+            reference_normalized_media_host_bytes,
+            reference_preprocess_staging_host_bytes,
+        ])?
+    } else {
+        0
+    };
+    let reference_encode_phase_host_bytes = if ref2va {
+        checked_sum([
+            attempt_host_bytes,
+            transformer_alive_metadata_host_bytes,
+            reference_normalized_media_host_bytes,
+            condition_backing_host_bytes,
+            packed_layout_host_bytes,
+            text_modality_tags_host_bytes,
+        ])?
+    } else {
+        0
+    };
+    let reference_decode_phase_device_bytes = if ref2va {
+        bounds.fixed_runtime_device_bytes
+    } else {
+        0
+    };
+    let reference_preprocess_phase_device_bytes = reference_decode_phase_device_bytes;
+    let reference_visual_encode_phase_device_bytes = if ref2va {
+        checked_sum([
+            bounds.fixed_runtime_device_bytes,
+            retained_vaes,
+            qwen_output_state_device_bytes,
+            bounds.condition_vae_workspace_device_bytes,
+            condition_latent_backing_device_bytes,
+            packed_layout_device_bytes,
+        ])?
+    } else {
+        0
+    };
+    let reference_audio_encode_phase_device_bytes = if ref2va {
+        checked_sum([
+            bounds.fixed_runtime_device_bytes,
+            retained_vaes,
+            qwen_output_state_device_bytes,
+            reference_audio_encode_workspace_device_bytes,
+            condition_latent_backing_device_bytes,
+            packed_layout_device_bytes,
+        ])?
+    } else {
+        0
+    };
+    // Condition encode is not in Ref2VA's order at all.
+    let condition_encode_phase_host_bytes = if ref2va {
+        0
+    } else {
+        condition_encode_phase_host_bytes
+    };
+    let condition_encode_phase_device_bytes = if ref2va {
+        0
+    } else {
+        condition_encode_phase_device_bytes
+    };
     let predicted_host_increment_bytes = [
+        reference_decode_phase_host_bytes,
+        reference_preprocess_phase_host_bytes,
+        reference_encode_phase_host_bytes,
         vae_load_phase_host_bytes,
         qwen_encode_phase_host_bytes,
         qwen_transfer_phase_host_bytes,
@@ -1669,9 +1796,24 @@ fn build_canonical_private_fl2va_target_budget(
     .into_iter()
     .max()
     .unwrap_or(0);
+    let predicted_device_peak_bytes = [
+        predicted_device_peak_bytes,
+        reference_decode_phase_device_bytes,
+        reference_preprocess_phase_device_bytes,
+        reference_visual_encode_phase_device_bytes,
+        reference_audio_encode_phase_device_bytes,
+        condition_encode_phase_device_bytes,
+    ]
+    .into_iter()
+    .max()
+    .unwrap_or(0);
     let mut budget = H3FactoryTargetBudgetInput {
         identity_sha256: String::new(),
-        load_drop_policy: H3FactoryTargetLoadDropPolicy::LoadVaesLoadQwenEncodeTransferDropQwenEncodeConditionsParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux,
+        load_drop_policy: if ref2va {
+            H3FactoryTargetLoadDropPolicy::DecodeReferencesPreprocessReferencesLoadVaesLoadQwenEncodeVisionTransferDropQwenEncodeVisualReferencesEncodeAudioReferencesParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux
+        } else {
+            H3FactoryTargetLoadDropPolicy::LoadVaesLoadQwenEncodeTransferDropQwenEncodeConditionsParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux
+        },
         artifacts,
         artifact_host_bytes,
         fixed_runtime_host_bytes: bounds.fixed_runtime_host_bytes,
@@ -1688,20 +1830,18 @@ fn build_canonical_private_fl2va_target_budget(
         packed_layout_freeze_staging_host_bytes,
         text_modality_tags_host_bytes,
         noise_cpu_staging_host_bytes,
-        // FL2VA has no ordered references, so every reference ledger is zero.
-        // The Ref2VA builder is the authority that fills them.
-        reference_normalized_media_host_bytes: 0,
-        reference_decode_staging_host_bytes: 0,
-        reference_preprocess_staging_host_bytes: 0,
-        reference_decode_phase_host_bytes: 0,
-        reference_preprocess_phase_host_bytes: 0,
-        reference_visual_encode_phase_host_bytes: 0,
-        reference_audio_encode_phase_host_bytes: 0,
-        reference_audio_encode_workspace_device_bytes: 0,
-        reference_decode_phase_device_bytes: 0,
-        reference_preprocess_phase_device_bytes: 0,
-        reference_visual_encode_phase_device_bytes: 0,
-        reference_audio_encode_phase_device_bytes: 0,
+        reference_normalized_media_host_bytes,
+        reference_decode_staging_host_bytes,
+        reference_preprocess_staging_host_bytes,
+        reference_decode_phase_host_bytes,
+        reference_preprocess_phase_host_bytes,
+        reference_visual_encode_phase_host_bytes: reference_encode_phase_host_bytes,
+        reference_audio_encode_phase_host_bytes: reference_encode_phase_host_bytes,
+        reference_audio_encode_workspace_device_bytes,
+        reference_decode_phase_device_bytes,
+        reference_preprocess_phase_device_bytes,
+        reference_visual_encode_phase_device_bytes,
+        reference_audio_encode_phase_device_bytes,
         vae_peak_host_io_buffer_bytes: vae_memory.peak_host_io_buffer_bytes,
         vae_peak_host_mapped_file_bytes: vae_memory.peak_host_mapped_file_bytes,
         vae_peak_staging_disk_bytes: vae_memory.peak_staging_disk_bytes,
@@ -1735,9 +1875,7 @@ fn build_canonical_private_fl2va_target_budget(
         audio_vae_resident_device_bytes: vae_memory.audio.resident_device_weight_bytes,
         attempt_resident_vae_device_bytes: retained_vaes,
         vae_construction_device_workspace_bytes: bounds.vae_construction_device_workspace_bytes,
-        vae_memory_evidence_identity_sha256: vae
-            .artifact_validation_identity_sha256()
-            .into(),
+        vae_memory_evidence_identity_sha256: vae.artifact_validation_identity_sha256().into(),
         qwen_device_parameter_bytes,
         qwen_activation_device_bytes,
         qwen_output_state_device_bytes,
