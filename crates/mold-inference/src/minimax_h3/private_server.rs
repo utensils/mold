@@ -80,7 +80,6 @@ use super::private_runtime_observer::{
     capture_process_observation, H3PrivateRuntimeAuthorityObservation,
     H3PrivateRuntimeBoundCapture, H3PrivateRuntimeEnvelopeObservation,
 };
-#[cfg(feature = "mp4")]
 use super::sampler::H3SamplerKind;
 #[cfg(feature = "mp4")]
 use super::vae_runtime::{
@@ -2385,6 +2384,7 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
             .factory_attempt_input()
             .request
             .denoise_forward_count,
+        sampler: frozen_factory.quantization().sampler_kind(),
         predicted_device_peak_bytes: prepared.predicted_device_peak_bytes(),
         predicted_host_increment_bytes: prepared.predicted_host_increment_bytes(),
         media,
@@ -3359,7 +3359,7 @@ fn validate_private_sampler_provenance(
     transformer_evaluations: usize,
     owner: &H3PrivateFl2VaOwnerFacts,
 ) -> Result<()> {
-    if sampler != H3SamplerKind::ComfyResMultistep.as_str()
+    if sampler != owner.sampler.as_str()
         || requested_grid_points != usize::try_from(owner.requested_grid_points)?
         || transformer_evaluations != usize::try_from(owner.transformer_evaluations)?
     {
@@ -3386,6 +3386,11 @@ pub struct H3PrivateFl2VaOwnerFacts {
     pub component_set_identity_sha256: String,
     pub requested_grid_points: u32,
     pub transformer_evaluations: u32,
+    /// The integrator the frozen quantization authority resolved for this
+    /// attempt (RES-multistep without an adapter, first-order Euler under a
+    /// reviewed Turbo tier). The terminal provenance gate compares against
+    /// this, never a constant — a Turbo render legitimately executes Euler.
+    pub(crate) sampler: H3SamplerKind,
     pub predicted_device_peak_bytes: u64,
     pub predicted_host_increment_bytes: u64,
     pub media: H3PrivateFl2VaMediaContract,
@@ -3399,6 +3404,7 @@ impl H3PrivateFl2VaOwnerFacts {
             || self.predicted_host_increment_bytes == 0
             || self.requested_grid_points < 2
             || self.transformer_evaluations != self.requested_grid_points - 1
+            || !self.sampler.uses_comfy_simple_grid()
             || [
                 self.work_identity_sha256.as_str(),
                 self.cancellation_scope_identity_sha256.as_str(),
@@ -5641,6 +5647,7 @@ mod tests {
             component_set_identity_sha256: sha('9'),
             requested_grid_points: contract::COMFY_DEFAULT_STEPS,
             transformer_evaluations: contract::COMFY_DEFAULT_STEPS - 1,
+            sampler: H3SamplerKind::ComfyResMultistep,
             predicted_device_peak_bytes: 7,
             predicted_host_increment_bytes: 8,
             media: media(),
@@ -5678,6 +5685,7 @@ mod tests {
         .unwrap();
         for (sampler, grid_points, evaluations) in [
             ("official-euler", grid_points, evaluations),
+            ("comfy-euler", grid_points, evaluations),
             ("comfy-res-multistep", grid_points + 1, evaluations),
             ("comfy-res-multistep", grid_points, evaluations + 1),
         ] {
@@ -5688,6 +5696,35 @@ mod tests {
                     .contains("sampler provenance")
             );
         }
+    }
+
+    #[cfg(feature = "mp4")]
+    #[test]
+    fn turbo_owner_accepts_only_the_frozen_euler_sampler() {
+        // A frozen Turbo attempt executes ComfyEuler; the terminal gate must
+        // accept exactly that sampler and still refuse the non-Turbo one.
+        let mut owner = owner_facts();
+        owner.sampler = H3SamplerKind::ComfyEuler;
+        owner.requested_grid_points = 9;
+        owner.transformer_evaluations = 8;
+        validate_private_sampler_provenance("comfy-euler", 9, 8, &owner).unwrap();
+        for sampler in ["comfy-res-multistep", "official-euler"] {
+            assert!(validate_private_sampler_provenance(sampler, 9, 8, &owner)
+                .unwrap_err()
+                .to_string()
+                .contains("sampler provenance"));
+        }
+    }
+
+    #[test]
+    fn owner_facts_refuse_a_sampler_off_the_comfy_simple_grid() {
+        let mut owner = owner_facts();
+        owner.sampler = H3SamplerKind::OfficialEuler;
+        assert!(owner
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("owner facts"));
     }
 
     #[test]
