@@ -5037,6 +5037,50 @@ mod tests {
         assert!(transformer_load_phase_host_bytes(host_terms(u64::MAX)).is_err());
     }
 
+    /// Media facts keep the request's full reviewed identity, so the pairing
+    /// between that identity and the frozen authority's adapter tier is the
+    /// gate that stops a Turbo tag rendering without its adapter (or with the
+    /// wrong tier) and a base render claiming a Turbo identity.
+    #[test]
+    fn media_model_pairing_requires_the_exact_frozen_turbo_tier() {
+        let baseline = FrozenH3FactoryAuthority::new_contract_only(exact_input()).unwrap();
+        assert!(media_model_matches_h3_authority(
+            contract::FL2VA_COMFY,
+            &baseline
+        ));
+        for mismatched in [
+            contract::FL2VA_COMFY_TURBO_8STEP,
+            contract::FL2VA_COMFY_TURBO_4STEP_768P,
+            contract::REF2VA_COMFY,
+            "minimax-h3-fl2va:comfy-pruned-int8-turbo-2step",
+        ] {
+            assert!(
+                !media_model_matches_h3_authority(mismatched, &baseline),
+                "{mismatched}"
+            );
+        }
+
+        let turbo = turbo_authority_for(TURBO_4STEP_TIER);
+        let mut input = exact_input();
+        apply_turbo_budget(&mut input, &turbo);
+        with_turbo_adapter(&mut input, Some(turbo));
+        let frozen = FrozenH3FactoryAuthority::new_contract_only(input).unwrap();
+        assert!(media_model_matches_h3_authority(
+            contract::FL2VA_COMFY_TURBO_4STEP_768P,
+            &frozen
+        ));
+        assert!(!media_model_matches_h3_authority(
+            contract::FL2VA_COMFY_TURBO_8STEP,
+            &frozen
+        ));
+        // A base identity over a frozen adapter is the capture-scope UAT
+        // env-override shape and stays valid only under that feature.
+        assert_eq!(
+            media_model_matches_h3_authority(contract::FL2VA_COMFY, &frozen),
+            cfg!(feature = "h3-private-uat")
+        );
+    }
+
     /// A budget whose phase fields were produced by the production formulas is
     /// accepted by the production validator, with and without a Turbo adapter.
     ///

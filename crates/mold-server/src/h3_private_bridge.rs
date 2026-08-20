@@ -814,7 +814,7 @@ pub(crate) fn authenticated_h3_private_model_rows(
 /// One executable compact-FL2VA `/api/models` row. Shared by the base
 /// partition and its reviewed Turbo variants so the two can never advertise
 /// diverging envelope shapes.
-#[cfg(any(test, feature = "h3", feature = "h3-private-uat"))]
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 fn h3_model_row(
     model: &str,
     display_name: &str,

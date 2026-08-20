@@ -2361,8 +2361,18 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
         bail!("private H3 prepared budget differs from the scheduler owner fence")
     }
 
+    // Media facts carry the request's full reviewed identity — a Turbo tag
+    // included — because the terminal gate compares them against the request
+    // and the response's provenance records them. The identity must pair with
+    // the frozen authority's adapter tier exactly.
+    if !crate::h3_factory::media_model_matches_h3_authority(&request.model, frozen_factory) {
+        bail!(
+            "private H3 request model {:?} does not pair with the frozen factory's Turbo authority",
+            request.model
+        )
+    }
     let media = H3PrivateFl2VaMediaContract {
-        canonical_model: contract::FL2VA_COMFY.into(),
+        canonical_model: request.model.clone(),
         task: Task::Fl2va,
         mode,
         seed,
