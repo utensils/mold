@@ -134,17 +134,12 @@ fn every_determinism_dimension_participates_in_equivalence_identity() {
     assert_ne!(fingerprint, changed.fingerprint());
 
     let mut changed = base.clone();
-    changed
-        .components
-        .iter_mut()
-        .next()
-        .unwrap()
-        .content_fingerprint =
+    changed.components.first_mut().unwrap().content_fingerprint =
         mold_server::execution_plan::EquivalenceContentIdentity::Sha256("different-assets".into());
     assert_ne!(fingerprint, changed.fingerprint());
 
     let mut changed = base.clone();
-    changed.components.iter_mut().next().unwrap().dtype = Some(PlannedDType::F32);
+    changed.components.first_mut().unwrap().dtype = Some(PlannedDType::F32);
     assert_ne!(fingerprint, changed.fingerprint());
 
     let mut changed = base.clone();
@@ -166,7 +161,7 @@ fn every_determinism_dimension_participates_in_equivalence_identity() {
     assert_ne!(fingerprint, changed.fingerprint());
 
     let mut changed = base.clone();
-    changed.components.iter_mut().next().unwrap().load_strategy = ComponentLoadStrategy::ParkedCpu;
+    changed.components.first_mut().unwrap().load_strategy = ComponentLoadStrategy::ParkedCpu;
     assert_ne!(fingerprint, changed.fingerprint());
 
     let mut changed = base.clone();
