@@ -1265,7 +1265,10 @@ fn prepare_reviewed_h3_private_fl2va_admission(
             model: contract::FL2VA_COMFY.into(),
             device_id: device_id.into(),
             device_ordinal,
-            compute_capability,
+            // The public H3 runtime profile is CUDA SM89, so this is always a
+            // CUDA route; the factory input is optional only because a Metal
+            // plan carries no compute capability.
+            compute_capability: Some(compute_capability),
             execution_fingerprint: execution_fingerprint.clone(),
             conditioner_placement: H3FactoryConditionerPlacement::HostCpuThenDrop,
             qwen_parameter_bytes: qwen_memory.source_parameter_bytes,
@@ -1307,7 +1310,7 @@ fn prepare_reviewed_h3_private_fl2va_admission(
         &qwen_support,
         device_id,
         device_ordinal,
-        compute_capability,
+        Some(compute_capability),
         &qwen_artifact.sha256,
         qwen_header_identity,
         qwen_policy_identity,
@@ -2294,7 +2297,7 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
         &qwen_support,
         &owner_fence.device_id,
         owner_fence.device_ordinal,
-        owner_fence.compute_capability,
+        Some(owner_fence.compute_capability),
         &qwen_artifact.sha256,
         qwen_header_identity,
         qwen_policy_identity,
@@ -2575,7 +2578,11 @@ impl H3PrivateQwenConditionerLease for H3PrivateServerConditionerLease {
 struct H3PrivateServerExecutionLease {
     lease_id: String,
     device_id: String,
-    compute_capability: (u16, u16),
+    /// Mirrors the factory's own optional capability: `None` is the Metal
+    /// route. The lease reports the class the factory froze rather than
+    /// asserting CUDA, so a crossed route is caught by the plan comparison
+    /// instead of by an unwrap here.
+    compute_capability: Option<(u16, u16)>,
     execution_fingerprint: String,
     device: Device,
     active: bool,
@@ -2598,9 +2605,7 @@ impl H3PrivateServerExecutionLease {
                 cancellation_scope_identity_sha256,
             ),
             device_id: factory.device_id().into(),
-            compute_capability: factory
-                .compute_capability()
-                .ok_or_else(|| anyhow!("public MiniMax H3 runtime requires a CUDA route"))?,
+            compute_capability: factory.compute_capability(),
             execution_fingerprint: factory.execution_fingerprint().into(),
             device,
             active: true,
@@ -2619,9 +2624,7 @@ impl H3BackendExecutionLease for H3PrivateServerExecutionLease {
     }
 
     fn backend(&self) -> H3CandleBackendDevice {
-        H3CandleBackendDevice::Cuda {
-            compute_capability: self.compute_capability,
-        }
+        H3CandleBackendDevice::from_compute_capability(self.compute_capability)
     }
 
     fn execution_fingerprint(&self) -> &str {
@@ -6223,7 +6226,7 @@ mod tests {
         let route = H3PrivatePresentationRoute {
             device_id: "cuda:00000000000000000000000000000000",
             device_ordinal: 0,
-            compute_capability: Some((8, 9)),
+            compute_capability: (8, 9),
         };
         let authority = authenticate_h3_public_presentation(&[route]).unwrap();
         assert_eq!(authority.canonical_model(), contract::FL2VA_COMFY);

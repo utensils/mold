@@ -27,10 +27,11 @@ cuda = ["mold-inference/cuda", "nvml", "dep:cudarc"]
 metal = ["mold-inference/metal"]
 expand = ["mold-inference/expand"]
 mp4 = ["mold-inference/mp4"]
-# Public compact MiniMax H3 CUDA runtime. Unlike the qualification feature,
-# this carries no capture binaries or external authorization-record surface.
+# Public compact MiniMax H3 runtime. Device-agnostic (#1164): pair with `cuda`
+# for the shipping SM89 route or with `metal` for the Apple Silicon
+# correctness route. Unlike the qualification feature, this carries no capture
+# binaries or external authorization-record surface.
 h3 = [
-    "cuda",
     "h3-private-bridge",
     "mp4",
     "mold-core/h3",

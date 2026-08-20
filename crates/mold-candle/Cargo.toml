@@ -18,9 +18,13 @@ metal = ["candle/metal", "candle-nn/metal", "candle-transformers/metal"]
 # FlashAttention v2 primitive without making it reachable from the Mold CLI,
 # server factory, catalog, downloads, or any published artifact.
 h3-flash-attn-rc = ["dep:candle-flash-attn", "cuda"]
-# Shipping MiniMax H3 CUDA runtime. Qualification-only observers and capture
-# adapters remain on `h3-private-uat`.
-h3 = ["h3-flash-attn-rc"]
+# Shipping MiniMax H3 runtime. Device-agnostic on purpose (#1164): the CUDA
+# route additionally needs `h3-flash-attn-rc`, which a CUDA build enables
+# alongside `cuda`, while a macOS build enables `h3` + `metal` and takes the
+# chunked dense correctness route. Making `h3` imply `cuda` made an Apple
+# Silicon H3 build impossible to express at all. Qualification-only observers
+# and capture adapters remain on `h3-private-uat`.
+h3 = []
 # Development-only visibility for the authorization-bound H3 artifact runtime.
 # No Mold shipping surface forwards this feature.
 h3-private-uat = []

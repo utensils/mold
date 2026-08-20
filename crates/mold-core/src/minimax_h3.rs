@@ -196,6 +196,11 @@ pub enum Mode {
 pub enum BackendQualification {
     /// The implementation target is CUDA, but no runnable engine is registered.
     ContractTarget,
+    /// The execution path exists and is qualified for correctness only;
+    /// throughput is deliberately unqualified. This mirrors
+    /// `mold_inference::BackendQualification::CorrectnessOnly`, the tier Wan
+    /// (#800) and LTX-2 landed Metal on before any perf UAT.
+    CorrectnessOnly,
     Unsupported,
 }
 
@@ -253,7 +258,14 @@ pub const fn capabilities(task: Task) -> Capabilities {
         runtime_available: false,
         backends: BackendApplicability {
             cuda: BackendQualification::ContractTarget,
-            metal: BackendQualification::Unsupported,
+            // The Apple Silicon execution path landed in #1164: family-scoped
+            // BF16, a folded audio-VAE reduction, chunked dense attention, the
+            // portable INT8 arm, and fp8 refused by name. It is advertised as
+            // correctness-only and stays that way until perf UAT on real
+            // hardware, per the Wan #800 precedent. Note this is the *path*
+            // tier: `runtime_available` above still gates whether any H3
+            // engine is registered at all.
+            metal: BackendQualification::CorrectnessOnly,
             cpu: BackendQualification::Unsupported,
         },
         native_batch_sizes: NATIVE_BATCH_SIZES,
@@ -3132,7 +3144,10 @@ mod tests {
             assert!(!caps.runtime_available);
             assert_eq!(caps.native_batch_sizes, &[1]);
             assert_eq!(caps.backends.cuda, BackendQualification::ContractTarget);
-            assert_eq!(caps.backends.metal, BackendQualification::Unsupported);
+            // #1164: Metal is a real execution path, qualified for
+            // correctness only. CPU stays unsupported — a real capability
+            // limit, not a licence gate.
+            assert_eq!(caps.backends.metal, BackendQualification::CorrectnessOnly);
             assert_eq!(caps.backends.cpu, BackendQualification::Unsupported);
             assert!(caps.synchronized_audio);
             assert!(!caps.audio_disable_supported);
@@ -3216,7 +3231,7 @@ mod tests {
                 contract.generation.backends,
                 BackendApplicability {
                     cuda: BackendQualification::ContractTarget,
-                    metal: BackendQualification::Unsupported,
+                    metal: BackendQualification::CorrectnessOnly,
                     cpu: BackendQualification::Unsupported,
                 }
             );

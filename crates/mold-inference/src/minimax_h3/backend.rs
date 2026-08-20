@@ -855,6 +855,17 @@ where
     if components.transformer.config() != &Default::default() {
         bail!("MiniMax H3 loader returned a non-production transformer architecture");
     }
+    // The loader's device must be one H3 has a qualified route for, and the
+    // transformer's precision must be the family-scoped dtype that route
+    // implies. `super::dtype` owns both so admission, the loader seam, and the
+    // Metal exception cannot drift apart.
+    let execution_device = components.execution_lease.device();
+    super::dtype::ensure_supported(execution_device)?;
+    if components.transformer.precision().compute_dtype()
+        != super::dtype::compute_dtype(execution_device)
+    {
+        bail!("MiniMax H3 loader returned a transformer precision its device does not run");
+    }
     match plan.layout {
         Layout::OfficialBf16
             if components.transformer.precision() == H3PrecisionProfile::OfficialMixedBf16F32

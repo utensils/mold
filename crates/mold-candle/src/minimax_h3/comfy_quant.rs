@@ -42,7 +42,11 @@ pub const H3_COMFY_NVFP4_BLOCK_SIZE: usize = 16;
 pub const H3_COMFY_PORTABLE_ROW_CHUNK: usize = 256;
 
 /// Workspace offered to the source-matched cuBLASLt INT8 heuristic.
-#[cfg(any(feature = "cuda", feature = "h3-private-uat"))]
+///
+/// Compiled whenever the workspace accounting is, not only when the kernel is:
+/// `reference_workspace_upper_bound` has a `native_cuda` arm that a Metal or
+/// CPU H3 build still has to be able to name, even though it never takes it.
+#[cfg(any(feature = "cuda", feature = "h3", feature = "h3-private-uat"))]
 pub(crate) const H3_NATIVE_INT8_CUBLAS_WORKSPACE_BYTES: usize = 4 * 1024 * 1024;
 
 /// Which arm executes one INT8 ConvRot linear.
