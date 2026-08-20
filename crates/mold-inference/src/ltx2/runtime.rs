@@ -2317,16 +2317,13 @@ fn apply_video_token_replacements(
 /// every step — the first latent frame never converges to the pure source.
 ///
 /// Re-applying the replacements with strength 1.0 overwrites those positions
-/// with the pure source tokens, leaving appended keyframe tokens (already
-/// full-strength in `apply_appended_video_conditioning`) and pure-noise
-/// regions untouched.
+/// with the pure source tokens. Appended conditions likewise use their clean
+/// tokens here even when their initial latent is softly noised (#1080).
 fn clean_latents_for_conditioning(
     video_latents: &Tensor,
+    base_token_count: usize,
     conditioning: &StageVideoConditioning,
 ) -> Result<Tensor> {
-    if conditioning.replacements.is_empty() {
-        return Ok(video_latents.clone());
-    }
     let hard_replacements: Vec<VideoTokenReplacement> = conditioning
         .replacements
         .iter()
@@ -2336,32 +2333,75 @@ fn clean_latents_for_conditioning(
             strength: 1.0,
         })
         .collect();
-    apply_video_token_replacements(video_latents, &hard_replacements)
+    let base = video_latents.narrow(1, 0, base_token_count)?;
+    let base = apply_video_token_replacements(&base, &hard_replacements)?;
+    if conditioning.appended.is_empty() {
+        return Ok(base);
+    }
+
+    let mut parts = vec![base];
+    for condition in &conditioning.appended {
+        parts.push(
+            condition
+                .tokens
+                .to_device(video_latents.device())?
+                .to_dtype(video_latents.dtype())?,
+        );
+    }
+    let refs = parts.iter().collect::<Vec<_>>();
+    Tensor::cat(&refs, 1).map_err(Into::into)
 }
 
 fn apply_appended_video_conditioning(
     video_latents: &Tensor,
     video_positions: &Tensor,
     appended: &[VideoTokenAppendCondition],
+    noise_seed: u64,
 ) -> Result<(Tensor, Tensor)> {
     if appended.is_empty() {
         return Ok((video_latents.clone(), video_positions.clone()));
     }
 
+    let mut soft_appended_token_count = 0;
+    for condition in appended.iter().filter(|condition| condition.strength < 1.0) {
+        soft_appended_token_count += condition.tokens.dim(1)?;
+    }
+    let (batch, _, channels) = video_latents.dims3()?;
+    let appended_noise = if soft_appended_token_count == 0 {
+        None
+    } else {
+        Some(seeded_randn(
+            noise_seed ^ APPENDED_VIDEO_NOISE_SALT,
+            &[batch, soft_appended_token_count, channels],
+            video_latents.device(),
+            video_latents.dtype(),
+        )?)
+    };
+
     let mut token_parts = vec![video_latents.clone()];
     let mut position_parts = vec![video_positions.clone()];
+    let mut noise_offset = 0;
     for condition in appended {
-        let tokens = if condition.strength <= 0.0 {
-            condition
-                .tokens
-                .zeros_like()?
-                .to_device(video_latents.device())?
-                .to_dtype(video_latents.dtype())?
+        let clean = condition
+            .tokens
+            .to_device(video_latents.device())?
+            .to_dtype(video_latents.dtype())?;
+        let token_count = clean.dim(1)?;
+        let tokens = if condition.strength >= 1.0 {
+            clean
         } else {
-            condition
-                .tokens
-                .to_device(video_latents.device())?
-                .to_dtype(video_latents.dtype())?
+            let noise = appended_noise
+                .as_ref()
+                .context("soft appended video conditioning requires a noise stream")?
+                .narrow(1, noise_offset, token_count)?;
+            noise_offset += token_count;
+            if condition.strength <= 0.0 {
+                noise
+            } else {
+                noise
+                    .affine(1.0 - condition.strength, 0.0)?
+                    .broadcast_add(&clean.affine(condition.strength, 0.0)?)?
+            }
         };
         token_parts.push(tokens);
         position_parts.push(
@@ -2383,9 +2423,15 @@ fn apply_stage_video_conditioning(
     video_latents: &Tensor,
     video_positions: &Tensor,
     conditioning: &StageVideoConditioning,
+    appended_noise_seed: u64,
 ) -> Result<(Tensor, Tensor)> {
     let replaced = apply_video_token_replacements(video_latents, &conditioning.replacements)?;
-    apply_appended_video_conditioning(&replaced, video_positions, &conditioning.appended)
+    apply_appended_video_conditioning(
+        &replaced,
+        video_positions,
+        &conditioning.appended,
+        appended_noise_seed,
+    )
 }
 
 fn reapply_stage_video_conditioning(
@@ -2413,17 +2459,23 @@ fn reapply_stage_video_conditioning(
     }
 
     let mut parts = vec![base];
+    let mut appended_offset = base_token_count;
     for condition in &conditioning.appended {
         // Appended conditioning tokens must remain present for the whole
-        // denoise loop. Their strength is expressed via the denoise mask;
-        // dropping "soft" appended tokens here desynchronizes the token
-        // count from the cached clean latents and mask tensors.
-        parts.push(
+        // denoise loop. Hard tokens stay pinned to their source; soft tokens
+        // keep the sampler's evolved slice. Dropping either kind would
+        // desynchronize the cached clean latents, mask, and positions.
+        let token_count = condition.tokens.dim(1)?;
+        let tokens = if condition.strength >= 1.0 {
             condition
                 .tokens
                 .to_device(video_latents.device())?
-                .to_dtype(video_latents.dtype())?,
-        );
+                .to_dtype(video_latents.dtype())?
+        } else {
+            video_latents.narrow(1, appended_offset, token_count)?
+        };
+        parts.push(tokens);
+        appended_offset += token_count;
     }
     let refs = parts.iter().collect::<Vec<_>>();
     Tensor::cat(&refs, 1).map_err(Into::into)
@@ -2656,13 +2708,17 @@ struct VideoStageInit {
     denoise_mask: Tensor,
 }
 
+/// Keep appended conditioning noise independent from the main video latent
+/// stream while remaining deterministic across CPU, Metal, and CUDA.
+const APPENDED_VIDEO_NOISE_SALT: u64 = 0x4150_5045_4e44_4c54;
+
 /// Build the initial conditioned video latents exactly once (#1055).
 ///
 /// Upstream constructs the noisy state with a single lerp
 /// (`noisers.py:32-33` @ fd4ded7): a conditioned token starts as
 /// `s·C + (1-s)·N` and its per-token timestep says `(1-s)·σ` — the two
-/// must agree. `apply_stage_video_conditioning` already performs that
-/// blend for soft replacements (the i2v source path), so re-blending the
+/// must agree. `apply_stage_video_conditioning` performs that blend for soft
+/// replacements and soft appended tokens, so re-blending the
 /// result toward the clean target — which this function's pre-fix caller
 /// did for every conditioned render — double-counted the source:
 /// `(2s-s²)·C + (1-s)²·N` under a timestep still claiming `(1-s)` noise.
@@ -2674,22 +2730,28 @@ struct VideoStageInit {
 /// audio mirrors this on the audio side): there the blend is what installs
 /// the source into the frozen (mask = 0) regions, and it runs exactly
 /// once. For conditioning-derived cleans it is removed rather than kept:
-/// hard replacements and appended tokens already equal their clean values
-/// (identity blend), and soft replacements are the double-count.
+/// hard replacements and hard appended tokens already equal their clean
+/// values (identity blend), while soft conditioning is already correctly
+/// noised once.
 fn initialize_video_stage_latents(
     patched_start_latents: &Tensor,
     video_positions: &Tensor,
     conditioning: &StageVideoConditioning,
+    appended_noise_seed: u64,
     clean_override: Option<&Tensor>,
     mask_override: Option<&Tensor>,
     base_token_count: usize,
     device: &candle_core::Device,
 ) -> Result<VideoStageInit> {
-    let (latents, positions) =
-        apply_stage_video_conditioning(patched_start_latents, video_positions, conditioning)?;
+    let (latents, positions) = apply_stage_video_conditioning(
+        patched_start_latents,
+        video_positions,
+        conditioning,
+        appended_noise_seed,
+    )?;
     let clean = match clean_override {
         Some(clean) => clean.clone(),
-        None => clean_latents_for_conditioning(&latents, conditioning)?,
+        None => clean_latents_for_conditioning(&latents, base_token_count, conditioning)?,
     };
     let denoise_mask = match mask_override {
         Some(mask) => mask.to_device(device)?.to_dtype(DType::F32)?,
@@ -2881,6 +2943,7 @@ fn render_real_distilled_av(
                     audio_shape,
                     &stage1_video_noise,
                     &stage1_video_conditioning,
+                    plan.seed,
                     None,
                     stage1_audio_noise.as_ref(),
                     None,
@@ -3081,6 +3144,7 @@ fn render_real_distilled_av(
                     stage2_audio.shape,
                     &request.start_latents,
                     &request.conditioning,
+                    plan.seed,
                     None,
                     stage2_audio.start,
                     None,
@@ -3815,6 +3879,7 @@ fn render_real_two_stage_av(
                     audio_shape,
                     &stage1_video_noise,
                     &stage1_video_conditioning,
+                    plan.seed,
                     None,
                     stage1_audio_start,
                     None,
@@ -4057,6 +4122,7 @@ fn render_real_two_stage_av(
                     stage2_audio.shape,
                     &request.start_latents,
                     &request.conditioning,
+                    plan.seed,
                     None,
                     stage2_audio.start,
                     None,
@@ -4283,6 +4349,7 @@ fn render_real_one_stage_av(
                 audio_shape,
                 &stage1_video_noise,
                 &stage1_video_conditioning,
+                plan.seed,
                 None,
                 stage1_audio_noise.as_ref(),
                 None,
@@ -4491,6 +4558,7 @@ fn render_real_retake_av(
                 audio_shape,
                 &stage1_video_noise,
                 &stage_video_conditioning,
+                plan.seed,
                 Some(&source_video.latents),
                 stage1_audio_noise.as_ref(),
                 conditioned_audio.as_ref().map(|audio| &audio.latents),
@@ -4578,6 +4646,7 @@ fn run_real_distilled_stage(
     audio_shape: Option<AudioLatentShape>,
     video_start_latents: &Tensor,
     video_conditioning: &StageVideoConditioning,
+    request_seed: u64,
     video_clean_latents: Option<&Tensor>,
     audio_start_latents: Option<&Tensor>,
     audio_clean_latents: Option<&Tensor>,
@@ -4625,6 +4694,7 @@ fn run_real_distilled_stage(
         &video_patchifier.patchify(video_start_latents)?,
         video_positions,
         video_conditioning,
+        request_seed,
         clean_video_override.as_ref(),
         video_denoise_mask,
         base_video_token_count,
@@ -8273,9 +8343,10 @@ mod tests {
         strip_appended_video_conditioning, timestep_from_sigma_and_mask,
         write_hdr_frames_streaming, HdrExrTarget, Ltx2RuntimeSession, Ltx2VaeLatentStats,
         Stage2AudioPolicy, StageAudioConditioning, StageVideoConditioning, TiledStage2Pass,
-        VideoTokenAppendCondition, VideoTokenReplacement, LTX2_AUDIO_LATENT_CHANNELS,
-        LTX2_AUDIO_MEL_BINS, LTX2_VIDEO_LATENT_CHANNELS,
+        VideoTokenAppendCondition, VideoTokenReplacement, APPENDED_VIDEO_NOISE_SALT,
+        LTX2_AUDIO_LATENT_CHANNELS, LTX2_AUDIO_MEL_BINS, LTX2_VIDEO_LATENT_CHANNELS,
     };
+    use crate::engine::seeded_randn;
     use crate::ltx2::conditioning::{self, StagedConditioning};
     use crate::ltx2::model::VideoLatentShape;
     use crate::ltx2::model::VideoPixelShape;
@@ -10859,6 +10930,7 @@ mod tests {
                 &noise,
                 &positions,
                 &conditioning,
+                42,
                 None,
                 None,
                 3,
@@ -10915,6 +10987,7 @@ mod tests {
             &noise,
             &positions,
             &conditioning,
+            42,
             None,
             None,
             2,
@@ -10943,12 +11016,11 @@ mod tests {
         assert!((timestep[1] - sigma).abs() < 1e-6);
     }
 
-    /// Appended conditioning (keyframes, references, the chain anchor)
-    /// initializes to its clean token values — for those tokens the old
-    /// pre-loop blend was an exact identity, so removing it changes
-    /// nothing.
+    /// #1080 witness: soft appended conditioning must start as the same
+    /// single `s·C + (1-s)·N` blend upstream's noiser produces. Hard
+    /// keyframes and references remain exactly clean.
     #[test]
-    fn appended_tokens_initialize_to_their_clean_values() {
+    fn soft_appended_tokens_initialize_with_seeded_noise() {
         let noise = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (1, 2, 2), &Device::Cpu).unwrap();
         let positions = Tensor::zeros((1, 3, 2, 2), DType::F32, &Device::Cpu).unwrap();
         let conditioning = StageVideoConditioning {
@@ -10965,6 +11037,7 @@ mod tests {
             &noise,
             &positions,
             &conditioning,
+            42,
             None,
             None,
             2,
@@ -10977,7 +11050,32 @@ mod tests {
             .unwrap()
             .to_vec1::<f32>()
             .unwrap();
-        assert_eq!(values, vec![1.0, 2.0, 3.0, 4.0, 9.0, 10.0]);
+        let appended_noise = seeded_randn(
+            42 ^ APPENDED_VIDEO_NOISE_SALT,
+            &[1, 1, 2],
+            &Device::Cpu,
+            DType::F32,
+        )
+        .unwrap()
+        .flatten_all()
+        .unwrap()
+        .to_vec1::<f32>()
+        .unwrap();
+        assert_eq!(
+            values,
+            vec![
+                1.0,
+                2.0,
+                3.0,
+                4.0,
+                0.4 * 9.0 + 0.6 * appended_noise[0],
+                0.4 * 10.0 + 0.6 * appended_noise[1],
+            ]
+        );
+        assert_eq!(
+            init.clean.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+            vec![1.0, 2.0, 3.0, 4.0, 9.0, 10.0]
+        );
         let mask = init
             .denoise_mask
             .flatten_all()
@@ -11002,6 +11100,7 @@ mod tests {
             &noise,
             &positions,
             &StageVideoConditioning::default(),
+            42,
             Some(&clean),
             Some(&mask),
             2,
@@ -11026,6 +11125,7 @@ mod tests {
             &noise,
             &positions,
             &StageVideoConditioning::default(),
+            42,
             None,
             None,
             2,
@@ -11081,7 +11181,7 @@ mod tests {
         };
 
         let (conditioned_latents, conditioned_positions) =
-            apply_stage_video_conditioning(&latents, &positions, &conditioning).unwrap();
+            apply_stage_video_conditioning(&latents, &positions, &conditioning, 42).unwrap();
         assert_eq!(conditioned_latents.dims3().unwrap(), (1, 3, 2));
         assert_eq!(conditioned_positions.dims4().unwrap(), (1, 3, 3, 2));
         assert_eq!(
@@ -11115,8 +11215,12 @@ mod tests {
 
     #[test]
     fn reapply_stage_video_conditioning_keeps_soft_appended_tokens() {
-        let latents =
-            Tensor::from_vec(vec![0.0f32, 0.0, 1.0, 1.0], (1, 2, 2), &Device::Cpu).unwrap();
+        let latents = Tensor::from_vec(
+            vec![0.0f32, 0.0, 1.0, 1.0, 2.0, 2.0],
+            (1, 3, 2),
+            &Device::Cpu,
+        )
+        .unwrap();
         let conditioning = StageVideoConditioning {
             replacements: vec![],
             appended: vec![VideoTokenAppendCondition {
@@ -11133,7 +11237,7 @@ mod tests {
         assert_eq!(reapplied.dims3().unwrap(), (1, 3, 2));
         assert_eq!(
             reapplied.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
-            vec![0.0, 0.0, 1.0, 1.0, 9.0, 10.0]
+            vec![0.0, 0.0, 1.0, 1.0, 2.0, 2.0]
         );
     }
 
@@ -11174,7 +11278,7 @@ mod tests {
             appended: vec![],
         };
 
-        let clean = clean_latents_for_conditioning(&soft_blended, &conditioning).unwrap();
+        let clean = clean_latents_for_conditioning(&soft_blended, 3, &conditioning).unwrap();
         let values = clean.flatten_all().unwrap().to_vec1::<f32>().unwrap();
 
         assert_eq!(
@@ -11191,7 +11295,7 @@ mod tests {
             Tensor::from_vec(vec![0.0f32, 1.0, 2.0, 3.0], (1, 2, 2), &Device::Cpu).unwrap();
         let conditioning = StageVideoConditioning::default();
 
-        let clean = clean_latents_for_conditioning(&latents, &conditioning).unwrap();
+        let clean = clean_latents_for_conditioning(&latents, 2, &conditioning).unwrap();
         assert_eq!(
             clean.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
             vec![0.0, 1.0, 2.0, 3.0]
