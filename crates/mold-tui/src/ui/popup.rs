@@ -100,7 +100,7 @@ fn render_help(frame: &mut Frame, app: &App) {
         Line::from("  hjkl / arrows      Navigate the grid"),
         Line::from("  Enter              Open detail view"),
         Line::from("  e / r              Recall into Create"),
-        Line::from("  d                  Delete print (on every machine it exists on)"),
+        Line::from("  d                  Move print to the trash (on every machine it exists on)"),
         Line::from("  u                  Upscale with AI model"),
         Line::from("  o                  Open in system viewer"),
         Line::from("  /                  Filter by prompt, model, or filename"),

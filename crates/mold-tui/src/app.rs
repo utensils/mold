@@ -1242,6 +1242,10 @@ pub struct GalleryState {
     pub dirty: bool,
     /// Remote sources that failed the last merged scan (header honesty).
     pub offline_hosts: usize,
+    /// Whether this machine's disk-backed prints can be moved to
+    /// `<output_dir>/.trash/` (the metadata DB answered the last local
+    /// scan). False ⇒ a local delete is the pre-trash hard delete.
+    pub local_trash_available: bool,
 }
 
 impl Default for GalleryState {
@@ -1266,6 +1270,7 @@ impl Default for GalleryState {
             last_scan: None,
             dirty: false,
             offline_hosts: 0,
+            local_trash_available: false,
         }
     }
 }
@@ -1396,6 +1401,10 @@ pub struct GalleryEntry {
     pub timestamp: u64,
     /// When set, this entry is served by the remote server at this URL.
     pub server_url: Option<String>,
+    /// Editable print title from the gallery row (`generations.title` /
+    /// `GalleryImage.title`). `None` for untitled prints and for hosts
+    /// too old to send one — the UI then shows nothing in its place.
+    pub title: Option<String>,
     /// Every machine this print exists on (first = primary fetch route).
     /// Empty is the legacy form — interpreted via `server_url`.
     pub origins: Vec<GalleryOrigin>,
@@ -1441,13 +1450,54 @@ impl GalleryEntry {
     }
 }
 
-/// Confirm copy for deleting a print. Names every machine it will be
-/// removed from when it exists on more than one.
-pub(crate) fn delete_confirm_message(filename: &str, machines: usize) -> String {
-    if machines > 1 {
-        format!("Delete {filename}? It exists on {machines} machines. This can't be undone.")
+/// Settings display for `gallery.trash_retention_days`: the day count,
+/// with `0` spelled out as the "keep forever" it means.
+pub(crate) fn trash_retention_display(days: u32) -> String {
+    if days == 0 {
+        "0 (forever)".to_string()
     } else {
-        format!("Delete {filename}?")
+        days.to_string()
+    }
+}
+
+/// What pressing `d` on a print will do on the machines that hold it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RemovalKind {
+    /// Every owning machine moves the print to its gallery trash: the
+    /// local DB-backed `.trash/` move, or a server whose capabilities
+    /// advertise `gallery.trash`. Recoverable from any Trash view.
+    Trash,
+    /// At least one owning machine cannot trash (DB-less local scan, an
+    /// older server, or a host whose capabilities are not known yet), so
+    /// the TUI never promises recoverability for the whole print.
+    Delete,
+}
+
+impl RemovalKind {
+    /// Short key-hint label (`d Trash` / `d Delete`).
+    pub(crate) fn hint_label(self) -> &'static str {
+        match self {
+            RemovalKind::Trash => "Trash",
+            RemovalKind::Delete => "Delete",
+        }
+    }
+}
+
+/// Confirm copy for removing a print. Names every machine it will be
+/// removed from when it exists on more than one. The trash wording is
+/// used only when every owning machine can trash it (see
+/// [`RemovalKind`]); otherwise neutral "Remove" copy that promises no
+/// recovery — the older-server / DB-less delete really is permanent.
+pub(crate) fn delete_confirm_message(filename: &str, machines: usize, kind: RemovalKind) -> String {
+    match (kind, machines > 1) {
+        (RemovalKind::Trash, true) => {
+            format!("Move {filename} to the trash? It exists on {machines} machines.")
+        }
+        (RemovalKind::Trash, false) => format!("Move {filename} to the trash?"),
+        (RemovalKind::Delete, true) => {
+            format!("Remove {filename}? It exists on {machines} machines. This can't be undone.")
+        }
+        (RemovalKind::Delete, false) => format!("Remove {filename}? This can't be undone."),
     }
 }
 
@@ -1481,6 +1531,8 @@ pub enum SettingsKey {
     T5Variant,
     Qwen3Variant,
     DefaultNegativePrompt,
+    // Library (DB-surface `gallery.*` keys)
+    GalleryTrashRetentionDays,
     // Expand
     ExpandEnabled,
     ExpandBackend,
@@ -4357,8 +4409,9 @@ impl App {
                 if let Some(entry) = self.gallery.entries.get(self.gallery.selected) {
                     let filename = entry.filename();
                     let machines = entry.owning_origins().len();
+                    let kind = self.removal_kind_for(entry);
                     self.request_confirm(
-                        delete_confirm_message(&filename, machines),
+                        delete_confirm_message(&filename, machines, kind),
                         ConfirmAction::DeleteGalleryImage,
                     );
                 }
@@ -5231,7 +5284,64 @@ impl App {
         }
     }
 
-    /// Delete the currently selected gallery image and its thumbnail.
+    /// Capabilities the TUI has polled for the machine behind `origin`.
+    /// The connected `--host` server is polled under `LOCAL_HOST_ID`
+    /// even when it is a different box, so an origin synthesized from
+    /// that URL falls back to that slot.
+    pub(crate) fn capabilities_for_origin(
+        &self,
+        origin: &GalleryOrigin,
+    ) -> Option<&mold_core::ServerCapabilities> {
+        if let Some(caps) = self.machines.capabilities.get(&origin.host_id) {
+            return Some(caps);
+        }
+        if origin.url.is_some() && origin.url == self.server_url {
+            return self.machines.capabilities.get(crate::hosts::LOCAL_HOST_ID);
+        }
+        None
+    }
+
+    /// Whether a print held by `origin` is moved to a trash (recoverable)
+    /// or deleted outright when the TUI removes it there. A server whose
+    /// capabilities have not been read yet is **not** assumed to trash.
+    pub(crate) fn origin_can_trash(&self, origin: &GalleryOrigin) -> bool {
+        match origin.url {
+            None => self.gallery.local_trash_available,
+            Some(_) => self
+                .capabilities_for_origin(origin)
+                .and_then(|caps| caps.gallery.trash.as_ref())
+                .is_some_and(|trash| trash.enabled),
+        }
+    }
+
+    /// What `d` does for `entry`: trash only when every owning machine
+    /// can trash, else the honest hard-delete wording.
+    pub(crate) fn removal_kind_for(&self, entry: &GalleryEntry) -> RemovalKind {
+        if entry
+            .owning_origins()
+            .iter()
+            .all(|origin| self.origin_can_trash(origin))
+        {
+            RemovalKind::Trash
+        } else {
+            RemovalKind::Delete
+        }
+    }
+
+    /// Removal verb for the selected print's key hints.
+    pub(crate) fn selected_removal_kind(&self) -> RemovalKind {
+        self.gallery
+            .entries
+            .get(self.gallery.selected)
+            .map(|entry| self.removal_kind_for(entry))
+            .unwrap_or(RemovalKind::Delete)
+    }
+
+    /// Remove the currently selected gallery print on every machine that
+    /// holds it: the trash where available (local DB-backed `.trash/`
+    /// move, server `DELETE` which current servers treat as trash), a
+    /// hard delete otherwise — plus the TUI's own thumbnail/preview cache
+    /// entries either way.
     fn delete_selected_gallery_image(&mut self) {
         if self.gallery.entries.is_empty() {
             return;
@@ -5243,18 +5353,43 @@ impl App {
 
         let entry = &self.gallery.entries[idx];
         let filename = entry.filename();
+
+        // Local disk copy first, synchronously: a failed trash move keeps
+        // the tile (and the file) exactly where it was and says why,
+        // instead of optimistically dropping a print that still exists.
+        if self.gallery.local_trash_available && entry.path.is_file() {
+            let result = match mold_db::open_default() {
+                Ok(Some(db)) => crate::gallery_trash::trash_local_print(
+                    &db,
+                    &entry.path,
+                    mold_core::time::now_epoch_ms(),
+                ),
+                Ok(None) => Err(anyhow::anyhow!("the metadata DB is disabled")),
+                Err(e) => Err(e),
+            };
+            if let Err(e) = result {
+                self.generate.error_message = Some(format!("Move to trash failed: {e:#}"));
+                return;
+            }
+        }
+
+        let entry = &self.gallery.entries[idx];
         let thumb_path = crate::thumbnails::thumbnail_path(&entry.path);
         let _ = std::fs::remove_file(&thumb_path);
         // Also remove the legacy (pre-host-scoping) cached copy.
         let cache_path = crate::gallery_scan::image_cache_dir().join(&filename);
         let _ = std::fs::remove_file(&cache_path);
 
-        // Delete on every machine the print exists on. Remote deletes go
+        // Remove on every machine the print exists on. Remote removals go
         // through the OWNING host's client (with its saved API key) and
         // propagate errors through the background channel so the UI can
         // surface them and rescan — a silent fire-and-forget would mask
-        // transient network errors and leave the deleted tile "gone"
-        // locally while a server still holds the file.
+        // transient network errors and leave the removed tile "gone"
+        // locally while a server still holds the file. The request is
+        // the same `DELETE /api/gallery/image/:name` on every server:
+        // current servers move the print to their trash, older ones
+        // delete it — which is why the confirm copy only promises the
+        // trash when every owning host advertises `gallery.trash`.
         for origin in entry.owning_origins() {
             let Some(url) = origin.url else { continue };
             let _ = std::fs::remove_file(crate::gallery_scan::cached_image_path(
@@ -5271,14 +5406,16 @@ impl App {
             self.tokio_handle.spawn(async move {
                 let api_key = crate::hosts::api_key_for(&host_id);
                 let client = crate::hosts::client_for(&url, api_key.as_deref());
-                if let Err(e) = client.delete_gallery_image(&filename).await {
+                if let Err(e) = client.trash_gallery_image(&filename).await {
                     let _ = tx.send(BackgroundEvent::GalleryDeleteFailed(e.to_string()));
                 }
             });
         }
-        // Always try to remove the local file (covers both local and server-backed entries
-        // where the TUI also saved a copy during generation)
-        if entry.path.is_file() {
+        // Without a local trash, remove the local file outright (covers
+        // both local and server-backed entries where the TUI also saved a
+        // copy during generation). With one, the move above already
+        // emptied this path.
+        if !self.gallery.local_trash_available && entry.path.is_file() {
             let _ = std::fs::remove_file(&entry.path);
         }
 
@@ -5786,6 +5923,22 @@ impl App {
             field_type: SettingsFieldType::Text,
         });
 
+        // ── Library ─────────────────────────────────────────────
+        // How long a print moved to the trash survives before the
+        // retention sweeper purges it; 0 keeps trashed prints forever.
+        rows.push(SettingsRow::SectionHeader {
+            name: "Library".into(),
+        });
+        rows.push(SettingsRow::Field {
+            key: SettingsKey::GalleryTrashRetentionDays,
+            label: "Trash (days)",
+            field_type: SettingsFieldType::Number {
+                min: 0.0,
+                max: f64::from(mold_core::config::GALLERY_TRASH_RETENTION_MAX_DAYS),
+                step: 1.0,
+            },
+        });
+
         // ── Expand ──────────────────────────────────────────────
         rows.push(SettingsRow::SectionHeader {
             name: "Expand".into(),
@@ -6031,6 +6184,10 @@ impl App {
                 .as_deref()
                 .unwrap_or("(none)")
                 .to_string(),
+            // Library
+            SettingsKey::GalleryTrashRetentionDays => {
+                trash_retention_display(cfg.gallery.trash_retention_days)
+            }
             // Expand
             SettingsKey::ExpandEnabled => if cfg.expand.enabled { "on" } else { "off" }.into(),
             SettingsKey::ExpandBackend => cfg.expand.backend.clone(),
@@ -6105,6 +6262,21 @@ impl App {
         }
     }
 
+    /// Persist a DB-surface config key (`expand.*`, `gallery.*`, …) after
+    /// `self.config` has been mutated, through the same
+    /// `mold_db::config_sync::persist_config_key` path the CLI and server
+    /// use. A disabled/unavailable DB is a silent no-op (the TOML save
+    /// that follows still records the value).
+    fn persist_db_surface_key(&mut self, key: &str) {
+        let db = match mold_db::open_default() {
+            Ok(Some(db)) => db,
+            _ => return,
+        };
+        if let Err(e) = mold_db::config_sync::persist_config_key(&db, &self.config, key) {
+            self.settings.save_error = Some(format!("Save failed: {e:#}"));
+        }
+    }
+
     /// Return the env var name if it overrides the given settings key.
     pub fn settings_env_override(key: &SettingsKey) -> Option<&'static str> {
         let var = match key {
@@ -6119,6 +6291,9 @@ impl App {
             SettingsKey::ExpandModel | SettingsKey::ExpandApiModel => "MOLD_EXPAND_MODEL",
             SettingsKey::ExpandTemperature => "MOLD_EXPAND_TEMPERATURE",
             SettingsKey::ExpandThinking => "MOLD_EXPAND_THINKING",
+            SettingsKey::GalleryTrashRetentionDays => {
+                mold_core::config::GallerySettings::TRASH_RETENTION_DAYS_ENV
+            }
             _ => return None,
         };
         if std::env::var(var).is_ok() {
@@ -6261,6 +6436,18 @@ impl App {
             }
             SettingsKey::LogMaxDays => {
                 cfg.logging.max_days = (cfg.logging.max_days as f64 + delta).clamp(min, max) as u32;
+            }
+            SettingsKey::GalleryTrashRetentionDays => {
+                cfg.gallery.trash_retention_days =
+                    (f64::from(cfg.gallery.trash_retention_days) + delta).clamp(min, max) as u32;
+                // `gallery.*` is a DB-surface key: persist it through the
+                // shared config_sync writer (what `mold config set` and
+                // the server's `PUT /api/config/:key` use) as well as the
+                // TOML, so the server's sweeper and every other surface
+                // read the same value.
+                self.persist_db_surface_key(
+                    mold_core::config_keys::GALLERY_TRASH_RETENTION_DAYS_KEY,
+                );
             }
             SettingsKey::ModelSteps => {
                 if let Some(name) = &self.settings.selected_model {
@@ -7491,6 +7678,7 @@ impl App {
                                 // Entry is local — the TUI saved this file directly.
                                 // The server has its own copy via output_dir.
                                 server_url: None,
+                                title: None,
                                 origins: vec![GalleryOrigin::local()],
                             },
                         );
@@ -7519,6 +7707,7 @@ impl App {
                 }
                 BackgroundEvent::GalleryScanComplete(scan) => {
                     self.gallery.offline_hosts = scan.offline_hosts;
+                    self.gallery.local_trash_available = scan.local_trash_available;
                     self.apply_gallery_scan(scan.entries);
 
                     // Spawn background thumbnail generation. Remote
@@ -7890,6 +8079,7 @@ impl App {
                             generation_time_ms: Some(upscale_time_ms),
                             timestamp: ts,
                             server_url: None,
+                            title: None,
                             origins: vec![GalleryOrigin::local()],
                         },
                     );
@@ -9062,6 +9252,7 @@ mod tests {
             generation_time_ms: Some(5000),
             timestamp: 1234,
             server_url: None,
+            title: None,
             origins: Vec::new(),
         };
         assert_eq!(entry.filename(), "mold-flux-1234.png");
@@ -9134,6 +9325,7 @@ mod tests {
             generation_time_ms: None,
             timestamp: 0,
             server_url: None,
+            title: None,
             origins: Vec::new(),
         };
         assert_eq!(entry.filename(), "unknown");
@@ -9278,6 +9470,7 @@ mod tests {
             generation_time_ms: Some(5000),
             timestamp: 1234,
             server_url: None,
+            title: None,
             origins: Vec::new(),
         }
     }
@@ -10649,6 +10842,7 @@ mod tests {
                 generation_time_ms: None,
                 timestamp: 0,
                 server_url: None,
+                title: None,
                 origins: Vec::new(),
             });
             app.gallery.thumbnail_states.push(None);
@@ -10936,6 +11130,73 @@ mod tests {
         let mut app = make_settings_test_app();
         app.settings_adjust_number(SettingsKey::ExpandMaxTokens, 64.0, 64.0, 4096.0);
         assert_eq!(app.config.expand.max_tokens, 364);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(mold_env)]
+    async fn settings_trash_retention_row_is_listed_and_displays_forever_for_zero() {
+        let mut app = make_settings_test_app();
+        let row = find_settings_row(&app, SettingsKey::GalleryTrashRetentionDays);
+        match &app.build_settings_rows()[row] {
+            SettingsRow::Field {
+                label, field_type, ..
+            } => {
+                assert_eq!(*label, "Trash (days)");
+                assert!(
+                    matches!(field_type, SettingsFieldType::Number { min, max, step }
+                        if *min == 0.0 && *max == 3650.0 && *step == 1.0),
+                    "0..=3650 days, one day per step: {field_type:?}"
+                );
+            }
+            other => panic!("expected a field row, got {other:?}"),
+        }
+        assert_eq!(
+            app.settings_display_value(&SettingsKey::GalleryTrashRetentionDays),
+            "30",
+            "default retention is 30 days"
+        );
+        app.config.gallery.trash_retention_days = 0;
+        assert_eq!(
+            app.settings_display_value(&SettingsKey::GalleryTrashRetentionDays),
+            "0 (forever)"
+        );
+        assert_eq!(
+            App::settings_env_override(&SettingsKey::GalleryTrashRetentionDays),
+            None,
+            "no env override unless MOLD_GALLERY_TRASH_RETENTION_DAYS is set"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(mold_env)]
+    async fn settings_trash_retention_round_trips_through_the_db_surface() {
+        // `gallery.trash_retention_days` is a DB-surface key: adjusting
+        // the row must land in the settings table the server's sweeper
+        // and `mold config get` read, clamped to 0..=3650.
+        crate::test_env::with_isolated_env(|_home| {
+            let mut app = make_settings_test_app();
+            assert_eq!(app.config.gallery.trash_retention_days, 30);
+            app.settings_adjust_number(SettingsKey::GalleryTrashRetentionDays, -31.0, 0.0, 3650.0);
+            assert_eq!(app.config.gallery.trash_retention_days, 0, "clamped at 0");
+            app.settings_adjust_number(SettingsKey::GalleryTrashRetentionDays, 7.0, 0.0, 3650.0);
+            assert_eq!(app.config.gallery.trash_retention_days, 7);
+
+            let db = mold_db::open_default().unwrap().expect("isolated DB");
+            let mut stored = mold_core::config::GallerySettings::default();
+            let applied = mold_db::config_sync::hydrate_gallery_from_db(&db, &mut stored).unwrap();
+            assert!(applied, "the DB surface holds the gallery row");
+            assert_eq!(stored.trash_retention_days, 7);
+            assert_eq!(
+                mold_core::config_keys::get_value(
+                    &app.config,
+                    mold_core::config_keys::GALLERY_TRASH_RETENTION_DAYS_KEY
+                )
+                .map(|v| v.display())
+                .ok(),
+                Some("7".to_string()),
+                "the shared config_keys view agrees"
+            );
+        });
     }
 
     #[tokio::test]
@@ -13779,6 +14040,7 @@ mod tests {
             generation_time_ms: None,
             timestamp: 0,
             server_url: None,
+            title: None,
             origins: Vec::new(),
         });
         app.gallery.thumbnail_states.push(None);
@@ -13892,6 +14154,7 @@ mod tests {
                 generation_time_ms: None,
                 timestamp: 0,
                 server_url: None,
+                title: None,
                 origins: Vec::new(),
             });
             app.gallery.thumbnail_states.push(None);
@@ -13988,6 +14251,7 @@ mod tests {
             generation_time_ms: None,
             timestamp: 0,
             server_url: Some(server),
+            title: None,
             origins: Vec::new(),
         });
         app.gallery.thumbnail_states.push(None);
@@ -14118,6 +14382,7 @@ mod tests {
             generation_time_ms: None,
             timestamp: 0,
             server_url: None,
+            title: None,
             origins: Vec::new(),
         }
     }
@@ -14273,11 +14538,201 @@ mod tests {
 
     #[test]
     fn delete_confirm_message_names_machine_count() {
-        assert_eq!(delete_confirm_message("a.png", 1), "Delete a.png?");
+        // Every owning machine can trash → the trash wording, which
+        // deliberately never says "can't be undone".
         assert_eq!(
-            delete_confirm_message("a.png", 2),
-            "Delete a.png? It exists on 2 machines. This can't be undone."
+            delete_confirm_message("a.png", 1, RemovalKind::Trash),
+            "Move a.png to the trash?"
         );
+        assert_eq!(
+            delete_confirm_message("a.png", 2, RemovalKind::Trash),
+            "Move a.png to the trash? It exists on 2 machines."
+        );
+        // Some owner hard-deletes (older server, DB-less local scan,
+        // unknown capabilities) → neutral copy that promises no recovery.
+        assert_eq!(
+            delete_confirm_message("a.png", 1, RemovalKind::Delete),
+            "Remove a.png? This can't be undone."
+        );
+        assert_eq!(
+            delete_confirm_message("a.png", 2, RemovalKind::Delete),
+            "Remove a.png? It exists on 2 machines. This can't be undone."
+        );
+    }
+
+    #[test]
+    fn removal_kind_is_trash_only_when_every_owner_can_trash() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let mut app = make_settings_test_app();
+        let hal = GalleryOrigin {
+            host_id: "hal9000-7680".into(),
+            url: Some("http://hal9000:7680".into()),
+            name: "hal9000".into(),
+        };
+        let mut entry = make_test_entry_with_name("shared.png");
+        entry.origins = vec![GalleryOrigin::local(), hal.clone()];
+
+        // Nothing known: the local scan was DB-less and hal's
+        // capabilities were never read → hard delete wording.
+        assert_eq!(app.removal_kind_for(&entry), RemovalKind::Delete);
+
+        // Local trash available but hal still unknown → still Delete; an
+        // unread host is never assumed to trash.
+        app.gallery.local_trash_available = true;
+        assert_eq!(app.removal_kind_for(&entry), RemovalKind::Delete);
+
+        // hal advertises a trash → both owners can trash.
+        let mut caps = mold_core::ServerCapabilities::default();
+        caps.gallery.trash = Some(mold_core::GalleryTrashCapabilities {
+            enabled: true,
+            retention_days: 30,
+        });
+        app.machines
+            .apply_capabilities("hal9000-7680".into(), Some(caps.clone()));
+        assert_eq!(app.removal_kind_for(&entry), RemovalKind::Trash);
+        assert_eq!(app.removal_kind_for(&entry).hint_label(), "Trash");
+
+        // An older server (capabilities without `gallery.trash`) drops
+        // the whole print back to the honest wording.
+        caps.gallery.trash = None;
+        app.machines
+            .apply_capabilities("hal9000-7680".into(), Some(caps));
+        assert_eq!(app.removal_kind_for(&entry), RemovalKind::Delete);
+
+        // A local-only entry follows the local scan's DB availability.
+        let local_only = make_test_entry_with_name("local.png");
+        assert_eq!(app.removal_kind_for(&local_only), RemovalKind::Trash);
+        app.gallery.local_trash_available = false;
+        assert_eq!(app.removal_kind_for(&local_only), RemovalKind::Delete);
+    }
+
+    #[test]
+    fn removal_kind_reads_the_connected_server_under_the_local_slot() {
+        // The unregistered `--host` server is polled under LOCAL_HOST_ID
+        // but its gallery origin is synthesized from the URL; the
+        // capability lookup must bridge the two.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let mut app = make_settings_test_app();
+        app.server_url = Some("http://bender:7680".into());
+        let mut entry = make_test_entry_with_name("remote.png");
+        entry.origins = vec![GalleryOrigin::remote_from_url("http://bender:7680")];
+        assert_eq!(app.removal_kind_for(&entry), RemovalKind::Delete);
+
+        let mut caps = mold_core::ServerCapabilities::default();
+        caps.gallery.trash = Some(mold_core::GalleryTrashCapabilities {
+            enabled: true,
+            retention_days: 0,
+        });
+        app.machines
+            .apply_capabilities(crate::hosts::LOCAL_HOST_ID.into(), Some(caps));
+        assert_eq!(app.removal_kind_for(&entry), RemovalKind::Trash);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(mold_env)]
+    async fn delete_selected_gallery_image_moves_local_file_to_trash_when_db_available() {
+        // With the metadata DB available the local delete is a trash
+        // move: the bytes land in `<output_dir>/.trash/` next to a
+        // tombstone, the row is flagged, and the live listing no longer
+        // shows the print.
+        crate::test_env::with_isolated_env(|home| {
+            let mut app = make_settings_test_app();
+            let gallery = home.join("output");
+            std::fs::create_dir_all(&gallery).unwrap();
+            let path = gallery.join("mold-trash-me.png");
+            let img = image::RgbaImage::from_fn(64, 64, |x, y| {
+                image::Rgba([(x * 37 % 251) as u8, (y * 91 % 241) as u8, 200, 255])
+            });
+            image::DynamicImage::ImageRgba8(img).save(&path).unwrap();
+            let db = mold_db::open_default().unwrap().expect("isolated DB");
+            db.reconcile(&gallery).unwrap();
+
+            app.gallery.entries.push(GalleryEntry {
+                path: path.clone(),
+                metadata: make_test_metadata(),
+                generation_time_ms: None,
+                timestamp: 0,
+                server_url: None,
+                title: None,
+                origins: vec![GalleryOrigin::local()],
+            });
+            app.gallery.thumbnail_states.push(None);
+            app.gallery.thumb_dimensions.push(None);
+            app.gallery.thumb_fixed_cache.push(None);
+            app.gallery.selected = 0;
+            app.gallery.local_trash_available = true;
+
+            app.delete_selected_gallery_image();
+
+            assert!(!path.exists(), "live file moved out of the gallery");
+            let trash_dir = mold_db::trash::trash_dir(&gallery);
+            assert!(
+                trash_dir.join("mold-trash-me.png").is_file(),
+                "bytes in .trash/"
+            );
+            assert!(
+                mold_db::trash::tombstone_path(&trash_dir, "mold-trash-me.png").is_file(),
+                "tombstone written"
+            );
+            let row = db.get(&gallery, "mold-trash-me.png").unwrap().unwrap();
+            assert!(row.trashed_at_ms.is_some(), "row flagged trashed");
+            assert!(db.list_live(Some(&gallery)).unwrap().is_empty());
+            assert!(
+                app.gallery.entries.is_empty(),
+                "tile removed from the Library"
+            );
+            assert!(
+                app.generate.error_message.is_none(),
+                "no error: {:?}",
+                app.generate.error_message
+            );
+        });
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(mold_env)]
+    async fn delete_selected_gallery_image_keeps_the_tile_when_the_trash_move_fails() {
+        // A failed trash move must not optimistically drop a print that
+        // is still on disk: the tile stays, the file stays, the error
+        // is surfaced.
+        crate::test_env::with_isolated_env(|home| {
+            let mut app = make_settings_test_app();
+            let gallery = home.join("output");
+            std::fs::create_dir_all(&gallery).unwrap();
+            // A file that fails the gallery-format guard can't get a row,
+            // so the trash move refuses it.
+            let path = gallery.join("not-a-gallery-file.txt");
+            std::fs::write(&path, b"plain text").unwrap();
+            app.gallery.entries.push(GalleryEntry {
+                path: path.clone(),
+                metadata: make_test_metadata(),
+                generation_time_ms: None,
+                timestamp: 0,
+                server_url: None,
+                title: None,
+                origins: vec![GalleryOrigin::local()],
+            });
+            app.gallery.thumbnail_states.push(None);
+            app.gallery.thumb_dimensions.push(None);
+            app.gallery.thumb_fixed_cache.push(None);
+            app.gallery.selected = 0;
+            app.gallery.local_trash_available = true;
+
+            app.delete_selected_gallery_image();
+
+            assert!(path.exists(), "file untouched after a failed trash move");
+            assert_eq!(app.gallery.entries.len(), 1, "tile kept");
+            let msg = app.generate.error_message.clone().unwrap_or_default();
+            assert!(msg.starts_with("Move to trash failed"), "{msg}");
+        });
     }
 
     #[test]
@@ -14308,6 +14763,7 @@ mod tests {
                 generation_time_ms: None,
                 timestamp: 0,
                 server_url: Some("http://127.0.0.1:1".into()),
+                title: None,
                 origins: vec![
                     GalleryOrigin {
                         host_id: "host-a".into(),
@@ -14353,6 +14809,7 @@ mod tests {
                 crate::gallery_scan::MergedScan {
                     entries: vec![make_test_entry_with_name("a.png")],
                     offline_hosts: 2,
+                    local_trash_available: false,
                 },
             ))
             .unwrap();
