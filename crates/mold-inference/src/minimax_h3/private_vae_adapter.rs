@@ -31,13 +31,62 @@ use super::private_fl2va_runtime::H3PrivateVaeFreeInnerAuthority;
 use super::sampler::H3SamplerKind;
 use super::vae_runtime::{H3ComfyVaeRuntimeBundle, H3ComfyVaeRuntimeMemory};
 
+/// Build the `[1, 3, T, H, W]` U8 tensor the visual VAE's encoder consumes
+/// from the retained normalized frames of one reference.
+///
+/// Every frame must share the normalized canvas the prepared shape froze; a
+/// ragged sequence would silently change the encoder's temporal plan and with
+/// it the packed row count admission already priced.
+fn reference_frame_tensor(frames: &[RgbImage], device: &Device) -> Result<Tensor> {
+    let first = frames
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("MiniMax H3 visual reference retained no frames"))?;
+    let (width, height) = first.dimensions();
+    if width == 0 || height == 0 {
+        bail!("MiniMax H3 visual reference retained an empty canvas");
+    }
+    if frames
+        .iter()
+        .any(|frame| frame.dimensions() != (width, height))
+    {
+        bail!("MiniMax H3 visual reference frames do not share one normalized canvas");
+    }
+    let pixels = usize::try_from(width)?
+        .checked_mul(usize::try_from(height)?)
+        .and_then(|pixels| pixels.checked_mul(3))
+        .ok_or_else(|| anyhow::anyhow!("MiniMax H3 visual reference frame size overflow"))?;
+    // Interleaved RGB per frame, then one permute to the encoder's channel
+    // ordering. Building the planar layout by hand would copy three times.
+    let mut interleaved = Vec::with_capacity(
+        pixels
+            .checked_mul(frames.len())
+            .ok_or_else(|| anyhow::anyhow!("MiniMax H3 visual reference tensor size overflow"))?,
+    );
+    for frame in frames {
+        interleaved.extend_from_slice(frame.as_raw());
+    }
+    Tensor::from_vec(
+        interleaved,
+        (
+            1,
+            frames.len(),
+            usize::try_from(height)?,
+            usize::try_from(width)?,
+            3,
+        ),
+        device,
+    )?
+    .permute((0, 4, 1, 2, 3))?
+    .contiguous()
+    .map_err(Into::into)
+}
+
 /// Encode one already-normalized reference waveform while preserving typed
 /// pipeline failures across Candle's callback error boundary.
 ///
-/// The dormant Ref2VA composer will own media lookup and association. This
-/// seam deliberately accepts only an already-associated reference waveform
-/// and exposes no registry, factory, server, or public-engine activation.
-#[allow(dead_code)]
+/// This seam accepts only an already-associated reference waveform: the
+/// association carries the one-based reference index, and generated audio is
+/// refused so a decoded output can never be fed back as conditioning.
 pub(crate) fn encode_private_audio_reference(
     audio_vae: &AudioVae,
     waveform: &StereoWaveform,
@@ -63,6 +112,26 @@ pub(crate) trait H3PrivateVaeRuntime: Send + Sync {
         mode: mold_candle::minimax_h3::ConditionEncodeMode,
         checkpoint: &mut dyn H3PipelineCheckpoint,
     ) -> Result<Tensor>;
+
+    /// Encode one ordered Ref2VA visual reference. The frames are the exact
+    /// normalized RGB8 sequence the media adapter retained — one for a still,
+    /// the whole visual-VAE prefix for a video — so the encoder's causal
+    /// temporal plan sees the same geometry admission priced.
+    fn encode_visual_reference(
+        &self,
+        frames: &[RgbImage],
+        mode: mold_candle::minimax_h3::ConditionEncodeMode,
+        checkpoint: &mut dyn H3PipelineCheckpoint,
+    ) -> Result<Tensor>;
+
+    /// Encode one ordered Ref2VA reference soundtrack through the audio VAE's
+    /// encoder. The waveform carries its one-based reference association, and
+    /// the encoder refuses generated audio.
+    fn encode_audio_reference(
+        &self,
+        waveform: &StereoWaveform,
+        checkpoint: &mut dyn H3PipelineCheckpoint,
+    ) -> Result<StereoLatents>;
 
     fn decode_video(
         &self,
@@ -124,6 +193,33 @@ impl H3PrivateVaeRuntime for H3ComfyVaeRuntimeBundle {
             .visual_vae
             .encode_condition_u8(pixels, mode, &mut observer);
         error_bridge.finish(result)
+    }
+
+    fn encode_visual_reference(
+        &self,
+        frames: &[RgbImage],
+        mode: mold_candle::minimax_h3::ConditionEncodeMode,
+        checkpoint: &mut dyn H3PipelineCheckpoint,
+    ) -> Result<Tensor> {
+        let pixels = Uint8RgbPixels::new(reference_frame_tensor(frames, self.device())?)?;
+        let error_bridge = H3CallbackErrorBridge::default();
+        let mut observer = H3PrivateVisualObserver {
+            checkpoint,
+            phase: H3PipelinePhase::ReferenceVisualEncodeChunk,
+            error_bridge: error_bridge.clone(),
+        };
+        let result = self
+            .visual_vae
+            .encode_condition_u8(pixels, mode, &mut observer);
+        error_bridge.finish(result)
+    }
+
+    fn encode_audio_reference(
+        &self,
+        waveform: &StereoWaveform,
+        checkpoint: &mut dyn H3PipelineCheckpoint,
+    ) -> Result<StereoLatents> {
+        encode_private_audio_reference(&self.audio_vae, waveform, checkpoint)
     }
 
     fn decode_video(
@@ -899,6 +995,39 @@ mod tests {
                 total: 1,
             })?;
             Ok(Tensor::zeros((1, 16, 1, 1, 1), DType::F32, &self.device)?)
+        }
+
+        fn encode_visual_reference(
+            &self,
+            frames: &[RgbImage],
+            _mode: ConditionEncodeMode,
+            checkpoint: &mut dyn H3PipelineCheckpoint,
+        ) -> Result<Tensor> {
+            *self.visual_calls.lock().unwrap() += 1;
+            checkpoint.checkpoint(H3PipelineEvent {
+                phase: H3PipelinePhase::ReferenceVisualEncodeChunk,
+                completed: 1,
+                total: 1,
+            })?;
+            Ok(Tensor::zeros(
+                (1, 16, frames.len(), 1, 1),
+                DType::F32,
+                &self.device,
+            )?)
+        }
+
+        fn encode_audio_reference(
+            &self,
+            waveform: &StereoWaveform,
+            checkpoint: &mut dyn H3PipelineCheckpoint,
+        ) -> Result<StereoLatents> {
+            self.audio_calls.fetch_add(1, Ordering::SeqCst);
+            encode_private_audio_reference_with(waveform, checkpoint, |_| {
+                StereoLatents::new(
+                    Tensor::zeros((1, 32, 2, 1), DType::F32, &self.device)?,
+                    &mold_candle::minimax_h3::AudioVaeConfig::default(),
+                )
+            })
         }
 
         fn decode_video(

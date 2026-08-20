@@ -881,6 +881,14 @@ impl H3PrivatePreparedFl2VaRetention {
         usize::try_from(self.factory_attempt.request.denoise_forward_count)
             .map_err(|_| anyhow!("private H3 retained denoise count exceeds usize"))
     }
+
+    /// The admitted packed-sequence length. It is the frozen ceiling the
+    /// orchestrator checks its assembled sequence against, so it must come
+    /// from the retained factory authority rather than be recomputed.
+    pub(crate) fn total_packed_rows(&self) -> Result<usize> {
+        usize::try_from(self.factory_attempt.request.rows.total_packed_rows)
+            .map_err(|_| anyhow!("private H3 retained packed row count exceeds usize"))
+    }
 }
 
 fn validate_prepared_runtime_request(

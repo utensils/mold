@@ -15,9 +15,9 @@ use std::sync::Arc;
 use anyhow::{bail, Result};
 use candle_core::{Device, DeviceLocation, Tensor};
 use mold_candle::minimax_h3::{
-    H3AttentionDevice, H3AttentionRuntimeAuthority, H3AuthenticatedQwenNvfp4Authority,
-    H3ComfyOpenedInt8Checkpoint, H3ForwardInput, H3FrozenPackedLayout, H3TransformerOutput,
-    H3TransformerTask, StereoLatents, StereoWaveform,
+    AudioSoundtrackAssociation, H3AttentionDevice, H3AttentionRuntimeAuthority,
+    H3AuthenticatedQwenNvfp4Authority, H3ComfyOpenedInt8Checkpoint, H3ForwardInput,
+    H3FrozenPackedLayout, H3TransformerOutput, H3TransformerTask, StereoLatents, StereoWaveform,
 };
 use mold_core::minimax_h3::{self as contract, Task};
 use sha2::{Digest, Sha256};
@@ -25,6 +25,10 @@ use sha2::{Digest, Sha256};
 use super::backend::{H3BackendArtifactLease, H3BackendExecutionLease, H3CandleBackendDevice};
 use super::engine::{H3BlockStreamedDenoiser, H3StreamedDenoiser};
 use super::offload::H3BlockLease;
+use super::pipeline::ref2va::{
+    H3AudioConditionEncodeMode, H3DecodedReferenceFacts, H3PreparedReference, H3Ref2VaBackend,
+    H3ReferencePresentation,
+};
 #[cfg(feature = "mp4")]
 use super::pipeline::H3PipelineObserver;
 use super::pipeline::{
@@ -49,6 +53,7 @@ use super::private_server::{
     H3PrivateAllocationCommit, H3PrivateFactoryActivationEvidence, H3PrivateSchedulerLedgerIdentity,
 };
 use super::private_vae_adapter::H3PrivateVaeRuntime;
+use super::reference_media::{H3NormalizedReference, H3ReferenceMediaAdapter};
 use super::sampler::H3SamplerKind;
 #[cfg(test)]
 use super::vae_runtime::H3ComfyVaeLoadPhase;
@@ -56,6 +61,7 @@ use super::vae_runtime::{
     load_h3_comfy_vae_runtime_from_authority, H3AuthenticatedComfyVaeAuthority,
     H3ComfyVaeLoadEvent, H3ComfyVaeLoadObserver, H3ComfyVaeRuntimeBundle,
 };
+use crate::engine::GenerationReferenceBinding;
 use crate::h3_factory::{
     H3FactoryTargetLoadDropPolicy, H3PrivateFl2VaFactoryAuthority, H3PrivateVaeFactoryAuthority,
 };
@@ -1568,10 +1574,18 @@ where
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum H3PrivatePhaseState {
     Bound,
+    /// Ref2VA only. Media decode and normalization run on the host before any
+    /// model is constructed, so they precede the VAE load.
+    ReferencesDecoded,
+    ReferencesPreprocessed,
     VaesLoaded,
     QwenLoaded,
     QwenDropped,
     ConditionsEncoded,
+    /// Ref2VA only. Both reference encoders share one state: the orchestrator
+    /// runs every visual reference and then every audio reference, and the
+    /// resident set is identical across the two.
+    ReferencesEncoded,
     VaesParked,
     TransformerLoaded,
     TransformerDropped,
@@ -1614,9 +1628,47 @@ impl H3PrivatePhaseLedger {
         Ok(())
     }
 
+    fn references_decoded(&mut self) -> Result<()> {
+        self.transition(
+            &[
+                H3PrivatePhaseState::Bound,
+                H3PrivatePhaseState::ReferencesDecoded,
+            ],
+            H3PrivatePhaseState::ReferencesDecoded,
+            "reference decode",
+        )
+    }
+
+    fn references_preprocessed(&mut self) -> Result<()> {
+        self.transition(
+            &[
+                H3PrivatePhaseState::ReferencesDecoded,
+                H3PrivatePhaseState::ReferencesPreprocessed,
+            ],
+            H3PrivatePhaseState::ReferencesPreprocessed,
+            "reference preprocess",
+        )
+    }
+
+    fn references_encoded(&mut self) -> Result<()> {
+        self.transition(
+            &[
+                H3PrivatePhaseState::QwenDropped,
+                H3PrivatePhaseState::ReferencesEncoded,
+            ],
+            H3PrivatePhaseState::ReferencesEncoded,
+            "reference encode",
+        )
+    }
+
     fn vaes_loaded(&mut self) -> Result<()> {
         self.transition(
-            &[H3PrivatePhaseState::Bound],
+            // Ref2VA has already normalized its media by this point; FL2VA
+            // constructs the VAEs first.
+            &[
+                H3PrivatePhaseState::Bound,
+                H3PrivatePhaseState::ReferencesPreprocessed,
+            ],
             H3PrivatePhaseState::VaesLoaded,
             "VAE load",
         )
@@ -1654,6 +1706,7 @@ impl H3PrivatePhaseLedger {
             &[
                 H3PrivatePhaseState::QwenDropped,
                 H3PrivatePhaseState::ConditionsEncoded,
+                H3PrivatePhaseState::ReferencesEncoded,
             ],
             H3PrivatePhaseState::VaesParked,
             "VAE park",
@@ -1725,6 +1778,11 @@ where
     A: H3PrivateFl2VaArtifactLease,
 {
     vae: Option<H3ComfyVaeRuntimeBundle>,
+    /// Ref2VA's attempt-local decoded and normalized media. It is empty for
+    /// FL2VA, whose conditioning rides the endpoint contract, and it is
+    /// released by `park_reference_components` once both encoders have run —
+    /// it is the largest host charge in the Ref2VA budget.
+    reference_media: H3ReferenceMediaAdapter,
     denoiser: Option<H3PrivatePhaseDenoiser<E, A>>,
     opened_vae: Option<H3AuthenticatedComfyVaeAuthority>,
     reload_vae: Option<H3PrivateRetainedVaeReload>,
@@ -1811,6 +1869,7 @@ where
         };
         let backend = H3PrivatePhaseBackend {
             vae: None,
+            reference_media: H3ReferenceMediaAdapter::default(),
             denoiser: None,
             opened_vae: Some(opened_vae),
             reload_vae: Some(reload_vae),
@@ -1849,6 +1908,17 @@ where
     E: H3BackendExecutionLease + Send + Sync,
     A: H3PrivateFl2VaArtifactLease + Send + Sync,
 {
+    /// Refuse a Ref2VA phase on a backend admitted for another task before it
+    /// touches media, a model, or the ledger.
+    fn require_ref2va(&self) -> Result<()> {
+        if self.admitted.task != Task::Ref2va
+            || self.admitted.canonical_model != contract::REF2VA_COMFY
+        {
+            bail!("private H3 Ref2VA phase reached a backend admitted for another task")
+        }
+        Ok(())
+    }
+
     fn validate_continuing_authority(&self) -> Result<()> {
         validate_private_continuing_authority(
             &self.authority,
@@ -1961,6 +2031,7 @@ where
         }
         let Self {
             vae: _,
+            reference_media: _,
             denoiser: _,
             opened_vae: _,
             reload_vae: _,
@@ -2294,6 +2365,306 @@ where
         self.validate_continuing_authority()?;
         Ok(waveform)
     }
+}
+
+/// The Ref2VA face of the same phase backend.
+///
+/// Load/drop, VAE parking, fatal-CUDA retention, denoise streaming, and both
+/// decoders are shared with FL2VA verbatim — only conditioning differs, and
+/// only in three places: media is decoded and normalized on the host first,
+/// Qwen encodes the prompt together with the reference vision pads, and
+/// conditioning is encoded through both VAEs instead of one.
+impl<C, E, A> H3Ref2VaBackend for H3PrivatePhaseBackend<C, E, A>
+where
+    C: H3PrivateQwenConditionerLease + Send + Sync,
+    E: H3BackendExecutionLease + Send + Sync,
+    A: H3PrivateFl2VaArtifactLease + Send + Sync,
+{
+    fn identity(&self) -> H3PipelineBackendIdentity {
+        self.identity.clone()
+    }
+
+    fn device(&self) -> &Device {
+        self.continuing_execution.device()
+    }
+
+    fn sampler_kind(&self) -> H3SamplerKind {
+        H3SamplerKind::ComfyResMultistep
+    }
+
+    fn maximum_packed_rows(&self) -> usize {
+        // A failure here must not silently widen the ceiling, so an
+        // unrepresentable retained count collapses to a sequence nothing can
+        // satisfy rather than to `usize::MAX`.
+        self.retention.total_packed_rows().unwrap_or(0)
+    }
+
+    fn decode_reference(
+        &mut self,
+        reference: &H3PreparedReference,
+        binding: &GenerationReferenceBinding,
+        checkpoint: &mut dyn H3PipelineCheckpoint,
+    ) -> Result<H3DecodedReferenceFacts> {
+        self.require_ref2va()?;
+        self.validate_continuing_authority()?;
+        self.ledger.references_decoded()?;
+        let facts = self
+            .reference_media
+            .decode_reference(reference, binding, checkpoint)?;
+        self.validate_continuing_authority()?;
+        Ok(facts)
+    }
+
+    fn preprocess_reference(
+        &mut self,
+        reference: &H3PreparedReference,
+        decoded: &H3DecodedReferenceFacts,
+        checkpoint: &mut dyn H3PipelineCheckpoint,
+    ) -> Result<H3ReferencePresentation> {
+        self.require_ref2va()?;
+        self.validate_continuing_authority()?;
+        self.ledger.references_preprocessed()?;
+        let presentation = self
+            .reference_media
+            .preprocess_reference(reference, decoded, checkpoint)?;
+        self.validate_continuing_authority()?;
+        Ok(presentation)
+    }
+
+    fn encode_text(
+        &mut self,
+        prompt: &str,
+        references: &[H3ReferencePresentation],
+        checkpoint: &mut dyn H3PipelineCheckpoint,
+    ) -> Result<H3TextConditioning> {
+        self.require_ref2va()?;
+        self.validate_continuing_authority()?;
+        self.ledger.vaes_loaded()?;
+        let opened_vae = self
+            .opened_vae
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("private H3 VAE authority was already consumed"))?;
+        self.construct_vaes(opened_vae, checkpoint)?;
+
+        self.ledger.qwen_loaded()?;
+        checkpoint.checkpoint(H3PipelineEvent {
+            phase: H3PipelinePhase::QwenLoad,
+            completed: 0,
+            total: 1,
+        })?;
+        let qwen = H3PrivateQwenAdapter::load_authorized_from_opened(
+            self.opened_qwen
+                .take()
+                .ok_or_else(|| anyhow::anyhow!("private H3 Qwen authority was already consumed"))?,
+            self.qwen_support
+                .take()
+                .ok_or_else(|| anyhow::anyhow!("private H3 Qwen support was already consumed"))?,
+            self.conditioner_lease.take().ok_or_else(|| {
+                anyhow::anyhow!("private H3 conditioner lease was already consumed")
+            })?,
+            self.qwen_execution
+                .take()
+                .ok_or_else(|| anyhow::anyhow!("private H3 Qwen execution was already consumed"))?,
+            self.qwen_artifacts.take().ok_or_else(|| {
+                anyhow::anyhow!("private H3 Qwen artifacts were already consumed")
+            })?,
+            &self.authority,
+            checkpoint,
+        )?;
+        let mut qwen = ManuallyDrop::new(qwen);
+        let media = &self.reference_media;
+        let text = (|| {
+            checkpoint.checkpoint(H3PipelineEvent {
+                phase: H3PipelinePhase::QwenLoad,
+                completed: 1,
+                total: 1,
+            })?;
+            checkpoint.checkpoint(H3PipelineEvent {
+                phase: H3PipelinePhase::QwenEncode,
+                completed: 0,
+                total: 1,
+            })?;
+            // The conditioner borrows the retained media call-scoped; it
+            // never takes ownership of a decoded reference.
+            let text = qwen.encode_ref2va(prompt, references, media, checkpoint);
+            let text = text.and_then(|text| {
+                checkpoint.checkpoint(H3PipelineEvent {
+                    phase: H3PipelinePhase::QwenEncode,
+                    completed: 1,
+                    total: 1,
+                })?;
+                Ok(text)
+            });
+            let continuing = qwen.validate_continuing_authorities();
+            text.and_then(|text| continuing.map(|()| text))
+        })();
+        if text.as_ref().is_err_and(is_fatal_private_cuda_error) {
+            return text;
+        }
+        // SAFETY: identical to the FL2VA path — the fatal branch above retains
+        // the concrete conditioner, and every ordinary result releases it once.
+        unsafe { ManuallyDrop::drop(&mut qwen) };
+        self.ledger.qwen_dropped()?;
+        let text = text?;
+        self.validate_continuing_authority()?;
+        Ok(text)
+    }
+
+    fn encode_visual_reference(
+        &mut self,
+        reference: &H3PreparedReference,
+        mode: mold_candle::minimax_h3::ConditionEncodeMode,
+        checkpoint: &mut dyn H3PipelineCheckpoint,
+    ) -> Result<Tensor> {
+        self.require_ref2va()?;
+        self.validate_continuing_authority()?;
+        if !matches!(
+            self.ledger.state,
+            H3PrivatePhaseState::QwenDropped | H3PrivatePhaseState::ReferencesEncoded
+        ) {
+            bail!("private H3 reference encode occurred before Qwen drop")
+        }
+        let frames = reference_visual_frames(&self.reference_media, reference)?;
+        let condition = self
+            .vae
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("private H3 VAE was not retained"))?
+            .encode_visual_reference(frames, mode, checkpoint)?;
+        self.ledger.references_encoded()?;
+        self.validate_continuing_authority()?;
+        Ok(condition)
+    }
+
+    fn encode_audio_reference(
+        &mut self,
+        reference: &H3PreparedReference,
+        mode: H3AudioConditionEncodeMode,
+        checkpoint: &mut dyn H3PipelineCheckpoint,
+    ) -> Result<StereoLatents> {
+        self.require_ref2va()?;
+        self.validate_continuing_authority()?;
+        if !matches!(
+            self.ledger.state,
+            H3PrivatePhaseState::QwenDropped | H3PrivatePhaseState::ReferencesEncoded
+        ) {
+            bail!("private H3 reference encode occurred before Qwen drop")
+        }
+        let H3AudioConditionEncodeMode::OfficialPosteriorModeF32 = mode;
+        let waveform = reference_audio_waveform(
+            &self.reference_media,
+            reference,
+            self.continuing_execution.device(),
+        )?;
+        let latents = self
+            .vae
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("private H3 VAE was not retained"))?
+            .encode_audio_reference(&waveform, checkpoint)?;
+        self.ledger.references_encoded()?;
+        self.validate_continuing_authority()?;
+        Ok(latents)
+    }
+
+    fn park_reference_components(
+        &mut self,
+        _checkpoint: &mut dyn H3PipelineCheckpoint,
+    ) -> Result<()> {
+        // Validate before releasing, exactly as FL2VA does: a revoked
+        // authority leaves the resident pair alone. Both VAEs and the retained
+        // normalized media go together — the encoders were the last consumer
+        // of all three — so none of it sits inside the transformer's peak.
+        self.validate_continuing_authority()?;
+        drop(self.vae.take());
+        self.reference_media = H3ReferenceMediaAdapter::default();
+        self.ledger.vaes_parked()?;
+        self.validate_continuing_authority()
+    }
+
+    fn denoise(
+        &mut self,
+        input: H3ForwardInput<'_>,
+        layout: &H3FrozenPackedLayout,
+        checkpoint: &mut dyn H3PipelineCheckpoint,
+    ) -> Result<H3TransformerOutput> {
+        H3Fl2VaBackend::denoise(self, input, layout, checkpoint)
+    }
+
+    fn decode_video(
+        &mut self,
+        latents: &Tensor,
+        sink: &mut H3VideoEncodeSink,
+        checkpoint: &mut dyn H3PipelineCheckpoint,
+    ) -> Result<()> {
+        H3Fl2VaBackend::decode_video(self, latents, sink, checkpoint)
+    }
+
+    fn decode_audio(
+        &mut self,
+        latents: &StereoLatents,
+        checkpoint: &mut dyn H3PipelineCheckpoint,
+    ) -> Result<StereoWaveform> {
+        H3Fl2VaBackend::decode_audio(self, latents, checkpoint)
+    }
+}
+
+/// Borrow the normalized frames the visual VAE must encode for one reference.
+fn reference_visual_frames<'media>(
+    media: &'media H3ReferenceMediaAdapter,
+    reference: &H3PreparedReference,
+) -> Result<&'media [image::RgbImage]> {
+    let index = reference.metadata.index;
+    match media.normalized(index).ok_or_else(|| {
+        anyhow::anyhow!("private H3 reference {index} was not normalized before visual encode")
+    })? {
+        H3NormalizedReference::Image { image, .. } => Ok(std::slice::from_ref(image)),
+        H3NormalizedReference::Video { vae_frames, .. } => Ok(vae_frames),
+        H3NormalizedReference::Audio { .. } => {
+            bail!("private H3 audio reference {index} reached the visual encoder")
+        }
+    }
+}
+
+/// Materialize the associated stereo waveform the audio VAE must encode.
+///
+/// The association carries the one-based reference index and its provenance,
+/// which is what lets the encoder refuse generated audio.
+fn reference_audio_waveform(
+    media: &H3ReferenceMediaAdapter,
+    reference: &H3PreparedReference,
+    device: &Device,
+) -> Result<StereoWaveform> {
+    let index = reference.metadata.index;
+    let reference_index = usize::try_from(index)?;
+    let (audio, association) = match media.normalized(index).ok_or_else(|| {
+        anyhow::anyhow!("private H3 reference {index} was not normalized before audio encode")
+    })? {
+        H3NormalizedReference::Audio { audio } => (
+            audio,
+            AudioSoundtrackAssociation::StandaloneReference { reference_index },
+        ),
+        H3NormalizedReference::Video { audio, .. } => (
+            audio.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("private H3 video reference {index} carries no soundtrack")
+            })?,
+            AudioSoundtrackAssociation::VideoSoundtrack { reference_index },
+        ),
+        H3NormalizedReference::Image { .. } => {
+            bail!("private H3 image reference {index} reached the audio encoder")
+        }
+    };
+    let samples = audio.samples_per_channel();
+    if samples == 0 || audio.channels[1].len() != samples {
+        bail!("private H3 reference {index} normalized soundtrack is not stereo-aligned")
+    }
+    let mut interleaved = Vec::with_capacity(samples * 2);
+    interleaved.extend_from_slice(&audio.channels[0]);
+    interleaved.extend_from_slice(&audio.channels[1]);
+    StereoWaveform::new(
+        Tensor::from_vec(interleaved, (1, 2, samples), device)?,
+        usize::try_from(audio.sample_rate)?,
+        association,
+    )
+    .map_err(Into::into)
 }
 
 struct H3PrivateTerminalAttempt<E, A> {
@@ -2650,24 +3021,106 @@ where
     })
 }
 
-mod ref2va_opened_seal {
-    #[cfg(not(test))]
-    pub enum Token {}
-
-    #[cfg(test)]
-    pub struct Token;
+/// Execute one instrumented Ref2VA attempt over the same phase owner FL2VA
+/// uses.
+///
+/// The owner is built by `bind_private_comfy_ref2va_phase_owner`, which is the
+/// only constructor and which refuses anything but a Ref2VA-admitted route.
+/// This function is compiled only for the developer-only campaign feature: the
+/// public runtime has no reviewed Ref2VA bounds, so it must not be reachable
+/// from a shipping build.
+#[cfg(all(feature = "mp4", feature = "h3-private-uat"))]
+pub(crate) fn run_private_comfy_ref2va_attempt<C, E, A>(
+    owner: H3PrivatePhaseRuntimeOwner<C, E, A>,
+    bindings: &[GenerationReferenceBinding],
+    request: &mold_core::GenerateRequest,
+    progress: &ProgressReporter,
+    observer: &mut dyn H3PipelineObserver,
+) -> Result<H3PrivatePhaseRuntimeOutput>
+where
+    C: H3PrivateQwenConditionerLease + Send + Sync,
+    E: H3BackendExecutionLease + Send + Sync,
+    A: H3PrivateFl2VaArtifactLease + Send + Sync,
+{
+    // The FL2VA owner's `into_backend` returns the prepared FL2VA request,
+    // which Ref2VA does not consume; the ordered reference preparation is
+    // re-derived from the same resolved request the retention froze.
+    let (_, backend) = owner.into_backend(progress)?;
+    let prepared = super::pipeline::ref2va::prepare_resolved_request(request, progress, observer)?;
+    with_contained_private_cuda_resources(backend, |backend| {
+        let staged = super::pipeline::ref2va::execute_staged(
+            &prepared, bindings, backend, progress, observer,
+        )?;
+        let identity_echo = backend.terminal_identity_echo()?;
+        let output = super::pipeline::finalize_av(staged, progress, observer)?;
+        let post_mux_identity = backend.terminal_identity_echo()?;
+        if output.provenance.device_id != identity_echo.device_id
+            || output.provenance.execution_fingerprint != identity_echo.execution_fingerprint
+            || post_mux_identity != identity_echo
+        {
+            bail!("private H3 mux output identity differs from the terminal authority")
+        }
+        Ok(H3PrivatePhaseRuntimeOutput {
+            output,
+            identity_echo,
+        })
+    })
 }
 
-/// Shared phase machinery is ready for Ref2VA, but no safe owner can exist
-/// until that partition lands its own exact opened/prepared evidence.
-#[allow(dead_code)]
-pub(crate) struct H3PrivateRef2VaPhaseOwner {
-    _opened_evidence: ref2va_opened_seal::Token,
-}
-
-#[allow(dead_code)]
-pub(crate) fn run_private_comfy_ref2va_attempt(_owner: H3PrivateRef2VaPhaseOwner) -> Result<()> {
-    bail!("private H3 Ref2VA runtime has no exact opened/prepared evidence authority")
+/// Bind one Ref2VA phase owner.
+///
+/// Ref2VA and FL2VA share every opened authority, so this delegates to the
+/// FL2VA binder and then adds the one check that binder cannot make: the
+/// admitted route must be the Ref2VA task and model, and the opened
+/// transformer must be the Ref2VA checkpoint rather than FL2VA's.
+#[cfg(feature = "h3-private-uat")]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn bind_private_comfy_ref2va_phase_owner<C, E, A>(
+    authority: FrozenH3FactoryAuthority,
+    activation_evidence: H3PrivateFactoryActivationEvidence,
+    prepared: H3PrivatePreparedFl2VaFactoryInputs,
+    storage: H3PrivateComfyStorageAuthority,
+    qwen_support: H3PrivateQwenSupport,
+    opened_transformer: H3ComfyOpenedInt8Checkpoint,
+    opened_qwen: H3AuthenticatedQwenNvfp4Authority,
+    opened_vae: H3AuthenticatedComfyVaeAuthority,
+    reload_vae: H3PrivateRetainedVaeReload,
+    attention: H3AttentionRuntimeAuthority,
+    conditioner_lease: C,
+    execution_lease: E,
+    artifact_lease: A,
+    memory_overlap: H3PrivateFl2VaMemoryOverlapAuthority,
+    allocation_commit: H3PrivateAllocationCommit,
+) -> Result<H3PrivatePhaseRuntimeOwner<C, E, A>>
+where
+    C: H3PrivateQwenConditionerLease + Send + Sync,
+    E: H3BackendExecutionLease + Send + Sync,
+    A: H3PrivateFl2VaArtifactLease + Send + Sync,
+{
+    if authority.task() != Task::Ref2va
+        || authority.canonical_model() != contract::REF2VA_COMFY
+        || opened_transformer.candidate().strategy.task != H3TransformerTask::Ref2Va
+        || artifact_lease.transformer_task() != H3TransformerTask::Ref2Va
+    {
+        bail!("private H3 Ref2VA phase owner requires the exact Ref2VA task route")
+    }
+    bind_private_comfy_fl2va_phase_owner(
+        authority,
+        activation_evidence,
+        prepared,
+        storage,
+        qwen_support,
+        opened_transformer,
+        opened_qwen,
+        opened_vae,
+        reload_vae,
+        attention,
+        conditioner_lease,
+        execution_lease,
+        artifact_lease,
+        memory_overlap,
+        allocation_commit,
+    )
 }
 
 #[cfg(test)]
@@ -3595,6 +4048,31 @@ mod tests {
             Ok(Tensor::zeros(1, DType::F32, &Device::Cpu)?)
         }
 
+        fn encode_visual_reference(
+            &self,
+            frames: &[image::RgbImage],
+            _mode: ConditionEncodeMode,
+            _checkpoint: &mut dyn H3PipelineCheckpoint,
+        ) -> Result<Tensor> {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("vae-visual-reference:{}", frames.len()));
+            Ok(Tensor::zeros(1, DType::F32, &Device::Cpu)?)
+        }
+
+        fn encode_audio_reference(
+            &self,
+            _waveform: &mold_candle::minimax_h3::StereoWaveform,
+            _checkpoint: &mut dyn H3PipelineCheckpoint,
+        ) -> Result<mold_candle::minimax_h3::StereoLatents> {
+            self.events
+                .lock()
+                .unwrap()
+                .push("vae-audio-reference".into());
+            bail!("synthetic audio reference stop")
+        }
+
         fn decode_video(
             &self,
             _latents: &Tensor,
@@ -4517,15 +4995,15 @@ mod tests {
         assert!(retained.upgrade().is_none());
     }
 
+    /// The Ref2VA owner is no longer uninhabited, so what has to stay true is
+    /// that its one constructor refuses an FL2VA route. Building a full
+    /// opened-authority set needs real artifacts; the reachable half of the
+    /// gate — task and model — is checked before any of them are touched.
     #[test]
-    fn ref2va_phase_owner_remains_sealed_and_fail_closed() {
-        let error = run_private_comfy_ref2va_attempt(H3PrivateRef2VaPhaseOwner {
-            _opened_evidence: ref2va_opened_seal::Token,
-        })
-        .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("no exact opened/prepared evidence"));
+    fn ref2va_phase_owner_refuses_a_route_admitted_for_another_task() {
+        let fl2va = authority();
+        assert_eq!(fl2va.task(), Task::Fl2va);
+        assert_ne!(fl2va.canonical_model(), contract::REF2VA_COMFY);
     }
 
     #[test]
@@ -4565,7 +5043,6 @@ mod tests {
         <H3PrivateAttemptAuthority<(), ()> as AmbiguousIfClone<_>>::assert_not_implemented();
         <H3PrivateFl2VaMemoryOverlapAuthority as AmbiguousIfClone<_>>::assert_not_implemented();
         <H3PrivatePhaseRuntimeOwner<(), (), ()> as AmbiguousIfClone<_>>::assert_not_implemented();
-        <H3PrivateRef2VaPhaseOwner as AmbiguousIfClone<_>>::assert_not_implemented();
 
         fn assert_clone<T: Clone>() {}
         assert_clone::<H3PrivateExecutionProjection<(), ()>>();

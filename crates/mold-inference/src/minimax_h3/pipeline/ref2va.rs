@@ -138,6 +138,23 @@ pub(crate) trait H3Ref2VaBackend {
         checkpoint: &mut dyn H3PipelineCheckpoint,
     ) -> Result<StereoLatents>;
 
+    /// Release every component the two reference encoders were the last
+    /// consumer of, before noise allocation and the transformer load. This is
+    /// the same contract as the FL2VA orchestrator's own parking hook and
+    /// exists for the same reason: nothing between here and visual decode
+    /// reads a VAE, so a backend that keeps both device-resident through
+    /// denoise pays their weights inside the transformer's own peak. Ref2VA
+    /// additionally holds the retained normalized media, which the encoders
+    /// were the last consumer of. A backend that parks here must be able to
+    /// reconstruct before `decode_video`.
+    fn park_reference_components(
+        &mut self,
+        checkpoint: &mut dyn H3PipelineCheckpoint,
+    ) -> Result<()> {
+        let _ = checkpoint;
+        Ok(())
+    }
+
     /// Borrowed inputs are call-scoped. Implementations must not clone or
     /// retain text states after returning; the orchestrator releases them
     /// immediately after the final forward to satisfy the frozen phase plan.
@@ -420,6 +437,10 @@ pub(crate) fn execute_staged(
             total: 1,
         })?;
     }
+
+    ensure_ref_identity(backend, &frozen_identity, &device)?;
+    backend.park_reference_components(&mut control)?;
+    ensure_ref_identity(backend, &frozen_identity, &device)?;
 
     let mut posterior_draws = visual_conditions
         .iter()

@@ -5263,6 +5263,7 @@ mod tests {
                     * 3,
                 normalized_cpu_content_sha256: sha('5'),
             }],
+            references: Vec::new(),
             rows: H3FactoryPreparedRowsInput {
                 qwen_output_text_rows: 128,
                 qwen_vision_rows: 1_024,
