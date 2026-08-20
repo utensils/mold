@@ -189,7 +189,11 @@ fn effective_dimensions(
             (None, None, Some(source_image)) => {
                 let image = image::load_from_memory(source_image)
                     .map_err(|error| anyhow::anyhow!("failed to decode H3 first frame: {error}"))?;
-                Ok(mold_core::minimax_h3::recommended_dimensions(
+                // Compact layouts (base + Turbo tags) must submit the fixed
+                // reviewed envelope regardless of source aspect; only the
+                // official BF16 reference keeps the aspect-derived canvas.
+                Ok(mold_core::minimax_h3::source_fit_dimensions(
+                    model,
                     image.width(),
                     image.height(),
                 ))
@@ -4436,6 +4440,78 @@ mod tests {
         assert_eq!(
             effective_generation_steps(true, &official, &config, None),
             mold_core::minimax_h3::DEFAULT_STEPS
+        );
+    }
+
+    /// A source image without explicit dims must not bend a compact H3
+    /// request off the reviewed envelope: admission validates exact
+    /// 1344x768, and the engine fits the source internally. The hidden
+    /// official BF16 reference keeps its flexible aspect-derived canvas.
+    #[test]
+    fn h3_source_image_keeps_the_compact_envelope() {
+        let config = Config::default();
+        let model_cfg = ModelConfig::default();
+
+        // A square 1024x1024 source (encoded as a real PNG).
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgb8(image::RgbImage::new(1024, 1024))
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+
+        for model in [
+            mold_core::minimax_h3::FL2VA_COMFY,
+            mold_core::minimax_h3::FL2VA_COMFY_TURBO_8STEP,
+            mold_core::minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P,
+        ] {
+            assert_eq!(
+                effective_dimensions(
+                    &config,
+                    &model_cfg,
+                    model,
+                    Some("minimax-h3"),
+                    None,
+                    None,
+                    Some(&png),
+                    None
+                )
+                .unwrap(),
+                (
+                    mold_core::minimax_h3::DEFAULT_WIDTH,
+                    mold_core::minimax_h3::DEFAULT_HEIGHT
+                ),
+                "{model}"
+            );
+        }
+
+        assert_eq!(
+            effective_dimensions(
+                &config,
+                &model_cfg,
+                mold_core::minimax_h3::FL2VA_OFFICIAL,
+                Some("minimax-h3"),
+                None,
+                None,
+                Some(&png),
+                None
+            )
+            .unwrap(),
+            mold_core::minimax_h3::recommended_dimensions(1024, 1024)
+        );
+
+        // Explicit dims still win on every layout.
+        assert_eq!(
+            effective_dimensions(
+                &config,
+                &model_cfg,
+                mold_core::minimax_h3::FL2VA_COMFY_TURBO_8STEP,
+                Some("minimax-h3"),
+                Some(1344),
+                Some(768),
+                Some(&png),
+                None
+            )
+            .unwrap(),
+            (1344, 768)
         );
     }
 

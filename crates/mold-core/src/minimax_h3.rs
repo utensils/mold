@@ -575,6 +575,22 @@ pub fn recommended_frames(frames: u32) -> u32 {
     }
 }
 
+/// The canvas an H3 request should submit when the caller attached a source
+/// image without explicit dimensions. The official BF16 reference keeps its
+/// flexible short-edge/area canvas ([`recommended_dimensions`]); every
+/// compact layout — the base task partitions and the Turbo tiers — must
+/// submit the fixed reviewed envelope regardless of source aspect, because
+/// compact admission validates exact `DEFAULT_WIDTH`x`DEFAULT_HEIGHT`
+/// dimensions and the engine fits the source internally. A model the layout
+/// resolver does not recognize also takes the envelope: fail toward the
+/// stricter contract.
+pub fn source_fit_dimensions(model: &str, width: u32, height: u32) -> (u32, u32) {
+    match layout_for_model(model) {
+        Some(Layout::OfficialBf16) => recommended_dimensions(width, height),
+        _ => (DEFAULT_WIDTH, DEFAULT_HEIGHT),
+    }
+}
+
 pub fn recommended_dimensions(width: u32, height: u32) -> (u32, u32) {
     if width == 0 || height == 0 {
         return (DEFAULT_WIDTH, DEFAULT_HEIGHT);
@@ -2629,6 +2645,42 @@ mod tests {
             distill_strength_low: None,
             placement: None,
         }
+    }
+
+    /// A source image never bends a compact request off the reviewed
+    /// envelope: the aspect-derived canvas is official-BF16 behavior only,
+    /// and compact admission validates exact envelope dimensions.
+    #[test]
+    fn source_fit_keeps_the_compact_envelope_and_the_official_aspect_canvas() {
+        for model in [
+            FL2VA_COMFY,
+            REF2VA_COMFY,
+            FL2VA_COMFY_TURBO_8STEP,
+            FL2VA_COMFY_TURBO_4STEP_768P,
+        ] {
+            assert_eq!(
+                source_fit_dimensions(model, 1024, 1024),
+                (DEFAULT_WIDTH, DEFAULT_HEIGHT),
+                "{model}"
+            );
+            assert_eq!(
+                source_fit_dimensions(model, 1920, 1080),
+                (DEFAULT_WIDTH, DEFAULT_HEIGHT),
+                "{model}"
+            );
+        }
+        for (width, height) in [(1024, 1024), (1920, 1080), (1080, 1920)] {
+            assert_eq!(
+                source_fit_dimensions(FL2VA_OFFICIAL, width, height),
+                recommended_dimensions(width, height)
+            );
+        }
+        // Unresolvable family-configured models fail toward the stricter
+        // compact contract.
+        assert_eq!(
+            source_fit_dimensions("custom-h3-finetune", 1920, 1080),
+            (DEFAULT_WIDTH, DEFAULT_HEIGHT)
+        );
     }
 
     #[test]
