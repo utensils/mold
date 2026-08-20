@@ -158,9 +158,26 @@ const entries = ref<HostGalleryImage[]>([]);
 const rawEntries = ref<HostGalleryImage[]>([]);
 /** Per-host organization: capabilities, collections, tags, trash listing. */
 const snapshots = ref<HostOrganizationSnapshot[]>([]);
-/** Copies moved to the trash locally (undo window elapsed) until the next
- * server listing confirms them. */
+/** Copies moved to the trash locally (undo window elapsed) until a
+ * SUCCESSFUL server listing confirms them (or they age out). */
 const pendingTrashed = ref<HostGalleryImage[]>([]);
+/** A shadow with no server confirmation is dropped after this bound so a
+ * host that never lists it can't pin a phantom row forever. */
+const PENDING_TRASH_MAX_AGE_SECS = 15 * 60;
+/** Print keys optimistically removed while their delete/trash commit waits
+ * out the undo window. The 10 s poll masks these so a refresh can't
+ * resurrect still-live rows mid-window (codex review). */
+const pendingRemovalKeys = ref<Set<string>>(new Set());
+function addPendingRemovals(keys: Iterable<string>) {
+  const next = new Set(pendingRemovalKeys.value);
+  for (const key of keys) next.add(key);
+  pendingRemovalKeys.value = next;
+}
+function clearPendingRemovals(keys: Iterable<string>) {
+  const next = new Set(pendingRemovalKeys.value);
+  for (const key of keys) next.delete(key);
+  pendingRemovalKeys.value = next;
+}
 const models = ref<ModelInfoExtended[]>([]);
 // Hosts whose /api/gallery failed this refresh (surfaced, not hidden), and
 // how many non-origin hosts were attempted (drives the honest count line).
@@ -612,6 +629,15 @@ watch(resolver, () => {
   if (rawEntries.value.length > 0) syncLogicalEntries();
 });
 
+/** Re-add optimistically removed copies, deduped by key — a refresh that
+ * raced the undo window may already have re-added the live rows. */
+function restoreRemovedEntries(removed: readonly HostGalleryImage[]) {
+  const present = new Set(rawEntries.value.map((e) => keyOf(e)));
+  const missing = removed.filter((e) => !present.has(keyOf(e)));
+  if (missing.length > 0) rawEntries.value = [...rawEntries.value, ...missing];
+  syncLogicalEntries();
+}
+
 /** Keep the Lightbox pointed at the freshest object for its print. */
 function reselectCurrent() {
   if (!selected.value) return;
@@ -663,19 +689,37 @@ async function handleDeleteMany(keys: string[]): Promise<number> {
     group.some((entry) => failedKeys.has(keyOf(entry))),
   ).length;
   const deletedPrints = selectedTargets.length - failedPrints;
-  const verb = trashedNow.length > 0 && failed === 0 ? "Trashed" : "Deleted";
+  // Copies that hard-deleted on a host without a trash. "Trashed" wording is
+  // truthful only when EVERY successful copy landed in a trash — a mixed
+  // fleet names its permanent deletions instead (codex review).
+  const hardDeletedNow = targets
+    .filter((t) => deleted.has(t.key))
+    .map((t) => t.entry)
+    .filter((entry) => !hostTrashes(snapshots.value, entry.hostId));
   if (failed > 0) {
     toast(
       "error",
       `Deleted ${deletedPrints} of ${selectedTargets.length} prints everywhere. ${failedPrints} still have a copy on an unavailable device.`,
     );
   } else if (selectedTargets.length > 0) {
-    toast(
-      "success",
-      selectedTargets.length === 1
-        ? `${verb} print everywhere`
-        : `${verb} ${selectedTargets.length} prints everywhere`,
-    );
+    if (trashedNow.length > 0 && hardDeletedNow.length > 0) {
+      const copies =
+        hardDeletedNow.length === 1
+          ? "1 copy on an older machine was"
+          : `${hardDeletedNow.length} copies on older machines were`;
+      toast(
+        "success",
+        `Trashed ${deletedPrints} ${deletedPrints === 1 ? "print" : "prints"}; ${copies} deleted permanently.`,
+      );
+    } else {
+      const verb = trashedNow.length > 0 ? "Trashed" : "Deleted";
+      toast(
+        "success",
+        selectedTargets.length === 1
+          ? `${verb} print everywhere`
+          : `${verb} ${selectedTargets.length} prints everywhere`,
+      );
+    }
   }
   return deletedPrints;
 }
@@ -706,9 +750,11 @@ async function deleteSelected() {
     copies.every((copy) => hostTrashes(snapshots.value, copy.hostId));
   if (reversible) {
     // Reversible: no confirm — the prints wait in the Trash, and the toast
-    // offers the 6 s undo before the request even fires.
+    // offers the 6 s undo before the request even fires. The keys stay
+    // masked from refresh until undo or commit settles (codex review).
     const removedKeys = new Set(copies.map((copy) => keyOf(copy)));
     const removed = rawEntries.value.filter((e) => removedKeys.has(keyOf(e)));
+    addPendingRemovals(removedKeys);
     rawEntries.value = rawEntries.value.filter(
       (e) => !removedKeys.has(keyOf(e)),
     );
@@ -720,23 +766,24 @@ async function deleteSelected() {
           ? "Moved to trash"
           : `Moved ${keys.length} prints to the trash`,
       undo: () => {
-        rawEntries.value = [...rawEntries.value, ...removed];
-        syncLogicalEntries();
+        clearPendingRemovals(removedKeys);
+        restoreRemovedEntries(removed);
       },
       commit: async () => {
-        const result = await applyOrganizationMutation(
-          removed,
-          { kind: "trash" },
-          mutationContext(),
-        );
-        const failedHosts = new Set(result.failed.map((f) => f.hostId));
-        const failed = removed.filter((e) => failedHosts.has(e.hostId));
-        if (failed.length > 0) {
-          rawEntries.value = [...rawEntries.value, ...failed];
-          syncLogicalEntries();
+        try {
+          const result = await applyOrganizationMutation(
+            removed,
+            { kind: "trash" },
+            mutationContext(),
+          );
+          const failedHosts = new Set(result.failed.map((f) => f.hostId));
+          const failed = removed.filter((e) => failedHosts.has(e.hostId));
+          if (failed.length > 0) restoreRemovedEntries(failed);
+          markTrashedLocally(removed.filter((e) => !failedHosts.has(e.hostId)));
+          reportFanout(result, "move to the trash");
+        } finally {
+          clearPendingRemovals(removedKeys);
         }
-        markTrashedLocally(removed.filter((e) => !failedHosts.has(e.hostId)));
-        reportFanout(result, "move to the trash");
       },
     });
     return;
@@ -1377,10 +1424,29 @@ async function performRefresh() {
     ]);
     if (organization) {
       snapshots.value = organization;
-      // The server now lists what we trashed locally; drop the shadow copies.
-      pendingTrashed.value = [];
+      // Drop a shadow copy only once its host's trash listing SUCCEEDED and
+      // actually lists it — a failed listing degrades to an empty list and
+      // is no evidence the trash move was lost (codex review). A generous
+      // age bound keeps a host that never confirms from pinning a phantom.
+      const now = Math.floor(Date.now() / 1000);
+      pendingTrashed.value = pendingTrashed.value.filter((copy) => {
+        const snap = organization.find((s) => s.hostId === copy.hostId);
+        const key = keyOf(copy);
+        const confirmed =
+          snap?.trashListingOk === true &&
+          snap.trashed.some((row) => keyOf(row) === key);
+        if (confirmed) return false;
+        return now - (copy.trashed_at ?? now) <= PENDING_TRASH_MAX_AGE_SECS;
+      });
     }
-    rawEntries.value = merged.rawEntries;
+    // Never resurrect prints whose optimistic removal still waits out its
+    // undo window — the server lists them live until the commit fires.
+    rawEntries.value =
+      pendingRemovalKeys.value.size > 0
+        ? merged.rawEntries.filter(
+            (e) => !pendingRemovalKeys.value.has(keyOf(e)),
+          )
+        : merged.rawEntries;
     syncLogicalEntries();
     unreachableHostIds.value = merged.unreachableHostIds;
     remoteHostCount.value = merged.remoteHostCount;
@@ -1428,13 +1494,39 @@ const countLabel = computed(() => {
     return `${trashEntries.value.length} ${trashEntries.value.length === 1 ? "print" : "prints"} in trash`;
   return `${total.value} prints · ${scopeLabel.value}`;
 });
-const scopeOptions = computed<SegmentOption<Scope>[]>(() => [
-  { value: "prints", label: `Prints · ${total.value}` },
-  { value: "collections", label: `Collections · ${collections.value.length}` },
-  { value: "trash", label: `Trash · ${trashEntries.value.length}` },
-]);
+/** Each scope is offered on its OWN capability: Collections needs a host
+ * with `gallery.organize`, Trash a host with `gallery.trash.enabled` — a
+ * DB-backed host with its trash disabled must not offer Trash just because
+ * it organizes (codex review). */
+const scopeOptions = computed<SegmentOption<Scope>[]>(() => {
+  const options: SegmentOption<Scope>[] = [
+    { value: "prints", label: `Prints · ${total.value}` },
+  ];
+  if (canOrganize.value)
+    options.push({
+      value: "collections",
+      label: `Collections · ${collections.value.length}`,
+    });
+  if (canTrash.value)
+    options.push({
+      value: "trash",
+      label: `Trash · ${trashEntries.value.length}`,
+    });
+  return options;
+});
 /** Scopes only exist once some host can organize or trash. */
-const showScopes = computed(() => canOrganize.value || canTrash.value);
+const showScopes = computed(() => scopeOptions.value.length > 1);
+// Clamp a deep-linked `?scope=` no host offers back to Prints. Reactive, not
+// mount-only: capabilities arrive asynchronously, so the verdict lands after
+// the URL did. A fleet with any UNKNOWN capability probe (`organize: null`)
+// never clamps — unknown is not incapable.
+watch([scopeOptions, snapshots], () => {
+  if (scope.value === "prints") return;
+  if (snapshots.value.length === 0) return;
+  if (snapshots.value.some((s) => s.organize === null)) return;
+  if (!scopeOptions.value.some((option) => option.value === scope.value))
+    setScope("prints");
+});
 
 // ── Lightbox ─────────────────────────────────────────────────────────────────
 const selected = ref<GalleryImage | null>(null);
@@ -1732,6 +1824,8 @@ async function onLightboxDelete(item: GalleryImage) {
   const removedKeys = new Set(removed.map((entry) => keyOf(entry)));
 
   // Optimistic removal; commit the DELETE only once the undo window elapses.
+  // Masked from refresh until then so a poll can't resurrect the rows.
+  addPendingRemovals(removedKeys);
   rawEntries.value = rawEntries.value.filter((e) => !removedKeys.has(keyOf(e)));
   syncLogicalEntries();
   if (filtered.value.length === 0) {
@@ -1748,29 +1842,34 @@ async function onLightboxDelete(item: GalleryImage) {
   undoableAction({
     text: reversible ? "Moved to trash" : "Print deleted everywhere",
     undo: () => {
-      rawEntries.value = [...rawEntries.value, ...removed];
-      syncLogicalEntries();
+      clearPendingRemovals(removedKeys);
+      restoreRemovedEntries(removed);
     },
     commit: async () => {
-      const results = await Promise.allSettled(
-        removed.map((entry) => deleteRouted(entry)),
-      );
-      const failed = removed.filter(
-        (_, index) => results[index]?.status === "rejected",
-      );
-      const succeeded = removed.filter(
-        (_, index) => results[index]?.status === "fulfilled",
-      );
-      markTrashedLocally(
-        succeeded.filter((entry) => hostTrashes(snapshots.value, entry.hostId)),
-      );
-      if (failed.length > 0) {
-        rawEntries.value = [...rawEntries.value, ...failed];
-        syncLogicalEntries();
-        toast(
-          "error",
-          `${failed.length} device ${failed.length === 1 ? "copy remains" : "copies remain"} because a delete failed.`,
+      try {
+        const results = await Promise.allSettled(
+          removed.map((entry) => deleteRouted(entry)),
         );
+        const failed = removed.filter(
+          (_, index) => results[index]?.status === "rejected",
+        );
+        const succeeded = removed.filter(
+          (_, index) => results[index]?.status === "fulfilled",
+        );
+        markTrashedLocally(
+          succeeded.filter((entry) =>
+            hostTrashes(snapshots.value, entry.hostId),
+          ),
+        );
+        if (failed.length > 0) {
+          restoreRemovedEntries(failed);
+          toast(
+            "error",
+            `${failed.length} device ${failed.length === 1 ? "copy remains" : "copies remain"} because a delete failed.`,
+          );
+        }
+      } finally {
+        clearPendingRemovals(removedKeys);
       }
     },
   });

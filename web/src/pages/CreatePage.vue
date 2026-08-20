@@ -306,8 +306,9 @@ const showTemplates = ref(false);
 const templatesHost = ref<HTMLElement | null>(null);
 const composerError = ref<string | null>(null);
 /** Inline validation for the print title field (`validatePrintTitle`). An
- * invalid title never reaches the wire — `toRequest` drops it — so the error
- * here is the only place the user learns why. */
+ * invalid title BLOCKS submit — `validateSubmit` re-checks the form value
+ * (a restored draft can carry one without an input event) so Generate can
+ * never fire while silently dropping the title (codex review). */
 const titleError = ref("");
 function onTitleInput(value: string) {
   form.state.value.title = value;
@@ -2691,6 +2692,18 @@ function validateSubmit(): boolean {
     showAdvanced.value = false;
     composerError.value = "Pick a model to start.";
     return false;
+  }
+  // An invalid print title blocks the submit like every other inline
+  // validation — `toRequest` would silently drop it otherwise, generating
+  // an untitled print despite a populated field (codex review). Sequences
+  // carry no title slot on the wire, so a stale one never blocks them.
+  if (!sequenceMode.value) {
+    const titleCheck = validatePrintTitle(form.state.value.title ?? "");
+    if (!titleCheck.ok) {
+      titleError.value = titleCheck.reason;
+      composerError.value = titleCheck.reason;
+      return false;
+    }
   }
   const h3Error = h3FrameError.value;
   if (h3Error) {

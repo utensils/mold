@@ -948,8 +948,35 @@ describe("CreatePage layout and behavior", () => {
     submitMock.mockClear();
     await wrapper.get("[data-test='composer-submit']").trigger("click");
     await flushPromises();
-    // An invalid title never reaches the wire; the request still goes.
-    expect(submitMock.mock.calls[0]?.[0]?.title).toBeUndefined();
+    // An invalid title BLOCKS the submit — it is never silently dropped
+    // from the wire while Generate fires anyway (codex review).
+    expect(submitMock).not.toHaveBeenCalled();
+
+    // Fixing the title unblocks Generate and the value rides the request.
+    await title.setValue("Valid again");
+    await wrapper.get("[data-test='composer-submit']").trigger("click");
+    await flushPromises();
+    expect(submitMock.mock.calls[0]?.[0]).toMatchObject({
+      title: "Valid again",
+    });
+  });
+
+  it("blocks a submit for an invalid title that never went through the field", async () => {
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    const form = useGenerateForm();
+    form.state.value.model = "flux-dev:q4";
+    form.state.value.modelFamily = "flux";
+    form.state.value.prompt = "a cat";
+    // A restored draft can carry an invalid title without an input event.
+    form.state.value.title = "bad\u0007title";
+    await nextTick();
+
+    await wrapper.get("[data-test='composer-submit']").trigger("click");
+    await flushPromises();
+    expect(submitMock).not.toHaveBeenCalled();
+    expect(wrapper.get("[data-test='print-title-error']").text()).toContain(
+      "control characters",
+    );
   });
 
   it("still blocks a malformed non-integer size", async () => {

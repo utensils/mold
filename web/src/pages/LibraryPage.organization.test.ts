@@ -750,3 +750,196 @@ describe("Keyboard", () => {
     expect(orgApi.organizeGallery).not.toHaveBeenCalled();
   });
 });
+
+describe("Refresh races (codex review)", () => {
+  it("a poll inside the undo window never resurrects pending prints, and undo restores without duplicates", async () => {
+    vi.useFakeTimers();
+    const wrapper = mountPage();
+    await flushPromises();
+    // Shift the delete to t = 7 s so the 10 s poll fires inside the 6 s
+    // undo window (which then ends at t = 13 s).
+    vi.advanceTimersByTime(7000);
+    await flushPromises();
+    await wrapper.get("[data-test='gallery-select']").trigger("click");
+    await wrapper.get("[data-test='grid-select-first']").trigger("click");
+    await wrapper.get("[data-test='grid-select-second']").trigger("click");
+    await wrapper.get("[data-test='bulk-delete']").trigger("click");
+    await flushPromises();
+    expect(wrapper.get("[data-test='grid-count']").text()).toBe("1");
+
+    // t = 10 s: the poll refetches the still-live rows from the server.
+    // They must stay masked while the trash commit is pending.
+    vi.advanceTimersByTime(3000);
+    await flushPromises();
+    expect(wrapper.get("[data-test='grid-count']").text()).toBe("1");
+
+    // Undo restores each print exactly once — never duplicated rows.
+    const toastId = useNotifications().toasts[0]!.id;
+    runToastAction(toastId);
+    await flushPromises();
+    expect(wrapper.get("[data-test='grid-count']").text()).toBe("3");
+    expect(
+      wrapper.get("[data-test='grid-names']").text().split(",").sort(),
+    ).toEqual(["frog.png", "plain.png", "smurf.png"]);
+    expect(orgApi.trashMany).not.toHaveBeenCalled();
+  });
+
+  it("commit after a mid-window poll still removes the prints for good", async () => {
+    vi.useFakeTimers();
+    const wrapper = mountPage();
+    await flushPromises();
+    vi.advanceTimersByTime(7000);
+    await flushPromises();
+    await wrapper.get("[data-test='gallery-select']").trigger("click");
+    await wrapper.get("[data-test='grid-select-first']").trigger("click");
+    await wrapper.get("[data-test='bulk-delete']").trigger("click");
+    await flushPromises();
+    expect(wrapper.get("[data-test='grid-count']").text()).toBe("2");
+
+    // t = 10 s poll re-reads the still-live rows.
+    vi.advanceTimersByTime(3000);
+    await flushPromises();
+    // t = 13 s: the undo window elapses, the trash commit fires.
+    listGalleryMock.mockResolvedValue([frog, plain]);
+    vi.advanceTimersByTime(3000);
+    await flushPromises();
+    expect(orgApi.trashMany).toHaveBeenCalledWith(ORIGIN_TARGET, ["smurf.png"]);
+    expect(wrapper.get("[data-test='grid-count']").text()).toBe("2");
+    expect(wrapper.get("[data-test='grid-names']").text()).not.toContain(
+      "smurf.png",
+    );
+  });
+});
+
+describe("Mixed-capability delete wording", () => {
+  it("names the permanent deletions when only some copies could be trashed", async () => {
+    localStorage.setItem(
+      "mold.web.hosts.v1",
+      JSON.stringify([
+        { id: "plato", name: "plato", url: "http://plato:7680" },
+      ]),
+    );
+    hostCapabilitiesMock.mockImplementation(async (host: { id: string }) =>
+      host.id === "origin" ? ORGANIZING : { gallery: { can_delete: true } },
+    );
+    listGalleryMock.mockResolvedValue([
+      smurf,
+      { ...smurf, hostId: "plato", hostLabel: "plato" },
+    ]);
+    const wrapper = await mounted();
+    await wrapper.get("[data-test='gallery-select']").trigger("click");
+    await wrapper.get("[data-test='grid-select-first']").trigger("click");
+    await wrapper.get("[data-test='bulk-delete']").trigger("click");
+    await flushPromises();
+    // One copy hard-deletes on plato, so the flow is not reversible.
+    expect(requestConfirm).toHaveBeenCalled();
+    const texts = useNotifications().toasts.map((t) => t.text);
+    expect(texts).toContain(
+      "Trashed 1 print; 1 copy on an older machine was deleted permanently.",
+    );
+    expect(texts.some((t) => t.includes("Trashed print everywhere"))).toBe(
+      false,
+    );
+  });
+});
+
+describe("Capability-scoped scope options", () => {
+  const ORGANIZE_NO_TRASH = {
+    gallery: {
+      can_delete: true,
+      organize: true,
+      trash: { enabled: false, retention_days: 0 },
+    },
+  };
+
+  it("offers Trash only when a host has trash enabled", async () => {
+    hostCapabilitiesMock.mockResolvedValue(ORGANIZE_NO_TRASH);
+    hostGalleryMock.mockResolvedValue([]);
+    const wrapper = await mounted();
+    const labels = wrapper
+      .get("[data-test='library-scope']")
+      .findAll(".ms-seg__btn")
+      .map((b) => b.text());
+    expect(labels).toEqual(["Prints · 3", "Collections · 2"]);
+  });
+
+  it("offers Collections only when a host can organize", async () => {
+    hostCapabilitiesMock.mockResolvedValue({
+      gallery: {
+        can_delete: true,
+        trash: { enabled: true, retention_days: 30 },
+      },
+    });
+    const wrapper = await mounted();
+    const labels = wrapper
+      .get("[data-test='library-scope']")
+      .findAll(".ms-seg__btn")
+      .map((b) => b.text());
+    expect(labels).toEqual(["Prints · 3", "Trash · 1"]);
+  });
+
+  it("clamps a deep-linked scope no host offers once capabilities arrive", async () => {
+    routeQuery.value = { scope: "trash" };
+    hostCapabilitiesMock.mockResolvedValue(ORGANIZE_NO_TRASH);
+    hostGalleryMock.mockResolvedValue([]);
+    const wrapper = await mounted();
+    expect(wrapper.get("[data-test='grid']").attributes("data-trash")).toBe(
+      "false",
+    );
+    expect(replaceMock).toHaveBeenLastCalledWith({ query: {} });
+  });
+
+  it("keeps a deep-linked scope while capabilities are unknown", async () => {
+    routeQuery.value = { scope: "trash" };
+    hostCapabilitiesMock.mockRejectedValue(new Error("down"));
+    hostGalleryMock.mockResolvedValue([]);
+    const wrapper = await mounted();
+    // A failed probe is unknown, not incapable — never clamp on it.
+    expect(wrapper.get(".gal").attributes("data-scope")).toBe("trash");
+  });
+});
+
+describe("Pending trash shadows survive failed listings", () => {
+  it("keeps a just-trashed shadow until a successful listing confirms it", async () => {
+    vi.useFakeTimers();
+    const wrapper = mountPage();
+    await flushPromises();
+    await wrapper.get("[data-test='grid-open']").trigger("click");
+    await wrapper.get("[data-test='lb-delete']").trigger("click");
+    await flushPromises();
+    vi.advanceTimersByTime(6000); // undo window elapses → commit → shadow
+    await flushPromises();
+    // The server no longer lists it live, but the trash listing FAILS —
+    // the shadow must survive that refresh instead of vanishing.
+    listGalleryMock.mockResolvedValue([frog, plain]);
+    hostGalleryMock.mockRejectedValue(new Error("listing down"));
+    vi.advanceTimersByTime(4000); // t = 10 s poll
+    await flushPromises();
+    await wrapper
+      .get("[data-test='library-scope']")
+      .findAll(".ms-seg__btn")[2]!
+      .trigger("click");
+    await flushPromises();
+    expect(wrapper.get("[data-test='grid-names']").text()).toContain(
+      "smurf.png",
+    );
+
+    // A successful listing that OMITS the row still keeps the shadow.
+    hostGalleryMock.mockResolvedValue([trashedOld]);
+    vi.advanceTimersByTime(10_000);
+    await flushPromises();
+    expect(wrapper.get("[data-test='grid-names']").text()).toContain(
+      "smurf.png",
+    );
+
+    // Once a successful listing includes it, the shadow yields to the row.
+    hostGalleryMock.mockResolvedValue([
+      trashedOld,
+      { ...smurf, trashed_at: 1_700_000_100 },
+    ]);
+    vi.advanceTimersByTime(10_000);
+    await flushPromises();
+    const names = wrapper.get("[data-test='grid-names']").text().split(",");
+    expect(names.filter((n) => n === "smurf.png")).toHaveLength(1);
+  });
+});

@@ -56,14 +56,21 @@ import type { Collection, GalleryImage, TagCount } from "../types";
 export interface HostOrganizationSnapshot {
   hostId: string;
   hostLabel: string;
-  /** `gallery.organize` — titles / favorites / tags / collections editable. */
-  organize: boolean;
+  /** `gallery.organize` — titles / favorites / tags / collections editable.
+   * `null` = the `/api/capabilities` probe FAILED, so support is unknown —
+   * deliberately distinguishable from an answered `organize: false`, because
+   * unknown hosts stay in the mutation fan-out (codex review). */
+  organize: boolean | null;
   /** `gallery.trash` — DELETE moves to the trash; `null` = permanent delete. */
   trash: { enabled: boolean; retentionDays: number } | null;
   collections: Collection[];
   tags: TagCount[];
   /** `GET /api/gallery?view=trash` rows, host-tagged. */
   trashed: HostGalleryImage[];
+  /** True only when the trash listing itself was fetched successfully this
+   * refresh. A failed listing degrades to `trashed: []`, and pending local
+   * shadows must not be cleared on that non-evidence (codex review). */
+  trashListingOk: boolean;
 }
 
 export interface OrganizationFetchers {
@@ -92,11 +99,12 @@ function emptySnapshot(host: HostEntry): HostOrganizationSnapshot {
   return {
     hostId: host.id,
     hostLabel: host.name,
-    organize: false,
+    organize: null,
     trash: null,
     collections: [],
     tags: [],
     trashed: [],
+    trashListingOk: false,
   };
 }
 
@@ -108,7 +116,8 @@ async function fetchHostSnapshot(
   const snapshot = emptySnapshot(host);
   const caps = await fetchers.capabilities(host, signal).catch(() => null);
   const gallery = caps?.gallery;
-  snapshot.organize = gallery?.organize === true;
+  // A failed probe is UNKNOWN (null), never "answered organize: false".
+  snapshot.organize = caps ? gallery?.organize === true : null;
   snapshot.trash = gallery?.trash
     ? {
         enabled: gallery.trash.enabled,
@@ -116,17 +125,25 @@ async function fetchHostSnapshot(
       }
     : null;
   const target = hostApiTarget(host);
+  let trashListingOk = false;
   const [collections, tags, trashed] = await Promise.all([
-    snapshot.organize
+    snapshot.organize === true
       ? fetchers.collections(target, signal).catch(() => [] as Collection[])
       : Promise.resolve([] as Collection[]),
-    snapshot.organize
+    snapshot.organize === true
       ? fetchers.tags(target, signal).catch(() => [] as TagCount[])
       : Promise.resolve([] as TagCount[]),
     snapshot.trash?.enabled
-      ? fetchers.trash(host, signal).catch(() => [] as GalleryImage[])
+      ? fetchers
+          .trash(host, signal)
+          .then((rows) => {
+            trashListingOk = true;
+            return rows;
+          })
+          .catch(() => [] as GalleryImage[])
       : Promise.resolve([] as GalleryImage[]),
   ]);
+  snapshot.trashListingOk = trashListingOk;
   snapshot.collections = collections;
   snapshot.tags = tags;
   snapshot.trashed = trashed.map((item) => ({
@@ -161,7 +178,7 @@ export function snapshotFor(
 export function anyHostOrganizes(
   snapshots: readonly HostOrganizationSnapshot[],
 ): boolean {
-  return snapshots.some((s) => s.organize);
+  return snapshots.some((s) => s.organize === true);
 }
 
 export function anyHostTrashes(
@@ -450,13 +467,15 @@ export async function applyOrganizationMutation(
   mutation: OrganizationMutation,
   context: MutationContext,
 ): Promise<FanoutResult> {
-  // A host whose snapshot says `gallery.organize: false` (older build,
+  // A host whose snapshot ANSWERED `gallery.organize: false` (older build,
   // MOLD_DB_DISABLE) contributes no organization state and would 404/501
   // every edit — skip its copies instead of surfacing partial failures for
   // prints that are defined as unorganizable there (codex review). A host
-  // with no snapshot yet stays in: unknown is not incapable.
+  // with no snapshot, or whose capability probe failed (`organize: null`),
+  // stays in: unknown is not incapable, and its edits must either land or
+  // surface as that host's own failure — never silently skip (codex review).
   const incapable = new Set(
-    context.snapshots.filter((s) => !s.organize).map((s) => s.hostId),
+    context.snapshots.filter((s) => s.organize === false).map((s) => s.hostId),
   );
   const ops = planOrganizationFanout(
     copies

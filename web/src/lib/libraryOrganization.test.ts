@@ -107,6 +107,7 @@ function snapshot(
     collections: [],
     tags: [],
     trashed: [],
+    trashListingOk: true,
     ...extra,
   };
 }
@@ -164,7 +165,7 @@ describe("fetchOrganization", () => {
     expect(fetchers.trash).toHaveBeenCalledTimes(1);
   });
 
-  it("degrades a failing probe to no organization instead of throwing", async () => {
+  it("marks a failed capability probe unknown (null) instead of incapable", async () => {
     const snapshots = await fetchOrganization([ORIGIN], {
       capabilities: vi.fn(async () => {
         throw new Error("down");
@@ -173,7 +174,48 @@ describe("fetchOrganization", () => {
       tags: vi.fn(async () => []),
       trash: vi.fn(async () => []),
     });
+    // Unknown is not incapable: `organize` stays null so mutation fan-out can
+    // keep the host in and surface per-host failures (codex review).
+    expect(snapshots[0]).toMatchObject({
+      organize: null,
+      trash: null,
+      trashListingOk: false,
+    });
+  });
+
+  it("a host that answers organize:false stays known-incapable, not unknown", async () => {
+    const snapshots = await fetchOrganization([ORIGIN], {
+      capabilities: vi.fn(async () => ({
+        gallery: { can_delete: true, organize: false },
+      })),
+      collections: vi.fn(async () => []),
+      tags: vi.fn(async () => []),
+      trash: vi.fn(async () => []),
+    });
     expect(snapshots[0]).toMatchObject({ organize: false, trash: null });
+  });
+
+  it("records whether the trash listing itself succeeded per host", async () => {
+    const capable = {
+      gallery: {
+        can_delete: true,
+        organize: true,
+        trash: { enabled: true, retention_days: 7 },
+      },
+    };
+    const snapshots = await fetchOrganization([ORIGIN, PLATO], {
+      capabilities: vi.fn(async () => capable),
+      collections: vi.fn(async () => []),
+      tags: vi.fn(async () => []),
+      trash: vi.fn(async (host: HostEntry) => {
+        if (host.id === "plato") throw new Error("listing down");
+        return [];
+      }),
+    });
+    expect(snapshots[0]!.trashListingOk).toBe(true);
+    // A swallowed listing failure must stay distinguishable from a genuinely
+    // empty trash, or pending shadows get cleared on bad evidence.
+    expect(snapshots[1]).toMatchObject({ trashListingOk: false, trashed: [] });
   });
 });
 
@@ -431,6 +473,32 @@ describe("mutations fan out to every copy's host", () => {
         // plato is KNOWN incapable; origin has no snapshot (unknown) and
         // must still receive the mutation.
         snapshots: [snapshot("plato", { organize: false })],
+      },
+    );
+    expect(api.organizeGallery).toHaveBeenCalledTimes(1);
+    expect(api.organizeGallery).toHaveBeenCalledWith(originTarget, {
+      filenames: ["twin.png"],
+      favorite: true,
+    });
+  });
+
+  it("keeps a host whose capability probe failed (organize unknown) in the fan-out", async () => {
+    await applyOrganizationMutation(
+      copies,
+      { kind: "setFavorite", favorite: true },
+      {
+        hostById,
+        // plato is KNOWN incapable; origin's /api/capabilities transiently
+        // failed (organize: null) — unknown must still receive the mutation
+        // so a real failure surfaces per host instead of a silent skip.
+        snapshots: [
+          snapshot("plato", { organize: false }),
+          snapshot("origin", {
+            organize: null,
+            trash: null,
+            trashListingOk: false,
+          }),
+        ],
       },
     );
     expect(api.organizeGallery).toHaveBeenCalledTimes(1);
