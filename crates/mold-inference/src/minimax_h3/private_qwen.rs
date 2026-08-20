@@ -2804,7 +2804,7 @@ mod tests {
         }
         fn backend(&self) -> H3CandleBackendDevice {
             H3CandleBackendDevice::Cuda {
-                compute_capability: Some((8, 9)),
+                compute_capability: (8, 9),
             }
         }
         fn execution_fingerprint(&self) -> &str {
