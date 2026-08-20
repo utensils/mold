@@ -890,8 +890,15 @@ where
         self.execution_authority.device()
     }
 
+    /// The integrator is a property of the frozen quantization authority,
+    /// not of the layout: a reviewed Turbo tier distils to `comfy-euler`
+    /// while the unadapted compact checkpoint keeps `comfy-res-multistep`.
     fn sampler_kind(&self) -> H3SamplerKind {
-        H3SamplerKind::ComfyResMultistep
+        self.admitted.quantization.sampler_kind()
+    }
+
+    fn sampler_video_shift(&self) -> f32 {
+        self.admitted.quantization.video_shift()
     }
 
     fn encode_text(
@@ -1236,6 +1243,8 @@ where
                     .into(),
             },
         },
+        // Frozen at admission; the load never re-reads the environment.
+        admitted.quantization.turbo_adapter().cloned(),
     )?;
     let stream_authority = bound_transformer.authority().clone();
     validate_private_artifact_authority(
@@ -1778,12 +1787,14 @@ where
         } = self;
         let (prepared, retention) = prepared.into_runtime_parts();
         retention.revalidate()?;
-        let expected_denoise_forwards = super::sampler::H3DualSchedule::new_for_sampler(
-            prepared.grid_points,
-            H3SamplerKind::ComfyResMultistep,
-        )?
-        .counts()
-        .transformer_evaluations;
+        let expected_denoise_forwards =
+            super::sampler::H3DualSchedule::new_for_sampler_with_video_shift(
+                prepared.grid_points,
+                admitted.quantization.sampler_kind(),
+                admitted.quantization.video_shift(),
+            )?
+            .counts()
+            .transformer_evaluations;
         if expected_denoise_forwards != retention.denoise_forward_count()? {
             bail!("private H3 prepared denoise count differs from retained factory authority")
         }
@@ -2063,7 +2074,11 @@ where
     }
 
     fn sampler_kind(&self) -> H3SamplerKind {
-        H3SamplerKind::ComfyResMultistep
+        self.admitted.quantization.sampler_kind()
+    }
+
+    fn sampler_video_shift(&self) -> f32 {
+        self.admitted.quantization.video_shift()
     }
 
     fn encode_text(
@@ -2726,6 +2741,7 @@ mod tests {
                 transformer_policy_sha256: sha('c'),
                 qwen_policy_sha256: sha('d'),
                 pruned_adaln_table_sha256: sha('e'),
+                turbo_adapter: None,
             },
             components: [
                 H3FactoryComponentRole::Conditioner,

@@ -28,6 +28,12 @@ pub const ENGINE_SHAPING_VARIABLES: &[&str] = &[
     "MOLD_EAGER",
     "MOLD_FLUX_DELTA_CACHE",
     "MOLD_FLUX_KEEP_TRANSFORMER",
+    // #1174 follow-up: the reviewed MiniMax H3 Turbo LoRA tier is selected by
+    // adapter path plus tier id until manifests own it. Both change which
+    // adapter runs, which integrator consumes it, and the step count, so both
+    // are engine-shaping.
+    "MOLD_H3_TURBO_ADAPTER",
+    "MOLD_H3_TURBO_TIER",
     "MOLD_KEEP_TE_RAM",
     "MOLD_LONG_PROMPTS",
     "MOLD_LORA_BYPASS",
