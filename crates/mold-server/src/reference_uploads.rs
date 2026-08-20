@@ -170,6 +170,10 @@ impl Drop for ResolvedQuotaLease {
     }
 }
 
+/// Plain staged-file coordinates: probed metadata plus the private path. It
+/// owns no descriptor, quota, or lifetime, so copying one grants no authority
+/// on its own — every use still opens and re-verifies the file.
+#[derive(Clone)]
 pub struct ResolvedReference {
     pub metadata: GenerationReferenceMetadata,
     pub path: PathBuf,
@@ -234,12 +238,95 @@ impl ResolvedReferenceSet {
         request: &mold_core::GenerateRequest,
         cancellation: Option<&mold_inference::InferenceCancellationToken>,
     ) -> anyhow::Result<Vec<mold_inference::GenerationReferenceBinding>> {
+        mint_inference_bindings(&self.entries, &self.fingerprint, request, cancellation)
+    }
+
+    /// A payload-free, quota-free projection of this set for H3 admission.
+    ///
+    /// Admission runs on a spawned task, so it needs an owned `'static` value,
+    /// but `ResolvedReferenceSet` deliberately is not `Clone`: its quota lease
+    /// is a drop guard and cloning it would release the reservation twice, and
+    /// its `Drop` removes the staging directory. The view therefore carries
+    /// neither — the set on the job keeps owning the quota and the directory.
+    ///
+    /// It holds paths and probed metadata, never bytes, and mints its bindings
+    /// through the same verifier the runtime uses.
+    ///
+    /// The view does NOT keep the staged files alive: if the owning set is
+    /// dropped first, its `Drop` removes them and every binding this view
+    /// mints fails to open. That is the intended failure mode — admission
+    /// errors out rather than proceeding on media it cannot verify — and it is
+    /// why the store lifetime is retained only to pin the root, not the set's
+    /// own subdirectory. Callers must keep the owning job alive across
+    /// preparation, which the scheduler does.
+    pub fn admission_view(&self) -> ResolvedReferenceAdmissionView {
+        ResolvedReferenceAdmissionView {
+            entries: self.entries.clone(),
+            fingerprint: self.fingerprint.clone(),
+            _store_lifetime: Arc::clone(&self._store_lifetime),
+        }
+    }
+}
+
+/// See [`ResolvedReferenceSet::admission_view`].
+#[derive(Clone)]
+pub struct ResolvedReferenceAdmissionView {
+    entries: Vec<ResolvedReference>,
+    fingerprint: String,
+    _store_lifetime: Arc<StoreLifetime>,
+}
+
+impl std::fmt::Debug for ResolvedReferenceAdmissionView {
+    /// Never render staged paths; the set's own `Debug` has the same rule.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ResolvedReferenceAdmissionView")
+            .field("entries", &self.entries.len())
+            .field("fingerprint", &self.fingerprint)
+            .finish()
+    }
+}
+
+impl ResolvedReferenceAdmissionView {
+    pub fn fingerprint(&self) -> &str {
+        &self.fingerprint
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Mint verified bindings for admission. Identical verification to the
+    /// runtime's path — same order, metadata, and fingerprint checks, and
+    /// fresh descriptors opened without following symlinks.
+    pub fn inference_bindings(
+        &self,
+        request: &mold_core::GenerateRequest,
+        cancellation: Option<&mold_inference::InferenceCancellationToken>,
+    ) -> anyhow::Result<Vec<mold_inference::GenerationReferenceBinding>> {
+        mint_inference_bindings(&self.entries, &self.fingerprint, request, cancellation)
+    }
+}
+
+/// The one binding verifier. Both the owning set and its admission view route
+/// here so a staged file can never be bound under two different rule sets.
+fn mint_inference_bindings(
+    entries: &[ResolvedReference],
+    fingerprint: &str,
+    request: &mold_core::GenerateRequest,
+    cancellation: Option<&mold_inference::InferenceCancellationToken>,
+) -> anyhow::Result<Vec<mold_inference::GenerationReferenceBinding>> {
+    {
         let references = request
             .references
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("resolved references lost their queued descriptors"))?;
         anyhow::ensure!(
-            references.len() == self.entries.len(),
+            references.len() == entries.len(),
             "resolved reference count changed before inference"
         );
         let queued_metadata = references
@@ -248,10 +335,10 @@ impl ResolvedReferenceSet {
             .map(|(index, reference)| reference.redacted_metadata_lossless(index))
             .collect::<Vec<_>>();
         anyhow::ensure!(
-            mold_core::generation_reference_fingerprint(&queued_metadata) == self.fingerprint,
+            mold_core::generation_reference_fingerprint(&queued_metadata) == fingerprint,
             "resolved reference fingerprint changed before inference"
         );
-        self.entries
+        entries
             .iter()
             .zip(queued_metadata)
             .map(|(entry, queued)| {
@@ -2555,6 +2642,107 @@ mod tests {
             inner.sessions[&session_digest].request.model,
             minimax_h3::REF2VA_COMFY
         );
+    }
+
+    /// The admission view is what lets Ref2VA admission reach the staged media
+    /// before a frozen plan exists, so it must bind exactly like the runtime
+    /// path while carrying none of the owning set's authority.
+    #[tokio::test]
+    async fn admission_view_binds_like_the_runtime_and_holds_no_owning_authority() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ReferenceUploadStore::at(dir.path().join("cache"));
+        let bytes = png_bytes();
+        let byte_count = bytes.len() as u64;
+        let digest = format!("{:x}", Sha256::digest(&bytes));
+        let descriptor = png_reference(GenerationReferenceAuthority::Descriptor, Some(digest));
+        let session = store
+            .create_session(
+                "auth-a",
+                "instance-a",
+                ReferenceUploadSessionRequest {
+                    request: request(descriptor.clone()),
+                    upload_references: vec![1],
+                },
+            )
+            .await
+            .unwrap();
+        let handle = session.uploads[0].handle.clone();
+        let complete = store
+            .upload(
+                "auth-a",
+                "instance-a",
+                &handle,
+                "image/png",
+                byte_count,
+                Body::from(bytes),
+            )
+            .await
+            .unwrap();
+        let mut final_request = request(png_reference(
+            GenerationReferenceAuthority::Upload {
+                handle: handle.clone(),
+            },
+            Some(complete.metadata.sha256.clone()),
+        ));
+        let resolved = store
+            .resolve_request("auth-a", &mut final_request, &[], None)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let view = resolved.admission_view();
+        assert_eq!(view.len(), resolved.entries().len());
+        assert!(!view.is_empty());
+        assert_eq!(view.fingerprint(), resolved.fingerprint());
+
+        // Same verifier, same result: the view must not become a second
+        // contract that could admit media the runtime would reject.
+        let runtime_bindings = resolved.inference_bindings(&final_request, None).unwrap();
+        let admission_bindings = view.inference_bindings(&final_request, None).unwrap();
+        assert_eq!(admission_bindings.len(), runtime_bindings.len());
+        assert_eq!(
+            admission_bindings[0].metadata(),
+            runtime_bindings[0].metadata()
+        );
+        // Independent descriptors, so releasing admission's cannot disturb the
+        // runtime's later binding.
+        drop(admission_bindings);
+        drop(runtime_bindings);
+        assert_eq!(
+            resolved
+                .inference_bindings(&final_request, None)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // It renders neither staged paths nor the upload handle.
+        let rendered = format!("{view:?}");
+        assert!(!rendered.contains(dir.path().to_string_lossy().as_ref()));
+        assert!(!rendered.contains(&handle));
+
+        // It carries no quota lease, so cloning and dropping it must not
+        // release the owning set's reservation.
+        let cloned = view.clone();
+        drop(cloned);
+        assert_eq!(store.resolved_bytes.load(Ordering::Acquire), byte_count);
+
+        // A drifted request is refused here exactly as on the runtime path.
+        let mut drifted = final_request.clone();
+        drifted.references = None;
+        assert!(view.inference_bindings(&drifted, None).is_err());
+
+        // Cancellation is honoured identically too.
+        let cancellation = mold_inference::InferenceCancellationToken::default();
+        cancellation.cancel();
+        let cancelled = view
+            .inference_bindings(&final_request, Some(&cancellation))
+            .unwrap_err();
+        assert!(mold_inference::is_inference_cancelled(&cancelled));
+
+        drop(view);
+        drop(resolved);
+        assert_eq!(store.resolved_bytes.load(Ordering::Acquire), 0);
     }
 
     #[tokio::test]

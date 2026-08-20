@@ -1723,6 +1723,15 @@ impl Coordinator {
             #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
             let context = crate::variant_dependencies::DependencyPreparationContext {
                 h3_private_ingress_grant: pending.job.h3_private_ingress_grant.clone(),
+                // Ref2VA admission derives its prepared shapes from the staged
+                // media, so it needs the files before the frozen plan exists.
+                // The view is payload-free and the job keeps owning the set,
+                // its quota, and its staging directory across preparation.
+                h3_resolved_references: pending
+                    .job
+                    .resolved_references
+                    .as_ref()
+                    .map(crate::reference_uploads::ResolvedReferenceSet::admission_view),
             };
             #[cfg(not(any(feature = "h3", feature = "h3-private-uat")))]
             let context = crate::variant_dependencies::DependencyPreparationContext::default();

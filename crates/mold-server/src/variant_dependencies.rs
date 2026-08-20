@@ -1182,7 +1182,15 @@ async fn prepare_inputs_for_devices(
         })?;
         grant.validate_for_request(request, live_state.instance_id.as_str())?;
         return prepare_h3_private_inputs_for_devices(
-            state, work_id, request, config, devices, progress, policy, grant,
+            state,
+            work_id,
+            request,
+            config,
+            devices,
+            progress,
+            policy,
+            grant,
+            context.h3_resolved_references.clone(),
         )
         .await;
     }
@@ -1457,6 +1465,7 @@ async fn prepare_h3_private_inputs_for_devices(
     progress: Option<&tokio::sync::mpsc::UnboundedSender<SseMessage>>,
     _policy: DependencyMaterializationPolicy,
     ingress_grant: crate::h3_private_bridge::H3PrivateIngressGrant,
+    resolved_references: Option<crate::reference_uploads::ResolvedReferenceAdmissionView>,
 ) -> Result<PreparedExecutionInputs, String> {
     use sha2::{Digest, Sha256};
 
@@ -1495,6 +1504,11 @@ async fn prepare_h3_private_inputs_for_devices(
         };
         let admission_request = resolved_request.clone();
         let paths = uat_paths.clone();
+        // Each device's admission mints its own descriptors rather than
+        // sharing one set: a binding owns an open file, and re-opening per
+        // attempt is what keeps descriptor identity fenced to the attempt that
+        // verified it.
+        let references = resolved_references.clone();
         let device_id = device.id.clone();
         let device_ordinal = device.ordinal;
         let available_device_bytes = device.available_vram_bytes;
@@ -1506,10 +1520,23 @@ async fn prepare_h3_private_inputs_for_devices(
                     crate::gpu_worker::record_h3_progress(event, Some(&progress_tx));
                 }));
             }
+            let bindings = match references
+                .as_ref()
+                .map(|references| references.inference_bindings(&admission_request, None))
+                .transpose()
+            {
+                Ok(bindings) => bindings.unwrap_or_default(),
+                Err(error) => {
+                    return Err(format!(
+                        "MiniMax H3 admission could not bind its staged references: {error}"
+                    ))
+                }
+            };
             mold_inference::prepare_h3_private_fl2va_admission(
                 mold_inference::H3PrivateFl2VaAdmissionInput {
                     request: &admission_request,
                     paths: paths.inference_paths(),
+                    references: &bindings,
                     device_id: &device_id,
                     device_ordinal,
                     compute_capability,
@@ -1608,10 +1635,20 @@ async fn prepare_h3_private_inputs_for_devices(
     })
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default)]
 pub struct DependencyPreparationContext {
     #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     pub(crate) h3_private_ingress_grant: Option<crate::h3_private_bridge::H3PrivateIngressGrant>,
+    /// Staged Ref2VA references, as a payload-free view.
+    ///
+    /// Ref2VA admission must derive its prepared shapes from the real media,
+    /// so it needs the staged files before the frozen plan exists. Only the
+    /// scheduler populates this, from the owning job; placement preview leaves
+    /// it `None`, which keeps that probe media-free and non-authoritative for
+    /// Ref2VA exactly as the placement-preview boundary requires.
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+    pub(crate) h3_resolved_references:
+        Option<crate::reference_uploads::ResolvedReferenceAdmissionView>,
 }
 
 pub async fn prepare_execution_inputs(

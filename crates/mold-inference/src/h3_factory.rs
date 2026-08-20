@@ -1449,6 +1449,39 @@ impl H3FactoryPreparedAttemptAuthority {
     }
 }
 
+/// The charges one ordered reference contributes, derived from its frozen
+/// geometry.
+///
+/// Exposed so the admission builder can populate a descriptor from the SAME
+/// arithmetic `validate_prepared_request` re-derives, rather than restating it
+/// and drifting. Every field here is computed; none is read back from the
+/// input.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(not(feature = "mp4"), allow(dead_code))]
+pub struct H3FactoryReferenceCharges {
+    pub visual_rows: u64,
+    pub audio_rows: u64,
+    pub qwen_vision_rows: u64,
+    pub normalized_host_bytes: u64,
+    pub native_host_bytes: u64,
+}
+
+/// Derive one reference's charges. The geometry fields of `reference` are the
+/// only inputs read; its own charge fields are ignored.
+#[cfg_attr(not(feature = "mp4"), allow(dead_code))]
+pub fn expected_h3_factory_reference_charges(
+    reference: &H3FactoryReferenceInput,
+) -> Result<H3FactoryReferenceCharges> {
+    let charges = h3_reference_charges(reference)?;
+    Ok(H3FactoryReferenceCharges {
+        visual_rows: charges.visual_rows,
+        audio_rows: charges.audio_rows,
+        qwen_vision_rows: charges.qwen_vision_rows,
+        normalized_host_bytes: charges.normalized_host_bytes,
+        native_host_bytes: charges.native_host_bytes,
+    })
+}
+
 /// Recomputed charges for one ordered Ref2VA reference.
 struct H3ReferenceCharges {
     visual_rows: u64,

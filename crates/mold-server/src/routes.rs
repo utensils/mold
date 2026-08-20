@@ -3476,6 +3476,11 @@ async fn placement_preview_for_request_authenticated(
         } else {
             None
         },
+        // Placement preview is a read-only probe that must stay media-free, so
+        // it never carries staged references. A Ref2VA preview therefore has
+        // no prepared shapes to derive and stays non-authoritative, which is
+        // the documented behaviour for a plan this endpoint cannot model.
+        h3_resolved_references: None,
     };
     #[cfg(not(any(feature = "h3", feature = "h3-private-uat")))]
     let dependency_context = crate::variant_dependencies::DependencyPreparationContext::default();

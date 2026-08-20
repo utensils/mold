@@ -28,6 +28,32 @@ pub(crate) struct H3PreparedRef2VaRequest {
     grid_points: usize,
 }
 
+impl H3PreparedRef2VaRequest {
+    pub(crate) fn references(&self) -> &[H3PreparedReference] {
+        &self.references
+    }
+
+    pub(crate) fn prompt(&self) -> &str {
+        &self.prompt
+    }
+
+    pub(crate) const fn seed(&self) -> u64 {
+        self.seed
+    }
+
+    pub(crate) const fn grid_points(&self) -> usize {
+        self.grid_points
+    }
+
+    pub(crate) const fn geometry(&self) -> &H3Fl2VaGeometry {
+        &self.geometry
+    }
+
+    pub(crate) fn reference_fingerprint(&self) -> &str {
+        &self.reference_fingerprint
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct H3PreparedReference {
     pub metadata: GenerationReferenceMetadata,

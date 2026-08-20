@@ -19,6 +19,8 @@ use mold_core::manifest::{find_manifest, storage_path, ModelComponent, ModelMani
 use mold_core::minimax_h3::{self as contract, Layout, Mode, Task};
 use mold_core::secure_file::{open_regular_file_no_follow, sha256_open_file};
 use mold_core::GenerateRequest;
+#[cfg(feature = "mp4")]
+use mold_core::GenerationReferenceKind;
 use sha2::{Digest, Sha256};
 
 #[cfg(unix)]
@@ -29,7 +31,11 @@ use super::pipeline::{
     collect_endpoint_bytes, prepare_request, H3EndpointAnchor, H3PipelineObserver,
     H3PreparedFl2VaRequest,
 };
+#[cfg(feature = "mp4")]
+use super::private_qwen::prepare_ref2va_conditioner_input_for_admission;
 use super::private_qwen_support::H3PrivateQwenSupport;
+#[cfg(feature = "mp4")]
+use super::private_server::H3PrivatePreparationCheckpoint;
 use super::sampler::{H3DualSchedule, H3SamplerKind};
 use super::vae_runtime::{
     FrozenH3ComfyVaeLoadPlan, H3AuthenticatedComfyVaeAuthority, H3ComfyVaeArtifactRole,
@@ -43,6 +49,10 @@ use crate::h3_factory::{
     H3FactoryPreparedAttemptInput, H3FactoryPreparedRequestInput, H3FactoryPreparedRowsInput,
     H3FactoryRawCheckpointInput, H3FactoryTargetBudgetInput, H3FactoryTargetDenoiseCopyPolicy,
     H3FactoryTargetLoadDropPolicy, H3FactoryTurboAdapterAuthority,
+};
+#[cfg(feature = "mp4")]
+use crate::h3_factory::{
+    expected_h3_factory_reference_charges, H3FactoryReferenceInput, H3FactoryReferenceKind,
 };
 use crate::progress::ProgressReporter;
 
@@ -685,6 +695,202 @@ impl H3PrivatePreparedFl2VaAttempt {
             _transformer_support: self._transformer_support,
         }
     }
+}
+
+/// Derive the factory's ordered reference descriptors from the prepared shapes
+/// and the facts the decoder reported.
+///
+/// Normalized geometry comes from the prepared shape (metadata-derived, the
+/// same values the runtime will normalize to); native geometry comes from what
+/// the decoder actually found, which is the authority for the retained-media
+/// charge. The two retained-byte totals are left to the factory to re-derive —
+/// this only reports the geometry they are computed from.
+#[cfg(feature = "mp4")]
+fn ref2va_factory_references(
+    prepared: &[super::pipeline::ref2va::H3PreparedReference],
+    decoded: &[super::pipeline::ref2va::H3DecodedReferenceFacts],
+) -> Result<Vec<H3FactoryReferenceInput>> {
+    prepared
+        .iter()
+        .zip(decoded)
+        .map(|(reference, facts)| {
+            let shape = &reference.shape;
+            let kind = match reference.metadata.kind {
+                GenerationReferenceKind::Image => H3FactoryReferenceKind::Image,
+                GenerationReferenceKind::Video => H3FactoryReferenceKind::Video,
+                GenerationReferenceKind::Audio => H3FactoryReferenceKind::Audio,
+            };
+            let mut input = H3FactoryReferenceInput {
+                index: reference.metadata.index,
+                kind,
+                content_sha256: reference.metadata.sha256.clone(),
+                preprocess_version: shape.version,
+                normalized_width: shape.normalized_width,
+                normalized_height: shape.normalized_height,
+                normalized_video_frames: shape.normalized_video_frames,
+                video_frames: shape.video_frames,
+                qwen_video_frames: shape.qwen_video_frames,
+                audio_samples_per_channel: shape.audio_samples_per_channel,
+                native_width: facts.width,
+                native_height: facts.height,
+                native_audio_samples_per_channel: facts
+                    .audio
+                    .as_ref()
+                    .map(|audio| audio.samples_per_channel),
+                native_audio_channels: facts.audio.as_ref().map(|audio| audio.channels),
+                visual_rows: 0,
+                audio_rows: 0,
+                qwen_vision_rows: 0,
+                normalized_host_bytes: 0,
+                native_host_bytes: 0,
+            };
+            // The factory owns this arithmetic; ask it rather than restate it,
+            // so the builder and the validator agree by construction.
+            let charges = expected_h3_factory_reference_charges(&input)?;
+            input.visual_rows = charges.visual_rows;
+            input.audio_rows = charges.audio_rows;
+            input.qwen_vision_rows = charges.qwen_vision_rows;
+            input.normalized_host_bytes = charges.normalized_host_bytes;
+            input.native_host_bytes = charges.native_host_bytes;
+            // The metadata-derived shape must agree with what the factory
+            // derives; a disagreement means the two contracts have drifted.
+            if shape.visual_rows != charges.visual_rows || shape.audio_rows != charges.audio_rows {
+                bail!(
+                    "private H3 reference {} prepared shape disagrees with the factory's rows",
+                    reference.metadata.index
+                )
+            }
+            Ok(input)
+        })
+        .collect()
+}
+
+/// Assemble the Ref2VA prepared-request input the frozen plan is built from.
+#[cfg(feature = "mp4")]
+fn ref2va_prepared_request_input(
+    request: &GenerateRequest,
+    prepared: &super::pipeline::ref2va::H3PreparedRef2VaRequest,
+    references: Vec<H3FactoryReferenceInput>,
+    qwen_output_text_rows: u64,
+) -> Result<H3FactoryPreparedRequestInput> {
+    let geometry = prepared.geometry();
+    let condition_visual_rows = checked_sum(references.iter().map(|entry| entry.visual_rows))?;
+    let condition_audio_rows = checked_sum(references.iter().map(|entry| entry.audio_rows))?;
+    let qwen_vision_rows = checked_sum(references.iter().map(|entry| entry.qwen_vision_rows))?;
+    let target_video_rows = u64::try_from(geometry.generated_video_rows)?;
+    let target_audio_rows = u64::try_from(geometry.generated_audio_rows)?;
+    let total_packed_rows = checked_sum([
+        qwen_output_text_rows,
+        condition_visual_rows,
+        condition_audio_rows,
+        target_video_rows,
+        target_audio_rows,
+    ])?;
+    let schedule =
+        H3DualSchedule::new_for_sampler(prepared.grid_points(), H3SamplerKind::ComfyResMultistep)?;
+    let mut input = H3FactoryPreparedRequestInput {
+        identity_sha256: String::new(),
+        canonical_model: contract::REF2VA_COMFY.into(),
+        task: Task::Ref2va,
+        mode: Mode::ReferenceToAudioVideo,
+        prompt_sha256: sha256(prepared.prompt().as_bytes()),
+        seed: prepared.seed(),
+        grid_points: u32::try_from(prepared.grid_points())?,
+        denoise_forward_count: u32::try_from(schedule.counts().transformer_evaluations)?,
+        guidance_f64_bits: request.guidance.to_bits(),
+        strength_f64_bits: request.strength.to_bits(),
+        batch_size: request.batch_size,
+        width: u32::try_from(geometry.width)?,
+        height: u32::try_from(geometry.height)?,
+        frames: u32::try_from(geometry.frames)?,
+        fps: contract::FIXED_FPS,
+        synchronized_audio: true,
+        mp4_output: true,
+        video_latent_frames: u64::try_from(geometry.latent_frames)?,
+        audio_latents_per_channel: u64::try_from(geometry.audio_latents_per_channel)?,
+        audio_samples_per_channel: u64::try_from(geometry.audio_latents_per_channel)?
+            .checked_mul(800)
+            .ok_or_else(|| anyhow!("private H3 Ref2VA audio sample count overflow"))?,
+        // Ref2VA conditions on references, so the endpoint fingerprint is the
+        // fixed no-endpoint domain and the reference fingerprint is the live
+        // one the staged set produced.
+        conditioning_fingerprint: sha256(b"mold.minimax-h3.ref2va-no-endpoints.v1"),
+        reference_fingerprint: prepared.reference_fingerprint().into(),
+        endpoints: Vec::new(),
+        references,
+        rows: H3FactoryPreparedRowsInput {
+            qwen_output_text_rows,
+            qwen_vision_rows,
+            condition_visual_rows,
+            condition_audio_rows,
+            target_video_rows,
+            target_audio_rows,
+            total_packed_rows,
+        },
+    };
+    input.identity_sha256 = expected_h3_factory_prepared_request_identity(&input);
+    Ok(input)
+}
+
+/// Build the Ref2VA admission prepared request.
+///
+/// Admission decodes and normalizes the ordered references through the SAME
+/// [`H3ReferenceMediaAdapter`] the runtime uses — there is deliberately no
+/// second decoder — because the exact Qwen row counts come from packing real
+/// vision pads, and the target budget is sized from the retained media those
+/// same steps produce. It runs entirely on the CPU and opens no CUDA device,
+/// matching the FL2VA path's endpoint normalization.
+///
+/// The decoded media is dropped when this returns: only geometry, digests, and
+/// row counts survive into the frozen plan, so no reference byte reaches the
+/// request, the queue journal, or the gallery.
+#[cfg(feature = "mp4")]
+pub(crate) fn prepare_private_ref2va_admission_request(
+    request: &GenerateRequest,
+    references: &[crate::engine::GenerationReferenceBinding],
+    support: &H3PrivateQwenSupport,
+    progress: &ProgressReporter,
+    observer: &mut dyn H3PipelineObserver,
+) -> Result<H3PrivateFl2VaAdmissionPreparedRequest> {
+    if support.model() != contract::REF2VA_COMFY || support.task() != Task::Ref2va {
+        bail!("private H3 Ref2VA admission has cross-task Qwen support")
+    }
+    let prepared = super::pipeline::ref2va::prepare_resolved_request(request, progress, observer)?;
+    let prepared_references = prepared.references();
+    if prepared_references.len() != references.len() {
+        bail!("private H3 Ref2VA admission reference count differs from its staged bindings")
+    }
+
+    let mut media = super::reference_media::H3ReferenceMediaAdapter::default();
+    let mut checkpoint = H3PrivatePreparationCheckpoint { progress };
+    let mut decoded = Vec::with_capacity(references.len());
+    for (reference, binding) in prepared_references.iter().zip(references) {
+        decoded.push(media.decode_reference(reference, binding, &mut checkpoint)?);
+    }
+    let mut presentations = Vec::with_capacity(references.len());
+    for (reference, facts) in prepared_references.iter().zip(&decoded) {
+        presentations.push(media.preprocess_reference(reference, facts, &mut checkpoint)?);
+    }
+
+    let (conditioner, _) = prepare_ref2va_conditioner_input_for_admission(
+        support.tokenizer(),
+        prepared.prompt(),
+        &presentations,
+        &media,
+    )?;
+    let (_, qwen_output_text_rows) = conditioner.input_ids.dims2()?;
+
+    let factory_references = ref2va_factory_references(prepared_references, &decoded)?;
+    let factory_request = ref2va_prepared_request_input(
+        request,
+        &prepared,
+        factory_references,
+        u64::try_from(qwen_output_text_rows)?,
+    )?;
+    Ok(H3PrivateFl2VaAdmissionPreparedRequest {
+        seed: prepared.seed(),
+        request: factory_request,
+    })
 }
 
 pub(crate) fn prepare_private_fl2va_admission_request(
