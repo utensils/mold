@@ -49,6 +49,7 @@ pub async fn scan_images_from_server(origin: &GalleryOrigin) -> Option<Vec<Galle
                 generation_time_ms: None,
                 timestamp: img.timestamp,
                 server_url: Some(url.to_string()),
+                title: img.title,
                 origins: vec![origin.clone()],
             })
             .collect(),
@@ -137,6 +138,18 @@ pub fn is_video_filename(filename: &str) -> bool {
     )
 }
 
+/// Result of the local-disk scan.
+#[derive(Debug, Default)]
+pub(crate) struct LocalScan {
+    /// Live (non-trashed) prints, newest first.
+    pub entries: Vec<GalleryEntry>,
+    /// True when the metadata DB answered — the only case in which a
+    /// local delete can become a "move to `<output_dir>/.trash/`" with a
+    /// tombstone and a flagged row. Without the DB the TUI hard-deletes,
+    /// exactly as before trash existed.
+    pub trash_available: bool,
+}
+
 /// Scan for mold-generated images in the local output directory.
 ///
 /// Prefers the SQLite metadata DB (populated by both the CLI and server
@@ -146,10 +159,18 @@ pub fn is_video_filename(filename: &str) -> bool {
 /// embedded metadata (gif/webp/mp4) without requiring per-file parsing on
 /// every refresh.
 pub fn scan_images_local() -> Vec<GalleryEntry> {
+    scan_local().entries
+}
+
+/// [`scan_images_local`] plus whether the metadata DB was available. Only
+/// **live** rows are listed (`MetadataDb::list_live`): a trashed print
+/// keeps its row and its bytes under `.trash/`, but it is not part of the
+/// Library until restored.
+pub(crate) fn scan_local() -> LocalScan {
     let output_dir = default_gallery_dir();
 
     if !output_dir.is_dir() {
-        return Vec::new();
+        return LocalScan::default();
     }
 
     if let Ok(Some(db)) = mold_db::open_default() {
@@ -161,7 +182,7 @@ pub fn scan_images_local() -> Vec<GalleryEntry> {
         if let Err(e) = db.reconcile(&output_dir) {
             tracing::warn!("local TUI gallery reconcile failed: {e:#}");
         }
-        if let Ok(rows) = db.list(Some(&output_dir)) {
+        if let Ok(rows) = db.list_live(Some(&output_dir)) {
             if !rows.is_empty() {
                 let entries: Vec<GalleryEntry> = rows
                     .into_iter()
@@ -175,20 +196,36 @@ pub fn scan_images_local() -> Vec<GalleryEntry> {
                             .map(|ms| (ms / 1000) as u64)
                             .unwrap_or(0),
                         server_url: None,
+                        title: r.title,
                         origins: vec![GalleryOrigin::local()],
                     })
                     .collect();
-                return entries;
+                return LocalScan {
+                    entries,
+                    trash_available: true,
+                };
             }
         }
+        // The DB is up but holds no row for this directory (fresh
+        // install, or every row is trashed): walk the disk for the
+        // listing, but a delete can still go through the DB-backed
+        // trash, which records the row itself.
+        let mut scan = scan_local_disk(&output_dir);
+        scan.trash_available = true;
+        return scan;
     }
 
+    scan_local_disk(&output_dir)
+}
+
+/// The DB-less listing: walk `output_dir` and recover metadata per file.
+fn scan_local_disk(output_dir: &Path) -> LocalScan {
     // Fallback filesystem walk (DB disabled/unavailable): the shared
     // mold-db walker applies the same validity guards the server gallery
     // and reconcile use, and the shared metadata leaf recovers embedded
     // PNG/JPEG/GIF metadata or synthesizes from the filename (with real
     // raster dims) for everything else.
-    let mut entries: Vec<GalleryEntry> = mold_db::scan::scan_output_dir(&output_dir)
+    let mut entries: Vec<GalleryEntry> = mold_db::scan::scan_output_dir(output_dir)
         .filter_map(|item| match item {
             mold_db::scan::ScanItem::Valid(file) => Some(file),
             _ => None,
@@ -207,13 +244,17 @@ pub fn scan_images_local() -> Vec<GalleryEntry> {
                 generation_time_ms: None,
                 timestamp,
                 server_url: None,
+                title: None,
                 origins: vec![GalleryOrigin::local()],
             }
         })
         .collect();
 
     entries.sort_by_key(|e| std::cmp::Reverse(e.timestamp));
-    entries
+    LocalScan {
+        entries,
+        trash_available: false,
+    }
 }
 
 // ── Multi-host merged scan ──────────────────────────────────────────
@@ -226,6 +267,12 @@ pub struct MergedScan {
     /// Number of remote sources that failed to answer — surfaced in the
     /// Library header so the merged view is honest about missing hosts.
     pub offline_hosts: usize,
+    /// True when this machine's prints came from the DB-backed local scan,
+    /// so a local delete can move the file to `<output_dir>/.trash/`
+    /// (see [`LocalScan::trash_available`]). False when the local source
+    /// was read through a loopback server (that host's capabilities
+    /// answer instead) or when the DB was unavailable.
+    pub local_trash_available: bool,
 }
 
 /// One source's contribution to a merged scan. `entries: None` means the
@@ -235,6 +282,9 @@ pub struct MergedScan {
 pub(crate) struct SourceScan {
     pub origin: GalleryOrigin,
     pub entries: Option<Vec<GalleryEntry>>,
+    /// Only meaningful for the disk-backed this-machine source: whether
+    /// the metadata DB answered, i.e. whether local trash is available.
+    pub local_trash_available: bool,
 }
 
 /// Whether a URL points at this machine (`localhost` / `127.*` / `::1` /
@@ -318,19 +368,25 @@ pub async fn scan_all_hosts(sources: Vec<GalleryOrigin>) -> MergedScan {
                         return SourceScan {
                             origin,
                             entries: Some(entries),
+                            local_trash_available: false,
                         };
                     }
                 }
-                let entries = tokio::task::spawn_blocking(scan_images_local)
+                let scan = tokio::task::spawn_blocking(scan_local)
                     .await
                     .unwrap_or_default();
                 SourceScan {
                     origin: GalleryOrigin::local(),
-                    entries: Some(entries),
+                    entries: Some(scan.entries),
+                    local_trash_available: scan.trash_available,
                 }
             } else {
                 let entries = scan_images_from_server(&origin).await;
-                SourceScan { origin, entries }
+                SourceScan {
+                    origin,
+                    entries,
+                    local_trash_available: false,
+                }
             }
         }));
     }
@@ -364,8 +420,10 @@ pub(crate) fn merge_scans(scans: Vec<SourceScan>) -> MergedScan {
     let mut entries: Vec<GalleryEntry> = Vec::new();
     let mut by_name: HashMap<String, usize> = HashMap::new();
     let mut offline_hosts = 0usize;
+    let mut local_trash_available = false;
 
     for scan in scans {
+        local_trash_available |= scan.local_trash_available;
         let Some(source_entries) = scan.entries else {
             if !scan.origin.is_this_machine() {
                 offline_hosts += 1;
@@ -400,6 +458,7 @@ pub(crate) fn merge_scans(scans: Vec<SourceScan>) -> MergedScan {
     MergedScan {
         entries,
         offline_hosts,
+        local_trash_available,
     }
 }
 
@@ -552,6 +611,7 @@ mod tests {
             generation_time_ms: None,
             timestamp: ts,
             server_url: None,
+            title: None,
             origins: vec![GalleryOrigin::local()],
         }
     }
@@ -571,6 +631,7 @@ mod tests {
             generation_time_ms: None,
             timestamp: ts,
             server_url: origin.url.clone(),
+            title: None,
             origins: vec![origin.clone()],
         }
     }
@@ -594,6 +655,7 @@ mod tests {
             SourceScan {
                 origin: GalleryOrigin::local(),
                 entries: Some(vec![local_entry("print-1.png", 100)]),
+                local_trash_available: false,
             },
             SourceScan {
                 origin: hal.clone(),
@@ -601,6 +663,7 @@ mod tests {
                     remote_entry("print-1.png", 100, &hal),
                     remote_entry("print-2.png", 50, &hal),
                 ]),
+                local_trash_available: false,
             },
         ];
         let merged = merge_scans(scans);
@@ -624,10 +687,12 @@ mod tests {
             SourceScan {
                 origin: GalleryOrigin::local(),
                 entries: Some(vec![local_entry("old.png", 10)]),
+                local_trash_available: false,
             },
             SourceScan {
                 origin: hal.clone(),
                 entries: Some(vec![remote_entry("new.png", 99, &hal)]),
+                local_trash_available: false,
             },
         ];
         let merged = merge_scans(scans);
@@ -644,14 +709,17 @@ mod tests {
             SourceScan {
                 origin: GalleryOrigin::local(),
                 entries: Some(vec![local_entry("a.png", 1)]),
+                local_trash_available: false,
             },
             SourceScan {
                 origin: hal,
                 entries: None, // offline
+                local_trash_available: false,
             },
             SourceScan {
                 origin: bender,
                 entries: None, // offline
+                local_trash_available: false,
             },
         ];
         let merged = merge_scans(scans);
@@ -669,10 +737,12 @@ mod tests {
             SourceScan {
                 origin: hal.clone(),
                 entries: Some(vec![remote_entry("shared.png", 5, &hal)]),
+                local_trash_available: false,
             },
             SourceScan {
                 origin: bender.clone(),
                 entries: Some(vec![remote_entry("shared.png", 5, &bender)]),
+                local_trash_available: false,
             },
         ];
         let merged = merge_scans(scans);
@@ -917,6 +987,129 @@ mod tests {
     fn scan_images_local_returns_empty_for_nonexistent_dir() {
         let entries = scan_images_local();
         let _ = entries;
+    }
+
+    /// A PNG that passes the shared gallery validity guards.
+    fn write_valid_png(path: &Path) {
+        let img = image::RgbaImage::from_fn(64, 64, |x, y| {
+            image::Rgba([
+                (x * 37 % 251) as u8,
+                (y * 91 % 241) as u8,
+                ((x ^ y) * 13 % 233) as u8,
+                255,
+            ])
+        });
+        image::DynamicImage::ImageRgba8(img).save(path).unwrap();
+    }
+
+    /// Run `f` with `MOLD_OUTPUT_DIR` pinned to `dir` (inside the isolated
+    /// env, which already holds the env mutex), restoring it afterwards.
+    fn with_output_dir<F: FnOnce()>(dir: &Path, f: F) {
+        let prev = std::env::var("MOLD_OUTPUT_DIR").ok();
+        std::env::set_var("MOLD_OUTPUT_DIR", dir);
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        match prev {
+            Some(v) => std::env::set_var("MOLD_OUTPUT_DIR", v),
+            None => std::env::remove_var("MOLD_OUTPUT_DIR"),
+        }
+        if let Err(payload) = res {
+            std::panic::resume_unwind(payload);
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(mold_env)]
+    fn scan_local_lists_only_live_rows_and_carries_titles() {
+        // A trashed print keeps its row (flagged) and its bytes under
+        // `.trash/`, but the Library must not list it; a live print's
+        // editable title rides along so the grid/details can show it.
+        crate::test_env::with_isolated_env(|home| {
+            let gallery = home.join("output");
+            std::fs::create_dir_all(&gallery).unwrap();
+            write_valid_png(&gallery.join("mold-live-0001.png"));
+            write_valid_png(&gallery.join("mold-binned-0002.png"));
+            let db = mold_db::open_default().unwrap().expect("isolated DB");
+            db.reconcile(&gallery).unwrap();
+            db.set_title(&gallery, "mold-live-0001.png", Some("Lighthouse study"))
+                .unwrap();
+            crate::gallery_trash::trash_local_print(
+                &db,
+                &gallery.join("mold-binned-0002.png"),
+                1_700_000_000_000,
+            )
+            .unwrap();
+
+            with_output_dir(&gallery, || {
+                let scan = scan_local();
+                assert!(scan.trash_available, "DB answered ⇒ trash available");
+                let names: Vec<String> = scan.entries.iter().map(|e| e.filename()).collect();
+                assert_eq!(names, vec!["mold-live-0001.png".to_string()]);
+                assert_eq!(
+                    scan.entries[0].title.as_deref(),
+                    Some("Lighthouse study"),
+                    "title carried from the gallery row"
+                );
+                assert!(scan.entries[0].origins[0].is_local());
+
+                // Nothing live at all: the disk walk finds nothing either
+                // (`.trash/` is a directory, below the depth-1 walk) —
+                // but the trash stays available for the next delete.
+                crate::gallery_trash::trash_local_print(
+                    &db,
+                    &gallery.join("mold-live-0001.png"),
+                    1_700_000_000_001,
+                )
+                .unwrap();
+                let scan = scan_local();
+                assert!(scan.entries.is_empty(), "{:?}", scan.entries);
+                assert!(scan.trash_available);
+            });
+        });
+    }
+
+    #[test]
+    #[serial_test::serial(mold_env)]
+    fn scan_local_without_the_db_walks_the_disk_and_offers_no_trash() {
+        crate::test_env::with_isolated_env(|home| {
+            std::env::set_var("MOLD_DB_DISABLE", "1");
+            let gallery = home.join("output");
+            std::fs::create_dir_all(&gallery).unwrap();
+            write_valid_png(&gallery.join("mold-disk-0001.png"));
+            with_output_dir(&gallery, || {
+                let scan = scan_local();
+                assert_eq!(scan.entries.len(), 1);
+                assert_eq!(scan.entries[0].title, None);
+                assert!(
+                    !scan.trash_available,
+                    "no DB ⇒ a local delete stays a hard delete"
+                );
+            });
+            std::env::remove_var("MOLD_DB_DISABLE");
+        });
+    }
+
+    #[test]
+    fn merge_scans_keeps_local_trash_availability_from_the_local_source() {
+        let hal = remote_origin("hal9000-7680", "hal9000");
+        let merged = merge_scans(vec![
+            SourceScan {
+                origin: GalleryOrigin::local(),
+                entries: Some(vec![local_entry("a.png", 1)]),
+                local_trash_available: true,
+            },
+            SourceScan {
+                origin: hal.clone(),
+                entries: Some(vec![remote_entry("b.png", 2, &hal)]),
+                local_trash_available: false,
+            },
+        ]);
+        assert!(merged.local_trash_available);
+        let merged = merge_scans(vec![SourceScan {
+            origin: GalleryOrigin::local(),
+            entries: Some(vec![local_entry("a.png", 1)]),
+            local_trash_available: false,
+        }]);
+        assert!(!merged.local_trash_available);
     }
 
     #[test]

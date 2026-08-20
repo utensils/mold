@@ -867,10 +867,16 @@ impl H3FactoryTurboAdapterAuthority {
         Ok(())
     }
 
+    /// Consumed by the gated private FL2VA runtime; without the `h3` /
+    /// `h3-private-uat` features only tests reach it.
+    #[cfg_attr(not(any(feature = "h3", feature = "h3-private-uat")), allow(dead_code))]
     pub(crate) const fn resolved_sampler_kind(&self) -> H3SamplerKind {
         self.sampler_kind.runtime_kind()
     }
 
+    /// Consumed by the gated private FL2VA runtime; without the `h3` /
+    /// `h3-private-uat` features only tests reach it.
+    #[cfg_attr(not(any(feature = "h3", feature = "h3-private-uat")), allow(dead_code))]
     pub(crate) fn video_shift(&self) -> f32 {
         f32::from_bits(self.video_shift_bits)
     }

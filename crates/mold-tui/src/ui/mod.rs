@@ -276,6 +276,9 @@ pub(crate) fn status_shortcuts(app: &App) -> Vec<(String, String)> {
             }
         }
         View::Library => {
+            // `d` is "Trash" only when every machine holding the selected
+            // print can move it to its trash; otherwise the honest "Delete".
+            let removal = app.selected_removal_kind().hint_label();
             if app.upscale_in_progress {
                 vec![("Esc", "Cancel"), ("", upscale_status.as_str())]
             } else if app.gallery.filtering {
@@ -285,7 +288,7 @@ pub(crate) fn status_shortcuts(app: &App) -> Vec<(String, String)> {
                     ("e", "Edit"),
                     ("r", "Regen"),
                     ("u", "Upscale"),
-                    ("d", "Delete"),
+                    ("d", removal),
                     ("o/Enter", "Open"),
                     ("j/k", "Prev/Next"),
                     ("Esc", "Grid"),
@@ -296,7 +299,7 @@ pub(crate) fn status_shortcuts(app: &App) -> Vec<(String, String)> {
                     ("Enter", "Details"),
                     ("r", "Recall"),
                     ("u", "Upscale"),
-                    ("d", "Delete"),
+                    ("d", removal),
                     ("/", "Filter"),
                     ("?", "Help"),
                     ("q", "Quit"),
@@ -396,6 +399,56 @@ mod tests {
                 "Esc Unfocus must stay visible so users can escape into navigation"
             );
         }
+    }
+
+    #[test]
+    #[serial_test::serial(mold_env)]
+    fn library_shortcuts_name_trash_only_when_the_selected_print_can_be_trashed() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let mut picker = ratatui_image::picker::Picker::from_fontsize((8, 16));
+        picker.set_protocol_type(ratatui_image::picker::ProtocolType::Halfblocks);
+        let mut app = App::new(None, true, picker).unwrap();
+        app.active_view = View::Library;
+
+        // Empty Library: nothing selected ⇒ the conservative "Delete".
+        let hints = status_shortcuts(&app);
+        assert!(
+            hints.iter().any(|(k, d)| k == "d" && d == "Delete"),
+            "{hints:?}"
+        );
+
+        app.gallery.entries.push(crate::app::GalleryEntry {
+            path: std::path::PathBuf::from("hinted.png"),
+            metadata: crate::ui::gallery::tests::test_metadata(64, 64),
+            generation_time_ms: None,
+            timestamp: 0,
+            server_url: None,
+            title: None,
+            origins: Vec::new(),
+        });
+        app.gallery.refresh_filter();
+        app.gallery.local_trash_available = true;
+        for mode in [
+            crate::app::GalleryViewMode::Grid,
+            crate::app::GalleryViewMode::Detail,
+        ] {
+            app.gallery.view_mode = mode;
+            let hints = status_shortcuts(&app);
+            assert!(
+                hints.iter().any(|(k, d)| k == "d" && d == "Trash"),
+                "{mode:?}: {hints:?}"
+            );
+        }
+        app.gallery.local_trash_available = false;
+        let hints = status_shortcuts(&app);
+        assert!(
+            hints.iter().any(|(k, d)| k == "d" && d == "Delete"),
+            "{hints:?}"
+        );
     }
 
     #[test]

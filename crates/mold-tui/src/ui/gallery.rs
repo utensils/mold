@@ -309,7 +309,7 @@ fn render_grid_cell(frame: &mut Frame, app: &mut App, area: Rect, idx: usize, se
 
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
-mod tests {
+pub(crate) mod tests {
     use super::{center_rect, centered_thumb_rect, render_grid_cell, CELL_H, CELL_W};
     use crate::app::{App, GalleryEntry};
     use image::{DynamicImage, Rgba, RgbaImage};
@@ -320,7 +320,7 @@ mod tests {
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    fn test_metadata(width: u32, height: u32) -> mold_core::OutputMetadata {
+    pub(crate) fn test_metadata(width: u32, height: u32) -> mold_core::OutputMetadata {
         mold_core::OutputMetadata {
             title: None,
             source_fit: None,
@@ -440,6 +440,7 @@ mod tests {
             generation_time_ms: None,
             timestamp: 0,
             server_url: None,
+            title: None,
             origins: Vec::new(),
         }];
         // No thumbnail loaded — we only care about the text rendering path.
@@ -499,6 +500,7 @@ mod tests {
             generation_time_ms: None,
             timestamp: 0,
             server_url: None,
+            title: None,
             origins: Vec::new(),
         }];
         app.gallery.thumbnail_states = vec![Some(app.picker.new_resize_protocol(img.clone()))];
@@ -556,6 +558,7 @@ mod tests {
             generation_time_ms: None,
             timestamp: 0,
             server_url: None,
+            title: None,
             origins: Vec::new(),
         }];
         app.gallery.thumbnail_states = vec![None];
@@ -602,6 +605,7 @@ mod tests {
             generation_time_ms: None,
             timestamp: 0,
             server_url: None,
+            title: None,
             origins: Vec::new(),
         }];
         app.gallery.thumbnail_states = vec![None];
@@ -651,6 +655,7 @@ mod tests {
             generation_time_ms: None,
             timestamp: 0,
             server_url: None,
+            title: None,
             origins: Vec::new(),
         }];
 
@@ -675,6 +680,90 @@ mod tests {
             rendered.contains("two-stage-hq"),
             "runtime pipeline value: {rendered:?}"
         );
+    }
+
+    fn render_detail_to_string(app: &mut App) -> String {
+        let backend = TestBackend::new(100, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| super::render_detail(frame, &mut *app, Rect::new(0, 0, 100, 40)))
+            .unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
+    #[test]
+    #[serial_test::serial(mold_env)]
+    fn full_detail_shows_the_title_above_the_filename_when_present() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+
+        let mut picker = Picker::from_fontsize((8, 16));
+        picker.set_protocol_type(ProtocolType::Halfblocks);
+        let mut app = App::new(None, true, picker).unwrap();
+        app.gallery.entries = vec![GalleryEntry {
+            path: PathBuf::from("titled-print.png"),
+            metadata: test_metadata(64, 64),
+            generation_time_ms: None,
+            timestamp: 0,
+            server_url: None,
+            title: Some("Lighthouse study".into()),
+            origins: Vec::new(),
+        }];
+
+        let rendered = render_detail_to_string(&mut app);
+        let title_at = rendered.find("Lighthouse study").expect("title rendered");
+        let name_at = rendered
+            .find("titled-print.png")
+            .expect("filename rendered");
+        assert!(title_at < name_at, "title sits above the filename");
+
+        // Untitled prints render nothing in the title's place.
+        app.gallery.entries[0].title = None;
+        let rendered = render_detail_to_string(&mut app);
+        assert!(!rendered.contains("Lighthouse study"));
+        assert!(rendered.contains("titled-print.png"));
+    }
+
+    #[test]
+    #[serial_test::serial(mold_env)]
+    fn full_detail_hint_names_trash_only_when_the_print_can_be_trashed() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+
+        let mut picker = Picker::from_fontsize((8, 16));
+        picker.set_protocol_type(ProtocolType::Halfblocks);
+        let mut app = App::new(None, true, picker).unwrap();
+        app.gallery.entries = vec![GalleryEntry {
+            path: PathBuf::from("hinted.png"),
+            metadata: test_metadata(64, 64),
+            generation_time_ms: None,
+            timestamp: 0,
+            server_url: None,
+            title: None,
+            origins: Vec::new(),
+        }];
+
+        app.gallery.local_trash_available = false;
+        let rendered = render_detail_to_string(&mut app);
+        assert!(rendered.contains("Delete"), "{rendered:?}");
+        assert!(!rendered.contains("Trash"), "{rendered:?}");
+
+        app.gallery.local_trash_available = true;
+        let rendered = render_detail_to_string(&mut app);
+        assert!(rendered.contains("Trash"), "{rendered:?}");
+        assert!(!rendered.contains("Delete"), "{rendered:?}");
     }
 }
 
@@ -704,9 +793,21 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(meta_block, layout[0]);
 
     let meta = &entry.metadata;
+    let removal = app.selected_removal_kind().hint_label();
     let mut lines: Vec<Line> = Vec::new();
 
-    // Filename
+    // Title (when the print has one), then filename
+    if let Some(title) = entry
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+    {
+        lines.push(Line::from(Span::styled(
+            title.to_string(),
+            Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+        )));
+    }
     lines.push(Line::from(Span::styled(
         entry.filename(),
         Style::default()
@@ -815,7 +916,7 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
         ("e", "Edit"),
         ("r", "Regenerate"),
         ("u", "Upscale"),
-        ("d", "Delete"),
+        ("d", removal),
         ("o/Enter", "Open"),
         ("Esc", "Back"),
     ];

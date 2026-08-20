@@ -48,6 +48,12 @@ pub(crate) fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     // Snapshot everything the text content needs before the mutable
     // thumbnail-cache borrow below.
     let idx = app.gallery.selected;
+    let title = entry
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(str::to_string);
     let prompt = entry.metadata.prompt.clone();
     let negative = entry.metadata.negative_prompt.clone();
     let model =
@@ -72,6 +78,24 @@ pub(crate) fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 
     let theme = &app.theme;
+
+    // ── Title (when set), one bold row above the prompt ─────────
+    if let Some(ref title) = title {
+        if y < inner.y + inner.height {
+            let title_area = Rect {
+                x: inner.x,
+                y,
+                width: inner.width,
+                height: 1,
+            };
+            frame.render_widget(
+                Paragraph::new(title.as_str())
+                    .style(Style::default().fg(theme.text).add_modifier(Modifier::BOLD)),
+                title_area,
+            );
+            y += 1;
+        }
+    }
 
     // ── Prompt (wrapped) + dim negative line ────────────────────
     let remaining = (inner.y + inner.height).saturating_sub(y);
@@ -267,6 +291,7 @@ mod tests {
             generation_time_ms: None,
             timestamp: 0,
             server_url: None,
+            title: None,
             origins,
         }];
         app.gallery.thumbnail_states = vec![None];
@@ -375,6 +400,33 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(mold_env)]
+    fn panel_shows_the_title_above_the_prompt_when_present() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+
+        let mut app = test_app_with_entry(Vec::new());
+        app.gallery.entries[0].title = Some("Lighthouse study".into());
+        let rendered = render_to_string(&mut app);
+        let title_at = rendered
+            .find("Lighthouse study")
+            .expect("title: {rendered:?}");
+        let prompt_at = rendered
+            .find("lighthouse at dusk")
+            .expect("prompt: {rendered:?}");
+        assert!(title_at < prompt_at, "title line sits above the prompt");
+
+        // Blank titles count as absent — nothing is rendered in its place.
+        app.gallery.entries[0].title = Some("   ".into());
+        let rendered = render_to_string(&mut app);
+        assert!(!rendered.contains("Lighthouse study"));
+        assert!(rendered.contains("lighthouse at dusk"));
+    }
+
+    #[test]
     fn machine_label_counts_multi_host_prints() {
         let entry = GalleryEntry {
             path: PathBuf::from("multi.png"),
@@ -382,6 +434,7 @@ mod tests {
             generation_time_ms: None,
             timestamp: 0,
             server_url: None,
+            title: None,
             origins: vec![
                 GalleryOrigin {
                     host_id: crate::hosts::LOCAL_HOST_ID.into(),
