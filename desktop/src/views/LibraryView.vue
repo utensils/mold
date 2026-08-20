@@ -3,21 +3,24 @@ import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { useVirtualizer } from "@tanstack/vue-virtual";
 import Icon from "@ui/components/Icon.vue";
-import SegmentedControl from "@ui/components/SegmentedControl.vue";
-import ThumbnailSizeSlider from "@ui/components/ThumbnailSizeSlider.vue";
 import {
-  GALLERY_THUMBNAIL_SIZE_MAX,
-  GALLERY_THUMBNAIL_SIZE_MIN,
-  GALLERY_THUMBNAIL_SIZE_STEP,
   loadGalleryThumbnailSize,
   saveGalleryThumbnailSize,
 } from "@studio/lib/galleryThumbnailSize";
 import { blobToBase64 } from "@studio/lib/base64";
 import AuthedMedia from "../components/gallery/AuthedMedia.vue";
 import Lightbox from "../components/gallery/Lightbox.vue";
+import BulkBar from "../components/library/BulkBar.vue";
+import CollectionsShelf, { type ShelfCard } from "../components/library/CollectionsShelf.vue";
+import type { CoverTile } from "../components/library/CollectionCard.vue";
 import HistoryDrawer from "../components/library/HistoryDrawer.vue";
+import LibraryChipRow from "../components/library/LibraryChipRow.vue";
+import LibraryHeader from "../components/library/LibraryHeader.vue";
+import TrashBanner from "../components/library/TrashBanner.vue";
+import TrashTileActions from "../components/library/TrashTileActions.vue";
+import ConfirmDialog from "../components/shell/ConfirmDialog.vue";
 import EmptyState from "../components/shell/EmptyState.vue";
-import HostFilterChips from "../components/shell/HostFilterChips.vue";
+import RenameDialog from "../components/shell/RenameDialog.vue";
 import { layoutJustifiedRows } from "../lib/gallery/layout";
 import {
   fetchGalleryMediaBytes,
@@ -26,17 +29,25 @@ import {
   isVideoItem,
 } from "../lib/gallery/media";
 import { applySelectionClick } from "../lib/gallery/selection";
+import { suggestedSaveName } from "../lib/gallery/saveName";
 import {
   planSequenceReuse,
   sequenceEditAvailability,
   sequenceGoneMessage,
   sequenceHostUnreachableMessage,
 } from "@studio/lib/sequenceReuse";
+import {
+  displayTitle,
+  validatePrintTitle,
+  type MergedCollection,
+} from "@studio/lib/libraryOrganization";
 import { ApiError, type ApiTarget } from "../lib/api/client";
 import {
   useGalleryStore,
+  type FanoutResult,
   type GalleryKindFilter,
   type GalleryLocation,
+  type LibraryScope,
   type MergedPrint,
 } from "../stores/gallery";
 import { useHostsStore } from "../stores/hosts";
@@ -49,6 +60,7 @@ import { useToastStore } from "../stores/toasts";
 import { inTauri, ipc } from "../lib/ipc";
 import { copyImageBytesToClipboard } from "../lib/clipboard";
 import { copyLocalOutputPath } from "../lib/localOutputPath";
+import { formatBytes } from "../lib/format";
 import { primaryModifierPressed } from "../lib/platform";
 import { allowsNativeContextMenu } from "../lib/shortcuts";
 import { modelDisplayNameForId } from "../lib/models";
@@ -68,6 +80,8 @@ const GAP = 8;
 const PAD = 16;
 /** Extra hosts have no SSE — their buckets poll while the view is open. */
 const EXTRA_POLL_MS = 15_000;
+/** Tags offered in the tile menu's Tags ▸ submenu. */
+const MENU_TAG_LIMIT = 12;
 
 const router = useRouter();
 const route = useRoute();
@@ -102,15 +116,118 @@ watch(
   { immediate: true },
 );
 
-// ── Header labels ────────────────────────────────────────────────────────────
-const scopeLabel = computed(() =>
-  gallery.filter === "all"
-    ? "all hosts"
-    : (gallery.sources.find((s) => s.key === gallery.filter)?.label ?? "all hosts"),
+// ── Scopes (V3 "Shelf": Prints | Collections | Trash) ────────────────────────
+// Capability-gated: Collections needs an organize-capable host, Trash a
+// trash-capable one (or this device's offline `.trash/` listing). With only
+// Prints the control disappears and every organization affordance hides, so
+// old servers keep today's Library and its hard-delete wording.
+const organizeAvailable = computed(() => gallery.anyOrganizeCapable);
+const offlineLocalTrash = computed(() => inTauri() && !gallery.hostFor("local"));
+const trashAvailable = computed(() => gallery.anyTrashCapable || offlineLocalTrash.value);
+const scopes = computed<LibraryScope[]>(() => [
+  "prints",
+  ...(organizeAvailable.value ? (["collections"] as const) : []),
+  ...(trashAvailable.value ? (["trash"] as const) : []),
+]);
+const scope = computed<LibraryScope>(() =>
+  scopes.value.includes(gallery.scope) ? gallery.scope : "prints",
 );
+const inTrash = computed(() => scope.value === "trash");
+const inCollections = computed(() => scope.value === "collections");
+/** The open collection (drill-in), resolved from the merged shelf. */
+const openCollection = computed<MergedCollection | null>(() =>
+  inCollections.value && gallery.collectionSlug
+    ? (gallery.mergedCollections.find((c) => c.slug === gallery.collectionSlug) ?? null)
+    : null,
+);
+const drillInName = computed(() =>
+  inCollections.value && gallery.collectionSlug
+    ? (openCollection.value?.name ?? gallery.collectionSlug)
+    : null,
+);
+/** The shelf (cards) shows only in Collections with no collection open. */
+const showShelf = computed(() => inCollections.value && !gallery.collectionSlug);
+
+function setScope(next: LibraryScope) {
+  if (next === gallery.scope) return;
+  gallery.scope = next;
+  setSelectMode(false);
+  selected.value = null;
+  lightboxOpen.value = false;
+  if (next === "trash") void gallery.fetchTrash();
+  if (next === "collections") void gallery.fetchCollections();
+}
+
+/** What the grid renders right now: the trash, or the live filtered set
+ *  (which already applies ♥ / tags / the open collection). */
+const entries = computed<MergedPrint[]>(() =>
+  inTrash.value ? gallery.trashFiltered : gallery.filtered,
+);
+
+const orgOf = (entry: MergedPrint) => gallery.organizationOf(entry);
+const isFavorite = (entry: MergedPrint) => orgOf(entry).favorite;
+const tileTitle = (entry: MergedPrint) =>
+  displayTitle({ ...entry.item, title: orgOf(entry).title });
+
+/** Some copy of this print sits on a host that can organize. */
+const canOrganizeEntry = (entry: MergedPrint) =>
+  gallery.allLocationsOf(entry).some((l) => gallery.organizeCapable(l.sourceKey));
+/** Every copy of this print deletes into a trash (else the old hard delete). */
+const entryTrashCapable = (entry: MergedPrint) => {
+  const locations = gallery.locationsOf(entry);
+  if (locations.length === 0) return gallery.trashCapable(entry.sourceKey);
+  return locations.every(
+    (l) =>
+      gallery.trashCapable(l.sourceKey) || (l.sourceKey === "local" && offlineLocalTrash.value),
+  );
+};
+
+// ── Header labels ────────────────────────────────────────────────────────────
+const hostScopeLabel = computed(() =>
+  gallery.filter === "all"
+    ? null
+    : (gallery.sources.find((s) => s.key === gallery.filter)?.label ?? null),
+);
+const scopeCounts = computed(() => ({
+  prints: gallery.merged.length,
+  collections: gallery.mergedCollections.length,
+  trash: gallery.trashCount,
+}));
 const countLabel = computed(() => {
-  const n = gallery.filtered.length;
-  return `${n} ${n === 1 ? "print" : "prints"} · ${scopeLabel.value}`;
+  if (showShelf.value) {
+    const n = shelfCards.value.length;
+    return `${n} ${n === 1 ? "collection" : "collections"}`;
+  }
+  const list = entries.value;
+  const n = list.length;
+  const noun = n === 1 ? "print" : "prints";
+  const parts = [inTrash.value ? `${n} ${noun} in trash` : `${n} ${noun}`];
+  const bytes = list.reduce((sum, e) => sum + (e.item.size_bytes ?? 0), 0);
+  if (bytes > 0) parts.push(formatBytes(bytes));
+  if (hostScopeLabel.value) parts.push(hostScopeLabel.value);
+  return parts.join(" · ");
+});
+const trashBytes = computed(() =>
+  gallery.trashMerged.reduce((sum, e) => sum + (e.item.size_bytes ?? 0), 0),
+);
+const favoritesCount = computed(() => gallery.merged.filter((e) => isFavorite(e)).length);
+const sourceLabel = (key: string) => gallery.sources.find((s) => s.key === key)?.label ?? key;
+/** "This Mac · plato" — every organize-capable host, for the fan-out notes. */
+const organizeHostNote = computed(() => {
+  const labels = gallery.sources.filter((s) => gallery.organizeCapable(s.key)).map((s) => s.label);
+  return labels.length > 0 ? labels.join(" · ") : null;
+});
+
+/** Every SELECTED logical print has at least one copy on an
+ *  organize-capable host — the bulk bar's Favorite / Tag / Collection
+ *  controls act on nothing otherwise. Empty selections stay enabled (the
+ *  buttons already disable on `none`) so the bar reads normally. */
+const selectionOrganizeBlockedReason = computed<string | null>(() => {
+  const blocked = selectedEntries.value.filter((e) => !canOrganizeEntry(e));
+  if (blocked.length === 0) return null;
+  const labels = [...new Set(blocked.flatMap((e) => e.availableOn.map((s) => s.label)))];
+  const n = blocked.length;
+  return `${n} selected ${n === 1 ? "print lives" : "prints live"} only on ${joinNames(labels)}, which can't organize prints.`;
 });
 
 /** Reveal works for files on this Mac: the IPC bucket, or a local-kind
@@ -199,9 +316,14 @@ async function upscaleItem(entry: MergedPrint) {
   try {
     const upscaled = await streamUpscale(await fetchItemBase64(entry));
     // The upscale endpoints don't persist server-side — the local save IS
-    // the durable copy.
-    const stem = entry.item.filename.replace(/\.[^.]+$/, "");
-    const saved = await ipc.saveOutputBytes(`${stem}-upscaled.png`, upscaled);
+    // the durable copy. A titled print saves under its title slug.
+    const saved = await ipc.saveOutputBytes(
+      suggestedSaveName(
+        { ...entry.item, title: orgOf(entry).title },
+        { suffix: "-upscaled", extension: "png" },
+      ),
+      upscaled,
+    );
     toasts.push(`Upscaled — saved locally as ${saved}`);
     // The save landed in this Mac's output dir: on a local/external primary
     // the engine bucket reads that same dir; on a remote primary it's the
@@ -291,20 +413,457 @@ async function editSequence(entry: MergedPrint) {
   void router.push({ path: "/create", query: { output: "sequence" } });
 }
 
+// ── Organization actions (fan-out; the store reaches every copy) ────────────
+/** Toast a fan-out outcome: silent on success, the first error otherwise. */
+function reportFanout(result: FanoutResult, okMessage?: string) {
+  if (result.failed > 0) {
+    const hosts = result.failedHosts.map(sourceLabel).join(", ");
+    toasts.push(result.error ? `${result.error} (${hosts})` : `Failed on ${hosts}.`, "error");
+    return false;
+  }
+  if (okMessage) toasts.push(okMessage);
+  return true;
+}
+
+/** The prints an action applies to: the bulk selection when the entry is
+ *  part of it (and there is more than one), else the entry alone. */
+function actionTargets(entry: MergedPrint): MergedPrint[] {
+  if (
+    selectMode.value &&
+    bulkSelection.value.size > 1 &&
+    bulkSelection.value.has(entry.item.filename)
+  ) {
+    return selectedEntries.value;
+  }
+  return [entry];
+}
+
+async function setFavorite(targets: MergedPrint[], value: boolean) {
+  if (targets.length === 0) return;
+  reportFanout(await gallery.setFavorite(targets, value));
+}
+
+function toggleFavorite(entry: MergedPrint) {
+  const targets = actionTargets(entry);
+  // Any unfavorited → favorite all; else unfavorite all.
+  void setFavorite(
+    targets,
+    targets.some((e) => !isFavorite(e)),
+  );
+}
+
+async function applyTags(targets: MergedPrint[], change: { add: string[]; remove: string[] }) {
+  if (targets.length === 0) return;
+  if (change.add.length > 0) reportFanout(await gallery.addTags(targets, change.add));
+  if (change.remove.length > 0) reportFanout(await gallery.removeTags(targets, change.remove));
+}
+
+async function toggleCollection(
+  targets: MergedPrint[],
+  change: { slug?: string; name?: string; checked: boolean },
+) {
+  if (targets.length === 0) return;
+  // Zero addable copies would "add" nothing (and create-on-demand would
+  // leave an empty collection) — refuse honestly instead.
+  if (change.checked && gallery.organizeTargetsFor(targets).length === 0) {
+    toasts.push("None of the selected prints are on a machine that can organize.", "error");
+    return;
+  }
+  if (!change.checked) {
+    if (!change.slug) return;
+    reportFanout(await gallery.removeFromCollection(targets, change.slug));
+    return;
+  }
+  const name =
+    change.name ??
+    gallery.mergedCollections.find((c) => c.slug === change.slug)?.name ??
+    change.slug ??
+    "";
+  if (!name) return;
+  const result = await gallery.addToCollection(
+    targets,
+    change.slug ? { slug: change.slug, name } : { name },
+  );
+  const n = targets.length;
+  reportFanout(result, `Added ${n} ${n === 1 ? "print" : "prints"} to “${name}”`);
+}
+
+async function renamePrint(entry: MergedPrint, raw: string | null) {
+  const check = validatePrintTitle(raw ?? "");
+  if (!check.ok) {
+    toasts.push(check.reason, "error");
+    return;
+  }
+  reportFanout(await gallery.setTitle(entry, check.value));
+}
+
+// ── Dialogs ─────────────────────────────────────────────────────────────────
+const renameTarget = ref<MergedPrint | null>(null);
+const newTagTargets = ref<MergedPrint[] | null>(null);
+/** New collection dialog: the prints to add once created (may be empty). */
+const newCollectionTargets = ref<MergedPrint[] | null>(null);
+const collectionRenameSlug = ref<string | null>(null);
+const collectionDeleteSlug = ref<string | null>(null);
+const emptyTrashOpen = ref(false);
+const deleteForeverTargets = ref<MergedPrint[] | null>(null);
+const organizeBusy = ref(false);
+
+const collectionNamed = (slug: string | null) =>
+  slug ? (gallery.mergedCollections.find((c) => c.slug === slug)?.name ?? slug) : "";
+
+function openRename(entry: MergedPrint) {
+  renameTarget.value = entry;
+}
+async function onRenameSave(name: string) {
+  const entry = renameTarget.value;
+  renameTarget.value = null;
+  if (entry) await renamePrint(entry, name);
+}
+
+function openNewTag(targets: MergedPrint[]) {
+  newTagTargets.value = targets;
+}
+async function onNewTagSave(name: string) {
+  const targets = newTagTargets.value ?? [];
+  newTagTargets.value = null;
+  await applyTags(targets, { add: [name], remove: [] });
+}
+
+function openNewCollection(targets: MergedPrint[] = []) {
+  newCollectionTargets.value = targets;
+}
+async function createCollection(name: string, targets: MergedPrint[] = []) {
+  // Creating for a selection must not leave an empty collection behind when
+  // no selected copy sits on an organize-capable host — refuse honestly
+  // instead of creating everywhere and "adding" nothing.
+  if (targets.length > 0 && gallery.organizeTargetsFor(targets).length === 0) {
+    const n = targets.length;
+    toasts.push(
+      `None of the ${n === 1 ? "selected print's copies live" : `${n} selected prints' copies live`} on a machine that can organize — no collection was created.`,
+      "error",
+    );
+    return;
+  }
+  organizeBusy.value = true;
+  try {
+    const result = await gallery.createCollection(name);
+    if (!reportFanout(result)) return;
+    if (targets.length > 0) {
+      const added = await gallery.addToCollection(targets, { slug: result.slug, name });
+      const n = targets.length;
+      reportFanout(added, `Added ${n} ${n === 1 ? "print" : "prints"} to “${name}”`);
+    } else {
+      toasts.push(`Created collection “${name}”`);
+    }
+  } finally {
+    organizeBusy.value = false;
+  }
+}
+async function onNewCollectionSave(name: string) {
+  const targets = newCollectionTargets.value ?? [];
+  newCollectionTargets.value = null;
+  await createCollection(name, targets);
+}
+
+async function onCollectionRenameSave(name: string) {
+  const slug = collectionRenameSlug.value;
+  collectionRenameSlug.value = null;
+  if (!slug) return;
+  reportFanout(await gallery.renameCollection(slug, name), `Renamed to “${name}”`);
+}
+
+async function confirmDeleteCollection() {
+  const slug = collectionDeleteSlug.value;
+  collectionDeleteSlug.value = null;
+  if (!slug) return;
+  const name = collectionNamed(slug);
+  organizeBusy.value = true;
+  try {
+    if (reportFanout(await gallery.deleteCollection(slug), `Deleted collection “${name}”`)) {
+      if (gallery.collectionSlug === slug) gallery.collectionSlug = null;
+    }
+  } finally {
+    organizeBusy.value = false;
+  }
+}
+
+async function useAsCover(entry: MergedPrint) {
+  const slug = gallery.collectionSlug;
+  if (!slug) return;
+  reportFanout(await gallery.setCollectionCover(slug, entry), "Cover set");
+}
+
+async function removeFromOpenCollection(targets: MergedPrint[]) {
+  const slug = gallery.collectionSlug;
+  if (!slug || targets.length === 0) return;
+  const n = targets.length;
+  reportFanout(
+    await gallery.removeFromCollection(targets, slug),
+    `Removed ${n} ${n === 1 ? "print" : "prints"} from “${collectionNamed(slug)}”`,
+  );
+  pruneSelection();
+}
+
+// ── Trash actions ───────────────────────────────────────────────────────────
+async function restorePrints(targets: MergedPrint[]) {
+  if (targets.length === 0) return;
+  organizeBusy.value = true;
+  try {
+    const result = await gallery.restore(targets);
+    const n = result.restored;
+    reportFanout(result, `Restored ${n} ${n === 1 ? "print" : "prints"}`);
+  } finally {
+    organizeBusy.value = false;
+  }
+  pruneSelection();
+}
+
+function askDeleteForever(targets: MergedPrint[]) {
+  if (targets.length === 0) return;
+  deleteForeverTargets.value = targets;
+}
+const deleteForeverTitle = computed(() => {
+  const targets = deleteForeverTargets.value ?? [];
+  if (targets.length === 1) return `Delete “${tileTitle(targets[0]!)}” forever?`;
+  return `Delete ${targets.length} prints forever?`;
+});
+async function confirmDeleteForever() {
+  const targets = deleteForeverTargets.value ?? [];
+  deleteForeverTargets.value = null;
+  if (targets.length === 0) return;
+  organizeBusy.value = true;
+  try {
+    const result = await gallery.deleteForever(targets);
+    if (result.failedPrints > 0) {
+      toasts.push(
+        result.error ??
+          `${result.failedPrints} ${result.failedPrints === 1 ? "print" : "prints"} could not be deleted.`,
+        "error",
+      );
+    } else {
+      const n = result.deletedPrints;
+      toasts.push(`Deleted ${n} ${n === 1 ? "print" : "prints"} forever`);
+    }
+  } finally {
+    organizeBusy.value = false;
+  }
+  pruneSelection();
+}
+
+const trashHostLabels = computed(() => {
+  const labels = gallery.retentionByHost.map((h) => h.label);
+  if (labels.length === 0 && offlineLocalTrash.value) labels.push(sourceLabel("local"));
+  return labels;
+});
+function joinNames(names: string[]): string {
+  if (names.length <= 1) return names[0] ?? "";
+  return `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+}
+const emptyTrashMessage = computed(() => {
+  const n = gallery.trashCount;
+  const where = joinNames(trashHostLabels.value);
+  return `Delete ${n} ${n === 1 ? "print" : "prints"} in the trash${where ? ` on ${where}` : ""} forever? This can't be undone.`;
+});
+async function confirmEmptyTrash() {
+  emptyTrashOpen.value = false;
+  organizeBusy.value = true;
+  try {
+    const result = await gallery.emptyTrash();
+    reportFanout(
+      result,
+      `Deleted ${result.purged} ${result.purged === 1 ? "print" : "prints"} forever`,
+    );
+  } finally {
+    organizeBusy.value = false;
+  }
+  selected.value = null;
+  lightboxOpen.value = false;
+  clearBulkSelection();
+}
+
+/** The retention link: this device's value lives in Settings ▸ Library, a
+ *  remote's in Machines ▸ host. */
+const retentionLinkLabel = computed(() =>
+  gallery.retentionByHost.some((h) => h.key === "local") || gallery.retentionByHost.length === 0
+    ? "Change retention · Settings"
+    : "Change retention · Machines",
+);
+function changeRetention() {
+  const hostsWithTrash = gallery.retentionByHost;
+  if (hostsWithTrash.some((h) => h.key === "local") || hostsWithTrash.length === 0) {
+    void router.push({ path: "/settings", query: { section: "library" } });
+  } else if (hostsWithTrash.length === 1) {
+    void router.push(`/machines/${encodeURIComponent(hostsWithTrash[0]!.key)}`);
+  } else {
+    void router.push("/machines");
+  }
+}
+
+// ── Collections shelf ───────────────────────────────────────────────────────
+/** Collection slug → its logical prints, newest first (one pass). */
+const membersBySlug = computed(() => {
+  const map = new Map<string, MergedPrint[]>();
+  for (const entry of gallery.merged) {
+    for (const slug of orgOf(entry).collections) {
+      const list = map.get(slug) ?? [];
+      list.push(entry);
+      map.set(slug, list);
+    }
+  }
+  return map;
+});
+
+function coverTile(entry: MergedPrint): CoverTile {
+  const source = gallery.mediaSourceOf(entry.sourceKey);
+  return {
+    path: galleryMediaPath(entry.item.filename, source, true),
+    target: targetFor(entry),
+    cacheKey: entry.sourceKey,
+    video: source === "local" && isVideo(entry.item),
+    alt: tileTitle(entry),
+  };
+}
+
+function coversFor(collection: MergedCollection): CoverTile[] {
+  const members = membersBySlug.value.get(collection.slug) ?? [];
+  let ordered = members;
+  const cover = collection.cover;
+  if (cover) {
+    const at = members.findIndex(
+      (e) =>
+        e.item.filename === cover.filename ||
+        (e.copies ?? []).some(
+          (copy) => copy.sourceKey === cover.hostId && copy.item.filename === cover.filename,
+        ),
+    );
+    if (at > 0) ordered = [members[at]!, ...members.slice(0, at), ...members.slice(at + 1)];
+  }
+  return ordered.slice(0, 4).map(coverTile);
+}
+
+function collectionUpdatedAt(collection: MergedCollection): number | null {
+  let latest: number | null = null;
+  for (const host of collection.hosts) {
+    const row = gallery.collectionsByHost[host.hostId]?.items.find((c) => c.id === host.id);
+    if (row?.updated_at != null && (latest === null || row.updated_at > latest)) {
+      latest = row.updated_at;
+    }
+  }
+  return latest;
+}
+
+const shelfCards = computed<ShelfCard[]>(() => {
+  const q = gallery.query.trim().toLowerCase();
+  return gallery.mergedCollections
+    .filter((c) => !q || c.name.toLowerCase().includes(q))
+    .map((c) => ({
+      slug: c.slug,
+      name: c.name,
+      count: gallery.collectionCounts(c.slug),
+      hostLabels: c.hosts.map((h) => sourceLabel(h.hostId)),
+      updatedAt: collectionUpdatedAt(c),
+      covers: coversFor(c),
+    }));
+});
+
+const shelf = ref<InstanceType<typeof CollectionsShelf> | null>(null);
+
+function openCollectionSlug(slug: string) {
+  gallery.collectionSlug = slug;
+  setSelectMode(false);
+  selected.value = null;
+  void gallery.fetchCollectionItems(slug);
+}
+function exitCollection() {
+  gallery.collectionSlug = null;
+  setSelectMode(false);
+  selected.value = null;
+  lightboxOpen.value = false;
+}
+
+function collectionMenu(slug: string): MenuEntry[] {
+  return [
+    { label: "Open", action: () => openCollectionSlug(slug) },
+    { label: "Rename…", action: () => (collectionRenameSlug.value = slug) },
+    { separator: true },
+    {
+      label: "Delete collection…",
+      danger: true,
+      action: () => (collectionDeleteSlug.value = slug),
+    },
+  ];
+}
+
+/** The drill-in's Edit menu: rename / remove prints / delete. */
+function openEditMenu(event: MouseEvent) {
+  const slug = gallery.collectionSlug;
+  if (!slug) return;
+  contextMenu.open(event, [
+    { label: "Rename…", action: () => (collectionRenameSlug.value = slug) },
+    {
+      label: "Remove prints…",
+      action: () => setSelectMode(true),
+    },
+    { separator: true },
+    {
+      label: "Delete collection…",
+      danger: true,
+      action: () => (collectionDeleteSlug.value = slug),
+    },
+  ]);
+}
+
+// ── Tile context menu ───────────────────────────────────────────────────────
+function tagSubmenu(entry: MergedPrint): MenuEntry[] {
+  const targets = actionTargets(entry);
+  const orgs = targets.map(orgOf);
+  const hasTag = (name: string) =>
+    orgs.every((o) => o.tags.some((t) => t.toLowerCase() === name.toLowerCase()));
+  const items: MenuEntry[] = gallery.mergedTags.slice(0, MENU_TAG_LIMIT).map((tag) => {
+    const checked = hasTag(tag.name);
+    return {
+      label: tag.name,
+      checked,
+      action: () =>
+        void applyTags(
+          targets,
+          checked ? { add: [], remove: [tag.name] } : { add: [tag.name], remove: [] },
+        ),
+    };
+  });
+  if (items.length > 0) items.push({ separator: true });
+  items.push({ label: "New tag…", action: () => openNewTag(targets) });
+  return items;
+}
+
+function collectionSubmenu(entry: MergedPrint): MenuEntry[] {
+  const targets = actionTargets(entry);
+  const orgs = targets.map(orgOf);
+  const items: MenuEntry[] = gallery.mergedCollections.map((collection) => {
+    const checked = orgs.every((o) => o.collections.includes(collection.slug));
+    return {
+      label: collection.name,
+      checked,
+      action: () =>
+        void toggleCollection(targets, {
+          slug: collection.slug,
+          name: collection.name,
+          checked: !checked,
+        }),
+    };
+  });
+  if (items.length > 0) items.push({ separator: true });
+  items.push({ label: "New collection…", action: () => openNewCollection(targets) });
+  return items;
+}
+
 function tileMenu(entry: MergedPrint): MenuEntry[] {
   const item = entry.item;
   const m = item.metadata;
-  const selectedForBulkDelete =
-    selectMode.value && bulkSelection.value.has(item.filename) && bulkSelection.value.size > 1;
-  return [
-    ...(isSequencePrint(entry)
-      ? [
-          ...(canEditSequence(entry)
-            ? [{ label: "Edit sequence", action: () => void editSequence(entry) }]
-            : []),
-          { label: "Duplicate as new", action: () => reuseSequence(entry) },
-        ]
-      : [{ label: "Reuse settings", action: () => reuseSettings(entry) }]),
+  const bulkCount = bulkSelection.value.size;
+  const selectedForBulk =
+    selectMode.value && bulkSelection.value.has(item.filename) && bulkCount > 1;
+  const copyItems: MenuEntry[] = [
     {
       label: "Copy prompt",
       action: () => {
@@ -317,6 +876,61 @@ function tileMenu(entry: MergedPrint): MenuEntry[] {
         void navigator.clipboard.writeText(String(m.seed)).then(() => toasts.push("Copied"));
       },
     },
+  ];
+  if (inTrash.value) {
+    const targets = actionTargets(entry);
+    return [
+      {
+        label: selectedForBulk ? `Restore ${bulkCount} selected` : "Restore",
+        action: () => void restorePrints(targets),
+      },
+      ...copyItems,
+      { separator: true },
+      {
+        label: selectedForBulk ? `Delete ${bulkCount} selected forever` : "Delete forever",
+        danger: true,
+        action: () => askDeleteForever(targets),
+      },
+    ];
+  }
+  const organize = canOrganizeEntry(entry);
+  const favorite = isFavorite(entry);
+  const trashable = entryTrashCapable(entry);
+  return [
+    ...(isSequencePrint(entry)
+      ? [
+          ...(canEditSequence(entry)
+            ? [{ label: "Edit sequence", action: () => void editSequence(entry) }]
+            : []),
+          { label: "Duplicate as new", action: () => reuseSequence(entry) },
+        ]
+      : [{ label: "Reuse settings", action: () => reuseSettings(entry) }]),
+    ...(organize
+      ? [
+          { separator: true } as MenuEntry,
+          {
+            label: favorite ? "Unfavorite" : "Favorite",
+            checked: favorite,
+            action: () => toggleFavorite(entry),
+          },
+          { label: "Rename…", action: () => openRename(entry) },
+          { label: "Tags", children: tagSubmenu(entry) },
+          { label: "Add to collection", children: collectionSubmenu(entry) },
+          ...(gallery.collectionSlug && inCollections.value
+            ? [
+                { label: "Use as cover", action: () => void useAsCover(entry) },
+                {
+                  label: selectedForBulk
+                    ? `Remove ${bulkCount} selected from collection`
+                    : "Remove from collection",
+                  action: () => void removeFromOpenCollection(actionTargets(entry)),
+                },
+              ]
+            : []),
+          { separator: true } as MenuEntry,
+        ]
+      : []),
+    ...copyItems,
     {
       label: "Copy image",
       disabled: isVideo(item),
@@ -360,10 +974,16 @@ function tileMenu(entry: MergedPrint): MenuEntry[] {
     },
     { separator: true },
     {
-      label: selectedForBulkDelete ? `Delete ${bulkSelection.value.size} selected` : "Delete",
+      label: trashable
+        ? selectedForBulk
+          ? `Move ${bulkCount} selected to trash`
+          : "Move to trash"
+        : selectedForBulk
+          ? `Delete ${bulkCount} selected`
+          : "Delete",
       danger: true,
       action: () => {
-        if (selectedForBulkDelete) void deleteSelectedPrints();
+        if (selectedForBulk) void deleteSelectedPrints();
         else deletePrint(entry);
       },
     },
@@ -377,21 +997,22 @@ const lightboxOpen = ref(false);
 const rowHeight = ref(loadGalleryThumbnailSize());
 watch(rowHeight, (value) => saveGalleryThumbnailSize(value));
 
-// ── Single-print delete: optimistic + undoable (§08 G12) ─────────────────────
+// ── Delete: optimistic + undoable (§08 G12) ──────────────────────────────────
 // The tile leaves the grid instantly; a 6 s undo toast holds the print in limbo
 // (no server call). Undo restores it; letting the toast expire commits the real
-// DELETE. Several deletes can be pending at once, so timers are keyed per print.
+// DELETE — which on a trash-capable host moves the print to the trash. Several
+// deletes can be pending at once, so timers are keyed per print (or per bulk
+// batch).
 const UNDO_WINDOW_MS = 6000;
 const pendingDeletes = new Map<
   string,
   {
-    sourceKey: string;
-    filename: string;
     locations: GalleryLocation[];
     timer: ReturnType<typeof setTimeout>;
   }
 >();
 const deleteKey = (sourceKey: string, filename: string) => `${sourceKey}::${filename}`;
+let bulkDeleteSeq = 0;
 
 // ── History drawer ──────────────────────────────────────────────────────────
 // Open state lives in the URL (?panel=history) so the retired /history route
@@ -410,7 +1031,7 @@ function closeHistory() {
 // ── Search + media-kind chips ──────────────────────────────────────────────
 const SEARCH_DEBOUNCE_MS = 200;
 const searchInput = ref(gallery.query);
-const searchEl = ref<HTMLInputElement | null>(null);
+const header = ref<InstanceType<typeof LibraryHeader> | null>(null);
 let searchTimer: ReturnType<typeof setTimeout> | null = null;
 watch(searchInput, (value) => {
   if (searchTimer) clearTimeout(searchTimer);
@@ -428,6 +1049,28 @@ const kindOptions = computed(() => [
 ]);
 const setKind = (value: GalleryKindFilter) => (gallery.mediaKind = value);
 
+// ── Filter chips (♥ / tags / hosts) ─────────────────────────────────────────
+const chipRow = ref<InstanceType<typeof LibraryChipRow> | null>(null);
+const showChipRow = computed(
+  () =>
+    scope.value !== "trash" &&
+    !showShelf.value &&
+    (organizeAvailable.value || gallery.chipCounts.length > 1),
+);
+function toggleTagFilter(name: string) {
+  const key = name.toLowerCase();
+  const have = gallery.tagFilter.some((t) => t.toLowerCase() === key);
+  gallery.tagFilter = have
+    ? gallery.tagFilter.filter((t) => t.toLowerCase() !== key)
+    : [...gallery.tagFilter, name];
+}
+function clearFilters() {
+  gallery.favoritesOnly = false;
+  gallery.tagFilter = [];
+  gallery.filter = "all";
+  if (inCollections.value) exitCollection();
+}
+
 // ── Bulk select mode ───────────────────────────────────────────────────────
 // Selection is keyed by print identity (filename — the merged grid's
 // cross-host identity), never row index: the virtualized grid re-flows.
@@ -438,6 +1081,38 @@ const bulkSelection = ref<Set<string>>(new Set());
 const bulkAnchor = ref<string | null>(null);
 const confirmingBulkDelete = ref(false);
 const bulkDeleting = ref(false);
+const bulkBar = ref<InstanceType<typeof BulkBar> | null>(null);
+
+const selectedEntries = computed(() =>
+  entries.value.filter((e) => bulkSelection.value.has(e.item.filename)),
+);
+/** Organization state over the bulk selection, for the bar's popovers. */
+const selectionOrganization = computed(() => {
+  const orgs = selectedEntries.value.map(orgOf);
+  if (orgs.length === 0) {
+    return { collectionsAll: [], collectionsSome: [], tags: [], allFavorite: false };
+  }
+  const slugs = new Set(orgs.flatMap((o) => o.collections));
+  const collectionsAll: string[] = [];
+  const collectionsSome: string[] = [];
+  for (const slug of slugs) {
+    if (orgs.every((o) => o.collections.includes(slug))) collectionsAll.push(slug);
+    else collectionsSome.push(slug);
+  }
+  const first = orgs[0]!;
+  const tags = first.tags.filter((tag) =>
+    orgs.every((o) => o.tags.some((t) => t.toLowerCase() === tag.toLowerCase())),
+  );
+  return {
+    collectionsAll,
+    collectionsSome,
+    tags,
+    allFavorite: orgs.every((o) => o.favorite),
+  };
+});
+const selectionTrashCapable = computed(
+  () => selectedEntries.value.length > 0 && selectedEntries.value.every(entryTrashCapable),
+);
 
 function setSelectMode(next: boolean) {
   selectMode.value = next;
@@ -445,6 +1120,7 @@ function setSelectMode(next: boolean) {
     bulkSelection.value = new Set();
     bulkAnchor.value = null;
     confirmingBulkDelete.value = false;
+    bulkBar.value?.closePopovers();
   }
 }
 
@@ -456,7 +1132,7 @@ function onTileClick(entry: MergedPrint, e: MouseEvent) {
   const next = applySelectionClick(
     bulkSelection.value,
     bulkAnchor.value,
-    gallery.filtered.map((x) => x.item.filename),
+    entries.value.map((x) => x.item.filename),
     entry.item.filename,
     { shift: e.shiftKey, meta: e.metaKey || e.ctrlKey },
   );
@@ -471,7 +1147,7 @@ function onTileDblclick(entry: MergedPrint) {
 }
 
 function selectAllInFilter() {
-  bulkSelection.value = new Set(gallery.filtered.map((e) => e.item.filename));
+  bulkSelection.value = new Set(entries.value.map((e) => e.item.filename));
 }
 
 function clearBulkSelection() {
@@ -479,15 +1155,35 @@ function clearBulkSelection() {
   bulkAnchor.value = null;
 }
 
+/** Drop selection / lightbox state for prints that left the grid. */
+function pruneSelection() {
+  const remaining = new Set(entries.value.map((e) => e.item.filename));
+  bulkSelection.value = new Set([...bulkSelection.value].filter((f) => remaining.has(f)));
+  if (bulkAnchor.value && !remaining.has(bulkAnchor.value)) bulkAnchor.value = null;
+  if (selected.value && !remaining.has(selected.value.filename)) {
+    selected.value = null;
+    lightboxOpen.value = false;
+  }
+}
+
+/**
+ * Bulk delete. On trash-capable hosts: optimistic, one 6 s undo toast for
+ * the batch, then the real (trash-aware) DELETE per copy. Elsewhere: the
+ * two-press arming button, then the immediate hard delete.
+ */
 async function deleteSelectedPrints() {
+  const targets = selectedEntries.value;
+  if (targets.length === 0) return;
+  if (targets.every(entryTrashCapable)) {
+    trashPrints(targets);
+    return;
+  }
   if (!confirmingBulkDelete.value) {
     confirmingBulkDelete.value = true;
     return;
   }
   confirmingBulkDelete.value = false;
   if (bulkDeleting.value) return;
-  const targets = gallery.filtered.filter((e) => bulkSelection.value.has(e.item.filename));
-  if (targets.length === 0) return;
   bulkDeleting.value = true;
   try {
     const { deletedPrints, failedPrints, deletedCopies } =
@@ -508,24 +1204,18 @@ async function deleteSelectedPrints() {
   } finally {
     bulkDeleting.value = false;
   }
-  const remaining = new Set(gallery.filtered.map((e) => e.item.filename));
-  bulkSelection.value = new Set([...bulkSelection.value].filter((f) => remaining.has(f)));
-  if (bulkAnchor.value && !remaining.has(bulkAnchor.value)) bulkAnchor.value = null;
-  if (selected.value && !remaining.has(selected.value.filename)) {
-    selected.value = null;
-    lightboxOpen.value = false;
-  }
+  pruneSelection();
 }
 
 let resizeObserver: ResizeObserver | null = null;
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 
-/** Justified layout over the filtered merged set; each laid tile keeps its
- *  merged entry so origin (badge, target, actions) travels with it. */
+/** Justified layout over the visible set; each laid tile keeps its merged
+ *  entry so origin (badge, target, actions) travels with it. */
 const rows = computed(() => {
-  const entries = gallery.filtered;
+  const list = entries.value;
   const laidRows = layoutJustifiedRows(
-    entries.map((e) => e.item),
+    list.map((e) => e.item),
     Math.max(0, containerWidth.value - PAD * 2),
     rowHeight.value,
     GAP,
@@ -533,7 +1223,7 @@ const rows = computed(() => {
   let cursor = 0;
   return laidRows.map((r) => ({
     height: r.height,
-    items: r.items.map((laid) => ({ ...laid, entry: entries[cursor++]! })),
+    items: r.items.map((laid) => ({ ...laid, entry: list[cursor++]! })),
   }));
 });
 
@@ -555,7 +1245,9 @@ watch(
   () => virtualizer.value?.measure?.(),
 );
 
-const showBadges = computed(() => gallery.filter === "all" && gallery.chipCounts.length > 1);
+const showBadges = computed(
+  () => !inTrash.value && gallery.filter === "all" && gallery.chipCounts.length > 1,
+);
 const availabilityLabel = (entry: MergedPrint) =>
   entry.availableOn.map((source) => source.label).join(" · ");
 
@@ -568,9 +1260,9 @@ function select(entry: MergedPrint) {
   selected.value = { sourceKey: entry.sourceKey, filename: entry.item.filename };
 }
 
-const selectedIndex = computed(() => gallery.filtered.findIndex((e) => isSelected(e)));
+const selectedIndex = computed(() => entries.value.findIndex((e) => isSelected(e)));
 const selectedEntry = computed<MergedPrint | null>(
-  () => gallery.filtered[selectedIndex.value] ?? null,
+  () => entries.value[selectedIndex.value] ?? null,
 );
 
 /** Shared with the store's kind filter so badge and chips never disagree. */
@@ -579,7 +1271,12 @@ const isAudio = (i: GalleryImage) => isAudioItem(i);
 
 async function copyImage(entry: MergedPrint) {
   try {
-    const path = galleryMediaPath(entry.item.filename, gallery.mediaSourceOf(entry.sourceKey));
+    const path = galleryMediaPath(
+      entry.item.filename,
+      gallery.mediaSourceOf(entry.sourceKey),
+      false,
+      entry.item.trashed_at != null,
+    );
     const target = targetFor(entry);
     await copyImageBytesToClipboard(
       path,
@@ -592,24 +1289,59 @@ async function copyImage(entry: MergedPrint) {
 }
 
 function moveSelection(delta: number) {
-  const entries = gallery.filtered;
-  if (entries.length === 0) return;
+  const list = entries.value;
+  if (list.length === 0) return;
   const next = Math.min(
-    entries.length - 1,
+    list.length - 1,
     Math.max(0, (selectedIndex.value === -1 ? 0 : selectedIndex.value) + delta),
   );
-  select(entries[next]!);
+  select(list[next]!);
+}
+
+/** The prints a keyboard action targets: the bulk selection, else the
+ *  selected tile. */
+function keyboardTargets(): MergedPrint[] {
+  if (selectMode.value && bulkSelection.value.size > 0) return selectedEntries.value;
+  return selectedEntry.value ? [selectedEntry.value] : [];
+}
+
+/** Close the topmost transient surface; true when one was open. */
+function closeTransient(): boolean {
+  if (bulkBar.value?.closePopovers()) return true;
+  if (chipRow.value?.isOpen()) {
+    chipRow.value.closeMore();
+    return true;
+  }
+  return false;
 }
 
 function onKeydown(e: KeyboardEvent) {
   // ⌘F focuses the view's own search — the screen-level filter shortcut.
   if (e.key === "f" && primaryModifierPressed(e) && !e.altKey) {
     e.preventDefault();
-    searchEl.value?.focus();
+    header.value?.focusSearch();
     return;
   }
   // The history drawer owns the keyboard while it's open.
   if (historyOpen.value) return;
+  // ⌘⇧N — new collection (organize-capable hosts only).
+  if ((e.key === "n" || e.key === "N") && e.shiftKey && primaryModifierPressed(e)) {
+    if (!organizeAvailable.value || allowsNativeContextMenu(e.target as Element | null)) return;
+    e.preventDefault();
+    if (showShelf.value) void shelf.value?.startCreate();
+    else openNewCollection(keyboardTargets());
+    return;
+  }
+  // ⌘⌫ — delete forever (confirm), in any scope.
+  if ((e.key === "Delete" || e.key === "Backspace") && primaryModifierPressed(e)) {
+    if (allowsNativeContextMenu(e.target as Element | null)) return;
+    e.preventDefault();
+    if (e.repeat) return;
+    if (trashAvailable.value) askDeleteForever(keyboardTargets());
+    else if (selectMode.value && bulkSelection.value.size > 0) void deleteSelectedPrints();
+    else if (selectedEntry.value) deletePrint(selectedEntry.value);
+    return;
+  }
   if (e.metaKey || e.ctrlKey || e.altKey) return;
   if (e.key === "Delete" || e.key === "Backspace") {
     // WebKit treats an unhandled Backspace/Delete as history-back. Keep the
@@ -618,11 +1350,41 @@ function onKeydown(e: KeyboardEvent) {
     if (allowsNativeContextMenu(e.target as Element | null)) return;
     e.preventDefault();
     if (e.repeat) return;
-    if (selectMode.value && bulkSelection.value.size > 0) {
+    if (inTrash.value) {
+      askDeleteForever(keyboardTargets());
+    } else if (selectMode.value && bulkSelection.value.size > 0) {
       void deleteSelectedPrints();
     } else if (selectedEntry.value) {
       deletePrint(selectedEntry.value);
     }
+  } else if (
+    (e.key === "f" || e.key === "F") &&
+    !allowsNativeContextMenu(e.target as Element | null)
+  ) {
+    if (!organizeAvailable.value || inTrash.value) return;
+    const targets = keyboardTargets();
+    if (targets.length === 0) return;
+    e.preventDefault();
+    void setFavorite(
+      targets,
+      targets.some((t) => !isFavorite(t)),
+    );
+  } else if (
+    (e.key === "t" || e.key === "T") &&
+    !allowsNativeContextMenu(e.target as Element | null)
+  ) {
+    if (!organizeAvailable.value || inTrash.value) return;
+    const targets = keyboardTargets();
+    if (targets.length === 0) return;
+    e.preventDefault();
+    // The Tag popover lives on the bulk bar: enter select mode around the
+    // current print when needed, then open it.
+    if (!selectMode.value) {
+      selectMode.value = true;
+      bulkSelection.value = new Set(targets.map((t) => t.item.filename));
+      bulkAnchor.value = targets[0]!.item.filename;
+    }
+    void Promise.resolve().then(() => bulkBar.value?.openTags());
   } else if (e.key === "ArrowRight") {
     e.preventDefault();
     moveSelection(1);
@@ -630,18 +1392,19 @@ function onKeydown(e: KeyboardEvent) {
     e.preventDefault();
     moveSelection(-1);
   } else if (e.key === " ") {
+    if (allowsNativeContextMenu(e.target as Element | null)) return;
     e.preventDefault();
     if (selected.value) lightboxOpen.value = !lightboxOpen.value;
   } else if (e.key === "Escape") {
+    if (closeTransient()) return;
     if (lightboxOpen.value) lightboxOpen.value = false;
     else if (selectMode.value) setSelectMode(false);
   }
 }
 
-/** Fire the real DELETE for a pending print, surfacing any failure (which
+/** Fire the real DELETE for a pending batch, surfacing any failure (which
  *  restores the print via the store's finally). */
-async function commitDelete(sourceKey: string, filename: string) {
-  const key = deleteKey(sourceKey, filename);
+async function commitDelete(key: string) {
   const pending = pendingDeletes.get(key);
   if (pending) clearTimeout(pending.timer);
   pendingDeletes.delete(key);
@@ -657,12 +1420,21 @@ async function commitDelete(sourceKey: string, filename: string) {
 }
 
 /** Undo a still-pending delete — the print returns to the grid, no server call. */
-function undoDelete(sourceKey: string, filename: string) {
-  const key = deleteKey(sourceKey, filename);
+function undoDelete(key: string) {
   const pending = pendingDeletes.get(key);
   if (pending) clearTimeout(pending.timer);
   pendingDeletes.delete(key);
   if (pending) gallery.cancelDeleteEverywhere(pending.locations);
+}
+
+/** Hold a set of locations in limbo behind one undo toast. */
+function scheduleDelete(key: string, locations: GalleryLocation[], message: string) {
+  const timer = setTimeout(() => void commitDelete(key), UNDO_WINDOW_MS);
+  pendingDeletes.set(key, { locations, timer });
+  toasts.push(message, "info", {
+    durationMs: UNDO_WINDOW_MS,
+    action: { label: "Undo", run: () => undoDelete(key) },
+  });
 }
 
 /**
@@ -676,13 +1448,15 @@ function deletePrint(entry: MergedPrint) {
   const key = deleteKey(sourceKey, filename);
   if (pendingDeletes.has(key)) return;
 
-  const index = gallery.filtered.findIndex(
+  const index = entries.value.findIndex(
     (candidate) => candidate.sourceKey === sourceKey && candidate.item.filename === filename,
   );
   const wasSelected = isSelected(entry);
+  const trashable = entryTrashCapable(entry);
+  const title = tileTitle(entry);
   const locations = gallery.beginDeleteEverywhere(entry);
   if (wasSelected) {
-    const remaining = gallery.filtered;
+    const remaining = entries.value;
     if (remaining.length === 0) {
       lightboxOpen.value = false;
       selected.value = null;
@@ -690,13 +1464,26 @@ function deletePrint(entry: MergedPrint) {
       select(remaining[Math.min(Math.max(index, 0), remaining.length - 1)]!);
     }
   }
+  scheduleDelete(
+    key,
+    locations,
+    trashable ? `Moved “${title}” to trash` : `Deleted ${filename} everywhere`,
+  );
+}
 
-  const timer = setTimeout(() => void commitDelete(sourceKey, filename), UNDO_WINDOW_MS);
-  pendingDeletes.set(key, { sourceKey, filename, locations, timer });
-  toasts.push(`Deleted ${filename} everywhere`, "info", {
-    durationMs: UNDO_WINDOW_MS,
-    action: { label: "Undo", run: () => undoDelete(sourceKey, filename) },
-  });
+/** Bulk move to trash: every selected print into limbo behind ONE undo toast. */
+function trashPrints(targets: MergedPrint[]) {
+  const fresh = targets.filter((e) => !pendingDeletes.has(deleteKey(e.sourceKey, e.item.filename)));
+  if (fresh.length === 0) return;
+  const locations: GalleryLocation[] = [];
+  for (const entry of fresh) locations.push(...gallery.beginDeleteEverywhere(entry));
+  const n = fresh.length;
+  scheduleDelete(
+    `bulk-${++bulkDeleteSeq}`,
+    locations,
+    `Moved ${n} ${n === 1 ? "print" : "prints"} to trash`,
+  );
+  pruneSelection();
 }
 
 function removeSelected() {
@@ -770,6 +1557,68 @@ async function useSelectedAsSource() {
   if (entry) await useAsSource(entry);
 }
 
+// ── URL sync (?scope, ?c, ?tag, ?fav — plus the pre-existing ?host, ?print,
+//    ?panel, ?tab) ───────────────────────────────────────────────────────────
+// Route → store when the params are present (a deep link or a back/forward
+// hop); store → route (replace) so the address bar always names the view.
+// Plain /library keeps the session state, like ?host always has.
+const VALID_SCOPES: readonly LibraryScope[] = ["prints", "collections", "trash"];
+const asString = (value: unknown): string | null =>
+  typeof value === "string" && value.length > 0 ? value : null;
+
+let syncingFromRoute = false;
+watch(
+  () => [route.query.scope, route.query.c, route.query.tag, route.query.fav] as const,
+  ([scopeParam, c, tag, fav]) => {
+    syncingFromRoute = true;
+    try {
+      const wantScope = asString(scopeParam);
+      if (wantScope && (VALID_SCOPES as readonly string[]).includes(wantScope)) {
+        gallery.scope = wantScope as LibraryScope;
+      }
+      if (c !== undefined) gallery.collectionSlug = asString(c);
+      if (tag !== undefined) {
+        gallery.tagFilter = (asString(tag) ?? "")
+          .split(",")
+          .map((t) => t.trim())
+          .filter((t) => t.length > 0);
+      }
+      if (fav !== undefined) gallery.favoritesOnly = asString(fav) === "1";
+    } finally {
+      syncingFromRoute = false;
+    }
+  },
+  { immediate: true },
+);
+
+watch(
+  () =>
+    [
+      gallery.scope,
+      gallery.collectionSlug,
+      gallery.tagFilter.join(","),
+      gallery.favoritesOnly,
+    ] as const,
+  ([scopeValue, slug, tags, fav]) => {
+    if (syncingFromRoute || route.path !== "/library") return;
+    const query: Record<string, string | undefined> = {
+      ...(route.query as Record<string, string | undefined>),
+    };
+    const set = (key: string, value: string | null) => {
+      if (value === null) delete query[key];
+      else query[key] = value;
+    };
+    set("scope", scopeValue === "prints" ? null : scopeValue);
+    set("c", scopeValue === "collections" && slug ? slug : null);
+    set("tag", tags.length > 0 ? tags : null);
+    set("fav", fav ? "1" : null);
+    const same = Object.keys({ ...route.query, ...query }).every(
+      (key) => (route.query[key] ?? undefined) === (query[key] ?? undefined),
+    );
+    if (!same) void router.replace({ path: "/library", query });
+  },
+);
+
 // Deep link: /library?host=<bucket key> pre-picks a chip ("local" = This
 // Mac's key in every mode). Plain /library keeps the session filter.
 watch(
@@ -794,6 +1643,10 @@ watch(
     if (typeof print !== "string" || !print) return;
     const entry = gallery.merged.find((e) => e.item.filename === print);
     if (!entry) return;
+    gallery.scope = "prints";
+    gallery.collectionSlug = null;
+    gallery.favoritesOnly = false;
+    gallery.tagFilter = [];
     gallery.filter = "all";
     gallery.mediaKind = "all";
     gallery.query = "";
@@ -813,13 +1666,37 @@ watch(
   { immediate: true },
 );
 
+// Collections / tags / trash ride the same trigger plus the capability
+// snapshot, which can land after the buckets do.
+watch(
+  () =>
+    [
+      gallery.sources.map((s) => s.key).join("|"),
+      organizeAvailable.value,
+      trashAvailable.value,
+    ] as const,
+  ([, organize, trash]) => {
+    if (organize || trash) void gallery.fetchOrganization();
+  },
+  { immediate: true },
+);
+
+// A drill-in needs the origin order of its collection.
+watch(
+  () => (inCollections.value ? gallery.collectionSlug : null),
+  (slug) => {
+    if (slug) void gallery.fetchCollectionItems(slug);
+  },
+  { immediate: true },
+);
+
 onMounted(() => {
   window.addEventListener("keydown", onKeydown);
   pollTimer = setInterval(() => void gallery.pollExtras(), EXTRA_POLL_MS);
   if (scrollEl.value) {
     containerWidth.value = scrollEl.value.clientWidth;
-    resizeObserver = new ResizeObserver((entries) => {
-      containerWidth.value = entries[0]?.contentRect.width ?? containerWidth.value;
+    resizeObserver = new ResizeObserver((observed) => {
+      containerWidth.value = observed[0]?.contentRect.width ?? containerWidth.value;
     });
     resizeObserver.observe(scrollEl.value);
   }
@@ -831,8 +1708,8 @@ onUnmounted(() => {
   resizeObserver?.disconnect();
   // Finalize any deletes still inside their undo window — leaving Library
   // commits them rather than stranding a hidden-but-not-deleted print.
-  for (const { sourceKey, filename } of [...pendingDeletes.values()]) {
-    void commitDelete(sourceKey, filename);
+  for (const key of [...pendingDeletes.keys()]) {
+    void commitDelete(key);
   }
   // Flush a pending debounced search so the store matches the input.
   if (searchTimer) {
@@ -845,96 +1722,144 @@ onUnmounted(() => {
 
 <template>
   <div class="relative flex h-full flex-col">
-    <header class="flex h-[52px] shrink-0 items-center gap-3 border-b border-edge px-6">
-      <span class="font-display text-[17px] font-semibold text-ink" style="font-stretch: 92%">
-        Library
-      </span>
-      <span class="data-mono text-caption text-ink-3">{{ countLabel }}</span>
-      <span v-if="gallery.firstError" class="text-caption text-stop">
-        {{ gallery.firstError }}
-      </span>
-      <HostFilterChips
-        v-if="gallery.chipCounts.length > 1"
-        v-model="gallery.filter"
-        class="ml-1"
-        :chips="gallery.chipCounts"
-        :all-count="gallery.merged.length"
-      />
+    <LibraryHeader
+      ref="header"
+      :scope="scope"
+      :scopes="scopes"
+      :counts="scopeCounts"
+      :count-label="countLabel"
+      :error="gallery.firstError"
+      :thumbnail-size="rowHeight"
+      :media-kind="gallery.mediaKind"
+      :kind-options="kindOptions"
+      :search="searchInput"
+      :select-mode="selectMode"
+      :trash-count="gallery.trashCount"
+      :busy="organizeBusy"
+      @update:scope="setScope"
+      @update:thumbnail-size="rowHeight = $event"
+      @update:media-kind="setKind"
+      @update:search="searchInput = $event"
+      @open-history="openHistory"
+      @toggle-select="setSelectMode(!selectMode)"
+      @refresh="gallery.fetchAll()"
+      @empty-trash="emptyTrashOpen = true"
+    />
 
+    <LibraryChipRow
+      v-if="showChipRow"
+      ref="chipRow"
+      :organize="organizeAvailable"
+      :favorites-only="gallery.favoritesOnly"
+      :favorites-count="favoritesCount"
+      :tags="gallery.mergedTags"
+      :active-tags="gallery.tagFilter"
+      :host-chips="gallery.chipCounts"
+      :host-filter="gallery.filter"
+      :all-count="gallery.merged.length"
+      :collection-name="drillInName"
+      @update:favorites-only="gallery.favoritesOnly = $event"
+      @toggle-tag="toggleTagFilter"
+      @update:host-filter="gallery.filter = $event"
+      @clear-filters="clearFilters"
+      @exit-collection="exitCollection"
+    />
+
+    <!-- Collections drill-in: crumb bar with Select + Edit. -->
+    <div
+      v-if="inCollections && gallery.collectionSlug"
+      class="flex h-11 shrink-0 items-center gap-2.5 border-b border-edge bg-[color-mix(in_srgb,var(--bench)_50%,var(--bath))] px-6"
+      data-test="collection-crumbs"
+    >
+      <button
+        type="button"
+        class="flex items-center gap-0.5 rounded-control text-body text-ink-2 hover:text-ink"
+        data-test="crumb-back"
+        @click="exitCollection"
+      >
+        <Icon name="chevron-left" :size="14" />
+        Collections
+      </button>
+      <span class="text-ink-3" aria-hidden="true">›</span>
+      <span class="font-display text-[15px] font-semibold text-ink" data-test="crumb-here">
+        {{ drillInName }}
+      </span>
+      <span v-if="openCollection" class="font-utility text-[10.5px] text-ink-3">
+        {{ openCollection.hosts.map((h) => sourceLabel(h.hostId)).join(" · ") }}
+      </span>
       <div class="flex-1" />
-
-      <ThumbnailSizeSlider
-        v-model="rowHeight"
-        :min="GALLERY_THUMBNAIL_SIZE_MIN"
-        :max="GALLERY_THUMBNAIL_SIZE_MAX"
-        :step="GALLERY_THUMBNAIL_SIZE_STEP"
-      />
-
-      <SegmentedControl
-        :model-value="gallery.mediaKind"
-        :options="kindOptions"
-        label="Media kind"
-        @update:model-value="setKind"
-      />
-
-      <label
-        class="flex h-[34px] w-[180px] items-center gap-2 rounded-chrome border border-ce bg-bench px-2.5"
-      >
-        <Icon name="search" :size="14" class="shrink-0 text-ink-3" />
-        <input
-          ref="searchEl"
-          v-model="searchInput"
-          data-selectable
-          type="search"
-          placeholder="Search prompts…"
-          aria-label="Search prints"
-          class="min-w-0 flex-1 bg-transparent text-body text-ink outline-none placeholder:text-ink-3"
-        />
-      </label>
-
       <button
         type="button"
-        class="flex h-[34px] w-[34px] shrink-0 items-center justify-center rounded-chrome text-ink-3 transition-colors duration-100 hover:bg-[color-mix(in_srgb,var(--rebate)_6%,transparent)] hover:text-ink"
-        title="History"
-        aria-label="Open history"
-        @click="openHistory"
+        class="flex h-[30px] items-center gap-1.5 rounded-chrome border border-edge bg-bench px-2.5 text-[12.5px] text-ink-2 hover:text-ink"
+        data-test="collection-edit"
+        aria-haspopup="menu"
+        @click="openEditMenu"
       >
-        <Icon name="history" :size="17" />
+        Edit
+        <Icon name="chevron-down" :size="12" />
       </button>
-      <button
-        type="button"
-        class="flex h-[34px] w-[34px] shrink-0 items-center justify-center rounded-chrome transition-colors duration-100"
-        :class="
-          selectMode
-            ? 'bg-[color-mix(in_srgb,var(--safelight)_16%,transparent)] text-safelight'
-            : 'text-ink-3 hover:bg-[color-mix(in_srgb,var(--rebate)_6%,transparent)] hover:text-ink'
-        "
-        :aria-pressed="selectMode"
-        title="Select"
-        aria-label="Toggle select mode"
-        @click="setSelectMode(!selectMode)"
-      >
-        <Icon name="check" :size="17" />
-      </button>
-      <button
-        type="button"
-        class="flex h-[34px] w-[34px] shrink-0 items-center justify-center rounded-chrome text-ink-3 transition-colors duration-100 hover:bg-[color-mix(in_srgb,var(--rebate)_6%,transparent)] hover:text-ink"
-        title="Refresh"
-        aria-label="Refresh library"
-        @click="gallery.fetchAll()"
-      >
-        <Icon name="refresh" :size="17" />
-      </button>
-    </header>
+    </div>
+
+    <TrashBanner
+      v-if="inTrash"
+      :hosts="gallery.retentionByHost"
+      :count="gallery.trashCount"
+      :bytes="trashBytes"
+      :link-label="retentionLinkLabel"
+      @change-retention="changeRetention"
+    />
 
     <div ref="scrollEl" class="min-h-0 flex-1 overflow-y-auto" style="contain: strict">
+      <!-- Collections shelf -->
+      <template v-if="showShelf">
+        <EmptyState
+          v-if="gallery.mergedCollections.length === 0"
+          headline="No collections yet"
+          detail="Group prints however you like — a collection lives on every machine that holds a copy."
+          action="New collection"
+          @action="openNewCollection()"
+        />
+        <EmptyState
+          v-else-if="shelfCards.length === 0"
+          headline="No matching collections"
+          detail="Nothing here matches the current search."
+        />
+        <CollectionsShelf
+          v-else
+          ref="shelf"
+          :cards="shelfCards"
+          :busy="organizeBusy"
+          @open="openCollectionSlug"
+          @create="(name) => createCollection(name)"
+          @contextmenu="(slug, event) => contextMenu.open(event, collectionMenu(slug))"
+        />
+      </template>
+
+      <!-- Trash empty states -->
       <EmptyState
-        v-if="gallery.loaded && gallery.filtered.length === 0 && gallery.hostFiltered.length > 0"
+        v-else-if="inTrash && entries.length === 0 && gallery.trashCount > 0"
+        headline="No prints in the trash match"
+        detail="Nothing in the trash matches the current search or filter."
+      />
+      <EmptyState v-else-if="inTrash && entries.length === 0" headline="Trash is empty" />
+
+      <!-- Drill-in empty state -->
+      <EmptyState
+        v-else-if="inCollections && gallery.loaded && entries.length === 0"
+        headline="Nothing in this collection yet"
+        detail="Select prints in the Library and choose Add to collection."
+        action="Go to prints"
+        @action="setScope('prints')"
+      />
+
+      <!-- Prints empty states -->
+      <EmptyState
+        v-else-if="gallery.loaded && entries.length === 0 && gallery.hostFiltered.length > 0"
         headline="No matching prints"
-        detail="Nothing here matches the current search or media filter."
+        detail="Nothing here matches the current search or filters."
       />
       <EmptyState
-        v-else-if="gallery.loaded && gallery.filtered.length === 0"
+        v-else-if="gallery.loaded && entries.length === 0"
         headline="No prints here yet"
         :detail="
           gallery.filter === 'local'
@@ -955,10 +1880,13 @@ onUnmounted(() => {
             padding: `0 ${PAD}px`,
           }"
         >
-          <button
+          <!-- A tile is a wrapper (click / context / dblclick) around a focusable
+               button carrying the media, badges, and the rising edge code; the
+               ♥ and trash actions are sibling overlays so they never nest a
+               button inside a button. -->
+          <div
             v-for="laid in rows[vrow.index]?.items ?? []"
             :key="`${laid.entry.sourceKey}::${laid.item.filename}`"
-            type="button"
             class="ms-lib-tile group relative shrink-0 overflow-hidden rounded-[9px] border"
             :class="
               (selectMode ? bulkSelection.has(laid.item.filename) : isSelected(laid.entry))
@@ -966,6 +1894,7 @@ onUnmounted(() => {
                 : 'border-[color-mix(in_srgb,var(--rebate)_14%,transparent)]'
             "
             :style="{ width: `${laid.width}px`, height: `${laid.height}px` }"
+            :data-filename="laid.item.filename"
             @click="onTileClick(laid.entry, $event)"
             @contextmenu="
               select(laid.entry);
@@ -973,137 +1902,155 @@ onUnmounted(() => {
             "
             @dblclick="onTileDblclick(laid.entry)"
           >
-            <AuthedMedia
-              :path="
-                galleryMediaPath(
-                  laid.item.filename,
-                  gallery.mediaSourceOf(laid.entry.sourceKey),
-                  true,
-                )
-              "
-              :target="targetFor(laid.entry)"
-              :cache-key="laid.entry.sourceKey"
-              :video="gallery.mediaSourceOf(laid.entry.sourceKey) === 'local' && isVideo(laid.item)"
-              :alt="laid.item.metadata.prompt"
-            />
-            <!-- NEW badge (top-left) — hidden while selecting, where the
-                 checkbox owns that corner. -->
-            <span
-              v-if="!selectMode && isFresh(laid.entry)"
-              data-test="new-badge"
-              class="ms-lib-new absolute top-2 left-2"
+            <button
+              type="button"
+              class="absolute inset-0 block h-full w-full overflow-hidden text-left"
+              :aria-label="tileTitle(laid.entry)"
             >
-              New
-            </span>
-            <span
-              v-if="!selectMode && isUpscaledImage(laid.item)"
-              data-test="upscaled-badge"
-              class="ms-lib-upscaled absolute top-2 right-2"
-            >
-              Upscaled
-            </span>
-            <span
-              v-if="isVideo(laid.item) || isAudio(laid.item)"
-              class="absolute top-1.5 right-1.5 rounded-control bg-black/60 px-1 text-caption text-on-media"
-            >
-              {{ isAudio(laid.item) ? "♪" : "▶" }}
-            </span>
-            <span
-              v-if="selectMode"
-              data-test="select-indicator"
-              class="absolute top-1.5 left-1.5 flex h-5 w-5 items-center justify-center rounded-full text-caption"
+              <AuthedMedia
+                :path="
+                  galleryMediaPath(
+                    laid.item.filename,
+                    gallery.mediaSourceOf(laid.entry.sourceKey),
+                    true,
+                    laid.item.trashed_at != null,
+                  )
+                "
+                :target="targetFor(laid.entry)"
+                :cache-key="laid.entry.sourceKey"
+                :video="
+                  gallery.mediaSourceOf(laid.entry.sourceKey) === 'local' && isVideo(laid.item)
+                "
+                :alt="laid.item.metadata.prompt"
+              />
+              <!-- NEW badge (top-left) — hidden while selecting, where the
+                   checkbox owns that corner; never in the trash. -->
+              <span
+                v-if="!selectMode && !inTrash && isFresh(laid.entry)"
+                data-test="new-badge"
+                class="ms-lib-new absolute top-2 left-2"
+              >
+                New
+              </span>
+              <span
+                v-if="!selectMode && isUpscaledImage(laid.item)"
+                data-test="upscaled-badge"
+                class="ms-lib-upscaled absolute top-2 right-2"
+              >
+                Upscaled
+              </span>
+              <span
+                v-if="isVideo(laid.item) || isAudio(laid.item)"
+                class="absolute top-1.5 right-1.5 rounded-control bg-black/60 px-1 text-caption text-on-media"
+              >
+                {{ isAudio(laid.item) ? "♪" : "▶" }}
+              </span>
+              <span
+                v-if="selectMode"
+                data-test="select-indicator"
+                class="absolute top-1.5 left-1.5 flex h-5 w-5 items-center justify-center rounded-full text-caption"
+                :class="
+                  bulkSelection.has(laid.item.filename)
+                    ? 'bg-safelight font-semibold text-on-accent'
+                    : 'border border-white/70 bg-black/40 text-on-media'
+                "
+              >
+                {{ bulkSelection.has(laid.item.filename) ? "✓" : "" }}
+              </span>
+              <!-- The badge yields to the rising edge code on hover — both live
+                   in the tile's bottom margin and must never overlap. -->
+              <span
+                v-if="showBadges"
+                data-test="host-badge"
+                class="edge-code absolute bottom-1.5 left-1.5 max-w-[70%] truncate rounded-control bg-black/60 px-1 !text-on-media transition-opacity duration-100 group-hover:opacity-0"
+                :title="`Available on ${availabilityLabel(laid.entry)}`"
+              >
+                {{ availabilityLabel(laid.entry) }}
+              </span>
+              <span
+                v-if="!inTrash"
+                data-test="edge-strip"
+                class="edge-code absolute right-0 bottom-0 left-0 translate-y-full truncate bg-black/60 py-0.5 pr-7 pl-1.5 text-left !text-on-media transition-transform duration-100 group-hover:translate-y-0"
+              >
+                {{ tileTitle(laid.entry) }} · {{ modelLabel(laid.item.metadata.model) }} · S
+                {{ laid.item.metadata.seed }}
+              </span>
+            </button>
+            <!-- ♥ (bottom-right): filled when favorite, faint on hover when not;
+                 click toggles without opening the print. -->
+            <button
+              v-if="!inTrash && organizeAvailable && canOrganizeEntry(laid.entry)"
+              type="button"
+              data-test="tile-favorite"
+              class="ms-lib-heart absolute right-1.5 bottom-1.5 z-10 flex h-6 w-6 items-center justify-center rounded-full text-on-media transition-opacity duration-100"
               :class="
-                bulkSelection.has(laid.item.filename)
-                  ? 'bg-safelight font-semibold text-on-accent'
-                  : 'border border-white/70 bg-black/40 text-on-media'
+                isFavorite(laid.entry)
+                  ? 'ms-lib-heart--on opacity-100'
+                  : 'opacity-0 group-hover:opacity-60 hover:!opacity-100'
               "
+              :aria-pressed="isFavorite(laid.entry)"
+              :aria-label="isFavorite(laid.entry) ? 'Unfavorite' : 'Favorite'"
+              :title="isFavorite(laid.entry) ? 'Unfavorite' : 'Favorite'"
+              @click.stop="toggleFavorite(laid.entry)"
+              @dblclick.stop
             >
-              {{ bulkSelection.has(laid.item.filename) ? "✓" : "" }}
-            </span>
-            <!-- The badge yields to the rising edge code on hover — both live
-                 in the tile's bottom margin and must never overlap. -->
-            <span
-              v-if="showBadges"
-              data-test="host-badge"
-              class="edge-code absolute bottom-1.5 left-1.5 max-w-[70%] truncate rounded-control bg-black/60 px-1 !text-on-media transition-opacity duration-100 group-hover:opacity-0"
-              :title="`Available on ${availabilityLabel(laid.entry)}`"
-            >
-              {{ availabilityLabel(laid.entry) }}
-            </span>
-            <span
-              class="edge-code absolute right-0 bottom-0 left-0 translate-y-full bg-black/60 px-1.5 py-0.5 text-left !text-on-media transition-transform duration-100 group-hover:translate-y-0"
-            >
-              {{ modelLabel(laid.item.metadata.model) }} · S {{ laid.item.metadata.seed }}
-            </span>
-          </button>
+              <Icon name="heart" :size="14" />
+            </button>
+            <TrashTileActions
+              v-if="inTrash"
+              :purge-at="orgOf(laid.entry).purgeAt"
+              :show-actions="!selectMode"
+              :busy="organizeBusy"
+              @restore="restorePrints([laid.entry])"
+              @delete-forever="askDeleteForever([laid.entry])"
+            />
+          </div>
         </div>
       </div>
     </div>
 
     <!-- Floating bulk-action bar while select mode is active. -->
-    <div
+    <BulkBar
       v-if="selectMode"
-      data-test="bulk-action-bar"
-      class="border-edge absolute bottom-4 left-1/2 z-30 flex max-w-[calc(100%-2rem)] -translate-x-1/2 flex-wrap items-center gap-2 rounded-chrome border bg-bench px-3 py-2 shadow-lg"
-      role="toolbar"
-      aria-label="Selection actions"
-    >
-      <span class="data-mono px-1 text-caption text-ink">
-        {{ bulkSelection.size }}
-        <span class="text-ink-3">/ {{ gallery.filtered.length }} selected</span>
-      </span>
-      <button
-        type="button"
-        class="border-edge h-7 rounded-control border px-2.5 text-caption text-ink-2 transition-colors duration-100 hover:text-ink disabled:opacity-50"
-        :disabled="gallery.filtered.length === 0"
-        @click="selectAllInFilter"
-      >
-        Select all
-      </button>
-      <button
-        type="button"
-        class="border-edge h-7 rounded-control border px-2.5 text-caption text-ink-2 transition-colors duration-100 hover:text-ink disabled:opacity-50"
-        :disabled="bulkSelection.size === 0"
-        @click="clearBulkSelection"
-      >
-        Clear
-      </button>
-      <button
-        type="button"
-        class="border-edge h-7 rounded-control border px-2.5 text-caption transition-colors duration-100 disabled:opacity-50"
-        :class="
-          confirmingBulkDelete
-            ? 'border-stop bg-stop font-semibold text-on-accent'
-            : 'text-ink-2 hover:text-stop'
-        "
-        :disabled="bulkSelection.size === 0 || bulkDeleting"
-        @blur="confirmingBulkDelete = false"
-        @click="deleteSelectedPrints"
-      >
-        {{
-          bulkDeleting
-            ? "Deleting…"
-            : confirmingBulkDelete
-              ? `Delete ${bulkSelection.size} ${bulkSelection.size === 1 ? "print" : "prints"}? This can't be undone.`
-              : "Delete selected"
-        }}
-      </button>
-      <button
-        type="button"
-        class="flex h-7 w-7 items-center justify-center rounded-control text-ink-3 transition-colors duration-100 hover:text-ink"
-        aria-label="Exit select mode"
-        title="Exit select mode (Esc)"
-        @click="setSelectMode(false)"
-      >
-        ✕
-      </button>
-    </div>
+      ref="bulkBar"
+      :selected-count="bulkSelection.size"
+      :total="entries.length"
+      :scope="scope"
+      :organize="organizeAvailable"
+      :organize-blocked-reason="selectionOrganizeBlockedReason"
+      :trash="selectionTrashCapable"
+      :confirming="confirmingBulkDelete"
+      :busy="bulkDeleting || organizeBusy"
+      :collections="gallery.mergedCollections"
+      :collection-selected="selectionOrganization.collectionsAll"
+      :collection-mixed="selectionOrganization.collectionsSome"
+      :collection-counts="gallery.collectionCounts"
+      :tags="selectionOrganization.tags"
+      :tag-suggestions="gallery.mergedTags"
+      :all-favorite="selectionOrganization.allFavorite"
+      :collection-name="drillInName"
+      :host-note="organizeHostNote"
+      @select-all="selectAllInFilter"
+      @clear="clearBulkSelection"
+      @exit="setSelectMode(false)"
+      @favorite="(value) => setFavorite(selectedEntries, value)"
+      @trash="deleteSelectedPrints"
+      @update:confirming="confirmingBulkDelete = $event"
+      @delete="deleteSelectedPrints"
+      @restore="restorePrints(selectedEntries)"
+      @delete-forever="askDeleteForever(selectedEntries)"
+      @remove-from-collection="removeFromOpenCollection(selectedEntries)"
+      @toggle-collection="(slug, checked) => toggleCollection(selectedEntries, { slug, checked })"
+      @create-collection="(name) => createCollection(name, selectedEntries)"
+      @add-tags="(names) => applyTags(selectedEntries, { add: names, remove: [] })"
+      @remove-tags="(names) => applyTags(selectedEntries, { add: [], remove: names })"
+    />
 
     <Lightbox
       v-if="lightboxOpen && selectedEntry"
       :item="selectedEntry.item"
       :index="selectedIndex"
-      :count="gallery.filtered.length"
+      :count="entries.length"
       :video="isVideo(selectedEntry.item)"
       :audio="isAudio(selectedEntry.item)"
       :source="gallery.mediaSourceOf(selectedEntry.sourceKey)"
@@ -1113,6 +2060,13 @@ onUnmounted(() => {
       :can-reveal="canReveal(selectedEntry)"
       :is-sequence="isSequencePrint(selectedEntry)"
       :can-edit-sequence="canEditSequence(selectedEntry)"
+      :organization="orgOf(selectedEntry)"
+      :can-organize="organizeAvailable && canOrganizeEntry(selectedEntry)"
+      :can-trash="entryTrashCapable(selectedEntry)"
+      :trashed="inTrash"
+      :collections="gallery.mergedCollections"
+      :collection-counts="gallery.collectionCounts"
+      :tag-suggestions="gallery.mergedTags"
       @close="lightboxOpen = false"
       @prev="moveSelection(-1)"
       @next="moveSelection(1)"
@@ -1120,9 +2074,76 @@ onUnmounted(() => {
       @use-source="useSelectedAsSource"
       @reuse-sequence="reuseSequence(selectedEntry)"
       @edit-sequence="editSequence(selectedEntry)"
+      @rename="(title) => renamePrint(selectedEntry!, title)"
+      @favorite="(value) => setFavorite([selectedEntry!], value)"
+      @tags="(change) => applyTags([selectedEntry!], change)"
+      @collections="(change) => toggleCollection([selectedEntry!], change)"
+      @restore="restorePrints([selectedEntry!])"
+      @delete-forever="askDeleteForever([selectedEntry!])"
     />
 
     <HistoryDrawer :open="historyOpen" @close="closeHistory" />
+
+    <!-- Naming dialogs (shared RenameDialog shell) -->
+    <RenameDialog
+      :open="renameTarget !== null"
+      title="Rename print"
+      :initial="renameTarget ? (orgOf(renameTarget).title ?? '') : ''"
+      @save="onRenameSave"
+      @cancel="renameTarget = null"
+    />
+    <RenameDialog
+      :open="newTagTargets !== null"
+      title="New tag"
+      initial=""
+      @save="onNewTagSave"
+      @cancel="newTagTargets = null"
+    />
+    <RenameDialog
+      :open="newCollectionTargets !== null"
+      title="New collection"
+      initial=""
+      @save="onNewCollectionSave"
+      @cancel="newCollectionTargets = null"
+    />
+    <RenameDialog
+      :open="collectionRenameSlug !== null"
+      title="Rename collection"
+      :initial="collectionNamed(collectionRenameSlug)"
+      @save="onCollectionRenameSave"
+      @cancel="collectionRenameSlug = null"
+    />
+
+    <!-- Destructive confirms (plain shared ConfirmDialog — no typed phrase) -->
+    <ConfirmDialog
+      :open="collectionDeleteSlug !== null"
+      :title="`Delete collection “${collectionNamed(collectionDeleteSlug)}”?`"
+      message="Its prints stay in the Library."
+      confirm-label="Delete"
+      danger
+      @confirm="confirmDeleteCollection"
+      @cancel="collectionDeleteSlug = null"
+    />
+    <ConfirmDialog
+      :open="emptyTrashOpen"
+      title="Empty trash?"
+      :message="emptyTrashMessage"
+      confirm-label="Delete forever"
+      danger
+      :busy="organizeBusy"
+      @confirm="confirmEmptyTrash"
+      @cancel="emptyTrashOpen = false"
+    />
+    <ConfirmDialog
+      :open="deleteForeverTargets !== null"
+      :title="deleteForeverTitle"
+      message="This can't be undone."
+      confirm-label="Delete forever"
+      danger
+      :busy="organizeBusy"
+      @confirm="confirmDeleteForever"
+      @cancel="deleteForeverTargets = null"
+    />
   </div>
 </template>
 
@@ -1136,6 +2157,11 @@ onUnmounted(() => {
 .ms-lib-tile:hover {
   transform: translateY(-2px);
   box-shadow: 0 10px 24px rgba(0, 0, 0, 0.4);
+}
+
+.ms-lib-tile > button:focus-visible {
+  outline: 2px solid var(--safelight);
+  outline-offset: -2px;
 }
 
 .ms-lib-new {
@@ -1160,5 +2186,21 @@ onUnmounted(() => {
   color: var(--on-accent);
   padding: 2px 6px;
   border-radius: 5px;
+}
+
+/* ♥ overlay: a drop shadow keeps the glyph legible on any print; the
+   favorited state fills the outline glyph with the current color. */
+.ms-lib-heart {
+  filter: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.7));
+}
+
+.ms-lib-heart--on :deep(svg) {
+  fill: currentColor;
+}
+
+.ms-lib-heart:focus-visible {
+  outline: 2px solid var(--safelight);
+  outline-offset: 1px;
+  opacity: 1;
 }
 </style>

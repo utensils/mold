@@ -1,9 +1,12 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import Icon from "@ui/components/Icon.vue";
 import VideoExportDialog from "@ui/components/VideoExportDialog.vue";
 import AuthedMedia from "./AuthedMedia.vue";
+import CollectionPicker from "../library/CollectionPicker.vue";
+import TagEditor from "../library/TagEditor.vue";
+import ConfirmDialog from "../shell/ConfirmDialog.vue";
 import {
   fetchGalleryMediaBytes,
   galleryMediaPath,
@@ -29,7 +32,27 @@ import {
   type VideoExportOptions,
 } from "@studio/lib/videoExport";
 import { strengthSemanticsForModel } from "@studio/lib/strengthSemantics";
+import {
+  displayTitle,
+  purgeCountdownFromPurgeAt,
+  validatePrintTitle,
+  type MergedCollection,
+} from "@studio/lib/libraryOrganization";
+import type { TagCount } from "@studio/lib/api/galleryOrganization";
 import { saveGalleryMedia, showSavedMediaToast } from "../../lib/mediaSave";
+import { suggestedSaveName } from "../../lib/gallery/saveName";
+
+/** The print's organization across every copy (the Library's
+ *  `organizationOf(entry)` union). Optional so callers that predate the
+ *  Library organization keep mounting the Lightbox unchanged. */
+export interface LightboxOrganization {
+  title: string | null;
+  favorite: boolean;
+  tags: string[];
+  collections: string[];
+  trashedAt?: number | null;
+  purgeAt?: number | null;
+}
 
 const props = withDefaults(
   defineProps<{
@@ -53,6 +76,22 @@ const props = withDefaults(
     /** The producing job is (as far as we know without probing) still on its
      *  origin host — see `sequenceEditAvailability`. */
     canEditSequence?: boolean;
+    /** Title / ♥ / tags / collections union for this print; null hides the
+     *  editing rows (the title line still shows the display title). */
+    organization?: LightboxOrganization | null;
+    /** Some host holding this print can edit its organization. */
+    canOrganize?: boolean;
+    /** Delete moves to the trash (6 s undo) rather than hard-deleting. */
+    canTrash?: boolean;
+    /** The open print is in the trash: show the purge countdown and
+     *  Restore / Delete forever instead of the Delete button. */
+    trashed?: boolean;
+    /** Host-merged collections for the "In collections" checklist. */
+    collections?: MergedCollection[];
+    /** Optional logical-print counts per collection slug. */
+    collectionCounts?: ((slug: string) => number) | null;
+    /** Host-merged tags for the tag editor's suggestions. */
+    tagSuggestions?: TagCount[];
   }>(),
   {
     audio: false,
@@ -63,6 +102,13 @@ const props = withDefaults(
     canReveal: false,
     isSequence: false,
     canEditSequence: false,
+    organization: null,
+    canOrganize: false,
+    canTrash: false,
+    trashed: false,
+    collections: () => [],
+    collectionCounts: null,
+    tagSuggestions: () => [],
   },
 );
 const emit = defineEmits<{
@@ -73,6 +119,14 @@ const emit = defineEmits<{
   useSource: [];
   reuseSequence: [];
   editSequence: [];
+  /** Title edited in the aside (`null` clears it). */
+  rename: [title: string | null];
+  favorite: [value: boolean];
+  tags: [change: { add: string[]; remove: string[] }];
+  /** Collection membership toggled, or a new collection named. */
+  collections: [change: { slug?: string; name?: string; checked: boolean }];
+  restore: [];
+  deleteForever: [];
 }>();
 
 const router = useRouter();
@@ -91,7 +145,13 @@ watch(
   () => void copy(String(props.item.metadata.seed)),
 );
 
+/** The open print's bytes live in the trash: resolve media, file paths,
+ *  Reveal, and Save into `.trash/` so a newer same-name live file can never
+ *  shadow them. Derived from the row itself with the view as fallback. */
+const fromTrash = computed(() => props.trashed || props.item.trashed_at != null);
+
 const confirmingDelete = ref(false);
+const confirmingForever = ref(false);
 const exportOpen = ref(false);
 const exportBusy = ref(false);
 const saveBusy = ref(false);
@@ -99,8 +159,75 @@ const exportError = ref("");
 const exportCapabilities = ref<VideoExportCapabilities>(DEFAULT_VIDEO_EXPORT_CAPABILITIES);
 watch(
   () => props.item.filename,
-  () => (confirmingDelete.value = false),
+  () => {
+    confirmingDelete.value = false;
+    confirmingForever.value = false;
+  },
 );
+
+// ── Title (Library organization, D5) ─────────────────────────────────────────
+// The aside leads with an editable title; the raw filename drops to a mono
+// detail row. Enter commits (emit `rename`), Escape reverts, blur commits a
+// changed draft. The placeholder is the display fallback (prompt excerpt or
+// filename stem) so an untitled print never reads as a literal "Untitled".
+const currentTitle = computed(() => props.organization?.title ?? props.item.title ?? null);
+const titleDraft = ref(currentTitle.value ?? "");
+const titleEditing = ref(false);
+const titleError = ref<string | null>(null);
+const titleEl = ref<HTMLInputElement | null>(null);
+watch([currentTitle, () => props.item.filename], () => {
+  if (!titleEditing.value) titleDraft.value = currentTitle.value ?? "";
+  titleError.value = null;
+});
+const titlePlaceholder = computed(() => displayTitle({ ...props.item, title: null }));
+const headline = computed(() => displayTitle({ ...props.item, title: currentTitle.value }));
+
+async function startTitleEdit() {
+  if (!props.canOrganize) return;
+  titleEditing.value = true;
+  titleDraft.value = currentTitle.value ?? "";
+  await nextTick();
+  titleEl.value?.focus();
+  titleEl.value?.select();
+}
+
+function commitTitle() {
+  if (!titleEditing.value) return;
+  const check = validatePrintTitle(titleDraft.value);
+  if (!check.ok) {
+    titleError.value = check.reason;
+    return;
+  }
+  titleError.value = null;
+  titleEditing.value = false;
+  if ((check.value ?? null) !== (currentTitle.value ?? null)) emit("rename", check.value);
+}
+
+function revertTitle() {
+  titleDraft.value = currentTitle.value ?? "";
+  titleError.value = null;
+  titleEditing.value = false;
+}
+
+function onTitleKeydown(event: KeyboardEvent) {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    commitTitle();
+  } else if (event.key === "Escape") {
+    event.preventDefault();
+    event.stopPropagation();
+    revertTitle();
+  }
+}
+
+// ── ♥ / tags / collections ──────────────────────────────────────────────────
+const isFavorite = computed(() => props.organization?.favorite === true);
+const tags = computed(() => props.organization?.tags ?? []);
+const inCollections = computed(() => props.organization?.collections ?? []);
+const purge = computed(() =>
+  props.trashed ? purgeCountdownFromPurgeAt(props.organization?.purgeAt ?? null, Date.now()) : null,
+);
+const showOrganization = computed(() => props.canOrganize && props.organization !== null);
 
 // Focus the close button on open and hand focus back to the opener on teardown,
 // so the lightbox is keyboard-operable and doesn't strand focus when dismissed.
@@ -172,7 +299,7 @@ async function copyImage() {
   try {
     const target = props.target;
     await copyImageBytesToClipboard(
-      galleryMediaPath(props.item.filename, props.source),
+      galleryMediaPath(props.item.filename, props.source, false, fromTrash.value),
       target ? { fetchImage: (p) => fetchGalleryMediaBytes(p, target) } : undefined,
     );
     toasts.push("Image copied");
@@ -191,7 +318,7 @@ function imageMenu(): MenuEntry[] {
     {
       label: "Copy file path",
       action: () =>
-        void copyLocalOutputPath(props.item.filename)
+        void copyLocalOutputPath(props.item.filename, fromTrash.value)
           .then(() => toasts.push("File path copied"))
           .catch((error) =>
             toasts.push(error instanceof Error ? error.message : String(error), "error"),
@@ -206,13 +333,18 @@ function imageMenu(): MenuEntry[] {
 
 async function reveal() {
   try {
-    await ipc.revealOutputFile(props.item.filename);
+    await ipc.revealOutputFile(props.item.filename, fromTrash.value);
   } catch (err) {
     toasts.push(String(err), "error");
   }
 }
 
 function onDelete() {
+  if (props.canTrash) {
+    // The parent owns the 6 s undo toast.
+    emit("delete");
+    return;
+  }
   if (!confirmingDelete.value) {
     confirmingDelete.value = true;
     return;
@@ -221,11 +353,22 @@ function onDelete() {
   toasts.push("Deleted print");
 }
 
+function confirmDeleteForever() {
+  confirmingForever.value = false;
+  emit("deleteForever");
+}
+
 async function saveMedia() {
   if (saveBusy.value) return;
   saveBusy.value = true;
   try {
-    const saved = await saveGalleryMedia(props.target, props.item.filename);
+    const saved = await saveGalleryMedia(
+      props.target,
+      props.item.filename,
+      suggestedSaveName({ ...props.item, title: currentTitle.value }),
+      null,
+      fromTrash.value,
+    );
     showSavedMediaToast(toasts, saved);
   } catch (error) {
     toasts.push(error instanceof Error ? error.message : String(error), "error");
@@ -257,7 +400,10 @@ async function performVideoExport(options: VideoExportOptions) {
     const saved = await saveGalleryMedia(
       props.target,
       props.item.filename,
-      videoExportFilename(props.item.filename, options.format),
+      videoExportFilename(
+        suggestedSaveName({ ...props.item, title: currentTitle.value }),
+        options.format,
+      ),
       options,
     );
     exportOpen.value = false;
@@ -290,14 +436,14 @@ async function performVideoExport(options: VideoExportOptions) {
         >
           <div v-if="audio" class="flex w-full max-w-2xl flex-col items-center gap-4 p-4">
             <AuthedMedia
-              :path="galleryMediaPath(item.filename, source, true)"
+              :path="galleryMediaPath(item.filename, source, true, fromTrash)"
               :target="target"
               :cache-key="cacheKey"
               :alt="meta.prompt"
               class="!object-contain"
             />
             <AuthedMedia
-              :path="galleryMediaPath(item.filename, source)"
+              :path="galleryMediaPath(item.filename, source, false, fromTrash)"
               :target="target"
               :cache-key="cacheKey"
               audio
@@ -307,7 +453,7 @@ async function performVideoExport(options: VideoExportOptions) {
           </div>
           <AuthedMedia
             v-else
-            :path="galleryMediaPath(item.filename, source)"
+            :path="galleryMediaPath(item.filename, source, false, fromTrash)"
             :target="target"
             :cache-key="cacheKey"
             :video="video"
@@ -362,12 +508,105 @@ async function performVideoExport(options: VideoExportOptions) {
         </div>
 
         <div class="min-h-0 flex-1 overflow-y-auto">
-          <span class="data-mono block truncate text-caption text-ink-3" :title="item.filename">
+          <!-- Title lead line: editable when a host can organize, else the
+               display title (title ?? prompt excerpt ?? filename stem). -->
+          <div class="flex items-center gap-2" data-test="lightbox-title-row">
+            <input
+              v-if="canOrganize"
+              ref="titleEl"
+              v-model="titleDraft"
+              data-selectable
+              data-test="lightbox-title"
+              type="text"
+              class="lightbox-title min-w-0 flex-1"
+              :class="{ 'lightbox-title--editing': titleEditing }"
+              :placeholder="titlePlaceholder"
+              :aria-invalid="titleError !== null"
+              aria-label="Print title"
+              :title="currentTitle ?? titlePlaceholder"
+              @focus="startTitleEdit"
+              @blur="commitTitle"
+              @keydown="onTitleKeydown"
+            />
+            <span
+              v-else
+              class="lightbox-title min-w-0 flex-1 truncate"
+              data-test="lightbox-title"
+              :title="headline"
+            >
+              {{ headline }}
+            </span>
+            <button
+              v-if="showOrganization"
+              type="button"
+              class="lightbox-fav flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-chrome border transition-colors duration-100"
+              :class="
+                isFavorite
+                  ? 'lightbox-fav--on border-safelight text-safelight'
+                  : 'border-edge text-ink-3 hover:text-ink'
+              "
+              :aria-pressed="isFavorite"
+              :aria-label="isFavorite ? 'Unfavorite' : 'Favorite'"
+              :title="isFavorite ? 'Unfavorite (F)' : 'Favorite (F)'"
+              data-test="lightbox-favorite"
+              @click="emit('favorite', !isFavorite)"
+            >
+              <Icon name="heart" :size="15" />
+            </button>
+          </div>
+          <p
+            v-if="titleError"
+            class="mt-1 text-caption text-stop"
+            data-test="lightbox-title-error"
+            role="alert"
+          >
+            {{ titleError }}
+          </p>
+          <span
+            class="data-mono mt-1.5 block truncate text-caption text-ink-3"
+            data-test="lightbox-filename"
+            :title="item.filename"
+          >
             {{ item.filename }}
           </span>
+          <p
+            v-if="purge"
+            class="mt-2 font-utility text-[11px] text-ink-2"
+            data-test="lightbox-purge"
+            :data-kind="purge.kind"
+          >
+            <template v-if="purge.kind === 'purges'">
+              In the trash · purges in <b class="text-warning">{{ purge.days }} d</b>
+            </template>
+            <template v-else-if="purge.kind === 'today'">
+              In the trash · purges <b class="text-warning">today</b>
+            </template>
+            <template v-else>In the trash · kept until you empty it</template>
+          </p>
           <p data-selectable class="mt-3 text-body text-ink" :title="meta.prompt">
             {{ meta.prompt }}
           </p>
+          <template v-if="showOrganization">
+            <p class="lightbox-kicker mt-4 mb-1.5">Tags</p>
+            <TagEditor
+              :model-value="tags"
+              :suggestions="tagSuggestions"
+              aria-label="Print tags"
+              data-test="lightbox-tags"
+              @add="(name) => emit('tags', { add: [name], remove: [] })"
+              @remove="(name) => emit('tags', { add: [], remove: [name] })"
+            />
+            <p class="lightbox-kicker mt-4 mb-1.5">In collections</p>
+            <CollectionPicker
+              :collections="collections"
+              :selected="inCollections"
+              :counts="collectionCounts"
+              aria-label="In collections"
+              data-test="lightbox-collections"
+              @toggle="(slug, checked) => emit('collections', { slug, checked })"
+              @create="(name) => emit('collections', { name, checked: true })"
+            />
+          </template>
           <p
             v-if="meta.original_prompt"
             data-test="lightbox-original"
@@ -561,8 +800,28 @@ async function performVideoExport(options: VideoExportOptions) {
           >
             Reveal in file manager
           </button>
+          <template v-if="trashed">
+            <button
+              type="button"
+              data-test="lightbox-restore"
+              class="border-edge h-8 flex-1 rounded-control border text-caption text-ink-2 transition-colors duration-100 hover:text-ink"
+              @click="emit('restore')"
+            >
+              Restore
+            </button>
+            <button
+              type="button"
+              data-test="lightbox-delete-forever"
+              class="border-edge h-8 flex-1 rounded-control border text-caption text-ink-2 transition-colors duration-100 hover:text-stop"
+              @click="confirmingForever = true"
+            >
+              Delete forever
+            </button>
+          </template>
           <button
+            v-else
             type="button"
+            data-test="lightbox-delete"
             class="border-edge h-8 flex-1 rounded-control border text-caption transition-colors duration-100"
             :class="
               confirmingDelete
@@ -572,11 +831,22 @@ async function performVideoExport(options: VideoExportOptions) {
             @blur="confirmingDelete = false"
             @click="onDelete"
           >
-            {{ confirmingDelete ? "Delete? Can't be undone." : "Delete" }}
+            {{
+              canTrash ? "Move to trash" : confirmingDelete ? "Delete? Can't be undone." : "Delete"
+            }}
           </button>
         </div>
       </aside>
     </div>
+    <ConfirmDialog
+      :open="confirmingForever"
+      :title="`Delete “${headline}” forever?`"
+      message="This can't be undone."
+      confirm-label="Delete forever"
+      danger
+      @confirm="confirmDeleteForever"
+      @cancel="confirmingForever = false"
+    />
     <VideoExportDialog
       :open="exportOpen"
       :filename="item.filename"
@@ -601,6 +871,44 @@ async function performVideoExport(options: VideoExportOptions) {
   letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--ink-3);
+}
+
+/* Title lead line: display 16/600, a quiet underline that turns accent
+   while editing. 34px tall so it is a real target. */
+.lightbox-title {
+  display: block;
+  height: 34px;
+  font-family: var(--f-display);
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--rebate);
+  background: transparent;
+  border: 0;
+  border-bottom: 1.5px solid transparent;
+  padding: 0 0 2px;
+  outline: none;
+  line-height: 30px;
+  transition: border-color var(--dur-quick) var(--ease);
+}
+
+input.lightbox-title::placeholder {
+  color: var(--ink-3);
+  font-weight: 500;
+}
+
+input.lightbox-title:hover {
+  border-bottom-color: var(--edge);
+}
+
+input.lightbox-title:focus,
+.lightbox-title--editing {
+  border-bottom-color: var(--safelight);
+}
+
+/* The filled heart: the registry ships one outline glyph; the active state
+   fills it with the current (accent) color. */
+.lightbox-fav--on :deep(svg) {
+  fill: currentColor;
 }
 
 .ms-lib-upscaled {

@@ -6,13 +6,37 @@ import { evictHostMedia, evictMedia } from "../lib/gallery/media";
 import { useConnectionStore } from "./connection";
 import { useGalleryStore, type GalleryBucket } from "./gallery";
 import { useHostsStore } from "./hosts";
-import type { GalleryImage } from "../lib/api/types";
+import type { Collection, GalleryImage, ServerCapabilities } from "../lib/api/types";
+import * as organization from "@studio/api/galleryOrganization";
 
 vi.mock("../lib/ipc", () => ({
   ipc: {
     localGalleryList: vi.fn(),
     localGalleryDelete: vi.fn(),
+    localGalleryTrashList: vi.fn(),
+    localGalleryRestore: vi.fn(),
+    localGalleryDeleteForever: vi.fn(),
   },
+}));
+
+vi.mock("@studio/api/galleryOrganization", () => ({
+  patchGalleryImage: vi.fn(),
+  organizeGallery: vi.fn(),
+  listCollections: vi.fn(),
+  createCollection: vi.fn(),
+  updateCollection: vi.fn(),
+  deleteCollection: vi.fn(),
+  setCollectionItems: vi.fn(),
+  listTags: vi.fn(),
+  renameTag: vi.fn(),
+  deleteTag: vi.fn(),
+  trashGalleryImage: vi.fn(),
+  deleteGalleryImageForever: vi.fn(),
+  trashMany: vi.fn(),
+  restoreTrashed: vi.fn(),
+  emptyTrash: vi.fn(),
+  sweepTrash: vi.fn(),
+  listTrash: vi.fn(),
 }));
 
 vi.mock("../lib/api/client", () => ({
@@ -1033,5 +1057,837 @@ describe("undoable single-print delete (G12)", () => {
     gallery.buckets.local = loadedBucket([img("a.png", 1)]);
     await gallery.commitDelete("local", "a.png"); // never began
     expect(vi.mocked(ipc.localGalleryDelete)).not.toHaveBeenCalled();
+  });
+});
+
+// ── Library organization (titles / favorites / tags / collections / trash) ──
+
+const LOCAL_TARGET = { baseUrl: "http://127.0.0.1:49152", apiKey: "desktop-key" };
+const HAL_TARGET = { baseUrl: "http://hal9000:7680", apiKey: "hk" };
+
+/** Advertise organization + trash on a host (the "local" key is the engine). */
+function advertise(
+  hostKey: string,
+  options: { organize?: boolean; retentionDays?: number | null } = {},
+) {
+  const { organize = true, retentionDays = 30 } = options;
+  const caps: ServerCapabilities = {
+    gallery: {
+      can_delete: true,
+      organize,
+      trash: retentionDays === null ? null : { enabled: true, retention_days: retentionDays },
+    },
+  };
+  useHostsStore().capabilities[hostKey] = caps;
+}
+
+const organized = (
+  filename: string,
+  timestamp: number,
+  fields: Partial<GalleryImage> = {},
+): GalleryImage =>
+  ({ filename, timestamp, metadata: { prompt: "p", model: "flux" }, ...fields }) as never;
+
+const collection = (
+  id: string,
+  name: string,
+  count = 0,
+  cover: string | null = null,
+): Collection => ({
+  id,
+  name,
+  slug: name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, ""),
+  description: null,
+  cover_filename: cover,
+  count,
+  created_at: 1,
+  updated_at: 1,
+});
+
+const loadedCollections = (items: Collection[]) => ({
+  items,
+  loading: false,
+  error: null,
+  loaded: true,
+});
+
+describe("organization capability gating", () => {
+  it("reads organize/trash from the host capability snapshot; the local key is the engine", () => {
+    connectLocalPlusHal();
+    const gallery = useGalleryStore();
+    expect(gallery.organizeCapable("local")).toBe(false);
+    expect(gallery.trashCapable("local")).toBe(false);
+    expect(gallery.anyOrganizeCapable).toBe(false);
+
+    advertise("local", { retentionDays: 7 });
+    advertise("hal9000-7680", { organize: false, retentionDays: null });
+
+    expect(gallery.organizeCapable("local")).toBe(true);
+    expect(gallery.trashCapable("local")).toBe(true);
+    expect(gallery.organizeCapable("hal9000-7680")).toBe(false);
+    expect(gallery.trashCapable("hal9000-7680")).toBe(false);
+    expect(gallery.anyOrganizeCapable).toBe(true);
+    // Only trash-capable hosts feed the banner, This device first.
+    expect(gallery.retentionByHost).toEqual([
+      { key: "local", label: "This device", retentionDays: 7 },
+    ]);
+  });
+
+  it("old servers (no gallery.organize / gallery.trash) read as not capable", () => {
+    connectLocal();
+    useHostsStore().capabilities["local"] = { gallery: { can_delete: true } };
+    const gallery = useGalleryStore();
+    expect(gallery.organizeCapable("local")).toBe(false);
+    expect(gallery.trashCapable("local")).toBe(false);
+    expect(gallery.retentionByHost).toEqual([]);
+  });
+});
+
+describe("organization fetch", () => {
+  it("loads collections + tags per capable host and settles non-capable hosts empty", async () => {
+    connectLocalPlusHal();
+    advertise("local");
+    // hal9000 is an older server: no organize capability.
+    useHostsStore().capabilities["hal9000-7680"] = { gallery: { can_delete: true } };
+    vi.mocked(organization.listCollections).mockResolvedValue([collection("c1", "Smurfs", 2)]);
+    vi.mocked(organization.listTags).mockResolvedValue([{ name: "blue", count: 3 }]);
+    const gallery = useGalleryStore();
+
+    await gallery.fetchCollections();
+    await gallery.fetchTags();
+
+    expect(organization.listCollections).toHaveBeenCalledTimes(1);
+    expect(organization.listCollections).toHaveBeenCalledWith(LOCAL_TARGET);
+    expect(gallery.collectionsByHost["local"]!.items.map((c) => c.name)).toEqual(["Smurfs"]);
+    expect(gallery.collectionsByHost["hal9000-7680"]).toMatchObject({ items: [], loaded: true });
+    expect(gallery.tagsByHost["local"]!.items).toEqual([{ name: "blue", count: 3 }]);
+    expect(gallery.tagsByHost["hal9000-7680"]).toMatchObject({ items: [], loaded: true });
+  });
+
+  it("merges collections by slug and tags case-insensitively across hosts", () => {
+    connectLocalPlusHal();
+    const gallery = useGalleryStore();
+    gallery.collectionsByHost["local"] = loadedCollections([
+      collection("l1", "Smurfs", 2, "a.png"),
+      collection("l2", "River studies", 1),
+    ]);
+    gallery.collectionsByHost["hal9000-7680"] = loadedCollections([collection("h9", "smurfs", 5)]);
+    gallery.tagsByHost["local"] = { items: [{ name: "Blue", count: 2 }], loaded: true };
+    gallery.tagsByHost["hal9000-7680"] = {
+      items: [
+        { name: "blue", count: 1 },
+        { name: "portrait", count: 4 },
+      ],
+      loaded: true,
+    };
+
+    expect(gallery.mergedCollections.map((c) => [c.slug, c.count, c.hosts.length])).toEqual([
+      ["river-studies", 1, 1],
+      ["smurfs", 7, 2],
+    ]);
+    expect(gallery.mergedCollections[1]!.cover).toEqual({ hostId: "local", filename: "a.png" });
+    expect(gallery.mergedTags).toEqual([
+      { name: "portrait", count: 4 },
+      { name: "Blue", count: 3 },
+    ]);
+  });
+
+  it("lists the trash per host: the engine through the native command, hosts over HTTP, old hosts empty", async () => {
+    connectLocalPlusHal();
+    addExtra("okra-7680", "http://okra:7680", null);
+    advertise("local");
+    advertise("hal9000-7680");
+    useHostsStore().capabilities["okra-7680"] = { gallery: { can_delete: true } };
+    vi.mocked(ipc.localGalleryTrashList).mockResolvedValue({
+      images: [organized("t1.png", 10, { trashed_at: 1, purge_at: 2 })],
+      target: LOCAL_TARGET,
+    });
+    vi.mocked(organization.listTrash).mockResolvedValue([
+      organized("t2.png", 20, { trashed_at: 3 }),
+      organized("t1.png", 9, { trashed_at: 1 }),
+    ]);
+    const gallery = useGalleryStore();
+
+    await gallery.fetchTrash();
+
+    expect(ipc.localGalleryTrashList).toHaveBeenCalledTimes(1);
+    expect(organization.listTrash).toHaveBeenCalledTimes(1);
+    expect(organization.listTrash).toHaveBeenCalledWith(HAL_TARGET);
+    expect(gallery.trashBuckets["okra-7680"]).toMatchObject({ items: [], loaded: true });
+    // Same identity rules as the live grid: t1 is one print on two hosts.
+    expect(gallery.trashMerged.map((e) => [e.item.filename, e.sourceKey])).toEqual([
+      ["t2.png", "hal9000-7680"],
+      ["t1.png", "local"],
+    ]);
+    expect(gallery.trashMerged[1]!.availableOn.map((s) => s.key)).toEqual([
+      "local",
+      "hal9000-7680",
+    ]);
+    expect(gallery.trashCount).toBe(2);
+  });
+
+  it("fetchTrash on the engine with the server Off uses the native command without a capability", async () => {
+    const conn = useConnectionStore();
+    conn.info = { mode: "local", baseUrl: "http://127.0.0.1:49152", apiKey: null };
+    conn.status = "error";
+    vi.mocked(ipc.localGalleryTrashList).mockResolvedValue({
+      images: [organized("t1.png", 10, { trashed_at: 1 })],
+      target: null,
+    });
+    const gallery = useGalleryStore();
+    await gallery.fetchTrash("local");
+    expect(gallery.trashBuckets["local"]!.items).toHaveLength(1);
+    expect(gallery.trashBuckets["local"]!.authorityTarget).toBeNull();
+  });
+
+  it("orders trash buckets and trashMerged newest-DELETED first (trashed_at desc, timestamp fallback)", async () => {
+    connectLocalPlusHal();
+    advertise("local");
+    advertise("hal9000-7680");
+    // An OLD print deleted recently must sort above a NEWER print deleted
+    // earlier — the server's view=trash contract, not creation order.
+    vi.mocked(ipc.localGalleryTrashList).mockResolvedValue({
+      images: [
+        organized("new-deleted-early.png", 500, { trashed_at: 100 }),
+        organized("old-deleted-late.png", 10, { trashed_at: 900 }),
+      ],
+      target: LOCAL_TARGET,
+    });
+    // A legacy row without a deletion stamp falls back to its timestamp.
+    vi.mocked(organization.listTrash).mockResolvedValue([organized("no-stamp.png", 400)]);
+    const gallery = useGalleryStore();
+    await gallery.fetchTrash();
+    expect(gallery.trashBuckets["local"]!.items.map((i) => i.filename)).toEqual([
+      "old-deleted-late.png",
+      "new-deleted-early.png",
+    ]);
+    expect(gallery.trashMerged.map((e) => e.item.filename)).toEqual([
+      "old-deleted-late.png",
+      "no-stamp.png",
+      "new-deleted-early.png",
+    ]);
+  });
+
+  it("retentionByHost names This device from the offline IPC listing while the server is Off", async () => {
+    // Server Off: there is no "local" capability snapshot, but the offline
+    // `.trash/` is in use — the banner must not claim no machine keeps a
+    // trash while trash items are displayed.
+    const conn = useConnectionStore();
+    conn.info = { mode: "local", baseUrl: "http://127.0.0.1:49152", apiKey: null };
+    conn.status = "error";
+    vi.mocked(ipc.localGalleryTrashList).mockResolvedValue({
+      images: [organized("t1.png", 10, { trashed_at: 1 })],
+      target: null,
+      retentionDays: 14,
+    });
+    const gallery = useGalleryStore();
+    expect(gallery.retentionByHost).toEqual([]);
+    await gallery.fetchTrash("local");
+    expect(gallery.retentionByHost).toEqual([
+      { key: "local", label: "This device", retentionDays: 14 },
+    ]);
+  });
+
+  it("defaults offline retention to 30 days when the listing omits it, and yields to a running server's capabilities", async () => {
+    const conn = useConnectionStore();
+    conn.info = { mode: "local", baseUrl: "http://127.0.0.1:49152", apiKey: null };
+    conn.status = "error";
+    // Trashed items with no retention field (an older native listing):
+    // fall back to the documented 30-day config default. A field-less AND
+    // item-less snapshot is the browser-shell stub and claims nothing.
+    vi.mocked(ipc.localGalleryTrashList).mockResolvedValue({
+      images: [organized("t1.png", 10, { trashed_at: 1 })],
+      target: null,
+    });
+    const gallery = useGalleryStore();
+    await gallery.fetchTrash("local");
+    expect(gallery.retentionByHost).toEqual([
+      { key: "local", label: "This device", retentionDays: 30 },
+    ]);
+
+    // The engine comes back: its capability snapshot is the authority again.
+    connectLocal();
+    advertise("local", { retentionDays: 7 });
+    vi.mocked(ipc.localGalleryTrashList).mockResolvedValue({
+      images: [],
+      target: { baseUrl: "http://127.0.0.1:49152", apiKey: "desktop-key" },
+    });
+    await gallery.fetchTrash("local");
+    expect(gallery.localOfflineTrashRetentionDays).toBeNull();
+    expect(gallery.retentionByHost).toEqual([
+      { key: "local", label: "This device", retentionDays: 7 },
+    ]);
+  });
+});
+
+describe("organization union + filters", () => {
+  function seed() {
+    connectLocalPlusHal();
+    advertise("local");
+    advertise("hal9000-7680");
+    const gallery = useGalleryStore();
+    gallery.buckets["local"] = loadedBucket([
+      organized("shared.png", 300, { title: "Grain test", tags: ["Blue"], collections: ["l1"] }),
+      organized("solo.png", 200, { favorite: true, tags: ["blue", "portrait"] }),
+    ]);
+    gallery.buckets["hal9000-7680"] = loadedBucket([
+      organized("shared.png", 299, { favorite: true, tags: ["keep"], collections: ["h9"] }),
+      organized("remote.png", 100, { collections: ["h9"] }),
+    ]);
+    gallery.collectionsByHost["local"] = loadedCollections([collection("l1", "Smurfs", 1)]);
+    gallery.collectionsByHost["hal9000-7680"] = loadedCollections([
+      collection("h9", "Smurfs", 2),
+      collection("h2", "River studies", 0),
+    ]);
+    return gallery;
+  }
+
+  it("organizationOf unions favorite/tags/collections over every copy, local title first", () => {
+    const gallery = seed();
+    const shared = gallery.merged.find((e) => e.item.filename === "shared.png")!;
+    expect(gallery.organizationOf(shared)).toMatchObject({
+      title: "Grain test",
+      favorite: true,
+      tags: ["Blue", "keep"],
+      collections: ["smurfs"],
+      trashedAt: null,
+    });
+    // A host-chip entry still reads the whole print's union.
+    gallery.filter = "hal9000-7680";
+    const halShared = gallery.filtered.find((e) => e.item.filename === "shared.png")!;
+    expect(gallery.organizationOf(halShared).title).toBe("Grain test");
+  });
+
+  it("favoritesOnly and tag chips (AND over the union) narrow the grid", () => {
+    const gallery = seed();
+    gallery.favoritesOnly = true;
+    expect(gallery.filtered.map((e) => e.item.filename)).toEqual(["shared.png", "solo.png"]);
+    gallery.tagFilter = ["BLUE", "portrait"];
+    expect(gallery.filtered.map((e) => e.item.filename)).toEqual(["solo.png"]);
+    gallery.favoritesOnly = false;
+    gallery.tagFilter = ["keep"];
+    expect(gallery.filtered.map((e) => e.item.filename)).toEqual(["shared.png"]);
+  });
+
+  it("the open collection narrows the grid only in the Collections scope, ordered by the origin list when loaded", () => {
+    const gallery = seed();
+    gallery.collectionSlug = "smurfs";
+    expect(gallery.filtered).toHaveLength(3); // Prints scope ignores the drill-in
+    gallery.scope = "collections";
+    expect(gallery.filtered.map((e) => e.item.filename)).toEqual(["shared.png", "remote.png"]);
+    expect(gallery.collectionCounts("smurfs")).toBe(2);
+    expect(gallery.collectionCounts("river-studies")).toBe(0);
+    // Origin order: hal's list puts remote first.
+    gallery.collectionItemsByHost["hal9000-7680"] = { h9: ["remote.png", "shared.png"] };
+    expect(gallery.filtered.map((e) => e.item.filename)).toEqual(["remote.png", "shared.png"]);
+  });
+
+  it("text search also matches the title", () => {
+    const gallery = seed();
+    gallery.query = "grain";
+    expect(gallery.filtered.map((e) => e.item.filename)).toEqual(["shared.png"]);
+  });
+});
+
+describe("organization fan-out", () => {
+  function seed() {
+    connectLocalPlusHal();
+    addExtra("okra-7680", "http://okra:7680", null);
+    advertise("local");
+    advertise("hal9000-7680");
+    useHostsStore().capabilities["okra-7680"] = { gallery: { can_delete: true } }; // old server
+    const gallery = useGalleryStore();
+    gallery.buckets["local"] = loadedBucket([organized("shared.png", 300, { tags: ["blue"] })]);
+    gallery.buckets["hal9000-7680"] = loadedBucket([organized("shared.png", 299)]);
+    gallery.buckets["okra-7680"] = loadedBucket([organized("shared.png", 298)]);
+    gallery.collectionsByHost["local"] = loadedCollections([collection("l1", "Smurfs", 0)]);
+    gallery.collectionsByHost["hal9000-7680"] = loadedCollections([]);
+    gallery.tagsByHost["local"] = { items: [{ name: "blue", count: 1 }], loaded: true };
+    gallery.tagsByHost["hal9000-7680"] = { items: [], loaded: true };
+    vi.mocked(organization.organizeGallery).mockResolvedValue();
+    return gallery;
+  }
+
+  it("setTitle PATCHes every organize-capable copy and absorbs the echoed rows", async () => {
+    const gallery = seed();
+    vi.mocked(organization.patchGalleryImage).mockImplementation(
+      async (target, filename, body) =>
+        organized(filename, (target as { baseUrl: string }).baseUrl.includes("hal") ? 299 : 300, {
+          title: body.title ?? null,
+        }) as never,
+    );
+    const result = await gallery.setTitle(gallery.merged[0]!, "  Grain test ");
+    expect(result).toEqual({ applied: 2, failed: 0, failedHosts: [], error: null });
+    expect(organization.patchGalleryImage).toHaveBeenCalledTimes(2);
+    expect(organization.patchGalleryImage).toHaveBeenCalledWith(LOCAL_TARGET, "shared.png", {
+      title: "Grain test",
+    });
+    expect(organization.patchGalleryImage).toHaveBeenCalledWith(HAL_TARGET, "shared.png", {
+      title: "Grain test",
+    });
+    expect(gallery.buckets["local"]!.items[0]!.title).toBe("Grain test");
+    expect(gallery.buckets["hal9000-7680"]!.items[0]!.title).toBe("Grain test");
+    // okra cannot organize: skipped, not failed, row untouched.
+    expect(gallery.buckets["okra-7680"]!.items[0]!.title).toBeUndefined();
+    expect(gallery.organizationOf(gallery.merged[0]!).title).toBe("Grain test");
+  });
+
+  it("clearing a title sends the empty string the PATCH contract expects", async () => {
+    const gallery = seed();
+    vi.mocked(organization.patchGalleryImage).mockResolvedValue(null);
+    await gallery.setTitle(gallery.merged[0]!, "   ");
+    expect(organization.patchGalleryImage).toHaveBeenCalledWith(LOCAL_TARGET, "shared.png", {
+      title: "",
+    });
+  });
+
+  it("setFavorite / addTags / removeTags go through /organize per host and update rows + tag counts", async () => {
+    const gallery = seed();
+    const print = gallery.merged[0]!;
+
+    await gallery.setFavorite(print, true);
+    expect(organization.organizeGallery).toHaveBeenCalledWith(LOCAL_TARGET, {
+      filenames: ["shared.png"],
+      favorite: true,
+    });
+    expect(gallery.buckets["hal9000-7680"]!.items[0]!.favorite).toBe(true);
+    expect(gallery.organizationOf(print).favorite).toBe(true);
+
+    await gallery.addTags(print, ["#Blue", " portrait "]);
+    expect(organization.organizeGallery).toHaveBeenCalledWith(HAL_TARGET, {
+      filenames: ["shared.png"],
+      add_tags: ["Blue", "portrait"],
+    });
+    // local already had "blue": only portrait is new there.
+    expect(gallery.buckets["local"]!.items[0]!.tags).toEqual(["blue", "portrait"]);
+    expect(gallery.tagsByHost["local"]!.items).toEqual([
+      { name: "blue", count: 1 },
+      { name: "portrait", count: 1 },
+    ]);
+    expect(gallery.tagsByHost["hal9000-7680"]!.items).toEqual([
+      { name: "Blue", count: 1 },
+      { name: "portrait", count: 1 },
+    ]);
+
+    await gallery.removeTags(print, ["BLUE"]);
+    expect(organization.organizeGallery).toHaveBeenCalledWith(LOCAL_TARGET, {
+      filenames: ["shared.png"],
+      remove_tags: ["BLUE"],
+    });
+    expect(gallery.buckets["local"]!.items[0]!.tags).toEqual(["portrait"]);
+    expect(gallery.tagsByHost["local"]!.items).toEqual([{ name: "portrait", count: 1 }]);
+    expect(gallery.organizationOf(print).tags).toEqual(["portrait"]);
+  });
+
+  it("addToCollection creates the collection by name on hosts lacking the slug first", async () => {
+    const gallery = seed();
+    vi.mocked(organization.createCollection).mockResolvedValue(collection("h9", "Smurfs", 0));
+    const result = await gallery.addToCollection(gallery.merged[0]!, {
+      slug: "smurfs",
+      name: "Smurfs",
+    });
+    expect(result.failed).toBe(0);
+    // local already has it; hal creates it.
+    expect(organization.createCollection).toHaveBeenCalledTimes(1);
+    expect(organization.createCollection).toHaveBeenCalledWith(HAL_TARGET, { name: "Smurfs" });
+    expect(organization.organizeGallery).toHaveBeenCalledWith(LOCAL_TARGET, {
+      filenames: ["shared.png"],
+      add_to_collections: ["l1"],
+    });
+    expect(organization.organizeGallery).toHaveBeenCalledWith(HAL_TARGET, {
+      filenames: ["shared.png"],
+      add_to_collections: ["h9"],
+    });
+    expect(gallery.buckets["local"]!.items[0]!.collections).toEqual(["l1"]);
+    expect(gallery.buckets["hal9000-7680"]!.items[0]!.collections).toEqual(["h9"]);
+    expect(gallery.mergedCollections.find((c) => c.slug === "smurfs")!.count).toBe(2);
+    expect(gallery.organizationOf(gallery.merged[0]!).collections).toEqual(["smurfs"]);
+
+    await gallery.removeFromCollection(gallery.merged[0]!, "smurfs");
+    expect(organization.organizeGallery).toHaveBeenCalledWith(HAL_TARGET, {
+      filenames: ["shared.png"],
+      remove_from_collections: ["h9"],
+    });
+    expect(gallery.buckets["local"]!.items[0]!.collections).toEqual([]);
+    expect(gallery.mergedCollections.find((c) => c.slug === "smurfs")!.count).toBe(0);
+  });
+
+  it("organizeMany dedupes copies per host for bulk selections and reports failed hosts", async () => {
+    const gallery = seed();
+    gallery.buckets["local"]!.items.push(organized("two.png", 50));
+    gallery.buckets["hal9000-7680"]!.items.push(organized("two.png", 49));
+    vi.mocked(organization.organizeGallery).mockImplementation((target) =>
+      (target as { baseUrl: string }).baseUrl.includes("hal")
+        ? Promise.reject(new Error("hal is busy"))
+        : Promise.resolve(),
+    );
+    vi.mocked(apiJsonTo).mockResolvedValue([]);
+    vi.mocked(organization.listCollections).mockResolvedValue([]);
+
+    const result = await gallery.organizeMany(gallery.merged, {
+      kind: "setFavorite",
+      favorite: true,
+    });
+
+    expect(result).toEqual({
+      applied: 1,
+      failed: 1,
+      failedHosts: ["hal9000-7680"],
+      error: "hal is busy",
+    });
+    expect(organization.organizeGallery).toHaveBeenCalledWith(LOCAL_TARGET, {
+      filenames: ["shared.png", "two.png"],
+      favorite: true,
+    });
+    // The failed origin was refetched to reconverge.
+    expect(apiJsonTo).toHaveBeenCalledWith(HAL_TARGET, "/api/gallery");
+  });
+
+  it("collections CRUD fans out to every host holding the slug", async () => {
+    const gallery = seed();
+    gallery.collectionsByHost["hal9000-7680"] = loadedCollections([collection("h9", "Smurfs", 1)]);
+    vi.mocked(organization.updateCollection).mockImplementation(async (_t, id, body) =>
+      collection(id, body.name ?? "Smurfs", 1, body.cover_filename ?? null),
+    );
+    vi.mocked(organization.deleteCollection).mockResolvedValue();
+    vi.mocked(organization.createCollection).mockImplementation(async (target, body) =>
+      collection(
+        (target as { baseUrl: string }).baseUrl.includes("hal") ? "h-new" : "l-new",
+        body.name,
+      ),
+    );
+
+    const created = await gallery.createCollection("River studies");
+    expect(created.slug).toBe("river-studies");
+    expect(organization.createCollection).toHaveBeenCalledTimes(2); // local + hal, not okra
+    expect(gallery.mergedCollections.map((c) => c.slug)).toEqual(["river-studies", "smurfs"]);
+
+    gallery.collectionSlug = "smurfs";
+    const renamed = await gallery.renameCollection("smurfs", "Blue cats");
+    expect(renamed.failed).toBe(0);
+    expect(organization.updateCollection).toHaveBeenCalledWith(LOCAL_TARGET, "l1", {
+      name: "Blue cats",
+    });
+    expect(organization.updateCollection).toHaveBeenCalledWith(HAL_TARGET, "h9", {
+      name: "Blue cats",
+    });
+    expect(gallery.collectionSlug).toBe("blue-cats");
+
+    // The server echoes the whole row: the name survives a cover change.
+    vi.mocked(organization.updateCollection).mockImplementation(async (_t, id, body) =>
+      collection(id, "Blue cats", 1, body.cover_filename ?? null),
+    );
+    await gallery.setCollectionCover("blue-cats", gallery.merged[0]!);
+    expect(organization.updateCollection).toHaveBeenCalledWith(LOCAL_TARGET, "l1", {
+      cover_filename: "shared.png",
+    });
+    expect(gallery.mergedCollections.find((c) => c.slug === "blue-cats")!.cover).toEqual({
+      hostId: "local",
+      filename: "shared.png",
+    });
+
+    gallery.buckets["local"]!.items[0]!.collections = ["l1"];
+    await gallery.deleteCollection("blue-cats");
+    expect(organization.deleteCollection).toHaveBeenCalledWith(LOCAL_TARGET, "l1");
+    expect(organization.deleteCollection).toHaveBeenCalledWith(HAL_TARGET, "h9");
+    expect(gallery.mergedCollections.map((c) => c.slug)).toEqual(["river-studies"]);
+    expect(gallery.buckets["local"]!.items[0]!.collections).toEqual([]);
+    expect(gallery.collectionSlug).toBeNull();
+  });
+});
+
+describe("trash", () => {
+  it("a plain delete moves the row into the trash on a trash-capable host (media kept), hard-deletes elsewhere", async () => {
+    connectLocalPlusHal();
+    advertise("local", { retentionDays: 30 });
+    useHostsStore().capabilities["hal9000-7680"] = { gallery: { can_delete: true } };
+    const gallery = useGalleryStore();
+    gallery.buckets["local"] = loadedBucket([img("a.png", 10)]);
+    gallery.buckets["hal9000-7680"] = loadedBucket([img("h.png", 9)]);
+    gallery.trashBuckets["local"] = loadedBucket([]);
+    vi.mocked(apiFetchTo).mockResolvedValue(new Response(null, { status: 204 }) as never);
+    vi.mocked(ipc.localGalleryTrashList).mockResolvedValue({ images: [], target: LOCAL_TARGET });
+
+    await gallery.remove("local", "a.png");
+    expect(apiFetchTo).toHaveBeenCalledWith(LOCAL_TARGET, "/api/gallery/image/a.png", {
+      method: "DELETE",
+    });
+    expect(gallery.buckets["local"]!.items).toHaveLength(0);
+    expect(gallery.trashBuckets["local"]!.items.map((i) => i.filename)).toEqual(["a.png"]);
+    expect(gallery.trashBuckets["local"]!.items[0]!.trashed_at).toEqual(expect.any(Number));
+    expect(gallery.trashBuckets["local"]!.items[0]!.purge_at).toBeGreaterThan(
+      gallery.trashBuckets["local"]!.items[0]!.trashed_at!,
+    );
+    expect(evictMedia).not.toHaveBeenCalled();
+
+    await gallery.remove("hal9000-7680", "h.png");
+    expect(gallery.buckets["hal9000-7680"]!.items).toHaveLength(0);
+    expect(gallery.trashBuckets["hal9000-7680"]).toBeUndefined();
+    expect(evictMedia).toHaveBeenCalled();
+  });
+
+  it("permanent removal bypasses the trash on every route", async () => {
+    connectLocalPlusHal();
+    advertise("local");
+    const gallery = useGalleryStore();
+    gallery.buckets["local"] = loadedBucket([img("a.png", 10)]);
+    gallery.trashBuckets["local"] = loadedBucket([img("t.png", 5)]);
+    vi.mocked(apiFetchTo).mockResolvedValue(new Response(null, { status: 204 }) as never);
+
+    await gallery.remove("local", "t.png", { permanent: true });
+    expect(apiFetchTo).toHaveBeenCalledWith(
+      LOCAL_TARGET,
+      "/api/gallery/image/t.png?permanent=true",
+      { method: "DELETE" },
+    );
+    expect(gallery.trashBuckets["local"]!.items).toHaveLength(0);
+
+    // Engine Off: the native command.
+    const conn = useConnectionStore();
+    conn.status = "error";
+    gallery.buckets["local"]!.authorityResolved = false;
+    vi.mocked(ipc.localGalleryDeleteForever).mockResolvedValue();
+    await gallery.remove("local", "a.png", { permanent: true });
+    expect(ipc.localGalleryDeleteForever).toHaveBeenCalledWith("a.png");
+    expect(gallery.buckets["local"]!.items).toHaveLength(0);
+  });
+
+  it("the 6 s undo commit lands in the trash, and a loaded trash bucket refetches for authoritative stamps", async () => {
+    connectLocal();
+    advertise("local");
+    const gallery = useGalleryStore();
+    gallery.buckets["local"] = loadedBucket([img("a.png", 10)]);
+    gallery.trashBuckets["local"] = loadedBucket([]);
+    vi.mocked(apiFetchTo).mockResolvedValue(new Response(null, { status: 204 }) as never);
+    vi.mocked(ipc.localGalleryTrashList).mockResolvedValue({
+      images: [organized("a.png", 10, { trashed_at: 123, purge_at: 456 })],
+      target: LOCAL_TARGET,
+    });
+
+    gallery.beginDelete("local", "a.png");
+    expect(gallery.merged).toHaveLength(0);
+    await gallery.commitDelete("local", "a.png");
+
+    expect(ipc.localGalleryTrashList).toHaveBeenCalledTimes(1);
+    expect(gallery.trashMerged.map((e) => e.item.purge_at)).toEqual([456]);
+  });
+
+  it("restore puts every trashed copy back in place and reports a 409 as failed", async () => {
+    connectLocalPlusHal();
+    advertise("local");
+    advertise("hal9000-7680");
+    const gallery = useGalleryStore();
+    gallery.buckets["local"] = loadedBucket([]);
+    gallery.buckets["hal9000-7680"] = loadedBucket([]);
+    gallery.trashBuckets["local"] = loadedBucket([organized("a.png", 10, { trashed_at: 1 })]);
+    gallery.trashBuckets["hal9000-7680"] = loadedBucket([organized("a.png", 9, { trashed_at: 1 })]);
+    vi.mocked(organization.restoreTrashed).mockImplementation((target) =>
+      (target as { baseUrl: string }).baseUrl.includes("hal")
+        ? Promise.reject(new Error("409 GALLERY_RESTORE_CONFLICT"))
+        : Promise.resolve(),
+    );
+    vi.mocked(organization.listTrash).mockResolvedValue([organized("a.png", 9, { trashed_at: 1 })]);
+    vi.mocked(apiJsonTo).mockResolvedValue([]);
+
+    const result = await gallery.restore([gallery.trashMerged[0]!]);
+
+    expect(result).toMatchObject({
+      applied: 1,
+      failed: 1,
+      failedHosts: ["hal9000-7680"],
+      restored: 1,
+    });
+    expect(result.error).toContain("409");
+    expect(organization.restoreTrashed).toHaveBeenCalledWith(LOCAL_TARGET, ["a.png"]);
+    expect(gallery.buckets["local"]!.items.map((i) => [i.filename, i.trashed_at])).toEqual([
+      ["a.png", null],
+    ]);
+    expect(gallery.trashBuckets["local"]!.items).toHaveLength(0);
+    // The failed host's trash was refetched: its copy is still there.
+    expect(gallery.trashBuckets["hal9000-7680"]!.items).toHaveLength(1);
+  });
+
+  it("restore uses the native command for the host-less engine bucket", async () => {
+    const conn = useConnectionStore();
+    conn.info = { mode: "local", baseUrl: "http://127.0.0.1:49152", apiKey: null };
+    conn.status = "error";
+    const gallery = useGalleryStore();
+    gallery.buckets["local"] = loadedBucket([]);
+    gallery.trashBuckets["local"] = loadedBucket([organized("a.png", 10, { trashed_at: 1 })]);
+    vi.mocked(ipc.localGalleryRestore).mockResolvedValue();
+
+    await gallery.restore([gallery.trashMerged[0]!]);
+    expect(ipc.localGalleryRestore).toHaveBeenCalledWith("a.png");
+    expect(gallery.buckets["local"]!.items.map((i) => i.filename)).toEqual(["a.png"]);
+  });
+
+  it("deleteForever hard-deletes every live and trashed copy", async () => {
+    connectLocalPlusHal();
+    advertise("local");
+    advertise("hal9000-7680");
+    const gallery = useGalleryStore();
+    gallery.buckets["local"] = loadedBucket([]);
+    gallery.buckets["hal9000-7680"] = loadedBucket([img("a.png", 9)]);
+    gallery.trashBuckets["local"] = loadedBucket([organized("a.png", 10, { trashed_at: 1 })]);
+    vi.mocked(apiFetchTo).mockResolvedValue(new Response(null, { status: 204 }) as never);
+
+    const result = await gallery.deleteForever([gallery.trashMerged[0]!]);
+
+    expect(result).toEqual({ deletedPrints: 1, failedPrints: 0, deletedCopies: 2, error: null });
+    expect(apiFetchTo).toHaveBeenCalledWith(
+      LOCAL_TARGET,
+      "/api/gallery/image/a.png?permanent=true",
+      { method: "DELETE" },
+    );
+    expect(apiFetchTo).toHaveBeenCalledWith(HAL_TARGET, "/api/gallery/image/a.png?permanent=true", {
+      method: "DELETE",
+    });
+    expect(gallery.trashBuckets["local"]!.items).toHaveLength(0);
+    expect(gallery.buckets["hal9000-7680"]!.items).toHaveLength(0);
+  });
+
+  it("emptyTrash purges every trash-capable host and clears their buckets", async () => {
+    connectLocalPlusHal();
+    addExtra("okra-7680", "http://okra:7680", null);
+    advertise("local");
+    advertise("hal9000-7680");
+    useHostsStore().capabilities["okra-7680"] = { gallery: { can_delete: true } };
+    const gallery = useGalleryStore();
+    gallery.trashBuckets["local"] = loadedBucket([organized("a.png", 10, { trashed_at: 1 })]);
+    gallery.trashBuckets["hal9000-7680"] = loadedBucket([organized("b.png", 9, { trashed_at: 1 })]);
+    vi.mocked(organization.emptyTrash).mockResolvedValue({ purged: 1 });
+
+    const result = await gallery.emptyTrash();
+
+    expect(result).toMatchObject({ purged: 2, failed: 0 });
+    expect(organization.emptyTrash).toHaveBeenCalledTimes(2);
+    expect(organization.emptyTrash).not.toHaveBeenCalledWith({
+      baseUrl: "http://okra:7680",
+      apiKey: null,
+    });
+    expect(gallery.trashCount).toBe(0);
+    expect(evictMedia).toHaveBeenCalled();
+  });
+
+  it("sweepTrash purges expired prints on one host and refetches its trash", async () => {
+    connectLocal();
+    advertise("local");
+    const gallery = useGalleryStore();
+    gallery.trashBuckets["local"] = loadedBucket([organized("a.png", 10, { trashed_at: 1 })]);
+    vi.mocked(organization.sweepTrash).mockResolvedValue({ purged: 1, remaining: 0 });
+    vi.mocked(ipc.localGalleryTrashList).mockResolvedValue({ images: [], target: LOCAL_TARGET });
+
+    const result = await gallery.sweepTrash("local");
+    expect(result).toEqual({ purged: 1, remaining: 0 });
+    expect(gallery.trashBuckets["local"]!.items).toHaveLength(0);
+  });
+});
+
+describe("organization server events", () => {
+  it("applyUpdated replaces the primary row in place (live or trash)", () => {
+    connectLocal();
+    const gallery = useGalleryStore();
+    gallery.buckets["local"] = loadedBucket([img("a.png", 10), img("b.png", 5)]);
+    gallery.trashBuckets["local"] = loadedBucket([organized("t.png", 3, { trashed_at: 1 })]);
+
+    gallery.applyUpdated({
+      type: "gallery_updated",
+      filename: "b.png",
+      image: organized("b.png", 5, { title: "Named", favorite: true }),
+    });
+    expect(gallery.buckets["local"]!.items.map((i) => [i.filename, i.title])).toEqual([
+      ["a.png", undefined],
+      ["b.png", "Named"],
+    ]);
+    gallery.applyUpdated({
+      type: "gallery_updated",
+      filename: "t.png",
+      image: organized("t.png", 3, { trashed_at: 1, tags: ["x"] }),
+    });
+    expect(gallery.trashBuckets["local"]!.items[0]!.tags).toEqual(["x"]);
+  });
+
+  it("applyUpdated without a row debounces a refetch of the primary", async () => {
+    vi.useFakeTimers();
+    try {
+      connectLocal();
+      const gallery = useGalleryStore();
+      gallery.buckets["local"] = loadedBucket([]);
+      gallery.applyUpdated({ type: "gallery_updated", filename: "a.png", image: null });
+      gallery.applyUpdated({ type: "gallery_updated", filename: "b.png", image: null });
+      await vi.advanceTimersByTimeAsync(600);
+      expect(ipc.localGalleryList).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("applyTrashed moves the primary's row into its loaded trash; applyRestored brings it back", () => {
+    connectLocal();
+    advertise("local", { retentionDays: 7 });
+    const gallery = useGalleryStore();
+    gallery.buckets["local"] = loadedBucket([img("a.png", 10)]);
+    gallery.trashBuckets["local"] = loadedBucket([]);
+
+    gallery.applyTrashed("a.png");
+    expect(gallery.buckets["local"]!.items).toHaveLength(0);
+    const trashed = gallery.trashBuckets["local"]!.items[0]!;
+    expect(trashed.filename).toBe("a.png");
+    expect(trashed.purge_at! - trashed.trashed_at!).toBe(7 * 86_400);
+
+    gallery.applyRestored({ type: "gallery_restored", filename: "a.png", image: null });
+    expect(gallery.trashBuckets["local"]!.items).toHaveLength(0);
+    expect(gallery.buckets["local"]!.items.map((i) => [i.filename, i.trashed_at])).toEqual([
+      ["a.png", null],
+    ]);
+  });
+
+  it("applyTrashed drops the live row even when the trash was never listed", () => {
+    connectLocal();
+    const gallery = useGalleryStore();
+    gallery.buckets["local"] = loadedBucket([img("a.png", 10)]);
+    gallery.applyTrashed("a.png");
+    expect(gallery.buckets["local"]!.items).toHaveLength(0);
+    expect(gallery.trashBuckets["local"]).toBeUndefined();
+  });
+
+  it("applyRemoved also drops a purged row from the trash", () => {
+    connectLocal();
+    const gallery = useGalleryStore();
+    gallery.buckets["local"] = loadedBucket([]);
+    gallery.trashBuckets["local"] = loadedBucket([organized("t.png", 3, { trashed_at: 1 })]);
+    gallery.applyRemoved("t.png");
+    expect(gallery.trashBuckets["local"]!.items).toHaveLength(0);
+  });
+
+  it("applyCollectionsChanged refetches the primary's loaded listing only", async () => {
+    connectLocal();
+    advertise("local");
+    const gallery = useGalleryStore();
+    vi.mocked(organization.listCollections).mockResolvedValue([collection("c1", "Smurfs")]);
+
+    gallery.applyCollectionsChanged();
+    expect(organization.listCollections).not.toHaveBeenCalled();
+
+    gallery.collectionsByHost["local"] = loadedCollections([]);
+    gallery.applyCollectionsChanged();
+    await Promise.resolve();
+    expect(organization.listCollections).toHaveBeenCalledWith(LOCAL_TARGET);
+  });
+
+  it("syncBuckets drops organization state for vanished sources", async () => {
+    connectLocalPlusHal();
+    const gallery = useGalleryStore();
+    gallery.trashBuckets["hal9000-7680"] = loadedBucket([]);
+    gallery.collectionsByHost["hal9000-7680"] = loadedCollections([]);
+    gallery.tagsByHost["hal9000-7680"] = { items: [], loaded: true };
+    useHostsStore().extras.splice(0);
+    gallery.syncBuckets();
+    expect(gallery.trashBuckets["hal9000-7680"]).toBeUndefined();
+    expect(gallery.collectionsByHost["hal9000-7680"]).toBeUndefined();
+    expect(gallery.tagsByHost["hal9000-7680"]).toBeUndefined();
   });
 });

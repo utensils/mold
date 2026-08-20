@@ -179,6 +179,12 @@ enum LocalGalleryAuthority<'a> {
 pub struct LocalGallerySnapshot {
     images: Vec<mold_core::GalleryImage>,
     target: Option<LocalGalleryTarget>,
+    /// The retention this device's OFFLINE `.trash/` sweep would apply, so
+    /// the Trash banner can name This Mac while no capability snapshot
+    /// exists. `None` whenever a running local server is the authority (its
+    /// `/api/capabilities` carries the value) and on the live listing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    retention_days: Option<u32>,
 }
 
 #[derive(Serialize)]
@@ -253,6 +259,7 @@ pub async fn local_gallery_list(
         return Ok(LocalGallerySnapshot {
             images,
             target: Some(target),
+            retention_days: None,
         });
     }
     let LocalGalleryAuthority::Offline(_guard) = authority else {
@@ -262,28 +269,423 @@ pub async fn local_gallery_list(
         return Ok(LocalGallerySnapshot {
             images: Vec::new(),
             target: None,
+            retention_days: None,
         });
     };
-    let images = tauri::async_runtime::spawn_blocking(
-        move || -> Result<Vec<mold_core::GalleryImage>, String> {
-            if !dir.is_dir() {
-                return Ok(Vec::new());
-            }
-            if let Some(db) = mold_db::global_db() {
-                let rows = db.list(Some(&dir)).map_err(|error| format!("{error:#}"))?;
-                if !rows.is_empty() {
-                    return Ok(rows.iter().map(|row| row.to_gallery_image()).collect());
-                }
-            }
-            Ok(scan(&dir))
-        },
-    )
+    let images = tauri::async_runtime::spawn_blocking(move || {
+        offline_live_images(&dir, mold_db::global_db())
+    })
     .await
     .map_err(|error| error.to_string())??;
     Ok(LocalGallerySnapshot {
         images,
         target: None,
+        retention_days: None,
     })
+}
+
+/// The trashed prints of this device's gallery (`GET /api/gallery?view=trash`
+/// while the local server runs; the `.trash/` rows otherwise). Same snapshot
+/// shape as [`local_gallery_list`] so the store reuses one reader.
+#[tauri::command]
+pub async fn local_gallery_trash_list(
+    state: tauri::State<'_, AppState>,
+) -> Result<LocalGallerySnapshot, String> {
+    let authority = local_gallery_authority(&state).await;
+    if let LocalGalleryAuthority::Server(info) = authority {
+        let target = LocalGalleryTarget::from_server(&info)?;
+        let response = reqwest::Client::new()
+            .get(server_url(&info, "/api/gallery?view=trash"))
+            .header("X-Api-Key", api_key(&info)?)
+            .send()
+            .await
+            .map_err(|error| format!("Couldn't reach the local gallery server: {error}"))?;
+        if !response.status().is_success() {
+            return Err(response_error(response).await);
+        }
+        let images = response
+            .json()
+            .await
+            .map_err(|error| format!("Invalid local gallery response: {error}"))?;
+        return Ok(LocalGallerySnapshot {
+            images,
+            target: Some(target),
+            retention_days: None,
+        });
+    }
+    let LocalGalleryAuthority::Offline(_guard) = authority else {
+        unreachable!()
+    };
+    let Some(dir) = output_dir() else {
+        // Output disabled: there is no offline trash to keep, so no
+        // retention to advertise either.
+        return Ok(LocalGallerySnapshot {
+            images: Vec::new(),
+            target: None,
+            retention_days: None,
+        });
+    };
+    let retention_days = offline_trash_retention_days();
+    let images = tauri::async_runtime::spawn_blocking(move || {
+        offline_trash_images(&dir, mold_db::global_db(), retention_days)
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+    Ok(LocalGallerySnapshot {
+        images,
+        target: None,
+        retention_days: Some(retention_days),
+    })
+}
+
+// ── Offline trash (the lifecycle guard proves no local server runs) ───────
+//
+// These helpers take the gallery directory and the metadata DB explicitly so
+// the commands above stay thin and the trash arithmetic is testable against
+// a tempdir + in-memory DB. They mirror the server's `gallery_trash.rs`
+// primitives: move the bytes to `<output_dir>/.trash/<filename>`, write the
+// tombstone, flag the row (`mold_db::trash`). Never call them while the
+// server runs — the `Server` arm of every command routes over HTTP.
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// The retention the embedded engine would apply, read through the DB
+/// overlay like every other local surface (`Config::load_or_default`).
+fn offline_trash_retention_days() -> u32 {
+    mold_core::Config::load_or_default()
+        .gallery
+        .effective_trash_retention_days()
+}
+
+/// `dir/filename` when it exists AND canonicalizes inside `dir`; `None` when
+/// it does not exist; an error for anything escaping the directory.
+fn contained_file(
+    dir: &std::path::Path,
+    filename: &str,
+) -> Result<Option<std::path::PathBuf>, String> {
+    let path = dir.join(filename);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let root = dir.canonicalize().map_err(|error| error.to_string())?;
+    let candidate = path.canonicalize().map_err(|error| error.to_string())?;
+    if !candidate.starts_with(&root) || !candidate.is_file() {
+        return Err("Invalid gallery filename.".into());
+    }
+    Ok(Some(candidate))
+}
+
+/// Where a print's bytes live offline. A live-view lookup prefers the live
+/// file, then its `.trash/` copy (trashed rows keep their media reachable —
+/// thumbnails, the Trash lightbox — exactly as the server resolves trashed
+/// rows into `.trash/`). A trash-view lookup (`from_trash`) prefers the
+/// `.trash/` copy, so a trashed print is never shadowed by a NEW live file
+/// that later landed under the same name.
+fn offline_media_path(
+    dir: &std::path::Path,
+    filename: &str,
+    from_trash: bool,
+) -> Result<Option<std::path::PathBuf>, String> {
+    let trash_dir = mold_db::trash::trash_dir(dir);
+    let (first, second) = if from_trash {
+        (trash_dir.as_path(), dir)
+    } else {
+        (dir, trash_dir.as_path())
+    };
+    if let Some(found) = contained_file(first, filename)? {
+        return Ok(Some(found));
+    }
+    contained_file(second, filename)
+}
+
+/// Live prints only: DB rows with `trashed_at_ms IS NULL`, else a disk scan
+/// (which never descends into `.trash/`).
+fn offline_live_images(
+    dir: &std::path::Path,
+    db: Option<&mold_db::MetadataDb>,
+) -> Result<Vec<mold_core::GalleryImage>, String> {
+    if !dir.is_dir() {
+        return Ok(Vec::new());
+    }
+    if let Some(db) = db {
+        let rows = db
+            .list_live(Some(dir))
+            .map_err(|error| format!("{error:#}"))?;
+        if !rows.is_empty() {
+            return Ok(rows.iter().map(|row| row.to_gallery_image()).collect());
+        }
+    }
+    Ok(scan(dir))
+}
+
+/// Trashed prints: DB rows with `trashed_at_ms` set (purge stamps derived
+/// from `retention_days`), unioned with the tombstoned files in `.trash/`
+/// that have no row — a DB-less install, or an entry whose row was stolen
+/// by a same-name replacement — so everything restorable is listed.
+fn offline_trash_images(
+    dir: &std::path::Path,
+    db: Option<&mold_db::MetadataDb>,
+    retention_days: u32,
+) -> Result<Vec<mold_core::GalleryImage>, String> {
+    let trash_dir = mold_db::trash::trash_dir(dir);
+    if !trash_dir.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut listed: Vec<mold_core::GalleryImage> = Vec::new();
+    let mut covered = std::collections::HashSet::new();
+    if let Some(db) = db {
+        let rows = db
+            .list_trashed(Some(dir))
+            .map_err(|error| format!("{error:#}"))?;
+        for row in &rows {
+            covered.insert(row.filename.clone());
+            let mut image = row.to_gallery_image();
+            image.purge_at = row
+                .trashed_at_ms
+                .and_then(|t| mold_db::trash::purge_at_ms(t, retention_days))
+                .map(|ms| (ms / 1000) as u64);
+            listed.push(image);
+        }
+    }
+    let mut images: Vec<_> = scan(&trash_dir)
+        .into_iter()
+        .filter(|image| !covered.contains(&image.filename))
+        .map(|mut image| {
+            let tombstone = mold_db::trash::read_tombstone(&mold_db::trash::tombstone_path(
+                &trash_dir,
+                &image.filename,
+            ))
+            .ok();
+            if let Some(tombstone) = tombstone {
+                if let Some(metadata) = tombstone
+                    .metadata_json
+                    .as_deref()
+                    .and_then(|json| serde_json::from_str(json).ok())
+                {
+                    image.metadata = metadata;
+                    image.metadata_synthetic = false;
+                }
+                image.title = tombstone.title.or(image.title);
+                image.favorite = tombstone.favorite;
+                image.tags = tombstone.tags;
+                image.trashed_at = Some((tombstone.trashed_at_ms / 1000) as u64);
+                image.purge_at =
+                    mold_db::trash::purge_at_ms(tombstone.trashed_at_ms, retention_days)
+                        .map(|ms| (ms / 1000) as u64);
+            } else {
+                image.trashed_at = Some(image.timestamp);
+                image.purge_at =
+                    mold_db::trash::purge_at_ms(image.timestamp as i64 * 1000, retention_days)
+                        .map(|ms| (ms / 1000) as u64);
+            }
+            image
+        })
+        .collect();
+    images.append(&mut listed);
+    images.sort_by_key(|image| std::cmp::Reverse(image.trashed_at.unwrap_or(image.timestamp)));
+    Ok(images)
+}
+
+/// First free name for an incoming trash entry: `<name>`, then
+/// `<stem>-2.<ext>`, `-3`, … Free means no trashed bytes, no tombstone, no
+/// live file, and (past the original name, whose row is the one being
+/// re-keyed) no DB row already claim it. An existing trash entry must NEVER
+/// be renamed over — that silently destroys the previously trashed bytes
+/// AND their tombstone.
+fn unique_trash_name(
+    dir: &std::path::Path,
+    trash_dir: &std::path::Path,
+    db: &mold_db::MetadataDb,
+    filename: &str,
+) -> Result<String, String> {
+    let taken = |name: &str| -> Result<bool, String> {
+        if trash_dir.join(name).exists() || mold_db::trash::tombstone_path(trash_dir, name).exists()
+        {
+            return Ok(true);
+        }
+        if name == filename {
+            return Ok(false);
+        }
+        // A de-conflicted candidate must also dodge live files and other
+        // rows: the rename re-keys the row, and a restore lands at
+        // `dir/<name>`.
+        if dir.join(name).exists() {
+            return Ok(true);
+        }
+        Ok(db
+            .get(dir, name)
+            .map_err(|error| format!("{error:#}"))?
+            .is_some())
+    };
+    if !taken(filename)? {
+        return Ok(filename.to_string());
+    }
+    let (stem, ext) = match filename.rsplit_once('.') {
+        Some((s, e)) => (s, e),
+        None => (filename, ""),
+    };
+    for n in 2.. {
+        let name = if ext.is_empty() {
+            format!("{stem}-{n}")
+        } else {
+            format!("{stem}-{n}.{ext}")
+        };
+        if !taken(&name)? {
+            return Ok(name);
+        }
+    }
+    unreachable!("the counter loop always yields a free name")
+}
+
+/// Re-key a `generations` row in place — same rowid, so its tag and
+/// collection links survive. `mold_db` exposes no rename primitive and the
+/// desktop's offline trash de-confliction is the only caller that needs
+/// one, so this goes through the public `with_conn` escape hatch rather
+/// than growing the crate's API for it.
+fn rename_generation_row(
+    db: &mold_db::MetadataDb,
+    dir: &std::path::Path,
+    from: &str,
+    to: &str,
+) -> Result<(), String> {
+    let dir_key = mold_db::canonical_dir_string(dir);
+    db.with_conn(|conn| {
+        conn.execute(
+            "UPDATE generations SET filename = ?1 WHERE output_dir = ?2 AND filename = ?3",
+            [to, dir_key.as_str(), from],
+        )?;
+        Ok(())
+    })
+    .map_err(|error| format!("{error:#}"))
+}
+
+/// Move a live print into `.trash/` with its tombstone and flag the row.
+/// Without a DB there is no row to flag and no retention sweeper to honour,
+/// so the file is removed outright — today's behaviour.
+///
+/// A `.trash/<filename>` that already exists (an earlier print was trashed,
+/// then a new live file landed under the same name and is being trashed
+/// too) is a distinct print that must survive: the INCOMING file is
+/// de-conflicted to `<stem>-2.<ext>` (first free suffix) and its tombstone,
+/// DB row, and trash listing all carry that new name, so both prints keep
+/// their bytes and both stay individually restorable.
+fn offline_trash(
+    dir: &std::path::Path,
+    db: Option<&mold_db::MetadataDb>,
+    filename: &str,
+    now_ms: i64,
+) -> Result<(), String> {
+    let Some(db) = db else {
+        if let Some(path) = contained_file(dir, filename)? {
+            std::fs::remove_file(&path).map_err(|error| error.to_string())?;
+        }
+        return Ok(());
+    };
+    let trash_dir = mold_db::trash::trash_dir(dir);
+    if let Some(path) = contained_file(dir, filename)? {
+        // The row under this name belongs to the INCOMING live file only
+        // when it is not already flagged trashed — a trashed row is the
+        // previously trashed print's and must stay untouched.
+        let has_live_row = db
+            .get(dir, filename)
+            .map_err(|error| format!("{error:#}"))?
+            .is_some_and(|row| row.trashed_at_ms.is_none());
+        let trash_name = unique_trash_name(dir, &trash_dir, db, filename)?;
+        let fallback = || mold_db::trash::Tombstone {
+            version: mold_db::trash::TOMBSTONE_VERSION,
+            filename: filename.to_string(),
+            trashed_at_ms: now_ms,
+            original_dir: dir.display().to_string(),
+            title: None,
+            favorite: false,
+            tags: Vec::new(),
+            collections: Vec::new(),
+            metadata_json: None,
+        };
+        let mut tombstone = if has_live_row {
+            db.build_tombstone(dir, filename, now_ms)
+                .map_err(|error| format!("{error:#}"))?
+                .unwrap_or_else(fallback)
+        } else {
+            // Without a live row (or with a stolen one) the row under this
+            // name describes some OTHER print; record only what we know.
+            fallback()
+        };
+        // The tombstone names the trash entry (bytes sit at
+        // `.trash/<tombstone.filename>`); everything else it carries — the
+        // row's organization and metadata — is the incoming print's.
+        tombstone.filename = trash_name.clone();
+        mold_db::trash::write_tombstone(&trash_dir, &tombstone)
+            .map_err(|error| format!("{error:#}"))?;
+        std::fs::rename(&path, trash_dir.join(&trash_name))
+            .map_err(|error| format!("Couldn't move {filename} to the trash: {error}"))?;
+        if trash_name != filename && has_live_row {
+            rename_generation_row(db, dir, filename, &trash_name)?;
+        }
+        db.mark_trashed(dir, &trash_name, now_ms)
+            .map_err(|error| format!("{error:#}"))?;
+        return Ok(());
+    }
+    // A row without a file still settles: the flag is what hides it from
+    // the Library and what the sweeper reads.
+    db.mark_trashed(dir, filename, now_ms)
+        .map_err(|error| format!("{error:#}"))?;
+    Ok(())
+}
+
+/// Move a trashed print back. A live file with the same name is a conflict
+/// (the server answers 409 `GALLERY_RESTORE_CONFLICT`); never overwrite it.
+fn offline_restore(
+    dir: &std::path::Path,
+    db: Option<&mold_db::MetadataDb>,
+    filename: &str,
+) -> Result<(), String> {
+    let trash_dir = mold_db::trash::trash_dir(dir);
+    let trashed = contained_file(&trash_dir, filename)?;
+    if contained_file(dir, filename)?.is_some() {
+        return Err(format!(
+            "Couldn't restore {filename}: a print with that name is already in the library."
+        ));
+    }
+    let Some(trashed) = trashed else {
+        return Err(format!("{filename} is not in the trash."));
+    };
+    std::fs::rename(&trashed, dir.join(filename))
+        .map_err(|error| format!("Couldn't restore {filename}: {error}"))?;
+    mold_db::trash::remove_tombstone(&trash_dir, filename).map_err(|error| format!("{error:#}"))?;
+    if let Some(db) = db {
+        db.mark_restored(dir, filename)
+            .map_err(|error| format!("{error:#}"))?;
+    }
+    Ok(())
+}
+
+/// Remove a print's bytes for good — from `.trash/` when it was trashed,
+/// from the live gallery otherwise — plus its tombstone and row.
+fn offline_delete_forever(
+    dir: &std::path::Path,
+    db: Option<&mold_db::MetadataDb>,
+    filename: &str,
+) -> Result<(), String> {
+    let trash_dir = mold_db::trash::trash_dir(dir);
+    if let Some(trashed) = contained_file(&trash_dir, filename)? {
+        std::fs::remove_file(&trashed).map_err(|error| error.to_string())?;
+    } else if let Some(live) = contained_file(dir, filename)? {
+        std::fs::remove_file(&live).map_err(|error| error.to_string())?;
+    }
+    if trash_dir.is_dir() {
+        mold_db::trash::remove_tombstone(&trash_dir, filename)
+            .map_err(|error| format!("{error:#}"))?;
+    }
+    if let Some(db) = db {
+        let _ = db.delete(dir, filename);
+    }
+    Ok(())
 }
 
 /// First free name for a new save: `name.png`, then `name-2.png`, `-3`, …
@@ -815,6 +1217,9 @@ pub async fn save_media_bytes(
     .map_err(|error| error.to_string())?
 }
 
+// A Tauri command's parameters are its wire contract — bundling them into a
+// struct would change every call site for a lint about human ergonomics.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn save_gallery_media(
     app: tauri::AppHandle,
@@ -824,10 +1229,12 @@ pub async fn save_gallery_media(
     filename: String,
     output_filename: String,
     export_options: Option<serde_json::Value>,
+    from_trash: Option<bool>,
 ) -> Result<SavedMedia, String> {
     if !valid_filename(&filename) || !valid_filename(&output_filename) {
         return Err("Invalid filename.".into());
     }
+    let from_trash = from_trash.unwrap_or(false);
     let dir = effective_media_save_dir(&app, &store)?;
     let target = match target {
         Some(target) => target,
@@ -842,16 +1249,11 @@ pub async fn save_gallery_media(
             LocalGalleryAuthority::Offline(_guard) => {
                 let source_dir =
                     output_dir().ok_or_else(|| "This device's gallery is disabled.".to_string())?;
-                let root = source_dir
-                    .canonicalize()
-                    .map_err(|error| format!("Couldn't open this device's gallery: {error}"))?;
-                let source = source_dir
-                    .join(&filename)
-                    .canonicalize()
-                    .map_err(|_| "The gallery file is no longer on disk.".to_string())?;
-                if !source.starts_with(&root) || !source.is_file() {
-                    return Err("Invalid gallery filename.".into());
-                }
+                // Trash-view rows resolve into `.trash/` (and either view
+                // falls through to the other location) so Save keeps
+                // working on a trashed print.
+                let source = offline_media_path(&source_dir, &filename, from_trash)?
+                    .ok_or_else(|| "The gallery file is no longer on disk.".to_string())?;
                 let mut input = std::fs::File::open(&source)
                     .map_err(|error| format!("Couldn't read {filename}: {error}"))?;
                 let mut temp = tempfile::Builder::new()
@@ -908,10 +1310,12 @@ pub async fn save_gallery_media(
 pub async fn local_output_file_path(
     state: tauri::State<'_, AppState>,
     filename: String,
+    from_trash: Option<bool>,
 ) -> Result<Option<String>, String> {
     if !valid_filename(&filename) {
         return Err("Invalid gallery filename.".into());
     }
+    let from_trash = from_trash.unwrap_or(false);
     let Some(dir) = output_dir() else {
         return Ok(None);
     };
@@ -934,26 +1338,28 @@ pub async fn local_output_file_path(
             if !response.status().is_success() {
                 return Err(response_error(response).await);
             }
-            Ok(Some(dir.join(filename).display().to_string()))
+            // While the server runs, existence was proven over HTTP; the
+            // path is joined without touching the filesystem (the running
+            // server owns direct access). Trash-view rows live under the
+            // server's own `.trash/` layout (`mold_db::trash::trash_dir`).
+            let path = if from_trash {
+                mold_db::trash::trash_dir(&dir).join(filename)
+            } else {
+                dir.join(filename)
+            };
+            Ok(Some(path.display().to_string()))
         }
         LocalGalleryAuthority::Offline(_guard) => {
             // The guard proves no local server is starting or running, so
             // direct filesystem inspection is safe under the singular
-            // desktop gallery authority.
-            let root = match dir.canonicalize() {
-                Ok(root) => root,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-                Err(error) => return Err(error.to_string()),
-            };
-            let candidate = match dir.join(filename).canonicalize() {
-                Ok(candidate) => candidate,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-                Err(error) => return Err(error.to_string()),
-            };
-            if !candidate.starts_with(root) || !candidate.is_file() {
+            // desktop gallery authority. A trashed print resolves into
+            // `.trash/` so Reveal still works from the Trash view.
+            if !dir.is_dir() {
                 return Ok(None);
             }
-            Ok(Some(candidate.display().to_string()))
+            Ok(offline_media_path(&dir, &filename, from_trash)
+                .unwrap_or(None)
+                .map(|path| path.display().to_string()))
         }
     }
 }
@@ -984,20 +1390,89 @@ pub async fn local_gallery_delete(
     let LocalGalleryAuthority::Offline(_guard) = authority else {
         unreachable!()
     };
+    // Offline, delete means "move to this device's trash" exactly as the
+    // server does; `local_gallery_delete_forever` is the permanent path.
     let dir = output_dir().ok_or_else(|| "Local gallery is disabled.".to_string())?;
-    let path = dir.join(&filename);
-    if path.exists() {
-        let root = dir.canonicalize().map_err(|error| error.to_string())?;
-        let candidate = path.canonicalize().map_err(|error| error.to_string())?;
-        if !candidate.starts_with(&root) {
-            return Err("Invalid gallery filename.".into());
+    tauri::async_runtime::spawn_blocking(move || {
+        offline_trash(&dir, mold_db::global_db(), &filename, now_ms())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// Bring a trashed print back (`POST /api/gallery/trash/restore` while the
+/// local server runs; the `.trash/` move otherwise). A name conflict is an
+/// error, never an overwrite.
+#[tauri::command]
+pub async fn local_gallery_restore(
+    state: tauri::State<'_, AppState>,
+    filename: String,
+) -> Result<(), String> {
+    if !valid_filename(&filename) {
+        return Err("Invalid gallery filename.".into());
+    }
+    let authority = local_gallery_authority(&state).await;
+    if let LocalGalleryAuthority::Server(info) = authority {
+        let response = reqwest::Client::new()
+            .post(server_url(&info, "/api/gallery/trash/restore"))
+            .header("X-Api-Key", api_key(&info)?)
+            .json(&serde_json::json!({ "filenames": [filename] }))
+            .send()
+            .await
+            .map_err(|error| format!("Couldn't reach the local gallery server: {error}"))?;
+        if !response.status().is_success() {
+            return Err(response_error(response).await);
         }
-        std::fs::remove_file(&candidate).map_err(|error| error.to_string())?;
+        return Ok(());
     }
-    if let Some(db) = mold_db::global_db() {
-        let _ = db.delete(&dir, &filename);
+    let LocalGalleryAuthority::Offline(_guard) = authority else {
+        unreachable!()
+    };
+    let dir = output_dir().ok_or_else(|| "Local gallery is disabled.".to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        offline_restore(&dir, mold_db::global_db(), &filename)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// Delete a print for good (`DELETE /api/gallery/image/:filename?permanent=true`
+/// while the local server runs; the `.trash/` purge otherwise).
+#[tauri::command]
+pub async fn local_gallery_delete_forever(
+    state: tauri::State<'_, AppState>,
+    filename: String,
+) -> Result<(), String> {
+    if !valid_filename(&filename) {
+        return Err("Invalid gallery filename.".into());
     }
-    Ok(())
+    let authority = local_gallery_authority(&state).await;
+    if let LocalGalleryAuthority::Server(info) = authority {
+        let encoded =
+            percent_encoding::utf8_percent_encode(&filename, percent_encoding::NON_ALPHANUMERIC);
+        let response = reqwest::Client::new()
+            .delete(server_url(
+                &info,
+                &format!("/api/gallery/image/{encoded}?permanent=true"),
+            ))
+            .header("X-Api-Key", api_key(&info)?)
+            .send()
+            .await
+            .map_err(|error| format!("Couldn't reach the local gallery server: {error}"))?;
+        if !response.status().is_success() {
+            return Err(response_error(response).await);
+        }
+        return Ok(());
+    }
+    let LocalGalleryAuthority::Offline(_guard) = authority else {
+        unreachable!()
+    };
+    let dir = output_dir().ok_or_else(|| "Local gallery is disabled.".to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        offline_delete_forever(&dir, mold_db::global_db(), &filename)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 fn content_type(filename: &str) -> &'static str {
@@ -1053,9 +1528,16 @@ fn protocol_response_offline(request: Request<Vec<u8>>) -> Response<Vec<u8>> {
     let Some(dir) = output_dir() else {
         return error_response(StatusCode::NOT_FOUND, "Local gallery is disabled.");
     };
-    let path = dir.join(&filename);
-    let safe_path = match (dir.canonicalize(), path.canonicalize()) {
-        (Ok(root), Ok(candidate)) if candidate.starts_with(&root) => candidate,
+    // Live file first, then its `.trash/` copy (trashed prints keep their
+    // thumbnails and lightbox media, mirroring the server's path resolution).
+    // A `?view=trash` URL flips that preference so a Trash-view row is never
+    // shadowed by a newer live file under the same name.
+    let from_trash = request
+        .uri()
+        .query()
+        .is_some_and(|query| query.split('&').any(|pair| pair == "view=trash"));
+    let safe_path = match offline_media_path(&dir, &filename, from_trash) {
+        Ok(Some(path)) => path,
         _ => return error_response(StatusCode::NOT_FOUND, "Gallery file not found."),
     };
     let Ok(mut file) = std::fs::File::open(&safe_path) else {
@@ -1347,6 +1829,350 @@ mod tests {
             panic!("completed transition must route through HTTP");
         };
         assert_eq!(info.api_key.as_deref(), Some("desktop-test-key"));
+    }
+
+    /// Seed a png in `dir` with a DB row (the offline list reads rows first).
+    fn seed_print(
+        db: &mold_db::MetadataDb,
+        dir: &std::path::Path,
+        filename: &str,
+    ) -> std::path::PathBuf {
+        let path = dir.join(filename);
+        image::RgbImage::from_pixel(2, 2, image::Rgb([200, 100, 50]))
+            .save(&path)
+            .unwrap();
+        let req: mold_core::GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"an offline owl","model":"flux-dev:q4","width":2,"height":2,"steps":1,"guidance":1.0}"#,
+        )
+        .unwrap();
+        let metadata = mold_core::OutputMetadata::from_generate_request(&req, 9, None, "test");
+        let mut rec = mold_db::GenerationRecord::from_save(
+            dir,
+            filename,
+            mold_core::OutputFormat::Png,
+            metadata,
+            mold_db::RecordSource::Server,
+            1_700_000_000_000,
+        );
+        rec.stat_from_disk(&path);
+        db.upsert(&rec).unwrap();
+        path
+    }
+
+    #[test]
+    fn offline_delete_moves_the_print_to_trash_and_hides_it_from_the_live_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = mold_db::MetadataDb::open_in_memory().unwrap();
+        let live = seed_print(&db, dir.path(), "mold-flux-dev-1700000000.png");
+        seed_print(&db, dir.path(), "mold-flux-dev-1700000001.png");
+        assert_eq!(offline_live_images(dir.path(), Some(&db)).unwrap().len(), 2);
+
+        offline_trash(
+            dir.path(),
+            Some(&db),
+            "mold-flux-dev-1700000000.png",
+            1_000_000,
+        )
+        .unwrap();
+
+        let trash_dir = mold_db::trash::trash_dir(dir.path());
+        assert!(!live.exists(), "the live file must move, not be copied");
+        assert!(trash_dir.join("mold-flux-dev-1700000000.png").is_file());
+        let tombstone = mold_db::trash::read_tombstone(&mold_db::trash::tombstone_path(
+            &trash_dir,
+            "mold-flux-dev-1700000000.png",
+        ))
+        .unwrap();
+        assert_eq!(tombstone.trashed_at_ms, 1_000_000);
+        assert_eq!(tombstone.filename, "mold-flux-dev-1700000000.png");
+
+        let live_rows = offline_live_images(dir.path(), Some(&db)).unwrap();
+        assert_eq!(
+            live_rows
+                .iter()
+                .map(|i| i.filename.as_str())
+                .collect::<Vec<_>>(),
+            ["mold-flux-dev-1700000001.png"]
+        );
+        let trashed = offline_trash_images(dir.path(), Some(&db), 30).unwrap();
+        assert_eq!(trashed.len(), 1);
+        assert_eq!(trashed[0].filename, "mold-flux-dev-1700000000.png");
+        assert_eq!(trashed[0].trashed_at, Some(1_000));
+        assert_eq!(
+            trashed[0].purge_at,
+            Some(1_000 + 30 * 24 * 60 * 60),
+            "purge_at derives from the device's retention"
+        );
+        // Keep-forever advertises no purge stamp.
+        assert_eq!(
+            offline_trash_images(dir.path(), Some(&db), 0).unwrap()[0].purge_at,
+            None
+        );
+        // Trashed media stays reachable for thumbnails / the Trash lightbox.
+        assert_eq!(
+            offline_media_path(dir.path(), "mold-flux-dev-1700000000.png", false)
+                .unwrap()
+                .unwrap()
+                .canonicalize()
+                .unwrap(),
+            trash_dir
+                .join("mold-flux-dev-1700000000.png")
+                .canonicalize()
+                .unwrap()
+        );
+    }
+
+    /// A distinguishable PNG that passes the gallery scan's validity gate
+    /// (`is_valid_gallery_file`: ≥256 bytes, decodable, not solid-color) —
+    /// raw junk bytes or a tiny solid swatch won't list from a disk scan.
+    fn png_bytes(rgb: [u8; 3]) -> Vec<u8> {
+        let path = tempfile::Builder::new()
+            .suffix(".png")
+            .tempfile()
+            .unwrap()
+            .into_temp_path();
+        image::RgbImage::from_fn(64, 64, |x, y| {
+            if ((x / 8) + (y / 8)) % 2 == 0 {
+                image::Rgb(rgb)
+            } else {
+                image::Rgb([255 - rgb[0], 255 - rgb[1], 255 - rgb[2]])
+            }
+        })
+        .save(&path)
+        .unwrap();
+        std::fs::read(&path).unwrap()
+    }
+
+    #[test]
+    fn offline_trash_keeps_both_prints_on_a_same_name_collision() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = mold_db::MetadataDb::open_in_memory().unwrap();
+        let name = "mold-flux-dev-1700000000.png";
+        let live = seed_print(&db, dir.path(), name);
+        let original_bytes = std::fs::read(&live).unwrap();
+        offline_trash(dir.path(), Some(&db), name, 1_000).unwrap();
+
+        // A NEW print lands under the same filename (out-of-band — it has
+        // no row of its own) and is trashed too.
+        let replacement_bytes = png_bytes([10, 20, 30]);
+        assert_ne!(replacement_bytes, original_bytes);
+        std::fs::write(&live, &replacement_bytes).unwrap();
+        offline_trash(dir.path(), Some(&db), name, 2_000).unwrap();
+
+        let trash_dir = mold_db::trash::trash_dir(dir.path());
+        // The ORIGINAL trashed bytes and tombstone survive untouched.
+        assert_eq!(
+            std::fs::read(trash_dir.join(name)).unwrap(),
+            original_bytes,
+            "a same-name collision must never overwrite previously trashed bytes"
+        );
+        let original_tombstone =
+            mold_db::trash::read_tombstone(&mold_db::trash::tombstone_path(&trash_dir, name))
+                .unwrap();
+        assert_eq!(original_tombstone.trashed_at_ms, 1_000);
+
+        // The INCOMING print was de-conflicted to `<stem>-2.png` with a
+        // consistent tombstone + listing under the new name.
+        let deconflicted = "mold-flux-dev-1700000000-2.png";
+        assert_eq!(
+            std::fs::read(trash_dir.join(deconflicted)).unwrap(),
+            replacement_bytes
+        );
+        let tombstone = mold_db::trash::read_tombstone(&mold_db::trash::tombstone_path(
+            &trash_dir,
+            deconflicted,
+        ))
+        .unwrap();
+        assert_eq!(tombstone.filename, deconflicted);
+        assert_eq!(tombstone.trashed_at_ms, 2_000);
+        let trashed = offline_trash_images(dir.path(), Some(&db), 30).unwrap();
+        let mut names: Vec<_> = trashed.iter().map(|i| i.filename.as_str()).collect();
+        names.sort();
+        assert_eq!(names, [deconflicted, name]);
+
+        // Both remain individually restorable; the de-conflicted print
+        // restores under its new name without touching the original.
+        offline_restore(dir.path(), Some(&db), deconflicted).unwrap();
+        assert_eq!(
+            std::fs::read(dir.path().join(deconflicted)).unwrap(),
+            replacement_bytes
+        );
+        assert_eq!(std::fs::read(trash_dir.join(name)).unwrap(), original_bytes);
+        offline_restore(dir.path(), Some(&db), name).unwrap();
+        assert_eq!(
+            std::fs::read(dir.path().join(name)).unwrap(),
+            original_bytes
+        );
+        assert!(offline_trash_images(dir.path(), Some(&db), 30)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn offline_trash_re_keys_the_live_row_when_its_name_is_deconflicted() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = mold_db::MetadataDb::open_in_memory().unwrap();
+        let name = "mold-flux-dev-1700000000.png";
+        // An earlier print already sits in the trash under this name — as a
+        // tombstoned file without a row (e.g. trashed while the DB was
+        // unavailable).
+        let trash_dir = mold_db::trash::trash_dir(dir.path());
+        std::fs::create_dir_all(&trash_dir).unwrap();
+        let original_bytes = png_bytes([200, 0, 0]);
+        std::fs::write(trash_dir.join(name), &original_bytes).unwrap();
+        mold_db::trash::write_tombstone(
+            &trash_dir,
+            &mold_db::trash::Tombstone {
+                version: mold_db::trash::TOMBSTONE_VERSION,
+                filename: name.to_string(),
+                trashed_at_ms: 500,
+                original_dir: dir.path().display().to_string(),
+                title: None,
+                favorite: false,
+                tags: Vec::new(),
+                collections: Vec::new(),
+                metadata_json: None,
+            },
+        )
+        .unwrap();
+
+        // A live print with a real row is trashed under the same name.
+        seed_print(&db, dir.path(), name);
+        offline_trash(dir.path(), Some(&db), name, 2_000).unwrap();
+
+        let deconflicted = "mold-flux-dev-1700000000-2.png";
+        assert_eq!(std::fs::read(trash_dir.join(name)).unwrap(), original_bytes);
+        assert!(trash_dir.join(deconflicted).is_file());
+        // The live row followed its bytes: re-keyed in place (same rowid,
+        // organization intact) and flagged trashed under the new name.
+        assert!(db.get(dir.path(), name).unwrap().is_none());
+        let row = db.get(dir.path(), deconflicted).unwrap().unwrap();
+        assert_eq!(row.trashed_at_ms, Some(2_000));
+        let trashed = offline_trash_images(dir.path(), Some(&db), 30).unwrap();
+        let mut names: Vec<_> = trashed.iter().map(|i| i.filename.as_str()).collect();
+        names.sort();
+        assert_eq!(names, [deconflicted, name]);
+    }
+
+    #[test]
+    fn offline_media_path_prefers_trash_for_the_trash_view() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = mold_db::MetadataDb::open_in_memory().unwrap();
+        let name = "mold-flux-dev-1700000000.png";
+        let live = seed_print(&db, dir.path(), name);
+        let original_bytes = std::fs::read(&live).unwrap();
+        offline_trash(dir.path(), Some(&db), name, 1_000).unwrap();
+        // A new live file lands under the same name.
+        std::fs::write(&live, b"replacement bytes").unwrap();
+
+        let trash_path = offline_media_path(dir.path(), name, true).unwrap().unwrap();
+        assert_eq!(
+            trash_path.canonicalize().unwrap(),
+            mold_db::trash::trash_dir(dir.path())
+                .join(name)
+                .canonicalize()
+                .unwrap(),
+            "the trash view must read the tombstoned bytes, not the replacement"
+        );
+        assert_eq!(std::fs::read(&trash_path).unwrap(), original_bytes);
+        let live_path = offline_media_path(dir.path(), name, false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            live_path.canonicalize().unwrap(),
+            live.canonicalize().unwrap()
+        );
+        // Either view falls back to the other location when its preferred
+        // copy is missing.
+        std::fs::remove_file(&live).unwrap();
+        assert_eq!(
+            offline_media_path(dir.path(), name, false)
+                .unwrap()
+                .unwrap()
+                .canonicalize()
+                .unwrap(),
+            trash_path.canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn offline_restore_moves_the_print_back_and_refuses_a_name_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = mold_db::MetadataDb::open_in_memory().unwrap();
+        let live = seed_print(&db, dir.path(), "mold-flux-dev-1700000000.png");
+        offline_trash(dir.path(), Some(&db), "mold-flux-dev-1700000000.png", 5).unwrap();
+
+        // A new live print lands under the same name → restore must refuse.
+        std::fs::write(&live, b"newer bytes").unwrap();
+        let err =
+            offline_restore(dir.path(), Some(&db), "mold-flux-dev-1700000000.png").unwrap_err();
+        assert!(err.contains("already in the library"), "{err}");
+        assert_eq!(std::fs::read(&live).unwrap(), b"newer bytes");
+        std::fs::remove_file(&live).unwrap();
+
+        offline_restore(dir.path(), Some(&db), "mold-flux-dev-1700000000.png").unwrap();
+        assert!(live.is_file());
+        let trash_dir = mold_db::trash::trash_dir(dir.path());
+        assert!(!trash_dir.join("mold-flux-dev-1700000000.png").exists());
+        assert!(
+            !mold_db::trash::tombstone_path(&trash_dir, "mold-flux-dev-1700000000.png").exists()
+        );
+        assert_eq!(offline_live_images(dir.path(), Some(&db)).unwrap().len(), 1);
+        assert!(offline_trash_images(dir.path(), Some(&db), 30)
+            .unwrap()
+            .is_empty());
+        assert!(
+            offline_restore(dir.path(), Some(&db), "mold-flux-dev-1700000000.png").is_err(),
+            "restoring a live print is not in the trash"
+        );
+    }
+
+    #[test]
+    fn offline_delete_forever_purges_trash_tombstone_and_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = mold_db::MetadataDb::open_in_memory().unwrap();
+        seed_print(&db, dir.path(), "mold-flux-dev-1700000000.png");
+        offline_trash(dir.path(), Some(&db), "mold-flux-dev-1700000000.png", 5).unwrap();
+
+        offline_delete_forever(dir.path(), Some(&db), "mold-flux-dev-1700000000.png").unwrap();
+        let trash_dir = mold_db::trash::trash_dir(dir.path());
+        assert!(!trash_dir.join("mold-flux-dev-1700000000.png").exists());
+        assert!(
+            !mold_db::trash::tombstone_path(&trash_dir, "mold-flux-dev-1700000000.png").exists()
+        );
+        assert!(db
+            .get(dir.path(), "mold-flux-dev-1700000000.png")
+            .unwrap()
+            .is_none());
+        assert!(offline_trash_images(dir.path(), Some(&db), 30)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn offline_delete_without_a_db_keeps_todays_hard_delete() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mold-flux-dev-1700000000.png");
+        image::RgbImage::from_pixel(2, 2, image::Rgb([1, 2, 3]))
+            .save(&path)
+            .unwrap();
+        offline_trash(dir.path(), None, "mold-flux-dev-1700000000.png", 5).unwrap();
+        assert!(!path.exists());
+        assert!(!mold_db::trash::trash_dir(dir.path()).exists());
+    }
+
+    #[test]
+    fn offline_trash_never_escapes_the_gallery_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = mold_db::MetadataDb::open_in_memory().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let victim = outside.path().join("victim.png");
+        std::fs::write(&victim, b"x").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&victim, dir.path().join("link.png")).unwrap();
+        #[cfg(unix)]
+        assert!(offline_trash(dir.path(), Some(&db), "link.png", 5).is_err());
+        assert!(victim.exists());
     }
 
     #[tokio::test]

@@ -282,12 +282,20 @@ export const mediaPath = (filename: string) => `/api/gallery/image/${encodeURICo
  */
 export type GallerySource = "host" | "local";
 
-export const localMediaPath = (filename: string) =>
-  `mold-local://localhost/${encodeURIComponent(filename)}`;
+/** `fromTrash` flips the native protocol's live-first resolution so a
+ *  Trash-view row reads its `.trash/` bytes even when a NEW live file later
+ *  landed under the same name. */
+export const localMediaPath = (filename: string, fromTrash = false) =>
+  `mold-local://localhost/${encodeURIComponent(filename)}${fromTrash ? "?view=trash" : ""}`;
 
-export const galleryMediaPath = (filename: string, source: GallerySource, thumbnail = false) =>
+export const galleryMediaPath = (
+  filename: string,
+  source: GallerySource,
+  thumbnail = false,
+  fromTrash = false,
+) =>
   source === "local"
-    ? localMediaPath(filename)
+    ? localMediaPath(filename, fromTrash)
     : thumbnail
       ? thumbnailPath(filename)
       : mediaPath(filename);

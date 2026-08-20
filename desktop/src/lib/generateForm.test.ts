@@ -4,6 +4,7 @@ import {
   applyModelDefaults,
   applyRecipeDefaults,
   applyPrefillToForm,
+  applyRequestToForm,
   buildRequest,
   cloneGenerateForm,
   newGenerateForm,
@@ -2474,5 +2475,71 @@ describe("source label clearing invariants (review findings)", () => {
     applyMetadataToForm(form, { ...richImageMetadata() });
     expect(form.sourceImage).toBeNull();
     expect(form.sourceImageName).toBeNull();
+  });
+});
+
+// ── Print titles (Library organization, D5) ────────────────────────────────
+
+describe("print title", () => {
+  function baseMetadata(): OutputMetadata {
+    return {
+      prompt: "a smurf village",
+      model: "flux-dev:q8",
+      seed: 7,
+      steps: 4,
+      guidance: 3.5,
+      width: 1024,
+      height: 1024,
+    } as OutputMetadata;
+  }
+
+  it("starts untitled", () => {
+    expect(newGenerateForm().title).toBe("");
+  });
+
+  it("ships a trimmed title on the wire and omits an empty one", () => {
+    const form = newGenerateForm();
+    form.prompt = "a smurf village";
+    expect(buildRequest(form).title).toBeUndefined();
+    form.title = "  Smurf village at dusk  ";
+    expect(buildRequest(form).title).toBe("Smurf village at dusk");
+  });
+
+  it("never ships a title that fails validation", () => {
+    const form = newGenerateForm();
+    form.title = "x".repeat(121);
+    expect(buildRequest(form).title).toBeUndefined();
+  });
+
+  it("survives cloneGenerateForm (the submit snapshot)", () => {
+    const form = newGenerateForm();
+    form.title = "Smurf village";
+    expect(cloneGenerateForm(form).title).toBe("Smurf village");
+  });
+
+  it("reuse settings restores the recorded title and clears it when absent", () => {
+    const form = newGenerateForm();
+    form.title = "stale";
+    applyMetadataToForm(form, { ...baseMetadata(), title: "Smurf village" }, []);
+    expect(form.title).toBe("Smurf village");
+    applyMetadataToForm(form, baseMetadata(), []);
+    expect(form.title).toBe("");
+  });
+
+  it("an exact queued request restores its title too", () => {
+    const form = newGenerateForm();
+    applyRequestToForm(
+      form,
+      {
+        prompt: "a smurf village",
+        model: "flux-dev:q8",
+        width: 1024,
+        height: 1024,
+        steps: 4,
+        title: "Smurf village",
+      },
+      [],
+    );
+    expect(form.title).toBe("Smurf village");
   });
 });

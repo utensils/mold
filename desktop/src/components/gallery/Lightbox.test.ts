@@ -310,3 +310,147 @@ describe("Lightbox save action", () => {
     expect(useToastStore().items.at(-1)?.message).toBe("Saved print-0001.gif");
   });
 });
+
+describe("Lightbox organization (V3 Shelf)", () => {
+  const organization = {
+    title: "smurf 04",
+    favorite: true,
+    tags: ["smurf", "blue"],
+    collections: ["smurfs"],
+    trashedAt: null,
+    purgeAt: null,
+  };
+  const collections = [
+    { slug: "smurfs", name: "Smurfs", count: 9, hosts: [], cover: null },
+    { slug: "river", name: "River studies", count: 6, hosts: [], cover: null },
+  ];
+
+  it("leads with the display title (prompt excerpt) and demotes the filename when it cannot organize", () => {
+    const wrapper = mountLightbox();
+    expect(wrapper.get("[data-test='lightbox-title']").text()).toBe("a lighthouse at dusk");
+    expect(wrapper.get("[data-test='lightbox-filename']").text()).toBe("print-0001.png");
+    expect(wrapper.find("[data-test='lightbox-favorite']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='lightbox-tags']").exists()).toBe(false);
+    expect(wrapper.get("[data-test='lightbox-delete']").text()).toBe("Delete");
+  });
+
+  it("edits the title inline: Enter commits a rename, Escape reverts, empty clears", async () => {
+    const wrapper = mountLightbox(item, false, { canOrganize: true, organization });
+    const input = wrapper.get<HTMLInputElement>("[data-test='lightbox-title']");
+    expect(input.element.value).toBe("smurf 04");
+    expect(input.attributes("placeholder")).toBe("a lighthouse at dusk");
+    await input.trigger("focus");
+    await input.setValue("Smurf 05");
+    await input.trigger("keydown", { key: "Enter" });
+    expect(wrapper.emitted("rename")).toEqual([["Smurf 05"]]);
+
+    await input.trigger("focus");
+    await input.setValue("discard me");
+    await input.trigger("keydown", { key: "Escape" });
+    expect(input.element.value).toBe("smurf 04");
+    expect(wrapper.emitted("rename")).toHaveLength(1);
+
+    await input.trigger("focus");
+    await input.setValue("   ");
+    await input.trigger("blur");
+    expect(wrapper.emitted("rename")?.at(-1)).toEqual([null]);
+  });
+
+  it("rejects an invalid title inline without emitting", async () => {
+    const wrapper = mountLightbox(item, false, { canOrganize: true, organization });
+    const input = wrapper.get("[data-test='lightbox-title']");
+    await input.trigger("focus");
+    await input.setValue("x".repeat(121));
+    await input.trigger("keydown", { key: "Enter" });
+    expect(wrapper.emitted("rename")).toBeUndefined();
+    expect(wrapper.get("[data-test='lightbox-title-error']").text()).toContain("120");
+  });
+
+  it("toggles ♥, edits tags, and toggles collections through emits", async () => {
+    const wrapper = mountLightbox(item, false, {
+      canOrganize: true,
+      organization,
+      collections,
+      tagSuggestions: [{ name: "outdoor", count: 2 }],
+    });
+    const fav = wrapper.get("[data-test='lightbox-favorite']");
+    expect(fav.attributes("aria-pressed")).toBe("true");
+    await fav.trigger("click");
+    expect(wrapper.emitted("favorite")).toEqual([[false]]);
+
+    const tagsEditor = wrapper.get("[data-test='lightbox-tags']");
+    expect(tagsEditor.findAll("[data-test='tag-chip']").map((c) => c.find("span").text())).toEqual([
+      "smurf",
+      "blue",
+    ]);
+    await tagsEditor.findAll("[data-test='tag-remove']")[1]!.trigger("click");
+    expect(wrapper.emitted("tags")).toEqual([[{ add: [], remove: ["blue"] }]]);
+    const tagInput = tagsEditor.get("[data-test='tag-input']");
+    await tagInput.setValue("outdoor");
+    await tagInput.trigger("keydown", { key: "Enter" });
+    expect(wrapper.emitted("tags")?.at(-1)).toEqual([{ add: ["outdoor"], remove: [] }]);
+
+    const picker = wrapper.get("[data-test='lightbox-collections']");
+    const rows = picker.findAll("[data-test='collection-row']");
+    expect(rows[0]!.attributes("aria-checked")).toBe("true");
+    expect(rows[1]!.attributes("aria-checked")).toBe("false");
+    await rows[1]!.trigger("click");
+    expect(wrapper.emitted("collections")).toEqual([[{ slug: "river", checked: true }]]);
+    await picker.get("[data-test='collection-new']").trigger("click");
+    const newInput = picker.get("[data-test='collection-new-input']");
+    await newInput.setValue("Halcyon");
+    await newInput.trigger("keydown", { key: "Enter" });
+    expect(wrapper.emitted("collections")?.at(-1)).toEqual([{ name: "Halcyon", checked: true }]);
+  });
+
+  it("labels Delete as Move to trash on a trash-capable host, single press", async () => {
+    const wrapper = mountLightbox(item, false, { canTrash: true });
+    const button = wrapper.get("[data-test='lightbox-delete']");
+    expect(button.text()).toBe("Move to trash");
+    await button.trigger("click");
+    expect(wrapper.emitted("delete")).toHaveLength(1);
+  });
+
+  it("shows the purge countdown with Restore / Delete forever (plain confirm) for a trashed print", async () => {
+    const now = Date.now();
+    const wrapper = mountLightbox(item, false, {
+      canOrganize: true,
+      trashed: true,
+      organization: {
+        ...organization,
+        trashedAt: now / 1000 - 10,
+        purgeAt: now / 1000 + 5 * 86_400,
+      },
+    });
+    expect(wrapper.get("[data-test='lightbox-purge']").text()).toContain("purges in 5 d");
+    expect(wrapper.find("[data-test='lightbox-delete']").exists()).toBe(false);
+    await wrapper.get("[data-test='lightbox-restore']").trigger("click");
+    expect(wrapper.emitted("restore")).toHaveLength(1);
+
+    await wrapper.get("[data-test='lightbox-delete-forever']").trigger("click");
+    const dialog = document.body.querySelector("[data-test='confirm-dialog']")!;
+    expect(dialog.textContent).toContain("Delete “smurf 04” forever?");
+    expect(dialog.textContent).toContain("This can't be undone.");
+    expect(dialog.querySelector("input")).toBeNull();
+    (dialog.querySelector("[data-test='confirm-accept']") as HTMLButtonElement).click();
+    expect(wrapper.emitted("deleteForever")).toHaveLength(1);
+    wrapper.unmount();
+  });
+
+  it("saves under the title slug when the print has a title", async () => {
+    const wrapper = mountLightbox(item, false, {
+      canOrganize: true,
+      organization,
+      target: { baseUrl: "http://hal", apiKey: "secret" },
+    });
+    await wrapper.get("[data-test='save-media']").trigger("click");
+    await vi.waitFor(() => expect(saveGalleryMedia).toHaveBeenCalledOnce());
+    expect(saveGalleryMedia).toHaveBeenCalledWith(
+      { baseUrl: "http://hal", apiKey: "secret" },
+      "print-0001.png",
+      "smurf-04.png",
+      null,
+      false,
+    );
+  });
+});

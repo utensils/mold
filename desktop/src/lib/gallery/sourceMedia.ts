@@ -25,7 +25,9 @@ export async function readGalleryMediaBlob(
 ): Promise<Blob> {
   let response: Response;
   if (gallery.mediaSourceOf(entry.sourceKey) === "local") {
-    response = await fetch(localMediaPath(entry.item.filename));
+    // A trashed row's bytes live in `.trash/` — resolve there so a newer
+    // same-name live file can never shadow the print being read.
+    response = await fetch(localMediaPath(entry.item.filename, entry.item.trashed_at != null));
   } else {
     const path = mediaPath(entry.item.filename);
     const target = gallery.targetOf(entry.sourceKey);

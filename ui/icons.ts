@@ -75,6 +75,9 @@ export const ICONS = {
   // on the active element — never add a second filled glyph here.
   heart:
     '<path d="M19.5 12.6 12 20l-7.5-7.4A4.7 4.7 0 0 1 12 6.3a4.7 4.7 0 0 1 7.5 6.3z"/>',
+  // Pencil — the inline "rename / edit title" affordance (Lucide `pencil`).
+  pencil:
+    '<path d="M17 3.5a2.1 2.1 0 0 1 3 3L8 18.5 3.5 20l1.5-4.5z"/><path d="M15 5.5l3.5 3.5"/>',
 
   // Generate / advanced
   scheduler:

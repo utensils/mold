@@ -515,7 +515,7 @@ describe("LibraryView header + NEW badges", () => {
     const { wrapper } = await mountView();
     const header = wrapper.get("header");
     expect(header.text()).toContain("Library");
-    expect(header.text()).toContain("2 prints · all hosts");
+    expect(wrapper.get("[data-test='library-count']").text()).toBe("2 prints");
     wrapper.unmount();
   });
 
