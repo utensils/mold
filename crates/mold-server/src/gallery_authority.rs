@@ -32,11 +32,18 @@ struct AuthoritySnapshot {
     legacy_evidence_epochs: std::collections::BTreeMap<String, u64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 struct ChecksummedSnapshot {
     version: u32,
     payload_sha256: String,
     snapshot: AuthoritySnapshot,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawChecksummedSnapshot {
+    version: u32,
+    payload_sha256: String,
+    snapshot: Box<serde_json::value::RawValue>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -112,20 +119,28 @@ fn wrap_snapshot(snapshot: AuthoritySnapshot) -> anyhow::Result<ChecksummedSnaps
 }
 
 fn validate_envelope(
-    envelope: ChecksummedSnapshot,
+    envelope: RawChecksummedSnapshot,
     path: &Path,
 ) -> anyhow::Result<AuthoritySnapshot> {
     ensure!(
-        envelope.version == STORAGE_VERSION && envelope.snapshot.version == STORAGE_VERSION,
+        envelope.version == STORAGE_VERSION,
         "unsupported gallery authority checkpoint version in {}",
         path.display()
     );
     ensure!(
-        digest_json(&envelope.snapshot)? == envelope.payload_sha256,
+        format!("{:x}", Sha256::digest(envelope.snapshot.get().as_bytes()))
+            == envelope.payload_sha256,
         "gallery authority checkpoint checksum mismatch in {}",
         path.display()
     );
-    Ok(envelope.snapshot)
+    let snapshot: AuthoritySnapshot = serde_json::from_str(envelope.snapshot.get())
+        .with_context(|| format!("reading gallery authority snapshot in {}", path.display()))?;
+    ensure!(
+        snapshot.version == STORAGE_VERSION,
+        "unsupported gallery authority checkpoint version in {}",
+        path.display()
+    );
+    Ok(snapshot)
 }
 
 fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> anyhow::Result<T> {
@@ -695,7 +710,11 @@ pub(crate) fn storage_file_count(root: &Path) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::batch_transaction::acquire_gallery_bookkeeping_lock;
+    use crate::batch_transaction::{
+        acquire_gallery_bookkeeping_lock, ArchiveFileFacts, ArchivedChildIdentity,
+    };
+    use mold_core::{GenerateRequest, OutputFormat, OutputMetadata};
+    use mold_db::{GenerationRecord, RecordSource};
 
     fn empty_snapshot(generation: u64) -> AuthoritySnapshot {
         AuthoritySnapshot {
@@ -704,6 +723,92 @@ mod tests {
             index: CommittedArchiveIndex::default(),
             legacy_evidence_epochs: Default::default(),
         }
+    }
+
+    #[test]
+    fn accepts_valid_checkpoint_from_before_additive_record_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(CHECKPOINT_FILE);
+        let filename = "legacy.png";
+        let media_path = dir.path().join(filename);
+        fs::write(&media_path, b"legacy").unwrap();
+        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "legacy prompt",
+            "model": "test",
+            "width": 64,
+            "height": 64,
+            "steps": 1,
+            "guidance": 1.0
+        }))
+        .unwrap();
+        let mut record = GenerationRecord::from_save(
+            dir.path(),
+            filename,
+            OutputFormat::Png,
+            OutputMetadata::from_generate_request(&request, 1, None, "test"),
+            RecordSource::Server,
+            1,
+        );
+        record.stat_from_disk(&media_path);
+        let mut index = CommittedArchiveIndex::default();
+        index.entries.insert(
+            filename.to_owned(),
+            CommittedArchiveEntry {
+                identity: ArchivedChildIdentity {
+                    parent_id: "legacy".into(),
+                    attempt_generation: 0,
+                    child_index: 0,
+                    final_name: filename.into(),
+                    checksum_sha256: format!("{:x}", Sha256::digest(b"legacy")),
+                    size_bytes: 6,
+                },
+                record,
+                facts: Some(ArchiveFileFacts::from_path(&media_path).unwrap()),
+            },
+        );
+        let snapshot = AuthoritySnapshot {
+            version: STORAGE_VERSION,
+            generation: 7,
+            index,
+            legacy_evidence_epochs: Default::default(),
+        };
+        let mut legacy = serde_json::to_value(snapshot).unwrap();
+        let record = legacy["index"]["entries"][filename]["record"]
+            .as_object_mut()
+            .unwrap();
+        record.remove("title");
+        record.remove("favorite");
+        record.remove("trashed_at_ms");
+        let payload_sha256 = digest_json(&legacy).unwrap();
+        fs::write(
+            &path,
+            serde_json::to_vec(&serde_json::json!({
+                "version": STORAGE_VERSION,
+                "payload_sha256": payload_sha256,
+                "snapshot": legacy,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let loaded = read_checkpoint_at(&path).unwrap();
+        assert_eq!(loaded.generation, 7);
+        let loaded_record = &loaded.index.entries[filename].record;
+        assert_eq!(loaded_record.title, None);
+        assert!(!loaded_record.favorite);
+        assert_eq!(loaded_record.trashed_at_ms, None);
+
+        let mut tampered: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        tampered["snapshot"]["generation"] = serde_json::json!(8);
+        fs::write(&path, serde_json::to_vec(&tampered).unwrap()).unwrap();
+        assert!(
+            read_checkpoint_at(&path)
+                .unwrap_err()
+                .to_string()
+                .contains("checksum mismatch"),
+            "validating stored bytes must still reject a modified snapshot"
+        );
     }
 
     #[test]
