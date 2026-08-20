@@ -191,7 +191,11 @@ jobs:
               }
             }' \
             > "$updater_config"
-          bunx tauri build --features metal --bundles app,dmg --ci --config "$updater_config"
+          bunx tauri build --features metal --bundles app --ci --config "$updater_config"
+          ../scripts/create-desktop-dmg.sh \
+            src-tauri/target/release/bundle/macos/Mold.app \
+            "src-tauri/target/release/bundle/dmg/$MOLD_DESKTOP_DMG_NAME" \
+            "$APPLE_SIGNING_IDENTITY"
 
       - name: Notarize and staple DMG
         working-directory: .
