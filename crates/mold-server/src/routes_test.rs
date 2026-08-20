@@ -6205,7 +6205,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_models_surfaces_only_the_two_pinned_compact_h3_downloads() {
+    async fn list_models_surfaces_only_the_pinned_compact_h3_downloads() {
         let app = app_with(MockEngine::ready());
         let resp = app
             .oneshot(Request::get("/api/models").body(Body::empty()).unwrap())
@@ -6238,6 +6238,16 @@ mod tests {
                 ),
                 (
                     mold_core::minimax_h3::REF2VA_COMFY,
+                    false,
+                    "Comfy-Org/MiniMax-H3",
+                ),
+                (
+                    mold_core::minimax_h3::FL2VA_COMFY_TURBO_8STEP,
+                    false,
+                    "Comfy-Org/MiniMax-H3",
+                ),
+                (
+                    mold_core::minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P,
                     false,
                     "Comfy-Org/MiniMax-H3",
                 ),
