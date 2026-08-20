@@ -121,6 +121,26 @@ pub fn base_compact_model(model: &str) -> Option<&'static str> {
     Some(canonical)
 }
 
+/// The model identity whose directory holds a manifest's model-specific
+/// files. A reviewed Turbo tag is the base compact stack plus one shared
+/// adapter, so its base-stack files install into — and verify against — the
+/// base checkpoint's directory instead of duplicating ~41 GB per tag. The
+/// tag's only novel artifact, the adapter, is routed to the shared family
+/// bucket by `manifest::storage_path` before this identity is consulted.
+///
+/// Takes the exact manifest name (already canonical inside `storage_path`),
+/// deliberately not `resolve_model_name`, so the mapping stays a pure lookup.
+pub fn storage_identity(name: &str) -> &str {
+    if REVIEWED_TURBO_MANIFEST_TIERS
+        .iter()
+        .any(|tier| tier.model == name)
+    {
+        FL2VA_COMFY
+    } else {
+        name
+    }
+}
+
 /// Resolve the reviewed Turbo tier a model identity selects, if any.
 pub fn turbo_tier_for_model(model: &str) -> Option<&'static TurboManifestTier> {
     let canonical = resolve_model_name(model)?;
@@ -3653,6 +3673,113 @@ mod tests {
             assert_eq!(contract.identity.source_revision, COMFY_TURBO_LORA_REVISION);
             assert_eq!(contract.identity.sha256, tier.adapter_sha256);
         }
+    }
+
+    /// A Turbo tag is the base checkpoint plus one shared adapter, so every
+    /// non-adapter file must resolve to the exact storage path the base
+    /// manifest owns. Anything else re-downloads the ~41 GB base stack into a
+    /// tag-named directory beside an identical installed copy, and removal
+    /// ref-counting stops protecting the shared bytes.
+    #[test]
+    fn turbo_manifests_store_the_base_stack_in_the_base_models_directory() {
+        let base = find_manifest(FL2VA_COMFY).unwrap();
+        for tier in REVIEWED_TURBO_MANIFEST_TIERS {
+            let manifest = find_manifest(tier.model).unwrap();
+            for file in &manifest.files {
+                if file.component == ModelComponent::DistilledLora {
+                    continue;
+                }
+                let same = base
+                    .files
+                    .iter()
+                    .find(|candidate| {
+                        candidate.hf_repo == file.hf_repo
+                            && candidate.hf_filename == file.hf_filename
+                    })
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "{} carries {} which the base manifest does not own",
+                            tier.model, file.hf_filename
+                        )
+                    });
+                assert_eq!(
+                    storage_path(manifest, file),
+                    storage_path(base, same),
+                    "{} must reuse the base install for {}",
+                    tier.model,
+                    file.hf_filename
+                );
+            }
+        }
+    }
+
+    /// Removal ref-counting must protect the shared base stack in both
+    /// directions: removing a Turbo tag deletes only its adapter, and
+    /// removing the base while a Turbo tag is installed keeps every shared
+    /// file, naming the tag that still uses it.
+    #[test]
+    fn turbo_removal_refcounts_protect_the_shared_base_stack() {
+        use crate::removal::plan_removal;
+        use crate::{Config, ModelConfig};
+
+        let root = std::path::Path::new("/models");
+        let base_manifest = find_manifest(FL2VA_COMFY).unwrap();
+        let tier = &REVIEWED_TURBO_MANIFEST_TIERS[0];
+        let turbo_manifest = find_manifest(tier.model).unwrap();
+        let path_of = |manifest: &ModelManifest, component: ModelComponent| {
+            let file = manifest
+                .files
+                .iter()
+                .find(|file| file.component == component)
+                .unwrap();
+            root.join(storage_path(manifest, file))
+                .to_string_lossy()
+                .to_string()
+        };
+
+        let mut config = Config::default();
+        config.models.insert(
+            FL2VA_COMFY.to_string(),
+            ModelConfig {
+                transformer: Some(path_of(base_manifest, ModelComponent::Transformer)),
+                ..ModelConfig::default()
+            },
+        );
+        config.models.insert(
+            tier.model.to_string(),
+            ModelConfig {
+                transformer: Some(path_of(turbo_manifest, ModelComponent::Transformer)),
+                distilled_lora: Some(path_of(turbo_manifest, ModelComponent::DistilledLora)),
+                ..ModelConfig::default()
+            },
+        );
+
+        let adapter_path = path_of(turbo_manifest, ModelComponent::DistilledLora);
+        let transformer_path = path_of(base_manifest, ModelComponent::Transformer);
+
+        let plan = plan_removal(&config, tier.model);
+        let unique: Vec<&str> = plan
+            .unique_files
+            .iter()
+            .map(|(path, _)| path.as_str())
+            .collect();
+        assert_eq!(unique, vec![adapter_path.as_str()]);
+        assert!(plan
+            .shared_files
+            .iter()
+            .any(|(path, used_by)| path == &transformer_path
+                && used_by == &vec![FL2VA_COMFY.to_string()]));
+
+        let plan = plan_removal(&config, FL2VA_COMFY);
+        assert!(
+            plan.unique_files.is_empty(),
+            "the base owns nothing exclusively while a Turbo tag is installed"
+        );
+        assert!(plan
+            .shared_files
+            .iter()
+            .any(|(path, used_by)| path == &transformer_path
+                && used_by == &vec![tier.model.to_string()]));
     }
 
     #[test]

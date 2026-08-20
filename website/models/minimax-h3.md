@@ -64,6 +64,14 @@ once under `shared/minimax-h3/loras/` and shared by both tags):
 - `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p` — 5 terminal-inclusive
   sampler grid points (4 model evaluations)
 
+A Turbo tag stores its base stack in the base checkpoint's own directory
+(`minimax-h3-fl2va-comfy-pruned-int8/` plus the shared family bucket), so a
+machine that already has `minimax-h3-fl2va:comfy-pruned-int8` installed
+downloads only the ~1.96 GB adapter — and pulling a Turbo tag first means a
+later base pull downloads nothing. Removal ref-counts every file across the
+installed tags: removing a Turbo tag deletes only its adapter while the base
+is installed, and removing the base keeps every file a Turbo tag still uses.
+
 Selecting a Turbo model resolves the base INT8 transformer, the tier's pinned
 adapter, and the tier's reviewed step count with no extra configuration. The
 `MOLD_H3_TURBO_ADAPTER` / `MOLD_H3_TURBO_TIER` environment pair is a
