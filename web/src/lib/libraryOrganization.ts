@@ -450,8 +450,18 @@ export async function applyOrganizationMutation(
   mutation: OrganizationMutation,
   context: MutationContext,
 ): Promise<FanoutResult> {
+  // A host whose snapshot says `gallery.organize: false` (older build,
+  // MOLD_DB_DISABLE) contributes no organization state and would 404/501
+  // every edit — skip its copies instead of surfacing partial failures for
+  // prints that are defined as unorganizable there (codex review). A host
+  // with no snapshot yet stays in: unknown is not incapable.
+  const incapable = new Set(
+    context.snapshots.filter((s) => !s.organize).map((s) => s.hostId),
+  );
   const ops = planOrganizationFanout(
-    copies.map((copy) => ({ hostId: copy.hostId, filename: copy.filename })),
+    copies
+      .filter((copy) => !incapable.has(copy.hostId))
+      .map((copy) => ({ hostId: copy.hostId, filename: copy.filename })),
     mutation,
   );
   return fanout(ops, context.hostById, async (op, _host, target) => {
@@ -568,12 +578,19 @@ export function setCollectionCover(
   );
 }
 
-/** Purge the trash on every trash-capable host that has something in it. */
+/**
+ * Purge the trash on every trash-capable host. Deliberately not limited to
+ * hosts whose snapshot already lists trashed rows: a print committed to the
+ * trash inside the last poll interval exists only as a pending shadow entry,
+ * and skipping its host would make Empty trash silently do nothing while the
+ * button showed a positive count (codex review). `DELETE /api/gallery/trash`
+ * on an already-empty host is a cheap no-op.
+ */
 export function emptyTrashEverywhere(
   snapshots: readonly HostOrganizationSnapshot[],
   hostById: HostLookup,
 ): Promise<FanoutResult> {
-  const ops = snapshots.filter((s) => s.trash?.enabled && s.trashed.length > 0);
+  const ops = snapshots.filter((s) => s.trash?.enabled);
   return fanout(ops, hostById, (_op, _host, target) =>
     emptyTrash(target).then(() => undefined),
   );

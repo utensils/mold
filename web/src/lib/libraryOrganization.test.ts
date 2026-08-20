@@ -404,15 +404,40 @@ describe("mutations fan out to every copy's host", () => {
       { hostById, snapshots: [] },
     );
     expect(api.deleteGalleryImageForever).toHaveBeenCalledTimes(3);
+    // Every trash-ENABLED host is purged, even one whose snapshot lists no
+    // trashed rows yet: a print committed to the trash within the last poll
+    // interval exists only as a pending shadow entry, and skipping its host
+    // would make Empty trash silently do nothing (codex review). A host
+    // whose trash is disabled is never called.
     await emptyTrashEverywhere(
       [
         snapshot("origin", { trashed: [entry("origin", "t.png")] }),
         snapshot("plato", { trashed: [] }),
+        snapshot("basil", { trash: null }),
       ],
       hostById,
     );
-    expect(api.emptyTrash).toHaveBeenCalledTimes(1);
+    expect(api.emptyTrash).toHaveBeenCalledTimes(2);
     expect(api.emptyTrash).toHaveBeenCalledWith(originTarget);
+    expect(api.emptyTrash).toHaveBeenCalledWith(platoTarget);
+  });
+
+  it("skips hosts known to lack gallery.organize, keeps unknown hosts", async () => {
+    await applyOrganizationMutation(
+      copies,
+      { kind: "setFavorite", favorite: true },
+      {
+        hostById,
+        // plato is KNOWN incapable; origin has no snapshot (unknown) and
+        // must still receive the mutation.
+        snapshots: [snapshot("plato", { organize: false })],
+      },
+    );
+    expect(api.organizeGallery).toHaveBeenCalledTimes(1);
+    expect(api.organizeGallery).toHaveBeenCalledWith(originTarget, {
+      filenames: ["twin.png"],
+      favorite: true,
+    });
   });
 
   it("renames, deletes, and re-covers a merged collection on its hosts", async () => {

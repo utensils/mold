@@ -15,8 +15,9 @@ import type { GalleryImage } from "../types";
 
 export function useThumbnailSources() {
   const remoteSrc = ref(new Map<string, string>());
-  // Keys with a resolve in flight (or already settled, even to ""), so a
-  // re-render never re-issues the same ticket request.
+  // Keys with a resolve genuinely in flight. Success settles into
+  // `remoteSrc`; failure clears the key so the next render retries — a
+  // transient host error must not blank the tile forever (codex review).
   const requested = new Set<string>();
 
   function srcFor(entry: GalleryImage): string {
@@ -33,7 +34,9 @@ export function useThumbnailSources() {
           remoteSrc.value = new Map(remoteSrc.value).set(key, url);
         })
         .catch(() => {
-          /* a tile that can't resolve keeps the browser's broken-image state */
+          // Leave no settled entry: the tile shows nothing now, and the
+          // next gallery refresh re-requests once the host recovers.
+          requested.delete(key);
         });
     }
     return "";

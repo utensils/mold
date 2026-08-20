@@ -301,7 +301,10 @@ async function reloadAll(
 // that host's own `gallery.trash_retention_days`, read and written with its
 // key (per-host, like every other setting on this page).
 const RETENTION_KEY = "gallery.trash_retention_days";
-const trashCapable = computed(() => !!caps.value?.gallery?.trash);
+// `trash.enabled === false` is a real answer (MOLD_DB_DISABLE, output
+// disabled): delete stays permanent there, so the Library card and its
+// config/trash polling must stay hidden — presence alone is not consent.
+const trashCapable = computed(() => caps.value?.gallery?.trash?.enabled === true);
 const trashRetentionDays = ref<number | null>(null);
 const trashCount = ref<number | null>(null);
 const savingRetention = ref(false);
