@@ -1570,6 +1570,64 @@ fn validate_vae_contract(expected_task: Task, task: Task, canonical_model: &str)
     Ok(())
 }
 
+/// FL2VA's corrected observed Qwen activation workspace and the Qwen
+/// sequence it was measured over (2026-08-19 on hal9000, RTX 4090 SM89,
+/// issue #827): the qualifying render encoded 1,058 output-text rows plus
+/// 4,032 vision rows. `public_runtime_bounds` applies its margin policy to
+/// the same observation; restated here because that function is compiled
+/// only under `h3`.
+const FL2VA_OBSERVED_QWEN_ACTIVATION_WORKSPACE_BYTES: u64 = 3_400_171_520;
+const FL2VA_OBSERVED_QWEN_SEQUENCE_ROWS: u64 = 1_058 + 4_032;
+
+/// The Qwen activation workspace one request charges into its exact budget
+/// and freezes into its factory authority.
+///
+/// FL2VA keeps the reviewed grant verbatim: its envelope caps the Qwen
+/// sequence at the rows the grant was measured over, so the flat figure IS
+/// the request figure. Ref2VA's profile grant is a flat provisional ceiling
+/// while the request's Qwen sequence varies by an order of magnitude with
+/// the ordered reference set, so charging the grant as a constant
+/// undercharges any request past the grant's sizing point (three
+/// maximum-canvas references already reach 2.62x the measured sequence).
+/// The exact budget therefore charges the REQUEST-derived demand — the
+/// corrected observed per-row cost scaled by the request's own text+vision
+/// rows, under the same x1.15 + 64 MiB-grid policy as the corrected public
+/// ceilings — and a demand above the profile's grant is a named refusal
+/// rather than an undercharged admit. Admission and the frozen-plan reopen
+/// both derive through here, so the freeze-time projection comparison
+/// cannot drift.
+pub(crate) fn qwen_activation_workspace_demand_bytes(
+    request: &H3FactoryPreparedRequestInput,
+    granted_qwen_activation_workspace_bytes: u64,
+) -> Result<u64> {
+    match request.task {
+        Task::Fl2va => Ok(granted_qwen_activation_workspace_bytes),
+        Task::Ref2va => {
+            let rows = checked_sum([
+                request.rows.qwen_output_text_rows,
+                request.rows.qwen_vision_rows,
+            ])?;
+            let scaled = FL2VA_OBSERVED_QWEN_ACTIVATION_WORKSPACE_BYTES
+                .checked_mul(rows)
+                .map(|bytes| bytes / FL2VA_OBSERVED_QWEN_SEQUENCE_ROWS)
+                .ok_or_else(|| anyhow!("private H3 Qwen activation demand overflow"))?;
+            let demand = scaled
+                .checked_mul(115)
+                .map(|bytes| (bytes / 100).next_multiple_of(64 * 1024 * 1024))
+                .ok_or_else(|| anyhow!("private H3 Qwen activation demand overflow"))?;
+            if demand > granted_qwen_activation_workspace_bytes {
+                bail!(
+                    "private H3 Ref2VA Qwen sequence of {rows} rows needs {demand} bytes of \
+                     Qwen activation workspace, exceeding the \
+                     {granted_qwen_activation_workspace_bytes} bytes the capture profile \
+                     provisionally grants"
+                )
+            }
+            Ok(demand)
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_canonical_private_fl2va_target_budget(
     request: &H3FactoryPreparedRequestInput,
@@ -1643,6 +1701,10 @@ fn build_canonical_private_fl2va_target_budget(
         .qwen_output_text_rows
         .checked_mul(5_120 * 2)
         .ok_or_else(|| anyhow!("private H3 Qwen output bytes overflow"))?;
+    // Request-derived for Ref2VA, the reviewed grant verbatim for FL2VA; a
+    // Ref2VA sequence past the profile's grant is a named refusal here.
+    let qwen_activation_workspace_bytes =
+        qwen_activation_workspace_demand_bytes(request, bounds.qwen_activation_workspace_bytes)?;
     let (
         qwen_host_activation_bytes,
         qwen_host_output_state_bytes,
@@ -1654,11 +1716,11 @@ fn build_canonical_private_fl2va_target_budget(
             0,
             0,
             qwen_memory.device_resident_parameter_bytes,
-            bounds.qwen_activation_workspace_bytes,
+            qwen_activation_workspace_bytes,
             0,
         ),
         H3QwenNvfp4RuntimePlacement::Cpu => (
-            bounds.qwen_activation_workspace_bytes,
+            qwen_activation_workspace_bytes,
             qwen_output_state_device_bytes,
             0,
             0,
@@ -2461,6 +2523,69 @@ mod tests {
             },
         };
         (prepared, frozen)
+    }
+
+    /// The exact budget charges the Qwen activation workspace from the
+    /// REQUEST's own Qwen sequence, never a flat profile constant: FL2VA
+    /// keeps its reviewed grant verbatim (its envelope caps the sequence at
+    /// the rows the grant was measured over), the scripted one-reference
+    /// campaign shape stays admitted at its own derived demand, and a
+    /// three-reference maximum-canvas request — 2.62x FL2VA's measured
+    /// sequence, above the capture profile's 2x provisional grant — is a
+    /// named refusal instead of an undercharged admit.
+    #[test]
+    fn qwen_activation_charge_follows_the_request_sequence() {
+        const FL2VA_PUBLIC_CEILING: u64 = 3_959_422_976;
+        const CAPTURE_GRANT: u64 = 2 * FL2VA_PUBLIC_CEILING;
+        let (_, fl2va_frozen) = prepared_runtime_pair();
+
+        // FL2VA: the reviewed grant, byte-identical to the old flat charge.
+        assert_eq!(
+            qwen_activation_workspace_demand_bytes(&fl2va_frozen, FL2VA_PUBLIC_CEILING).unwrap(),
+            FL2VA_PUBLIC_CEILING
+        );
+
+        let ref2va_shape = |vision_rows: u64| {
+            let mut request = fl2va_frozen.clone();
+            request.canonical_model = contract::REF2VA_COMFY.into();
+            request.task = Task::Ref2va;
+            request.rows.qwen_output_text_rows = 1_058;
+            request.rows.qwen_vision_rows = vision_rows;
+            request
+        };
+
+        // The scripted campaign request: one 2048-square still (4,096 vision
+        // pads). Its derived demand lands exactly on the corrected public
+        // ceiling — the same per-row cost at essentially the same sequence —
+        // and sits inside the capture grant.
+        let campaign = ref2va_shape(4_096);
+        let campaign_demand =
+            qwen_activation_workspace_demand_bytes(&campaign, CAPTURE_GRANT).unwrap();
+        assert_eq!(campaign_demand, FL2VA_PUBLIC_CEILING);
+        assert!(campaign_demand <= CAPTURE_GRANT);
+
+        // Three maximum-canvas references: 1,058 + 3 x 4,096 = 13,346 rows =
+        // 2.62x the measured 5,090-row sequence. The derived demand exceeds
+        // the 2x grant, so the request is refused by name rather than
+        // admitted under insufficient authority.
+        let three_references = ref2va_shape(3 * 4_096);
+        let error = qwen_activation_workspace_demand_bytes(&three_references, CAPTURE_GRANT)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Qwen activation workspace"), "{error}");
+        assert!(error.contains("10267656192"), "{error}");
+        assert!(error.contains("7918845952"), "{error}");
+        // And the derived figure really is beyond twice the FL2VA ceiling:
+        // at an unbounded grant the same shape charges exactly that demand.
+        let unfenced = qwen_activation_workspace_demand_bytes(&three_references, u64::MAX).unwrap();
+        assert_eq!(unfenced, 10_267_656_192);
+        assert!(unfenced > 2 * FL2VA_PUBLIC_CEILING);
+
+        // A demand exactly at the grant is admitted — the fence refuses only
+        // what the profile cannot cover.
+        let at_grant = ref2va_shape(9_178);
+        let demand = qwen_activation_workspace_demand_bytes(&at_grant, CAPTURE_GRANT).unwrap();
+        assert!(demand <= CAPTURE_GRANT, "{demand}");
     }
 
     /// The prepared owner attempt authority is task-shaped: FL2VA passes the

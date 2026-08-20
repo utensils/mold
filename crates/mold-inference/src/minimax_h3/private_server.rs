@@ -54,8 +54,8 @@ use super::private_fl2va_runtime::{
 #[cfg(feature = "mp4")]
 use super::private_opened_evidence::{
     build_private_fl2va_admission_attempt, prepare_private_fl2va_admission_request,
-    prepare_private_ref2va_admission_request, H3PrivateComfyStorageAuthority,
-    H3PrivatePreparedFl2VaAttempt,
+    prepare_private_ref2va_admission_request, qwen_activation_workspace_demand_bytes,
+    H3PrivateComfyStorageAuthority, H3PrivatePreparedFl2VaAttempt,
 };
 use super::private_opened_evidence::{
     H3PrivateOpenedActivationFacts, H3PrivatePreparedFl2VaFactoryInputs,
@@ -1485,9 +1485,15 @@ fn prepare_reviewed_h3_private_fl2va_admission(
             qwen_parameter_bytes: qwen_memory.source_parameter_bytes,
             qwen_host_resident_parameter_bytes: qwen_memory.host_resident_parameter_bytes,
             qwen_device_resident_parameter_bytes: qwen_memory.device_resident_parameter_bytes,
-            qwen_activation_workspace_bytes: runtime_qualification
-                .bounds()
-                .qwen_activation_workspace_bytes,
+            // Request-derived for Ref2VA, the reviewed grant verbatim for
+            // FL2VA — the same seam the budget builder charges through, so
+            // the freeze-time projection comparison cannot drift.
+            qwen_activation_workspace_bytes: qwen_activation_workspace_demand_bytes(
+                &admission_request.request,
+                runtime_qualification
+                    .bounds()
+                    .qwen_activation_workspace_bytes,
+            )?,
             qwen_maximum_tensor_staging_bytes: qwen_memory.maximum_tensor_staging_bytes,
             qwen_retained_raw_header_bytes: qwen_memory.retained_raw_header_bytes,
             qwen_output_text_rows: admission_request.request.rows.qwen_output_text_rows,
@@ -4477,34 +4483,112 @@ const fn public_style_generated_caps() -> (u64, u64, u64) {
     (1_058, 37_296, 414)
 }
 
-/// Provisional device/host ceilings for one instrumented Ref2VA attempt.
+/// FL2VA's corrected observed workspace measurements — the identical figures
+/// `public_runtime_bounds` applies its margin policy to (2026-08-19 on
+/// hal9000, RTX 4090 SM89, 1344x768, 124 frames, 21 steps, recorded on issue
+/// #827). Restated here because that function is compiled only under `h3`
+/// while the capture build runs without it; a divergence is a review error.
+#[cfg(feature = "h3-private-uat")]
+mod fl2va_observed {
+    pub(super) const ATTENTION_WORKSPACE_DEVICE_BYTES: u64 = 6_172_029_280;
+    pub(super) const FFN_WORKSPACE_DEVICE_BYTES: u64 = 7_641_748_832;
+    pub(super) const CONDITION_VAE_WORKSPACE_DEVICE_BYTES: u64 = 366_027_840;
+    /// The packed-row count of the reviewed FL2VA envelope the two denoise
+    /// transients above were measured under (`max_total_packed_rows`,
+    /// `public_runtime_envelope_for_steps`); the qualifying render used
+    /// 39,768 of these 39,776 rows, so the observation IS the envelope's.
+    pub(super) const ENVELOPE_TOTAL_PACKED_ROWS: u64 = 39_776;
+    /// The conditioning canvas the FL2VA condition-VAE transient was
+    /// measured encoding (one 512x384 boundary frame).
+    pub(super) const CONDITION_ENCODE_PIXELS: u64 = 512 * 384;
+}
+
+/// The corrected public margin/rounding policy (`public_runtime_bound`),
+/// restated for the capture build: round a derived ceiling up to the 64 MiB
+/// grant grid. The capture derivation deliberately applies NO percentage
+/// margin on top — its headroom is structural (see each term below), and a
+/// percentage would push the denoise grant past what the 24 GiB campaign
+/// card can hold beside the transformer itself.
+#[cfg(feature = "h3-private-uat")]
+const fn capture_grid_ceiling(bytes: u64) -> u64 {
+    bytes.next_multiple_of(64 * 1024 * 1024)
+}
+
+/// Provisional device/host ceilings for one instrumented Ref2VA attempt,
+/// derived term by term from the CORRECTED measurement-grounded FL2VA ledger
+/// at the capture envelope. The pre-correction sizing (attention 10.13 GB x5,
+/// FFN 15.30 GB x3) put the admission device floor at 51.3 GB — over double
+/// the SM89 campaign card — so the campaign could never admit on the very
+/// device it exists to measure.
 ///
-/// Derived from FL2VA's corrected public bounds with one scaling argument per
-/// axis, all of them deliberately generous:
+/// Per-term provenance:
 ///
-/// * Attention and FFN scale with the packed sequence. FL2VA's measured pair
-///   covers 39,776 rows; the capture envelope admits at most 88,022, which is
-///   2.22x. Attention's score matrix is quadratic in sequence length, so its
-///   ceiling takes 5x (2.22^2 rounded up) and the FFN's, which is linear in
-///   rows, takes 3x.
-/// * The condition-VAE workspace is per-encode, not per-sequence, but Ref2VA
-///   encodes a 2048-square canvas where FL2VA encodes 512x384 — 21x the pixels
-///   — so its ceiling takes 24x.
-/// * Everything else is either fixed runtime state or generated-side output
-///   whose geometry is identical to FL2VA's, and keeps FL2VA's own value.
+/// * `attention`/`ffn` — the denoise transients are per-forward workspaces
+///   over the packed sequence, and the admission device floor is
+///   `fixed_runtime_device + max(attention, ffn)`
+///   (`denoise_transient_workspace_device_bytes`). Both scale LINEARLY with
+///   packed rows: the route is FlashAttention v2 (no materialized score
+///   matrix — the old x5 "quadratic" argument sized a matrix the kernel
+///   never allocates) and the FFN materializes per-row projections. Ceiling =
+///   observed x (capture envelope rows / FL2VA envelope rows) =
+///   x 88,334/39,776, grid-rounded: attention 13.76 GB, FFN 16.98 GB. The
+///   provisional headroom is structural: the envelope prices twelve
+///   2048-square references while the instrumented campaign request packs a
+///   small ordered set (~43k rows, barely above FL2VA's 39.8k), so the grant
+///   sits ~2x above the expected observation. Device floor:
+///   0.60 + 16.98 = 17.58 GB — clears the campaign card's 24.97 GB sample
+///   with the transformer's own denoise-phase terms still fitting beside it.
+/// * `condition_vae` — a per-encode transient, linear in the encoded canvas:
+///   observed x (largest reference canvas / FL2VA's measured condition
+///   canvas) = x 2048^2/(512x384) = x64/3, grid-rounded: 7.85 GB. Charged in
+///   the reference visual-encode phase, far below the denoise peak.
+/// * `qwen_activation` — 2x the corrected public ceiling (2 x 3.96 GB =
+///   7.92 GB). This is the provisional GRANT ceiling only, not the charge:
+///   the exact budget charges each request's own derived demand — the
+///   corrected observed per-row cost scaled by the request's text+vision
+///   rows (`qwen_activation_workspace_demand_bytes`) — and a Ref2VA
+///   sequence whose demand exceeds this grant is a named refusal at budget
+///   build, never an undercharged admit. The 2x sizing covers the
+///   campaign's ordered sets (~2x FL2VA's 5,090-row measured sequence);
+///   the envelope's twelve-still maximum (50,210 Qwen rows) is
+///   deliberately NOT the sizing point — granting it would exceed the
+///   campaign host headroom beside the 19.1 GB CPU-placed conditioner.
+/// * `fixed_runtime_host` / `fixed_runtime_device` /
+///   `decoder_tile` / `audio_decode` — fixed runtime state and
+///   generated-side output whose geometry the capture envelope shares with
+///   FL2VA exactly; each keeps the corrected public ceiling
+///   (`public_runtime_bound(observed)`): 805,306,368 / 603,979,776 /
+///   1,543,503,872 / 268,435,456.
+/// * `vae_construction` — the public profile's own 64 MiB floor for a
+///   transient observed at zero (a zero bound is inadmissible).
+/// * The four pipeline host bounds remain the pipeline's own allocation
+///   limits, as everywhere else.
 ///
-/// The audio encoder is the one axis with no FL2VA analogue at all; it borrows
-/// the decoder's measured workspace, which runs the larger BigVGAN stack.
+/// The audio reference encoder still has no FL2VA analogue; the budget
+/// builder borrows `audio_decode_workspace_device_bytes` for it, which rides
+/// the corrected value above.
 #[cfg(feature = "h3-private-uat")]
 fn capture_runtime_bounds() -> H3PrivateRuntimeBoundRecord {
+    let envelope_rows = capture_runtime_envelope().max_total_packed_rows;
+    let sequence_scaled = |observed_bytes: u64| {
+        capture_grid_ceiling(
+            observed_bytes * envelope_rows / fl2va_observed::ENVELOPE_TOTAL_PACKED_ROWS,
+        )
+    };
+    let largest_reference_pixels = 2_048_u64 * 2_048;
     H3PrivateRuntimeBoundRecord {
-        fixed_runtime_host_bytes: 671_088_640,
+        fixed_runtime_host_bytes: 805_306_368,
         fixed_runtime_device_bytes: 603_979_776,
-        qwen_activation_workspace_bytes: 3_758_096_384,
+        qwen_activation_workspace_bytes: 2 * 3_959_422_976,
         vae_construction_device_workspace_bytes: 67_108_864,
-        condition_vae_workspace_device_bytes: 469_762_048 * 24,
-        attention_workspace_device_bytes: 10_133_438_464 * 5,
-        ffn_workspace_device_bytes: 15_300_820_992 * 3,
+        condition_vae_workspace_device_bytes: capture_grid_ceiling(
+            fl2va_observed::CONDITION_VAE_WORKSPACE_DEVICE_BYTES * largest_reference_pixels
+                / fl2va_observed::CONDITION_ENCODE_PIXELS,
+        ),
+        attention_workspace_device_bytes: sequence_scaled(
+            fl2va_observed::ATTENTION_WORKSPACE_DEVICE_BYTES,
+        ),
+        ffn_workspace_device_bytes: sequence_scaled(fl2va_observed::FFN_WORKSPACE_DEVICE_BYTES),
         decoder_tile_workspace_device_bytes: 1_543_503_872,
         audio_decode_workspace_device_bytes: 268_435_456,
         encoded_video_host_bytes_bound: super::pipeline::SMALL_ENCODED_VIDEO_HOST_BYTES_BOUND,
@@ -6907,13 +6991,57 @@ mod tests {
         assert_eq!(envelope.endpoint_count, 0);
         assert_eq!(envelope.endpoint_anchor, "none");
 
-        // Every ceiling is at or above the FL2VA value it was scaled from, and
-        // the two sequence-dependent ones are strictly above it.
+        // Every ceiling is at or above the corrected FL2VA measurement it was
+        // scaled from, and the sequence- and canvas-scaled ones are strictly
+        // above it.
         let ceilings = capture_runtime_bounds();
         ceilings.validate().unwrap();
-        assert!(ceilings.attention_workspace_device_bytes > 10_133_438_464);
-        assert!(ceilings.ffn_workspace_device_bytes > 15_300_820_992);
-        assert!(ceilings.condition_vae_workspace_device_bytes > 469_762_048);
+        assert!(ceilings.attention_workspace_device_bytes > 6_172_029_280);
+        assert!(ceilings.ffn_workspace_device_bytes > 7_641_748_832);
+        assert!(ceilings.condition_vae_workspace_device_bytes > 366_027_840);
+        assert!(ceilings.qwen_activation_workspace_bytes > 3_400_171_520);
+
+        // The admission floors these ceilings imply must clear the SM89
+        // campaign card the profile exists to measure on. Campaign attempt 5
+        // (RTX 4090, 24 GiB) sampled exactly these device/host figures and
+        // was refused at a 51.3 GB device floor because the provisional
+        // attention/FFN ceilings carried pre-correction ledger sizing; the
+        // corrected derivation must admit on that same sample.
+        #[cfg(feature = "mp4")]
+        {
+            const SM89_CAMPAIGN_DEVICE_SAMPLE_BYTES: u64 = 24_967_446_528;
+            const SM89_CAMPAIGN_HOST_SAMPLE_BYTES: u64 = 46_225_700_250;
+            let device_floor = private_h3_admission_device_floor_bytes(&ceilings).unwrap();
+            let host_floor = private_h3_admission_host_floor_bytes(&ceilings).unwrap();
+            assert!(
+                device_floor <= 22_000_000_000,
+                "capture device floor {device_floor} exceeds the ~22 GB campaign target"
+            );
+            precheck_private_h3_admission_capacity(
+                &ceilings,
+                SM89_CAMPAIGN_DEVICE_SAMPLE_BYTES,
+                SM89_CAMPAIGN_HOST_SAMPLE_BYTES,
+            )
+            .unwrap();
+            // Pin the derived floors so any re-derivation of the ceilings is
+            // a visible, reviewed decision rather than silent drift.
+            assert_eq!(device_floor, 603_979_776 + 16_978_542_592);
+            assert_eq!(host_floor, 805_306_368 + 19_066_444_664);
+        }
+
+        // The two sequence-linear denoise transients are the corrected FL2VA
+        // observations scaled by the exact envelope packed-row ratio, then
+        // rounded up to the 64 MiB grant grid.
+        let rows = capture_runtime_envelope().max_total_packed_rows;
+        assert_eq!(rows, 88_334);
+        assert_eq!(
+            ceilings.attention_workspace_device_bytes,
+            (6_172_029_280_u64 * rows / 39_776).next_multiple_of(64 * 1024 * 1024)
+        );
+        assert_eq!(
+            ceilings.ffn_workspace_device_bytes,
+            (7_641_748_832_u64 * rows / 39_776).next_multiple_of(64 * 1024 * 1024)
+        );
 
         // The report renders observation against ceiling so a reviewer
         // transcribes the measurement, never the ceiling.
@@ -7602,6 +7730,11 @@ mod tests {
             record(7_113_539_584, 8_791_261_184, 603_979_776, 805_306_368),
             record(15_300_820_992, 10_133_438_464, 603_979_776, 671_088_640),
             record(u32::MAX.into(), 1, u32::MAX.into(), u32::MAX.into()),
+            // The derived capture-scope ceilings themselves, so the floor
+            // invariant is checked at exactly the record the Ref2VA campaign
+            // admits under.
+            #[cfg(feature = "h3-private-uat")]
+            capture_runtime_bounds(),
         ];
         // Request-derived terms the exact sums add on top. Every one is
         // non-negative, so the floor has to hold for the empty case too.
