@@ -1405,6 +1405,54 @@ Models: `minimax-h3-fl2va:comfy-pruned-int8`.
 
 Provenance: [Upstream](https://github.com/MiniMax-AI/MiniMax-H3) at `fa6891ff7cdaaa03fa4497e89ac64ff169219acf`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
+### `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p`
+
+Schema 1 · hash `9c3a8270a55ab5194ec2248e389154d579d081b0921bc378d186f76e64d9c800` · default recipe `default`
+
+Models: `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p`.
+
+#### Default (`default`)
+
+- Resolution: dynamic; alignment `32`; minimum `64x64`; maximum `1069056` pixels; axis limit `none`; aspect range `0.25–4`.
+- Defaults: `1344x768`, 5 steps, guidance 0.
+- Steps: 2–100 by 1; guidance: 0–0 by 0.1 (Fixed).
+- Temporal: frames 124–345 on `17n+5` (default 124); FPS fixed 24; duration limit 15s.
+
+| Exact ratio | Qualified presets |
+|---|---|
+| `16:7` | `1536x672` (recommended) |
+| `7:4` | `1344x768` (recommended) |
+| `4:3` | `1024x768` (recommended) |
+| `1:1` | `768x768` (recommended) |
+| `3:4` | `768x1024` (recommended) |
+| `4:7` | `768x1344` (recommended) |
+
+Provenance: [Upstream](https://github.com/MiniMax-AI/MiniMax-H3) at `fa6891ff7cdaaa03fa4497e89ac64ff169219acf`, qualified: `true`, evidence: `mold.generation-profile.v1`.
+
+### `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step`
+
+Schema 1 · hash `c78c1015b3187c8be0065a1462fa3abcc94faac1df7cda17ee477f7d0c99166e` · default recipe `default`
+
+Models: `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step`.
+
+#### Default (`default`)
+
+- Resolution: dynamic; alignment `32`; minimum `64x64`; maximum `1069056` pixels; axis limit `none`; aspect range `0.25–4`.
+- Defaults: `1344x768`, 9 steps, guidance 0.
+- Steps: 2–100 by 1; guidance: 0–0 by 0.1 (Fixed).
+- Temporal: frames 124–345 on `17n+5` (default 124); FPS fixed 24; duration limit 15s.
+
+| Exact ratio | Qualified presets |
+|---|---|
+| `16:7` | `1536x672` (recommended) |
+| `7:4` | `1344x768` (recommended) |
+| `4:3` | `1024x768` (recommended) |
+| `1:1` | `768x768` (recommended) |
+| `3:4` | `768x1024` (recommended) |
+| `4:7` | `768x1344` (recommended) |
+
+Provenance: [Upstream](https://github.com/MiniMax-AI/MiniMax-H3) at `fa6891ff7cdaaa03fa4497e89ac64ff169219acf`, qualified: `true`, evidence: `mold.generation-profile.v1`.
+
 ### `minimax-h3-fl2va:official-bf16`
 
 Schema 1 · hash `f6dbfccd17c5f016689e872c51e2d21e9dd258a57af7906b4e0023e9707efc00` · default recipe `default`
