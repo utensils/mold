@@ -45,6 +45,33 @@ function mountComposer(form: GenerateForm, overrides: Record<string, unknown> = 
 }
 
 describe("ComposerCard", () => {
+  it("walks prompt history chronologically and restores the authored draft", async () => {
+    const form = baseForm();
+    form.prompt = "draft";
+    const wrapper = mountComposer(form, { history: ["newest", "middle", "oldest"] });
+    const textarea = wrapper.get("textarea[aria-label='Prompt']");
+    const el = textarea.element as HTMLTextAreaElement;
+    el.setSelectionRange(0, 0);
+
+    await textarea.trigger("keydown", { key: "ArrowUp" });
+    expect(form.prompt).toBe("newest");
+    await textarea.trigger("keydown", { key: "ArrowUp" });
+    expect(form.prompt).toBe("middle");
+    await textarea.trigger("keydown", { key: "ArrowDown" });
+    expect(form.prompt).toBe("newest");
+    await textarea.trigger("keydown", { key: "ArrowDown" });
+    expect(form.prompt).toBe("draft");
+  });
+
+  it("does not swallow ArrowUp when there is no cached or live history", () => {
+    const wrapper = mountComposer(baseForm(), { history: [] });
+    const el = wrapper.get("textarea[aria-label='Prompt']").element as HTMLTextAreaElement;
+    el.setSelectionRange(0, 0);
+    const event = new KeyboardEvent("keydown", { key: "ArrowUp", cancelable: true });
+    el.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(false);
+  });
+
   it("submits on the primary-modifier Enter shortcut", async () => {
     const wrapper = mountComposer(baseForm());
     await wrapper

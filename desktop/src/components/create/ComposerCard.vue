@@ -84,15 +84,16 @@ onMounted(() => {
   promptEl.value?.focus();
 });
 
-function cycleHistory(direction: "prev" | "next") {
+function cycleHistory(direction: "prev" | "next"): boolean {
   const replacement = direction === "prev" ? cycler.prev(props.form.prompt) : cycler.next();
-  if (replacement === null) return;
+  if (replacement === null) return false;
   props.form.prompt = replacement;
   emit("prompt-authored", replacement);
   void nextTick(() => {
     const el = promptEl.value;
     el?.setSelectionRange(el.value.length, el.value.length);
   });
+  return true;
 }
 
 function onPromptInput(event: Event) {
@@ -109,11 +110,9 @@ function onKeydown(e: KeyboardEvent) {
     e.preventDefault();
     expandControl.value?.expand();
   } else if (e.key === "ArrowUp" && promptEl.value && caretOnFirstLine(promptEl.value)) {
-    e.preventDefault();
-    cycleHistory("prev");
+    if (cycleHistory("prev")) e.preventDefault();
   } else if (e.key === "ArrowDown" && promptEl.value && caretOnLastLine(promptEl.value)) {
-    e.preventDefault();
-    cycleHistory("next");
+    if (cycleHistory("next")) e.preventDefault();
   }
 }
 

@@ -123,13 +123,19 @@ import {
   deleteGalleryImage,
   expandPrompt,
   fetchChainLimits,
-  fetchPromptHistory,
   getChainJob,
   imageUrl,
   listGallery,
   upscaleStream,
   type StreamTarget,
 } from "../api";
+import { apiJsonTo } from "@studio/api/client";
+import {
+  availablePromptHistoryStorage,
+  PromptHistoryCoordinator,
+  promptHistoryHostSignature,
+  recordPromptHistoryCache,
+} from "@studio/lib/promptHistoryCache";
 import type {
   PromptTransformProvenanceWire,
   RemixDimension,
@@ -1246,9 +1252,34 @@ async function refreshGallery() {
   }
 }
 
+const promptHistoryCoordinator = new PromptHistoryCoordinator();
 async function refreshHistory() {
-  promptHistory.value = await fetchPromptHistory();
+  const history = await promptHistoryCoordinator.load(
+    availablePromptHistoryStorage(),
+    routing.hosts.value.map((host) => ({
+      hostId: host.id,
+      hostLabel: host.label,
+      fetchable: host.status === "ready",
+      source: { baseUrl: host.url, apiKey: host.apiKey ?? null },
+    })),
+    async (target) => {
+      const listing = await apiJsonTo<{
+        entries?: Array<{ prompt: string; model: string; used_at: number }>;
+      }>(target, "/api/history?limit=100");
+      return listing.entries ?? [];
+    },
+  );
+  if (history) promptHistory.value = history.map((entry) => entry.prompt);
 }
+
+// The first call commonly lands while registry hosts are still connecting.
+// Re-run on every reachability transition so the cache is visible offline and
+// each newly reachable host is folded into the same chronological timeline.
+watch(
+  () => promptHistoryHostSignature(routing.hosts.value),
+  () => void refreshHistory(),
+  { immediate: true },
+);
 
 const doneJobIds = computed(() =>
   stream.jobs.value
@@ -3365,6 +3396,15 @@ async function onSubmitInner(allowStaleQuick = false) {
   quickPrepared.value = null;
   // Push to history immediately so ↑ recalls it before the server round-trips.
   composerCardRef.value?.record(req.prompt);
+  recordPromptHistoryCache(
+    availablePromptHistoryStorage(),
+    routing.hosts.value.map((host) => ({
+      hostId: host.id,
+      hostLabel: host.label,
+    })),
+    route.hostId,
+    { prompt: req.prompt, model: req.model, used_at: Date.now() },
+  );
   if (
     form.state.value.seedMode === "increment" &&
     form.state.value.seed !== null
@@ -4206,6 +4246,7 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
+  promptHistoryCoordinator.invalidate();
   stopAutoRefresh();
   clearSequencePreviews();
   phoneQuery?.removeEventListener?.("change", syncPhone);

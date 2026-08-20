@@ -122,6 +122,14 @@ const placementPreviewMock = vi.hoisted(() =>
     },
   })),
 );
+const promptHistoryApiMock = vi.hoisted(() =>
+  vi.fn(async () => ({ entries: [] })),
+);
+
+vi.mock("@studio/api/client", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@studio/api/client")>()),
+  apiJsonTo: promptHistoryApiMock,
+}));
 
 vi.mock("@studio/api/generationPlacement", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@studio/api/generationPlacement")>()),
@@ -180,7 +188,6 @@ vi.mock("../api", async (importOriginal) => {
     listGallery: vi.fn(async () => [entry]),
     deleteGalleryImage: vi.fn(async () => undefined),
     upscaleStream: upscaleStreamMock,
-    fetchPromptHistory: vi.fn(async () => []),
     imageUrl: (name: string) => `/api/gallery/image/${name}`,
     thumbnailUrl: (name: string) => `/api/gallery/thumbnail/${name}`,
     fetchChainLimits: fetchChainLimitsMock,
@@ -308,6 +315,8 @@ describe("CreatePage layout and behavior", () => {
     generateFormTesting.resetForTest();
     resetNotifications();
     submitMock.mockClear();
+    promptHistoryApiMock.mockReset();
+    promptHistoryApiMock.mockResolvedValue({ entries: [] });
     placementPreviewMock.mockReset();
     placementPreviewMock.mockResolvedValue({
       version: 1,
@@ -3290,6 +3299,8 @@ describe("CreatePage host routing", () => {
     generateFormTesting.resetForTest();
     resetNotifications();
     submitMock.mockClear();
+    promptHistoryApiMock.mockReset();
+    promptHistoryApiMock.mockResolvedValue({ entries: [] });
     placementPreviewMock.mockReset();
     placementPreviewMock.mockResolvedValue({
       version: 1,
