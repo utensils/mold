@@ -85,8 +85,12 @@ MiniMax H3 weights use the
 not Mold's MIT license. H3 may be used through Mold in every territory and
 workflow — local, remote, shared, hosted, output distribution, and
 redistribution — with no separate acceptance step; review the linked terms for
-your use. Current capability limits (FL2VA on SM89 CUDA only) are documented in
-the [H3 model guide](https://utensils.io/mold/models/minimax-h3).
+your use. The reviewed FL2VA Turbo distillations are ordinary model tags
+(`minimax-h3-fl2va:comfy-pruned-int8-turbo-8step` and
+`…-turbo-4step-768p`) that pull the same compact stack plus one pinned LoRA
+adapter and render at their tier's fixed step count. Current capability limits
+(FL2VA on SM89 CUDA only) are documented in the
+[H3 model guide](https://utensils.io/mold/models/minimax-h3).
 
 ## Mold Studio
 

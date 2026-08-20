@@ -132,6 +132,12 @@ const h3ModelDoc = readRel('models/minimax-h3.md')
 const requiredH3DownloadFacts = [
   'minimax-h3-fl2va:comfy-pruned-int8',
   'minimax-h3-ref2va:comfy-pruned-int8',
+  'minimax-h3-fl2va:comfy-pruned-int8-turbo-8step',
+  'minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p',
+  '1,956,193,000',
+  '1,956,192,992',
+  'dc559027db79c174125df4d827db55cd11178860',
+  'capture-scope UAT override',
   '42,482,090,318',
   '63,452,470,480',
   '20,970,379,616',
