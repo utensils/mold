@@ -1844,7 +1844,7 @@ where
             allocation_commit,
             attempt,
         } = self;
-        let (prepared, retention) = prepared.into_runtime_parts();
+        let (prepared, retention) = prepared.into_runtime_parts()?;
         retention.revalidate()?;
         let expected_denoise_forwards =
             super::sampler::H3DualSchedule::new_for_sampler_with_video_shift(

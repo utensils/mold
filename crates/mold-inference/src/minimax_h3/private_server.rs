@@ -791,6 +791,12 @@ pub struct H3PrivateFl2VaPrepareInput<'a> {
     pub admission_evidence: &'a H3PrivateFl2VaAdmissionEvidence,
     pub paths: H3PrivateFl2VaUatPaths<'a>,
     pub owner_fence: H3PrivateFl2VaOwnerFenceFacts,
+    /// Verified bindings for the ordered Ref2VA references, minted by the
+    /// caller from the staged set immediately before owner preparation —
+    /// the same shape admission consumed, because the reopen re-derives the
+    /// exact frozen factory request through the same decoder. Empty for
+    /// FL2VA.
+    pub references: &'a [GenerationReferenceBinding],
 }
 
 /// Canonical private-UAT filesystem inputs. Preparation resolves every model
@@ -2321,6 +2327,7 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
         admission_evidence,
         paths,
         owner_fence,
+        references,
     } = input;
     owner_fence.validate()?;
     admission_evidence.validate_for(
@@ -2542,6 +2549,7 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
     let frozen_turbo = frozen_factory.quantization().turbo_adapter();
     let prepared_attempt = H3PrivatePreparedFl2VaAttempt::prepare(
         request,
+        references,
         frozen_factory.execution_fingerprint(),
         &storage,
         &qwen_support,
