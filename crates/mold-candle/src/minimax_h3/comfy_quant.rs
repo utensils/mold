@@ -45,6 +45,54 @@ pub const H3_COMFY_PORTABLE_ROW_CHUNK: usize = 256;
 #[cfg(any(feature = "cuda", feature = "h3-private-uat"))]
 pub(crate) const H3_NATIVE_INT8_CUBLAS_WORKSPACE_BYTES: usize = 4 * 1024 * 1024;
 
+/// Which arm executes one INT8 ConvRot linear.
+///
+/// The choice is a pure function of the device, the compiled feature set, and
+/// the weight's own shape — never of the calling surface — mirroring
+/// `zimage`/`qwen_image`'s `select_linear_kind`. Keeping it a function rather
+/// than an inline `cfg!` is what lets Metal's arm be pinned by a test on a
+/// machine that has no Metal device.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum H3Int8LinearKind {
+    /// cuBLASLt signed INT8 -> INT32 GEMM with a fused dequantize.
+    NativeCudaInt8,
+    /// Portable quantize/dequantize: rotate, dynamically quantize the
+    /// activation, accumulate against the packed signed bytes in F32 over
+    /// bounded output-row chunks, then apply both scales. This is the arm
+    /// Metal and CPU take, and it is exact against the same reference the
+    /// CUDA kernel matches.
+    PortableQuantizeDequantize,
+}
+
+/// Resolve the INT8 ConvRot arm for one linear.
+///
+/// Metal always takes the portable arm: `int8_cuda.rs`'s cuBLASLt kernel has
+/// no Metal twin, and unlike Qwen-Image's `QMatMul` there is no candle-side
+/// Metal quantized kernel to qualify — so this is a correctness fallback by
+/// construction, not a tuning choice. It is also why the H3 Metal tier is
+/// `CorrectnessOnly`: the portable arm re-uploads and widens the packed weight
+/// chunk on every forward.
+pub fn select_h3_int8_linear_kind(
+    device: &Device,
+    native_kernel_compiled: bool,
+    has_bias: bool,
+    in_features: usize,
+    out_features: usize,
+) -> H3Int8LinearKind {
+    // The kernel folds no bias and its cuBLASLt layout descriptors require
+    // both extents to be a multiple of four.
+    if native_kernel_compiled
+        && device.is_cuda()
+        && !has_bias
+        && in_features.is_multiple_of(4)
+        && out_features.is_multiple_of(4)
+    {
+        H3Int8LinearKind::NativeCudaInt8
+    } else {
+        H3Int8LinearKind::PortableQuantizeDequantize
+    }
+}
+
 const E2M1_LUT: [f32; 16] = [
     0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0,
 ];
@@ -342,6 +390,17 @@ impl H3ComfyFp8ScaledLinear {
             candle::bail!("MiniMax H3 scaled FP8 row chunk must be positive")
         }
         let device = input.device();
+        // candle has no Metal F8E4M3 cast kernel, so the round trip in
+        // `quantize_dequantize_input` would fail with a raw
+        // "Metal contiguous to_dtype F32 F8E4M3 not implemented" from inside a
+        // linear, naming neither the checkpoint nor the fix. Refuse by name,
+        // the same rule Wan applies to its fp8-scaled tiers.
+        if device.is_metal() {
+            candle::bail!(
+                "MiniMax H3 scaled FP8 weights do not run on Metal — candle has no Metal fp8 \
+                 widening kernel. Use the INT8 ConvRot or BF16 tier of this checkpoint instead."
+            )
+        }
         let (flat, output_shape) = flattened_input(input, self.in_features)?;
         let quantized_input = self.quantize_dequantize_input(&flat)?;
         let mut chunks = Vec::new();
@@ -817,12 +876,17 @@ impl H3ComfyInt8ConvRotLinear {
             .reshape((grouped_rows, H3_COMFY_CONVROT_GROUP_SIZE))?
             .matmul(&hadamard)?
             .reshape((rows, self.in_features))?;
+        let kind = select_h3_int8_linear_kind(
+            device,
+            cfg!(feature = "cuda"),
+            bias.is_some(),
+            self.in_features,
+            self.out_features,
+        );
+        #[cfg(not(feature = "cuda"))]
+        debug_assert_eq!(kind, H3Int8LinearKind::PortableQuantizeDequantize);
         #[cfg(feature = "cuda")]
-        if device.is_cuda()
-            && bias.is_none()
-            && self.in_features.is_multiple_of(4)
-            && self.out_features.is_multiple_of(4)
-        {
+        if kind == H3Int8LinearKind::NativeCudaInt8 {
             let weight = self.weight.to_device(device)?;
             let weight_scale = self.weight_scale.to_device(device)?;
             let mut output_shape = output_shape;
@@ -1297,6 +1361,13 @@ impl H3ComfyNvfp4AwqLinear {
     /// Comfy text encoders multiply by the ModelOpt AWQ input scale and then
     /// use a full-precision matrix multiplication over dequantized NVFP4
     /// weights. This method preserves that ordering and bounds weight staging.
+    ///
+    /// There is deliberately no device dispatch here, on any backend: NVFP4
+    /// has no native kernel in mold at all, so CUDA, Metal, and CPU share this
+    /// one arm. The FP8-E4M3 block scales never reach a device — they are
+    /// unswizzled to `f32` on the host at construction — so this path needs no
+    /// Metal fp8 cast and is exempt from the fp8 refusal that
+    /// `H3ComfyFp8ScaledLinear` carries.
     pub fn forward_dequantized(
         &self,
         input: &Tensor,
@@ -1399,6 +1470,64 @@ mod tests {
         assert_eq!(linear.input_scale(), 0.5);
         assert_eq!(linear.encoded_weight_bytes()?, 16);
         assert_eq!(linear.portable_weight_staging_bytes(1)?, 16);
+        Ok(())
+    }
+
+    /// The INT8 arm is chosen from the device, the compiled kernel, and the
+    /// weight's own shape. Metal and CPU can never reach the CUDA kernel, and
+    /// a build without it never reaches it either — which is what makes the
+    /// portable arm the honest description of the Metal tier.
+    #[test]
+    fn the_int8_arm_is_native_only_for_a_compiled_cuda_kernel() {
+        // Metal and CPU take the portable arm however the binary was built.
+        for compiled in [false, true] {
+            assert_eq!(
+                select_h3_int8_linear_kind(&Device::Cpu, compiled, false, 256, 512),
+                H3Int8LinearKind::PortableQuantizeDequantize
+            );
+        }
+        // A build that omitted the kernel must not claim it even on CUDA.
+        assert_eq!(
+            select_h3_int8_linear_kind(&Device::Cpu, false, false, 256, 512),
+            H3Int8LinearKind::PortableQuantizeDequantize
+        );
+    }
+
+    /// A Metal device must take the portable arm, and the selector must say so
+    /// without needing one — the same reason `zimage`'s `select_linear_kind` is
+    /// a pure function.
+    #[cfg(feature = "metal")]
+    #[test]
+    fn metal_never_selects_the_native_int8_kernel() {
+        let metal = Device::new_metal(0).unwrap();
+        assert_eq!(
+            select_h3_int8_linear_kind(&metal, true, false, 256, 512),
+            H3Int8LinearKind::PortableQuantizeDequantize
+        );
+    }
+
+    /// candle has no Metal fp8 widening kernel, so an fp8-scaled linear is
+    /// refused by name rather than erroring from inside the cast.
+    #[cfg(feature = "metal")]
+    #[test]
+    fn an_fp8_scaled_linear_is_refused_on_metal_by_name() -> Result<()> {
+        let device = Device::Cpu;
+        let weight = Tensor::from_vec(vec![1.0f32, 2.0, -1.0, 0.5], (1, 4), &device)?
+            .to_dtype(DType::F8E4M3)?;
+        let linear = H3ComfyFp8ScaledLinear::new(
+            weight,
+            Tensor::new(0.25f32, &device)?,
+            Tensor::new(0.5f32, &device)?,
+        )?;
+        let metal = Device::new_metal(0).unwrap();
+        let input = Tensor::from_vec(vec![0.5f32, 1.0, -0.5, 0.25], (1, 4), &metal)?;
+        let error = linear
+            .forward_reference(&input, None, DType::F32, 1)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Metal"), "{error}");
+        assert!(error.contains("fp8"), "{error}");
+        assert!(error.contains("INT8 ConvRot or BF16"), "{error}");
         Ok(())
     }
 

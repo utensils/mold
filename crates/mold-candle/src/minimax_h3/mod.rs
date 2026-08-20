@@ -83,9 +83,9 @@ pub use comfy_dit::{
     H3_COMFY_PUBLISHED_INT8_HEADER_SHA256, H3_COMFY_PUBLISHED_INT8_TENSOR_COUNT,
 };
 pub use comfy_quant::{
-    H3ComfyFp8ScaledLinear, H3ComfyInt8ConvRotLinear, H3ComfyInt8TensorwiseEmbedding,
-    H3ComfyNvfp4AwqLinear, H3_COMFY_CONVROT_GROUP_SIZE, H3_COMFY_NVFP4_BLOCK_SIZE,
-    H3_COMFY_PORTABLE_ROW_CHUNK,
+    select_h3_int8_linear_kind, H3ComfyFp8ScaledLinear, H3ComfyInt8ConvRotLinear,
+    H3ComfyInt8TensorwiseEmbedding, H3ComfyNvfp4AwqLinear, H3Int8LinearKind,
+    H3_COMFY_CONVROT_GROUP_SIZE, H3_COMFY_NVFP4_BLOCK_SIZE, H3_COMFY_PORTABLE_ROW_CHUNK,
 };
 pub use config::{
     H3ConditionerConfig, H3TextConfig, H3VisionConfig, H3_BF16_PARAMETER_BYTES,
