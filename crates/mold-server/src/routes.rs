@@ -3476,7 +3476,27 @@ async fn placement_preview_for_request_authenticated(
         } else {
             None
         },
+        // Placement preview is a read-only probe that must stay media-free, so
+        // it never carries staged references. A Ref2VA preview therefore has
+        // no prepared shapes to derive and stays non-authoritative, which is
+        // the documented behaviour for a plan this endpoint cannot model.
+        h3_resolved_references: None,
     };
+    // Ref2VA plans depend on the staged reference media, which this probe
+    // deliberately never carries. Preparation would therefore fail for the
+    // absence of media rather than for anything about the device, and
+    // reporting that as an authoritative `infeasible` would tell the client a
+    // capacity answer this endpoint cannot give. Decline before that runs.
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+    if mold_core::minimax_h3::capability_contract_for_model(&request.model)
+        .is_some_and(|contract| contract.task == mold_core::minimax_h3::Task::Ref2va)
+    {
+        return Ok(unavailable(
+            "unsupported",
+            "MiniMax H3 Ref2VA placement preview is not modeled without staged reference media"
+                .to_string(),
+        ));
+    }
     #[cfg(not(any(feature = "h3", feature = "h3-private-uat")))]
     let dependency_context = crate::variant_dependencies::DependencyPreparationContext::default();
     let prepared = match crate::variant_dependencies::prepare_execution_inputs_existing_only(

@@ -138,11 +138,33 @@ struct UploadSource {
 /// Private resolved media authority. Paths never enter JSON, queue metadata,
 /// logs, or durable recovery state; dropping the last owner removes staging.
 pub struct ResolvedReferenceSet {
-    root: PathBuf,
     entries: Vec<ResolvedReference>,
     fingerprint: String,
+    hold: Arc<ResolvedReferenceHold>,
+}
+
+/// The quota reservation and staging directory for one resolved set.
+///
+/// These were drop-scoped to the set itself, which raced admission: cancelling
+/// a queued job drops the set, releasing the quota and unlinking the staging
+/// while a spawned preparation task is still decoding from descriptors that
+/// survive the unlink. Holding both behind an `Arc` means the last holder
+/// releases them — the quota exactly once, and the directory only when no
+/// admission view can still be reading it.
+struct ResolvedReferenceHold {
+    root: PathBuf,
     _quota: ResolvedQuotaLease,
     _store_lifetime: Arc<StoreLifetime>,
+}
+
+impl Drop for ResolvedReferenceHold {
+    fn drop(&mut self) {
+        if let Err(error) = std::fs::remove_dir_all(&self.root) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!("failed to remove private reference staging: {error}");
+            }
+        }
+    }
 }
 
 struct ResolvedQuotaLease {
@@ -170,6 +192,10 @@ impl Drop for ResolvedQuotaLease {
     }
 }
 
+/// Plain staged-file coordinates: probed metadata plus the private path. It
+/// owns no descriptor, quota, or lifetime, so copying one grants no authority
+/// on its own — every use still opens and re-verifies the file.
+#[derive(Clone)]
 pub struct ResolvedReference {
     pub metadata: GenerationReferenceMetadata,
     pub path: PathBuf,
@@ -212,15 +238,16 @@ impl ResolvedReferenceSet {
             uuid::Uuid::new_v4()
         ));
         Self {
-            root: root.clone(),
             entries: Vec::new(),
             fingerprint: mold_core::generation_reference_fingerprint(&metadata),
-            _quota: ResolvedQuotaLease::new(Arc::new(AtomicU64::new(0))),
-            // A test/synthetic set owns no live staging root of its own.
-            // A resolved set owns no staging root of its own to claim.
-            _store_lifetime: Arc::new(StoreLifetime {
-                claim: std::sync::OnceLock::new(),
-                root,
+            hold: Arc::new(ResolvedReferenceHold {
+                root: root.clone(),
+                _quota: ResolvedQuotaLease::new(Arc::new(AtomicU64::new(0))),
+                // A test/synthetic set owns no live staging root to claim.
+                _store_lifetime: Arc::new(StoreLifetime {
+                    claim: std::sync::OnceLock::new(),
+                    root,
+                }),
             }),
         }
     }
@@ -234,12 +261,96 @@ impl ResolvedReferenceSet {
         request: &mold_core::GenerateRequest,
         cancellation: Option<&mold_inference::InferenceCancellationToken>,
     ) -> anyhow::Result<Vec<mold_inference::GenerationReferenceBinding>> {
+        mint_inference_bindings(&self.entries, &self.fingerprint, request, cancellation)
+    }
+
+    /// A payload-free, quota-free projection of this set for H3 admission.
+    ///
+    /// Admission runs on a spawned task, so it needs an owned `'static` value,
+    /// but `ResolvedReferenceSet` deliberately is not `Clone`: its quota lease
+    /// is a drop guard and cloning it would release the reservation twice, and
+    /// its `Drop` removes the staging directory. The view therefore carries
+    /// neither — the set on the job keeps owning the quota and the directory.
+    ///
+    /// It holds paths and probed metadata, never bytes, and mints its bindings
+    /// through the same verifier the runtime uses.
+    ///
+    /// The view DOES keep the staged files and their quota reservation alive:
+    /// it shares the set's hold, so cancelling and dropping the owning job
+    /// mid-preparation cannot unlink the staging or release the reservation
+    /// out from under an in-flight decode. The quota is still released exactly
+    /// once, by whichever holder drops last.
+    pub fn admission_view(&self) -> ResolvedReferenceAdmissionView {
+        ResolvedReferenceAdmissionView {
+            entries: self.entries.clone(),
+            fingerprint: self.fingerprint.clone(),
+            _hold: Arc::clone(&self.hold),
+        }
+    }
+}
+
+/// See [`ResolvedReferenceSet::admission_view`].
+#[derive(Clone)]
+pub struct ResolvedReferenceAdmissionView {
+    entries: Vec<ResolvedReference>,
+    fingerprint: String,
+    /// Keeps the staged files and their quota reservation alive for as long as
+    /// admission may still read them, even if the owning job is cancelled and
+    /// dropped mid-preparation.
+    _hold: Arc<ResolvedReferenceHold>,
+}
+
+impl std::fmt::Debug for ResolvedReferenceAdmissionView {
+    /// Never render staged paths; the set's own `Debug` has the same rule.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ResolvedReferenceAdmissionView")
+            .field("entries", &self.entries.len())
+            .field("fingerprint", &self.fingerprint)
+            .finish()
+    }
+}
+
+impl ResolvedReferenceAdmissionView {
+    pub fn fingerprint(&self) -> &str {
+        &self.fingerprint
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Mint verified bindings for admission. Identical verification to the
+    /// runtime's path — same order, metadata, and fingerprint checks, and
+    /// fresh descriptors opened without following symlinks.
+    pub fn inference_bindings(
+        &self,
+        request: &mold_core::GenerateRequest,
+        cancellation: Option<&mold_inference::InferenceCancellationToken>,
+    ) -> anyhow::Result<Vec<mold_inference::GenerationReferenceBinding>> {
+        mint_inference_bindings(&self.entries, &self.fingerprint, request, cancellation)
+    }
+}
+
+/// The one binding verifier. Both the owning set and its admission view route
+/// here so a staged file can never be bound under two different rule sets.
+fn mint_inference_bindings(
+    entries: &[ResolvedReference],
+    fingerprint: &str,
+    request: &mold_core::GenerateRequest,
+    cancellation: Option<&mold_inference::InferenceCancellationToken>,
+) -> anyhow::Result<Vec<mold_inference::GenerationReferenceBinding>> {
+    {
         let references = request
             .references
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("resolved references lost their queued descriptors"))?;
         anyhow::ensure!(
-            references.len() == self.entries.len(),
+            references.len() == entries.len(),
             "resolved reference count changed before inference"
         );
         let queued_metadata = references
@@ -248,10 +359,10 @@ impl ResolvedReferenceSet {
             .map(|(index, reference)| reference.redacted_metadata_lossless(index))
             .collect::<Vec<_>>();
         anyhow::ensure!(
-            mold_core::generation_reference_fingerprint(&queued_metadata) == self.fingerprint,
+            mold_core::generation_reference_fingerprint(&queued_metadata) == fingerprint,
             "resolved reference fingerprint changed before inference"
         );
-        self.entries
+        entries
             .iter()
             .zip(queued_metadata)
             .map(|(entry, queued)| {
@@ -285,16 +396,6 @@ impl ResolvedReferenceSet {
                 })
             })
             .collect()
-    }
-}
-
-impl Drop for ResolvedReferenceSet {
-    fn drop(&mut self) {
-        if let Err(error) = std::fs::remove_dir_all(&self.root) {
-            if error.kind() != std::io::ErrorKind::NotFound {
-                tracing::warn!("failed to remove private reference staging: {error}");
-            }
-        }
     }
 }
 
@@ -1145,11 +1246,13 @@ impl ReferenceUploadStore {
         let fingerprint = mold_core::generation_reference_fingerprint(&metadata);
         request.references = Some(descriptors);
         Ok(Some(ResolvedReferenceSet {
-            root: resolved_root,
             entries,
             fingerprint,
-            _quota: quota,
-            _store_lifetime: self._lifetime.clone(),
+            hold: Arc::new(ResolvedReferenceHold {
+                root: resolved_root,
+                _quota: quota,
+                _store_lifetime: self._lifetime.clone(),
+            }),
         }))
     }
 }
@@ -2555,6 +2658,236 @@ mod tests {
             inner.sessions[&session_digest].request.model,
             minimax_h3::REF2VA_COMFY
         );
+    }
+
+    /// The admission view is what lets Ref2VA admission reach the staged media
+    /// before a frozen plan exists, so it must bind exactly like the runtime
+    /// path while carrying none of the owning set's authority.
+    #[tokio::test]
+    async fn admission_view_binds_like_the_runtime_and_holds_no_owning_authority() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ReferenceUploadStore::at(dir.path().join("cache"));
+        let bytes = png_bytes();
+        let byte_count = bytes.len() as u64;
+        let digest = format!("{:x}", Sha256::digest(&bytes));
+        let descriptor = png_reference(GenerationReferenceAuthority::Descriptor, Some(digest));
+        let session = store
+            .create_session(
+                "auth-a",
+                "instance-a",
+                ReferenceUploadSessionRequest {
+                    request: request(descriptor.clone()),
+                    upload_references: vec![1],
+                },
+            )
+            .await
+            .unwrap();
+        let handle = session.uploads[0].handle.clone();
+        let complete = store
+            .upload(
+                "auth-a",
+                "instance-a",
+                &handle,
+                "image/png",
+                byte_count,
+                Body::from(bytes),
+            )
+            .await
+            .unwrap();
+        let mut final_request = request(png_reference(
+            GenerationReferenceAuthority::Upload {
+                handle: handle.clone(),
+            },
+            Some(complete.metadata.sha256.clone()),
+        ));
+        let resolved = store
+            .resolve_request("auth-a", &mut final_request, &[], None)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let view = resolved.admission_view();
+        assert_eq!(view.len(), resolved.entries().len());
+        assert!(!view.is_empty());
+        assert_eq!(view.fingerprint(), resolved.fingerprint());
+
+        // Same verifier, same result: the view must not become a second
+        // contract that could admit media the runtime would reject.
+        let runtime_bindings = resolved.inference_bindings(&final_request, None).unwrap();
+        let admission_bindings = view.inference_bindings(&final_request, None).unwrap();
+        assert_eq!(admission_bindings.len(), runtime_bindings.len());
+        assert_eq!(
+            admission_bindings[0].metadata(),
+            runtime_bindings[0].metadata()
+        );
+        // Independent descriptors, so releasing admission's cannot disturb the
+        // runtime's later binding.
+        drop(admission_bindings);
+        drop(runtime_bindings);
+        assert_eq!(
+            resolved
+                .inference_bindings(&final_request, None)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // It renders neither staged paths nor the upload handle.
+        let rendered = format!("{view:?}");
+        assert!(!rendered.contains(dir.path().to_string_lossy().as_ref()));
+        assert!(!rendered.contains(&handle));
+
+        // It carries no quota lease, so cloning and dropping it must not
+        // release the owning set's reservation.
+        let cloned = view.clone();
+        drop(cloned);
+        assert_eq!(store.resolved_bytes.load(Ordering::Acquire), byte_count);
+
+        // A drifted request is refused here exactly as on the runtime path.
+        let mut drifted = final_request.clone();
+        drifted.references = None;
+        assert!(view.inference_bindings(&drifted, None).is_err());
+
+        // Cancellation is honoured identically too.
+        let cancellation = mold_inference::InferenceCancellationToken::default();
+        cancellation.cancel();
+        let cancelled = view
+            .inference_bindings(&final_request, Some(&cancellation))
+            .unwrap_err();
+        assert!(mold_inference::is_inference_cancelled(&cancelled));
+
+        drop(view);
+        drop(resolved);
+        assert_eq!(store.resolved_bytes.load(Ordering::Acquire), 0);
+    }
+
+    /// Cancelling a queued job drops the resolved set while an admission
+    /// decode may still be running against it. The staging and its quota must
+    /// outlive that decode, and the quota must still be released exactly once.
+    #[tokio::test]
+    async fn dropping_the_owning_set_mid_admission_keeps_staging_and_releases_quota_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ReferenceUploadStore::at(dir.path().join("cache"));
+        let bytes = png_bytes();
+        let byte_count = bytes.len() as u64;
+        let digest = format!("{:x}", Sha256::digest(&bytes));
+        let descriptor = png_reference(GenerationReferenceAuthority::Descriptor, Some(digest));
+        let session = store
+            .create_session(
+                "auth-a",
+                "instance-a",
+                ReferenceUploadSessionRequest {
+                    request: request(descriptor.clone()),
+                    upload_references: vec![1],
+                },
+            )
+            .await
+            .unwrap();
+        let handle = session.uploads[0].handle.clone();
+        let complete = store
+            .upload(
+                "auth-a",
+                "instance-a",
+                &handle,
+                "image/png",
+                byte_count,
+                Body::from(bytes),
+            )
+            .await
+            .unwrap();
+        let mut final_request = request(png_reference(
+            GenerationReferenceAuthority::Upload {
+                handle: handle.clone(),
+            },
+            Some(complete.metadata.sha256.clone()),
+        ));
+        let resolved = store
+            .resolve_request("auth-a", &mut final_request, &[], None)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let staged = resolved.entries()[0].path.clone();
+        assert!(staged.is_file());
+        assert_eq!(store.resolved_bytes.load(Ordering::Acquire), byte_count);
+
+        // Admission is in flight, holding only the view.
+        let view = resolved.admission_view();
+
+        // The job is cancelled and its set dropped out from under admission.
+        drop(resolved);
+
+        // Staging survives and the reservation is still charged, so the decode
+        // is not reading unlinked files on released quota.
+        assert!(
+            staged.is_file(),
+            "staging must outlive the owning set while an admission view holds it"
+        );
+        assert_eq!(store.resolved_bytes.load(Ordering::Acquire), byte_count);
+        // And it can still bind, which is the whole point of holding it.
+        assert_eq!(
+            view.inference_bindings(&final_request, None).unwrap().len(),
+            1
+        );
+
+        // When admission finishes, the last holder releases both — once.
+        drop(view);
+        assert!(!staged.exists());
+        assert_eq!(store.resolved_bytes.load(Ordering::Acquire), 0);
+    }
+
+    /// A cancelled preparation must stop decoding rather than run to
+    /// completion on media whose job is already gone.
+    #[tokio::test]
+    async fn a_cancelled_admission_stops_binding_cooperatively() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ReferenceUploadStore::at(dir.path().join("cache"));
+        let bytes = png_bytes();
+        let byte_count = bytes.len() as u64;
+        let digest = format!("{:x}", Sha256::digest(&bytes));
+        let descriptor = png_reference(GenerationReferenceAuthority::Descriptor, Some(digest));
+        let session = store
+            .create_session(
+                "auth-a",
+                "instance-a",
+                ReferenceUploadSessionRequest {
+                    request: request(descriptor.clone()),
+                    upload_references: vec![1],
+                },
+            )
+            .await
+            .unwrap();
+        let handle = session.uploads[0].handle.clone();
+        let complete = store
+            .upload(
+                "auth-a",
+                "instance-a",
+                &handle,
+                "image/png",
+                byte_count,
+                Body::from(bytes),
+            )
+            .await
+            .unwrap();
+        let mut final_request = request(png_reference(
+            GenerationReferenceAuthority::Upload {
+                handle: handle.clone(),
+            },
+            Some(complete.metadata.sha256.clone()),
+        ));
+        let resolved = store
+            .resolve_request("auth-a", &mut final_request, &[], None)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let view = resolved.admission_view();
+        let cancellation = mold_inference::InferenceCancellationToken::default();
+        cancellation.cancel();
+        let error = view
+            .inference_bindings(&final_request, Some(&cancellation))
+            .unwrap_err();
+        assert!(mold_inference::is_inference_cancelled(&error));
     }
 
     #[tokio::test]

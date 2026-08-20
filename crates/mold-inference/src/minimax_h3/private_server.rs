@@ -54,7 +54,8 @@ use super::private_fl2va_runtime::{
 #[cfg(feature = "mp4")]
 use super::private_opened_evidence::{
     build_private_fl2va_admission_attempt, prepare_private_fl2va_admission_request,
-    H3PrivateComfyStorageAuthority, H3PrivatePreparedFl2VaAttempt,
+    prepare_private_ref2va_admission_request, H3PrivateComfyStorageAuthority,
+    H3PrivatePreparedFl2VaAttempt,
 };
 use super::private_opened_evidence::{
     H3PrivateOpenedActivationFacts, H3PrivatePreparedFl2VaFactoryInputs,
@@ -92,6 +93,7 @@ use super::H3ConditionerLease;
 use crate::attention::{AttentionBackend, AttentionChunkPolicy};
 // Feature-independent: the envelope validators below name this in their
 // signatures in every build, matching how the type itself is defined.
+use crate::engine::GenerationReferenceBinding;
 use crate::h3_factory::H3FactoryTurboAdapterAuthority;
 #[cfg(feature = "mp4")]
 use crate::h3_factory::H3PrivateFl2VaFactoryAuthority;
@@ -811,6 +813,17 @@ pub struct H3PrivateFl2VaAdmissionInput<'a> {
     /// Host RAM available after the server's canonical 15%-or-8-GiB safety
     /// floor, never the raw operating-system available-memory sample.
     pub available_host_headroom_bytes: u64,
+    /// Verified bindings for the ordered Ref2VA references, minted by the
+    /// caller from the staged set immediately before admission.
+    ///
+    /// Empty for FL2VA, whose conditioning rides the endpoint contract. For
+    /// Ref2VA these are what let admission derive the prepared shapes and the
+    /// native/normalized retained-media geometry the target budget is sized
+    /// from — it decodes through the same media adapter the runtime uses, so
+    /// there is exactly one decoder. The bindings carry descriptors, never
+    /// bytes, and nothing derived from them reaches the request, the queue
+    /// journal, or the gallery.
+    pub references: &'a [GenerationReferenceBinding],
 }
 
 /// Payload-free projection of the thirteen independently reviewed runtime
@@ -1078,9 +1091,12 @@ impl H3PrivateFl2VaAdmissionEvidence {
             self.attention.model_contract,
         )
         .map_err(|error| anyhow!(error.to_string()))?;
-        if self.canonical_model != contract::FL2VA_COMFY
-            || self.task != Task::Fl2va
-            || contract::validate_request_contract(&resolved, Task::Fl2va)
+        // The recorded route must be a coherent pinned pair, and the resolved
+        // request must satisfy THAT route. Re-asserting FL2VA here is what
+        // killed the Ref2VA evidence the rest of admission had just derived.
+        let recorded_contract = contract::capability_contract_for_model(&self.canonical_model);
+        if !recorded_contract.is_some_and(|recorded| recorded.task == self.task)
+            || contract::validate_resolved_request_contract(&resolved, self.task)
                 .map_err(|error| anyhow!("{}: {}", error.code, error.message))?
                 != self.mode
             || private_h3_request_identity(&resolved)? != self.resolved_request_identity_sha256
@@ -1161,6 +1177,7 @@ fn prepare_reviewed_h3_private_fl2va_admission(
     let H3PrivateFl2VaAdmissionInput {
         request,
         paths,
+        references,
         device_id,
         device_ordinal,
         compute_capability,
@@ -1174,7 +1191,29 @@ fn prepare_reviewed_h3_private_fl2va_admission(
     {
         bail!("private H3 admission requires one concrete nonempty CUDA capacity sample")
     }
-    let mode = contract::validate_request_contract(request, Task::Fl2va)
+    // The admitted route is derived once, from the request model's own pinned
+    // contract, and threaded through every step below. Reading it again from a
+    // constant is what let a Ref2VA request load FL2VA support and then fail
+    // its own cross-task check.
+    let admitted = contract::capability_contract_for_model(&request.model)
+        .ok_or_else(|| anyhow!("private H3 admission names an unknown model"))?;
+    let admitted_model = admitted.canonical_model;
+    let admitted_task = admitted.task;
+    let (admitted_transformer_task, admitted_published_artifact) = match admitted_task {
+        Task::Fl2va => (
+            H3TransformerTask::T2VaFl2Va,
+            H3ComfyPublishedArtifact::Fl2VaPrunedInt8ConvRot,
+        ),
+        Task::Ref2va => (
+            H3TransformerTask::Ref2Va,
+            H3ComfyPublishedArtifact::Ref2VaPrunedInt8ConvRot,
+        ),
+    };
+    // Admission runs after reference resolution, so Ref2VA media are already
+    // descriptor authorities — the only valid queue/worker form, and the one
+    // the public-boundary validator refuses. FL2VA carries no references, so
+    // this is the same check it always made.
+    let mode = contract::validate_resolved_request_contract(request, admitted_task)
         .map_err(|error| anyhow!("{}: {}", error.code, error.message))?;
     let submitted_request_identity_sha256 = private_h3_request_identity(request)?;
 
@@ -1209,7 +1248,7 @@ fn prepare_reviewed_h3_private_fl2va_admission(
     )?;
     let artifact_report = qualify_private_artifacts_with_control(
         paths.models_root,
-        contract::FL2VA_COMFY,
+        admitted_model,
         paths.authorization_record,
         |hash| {
             progress.checkpoint()?;
@@ -1279,13 +1318,12 @@ fn prepare_reviewed_h3_private_fl2va_admission(
     progress.checkpoint()?;
 
     let storage = H3PrivateComfyStorageAuthority::resolve(paths.models_root)?;
-    let qwen_support =
-        load_qualified_private_qwen_support(paths.models_root, contract::FL2VA_COMFY)?;
+    let qwen_support = load_qualified_private_qwen_support(paths.models_root, admitted_model)?;
     let transformer_cancellation = H3PrivatePreparationCancellation { progress };
     let opened_transformer = open_h3_comfy_published_int8_checkpoint(
         storage.transformer_path(),
-        H3TransformerTask::T2VaFl2Va,
-        H3ComfyPublishedArtifact::Fl2VaPrunedInt8ConvRot,
+        admitted_transformer_task,
+        admitted_published_artifact,
         &transformer_cancellation,
     )
     .map_err(|error| anyhow!(error.to_string()))?;
@@ -1295,12 +1333,35 @@ fn prepare_reviewed_h3_private_fl2va_admission(
     let opened_vae = vae_observer.finish(opened_vae)?;
 
     let mut prepare_observer = H3EngineProgressObserver::new(progress);
-    let admission_request = prepare_private_fl2va_admission_request(
-        request,
-        &qwen_support,
-        progress,
-        &mut prepare_observer,
-    )?;
+    // Conditioning is task-shaped: FL2VA normalizes its boundary endpoints
+    // here, Ref2VA decodes and normalizes its ordered references through the
+    // same media adapter the runtime uses. Both run CPU-only, before the
+    // allocation commit, and neither opens a CUDA device.
+    let admission_request = match admitted_task {
+        Task::Fl2va => {
+            if !references.is_empty() {
+                bail!("private H3 FL2VA admission was handed Ref2VA reference bindings")
+            }
+            prepare_private_fl2va_admission_request(
+                request,
+                &qwen_support,
+                progress,
+                &mut prepare_observer,
+            )?
+        }
+        Task::Ref2va => {
+            if references.is_empty() {
+                bail!("private H3 Ref2VA admission has no staged reference bindings")
+            }
+            prepare_private_ref2va_admission_request(
+                request,
+                references,
+                &qwen_support,
+                progress,
+                &mut prepare_observer,
+            )?
+        }
+    };
     // The qualification above was minted at this tier's reviewed step count;
     // validating the prepared request against the baseline 21-step envelope
     // would reject every Turbo attempt.
@@ -1361,7 +1422,7 @@ fn prepare_reviewed_h3_private_fl2va_admission(
         .collect::<Result<Vec<_>>>()?;
     let base_factory_authority =
         FrozenH3FactoryAuthority::new_contract_only(H3FactoryAuthorityInput {
-            model: contract::FL2VA_COMFY.into(),
+            model: admitted_model.into(),
             device_id: device_id.into(),
             device_ordinal,
             // The public H3 runtime profile is CUDA SM89, so this is always a
@@ -1468,8 +1529,8 @@ fn prepare_reviewed_h3_private_fl2va_admission(
         identity_sha256: String::new(),
         submitted_request_identity_sha256,
         resolved_request_identity_sha256,
-        canonical_model: contract::FL2VA_COMFY.into(),
-        task: Task::Fl2va,
+        canonical_model: admitted_model.into(),
+        task: admitted_task,
         mode,
         device_id: device_id.into(),
         device_ordinal,
@@ -3029,8 +3090,8 @@ unsafe impl H3PrivateFl2VaArtifactLease for H3PrivateServerFl2VaArtifactLease {
 }
 
 #[cfg(feature = "mp4")]
-struct H3PrivatePreparationCheckpoint<'a> {
-    progress: &'a ProgressReporter,
+pub(crate) struct H3PrivatePreparationCheckpoint<'a> {
+    pub(crate) progress: &'a ProgressReporter,
 }
 
 #[cfg(feature = "mp4")]

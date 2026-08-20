@@ -1500,6 +1500,21 @@ impl ConditionerProgressMapper {
     }
 }
 
+/// Admission's view of the Ref2VA conditioner input.
+///
+/// Identical to what the runtime encodes, built on the CPU so admission can
+/// read the exact row counts the frozen plan must carry. Deliberately the same
+/// function the runtime uses rather than a parallel estimator.
+#[cfg(feature = "mp4")]
+pub(crate) fn prepare_ref2va_conditioner_input_for_admission(
+    tokenizer: &impl H3RawTokenizer,
+    prompt: &str,
+    references: &[H3ReferencePresentation],
+    media: &H3ReferenceMediaAdapter,
+) -> Result<(H3ConditionerInput, Vec<H3ModalityTag>)> {
+    prepare_ref2va_conditioner_input(tokenizer, prompt, references, media, &Device::Cpu)
+}
+
 fn prepare_ref2va_conditioner_input(
     tokenizer: &impl H3RawTokenizer,
     prompt: &str,
