@@ -1685,19 +1685,16 @@ fn validate_target_budget(
         ],
         "H3 noise allocation host phase",
     )?;
-    let transformer_load_host = checked_u64_sum(
-        [
-            attempt_host,
-            transformer_alive_metadata_host,
-            memory.condition_backing_host_bytes,
-            memory.packed_layout_host_bytes,
-            memory.text_modality_tags_host_bytes,
-            memory.schedule_host_bytes,
-            memory.fixed_transformer_load_host_staging_bytes,
-            memory.turbo_adapter_host_staging_bytes,
-        ],
-        "H3 transformer load host phase",
-    )?;
+    let transformer_load_host = transformer_load_phase_host_bytes(H3TransformerLoadHostTerms {
+        attempt_host_bytes: attempt_host,
+        transformer_alive_metadata_host_bytes: transformer_alive_metadata_host,
+        condition_backing_host_bytes: memory.condition_backing_host_bytes,
+        packed_layout_host_bytes: memory.packed_layout_host_bytes,
+        text_modality_tags_host_bytes: memory.text_modality_tags_host_bytes,
+        schedule_host_bytes: memory.schedule_host_bytes,
+        fixed_transformer_load_host_staging_bytes: memory.fixed_transformer_load_host_staging_bytes,
+        turbo_adapter_host_staging_bytes: memory.turbo_adapter_host_staging_bytes,
+    })?;
     let denoise_host = checked_u64_sum(
         [
             attempt_host,
@@ -1901,52 +1898,50 @@ fn validate_target_budget(
         ],
         "H3 noise allocation phase",
     )?;
-    let transformer_load = checked_u64_sum(
-        [
-            memory.fixed_runtime_device_bytes,
-            memory.fixed_transformer_device_bytes,
-            memory.qwen_output_state_device_bytes,
-            memory.condition_latent_backing_device_bytes,
-            memory.packed_layout_device_bytes,
-            memory.packed_video_state_device_bytes,
-            memory.packed_audio_state_device_bytes,
-            resident_blocks,
-            memory.fixed_transformer_load_device_staging_bytes,
-            memory.turbo_adapter_device_bytes,
-            memory.turbo_adapter_device_staging_bytes,
-        ],
-        "H3 transformer load phase",
-    )?;
+    let transformer_load = transformer_load_phase_device_bytes(H3TransformerLoadDeviceTerms {
+        fixed_runtime_device_bytes: memory.fixed_runtime_device_bytes,
+        fixed_transformer_device_bytes: memory.fixed_transformer_device_bytes,
+        qwen_output_state_device_bytes: memory.qwen_output_state_device_bytes,
+        condition_latent_backing_device_bytes: memory.condition_latent_backing_device_bytes,
+        packed_layout_device_bytes: memory.packed_layout_device_bytes,
+        packed_video_state_device_bytes: memory.packed_video_state_device_bytes,
+        packed_audio_state_device_bytes: memory.packed_audio_state_device_bytes,
+        resident_block_device_bytes: resident_blocks,
+        fixed_transformer_load_device_staging_bytes: memory
+            .fixed_transformer_load_device_staging_bytes,
+        turbo_adapter_device_bytes: memory.turbo_adapter_device_bytes,
+        turbo_adapter_device_staging_bytes: memory.turbo_adapter_device_staging_bytes,
+    })?;
     let denoise_copy_workspace = memory
         .packed_video_state_device_bytes
         .checked_add(memory.packed_audio_state_device_bytes)
         .and_then(|bytes| bytes.checked_mul(9))
         .ok_or_else(|| anyhow!("H3 paired RES multistep copy budget overflow"))?;
-    let denoise = checked_u64_sum(
-        [
-            memory.fixed_runtime_device_bytes,
-            memory.fixed_transformer_device_bytes,
-            memory.qwen_output_state_device_bytes,
-            memory.condition_latent_backing_device_bytes,
-            memory.packed_layout_device_bytes,
-            memory.packed_video_state_device_bytes,
-            memory.packed_audio_state_device_bytes,
-            memory.denoise_tensor_copy_workspace_device_bytes,
-            denoise_transient_workspace_device_bytes(
-                memory.attention_workspace_device_bytes,
-                memory.ffn_workspace_device_bytes,
-            ),
-            denoise_hidden_activation_device_bytes(request.rows.total_packed_rows)?,
-            resident_blocks,
-            streamed_block_overlap,
-            expected_prefetch,
-            max_device_staging,
-            // The adapter never streams: it is loaded once at transformer load
-            // and stays device-resident for every evaluation.
-            memory.turbo_adapter_device_bytes,
-        ],
-        "H3 denoise phase",
-    )?;
+    let denoise = denoise_phase_device_bytes(H3DenoiseDeviceTerms {
+        fixed_runtime_device_bytes: memory.fixed_runtime_device_bytes,
+        fixed_transformer_device_bytes: memory.fixed_transformer_device_bytes,
+        qwen_output_state_device_bytes: memory.qwen_output_state_device_bytes,
+        condition_latent_backing_device_bytes: memory.condition_latent_backing_device_bytes,
+        packed_layout_device_bytes: memory.packed_layout_device_bytes,
+        packed_video_state_device_bytes: memory.packed_video_state_device_bytes,
+        packed_audio_state_device_bytes: memory.packed_audio_state_device_bytes,
+        denoise_tensor_copy_workspace_device_bytes: memory
+            .denoise_tensor_copy_workspace_device_bytes,
+        denoise_transient_workspace_device_bytes: denoise_transient_workspace_device_bytes(
+            memory.attention_workspace_device_bytes,
+            memory.ffn_workspace_device_bytes,
+        ),
+        denoise_hidden_activation_device_bytes: denoise_hidden_activation_device_bytes(
+            request.rows.total_packed_rows,
+        )?,
+        resident_block_device_bytes: resident_blocks,
+        streamed_block_device_overlap_bytes: streamed_block_overlap,
+        prefetch_device_bytes: expected_prefetch,
+        max_device_weight_staging_bytes: max_device_staging,
+        // The adapter never streams: it is loaded once at transformer load and
+        // stays device-resident for every evaluation.
+        turbo_adapter_device_bytes: memory.turbo_adapter_device_bytes,
+    })?;
     let visual_decode = checked_u64_sum(
         [
             memory.fixed_runtime_device_bytes,
@@ -2000,164 +1995,531 @@ fn validate_target_budget(
         memory.condition_backing_host_bytes,
         memory.condition_latent_backing_device_bytes,
     );
-    if memory.load_drop_policy
-        != H3FactoryTargetLoadDropPolicy::LoadVaesLoadQwenEncodeTransferDropQwenEncodeConditionsParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux
-        || memory.artifact_host_bytes != authenticated_artifact_bytes
-        || memory.fixed_runtime_host_bytes == 0
-        || memory.fixed_runtime_device_bytes == 0
-        || memory.fixed_transformer_device_bytes
-            != checkpoint.fixed_transformer_protected_device_bytes
-        || memory.visual_vae_resident_device_bytes == 0
-        || memory.audio_vae_resident_device_bytes == 0
-        || memory.vae_construction_device_workspace_bytes == 0
-        || require_sha256(
+    // Name the first mismatching field instead of reporting an opaque
+    // inconsistency. This sweep compares ~110 terms between the builder's
+    // budget and this validator's independent recomputation; when the two
+    // disagree, the field name and both values are the only thing that makes
+    // the disagreement locatable from a production error string.
+    let mut mismatches: Vec<String> = Vec::new();
+    macro_rules! expect_eq {
+        ($label:literal, $observed:expr, $expected:expr) => {{
+            let observed = $observed;
+            let expected = $expected;
+            if observed != expected {
+                mismatches.push(format!("{} is {observed:?}, expected {expected:?}", $label));
+            }
+        }};
+    }
+    macro_rules! expect {
+        ($label:literal, $cond:expr) => {
+            if !($cond) {
+                mismatches.push(format!("{} is invalid", $label));
+            }
+        };
+    }
+
+    expect!(
+        "load_drop_policy",
+        memory.load_drop_policy
+            == H3FactoryTargetLoadDropPolicy::LoadVaesLoadQwenEncodeTransferDropQwenEncodeConditionsParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux
+    );
+    expect_eq!(
+        "artifact_host_bytes",
+        memory.artifact_host_bytes,
+        authenticated_artifact_bytes
+    );
+    expect!(
+        "fixed_runtime_host_bytes",
+        memory.fixed_runtime_host_bytes != 0
+    );
+    expect!(
+        "fixed_runtime_device_bytes",
+        memory.fixed_runtime_device_bytes != 0
+    );
+    expect_eq!(
+        "fixed_transformer_device_bytes",
+        memory.fixed_transformer_device_bytes,
+        checkpoint.fixed_transformer_protected_device_bytes
+    );
+    expect!(
+        "visual_vae_resident_device_bytes",
+        memory.visual_vae_resident_device_bytes != 0
+    );
+    expect!(
+        "audio_vae_resident_device_bytes",
+        memory.audio_vae_resident_device_bytes != 0
+    );
+    expect!(
+        "vae_construction_device_workspace_bytes",
+        memory.vae_construction_device_workspace_bytes != 0
+    );
+    expect!(
+        "vae_memory_evidence_identity_sha256",
+        require_sha256(
             &memory.vae_memory_evidence_identity_sha256,
             "H3 VAE memory evidence",
         )
-        .is_err()
-        || memory.target_video_latent_device_bytes == 0
-        || memory.target_audio_latent_device_bytes == 0
-        || memory.attempt_resident_vae_device_bytes != retained_vaes
-        || memory.qwen_host_workspace_bytes != qwen_host_workspace
-        || memory.endpoint_encoded_host_bytes != endpoint_encoded_bytes
-        || memory.normalized_endpoint_host_bytes != normalized_endpoint_bytes
-        || memory.schedule_host_bytes != schedule_host_bytes
-        || memory.packed_layout_host_bytes != packed_layout_host_bytes
-        || memory.packed_layout_construction_staging_host_bytes
-            != packed_layout_construction_staging_host_bytes
-        || memory.packed_layout_freeze_staging_host_bytes != packed_layout_freeze_staging_host_bytes
-        || memory.text_modality_tags_host_bytes != text_modality_tags_host_bytes
-        || memory.protected_block_device_bytes != protected_blocks
-        || memory.resident_block_device_bytes != resident_blocks
-        || memory.streamed_block_device_bytes != streamed_blocks
-        || memory.prefetch_device_bytes != expected_prefetch
-        || memory.streamed_block_device_overlap_bytes != streamed_block_overlap
-        || memory.dequantization_workspace_device_bytes != max_device_staging
-        || memory.max_device_weight_staging_bytes != max_device_staging
-        || memory.max_host_read_staging_bytes != max_host_staging
-        || memory.max_streamed_block_host_overlap_bytes != max_streamed_block_host_overlap
-        || memory.fixed_transformer_load_host_staging_bytes != fixed_transformer_host_staging
-        || memory.fixed_transformer_load_device_staging_bytes
-            != checkpoint.fixed_transformer_max_device_weight_staging_bytes
-        || memory.vae_load_phase_host_bytes != vae_load_host
-        || memory.qwen_encode_phase_host_bytes != qwen_encode_host
-        || memory.qwen_transfer_phase_host_bytes != qwen_transfer_host
-        || memory.condition_encode_phase_host_bytes != condition_encode_host
-        || memory.noise_allocation_phase_host_bytes != noise_allocation_host
-        || memory.transformer_load_phase_host_bytes != transformer_load_host
-        || memory.denoise_phase_host_bytes != denoise_host
-        || memory.visual_decode_phase_host_bytes != visual_decode_host
-        || memory.audio_decode_phase_host_bytes != audio_decode_host
-        || memory.waveform_transfer_phase_host_bytes != waveform_transfer_host
-        || memory.mux_phase_host_bytes != mux_host
-        || memory.transformer_retained_header_host_bytes != checkpoint.retained_header_host_bytes
-        // The VAE's retained config bytes are bound by the same opened memory
-        // evidence identity every other VAE-derived field is bound by.
-        || memory.vae_retained_config_host_bytes == 0
-        || memory.predicted_host_increment_bytes != predicted_host
-        || memory.vae_load_phase_device_bytes != vae_load
-        || memory.qwen_encode_phase_device_bytes != qwen_encode
-        || memory.qwen_transfer_phase_device_bytes != qwen_transfer
-        || memory.condition_encode_phase_device_bytes != condition_encode
-        || memory.noise_allocation_phase_device_bytes != noise_allocation
-        || memory.transformer_load_phase_device_bytes != transformer_load
-        || memory.denoise_phase_device_bytes != denoise
-        || memory.visual_decode_phase_device_bytes != visual_decode
-        || memory.audio_decode_phase_device_bytes != audio_decode
-        || memory.waveform_transfer_phase_device_bytes != waveform_transfer
-        || memory.mux_phase_device_bytes != 0
-        || memory.predicted_device_peak_bytes != predicted_device
-        || match conditioner_placement {
-            H3FactoryConditionerPlacement::AssignedCudaThenDrop => {
-                memory.qwen_host_parameter_bytes == 0
-                    || memory.qwen_host_activation_bytes != 0
-                    || memory.qwen_host_output_state_bytes != 0
-                    || memory.qwen_device_parameter_bytes == 0
-                    || memory.qwen_activation_device_bytes == 0
-                    || memory.qwen_output_transfer_device_bytes != 0
-            }
-            H3FactoryConditionerPlacement::HostCpuThenDrop => {
-                memory.qwen_host_parameter_bytes == 0
-                    || memory.qwen_host_activation_bytes == 0
-                    || memory.qwen_host_output_state_bytes != memory.qwen_output_state_device_bytes
-                    || memory.qwen_device_parameter_bytes != 0
-                    || memory.qwen_activation_device_bytes != 0
-                    || memory.qwen_output_transfer_device_bytes
-                        != memory.qwen_output_state_device_bytes
-            }
+        .is_ok()
+    );
+    expect!(
+        "target_video_latent_device_bytes",
+        memory.target_video_latent_device_bytes != 0
+    );
+    expect!(
+        "target_audio_latent_device_bytes",
+        memory.target_audio_latent_device_bytes != 0
+    );
+    expect_eq!(
+        "attempt_resident_vae_device_bytes",
+        memory.attempt_resident_vae_device_bytes,
+        retained_vaes
+    );
+    expect_eq!(
+        "qwen_host_workspace_bytes",
+        memory.qwen_host_workspace_bytes,
+        qwen_host_workspace
+    );
+    expect_eq!(
+        "endpoint_encoded_host_bytes",
+        memory.endpoint_encoded_host_bytes,
+        endpoint_encoded_bytes
+    );
+    expect_eq!(
+        "normalized_endpoint_host_bytes",
+        memory.normalized_endpoint_host_bytes,
+        normalized_endpoint_bytes
+    );
+    expect_eq!(
+        "schedule_host_bytes",
+        memory.schedule_host_bytes,
+        schedule_host_bytes
+    );
+    expect_eq!(
+        "packed_layout_host_bytes",
+        memory.packed_layout_host_bytes,
+        packed_layout_host_bytes
+    );
+    expect_eq!(
+        "packed_layout_construction_staging_host_bytes",
+        memory.packed_layout_construction_staging_host_bytes,
+        packed_layout_construction_staging_host_bytes
+    );
+    expect_eq!(
+        "packed_layout_freeze_staging_host_bytes",
+        memory.packed_layout_freeze_staging_host_bytes,
+        packed_layout_freeze_staging_host_bytes
+    );
+    expect_eq!(
+        "text_modality_tags_host_bytes",
+        memory.text_modality_tags_host_bytes,
+        text_modality_tags_host_bytes
+    );
+    expect_eq!(
+        "protected_block_device_bytes",
+        memory.protected_block_device_bytes,
+        protected_blocks
+    );
+    expect_eq!(
+        "resident_block_device_bytes",
+        memory.resident_block_device_bytes,
+        resident_blocks
+    );
+    expect_eq!(
+        "streamed_block_device_bytes",
+        memory.streamed_block_device_bytes,
+        streamed_blocks
+    );
+    expect_eq!(
+        "prefetch_device_bytes",
+        memory.prefetch_device_bytes,
+        expected_prefetch
+    );
+    expect_eq!(
+        "streamed_block_device_overlap_bytes",
+        memory.streamed_block_device_overlap_bytes,
+        streamed_block_overlap
+    );
+    expect_eq!(
+        "dequantization_workspace_device_bytes",
+        memory.dequantization_workspace_device_bytes,
+        max_device_staging
+    );
+    expect_eq!(
+        "max_device_weight_staging_bytes",
+        memory.max_device_weight_staging_bytes,
+        max_device_staging
+    );
+    expect_eq!(
+        "max_host_read_staging_bytes",
+        memory.max_host_read_staging_bytes,
+        max_host_staging
+    );
+    expect_eq!(
+        "max_streamed_block_host_overlap_bytes",
+        memory.max_streamed_block_host_overlap_bytes,
+        max_streamed_block_host_overlap
+    );
+    expect_eq!(
+        "fixed_transformer_load_host_staging_bytes",
+        memory.fixed_transformer_load_host_staging_bytes,
+        fixed_transformer_host_staging
+    );
+    expect_eq!(
+        "fixed_transformer_load_device_staging_bytes",
+        memory.fixed_transformer_load_device_staging_bytes,
+        checkpoint.fixed_transformer_max_device_weight_staging_bytes
+    );
+    expect_eq!(
+        "vae_load_phase_host_bytes",
+        memory.vae_load_phase_host_bytes,
+        vae_load_host
+    );
+    expect_eq!(
+        "qwen_encode_phase_host_bytes",
+        memory.qwen_encode_phase_host_bytes,
+        qwen_encode_host
+    );
+    expect_eq!(
+        "qwen_transfer_phase_host_bytes",
+        memory.qwen_transfer_phase_host_bytes,
+        qwen_transfer_host
+    );
+    expect_eq!(
+        "condition_encode_phase_host_bytes",
+        memory.condition_encode_phase_host_bytes,
+        condition_encode_host
+    );
+    expect_eq!(
+        "noise_allocation_phase_host_bytes",
+        memory.noise_allocation_phase_host_bytes,
+        noise_allocation_host
+    );
+    expect_eq!(
+        "transformer_load_phase_host_bytes",
+        memory.transformer_load_phase_host_bytes,
+        transformer_load_host
+    );
+    expect_eq!(
+        "denoise_phase_host_bytes",
+        memory.denoise_phase_host_bytes,
+        denoise_host
+    );
+    expect_eq!(
+        "visual_decode_phase_host_bytes",
+        memory.visual_decode_phase_host_bytes,
+        visual_decode_host
+    );
+    expect_eq!(
+        "audio_decode_phase_host_bytes",
+        memory.audio_decode_phase_host_bytes,
+        audio_decode_host
+    );
+    expect_eq!(
+        "waveform_transfer_phase_host_bytes",
+        memory.waveform_transfer_phase_host_bytes,
+        waveform_transfer_host
+    );
+    expect_eq!(
+        "mux_phase_host_bytes",
+        memory.mux_phase_host_bytes,
+        mux_host
+    );
+    expect_eq!(
+        "transformer_retained_header_host_bytes",
+        memory.transformer_retained_header_host_bytes,
+        checkpoint.retained_header_host_bytes
+    );
+    // The VAE's retained config bytes are bound by the same opened memory
+    // evidence identity every other VAE-derived field is bound by.
+    expect!(
+        "vae_retained_config_host_bytes",
+        memory.vae_retained_config_host_bytes != 0
+    );
+    expect_eq!(
+        "predicted_host_increment_bytes",
+        memory.predicted_host_increment_bytes,
+        predicted_host
+    );
+    expect_eq!(
+        "vae_load_phase_device_bytes",
+        memory.vae_load_phase_device_bytes,
+        vae_load
+    );
+    expect_eq!(
+        "qwen_encode_phase_device_bytes",
+        memory.qwen_encode_phase_device_bytes,
+        qwen_encode
+    );
+    expect_eq!(
+        "qwen_transfer_phase_device_bytes",
+        memory.qwen_transfer_phase_device_bytes,
+        qwen_transfer
+    );
+    expect_eq!(
+        "condition_encode_phase_device_bytes",
+        memory.condition_encode_phase_device_bytes,
+        condition_encode
+    );
+    expect_eq!(
+        "noise_allocation_phase_device_bytes",
+        memory.noise_allocation_phase_device_bytes,
+        noise_allocation
+    );
+    expect_eq!(
+        "transformer_load_phase_device_bytes",
+        memory.transformer_load_phase_device_bytes,
+        transformer_load
+    );
+    expect_eq!(
+        "denoise_phase_device_bytes",
+        memory.denoise_phase_device_bytes,
+        denoise
+    );
+    expect_eq!(
+        "visual_decode_phase_device_bytes",
+        memory.visual_decode_phase_device_bytes,
+        visual_decode
+    );
+    expect_eq!(
+        "audio_decode_phase_device_bytes",
+        memory.audio_decode_phase_device_bytes,
+        audio_decode
+    );
+    expect_eq!(
+        "waveform_transfer_phase_device_bytes",
+        memory.waveform_transfer_phase_device_bytes,
+        waveform_transfer
+    );
+    expect_eq!("mux_phase_device_bytes", memory.mux_phase_device_bytes, 0);
+    expect_eq!(
+        "predicted_device_peak_bytes",
+        memory.predicted_device_peak_bytes,
+        predicted_device
+    );
+    match conditioner_placement {
+        H3FactoryConditionerPlacement::AssignedCudaThenDrop => {
+            expect!(
+                "qwen_host_parameter_bytes (cuda placement)",
+                memory.qwen_host_parameter_bytes != 0
+            );
+            expect_eq!(
+                "qwen_host_activation_bytes (cuda placement)",
+                memory.qwen_host_activation_bytes,
+                0
+            );
+            expect_eq!(
+                "qwen_host_output_state_bytes (cuda placement)",
+                memory.qwen_host_output_state_bytes,
+                0
+            );
+            expect!(
+                "qwen_device_parameter_bytes (cuda placement)",
+                memory.qwen_device_parameter_bytes != 0
+            );
+            expect!(
+                "qwen_activation_device_bytes (cuda placement)",
+                memory.qwen_activation_device_bytes != 0
+            );
+            expect_eq!(
+                "qwen_output_transfer_device_bytes (cuda placement)",
+                memory.qwen_output_transfer_device_bytes,
+                0
+            );
         }
-        || memory.target_video_latent_device_bytes
-            != request
-                .rows
-                .target_video_rows
-                .checked_mul(96 * 4)
-                .ok_or_else(|| anyhow!("H3 target video latent bytes overflow"))?
-        || memory.target_audio_latent_device_bytes
-            != request
-                .rows
-                .target_audio_rows
-                .checked_mul(32 * 4)
-                .ok_or_else(|| anyhow!("H3 target audio latent bytes overflow"))?
-        || memory.condition_latent_backing_device_bytes
-            != request
-                .rows
-                .condition_visual_rows
-                .checked_mul(96 * 4)
-                .ok_or_else(|| anyhow!("H3 condition latent bytes overflow"))?
-        || memory.packed_video_state_device_bytes
-            != memory
-                .condition_latent_backing_device_bytes
-                .checked_add(memory.target_video_latent_device_bytes)
-                .ok_or_else(|| anyhow!("H3 packed video state bytes overflow"))?
-        || memory.packed_audio_state_device_bytes != memory.target_audio_latent_device_bytes
-        || memory.packed_layout_device_bytes
-            != request
-                .rows
-                .total_packed_rows
-                .checked_mul(24)
-                .ok_or_else(|| anyhow!("H3 packed layout bytes overflow"))?
-        || memory.qwen_output_state_device_bytes
-            != request
-                .rows
-                .qwen_output_text_rows
-                .checked_mul(5_120 * 2)
-                .ok_or_else(|| anyhow!("H3 Qwen output state bytes overflow"))?
-        || memory.noise_cpu_staging_host_bytes
-            != memory
-                .condition_latent_backing_device_bytes
-                .max(memory.target_video_latent_device_bytes)
-                .max(memory.target_audio_latent_device_bytes)
-        || memory.waveform_host_bytes
-            != request
-                .audio_samples_per_channel
-                .checked_mul(u64::from(contract::AUDIO_CHANNELS))
-                .and_then(|samples| samples.checked_mul(4))
-                .ok_or_else(|| anyhow!("H3 waveform host bytes overflow"))?
-        || memory.audio_waveform_device_bytes != memory.waveform_host_bytes
-        || memory.denoise_copy_policy
-            != H3FactoryTargetDenoiseCopyPolicy::CandleF32PairedResMultistepV2
-        || memory.denoise_tensor_copy_workspace_device_bytes != denoise_copy_workspace
-        || memory.vae_peak_host_io_buffer_bytes == 0
-        || memory.vae_peak_host_mapped_file_bytes == 0
-        || memory.vae_peak_staging_disk_bytes == 0
-        || memory.encoded_video_host_bytes_bound == 0
-        || memory.thumbnail_host_bytes_bound == 0
-        || memory.mux_output_host_bytes_bound == 0
-        || memory.aac_mux_staging_host_bytes == 0
-        || memory.attention_workspace_device_bytes == 0
-        || memory.ffn_workspace_device_bytes == 0
-        || memory.decoder_tile_workspace_device_bytes == 0
-        || memory.audio_decode_workspace_device_bytes == 0
-        || request.rows.condition_visual_rows == 0
-            && memory.condition_vae_workspace_device_bytes != 0
-        || request.rows.condition_visual_rows > 0
-            && memory.condition_vae_workspace_device_bytes == 0
-        || request.rows.condition_visual_rows == 0 && condition_bytes != (0, 0)
-        || request.rows.condition_visual_rows > 0
-            && (condition_bytes.0 == 0 || condition_bytes.1 == 0)
-        || memory.identity_sha256 != expected_target_budget_identity(memory)
-    {
-        bail!("MiniMax H3 target budget is internally inconsistent");
+        H3FactoryConditionerPlacement::HostCpuThenDrop => {
+            expect!(
+                "qwen_host_parameter_bytes (host placement)",
+                memory.qwen_host_parameter_bytes != 0
+            );
+            expect!(
+                "qwen_host_activation_bytes (host placement)",
+                memory.qwen_host_activation_bytes != 0
+            );
+            expect_eq!(
+                "qwen_host_output_state_bytes (host placement)",
+                memory.qwen_host_output_state_bytes,
+                memory.qwen_output_state_device_bytes
+            );
+            expect_eq!(
+                "qwen_device_parameter_bytes (host placement)",
+                memory.qwen_device_parameter_bytes,
+                0
+            );
+            expect_eq!(
+                "qwen_activation_device_bytes (host placement)",
+                memory.qwen_activation_device_bytes,
+                0
+            );
+            expect_eq!(
+                "qwen_output_transfer_device_bytes (host placement)",
+                memory.qwen_output_transfer_device_bytes,
+                memory.qwen_output_state_device_bytes
+            );
+        }
+    }
+    expect_eq!(
+        "target_video_latent_device_bytes",
+        memory.target_video_latent_device_bytes,
+        request
+            .rows
+            .target_video_rows
+            .checked_mul(96 * 4)
+            .ok_or_else(|| anyhow!("H3 target video latent bytes overflow"))?
+    );
+    expect_eq!(
+        "target_audio_latent_device_bytes",
+        memory.target_audio_latent_device_bytes,
+        request
+            .rows
+            .target_audio_rows
+            .checked_mul(32 * 4)
+            .ok_or_else(|| anyhow!("H3 target audio latent bytes overflow"))?
+    );
+    expect_eq!(
+        "condition_latent_backing_device_bytes",
+        memory.condition_latent_backing_device_bytes,
+        request
+            .rows
+            .condition_visual_rows
+            .checked_mul(96 * 4)
+            .ok_or_else(|| anyhow!("H3 condition latent bytes overflow"))?
+    );
+    expect_eq!(
+        "packed_video_state_device_bytes",
+        memory.packed_video_state_device_bytes,
+        memory
+            .condition_latent_backing_device_bytes
+            .checked_add(memory.target_video_latent_device_bytes)
+            .ok_or_else(|| anyhow!("H3 packed video state bytes overflow"))?
+    );
+    expect_eq!(
+        "packed_audio_state_device_bytes",
+        memory.packed_audio_state_device_bytes,
+        memory.target_audio_latent_device_bytes
+    );
+    expect_eq!(
+        "packed_layout_device_bytes",
+        memory.packed_layout_device_bytes,
+        request
+            .rows
+            .total_packed_rows
+            .checked_mul(24)
+            .ok_or_else(|| anyhow!("H3 packed layout bytes overflow"))?
+    );
+    expect_eq!(
+        "qwen_output_state_device_bytes",
+        memory.qwen_output_state_device_bytes,
+        request
+            .rows
+            .qwen_output_text_rows
+            .checked_mul(5_120 * 2)
+            .ok_or_else(|| anyhow!("H3 Qwen output state bytes overflow"))?
+    );
+    expect_eq!(
+        "noise_cpu_staging_host_bytes",
+        memory.noise_cpu_staging_host_bytes,
+        memory
+            .condition_latent_backing_device_bytes
+            .max(memory.target_video_latent_device_bytes)
+            .max(memory.target_audio_latent_device_bytes)
+    );
+    expect_eq!(
+        "waveform_host_bytes",
+        memory.waveform_host_bytes,
+        request
+            .audio_samples_per_channel
+            .checked_mul(u64::from(contract::AUDIO_CHANNELS))
+            .and_then(|samples| samples.checked_mul(4))
+            .ok_or_else(|| anyhow!("H3 waveform host bytes overflow"))?
+    );
+    expect_eq!(
+        "audio_waveform_device_bytes",
+        memory.audio_waveform_device_bytes,
+        memory.waveform_host_bytes
+    );
+    expect!(
+        "denoise_copy_policy",
+        memory.denoise_copy_policy
+            == H3FactoryTargetDenoiseCopyPolicy::CandleF32PairedResMultistepV2
+    );
+    expect_eq!(
+        "denoise_tensor_copy_workspace_device_bytes",
+        memory.denoise_tensor_copy_workspace_device_bytes,
+        denoise_copy_workspace
+    );
+    expect!(
+        "vae_peak_host_io_buffer_bytes",
+        memory.vae_peak_host_io_buffer_bytes != 0
+    );
+    expect!(
+        "vae_peak_host_mapped_file_bytes",
+        memory.vae_peak_host_mapped_file_bytes != 0
+    );
+    expect!(
+        "vae_peak_staging_disk_bytes",
+        memory.vae_peak_staging_disk_bytes != 0
+    );
+    expect!(
+        "encoded_video_host_bytes_bound",
+        memory.encoded_video_host_bytes_bound != 0
+    );
+    expect!(
+        "thumbnail_host_bytes_bound",
+        memory.thumbnail_host_bytes_bound != 0
+    );
+    expect!(
+        "mux_output_host_bytes_bound",
+        memory.mux_output_host_bytes_bound != 0
+    );
+    expect!(
+        "aac_mux_staging_host_bytes",
+        memory.aac_mux_staging_host_bytes != 0
+    );
+    expect!(
+        "attention_workspace_device_bytes",
+        memory.attention_workspace_device_bytes != 0
+    );
+    expect!(
+        "ffn_workspace_device_bytes",
+        memory.ffn_workspace_device_bytes != 0
+    );
+    expect!(
+        "decoder_tile_workspace_device_bytes",
+        memory.decoder_tile_workspace_device_bytes != 0
+    );
+    expect!(
+        "audio_decode_workspace_device_bytes",
+        memory.audio_decode_workspace_device_bytes != 0
+    );
+    if request.rows.condition_visual_rows == 0 {
+        expect_eq!(
+            "condition_vae_workspace_device_bytes (no condition rows)",
+            memory.condition_vae_workspace_device_bytes,
+            0
+        );
+        expect_eq!(
+            "condition_backing_host_bytes/condition_latent_backing_device_bytes (no condition rows)",
+            condition_bytes,
+            (0, 0)
+        );
+    } else {
+        expect!(
+            "condition_vae_workspace_device_bytes",
+            memory.condition_vae_workspace_device_bytes != 0
+        );
+        expect!("condition_backing_host_bytes", condition_bytes.0 != 0);
+        expect!(
+            "condition_latent_backing_device_bytes",
+            condition_bytes.1 != 0
+        );
+    }
+    expect!(
+        "identity_sha256",
+        memory.identity_sha256 == expected_target_budget_identity(memory)
+    );
+
+    if let Some(first) = mismatches.first() {
+        bail!("MiniMax H3 target budget is internally inconsistent: {first}");
     }
     Ok(())
 }
@@ -2177,6 +2539,166 @@ fn checked_u64_sum(values: impl IntoIterator<Item = u64>, label: &'static str) -
 /// therefore charges the larger of the two per-workspace bounds, never their
 /// sum. The hidden-sized tensors that DO stay live across that boundary are
 /// charged by `denoise_hidden_activation_device_bytes`, not here.
+/// Device-byte terms live during the transformer-load phase.
+///
+/// The evidence builder and [`validate_target_budget`] both fill this in and
+/// call [`transformer_load_phase_device_bytes`], so the phase can no longer be
+/// transcribed two different ways. That is not hypothetical: the Turbo staging
+/// term was added to the validator's sum and missed in the builder's, and every
+/// fixture test still passed because those build both sides from one reference.
+/// Adding a term is now a struct field, i.e. a compile error at both call sites
+/// until each supplies it.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct H3TransformerLoadDeviceTerms {
+    pub(crate) fixed_runtime_device_bytes: u64,
+    pub(crate) fixed_transformer_device_bytes: u64,
+    pub(crate) qwen_output_state_device_bytes: u64,
+    pub(crate) condition_latent_backing_device_bytes: u64,
+    pub(crate) packed_layout_device_bytes: u64,
+    pub(crate) packed_video_state_device_bytes: u64,
+    pub(crate) packed_audio_state_device_bytes: u64,
+    pub(crate) resident_block_device_bytes: u64,
+    pub(crate) fixed_transformer_load_device_staging_bytes: u64,
+    pub(crate) turbo_adapter_device_bytes: u64,
+    pub(crate) turbo_adapter_device_staging_bytes: u64,
+}
+
+pub(crate) fn transformer_load_phase_device_bytes(
+    terms: H3TransformerLoadDeviceTerms,
+) -> Result<u64> {
+    let H3TransformerLoadDeviceTerms {
+        fixed_runtime_device_bytes,
+        fixed_transformer_device_bytes,
+        qwen_output_state_device_bytes,
+        condition_latent_backing_device_bytes,
+        packed_layout_device_bytes,
+        packed_video_state_device_bytes,
+        packed_audio_state_device_bytes,
+        resident_block_device_bytes,
+        fixed_transformer_load_device_staging_bytes,
+        turbo_adapter_device_bytes,
+        turbo_adapter_device_staging_bytes,
+    } = terms;
+    checked_u64_sum(
+        [
+            fixed_runtime_device_bytes,
+            fixed_transformer_device_bytes,
+            qwen_output_state_device_bytes,
+            condition_latent_backing_device_bytes,
+            packed_layout_device_bytes,
+            packed_video_state_device_bytes,
+            packed_audio_state_device_bytes,
+            resident_block_device_bytes,
+            fixed_transformer_load_device_staging_bytes,
+            turbo_adapter_device_bytes,
+            turbo_adapter_device_staging_bytes,
+        ],
+        "H3 transformer load phase",
+    )
+}
+
+/// Device-byte terms live during the denoise phase.
+///
+/// The Turbo adapter's residents are here but its upload staging is not: the
+/// transposed copies are released before the first evaluation.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct H3DenoiseDeviceTerms {
+    pub(crate) fixed_runtime_device_bytes: u64,
+    pub(crate) fixed_transformer_device_bytes: u64,
+    pub(crate) qwen_output_state_device_bytes: u64,
+    pub(crate) condition_latent_backing_device_bytes: u64,
+    pub(crate) packed_layout_device_bytes: u64,
+    pub(crate) packed_video_state_device_bytes: u64,
+    pub(crate) packed_audio_state_device_bytes: u64,
+    pub(crate) denoise_tensor_copy_workspace_device_bytes: u64,
+    pub(crate) denoise_transient_workspace_device_bytes: u64,
+    pub(crate) denoise_hidden_activation_device_bytes: u64,
+    pub(crate) resident_block_device_bytes: u64,
+    pub(crate) streamed_block_device_overlap_bytes: u64,
+    pub(crate) prefetch_device_bytes: u64,
+    pub(crate) max_device_weight_staging_bytes: u64,
+    pub(crate) turbo_adapter_device_bytes: u64,
+}
+
+pub(crate) fn denoise_phase_device_bytes(terms: H3DenoiseDeviceTerms) -> Result<u64> {
+    let H3DenoiseDeviceTerms {
+        fixed_runtime_device_bytes,
+        fixed_transformer_device_bytes,
+        qwen_output_state_device_bytes,
+        condition_latent_backing_device_bytes,
+        packed_layout_device_bytes,
+        packed_video_state_device_bytes,
+        packed_audio_state_device_bytes,
+        denoise_tensor_copy_workspace_device_bytes,
+        denoise_transient_workspace_device_bytes,
+        denoise_hidden_activation_device_bytes,
+        resident_block_device_bytes,
+        streamed_block_device_overlap_bytes,
+        prefetch_device_bytes,
+        max_device_weight_staging_bytes,
+        turbo_adapter_device_bytes,
+    } = terms;
+    checked_u64_sum(
+        [
+            fixed_runtime_device_bytes,
+            fixed_transformer_device_bytes,
+            qwen_output_state_device_bytes,
+            condition_latent_backing_device_bytes,
+            packed_layout_device_bytes,
+            packed_video_state_device_bytes,
+            packed_audio_state_device_bytes,
+            denoise_tensor_copy_workspace_device_bytes,
+            denoise_transient_workspace_device_bytes,
+            denoise_hidden_activation_device_bytes,
+            resident_block_device_bytes,
+            streamed_block_device_overlap_bytes,
+            prefetch_device_bytes,
+            max_device_weight_staging_bytes,
+            turbo_adapter_device_bytes,
+        ],
+        "H3 denoise phase",
+    )
+}
+
+/// Host-byte terms live during the transformer-load phase.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct H3TransformerLoadHostTerms {
+    pub(crate) attempt_host_bytes: u64,
+    pub(crate) transformer_alive_metadata_host_bytes: u64,
+    pub(crate) condition_backing_host_bytes: u64,
+    pub(crate) packed_layout_host_bytes: u64,
+    pub(crate) text_modality_tags_host_bytes: u64,
+    pub(crate) schedule_host_bytes: u64,
+    pub(crate) fixed_transformer_load_host_staging_bytes: u64,
+    pub(crate) turbo_adapter_host_staging_bytes: u64,
+}
+
+pub(crate) fn transformer_load_phase_host_bytes(terms: H3TransformerLoadHostTerms) -> Result<u64> {
+    let H3TransformerLoadHostTerms {
+        attempt_host_bytes,
+        transformer_alive_metadata_host_bytes,
+        condition_backing_host_bytes,
+        packed_layout_host_bytes,
+        text_modality_tags_host_bytes,
+        schedule_host_bytes,
+        fixed_transformer_load_host_staging_bytes,
+        turbo_adapter_host_staging_bytes,
+    } = terms;
+    checked_u64_sum(
+        [
+            attempt_host_bytes,
+            transformer_alive_metadata_host_bytes,
+            condition_backing_host_bytes,
+            packed_layout_host_bytes,
+            text_modality_tags_host_bytes,
+            schedule_host_bytes,
+            fixed_transformer_load_host_staging_bytes,
+            turbo_adapter_host_staging_bytes,
+        ],
+        "H3 transformer load host phase",
+    )
+}
+
 pub(crate) fn denoise_transient_workspace_device_bytes(
     attention_workspace_device_bytes: u64,
     ffn_workspace_device_bytes: u64,
@@ -3574,19 +4096,26 @@ mod tests {
             packed_video_state_device_bytes,
             packed_audio_state_device_bytes,
         ]);
-        let transformer_load_phase_device_bytes = sum(&[
-            fixed_runtime_device_bytes,
-            fixed_transformer_device_bytes,
-            qwen_output_state_device_bytes,
-            condition_latent_backing_device_bytes,
-            packed_layout_device_bytes,
-            packed_video_state_device_bytes,
-            packed_audio_state_device_bytes,
-            fixed_transformer_load_device_staging_bytes,
-            turbo_adapter_device_bytes,
-            turbo_adapter_device_staging_bytes,
-        ]);
-        let denoise_phase_device_bytes = sum(&[
+        // Deliberately the PRODUCTION formula, not a fourth transcription of
+        // it: a reference that restates the sum can only ever agree with
+        // itself, which is how the Turbo staging term stayed missing from the
+        // real builder while every fixture test passed.
+        let transformer_load_phase_device_bytes =
+            transformer_load_phase_device_bytes(H3TransformerLoadDeviceTerms {
+                fixed_runtime_device_bytes,
+                fixed_transformer_device_bytes,
+                qwen_output_state_device_bytes,
+                condition_latent_backing_device_bytes,
+                packed_layout_device_bytes,
+                packed_video_state_device_bytes,
+                packed_audio_state_device_bytes,
+                resident_block_device_bytes: 0,
+                fixed_transformer_load_device_staging_bytes,
+                turbo_adapter_device_bytes,
+                turbo_adapter_device_staging_bytes,
+            })
+            .unwrap();
+        let denoise_phase_device_bytes = denoise_phase_device_bytes(H3DenoiseDeviceTerms {
             fixed_runtime_device_bytes,
             fixed_transformer_device_bytes,
             qwen_output_state_device_bytes,
@@ -3595,15 +4124,21 @@ mod tests {
             packed_video_state_device_bytes,
             packed_audio_state_device_bytes,
             denoise_tensor_copy_workspace_device_bytes,
-            denoise_transient_workspace_device_bytes(
+            denoise_transient_workspace_device_bytes: denoise_transient_workspace_device_bytes(
                 attention_workspace_device_bytes,
                 ffn_workspace_device_bytes,
             ),
-            denoise_hidden_activation_device_bytes(request.rows.total_packed_rows).unwrap(),
+            denoise_hidden_activation_device_bytes: denoise_hidden_activation_device_bytes(
+                request.rows.total_packed_rows,
+            )
+            .unwrap(),
+            resident_block_device_bytes: 0,
             streamed_block_device_overlap_bytes,
+            prefetch_device_bytes: 0,
             max_device_weight_staging_bytes,
             turbo_adapter_device_bytes,
-        ]);
+        })
+        .unwrap();
         let visual_decode_phase_device_bytes = sum(&[
             fixed_runtime_device_bytes,
             retained_vaes,
@@ -3727,16 +4262,18 @@ mod tests {
             schedule_host_bytes,
             noise_cpu_staging_host_bytes,
         ]);
-        let transformer_load_phase_host_bytes = sum(&[
-            attempt_host_bytes,
-            transformer_alive_metadata_host_bytes,
-            condition_backing_host_bytes,
-            packed_layout_host_bytes,
-            text_modality_tags_host_bytes,
-            schedule_host_bytes,
-            fixed_transformer_load_host_staging_bytes,
-            turbo_adapter_host_staging_bytes,
-        ]);
+        let transformer_load_phase_host_bytes =
+            transformer_load_phase_host_bytes(H3TransformerLoadHostTerms {
+                attempt_host_bytes,
+                transformer_alive_metadata_host_bytes,
+                condition_backing_host_bytes,
+                packed_layout_host_bytes,
+                text_modality_tags_host_bytes,
+                schedule_host_bytes,
+                fixed_transformer_load_host_staging_bytes,
+                turbo_adapter_host_staging_bytes,
+            })
+            .unwrap();
         let denoise_phase_host_bytes = sum(&[
             attempt_host_bytes,
             transformer_alive_metadata_host_bytes,
@@ -4224,6 +4761,133 @@ mod tests {
             pruned_adaln_table_sha256: sha('e'),
             turbo_adapter: adapter,
         };
+    }
+
+    /// Pin which phases each Turbo term reaches, through the production
+    /// formulas the builder and the validator both call.
+    ///
+    /// The bug this replaces: `turbo_adapter_device_staging_bytes` was added to
+    /// the validator's transformer-load sum and to this file's reference sum,
+    /// but not to the evidence builder's — three transcriptions of one formula,
+    /// two of which agreed. Every fixture test passed and the first real
+    /// admission failed with a 20,643,840-byte gap. There is now one formula;
+    /// this test pins its Turbo contribution per phase.
+    #[test]
+    fn turbo_terms_reach_exactly_the_phases_that_hold_them() {
+        const RESIDENT: u64 = 1_956_118_528;
+        const DEVICE_STAGING: u64 = 20_643_840;
+        const HOST_STAGING: u64 = 33_030_144;
+
+        let device_terms = |turbo_resident: u64, turbo_staging: u64| H3TransformerLoadDeviceTerms {
+            fixed_runtime_device_bytes: 100,
+            fixed_transformer_device_bytes: 200,
+            qwen_output_state_device_bytes: 300,
+            condition_latent_backing_device_bytes: 400,
+            packed_layout_device_bytes: 500,
+            packed_video_state_device_bytes: 600,
+            packed_audio_state_device_bytes: 700,
+            resident_block_device_bytes: 800,
+            fixed_transformer_load_device_staging_bytes: 900,
+            turbo_adapter_device_bytes: turbo_resident,
+            turbo_adapter_device_staging_bytes: turbo_staging,
+        };
+        let baseline = transformer_load_phase_device_bytes(device_terms(0, 0)).unwrap();
+        // The transformer load pays BOTH: the residents it uploads and the
+        // transposed copies live beside their originals while it does.
+        assert_eq!(
+            transformer_load_phase_device_bytes(device_terms(RESIDENT, DEVICE_STAGING)).unwrap(),
+            baseline + RESIDENT + DEVICE_STAGING
+        );
+
+        let denoise_terms = |turbo_resident: u64| H3DenoiseDeviceTerms {
+            fixed_runtime_device_bytes: 100,
+            fixed_transformer_device_bytes: 200,
+            qwen_output_state_device_bytes: 300,
+            condition_latent_backing_device_bytes: 400,
+            packed_layout_device_bytes: 500,
+            packed_video_state_device_bytes: 600,
+            packed_audio_state_device_bytes: 700,
+            denoise_tensor_copy_workspace_device_bytes: 800,
+            denoise_transient_workspace_device_bytes: 900,
+            denoise_hidden_activation_device_bytes: 1_000,
+            resident_block_device_bytes: 1_100,
+            streamed_block_device_overlap_bytes: 1_200,
+            prefetch_device_bytes: 1_300,
+            max_device_weight_staging_bytes: 1_400,
+            turbo_adapter_device_bytes: turbo_resident,
+        };
+        let denoise_baseline = denoise_phase_device_bytes(denoise_terms(0)).unwrap();
+        // The denoise pays only the residents; the transposes are long gone,
+        // and `H3DenoiseDeviceTerms` has no field to charge them with.
+        assert_eq!(
+            denoise_phase_device_bytes(denoise_terms(RESIDENT)).unwrap(),
+            denoise_baseline + RESIDENT
+        );
+
+        let host_terms = |turbo_host: u64| H3TransformerLoadHostTerms {
+            attempt_host_bytes: 100,
+            transformer_alive_metadata_host_bytes: 200,
+            condition_backing_host_bytes: 300,
+            packed_layout_host_bytes: 400,
+            text_modality_tags_host_bytes: 500,
+            schedule_host_bytes: 600,
+            fixed_transformer_load_host_staging_bytes: 700,
+            turbo_adapter_host_staging_bytes: turbo_host,
+        };
+        let host_baseline = transformer_load_phase_host_bytes(host_terms(0)).unwrap();
+        assert_eq!(
+            transformer_load_phase_host_bytes(host_terms(HOST_STAGING)).unwrap(),
+            host_baseline + HOST_STAGING
+        );
+
+        // Every phase still refuses to wrap rather than silently truncating.
+        assert!(transformer_load_phase_device_bytes(device_terms(u64::MAX, u64::MAX)).is_err());
+        assert!(denoise_phase_device_bytes(denoise_terms(u64::MAX)).is_err());
+        assert!(transformer_load_phase_host_bytes(host_terms(u64::MAX)).is_err());
+    }
+
+    /// A budget whose phase fields were produced by the production formulas is
+    /// accepted by the production validator, with and without a Turbo adapter.
+    ///
+    /// This is the round trip the fixture tests could not make before: the
+    /// reference sums are now the same functions the evidence builder calls,
+    /// so a term present in one side and missing in the other cannot pass.
+    #[test]
+    fn a_turbo_budget_round_trips_through_the_production_phase_formulas() {
+        let turbo = turbo_authority_for(TURBO_4STEP_TIER);
+        let mut input = exact_input();
+        apply_turbo_budget(&mut input, &turbo);
+        with_turbo_adapter(&mut input, Some(turbo.clone()));
+        let frozen = FrozenH3FactoryAuthority::new_contract_only(input).unwrap();
+        let budget = &frozen.prepared_attempt.as_ref().unwrap().target_budget;
+
+        // The two phases that hold the adapter agree with the shared formulas
+        // when they are re-derived from the frozen budget's own fields.
+        assert_eq!(budget.turbo_adapter_device_bytes, TURBO_DEVICE_BYTES);
+        assert_eq!(
+            budget.turbo_adapter_device_staging_bytes,
+            TURBO_DEVICE_STAGING_BYTES
+        );
+        assert_eq!(
+            budget.turbo_adapter_host_staging_bytes,
+            TURBO_HOST_STAGING_BYTES
+        );
+        // Transformer load carries resident + staging more than denoise does,
+        // once the phases' non-Turbo differences are removed.
+        let baseline = exact_input().prepared_attempt.unwrap().target_budget;
+        assert_eq!(
+            budget.transformer_load_phase_device_bytes
+                - baseline.transformer_load_phase_device_bytes,
+            TURBO_DEVICE_BYTES + TURBO_DEVICE_STAGING_BYTES
+        );
+        assert_eq!(
+            budget.denoise_phase_device_bytes - baseline.denoise_phase_device_bytes,
+            TURBO_DEVICE_BYTES
+        );
+        assert_eq!(
+            budget.transformer_load_phase_host_bytes - baseline.transformer_load_phase_host_bytes,
+            TURBO_HOST_STAGING_BYTES
+        );
     }
 
     #[test]
