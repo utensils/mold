@@ -1356,7 +1356,7 @@ fn prepare_reviewed_h3_private_fl2va_admission(
     )?;
     progress.checkpoint()?;
 
-    let storage = H3PrivateComfyStorageAuthority::resolve(paths.models_root)?;
+    let storage = H3PrivateComfyStorageAuthority::resolve(paths.models_root, admitted_task)?;
     let qwen_support = load_qualified_private_qwen_support(paths.models_root, partition_model)?;
     let transformer_cancellation = H3PrivatePreparationCancellation { progress };
     let opened_transformer = open_h3_comfy_published_int8_checkpoint(
@@ -2439,14 +2439,26 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
     }
     progress.checkpoint()?;
 
-    let storage = H3PrivateComfyStorageAuthority::resolve(paths.models_root)?;
-    let qwen_support =
-        load_qualified_private_qwen_support(paths.models_root, contract::FL2VA_COMFY)?;
+    // The reopen must follow what admission froze, never a fresh constant.
+    let reopened_task = frozen_factory.task();
+    let reopened_model = frozen_factory.canonical_model().to_owned();
+    let (reopened_transformer_task, reopened_published_artifact) = match reopened_task {
+        Task::Fl2va => (
+            H3TransformerTask::T2VaFl2Va,
+            H3ComfyPublishedArtifact::Fl2VaPrunedInt8ConvRot,
+        ),
+        Task::Ref2va => (
+            H3TransformerTask::Ref2Va,
+            H3ComfyPublishedArtifact::Ref2VaPrunedInt8ConvRot,
+        ),
+    };
+    let storage = H3PrivateComfyStorageAuthority::resolve(paths.models_root, reopened_task)?;
+    let qwen_support = load_qualified_private_qwen_support(paths.models_root, &reopened_model)?;
     let transformer_cancellation = H3PrivatePreparationCancellation { progress };
     let opened_transformer = open_h3_comfy_published_int8_checkpoint(
         storage.transformer_path(),
-        H3TransformerTask::T2VaFl2Va,
-        H3ComfyPublishedArtifact::Fl2VaPrunedInt8ConvRot,
+        reopened_transformer_task,
+        reopened_published_artifact,
         &transformer_cancellation,
     )
     .map_err(|error| anyhow!(error.to_string()))?;

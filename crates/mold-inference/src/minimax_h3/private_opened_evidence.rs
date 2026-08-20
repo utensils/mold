@@ -58,8 +58,22 @@ use crate::progress::ProgressReporter;
 
 const FL2VA_TRANSFORMER_SOURCE: &str =
     "diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors";
+const REF2VA_TRANSFORMER_SOURCE: &str =
+    "diffusion_models/minimax_h3_ref2va_pruned_int8_convrot.safetensors";
 const QWEN_WEIGHT_SOURCE: &str = "text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors";
 const FL2VA_TASK_CONFIG_SOURCE: &str = "transformer/config.json";
+const REF2VA_TASK_CONFIG_SOURCE: &str = "transformer_ref/config.json";
+
+/// The two manifest entries that differ between the compact FL2VA and Ref2VA
+/// stacks. Everything else — Qwen weights, both VAEs, and every runtime
+/// support file — is shared, and the task config's content and digest are
+/// identical between them; only its manifest lookup key differs.
+const fn comfy_task_sources(task: Task) -> (&'static str, &'static str) {
+    match task {
+        Task::Fl2va => (FL2VA_TRANSFORMER_SOURCE, FL2VA_TASK_CONFIG_SOURCE),
+        Task::Ref2va => (REF2VA_TRANSFORMER_SOURCE, REF2VA_TASK_CONFIG_SOURCE),
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct H3PrivateStorageRootIdentity {
@@ -224,6 +238,11 @@ pub(crate) struct H3PrivateComfyStorageAuthority {
     transformer: PathBuf,
     qwen_weights: PathBuf,
     task_config: PathBuf,
+    /// The task this authority resolved for. Deliberately NOT part of
+    /// `storage_authority_identity`: that digest already covers the four
+    /// resolved paths, two of which differ per task, so it distinguishes the
+    /// tasks on its own — and FL2VA's digest stays byte-identical.
+    task: Task,
     identity_sha256: String,
 }
 
@@ -247,13 +266,14 @@ pub(crate) struct H3PrivateOpenedActivationFacts {
 }
 
 impl H3PrivateComfyStorageAuthority {
-    pub(crate) fn resolve(models_root: &Path) -> Result<Self> {
+    pub(crate) fn resolve(models_root: &Path, task: Task) -> Result<Self> {
         let (models_root, root_identity) = validate_storage_root(models_root)?;
-        let manifest = private_fl2va_manifest()?;
+        let manifest = private_comfy_manifest(task)?;
+        let (transformer_source, task_config_source) = comfy_task_sources(task);
         let transformer = resolve_component(
             manifest,
             &models_root,
-            FL2VA_TRANSFORMER_SOURCE,
+            transformer_source,
             ModelComponent::Transformer,
         )?;
         let qwen_weights = resolve_component(
@@ -265,7 +285,7 @@ impl H3PrivateComfyStorageAuthority {
         let task_config = resolve_component(
             manifest,
             &models_root,
-            FL2VA_TASK_CONFIG_SOURCE,
+            task_config_source,
             ModelComponent::TaskConfig,
         )?;
         let mut authority = Self {
@@ -274,6 +294,7 @@ impl H3PrivateComfyStorageAuthority {
             transformer,
             qwen_weights,
             task_config,
+            task,
             identity_sha256: String::new(),
         };
         authority.identity_sha256 = storage_authority_identity(&authority);
@@ -316,7 +337,7 @@ impl H3PrivateComfyStorageAuthority {
 
     fn open_task_config(&self) -> Result<H3PrivateOpenedTaskConfigAuthority> {
         self.validate()?;
-        let manifest = private_fl2va_manifest()?;
+        let manifest = private_comfy_manifest(self.task)?;
         let matches = manifest
             .files
             .iter()
@@ -347,7 +368,7 @@ impl H3PrivateComfyStorageAuthority {
 
     fn vae_source_path(&self, role: H3ComfyVaeArtifactRole) -> Result<PathBuf> {
         resolve_component(
-            private_fl2va_manifest()?,
+            private_comfy_manifest(self.task)?,
             &self.models_root,
             role.source_path(),
             role.manifest_component(),
@@ -367,8 +388,8 @@ impl H3PrivateComfyStorageAuthority {
         transformer.revalidate()?;
         qwen.revalidate()?;
         vae.validate()?;
-        validate_fl2va_transformer_contract(transformer.candidate().artifact)?;
-        validate_fl2va_vae_contract(vae.task(), vae.canonical_model())?;
+        validate_transformer_contract(self.task, transformer.candidate().artifact)?;
+        validate_vae_contract(self.task, vae.task(), vae.canonical_model())?;
         if transformer.source_path() != self.transformer || qwen.source_path() != self.qwen_weights
         {
             bail!(
@@ -434,21 +455,21 @@ impl H3PrivateComfyStorageAuthority {
             || self.identity_sha256 != storage_authority_identity(self)
             || self.transformer
                 != resolve_component(
-                    private_fl2va_manifest()?,
+                    private_comfy_manifest(self.task)?,
                     &root,
                     FL2VA_TRANSFORMER_SOURCE,
                     ModelComponent::Transformer,
                 )?
             || self.qwen_weights
                 != resolve_component(
-                    private_fl2va_manifest()?,
+                    private_comfy_manifest(self.task)?,
                     &root,
                     QWEN_WEIGHT_SOURCE,
                     ModelComponent::TextEncoder,
                 )?
             || self.task_config
                 != resolve_component(
-                    private_fl2va_manifest()?,
+                    private_comfy_manifest(self.task)?,
                     &root,
                     FL2VA_TASK_CONFIG_SOURCE,
                     ModelComponent::TaskConfig,
@@ -460,18 +481,22 @@ impl H3PrivateComfyStorageAuthority {
     }
 }
 
-fn private_fl2va_manifest() -> Result<&'static ModelManifest> {
-    let manifest = find_manifest(contract::FL2VA_COMFY)
-        .ok_or_else(|| anyhow!("missing MiniMax H3 FL2VA Comfy manifest"))?;
+fn private_comfy_manifest(task: Task) -> Result<&'static ModelManifest> {
+    // One authority for the task -> engine-partition mapping. #1203 made this
+    // the route's `partition_model`, so deriving it a second time here would
+    // be exactly the duplication that let a turbo tag reach qualification.
+    let expected_model = contract::base_compact_model_for_task(task);
+    let manifest = find_manifest(expected_model)
+        .ok_or_else(|| anyhow!("missing MiniMax H3 {expected_model} Comfy manifest"))?;
     let manifest_contract = contract::manifest_contract(manifest)
         .ok_or_else(|| anyhow!("MiniMax H3 manifest lost its contract"))?;
-    if manifest.name != contract::FL2VA_COMFY
+    if manifest.name != expected_model
         || manifest.family != contract::FAMILY
-        || manifest_contract.task != Task::Fl2va
+        || manifest_contract.task != task
         || manifest_contract.layout != Layout::ComfyPrunedInt8ConvrotNvfp4Awq
         || manifest_contract.runtime_available
     {
-        bail!("private H3 storage requires the exact inactive FL2VA Comfy manifest")
+        bail!("private H3 storage requires the exact inactive {expected_model} Comfy manifest")
     }
     Ok(manifest)
 }
@@ -646,7 +671,7 @@ impl H3PrivatePreparedFl2VaAttempt {
         transformer_support.revalidate()?;
         let (prepared, factory_request) =
             prepare_private_fl2va_request_input(request, support, progress, observer)?;
-        let raw_checkpoint = raw_checkpoint_input(transformer)?;
+        let raw_checkpoint = raw_checkpoint_input(factory_request.task, transformer)?;
         let target_budget = build_canonical_private_fl2va_target_budget(
             &factory_request,
             &raw_checkpoint,
@@ -928,7 +953,7 @@ pub(crate) fn build_private_fl2va_admission_attempt(
     storage.validate_opened_components(support, transformer, qwen, vae)?;
     let transformer_support = storage.open_task_config()?;
     transformer_support.revalidate()?;
-    let raw_checkpoint = raw_checkpoint_input(transformer)?;
+    let raw_checkpoint = raw_checkpoint_input(request.task, transformer)?;
     let target_budget = build_canonical_private_fl2va_target_budget(
         &request,
         &raw_checkpoint,
@@ -1302,18 +1327,18 @@ fn prepared_request_input(
 }
 
 fn raw_checkpoint_input(
+    task: Task,
     transformer: &H3ComfyOpenedInt8Checkpoint,
 ) -> Result<H3FactoryRawCheckpointInput> {
     transformer.revalidate()?;
-    validate_fl2va_transformer_contract(transformer.candidate().artifact)?;
+    validate_transformer_contract(task, transformer.candidate().artifact)?;
+    let (expected_artifact, _) = expected_published_transformer(task);
     let evidence = transformer.memory_evidence();
-    if transformer.content_sha256()
-        != H3ComfyPublishedArtifact::Fl2VaPrunedInt8ConvRot.content_sha256()
-        || evidence.verified_file_bytes
-            != H3ComfyPublishedArtifact::Fl2VaPrunedInt8ConvRot.file_bytes()
+    if transformer.content_sha256() != expected_artifact.content_sha256()
+        || evidence.verified_file_bytes != expected_artifact.file_bytes()
         || evidence.blocks.len() != 50
     {
-        bail!("private H3 opened transformer evidence differs from the exact FL2VA artifact")
+        bail!("private H3 opened transformer evidence differs from the exact {task:?} artifact")
     }
     let blocks = evidence
         .blocks
@@ -1355,18 +1380,35 @@ fn raw_checkpoint_input(
     Ok(input)
 }
 
-fn validate_fl2va_transformer_contract(artifact: H3ComfyPublishedArtifact) -> Result<()> {
-    if artifact != H3ComfyPublishedArtifact::Fl2VaPrunedInt8ConvRot
-        || artifact.task() != H3TransformerTask::T2VaFl2Va
-    {
-        bail!("private H3 prepared attempt requires the exact FL2VA INT8 ConvRot transformer")
+/// The exact published transformer and its transformer-task discriminant for
+/// one admitted task.
+const fn expected_published_transformer(
+    task: Task,
+) -> (H3ComfyPublishedArtifact, H3TransformerTask) {
+    match task {
+        Task::Fl2va => (
+            H3ComfyPublishedArtifact::Fl2VaPrunedInt8ConvRot,
+            H3TransformerTask::T2VaFl2Va,
+        ),
+        Task::Ref2va => (
+            H3ComfyPublishedArtifact::Ref2VaPrunedInt8ConvRot,
+            H3TransformerTask::Ref2Va,
+        ),
+    }
+}
+
+fn validate_transformer_contract(task: Task, artifact: H3ComfyPublishedArtifact) -> Result<()> {
+    let (expected_artifact, expected_task) = expected_published_transformer(task);
+    if artifact != expected_artifact || artifact.task() != expected_task {
+        bail!("private H3 prepared attempt requires the exact {task:?} INT8 ConvRot transformer")
     }
     Ok(())
 }
 
-fn validate_fl2va_vae_contract(task: Task, canonical_model: &str) -> Result<()> {
-    if task != Task::Fl2va || canonical_model != contract::FL2VA_COMFY {
-        bail!("private H3 prepared attempt requires the exact FL2VA VAE authority")
+fn validate_vae_contract(expected_task: Task, task: Task, canonical_model: &str) -> Result<()> {
+    let expected_model = contract::base_compact_model_for_task(expected_task);
+    if task != expected_task || canonical_model != expected_model {
+        bail!("private H3 prepared attempt requires the exact {expected_task:?} VAE authority")
     }
     Ok(())
 }
@@ -2343,7 +2385,7 @@ mod tests {
     fn hidden_storage_resolution_is_canonical_and_identity_bound() {
         let root = tempfile::tempdir().unwrap();
         let root = root.path().canonicalize().unwrap();
-        let authority = H3PrivateComfyStorageAuthority::resolve(&root).unwrap();
+        let authority = H3PrivateComfyStorageAuthority::resolve(&root, Task::Fl2va).unwrap();
         authority.validate().unwrap();
         assert!(authority
             .transformer_path()
@@ -2366,10 +2408,10 @@ mod tests {
         let real = real.canonicalize().unwrap();
         let alias = parent.path().join("alias");
         symlink(&real, &alias).unwrap();
-        assert!(H3PrivateComfyStorageAuthority::resolve(&alias).is_err());
+        assert!(H3PrivateComfyStorageAuthority::resolve(&alias, Task::Fl2va).is_err());
 
         std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o777)).unwrap();
-        assert!(H3PrivateComfyStorageAuthority::resolve(&real).is_ok());
+        assert!(H3PrivateComfyStorageAuthority::resolve(&real, Task::Fl2va).is_ok());
     }
 
     #[cfg(unix)]
@@ -2379,7 +2421,7 @@ mod tests {
         let parent = parent.path().canonicalize().unwrap();
         let root = parent.join("models");
         std::fs::create_dir(&root).unwrap();
-        let authority = H3PrivateComfyStorageAuthority::resolve(&root).unwrap();
+        let authority = H3PrivateComfyStorageAuthority::resolve(&root, Task::Fl2va).unwrap();
         let authenticated = parent.join("authenticated-models");
         std::fs::rename(&root, authenticated).unwrap();
         std::fs::create_dir(&root).unwrap();
@@ -2388,16 +2430,113 @@ mod tests {
         assert!(error.to_string().contains("authority changed"), "{error}");
     }
 
+    /// The two tasks resolve different storage, and the Ref2VA route differs
+    /// from FL2VA in exactly the two manifest entries that actually differ.
+    /// The storage authority keys on TASK while #1203's route keys engine
+    /// partitioning on `partition_model`. Those are two names for one fact, so
+    /// pin them together: if they ever disagree, a turbo tag resolves storage
+    /// from one identity and qualification from another — the #1203 defect,
+    /// one layer down.
+    #[test]
+    fn storage_task_keying_agrees_with_the_route_partition_for_every_model() {
+        for model in [
+            contract::FL2VA_COMFY,
+            contract::REF2VA_COMFY,
+            contract::FL2VA_COMFY_TURBO_8STEP,
+            contract::FL2VA_COMFY_TURBO_4STEP_768P,
+        ] {
+            let route = contract::capability_contract_for_model(model)
+                .unwrap_or_else(|| panic!("{model} must resolve a contract"));
+            let partition = contract::base_compact_model(model)
+                .unwrap_or_else(|| panic!("{model} must resolve a partition"));
+            // What the storage authority would resolve for this request.
+            let storage_model = contract::base_compact_model_for_task(route.task);
+            assert_eq!(
+                storage_model, partition,
+                "{model}: storage resolved {storage_model} but the route partitions on {partition}"
+            );
+            // And that identity is the manifest the authority actually opens.
+            let manifest = private_comfy_manifest(route.task).unwrap();
+            assert_eq!(manifest.name, partition, "{model}");
+        }
+    }
+
+    #[test]
+    fn the_two_tasks_resolve_their_own_transformer_and_task_config() {
+        let (fl2va_transformer, fl2va_config) = comfy_task_sources(Task::Fl2va);
+        let (ref2va_transformer, ref2va_config) = comfy_task_sources(Task::Ref2va);
+        assert_ne!(fl2va_transformer, ref2va_transformer);
+        assert_ne!(fl2va_config, ref2va_config);
+        assert_eq!(fl2va_config, "transformer/config.json");
+        assert_eq!(ref2va_config, "transformer_ref/config.json");
+
+        // Both manifests exist and each is the inactive compact stack for its
+        // own task, so neither can be mistaken for the other.
+        let fl2va = private_comfy_manifest(Task::Fl2va).unwrap();
+        let ref2va = private_comfy_manifest(Task::Ref2va).unwrap();
+        assert_eq!(fl2va.name, contract::FL2VA_COMFY);
+        assert_eq!(ref2va.name, contract::REF2VA_COMFY);
+
+        // Everything else is shared: the Qwen weights and both VAEs are the
+        // same files, which is why only the two entries above are switched.
+        let shared = |manifest: &ModelManifest, source: &str| {
+            manifest
+                .files
+                .iter()
+                .find(|file| file.hf_filename == source)
+                .map(|file| file.sha256)
+        };
+        for source in [
+            QWEN_WEIGHT_SOURCE,
+            "vae/minimax_h3_video_vae_fp16.safetensors",
+            "vae/minimax_h3_audio_vae_fp32.safetensors",
+        ] {
+            assert_eq!(
+                shared(fl2va, source),
+                shared(ref2va, source),
+                "{source} must be shared between the two tasks"
+            );
+            assert!(shared(fl2va, source).is_some(), "{source} must exist");
+        }
+        // The task config's CONTENT is identical too; only its key differs.
+        assert_eq!(
+            shared(fl2va, fl2va_config),
+            shared(ref2va, ref2va_config),
+            "the task config differs only by manifest key, never by content"
+        );
+    }
+
     #[test]
     fn cross_task_transformer_and_vae_authorities_fail_closed() {
-        assert!(validate_fl2va_transformer_contract(
+        // Each task accepts only its own artifacts, in BOTH directions — the
+        // Ref2VA arm must be exactly as strict as the FL2VA one it mirrors.
+        validate_transformer_contract(
+            Task::Fl2va,
+            H3ComfyPublishedArtifact::Fl2VaPrunedInt8ConvRot,
+        )
+        .unwrap();
+        validate_transformer_contract(
+            Task::Ref2va,
+            H3ComfyPublishedArtifact::Ref2VaPrunedInt8ConvRot,
+        )
+        .unwrap();
+        assert!(validate_transformer_contract(
+            Task::Fl2va,
             H3ComfyPublishedArtifact::Ref2VaPrunedInt8ConvRot
         )
         .is_err());
-        assert!(validate_fl2va_vae_contract(Task::Ref2va, contract::REF2VA_COMFY).is_err());
-        validate_fl2va_transformer_contract(H3ComfyPublishedArtifact::Fl2VaPrunedInt8ConvRot)
-            .unwrap();
-        validate_fl2va_vae_contract(Task::Fl2va, contract::FL2VA_COMFY).unwrap();
+        assert!(validate_transformer_contract(
+            Task::Ref2va,
+            H3ComfyPublishedArtifact::Fl2VaPrunedInt8ConvRot
+        )
+        .is_err());
+
+        validate_vae_contract(Task::Fl2va, Task::Fl2va, contract::FL2VA_COMFY).unwrap();
+        validate_vae_contract(Task::Ref2va, Task::Ref2va, contract::REF2VA_COMFY).unwrap();
+        assert!(validate_vae_contract(Task::Fl2va, Task::Ref2va, contract::REF2VA_COMFY).is_err());
+        assert!(validate_vae_contract(Task::Ref2va, Task::Fl2va, contract::FL2VA_COMFY).is_err());
+        // A matching task with the other task's model is still refused.
+        assert!(validate_vae_contract(Task::Ref2va, Task::Ref2va, contract::FL2VA_COMFY).is_err());
     }
 
     #[test]

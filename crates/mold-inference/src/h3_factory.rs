@@ -5598,6 +5598,26 @@ mod tests {
         assert_ne!(transposed_budget.identity_sha256, base.identity_sha256);
     }
 
+    /// FL2VA's frozen plan must be byte-identical across the Ref2VA work.
+    ///
+    /// The prepared-attempt identity covers the request, the raw checkpoint,
+    /// and the whole target budget, so pinning it to a literal digest is the
+    /// cheapest complete statement that adding a second task changed nothing
+    /// about the first. Recomputed from the fixture, which is path- and
+    /// machine-independent by construction.
+    ///
+    /// If this digest changes, an FL2VA frozen plan changed. That is either a
+    /// deliberate FL2VA change — update the literal and say so — or a Ref2VA
+    /// change that leaked, which is a bug.
+    #[test]
+    fn fl2va_frozen_plan_identity_is_pinned() {
+        let attempt = prepared_attempt();
+        assert_eq!(
+            expected_h3_factory_prepared_attempt_identity(&attempt),
+            "862ae3c24e6956fece01b429f8361da5028a0efa8b175470900cb7cb0087219c"
+        );
+    }
+
     fn raw_checkpoint() -> H3FactoryRawCheckpointInput {
         let blocks = (0_u16..50)
             .map(|index| H3FactoryBlockMemoryInput {
