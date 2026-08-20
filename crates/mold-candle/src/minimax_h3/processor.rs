@@ -195,7 +195,9 @@ pub fn sample_video_frames(
         timestamps.push(*timestamps.last().expect("at least two timestamps"));
     }
     let block_timestamps_seconds = timestamps
-        .chunks_exact(TEMPORAL_PATCH)
+        .as_chunks::<TEMPORAL_PATCH>()
+        .0
+        .iter()
         .map(|chunk| (chunk[0] + chunk[TEMPORAL_PATCH - 1]) / 2.0)
         .collect();
     Ok(SampledVideo {
