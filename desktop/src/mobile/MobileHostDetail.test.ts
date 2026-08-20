@@ -33,6 +33,11 @@ vi.mock("../lib/api/client", async (importOriginal) => ({
   apiJsonTo,
 }));
 
+vi.mock("@studio/api/client", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@studio/api/client")>()),
+  apiJsonTo,
+}));
+
 vi.mock("../lib/api/sse", () => ({
   sseStream: (path: string, options: SseCall["options"]) => {
     sseCalls.push({ path, options });
@@ -1489,5 +1494,136 @@ describe("MobileHostDetail host switching", () => {
 
     expect(wrapper.text()).not.toContain("stale-model");
     expect(wrapper.emitted("status")).toHaveLength(1);
+  });
+});
+
+describe("MobileHostDetail Library card", () => {
+  function installLibraryApi(options: { locked?: boolean; retention?: number } = {}): void {
+    const base = apiJsonTo.getMockImplementation()!;
+    apiJsonTo.mockImplementation(
+      (target: { baseUrl: string }, path: string, init?: RequestInit): Promise<unknown> => {
+        if (path === "/api/capabilities") {
+          return Promise.resolve({
+            events: { available: true },
+            devices: { available: true, lifecycle: true, restart_enable: false },
+            dispatch: { active_mode: "v2", v2_authoritative: true },
+            gallery: {
+              can_delete: true,
+              organize: true,
+              trash: { enabled: true, retention_days: options.retention ?? 30 },
+            },
+          });
+        }
+        if (path === "/api/config/gallery.trash_retention_days") {
+          if (init?.method === "PUT") {
+            const body = JSON.parse(String(init.body)) as { value: number };
+            return Promise.resolve({
+              key: "gallery.trash_retention_days",
+              value: body.value,
+              source: "db",
+            });
+          }
+          return Promise.resolve({
+            key: "gallery.trash_retention_days",
+            value: options.retention ?? 30,
+            source: options.locked ? "env" : "db",
+            env_var: options.locked ? "MOLD_GALLERY_TRASH_RETENTION_DAYS" : null,
+          });
+        }
+        if (path === "/api/gallery?view=trash") {
+          return Promise.resolve([
+            {
+              filename: "old print.png",
+              timestamp: 1_700_000_000,
+              format: "png",
+              metadata: { prompt: "", model: "flux-dev:q8" },
+              trashed_at: 1_700_000_000,
+              purge_at: 1_702_592_000,
+            },
+          ]);
+        }
+        return base(target, path, init);
+      },
+    );
+  }
+
+  it("hides the card when the host does not advertise a trash", async () => {
+    const view = await mountDetail();
+    expect(view.find("[data-test='host-detail-library']").exists()).toBe(false);
+  });
+
+  it("reads the host's retention and trash count into the card", async () => {
+    installLibraryApi();
+    const view = await mountDetail();
+    await flushPromises();
+
+    const card = view.get("[data-test='host-detail-library']");
+    const select = card.get("[data-test='host-detail-retention']").element as HTMLSelectElement;
+    expect(select.value).toBe("30");
+    expect(card.get("[data-test='host-detail-trash-row']").text()).toContain("Prints in trash: 1");
+    expect(apiJsonTo).toHaveBeenCalledWith(
+      studioTarget,
+      "/api/config/gallery.trash_retention_days",
+      expect.anything(),
+    );
+  });
+
+  it("writes a new retention through PUT on the exact authenticated host", async () => {
+    installLibraryApi();
+    const view = await mountDetail();
+    await flushPromises();
+
+    await view.get("[data-test='host-detail-retention']").setValue("7");
+    await flushPromises();
+
+    const put = apiJsonTo.mock.calls.find(
+      ([, path, init]) =>
+        path === "/api/config/gallery.trash_retention_days" &&
+        (init as RequestInit | undefined)?.method === "PUT",
+    );
+    expect(put?.[0]).toEqual(studioTarget);
+    expect(JSON.parse(String((put?.[2] as RequestInit).body))).toEqual({ value: 7 });
+    expect(
+      (view.get("[data-test='host-detail-retention']").element as HTMLSelectElement).value,
+    ).toBe("7");
+  });
+
+  it("keeps an env-pinned retention read-only and says which variable owns it", async () => {
+    installLibraryApi({ locked: true });
+    const view = await mountDetail();
+    await flushPromises();
+
+    expect(view.get("[data-test='host-detail-retention']").attributes("disabled")).toBeDefined();
+    expect(view.get("[data-test='host-detail-retention-locked']").text()).toContain(
+      "MOLD_GALLERY_TRASH_RETENTION_DAYS",
+    );
+  });
+
+  it("empties the host's trash only after the two-step confirm", async () => {
+    installLibraryApi();
+    const view = await mountDetail();
+    await flushPromises();
+
+    const emptyCalls = () =>
+      apiJsonTo.mock.calls.filter(
+        ([, path, init]) =>
+          path === "/api/gallery/trash" && (init as RequestInit | undefined)?.method === "DELETE",
+      );
+
+    const button = view.get("[data-test='host-detail-empty-trash']");
+    await button.trigger("click");
+    expect(emptyCalls()).toHaveLength(0);
+    expect(view.get("[data-test='host-detail-empty-prompt']").text()).toContain(
+      "Delete everything in this host's trash forever?",
+    );
+
+    apiJsonTo.mockImplementation((_target: { baseUrl: string }, path: string) =>
+      path === "/api/gallery/trash"
+        ? Promise.resolve({ purged: 1 })
+        : Promise.reject(new Error(`Unexpected API path: ${path}`)),
+    );
+    await button.trigger("click");
+    await flushPromises();
+    expect(view.get("[data-test='host-detail-trash-row']").text()).toContain("Prints in trash: 0");
   });
 });

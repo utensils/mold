@@ -810,3 +810,169 @@ describe("MobileGalleryViewer", () => {
     expect(view.emitted("next")).toHaveLength(1);
   });
 });
+
+describe("MobileGalleryViewer info sheet", () => {
+  const organization = {
+    title: "Storm study",
+    favorite: false,
+    tags: ["Blue"],
+    collections: ["portraits"],
+    trashedAt: null,
+    purgeAt: null,
+    unresolvedCollectionIds: [],
+  };
+  const collections = [
+    {
+      slug: "portraits",
+      name: "Portraits",
+      count: 3,
+      hostIds: ["studio"],
+      hostsLabel: "Studio",
+      cover: null,
+    },
+    {
+      slug: "landscapes",
+      name: "Landscapes",
+      count: 1,
+      hostIds: ["studio"],
+      hostsLabel: "Studio",
+      cover: null,
+    },
+  ];
+
+  function mountOrganizedViewer(props: Record<string, unknown> = {}): VueWrapper {
+    wrapper = mount(MobileGalleryViewer, {
+      attachTo: document.body,
+      props: {
+        item: image,
+        target,
+        cacheKey: "studio",
+        hostName: "Studio",
+        thumbnailUrl: "blob:thumbnail",
+        organization,
+        organizeEnabled: true,
+        tagSuggestions: [
+          { name: "Blue", count: 4 },
+          { name: "smurf", count: 2 },
+        ],
+        collections,
+        ...props,
+      },
+    });
+    return wrapper;
+  }
+
+  it("hides the Info control until a host can organize or the print is trashed", async () => {
+    const view = mountViewer();
+    await flushPromises();
+    expect(view.find("[data-test='gallery-viewer-info']").exists()).toBe(false);
+  });
+
+  it("shows the saved title as the viewer title line", async () => {
+    const view = mountOrganizedViewer();
+    await flushPromises();
+    expect(view.get("[data-test='gallery-viewer-title']").text()).toBe("Storm study");
+  });
+
+  it("falls back to the prompt for an untitled print", async () => {
+    const view = mountOrganizedViewer({ organization: { ...organization, title: null } });
+    await flushPromises();
+    expect(view.get("[data-test='gallery-viewer-title']").text()).toBe("a lighthouse at dusk");
+  });
+
+  it("commits an edited title on Done and clears it when blanked", async () => {
+    const view = mountOrganizedViewer();
+    await flushPromises();
+    await view.get("[data-test='gallery-viewer-info']").trigger("click");
+
+    const input = view.get("[data-test='gallery-viewer-title-input']");
+    expect((input.element as HTMLInputElement).value).toBe("Storm study");
+    await input.setValue("  Grain test 01 ");
+    await input.trigger("blur");
+    expect(view.emitted("rename")).toEqual([["Grain test 01"]]);
+
+    await input.setValue("   ");
+    await view.get("[data-test='gallery-viewer-title-save']").trigger("submit");
+    expect(view.emitted("rename")?.at(-1)).toEqual([null]);
+  });
+
+  it("does not emit a rename when the title is unchanged", async () => {
+    const view = mountOrganizedViewer();
+    await flushPromises();
+    await view.get("[data-test='gallery-viewer-info']").trigger("click");
+    await view.get("[data-test='gallery-viewer-title-input']").trigger("blur");
+    expect(view.emitted("rename")).toBeUndefined();
+  });
+
+  it("toggles the favorite and edits tags from the sheet", async () => {
+    const view = mountOrganizedViewer();
+    await flushPromises();
+    await view.get("[data-test='gallery-viewer-info']").trigger("click");
+
+    await view.get("[data-test='gallery-viewer-favorite']").trigger("click");
+    expect(view.emitted("favorite")).toEqual([[true]]);
+
+    await view.get("[data-test='gallery-viewer-tag-remove']").trigger("click");
+    expect(view.emitted("tags")).toEqual([[{ remove: ["Blue"] }]]);
+
+    const input = view.get("[data-test='gallery-viewer-tag-input']");
+    await input.setValue("  #Grain ");
+    await view.get("[data-test='gallery-viewer-tag-add']").trigger("submit");
+    expect(view.emitted("tags")?.at(-1)).toEqual([{ add: ["Grain"] }]);
+  });
+
+  it("suggests merged tags the print does not already carry", async () => {
+    const view = mountOrganizedViewer();
+    await flushPromises();
+    await view.get("[data-test='gallery-viewer-info']").trigger("click");
+
+    const suggestions = view.get("[data-test='gallery-viewer-tag-suggestions']");
+    expect(suggestions.text()).toContain("smurf");
+    expect(suggestions.text()).not.toContain("Blue");
+  });
+
+  it("toggles collection membership and creates a new collection", async () => {
+    const view = mountOrganizedViewer();
+    await flushPromises();
+    await view.get("[data-test='gallery-viewer-info']").trigger("click");
+
+    const options = view.findAll("[data-test='gallery-viewer-collection-option']");
+    expect(options[0]?.attributes("aria-checked")).toBe("true");
+    await options[1]!.trigger("click");
+    expect(view.emitted("collection")).toEqual([
+      [{ slug: "landscapes", name: "Landscapes", member: true }],
+    ]);
+
+    await view.get("[data-test='gallery-viewer-collection-input']").setValue("Night shots");
+    await view.get("[data-test='gallery-viewer-collection-create']").trigger("submit");
+    expect(view.emitted("collection")?.at(-1)).toEqual([
+      [{ slug: "night-shots", name: "Night shots", member: true }][0],
+    ]);
+  });
+
+  it("offers Restore and a two-step Delete forever with the purge countdown", async () => {
+    const purgeAt = Math.floor(Date.now() / 1000) + 3 * 86_400;
+    const view = mountOrganizedViewer({
+      trashed: true,
+      organization: { ...organization, trashedAt: purgeAt - 30 * 86_400, purgeAt },
+    });
+    await flushPromises();
+    await view.get("[data-test='gallery-viewer-info']").trigger("click");
+
+    // Trashed prints swap the organize editors for recovery actions.
+    expect(view.find("[data-test='gallery-viewer-title-input']").exists()).toBe(false);
+    expect(view.get("[data-test='gallery-viewer-purge']").text()).toBe("Purges in 3 d");
+
+    const deleteButton = view.get("[data-test='gallery-viewer-delete-forever']");
+    await deleteButton.trigger("click");
+    expect(view.emitted("delete-forever")).toBeUndefined();
+    expect(view.get("[data-test='gallery-viewer-delete-prompt']").text()).toBe(
+      "Delete this print forever?",
+    );
+    await deleteButton.trigger("click");
+    expect(view.emitted("delete-forever")).toHaveLength(1);
+
+    await view.get("[data-test='gallery-viewer-restore']").trigger("click");
+    expect(view.emitted("restore")).toHaveLength(1);
+  });
+});

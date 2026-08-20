@@ -1,10 +1,12 @@
 import { IDBFactory } from "fake-indexeddb";
 import { beforeEach, describe, expect, it } from "vitest";
 import type { GalleryImage } from "../lib/api/types";
+import type { MobileGalleryImage } from "./libraryOrganization";
 import {
   loadCachedGallery,
   loadCachedGalleryMedia,
   clearCachedGalleryHosts,
+  patchCachedGalleryPrints,
   removeCachedGalleryPrints,
   storeCachedGallery,
   storeCachedGalleryMedia,
@@ -108,5 +110,45 @@ describe("mobile gallery cache", () => {
 
     expect(await loadCachedGallery("old-instance")).toEqual([]);
     expect(await loadCachedGalleryMedia("old-instance", "old.png", "thumbnail")).toBeNull();
+  });
+});
+
+describe("mobile gallery cache organization fields", () => {
+  it("persists additive title / favorite / tags / collections through a round trip", async () => {
+    const organized = {
+      ...print("org.png", 5),
+      title: "Grain test",
+      favorite: true,
+      tags: ["blue", "smurf"],
+      collections: ["c1"],
+    };
+    await storeCachedGallery("studio", [organized]);
+
+    const [restored] = (await loadCachedGallery("studio")) as Array<typeof organized>;
+    expect(restored?.title).toBe("Grain test");
+    expect(restored?.favorite).toBe(true);
+    expect(restored?.tags).toEqual(["blue", "smurf"]);
+    expect(restored?.collections).toEqual(["c1"]);
+  });
+
+  it("patches cached rows in place and fences out an older listing still in flight", async () => {
+    await storeCachedGallery("studio", [print("a.png", 2), print("b.png", 1)]);
+
+    // An older refresh captured the rows before the edit…
+    const staleRow: MobileGalleryImage = { ...print("a.png", 2), favorite: false };
+    const stale = storeCachedGallery("studio", [staleRow]);
+    await patchCachedGalleryPrints("studio", [
+      { filename: "a.png", patch: { favorite: true, title: "Named" } },
+    ]);
+    await stale;
+
+    const rows = (await loadCachedGallery("studio")) as Array<
+      ReturnType<typeof print> & { favorite?: boolean; title?: string | null }
+    >;
+    expect(rows.find((row) => row.filename === "a.png")).toMatchObject({
+      favorite: true,
+      title: "Named",
+    });
+    expect(rows.find((row) => row.filename === "b.png")).toBeDefined();
   });
 });

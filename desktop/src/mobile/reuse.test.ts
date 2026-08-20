@@ -79,6 +79,7 @@ describe("applyMobileGalleryMetadata", () => {
     expect(result).toEqual({
       modelName: model.name,
       substitutedModel: false,
+      title: "",
       sequence: null,
     });
 
@@ -135,6 +136,13 @@ describe("applyMobileGalleryMetadata", () => {
     expect(request.upscale_model).toBeUndefined();
   });
 
+  it("hands back the print's saved title, and an empty one for untitled prints", () => {
+    const form = newGenerateForm();
+    const titled = { ...metadata, title: "  Grain test 01 " } as OutputMetadata;
+    expect(applyMobileGalleryMetadata(form, titled, [model]).title).toBe("Grain test 01");
+    expect(applyMobileGalleryMetadata(form, metadata, [model]).title).toBe("");
+  });
+
   it("clears stale provenance when reusing a promptless print", () => {
     const form = newGenerateForm();
     form.prompt = "previous expanded prompt";
@@ -165,6 +173,7 @@ describe("applyMobileGalleryMetadata", () => {
     expect(result).toEqual({
       modelName: replacement.name,
       substitutedModel: true,
+      title: "",
       sequence: null,
     });
     expect(form.model).toBe(replacement.name);

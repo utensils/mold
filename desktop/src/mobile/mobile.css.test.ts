@@ -420,3 +420,60 @@ describe("mobile develop bed", () => {
     expect(app).toMatch(/--bed-ar/);
   });
 });
+
+describe("mobile Library organization", () => {
+  it("keeps the scope row, chips, and tag targets at the 44pt floor", () => {
+    for (const selector of [
+      ".mobile-library-scope button",
+      ".mobile-library-chip",
+      ".mobile-library-tag",
+      ".mobile-library-banner-link",
+      ".mobile-collection-menu-button",
+    ]) {
+      const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const rule = css.match(new RegExp(`${escaped}\\s*\\{([^}]*)\\}`, "s"));
+      expect(
+        Number(rule?.[1]?.match(/min-(?:height|width):\s*(\d+)px/)?.[1]),
+        selector,
+      ).toBeGreaterThanOrEqual(44);
+    }
+  });
+
+  it("never lets the scope row or chip rail capture the grid pinch", () => {
+    // The two-finger pinch is reserved for .gallery-grid (touch-action:
+    // pan-y); its siblings stay at manipulation so a stray touch on them
+    // cannot begin a resize or zoom.
+    const scope = css.match(/\.mobile-library-scope\s*\{([^}]*)\}/s);
+    const chips = css.match(/\.mobile-library-chips\s*\{([^}]*)\}/s);
+    expect(scope?.[1]).toMatch(/touch-action:\s*manipulation\s*;/);
+    expect(chips?.[1]).toMatch(/touch-action:\s*manipulation\s*;/);
+    expect(chips?.[1]).toMatch(/overflow-x:\s*auto\s*;/);
+  });
+
+  it("gives the Library sheet the pinned fixed-overlay and body invariants", () => {
+    const sheet = css.match(/\.mobile-library-sheet\s*\{([^}]*)\}/s);
+    const open = css.match(/\.mobile-library-sheet\.is-open\s*\{([^}]*)\}/s);
+    const body = css.match(/\.mobile-library-sheet-body\s*\{([^}]*)\}/s);
+    const done = css.match(/\.mobile-library-sheet-done\s*\{([^}]*)\}/s);
+    expect(sheet?.[1]).toMatch(/position:\s*fixed\s*;/);
+    expect(sheet?.[1]).toMatch(/display:\s*none\s*;/);
+    expect(sheet?.[1]).toMatch(/inset:\s*0\s*;/);
+    expect(open?.[1]).toMatch(/display:\s*flex\s*;/);
+    expect(body?.[1]).toMatch(/overflow-y:\s*auto\s*;/);
+    expect(body?.[1]).toMatch(/overscroll-behavior:\s*none\s*;/);
+    expect(body?.[1]).toMatch(/touch-action:\s*manipulation\s*;/);
+    expect(body?.[1]).toContain("env(safe-area-inset-left)");
+    expect(body?.[1]).toContain("env(safe-area-inset-right)");
+    expect(body?.[1]).toContain("env(safe-area-inset-bottom)");
+    expect(Number(done?.[1]?.match(/min-height:\s*(\d+)px/)?.[1])).toBeGreaterThanOrEqual(44);
+  });
+
+  it("uses the iPhone radii scale for chips, covers, and collection cards", () => {
+    const chip = css.match(/\.mobile-library-chip\s*\{([^}]*)\}/s);
+    const cover = css.match(/\.mobile-collection-cover\s*\{([^}]*)\}/s);
+    const row = css.match(/\.mobile-collection-row\s*\{([^}]*)\}/s);
+    expect(chip?.[1]).toMatch(/border-radius:\s*var\(--radius-pill\)\s*;/);
+    expect(cover?.[1]).toMatch(/border-radius:\s*var\(--radius-media\)\s*;/);
+    expect(row?.[1]).toMatch(/border-radius:\s*var\(--radius-card\)\s*;/);
+  });
+});

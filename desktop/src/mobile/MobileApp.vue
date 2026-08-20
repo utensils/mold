@@ -50,6 +50,26 @@ import {
 import type { CanvasIntent } from "@studio/lib/outputShape";
 import { groupLogicalGalleryPrints } from "@studio/lib/galleryPrintIdentity";
 import {
+  collectionSlug,
+  collectionSlugResolver,
+  displayTitle,
+  planOrganizationFanout,
+  tagKey,
+  trashRetentionSummary,
+  type OrganizationMutation,
+  type OrganizationUnion,
+} from "@studio/lib/libraryOrganization";
+import type { Collection, TagCount } from "@studio/lib/api/galleryOrganization";
+import {
+  createCollection as createHostCollection,
+  deleteCollection as deleteHostCollection,
+  emptyTrash as emptyHostTrash,
+  listCollections as listHostCollections,
+  listTags as listHostTags,
+  listTrash as listHostTrash,
+  updateCollection as updateHostCollection,
+} from "@studio/api/galleryOrganization";
+import {
   defaultClipFrames,
   modelsForOutput,
   sequenceMotionTailFrames,
@@ -253,9 +273,35 @@ import {
 } from "./hosts";
 import { applyMobileGalleryMetadata } from "./reuse";
 import {
+  EMPTY_LIBRARY_FILTERS,
+  MOBILE_LIBRARY_SCOPES,
+  MOBILE_LIBRARY_SCOPE_LABELS,
+  buildOrganizationIndex,
+  collectionCards,
+  collectionOnHost,
+  deleteActionCopy,
+  fanoutFailureMessage,
+  filterLibraryPrints,
+  libraryOrganizationSupport,
+  logicalCopiesOf,
+  mergeHostTags,
+  mergedCollectionsFor,
+  purgeChipLabel,
+  requestTitle,
+  runOrganizationFanout,
+  selectionDeleteKind,
+  tagChipPlan,
+  trashRetentionHosts,
+  validateCollectionName,
+  type MobileCollectionCard,
+  type MobileGalleryImage,
+  type MobileLibraryScope,
+} from "./libraryOrganization";
+import {
   clearCachedGalleryHosts,
   loadCachedGallery,
   loadCachedGalleryMedia,
+  patchCachedGalleryPrints,
   pruneCachedGalleryMedia,
   removeCachedGalleryPrints,
   storeCachedGallery,
@@ -280,6 +326,7 @@ import MobileExpansionPullStatus from "./MobileExpansionPullStatus.vue";
 import MobileGalleryViewer from "./MobileGalleryViewer.vue";
 import MobileGenerateParameters from "./MobileGenerateParameters.vue";
 import MobileHostDetail from "./MobileHostDetail.vue";
+import MobileLibrarySheet from "./MobileLibrarySheet.vue";
 import MobileLoraControls from "./MobileLoraControls.vue";
 import MobilePromptTools from "./MobilePromptTools.vue";
 import MobileRemixReview, { type MobileRemixReviewVariant } from "./MobileRemixReview.vue";
@@ -334,7 +381,7 @@ interface DiscoveredHost {
   port: number;
 }
 
-interface GalleryPrint extends GalleryImage {
+interface GalleryPrint extends MobileGalleryImage {
   hostId: string;
   cacheKey: string;
   hostName: string;
@@ -342,12 +389,20 @@ interface GalleryPrint extends GalleryImage {
   thumbnailUrl: string;
 }
 
-interface PendingGalleryPrint extends GalleryImage {
+interface PendingGalleryPrint extends MobileGalleryImage {
   hostId: string;
   cacheKey: string;
   hostName: string;
   target: ApiTarget;
 }
+
+/** The Library's bottom-sheet editors (one open at a time). */
+type LibrarySheet =
+  | { kind: "collections" }
+  | { kind: "tags" }
+  | { kind: "new-collection" }
+  | { kind: "rename-collection"; slug: string; name: string }
+  | { kind: "more-tags" };
 
 interface MobileExpansionPullAttempt {
   id: number;
@@ -650,6 +705,41 @@ const galleryZoomAnnouncement = ref("");
 const galleryGrid = ref<HTMLElement | null>(null);
 const galleryDeleting = ref(false);
 const selectedPrint = ref<GalleryPrint | null>(null);
+// ── Library organization (V3 "Shelf") ───────────────────────────────────────
+/** Prints | Collections | Trash. Collections and Trash appear only when a
+ * connected host advertises `capabilities.gallery.organize` / `.trash`. */
+const libraryScope = ref<MobileLibraryScope>("prints");
+const libraryFilters = reactive({ ...EMPTY_LIBRARY_FILTERS });
+/** Per-host `/api/gallery/collections` and `/api/gallery/tags` listings. */
+const hostCollections = reactive<Record<string, Collection[]>>({});
+const hostTags = reactive<Record<string, TagCount[]>>({});
+/** Merged title / ♥ / tags / collections per physical print key. */
+const galleryOrganization = ref<Map<string, OrganizationUnion>>(new Map());
+/** Per-host print counts behind the host chips (physical copies). */
+const libraryHostCounts = ref<Record<string, number>>({});
+/** Logical live prints (the Prints segment count). */
+const libraryPrintCount = ref(0);
+/** Inline (never a toast) organization failure banner. */
+const organizationError = ref("");
+const organizationBusy = ref(false);
+/** Trash listing, fetched lazily the first time the Trash scope opens. */
+let trashCopies: PendingGalleryPrint[] = [];
+const trashCount = ref(0);
+const trashLoaded = ref(false);
+const trashLoading = ref(false);
+const trashError = ref("");
+const emptyTrashConfirming = ref(false);
+const emptyingTrash = ref(false);
+const galleryRestoring = ref(false);
+const collectionMenuSlug = ref<string | null>(null);
+const collectionDeleteConfirmSlug = ref<string | null>(null);
+const collectionCovers = reactive<Record<string, string>>({});
+const librarySheet = ref<LibrarySheet | null>(null);
+const librarySheetInput = ref("");
+const librarySheetError = ref("");
+const librarySheetBusy = ref(false);
+/** Create ▸ Title — rides every mobile-built `GenerateRequest` as `title`. */
+const printTitle = ref("");
 const generatedViewerOpen = ref(false);
 const reusingPrint = ref(false);
 const usingPrintAsSource = ref(false);
@@ -4240,7 +4330,17 @@ async function prepareGenerationRequest(
   }
   const mediaBudgetError = mobileMediaBudgetValidationError(draft);
   if (mediaBudgetError) throw new Error(mediaBudgetError);
-  return buildRequest(draft);
+  return withPrintTitle(buildRequest(draft));
+}
+
+/** Stamp the Create title onto a mobile-built request (additive `title`;
+ * absent when blank so the server's own default naming applies). Batch
+ * siblings and prepared Batch N spread this request, so they inherit it. */
+function withPrintTitle(request: GenerateRequest): GenerateRequest {
+  const title = requestTitle(printTitle.value);
+  if (!title.ok) throw new Error(title.reason);
+  if (!title.title) return request;
+  return { ...request, title: title.title } as GenerateRequest;
 }
 
 async function generate(): Promise<void> {
@@ -4943,7 +5043,8 @@ async function performGalleryRefresh(): Promise<void> {
   });
   if (cachedCopies.length > 0) {
     galleryCopies = cachedCopies.sort((a, b) => b.timestamp - a.timestamp);
-    pendingGallery = groupLogicalGalleryPrints(galleryCopies).map((group) => group.representative);
+    rebuildGalleryOrganization();
+    pendingGallery = visibleRepresentatives();
     await loadMoreGalleryPage();
   }
 
@@ -4957,9 +5058,14 @@ async function performGalleryRefresh(): Promise<void> {
       const cacheKey = mobileGalleryCacheKey(host);
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), GALLERY_HOST_TIMEOUT_MS);
-      let prints: GalleryImage[];
+      let prints: MobileGalleryImage[];
+      // Capabilities ride along so the Library can gate organization and the
+      // trash per host; a refusal keeps whatever this host last advertised.
+      const capabilitiesRead = apiJsonTo<ServerCapabilities>(target, "/api/capabilities", {
+        signal: controller.signal,
+      }).catch(() => undefined);
       try {
-        prints = await apiJsonTo<GalleryImage[]>(target, "/api/gallery", {
+        prints = await apiJsonTo<MobileGalleryImage[]>(target, "/api/gallery", {
           signal: controller.signal,
         });
       } finally {
@@ -4969,9 +5075,16 @@ async function performGalleryRefresh(): Promise<void> {
       if (!currentHost || mobileGalleryCacheKey(currentHost) !== cacheKey) {
         throw new Error("Gallery host identity changed while refreshing");
       }
+      const capabilities = await capabilitiesRead;
+      if (capabilities !== undefined) serverCapabilities[host.id] = capabilities;
       await storeCachedGallery(cacheKey, prints);
       return { host, cacheKey, target, prints };
     }),
+  );
+  // Collections and tags for every host that can organize (read after the
+  // capabilities above so a just-upgraded host is included this pass).
+  await refreshHostOrganization(
+    results.flatMap((result) => (result.status === "fulfilled" ? [result.value.host.id] : [])),
   );
   const refreshedByHost = new Map(
     results.flatMap((result) =>
@@ -5008,7 +5121,11 @@ async function performGalleryRefresh(): Promise<void> {
   galleryCopies = refreshedCopies;
   for (const item of gallery.value) revokeObjectUrl(item.thumbnailUrl);
   gallery.value = [];
-  pendingGallery = groupLogicalGalleryPrints(galleryCopies).map((group) => group.representative);
+  rebuildGalleryOrganization();
+  // The Trash listing is refetched on its own schedule; a live refresh only
+  // marks it stale so the next Trash visit re-reads the host.
+  if (libraryScope.value !== "trash") trashLoaded.value = false;
+  pendingGallery = visibleRepresentatives();
   if (failed) {
     galleryError.value = `${failed} host${failed === 1 ? "" : "s"} unavailable${
       cachedCopies.length > 0 ? " · Showing saved Library" : ""
@@ -5017,6 +5134,7 @@ async function performGalleryRefresh(): Promise<void> {
   await loadMoreGalleryPage();
   void pruneCachedGalleryMedia();
   galleryLoading.value = false;
+  if (libraryScope.value === "trash") void refreshTrash();
 }
 
 function loadMoreGallery(): Promise<void> {
@@ -5080,6 +5198,9 @@ async function reusePrint(print: GalleryPrint): Promise<void> {
       reusePrintError.value = reuse.sequenceUnsupportedReason;
       return;
     }
+    // The print's own saved title comes back with its settings; the Library
+    // title (a later rename) wins over the metadata stamp when it exists.
+    printTitle.value = organizationOf(print)?.title ?? reuse.title;
     if (!reuse.sequence) await restoreOrdinaryReusedSource(print);
     if (reuse.sequence) {
       // A sequence print reloads the clip rail as a NEW draft: no edit
@@ -5365,6 +5486,881 @@ function allGalleryPrints(): Array<GalleryPrint | PendingGalleryPrint> {
   return [...gallery.value, ...pendingGallery];
 }
 
+// ── Library organization: support, merges, filters ──────────────────────────
+
+const librarySupport = computed(() =>
+  libraryOrganizationSupport(connectedHosts.value, serverCapabilities),
+);
+const libraryOrganizeEnabled = computed(() => librarySupport.value.organize);
+const libraryTrashEnabled = computed(() => librarySupport.value.trash);
+const libraryScopes = computed(() =>
+  MOBILE_LIBRARY_SCOPES.filter(
+    (scope) =>
+      scope === "prints" ||
+      (scope === "collections" && libraryOrganizeEnabled.value) ||
+      (scope === "trash" && libraryTrashEnabled.value),
+  ),
+);
+const hostNamesById = computed(() =>
+  Object.fromEntries(connectedHosts.value.map((host) => [host.id, host.name])),
+);
+const libraryCollectionCards = computed<MobileCollectionCard[]>(() =>
+  collectionCards(mergedCollectionsFor(hostCollections, connectedHosts.value), hostNamesById.value),
+);
+const mergedTags = computed(() => mergeHostTags(hostTags));
+const libraryTagChips = computed(() => tagChipPlan(mergedTags.value, libraryFilters.tag));
+const libraryHostChips = computed(() =>
+  connectedHosts.value.length > 1
+    ? connectedHosts.value.map((host) => ({
+        id: host.id,
+        name: host.name,
+        count: libraryHostCounts.value[host.id] ?? 0,
+      }))
+    : [],
+);
+const libraryChipRowVisible = computed(
+  () =>
+    libraryScope.value === "prints" &&
+    (libraryOrganizeEnabled.value || libraryHostChips.value.length > 0),
+);
+const activeCollection = computed(
+  () =>
+    libraryCollectionCards.value.find((card) => card.slug === libraryFilters.collectionSlug) ??
+    null,
+);
+const libraryScopeCounts = computed<Record<MobileLibraryScope, number>>(() => ({
+  prints: libraryPrintCount.value,
+  collections: libraryCollectionCards.value.length,
+  trash: trashCount.value,
+}));
+const trashRetention = computed(() =>
+  trashRetentionSummary(trashRetentionHosts(connectedHosts.value, librarySupport.value)),
+);
+const libraryEmptyCopy = computed(() => {
+  if (libraryScope.value === "trash") return "Trash is empty.";
+  if (libraryScope.value === "collections" && activeCollection.value) {
+    return "No prints in this collection yet. Add some from Select.";
+  }
+  if (libraryFilters.favoritesOnly) return "No favorites yet. Tap ♥ on a print to keep it close.";
+  if (libraryFilters.tag) return "No prints carry this tag.";
+  if (libraryFilters.hostId) return "No prints on this host.";
+  return "No prints found.";
+});
+const selectedGalleryKeysList = computed(() => [...gallerySelection.value]);
+/** Whether every selected print is already a favorite (♥ toggles off then). */
+const selectedAllFavorite = computed(() => {
+  const keys = selectedGalleryKeysList.value;
+  return keys.length > 0 && keys.every((key) => galleryOrganization.value.get(key)?.favorite);
+});
+const selectedDeleteKind = computed<"trash" | "delete" | "delete-forever">(() => {
+  if (libraryScope.value === "trash") return "delete-forever";
+  const hostIds = selectedPhysicalCopies().map((copy) => copy.hostId);
+  return selectionDeleteKind(hostIds, librarySupport.value);
+});
+const galleryDeleteCopy = computed(() =>
+  deleteActionCopy(
+    selectedDeleteKind.value,
+    gallerySelection.value.size,
+    galleryDeleteConfirming.value,
+    galleryDeleting.value,
+  ),
+);
+const printTitleError = computed(() => {
+  const result = requestTitle(printTitle.value);
+  return result.ok ? "" : result.reason;
+});
+const selectedPrintOrganization = computed(() =>
+  selectedPrint.value ? organizationOf(selectedPrint.value) : undefined,
+);
+const selectedPrintTrashed = computed(
+  () =>
+    libraryScope.value === "trash" || (selectedPrintOrganization.value?.trashedAt ?? null) !== null,
+);
+
+function organizationOf(
+  print: Pick<GalleryPrint, "hostId" | "filename">,
+): OrganizationUnion | undefined {
+  return galleryOrganization.value.get(galleryPrintKey(print));
+}
+
+function printCaption(print: Pick<GalleryPrint, "hostId" | "filename" | "metadata">): string {
+  return displayTitle({
+    title: organizationOf(print)?.title ?? null,
+    metadata: print.metadata,
+    filename: print.filename,
+  });
+}
+
+function tileLabel(print: GalleryPrint, action: string): string {
+  return `${action} ${printCaption(print)} from ${print.hostName}`;
+}
+
+function purgeChipFor(
+  print: Pick<GalleryPrint, "hostId" | "filename" | "purge_at">,
+): string | null {
+  const purgeAt = organizationOf(print)?.purgeAt ?? print.purge_at ?? null;
+  return purgeChipLabel(purgeAt, Date.now());
+}
+
+function scopeCopies(): PendingGalleryPrint[] {
+  return libraryScope.value === "trash" ? trashCopies : galleryCopies;
+}
+
+function rebuildGalleryOrganization(): void {
+  const resolver = collectionSlugResolver(
+    connectedHosts.value.map((host) => ({
+      hostId: host.id,
+      collections: hostCollections[host.id] ?? [],
+    })),
+  );
+  galleryOrganization.value = buildOrganizationIndex(
+    [...galleryCopies, ...trashCopies],
+    resolver,
+    selectedHostId.value || null,
+  );
+  const counts: Record<string, number> = {};
+  for (const copy of galleryCopies) counts[copy.hostId] = (counts[copy.hostId] ?? 0) + 1;
+  libraryHostCounts.value = counts;
+  libraryPrintCount.value = groupLogicalGalleryPrints(galleryCopies).length;
+  trashCount.value = groupLogicalGalleryPrints(trashCopies).length;
+}
+
+/** The representatives the grid pages through for the current scope + chips. */
+function visibleRepresentatives(): PendingGalleryPrint[] {
+  const copies = scopeCopies();
+  const representatives = groupLogicalGalleryPrints(copies).map((group) => group.representative);
+  const filters =
+    libraryScope.value === "prints"
+      ? { ...libraryFilters, collectionSlug: null }
+      : libraryScope.value === "collections"
+        ? { ...EMPTY_LIBRARY_FILTERS, collectionSlug: libraryFilters.collectionSlug }
+        : { ...EMPTY_LIBRARY_FILTERS };
+  return filterLibraryPrints(representatives, filters, organizationOf, (print) =>
+    logicalCopiesOf(copies, print),
+  );
+}
+
+/** Rebuild the paged grid from the current scope, filters, and organization. */
+async function resetGalleryPaging(): Promise<void> {
+  for (const item of gallery.value) revokeObjectUrl(item.thumbnailUrl);
+  gallery.value = [];
+  pendingGallery = visibleRepresentatives();
+  await loadMoreGalleryPage();
+}
+
+function requeueGallery(): Promise<void> {
+  return enqueueGalleryOperation(resetGalleryPaging);
+}
+
+async function refreshHostOrganization(hostIds: readonly string[]): Promise<void> {
+  const support = librarySupport.value;
+  await Promise.all(
+    hostIds.map(async (hostId) => {
+      const host = connectedHosts.value.find((candidate) => candidate.id === hostId);
+      if (!host || !support.organizeHostIds.has(hostId)) return;
+      const target = mobileHostTarget(host);
+      const [collections, tags] = await Promise.allSettled([
+        listHostCollections(target),
+        listHostTags(target),
+      ]);
+      if (collections.status === "fulfilled") hostCollections[hostId] = collections.value;
+      if (tags.status === "fulfilled") hostTags[hostId] = tags.value;
+    }),
+  );
+}
+
+function setLibraryScope(scope: MobileLibraryScope): void {
+  if (libraryScope.value === scope) return;
+  setGallerySelectMode(false);
+  libraryScope.value = scope;
+  emptyTrashConfirming.value = false;
+  collectionMenuSlug.value = null;
+  collectionDeleteConfirmSlug.value = null;
+  if (scope !== "collections") libraryFilters.collectionSlug = null;
+  if (scope === "trash" && !trashLoaded.value) void refreshTrash();
+  else void requeueGallery();
+}
+
+function toggleFavoritesFilter(): void {
+  libraryFilters.favoritesOnly = !libraryFilters.favoritesOnly;
+  void requeueGallery();
+}
+
+function setTagFilter(name: string | null): void {
+  const key = name ? tagKey(name) : null;
+  libraryFilters.tag = libraryFilters.tag === key ? null : key;
+  librarySheet.value = null;
+  void requeueGallery();
+}
+
+function setHostFilter(hostId: string | null): void {
+  libraryFilters.hostId = libraryFilters.hostId === hostId ? null : hostId;
+  void requeueGallery();
+}
+
+function openCollection(slug: string): void {
+  setGallerySelectMode(false);
+  collectionMenuSlug.value = null;
+  libraryFilters.collectionSlug = slug;
+  void requeueGallery();
+}
+
+function closeCollection(): void {
+  setGallerySelectMode(false);
+  libraryFilters.collectionSlug = null;
+  void requeueGallery();
+}
+
+/** Cover thumbnail for a collection card: a loaded tile when the cover print
+ * is on screen, otherwise fetched once through the cached media pipeline. */
+function collectionCoverUrl(card: MobileCollectionCard): string {
+  const loaded = gallery.value.find((print) =>
+    (organizationOf(print)?.collections ?? []).includes(card.slug),
+  );
+  if (loaded) return loaded.thumbnailUrl;
+  const cached = collectionCovers[card.slug];
+  if (cached) return cached;
+  const cover = card.cover;
+  if (!cover) return "";
+  const host = connectedHosts.value.find((candidate) => candidate.id === cover.hostId);
+  if (!host) return "";
+  collectionCovers[card.slug] = "";
+  void thumbnailUrl(mobileHostTarget(host), mobileGalleryCacheKey(host), cover.filename)
+    .then((url) => {
+      collectionCovers[card.slug] = url;
+    })
+    .catch(() => {
+      delete collectionCovers[card.slug];
+    });
+  return "";
+}
+
+// ── Library organization: mutations ─────────────────────────────────────────
+
+function selectedRepresentatives(): Array<GalleryPrint | PendingGalleryPrint> {
+  return allGalleryPrints().filter((print) => gallerySelection.value.has(galleryPrintKey(print)));
+}
+
+/** Every physical copy behind the selected logical prints. */
+function selectedPhysicalCopies(): PendingGalleryPrint[] {
+  const copies = scopeCopies();
+  const seen = new Map<string, PendingGalleryPrint>();
+  for (const print of selectedRepresentatives()) {
+    for (const copy of logicalCopiesOf(copies, print)) seen.set(galleryPrintKey(copy), copy);
+  }
+  return [...seen.values()];
+}
+
+function fanoutHosts(): Record<
+  string,
+  { id: string; name: string; target: ApiTarget; collections: Collection[] }
+> {
+  return Object.fromEntries(
+    connectedHosts.value.map((host) => [
+      host.id,
+      {
+        id: host.id,
+        name: host.name,
+        target: mobileHostTarget(host),
+        collections: hostCollections[host.id] ?? [],
+      },
+    ]),
+  );
+}
+
+interface LibraryMutationOutcome {
+  failedHostIds: Set<string>;
+  ok: boolean;
+}
+
+/**
+ * Fan one mutation out to every physical copy on its own Keychain-
+ * authenticated host; failures land in the inline banner, never a toast.
+ */
+async function runLibraryMutation(
+  copies: readonly PendingGalleryPrint[],
+  mutation: OrganizationMutation,
+  action: string,
+): Promise<LibraryMutationOutcome> {
+  organizationError.value = "";
+  organizationBusy.value = true;
+  try {
+    const ops = planOrganizationFanout(copies, mutation);
+    const result = await runOrganizationFanout(ops, fanoutHosts(), undefined, {
+      trashHostIds: librarySupport.value.trashHostIds,
+    });
+    if (result.createdCollections.length > 0) {
+      await refreshHostOrganization(result.createdCollections.map((entry) => entry.hostId));
+    }
+    const failedHostIds = new Set(result.failures.map((failure) => failure.hostId));
+    if (result.failures.length > 0) {
+      organizationError.value = fanoutFailureMessage(action, result.failures, (error, name) =>
+        describeTransportError(error, name),
+      );
+    }
+    return { failedHostIds, ok: result.failures.length === 0 };
+  } finally {
+    organizationBusy.value = false;
+  }
+}
+
+/** Apply a local organization patch to every matching copy (pending, loaded,
+ * trash, and the IndexedDB cache), then re-derive the merged index. */
+async function applyOrganizationPatch(
+  copies: readonly PendingGalleryPrint[],
+  patch: (copy: PendingGalleryPrint) => Partial<MobileGalleryImage>,
+  skipHostIds: ReadonlySet<string> = new Set(),
+): Promise<void> {
+  const patches = new Map<string, Partial<MobileGalleryImage>>();
+  for (const copy of copies) {
+    if (skipHostIds.has(copy.hostId)) continue;
+    patches.set(galleryPrintKey(copy), patch(copy));
+  }
+  const apply = <T extends PendingGalleryPrint>(list: T[]): T[] =>
+    list.map((entry) => {
+      const next = patches.get(galleryPrintKey(entry));
+      return next ? { ...entry, ...next } : entry;
+    });
+  galleryCopies = apply(galleryCopies);
+  trashCopies = apply(trashCopies);
+  pendingGallery = apply(pendingGallery);
+  gallery.value = apply(gallery.value);
+  if (selectedPrint.value) {
+    const next = patches.get(galleryPrintKey(selectedPrint.value));
+    if (next) selectedPrint.value = { ...selectedPrint.value, ...next };
+  }
+  rebuildGalleryOrganization();
+  const byCacheKey = new Map<
+    string,
+    Array<{ filename: string; patch: Partial<MobileGalleryImage> }>
+  >();
+  for (const copy of copies) {
+    const next = patches.get(galleryPrintKey(copy));
+    if (!next) continue;
+    const list = byCacheKey.get(copy.cacheKey) ?? [];
+    list.push({ filename: copy.filename, patch: next });
+    byCacheKey.set(copy.cacheKey, list);
+  }
+  await Promise.all(
+    [...byCacheKey].map(([cacheKey, list]) => patchCachedGalleryPrints(cacheKey, list)),
+  );
+}
+
+async function setFavoriteFor(
+  copies: readonly PendingGalleryPrint[],
+  favorite: boolean,
+): Promise<void> {
+  const outcome = await runLibraryMutation(
+    copies,
+    { kind: "setFavorite", favorite },
+    favorite ? "favorite these prints" : "unfavorite these prints",
+  );
+  await applyOrganizationPatch(copies, () => ({ favorite }), outcome.failedHostIds);
+}
+
+async function setTitleFor(
+  copies: readonly PendingGalleryPrint[],
+  title: string | null,
+): Promise<void> {
+  const outcome = await runLibraryMutation(
+    copies,
+    { kind: "setTitle", title },
+    "rename this print",
+  );
+  await applyOrganizationPatch(copies, () => ({ title }), outcome.failedHostIds);
+}
+
+async function addTagsFor(copies: readonly PendingGalleryPrint[], tags: string[]): Promise<void> {
+  if (tags.length === 0) return;
+  const outcome = await runLibraryMutation(copies, { kind: "addTags", tags }, "tag these prints");
+  await applyOrganizationPatch(
+    copies,
+    (copy) => {
+      const existing = copy.tags ?? [];
+      const keys = new Set(existing.map(tagKey));
+      return { tags: [...existing, ...tags.filter((tag) => !keys.has(tagKey(tag)))] };
+    },
+    outcome.failedHostIds,
+  );
+  await refreshHostOrganization([...new Set(copies.map((copy) => copy.hostId))]);
+}
+
+async function removeTagsFor(
+  copies: readonly PendingGalleryPrint[],
+  tags: string[],
+): Promise<void> {
+  if (tags.length === 0) return;
+  const outcome = await runLibraryMutation(
+    copies,
+    { kind: "removeTags", tags },
+    "remove the tag from these prints",
+  );
+  const removed = new Set(tags.map(tagKey));
+  await applyOrganizationPatch(
+    copies,
+    (copy) => ({ tags: (copy.tags ?? []).filter((tag) => !removed.has(tagKey(tag))) }),
+    outcome.failedHostIds,
+  );
+  await refreshHostOrganization([...new Set(copies.map((copy) => copy.hostId))]);
+}
+
+async function setCollectionMembershipFor(
+  copies: readonly PendingGalleryPrint[],
+  collection: { slug: string; name: string },
+  member: boolean,
+): Promise<void> {
+  const outcome = await runLibraryMutation(
+    copies,
+    member
+      ? { kind: "addToCollection", name: collection.name, slug: collection.slug }
+      : { kind: "removeFromCollection", slug: collection.slug },
+    member ? `add to “${collection.name}”` : `remove from “${collection.name}”`,
+  );
+  await refreshHostOrganization([...new Set(copies.map((copy) => copy.hostId))]);
+  await applyOrganizationPatch(
+    copies,
+    (copy) => {
+      const hostCollection = collectionOnHost(hostCollections, copy.hostId, collection.slug);
+      const ids = (copy.collections ?? []).filter((id) => id !== hostCollection?.id);
+      if (member && hostCollection) ids.push(hostCollection.id);
+      return { collections: ids };
+    },
+    outcome.failedHostIds,
+  );
+  if (libraryScope.value === "collections") await requeueGallery();
+}
+
+// ── Select-mode bulk actions ───────────────────────────────────────────────
+
+async function favoriteSelected(): Promise<void> {
+  if (organizationBusy.value || gallerySelection.value.size === 0) return;
+  galleryDeleteConfirming.value = false;
+  await setFavoriteFor(selectedPhysicalCopies(), !selectedAllFavorite.value);
+}
+
+function openLibrarySheet(sheet: LibrarySheet): void {
+  galleryDeleteConfirming.value = false;
+  librarySheetInput.value = sheet.kind === "rename-collection" ? sheet.name : "";
+  librarySheetError.value = "";
+  librarySheet.value = sheet;
+}
+
+function closeLibrarySheet(): void {
+  librarySheet.value = null;
+  librarySheetInput.value = "";
+  librarySheetError.value = "";
+}
+
+/** Tags every selected print carries (for the × chips in the tag editor). */
+const selectedTags = computed(() => {
+  const counts = new Map<string, { name: string; count: number }>();
+  for (const key of selectedGalleryKeysList.value) {
+    for (const tag of galleryOrganization.value.get(key)?.tags ?? []) {
+      const entry = counts.get(tagKey(tag)) ?? { name: tag, count: 0 };
+      entry.count += 1;
+      counts.set(tagKey(tag), entry);
+    }
+  }
+  return [...counts.values()].sort((a, b) => a.name.localeCompare(b.name));
+});
+const tagSuggestions = computed(() => {
+  const present = new Set(selectedTags.value.map((tag) => tagKey(tag.name)));
+  return mergedTags.value.filter((tag) => !present.has(tagKey(tag.name))).slice(0, 12);
+});
+
+async function addTagToSelected(raw: string): Promise<void> {
+  const name = raw
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/^#+\s*/, "");
+  if (!name) return;
+  librarySheetBusy.value = true;
+  try {
+    await addTagsFor(selectedPhysicalCopies(), [name]);
+    librarySheetInput.value = "";
+  } finally {
+    librarySheetBusy.value = false;
+  }
+}
+
+async function removeTagFromSelected(name: string): Promise<void> {
+  librarySheetBusy.value = true;
+  try {
+    await removeTagsFor(selectedPhysicalCopies(), [name]);
+  } finally {
+    librarySheetBusy.value = false;
+  }
+}
+
+/** Checklist state for the collection sheet: every selected print is in it. */
+function selectedInCollection(slug: string): boolean {
+  const keys = selectedGalleryKeysList.value;
+  return (
+    keys.length > 0 &&
+    keys.every((key) => (galleryOrganization.value.get(key)?.collections ?? []).includes(slug))
+  );
+}
+
+async function toggleSelectedCollection(card: { slug: string; name: string }): Promise<void> {
+  librarySheetBusy.value = true;
+  try {
+    await setCollectionMembershipFor(
+      selectedPhysicalCopies(),
+      card,
+      !selectedInCollection(card.slug),
+    );
+  } finally {
+    librarySheetBusy.value = false;
+  }
+}
+
+async function removeSelectedFromCollection(): Promise<void> {
+  const collection = activeCollection.value;
+  if (!collection || organizationBusy.value) return;
+  const copies = selectedPhysicalCopies();
+  await setCollectionMembershipFor(copies, collection, false);
+  gallerySelection.value = new Set();
+  setGallerySelectMode(false);
+}
+
+/** Create a collection by name. With a selection (collection sheet) the
+ * selected prints join it; from the Collections scope it is created empty on
+ * every host that can organize. */
+async function createCollectionFromSheet(): Promise<void> {
+  const validation = validateCollectionName(librarySheetInput.value);
+  if (!validation.ok) {
+    librarySheetError.value = validation.reason ?? "";
+    return;
+  }
+  librarySheetBusy.value = true;
+  librarySheetError.value = "";
+  organizationError.value = "";
+  try {
+    if (librarySheet.value?.kind === "collections" && gallerySelection.value.size > 0) {
+      await setCollectionMembershipFor(
+        selectedPhysicalCopies(),
+        { slug: collectionSlug(validation.value), name: validation.value },
+        true,
+      );
+      librarySheetInput.value = "";
+      return;
+    }
+    const hosts = connectedHosts.value.filter((host) =>
+      librarySupport.value.organizeHostIds.has(host.id),
+    );
+    const results = await Promise.allSettled(
+      hosts.map((host) => createHostCollection(mobileHostTarget(host), { name: validation.value })),
+    );
+    const failures = results.flatMap((result, index) =>
+      result.status === "rejected"
+        ? [{ hostId: hosts[index]!.id, hostName: hosts[index]!.name, error: result.reason }]
+        : [],
+    );
+    if (failures.length > 0) {
+      organizationError.value = fanoutFailureMessage(
+        `create “${validation.value}”`,
+        failures,
+        (error, name) => describeTransportError(error, name),
+      );
+    }
+    await refreshHostOrganization(hosts.map((host) => host.id));
+    rebuildGalleryOrganization();
+    closeLibrarySheet();
+  } finally {
+    librarySheetBusy.value = false;
+  }
+}
+
+function openCollectionMenu(slug: string): void {
+  collectionDeleteConfirmSlug.value = null;
+  collectionMenuSlug.value = collectionMenuSlug.value === slug ? null : slug;
+}
+
+async function renameCollectionFromSheet(): Promise<void> {
+  const sheet = librarySheet.value;
+  if (sheet?.kind !== "rename-collection") return;
+  const validation = validateCollectionName(librarySheetInput.value);
+  if (!validation.ok) {
+    librarySheetError.value = validation.reason ?? "";
+    return;
+  }
+  librarySheetBusy.value = true;
+  organizationError.value = "";
+  try {
+    const hosts = connectedHosts.value.filter((host) =>
+      collectionOnHost(hostCollections, host.id, sheet.slug),
+    );
+    const results = await Promise.allSettled(
+      hosts.map((host) =>
+        updateHostCollection(
+          mobileHostTarget(host),
+          collectionOnHost(hostCollections, host.id, sheet.slug)!.id,
+          { name: validation.value },
+        ),
+      ),
+    );
+    const failures = results.flatMap((result, index) =>
+      result.status === "rejected"
+        ? [{ hostId: hosts[index]!.id, hostName: hosts[index]!.name, error: result.reason }]
+        : [],
+    );
+    if (failures.length > 0) {
+      organizationError.value = fanoutFailureMessage(
+        `rename “${sheet.name}”`,
+        failures,
+        (error, name) => describeTransportError(error, name),
+      );
+    }
+    await refreshHostOrganization(hosts.map((host) => host.id));
+    rebuildGalleryOrganization();
+    collectionMenuSlug.value = null;
+    closeLibrarySheet();
+  } finally {
+    librarySheetBusy.value = false;
+  }
+}
+
+/** Two-step: first tap arms, second deletes the collection on every host
+ * that has it. Prints are never touched (D7). */
+async function deleteCollection(card: MobileCollectionCard): Promise<void> {
+  if (collectionDeleteConfirmSlug.value !== card.slug) {
+    collectionDeleteConfirmSlug.value = card.slug;
+    return;
+  }
+  collectionDeleteConfirmSlug.value = null;
+  organizationBusy.value = true;
+  organizationError.value = "";
+  try {
+    const hosts = connectedHosts.value.filter((host) =>
+      collectionOnHost(hostCollections, host.id, card.slug),
+    );
+    const results = await Promise.allSettled(
+      hosts.map((host) =>
+        deleteHostCollection(
+          mobileHostTarget(host),
+          collectionOnHost(hostCollections, host.id, card.slug)!.id,
+        ),
+      ),
+    );
+    const failures = results.flatMap((result, index) =>
+      result.status === "rejected"
+        ? [{ hostId: hosts[index]!.id, hostName: hosts[index]!.name, error: result.reason }]
+        : [],
+    );
+    if (failures.length > 0) {
+      organizationError.value = fanoutFailureMessage(
+        `delete “${card.name}”`,
+        failures,
+        (error, name) => describeTransportError(error, name),
+      );
+    }
+    await refreshHostOrganization(hosts.map((host) => host.id));
+    rebuildGalleryOrganization();
+    collectionMenuSlug.value = null;
+    if (libraryFilters.collectionSlug === card.slug) closeCollection();
+  } finally {
+    organizationBusy.value = false;
+  }
+}
+
+// ── Trash ───────────────────────────────────────────────────────────────────
+
+function refreshTrash(): Promise<void> {
+  return enqueueGalleryOperation(async () => {
+    trashLoading.value = true;
+    trashError.value = "";
+    const hosts = connectedHosts.value.filter(
+      (host) => librarySupport.value.trashHostIds.has(host.id) && host.online,
+    );
+    const results = await Promise.allSettled(
+      hosts.map(async (host) => {
+        const target = mobileHostTarget(host);
+        const prints = await listHostTrash<MobileGalleryImage>(target);
+        return { host, target, prints };
+      }),
+    );
+    const copies: PendingGalleryPrint[] = [];
+    let failed = 0;
+    results.forEach((result) => {
+      if (result.status !== "fulfilled") {
+        failed += 1;
+        return;
+      }
+      const { host, target, prints } = result.value;
+      for (const print of prints) {
+        copies.push({
+          ...print,
+          hostId: host.id,
+          cacheKey: mobileGalleryCacheKey(host),
+          hostName: host.name,
+          target,
+        });
+      }
+    });
+    trashCopies = copies.sort((a, b) => b.timestamp - a.timestamp);
+    trashLoaded.value = true;
+    if (failed > 0) {
+      trashError.value = `${failed} host${failed === 1 ? "" : "s"} unavailable · Trash may be incomplete`;
+    }
+    rebuildGalleryOrganization();
+    if (libraryScope.value === "trash") await resetGalleryPaging();
+    trashLoading.value = false;
+  });
+}
+
+/** Drop copies from the scope lists and the grid (after a trash / restore /
+ * purge succeeded on their host). */
+async function dropCopiesFromLibrary(
+  keys: ReadonlySet<string>,
+  options: { purgeThumbnails?: boolean } = {},
+): Promise<void> {
+  const removed = [...galleryCopies, ...trashCopies].filter((copy) =>
+    keys.has(galleryPrintKey(copy)),
+  );
+  if (options.purgeThumbnails) {
+    await removeCachedGalleryPrints(
+      removed.map((copy) => ({ hostId: copy.cacheKey, filename: copy.filename })),
+    );
+  }
+  galleryCopies = galleryCopies.filter((copy) => !keys.has(galleryPrintKey(copy)));
+  trashCopies = trashCopies.filter((copy) => !keys.has(galleryPrintKey(copy)));
+  rebuildGalleryOrganization();
+  await resetGalleryPaging();
+  gallerySelection.value = new Set(
+    [...gallerySelection.value].filter((key) =>
+      allGalleryPrints().some((print) => galleryPrintKey(print) === key),
+    ),
+  );
+  if (gallerySelection.value.size === 0) setGallerySelectMode(false);
+}
+
+async function restoreSelectedGalleryPrints(): Promise<void> {
+  if (galleryRestoring.value || gallerySelection.value.size === 0) return;
+  galleryDeleteConfirming.value = false;
+  galleryRestoring.value = true;
+  try {
+    const copies = selectedPhysicalCopies();
+    const outcome = await runLibraryMutation(copies, { kind: "restore" }, "restore these prints");
+    const restored = copies.filter((copy) => !outcome.failedHostIds.has(copy.hostId));
+    const keys = new Set(restored.map(galleryPrintKey));
+    // Restored copies rejoin the live Library locally; the next refresh
+    // confirms them against the host.
+    galleryCopies = [
+      ...galleryCopies,
+      ...restored.map(({ trashed_at: _trashedAt, purge_at: _purgeAt, ...copy }) => copy),
+    ].sort((a, b) => b.timestamp - a.timestamp);
+    trashCopies = trashCopies.filter((copy) => !keys.has(galleryPrintKey(copy)));
+    rebuildGalleryOrganization();
+    await resetGalleryPaging();
+    gallerySelection.value = new Set(
+      [...gallerySelection.value].filter((key) =>
+        allGalleryPrints().some((print) => galleryPrintKey(print) === key),
+      ),
+    );
+    if (gallerySelection.value.size === 0) setGallerySelectMode(false);
+  } finally {
+    galleryRestoring.value = false;
+  }
+}
+
+async function emptyTrash(): Promise<void> {
+  if (emptyingTrash.value) return;
+  if (!emptyTrashConfirming.value) {
+    emptyTrashConfirming.value = true;
+    return;
+  }
+  emptyTrashConfirming.value = false;
+  emptyingTrash.value = true;
+  organizationError.value = "";
+  try {
+    const hosts = connectedHosts.value.filter((host) =>
+      librarySupport.value.trashHostIds.has(host.id),
+    );
+    const results = await Promise.allSettled(
+      hosts.map((host) => emptyHostTrash(mobileHostTarget(host))),
+    );
+    const failures = results.flatMap((result, index) =>
+      result.status === "rejected"
+        ? [{ hostId: hosts[index]!.id, hostName: hosts[index]!.name, error: result.reason }]
+        : [],
+    );
+    if (failures.length > 0) {
+      organizationError.value = fanoutFailureMessage("empty the trash", failures, (error, name) =>
+        describeTransportError(error, name),
+      );
+    }
+    const failedHostIds = new Set(failures.map((failure) => failure.hostId));
+    const purged = new Set(
+      trashCopies.filter((copy) => !failedHostIds.has(copy.hostId)).map(galleryPrintKey),
+    );
+    await dropCopiesFromLibrary(purged, { purgeThumbnails: true });
+  } finally {
+    emptyingTrash.value = false;
+  }
+}
+
+// ── Viewer (info sheet) handlers ────────────────────────────────────────────
+
+function viewerCopies(): PendingGalleryPrint[] {
+  const print = selectedPrint.value;
+  return print ? logicalCopiesOf(scopeCopies(), print) : [];
+}
+
+async function renameSelectedPrint(title: string | null): Promise<void> {
+  await setTitleFor(viewerCopies(), title);
+}
+
+async function favoriteSelectedPrint(favorite: boolean): Promise<void> {
+  await setFavoriteFor(viewerCopies(), favorite);
+}
+
+async function tagSelectedPrint(change: { add?: string[]; remove?: string[] }): Promise<void> {
+  const copies = viewerCopies();
+  if (change.add?.length) await addTagsFor(copies, change.add);
+  if (change.remove?.length) await removeTagsFor(copies, change.remove);
+}
+
+async function collectSelectedPrint(change: {
+  slug: string;
+  name: string;
+  member: boolean;
+}): Promise<void> {
+  await setCollectionMembershipFor(viewerCopies(), change, change.member);
+}
+
+async function restoreSelectedPrint(): Promise<void> {
+  const copies = viewerCopies();
+  const outcome = await runLibraryMutation(copies, { kind: "restore" }, "restore this print");
+  const restored = copies.filter((copy) => !outcome.failedHostIds.has(copy.hostId));
+  if (restored.length === 0) return;
+  const keys = new Set(restored.map(galleryPrintKey));
+  galleryCopies = [
+    ...galleryCopies,
+    ...restored.map(({ trashed_at: _trashedAt, purge_at: _purgeAt, ...copy }) => copy),
+  ].sort((a, b) => b.timestamp - a.timestamp);
+  trashCopies = trashCopies.filter((copy) => !keys.has(galleryPrintKey(copy)));
+  selectedPrint.value = null;
+  galleryRefreshDeferred = false;
+  rebuildGalleryOrganization();
+  await requeueGallery();
+}
+
+async function deleteSelectedPrintForever(): Promise<void> {
+  const copies = viewerCopies();
+  const outcome = await runLibraryMutation(
+    copies,
+    { kind: "deleteForever" },
+    "delete this print forever",
+  );
+  const keys = new Set(
+    copies.filter((copy) => !outcome.failedHostIds.has(copy.hostId)).map(galleryPrintKey),
+  );
+  if (keys.size === 0) return;
+  selectedPrint.value = null;
+  galleryRefreshDeferred = false;
+  await enqueueGalleryOperation(() => dropCopiesFromLibrary(keys, { purgeThumbnails: true }));
+}
+
 function setGallerySelectMode(next: boolean): void {
   if (!next) {
     finishGallerySelectionDrag();
@@ -5595,54 +6591,62 @@ async function deleteSelectedGalleryPrints(): Promise<void> {
   galleryDeleteConfirming.value = false;
   galleryDeleting.value = true;
   galleryError.value = "";
+  organizationError.value = "";
 
-  const selected = allGalleryPrints().filter((print) =>
-    gallerySelection.value.has(galleryPrintKey(print)),
-  );
-  const logicalGroups = groupLogicalGalleryPrints(galleryCopies);
-  const groups = selected.map((print) => {
-    const key = galleryPrintKey(print);
-    return (
-      logicalGroups.find((group) => group.copies.some((copy) => galleryPrintKey(copy) === key))
-        ?.copies ?? [print]
-    );
-  });
-  const targets = new Map<string, GalleryPrint | PendingGalleryPrint>();
-  for (const group of groups) {
-    for (const print of group) targets.set(galleryPrintKey(print), print);
-  }
-  const targetList = [...targets.values()];
-  const results = await Promise.allSettled(
-    targetList.map((print) =>
-      apiFetchTo(print.target, `/api/gallery/image/${encodeURIComponent(print.filename)}`, {
-        method: "DELETE",
-      }),
+  const kind = selectedDeleteKind.value;
+  const selected = selectedRepresentatives();
+  const copies = selectedPhysicalCopies();
+  // One op per host: the trash on hosts that have one, today's hard
+  // `DELETE` elsewhere, `?permanent=true` only from the Trash scope.
+  const result = await runOrganizationFanout(
+    planOrganizationFanout(
+      copies,
+      kind === "delete-forever" ? { kind: "deleteForever" } : { kind: "trash" },
     ),
+    fanoutHosts(),
+    undefined,
+    { trashHostIds: librarySupport.value.trashHostIds },
   );
-  const deletedKeys = new Set<string>();
-  const failedKeys = new Set<string>();
-  const deletedCacheEntries: Array<{ hostId: string; filename: string }> = [];
-  results.forEach((result, index) => {
-    const key = galleryPrintKey(targetList[index]!);
-    if (result.status === "fulfilled") {
-      const print = targetList[index]!;
-      deletedKeys.add(key);
-      deletedCacheEntries.push({ hostId: print.cacheKey, filename: print.filename });
-    } else failedKeys.add(key);
-  });
-  await removeCachedGalleryPrints(deletedCacheEntries);
+  const failedHostIds = new Set(result.failures.map((failure) => failure.hostId));
+  const removedKeys = new Set(
+    copies.filter((copy) => !failedHostIds.has(copy.hostId)).map(galleryPrintKey),
+  );
+  const removedCopies = copies.filter((copy) => removedKeys.has(galleryPrintKey(copy)));
+  // Removed copies leave the offline cache (metadata and thumbnail bytes);
+  // the Trash grid repaints trashed prints from the host's own listing.
+  await removeCachedGalleryPrints(
+    removedCopies.map((copy) => ({ hostId: copy.cacheKey, filename: copy.filename })),
+  );
+  const trashedCopies =
+    kind === "trash"
+      ? removedCopies.filter((copy) => librarySupport.value.trashHostIds.has(copy.hostId))
+      : [];
   for (const print of gallery.value) revokeObjectUrl(print.thumbnailUrl);
-  galleryCopies = galleryCopies.filter((print) => !deletedKeys.has(galleryPrintKey(print)));
+  galleryCopies = galleryCopies.filter((print) => !removedKeys.has(galleryPrintKey(print)));
+  trashCopies = trashCopies.filter((print) => !removedKeys.has(galleryPrintKey(print)));
+  rebuildGalleryOrganization();
+  if (trashedCopies.length > 0) {
+    // The Trash listing is host authority (it carries the purge stamps): mark
+    // it stale so the next Trash visit refetches rather than guessing.
+    trashLoaded.value = false;
+    trashCount.value += groupLogicalGalleryPrints(trashedCopies).length;
+  }
   gallery.value = [];
-  pendingGallery = groupLogicalGalleryPrints(galleryCopies).map((group) => group.representative);
+  pendingGallery = visibleRepresentatives();
   await loadMoreGalleryPage();
 
-  const failedPrints = groups.filter((group) =>
-    group.some((print) => failedKeys.has(galleryPrintKey(print))),
+  const failedPrints = selected.filter((print) =>
+    logicalCopiesOf(copies, print).some((copy) => failedHostIds.has(copy.hostId)),
   ).length;
-  const deletedPrints = selected.length - failedPrints;
+  const donePrints = selected.length - failedPrints;
   if (failedPrints > 0) {
-    galleryError.value = `Deleted ${deletedPrints} of ${selected.length} prints everywhere. ${failedPrints} still have a copy on an unavailable device.`;
+    const verb =
+      kind === "trash"
+        ? `Moved ${donePrints} of ${selected.length} prints to the trash.`
+        : kind === "delete-forever"
+          ? `Deleted ${donePrints} of ${selected.length} prints forever.`
+          : `Deleted ${donePrints} of ${selected.length} prints everywhere.`;
+    galleryError.value = `${verb} ${failedPrints} still have a copy on an unavailable device.`;
   }
   gallerySelection.value = new Set(
     [...gallerySelection.value].filter((key) =>
@@ -6314,6 +7318,26 @@ onBeforeUnmount(() => {
           </template>
           <template v-else>
             <label class="field">
+              <span>Title</span>
+              <input
+                id="mobile-print-title"
+                v-model="printTitle"
+                class="control"
+                autocomplete="off"
+                enterkeyhint="next"
+                placeholder="Untitled print"
+                data-test="mobile-create-title"
+              />
+            </label>
+            <p
+              v-if="printTitleError"
+              class="status-line error-text"
+              role="alert"
+              data-test="mobile-create-title-error"
+            >
+              {{ printTitleError }}
+            </p>
+            <label class="field">
               <span>Prompt</span>
               <textarea
                 id="mobile-prompt"
@@ -6875,102 +7899,405 @@ onBeforeUnmount(() => {
         <div class="mobile-library-heading">
           <div>
             <h1 class="section-title">Library</h1>
-            <p class="section-note">
+            <p class="section-note" data-test="mobile-library-note">
               {{
                 gallerySelectMode
                   ? `${gallerySelection.size} selected`
-                  : "Prints from every connected host · Pinch to resize · Tap Select for multiple"
+                  : libraryScope === "trash"
+                    ? `${trashCount} in trash · Restore or delete forever from Select`
+                    : libraryScope === "collections"
+                      ? `${libraryCollectionCards.length} collection${libraryCollectionCards.length === 1 ? "" : "s"} across your hosts`
+                      : "Prints from every connected host · Pinch to resize · Tap Select for multiple"
               }}
             </p>
           </div>
+          <div class="mobile-library-heading-actions">
+            <button
+              v-if="libraryScope === 'trash' && !gallerySelectMode"
+              class="secondary-button mobile-library-select mobile-library-empty-trash"
+              type="button"
+              :class="{ 'is-armed': emptyTrashConfirming }"
+              :disabled="emptyingTrash || trashCount === 0"
+              data-test="mobile-library-empty-trash"
+              @click="emptyTrash"
+              @blur="emptyTrashConfirming = false"
+            >
+              {{ emptyingTrash ? "Emptying…" : emptyTrashConfirming ? "Confirm" : "Empty trash" }}
+            </button>
+            <button
+              v-if="libraryScope === 'collections' && !activeCollection && !gallerySelectMode"
+              class="secondary-button mobile-library-select"
+              type="button"
+              aria-label="New collection"
+              data-test="mobile-library-new-collection"
+              @click="openLibrarySheet({ kind: 'new-collection' })"
+            >
+              <span aria-hidden="true">＋</span>
+            </button>
+            <button
+              v-if="libraryScope !== 'collections' || activeCollection"
+              class="secondary-button mobile-library-select"
+              type="button"
+              :aria-pressed="gallerySelectMode"
+              data-test="mobile-gallery-select"
+              @click="setGallerySelectMode(!gallerySelectMode)"
+            >
+              {{ gallerySelectMode ? "Done" : "Select" }}
+            </button>
+          </div>
+        </div>
+        <p v-if="emptyTrashConfirming" class="status-line" data-test="mobile-library-empty-prompt">
+          Delete everything in the trash forever?
+        </p>
+        <div
+          v-if="libraryScopes.length > 1"
+          class="mobile-library-scope"
+          role="radiogroup"
+          aria-label="Library scope"
+          data-test="mobile-library-scope"
+        >
           <button
-            class="secondary-button mobile-library-select"
+            v-for="scope in libraryScopes"
+            :key="scope"
             type="button"
-            :aria-pressed="gallerySelectMode"
-            data-test="mobile-gallery-select"
-            @click="setGallerySelectMode(!gallerySelectMode)"
+            role="radio"
+            :aria-checked="libraryScope === scope"
+            :data-on="libraryScope === scope ? 'true' : undefined"
+            :data-test="`mobile-library-scope-${scope}`"
+            @click="setLibraryScope(scope)"
           >
-            {{ gallerySelectMode ? "Done" : "Select" }}
+            <span>{{ MOBILE_LIBRARY_SCOPE_LABELS[scope] }}</span>
+            <span class="mobile-library-scope-count">{{ libraryScopeCounts[scope] }}</span>
           </button>
         </div>
         <p v-if="galleryError" class="status-line error-text">{{ galleryError }}</p>
-        <div v-if="galleryLoading" class="empty-state">Loading prints…</div>
+        <p
+          v-if="organizationError"
+          class="status-line error-text"
+          role="alert"
+          data-test="mobile-library-organization-error"
+        >
+          {{ organizationError }}
+        </p>
         <div
-          v-else-if="gallery.length"
-          class="gallery-grid"
-          :class="{ 'is-selecting': gallerySelectMode }"
-          ref="galleryGrid"
-          :style="{ '--mobile-gallery-columns': galleryColumns }"
-          :aria-label="`Prints, ${galleryColumns} across. Pinch to resize.`"
-          :data-gallery-columns="galleryColumns"
+          v-if="libraryChipRowVisible"
+          class="mobile-library-chips"
           role="group"
-          data-test="mobile-gallery-grid"
-          @pointerdown="beginGalleryPinch"
+          aria-label="Library filters"
+          data-test="mobile-library-chips"
         >
           <button
-            v-for="print in gallery"
-            :key="`${print.hostId}:${print.filename}`"
-            class="gallery-item"
-            :class="{ 'gallery-item-selected': gallerySelection.has(galleryPrintKey(print)) }"
+            v-if="libraryOrganizeEnabled"
+            class="mobile-library-chip"
             type="button"
-            :aria-label="
-              gallerySelectMode
-                ? `${gallerySelection.has(galleryPrintKey(print)) ? 'Deselect' : 'Select'} ${print.filename} from ${print.hostName}`
-                : `Open ${print.filename} from ${print.hostName}`
-            "
-            :aria-pressed="
-              gallerySelectMode ? gallerySelection.has(galleryPrintKey(print)) : undefined
-            "
-            :data-gallery-print-key="galleryPrintKey(print)"
-            data-test="gallery-item"
-            @pointerdown="beginGallerySelectionDrag($event, print)"
-            @click="handleGalleryTileClick($event, print)"
+            :aria-pressed="libraryFilters.favoritesOnly"
+            :data-on="libraryFilters.favoritesOnly ? 'true' : undefined"
+            data-test="mobile-library-chip-favorites"
+            @click="toggleFavoritesFilter"
           >
-            <img
-              :src="print.thumbnailUrl"
-              :alt="print.metadata.prompt || print.filename"
-              loading="lazy"
-            />
-            <span
-              v-if="isVideoItem(print) || isAudioItem(print)"
-              class="gallery-video-badge"
-              aria-hidden="true"
-              >{{ isAudioItem(print) ? "♪" : "▶" }}</span
-            >
-            <span
-              v-if="!gallerySelectMode && isFreshMobilePrint(print)"
-              class="gallery-new-badge"
-              data-test="new-badge"
-            >
-              New
-            </span>
-            <span
-              v-if="isUpscaledImage(print)"
-              class="gallery-upscaled-badge"
-              data-test="upscaled-badge"
-            >
-              Upscaled
-            </span>
-            <span
-              v-if="gallerySelectMode"
-              class="gallery-selection-indicator"
-              data-test="mobile-gallery-selection-indicator"
-              aria-hidden="true"
-            >
-              {{ gallerySelection.has(galleryPrintKey(print)) ? "✓" : "" }}
-            </span>
+            <span class="mobile-library-chip-heart" aria-hidden="true">♥</span>Favorites
+          </button>
+          <button
+            v-for="tag in libraryTagChips.visible"
+            :key="`tag-${tag.name}`"
+            class="mobile-library-chip"
+            type="button"
+            :aria-pressed="libraryFilters.tag === tagKey(tag.name)"
+            :data-on="libraryFilters.tag === tagKey(tag.name) ? 'true' : undefined"
+            data-test="mobile-library-chip-tag"
+            @click="setTagFilter(tag.name)"
+          >
+            {{ tag.name }}<span class="mobile-library-chip-count">{{ tag.count }}</span>
+          </button>
+          <button
+            v-if="libraryTagChips.overflow.length"
+            class="mobile-library-chip is-more"
+            type="button"
+            data-test="mobile-library-chip-more"
+            @click="openLibrarySheet({ kind: 'more-tags' })"
+          >
+            More…
+          </button>
+          <button
+            v-for="host in libraryHostChips"
+            :key="`host-${host.id}`"
+            class="mobile-library-chip is-host"
+            type="button"
+            :aria-pressed="libraryFilters.hostId === host.id"
+            :data-on="libraryFilters.hostId === host.id ? 'true' : undefined"
+            data-test="mobile-library-chip-host"
+            @click="setHostFilter(host.id)"
+          >
+            {{ host.name }}<span class="mobile-library-chip-count">{{ host.count }}</span>
           </button>
         </div>
-        <div v-else class="empty-state">No prints found.</div>
-        <div
-          v-if="!galleryLoading && galleryRemaining"
-          ref="gallerySentinel"
-          class="gallery-scroll-sentinel"
-          data-test="mobile-gallery-sentinel"
-          aria-live="polite"
-        >
-          {{ galleryLoadingMore ? "Loading older prints…" : "" }}
-        </div>
+
+        <template v-if="libraryScope === 'collections' && !activeCollection">
+          <ul
+            v-if="libraryCollectionCards.length"
+            class="mobile-collection-list"
+            data-test="mobile-collection-list"
+          >
+            <li
+              v-for="card in libraryCollectionCards"
+              :key="card.slug"
+              class="mobile-collection-item"
+              :data-test="`mobile-collection-${card.slug}`"
+            >
+              <button
+                class="mobile-collection-row"
+                type="button"
+                :aria-label="`Open ${card.name}, ${card.count} prints`"
+                data-test="mobile-collection-open"
+                @click="openCollection(card.slug)"
+                @contextmenu.prevent="openCollectionMenu(card.slug)"
+              >
+                <span class="mobile-collection-cover" aria-hidden="true">
+                  <img v-if="collectionCoverUrl(card)" :src="collectionCoverUrl(card)" alt="" />
+                </span>
+                <span class="mobile-collection-copy">
+                  <strong>{{ card.name }}</strong>
+                  <span
+                    ><span class="mobile-collection-count">{{ card.count }}</span>
+                    <template v-if="card.hostsLabel"> · {{ card.hostsLabel }}</template></span
+                  >
+                </span>
+                <span class="mobile-collection-chevron" aria-hidden="true">›</span>
+              </button>
+              <button
+                class="mobile-collection-menu-button"
+                type="button"
+                :aria-label="`More actions for ${card.name}`"
+                :aria-expanded="collectionMenuSlug === card.slug"
+                data-test="mobile-collection-menu"
+                @click="openCollectionMenu(card.slug)"
+              >
+                <span aria-hidden="true">…</span>
+              </button>
+              <div
+                v-if="collectionMenuSlug === card.slug"
+                class="mobile-collection-actions"
+                data-test="mobile-collection-actions"
+              >
+                <p v-if="collectionDeleteConfirmSlug === card.slug" class="status-line">
+                  Delete collection “{{ card.name }}”? Its prints stay in the Library.
+                </p>
+                <div class="row-actions">
+                  <button
+                    class="secondary-button"
+                    type="button"
+                    data-test="mobile-collection-rename"
+                    @click="
+                      openLibrarySheet({
+                        kind: 'rename-collection',
+                        slug: card.slug,
+                        name: card.name,
+                      })
+                    "
+                  >
+                    Rename
+                  </button>
+                  <button
+                    class="secondary-button mobile-inline-danger"
+                    type="button"
+                    :disabled="organizationBusy"
+                    data-test="mobile-collection-delete"
+                    @click="deleteCollection(card)"
+                  >
+                    {{
+                      collectionDeleteConfirmSlug === card.slug ? "Confirm" : "Delete collection"
+                    }}
+                  </button>
+                  <button
+                    v-if="collectionDeleteConfirmSlug === card.slug"
+                    class="secondary-button"
+                    type="button"
+                    @click="collectionDeleteConfirmSlug = null"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            </li>
+            <li class="mobile-collection-item">
+              <button
+                class="mobile-collection-row is-new"
+                type="button"
+                data-test="mobile-collection-new-row"
+                @click="openLibrarySheet({ kind: 'new-collection' })"
+              >
+                <span class="mobile-collection-cover is-new" aria-hidden="true">＋</span>
+                <span class="mobile-collection-copy">
+                  <strong>New collection</strong>
+                  <span>Name it, then add prints from Select</span>
+                </span>
+              </button>
+            </li>
+          </ul>
+          <div v-else class="empty-state" data-test="mobile-collections-empty">
+            <p>No collections yet.</p>
+            <button
+              class="secondary-button"
+              type="button"
+              data-test="mobile-collection-new-row"
+              @click="openLibrarySheet({ kind: 'new-collection' })"
+            >
+              New collection
+            </button>
+          </div>
+        </template>
+        <template v-else>
+          <div
+            v-if="libraryScope === 'collections' && activeCollection"
+            class="mobile-collection-drillin"
+            data-test="mobile-collection-drillin"
+          >
+            <button
+              class="mobile-back-button"
+              type="button"
+              data-test="mobile-collection-back"
+              @click="closeCollection"
+            >
+              <span aria-hidden="true">‹</span> Collections
+            </button>
+            <div class="mobile-collection-drillin-title">
+              <strong>{{ activeCollection.name }}</strong>
+              <span
+                ><span class="mobile-collection-count">{{ activeCollection.count }}</span>
+                <template v-if="activeCollection.hostsLabel">
+                  · {{ activeCollection.hostsLabel }}</template
+                ></span
+              >
+            </div>
+          </div>
+          <div
+            v-if="libraryScope === 'trash' && trashRetention.segments.length"
+            class="mobile-library-banner"
+            data-test="mobile-library-trash-banner"
+          >
+            <p>
+              <template v-for="(segment, index) in trashRetention.segments" :key="index">
+                <span v-if="segment.mono" class="mobile-library-mono">{{ segment.text }}</span>
+                <template v-else>{{ segment.text }}</template>
+              </template>
+            </p>
+            <button
+              class="mobile-library-banner-link"
+              type="button"
+              data-test="mobile-library-retention-link"
+              @click="tab = 'hosts'"
+            >
+              Change · Machines
+            </button>
+          </div>
+          <p
+            v-if="libraryScope === 'trash' && trashError"
+            class="status-line error-text"
+            data-test="mobile-library-trash-error"
+          >
+            {{ trashError }}
+          </p>
+          <div
+            v-if="galleryLoading || (libraryScope === 'trash' && trashLoading && !gallery.length)"
+            class="empty-state"
+          >
+            {{ libraryScope === "trash" ? "Loading trash…" : "Loading prints…" }}
+          </div>
+          <div
+            v-else-if="gallery.length"
+            class="gallery-grid"
+            :class="{ 'is-selecting': gallerySelectMode }"
+            ref="galleryGrid"
+            :style="{ '--mobile-gallery-columns': galleryColumns }"
+            :aria-label="`Prints, ${galleryColumns} across. Pinch to resize.`"
+            :data-gallery-columns="galleryColumns"
+            role="group"
+            data-test="mobile-gallery-grid"
+            @pointerdown="beginGalleryPinch"
+          >
+            <button
+              v-for="print in gallery"
+              :key="`${print.hostId}:${print.filename}`"
+              class="gallery-item"
+              :class="{ 'gallery-item-selected': gallerySelection.has(galleryPrintKey(print)) }"
+              type="button"
+              :aria-label="
+                gallerySelectMode
+                  ? tileLabel(
+                      print,
+                      gallerySelection.has(galleryPrintKey(print)) ? 'Deselect' : 'Select',
+                    )
+                  : tileLabel(print, 'Open')
+              "
+              :aria-pressed="
+                gallerySelectMode ? gallerySelection.has(galleryPrintKey(print)) : undefined
+              "
+              :data-gallery-print-key="galleryPrintKey(print)"
+              data-test="gallery-item"
+              @pointerdown="beginGallerySelectionDrag($event, print)"
+              @click="handleGalleryTileClick($event, print)"
+            >
+              <img
+                :src="print.thumbnailUrl"
+                :alt="print.metadata.prompt || print.filename"
+                loading="lazy"
+              />
+              <span
+                v-if="isVideoItem(print) || isAudioItem(print)"
+                class="gallery-video-badge"
+                aria-hidden="true"
+                >{{ isAudioItem(print) ? "♪" : "▶" }}</span
+              >
+              <span
+                v-if="!gallerySelectMode && libraryScope !== 'trash' && isFreshMobilePrint(print)"
+                class="gallery-new-badge"
+                data-test="new-badge"
+              >
+                New
+              </span>
+              <span
+                v-if="isUpscaledImage(print)"
+                class="gallery-upscaled-badge"
+                data-test="upscaled-badge"
+              >
+                Upscaled
+              </span>
+              <span
+                v-if="!gallerySelectMode && organizationOf(print)?.favorite"
+                class="gallery-favorite-badge"
+                data-test="favorite-badge"
+                aria-label="Favorite"
+                >♥</span
+              >
+              <span
+                v-if="libraryScope === 'trash' && purgeChipFor(print)"
+                class="gallery-purge-chip"
+                data-test="purge-chip"
+                >{{ purgeChipFor(print) }}</span
+              >
+              <span
+                v-if="gallerySelectMode"
+                class="gallery-selection-indicator"
+                data-test="mobile-gallery-selection-indicator"
+                aria-hidden="true"
+              >
+                {{ gallerySelection.has(galleryPrintKey(print)) ? "✓" : "" }}
+              </span>
+            </button>
+          </div>
+          <div v-else class="empty-state" data-test="mobile-library-empty">
+            {{ libraryEmptyCopy }}
+          </div>
+          <div
+            v-if="!galleryLoading && galleryRemaining"
+            ref="gallerySentinel"
+            class="gallery-scroll-sentinel"
+            data-test="mobile-gallery-sentinel"
+            aria-live="polite"
+          >
+            {{ galleryLoadingMore ? "Loading older prints…" : "" }}
+          </div>
+        </template>
         <div
           v-if="gallerySelectMode"
           class="mobile-gallery-actions"
@@ -6978,13 +8305,7 @@ onBeforeUnmount(() => {
           aria-label="Library selection actions"
           data-test="mobile-gallery-actions"
         >
-          <span>
-            {{
-              galleryDeleteConfirming
-                ? `Delete ${gallerySelection.size} everywhere?`
-                : `${gallerySelection.size} selected`
-            }}
-          </span>
+          <span>{{ galleryDeleteCopy.status }}</span>
           <button
             v-if="!galleryDeleteConfirming"
             type="button"
@@ -7001,6 +8322,55 @@ onBeforeUnmount(() => {
           >
             Clear
           </button>
+          <template
+            v-if="!galleryDeleteConfirming && libraryScope !== 'trash' && libraryOrganizeEnabled"
+          >
+            <button
+              type="button"
+              :disabled="gallerySelection.size === 0 || organizationBusy"
+              :aria-pressed="selectedAllFavorite"
+              :aria-label="selectedAllFavorite ? 'Remove favorite' : 'Favorite'"
+              data-test="mobile-gallery-favorite"
+              @click="favoriteSelected"
+            >
+              <span aria-hidden="true">{{ selectedAllFavorite ? "♥" : "♡" }}</span>
+            </button>
+            <button
+              type="button"
+              :disabled="gallerySelection.size === 0"
+              data-test="mobile-gallery-tag"
+              @click="openLibrarySheet({ kind: 'tags' })"
+            >
+              Tag
+            </button>
+            <button
+              type="button"
+              :disabled="gallerySelection.size === 0"
+              data-test="mobile-gallery-collect"
+              @click="openLibrarySheet({ kind: 'collections' })"
+            >
+              Add to collection
+            </button>
+            <button
+              v-if="activeCollection"
+              type="button"
+              :disabled="gallerySelection.size === 0 || organizationBusy"
+              data-test="mobile-gallery-remove-from-collection"
+              @click="removeSelectedFromCollection"
+            >
+              Remove
+            </button>
+          </template>
+          <button
+            v-if="!galleryDeleteConfirming && libraryScope === 'trash'"
+            type="button"
+            class="is-primary"
+            :disabled="gallerySelection.size === 0 || galleryRestoring || organizationBusy"
+            data-test="mobile-gallery-restore"
+            @click="restoreSelectedGalleryPrints"
+          >
+            {{ galleryRestoring ? "Restoring…" : "Restore" }}
+          </button>
           <button
             v-if="galleryDeleteConfirming"
             type="button"
@@ -7013,11 +8383,205 @@ onBeforeUnmount(() => {
             class="danger"
             type="button"
             :disabled="gallerySelection.size === 0 || galleryDeleting"
+            data-test="mobile-gallery-delete"
             @click="deleteSelectedGalleryPrints"
           >
-            {{ galleryDeleting ? "Deleting…" : galleryDeleteConfirming ? "Confirm" : "Delete" }}
+            {{ galleryDeleteCopy.button }}
           </button>
         </div>
+
+        <MobileLibrarySheet
+          :open="librarySheet?.kind === 'tags'"
+          title="Tags"
+          test-id="mobile-tag-sheet"
+          @close="closeLibrarySheet"
+        >
+          <div class="mobile-library-tag-list" data-test="mobile-tag-sheet-current">
+            <span v-if="selectedTags.length === 0" class="mobile-empty-note">No tags yet.</span>
+            <span v-for="tag in selectedTags" :key="tag.name" class="mobile-library-tag">
+              <span>{{ tag.name }}</span>
+              <button
+                type="button"
+                :aria-label="`Remove tag ${tag.name}`"
+                :disabled="librarySheetBusy"
+                data-test="mobile-tag-sheet-remove"
+                @click="removeTagFromSelected(tag.name)"
+              >
+                ×
+              </button>
+            </span>
+          </div>
+          <form
+            class="mobile-library-sheet-form"
+            @submit.prevent="addTagToSelected(librarySheetInput)"
+          >
+            <label class="field">
+              <span>Add a tag</span>
+              <input
+                v-model="librarySheetInput"
+                class="control"
+                autocomplete="off"
+                autocapitalize="off"
+                enterkeyhint="done"
+                placeholder="smurf"
+                data-test="mobile-tag-sheet-input"
+              />
+            </label>
+            <button
+              class="primary-button"
+              type="submit"
+              :disabled="librarySheetBusy || !librarySheetInput.trim()"
+              data-test="mobile-tag-sheet-add"
+            >
+              {{ librarySheetBusy ? "Saving…" : "Add" }}
+            </button>
+          </form>
+          <div
+            v-if="tagSuggestions.length"
+            class="mobile-library-tag-list"
+            data-test="mobile-tag-sheet-suggestions"
+          >
+            <button
+              v-for="tag in tagSuggestions"
+              :key="`suggest-${tag.name}`"
+              class="mobile-library-chip"
+              type="button"
+              :disabled="librarySheetBusy"
+              @click="addTagToSelected(tag.name)"
+            >
+              {{ tag.name }}<span class="mobile-library-chip-count">{{ tag.count }}</span>
+            </button>
+          </div>
+        </MobileLibrarySheet>
+
+        <MobileLibrarySheet
+          :open="librarySheet?.kind === 'collections'"
+          title="Add to collection"
+          test-id="mobile-collection-sheet"
+          @close="closeLibrarySheet"
+        >
+          <ul class="mobile-library-checklist" data-test="mobile-collection-sheet-list">
+            <li v-for="card in libraryCollectionCards" :key="card.slug">
+              <button
+                type="button"
+                role="checkbox"
+                :aria-checked="selectedInCollection(card.slug)"
+                :disabled="librarySheetBusy"
+                data-test="mobile-collection-sheet-option"
+                @click="toggleSelectedCollection(card)"
+              >
+                <span class="mobile-library-check" aria-hidden="true">{{
+                  selectedInCollection(card.slug) ? "✓" : ""
+                }}</span>
+                <span class="mobile-collection-copy">
+                  <strong>{{ card.name }}</strong>
+                  <span
+                    ><span class="mobile-collection-count">{{ card.count }}</span>
+                    <template v-if="card.hostsLabel"> · {{ card.hostsLabel }}</template></span
+                  >
+                </span>
+              </button>
+            </li>
+            <li v-if="libraryCollectionCards.length === 0" class="mobile-empty-note">
+              No collections yet — name one below.
+            </li>
+          </ul>
+          <form class="mobile-library-sheet-form" @submit.prevent="createCollectionFromSheet">
+            <label class="field">
+              <span>New collection</span>
+              <input
+                v-model="librarySheetInput"
+                class="control"
+                autocomplete="off"
+                enterkeyhint="done"
+                placeholder="Collection name"
+                data-test="mobile-collection-sheet-input"
+              />
+            </label>
+            <button
+              class="primary-button"
+              type="submit"
+              :disabled="librarySheetBusy || !librarySheetInput.trim()"
+              data-test="mobile-collection-sheet-create"
+            >
+              {{ librarySheetBusy ? "Saving…" : "New" }}
+            </button>
+          </form>
+          <p v-if="librarySheetError" class="status-line error-text" role="alert">
+            {{ librarySheetError }}
+          </p>
+        </MobileLibrarySheet>
+
+        <MobileLibrarySheet
+          :open="
+            librarySheet?.kind === 'new-collection' || librarySheet?.kind === 'rename-collection'
+          "
+          :title="
+            librarySheet?.kind === 'rename-collection' ? 'Rename collection' : 'New collection'
+          "
+          done-label="Cancel"
+          test-id="mobile-collection-name-sheet"
+          @close="closeLibrarySheet"
+        >
+          <form
+            class="mobile-library-sheet-form"
+            @submit.prevent="
+              librarySheet?.kind === 'rename-collection'
+                ? renameCollectionFromSheet()
+                : createCollectionFromSheet()
+            "
+          >
+            <label class="field">
+              <span>Name</span>
+              <input
+                v-model="librarySheetInput"
+                class="control"
+                autocomplete="off"
+                enterkeyhint="done"
+                placeholder="Collection name"
+                data-test="mobile-collection-name-input"
+              />
+            </label>
+            <button
+              class="primary-button"
+              type="submit"
+              :disabled="librarySheetBusy || !librarySheetInput.trim()"
+              data-test="mobile-collection-name-submit"
+            >
+              {{
+                librarySheetBusy
+                  ? "Saving…"
+                  : librarySheet?.kind === "rename-collection"
+                    ? "Save"
+                    : "Create"
+              }}
+            </button>
+          </form>
+          <p v-if="librarySheetError" class="status-line error-text" role="alert">
+            {{ librarySheetError }}
+          </p>
+        </MobileLibrarySheet>
+
+        <MobileLibrarySheet
+          :open="librarySheet?.kind === 'more-tags'"
+          title="All tags"
+          test-id="mobile-more-tags-sheet"
+          @close="closeLibrarySheet"
+        >
+          <div class="mobile-library-tag-list">
+            <button
+              v-for="tag in mergedTags"
+              :key="`all-${tag.name}`"
+              class="mobile-library-chip"
+              type="button"
+              :data-on="libraryFilters.tag === tagKey(tag.name) ? 'true' : undefined"
+              data-test="mobile-more-tags-option"
+              @click="setTagFilter(tag.name)"
+            >
+              {{ tag.name }}<span class="mobile-library-chip-count">{{ tag.count }}</span>
+            </button>
+          </div>
+        </MobileLibrarySheet>
       </template>
 
       <template v-else-if="tab === 'hosts'">
@@ -7232,11 +8796,24 @@ onBeforeUnmount(() => {
       :total="gallery.length"
       :has-previous="selectedPrintIndex > 0"
       :has-next="selectedPrintIndex >= 0 && selectedPrintIndex < gallery.length - 1"
+      :organization="selectedPrintOrganization ?? null"
+      :organize-enabled="libraryOrganizeEnabled"
+      :trashed="selectedPrintTrashed"
+      :organizing="organizationBusy"
+      :organization-error="organizationError"
+      :tag-suggestions="mergedTags"
+      :collections="libraryCollectionCards"
       @close="closePrint"
       @reuse="reuseSelectedPrint"
       @use-source="useSelectedPrintAsSource"
       @previous="navigateSelectedPrint(-1)"
       @next="navigateSelectedPrint(1)"
+      @rename="renameSelectedPrint"
+      @favorite="favoriteSelectedPrint"
+      @tags="tagSelectedPrint"
+      @collection="collectSelectedPrint"
+      @restore="restoreSelectedPrint"
+      @delete-forever="deleteSelectedPrintForever"
     />
 
     <MobileGalleryViewer
