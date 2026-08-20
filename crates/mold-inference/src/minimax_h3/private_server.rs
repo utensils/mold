@@ -1143,6 +1143,39 @@ impl H3PrivateFl2VaAdmissionEvidence {
 }
 
 /// Produce exact, CUDA-allocation-free admission evidence for one private
+/// The once-derived admission route, carrying BOTH model names.
+///
+/// `admitted_model` keeps the full reviewed request identity — a Turbo tag
+/// included — for the media contract, provenance, and Turbo adapter
+/// resolution. `partition_model` is the compact engine partition that
+/// identity executes as (`base_compact_model`): artifact qualification, Qwen
+/// support, the factory authority, execution fingerprints, and admission
+/// evidence are all keyed on it, and the terminal media pairing
+/// (`media_model_matches_h3_authority`) expects exactly that split. For the
+/// base task models the two names are identical, so Ref2VA's task threading
+/// is unchanged. Deriving either name downstream instead of here is what let
+/// a Turbo tag reach `qualification_manifest` as itself and be refused.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct H3AdmittedRoute {
+    pub(crate) admitted_model: &'static str,
+    pub(crate) partition_model: &'static str,
+    pub(crate) task: Task,
+}
+
+pub(crate) fn admitted_h3_route(model: &str) -> Result<H3AdmittedRoute> {
+    let admitted = contract::capability_contract_for_model(model)
+        .ok_or_else(|| anyhow!("private H3 admission names an unknown model"))?;
+    let partition_model =
+        contract::base_compact_model(admitted.canonical_model).ok_or_else(|| {
+            anyhow!("private H3 admission names a model without a compact engine partition")
+        })?;
+    Ok(H3AdmittedRoute {
+        admitted_model: admitted.canonical_model,
+        partition_model,
+        task: admitted.task,
+    })
+}
+
 /// FL2VA request and one concrete CUDA route. Endpoint normalization and noise
 /// preparation deliberately remain here and may construct CPU-only Candle
 /// tensors; this function never creates a CUDA `Device` or CUDA tensor. It
@@ -1194,11 +1227,17 @@ fn prepare_reviewed_h3_private_fl2va_admission(
     // The admitted route is derived once, from the request model's own pinned
     // contract, and threaded through every step below. Reading it again from a
     // constant is what let a Ref2VA request load FL2VA support and then fail
-    // its own cross-task check.
-    let admitted = contract::capability_contract_for_model(&request.model)
-        .ok_or_else(|| anyhow!("private H3 admission names an unknown model"))?;
-    let admitted_model = admitted.canonical_model;
-    let admitted_task = admitted.task;
+    // its own cross-task check — and the route carries BOTH names, because a
+    // Turbo tag is a first-class canonical identity whose engine partition is
+    // the base compact model: qualification, Qwen support, the factory
+    // authority, and admission evidence key on the partition, while media
+    // facts and provenance keep the full tag. Threading the tag into the
+    // partition consumers is what refused every Turbo admission with
+    // "requires an exact Comfy H3 canonical model name".
+    let route = admitted_h3_route(&request.model)?;
+    let admitted_model = route.admitted_model;
+    let partition_model = route.partition_model;
+    let admitted_task = route.task;
     let (admitted_transformer_task, admitted_published_artifact) = match admitted_task {
         Task::Fl2va => (
             H3TransformerTask::T2VaFl2Va,
@@ -1248,7 +1287,7 @@ fn prepare_reviewed_h3_private_fl2va_admission(
     )?;
     let artifact_report = qualify_private_artifacts_with_control(
         paths.models_root,
-        admitted_model,
+        partition_model,
         paths.authorization_record,
         |hash| {
             progress.checkpoint()?;
@@ -1293,7 +1332,7 @@ fn prepare_reviewed_h3_private_fl2va_admission(
     // reviewed Turbo manifest tag); the env pair survives only as the
     // capture-scope UAT override inside `resolve_turbo_selection`.
     let turbo_adapter =
-        super::turbo::resolve_turbo_authority_for_request(&request.model, paths.models_root)?;
+        super::turbo::resolve_turbo_authority_for_request(admitted_model, paths.models_root)?;
     #[cfg(not(feature = "h3"))]
     let runtime_qualification = reviewed_runtime_qualification.authenticate(
         &artifact_report,
@@ -1318,7 +1357,7 @@ fn prepare_reviewed_h3_private_fl2va_admission(
     progress.checkpoint()?;
 
     let storage = H3PrivateComfyStorageAuthority::resolve(paths.models_root)?;
-    let qwen_support = load_qualified_private_qwen_support(paths.models_root, admitted_model)?;
+    let qwen_support = load_qualified_private_qwen_support(paths.models_root, partition_model)?;
     let transformer_cancellation = H3PrivatePreparationCancellation { progress };
     let opened_transformer = open_h3_comfy_published_int8_checkpoint(
         storage.transformer_path(),
@@ -1422,7 +1461,7 @@ fn prepare_reviewed_h3_private_fl2va_admission(
         .collect::<Result<Vec<_>>>()?;
     let base_factory_authority =
         FrozenH3FactoryAuthority::new_contract_only(H3FactoryAuthorityInput {
-            model: admitted_model.into(),
+            model: partition_model.into(),
             device_id: device_id.into(),
             device_ordinal,
             // The public H3 runtime profile is CUDA SM89, so this is always a
@@ -1529,7 +1568,10 @@ fn prepare_reviewed_h3_private_fl2va_admission(
         identity_sha256: String::new(),
         submitted_request_identity_sha256,
         resolved_request_identity_sha256,
-        canonical_model: admitted_model.into(),
+        // The engine partition, matching the factory authority the validate
+        // path equates it with; the request identity hashes retain the full
+        // reviewed tag.
+        canonical_model: partition_model.into(),
         task: admitted_task,
         mode,
         device_id: device_id.into(),
@@ -5350,6 +5392,50 @@ mod tests {
                 "{steps}: {error}"
             );
         }
+    }
+
+    /// The admitted route carries BOTH names: a Turbo tag stays the admitted
+    /// request identity while its engine partition is the task's compact
+    /// base — the name artifact qualification, Qwen support, the factory
+    /// authority, and admission evidence key on. Threading the tag into
+    /// those consumers refused every live Turbo admission with "requires an
+    /// exact Comfy H3 canonical model name" even though every piece passed
+    /// its own tests; this is the pin on the combination. Base models keep
+    /// partition == admitted, so Ref2VA's task threading is unchanged.
+    #[test]
+    fn turbo_admission_routes_on_the_compact_engine_partition() {
+        for tier in contract::REVIEWED_TURBO_MANIFEST_TIERS {
+            let route = admitted_h3_route(tier.model).unwrap();
+            assert_eq!(route.admitted_model, tier.model);
+            assert_eq!(route.partition_model, contract::FL2VA_COMFY);
+            assert_eq!(route.task, Task::Fl2va);
+            // The partition is derived from the tier's own task, never a
+            // constant — a future reviewed Ref2VA tier must partition to
+            // REF2VA_COMFY through the same seam.
+            assert_eq!(
+                route.partition_model,
+                contract::base_compact_model_for_task(route.task)
+            );
+        }
+        assert_eq!(
+            contract::base_compact_model_for_task(Task::Ref2va),
+            contract::REF2VA_COMFY
+        );
+
+        let base = admitted_h3_route(contract::FL2VA_COMFY).unwrap();
+        assert_eq!(base.admitted_model, contract::FL2VA_COMFY);
+        assert_eq!(base.partition_model, contract::FL2VA_COMFY);
+        assert_eq!(base.task, Task::Fl2va);
+
+        let ref2va = admitted_h3_route(contract::REF2VA_COMFY).unwrap();
+        assert_eq!(ref2va.admitted_model, contract::REF2VA_COMFY);
+        assert_eq!(ref2va.partition_model, contract::REF2VA_COMFY);
+        assert_eq!(ref2va.task, Task::Ref2va);
+
+        assert!(
+            admitted_h3_route("minimax-h3-fl2va:comfy-pruned-int8-turbo-2step").is_err(),
+            "unreviewed lookalike tags stay outside the admitted route"
+        );
     }
 
     /// A Turbo tier moves the step axis and ONLY the step axis, and only to the

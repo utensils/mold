@@ -1461,6 +1461,24 @@ mod tests {
         }
     }
 
+    /// A Turbo tag is a first-class request identity but NOT a qualification
+    /// name: admission must hand this function the tag's engine partition
+    /// (`admitted_h3_route().partition_model`), and that partition must
+    /// resolve to the base FL2VA manifest. Passing the tag itself is the
+    /// exact live failure "requires an exact Comfy H3 canonical model name".
+    #[test]
+    fn turbo_tags_qualify_through_their_engine_partition() {
+        for tier in contract::REVIEWED_TURBO_MANIFEST_TIERS {
+            assert!(qualification_manifest(tier.model).is_err());
+            let route = crate::minimax_h3::private_server::admitted_h3_route(tier.model).unwrap();
+            let (manifest, task, published) =
+                qualification_manifest(route.partition_model).unwrap();
+            assert_eq!(manifest.name, contract::FL2VA_COMFY);
+            assert_eq!(task, Task::Fl2va);
+            assert_eq!(published, H3ComfyPublishedArtifact::Fl2VaPrunedInt8ConvRot);
+        }
+    }
+
     #[test]
     fn claim_marker_and_scope_are_stable_and_private() {
         assert_eq!(

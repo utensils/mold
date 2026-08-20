@@ -106,17 +106,29 @@ pub const REVIEWED_TURBO_MANIFEST_TIERS: &[TurboManifestTier] = &[
     },
 ];
 
+/// The compact base identity one task executes as. Kept as an exhaustive
+/// `Task` match — never a constant — so a reviewed Turbo tier of either task
+/// partitions to its own base.
+pub fn base_compact_model_for_task(task: Task) -> &'static str {
+    match task {
+        Task::Fl2va => FL2VA_COMFY,
+        Task::Ref2va => REF2VA_COMFY,
+    }
+}
+
 /// The base compact identity a reviewed model executes as: a Turbo tag's
 /// underlying task partition, or the resolved identity itself. The internal
 /// engine partition is keyed by this value while the request keeps the full
-/// tag for provenance.
+/// tag for provenance. The partition is derived from the tag's own TASK, not
+/// hard-wired to FL2VA, so a future reviewed Ref2VA tier cannot resolve to
+/// the FL2VA base.
 pub fn base_compact_model(model: &str) -> Option<&'static str> {
     let canonical = resolve_model_name(model)?;
     if REVIEWED_TURBO_MANIFEST_TIERS
         .iter()
         .any(|tier| tier.model == canonical)
     {
-        return Some(FL2VA_COMFY);
+        return Some(base_compact_model_for_task(task_for_model(canonical)?));
     }
     Some(canonical)
 }
