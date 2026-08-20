@@ -1457,7 +1457,10 @@ impl H3FactoryPreparedAttemptAuthority {
 /// and drifting. Every field here is computed; none is read back from the
 /// input.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[cfg_attr(not(feature = "mp4"), allow(dead_code))]
+#[cfg_attr(
+    not(all(feature = "mp4", any(feature = "h3", feature = "h3-private-uat"))),
+    allow(dead_code)
+)]
 pub struct H3FactoryReferenceCharges {
     pub visual_rows: u64,
     pub audio_rows: u64,
@@ -1468,7 +1471,10 @@ pub struct H3FactoryReferenceCharges {
 
 /// Derive one reference's charges. The geometry fields of `reference` are the
 /// only inputs read; its own charge fields are ignored.
-#[cfg_attr(not(feature = "mp4"), allow(dead_code))]
+#[cfg_attr(
+    not(all(feature = "mp4", any(feature = "h3", feature = "h3-private-uat"))),
+    allow(dead_code)
+)]
 pub fn expected_h3_factory_reference_charges(
     reference: &H3FactoryReferenceInput,
 ) -> Result<H3FactoryReferenceCharges> {

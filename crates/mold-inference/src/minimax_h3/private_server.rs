@@ -1188,7 +1188,25 @@ fn prepare_reviewed_h3_private_fl2va_admission(
     {
         bail!("private H3 admission requires one concrete nonempty CUDA capacity sample")
     }
-    let mode = contract::validate_request_contract(request, Task::Fl2va)
+    // The admitted route is derived once, from the request model's own pinned
+    // contract, and threaded through every step below. Reading it again from a
+    // constant is what let a Ref2VA request load FL2VA support and then fail
+    // its own cross-task check.
+    let admitted = contract::capability_contract_for_model(&request.model)
+        .ok_or_else(|| anyhow!("private H3 admission names an unknown model"))?;
+    let admitted_model = admitted.canonical_model;
+    let admitted_task = admitted.task;
+    let (admitted_transformer_task, admitted_published_artifact) = match admitted_task {
+        Task::Fl2va => (
+            H3TransformerTask::T2VaFl2Va,
+            H3ComfyPublishedArtifact::Fl2VaPrunedInt8ConvRot,
+        ),
+        Task::Ref2va => (
+            H3TransformerTask::Ref2Va,
+            H3ComfyPublishedArtifact::Ref2VaPrunedInt8ConvRot,
+        ),
+    };
+    let mode = contract::validate_request_contract(request, admitted_task)
         .map_err(|error| anyhow!("{}: {}", error.code, error.message))?;
     let submitted_request_identity_sha256 = private_h3_request_identity(request)?;
 
@@ -1223,7 +1241,7 @@ fn prepare_reviewed_h3_private_fl2va_admission(
     )?;
     let artifact_report = qualify_private_artifacts_with_control(
         paths.models_root,
-        contract::FL2VA_COMFY,
+        admitted_model,
         paths.authorization_record,
         |hash| {
             progress.checkpoint()?;
@@ -1293,13 +1311,12 @@ fn prepare_reviewed_h3_private_fl2va_admission(
     progress.checkpoint()?;
 
     let storage = H3PrivateComfyStorageAuthority::resolve(paths.models_root)?;
-    let qwen_support =
-        load_qualified_private_qwen_support(paths.models_root, contract::FL2VA_COMFY)?;
+    let qwen_support = load_qualified_private_qwen_support(paths.models_root, admitted_model)?;
     let transformer_cancellation = H3PrivatePreparationCancellation { progress };
     let opened_transformer = open_h3_comfy_published_int8_checkpoint(
         storage.transformer_path(),
-        H3TransformerTask::T2VaFl2Va,
-        H3ComfyPublishedArtifact::Fl2VaPrunedInt8ConvRot,
+        admitted_transformer_task,
+        admitted_published_artifact,
         &transformer_cancellation,
     )
     .map_err(|error| anyhow!(error.to_string()))?;
@@ -1308,9 +1325,6 @@ fn prepare_reviewed_h3_private_fl2va_admission(
     let opened_vae = open_h3_comfy_vae_authority(&vae_plan, &mut vae_observer);
     let opened_vae = vae_observer.finish(opened_vae)?;
 
-    let admitted_task = contract::capability_contract_for_model(&request.model)
-        .ok_or_else(|| anyhow!("private H3 admission names an unknown model"))?
-        .task;
     let mut prepare_observer = H3EngineProgressObserver::new(progress);
     // Conditioning is task-shaped: FL2VA normalizes its boundary endpoints
     // here, Ref2VA decodes and normalizes its ordered references through the
@@ -1401,7 +1415,7 @@ fn prepare_reviewed_h3_private_fl2va_admission(
         .collect::<Result<Vec<_>>>()?;
     let base_factory_authority =
         FrozenH3FactoryAuthority::new_contract_only(H3FactoryAuthorityInput {
-            model: contract::FL2VA_COMFY.into(),
+            model: admitted_model.into(),
             device_id: device_id.into(),
             device_ordinal,
             // The public H3 runtime profile is CUDA SM89, so this is always a
@@ -1508,8 +1522,8 @@ fn prepare_reviewed_h3_private_fl2va_admission(
         identity_sha256: String::new(),
         submitted_request_identity_sha256,
         resolved_request_identity_sha256,
-        canonical_model: contract::FL2VA_COMFY.into(),
-        task: Task::Fl2va,
+        canonical_model: admitted_model.into(),
+        task: admitted_task,
         mode,
         device_id: device_id.into(),
         device_ordinal,

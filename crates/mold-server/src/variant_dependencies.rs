@@ -1454,6 +1454,29 @@ async fn prepare_inputs_for_devices(
     Ok(prepared)
 }
 
+/// Cancels its token when dropped, so an abandoned preparation stops the
+/// CPU decoding it spawned rather than letting it run to completion.
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+struct PreparationCancellationGuard(mold_inference::InferenceCancellationToken);
+
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+impl PreparationCancellationGuard {
+    fn new() -> Self {
+        Self(mold_inference::InferenceCancellationToken::default())
+    }
+
+    fn clone(&self) -> mold_inference::InferenceCancellationToken {
+        self.0.clone()
+    }
+}
+
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+impl Drop for PreparationCancellationGuard {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+
 #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 #[allow(clippy::too_many_arguments)]
 async fn prepare_h3_private_inputs_for_devices(
@@ -1484,6 +1507,9 @@ async fn prepare_h3_private_inputs_for_devices(
     #[cfg(feature = "h3")]
     uat_paths.ensure_staging_root();
     let mut resolved_request = request.clone();
+    // Dropped when this preparation returns or unwinds, which cancels every
+    // spawned decode that is still running for it.
+    let preparation_cancellation = PreparationCancellationGuard::new();
     let mut evidence_by_device = BTreeMap::new();
     let mut failures = BTreeMap::new();
 
@@ -1509,6 +1535,7 @@ async fn prepare_h3_private_inputs_for_devices(
         // attempt is what keeps descriptor identity fenced to the attempt that
         // verified it.
         let references = resolved_references.clone();
+        let cancellation = preparation_cancellation.clone();
         let device_id = device.id.clone();
         let device_ordinal = device.ordinal;
         let available_device_bytes = device.available_vram_bytes;
@@ -1520,9 +1547,15 @@ async fn prepare_h3_private_inputs_for_devices(
                     crate::gpu_worker::record_h3_progress(event, Some(&progress_tx));
                 }));
             }
+            // Cooperative abort: a cancelled preparation stops decoding at
+            // the next checkpoint instead of burning CPU on media whose job is
+            // already gone. The staging and its quota stay alive regardless,
+            // because the view shares the resolved set's hold.
             let bindings = match references
                 .as_ref()
-                .map(|references| references.inference_bindings(&admission_request, None))
+                .map(|references| {
+                    references.inference_bindings(&admission_request, Some(&cancellation))
+                })
                 .transpose()
             {
                 Ok(bindings) => bindings.unwrap_or_default(),
