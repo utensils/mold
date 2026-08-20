@@ -3104,7 +3104,7 @@ mod tests {
         let tensor = &header[name];
         let start = tensor["data_offsets"][0].as_u64().unwrap() as usize;
         let end = tensor["data_offsets"][1].as_u64().unwrap() as usize;
-        for bytes in data[start..end].chunks_exact_mut(4) {
+        for bytes in data[start..end].as_chunks_mut::<4>().0 {
             bytes.copy_from_slice(&value.to_le_bytes());
         }
     }
