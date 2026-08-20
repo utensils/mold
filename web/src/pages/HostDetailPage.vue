@@ -304,7 +304,9 @@ const RETENTION_KEY = "gallery.trash_retention_days";
 // `trash.enabled === false` is a real answer (MOLD_DB_DISABLE, output
 // disabled): delete stays permanent there, so the Library card and its
 // config/trash polling must stay hidden — presence alone is not consent.
-const trashCapable = computed(() => caps.value?.gallery?.trash?.enabled === true);
+const trashCapable = computed(
+  () => caps.value?.gallery?.trash?.enabled === true,
+);
 const trashRetentionDays = ref<number | null>(null);
 const trashCount = ref<number | null>(null);
 const savingRetention = ref(false);
