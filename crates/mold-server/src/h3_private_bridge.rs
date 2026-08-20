@@ -1314,6 +1314,12 @@ impl H3PrivateUatPathSet {
     /// owner-only and non-recursive in spirit: an existing directory is left
     /// exactly as the operator set it, and failures stay silent here because
     /// admission's own validation reports the authoritative error.
+    ///
+    /// The only lib caller is `feature = "h3"`-gated on purpose — the
+    /// private-UAT campaign layout stays fail-closed, its hand-built scope
+    /// must already exist — so the campaign build (`h3-private-uat` without
+    /// `h3`) compiles this method dead; tests still exercise it there.
+    #[cfg_attr(not(feature = "h3"), allow(dead_code))]
     pub(crate) fn ensure_staging_root(&self) {
         #[cfg(unix)]
         {
