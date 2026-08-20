@@ -791,6 +791,12 @@ pub struct H3PrivateFl2VaPrepareInput<'a> {
     pub admission_evidence: &'a H3PrivateFl2VaAdmissionEvidence,
     pub paths: H3PrivateFl2VaUatPaths<'a>,
     pub owner_fence: H3PrivateFl2VaOwnerFenceFacts,
+    /// Verified bindings for the ordered Ref2VA references, minted by the
+    /// caller from the staged set immediately before owner preparation —
+    /// the same shape admission consumed, because the reopen re-derives the
+    /// exact frozen factory request through the same decoder. Empty for
+    /// FL2VA.
+    pub references: &'a [GenerationReferenceBinding],
 }
 
 /// Canonical private-UAT filesystem inputs. Preparation resolves every model
@@ -1262,21 +1268,16 @@ fn prepare_reviewed_h3_private_fl2va_admission(
         .map_err(|error| anyhow!("{}: {}", error.code, error.message))?;
     let submitted_request_identity_sha256 = private_h3_request_identity(request)?;
 
-    // Private UAT retains its reviewed-record gate before bulk model I/O.
-    // Ordinary public H3 derives authority from compiled policy, the exact
-    // artifact graph, and the live SM89 attention route instead.
+    // Private UAT retains its reviewed-record gate before bulk model I/O —
+    // resolved per task, because Ref2VA has no reviewed record and its only
+    // authority is the compiled capture-scope profile. Ordinary public H3
+    // derives authority from compiled policy, the exact artifact graph, and
+    // the live SM89 attention route instead.
     #[cfg(not(feature = "h3"))]
-    let reviewed_runtime_qualification = open_reviewed_h3_private_runtime_qualification(
-        paths.runtime_qualification_record,
-        REVIEWED_RUNTIME_QUALIFICATION_RECORD_SHA256,
-    )?;
+    let runtime_qualification_source =
+        private_runtime_qualification_source(admitted_task, paths.runtime_qualification_record)?;
     #[cfg(not(feature = "h3"))]
-    reviewed_runtime_qualification.validate_route(device_id, device_ordinal, compute_capability)?;
-    #[cfg(not(feature = "h3"))]
-    let attention_qualification_sha256 = reviewed_runtime_qualification
-        .record
-        .attention_qualification_sha256
-        .clone();
+    runtime_qualification_source.validate_route(device_id, device_ordinal, compute_capability)?;
     // Cheap capacity floors BEFORE the artifact pass below hashes ~37 GB.
     // Refusing a hopeless device after several minutes of SHA-256 was the
     // worst failure this path had; both floors are provable lower bounds of
@@ -1285,7 +1286,7 @@ fn prepare_reviewed_h3_private_fl2va_admission(
     #[cfg(feature = "h3")]
     let precheck_bounds = public_runtime_bounds();
     #[cfg(not(feature = "h3"))]
-    let precheck_bounds = reviewed_runtime_qualification.record.bounds.clone();
+    let precheck_bounds = runtime_qualification_source.precheck_bounds();
     precheck_private_h3_admission_capacity(
         &precheck_bounds,
         available_device_bytes,
@@ -1316,6 +1317,9 @@ fn prepare_reviewed_h3_private_fl2va_admission(
             .map_err(|error| anyhow!(error.to_string()))?;
     #[cfg(feature = "h3")]
     let attention_qualification_sha256 = attention.identity_sha256().to_string();
+    #[cfg(not(feature = "h3"))]
+    let attention_qualification_sha256 =
+        runtime_qualification_source.attention_qualification_sha256(&attention);
     let attention_input = H3FactoryAttentionInput {
         generic_backend: AttentionBackend::Flash,
         generic_chunk: AttentionChunkPolicy::Off,
@@ -1340,7 +1344,7 @@ fn prepare_reviewed_h3_private_fl2va_admission(
     let turbo_adapter =
         super::turbo::resolve_turbo_authority_for_request(admitted_model, paths.models_root)?;
     #[cfg(not(feature = "h3"))]
-    let runtime_qualification = reviewed_runtime_qualification.authenticate(
+    let runtime_qualification = runtime_qualification_source.authenticate(
         &artifact_report,
         device_id,
         device_ordinal,
@@ -2323,6 +2327,7 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
         admission_evidence,
         paths,
         owner_fence,
+        references,
     } = input;
     owner_fence.validate()?;
     admission_evidence.validate_for(
@@ -2357,13 +2362,17 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
     // FL2VA constant, so a frozen Ref2VA attempt reaches its own validators.
     let frozen_route = validate_frozen_reopen_route(request, frozen_factory, &owner_fence)?;
     let mode = frozen_route.mode;
+    // The same per-task source admission resolved: the frozen FL2VA route
+    // reopens the reviewed record file, the frozen Ref2VA route re-mints the
+    // compiled capture-scope profile (deterministic, so the identity fence
+    // below still compares it against what admission froze).
     #[cfg(not(feature = "h3"))]
-    let reviewed_runtime_qualification = open_reviewed_h3_private_runtime_qualification(
+    let runtime_qualification_source = private_runtime_qualification_source(
+        frozen_route.task,
         paths.runtime_qualification_record,
-        REVIEWED_RUNTIME_QUALIFICATION_RECORD_SHA256,
     )?;
     #[cfg(not(feature = "h3"))]
-    reviewed_runtime_qualification.validate_route(
+    runtime_qualification_source.validate_route(
         &owner_fence.device_id,
         owner_fence.device_ordinal,
         owner_fence.compute_capability,
@@ -2418,7 +2427,7 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
         lossless: true,
     };
     #[cfg(not(feature = "h3"))]
-    let runtime_qualification = reviewed_runtime_qualification.authenticate(
+    let runtime_qualification = runtime_qualification_source.authenticate(
         &artifact_report,
         &owner_fence.device_id,
         owner_fence.device_ordinal,
@@ -2540,6 +2549,7 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
     let frozen_turbo = frozen_factory.quantization().turbo_adapter();
     let prepared_attempt = H3PrivatePreparedFl2VaAttempt::prepare(
         request,
+        references,
         frozen_factory.execution_fingerprint(),
         &storage,
         &qwen_support,
@@ -4841,6 +4851,132 @@ impl H3PrivateReviewedRuntimeQualification {
     }
 }
 
+/// The runtime-qualification source for one task under the private-record
+/// build (`not(feature = "h3")`), resolved BEFORE bulk model I/O.
+///
+/// FL2VA keeps its reviewed-record gate exactly as before. Ref2VA has no
+/// reviewed record at all: its only authority is the compiled capture-scope
+/// profile with provisional bounds, which exists precisely so the
+/// instrumented campaign run can be admitted and measure the real ones — so
+/// the Ref2VA arm never touches the record file. That arm is constructible
+/// only under the developer-only `h3-private-uat` feature; every other build
+/// keeps refusing the task here, and public `h3` builds never reach this type
+/// (their Ref2VA refusal lives in `public_runtime_qualification`).
+#[cfg(not(feature = "h3"))]
+enum H3PrivateRuntimeQualificationSource {
+    // Boxed: the opened record dwarfs the unit capture arm
+    // (clippy::large_enum_variant).
+    ReviewedRecord(Box<H3PrivateReviewedRuntimeQualification>),
+    #[cfg(feature = "h3-private-uat")]
+    CaptureCompiled,
+}
+
+#[cfg(not(feature = "h3"))]
+fn private_runtime_qualification_source(
+    task: Task,
+    record_path: &Path,
+) -> Result<H3PrivateRuntimeQualificationSource> {
+    match task {
+        Task::Fl2va => Ok(H3PrivateRuntimeQualificationSource::ReviewedRecord(
+            Box::new(open_reviewed_h3_private_runtime_qualification(
+                record_path,
+                REVIEWED_RUNTIME_QUALIFICATION_RECORD_SHA256,
+            )?),
+        )),
+        #[cfg(feature = "h3-private-uat")]
+        Task::Ref2va => Ok(H3PrivateRuntimeQualificationSource::CaptureCompiled),
+        #[cfg(not(feature = "h3-private-uat"))]
+        Task::Ref2va => bail!(
+            "private H3 Ref2VA has no reviewed runtime qualification outside the campaign build"
+        ),
+    }
+}
+
+#[cfg(not(feature = "h3"))]
+impl H3PrivateRuntimeQualificationSource {
+    /// Reject a route this source cannot authorize before the caller starts
+    /// the multi-artifact qualification pass. The capture arm mirrors the pin
+    /// `capture_runtime_qualification` enforces at minting, so a wrong-arch
+    /// device refuses cheaply instead of after hashing ~37 GB.
+    fn validate_route(
+        &self,
+        device_id: &str,
+        device_ordinal: usize,
+        compute_capability: (u16, u16),
+    ) -> Result<()> {
+        match self {
+            Self::ReviewedRecord(reviewed) => {
+                reviewed.validate_route(device_id, device_ordinal, compute_capability)
+            }
+            #[cfg(feature = "h3-private-uat")]
+            Self::CaptureCompiled => {
+                let _ = device_ordinal;
+                if device_id.trim().is_empty() || compute_capability != (8, 9) {
+                    bail!("capture-scope H3 runtime requires the exact compact Ref2VA SM89 route")
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// The bounds the cheap admission capacity floors are derived from.
+    fn precheck_bounds(&self) -> H3PrivateRuntimeBoundRecord {
+        match self {
+            Self::ReviewedRecord(reviewed) => reviewed.record.bounds.clone(),
+            #[cfg(feature = "h3-private-uat")]
+            Self::CaptureCompiled => capture_runtime_bounds(),
+        }
+    }
+
+    /// The attention qualification identity this source vouches for: the
+    /// reviewed record carries its campaign's own value, while the compiled
+    /// capture profile — like the compiled public profile — vouches for the
+    /// live qualified attention route itself.
+    fn attention_qualification_sha256(&self, attention: &H3AttentionRuntimeAuthority) -> String {
+        match self {
+            Self::ReviewedRecord(reviewed) => {
+                reviewed.record.attention_qualification_sha256.clone()
+            }
+            #[cfg(feature = "h3-private-uat")]
+            Self::CaptureCompiled => attention.identity_sha256().to_string(),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn authenticate(
+        self,
+        artifact_qualification: &H3PrivateArtifactQualificationReport,
+        device_id: &str,
+        device_ordinal: usize,
+        compute_capability: (u16, u16),
+        attention_runtime_identity_sha256: &str,
+        attention_kernel_identity: &str,
+        attention_qualification_sha256: &str,
+    ) -> Result<H3PrivateRuntimeQualificationAuthority> {
+        match self {
+            Self::ReviewedRecord(reviewed) => reviewed.authenticate(
+                artifact_qualification,
+                device_id,
+                device_ordinal,
+                compute_capability,
+                attention_runtime_identity_sha256,
+                attention_kernel_identity,
+                attention_qualification_sha256,
+            ),
+            #[cfg(feature = "h3-private-uat")]
+            Self::CaptureCompiled => capture_runtime_qualification(
+                artifact_qualification,
+                device_id,
+                device_ordinal,
+                compute_capability,
+                attention_runtime_identity_sha256,
+                attention_kernel_identity,
+                attention_qualification_sha256,
+            ),
+        }
+    }
+}
+
 fn open_reviewed_h3_private_runtime_qualification(
     path: &Path,
     reviewed_record_sha256: &[&str],
@@ -6610,6 +6746,147 @@ mod tests {
         assert!(crossed_task.validate().is_err());
     }
 
+    /// A Ref2VA admission under the campaign build must not require the
+    /// reviewed-record FILE: Ref2VA has no reviewed record, and its authority
+    /// is the compiled capture-scope profile. With the record path absent the
+    /// admission must proceed past the runtime-qualification gate and fail
+    /// later (here: at artifact qualification against an empty models root).
+    #[cfg(all(feature = "mp4", not(feature = "h3")))]
+    #[test]
+    fn ref2va_admission_proceeds_past_the_missing_reviewed_record() {
+        let models_root = tempfile::tempdir().unwrap();
+        let staging_root = tempfile::tempdir().unwrap();
+        let request = ref2va_reopen_request();
+        let progress = ProgressReporter::default();
+        let error = prepare_reviewed_h3_private_fl2va_admission(
+            H3PrivateFl2VaAdmissionInput {
+                request: &request,
+                paths: H3PrivateFl2VaUatPaths {
+                    models_root: models_root.path(),
+                    staging_root: staging_root.path(),
+                    authorization_record: Path::new("/nonexistent/authorization.json"),
+                    runtime_qualification_record: Path::new(
+                        "/nonexistent/runtime-qualification.json",
+                    ),
+                },
+                references: &[],
+                device_id: DEVICE_0,
+                device_ordinal: 0,
+                compute_capability: (8, 9),
+                available_device_bytes: 1 << 60,
+                available_host_headroom_bytes: 1 << 60,
+            },
+            &progress,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            !error.contains("runtime qualification"),
+            "Ref2VA admission still died at the reviewed-record gate: {error}"
+        );
+    }
+
+    /// Ref2VA under the campaign build resolves the compiled capture-scope
+    /// authority: `CaptureCompiled` storage, the provisional decision string,
+    /// and a record `validate_capture_runtime_profile` accepts — the same
+    /// checks the constructor enforces at minting.
+    #[cfg(all(not(feature = "h3"), feature = "h3-private-uat"))]
+    #[test]
+    fn ref2va_admission_resolves_the_compiled_capture_authority() {
+        let source = private_runtime_qualification_source(
+            Task::Ref2va,
+            Path::new("/nonexistent/runtime-qualification.json"),
+        )
+        .unwrap();
+        assert!(matches!(
+            source,
+            H3PrivateRuntimeQualificationSource::CaptureCompiled
+        ));
+        source.validate_route(DEVICE_0, 0, (8, 9)).unwrap();
+        assert!(source.validate_route(DEVICE_0, 0, (9, 0)).is_err());
+        assert_eq!(
+            source.precheck_bounds(),
+            capture_runtime_bounds(),
+            "the capture arm's admission floors come from the capture ceilings"
+        );
+
+        let mut artifact = artifact_report();
+        artifact.canonical_model = contract::REF2VA_COMFY.into();
+        artifact.task = "ref2va";
+        let attention_device = H3AttentionDevice::Cuda {
+            compute_capability: Some((8, 9)),
+        };
+        let attention_model = H3AttentionModelContract::released_bf16();
+        let kernel = H3AttentionKernel::CandleFlashFwdHdim128Bf16Sm80V011;
+        let runtime_identity = H3AttentionRuntimeAuthority::expected_identity_for(
+            H3AttentionBackend::FlashAttentionV2,
+            kernel,
+            H3AttentionActivation::ReleaseCandidateQualificationOnly,
+            attention_device,
+            attention_model,
+        )
+        .unwrap();
+        let authority = source
+            .authenticate(
+                &artifact,
+                DEVICE_0,
+                0,
+                (8, 9),
+                &runtime_identity,
+                kernel.identity(),
+                &runtime_identity,
+            )
+            .unwrap();
+        assert!(matches!(
+            authority.storage,
+            RuntimeQualificationStorage::CaptureCompiled
+        ));
+        assert_eq!(authority.record.decision, CAPTURE_RUNTIME_PROFILE_DECISION);
+        assert!(authority.record.decision.contains("provisional"));
+        assert_eq!(authority.record.canonical_model, contract::REF2VA_COMFY);
+        assert_eq!(authority.record.task, "ref2va");
+        validate_capture_runtime_profile(&authority.record, &authority.record_file_sha256).unwrap();
+        authority.revalidate().unwrap();
+
+        // A cross-task artifact report cannot mint the capture authority.
+        let error = private_runtime_qualification_source(
+            Task::Ref2va,
+            Path::new("/nonexistent/runtime-qualification.json"),
+        )
+        .unwrap()
+        .authenticate(
+            &artifact_report(),
+            DEVICE_0,
+            0,
+            (8, 9),
+            &runtime_identity,
+            kernel.identity(),
+            &runtime_identity,
+        )
+        .map(|_| ())
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("Ref2VA"), "{error}");
+    }
+
+    /// FL2VA under the same build keeps its reviewed-record FILE gate exactly
+    /// as before: a missing record still refuses the task.
+    #[cfg(not(feature = "h3"))]
+    #[test]
+    fn fl2va_admission_still_requires_the_reviewed_record_file() {
+        let Err(error) = private_runtime_qualification_source(
+            Task::Fl2va,
+            Path::new("/nonexistent/runtime-qualification.json"),
+        ) else {
+            panic!("FL2VA must not resolve a runtime qualification without its record file")
+        };
+        let error = error.to_string();
+        assert!(
+            error.contains("failed to open private H3 runtime qualification"),
+            "{error}"
+        );
+    }
+
     /// The capture-scope profile must never be mistakable for a qualified one.
     #[test]
     #[cfg(feature = "h3-private-uat")]
@@ -6979,7 +7256,7 @@ mod tests {
         let admission = &source[admission_start..admission_end];
         assert!(!admission.contains("Device::new_cuda"));
         let runtime_open = admission
-            .find("open_reviewed_h3_private_runtime_qualification")
+            .find("private_runtime_qualification_source(")
             .unwrap();
         let route_check = admission.find(".validate_route(").unwrap();
         let artifact_qualification = admission
@@ -6996,7 +7273,7 @@ mod tests {
         let prepare = &source[prepare_start..prepare_end];
         assert!(!prepare.contains("Device::new_cuda"));
         let runtime_open = prepare
-            .find("open_reviewed_h3_private_runtime_qualification")
+            .find("private_runtime_qualification_source(")
             .unwrap();
         let route_check = prepare.find(".validate_route(").unwrap();
         let artifact_qualification = prepare

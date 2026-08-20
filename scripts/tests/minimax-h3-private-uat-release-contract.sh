@@ -404,7 +404,7 @@ prepare_source=$(sed -n \
 if grep -Fq 'Device::new_cuda' <<<"$prepare_source"; then
   fail "private H3 preparation constructs a CUDA device before the owner allocation commit"
 fi
-reviewed_line=$(grep -nF 'open_reviewed_h3_private_runtime_qualification' \
+reviewed_line=$(grep -nF 'private_runtime_qualification_source(' \
   <<<"$prepare_source" | head -n 1 | cut -d: -f1)
 artifact_line=$(grep -nF 'qualify_private_artifacts_with_control' \
   <<<"$prepare_source" | head -n 1 | cut -d: -f1)
@@ -418,7 +418,7 @@ admission_source=$(sed -n \
 if grep -Fq 'Device::new_cuda' <<<"$admission_source"; then
   fail "private H3 admission constructs a CUDA device"
 fi
-admission_reviewed_line=$(grep -nF 'open_reviewed_h3_private_runtime_qualification' \
+admission_reviewed_line=$(grep -nF 'private_runtime_qualification_source(' \
   <<<"$admission_source" | head -n 1 | cut -d: -f1)
 admission_artifact_line=$(grep -nF 'qualify_private_artifacts_with_control' \
   <<<"$admission_source" | head -n 1 | cut -d: -f1)

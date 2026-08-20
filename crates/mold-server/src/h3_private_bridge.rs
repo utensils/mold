@@ -1314,6 +1314,12 @@ impl H3PrivateUatPathSet {
     /// owner-only and non-recursive in spirit: an existing directory is left
     /// exactly as the operator set it, and failures stay silent here because
     /// admission's own validation reports the authoritative error.
+    ///
+    /// The only lib caller is `feature = "h3"`-gated on purpose — the
+    /// private-UAT campaign layout stays fail-closed, its hand-built scope
+    /// must already exist — so the campaign build (`h3-private-uat` without
+    /// `h3`) compiles this method dead; tests still exercise it there.
+    #[cfg_attr(not(feature = "h3"), allow(dead_code))]
     pub(crate) fn ensure_staging_root(&self) {
         #[cfg(unix)]
         {
@@ -1457,10 +1463,16 @@ pub(crate) fn prepare_for_owner(
     if job.h3_prepared_attempt.is_some() {
         return Err("MiniMax H3 owner received a prepared attempt before final dispatch".into());
     }
-    if mold_core::minimax_h3::task_for_model(&job.request.model)
-        != Some(mold_core::minimax_h3::Task::Fl2va)
-    {
-        return Err("MiniMax H3 accepts only the supported FL2VA partition".into());
+    // Keyed on the same per-task availability predicate ingress advertises:
+    // FL2VA on every reviewed build, Ref2VA only in the developer campaign
+    // build, everything else refused.
+    match mold_core::minimax_h3::task_for_model(&job.request.model) {
+        Some(task) if reviewed_h3_private_runtime_available(task) => {}
+        _ => {
+            return Err(
+                "MiniMax H3 owner preparation accepts only a reviewed task partition".into(),
+            )
+        }
     }
     let plan = job
         .execution_plan
@@ -1571,6 +1583,19 @@ pub(crate) fn prepare_for_owner(
     progress.set_callback(Box::new(move |event| {
         crate::gpu_worker::record_h3_progress(event, progress_tx.as_ref());
     }));
+    // Bind the staged Ref2VA references immediately before preparation — the
+    // reopen re-derives the frozen factory request through the same decoder
+    // admission used, so it needs the same verified bindings. FL2VA jobs
+    // carry no resolved set and bind nothing.
+    let reference_bindings = job
+        .resolved_references
+        .as_ref()
+        .map(|references| references.inference_bindings(&job.request, Some(&cancellation)))
+        .transpose()
+        .map_err(|error| {
+            format!("MiniMax H3 owner preparation could not bind its staged references: {error}")
+        })?
+        .unwrap_or_default();
     progress.set_cancellation_token(cancellation);
     let prepared = mold_inference::prepare_h3_private_fl2va_attempt(
         mold_inference::H3PrivateFl2VaPrepareInput {
@@ -1578,6 +1603,7 @@ pub(crate) fn prepare_for_owner(
             frozen_factory,
             admission_evidence,
             paths: paths.inference_paths(),
+            references: &reference_bindings,
             owner_fence: mold_inference::H3PrivateFl2VaOwnerFenceFacts {
                 work_identity_sha256: work_identity_sha256.clone(),
                 cancellation_scope_identity_sha256: cancellation_scope_identity_sha256.clone(),
