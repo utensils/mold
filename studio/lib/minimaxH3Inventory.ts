@@ -231,8 +231,7 @@ function parseTurboVariant(
   ) {
     return null;
   }
-  const request =
-    value.request == null ? null : parseRequest(value.request);
+  const request = value.request == null ? null : parseRequest(value.request);
   if (value.request != null && request === null) return null;
   return {
     model: value.model,

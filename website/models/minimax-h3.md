@@ -30,12 +30,12 @@ a portability path, not a speed one.
 
 ## Compact variants
 
-| Model                                                | Task                                            | Total pull | Runtime status                       |
-| ---------------------------------------------------- | ----------------------------------------------- | ---------: | ------------------------------------ |
-| `minimax-h3-fl2va:comfy-pruned-int8`                 | First/last-frame conditioning with audio        |  42.482 GB | CUDA generation; first-frame profile |
-| `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step`     | FL2VA + reviewed Turbo 8-step LoRA (9 steps)    |  44.438 GB | CUDA generation; first-frame profile |
-| `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p`| FL2VA + reviewed Turbo 4-step 768p LoRA (5 steps)|  44.438 GB | CUDA generation; first-frame profile |
-| `minimax-h3-ref2va:comfy-pruned-int8`                | Reference media to video with audio             |  42.482 GB | Downloadable; execution unavailable  |
+| Model                                                 | Task                                              | Total pull | Runtime status                       |
+| ----------------------------------------------------- | ------------------------------------------------- | ---------: | ------------------------------------ |
+| `minimax-h3-fl2va:comfy-pruned-int8`                  | First/last-frame conditioning with audio          |  42.482 GB | CUDA generation; first-frame profile |
+| `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step`      | FL2VA + reviewed Turbo 8-step LoRA (9 steps)      |  44.438 GB | CUDA generation; first-frame profile |
+| `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p` | FL2VA + reviewed Turbo 4-step 768p LoRA (5 steps) |  44.438 GB | CUDA generation; first-frame profile |
+| `minimax-h3-ref2va:comfy-pruned-int8`                 | Reference media to video with audio               |  42.482 GB | Downloadable; execution unavailable  |
 
 Pull a variant from the CLI, or install it from **Models → Discover** in Mold
 Studio:
