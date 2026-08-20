@@ -4068,7 +4068,9 @@ mod tests {
         assert_eq!(body["output_format"], "mp4");
         assert_eq!(body["width"], mold_core::minimax_h3::DEFAULT_WIDTH);
         assert_eq!(body["height"], mold_core::minimax_h3::DEFAULT_HEIGHT);
-        assert_eq!(body["steps"], mold_core::minimax_h3::DEFAULT_STEPS);
+        // The compact model's manifest default (21), never the official BF16
+        // constant (50) the client used to submit and the server refused.
+        assert_eq!(body["steps"], mold_core::minimax_h3::COMFY_DEFAULT_STEPS);
         assert_eq!(body["guidance"], 0.0);
         assert_eq!(body["strength"], 1.0);
         assert_eq!(body["frames"], mold_core::minimax_h3::MIN_FRAMES);
