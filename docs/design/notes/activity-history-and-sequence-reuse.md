@@ -631,7 +631,7 @@ server work, not this note.)
 
 `CHANGELOG.md` `[Unreleased]`, `README.md` if it describes the strip,
 `CLAUDE.md`/`AGENTS.md` (activity/history invariant + sequence-reuse invariant),
-`.claude/skills/mold/SKILL.md`, `desktop/docs/`, `apps/mobile/README.md`,
+`crates/mold-cli/src/skill/SKILL.md`, `desktop/docs/`, `apps/mobile/README.md`,
 `website/` Library/Create pages, and the spec edits above.
 
 ---

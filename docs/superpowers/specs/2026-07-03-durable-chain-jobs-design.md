@@ -482,7 +482,7 @@ to the runner:
 6. GC + CLI `mold jobs`.
 
 Each step is independently shippable and CI-green; docs
-(`website/`, `.claude/skills/mold/SKILL.md`, `CHANGELOG.md`) update with the
+(`website/`, `crates/mold-cli/src/skill/SKILL.md`, `CHANGELOG.md`) update with the
 steps that change user-facing surface, per repo policy.
 
 ## 16. Open questions (non-blocking)

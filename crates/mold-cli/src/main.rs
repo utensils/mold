@@ -6,6 +6,7 @@ mod fs_util;
 mod metadata_db;
 mod output;
 mod procinfo;
+mod skill;
 #[cfg(test)]
 mod test_support;
 mod theme;
@@ -1122,6 +1123,13 @@ Examples:
         upscale: Option<String>,
     },
 
+    /// Install the mold Agent Skill for AI coding agents
+    ///
+    /// Generates a SKILL.md following the Agent Skills standard and installs
+    /// it for Claude Code, OpenAI Codex CLI, Pi, OpenClaw, GitHub Copilot CLI,
+    /// Cursor, Gemini CLI, Amp, Goose, or the generic Agent Skills directory.
+    Skill(skill::SkillArgs),
+
     /// Start the inference server
     #[command(after_long_help = "\
 Examples:
@@ -1783,6 +1791,13 @@ async fn run() -> anyhow::Result<()> {
     // Parse CLI first so we can set the log level based on the subcommand.
     clap_complete::CompleteEnv::with_factory(Cli::command).complete();
     let cli = Cli::parse();
+
+    // Skill management is self-contained and must keep working even when a
+    // configured external MOLD_HOME is offline or the inference stack cannot
+    // initialize. It only reads/writes the explicitly selected skill paths.
+    if let Commands::Skill(args) = &cli.command {
+        return skill::run(args);
+    }
 
     // A missing saved root means its external drive is offline. Fail before
     // the DB, logger, model cache, or output paths can recreate that mount.
@@ -2503,6 +2518,7 @@ async fn run() -> anyhow::Result<()> {
         Commands::Completions { shell } => {
             generate_completions(&shell)?;
         }
+        Commands::Skill(_) => unreachable!("skill commands return before runtime initialization"),
     }
 
     Ok(())
@@ -2652,6 +2668,35 @@ mod tests {
     /// Try to parse CLI args, returning the clap error on failure.
     fn try_parse(args: &[&str]) -> Result<Cli, clap::Error> {
         Cli::try_parse_from(std::iter::once("mold").chain(args.iter().copied()))
+    }
+
+    #[test]
+    fn skill_install_requires_an_explicit_target_mode() {
+        assert!(try_parse(&["skill", "install"]).is_err());
+    }
+
+    #[test]
+    fn skill_install_accepts_agents_and_project_scope() {
+        let cli = parse(&["skill", "install", "claude", "codex", "--project"]);
+        assert!(matches!(cli.command, Commands::Skill(_)));
+    }
+
+    #[test]
+    fn skill_install_target_modes_conflict() {
+        assert!(try_parse(&["skill", "install", "codex", "--all"]).is_err());
+        assert!(try_parse(&["skill", "install", "--detected", "--all"]).is_err());
+    }
+
+    #[test]
+    fn skill_show_and_uninstall_parse() {
+        assert!(matches!(
+            parse(&["skill", "show"]).command,
+            Commands::Skill(_)
+        ));
+        assert!(matches!(
+            parse(&["skill", "uninstall", "--dir", "/tmp/project"]).command,
+            Commands::Skill(_)
+        ));
     }
 
     #[tokio::test]

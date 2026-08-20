@@ -1,7 +1,6 @@
 ---
 name: mold
-description: Generate AI images and video locally using the mold CLI. Use when asked to generate images from text prompts, create video clips, transform existing images (img2img), or manage local AI models.
-argument-hint: [prompt or command]
+description: Generate and manage AI images and video with the mold CLI. Use when asked to create images or clips, transform source media, operate local or remote Mold servers, manage models and queues, inspect galleries, configure GPU inference, or automate any Mold CLI, REST, or MCP workflow.
 allowed-tools: Bash, Read, Glob, Grep
 ---
 
@@ -37,6 +36,7 @@ mold gpu disable cuda:<stable-id>                   # Drain, then disable
 mold gpu enable cuda:<stable-id>                    # Re-enable runtime scheduling
 mold trash list                                     # Trashed prints on $MOLD_HOST with purge countdowns
 mold trash restore <filename>...                    # Back to the live gallery
+mold skill install --detected                       # Install this skill for detected agents
 ```
 
 `mold mcp` exposes synchronous image generation, async generation with status
@@ -47,7 +47,7 @@ polling, gallery search/fetch, model and LoRA listing, and server status tools.
 Parse `$ARGUMENTS` to determine the action:
 
 - If arguments look like a **prompt** (natural language), run `mold run "<prompt>"` with sensible defaults
-- If arguments start with a **subcommand** (`pull`, `list`, `default`, `config`, `serve`, `server`, `mcp`, `info`, `ps`, `rm`, `unload`, `update`, `stats`, `clean`, `tui`, `completions`, `version`, `runpod`, `lambda`, `jobs`, `gpu`, `trash`), run that subcommand
+- If arguments start with a **subcommand** (`pull`, `list`, `default`, `config`, `serve`, `server`, `mcp`, `info`, `ps`, `rm`, `unload`, `update`, `stats`, `clean`, `tui`, `completions`, `version`, `runpod`, `lambda`, `jobs`, `gpu`, `trash`, `skill`), run that subcommand
 - If arguments include **flags** (`--model`, `--image`, `--steps`, etc.), pass them through
 
 ## Generating Images
@@ -1365,20 +1365,51 @@ boots `index.html`; `vite.mobile.config.ts` performs that rename. Run
 `scripts/generate-ios-icons.sh` to regenerate the opaque Apple catalog from the
 desktop icon master.
 
-## Updating This Skill
+## Agent Skill Management
 
-This skill is maintained in the mold repository on GitHub. To pull the latest version:
+Mold embeds this skill and can install it for the same agents and paths as nxv:
 
 ```bash
-# Source repository
-https://github.com/utensils/mold
-
-# Skill file location within the repo
-.claude/skills/mold/SKILL.md
-
-# Fetch the latest skill directly
-curl -sL https://raw.githubusercontent.com/utensils/mold/main/.claude/skills/mold/SKILL.md \
-  -o ~/.claude/skills/mold/SKILL.md
+mold skill list                              # Paths, detection, install status
+mold skill install codex                     # One user-wide agent
+mold skill install claude codex              # Several explicit agents
+mold skill install --detected                # Detected user configurations
+mold skill install --all                     # Every supported agent
+mold skill install codex --project           # Current project
+mold skill install --detected --dir ~/repo   # Another project's agent paths
+mold skill uninstall codex                   # Remove one user-wide copy
+mold skill uninstall --project               # Sweep project-level Mold copies
+mold skill show                              # Print the embedded SKILL.md
 ```
 
-When copying this skill to other workspaces or agents, always pull from `main` to get the latest model support, CLI flags, and environment variables.
+| Agent      | User-wide                 | Project-level     |
+| ---------- | ------------------------- | ----------------- |
+| `claude`   | `~/.claude/skills/`       | `.claude/skills/` |
+| `codex`    | `~/.codex/skills/`        | `.agents/skills/` |
+| `pi`       | `~/.pi/agent/skills/`     | `.pi/skills/`     |
+| `openclaw` | `~/.openclaw/skills/`     | `.agents/skills/` |
+| `copilot`  | `~/.copilot/skills/`      | `.github/skills/` |
+| `cursor`   | `~/.cursor/skills/`       | `.agents/skills/` |
+| `gemini`   | `~/.gemini/skills/`       | `.agents/skills/` |
+| `amp`      | `~/.config/amp/skills/`   | `.agents/skills/` |
+| `goose`    | `~/.config/goose/skills/` | `.agents/skills/` |
+| `agents`   | `~/.agents/skills/`       | `.agents/skills/` |
+
+Installation requires agent names, `--detected`, or `--all`; a bare install
+writes nothing. Shared project paths are written once. Install atomically
+replaces only `mold/SKILL.md`. Uninstall removes only that file and removes the
+`mold/` directory only when it is empty.
+
+## Updating This Skill
+
+The Mold binary embeds the canonical skill and installs it atomically. Refresh
+one user-wide agent install after upgrading Mold:
+
+```bash
+mold update
+mold skill install codex
+```
+
+Use `mold skill install --detected` to refresh detected agents, `--all` for every
+supported agent, or add `--project` / `--dir <PATH>` for project-local installs.
+`mold skill show` prints the exact embedded `SKILL.md`.

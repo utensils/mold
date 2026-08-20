@@ -440,7 +440,7 @@ done
 if grep -Fq 'mold-desktop-sm100' "$repo_root/flake.nix"; then
   fail "B200 is server-only; flake.nix must not export mold-desktop-sm100"
 fi
-require_text ".claude/skills/mold/SKILL.md" \
+require_text "crates/mold-cli/src/skill/SKILL.md" \
   'B200/B300 → `:<version>-sm100`; Grace Hopper and Grace Blackwell are unsupported'
 
 require_text "install.sh" 'echo "sm86"'

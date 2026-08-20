@@ -419,7 +419,30 @@ Common subcommands are `doctor`, `availability`, `deploy`, `status`, `logs`,
 | `mold ps`                                         | Show server status or local mold processes                      |
 | `mold unload`                                     | Unload the current server model                                 |
 | `mold update [--check] [--force] [--version TAG]` | Update a release binary                                         |
+| `mold skill <COMMAND>`                            | Manage Mold's embedded Agent Skill                              |
 | `mold version`                                    | Show version, build date, and git SHA                           |
+
+## `mold skill`
+
+Install the embedded Mold Agent Skill for AI coding agents:
+
+```bash
+mold skill list
+mold skill install codex
+mold skill install --detected
+mold skill install --all
+mold skill install claude codex --project
+mold skill install openclaw --dir ~/repo
+mold skill uninstall codex
+mold skill uninstall --project
+mold skill show
+```
+
+Supported targets match nxv: `claude`, `codex`, `pi`, `openclaw`, `copilot`,
+`cursor`, `gemini`, `amp`, `goose`, and generic `agents`. User-wide is the
+default. `--project` uses the current directory, while `--dir` selects another
+project root. Install requires explicit names, `--detected`, or `--all` and
+atomically replaces only `mold/SKILL.md`; uninstall preserves sibling files.
 
 ## `mold completions`
 
