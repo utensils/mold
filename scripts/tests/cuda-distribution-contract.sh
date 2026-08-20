@@ -250,6 +250,15 @@ rolling_tag_patch_line="$(
   && "$second_release_guard_line" -lt "$rolling_tag_patch_line" ]] \
   || fail "fresh-main guards must surround release mutation and tag movement"
 require_text "$release" 'tags: ["v*"]'
+require_text "$release" '- cron: "47 12 * * *"'
+require_text "$release" \
+  'group: release-${{ github.event_name == '\''schedule'\'' && '\''docker-nightly'\'' || github.ref }}'
+require_release_job_text "docker" \
+  "if: github.event_name == 'schedule' || startsWith(github.ref, 'refs/tags/v')"
+require_release_job_text "docker" \
+  'max-parallel: ${{ github.event_name == '\''schedule'\'' && 2 || 6 }}'
+require_release_job_text "release-latest" \
+  "if: github.event_name != 'schedule' && github.ref == 'refs/heads/main'"
 require_release_job_text "docker" \
   'type=raw,value=latest${{ matrix.suffix }},enable={{is_default_branch}}'
 require_release_job_text "docker" \
@@ -316,7 +325,10 @@ done
 require_release_job_text "docker" 'cuda_cap: "89"'
 require_release_job_text "docker" 'suffix: ""'
 require_ci_release_path "$cache_workflow"
-require_text "$cache_workflow" 'branches: [main]'
+require_text "$cache_workflow" 'tags: ["v*"]'
+if grep -Fq 'branches: [main]' "$repo_root/$cache_workflow"; then
+  fail "$cache_workflow must not build Cachix closures on main pushes"
+fi
 require_text "$cache_workflow" 'group: nix-cache-${{ github.ref }}'
 require_text "$cache_workflow" 'cancel-in-progress: false'
 require_text "$cache_workflow" 'permissions:'
