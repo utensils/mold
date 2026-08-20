@@ -312,6 +312,43 @@ describe("MiniMax H3 inventory presentation", () => {
     expect(presentMiniMaxH3Host(host("render-a", malformed))).toBeNull();
   });
 
+  it("parses additive Turbo variants strictly and defaults them empty", () => {
+    // Older-server shape (no turbo key) presents with an empty list.
+    const presented = presentMiniMaxH3Host(host());
+    expect(presented!.tasks[0]!.turbo).toEqual([]);
+
+    const withTurbo = h3Capability();
+    withTurbo.partitions[0]!.turbo = [
+      {
+        model: "minimax-h3-fl2va:comfy-pruned-int8-turbo-8step",
+        display_name: "MiniMax H3 FL2VA Turbo 8-step",
+        tier: "Turbo 8-step",
+        adapter_size_bytes: 2 * GB,
+        installed: false,
+      },
+    ];
+    const turbo = presentMiniMaxH3Host(host("render-a", withTurbo))!.tasks[0]!
+      .turbo;
+    expect(turbo).toHaveLength(1);
+    expect(turbo[0]!.installed).toBe(false);
+    expect(turbo[0]!.request).toBeNull();
+
+    // A malformed variant fails the whole host closed, exactly like every
+    // other malformed capability row.
+    const malformedTurbo = h3Capability();
+    malformedTurbo.partitions[0]!.turbo = [
+      { model: "", display_name: "x", tier: "x" } as never,
+    ];
+    expect(presentMiniMaxH3Host(host("render-a", malformedTurbo))).toBeNull();
+
+    const duplicateTurbo = h3Capability();
+    duplicateTurbo.partitions[0]!.turbo = [
+      withTurbo.partitions[0]!.turbo![0]!,
+      withTurbo.partitions[0]!.turbo![0]!,
+    ];
+    expect(presentMiniMaxH3Host(host("render-a", duplicateTurbo))).toBeNull();
+  });
+
   it("formats host-supplied byte facts without manufacturing precision", () => {
     expect(formatMiniMaxH3Bytes(24 * GB)).toBe("24.0 GB");
     expect(formatMiniMaxH3Bytes(500_000_000)).toBe("500 MB");

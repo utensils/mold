@@ -32,6 +32,20 @@ export interface MiniMaxH3PartitionCapability {
   tier: string;
   component_ids: string[];
   request?: MiniMaxH3RequestCapability | null;
+  /** Reviewed Turbo LoRA variants (additive; absent on older servers). */
+  turbo?: MiniMaxH3TurboVariantCapability[] | null;
+}
+
+/** One reviewed Turbo LoRA variant of a compact H3 partition: the same base
+ * component stack plus one pinned adapter. `request` is present only when the
+ * variant is executable (base stack and adapter both landed). */
+export interface MiniMaxH3TurboVariantCapability {
+  model: string;
+  display_name: string;
+  tier: string;
+  adapter_size_bytes: number;
+  installed: boolean;
+  request?: MiniMaxH3RequestCapability | null;
 }
 
 export interface MiniMaxH3RequestCapability {
@@ -120,6 +134,8 @@ export interface MiniMaxH3TaskPresentation {
   readiness: MiniMaxH3ComponentState;
   components: MiniMaxH3ComponentPresentation[];
   request: MiniMaxH3RequestCapability | null;
+  /** Reviewed Turbo LoRA variants advertised additively on this partition. */
+  turbo: MiniMaxH3TurboVariantCapability[];
 }
 
 export interface MiniMaxH3HostPresentation {
@@ -188,6 +204,44 @@ function stateValue(value: unknown): value is MiniMaxH3ComponentState {
 
 function roleValue(value: unknown): value is MiniMaxH3ComponentRole {
   return COMPONENT_ROLES.includes(value as MiniMaxH3ComponentRole);
+}
+
+/** Client-side mirror of the reviewed compact FL2VA step authorities
+ * (`mold_core::minimax_h3`): 21 for the base identity, 9/5 for the reviewed
+ * Turbo tiers. A server-advertised envelope must agree exactly — the
+ * advertised value is what the form submits, the table is the fail-closed
+ * pin. */
+export const MINIMAX_H3_REVIEWED_FL2VA_STEPS: Readonly<Record<string, number>> =
+  {
+    "minimax-h3-fl2va:comfy-pruned-int8": 21,
+    "minimax-h3-fl2va:comfy-pruned-int8-turbo-8step": 9,
+    "minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p": 5,
+  };
+
+function parseTurboVariant(
+  value: unknown,
+): MiniMaxH3TurboVariantCapability | null {
+  if (
+    !isRecord(value) ||
+    !nonEmptyString(value.model) ||
+    !nonEmptyString(value.display_name) ||
+    !nonEmptyString(value.tier) ||
+    !byteCount(value.adapter_size_bytes) ||
+    typeof value.installed !== "boolean"
+  ) {
+    return null;
+  }
+  const request =
+    value.request == null ? null : parseRequest(value.request);
+  if (value.request != null && request === null) return null;
+  return {
+    model: value.model,
+    display_name: value.display_name.trim(),
+    tier: value.tier.trim(),
+    adapter_size_bytes: value.adapter_size_bytes,
+    installed: value.installed,
+    request,
+  };
 }
 
 function parseRequest(value: unknown): MiniMaxH3RequestCapability | null {
@@ -380,6 +434,17 @@ export function presentMiniMaxH3Host(
     ) {
       return null;
     }
+    const turbo: MiniMaxH3TurboVariantCapability[] = [];
+    if (candidate.turbo != null) {
+      if (!Array.isArray(candidate.turbo)) return null;
+      const seen = new Set<string>();
+      for (const raw of candidate.turbo as unknown[]) {
+        const variant = parseTurboVariant(raw);
+        if (!variant || seen.has(variant.model)) return null;
+        seen.add(variant.model);
+        turbo.push(variant);
+      }
+    }
     partitionsByTask.set(candidate.task, {
       task: candidate.task,
       model: candidate.model,
@@ -388,6 +453,7 @@ export function presentMiniMaxH3Host(
       tier: candidate.tier.trim(),
       component_ids: [...candidate.component_ids],
       request: parseRequest(candidate.request),
+      turbo,
     });
   }
   if (partitionsByTask.size === 0) return null;
@@ -446,6 +512,7 @@ export function presentMiniMaxH3Host(
       readiness: readiness(resolved),
       components: resolved,
       request: parseRequest(partition.request),
+      turbo: partition.turbo ?? [],
     });
   }
 
@@ -474,15 +541,22 @@ export function presentMiniMaxH3Host(
  * Return the exact request envelope that may override the legacy family-wide
  * H3 restriction for one model row. The complete capability graph must parse,
  * every referenced component must already be installed, and only the reviewed
- * compact FL2VA identity is eligible. Malformed or older capability payloads
- * stay read-only inventory and cannot become generation authority.
+ * compact FL2VA identities — the base partition and its reviewed Turbo
+ * variants — are eligible. Every axis but steps is pinned to the reviewed
+ * canvas; the expected step count is the selected model's own reviewed
+ * authority from `MINIMAX_H3_REVIEWED_FL2VA_STEPS`, so a Turbo model passes
+ * its tier's steps while a widened envelope still fails closed. Malformed or
+ * older capability payloads stay read-only inventory and cannot become
+ * generation authority.
  */
 export function reviewedMiniMaxH3ModelAccess(
   capabilities: MiniMaxH3CapabilityRecord | null | undefined,
   model: string | null | undefined,
   generationProfileSha256: string | null | undefined,
 ): MiniMaxH3RequestCapability | null {
-  if (model !== "minimax-h3-fl2va:comfy-pruned-int8") return null;
+  if (typeof model !== "string") return null;
+  const expectedSteps = MINIMAX_H3_REVIEWED_FL2VA_STEPS[model];
+  if (expectedSteps === undefined) return null;
   const presented = presentMiniMaxH3Host({
     id: "model-access",
     label: "model access",
@@ -490,18 +564,22 @@ export function reviewedMiniMaxH3ModelAccess(
   });
   const task = presented?.tasks.find(
     (candidate) =>
-      candidate.task === "fl2va" &&
-      candidate.model === model &&
-      candidate.readiness === "installed",
+      candidate.task === "fl2va" && candidate.readiness === "installed",
   );
-  const request = task?.request;
+  if (!task) return null;
+  const request =
+    task.model === model
+      ? task.request
+      : (task.turbo.find(
+          (variant) => variant.model === model && variant.installed,
+        )?.request ?? null);
   if (
     !request ||
     request.width !== 1344 ||
     request.height !== 768 ||
     request.frames !== 124 ||
     request.fps !== 24 ||
-    request.steps !== 21 ||
+    request.steps !== expectedSteps ||
     request.batch_size !== 1 ||
     request.output_format !== "mp4" ||
     request.required_endpoint !== "first" ||

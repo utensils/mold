@@ -5,9 +5,14 @@ import {
   modelAccessRestrictionFor,
   type ModelAccessCapabilityRecord,
 } from "./modelAccess";
+import { reviewedMiniMaxH3ModelAccess } from "./minimaxH3Inventory";
 import {
   AUTHENTICATED_MINIMAX_H3_PROFILE_SHA256,
+  AUTHENTICATED_MINIMAX_H3_TURBO_PROFILE_SHA256,
+  MINIMAX_H3_TURBO_4STEP_768P_MODEL,
+  MINIMAX_H3_TURBO_8STEP_MODEL,
   authenticatedMiniMaxH3Capabilities,
+  authenticatedMiniMaxH3TurboCapabilities,
 } from "./minimaxH3Inventory.testFixtures";
 
 const capabilities: ModelAccessCapabilityRecord = {
@@ -87,6 +92,62 @@ describe("model access policy", () => {
         authenticatedMiniMaxH3Capabilities(),
       ),
     ).toEqual([exact]);
+  });
+
+  it("opens a reviewed Turbo variant at its own tier's step count", () => {
+    const turbo = {
+      name: MINIMAX_H3_TURBO_8STEP_MODEL,
+      family: "minimax-h3",
+      generation_profile: {
+        profile_hash: AUTHENTICATED_MINIMAX_H3_TURBO_PROFILE_SHA256,
+      },
+    };
+    const capabilities = authenticatedMiniMaxH3TurboCapabilities();
+    expect(filterRestrictedModels([turbo], capabilities)).toEqual([turbo]);
+    const request = reviewedMiniMaxH3ModelAccess(
+      capabilities,
+      turbo.name,
+      AUTHENTICATED_MINIMAX_H3_TURBO_PROFILE_SHA256,
+    );
+    expect(request?.steps).toBe(9);
+
+    // The variant whose adapter is not landed stays closed, as does a
+    // lookalike tag no review covers.
+    expect(
+      reviewedMiniMaxH3ModelAccess(
+        capabilities,
+        MINIMAX_H3_TURBO_4STEP_768P_MODEL,
+        AUTHENTICATED_MINIMAX_H3_TURBO_PROFILE_SHA256,
+      ),
+    ).toBeNull();
+    expect(
+      reviewedMiniMaxH3ModelAccess(
+        capabilities,
+        "minimax-h3-fl2va:comfy-pruned-int8-turbo-2step",
+        AUTHENTICATED_MINIMAX_H3_TURBO_PROFILE_SHA256,
+      ),
+    ).toBeNull();
+
+    // A Turbo envelope advertising the base 21 steps is a widened axis, not
+    // a reviewed tier.
+    const widened = authenticatedMiniMaxH3TurboCapabilities();
+    widened.minimax_h3!.partitions[0]!.turbo![0]!.request!.steps = 21;
+    expect(
+      reviewedMiniMaxH3ModelAccess(
+        widened,
+        turbo.name,
+        AUTHENTICATED_MINIMAX_H3_TURBO_PROFILE_SHA256,
+      ),
+    ).toBeNull();
+
+    // The base identity still requires exactly 21 steps and its own profile.
+    expect(
+      reviewedMiniMaxH3ModelAccess(
+        capabilities,
+        "minimax-h3-fl2va:comfy-pruned-int8",
+        AUTHENTICATED_MINIMAX_H3_PROFILE_SHA256,
+      )?.steps,
+    ).toBe(21);
   });
 
   it("keeps the family closed when request or component authority is incomplete", () => {
