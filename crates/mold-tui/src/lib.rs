@@ -7,6 +7,7 @@ mod app;
 mod backend;
 mod event;
 mod gallery_scan;
+mod gallery_trash;
 mod h3_references;
 mod history;
 mod hosts;
