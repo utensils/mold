@@ -40,4 +40,21 @@ describe("GalleryCard", () => {
 
     expect(wrapper.text()).toContain("visible image");
   });
+
+  it("shows the title caption and favorite heart only when the print has them", () => {
+    const plain = mount(GalleryCard, { props: { item, variant: "feed" } });
+    expect(plain.find('[data-test="card-title"]').exists()).toBe(false);
+    expect(plain.find('[data-test="card-favorite"]').exists()).toBe(false);
+
+    const organized = mount(GalleryCard, {
+      props: {
+        item: { ...item, title: "Smurf 04", favorite: true },
+        variant: "feed",
+      },
+    });
+    expect(organized.get('[data-test="card-title"]').text()).toBe("Smurf 04");
+    expect(organized.find('[data-test="card-favorite"]').exists()).toBe(true);
+    // The prompt stays visible beneath the title.
+    expect(organized.text()).toContain("visible image");
+  });
 });

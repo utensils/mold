@@ -53,6 +53,7 @@ import {
   syncCameraMotionLora,
 } from "@studio/lib/cameraMotion";
 import { pipelineForControlId } from "@studio/lib/ltx2Control";
+import { validatePrintTitle } from "@studio/lib/libraryOrganization";
 import { firstLastFrameKeyframes } from "@studio/lib/sourceImageCapability";
 import { stripAudioOnlyIncompatibleFields } from "@studio/lib/ltx2Pipeline";
 import {
@@ -128,6 +129,7 @@ function defaultForm(): GenerateFormState {
   return {
     version: FORM_VERSION,
     prompt: "",
+    title: null,
     originalPrompt: null,
     stylePreset: null,
     negativePrompt: "",
@@ -589,6 +591,10 @@ export function applyMetadataToForm(
   return {
     ...next,
     prompt: metadata.prompt ?? "",
+    // Creation-time title; the Library overrides it with the row's editable
+    // title before handing off, so the composer shows what the print is
+    // called now.
+    title: metadata.title ?? null,
     originalPrompt: metadata.original_prompt ?? null,
     // Saved metadata already carries the fully-composed prompt (style extras
     // included at generation time); re-applying a preset would double-append.
@@ -1146,8 +1152,13 @@ export function useGenerateForm(): UseGenerateForm {
       // something the server refuses. Doing it here rather than on the
       // pipeline transition keeps a user's source media intact if they switch
       // to `t2a` and back.
+      const title = validatePrintTitle(s.title ?? "");
       const request: GenerateRequestWire = {
         prompt: styled.prompt,
+        // The Create title rides every request this form builds (one-shot,
+        // batch siblings, prepared variations). Absent when empty or
+        // invalid so older servers and untitled prints behave as before.
+        ...(title.ok && title.value ? { title: title.value } : {}),
         ...(s.originalPrompt?.trim() &&
         s.originalPrompt.trim() !== styled.prompt
           ? { original_prompt: s.originalPrompt.trim() }

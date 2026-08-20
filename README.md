@@ -74,9 +74,11 @@ with prompt, model, seed, and generation metadata.
   placement, block offloading, and spatial tiling (`--spatial-tile`)
 - **Multi-machine**: connect LAN/Tailscale hosts and RunPod, route jobs by
   capability, and browse every machine's gallery in one place
-- **Library organization**: titles (`--title`), favorites, tags, and
-  collections per host, plus a trash with configurable retention
-  (`gallery.trash_retention_days`, `mold trash`) instead of permanent delete
+- **Library organization**: title (`--title`), favorite, tag, and collect
+  prints, with a per-host trash and configurable retention
+  (`gallery.trash_retention_days`, `mold trash`) instead of permanent
+  delete — merged across machines in the web and desktop Library
+  (Prints | Collections | Trash)
 
 MiniMax H3 weights use the
 [MiniMax H3 Community License](https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/bfc8ed0353f5a9733be73e6b2c98ec0948195b86/LICENSE),

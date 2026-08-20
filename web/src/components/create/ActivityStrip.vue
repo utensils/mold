@@ -172,8 +172,14 @@ function percentFor(job: Job): number | null {
   return null;
 }
 
+/** `title ?? prompt ?? "Untitled print"` — a chain request carries no title
+ * slot, so the `in` check keeps the union honest. */
 function promptFor(job: Job): string {
-  return job.request.prompt?.trim() || "Untitled print";
+  const title =
+    "title" in job.request && typeof job.request.title === "string"
+      ? job.request.title.trim()
+      : "";
+  return title || job.request.prompt?.trim() || "Untitled print";
 }
 
 const running = computed(() =>

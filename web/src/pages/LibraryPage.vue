@@ -1,11 +1,26 @@
 <script setup lang="ts">
 /*
- * Gallery workspace (Mold Studio W5, spec §06 + prototype WEB GALLERY /
- * LIGHTBOX). Grid-first: session prints render as MediaTiles on a responsive
- * grid, with a secondary feed view kept for existing users. All / Images /
- * Video filter, a search that narrows prompt + model + filename (synced to
- * `?q=`), marquee multi-select + bulk delete, and a two-pane / full-screen
- * Lightbox with reuse / use-as-source / download / delete.
+ * Library workspace (Mold Studio W5, spec §06 + V3 "Shelf"). One workspace,
+ * three scopes in its header — **Prints | Collections | Trash** — synced to
+ * `?scope=` (+ `?c=<slug>` for a collection drill-in, `?tag=a,b`, `?fav=1`).
+ *
+ *   Prints       today's grid/feed plus a filter-chip row (♥ Favorites, tag
+ *                chips, host chips), All / Images / Video / Audio, search over
+ *                prompt + model + filename + title + tags (`?q=`), marquee
+ *                multi-select with a bulk bar (Add to collection · Tag ·
+ *                ♥ Favorite · Trash), and the two-pane / full-screen Lightbox
+ *                whose aside is the one editing surface.
+ *   Collections  a shelf of cover-mosaic cards merged across hosts by name,
+ *                a dashed "New collection" card, and a breadcrumb drill-in
+ *                with Edit (rename / set cover / remove prints / delete).
+ *   Trash        the same grid with a retention banner, per-tile purge
+ *                countdown, Restore / Delete forever, and header Empty trash.
+ *
+ * Organization lives per host and fans out to every copy of a logical print
+ * (`lib/libraryOrganization`); a host without `gallery.organize` /
+ * `gallery.trash` contributes nothing and keeps the hard-delete wording.
+ * Destructive copy is deliberately plain: Empty trash / Delete forever use
+ * `requestConfirm` with a danger button and never a typed phrase.
  */
 import {
   computed,
@@ -22,6 +37,7 @@ import SegmentedControl, {
 } from "@ui/components/SegmentedControl.vue";
 import EmptyStateBlock from "@ui/components/EmptyStateBlock.vue";
 import ThumbnailSizeSlider from "@ui/components/ThumbnailSizeSlider.vue";
+import Popover from "@ui/components/Popover.vue";
 import {
   GALLERY_THUMBNAIL_SIZE_MAX,
   GALLERY_THUMBNAIL_SIZE_MIN,
@@ -41,19 +57,54 @@ import {
   sequenceGoneMessage,
   sequenceHostUnreachableMessage,
 } from "@studio/lib/sequenceReuse";
+import {
+  tagKey,
+  trashRetentionSummary,
+  type MergedCollection,
+  type OrganizationMutation,
+} from "@studio/lib/libraryOrganization";
 import { useChainJobs } from "../composables/useChainJobs";
 import { blobToBase64 } from "../lib/base64";
 import { fetchGalleryBlob } from "../lib/galleryMedia";
-import { requestConfirm, toast, undoableAction } from "../lib/toasts";
+import {
+  requestConfirm,
+  requestText,
+  toast,
+  undoableAction,
+} from "../lib/toasts";
 import {
   applyMetadataToForm,
   useGenerateForm,
 } from "../composables/useGenerateForm";
 import {
+  decorateEntries,
   fetchMergedGallery,
+  mergeLogicalEntries,
   printKey,
   type HostGalleryImage,
 } from "../lib/multiHostGallery";
+import {
+  anyHostOrganizes,
+  anyHostTrashes,
+  applyOrganizationMutation,
+  collectionCards,
+  collectionResolver,
+  createCollectionOn,
+  deleteCollectionEverywhere,
+  emptyTrashEverywhere,
+  entryMatchesSearch,
+  fetchOrganization,
+  filterByOrganization,
+  hostOrganizes,
+  hostTrashes,
+  mergedCollections,
+  mergedTags,
+  renameCollectionEverywhere,
+  retentionHosts,
+  setCollectionCover,
+  type FanoutResult,
+  type HostOrganizationSnapshot,
+} from "../lib/libraryOrganization";
 import {
   ORIGIN_HOST_ID,
   getHost,
@@ -66,6 +117,12 @@ import { mediaKind } from "../types";
 import GalleryGrid from "../components/gallery/GalleryGrid.vue";
 import GalleryFeed from "../components/GalleryFeed.vue";
 import HistoryDrawer from "../components/library/HistoryDrawer.vue";
+import LibraryChipRow from "../components/library/LibraryChipRow.vue";
+import CollectionsShelf from "../components/library/CollectionsShelf.vue";
+import CollectionPicker, {
+  type CollectionPickerRow,
+} from "../components/library/CollectionPicker.vue";
+import TagEditor from "../components/library/TagEditor.vue";
 import Lightbox from "../components/gallery/Lightbox.vue";
 import { setSequenceHandoff } from "../composables/useSequenceHandoff";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
@@ -81,6 +138,7 @@ import {
 
 type FilterKind = "all" | "images" | "video" | "audio";
 type ViewMode = "feed" | "grid";
+type Scope = "prints" | "collections" | "trash";
 
 // Persist the layout. The redesign is grid-first, so `grid` is the default;
 // `feed` stays available as a single-column, prompt-forward stream.
@@ -98,6 +156,28 @@ function loadViewMode(): ViewMode {
 const entries = ref<HostGalleryImage[]>([]);
 /** Concrete device copies retained behind the deduplicated All view. */
 const rawEntries = ref<HostGalleryImage[]>([]);
+/** Per-host organization: capabilities, collections, tags, trash listing. */
+const snapshots = ref<HostOrganizationSnapshot[]>([]);
+/** Copies moved to the trash locally (undo window elapsed) until a
+ * SUCCESSFUL server listing confirms them (or they age out). */
+const pendingTrashed = ref<HostGalleryImage[]>([]);
+/** A shadow with no server confirmation is dropped after this bound so a
+ * host that never lists it can't pin a phantom row forever. */
+const PENDING_TRASH_MAX_AGE_SECS = 15 * 60;
+/** Print keys optimistically removed while their delete/trash commit waits
+ * out the undo window. The 10 s poll masks these so a refresh can't
+ * resurrect still-live rows mid-window (codex review). */
+const pendingRemovalKeys = ref<Set<string>>(new Set());
+function addPendingRemovals(keys: Iterable<string>) {
+  const next = new Set(pendingRemovalKeys.value);
+  for (const key of keys) next.add(key);
+  pendingRemovalKeys.value = next;
+}
+function clearPendingRemovals(keys: Iterable<string>) {
+  const next = new Set(pendingRemovalKeys.value);
+  for (const key of keys) next.delete(key);
+  pendingRemovalKeys.value = next;
+}
 const models = ref<ModelInfoExtended[]>([]);
 // Hosts whose /api/gallery failed this refresh (surfaced, not hidden), and
 // how many non-origin hosts were attempted (drives the honest count line).
@@ -110,6 +190,10 @@ const search = ref("");
 const view = ref<ViewMode>(loadViewMode());
 const hostFilter = ref("all");
 const thumbnailSize = ref(loadGalleryThumbnailSize());
+const scope = ref<Scope>("prints");
+const collectionSlug = ref<string | null>(null);
+const favoritesOnly = ref(false);
+const tagFilter = ref<string[]>([]);
 
 const form = useGenerateForm();
 const draft = useSequenceDraftStore();
@@ -142,6 +226,95 @@ watch(
   },
   { immediate: true },
 );
+// Scope, drill-in, tag, and favorite filters live in the URL too so the
+// palette and History can deep-link straight into a collection or the trash.
+watch(
+  () => route.query.scope,
+  (value) => {
+    if (value === "prints" || value === "collections" || value === "trash") {
+      if (scope.value !== value) scope.value = value;
+    } else if (value === undefined && scope.value !== "prints") {
+      scope.value = "prints";
+    }
+  },
+  { immediate: true },
+);
+watch(
+  () => route.query.c,
+  (value) => {
+    const next = typeof value === "string" && value ? value : null;
+    if (next !== collectionSlug.value) collectionSlug.value = next;
+  },
+  { immediate: true },
+);
+watch(
+  () => route.query.tag,
+  (value) => {
+    const next =
+      typeof value === "string" && value
+        ? value
+            .split(",")
+            .map((t) => t.trim())
+            .filter(Boolean)
+        : [];
+    if (next.join(" ") !== tagFilter.value.join(" ")) tagFilter.value = next;
+  },
+  { immediate: true },
+);
+watch(
+  () => route.query.fav,
+  (value) => {
+    const next = value === "1" || value === "true";
+    if (next !== favoritesOnly.value) favoritesOnly.value = next;
+  },
+  { immediate: true },
+);
+
+function syncOrganizationToUrl() {
+  const query = { ...route.query };
+  if (scope.value === "prints") delete query.scope;
+  else query.scope = scope.value;
+  if (scope.value === "collections" && collectionSlug.value)
+    query.c = collectionSlug.value;
+  else delete query.c;
+  if (tagFilter.value.length > 0) query.tag = tagFilter.value.join(",");
+  else delete query.tag;
+  if (favoritesOnly.value) query.fav = "1";
+  else delete query.fav;
+  void router.replace({ query });
+}
+
+function setScope(next: Scope) {
+  if (scope.value === next) return;
+  scope.value = next;
+  if (next !== "collections") collectionSlug.value = null;
+  clearSelection();
+  closeLightbox();
+  syncOrganizationToUrl();
+}
+function openCollection(slug: string | null) {
+  scope.value = "collections";
+  collectionSlug.value = slug;
+  clearSelection();
+  closeLightbox();
+  syncOrganizationToUrl();
+}
+function toggleFavoritesOnly() {
+  favoritesOnly.value = !favoritesOnly.value;
+  syncOrganizationToUrl();
+}
+function toggleTag(tag: string) {
+  const key = tagKey(tag);
+  const next = tagFilter.value.filter((t) => tagKey(t) !== key);
+  if (next.length === tagFilter.value.length) next.push(tag);
+  tagFilter.value = next;
+  syncOrganizationToUrl();
+}
+function clearOrganizationFilters() {
+  favoritesOnly.value = false;
+  tagFilter.value = [];
+  syncOrganizationToUrl();
+}
 
 // History drawer state lives in the URL (?panel=history), so the Create
 // activity digest can deep-link straight to its Sequences lens.
@@ -229,8 +402,13 @@ function setMuted(next: boolean) {
 const keyOf = (entry: GalleryImage) =>
   printKey(entry as { hostId?: string; filename: string });
 
+/** Every physical copy the current scope can route to. */
+const scopeRaw = computed<HostGalleryImage[]>(() =>
+  scope.value === "trash" ? trashRaw.value : rawEntries.value,
+);
+
 function entryForKey(key: string): HostGalleryImage | null {
-  return rawEntries.value.find((e) => keyOf(e) === key) ?? null;
+  return scopeRaw.value.find((e) => keyOf(e) === key) ?? null;
 }
 
 /*
@@ -244,6 +422,8 @@ function hostForEntry(entry: GalleryImage) {
   if (id === ORIGIN_HOST_ID) return originHost();
   return getHost(id);
 }
+const hostById = (id: string) =>
+  id === ORIGIN_HOST_ID ? originHost() : getHost(id);
 
 function missingHostError(entry: GalleryImage): Error {
   const label =
@@ -251,6 +431,71 @@ function missingHostError(entry: GalleryImage): Error {
     (entry as { hostId?: string }).hostId ??
     "That host";
   return new Error(`${label} isn't connected anymore.`);
+}
+
+// ── Organization state (merged across hosts) ───────────────────────────────
+const resolver = computed(() => collectionResolver(snapshots.value));
+const collections = computed(() => mergedCollections(snapshots.value));
+const tags = computed(() => mergedTags(snapshots.value));
+const canOrganize = computed(() => anyHostOrganizes(snapshots.value));
+const canTrash = computed(() => anyHostTrashes(snapshots.value));
+const organizingHostCount = computed(
+  () => snapshots.value.filter((s) => s.organize).length,
+);
+const trashRaw = computed<HostGalleryImage[]>(() => {
+  const listed = snapshots.value.flatMap((s) => s.trashed);
+  const listedKeys = new Set(listed.map((e) => keyOf(e)));
+  return [
+    ...listed,
+    ...pendingTrashed.value.filter((e) => !listedKeys.has(keyOf(e))),
+  ];
+});
+const trashEntries = computed(() =>
+  mergeLogicalEntries(trashRaw.value, {
+    resolveCollectionSlug: resolver.value,
+  }),
+);
+const cards = computed(() =>
+  collectionCards(
+    collections.value,
+    entries.value,
+    snapshots.value,
+    rawEntries.value,
+  ),
+);
+const currentCollection = computed<MergedCollection | null>(() =>
+  scope.value === "collections" && collectionSlug.value
+    ? (collections.value.find((c) => c.slug === collectionSlug.value) ?? null)
+    : null,
+);
+const currentCard = computed(() =>
+  currentCollection.value
+    ? (cards.value.find((c) => c.slug === currentCollection.value!.slug) ??
+      null)
+    : null,
+);
+const favoriteCount = computed(
+  () => entries.value.filter((e) => e.favorite).length,
+);
+const retentionSummary = computed(() =>
+  trashRetentionSummary(retentionHosts(snapshots.value)),
+);
+
+/** Some copy of this logical print can be titled / tagged / favorited. */
+function canOrganizeEntry(entry: GalleryImage | null): boolean {
+  if (!entry) return false;
+  return copiesOf(entry).some((copy) =>
+    hostOrganizes(snapshots.value, copy.hostId),
+  );
+}
+/** Every copy goes to a trash on delete (else the old hard delete). */
+function allCopiesTrash(entry: GalleryImage | null): boolean {
+  if (!entry) return false;
+  const copies = copiesOf(entry);
+  return (
+    copies.length > 0 &&
+    copies.every((copy) => hostTrashes(snapshots.value, copy.hostId))
+  );
 }
 
 // ── NEW badge tracking ──────────────────────────────────────────────────────
@@ -343,7 +588,9 @@ function clearSelection() {
 }
 
 // A concrete copy still routes to its owning host. Callers expand one logical
-// print to every matching device copy before invoking this primitive.
+// print to every matching device copy before invoking this primitive. On a
+// trash-capable host the same DELETE moves the print to the trash; on an older
+// host it is permanent.
 function deleteRouted(entry: GalleryImage): Promise<void> {
   const host = hostForEntry(entry);
   if (!host) return Promise.reject(missingHostError(entry));
@@ -354,17 +601,49 @@ function deleteRouted(entry: GalleryImage): Promise<void> {
 function copiesOf(entry: GalleryImage): HostGalleryImage[] {
   const key = keyOf(entry);
   return (
-    groupLogicalGalleryPrints(rawEntries.value).find((group) =>
+    groupLogicalGalleryPrints(scopeRaw.value).find((group) =>
       group.copies.some((copy) => keyOf(copy) === key),
     )?.copies ?? []
   );
 }
 
+/** Expand many logical keys to every distinct physical copy. */
+function copiesOfKeys(keys: readonly string[]): HostGalleryImage[] {
+  const byKey = new Map<string, HostGalleryImage>();
+  for (const key of keys) {
+    const entry = entryForKey(key);
+    if (!entry) continue;
+    for (const copy of copiesOf(entry)) byKey.set(keyOf(copy), copy);
+  }
+  return [...byKey.values()];
+}
+
 function syncLogicalEntries(): void {
   rawEntries.value.sort((a, b) => b.timestamp - a.timestamp);
-  entries.value = groupLogicalGalleryPrints(rawEntries.value).map(
-    (group) => group.representative,
-  );
+  entries.value = mergeLogicalEntries(rawEntries.value, {
+    resolveCollectionSlug: resolver.value,
+  });
+  reselectCurrent();
+}
+watch(resolver, () => {
+  if (rawEntries.value.length > 0) syncLogicalEntries();
+});
+
+/** Re-add optimistically removed copies, deduped by key — a refresh that
+ * raced the undo window may already have re-added the live rows. */
+function restoreRemovedEntries(removed: readonly HostGalleryImage[]) {
+  const present = new Set(rawEntries.value.map((e) => keyOf(e)));
+  const missing = removed.filter((e) => !present.has(keyOf(e)));
+  if (missing.length > 0) rawEntries.value = [...rawEntries.value, ...missing];
+  syncLogicalEntries();
+}
+
+/** Keep the Lightbox pointed at the freshest object for its print. */
+function reselectCurrent() {
+  if (!selected.value) return;
+  const key = keyOf(selected.value);
+  const next = filtered.value.find((e) => keyOf(e) === key);
+  if (next) selected.value = next;
 }
 
 async function handleDeleteMany(keys: string[]): Promise<number> {
@@ -389,8 +668,13 @@ async function handleDeleteMany(keys: string[]): Promise<number> {
     if (results[i]?.status === "fulfilled") deleted.add(t.key);
     else failed++;
   });
+  const trashedNow = targets
+    .filter((t) => deleted.has(t.key))
+    .map((t) => t.entry)
+    .filter((entry) => hostTrashes(snapshots.value, entry.hostId));
   rawEntries.value = rawEntries.value.filter((e) => !deleted.has(keyOf(e)));
   syncLogicalEntries();
+  markTrashedLocally(trashedNow);
   if (deleted.size > 0) {
     const next = new Set(selection.value);
     for (const key of deleted) next.delete(key);
@@ -405,25 +689,105 @@ async function handleDeleteMany(keys: string[]): Promise<number> {
     group.some((entry) => failedKeys.has(keyOf(entry))),
   ).length;
   const deletedPrints = selectedTargets.length - failedPrints;
+  // Copies that hard-deleted on a host without a trash. "Trashed" wording is
+  // truthful only when EVERY successful copy landed in a trash — a mixed
+  // fleet names its permanent deletions instead (codex review).
+  const hardDeletedNow = targets
+    .filter((t) => deleted.has(t.key))
+    .map((t) => t.entry)
+    .filter((entry) => !hostTrashes(snapshots.value, entry.hostId));
   if (failed > 0) {
     toast(
       "error",
       `Deleted ${deletedPrints} of ${selectedTargets.length} prints everywhere. ${failedPrints} still have a copy on an unavailable device.`,
     );
   } else if (selectedTargets.length > 0) {
-    toast(
-      "success",
-      selectedTargets.length === 1
-        ? "Deleted print everywhere"
-        : `Deleted ${selectedTargets.length} prints everywhere`,
-    );
+    if (trashedNow.length > 0 && hardDeletedNow.length > 0) {
+      const copies =
+        hardDeletedNow.length === 1
+          ? "1 copy on an older machine was"
+          : `${hardDeletedNow.length} copies on older machines were`;
+      toast(
+        "success",
+        `Trashed ${deletedPrints} ${deletedPrints === 1 ? "print" : "prints"}; ${copies} deleted permanently.`,
+      );
+    } else {
+      const verb = trashedNow.length > 0 ? "Trashed" : "Deleted";
+      toast(
+        "success",
+        selectedTargets.length === 1
+          ? `${verb} print everywhere`
+          : `${verb} ${selectedTargets.length} prints everywhere`,
+      );
+    }
   }
   return deletedPrints;
 }
 
+/** Copies whose DELETE succeeded on a trash-capable host show up in the Trash
+ * scope immediately, stamped with that host's retention. */
+function markTrashedLocally(copies: readonly HostGalleryImage[]) {
+  if (copies.length === 0) return;
+  const now = Math.floor(Date.now() / 1000);
+  const stamped = copies.map((copy) => {
+    const retention =
+      snapshots.value.find((s) => s.hostId === copy.hostId)?.trash
+        ?.retentionDays ?? 0;
+    const next: HostGalleryImage = { ...copy, trashed_at: now };
+    if (retention > 0) next.purge_at = now + retention * 86_400;
+    return next;
+  });
+  pendingTrashed.value = [...pendingTrashed.value, ...stamped];
+}
+
+/** Trash (or delete, on an older host) every copy of the selected prints. */
 async function deleteSelected() {
   const keys = Array.from(selection.value);
   if (keys.length === 0) return;
+  const copies = copiesOfKeys(keys);
+  const reversible =
+    copies.length > 0 &&
+    copies.every((copy) => hostTrashes(snapshots.value, copy.hostId));
+  if (reversible) {
+    // Reversible: no confirm — the prints wait in the Trash, and the toast
+    // offers the 6 s undo before the request even fires. The keys stay
+    // masked from refresh until undo or commit settles (codex review).
+    const removedKeys = new Set(copies.map((copy) => keyOf(copy)));
+    const removed = rawEntries.value.filter((e) => removedKeys.has(keyOf(e)));
+    addPendingRemovals(removedKeys);
+    rawEntries.value = rawEntries.value.filter(
+      (e) => !removedKeys.has(keyOf(e)),
+    );
+    syncLogicalEntries();
+    clearSelection();
+    undoableAction({
+      text:
+        keys.length === 1
+          ? "Moved to trash"
+          : `Moved ${keys.length} prints to the trash`,
+      undo: () => {
+        clearPendingRemovals(removedKeys);
+        restoreRemovedEntries(removed);
+      },
+      commit: async () => {
+        try {
+          const result = await applyOrganizationMutation(
+            removed,
+            { kind: "trash" },
+            mutationContext(),
+          );
+          const failedHosts = new Set(result.failed.map((f) => f.hostId));
+          const failed = removed.filter((e) => failedHosts.has(e.hostId));
+          if (failed.length > 0) restoreRemovedEntries(failed);
+          markTrashedLocally(removed.filter((e) => !failedHosts.has(e.hostId)));
+          reportFanout(result, "move to the trash");
+        } finally {
+          clearPendingRemovals(removedKeys);
+        }
+      },
+    });
+    return;
+  }
   const accepted = await requestConfirm({
     title:
       keys.length === 1 ? "Delete print?" : `Delete ${keys.length} prints?`,
@@ -439,34 +803,545 @@ async function deleteAllFiltered() {
   const list = filtered.value;
   if (list.length === 0) return;
   const everything = list.length === entries.value.length;
+  const copies = copiesOfKeys(list.map((e) => keyOf(e)));
+  const reversible =
+    copies.length > 0 &&
+    copies.every((copy) => hostTrashes(snapshots.value, copy.hostId));
   const accepted = await requestConfirm({
-    title: everything
-      ? `Delete all ${list.length} prints?`
-      : `Delete ${list.length} filtered prints?`,
-    body: "Every matching copy on your connected devices will be deleted. This can't be undone.",
-    confirmLabel: "Delete",
+    title: reversible
+      ? everything
+        ? `Move all ${list.length} prints to the trash?`
+        : `Move ${list.length} filtered prints to the trash?`
+      : everything
+        ? `Delete all ${list.length} prints?`
+        : `Delete ${list.length} filtered prints?`,
+    body: reversible
+      ? "Every matching copy on your connected devices moves to that device's trash. You can restore them until they're purged."
+      : "Every matching copy on your connected devices will be deleted. This can't be undone.",
+    confirmLabel: reversible ? "Move to trash" : "Delete",
     danger: true,
-    typedPhrase: "delete",
   });
   if (!accepted) return;
   await handleDeleteMany(list.map((e) => keyOf(e)));
 }
 
+// ── Organization mutations ──────────────────────────────────────────────────
+function mutationContext() {
+  return { hostById, snapshots: snapshots.value };
+}
+
+function reportFanout(result: FanoutResult, what: string) {
+  if (result.failed.length === 0) return;
+  const names = result.failed
+    .map((f) => hostById(f.hostId)?.name ?? f.hostId)
+    .join(", ");
+  toast("error", `Couldn't ${what} on ${names}: ${result.failed[0]!.error}`);
+}
+
+/** Optimistically patch every copy of a logical print in place. */
+function patchCopies(
+  copies: readonly HostGalleryImage[],
+  patch: (copy: HostGalleryImage) => HostGalleryImage,
+) {
+  const keys = new Set(copies.map((copy) => keyOf(copy)));
+  const apply = (list: HostGalleryImage[]) =>
+    list.map((entry) => (keys.has(keyOf(entry)) ? patch(entry) : entry));
+  rawEntries.value = apply(rawEntries.value);
+  pendingTrashed.value = apply(pendingTrashed.value);
+  snapshots.value = snapshots.value.map((s) => ({
+    ...s,
+    trashed: apply(s.trashed),
+  }));
+  syncLogicalEntries();
+}
+
+async function mutateEntries(
+  copies: readonly HostGalleryImage[],
+  mutation: OrganizationMutation,
+  what: string,
+  optimistic?: (copy: HostGalleryImage) => HostGalleryImage,
+  refreshAfter = false,
+) {
+  if (copies.length === 0) return;
+  if (optimistic) patchCopies(copies, optimistic);
+  const result = await applyOrganizationMutation(
+    copies,
+    mutation,
+    mutationContext(),
+  );
+  reportFanout(result, what);
+  if (refreshAfter || result.failed.length > 0) void refresh();
+}
+
+function onRename(item: GalleryImage, title: string | null) {
+  void mutateEntries(
+    copiesOf(item),
+    { kind: "setTitle", title },
+    "rename the print",
+    (copy) => ({ ...copy, title }),
+  );
+}
+function onFavorite(item: GalleryImage, favorite: boolean) {
+  void mutateEntries(
+    copiesOf(item),
+    { kind: "setFavorite", favorite },
+    favorite ? "favorite the print" : "unfavorite the print",
+    (copy) => ({ ...copy, favorite }),
+  );
+}
+function onAddTag(item: GalleryImage, tag: string) {
+  void mutateEntries(
+    copiesOf(item),
+    { kind: "addTags", tags: [tag] },
+    "add the tag",
+    (copy) => ({
+      ...copy,
+      tags: (copy.tags ?? []).some((t) => tagKey(t) === tagKey(tag))
+        ? copy.tags
+        : [...(copy.tags ?? []), tag],
+    }),
+    true,
+  );
+}
+function onRemoveTag(item: GalleryImage, tag: string) {
+  void mutateEntries(
+    copiesOf(item),
+    { kind: "removeTags", tags: [tag] },
+    "remove the tag",
+    (copy) => ({
+      ...copy,
+      tags: (copy.tags ?? []).filter((t) => tagKey(t) !== tagKey(tag)),
+    }),
+    true,
+  );
+}
+function onSetCollection(item: GalleryImage, slug: string, member: boolean) {
+  const collection = collections.value.find((c) => c.slug === slug);
+  if (!collection) return;
+  void mutateEntries(
+    copiesOf(item),
+    member
+      ? { kind: "addToCollection", name: collection.name, slug }
+      : { kind: "removeFromCollection", slug },
+    member ? `add to ${collection.name}` : `remove from ${collection.name}`,
+    undefined,
+    true,
+  );
+}
+
+/** The host a brand-new collection is created on: the primary when it
+ * organizes, else the first host that does. */
+function collectionHomeHost() {
+  const capable = snapshots.value.filter((s) => s.organize);
+  const origin = capable.find((s) => s.hostId === ORIGIN_HOST_ID);
+  const pick = origin ?? capable[0];
+  return pick ? hostById(pick.hostId) : null;
+}
+
+/** Name → create on the home host → returns the merged slug, or null. */
+async function createCollectionFlow(
+  prefill = "",
+): Promise<{ slug: string; name: string } | null> {
+  const host = collectionHomeHost();
+  if (!host) {
+    toast("error", "No connected host supports collections yet.");
+    return null;
+  }
+  const name = (
+    await requestText({
+      title: "New collection",
+      label: "Name",
+      initial: prefill,
+      confirmLabel: "Create",
+    })
+  )?.trim();
+  if (!name) return null;
+  try {
+    const created = await createCollectionOn(host, name);
+    await refresh();
+    return { slug: created.slug, name: created.name };
+  } catch (error) {
+    toast(
+      "error",
+      `Couldn't create the collection: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return null;
+  }
+}
+
+async function onNewCollection(item?: GalleryImage) {
+  const created = await createCollectionFlow();
+  if (!created) return;
+  if (item) {
+    await mutateEntries(
+      copiesOf(item),
+      { kind: "addToCollection", name: created.name, slug: created.slug },
+      `add to ${created.name}`,
+      undefined,
+      true,
+    );
+  }
+}
+
+async function renameCollection(slug: string) {
+  const collection = collections.value.find((c) => c.slug === slug);
+  if (!collection) return;
+  const name = (
+    await requestText({
+      title: "Rename collection",
+      label: "Name",
+      initial: collection.name,
+      confirmLabel: "Rename",
+    })
+  )?.trim();
+  if (!name || name === collection.name) return;
+  const result = await renameCollectionEverywhere(collection, name, hostById);
+  reportFanout(result, "rename the collection");
+  await refresh();
+  if (collectionSlug.value === slug) {
+    const renamed = collections.value.find((c) => c.name === name);
+    if (renamed) openCollection(renamed.slug);
+  }
+}
+
+async function deleteCollection(slug: string) {
+  const collection = collections.value.find((c) => c.slug === slug);
+  if (!collection) return;
+  const accepted = await requestConfirm({
+    title: `Delete collection “${collection.name}”?`,
+    body: "Its prints stay in the Library.",
+    confirmLabel: "Delete collection",
+    danger: true,
+  });
+  if (!accepted) return;
+  const result = await deleteCollectionEverywhere(collection, hostById);
+  reportFanout(result, "delete the collection");
+  if (collectionSlug.value === slug) openCollection(null);
+  await refresh();
+}
+
+const collectionEditOpen = ref(false);
+async function setCoverFromSelection() {
+  collectionEditOpen.value = false;
+  const collection = currentCollection.value;
+  const key = [...selection.value][0];
+  const entry = key ? entryForKey(key) : null;
+  if (!collection || !entry || selection.value.size !== 1) return;
+  // The cover is a filename on one host: pick the copy that lives on a host
+  // holding the collection.
+  const copy =
+    copiesOf(entry).find((c) =>
+      collection.hosts.some((h) => h.hostId === c.hostId),
+    ) ?? null;
+  if (!copy) {
+    toast("error", "That print has no copy on a host holding this collection.");
+    return;
+  }
+  const result = await setCollectionCover(
+    collection,
+    { hostId: copy.hostId, filename: copy.filename },
+    hostById,
+  );
+  reportFanout(result, "set the cover");
+  await refresh();
+}
+async function removeSelectedFromCollection() {
+  collectionEditOpen.value = false;
+  const collection = currentCollection.value;
+  if (!collection || selection.value.size === 0) return;
+  const copies = copiesOfKeys([...selection.value]);
+  clearSelection();
+  await mutateEntries(
+    copies,
+    { kind: "removeFromCollection", slug: collection.slug },
+    `remove from ${collection.name}`,
+    undefined,
+    true,
+  );
+}
+
+// ── Bulk bar popovers ───────────────────────────────────────────────────────
+const bulkCollectionsOpen = ref(false);
+const bulkTagsOpen = ref(false);
+const bulkTagEditor = ref<InstanceType<typeof TagEditor> | null>(null);
+
+const selectedEntries = computed(() =>
+  [...selection.value]
+    .map(
+      (key) => filtered.value.find((e) => keyOf(e) === key) ?? entryForKey(key),
+    )
+    .filter((e): e is HostGalleryImage => !!e),
+);
+const selectionCopies = computed(() => copiesOfKeys([...selection.value]));
+const selectionOrganizes = computed(() =>
+  selectionCopies.value.some((copy) =>
+    hostOrganizes(snapshots.value, copy.hostId),
+  ),
+);
+const selectionTrashes = computed(
+  () =>
+    selectionCopies.value.length > 0 &&
+    selectionCopies.value.every((copy) =>
+      hostTrashes(snapshots.value, copy.hostId),
+    ),
+);
+const selectionAllFavorite = computed(
+  () =>
+    selectedEntries.value.length > 0 &&
+    selectedEntries.value.every((e) => e.favorite),
+);
+/** Tags on every selected print, and tags on only some. */
+const selectionTags = computed(() => {
+  const all = new Map<string, string>();
+  const common = new Map<string, string>();
+  selectedEntries.value.forEach((entry, index) => {
+    const own = new Map((entry.tags ?? []).map((t) => [tagKey(t), t]));
+    for (const [k, v] of own) if (!all.has(k)) all.set(k, v);
+    if (index === 0) for (const [k, v] of own) common.set(k, v);
+    else for (const k of [...common.keys()]) if (!own.has(k)) common.delete(k);
+  });
+  const shared = [...common.values()];
+  const mixed = [...all.values()].filter((t) => !common.has(tagKey(t)));
+  return { shared, mixed, all: [...shared, ...mixed] };
+});
+function collectionRowsFor(
+  items: readonly HostGalleryImage[],
+): CollectionPickerRow[] {
+  return collections.value.map((collection) => {
+    const inIt = items.filter((item) =>
+      (item.organization?.collections ?? []).includes(collection.slug),
+    ).length;
+    const partial =
+      collection.hosts.length < organizingHostCount.value
+        ? collection.hosts
+            .map((h) => hostById(h.hostId)?.name ?? h.hostId)
+            .join(" · ") + " only"
+        : "";
+    const row: CollectionPickerRow = {
+      slug: collection.slug,
+      name: collection.name,
+      checked: items.length > 0 && inIt === items.length,
+      mixed: inIt > 0 && inIt < items.length,
+    };
+    if (partial) row.note = partial;
+    return row;
+  });
+}
+const selectionCollectionRows = computed(() =>
+  collectionRowsFor(selectedEntries.value),
+);
+const lightboxCollectionRows = computed(() =>
+  selected.value ? collectionRowsFor([selected.value as HostGalleryImage]) : [],
+);
+const selectionHostsLabel = computed(() =>
+  [...new Set(selectionCopies.value.map((c) => c.hostLabel))].join(" · "),
+);
+
+function bulkFavorite() {
+  const favorite = !selectionAllFavorite.value;
+  void mutateEntries(
+    selectionCopies.value,
+    { kind: "setFavorite", favorite },
+    favorite ? "favorite the prints" : "unfavorite the prints",
+    (copy) => ({ ...copy, favorite }),
+  );
+}
+function bulkAddTag(tag: string) {
+  void mutateEntries(
+    selectionCopies.value,
+    { kind: "addTags", tags: [tag] },
+    "add the tag",
+    (copy) => ({
+      ...copy,
+      tags: (copy.tags ?? []).some((t) => tagKey(t) === tagKey(tag))
+        ? copy.tags
+        : [...(copy.tags ?? []), tag],
+    }),
+    true,
+  );
+}
+function bulkRemoveTag(tag: string) {
+  void mutateEntries(
+    selectionCopies.value,
+    { kind: "removeTags", tags: [tag] },
+    "remove the tag",
+    (copy) => ({
+      ...copy,
+      tags: (copy.tags ?? []).filter((t) => tagKey(t) !== tagKey(tag)),
+    }),
+    true,
+  );
+}
+function bulkSetCollection(slug: string, member: boolean) {
+  const collection = collections.value.find((c) => c.slug === slug);
+  if (!collection) return;
+  void mutateEntries(
+    selectionCopies.value,
+    member
+      ? { kind: "addToCollection", name: collection.name, slug }
+      : { kind: "removeFromCollection", slug },
+    member ? `add to ${collection.name}` : `remove from ${collection.name}`,
+    undefined,
+    true,
+  );
+}
+async function bulkNewCollection() {
+  bulkCollectionsOpen.value = false;
+  const copies = selectionCopies.value;
+  const created = await createCollectionFlow();
+  if (!created) return;
+  await mutateEntries(
+    copies,
+    { kind: "addToCollection", name: created.name, slug: created.slug },
+    `add to ${created.name}`,
+    undefined,
+    true,
+  );
+}
+
+// ── Trash scope actions ─────────────────────────────────────────────────────
+async function restoreCopies(copies: readonly HostGalleryImage[]) {
+  if (copies.length === 0) return;
+  const result = await applyOrganizationMutation(
+    copies,
+    { kind: "restore" },
+    mutationContext(),
+  );
+  const conflicts = result.failed.filter((f) => /409|conflict/i.test(f.error));
+  if (conflicts.length > 0) {
+    const names = conflicts
+      .map((f) => hostById(f.hostId)?.name ?? f.hostId)
+      .join(", ");
+    toast(
+      "error",
+      `Couldn't restore on ${names}: a print with that name is back in the Library there.`,
+    );
+  } else {
+    reportFanout(result, "restore");
+  }
+  if (result.ok.length > 0) {
+    const okHosts = new Set(result.ok);
+    const keys = new Set(
+      copies.filter((c) => okHosts.has(c.hostId)).map((c) => keyOf(c)),
+    );
+    pendingTrashed.value = pendingTrashed.value.filter(
+      (e) => !keys.has(keyOf(e)),
+    );
+    snapshots.value = snapshots.value.map((s) => ({
+      ...s,
+      trashed: s.trashed.filter((e) => !keys.has(keyOf(e))),
+    }));
+    toast(
+      "success",
+      copies.length === 1
+        ? "Restored print"
+        : `Restored ${copies.length} prints`,
+    );
+  }
+  closeLightbox();
+  clearSelection();
+  await refresh();
+}
+function restoreOne(item: GalleryImage) {
+  void restoreCopies(copiesOf(item));
+}
+function restoreSelected() {
+  void restoreCopies(selectionCopies.value);
+}
+
+async function deleteForeverCopies(
+  copies: readonly HostGalleryImage[],
+  count: number,
+) {
+  if (copies.length === 0) return;
+  const hosts = [...new Set(copies.map((c) => c.hostLabel))].join(" · ");
+  const accepted = await requestConfirm({
+    title:
+      count === 1 ? "Delete print forever?" : `Delete ${count} prints forever?`,
+    body: `${count === 1 ? "This print" : "These prints"} on ${hosts} will be deleted forever. This can't be undone.`,
+    confirmLabel: "Delete forever",
+    danger: true,
+  });
+  if (!accepted) return;
+  const result = await applyOrganizationMutation(
+    copies,
+    { kind: "deleteForever" },
+    mutationContext(),
+  );
+  reportFanout(result, "delete forever");
+  const okHosts = new Set(result.ok);
+  const keys = new Set(
+    copies.filter((c) => okHosts.has(c.hostId)).map((c) => keyOf(c)),
+  );
+  pendingTrashed.value = pendingTrashed.value.filter(
+    (e) => !keys.has(keyOf(e)),
+  );
+  snapshots.value = snapshots.value.map((s) => ({
+    ...s,
+    trashed: s.trashed.filter((e) => !keys.has(keyOf(e))),
+  }));
+  rawEntries.value = rawEntries.value.filter((e) => !keys.has(keyOf(e)));
+  syncLogicalEntries();
+  closeLightbox();
+  clearSelection();
+}
+function deleteForeverOne(item: GalleryImage) {
+  void deleteForeverCopies(copiesOf(item), 1);
+}
+function deleteForeverSelected() {
+  void deleteForeverCopies(selectionCopies.value, selection.value.size);
+}
+
+async function emptyTrash() {
+  const count = trashEntries.value.length;
+  if (count === 0) return;
+  const hosts = snapshots.value
+    .filter((s) => s.trash?.enabled && s.trashed.length > 0)
+    .map((s) => s.hostLabel)
+    .join(" · ");
+  const accepted = await requestConfirm({
+    title: "Empty trash?",
+    body: `Delete ${count} ${count === 1 ? "print" : "prints"} in the trash on ${hosts} forever? This can't be undone.`,
+    confirmLabel: "Delete forever",
+    danger: true,
+  });
+  if (!accepted) return;
+  const result = await emptyTrashEverywhere(snapshots.value, hostById);
+  reportFanout(result, "empty the trash");
+  const okHosts = new Set(result.ok);
+  pendingTrashed.value = pendingTrashed.value.filter(
+    (e) => !okHosts.has(e.hostId),
+  );
+  snapshots.value = snapshots.value.map((s) =>
+    okHosts.has(s.hostId) ? { ...s, trashed: [] } : s,
+  );
+  closeLightbox();
+  clearSelection();
+  void refresh();
+}
+
 // ── Filtering ────────────────────────────────────────────────────────────────
 const hostOptions = computed(() => {
   const options = new Map<string, string>();
-  for (const entry of rawEntries.value) {
+  for (const entry of scopeRaw.value) {
     const id = entry.hostId ?? ORIGIN_HOST_ID;
     options.set(id, entry.hostLabel ?? getHost(id)?.name ?? id);
   }
   return Array.from(options, ([id, label]) => ({ id, label }));
 });
 
+const scopeEntries = computed<HostGalleryImage[]>(() =>
+  scope.value === "trash" ? trashEntries.value : entries.value,
+);
+
 const hostFiltered = computed(() =>
   hostFilter.value === "all"
-    ? entries.value
-    : rawEntries.value.filter(
-        (entry) => (entry.hostId ?? ORIGIN_HOST_ID) === hostFilter.value,
+    ? scopeEntries.value
+    : decorateEntries(
+        scopeRaw.value.filter(
+          (entry) => (entry.hostId ?? ORIGIN_HOST_ID) === hostFilter.value,
+        ),
+        { resolveCollectionSlug: resolver.value },
       ),
 );
 
@@ -489,40 +1364,89 @@ watch(hostOptions, (options) => {
   }
 });
 
+const organizationFiltered = computed(() => {
+  if (scope.value === "trash") return kindFiltered.value;
+  return filterByOrganization(kindFiltered.value, {
+    favoritesOnly: favoritesOnly.value,
+    tags: tagFilter.value,
+    collectionSlug: scope.value === "collections" ? collectionSlug.value : null,
+  });
+});
+
 const filtered = computed(() => {
   const q = search.value.trim().toLowerCase();
-  if (!q) return kindFiltered.value;
-  return kindFiltered.value.filter((e) => {
-    if (e.filename.toLowerCase().includes(q)) return true;
-    const m = e.metadata;
-    if (m.model.toLowerCase().includes(q)) return true;
-    if (m.prompt && m.prompt.toLowerCase().includes(q)) return true;
-    return false;
-  });
+  if (!q) return organizationFiltered.value;
+  return organizationFiltered.value.filter((e) => entryMatchesSearch(e, q));
 });
 
 const total = computed(() => entries.value.length);
 const searchActive = computed(() => search.value.trim().length > 0);
+const organizationFilterActive = computed(
+  () => favoritesOnly.value || tagFilter.value.length > 0,
+);
+const filteredCards = computed(() => {
+  const q = search.value.trim().toLowerCase();
+  if (!q) return cards.value;
+  return cards.value.filter((card) => card.name.toLowerCase().includes(q));
+});
 
 // The empty-state variant to show when nothing is visible and we're not
 // mid-load. `null` means render the grid/feed (skeletons handle first load).
-const emptyKind = computed<null | "none" | "search" | "video" | "images">(
-  () => {
-    if (loading.value || filtered.value.length > 0) return null;
-    if (searchActive.value) return "search";
-    if (filter.value === "video") return "video";
-    if (filter.value === "images") return "images";
-    return "none";
-  },
-);
+const emptyKind = computed<
+  | null
+  | "none"
+  | "search"
+  | "video"
+  | "images"
+  | "organization"
+  | "trash"
+  | "collection"
+>(() => {
+  if (loading.value || filtered.value.length > 0) return null;
+  if (searchActive.value) return "search";
+  if (scope.value === "trash") return "trash";
+  if (scope.value === "collections") return "collection";
+  if (organizationFilterActive.value) return "organization";
+  if (filter.value === "video") return "video";
+  if (filter.value === "images") return "images";
+  return "none";
+});
 
 let refreshInFlight: Promise<void> | null = null;
 async function performRefresh() {
   loading.value = true;
   errorMessage.value = null;
   try {
-    const merged = await fetchMergedGallery(listHosts());
-    rawEntries.value = merged.rawEntries;
+    const hosts = listHosts();
+    const [merged, organization] = await Promise.all([
+      fetchMergedGallery(hosts),
+      fetchOrganization(hosts).catch(() => null),
+    ]);
+    if (organization) {
+      snapshots.value = organization;
+      // Drop a shadow copy only once its host's trash listing SUCCEEDED and
+      // actually lists it — a failed listing degrades to an empty list and
+      // is no evidence the trash move was lost (codex review). A generous
+      // age bound keeps a host that never confirms from pinning a phantom.
+      const now = Math.floor(Date.now() / 1000);
+      pendingTrashed.value = pendingTrashed.value.filter((copy) => {
+        const snap = organization.find((s) => s.hostId === copy.hostId);
+        const key = keyOf(copy);
+        const confirmed =
+          snap?.trashListingOk === true &&
+          snap.trashed.some((row) => keyOf(row) === key);
+        if (confirmed) return false;
+        return now - (copy.trashed_at ?? now) <= PENDING_TRASH_MAX_AGE_SECS;
+      });
+    }
+    // Never resurrect prints whose optimistic removal still waits out its
+    // undo window — the server lists them live until the commit fires.
+    rawEntries.value =
+      pendingRemovalKeys.value.size > 0
+        ? merged.rawEntries.filter(
+            (e) => !pendingRemovalKeys.value.has(keyOf(e)),
+          )
+        : merged.rawEntries;
     syncLogicalEntries();
     unreachableHostIds.value = merged.unreachableHostIds;
     remoteHostCount.value = merged.remoteHostCount;
@@ -563,10 +1487,51 @@ const unreachableLabel = computed(() => {
     .filter((n) => n !== originHost().name);
   return names.length ? `${names.join(", ")} unreachable` : "";
 });
+const countLabel = computed(() => {
+  if (scope.value === "collections")
+    return `${collections.value.length} ${collections.value.length === 1 ? "collection" : "collections"} · ${total.value} prints`;
+  if (scope.value === "trash")
+    return `${trashEntries.value.length} ${trashEntries.value.length === 1 ? "print" : "prints"} in trash`;
+  return `${total.value} prints · ${scopeLabel.value}`;
+});
+/** Each scope is offered on its OWN capability: Collections needs a host
+ * with `gallery.organize`, Trash a host with `gallery.trash.enabled` — a
+ * DB-backed host with its trash disabled must not offer Trash just because
+ * it organizes (codex review). */
+const scopeOptions = computed<SegmentOption<Scope>[]>(() => {
+  const options: SegmentOption<Scope>[] = [
+    { value: "prints", label: `Prints · ${total.value}` },
+  ];
+  if (canOrganize.value)
+    options.push({
+      value: "collections",
+      label: `Collections · ${collections.value.length}`,
+    });
+  if (canTrash.value)
+    options.push({
+      value: "trash",
+      label: `Trash · ${trashEntries.value.length}`,
+    });
+  return options;
+});
+/** Scopes only exist once some host can organize or trash. */
+const showScopes = computed(() => scopeOptions.value.length > 1);
+// Clamp a deep-linked `?scope=` no host offers back to Prints. Reactive, not
+// mount-only: capabilities arrive asynchronously, so the verdict lands after
+// the URL did. A fleet with any UNKNOWN capability probe (`organize: null`)
+// never clamps — unknown is not incapable.
+watch([scopeOptions, snapshots], () => {
+  if (scope.value === "prints") return;
+  if (snapshots.value.length === 0) return;
+  if (snapshots.value.some((s) => s.organize === null)) return;
+  if (!scopeOptions.value.some((option) => option.value === scope.value))
+    setScope("prints");
+});
 
 // ── Lightbox ─────────────────────────────────────────────────────────────────
 const selected = ref<GalleryImage | null>(null);
 const selectedIndex = ref<number>(-1);
+const lightbox = ref<InstanceType<typeof Lightbox> | null>(null);
 
 function openItem(item: GalleryImage) {
   const key = keyOf(item);
@@ -727,6 +1692,8 @@ async function onReuse(item: GalleryImage) {
     format: item.format,
     models: models.value,
   });
+  // The gallery row's editable title wins over the creation-time one.
+  form.state.value.title = item.title ?? item.metadata.title ?? null;
   const expected = {
     model: form.state.value.model,
     width: form.state.value.width,
@@ -833,14 +1800,23 @@ async function onUpscale(item: GalleryImage) {
   void router.push({ name: "create" });
 }
 
+/**
+ * Single-print delete from the Lightbox / context menu. Optimistic with a
+ * 6 s undo window either way; the commit is the same DELETE, which a
+ * trash-capable host turns into a trash move (so no confirm is asked there)
+ * and an older host executes permanently (so the confirm stays).
+ */
 async function onLightboxDelete(item: GalleryImage) {
-  const accepted = await requestConfirm({
-    title: "Delete print?",
-    body: `${item.filename} will be deleted from every connected device. You can undo for a few seconds.`,
-    confirmLabel: "Delete",
-    danger: true,
-  });
-  if (!accepted) return;
+  const reversible = allCopiesTrash(item);
+  if (!reversible) {
+    const accepted = await requestConfirm({
+      title: "Delete print?",
+      body: `${item.filename} will be deleted from every connected device. You can undo for a few seconds.`,
+      confirmLabel: "Delete",
+      danger: true,
+    });
+    if (!accepted) return;
+  }
   const key = keyOf(item);
   const entryIdx = rawEntries.value.findIndex((e) => keyOf(e) === key);
   if (entryIdx === -1) return;
@@ -848,6 +1824,8 @@ async function onLightboxDelete(item: GalleryImage) {
   const removedKeys = new Set(removed.map((entry) => keyOf(entry)));
 
   // Optimistic removal; commit the DELETE only once the undo window elapses.
+  // Masked from refresh until then so a poll can't resurrect the rows.
+  addPendingRemovals(removedKeys);
   rawEntries.value = rawEntries.value.filter((e) => !removedKeys.has(keyOf(e)));
   syncLogicalEntries();
   if (filtered.value.length === 0) {
@@ -862,25 +1840,36 @@ async function onLightboxDelete(item: GalleryImage) {
   }
 
   undoableAction({
-    text: "Print deleted everywhere",
+    text: reversible ? "Moved to trash" : "Print deleted everywhere",
     undo: () => {
-      rawEntries.value = [...rawEntries.value, ...removed];
-      syncLogicalEntries();
+      clearPendingRemovals(removedKeys);
+      restoreRemovedEntries(removed);
     },
     commit: async () => {
-      const results = await Promise.allSettled(
-        removed.map((entry) => deleteRouted(entry)),
-      );
-      const failed = removed.filter(
-        (_, index) => results[index]?.status === "rejected",
-      );
-      if (failed.length > 0) {
-        rawEntries.value = [...rawEntries.value, ...failed];
-        syncLogicalEntries();
-        toast(
-          "error",
-          `${failed.length} device ${failed.length === 1 ? "copy remains" : "copies remain"} because a delete failed.`,
+      try {
+        const results = await Promise.allSettled(
+          removed.map((entry) => deleteRouted(entry)),
         );
+        const failed = removed.filter(
+          (_, index) => results[index]?.status === "rejected",
+        );
+        const succeeded = removed.filter(
+          (_, index) => results[index]?.status === "fulfilled",
+        );
+        markTrashedLocally(
+          succeeded.filter((entry) =>
+            hostTrashes(snapshots.value, entry.hostId),
+          ),
+        );
+        if (failed.length > 0) {
+          restoreRemovedEntries(failed);
+          toast(
+            "error",
+            `${failed.length} device ${failed.length === 1 ? "copy remains" : "copies remain"} because a delete failed.`,
+          );
+        }
+      } finally {
+        clearPendingRemovals(removedKeys);
       }
     },
   });
@@ -936,13 +1925,119 @@ async function contextDelete() {
   closeContextMenu();
   if (item) await onLightboxDelete(item);
 }
+function contextFavorite() {
+  const item = contextMenu.value?.item;
+  closeContextMenu();
+  if (item) onFavorite(item, !item.favorite);
+}
+async function contextRename() {
+  const item = contextMenu.value?.item;
+  closeContextMenu();
+  if (!item) return;
+  const next = await requestText({
+    title: "Rename print",
+    label: "Title",
+    initial: item.title ?? "",
+    confirmLabel: "Rename",
+  });
+  if (next === null) return;
+  onRename(item, next.trim() || null);
+}
+function contextRestore() {
+  const item = contextMenu.value?.item;
+  closeContextMenu();
+  if (item) restoreOne(item);
+}
+function contextDeleteForever() {
+  const item = contextMenu.value?.item;
+  closeContextMenu();
+  if (item) deleteForeverOne(item);
+}
 function onDocumentPointerDown(event: PointerEvent) {
   const target = event.target as HTMLElement | null;
   if (!target?.closest("[data-test='gallery-context-menu']"))
     closeContextMenu();
 }
+
+// ── Keyboard ─────────────────────────────────────────────────────────────────
+// F favorite · T tag · ⌘⇧N new collection · ⌫ trash · ⌘⌫ delete forever.
+// Never while typing, and the Lightbox's own ←/→/Esc stay untouched.
+function typingTarget(event: KeyboardEvent): boolean {
+  const target = event.target as HTMLElement | null;
+  if (!target) return false;
+  const tag = target.tagName;
+  return (
+    tag === "INPUT" ||
+    tag === "TEXTAREA" ||
+    tag === "SELECT" ||
+    target.isContentEditable
+  );
+}
+function focusedEntries(): HostGalleryImage[] {
+  if (selected.value) return [selected.value as HostGalleryImage];
+  if (selectMode.value) return selectedEntries.value;
+  return [];
+}
 function onDocumentKeydown(event: KeyboardEvent) {
-  if (event.key === "Escape") closeContextMenu();
+  if (event.key === "Escape") {
+    closeContextMenu();
+    return;
+  }
+  if (typingTarget(event) || event.altKey) return;
+  const meta = event.metaKey || event.ctrlKey;
+  const key = event.key.toLowerCase();
+  if (meta && event.shiftKey && key === "n") {
+    if (!canOrganize.value) return;
+    event.preventDefault();
+    void onNewCollection(selected.value ?? undefined);
+    return;
+  }
+  if (
+    meta &&
+    !event.shiftKey &&
+    (event.key === "Backspace" || event.key === "Delete")
+  ) {
+    const items = focusedEntries();
+    if (items.length === 0 || !canTrash.value) return;
+    event.preventDefault();
+    if (selected.value) deleteForeverOne(selected.value);
+    else void deleteForeverCopies(selectionCopies.value, selection.value.size);
+    return;
+  }
+  if (meta || event.shiftKey) return;
+  if (event.key === "Backspace" || event.key === "Delete") {
+    if (scope.value === "trash") return;
+    if (selected.value) {
+      event.preventDefault();
+      void onLightboxDelete(selected.value);
+    } else if (selectMode.value && selection.value.size > 0) {
+      event.preventDefault();
+      void deleteSelected();
+    }
+    return;
+  }
+  if (key === "f") {
+    if (!canOrganize.value) return;
+    if (selected.value) {
+      event.preventDefault();
+      onFavorite(selected.value, !selected.value.favorite);
+    } else if (selectMode.value && selection.value.size > 0) {
+      event.preventDefault();
+      bulkFavorite();
+    }
+    return;
+  }
+  if (key === "t") {
+    if (!canOrganize.value) return;
+    if (selected.value) {
+      event.preventDefault();
+      lightbox.value?.focusTags();
+    } else if (selectMode.value && selection.value.size > 0) {
+      event.preventDefault();
+      bulkTagsOpen.value = true;
+      void nextTick(() => bulkTagEditor.value?.focus());
+    }
+  }
 }
 
 // ── Back-to-top FAB ──────────────────────────────────────────────────────────
@@ -984,145 +2079,54 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="gal">
+  <div class="gal" :data-scope="scope">
     <header class="gal__head">
-      <h1 class="gal__title">Gallery</h1>
+      <h1 class="gal__title">Library</h1>
       <span class="gal__count" data-test="gallery-count"
-        >{{ total }} prints · {{ scopeLabel
+        >{{ countLabel
         }}<span v-if="unreachableLabel" class="gal__unreachable">
           · {{ unreachableLabel }}</span
         ></span
       >
-      <span class="gal__flex"></span>
-
-      <ThumbnailSizeSlider
-        v-if="view === 'grid'"
-        class="gal__thumbnail-size"
-        :model-value="thumbnailSize"
-        :min="GALLERY_THUMBNAIL_SIZE_MIN"
-        :max="GALLERY_THUMBNAIL_SIZE_MAX"
-        :step="GALLERY_THUMBNAIL_SIZE_STEP"
-        @update:model-value="setThumbnailSize"
-      />
 
       <SegmentedControl
-        class="gal__filter"
-        data-test="gallery-filter"
-        :model-value="filter"
-        :options="filterOptions"
-        label="Filter prints"
-        @update:model-value="setFilter"
+        v-if="showScopes"
+        class="gal__scope"
+        data-test="library-scope"
+        :model-value="scope"
+        :options="scopeOptions"
+        label="Library scope"
+        compact
+        @update:model-value="setScope"
       />
 
-      <div
-        v-if="hostOptions.length > 1"
-        class="gal__hosts"
-        role="group"
-        aria-label="Filter by machine"
-      >
+      <span class="gal__flex"></span>
+
+      <template v-if="scope === 'collections'">
+        <label class="gal__search">
+          <Icon name="search" :size="15" />
+          <input
+            :value="search"
+            type="search"
+            :placeholder="
+              currentCollection ? 'Search prints…' : 'Search collections…'
+            "
+            aria-label="Search gallery"
+            data-test="gallery-search"
+            @input="onSearchInput(($event.target as HTMLInputElement).value)"
+          />
+        </label>
         <button
-          v-for="option in [
-            { id: 'all', label: 'All machines' },
-            ...hostOptions,
-          ]"
-          :key="option.id"
+          v-if="canOrganize"
           type="button"
-          class="gal__host-chip"
-          :data-on="hostFilter === option.id ? 'true' : undefined"
-          data-test="gallery-host-filter"
-          @click="hostFilter = option.id"
+          class="gal__primary"
+          data-test="new-collection"
+          @click="onNewCollection()"
         >
-          {{ option.label }}
+          <Icon name="plus" :size="14" /> New collection
         </button>
-      </div>
-
-      <label class="gal__search">
-        <Icon name="search" :size="15" />
-        <input
-          :value="search"
-          type="search"
-          placeholder="Search prompts, models…"
-          aria-label="Search gallery"
-          data-test="gallery-search"
-          @input="onSearchInput(($event.target as HTMLInputElement).value)"
-        />
-      </label>
-
-      <div class="gal__tools">
         <button
-          type="button"
-          class="gal__icon"
-          data-test="open-history"
-          aria-label="History"
-          title="History"
-          :aria-pressed="historyOpen"
-          @click="openHistory"
-        >
-          <Icon name="history" :size="16" />
-        </button>
-
-        <div class="gal__viewtoggle" role="group" aria-label="View mode">
-          <button
-            type="button"
-            class="gal__vbtn"
-            :data-on="view === 'grid' ? 'true' : undefined"
-            :aria-pressed="view === 'grid'"
-            aria-label="Grid view"
-            @click="setView('grid')"
-          >
-            <Icon name="library" :size="16" />
-          </button>
-          <button
-            type="button"
-            class="gal__vbtn"
-            :data-on="view === 'feed' ? 'true' : undefined"
-            :aria-pressed="view === 'feed'"
-            aria-label="Feed view"
-            @click="setView('feed')"
-          >
-            <Icon name="menu" :size="16" />
-          </button>
-        </div>
-
-        <button
-          type="button"
-          class="gal__icon"
-          :aria-pressed="!muted"
-          :aria-label="muted ? 'Unmute videos' : 'Mute videos'"
-          :title="muted ? 'Unmute videos' : 'Mute videos'"
-          @click="setMuted(!muted)"
-        >
-          <svg
-            v-if="muted"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-            aria-hidden="true"
-          >
-            <path d="M11 5 6 9H3v6h3l5 4z" />
-            <path d="m22 9-6 6" />
-            <path d="m16 9 6 6" />
-          </svg>
-          <svg
-            v-else
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-            aria-hidden="true"
-          >
-            <path d="M11 5 6 9H3v6h3l5 4z" />
-            <path d="M15.5 8.5a5 5 0 0 1 0 7" />
-            <path d="M18.5 5.5a9 9 0 0 1 0 13" />
-          </svg>
-        </button>
-
-        <button
+          v-if="currentCollection"
           type="button"
           class="gal__select"
           :class="{ 'gal__select--on': selectMode }"
@@ -1130,24 +2134,11 @@ onBeforeUnmount(() => {
           data-test="gallery-select"
           @click="setSelectMode(!selectMode)"
         >
-          <svg
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-            aria-hidden="true"
-          >
-            <path
-              d="M9 11l3 3L22 4M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"
-            />
-          </svg>
+          <Icon name="check" :size="15" />
           <span class="gal__select-label">
             {{ selectMode ? `${selection.size} selected` : "Select" }}
           </span>
         </button>
-
         <button
           type="button"
           class="gal__icon"
@@ -1158,14 +2149,349 @@ onBeforeUnmount(() => {
         >
           <Icon name="refresh" :size="16" :class="{ gal__spin: loading }" />
         </button>
-      </div>
+      </template>
+
+      <template v-else>
+        <ThumbnailSizeSlider
+          v-if="view === 'grid' || scope === 'trash'"
+          class="gal__thumbnail-size"
+          :model-value="thumbnailSize"
+          :min="GALLERY_THUMBNAIL_SIZE_MIN"
+          :max="GALLERY_THUMBNAIL_SIZE_MAX"
+          :step="GALLERY_THUMBNAIL_SIZE_STEP"
+          @update:model-value="setThumbnailSize"
+        />
+
+        <SegmentedControl
+          class="gal__filter"
+          data-test="gallery-filter"
+          :model-value="filter"
+          :options="filterOptions"
+          label="Filter prints"
+          @update:model-value="setFilter"
+        />
+
+        <label class="gal__search">
+          <Icon name="search" :size="15" />
+          <input
+            :value="search"
+            type="search"
+            placeholder="Search prompts, titles, tags…"
+            aria-label="Search gallery"
+            data-test="gallery-search"
+            @input="onSearchInput(($event.target as HTMLInputElement).value)"
+          />
+        </label>
+
+        <div class="gal__tools">
+          <button
+            v-if="scope === 'prints'"
+            type="button"
+            class="gal__icon"
+            data-test="open-history"
+            aria-label="History"
+            title="History"
+            :aria-pressed="historyOpen"
+            @click="openHistory"
+          >
+            <Icon name="history" :size="16" />
+          </button>
+
+          <div
+            v-if="scope === 'prints'"
+            class="gal__viewtoggle"
+            role="group"
+            aria-label="View mode"
+          >
+            <button
+              type="button"
+              class="gal__vbtn"
+              :data-on="view === 'grid' ? 'true' : undefined"
+              :aria-pressed="view === 'grid'"
+              aria-label="Grid view"
+              @click="setView('grid')"
+            >
+              <Icon name="library" :size="16" />
+            </button>
+            <button
+              type="button"
+              class="gal__vbtn"
+              :data-on="view === 'feed' ? 'true' : undefined"
+              :aria-pressed="view === 'feed'"
+              aria-label="Feed view"
+              @click="setView('feed')"
+            >
+              <Icon name="menu" :size="16" />
+            </button>
+          </div>
+
+          <button
+            v-if="scope === 'prints'"
+            type="button"
+            class="gal__icon"
+            :aria-pressed="!muted"
+            :aria-label="muted ? 'Unmute videos' : 'Mute videos'"
+            :title="muted ? 'Unmute videos' : 'Mute videos'"
+            @click="setMuted(!muted)"
+          >
+            <svg
+              v-if="muted"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M11 5 6 9H3v6h3l5 4z" />
+              <path d="m22 9-6 6" />
+              <path d="m16 9 6 6" />
+            </svg>
+            <svg
+              v-else
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M11 5 6 9H3v6h3l5 4z" />
+              <path d="M15.5 8.5a5 5 0 0 1 0 7" />
+              <path d="M18.5 5.5a9 9 0 0 1 0 13" />
+            </svg>
+          </button>
+
+          <button
+            type="button"
+            class="gal__select"
+            :class="{ 'gal__select--on': selectMode }"
+            :aria-pressed="selectMode"
+            data-test="gallery-select"
+            @click="setSelectMode(!selectMode)"
+          >
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <path
+                d="M9 11l3 3L22 4M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"
+              />
+            </svg>
+            <span class="gal__select-label">
+              {{ selectMode ? `${selection.size} selected` : "Select" }}
+            </span>
+          </button>
+
+          <button
+            v-if="scope === 'trash'"
+            type="button"
+            class="gal__danger-outline"
+            :disabled="trashEntries.length === 0"
+            data-test="empty-trash"
+            @click="emptyTrash"
+          >
+            <Icon name="trash" :size="14" /> Empty trash
+          </button>
+
+          <button
+            type="button"
+            class="gal__icon"
+            :disabled="loading"
+            :aria-busy="loading"
+            aria-label="Refresh gallery"
+            @click="refresh"
+          >
+            <Icon name="refresh" :size="16" :class="{ gal__spin: loading }" />
+          </button>
+        </div>
+      </template>
     </header>
+
+    <!-- Filter chips: ♥ Favorites · tags · hosts (Prints + drill-in). -->
+    <LibraryChipRow
+      v-if="
+        scope === 'prints' || (scope === 'collections' && currentCollection)
+      "
+      :organize="canOrganize"
+      :favorites-only="favoritesOnly"
+      :favorite-count="favoriteCount"
+      :tags="tags"
+      :active-tags="tagFilter"
+      :host-options="hostOptions"
+      :host-filter="hostFilter"
+      @toggle-favorites="toggleFavoritesOnly"
+      @toggle-tag="toggleTag"
+      @set-host="hostFilter = $event"
+    />
+    <LibraryChipRow
+      v-else-if="scope === 'trash'"
+      :organize="false"
+      :favorites-only="false"
+      :favorite-count="0"
+      :tags="[]"
+      :active-tags="[]"
+      :host-options="hostOptions"
+      :host-filter="hostFilter"
+      @set-host="hostFilter = $event"
+    />
+
+    <!-- Trash retention banner. -->
+    <div
+      v-if="scope === 'trash' && retentionSummary.segments.length > 0"
+      class="gal__banner"
+      data-test="trash-banner"
+    >
+      <span class="gal__banner-dot" aria-hidden="true">•</span>
+      <span class="gal__banner-text">
+        <template v-for="(segment, i) in retentionSummary.segments" :key="i">
+          <b v-if="segment.mono" class="gal__mono">{{ segment.text }}</b>
+          <template v-else>{{ segment.text }}</template>
+        </template>
+      </span>
+      <span class="gal__flex"></span>
+      <router-link class="gal__banner-link" to="/settings"
+        >Change retention · Settings</router-link
+      >
+      <router-link
+        v-if="remoteHostCount > 0"
+        class="gal__banner-link"
+        to="/machines"
+        >Machines</router-link
+      >
+    </div>
+
+    <!-- Collection drill-in breadcrumb + Edit. -->
+    <div
+      v-if="scope === 'collections' && collectionSlug"
+      class="gal__crumbs"
+      data-test="collection-crumbs"
+    >
+      <button
+        type="button"
+        class="gal__crumb"
+        data-test="crumb-collections"
+        @click="openCollection(null)"
+      >
+        <Icon name="chevron-left" :size="14" /> Collections
+      </button>
+      <span class="gal__crumb-sep" aria-hidden="true">›</span>
+      <span class="gal__crumb-here" data-test="crumb-here">{{
+        currentCollection?.name ?? collectionSlug
+      }}</span>
+      <span v-if="currentCard" class="gal__crumb-meta">
+        {{ currentCard.count }}
+        {{ currentCard.count === 1 ? "print" : "prints" }} ·
+        {{ currentCard.hostLabels.join(" · ") }}
+      </span>
+      <span class="gal__flex"></span>
+      <Popover
+        v-if="currentCollection && canOrganize"
+        :open="collectionEditOpen"
+        placement="bottom-end"
+        label="Edit collection"
+        @update:open="collectionEditOpen = $event"
+      >
+        <template #trigger>
+          <button
+            type="button"
+            class="gal__bar-btn"
+            :aria-expanded="collectionEditOpen"
+            data-test="collection-edit"
+            @click="collectionEditOpen = !collectionEditOpen"
+          >
+            Edit <Icon name="chevron-down" :size="13" />
+          </button>
+        </template>
+        <div class="gal__menu" role="menu" data-test="collection-edit-menu">
+          <button
+            type="button"
+            role="menuitem"
+            data-test="collection-edit-rename"
+            @click="
+              collectionEditOpen = false;
+              renameCollection(currentCollection.slug);
+            "
+          >
+            Rename…
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            :disabled="selection.size !== 1"
+            data-test="collection-edit-cover"
+            @click="setCoverFromSelection"
+          >
+            Set cover from selection
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            :disabled="selection.size === 0"
+            data-test="collection-edit-remove"
+            @click="removeSelectedFromCollection"
+          >
+            Remove selected prints
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            class="gal__context-danger"
+            data-test="collection-edit-delete"
+            @click="
+              collectionEditOpen = false;
+              deleteCollection(currentCollection.slug);
+            "
+          >
+            Delete collection…
+          </button>
+        </div>
+      </Popover>
+    </div>
 
     <main class="gal__main">
       <div v-if="errorMessage" class="gal__error" role="alert">
         <p class="gal__error-title">Couldn't load the gallery.</p>
         <p class="gal__error-body">{{ errorMessage }}</p>
       </div>
+
+      <!-- Collections shelf -->
+      <template v-else-if="scope === 'collections' && !collectionSlug">
+        <EmptyStateBlock
+          v-if="!loading && cards.length === 0"
+          icon="collection"
+          headline="No collections yet"
+          guidance="Name one, then add prints from the grid or a selection."
+        >
+          <template #action>
+            <button
+              v-if="canOrganize"
+              type="button"
+              class="gal__emptybtn"
+              data-test="empty-new-collection"
+              @click="onNewCollection()"
+            >
+              Create a collection
+            </button>
+          </template>
+        </EmptyStateBlock>
+        <CollectionsShelf
+          v-else
+          :cards="filteredCards"
+          :can-create="canOrganize"
+          @open="openCollection"
+          @new="onNewCollection()"
+          @rename="renameCollection"
+          @delete="deleteCollection"
+        />
+      </template>
 
       <template v-else>
         <EmptyStateBlock
@@ -1182,6 +2508,49 @@ onBeforeUnmount(() => {
               @click="clearSearch"
             >
               Clear search
+            </button>
+          </template>
+        </EmptyStateBlock>
+
+        <EmptyStateBlock
+          v-else-if="emptyKind === 'trash'"
+          icon="trash"
+          headline="No prints in the trash"
+          guidance="Prints you trash wait here until they're restored or purged."
+        />
+
+        <EmptyStateBlock
+          v-else-if="emptyKind === 'collection'"
+          icon="collection"
+          headline="This collection is empty"
+          guidance="Select prints in the Library and use Add to collection."
+        >
+          <template #action>
+            <button
+              type="button"
+              class="gal__emptybtn"
+              data-test="browse-prints"
+              @click="setScope('prints')"
+            >
+              Browse prints
+            </button>
+          </template>
+        </EmptyStateBlock>
+
+        <EmptyStateBlock
+          v-else-if="emptyKind === 'organization'"
+          icon="tag"
+          headline="No prints match"
+          guidance="Nothing carries every selected chip. Clear the filters to see everything."
+        >
+          <template #action>
+            <button
+              type="button"
+              class="gal__emptybtn"
+              data-test="clear-filters"
+              @click="clearOrganizationFilters"
+            >
+              Clear filters
             </button>
           </template>
         </EmptyStateBlock>
@@ -1208,7 +2577,7 @@ onBeforeUnmount(() => {
         />
 
         <GalleryGrid
-          v-else-if="view === 'grid'"
+          v-else-if="view === 'grid' || scope !== 'prints'"
           :entries="filtered"
           :models="models"
           :loading="loading"
@@ -1216,10 +2585,13 @@ onBeforeUnmount(() => {
           :select-mode="selectMode"
           :selection="selection"
           :fresh="fresh"
+          :trash="scope === 'trash'"
           @open="openItem"
           @toggle-select="toggleSelect"
           @drag-select="onDragSelect"
           @context-menu="openContextMenu"
+          @restore="restoreOne"
+          @delete-forever="deleteForeverOne"
         />
 
         <GalleryFeed
@@ -1255,36 +2627,76 @@ onBeforeUnmount(() => {
       >
         Open
       </button>
-      <button
-        v-if="canEditSequence(contextMenu.item)"
-        type="button"
-        role="menuitem"
-        data-test="context-edit-sequence"
-        @click="contextEditSequence"
-      >
-        Edit sequence
-      </button>
-      <button type="button" role="menuitem" @click="contextReuse">
-        {{
-          isSequencePrint(contextMenu.item)
-            ? "Duplicate as new"
-            : "Reuse settings"
-        }}
-      </button>
-      <button type="button" role="menuitem" @click="contextSource">
-        Use as source
-      </button>
-      <button
-        type="button"
-        role="menuitem"
-        class="gal__context-danger"
-        @click="contextDelete"
-      >
-        Delete
-      </button>
+      <template v-if="scope === 'trash'">
+        <button
+          type="button"
+          role="menuitem"
+          data-test="context-restore"
+          @click="contextRestore"
+        >
+          Restore
+        </button>
+        <button
+          type="button"
+          role="menuitem"
+          class="gal__context-danger"
+          data-test="context-delete-forever"
+          @click="contextDeleteForever"
+        >
+          Delete forever
+        </button>
+      </template>
+      <template v-else>
+        <button
+          v-if="canEditSequence(contextMenu.item)"
+          type="button"
+          role="menuitem"
+          data-test="context-edit-sequence"
+          @click="contextEditSequence"
+        >
+          Edit sequence
+        </button>
+        <button type="button" role="menuitem" @click="contextReuse">
+          {{
+            isSequencePrint(contextMenu.item)
+              ? "Duplicate as new"
+              : "Reuse settings"
+          }}
+        </button>
+        <button type="button" role="menuitem" @click="contextSource">
+          Use as source
+        </button>
+        <template v-if="canOrganizeEntry(contextMenu.item)">
+          <button
+            type="button"
+            role="menuitem"
+            data-test="context-favorite"
+            @click="contextFavorite"
+          >
+            {{ contextMenu.item.favorite ? "Unfavorite" : "Favorite" }}
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            data-test="context-rename"
+            @click="contextRename"
+          >
+            Rename…
+          </button>
+        </template>
+        <button
+          type="button"
+          role="menuitem"
+          class="gal__context-danger"
+          data-test="context-delete"
+          @click="contextDelete"
+        >
+          {{ allCopiesTrash(contextMenu.item) ? "Trash" : "Delete" }}
+        </button>
+      </template>
     </div>
 
-    <!-- Selection action bar (bulk delete). -->
+    <!-- Selection action bar. -->
     <Transition name="fade">
       <div
         v-if="selectMode"
@@ -1314,22 +2726,130 @@ onBeforeUnmount(() => {
           >
             Clear
           </button>
-          <button
-            type="button"
-            class="gal__bar-danger"
-            :disabled="selection.size === 0"
-            @click="deleteSelected"
-          >
-            Delete selected
-          </button>
-          <button
-            type="button"
-            class="gal__bar-danger gal__bar-danger--soft"
-            :disabled="filtered.length === 0"
-            @click="deleteAllFiltered"
-          >
-            Delete all
-          </button>
+
+          <template v-if="scope === 'trash'">
+            <button
+              type="button"
+              class="gal__bar-btn"
+              :disabled="selection.size === 0"
+              data-test="bulk-restore"
+              @click="restoreSelected"
+            >
+              Restore
+            </button>
+            <button
+              type="button"
+              class="gal__bar-danger"
+              :disabled="selection.size === 0"
+              data-test="bulk-delete-forever"
+              @click="deleteForeverSelected"
+            >
+              Delete forever
+            </button>
+          </template>
+
+          <template v-else>
+            <template v-if="canOrganize">
+              <Popover
+                :open="bulkCollectionsOpen"
+                placement="top-start"
+                label="Add to collection"
+                @update:open="bulkCollectionsOpen = $event"
+              >
+                <template #trigger>
+                  <button
+                    type="button"
+                    class="gal__bar-btn"
+                    :disabled="selection.size === 0 || !selectionOrganizes"
+                    :aria-expanded="bulkCollectionsOpen"
+                    data-test="bulk-collections"
+                    @click="bulkCollectionsOpen = !bulkCollectionsOpen"
+                  >
+                    <Icon name="collection" :size="14" /> Add to collection
+                  </button>
+                </template>
+                <div class="gal__pop" data-test="bulk-collections-panel">
+                  <p class="gal__pop-k">
+                    Add {{ selection.size }}
+                    {{ selection.size === 1 ? "print" : "prints" }} to
+                  </p>
+                  <CollectionPicker
+                    :rows="selectionCollectionRows"
+                    :footer="
+                      selectionHostsLabel
+                        ? `fans out to ${selectionHostsLabel}`
+                        : ''
+                    "
+                    @toggle="bulkSetCollection"
+                    @new="bulkNewCollection"
+                  />
+                </div>
+              </Popover>
+              <Popover
+                :open="bulkTagsOpen"
+                placement="top-start"
+                label="Tag"
+                @update:open="bulkTagsOpen = $event"
+              >
+                <template #trigger>
+                  <button
+                    type="button"
+                    class="gal__bar-btn"
+                    :disabled="selection.size === 0 || !selectionOrganizes"
+                    :aria-expanded="bulkTagsOpen"
+                    data-test="bulk-tags"
+                    @click="bulkTagsOpen = !bulkTagsOpen"
+                  >
+                    <Icon name="tag" :size="14" /> Tag
+                  </button>
+                </template>
+                <div class="gal__pop" data-test="bulk-tags-panel">
+                  <p class="gal__pop-k">
+                    Tags on {{ selection.size }}
+                    {{ selection.size === 1 ? "print" : "prints" }}
+                  </p>
+                  <TagEditor
+                    ref="bulkTagEditor"
+                    :tags="selectionTags.all"
+                    :mixed="selectionTags.mixed"
+                    :suggestions="tags"
+                    @add="bulkAddTag"
+                    @remove="bulkRemoveTag"
+                  />
+                </div>
+              </Popover>
+              <button
+                type="button"
+                class="gal__bar-btn gal__bar-fav"
+                :data-on="selectionAllFavorite ? 'true' : undefined"
+                :disabled="selection.size === 0 || !selectionOrganizes"
+                data-test="bulk-favorite"
+                @click="bulkFavorite"
+              >
+                <Icon name="heart" :size="14" :stroke-width="2" />
+                {{ selectionAllFavorite ? "Unfavorite" : "Favorite" }}
+              </button>
+            </template>
+            <button
+              type="button"
+              class="gal__bar-danger"
+              :disabled="selection.size === 0"
+              data-test="bulk-delete"
+              @click="deleteSelected"
+            >
+              {{ selectionTrashes ? "Trash" : "Delete selected" }}
+            </button>
+            <button
+              type="button"
+              class="gal__bar-danger gal__bar-danger--soft"
+              :disabled="filtered.length === 0"
+              data-test="bulk-delete-all"
+              @click="deleteAllFiltered"
+            >
+              {{ canTrash ? "Trash all" : "Delete all" }}
+            </button>
+          </template>
+
           <button
             type="button"
             class="gal__bar-x"
@@ -1358,6 +2878,7 @@ onBeforeUnmount(() => {
     </Transition>
 
     <Lightbox
+      ref="lightbox"
       :item="selected"
       :models="models"
       :index="selectedIndex"
@@ -1367,6 +2888,11 @@ onBeforeUnmount(() => {
       :muted="muted"
       :is-sequence="isSequencePrint(selected)"
       :can-edit-sequence="canEditSequence(selected)"
+      :can-organize="canOrganizeEntry(selected)"
+      :can-trash="allCopiesTrash(selected)"
+      :in-trash="scope === 'trash'"
+      :collections="lightboxCollectionRows"
+      :tag-suggestions="tags"
       @close="closeLightbox"
       @prev="stepLightbox(-1)"
       @next="stepLightbox(1)"
@@ -1375,6 +2901,14 @@ onBeforeUnmount(() => {
       @upscale="onUpscale"
       @delete="onLightboxDelete"
       @edit-sequence="onEditSequence"
+      @rename="onRename"
+      @favorite="onFavorite"
+      @add-tag="onAddTag"
+      @remove-tag="onRemoveTag"
+      @set-collection="onSetCollection"
+      @new-collection="onNewCollection"
+      @restore="restoreOne"
+      @delete-forever="deleteForeverOne"
     />
 
     <HistoryDrawer
@@ -1420,36 +2954,26 @@ onBeforeUnmount(() => {
   min-width: 0;
 }
 
+.gal__scope {
+  flex: 0 0 auto;
+}
 .gal__filter {
   flex: 0 0 auto;
 }
 .gal__thumbnail-size {
   flex: 0 0 136px;
 }
-.gal__hosts {
-  display: flex;
-  gap: 6px;
-  overflow-x: auto;
-}
-.gal__host-chip {
-  min-height: 34px;
-  padding: 0 10px;
-  border: 1px solid var(--ce);
-  border-radius: var(--radius-pill);
-  background: var(--bath);
-  color: var(--ink-2);
-  font-family: var(--f-mono);
-  font-size: 10px;
-  white-space: nowrap;
-  cursor: pointer;
-}
-.gal__host-chip[data-on="true"] {
-  border-color: var(--safelight);
-  color: var(--rebate);
-  background: var(--sel-bg);
+
+/* Below 640px the scope control spans the row over the grid. */
+@media (max-width: 639px) {
+  .gal__scope {
+    order: 10;
+    flex: 1 0 100%;
+  }
 }
 
-.gal__context {
+.gal__context,
+.gal__menu {
   position: fixed;
   z-index: 70;
   display: grid;
@@ -1460,18 +2984,34 @@ onBeforeUnmount(() => {
   background: var(--bench);
   box-shadow: var(--shadow-popover);
 }
-.gal__context button {
+.gal__menu {
+  position: static;
+  min-width: 220px;
+  box-shadow: var(--shadow-raised);
+}
+.gal__context button,
+.gal__menu button {
   min-height: 40px;
   padding: 0 10px;
   border: 0;
   border-radius: var(--radius-control);
   background: transparent;
   color: var(--rebate);
+  font: inherit;
   text-align: left;
   cursor: pointer;
 }
-.gal__context button:hover {
+.gal__menu button {
+  min-height: 34px;
+  font-size: 13px;
+}
+.gal__context button:hover,
+.gal__menu button:hover:not(:disabled) {
   background: var(--sel-bg);
+}
+.gal__menu button:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 .gal__context-danger {
   color: var(--stop) !important;
@@ -1587,7 +3127,9 @@ onBeforeUnmount(() => {
   }
 }
 
-.gal__select {
+.gal__select,
+.gal__primary,
+.gal__danger-outline {
   display: inline-flex;
   align-items: center;
   gap: 7px;
@@ -1607,7 +3149,8 @@ onBeforeUnmount(() => {
   width: 16px;
   height: 16px;
 }
-.gal__select:hover {
+.gal__select:hover,
+.gal__danger-outline:hover:not(:disabled) {
   color: var(--rebate);
 }
 .gal__select--on {
@@ -1615,13 +3158,100 @@ onBeforeUnmount(() => {
   color: var(--sel-ink);
   border-color: var(--sel-border);
 }
-.gal__select:focus-visible {
+.gal__select:focus-visible,
+.gal__primary:focus-visible,
+.gal__danger-outline:focus-visible {
   outline: 2px solid var(--safelight);
   outline-offset: 2px;
+}
+.gal__primary {
+  border-color: transparent;
+  background: var(--safelight);
+  color: var(--on-accent);
+}
+.gal__danger-outline {
+  color: var(--stop);
+  border-color: color-mix(in srgb, var(--stop) 50%, transparent);
+}
+.gal__danger-outline:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 .gal__main {
   margin-top: 4px;
+}
+
+/* Trash retention banner */
+.gal__banner {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 0 0 14px;
+  padding: 9px 12px;
+  border-radius: var(--radius-control-lg);
+  background: color-mix(in srgb, var(--halide) 12%, var(--bath));
+  color: var(--ink-2);
+  font-size: 12.5px;
+}
+.gal__banner-dot {
+  color: var(--halide);
+}
+.gal__mono {
+  font-family: var(--f-mono);
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--rebate);
+}
+.gal__banner-link {
+  color: var(--safelight);
+  font-size: 12px;
+  font-weight: 600;
+  text-decoration: none;
+}
+.gal__banner-link:hover {
+  text-decoration: underline;
+}
+
+/* Collection drill-in crumb bar */
+.gal__crumbs {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  margin: -6px 0 12px;
+  border-bottom: 1px solid var(--edge);
+}
+.gal__crumb {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  border: 0;
+  background: transparent;
+  color: var(--safelight);
+  font-family: var(--f-body);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.gal__crumb:focus-visible {
+  outline: 2px solid var(--safelight);
+  outline-offset: 2px;
+}
+.gal__crumb-sep {
+  color: var(--ink-3);
+}
+.gal__crumb-here {
+  font-family: var(--f-display);
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--rebate);
+}
+.gal__crumb-meta {
+  font-family: var(--f-mono);
+  font-size: 10.5px;
+  color: var(--ink-3);
 }
 
 .gal__error {
@@ -1694,17 +3324,29 @@ onBeforeUnmount(() => {
   color: var(--ink-3);
 }
 .gal__bar-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   border: 1px solid var(--ce);
   background: transparent;
   color: var(--rebate);
   padding: 6px 12px;
   border-radius: var(--radius-pill);
+  font-family: var(--f-body);
+  font-size: 13px;
   font-weight: 600;
   cursor: pointer;
 }
 .gal__bar-btn:disabled {
   opacity: 0.5;
   cursor: default;
+}
+.gal__bar-fav[data-on="true"] {
+  color: var(--safelight);
+  border-color: var(--safelight);
+}
+.gal__bar-fav[data-on="true"] :deep(svg) {
+  fill: currentColor;
 }
 .gal__bar-danger {
   border: 0;
@@ -1738,6 +3380,24 @@ onBeforeUnmount(() => {
 .gal__bar-x:hover {
   background: color-mix(in srgb, var(--rebate) 8%, transparent);
   color: var(--rebate);
+}
+
+/* Bulk-bar popovers */
+.gal__pop {
+  width: min(280px, calc(100vw - 32px));
+  padding: 10px;
+  border: 1px solid var(--ce);
+  border-radius: var(--radius-control-lg);
+  background: var(--bench);
+  box-shadow: var(--shadow-raised);
+}
+.gal__pop-k {
+  margin: 0 0 8px;
+  font-family: var(--f-mono);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-3);
 }
 
 .gal__fab {

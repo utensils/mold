@@ -1,0 +1,46 @@
+/*
+ * Host-aware thumbnail URLs for gallery tiles. A merged entry carries the
+ * host it came from: resolving every tile against the origin 404s every
+ * remote print, because the file lives on that machine. Keyless hosts
+ * (including the origin) resolve synchronously to a direct URL; an
+ * authenticated host needs a ticketed fetch, so its tile fills in once the
+ * blob resolves. Shared by the Library grid and the Collections shelf.
+ */
+import { ref } from "vue";
+import { thumbnailUrl } from "../api";
+import { getHost } from "../lib/hostRegistry";
+import { resolveThumbnailSrc } from "../lib/galleryMedia";
+import { printKey } from "../lib/multiHostGallery";
+import type { GalleryImage } from "../types";
+
+export function useThumbnailSources() {
+  const remoteSrc = ref(new Map<string, string>());
+  // Keys with a resolve genuinely in flight. Success settles into
+  // `remoteSrc`; failure clears the key so the next render retries — a
+  // transient host error must not blank the tile forever (codex review).
+  const requested = new Set<string>();
+
+  function srcFor(entry: GalleryImage): string {
+    const id = (entry as { hostId?: string }).hostId;
+    const host = id ? getHost(id) : null;
+    if (!host) return thumbnailUrl(entry.filename);
+    const key = printKey(entry as { hostId?: string; filename: string });
+    const resolved = remoteSrc.value.get(key);
+    if (resolved !== undefined) return resolved;
+    if (!requested.has(key)) {
+      requested.add(key);
+      void resolveThumbnailSrc(host, entry.filename)
+        .then((url) => {
+          remoteSrc.value = new Map(remoteSrc.value).set(key, url);
+        })
+        .catch(() => {
+          // Leave no settled entry: the tile shows nothing now, and the
+          // next gallery refresh re-requests once the host recovers.
+          requested.delete(key);
+        });
+    }
+    return "";
+  }
+
+  return { srcFor };
+}

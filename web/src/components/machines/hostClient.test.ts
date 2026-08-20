@@ -301,3 +301,71 @@ describe("useHostPoll target sessions", () => {
     poll.stop();
   });
 });
+
+describe("hostClient library organization plumbing", () => {
+  it("adapts a web host entry to the studio ApiTarget shape", async () => {
+    const { hostApiTarget } = await import("./hostClient");
+    expect(hostApiTarget(remote)).toEqual({
+      baseUrl: "http://192.168.1.20:7680",
+      apiKey: "sekret",
+    });
+    expect(hostApiTarget(keyless)).toEqual({
+      baseUrl: "http://localhost:7680",
+      apiKey: null,
+    });
+  });
+
+  it("lists the trash view with the host's key", async () => {
+    const { hostGallery } = await import("./hostClient");
+    fetchMock.mockResolvedValueOnce(ok([]));
+    await hostGallery(remote, undefined, "trash");
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toBe("http://192.168.1.20:7680/api/gallery?view=trash");
+    expect((init as RequestInit).headers).toMatchObject({
+      "x-api-key": "sekret",
+    });
+  });
+
+  it("keeps the bare gallery path for the default library view", async () => {
+    const { hostGallery } = await import("./hostClient");
+    fetchMock.mockResolvedValueOnce(ok([]));
+    await hostGallery(keyless);
+    expect(fetchMock.mock.calls[0]![0]).toBe(
+      "http://localhost:7680/api/gallery",
+    );
+  });
+
+  it("reads and writes one config key on a specific host", async () => {
+    const { hostConfigValue, hostWriteConfig } = await import("./hostClient");
+    fetchMock.mockResolvedValueOnce(
+      ok({ key: "gallery.trash_retention_days", value: 7, source: "db" }),
+    );
+    await expect(
+      hostConfigValue(remote, "gallery.trash_retention_days"),
+    ).resolves.toBe(7);
+    expect(fetchMock.mock.calls[0]![0]).toBe(
+      "http://192.168.1.20:7680/api/config/gallery.trash_retention_days",
+    );
+
+    fetchMock.mockResolvedValueOnce(ok({}));
+    await hostWriteConfig(remote, "gallery.trash_retention_days", 30);
+    const [url, init] = fetchMock.mock.calls[1]!;
+    expect(url).toBe(
+      "http://192.168.1.20:7680/api/config/gallery.trash_retention_days",
+    );
+    expect((init as RequestInit).method).toBe("PUT");
+    expect((init as RequestInit).body).toBe(JSON.stringify({ value: 30 }));
+    expect((init as RequestInit).headers).toMatchObject({
+      "x-api-key": "sekret",
+      "content-type": "application/json",
+    });
+  });
+
+  it("surfaces a failed config write instead of swallowing it as a 404", async () => {
+    const { hostWriteConfig } = await import("./hostClient");
+    fetchMock.mockResolvedValueOnce(ok({}, 404));
+    await expect(
+      hostWriteConfig(remote, "gallery.trash_retention_days", 30),
+    ).rejects.toThrow(/404/);
+  });
+});

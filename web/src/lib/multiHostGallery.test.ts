@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import { fetchMergedGallery, makePrintKey, printKey } from "./multiHostGallery";
+import {
+  fetchMergedGallery,
+  makePrintKey,
+  mergeLogicalEntries,
+  printKey,
+} from "./multiHostGallery";
 import { ORIGIN_HOST_ID, type HostEntry } from "./hostRegistry";
 import type { GalleryImage } from "../types";
 
@@ -131,6 +136,82 @@ describe("fetchMergedGallery", () => {
       "render-a",
       "render-c",
     ]);
+  });
+});
+
+describe("organization union on the logical print", () => {
+  const shared = (
+    hostId: string,
+    extra: Partial<GalleryImage> & { hostLabel?: string },
+  ) => ({
+    ...img("shared.png", 200),
+    hostId,
+    hostLabel: hostId,
+    size_bytes: 4_096,
+    metadata: { prompt: "shared", model: "flux", seed: 42 } as never,
+    ...extra,
+  });
+
+  it("unions title, favorite, tags, and collection slugs across copies", () => {
+    const raw = [
+      shared("origin", { tags: ["Blue"], collections: ["c-origin"] }),
+      shared("plato", {
+        title: "Riverbank",
+        favorite: true,
+        tags: ["blue", "outdoor"],
+        collections: ["c-plato", "c-unknown"],
+      }),
+    ];
+    const entries = mergeLogicalEntries(raw, {
+      localHostId: "origin",
+      resolveCollectionSlug: (_hostId, id) =>
+        id === "c-origin" ? "smurfs" : id === "c-plato" ? "rivers" : null,
+    });
+    expect(entries).toHaveLength(1);
+    const [entry] = entries;
+    expect(entry!.title).toBe("Riverbank");
+    expect(entry!.favorite).toBe(true);
+    expect(entry!.tags).toEqual(["Blue", "outdoor"]);
+    expect(entry!.organization?.collections).toEqual(["rivers", "smurfs"]);
+    expect(entry!.organization?.unresolvedCollectionIds).toEqual([
+      { hostId: "plato", id: "c-unknown" },
+    ]);
+  });
+
+  it("keeps the copies' own fields untouched — routing still uses them", () => {
+    const raw = [
+      shared("origin", {}),
+      shared("plato", { favorite: true, timestamp: 199 }),
+    ];
+    const entries = mergeLogicalEntries(raw, {
+      resolveCollectionSlug: () => null,
+    });
+    expect(entries[0]!.favorite).toBe(true);
+    expect(raw[0]!.favorite).toBeUndefined();
+  });
+
+  it("fetchMergedGallery applies the union with the provided resolver", async () => {
+    const a = host("render-a", "render a");
+    const b = host("render-b", "render b");
+    const fetcher = vi.fn(async (h: HostEntry) => [
+      h.id === "render-a"
+        ? { ...img("shared.png", 200), size_bytes: 4_096, tags: ["keep"] }
+        : {
+            ...img("shared.png", 199),
+            size_bytes: 4_096,
+            favorite: true,
+            collections: ["c1"],
+          },
+    ]);
+    const res = await fetchMergedGallery([a, b], fetcher, {
+      resolveCollectionSlug: () => "smurfs",
+    });
+    expect(res.entries[0]).toMatchObject({
+      hostId: "render-a",
+      favorite: true,
+      tags: ["keep"],
+    });
+    expect(res.entries[0]!.organization?.collections).toEqual(["smurfs"]);
   });
 });
 

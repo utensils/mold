@@ -258,4 +258,57 @@ describe("GalleryGrid multi-host thumbnails", () => {
     const src = w.find("img").attributes("src") ?? "";
     expect(src.startsWith("/api/gallery/thumbnail/")).toBe(true);
   });
+
+  it("marks favorites with a heart and leads the hover strip with the title", () => {
+    const wrapper = mount(GalleryGrid, {
+      props: {
+        entries: [
+          { ...image, favorite: true, title: "Smurf 04" },
+          { ...video, favorite: false },
+        ],
+        loading: false,
+      },
+    });
+    const cells = wrapper.findAll(".gg__cell");
+    expect(cells[0]!.find('[data-test="favorite-badge"]').exists()).toBe(true);
+    expect(cells[1]!.find('[data-test="favorite-badge"]').exists()).toBe(false);
+    expect(cells[0]!.get('[data-test="print-metadata"]').text()).toBe(
+      "Smurf 04 · flux-dev:fp16 · S 7",
+    );
+    expect(cells[1]!.get('[data-test="print-metadata"]').text()).toBe(
+      "flux-dev:fp16 · S 7",
+    );
+  });
+
+  it("in trash mode shows the purge countdown and emits restore / delete forever", async () => {
+    const now = 1_700_000_000_000;
+    const wrapper = mount(GalleryGrid, {
+      props: {
+        entries: [
+          {
+            ...image,
+            trashed_at: 1_700_000_000,
+            purge_at: Math.floor(now / 1000) + 3 * 86_400,
+          },
+          { ...video, trashed_at: 1_700_000_000 },
+        ],
+        loading: false,
+        trash: true,
+        now,
+      },
+    });
+    const chips = wrapper.findAll('[data-test="purge-chip"]');
+    expect(chips[0]!.text()).toBe("Purges in 3 d");
+    expect(chips[1]!.text()).toBe("Kept until you empty the trash");
+    await wrapper.findAll('[data-test="tile-restore"]')[0]!.trigger("click");
+    await wrapper
+      .findAll('[data-test="tile-delete-forever"]')[1]!
+      .trigger("click");
+    expect(wrapper.emitted("restore")?.[0]?.[0]).toMatchObject({
+      filename: "recent.png",
+    });
+    expect(wrapper.emitted("delete-forever")?.[0]?.[0]).toMatchObject({
+      filename: "clip.mp4",
+    });
+  });
 });

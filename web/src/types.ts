@@ -13,8 +13,18 @@ import type {
 import type { GenerationScheduler } from "@studio/lib/generationCapabilities";
 import type { WanRecipeState } from "@studio/lib/wanRecipe";
 import type { GenerationProfileSet } from "@studio/lib/generationProfile";
+import type {
+  GalleryOrganizationFields,
+  GalleryTrashCapabilities,
+} from "@studio/lib/api/galleryOrganization";
 
 export type { SourceFitPolicy } from "@studio/lib/sourceFit";
+export type {
+  Collection,
+  GalleryOrganizationFields,
+  GalleryTrashCapabilities,
+  TagCount,
+} from "@studio/lib/api/galleryOrganization";
 
 // Matches `mold_core::OutputFormat` on the wire (lowercase strings).
 export type OutputFormat =
@@ -61,6 +71,9 @@ export type Scheduler =
 export interface OutputMetadata {
   /** User-facing authoring mode; independent of internal auto-chaining. */
   output_mode?: "one-shot" | "sequence" | null;
+  /** User-authored print title as it was at creation (D5). Embedded so
+   * mirrors carry it; the gallery row's editable title wins for display. */
+  title?: string | null;
   prompt: string;
   negative_prompt?: string | null;
   original_prompt?: string | null;
@@ -132,7 +145,10 @@ export interface OutputMetadata {
   version: string;
 }
 
-export interface GalleryImage {
+/** One `/api/gallery` row. The organization fields (`title`, `tags`,
+ * `favorite`, `collections`, `trashed_at`, `purge_at`) are additive: older
+ * hosts omit them and every reader treats absence as "not organized". */
+export interface GalleryImage extends GalleryOrganizationFields {
   filename: string;
   metadata: OutputMetadata;
   timestamp: number;
@@ -162,9 +178,14 @@ export function mediaKind(
   return "image";
 }
 
-// Mirror of `mold_core::GalleryCapabilities`.
+// Mirror of `mold_core::GalleryCapabilities`. `trash` and `organize` are
+// additive: absent means an older host whose DELETE is permanent and whose
+// prints cannot be titled, tagged, favorited, or collected — the Library hides
+// that UI and keeps the hard-delete wording for such a host.
 export interface GalleryCapabilities {
   can_delete?: boolean;
+  trash?: GalleryTrashCapabilities | null;
+  organize?: boolean;
 }
 
 // Mirror of `mold_core::ServerCapabilities`.
@@ -287,6 +308,8 @@ export interface DevicePlacement {
 // Wire shape — what we POST to /api/generate/stream. snake_case to match serde.
 export interface GenerateRequestWire {
   prompt: string;
+  /** User-authored print title (D5). Additive; absent = untitled. */
+  title?: string | null;
   prompt_transform?: PromptTransformProvenanceWire | null;
   negative_prompt?: string | null;
   model: string;
@@ -924,6 +947,10 @@ export type {
 export interface GenerateFormState {
   version: 3;
   prompt: string;
+  /** Print title typed in Create's title field; rides every request this
+   * form builds as `GenerateRequestWire.title`. Optional so persisted
+   * pre-title drafts keep loading; `null`/absent = untitled. */
+  title?: string | null;
   /** Root user-authored prompt retained across Expand/Remix and Gallery reuse. */
   originalPrompt?: string | null;
   /** Active style preset id (see `lib/stylePresets`). `null` = no style. The
