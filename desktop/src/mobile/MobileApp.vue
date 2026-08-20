@@ -299,14 +299,18 @@ import {
   type MobileLibraryScope,
 } from "./libraryOrganization";
 import {
+  captureCachedHostFence,
   clearCachedGalleryHosts,
   loadCachedGallery,
   loadCachedGalleryMedia,
+  loadCachedHostPresentation,
   patchCachedGalleryPrints,
   pruneCachedGalleryMedia,
   removeCachedGalleryPrints,
   storeCachedGallery,
   storeCachedGalleryMedia,
+  storeCachedHostPresentation,
+  type CachedHostPresentation,
 } from "./galleryCache";
 import {
   MOBILE_GALLERY_COLUMNS_MAX,
@@ -395,6 +399,12 @@ interface PendingGalleryPrint extends MobileGalleryImage {
   cacheKey: string;
   hostName: string;
   target: ApiTarget;
+}
+
+interface ModelSnapshotIdentity {
+  cacheKey: string;
+  updatedAt: number;
+  serverVersion: string | null;
 }
 
 /** The Library's bottom-sheet editors (one open at a time). */
@@ -492,6 +502,7 @@ const HOST_PROBE_TIMEOUT_MS = 9_000;
  *  a deadline that fires with no route would manufacture a dead end. */
 const MOBILE_PLACEMENT_SETTLE_MS = 1_500;
 const GALLERY_HOST_TIMEOUT_MS = 9_000;
+const REUSE_PRESENTATION_TIMEOUT_MS = 9_000;
 const OUTPUT_OPTIONS = [
   { value: "single" as const, label: "One shot" },
   { value: "sequence" as const, label: "Sequence" },
@@ -554,6 +565,8 @@ const modelsHostId = ref("");
  *  to the union picker the automatic policies need. The browsed machine's copy
  *  is written by `refreshModels`; peers are filled in by `refreshRoutingModels`. */
 const modelsByHost = ref<Record<string, ModelEntry[]>>({});
+/** Identity and freshness authority for each in-memory model snapshot. */
+const modelSnapshotIdentities = ref<Record<string, ModelSnapshotIdentity>>({});
 /** Persisted generation target: a machine id, `auto`, or `capable`. */
 const generateTargetPolicy = ref(loadMobileGenerateTarget());
 const loadingModels = ref(false);
@@ -753,6 +766,10 @@ let pendingGallery: PendingGalleryPrint[] = [];
 /** Every concrete device copy behind the deduplicated Library tiles. */
 let galleryCopies: PendingGalleryPrint[] = [];
 let modelLoadEpoch = 0;
+let reusePrintEpoch = 0;
+let reusePrintController: AbortController | null = null;
+let sourceUseEpoch = 0;
+let sourceUseController: AbortController | null = null;
 let galleryRefreshRequested = false;
 let galleryRefreshDeferred = false;
 let galleryRefreshTask: Promise<void> | null = null;
@@ -2444,7 +2461,10 @@ async function refreshModels(): Promise<boolean> {
     host.online = true;
     host.version = status.version;
     host.hostname = status.hostname ?? undefined;
+    const priorCacheKey = mobileGalleryCacheKey(host);
     host.instanceId = status.instance_id ?? host.instanceId;
+    const nextCacheKey = mobileGalleryCacheKey(host);
+    if (priorCacheKey !== nextCacheKey) await clearCachedGalleryHosts([priorCacheKey]);
     captureHostTelemetry(hostId, status);
     expandCapabilities[hostId] = capabilities?.expand;
     serverCapabilities[hostId] = capabilities;
@@ -2454,6 +2474,22 @@ async function refreshModels(): Promise<boolean> {
     models.value = filterRestrictedModels(entries, capabilities);
     modelsHostId.value = hostId;
     modelsByHost.value = { ...modelsByHost.value, [hostId]: models.value };
+    modelSnapshotIdentities.value = {
+      ...modelSnapshotIdentities.value,
+      [hostId]: {
+        cacheKey: nextCacheKey,
+        updatedAt: Date.now(),
+        serverVersion: status.version ?? null,
+      },
+    };
+    await storeCachedHostPresentation({
+      hostId: nextCacheKey,
+      updatedAt: Date.now(),
+      instanceId: host.instanceId?.trim() || null,
+      serverVersion: status.version ?? null,
+      models: models.value,
+      capabilities,
+    });
     const selectedEntry = generationModels.value.find((model) => model.name === form.model);
     if (selectedEntry) {
       reconcileModelCapabilities(form, selectedEntry);
@@ -2487,30 +2523,54 @@ async function refreshRoutingModels(): Promise<void> {
     peers.map(async (host) => {
       try {
         const target = mobileHostTarget(host);
+        const cacheKey = mobileGalleryCacheKey(host);
+        const serverVersion = host.version ?? null;
         const [entries, capabilities] = await Promise.all([
           apiJsonTo<ModelEntry[]>(target, "/api/models"),
           apiJsonTo<ServerCapabilities>(target, "/api/capabilities").catch(() => null),
         ]);
+        const currentHost = hosts.value.find((candidate) => candidate.id === host.id);
+        if (
+          !currentHost ||
+          mobileGalleryCacheKey(currentHost) !== cacheKey ||
+          currentHost.baseUrl !== target.baseUrl ||
+          (currentHost.apiKey || null) !== target.apiKey
+        ) {
+          return null;
+        }
         if (capabilities !== null) {
           expandCapabilities[host.id] = capabilities.expand;
           serverCapabilities[host.id] = capabilities;
         }
-        return [host.id, filterRestrictedModels(entries, capabilities)] as const;
+        return [
+          host.id,
+          { cacheKey, updatedAt: Date.now(), serverVersion } satisfies ModelSnapshotIdentity,
+          filterRestrictedModels(entries, capabilities),
+        ] as const;
       } catch {
         return null;
       }
     }),
   );
   if (unmounted) return;
-  const connected = new Set(connectedHosts.value.map((host) => host.id));
   const next: Record<string, ModelEntry[]> = {};
+  const nextIdentities: Record<string, ModelSnapshotIdentity> = {};
   for (const [id, entries] of Object.entries(modelsByHost.value)) {
-    if (connected.has(id)) next[id] = entries;
+    const host = connectedHosts.value.find((candidate) => candidate.id === id);
+    const identity = modelSnapshotIdentities.value[id];
+    if (host && identity?.cacheKey === mobileGalleryCacheKey(host)) {
+      next[id] = entries;
+      nextIdentities[id] = identity;
+    }
   }
   for (const snapshot of snapshots) {
-    if (snapshot) next[snapshot[0]] = snapshot[1];
+    if (snapshot) {
+      next[snapshot[0]] = snapshot[2];
+      nextIdentities[snapshot[0]] = snapshot[1];
+    }
   }
   modelsByHost.value = next;
+  modelSnapshotIdentities.value = nextIdentities;
   // The union just grew: a machine other than the browsed one may hold the
   // only generation model in the fleet, and the picker must land on it the
   // same way `refreshModels` lands on the browsed machine's first model.
@@ -5205,23 +5265,60 @@ async function loadMoreGalleryPage(): Promise<void> {
 
 async function reusePrint(print: GalleryPrint): Promise<void> {
   if (reusingPrint.value || print.metadata_synthetic) return;
+  const epoch = ++reusePrintEpoch;
+  reusePrintController?.abort();
+  const controller = new AbortController();
+  reusePrintController = controller;
   reusingPrint.value = true;
   reusePrintError.value = "";
   try {
     if (selectedHostId.value !== print.hostId) {
       selectedHostId.value = print.hostId;
     }
-    if (modelsHostId.value !== print.hostId) {
-      if (!(await refreshModels())) {
-        reusePrintError.value = `Couldn’t load models from ${print.hostName}. Check the host and try again.`;
-        return;
-      }
+    const printHost = hosts.value.find((candidate) => candidate.id === print.hostId);
+    const inMemoryIdentity = modelSnapshotIdentities.value[print.hostId];
+    const inMemoryModels =
+      inMemoryIdentity?.cacheKey === print.cacheKey &&
+      (!printHost?.version ||
+        !inMemoryIdentity.serverVersion ||
+        inMemoryIdentity.serverVersion === printHost.version)
+        ? modelsByHost.value[print.hostId]
+        : undefined;
+    let reuseModels =
+      inMemoryModels?.filter((model) => model.downloaded && isGenerationModel(model)) ?? [];
+    let usedCachedPresentationAt: number | null =
+      inMemoryModels && printHost?.online !== true ? (inMemoryIdentity?.updatedAt ?? null) : null;
+    const cachedPresentation = await loadCachedHostPresentation(print.cacheKey);
+    if (cancelledReuse(epoch, controller)) return;
+    const cacheMatchesHost =
+      cachedPresentation !== null &&
+      (!cachedPresentation.instanceId || cachedPresentation.instanceId === print.cacheKey) &&
+      (!printHost?.version ||
+        !cachedPresentation.serverVersion ||
+        cachedPresentation.serverVersion === printHost.version);
+    const validCachedPresentation = cacheMatchesHost ? cachedPresentation : null;
+    if (reuseModels.length === 0 && validCachedPresentation) {
+      reuseModels = validCachedPresentation.models.filter(
+        (model) => model.downloaded && isGenerationModel(model),
+      );
+      if (reuseModels.length > 0) usedCachedPresentationAt = validCachedPresentation.updatedAt;
     }
-    if (generationModels.value.length === 0) {
+    if (reuseModels.length === 0) {
+      const presentation = await readReusePresentation(print, controller.signal);
+      if (cancelledReuse(epoch, controller)) return;
+      reuseModels = presentation.models.filter(
+        (model) => model.downloaded && isGenerationModel(model),
+      );
+    } else {
+      // Saved state is authoritative for this interaction. Refresh it for the
+      // next one without holding the viewer or mutating this reuse attempt.
+      void readReusePresentation(print, new AbortController().signal).catch(() => undefined);
+    }
+    if (reuseModels.length === 0) {
       reusePrintError.value = `${print.hostName} has no downloaded models available.`;
       return;
     }
-    const reuse = applyMobileGalleryMetadata(form, print.metadata, generationModels.value);
+    const reuse = applyMobileGalleryMetadata(form, print.metadata, reuseModels);
     if (reuse.sequenceUnsupportedReason) {
       reusePrintError.value = reuse.sequenceUnsupportedReason;
       return;
@@ -5229,7 +5326,14 @@ async function reusePrint(print: GalleryPrint): Promise<void> {
     // The print's own saved title comes back with its settings; the Library
     // title (a later rename) wins over the metadata stamp when it exists.
     printTitle.value = organizationOf(print)?.title ?? reuse.title;
-    if (!reuse.sequence) await restoreOrdinaryReusedSource(print);
+    const sourceRestoreNotice = !reuse.sequence
+      ? await restoreOrdinaryReusedSource(
+          print,
+          controller.signal,
+          () => !cancelledReuse(epoch, controller),
+        )
+      : null;
+    if (cancelledReuse(epoch, controller)) return;
     if (reuse.sequence) {
       // A sequence print reloads the clip rail as a NEW draft: no edit
       // session, nothing cached (iPhone has no chain-detail recovery route,
@@ -5257,6 +5361,14 @@ async function reusePrint(print: GalleryPrint): Promise<void> {
       draft.lastSingleModel = null;
     }
     const notes: string[] = [];
+    if (usedCachedPresentationAt !== null) {
+      const ageMinutes = Math.max(0, Math.floor((Date.now() - usedCachedPresentationAt) / 60_000));
+      notes.push(
+        ageMinutes < 1
+          ? "Saved model information was used and is refreshing in the background."
+          : `Model information saved ${ageMinutes} min ago was used and is refreshing in the background.`,
+      );
+    }
     if (reuse.substitutedModel) {
       notes.push(
         `The original model isn’t installed on ${print.hostName}; using ${reuse.modelName}.`,
@@ -5265,13 +5377,12 @@ async function reusePrint(print: GalleryPrint): Promise<void> {
     if (reuse.sequence) {
       notes.push(sequenceReuseNote(reuse.sequence.clips.length, reuse.sequence.lossy));
       if (reuse.sequence.raised > 0) {
-        notes.push(
-          sequenceReuseClampNote(modelDisplayNameForId(form.model, generationModels.value)),
-        );
+        notes.push(sequenceReuseClampNote(modelDisplayNameForId(form.model, reuseModels)));
       }
     } else if (notes.length === 0) {
       notes.push("Prompt settings restored");
     }
+    if (sourceRestoreNotice) notes.push(sourceRestoreNotice);
     // A first/last-frame print restores every knob except its closing still:
     // saved metadata records each keyframe's name and digest, never the bytes
     // (`applyMetadataToForm` already cleared `form.endFrame`). Say so, the same
@@ -5285,7 +5396,7 @@ async function reusePrint(print: GalleryPrint): Promise<void> {
       Boolean(print.metadata.source_image_sha256 ?? print.metadata.source_image_name),
     );
     if (endFrameNotice) notes.push(endFrameNotice);
-    setGenerationStatus(notes.join(" · "), !!endFrameNotice);
+    setGenerationStatus(notes.join(" · "), !!endFrameNotice || !!sourceRestoreNotice);
     // FL2VA reuse leaves bytes-less boundary descriptors; when the original
     // was a gallery image its bytes are still on the print's host — fetch
     // them so the wells fill instead of demanding a reattach.
@@ -5296,17 +5407,100 @@ async function reusePrint(print: GalleryPrint): Promise<void> {
     galleryRefreshDeferred = false;
     tab.value = "generate";
     void nextTick(() => document.querySelector<HTMLTextAreaElement>("#mobile-prompt")?.focus());
+  } catch (error) {
+    if (!cancelledReuse(epoch, controller)) {
+      reusePrintError.value =
+        error instanceof Error && error.message.includes("timed out")
+          ? error.message
+          : `Couldn’t load models from ${print.hostName}. ${describeTransportError(error, print.hostName)}`;
+    }
   } finally {
-    reusingPrint.value = false;
+    if (epoch === reusePrintEpoch) {
+      reusingPrint.value = false;
+      reusePrintController = null;
+    }
   }
 }
 
-async function restoreOrdinaryReusedSource(print: GalleryPrint): Promise<void> {
-  if (caps.value.sourceImageMode !== "single") return;
+function cancelledReuse(epoch: number, controller: AbortController): boolean {
+  return unmounted || controller.signal.aborted || epoch !== reusePrintEpoch;
+}
+
+async function readReusePresentation(
+  print: GalleryPrint,
+  signal: AbortSignal,
+): Promise<CachedHostPresentation> {
+  const host = hosts.value.find((candidate) => candidate.id === print.hostId);
+  if (!host) throw new Error("This machine is no longer configured.");
+  const target = mobileHostTarget(host);
+  const cacheFence = captureCachedHostFence(print.cacheKey);
+  const timeoutController = new AbortController();
+  let timeout: ReturnType<typeof setTimeout> | null = null;
+  let rejectCancellation: ((reason: Error) => void) | null = null;
+  const cancelled = new Promise<never>((_resolve, reject) => {
+    rejectCancellation = reject;
+  });
+  const abort = () => {
+    timeoutController.abort();
+    rejectCancellation?.(new DOMException("Reuse settings was cancelled", "AbortError"));
+  };
+  signal.addEventListener("abort", abort, { once: true });
+  if (signal.aborted) abort();
+  timeout = setTimeout(() => {
+    timeoutController.abort();
+    rejectCancellation?.(
+      new Error(`Loading saved settings from ${print.hostName} timed out. Try again.`),
+    );
+  }, REUSE_PRESENTATION_TIMEOUT_MS);
+  try {
+    const [status, entries, capabilities] = await Promise.race([
+      Promise.all([
+        apiJsonTo<ServerStatus>(target, "/api/status", { signal: timeoutController.signal }),
+        apiJsonTo<ModelEntry[]>(target, "/api/models", { signal: timeoutController.signal }),
+        apiJsonTo<ServerCapabilities>(target, "/api/capabilities", {
+          signal: timeoutController.signal,
+        }).catch(() => null),
+      ]),
+      cancelled,
+    ]);
+    const instanceId = status.instance_id?.trim() || null;
+    const expectedInstanceId =
+      print.cacheKey !== print.hostId ? print.cacheKey : host.instanceId?.trim();
+    if (expectedInstanceId && instanceId !== expectedInstanceId) {
+      throw new Error("This machine now reports a different server identity.");
+    }
+    const currentHost = hosts.value.find((candidate) => candidate.id === print.hostId);
+    if (!currentHost || mobileGalleryCacheKey(currentHost) !== print.cacheKey) {
+      throw new Error("This machine changed while its saved settings were refreshing.");
+    }
+    const presentation: CachedHostPresentation = {
+      hostId: print.cacheKey,
+      updatedAt: Date.now(),
+      instanceId,
+      serverVersion: status.version ?? null,
+      models: filterRestrictedModels(entries, capabilities),
+      capabilities,
+    };
+    await storeCachedHostPresentation(presentation, cacheFence);
+    return presentation;
+  } finally {
+    if (timeout !== null) clearTimeout(timeout);
+    signal.removeEventListener("abort", abort);
+    rejectCancellation = null;
+  }
+}
+
+async function restoreOrdinaryReusedSource(
+  print: GalleryPrint,
+  signal: AbortSignal,
+  isCurrent: () => boolean,
+): Promise<string | null> {
+  if (caps.value.sourceImageMode !== "single") return null;
   const restoredSourceFit = parseSourceFitPolicy(print.metadata.source_fit);
   const stored = await restoreGenerationSourceMedia(print.metadata.source_image_sha256).catch(
     () => null,
   );
+  if (!isCurrent()) return null;
   if (stored) {
     preserveRestoredSourceCanvas(stored.base64);
     form.sourceImage = stored.base64;
@@ -5315,16 +5509,17 @@ async function restoreOrdinaryReusedSource(print: GalleryPrint): Promise<void> {
     // image. Let that watcher settle, then reassert provenance attributes:
     // Library reuse is restoration, not a new pick.
     await nextTick();
+    if (!isCurrent()) return null;
     form.sourceImageWidth = stored.width ?? null;
     form.sourceImageHeight = stored.height ?? null;
     form.width = print.metadata.generation_width ?? print.metadata.width;
     form.height = print.metadata.generation_height ?? print.metadata.height;
     if (restoredSourceFit) form.sourceFit = restoredSourceFit;
-    return;
+    return null;
   }
 
   const filename = print.metadata.source_image_name;
-  if (!filename) return;
+  if (!filename) return null;
   const candidates = new Map<string, ApiTarget>([[print.hostId, print.target]]);
   for (const entry of gallery.value) {
     if (entry.filename === filename && !candidates.has(entry.hostId)) {
@@ -5333,30 +5528,68 @@ async function restoreOrdinaryReusedSource(print: GalleryPrint): Promise<void> {
   }
   for (const target of candidates.values()) {
     try {
-      const response = await apiFetchTo(target, galleryMediaPath(filename, "host"));
-      if (!response.ok) continue;
-      const blob = await response.blob();
-      if (!blob.size) continue;
-      const base64 = await blobToBase64(blob);
-      const dimensions = imageDimensionsFromBase64(base64);
-      preserveRestoredSourceCanvas(base64);
-      form.sourceImage = base64;
+      const source = await readReusedSourceCandidate(target, filename, signal);
+      if (!isCurrent()) return null;
+      if (!source) continue;
+      preserveRestoredSourceCanvas(source.base64);
+      form.sourceImage = source.base64;
       form.sourceImageName = filename;
       await nextTick();
-      form.sourceImageWidth = dimensions?.width ?? null;
-      form.sourceImageHeight = dimensions?.height ?? null;
+      if (!isCurrent()) return null;
+      form.sourceImageWidth = source.dimensions?.width ?? null;
+      form.sourceImageHeight = source.dimensions?.height ?? null;
       form.width = print.metadata.generation_width ?? print.metadata.width;
       form.height = print.metadata.generation_height ?? print.metadata.height;
       if (restoredSourceFit) form.sourceFit = restoredSourceFit;
-      return;
+      return null;
     } catch {
       // Continue through every host that advertises the named source.
     }
   }
-  setGenerationStatus(
-    "The original source image is unavailable. Reattach it before developing.",
-    true,
-  );
+  if (!isCurrent()) return null;
+  return "The original source image is unavailable. Reattach it before developing.";
+}
+
+async function readReusedSourceCandidate(
+  target: ApiTarget,
+  filename: string,
+  signal: AbortSignal,
+): Promise<{ base64: string; dimensions: SourceDimensions | null } | null> {
+  const controller = new AbortController();
+  let timeout: ReturnType<typeof setTimeout> | null = null;
+  let rejectDeadline: ((reason: Error) => void) | null = null;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    rejectDeadline = reject;
+  });
+  const abort = () => {
+    controller.abort();
+    rejectDeadline?.(new DOMException("Reuse source restoration was cancelled", "AbortError"));
+  };
+  signal.addEventListener("abort", abort, { once: true });
+  if (signal.aborted) abort();
+  timeout = setTimeout(() => {
+    controller.abort();
+    rejectDeadline?.(new Error("Source restoration timed out"));
+  }, REUSE_PRESENTATION_TIMEOUT_MS);
+  try {
+    return await Promise.race([
+      (async () => {
+        const response = await apiFetchTo(target, galleryMediaPath(filename, "host"), {
+          signal: controller.signal,
+        });
+        if (response.ok === false) return null;
+        const blob = await response.blob();
+        if (!blob.size) return null;
+        const base64 = await blobToBase64(blob);
+        return { base64, dimensions: imageDimensionsFromBase64(base64) };
+      })(),
+      deadline,
+    ]);
+  } finally {
+    if (timeout !== null) clearTimeout(timeout);
+    signal.removeEventListener("abort", abort);
+    rejectDeadline = null;
+  }
 }
 
 /** Fetch bytes for the reuse-restored FL2VA boundary descriptors, within the
@@ -5418,10 +5651,18 @@ async function restoreReusedH3BoundaryMedia(print: {
 async function useSelectedPrintAsSource(): Promise<void> {
   const print = selectedPrint.value;
   if (!print || !canUseSelectedPrintAsSource.value || usingPrintAsSource.value) return;
+  const epoch = ++sourceUseEpoch;
+  sourceUseController?.abort();
+  const controller = new AbortController();
+  sourceUseController = controller;
+  const isCurrent = () => !unmounted && !controller.signal.aborted && epoch === sourceUseEpoch;
   usingPrintAsSource.value = true;
   reusePrintError.value = "";
   try {
-    const response = await apiFetchTo(print.target, galleryMediaPath(print.filename, "host"));
+    const response = await apiFetchTo(print.target, galleryMediaPath(print.filename, "host"), {
+      signal: controller.signal,
+    });
+    if (!isCurrent()) return;
     const h3Task = minimaxH3TaskForModel(form.model);
     const attachmentMode = caps.value.sourceImageMode !== "single";
     const existingBytes = inlineGenerationMediaBytes(
@@ -5438,9 +5679,11 @@ async function useSelectedPrintAsSource(): Promise<void> {
       throw new Error(MOBILE_MEDIA_BUDGET_ERROR);
     }
     const blob = await response.blob();
+    if (!isCurrent()) return;
     if (blob.size === 0) throw new Error("That gallery image is empty.");
     if (exceedsBudget(blob.size)) throw new Error(MOBILE_MEDIA_BUDGET_ERROR);
     const base64 = await blobToBase64(blob);
+    if (!isCurrent()) return;
     if (h3Task) {
       const dimensions = imageDimensionsFromBase64(base64) ?? {
         width: print.metadata.width,
@@ -5487,9 +5730,12 @@ async function useSelectedPrintAsSource(): Promise<void> {
     galleryRefreshDeferred = false;
     tab.value = "generate";
   } catch (error) {
-    reusePrintError.value = describeTransportError(error, print.hostName);
+    if (isCurrent()) reusePrintError.value = describeTransportError(error, print.hostName);
   } finally {
-    usingPrintAsSource.value = false;
+    if (epoch === sourceUseEpoch) {
+      usingPrintAsSource.value = false;
+      sourceUseController = null;
+    }
   }
 }
 
@@ -6746,7 +6992,14 @@ function navigateSelectedPrint(delta: -1 | 1): void {
 }
 
 function closePrint(): void {
-  if (reusingPrint.value || usingPrintAsSource.value) return;
+  reusePrintEpoch += 1;
+  reusePrintController?.abort();
+  reusePrintController = null;
+  reusingPrint.value = false;
+  sourceUseEpoch += 1;
+  sourceUseController?.abort();
+  sourceUseController = null;
+  usingPrintAsSource.value = false;
   reusePrintError.value = "";
   selectedPrint.value = null;
   if (galleryRefreshDeferred || galleryRefreshRequested) {
@@ -7081,6 +7334,10 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   unmounted = true;
+  reusePrintEpoch += 1;
+  reusePrintController?.abort();
+  sourceUseEpoch += 1;
+  sourceUseController?.abort();
   if (pairingScannerOpen.value) {
     pairingScannerCancelled = true;
     void cancelBarcodeScanner().catch(() => undefined);

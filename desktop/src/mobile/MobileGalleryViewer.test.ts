@@ -129,6 +129,19 @@ describe("MobileGalleryViewer", () => {
     expect(view.emitted("reuse")).toHaveLength(1);
   });
 
+  it("always allows dismissal while settings are loading", async () => {
+    const view = mountViewer();
+    await view.setProps({ reusing: true });
+
+    const close = view.get("[data-test='gallery-viewer-close']");
+    expect(close.attributes("disabled")).toBeUndefined();
+    await close.trigger("click");
+    expect(view.emitted("close")).toHaveLength(1);
+
+    await view.get("dialog").trigger("cancel");
+    expect(view.emitted("close")).toHaveLength(2);
+  });
+
   it("shows the recorded runtime pipeline for an LTX video", async () => {
     const view = mountViewer({
       ...image,

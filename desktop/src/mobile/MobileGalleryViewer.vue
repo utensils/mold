@@ -332,7 +332,7 @@ function mediaFailed(): void {
 }
 
 function cancelViewer(): void {
-  if (!props.reusing) emit("close");
+  emit("close");
 }
 
 function navigate(direction: "previous" | "next"): void {
@@ -580,7 +580,6 @@ onBeforeUnmount(() => {
         type="button"
         aria-label="Close print"
         data-test="gallery-viewer-close"
-        :disabled="reusing"
         @click="emit('close')"
       >
         <span aria-hidden="true">×</span>

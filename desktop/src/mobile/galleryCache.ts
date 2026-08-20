@@ -1,10 +1,11 @@
-import type { GalleryImage } from "../lib/api/types";
+import type { GalleryImage, ModelEntry, ServerCapabilities } from "../lib/api/types";
 import type { MobileGalleryImage } from "./libraryOrganization";
 
 const DB_NAME = "mold-mobile-gallery-cache";
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 const GALLERIES_STORE = "galleries";
 const MEDIA_STORE = "media";
+const PRESENTATIONS_STORE = "host-presentations";
 const MAX_PRINTS_PER_HOST = 500;
 const MAX_THUMBNAIL_RECORDS = 320;
 const mediaMutationVersions = new Map<string, number>();
@@ -16,6 +17,22 @@ interface CachedGalleryRecord {
   hostId: string;
   updatedAt: number;
   prints: GalleryImage[];
+}
+
+/** Non-secret host state needed to interpret a saved print while its machine
+ * is offline. The key is the same stable instance identity as gallery rows. */
+export interface CachedHostPresentation {
+  hostId: string;
+  updatedAt: number;
+  instanceId: string | null;
+  serverVersion: string | null;
+  models: ModelEntry[];
+  capabilities: ServerCapabilities | null;
+}
+
+export interface CachedHostFence {
+  hostId: string;
+  version: number;
 }
 
 interface CachedMediaRecord {
@@ -63,6 +80,9 @@ function openDb(): Promise<IDBDatabase | null> {
       } else {
         const media = request.transaction!.objectStore(MEDIA_STORE);
         if (!media.indexNames.contains("hostId")) media.createIndex("hostId", "hostId");
+      }
+      if (!db.objectStoreNames.contains(PRESENTATIONS_STORE)) {
+        db.createObjectStore(PRESENTATIONS_STORE, { keyPath: "hostId" });
       }
     };
     request.onsuccess = () => finish(request.result);
@@ -123,6 +143,35 @@ export async function storeCachedGallery(
       ? store.put({ hostId, updatedAt: Date.now(), prints: bounded })
       : store.get(hostId),
   );
+}
+
+export async function loadCachedHostPresentation(
+  hostId: string,
+): Promise<CachedHostPresentation | null> {
+  const record = await requestFromStore<CachedHostPresentation>(
+    PRESENTATIONS_STORE,
+    "readonly",
+    (store) => store.get(hostId),
+  );
+  return record && Array.isArray(record.models) ? record : null;
+}
+
+export async function storeCachedHostPresentation(
+  presentation: CachedHostPresentation,
+  fence: CachedHostFence = captureCachedHostFence(presentation.hostId),
+): Promise<void> {
+  await requestFromStore(PRESENTATIONS_STORE, "readwrite", (store) =>
+    fence.hostId === presentation.hostId &&
+    (hostMutationVersions.get(presentation.hostId) ?? 0) === fence.version
+      ? store.put(presentation)
+      : store.get(presentation.hostId),
+  );
+}
+
+/** Capture before a network refresh. A later clear/removal advances this
+ * generation so the response cannot recreate a purged instance record. */
+export function captureCachedHostFence(hostId: string): CachedHostFence {
+  return { hostId, version: hostMutationVersions.get(hostId) ?? 0 };
 }
 
 export async function loadCachedGalleryMedia(
@@ -280,12 +329,17 @@ export async function clearCachedGalleryHosts(hostIds: readonly string[]): Promi
       resolve();
     };
     try {
-      const transaction = db.transaction([GALLERIES_STORE, MEDIA_STORE], "readwrite");
+      const transaction = db.transaction(
+        [GALLERIES_STORE, MEDIA_STORE, PRESENTATIONS_STORE],
+        "readwrite",
+      );
       const galleries = transaction.objectStore(GALLERIES_STORE);
       const media = transaction.objectStore(MEDIA_STORE);
+      const presentations = transaction.objectStore(PRESENTATIONS_STORE);
       const hostIndex = media.index("hostId");
       for (const hostId of ids) {
         galleries.delete(hostId);
+        presentations.delete(hostId);
         const keys = hostIndex.getAllKeys(hostId);
         keys.onsuccess = () => {
           for (const key of keys.result) {
