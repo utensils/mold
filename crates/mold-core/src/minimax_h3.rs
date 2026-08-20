@@ -117,13 +117,19 @@ pub fn base_compact_model_for_task(task: Task) -> &'static str {
 }
 
 /// The base compact identity a reviewed model executes as: a Turbo tag's
-/// underlying task partition, or the resolved identity itself. The internal
+/// underlying task partition, or the compact identity itself. The internal
 /// engine partition is keyed by this value while the request keeps the full
 /// tag for provenance. The partition is derived from the tag's own TASK, not
 /// hard-wired to FL2VA, so a future reviewed Ref2VA tier cannot resolve to
-/// the FL2VA base.
+/// the FL2VA base. Identities outside the compact layout — the hidden
+/// official BF16 references included — have no compact engine partition and
+/// return `None`, so admission's route refusal fires at the route instead of
+/// deep inside artifact qualification.
 pub fn base_compact_model(model: &str) -> Option<&'static str> {
     let canonical = resolve_model_name(model)?;
+    if layout_for_model(canonical) != Some(Layout::ComfyPrunedInt8ConvrotNvfp4Awq) {
+        return None;
+    }
     if REVIEWED_TURBO_MANIFEST_TIERS
         .iter()
         .any(|tier| tier.model == canonical)
@@ -3674,6 +3680,23 @@ mod tests {
         }
         assert!(is_reviewed_compact_model(FL2VA_COMFY));
         assert!(is_reviewed_compact_model(REF2VA_COMFY));
+        // The compact engine partition exists only for compact-layout
+        // identities: Turbo tags map to their task's base, the bases map to
+        // themselves, and the official BF16 references map to nothing.
+        for tier in REVIEWED_TURBO_MANIFEST_TIERS {
+            assert_eq!(
+                base_compact_model(tier.model),
+                Some(base_compact_model_for_task(
+                    task_for_model(tier.model).unwrap()
+                )),
+                "{}",
+                tier.model
+            );
+        }
+        assert_eq!(base_compact_model(FL2VA_COMFY), Some(FL2VA_COMFY));
+        assert_eq!(base_compact_model(REF2VA_COMFY), Some(REF2VA_COMFY));
+        assert_eq!(base_compact_model(FL2VA_OFFICIAL), None);
+        assert_eq!(base_compact_model(REF2VA_OFFICIAL), None);
     }
 
     #[test]

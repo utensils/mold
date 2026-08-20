@@ -1431,6 +1431,8 @@ fn prepare_reviewed_h3_private_fl2va_admission(
         qwen_artifact,
     )?;
     let execution_fingerprint = private_h3_admission_execution_fingerprint(
+        partition_model,
+        admitted_task,
         &resolved_request_identity_sha256,
         &artifact_report,
         runtime_qualification.identity_sha256(),
@@ -1850,6 +1852,8 @@ fn update_private_h3_qualified_artifact(digest: &mut Sha256, artifact: &H3Qualif
 #[cfg(feature = "mp4")]
 #[allow(clippy::too_many_arguments)]
 fn private_h3_admission_execution_fingerprint(
+    partition_model: &str,
+    task: Task,
     resolved_request_identity_sha256: &str,
     artifact_report: &H3PrivateArtifactQualificationReport,
     runtime_qualification_identity_sha256: &str,
@@ -1861,9 +1865,12 @@ fn private_h3_admission_execution_fingerprint(
 ) -> String {
     let mut digest = Sha256::new();
     digest.update(b"mold.minimax-h3.private-admission-execution.v1\0");
+    // The route's engine partition and task, not constants: Ref2VA evidence
+    // must mint in its own execution namespace even though the full-request
+    // hash already separates the two tasks.
     for value in [
-        contract::FL2VA_COMFY,
-        "fl2va",
+        partition_model,
+        super::private_qualification::task_id(task),
         resolved_request_identity_sha256,
         artifact_report.qualification_identity_sha256.as_str(),
         runtime_qualification_identity_sha256,
@@ -2476,7 +2483,11 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
         qwen_artifact,
     )?;
     validate_owner_component_digests(frozen_factory, &owner_component_digests)?;
+    // Recomputed under the frozen factory's own partition and task, so the
+    // comparison stays self-consistent with what admission stamped.
     let owner_execution_fingerprint = private_h3_admission_execution_fingerprint(
+        frozen_factory.canonical_model(),
+        frozen_factory.task(),
         &resolved_request_identity_sha256,
         &artifact_report,
         runtime_qualification.identity_sha256(),
@@ -5436,6 +5447,17 @@ mod tests {
             admitted_h3_route("minimax-h3-fl2va:comfy-pruned-int8-turbo-2step").is_err(),
             "unreviewed lookalike tags stay outside the admitted route"
         );
+
+        // The hidden official BF16 references have no compact engine
+        // partition, so the route's None refusal fires HERE — not several
+        // steps later inside artifact qualification.
+        for official in [contract::FL2VA_OFFICIAL, contract::REF2VA_OFFICIAL] {
+            let error = admitted_h3_route(official).unwrap_err().to_string();
+            assert!(
+                error.contains("compact engine partition"),
+                "{official}: {error}"
+            );
+        }
     }
 
     /// A Turbo tier moves the step axis and ONLY the step axis, and only to the

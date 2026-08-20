@@ -1411,7 +1411,7 @@ fn candle_task(task: Task) -> H3TransformerTask {
     }
 }
 
-const fn task_id(task: Task) -> &'static str {
+pub(crate) const fn task_id(task: Task) -> &'static str {
     match task {
         Task::Fl2va => "fl2va",
         Task::Ref2va => "ref2va",
