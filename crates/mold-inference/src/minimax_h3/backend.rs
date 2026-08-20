@@ -186,9 +186,17 @@ impl H3ValidatedComponentSet {
     }
 }
 
+/// The device class one frozen H3 plan is bound to.
+///
+/// CUDA carries its compute capability because the FlashAttention route is
+/// qualified for exactly SM89 and nothing else. Metal carries nothing: Apple
+/// Silicon has one attention route (`MetalChunkedDenseMath`), qualified for
+/// correctness rather than throughput, so there is no per-generation
+/// distinction a frozen plan would have to bind.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum H3CandleBackendDevice {
     Cuda { compute_capability: (u16, u16) },
+    Metal,
 }
 
 impl H3CandleBackendDevice {
@@ -198,6 +206,7 @@ impl H3CandleBackendDevice {
                 compute_capability: (major, _),
             } if major > 0 => Ok(()),
             Self::Cuda { .. } => bail!("MiniMax H3 CUDA route lacks a compute capability"),
+            Self::Metal => Ok(()),
         }
     }
 
@@ -206,6 +215,26 @@ impl H3CandleBackendDevice {
             Self::Cuda {
                 compute_capability: (major, minor),
             } => format!("cuda-sm{major}{minor}"),
+            Self::Metal => "metal".to_string(),
+        }
+    }
+
+    /// Resolve the device class a frozen route's compute capability describes.
+    ///
+    /// `None` is Metal, which has no per-architecture qualification, so this
+    /// is total rather than fallible.
+    pub(crate) const fn from_compute_capability(compute_capability: Option<(u16, u16)>) -> Self {
+        match compute_capability {
+            Some(compute_capability) => Self::Cuda { compute_capability },
+            None => Self::Metal,
+        }
+    }
+
+    /// Whether a candle device is the one this plan froze.
+    pub(crate) fn matches_candle(self, device: &candle_core::Device) -> bool {
+        match self {
+            Self::Cuda { .. } => device.is_cuda(),
+            Self::Metal => device.is_metal(),
         }
     }
 }
@@ -607,7 +636,11 @@ where
             || self.execution_lease.device_id() != self.plan.device_id
             || self.execution_lease.backend() != self.plan.backend
             || self.execution_lease.execution_fingerprint() != self.plan.execution_fingerprint
-            || !self.execution_lease.device().is_cuda()
+            // The lease's candle device must still be the class the plan froze
+            // -- CUDA for a CUDA plan, Metal for a Metal one. Comparing against
+            // `plan.backend` rather than a literal `is_cuda()` is what keeps
+            // this exact instead of merely non-CPU.
+            || !self.plan.backend.matches_candle(self.execution_lease.device())
         {
             bail!("MiniMax H3 execution lease changed after backend activation");
         }
@@ -793,7 +826,9 @@ where
         || components.execution_lease.device_id() != plan.device_id
         || components.execution_lease.backend() != plan.backend
         || components.execution_lease.execution_fingerprint() != plan.execution_fingerprint
-        || !components.execution_lease.device().is_cuda()
+        || !plan
+            .backend
+            .matches_candle(components.execution_lease.device())
     {
         bail!("MiniMax H3 loader returned a different or inactive execution lease");
     }
@@ -805,7 +840,9 @@ where
     if components.conditioner_lease.device_id() != plan.conditioner_placement.device_id
         || !components.conditioner_lease.device().same_device(
             match plan.conditioner_placement.execution {
-                H3ConditionerExecution::CudaResident => components.execution_lease.device(),
+                H3ConditionerExecution::CudaResident | H3ConditionerExecution::MetalResident => {
+                    components.execution_lease.device()
+                }
                 H3ConditionerExecution::CpuOffloaded => &Device::Cpu,
             },
         )
@@ -1103,6 +1140,7 @@ fn backend_plan_identity(plan: &FrozenH3Fl2VaCandlePlan) -> String {
     digest.update([0]);
     digest.update(match plan.conditioner_placement.execution {
         H3ConditionerExecution::CudaResident => b"cuda-resident".as_slice(),
+        H3ConditionerExecution::MetalResident => b"metal-resident".as_slice(),
         H3ConditionerExecution::CpuOffloaded => b"cpu-offloaded".as_slice(),
     });
     for value in [
@@ -1185,6 +1223,79 @@ mod tests {
             authorities(),
         )
         .unwrap()
+    }
+
+    /// Metal is a first-class frozen device class, and it is distinguishable
+    /// from every CUDA one: the stable id feeds the plan identity, so a Metal
+    /// plan must not collide with any `cuda-smXY`.
+    #[test]
+    fn the_metal_backend_device_validates_and_has_its_own_stable_id() {
+        assert!(H3CandleBackendDevice::Metal.validate().is_ok());
+        assert_eq!(H3CandleBackendDevice::Metal.stable_id(), "metal");
+        assert_ne!(
+            H3CandleBackendDevice::Metal.stable_id(),
+            H3CandleBackendDevice::Cuda {
+                compute_capability: (8, 9)
+            }
+            .stable_id()
+        );
+    }
+
+    /// `None` means Metal, not "an unknown CUDA card": a frozen route with no
+    /// compute capability is the Apple Silicon route.
+    #[test]
+    fn an_absent_compute_capability_resolves_to_metal() {
+        assert_eq!(
+            H3CandleBackendDevice::from_compute_capability(None),
+            H3CandleBackendDevice::Metal
+        );
+        assert_eq!(
+            H3CandleBackendDevice::from_compute_capability(Some((8, 9))),
+            H3CandleBackendDevice::Cuda {
+                compute_capability: (8, 9)
+            }
+        );
+    }
+
+    /// The lease device check is plan-exact, not merely "not CPU". Only the
+    /// CPU arm is exercisable without a GPU, and it is the one that matters:
+    /// neither device class may accept a CPU lease.
+    #[test]
+    fn neither_device_class_matches_a_cpu_lease() {
+        assert!(!H3CandleBackendDevice::Metal.matches_candle(&Device::Cpu));
+        assert!(!H3CandleBackendDevice::Cuda {
+            compute_capability: (8, 9)
+        }
+        .matches_candle(&Device::Cpu));
+    }
+
+    /// A Metal plan freezes and validates like a CUDA one, and its identity
+    /// differs — the device class is part of what was frozen.
+    #[test]
+    fn a_metal_plan_freezes_with_its_own_identity() {
+        let metal = FrozenH3Fl2VaCandlePlan::new_unavailable(
+            contract::FL2VA_OFFICIAL,
+            "gpu-0",
+            H3CandleBackendDevice::Metal,
+            EXECUTION,
+            FrozenH3ConditionerPlacement::new(
+                "cpu",
+                H3ConditionerExecution::CpuOffloaded,
+                EXECUTION,
+                mold_candle::minimax_h3::H3_BF16_PARAMETER_BYTES,
+                0,
+                1_024,
+            )
+            .unwrap(),
+            FrozenH3BlockStreamingPlan::new("gpu-0", EXECUTION, 8, 1).unwrap(),
+            authorities(),
+        )
+        .unwrap();
+        assert_eq!(metal.backend(), H3CandleBackendDevice::Metal);
+        assert_ne!(
+            metal.identity_sha256(),
+            plan(contract::FL2VA_OFFICIAL).identity_sha256()
+        );
     }
 
     #[test]

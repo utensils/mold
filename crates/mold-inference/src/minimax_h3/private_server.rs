@@ -1000,7 +1000,10 @@ impl H3PrivateFl2VaAdmissionEvidence {
             || self.base_factory_authority.task() != self.task
             || self.base_factory_authority.device_id() != self.device_id
             || self.base_factory_authority.device_ordinal() != self.device_ordinal
-            || self.base_factory_authority.compute_capability() != self.compute_capability
+            // The public runtime profile is CUDA SM89 only, so a Metal factory
+            // authority (which carries no compute capability) can never match
+            // here and fails closed without a separate branch.
+            || self.base_factory_authority.compute_capability() != Some(self.compute_capability)
             || self.base_factory_authority.execution_fingerprint() != self.execution_fingerprint
             || self.base_factory_authority.component_set_identity_sha256()
                 != self.component_set_identity_sha256
@@ -2444,7 +2447,7 @@ fn validate_base_factory(
         || factory.task() != Task::Fl2va
         || factory.device_id() != owner.device_id
         || factory.device_ordinal() != owner.device_ordinal
-        || factory.compute_capability() != owner.compute_capability
+        || factory.compute_capability() != Some(owner.compute_capability)
         || factory.prepared_target_attempt_identities().is_some()
         || !factory.attention_runtime_identity_sha256().is_empty()
         || factory.attention_backend() != AttentionBackend::Flash
@@ -2595,7 +2598,9 @@ impl H3PrivateServerExecutionLease {
                 cancellation_scope_identity_sha256,
             ),
             device_id: factory.device_id().into(),
-            compute_capability: factory.compute_capability(),
+            compute_capability: factory
+                .compute_capability()
+                .ok_or_else(|| anyhow!("public MiniMax H3 runtime requires a CUDA route"))?,
             execution_fingerprint: factory.execution_fingerprint().into(),
             device,
             active: true,
@@ -5404,7 +5409,7 @@ mod tests {
             model: contract::FL2VA_COMFY.into(),
             device_id: DEVICE_0.into(),
             device_ordinal: 0,
-            compute_capability: (8, 9),
+            compute_capability: Some((8, 9)),
             execution_fingerprint: sha('4'),
             conditioner_placement: H3FactoryConditionerPlacement::HostCpuThenDrop,
             qwen_parameter_bytes: 10,
@@ -6218,7 +6223,7 @@ mod tests {
         let route = H3PrivatePresentationRoute {
             device_id: "cuda:00000000000000000000000000000000",
             device_ordinal: 0,
-            compute_capability: (8, 9),
+            compute_capability: Some((8, 9)),
         };
         let authority = authenticate_h3_public_presentation(&[route]).unwrap();
         assert_eq!(authority.canonical_model(), contract::FL2VA_COMFY);
