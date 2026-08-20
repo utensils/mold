@@ -2,11 +2,13 @@ name: Publish Nix Cache
 
 on:
   push:
-    branches: [main]
+    # Cachix is a release convenience, not a per-commit validation signal.
+    # Build each public closure once for the immutable full release revision.
+    tags: ["v*"]
 
 concurrency:
-  # CUDA builds routinely outlive the interval between main pushes. Queue them
-  # so each completed build reaches Cachix instead of cancelling every upload.
+  # Full release tags are immutable. Let their cache publication finish rather
+  # than replacing a release closure if two tags are processed close together.
   group: nix-cache-${{ github.ref }}
   cancel-in-progress: false
 

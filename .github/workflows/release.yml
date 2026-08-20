@@ -4,9 +4,13 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
+  schedule:
+    # Rolling containers are deliberately separated from main-push delivery.
+    # 12:47 UTC is 05:47 America/Phoenix and avoids the top-of-hour surge.
+    - cron: "47 12 * * *"
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ github.event_name == 'schedule' && 'docker-nightly' || github.ref }}
   cancel-in-progress: true
 
 env:
@@ -16,6 +20,7 @@ env:
 
 jobs:
   build-macos:
+    if: github.event_name != 'schedule'
     runs-on: macos-14
     env:
       # sccache rejects incremental rustc invocations.
@@ -75,6 +80,7 @@ jobs:
 
   # Ampere (RTX 3090/A40, sm_86)
   build-linux-sm86:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     env:
       CARGO_INCREMENTAL: "0"
@@ -161,6 +167,7 @@ jobs:
 
   # Ada Lovelace (RTX 40-series, sm_89)
   build-linux-sm89:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     env:
       CARGO_INCREMENTAL: "0"
@@ -251,6 +258,7 @@ jobs:
   # Datacenter Blackwell (B200/B300, sm_100). Built and statically validated;
   # hardware qualification remains deferred.
   build-linux-sm100:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     env:
       CARGO_INCREMENTAL: "0"
@@ -337,6 +345,7 @@ jobs:
 
   # Consumer Blackwell (RTX 50-series, sm_120)
   build-linux-sm120:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     env:
       CARGO_INCREMENTAL: "0"
@@ -433,14 +442,19 @@ jobs:
       channel: stable
     secrets: inherit
 
-  # Docker images — main publishes the mutable rolling latest* map; v* jobs
-  # create-once/verify semver aliases and export exact digest fragments.
+  # Docker images — the off-hours schedule publishes the mutable rolling
+  # latest* map; v* jobs create-once/verify semver aliases and export exact
+  # digest fragments. Main pushes never allocate this six-target matrix.
   docker:
+    if: github.event_name == 'schedule' || startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
     strategy:
+      # Keep nightly maintenance from reclaiming the daytime runner pool.
+      # Full releases retain the existing parallel publication behavior.
+      max-parallel: ${{ github.event_name == 'schedule' && 2 || 6 }}
       matrix:
         include:
           - cuda_cap: "89"
@@ -591,7 +605,7 @@ jobs:
 
   # Rolling pre-release on every push to main
   release-latest:
-    if: github.ref == 'refs/heads/main'
+    if: github.event_name != 'schedule' && github.ref == 'refs/heads/main'
     # Native rolling artifacts should not wait for best-effort Nix validation
     # or the lower-priority container matrix. Docker publishes its own rolling
     # aliases, and Nix builds live in nix-cache.yml.
