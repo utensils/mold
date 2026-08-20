@@ -90,7 +90,8 @@ use super::vae_runtime::{
 use super::H3ConditionerLease;
 #[cfg(feature = "mp4")]
 use crate::attention::{AttentionBackend, AttentionChunkPolicy};
-#[cfg(feature = "mp4")]
+// Feature-independent: the envelope validators below name this in their
+// signatures in every build, matching how the type itself is defined.
 use crate::h3_factory::H3FactoryTurboAdapterAuthority;
 #[cfg(feature = "mp4")]
 use crate::h3_factory::H3PrivateFl2VaFactoryAuthority;
@@ -152,8 +153,15 @@ pub const fn reviewed_h3_private_runtime_available_for_task(task: Task) -> bool 
         Task::Fl2va => true,
         #[cfg(not(feature = "h3"))]
         Task::Fl2va => !REVIEWED_RUNTIME_QUALIFICATION_RECORD_SHA256.is_empty(),
-        // Ref2VA remains sealed until its own artifact and runtime campaign is
-        // reviewed. Do not infer authority from an FL2VA record.
+        // Ref2VA has no reviewed bounds and no qualified public route. It is
+        // reachable only from the developer-only campaign build, whose whole
+        // purpose is to measure the bounds a future reviewed record would
+        // carry, and which admits under explicitly provisional ceilings.
+        // Do not infer authority from an FL2VA record, and do not widen this
+        // to `feature = "h3"`: a shipping build must keep refusing Ref2VA.
+        #[cfg(feature = "h3-private-uat")]
+        Task::Ref2va => true,
+        #[cfg(not(feature = "h3-private-uat"))]
         Task::Ref2va => false,
     }
 }
@@ -245,7 +253,7 @@ impl H3PrivateRuntimeEnvelopeRecord {
     /// Kept as the no-adapter form so every existing caller is unchanged: the
     /// step count must be exactly [`contract::COMFY_DEFAULT_STEPS`].
     pub(crate) fn validate(&self) -> Result<()> {
-        self.validate_with_reviewed_steps(None)
+        self.validate_with_adapter(None)
     }
 
     /// Validate the envelope against an optional authenticated Turbo adapter.
@@ -255,7 +263,60 @@ impl H3PrivateRuntimeEnvelopeRecord {
     /// the step count, and it may move it only to the count that tier's
     /// distillation was reviewed for. Without an adapter the 21-step pin is
     /// exactly as strict as before.
-    pub(crate) fn validate_with_reviewed_steps(&self, turbo_steps: Option<u32>) -> Result<()> {
+    pub(crate) fn validate_with_adapter(
+        &self,
+        turbo: Option<&H3FactoryTurboAdapterAuthority>,
+    ) -> Result<()> {
+        self.validate_for_task_with_adapter(Task::Fl2va, turbo)
+    }
+
+    /// The record's serialized shape is task-neutral; what a task changes is
+    /// which conditioning fields are meaningful. FL2VA pins exactly one
+    /// first-frame endpoint and no condition audio, while Ref2VA carries no
+    /// endpoint at all and prices its conditioning from ordered references.
+    pub(crate) fn validate_for_task(&self, task: Task) -> Result<()> {
+        self.validate_for_task_with_adapter(task, None)
+    }
+
+    /// The general form. The step axis (a reviewed Turbo tier) and the
+    /// conditioning axis (the task) are orthogonal, but they are not
+    /// independent: a tier may only move the step count of an envelope for the
+    /// task its own distillation was reviewed for. Reducing the adapter to a
+    /// bare step count loses exactly that, and since the FL2V 768p and Ref2V
+    /// tiers are both 5-point schedules, an FL2V adapter would otherwise be
+    /// indistinguishable from a Ref2V one on a Ref2VA envelope.
+    pub(crate) fn validate_for_task_with_adapter(
+        &self,
+        task: Task,
+        turbo: Option<&H3FactoryTurboAdapterAuthority>,
+    ) -> Result<()> {
+        let reviewed_steps = match turbo {
+            None => None,
+            Some(turbo) => {
+                match turbo.reviewed_task() {
+                    Some(adapter_task) if adapter_task == task => {}
+                    // An unrecognised tier id is a mismatch, never a wildcard.
+                    _ => bail!(
+                        "private H3 Turbo adapter {} was not reviewed for the {task:?} envelope",
+                        turbo.tier_stable_id()
+                    ),
+                }
+                Some(turbo.grid_points())
+            }
+        };
+        self.validate_for_task_with_reviewed_steps(task, reviewed_steps)
+    }
+
+    /// Apply a step count whose task scoping the CALLER has already
+    /// established. Only two callers qualify: the adapter form above, which
+    /// has just matched the tier's reviewed task, and the compiled public
+    /// profile, which independently pins `record.task == "fl2va"`. Everything
+    /// else must go through the adapter form so the tier identity is checked.
+    fn validate_for_task_with_reviewed_steps(
+        &self,
+        task: Task,
+        turbo_steps: Option<u32>,
+    ) -> Result<()> {
         let reviewed_steps = turbo_steps.unwrap_or(contract::COMFY_DEFAULT_STEPS);
         if self.max_steps != reviewed_steps {
             bail!(
@@ -263,19 +324,30 @@ impl H3PrivateRuntimeEnvelopeRecord {
                 self.max_steps
             )
         }
-        self.validate_shape()
+        self.validate_shape(task)
     }
 
-    fn validate_shape(&self) -> Result<()> {
+    fn validate_shape(&self, task: Task) -> Result<()> {
+        let conditioning_ok = match task {
+            Task::Fl2va => {
+                self.endpoint_count == 1
+                    && self.endpoint_anchor == "first"
+                    && self.max_condition_visual_rows > 0
+            }
+            Task::Ref2va => {
+                self.endpoint_count == 0
+                    && self.endpoint_anchor == "none"
+                    && self.max_condition_visual_rows > 0
+            }
+        };
         if self.width != contract::DEFAULT_WIDTH
             || self.height != contract::DEFAULT_HEIGHT
             || self.frames != contract::MIN_FRAMES
             || self.fps != contract::FIXED_FPS
             || self.batch_size != 1
-            // The step axis is owned by `validate_with_turbo`, which is the
-            // only place a reviewed Turbo tier may move it.
-            || self.endpoint_count != 1
-            || self.endpoint_anchor != "first"
+            // The step axis is owned by `validate_for_task_with_adapter`,
+            // which is the only place a reviewed Turbo tier may move it.
+            || !conditioning_ok
             || [
                 self.max_qwen_output_text_rows,
                 self.max_qwen_vision_rows,
@@ -297,28 +369,45 @@ impl H3PrivateRuntimeEnvelopeRecord {
     /// step authority silently rejects every Turbo render (it did, in the first
     /// cut of this wiring), so each caller has to name which one it holds.
     #[cfg(feature = "mp4")]
-    fn validate_prepared_with_reviewed_steps(
+    fn validate_prepared_with_adapter(
         &self,
         request: &H3FactoryPreparedRequestInput,
-        turbo_steps: Option<u32>,
+        turbo: Option<&H3FactoryTurboAdapterAuthority>,
     ) -> Result<()> {
-        self.validate_with_reviewed_steps(turbo_steps)?;
+        // The request's own task selects the conditioning contract, and the
+        // adapter must have been reviewed for that same task before its step
+        // count is applied.
+        self.validate_for_task_with_adapter(request.task, turbo)?;
         let endpoint = request.endpoints.first();
+        let conditioning_ok = match request.task {
+            Task::Fl2va => {
+                request.mode == Mode::FirstFrameToAudioVideo
+                    && endpoint
+                        .is_some_and(|endpoint| endpoint.anchor == H3FactoryEndpointAnchor::First)
+                    && request.rows.condition_audio_rows == 0
+            }
+            Task::Ref2va => {
+                request.mode == Mode::ReferenceToAudioVideo
+                    && endpoint.is_none()
+                    && !request.references.is_empty()
+                    // The reference soundtrack cap rides the target-audio cap:
+                    // both are 32 kHz stereo latents over the same duration.
+                    && request.rows.condition_audio_rows <= self.max_target_audio_rows
+            }
+        };
         if request.width != self.width
             || request.height != self.height
             || request.frames != self.frames
             || request.fps != self.fps
             || request.batch_size != self.batch_size
             || request.grid_points != self.max_steps
-            || request.mode != Mode::FirstFrameToAudioVideo
             || !request.synchronized_audio
             || !request.mp4_output
             || request.endpoints.len() != usize::try_from(self.endpoint_count)?
-            || !endpoint.is_some_and(|endpoint| endpoint.anchor == H3FactoryEndpointAnchor::First)
+            || !conditioning_ok
             || request.rows.qwen_output_text_rows > self.max_qwen_output_text_rows
             || request.rows.qwen_vision_rows > self.max_qwen_vision_rows
             || request.rows.condition_visual_rows > self.max_condition_visual_rows
-            || request.rows.condition_audio_rows != 0
             || request.rows.target_video_rows > self.max_target_video_rows
             || request.rows.target_audio_rows > self.max_target_audio_rows
             || request.rows.total_packed_rows > self.max_total_packed_rows
@@ -1171,10 +1260,6 @@ fn prepare_reviewed_h3_private_fl2va_admission(
         &attention_qualification_sha256,
     )?;
     #[cfg(feature = "h3")]
-    let turbo_steps = turbo_adapter
-        .as_ref()
-        .map(H3FactoryTurboAdapterAuthority::grid_points);
-    #[cfg(feature = "h3")]
     let runtime_qualification = public_runtime_qualification(
         &artifact_report,
         device_id,
@@ -1183,7 +1268,7 @@ fn prepare_reviewed_h3_private_fl2va_admission(
         attention.identity_sha256(),
         attention.kernel().identity(),
         &attention_qualification_sha256,
-        turbo_steps,
+        turbo_adapter.as_ref(),
     )?;
     progress.checkpoint()?;
 
@@ -2228,10 +2313,7 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
         attention.kernel().identity(),
         &attention_qualification_sha256,
         // Whatever admission froze, not a fresh environment read.
-        frozen_factory
-            .quantization()
-            .turbo_adapter()
-            .map(H3FactoryTurboAdapterAuthority::grid_points),
+        frozen_factory.quantization().turbo_adapter(),
     )?;
     if runtime_qualification.identity_sha256() != owner_fence.runtime_qualification_identity_sha256
         || runtime_qualification.artifact_qualification_identity_sha256()
@@ -3124,12 +3206,9 @@ impl H3PrivateFl2VaPreparedRunner for H3PrivateConcretePreparedRunner {
             owner,
             consumption_binding,
         } = *self;
-        runtime_envelope.validate_prepared_with_reviewed_steps(
+        runtime_envelope.validate_prepared_with_adapter(
             prepared.prepared_request_input(),
-            authority
-                .quantization()
-                .turbo_adapter()
-                .map(H3FactoryTurboAdapterAuthority::grid_points),
+            authority.quantization().turbo_adapter(),
         )?;
         let observed_envelope = runtime_envelope_observation(prepared.prepared_request_input())?;
         let observed_compute_capability = match attention.device() {
@@ -3915,10 +3994,6 @@ impl H3PrivateRuntimeQualificationAuthority {
 
     #[cfg(feature = "mp4")]
     #[cfg(feature = "mp4")]
-    fn reviewed_turbo_steps(turbo: Option<&H3FactoryTurboAdapterAuthority>) -> Option<u32> {
-        turbo.map(H3FactoryTurboAdapterAuthority::grid_points)
-    }
-
     /// Validate a prepared request against this qualification's envelope,
     /// admitting a reviewed Turbo tier's own step count when an authenticated
     /// adapter is present. `None` is byte-identical to the previous behaviour.
@@ -3930,7 +4005,7 @@ impl H3PrivateRuntimeQualificationAuthority {
     ) -> Result<()> {
         self.record
             .envelope
-            .validate_prepared_with_reviewed_steps(request, Self::reviewed_turbo_steps(turbo))
+            .validate_prepared_with_adapter(request, turbo)
     }
 
     pub(crate) fn revalidate(&self) -> Result<()> {
@@ -3952,6 +4027,13 @@ enum RuntimeQualificationStorage {
     PublicCompiled {
         turbo_steps: Option<u32>,
     },
+    /// Provisional, non-qualifying bounds that exist only to admit an
+    /// instrumented campaign run so it can measure the real ones. Constructible
+    /// only under the developer-only campaign feature; release verification
+    /// rejects that feature's marker, which is the backstop that keeps this
+    /// out of every shipping build.
+    #[cfg(feature = "h3-private-uat")]
+    CaptureCompiled,
 }
 
 impl RuntimeQualificationStorage {
@@ -3978,6 +4060,8 @@ impl RuntimeQualificationStorage {
             Self::PublicCompiled { turbo_steps } => {
                 validate_public_runtime_profile_with_turbo(record, record_file_sha256, *turbo_steps)
             }
+            #[cfg(feature = "h3-private-uat")]
+            Self::CaptureCompiled => validate_capture_runtime_profile(record, record_file_sha256),
         }
     }
 }
@@ -4111,7 +4195,11 @@ fn validate_public_runtime_profile_with_turbo(
     profile_sha256: &str,
     turbo_steps: Option<u32>,
 ) -> Result<()> {
-    record.envelope.validate_with_reviewed_steps(turbo_steps)?;
+    // The record's own task is pinned to fl2va a few lines below, which is
+    // what scopes this step count.
+    record
+        .envelope
+        .validate_for_task_with_reviewed_steps(Task::Fl2va, turbo_steps)?;
     record.bounds.validate()?;
     if record.schema != PUBLIC_RUNTIME_PROFILE_SCHEMA
         || record.decision != PUBLIC_RUNTIME_PROFILE_DECISION
@@ -4126,6 +4214,240 @@ fn validate_public_runtime_profile_with_turbo(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Capture-scope Ref2VA profile.
+//
+// THESE BOUNDS ARE CEILINGS, NOT MEASUREMENTS. They exist for one purpose: an
+// instrumented Ref2VA run must be admitted before it can observe anything, and
+// admission's grant comes from a bounds record. Nothing here has been measured
+// on hardware, and nothing here may ever be transcribed into a public profile.
+// The reviewed record that eventually authorizes Ref2VA must transcribe the
+// campaign's OBSERVED values, which the capture report prints beside these
+// ceilings precisely so the two cannot be confused.
+// ---------------------------------------------------------------------------
+#[cfg(feature = "h3-private-uat")]
+const CAPTURE_RUNTIME_PROFILE_SCHEMA: &str = "mold.minimax-h3.capture-runtime-profile.v1";
+#[cfg(feature = "h3-private-uat")]
+const CAPTURE_RUNTIME_PROFILE_DECISION: &str =
+    "capture-scope-compact-ref2va-sm89-provisional-bounds";
+
+/// Ref2VA's compact campaign envelope.
+///
+/// Target geometry is FL2VA's — same canvas, duration, and step count — so the
+/// generated-side caps are identical and directly comparable. Conditioning is
+/// what differs, and its caps come from the released reference limits rather
+/// than from a measurement: at most [`contract::MAX_REFERENCE_FILES`] ordered
+/// references, each normalized onto its own canvas.
+#[cfg(feature = "h3-private-uat")]
+fn capture_runtime_envelope() -> H3PrivateRuntimeEnvelopeRecord {
+    let public = public_style_generated_caps();
+    // One 2048-square still is 4,096 rows and 4,096 vision pads — the largest
+    // single reference the contract admits. Twelve of them is the ceiling the
+    // reference count itself imposes.
+    let max_reference_rows = 4_096 * contract::MAX_REFERENCE_FILES as u64;
+    H3PrivateRuntimeEnvelopeRecord {
+        width: contract::DEFAULT_WIDTH,
+        height: contract::DEFAULT_HEIGHT,
+        frames: contract::MIN_FRAMES,
+        fps: contract::FIXED_FPS,
+        batch_size: 1,
+        max_steps: contract::COMFY_DEFAULT_STEPS,
+        // Ref2VA carries no boundary endpoint at all.
+        endpoint_count: 0,
+        endpoint_anchor: "none".into(),
+        max_qwen_output_text_rows: public.0,
+        max_qwen_vision_rows: max_reference_rows,
+        max_condition_visual_rows: max_reference_rows,
+        max_target_video_rows: public.1,
+        max_target_audio_rows: public.2,
+        max_total_packed_rows: public.0 + max_reference_rows + public.2 + public.1 + public.2,
+    }
+}
+
+/// The generated-side caps shared with the FL2VA compact envelope:
+/// `(qwen_output_text_rows, target_video_rows, target_audio_rows)`.
+#[cfg(feature = "h3-private-uat")]
+const fn public_style_generated_caps() -> (u64, u64, u64) {
+    (1_058, 37_296, 414)
+}
+
+/// Provisional device/host ceilings for one instrumented Ref2VA attempt.
+///
+/// Derived from FL2VA's corrected public bounds with one scaling argument per
+/// axis, all of them deliberately generous:
+///
+/// * Attention and FFN scale with the packed sequence. FL2VA's measured pair
+///   covers 39,776 rows; the capture envelope admits at most 88,022, which is
+///   2.22x. Attention's score matrix is quadratic in sequence length, so its
+///   ceiling takes 5x (2.22^2 rounded up) and the FFN's, which is linear in
+///   rows, takes 3x.
+/// * The condition-VAE workspace is per-encode, not per-sequence, but Ref2VA
+///   encodes a 2048-square canvas where FL2VA encodes 512x384 — 21x the pixels
+///   — so its ceiling takes 24x.
+/// * Everything else is either fixed runtime state or generated-side output
+///   whose geometry is identical to FL2VA's, and keeps FL2VA's own value.
+///
+/// The audio encoder is the one axis with no FL2VA analogue at all; it borrows
+/// the decoder's measured workspace, which runs the larger BigVGAN stack.
+#[cfg(feature = "h3-private-uat")]
+fn capture_runtime_bounds() -> H3PrivateRuntimeBoundRecord {
+    H3PrivateRuntimeBoundRecord {
+        fixed_runtime_host_bytes: 671_088_640,
+        fixed_runtime_device_bytes: 603_979_776,
+        qwen_activation_workspace_bytes: 3_758_096_384,
+        vae_construction_device_workspace_bytes: 67_108_864,
+        condition_vae_workspace_device_bytes: 469_762_048 * 24,
+        attention_workspace_device_bytes: 10_133_438_464 * 5,
+        ffn_workspace_device_bytes: 15_300_820_992 * 3,
+        decoder_tile_workspace_device_bytes: 1_543_503_872,
+        audio_decode_workspace_device_bytes: 268_435_456,
+        encoded_video_host_bytes_bound: super::pipeline::SMALL_ENCODED_VIDEO_HOST_BYTES_BOUND,
+        thumbnail_host_bytes_bound: super::pipeline::SMALL_THUMBNAIL_HOST_BYTES_BOUND,
+        mux_output_host_bytes_bound: super::pipeline::SMALL_MUX_OUTPUT_HOST_BYTES_BOUND,
+        aac_mux_staging_host_bytes: super::pipeline::SMALL_AAC_MUX_STAGING_HOST_BYTES,
+    }
+}
+
+#[cfg(feature = "h3-private-uat")]
+fn validate_capture_runtime_profile(
+    record: &H3PrivateRuntimeQualificationRecord,
+    profile_sha256: &str,
+) -> Result<()> {
+    record.envelope.validate_for_task(Task::Ref2va)?;
+    record.bounds.validate()?;
+    if record.schema != CAPTURE_RUNTIME_PROFILE_SCHEMA
+        || record.decision != CAPTURE_RUNTIME_PROFILE_DECISION
+        || record.canonical_model != contract::REF2VA_COMFY
+        || record.task != "ref2va"
+        || record.compute_capability != [8, 9]
+        || record.identity_sha256 != runtime_qualification_identity(record)
+        || profile_sha256 != record.identity_sha256
+    {
+        bail!("capture-scope H3 profile changed or is not the Ref2VA SM89 campaign profile")
+    }
+    Ok(())
+}
+
+/// Build the capture-scope authority for one instrumented Ref2VA attempt.
+///
+/// This deliberately mirrors `public_runtime_qualification`'s shape so the two
+/// are directly comparable in review, and differs from it in exactly the ways
+/// that matter: a different schema, a decision string that says the bounds are
+/// provisional, the Ref2VA task and model, and a storage variant that cannot
+/// exist in a shipping build.
+#[cfg(feature = "h3-private-uat")]
+#[allow(clippy::too_many_arguments)]
+fn capture_runtime_qualification(
+    artifact: &H3PrivateArtifactQualificationReport,
+    device_id: &str,
+    device_ordinal: usize,
+    compute_capability: (u16, u16),
+    attention_runtime_identity_sha256: &str,
+    attention_kernel_identity: &str,
+    attention_qualification_sha256: &str,
+) -> Result<H3PrivateRuntimeQualificationAuthority> {
+    if compute_capability != (8, 9)
+        || artifact.canonical_model != contract::REF2VA_COMFY
+        || artifact.task != "ref2va"
+        || !valid_sha256(attention_runtime_identity_sha256)
+        || !valid_sha256(attention_qualification_sha256)
+        || attention_kernel_identity.is_empty()
+    {
+        bail!("capture-scope H3 runtime requires the exact compact Ref2VA SM89 route")
+    }
+    let mut record = H3PrivateRuntimeQualificationRecord {
+        schema: CAPTURE_RUNTIME_PROFILE_SCHEMA.into(),
+        decision: CAPTURE_RUNTIME_PROFILE_DECISION.into(),
+        canonical_model: contract::REF2VA_COMFY.into(),
+        task: "ref2va".into(),
+        campaign_source_sha: exact_h3_runtime_build_source_sha()?.into(),
+        campaign_runtime_code_identity_sha256: super::PRIVATE_RUNTIME_CODE_IDENTITY_SHA256.into(),
+        campaign_bootstrap_record_sha256: sha256_domain("capture-profile-bootstrap"),
+        campaign_bootstrap_identity_sha256: sha256_domain("capture-profile-identity"),
+        measured_server_executable_relative_path: "capture-runtime-profile".into(),
+        measured_server_executable_sha256: sha256_domain("capture-runtime-executable"),
+        authorization_record_sha256: artifact.authorization_record_sha256.clone(),
+        authorization_source_document_sha256: artifact.authorization_source_document_sha256.clone(),
+        artifact_qualification_identity_sha256: artifact.qualification_identity_sha256.clone(),
+        artifact_total_bytes: artifact.total_bytes,
+        device_id: device_id.into(),
+        device_ordinal,
+        compute_capability: [8, 9],
+        attention_runtime_identity_sha256: attention_runtime_identity_sha256.into(),
+        attention_kernel_identity: attention_kernel_identity.into(),
+        attention_qualification_sha256: attention_qualification_sha256.into(),
+        campaign_process: H3PrivateRuntimeProcessObservation {
+            process_id: 0,
+            process_start_time_ticks: 0,
+            linux_boot_id_sha256: sha256_domain("capture-runtime-boot"),
+            executable_device: 0,
+            executable_inode: 0,
+            executable_bytes: 0,
+            executable_sha256: sha256_domain("capture-runtime-executable"),
+            launch_argv_sha256: sha256_domain("capture-runtime-argv"),
+            launch_environment_sha256: sha256_domain("capture-runtime-environment"),
+            cuda_driver_version: 0,
+            cuda_toolkit_version: 0,
+        },
+        envelope: capture_runtime_envelope(),
+        bounds: capture_runtime_bounds(),
+        evidence_artifacts: Vec::new(),
+        identity_sha256: String::new(),
+    };
+    record.identity_sha256 = runtime_qualification_identity(&record);
+    let profile_sha256 = record.identity_sha256.clone();
+    validate_capture_runtime_profile(&record, &profile_sha256)?;
+    let bounds = record.bounds.clone().into_authority();
+    Ok(H3PrivateRuntimeQualificationAuthority {
+        storage: RuntimeQualificationStorage::CaptureCompiled,
+        record_file_sha256: profile_sha256,
+        record,
+        bounds,
+        device_id: device_id.into(),
+        device_ordinal,
+        compute_capability,
+    })
+}
+
+/// Render one campaign bound as `observed / ceiling`, so the reviewer reading
+/// the capture transcribes the observation and never the ceiling.
+#[cfg(feature = "h3-private-uat")]
+pub fn h3_capture_bound_report(
+    observed: &[(&'static str, u64)],
+) -> Vec<(&'static str, u64, u64, f64)> {
+    let ceilings = capture_runtime_bounds();
+    let ceiling_for = |label: &str| match label {
+        "fixed_runtime_host_bytes" => ceilings.fixed_runtime_host_bytes,
+        "fixed_runtime_device_bytes" => ceilings.fixed_runtime_device_bytes,
+        "qwen_activation_workspace_bytes" => ceilings.qwen_activation_workspace_bytes,
+        "vae_construction_device_workspace_bytes" => {
+            ceilings.vae_construction_device_workspace_bytes
+        }
+        "condition_vae_workspace_device_bytes" => ceilings.condition_vae_workspace_device_bytes,
+        "attention_workspace_device_bytes" => ceilings.attention_workspace_device_bytes,
+        "ffn_workspace_device_bytes" => ceilings.ffn_workspace_device_bytes,
+        "decoder_tile_workspace_device_bytes" => ceilings.decoder_tile_workspace_device_bytes,
+        "audio_decode_workspace_device_bytes" => ceilings.audio_decode_workspace_device_bytes,
+        "encoded_video_host_bytes_bound" => ceilings.encoded_video_host_bytes_bound,
+        "thumbnail_host_bytes_bound" => ceilings.thumbnail_host_bytes_bound,
+        "mux_output_host_bytes_bound" => ceilings.mux_output_host_bytes_bound,
+        "aac_mux_staging_host_bytes" => ceilings.aac_mux_staging_host_bytes,
+        _ => 0,
+    };
+    observed
+        .iter()
+        .map(|(label, observed)| {
+            let ceiling = ceiling_for(label);
+            let headroom = if ceiling == 0 {
+                0.0
+            } else {
+                *observed as f64 / ceiling as f64
+            };
+            (*label, *observed, ceiling, headroom)
+        })
+        .collect()
+}
+
 #[cfg(feature = "h3")]
 #[allow(clippy::too_many_arguments)]
 fn public_runtime_qualification(
@@ -4136,8 +4458,21 @@ fn public_runtime_qualification(
     attention_runtime_identity_sha256: &str,
     attention_kernel_identity: &str,
     attention_qualification_sha256: &str,
-    turbo_steps: Option<u32>,
+    turbo: Option<&H3FactoryTurboAdapterAuthority>,
 ) -> Result<H3PrivateRuntimeQualificationAuthority> {
+    // This mints an FL2VA-shaped qualification, so a tier reviewed for another
+    // task may not set its step count — the FL2V 768p and Ref2V tiers share a
+    // 5-point schedule, so a bare count cannot tell them apart and the task
+    // identity would be stripped across this boundary.
+    if let Some(turbo) = turbo {
+        if turbo.reviewed_task() != Some(Task::Fl2va) {
+            bail!(
+                "private H3 Turbo adapter {} was not reviewed for the fl2va runtime qualification",
+                turbo.tier_stable_id()
+            )
+        }
+    }
+    let turbo_steps = turbo.map(H3FactoryTurboAdapterAuthority::grid_points);
     if compute_capability != (8, 9)
         || artifact.canonical_model != contract::FL2VA_COMFY
         || artifact.task != "fl2va"
@@ -4203,7 +4538,7 @@ fn public_runtime_qualification(
     })
 }
 
-#[cfg(feature = "h3")]
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 fn sha256_domain(value: &str) -> String {
     format!("{:x}", Sha256::digest(value.as_bytes()))
 }
@@ -4886,6 +5221,25 @@ mod tests {
     #[cfg(feature = "mp4")]
     use crate::{H3FactoryEndpointInput, H3FactoryEndpointPreprocess, H3FactoryPreparedRowsInput};
 
+    /// Build the reviewed adapter authority for one tier, so envelope tests
+    /// exercise the same value admission passes rather than a bare step count.
+    ///
+    /// Ungated like its callers: every piece it touches — the authority type,
+    /// its constructor, and the reviewed tier table — is feature-independent.
+    fn turbo_authority_for(
+        tier: mold_candle::minimax_h3::H3TurboLoraTier,
+    ) -> H3FactoryTurboAdapterAuthority {
+        H3FactoryTurboAdapterAuthority::for_reviewed_tier(
+            tier.stable_id(),
+            &sha('7'),
+            &sha('8'),
+            4_096,
+            2_048,
+            1_024,
+        )
+        .expect("reviewed tier must build an adapter authority")
+    }
+
     fn reviewed_envelope(max_steps: u32) -> H3PrivateRuntimeEnvelopeRecord {
         H3PrivateRuntimeEnvelopeRecord {
             width: contract::DEFAULT_WIDTH,
@@ -4925,9 +5279,15 @@ mod tests {
     /// count its own distillation was reviewed for.
     #[test]
     fn a_turbo_tier_moves_only_the_step_axis_of_the_reviewed_envelope() {
-        for reviewed_steps in [5u32, 9] {
+        // Both FL2V tiers, so the default FL2VA task pin applies throughout.
+        for tier in [
+            mold_candle::minimax_h3::H3TurboLoraTier::Fl2v768p4StepV10,
+            mold_candle::minimax_h3::H3TurboLoraTier::Fl2v8StepV10,
+        ] {
+            let adapter = turbo_authority_for(tier);
+            let reviewed_steps = adapter.grid_points();
             reviewed_envelope(reviewed_steps)
-                .validate_with_reviewed_steps(Some(reviewed_steps))
+                .validate_with_adapter(Some(&adapter))
                 .unwrap();
 
             // Any other count, including the baseline 21, is refused for that
@@ -4937,7 +5297,7 @@ mod tests {
                     continue;
                 }
                 let error = reviewed_envelope(wrong)
-                    .validate_with_reviewed_steps(Some(reviewed_steps))
+                    .validate_with_adapter(Some(&adapter))
                     .unwrap_err()
                     .to_string();
                 assert!(
@@ -4949,29 +5309,19 @@ mod tests {
             // And no other axis relaxes just because an adapter is present.
             let mut widened = reviewed_envelope(reviewed_steps);
             widened.width += 64;
-            assert!(widened
-                .validate_with_reviewed_steps(Some(reviewed_steps))
-                .is_err());
+            assert!(widened.validate_with_adapter(Some(&adapter)).is_err());
             let mut longer = reviewed_envelope(reviewed_steps);
             longer.frames += 4;
-            assert!(longer
-                .validate_with_reviewed_steps(Some(reviewed_steps))
-                .is_err());
+            assert!(longer.validate_with_adapter(Some(&adapter)).is_err());
             let mut batched = reviewed_envelope(reviewed_steps);
             batched.batch_size = 2;
-            assert!(batched
-                .validate_with_reviewed_steps(Some(reviewed_steps))
-                .is_err());
+            assert!(batched.validate_with_adapter(Some(&adapter)).is_err());
             let mut anchored = reviewed_envelope(reviewed_steps);
             anchored.endpoint_anchor = "last".into();
-            assert!(anchored
-                .validate_with_reviewed_steps(Some(reviewed_steps))
-                .is_err());
+            assert!(anchored.validate_with_adapter(Some(&adapter)).is_err());
             let mut zeroed = reviewed_envelope(reviewed_steps);
             zeroed.max_total_packed_rows = 0;
-            assert!(zeroed
-                .validate_with_reviewed_steps(Some(reviewed_steps))
-                .is_err());
+            assert!(zeroed.validate_with_adapter(Some(&adapter)).is_err());
         }
     }
 
@@ -4990,7 +5340,9 @@ mod tests {
     #[cfg(feature = "mp4")]
     #[test]
     fn a_turbo_prepared_request_validates_only_under_its_own_step_authority() {
-        for reviewed_steps in [5u32, 9] {
+        for tier in mold_candle::minimax_h3::H3TurboLoraTier::ALL {
+            let adapter = turbo_authority_for(tier);
+            let reviewed_steps = adapter.grid_points();
             // The real reviewed envelope with only the step axis moved, so
             // every other axis still matches the fixture request exactly.
             let mut envelope = record().envelope;
@@ -5000,15 +5352,22 @@ mod tests {
             request.denoise_forward_count = reviewed_steps - 1;
 
             // The path admission must take.
+            // FL2VA fixture request, so only an FL2V tier may move its steps.
+            if adapter.reviewed_task() != Some(Task::Fl2va) {
+                assert!(envelope
+                    .validate_prepared_with_adapter(&request, Some(&adapter))
+                    .is_err());
+                continue;
+            }
             envelope
-                .validate_prepared_with_reviewed_steps(&request, Some(reviewed_steps))
+                .validate_prepared_with_adapter(&request, Some(&adapter))
                 .unwrap();
 
             // The path admission took before this fix. It must fail, loudly and
             // for the step reason — otherwise passing the wrong authority is
             // silently harmless and nothing pins the call site.
             let error = envelope
-                .validate_prepared_with_reviewed_steps(&request, None)
+                .validate_prepared_with_adapter(&request, None)
                 .unwrap_err()
                 .to_string();
             assert!(
@@ -5021,7 +5380,7 @@ mod tests {
             let mut baseline_request = prepared_request_for_compact_quality_envelope();
             baseline_request.grid_points = contract::COMFY_DEFAULT_STEPS;
             assert!(envelope
-                .validate_prepared_with_reviewed_steps(&baseline_request, Some(reviewed_steps))
+                .validate_prepared_with_adapter(&baseline_request, Some(&adapter))
                 .is_err());
         }
 
@@ -5031,8 +5390,81 @@ mod tests {
         let request = prepared_request_for_compact_quality_envelope();
         assert_eq!(request.grid_points, contract::COMFY_DEFAULT_STEPS);
         baseline
-            .validate_prepared_with_reviewed_steps(&request, None)
+            .validate_prepared_with_adapter(&request, None)
             .unwrap();
+    }
+
+    /// The qualification boundary must not strip tier identity either.
+    ///
+    /// `public_runtime_qualification` mints an FL2VA-shaped record. Feeding it
+    /// a bare step count let a Ref2V adapter set that record's envelope from a
+    /// coincident 5-point schedule; the mismatch was caught later, but the
+    /// record in between claimed an authority its adapter never had.
+    #[cfg(all(feature = "h3", feature = "mp4"))]
+    #[test]
+    fn a_cross_task_turbo_adapter_cannot_mint_an_fl2va_qualification() {
+        let ref2v = turbo_authority_for(mold_candle::minimax_h3::H3TurboLoraTier::Ref2v4StepV10);
+        let fl2v = turbo_authority_for(mold_candle::minimax_h3::H3TurboLoraTier::Fl2v768p4StepV10);
+        assert_eq!(ref2v.grid_points(), fl2v.grid_points());
+
+        let artifact = artifact_report();
+        let mint = |turbo| {
+            public_runtime_qualification(
+                &artifact,
+                "gpu-0",
+                0,
+                (8, 9),
+                &sha('a'),
+                "synthetic-qualified-kernel",
+                &sha('b'),
+                turbo,
+            )
+        };
+        let error = mint(Some(&ref2v))
+            .expect_err("a ref2v tier must not mint an fl2va qualification")
+            .to_string();
+        assert!(error.contains("was not reviewed for"), "{error}");
+        // The FL2V tier at the identical step count is accepted, so the
+        // refusal is about task identity and not about the number.
+        assert!(mint(Some(&fl2v)).is_ok());
+        assert!(mint(None).is_ok());
+    }
+
+    /// A tier's step authority is scoped to the task it was distilled for.
+    ///
+    /// The FL2V 768p and Ref2V tiers are both 5-point schedules, so an
+    /// authority reduced to `Option<u32>` cannot tell them apart: an FL2V
+    /// adapter would validate a Ref2VA envelope on a numeric coincidence.
+    #[cfg(feature = "h3-private-uat")]
+    #[test]
+    fn a_turbo_tier_may_only_move_the_steps_of_its_own_task_envelope() {
+        let fl2v = turbo_authority_for(mold_candle::minimax_h3::H3TurboLoraTier::Fl2v768p4StepV10);
+        let ref2v = turbo_authority_for(mold_candle::minimax_h3::H3TurboLoraTier::Ref2v4StepV10);
+        // Same step count - the coincidence that made this reachable.
+        assert_eq!(fl2v.grid_points(), ref2v.grid_points());
+        assert_eq!(fl2v.reviewed_task(), Some(Task::Fl2va));
+        assert_eq!(ref2v.reviewed_task(), Some(Task::Ref2va));
+
+        let mut ref2va_envelope = capture_runtime_envelope();
+        ref2va_envelope.max_steps = ref2v.grid_points();
+        ref2va_envelope
+            .validate_for_task_with_adapter(Task::Ref2va, Some(&ref2v))
+            .expect("the ref2v tier is the one reviewed for a Ref2VA envelope");
+        let error = ref2va_envelope
+            .validate_for_task_with_adapter(Task::Ref2va, Some(&fl2v))
+            .expect_err("an fl2v tier must not carry a Ref2VA envelope")
+            .to_string();
+        assert!(error.contains("was not reviewed for"), "{error}");
+
+        // And the mirror on the FL2VA side.
+        let mut fl2va_envelope = record().envelope;
+        fl2va_envelope.max_steps = fl2v.grid_points();
+        fl2va_envelope
+            .validate_for_task_with_adapter(Task::Fl2va, Some(&fl2v))
+            .unwrap();
+        assert!(fl2va_envelope
+            .validate_for_task_with_adapter(Task::Fl2va, Some(&ref2v))
+            .is_err());
     }
 
     /// Every reviewed tier's step count must survive the whole prepared-request
@@ -5043,16 +5475,22 @@ mod tests {
     fn every_reviewed_turbo_tier_admits_its_own_prepared_request() {
         for tier_contract in super::super::turbo::REVIEWED_TURBO_TIERS {
             let steps = tier_contract.grid_points;
+            let adapter = turbo_authority_for(tier_contract.tier);
             let mut envelope = record().envelope;
             envelope.max_steps = steps;
             let mut request = prepared_request_for_compact_quality_envelope();
             request.grid_points = steps;
             request.denoise_forward_count = steps - 1;
-            envelope
-                .validate_prepared_with_reviewed_steps(&request, Some(steps))
-                .unwrap_or_else(|error| {
+            // The fixture request is FL2VA; a Ref2V tier is refused on it for
+            // task identity rather than admitted on a matching step count.
+            let outcome = envelope.validate_prepared_with_adapter(&request, Some(&adapter));
+            if adapter.reviewed_task() == Some(Task::Fl2va) {
+                outcome.unwrap_or_else(|error| {
                     panic!("{:?} at {steps} steps: {error}", tier_contract.tier)
                 });
+            } else {
+                assert!(outcome.is_err(), "{:?} crossed tasks", tier_contract.tier);
+            }
         }
     }
 
@@ -5061,9 +5499,16 @@ mod tests {
     #[test]
     fn reviewed_turbo_step_counts_come_from_the_tier_table() {
         for contract_entry in super::super::turbo::REVIEWED_TURBO_TIERS {
-            reviewed_envelope(contract_entry.grid_points)
-                .validate_with_reviewed_steps(Some(contract_entry.grid_points))
-                .unwrap();
+            let adapter = turbo_authority_for(contract_entry.tier);
+            let outcome =
+                reviewed_envelope(contract_entry.grid_points).validate_with_adapter(Some(&adapter));
+            // `reviewed_envelope` is the FL2VA envelope, so only FL2V tiers
+            // may carry it.
+            if adapter.reviewed_task() == Some(Task::Fl2va) {
+                outcome.unwrap();
+            } else {
+                assert!(outcome.is_err());
+            }
             assert!(matches!(contract_entry.grid_points, 5 | 9));
         }
     }
@@ -5269,6 +5714,7 @@ mod tests {
                     * 3,
                 normalized_cpu_content_sha256: sha('5'),
             }],
+            references: Vec::new(),
             rows: H3FactoryPreparedRowsInput {
                 qwen_output_text_rows: 128,
                 qwen_vision_rows: 1_024,
@@ -5287,7 +5733,7 @@ mod tests {
         let envelope = record().envelope;
         let reviewed = prepared_request_for_compact_quality_envelope();
         envelope
-            .validate_prepared_with_reviewed_steps(&reviewed, None)
+            .validate_prepared_with_adapter(&reviewed, None)
             .unwrap();
 
         let mut cases = Vec::new();
@@ -5346,7 +5792,7 @@ mod tests {
 
         for request in cases {
             assert!(envelope
-                .validate_prepared_with_reviewed_steps(&request, None)
+                .validate_prepared_with_adapter(&request, None)
                 .is_err());
         }
     }
@@ -5731,9 +6177,50 @@ mod tests {
     fn reviewed_allowlist_is_scoped_to_fl2va() {
         assert!(reviewed_h3_private_runtime_available());
         assert!(reviewed_h3_private_runtime_available_for_task(Task::Fl2va));
-        assert!(!reviewed_h3_private_runtime_available_for_task(
-            Task::Ref2va
-        ));
+        // Ref2VA has no reviewed bounds. It is reachable only from the
+        // developer-only campaign build that exists to measure them, and a
+        // shipping build — public `h3` or otherwise — must keep refusing it.
+        assert_eq!(
+            reviewed_h3_private_runtime_available_for_task(Task::Ref2va),
+            cfg!(feature = "h3-private-uat")
+        );
+    }
+
+    /// The capture-scope profile must never be mistakable for a qualified one.
+    #[test]
+    #[cfg(feature = "h3-private-uat")]
+    fn capture_scope_profile_announces_that_its_bounds_are_provisional() {
+        assert!(CAPTURE_RUNTIME_PROFILE_DECISION.contains("provisional"));
+        assert!(CAPTURE_RUNTIME_PROFILE_DECISION.contains("capture-scope"));
+        assert_ne!(CAPTURE_RUNTIME_PROFILE_SCHEMA, RUNTIME_QUALIFICATION_SCHEMA);
+        assert_ne!(
+            CAPTURE_RUNTIME_PROFILE_DECISION,
+            RUNTIME_QUALIFICATION_DECISION
+        );
+
+        // Its envelope is Ref2VA-shaped: no boundary endpoint, and reference
+        // conditioning priced from the released reference limits.
+        let envelope = capture_runtime_envelope();
+        envelope.validate_for_task(Task::Ref2va).unwrap();
+        assert!(envelope.validate_for_task(Task::Fl2va).is_err());
+        assert_eq!(envelope.endpoint_count, 0);
+        assert_eq!(envelope.endpoint_anchor, "none");
+
+        // Every ceiling is at or above the FL2VA value it was scaled from, and
+        // the two sequence-dependent ones are strictly above it.
+        let ceilings = capture_runtime_bounds();
+        ceilings.validate().unwrap();
+        assert!(ceilings.attention_workspace_device_bytes > 10_133_438_464);
+        assert!(ceilings.ffn_workspace_device_bytes > 15_300_820_992);
+        assert!(ceilings.condition_vae_workspace_device_bytes > 469_762_048);
+
+        // The report renders observation against ceiling so a reviewer
+        // transcribes the measurement, never the ceiling.
+        let report = h3_capture_bound_report(&[("attention_workspace_device_bytes", 1_000_000)]);
+        assert_eq!(report.len(), 1);
+        assert_eq!(report[0].1, 1_000_000);
+        assert_eq!(report[0].2, ceilings.attention_workspace_device_bytes);
+        assert!(report[0].3 < 1.0);
     }
 
     #[test]
@@ -6102,8 +6589,14 @@ mod tests {
             .map(|offset| preflight_start + offset)
             .unwrap();
         assert!(!opened_evidence[preflight_start..preflight_end].contains("Device::new_cuda"));
-        assert!(opened_evidence.contains(
-            "vae_memory_evidence_identity_sha256: vae\n            .artifact_validation_identity_sha256()"
+        // The binding, not its line breaks: rustfmt reflows this expression
+        // whenever the surrounding builder changes shape.
+        let collapsed = opened_evidence
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect::<String>();
+        assert!(collapsed.contains(
+            "vae_memory_evidence_identity_sha256:vae.artifact_validation_identity_sha256()"
         ));
         let pipeline = include_str!("pipeline.rs");
         assert!(pipeline.contains("`Device::Cpu`; execution transfers happen only after CUDA"));

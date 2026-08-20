@@ -1197,6 +1197,16 @@ where
             .encode_visual_reference(reference, mode, checkpoint)
     }
 
+    fn park_reference_components(
+        &mut self,
+        checkpoint: &mut dyn H3PipelineCheckpoint,
+    ) -> Result<()> {
+        // The components own the VAEs and the retained media; the separately
+        // streamed transformer is loaded after this point and holds nothing to
+        // release. Forwarding is what makes parking reach a real backend.
+        self.components.park_reference_components(checkpoint)
+    }
+
     fn encode_audio_reference(
         &mut self,
         reference: &H3PreparedReference,
@@ -2714,6 +2724,17 @@ mod tests {
             .map_err(Into::into)
         }
 
+        fn park_reference_components(
+            &mut self,
+            _checkpoint: &mut dyn H3PipelineCheckpoint,
+        ) -> Result<()> {
+            // A production backend releases both VAEs and the retained media
+            // here. Record that the orchestrator asks, and that it asks after
+            // both encoders and before the first denoise.
+            self.trace.lock().unwrap().push("park".into());
+            Ok(())
+        }
+
         fn denoise(
             &mut self,
             _input: H3ForwardInput<'_>,
@@ -2916,6 +2937,10 @@ mod tests {
                 "vision:2:0".into(),
                 "encode-visual:1:2048x2048x1".into(),
                 "encode-audio:2:80".into(),
+                // Both VAEs and the retained media are released here, before
+                // the transformer is loaded, so none of it sits inside the
+                // denoise peak.
+                "park".into(),
                 "decode-video:[1, 24, 37, 2, 2]".into(),
                 "decode-audio:207".into(),
             ]

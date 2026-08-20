@@ -105,6 +105,69 @@ pub struct H3FactoryEndpointInput {
     pub normalized_cpu_content_sha256: String,
 }
 
+/// Modality of one ordered Ref2VA reference. This mirrors
+/// [`mold_core::GenerationReferenceKind`] as a factory-local domain so the
+/// authority never inherits a wire enum's future variants.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum H3FactoryReferenceKind {
+    Image,
+    Video,
+    Audio,
+}
+
+/// One ordered Ref2VA reference, frozen at its normalized preprocessing shape.
+///
+/// Every geometry field is the exact value
+/// `mold_core::minimax_h3::reference_prepared_shapes_for_target` derived at
+/// admission. The validator recomputes the row and retained-byte charges from
+/// that geometry, so an understated charge is rejected rather than trusted.
+/// There is deliberately no path, upload handle, or byte buffer here.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct H3FactoryReferenceInput {
+    /// One-based request order.
+    pub index: u32,
+    pub kind: H3FactoryReferenceKind,
+    pub content_sha256: String,
+    /// Prepared-shape contract version the admission geometry was derived at.
+    pub preprocess_version: u32,
+    /// Normalized visual canvas. Absent exactly for audio-only references.
+    pub normalized_width: Option<u32>,
+    pub normalized_height: Option<u32>,
+    /// Exact CFR-normalized frame count, the visual-VAE prefix taken from it,
+    /// and the 2 fps Qwen cursor sample count. Video references only.
+    pub normalized_video_frames: Option<u32>,
+    pub video_frames: Option<u32>,
+    pub qwen_video_frames: Option<u32>,
+    /// Normalized 32 kHz stereo sample count. Absent without a soundtrack.
+    pub audio_samples_per_channel: Option<u64>,
+    /// NATIVE decoded geometry, before any normalization.
+    ///
+    /// The decoder retains what it decoded, not what preprocessing will
+    /// produce, and every reference stays retained until its own preprocess
+    /// step consumes it. These fields are what make that peak derivable; a
+    /// visual reference without them cannot be priced and is refused.
+    pub native_width: Option<u32>,
+    pub native_height: Option<u32>,
+    /// Native soundtrack sample count and channel count, at the source rate.
+    pub native_audio_samples_per_channel: Option<u64>,
+    pub native_audio_channels: Option<u16>,
+    /// Packed condition rows this reference contributes.
+    pub visual_rows: u64,
+    pub audio_rows: u64,
+    /// Qwen vision pads this reference contributes to `qwen_vision_rows`.
+    pub qwen_vision_rows: u64,
+    /// Host bytes the backend retains for this reference between preprocessing
+    /// and its two encoders: normalized RGB8 frames plus the normalized f32
+    /// stereo waveform. Recomputed by the validator from the geometry.
+    pub normalized_host_bytes: u64,
+    /// Host bytes the backend retains for this reference between its decode
+    /// and its preprocess: the NATIVE decoded frames it selected plus the
+    /// native f32 soundtrack. Recomputed by the validator from the native
+    /// geometry, and charged for every reference simultaneously because the
+    /// orchestrator decodes the whole ordered set before preprocessing any.
+    pub native_host_bytes: u64,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct H3FactoryPreparedRowsInput {
     pub qwen_output_text_rows: u64,
@@ -147,6 +210,9 @@ pub struct H3FactoryPreparedRequestInput {
     pub conditioning_fingerprint: String,
     pub reference_fingerprint: String,
     pub endpoints: Vec<H3FactoryEndpointInput>,
+    /// Ordered Ref2VA references. Always empty for FL2VA, whose conditioning
+    /// rides the endpoint contract instead.
+    pub references: Vec<H3FactoryReferenceInput>,
     pub rows: H3FactoryPreparedRowsInput,
 }
 
@@ -193,6 +259,13 @@ pub struct H3FactoryRawCheckpointInput {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum H3FactoryTargetLoadDropPolicy {
     LoadVaesLoadQwenEncodeTransferDropQwenEncodeConditionsParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux,
+    /// Ref2VA's real order. It diverges from FL2VA before the conditioner:
+    /// media is decoded and normalized on the host first (that retained media
+    /// is what the two reference encoders later consume), Qwen encodes the
+    /// prompt *with* the reference vision pads, and conditioning is then
+    /// encoded twice — once through the visual VAE and once through the audio
+    /// VAE — before the VAEs park for denoise and reload for decode.
+    DecodeReferencesPreprocessReferencesLoadVaesLoadQwenEncodeVisionTransferDropQwenEncodeVisualReferencesEncodeAudioReferencesParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux,
     /// Test-only marker proving that the policy discriminator participates in
     /// the target-budget identity without advertising another executable plan.
     #[cfg(test)]
@@ -320,6 +393,33 @@ pub struct H3FactoryTargetBudgetInput {
     pub qwen_retained_header_host_bytes: u64,
     pub transformer_retained_header_host_bytes: u64,
     pub vae_retained_config_host_bytes: u64,
+    /// Digest of the ordered reference facts this budget was derived from.
+    ///
+    /// Every reference term below is a byte total, and byte totals collide:
+    /// a 6000x4000 native canvas and a 4000x6000 one price identically, as do
+    /// any two reference sets summing to the same retained bytes. Binding the
+    /// geometry itself into the budget identity is what stops a budget from
+    /// being replayed against a different reference set that happens to cost
+    /// the same. Empty for FL2VA. Mirrors `vae_memory_evidence_identity_sha256`.
+    pub reference_media_identity_sha256: String,
+    /// Ref2VA retained normalized media: the RGB8 frames and f32 stereo
+    /// waveforms the backend holds from preprocessing until both reference
+    /// encoders have consumed them. Derived from the frozen reference plan,
+    /// never a flat constant — one 2048-square still is 12 MiB and a 768-square
+    /// video contributes its whole VAE prefix plus Qwen cursor frames. Zero for
+    /// FL2VA, which retains normalized endpoints instead.
+    pub reference_normalized_media_host_bytes: u64,
+    /// Transient host working set while one reference is decoded: the staged
+    /// copy of its verified bytes plus the decoder's own output before
+    /// normalization. Charged once because references decode one at a time.
+    pub reference_decode_staging_host_bytes: u64,
+    /// Transient host working set while one decoded reference is normalized
+    /// (resize and resample scratch), likewise charged once.
+    pub reference_preprocess_staging_host_bytes: u64,
+    pub reference_decode_phase_host_bytes: u64,
+    pub reference_preprocess_phase_host_bytes: u64,
+    pub reference_visual_encode_phase_host_bytes: u64,
+    pub reference_audio_encode_phase_host_bytes: u64,
     pub vae_load_phase_host_bytes: u64,
     pub qwen_encode_phase_host_bytes: u64,
     pub qwen_transfer_phase_host_bytes: u64,
@@ -377,6 +477,15 @@ pub struct H3FactoryTargetBudgetInput {
     /// Transient host bytes the Turbo adapter load peaks at while its deltas
     /// are read and staged one matrix at a time. Zero without one.
     pub turbo_adapter_host_staging_bytes: u64,
+    /// Device workspace the audio VAE's encoder peaks at while one reference
+    /// soundtrack is encoded. Distinct from `audio_decode_workspace_device_bytes`:
+    /// the encoder runs DAC plus the posterior projection, the decoder runs
+    /// BigVGAN. Zero for FL2VA, which never encodes audio.
+    pub reference_audio_encode_workspace_device_bytes: u64,
+    pub reference_decode_phase_device_bytes: u64,
+    pub reference_preprocess_phase_device_bytes: u64,
+    pub reference_visual_encode_phase_device_bytes: u64,
+    pub reference_audio_encode_phase_device_bytes: u64,
     pub vae_load_phase_device_bytes: u64,
     pub qwen_encode_phase_device_bytes: u64,
     pub qwen_transfer_phase_device_bytes: u64,
@@ -432,6 +541,14 @@ impl H3FactoryTargetBudgetInput {
             qwen_retained_header_host_bytes,
             transformer_retained_header_host_bytes,
             vae_retained_config_host_bytes,
+            reference_media_identity_sha256,
+            reference_normalized_media_host_bytes,
+            reference_decode_staging_host_bytes,
+            reference_preprocess_staging_host_bytes,
+            reference_decode_phase_host_bytes,
+            reference_preprocess_phase_host_bytes,
+            reference_visual_encode_phase_host_bytes,
+            reference_audio_encode_phase_host_bytes,
             vae_load_phase_host_bytes,
             qwen_encode_phase_host_bytes,
             qwen_transfer_phase_host_bytes,
@@ -480,6 +597,11 @@ impl H3FactoryTargetBudgetInput {
             turbo_adapter_device_bytes,
             turbo_adapter_device_staging_bytes,
             turbo_adapter_host_staging_bytes,
+            reference_audio_encode_workspace_device_bytes,
+            reference_decode_phase_device_bytes,
+            reference_preprocess_phase_device_bytes,
+            reference_visual_encode_phase_device_bytes,
+            reference_audio_encode_phase_device_bytes,
             vae_load_phase_device_bytes,
             qwen_encode_phase_device_bytes,
             qwen_transfer_phase_device_bytes,
@@ -497,6 +619,9 @@ impl H3FactoryTargetBudgetInput {
         hash.update(match load_drop_policy {
             H3FactoryTargetLoadDropPolicy::LoadVaesLoadQwenEncodeTransferDropQwenEncodeConditionsParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux => {
                 b"load-vaes-load-qwen-encode-transfer-drop-qwen-encode-conditions-park-vaes-allocate-noise-load-transformer-denoise-drop-transformer-reload-vaes-decode-visual-audio-drop-vaes-mux".as_slice()
+            }
+            H3FactoryTargetLoadDropPolicy::DecodeReferencesPreprocessReferencesLoadVaesLoadQwenEncodeVisionTransferDropQwenEncodeVisualReferencesEncodeAudioReferencesParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux => {
+                b"decode-references-preprocess-references-load-vaes-load-qwen-encode-vision-transfer-drop-qwen-encode-visual-references-encode-audio-references-park-vaes-allocate-noise-load-transformer-denoise-drop-transformer-reload-vaes-decode-visual-audio-drop-vaes-mux".as_slice()
             }
             #[cfg(test)]
             H3FactoryTargetLoadDropPolicy::IdentityMutationSentinel => {
@@ -541,6 +666,13 @@ impl H3FactoryTargetBudgetInput {
             qwen_retained_header_host_bytes,
             transformer_retained_header_host_bytes,
             vae_retained_config_host_bytes,
+            reference_normalized_media_host_bytes,
+            reference_decode_staging_host_bytes,
+            reference_preprocess_staging_host_bytes,
+            reference_decode_phase_host_bytes,
+            reference_preprocess_phase_host_bytes,
+            reference_visual_encode_phase_host_bytes,
+            reference_audio_encode_phase_host_bytes,
             vae_load_phase_host_bytes,
             qwen_encode_phase_host_bytes,
             qwen_transfer_phase_host_bytes,
@@ -563,6 +695,7 @@ impl H3FactoryTargetBudgetInput {
             hash.update(value.to_le_bytes());
         }
         update_string(hash, vae_memory_evidence_identity_sha256);
+        update_string(hash, reference_media_identity_sha256);
         for value in [
             qwen_device_parameter_bytes,
             qwen_activation_device_bytes,
@@ -605,6 +738,11 @@ impl H3FactoryTargetBudgetInput {
             turbo_adapter_device_bytes,
             turbo_adapter_device_staging_bytes,
             turbo_adapter_host_staging_bytes,
+            reference_audio_encode_workspace_device_bytes,
+            reference_decode_phase_device_bytes,
+            reference_preprocess_phase_device_bytes,
+            reference_visual_encode_phase_device_bytes,
+            reference_audio_encode_phase_device_bytes,
             vae_load_phase_device_bytes,
             qwen_encode_phase_device_bytes,
             qwen_transfer_phase_device_bytes,
@@ -771,6 +909,19 @@ impl H3FactoryTurboAdapterAuthority {
 
     pub const fn grid_points(&self) -> u32 {
         self.grid_points
+    }
+
+    /// The task this adapter's tier was reviewed for, resolved from its stable
+    /// id. An unrecognised id yields `None` and must be treated as a mismatch
+    /// rather than as "any task".
+    pub fn reviewed_task(&self) -> Option<Task> {
+        mold_candle::minimax_h3::H3TurboLoraTier::ALL
+            .into_iter()
+            .find(|tier| tier.stable_id() == self.tier_stable_id)
+            .map(|tier| match tier.task() {
+                mold_candle::minimax_h3::H3TransformerTask::Ref2Va => Task::Ref2va,
+                _ => Task::Fl2va,
+            })
     }
 
     pub const fn resident_device_bytes(&self) -> u64 {
@@ -1274,6 +1425,392 @@ impl H3FactoryPreparedAttemptAuthority {
     }
 }
 
+/// Recomputed charges for one ordered Ref2VA reference.
+struct H3ReferenceCharges {
+    visual_rows: u64,
+    audio_rows: u64,
+    qwen_vision_rows: u64,
+    normalized_host_bytes: u64,
+    native_host_bytes: u64,
+}
+
+/// Aggregate retained-media totals for one ordered reference set.
+///
+/// The two are charged in different phases and must not be collapsed: natives
+/// are held from decode until preprocess, normalized ones from preprocess
+/// until both encoders finish, and during preprocess the two overlap.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct H3ReferenceMediaTotals {
+    pub(crate) normalized_host_bytes: u64,
+    pub(crate) native_host_bytes: u64,
+    /// The largest single native payload — the transient a decode peaks at
+    /// while it materializes one reference on top of those already held.
+    pub(crate) largest_native_host_bytes: u64,
+    /// The largest single normalized payload, the transient a preprocess peaks
+    /// at while it writes one reference's normalized form.
+    pub(crate) largest_normalized_host_bytes: u64,
+}
+
+/// Re-derive every row and retained-byte charge for one reference from its
+/// frozen normalized geometry.
+///
+/// This deliberately repeats `mold_core::minimax_h3`'s own arithmetic instead
+/// of trusting the supplied totals: admission computes the shape, but the
+/// factory is the authority that a scheduler grant is sized from, and a
+/// reference whose rows were understated would be admitted into a budget that
+/// cannot hold it.
+fn h3_reference_charges(reference: &H3FactoryReferenceInput) -> Result<H3ReferenceCharges> {
+    let visual_canvas = match (reference.normalized_width, reference.normalized_height) {
+        (Some(width), Some(height)) => {
+            if width == 0
+                || height == 0
+                || !width.is_multiple_of(32)
+                || !height.is_multiple_of(32)
+                // The visual VAE downsamples 16x and the DiT packs 2x2 latent
+                // patches, so a canvas that is not 32-divisible cannot be
+                // patchified at all.
+                || reference.kind == H3FactoryReferenceKind::Audio
+            {
+                bail!(
+                    "MiniMax H3 reference {} has an invalid normalized visual canvas",
+                    reference.index
+                );
+            }
+            Some((u64::from(width), u64::from(height)))
+        }
+        (None, None) => {
+            if reference.kind != H3FactoryReferenceKind::Audio {
+                bail!(
+                    "MiniMax H3 visual reference {} lost its normalized canvas",
+                    reference.index
+                );
+            }
+            None
+        }
+        _ => bail!(
+            "MiniMax H3 reference {} has a half-specified normalized canvas",
+            reference.index
+        ),
+    };
+    let rows_per_latent_frame = visual_canvas
+        .map(|(width, height)| {
+            (width / 32)
+                .checked_mul(height / 32)
+                .ok_or_else(|| anyhow!("MiniMax H3 reference rows per latent frame overflow"))
+        })
+        .transpose()?
+        .unwrap_or(0);
+
+    // Frame geometry. Images occupy exactly one latent frame; videos take the
+    // `5n+2` causal latent count over their visual-VAE prefix; audio has none.
+    let (latent_frames, qwen_blocks) = match reference.kind {
+        H3FactoryReferenceKind::Image => {
+            if reference.normalized_video_frames.is_some()
+                || reference.video_frames.is_some()
+                || reference.qwen_video_frames.is_some()
+            {
+                bail!(
+                    "MiniMax H3 image reference {} carries video frame geometry",
+                    reference.index
+                );
+            }
+            (1_u64, 1_u64)
+        }
+        H3FactoryReferenceKind::Video => {
+            let normalized_frames = reference.normalized_video_frames.ok_or_else(|| {
+                anyhow!(
+                    "MiniMax H3 video reference {} lost its normalized frame count",
+                    reference.index
+                )
+            })?;
+            let video_frames = reference.video_frames.ok_or_else(|| {
+                anyhow!(
+                    "MiniMax H3 video reference {} lost its visual-VAE frame prefix",
+                    reference.index
+                )
+            })?;
+            let qwen_video_frames = reference.qwen_video_frames.ok_or_else(|| {
+                anyhow!(
+                    "MiniMax H3 video reference {} lost its Qwen cursor sample count",
+                    reference.index
+                )
+            })?;
+            if normalized_frames == 0 || video_frames == 0 || video_frames > normalized_frames {
+                bail!(
+                    "MiniMax H3 video reference {} has an invalid frame prefix",
+                    reference.index
+                );
+            }
+            if qwen_video_frames != normalized_frames.div_ceil(contract::FIXED_FPS / 2) {
+                bail!(
+                    "MiniMax H3 video reference {} Qwen 2 fps sampling differs from the contract",
+                    reference.index
+                );
+            }
+            let latent_frames = if video_frames <= 5 {
+                2_u64
+            } else {
+                u64::from((video_frames - 5) / contract::FRAME_STEP) * 5 + 2
+            };
+            // Qwen consumes temporal-patch-2 blocks over its 2 fps cursor.
+            (latent_frames, u64::from(qwen_video_frames).div_ceil(2))
+        }
+        H3FactoryReferenceKind::Audio => {
+            if reference.normalized_video_frames.is_some()
+                || reference.video_frames.is_some()
+                || reference.qwen_video_frames.is_some()
+            {
+                bail!(
+                    "MiniMax H3 audio reference {} carries video frame geometry",
+                    reference.index
+                );
+            }
+            (0, 0)
+        }
+    };
+
+    let visual_rows = latent_frames
+        .checked_mul(rows_per_latent_frame)
+        .ok_or_else(|| anyhow!("MiniMax H3 reference visual rows overflow"))?;
+    let qwen_vision_rows = qwen_blocks
+        .checked_mul(rows_per_latent_frame)
+        .ok_or_else(|| anyhow!("MiniMax H3 reference Qwen vision rows overflow"))?;
+
+    // Audio. Present exactly for standalone audio and for a video carrying a
+    // soundtrack; the VAE compresses 800 normalized samples per stereo latent.
+    let expects_audio = match reference.kind {
+        H3FactoryReferenceKind::Image => false,
+        H3FactoryReferenceKind::Video => reference.audio_samples_per_channel.is_some(),
+        H3FactoryReferenceKind::Audio => true,
+    };
+    let audio_samples = match (reference.audio_samples_per_channel, expects_audio) {
+        (Some(samples), true) if samples > 0 => samples,
+        (None, false) => 0,
+        _ => bail!(
+            "MiniMax H3 reference {} audio geometry differs from its modality",
+            reference.index
+        ),
+    };
+    let audio_rows = audio_samples
+        .div_ceil(800)
+        .checked_mul(u64::from(contract::AUDIO_CHANNELS))
+        .ok_or_else(|| anyhow!("MiniMax H3 reference audio rows overflow"))?;
+
+    // Retained host bytes. The backend holds the normalized RGB8 frames the
+    // visual VAE will encode plus the normalized f32 stereo waveform the audio
+    // VAE will encode; for a video the Qwen cursor frames are borrowed from
+    // that same prefix wherever they overlap and materialized beyond it.
+    let frame_bytes = visual_canvas
+        .map(|(width, height)| {
+            width
+                .checked_mul(height)
+                .and_then(|pixels| pixels.checked_mul(3))
+                .ok_or_else(|| anyhow!("MiniMax H3 reference frame bytes overflow"))
+        })
+        .transpose()?
+        .unwrap_or(0);
+    let retained_frames = match reference.kind {
+        H3FactoryReferenceKind::Image => 1,
+        H3FactoryReferenceKind::Video => {
+            let video_frames = u64::from(reference.video_frames.unwrap_or_default());
+            let qwen_frames = u64::from(reference.qwen_video_frames.unwrap_or_default());
+            // Cursor samples inside the VAE prefix are clones of frames that
+            // are already retained, so both sets are charged.
+            video_frames
+                .checked_add(qwen_frames)
+                .ok_or_else(|| anyhow!("MiniMax H3 reference retained frames overflow"))?
+        }
+        H3FactoryReferenceKind::Audio => 0,
+    };
+    let visual_host_bytes = retained_frames
+        .checked_mul(frame_bytes)
+        .ok_or_else(|| anyhow!("MiniMax H3 reference retained visual bytes overflow"))?;
+    let audio_host_bytes = audio_samples
+        .checked_mul(u64::from(contract::AUDIO_CHANNELS))
+        .and_then(|samples| samples.checked_mul(std::mem::size_of::<f32>() as u64))
+        .ok_or_else(|| anyhow!("MiniMax H3 reference retained audio bytes overflow"))?;
+    let normalized_host_bytes = visual_host_bytes
+        .checked_add(audio_host_bytes)
+        .ok_or_else(|| anyhow!("MiniMax H3 reference retained host bytes overflow"))?;
+
+    // Native retention. The decoder keeps what it decoded — the union of the
+    // visual-VAE prefix and the Qwen cursor, at source resolution — plus the
+    // source soundtrack, until this reference's own preprocess step runs.
+    let native_canvas = match (reference.native_width, reference.native_height) {
+        (Some(width), Some(height)) => {
+            // Bound it here, at the request boundary, so the ledger term is
+            // always derivable. An unbounded native payload would leave the
+            // scheduler charging an estimate the runtime can exceed.
+            if width == 0
+                || height == 0
+                || width > contract::MAX_REFERENCE_DIMENSION
+                || height > contract::MAX_REFERENCE_DIMENSION
+                || u64::from(width) * u64::from(height) > contract::MAX_REFERENCE_IMAGE_PIXELS
+                || reference.kind == H3FactoryReferenceKind::Audio
+            {
+                bail!(
+                    "MiniMax H3 reference {} native canvas is missing, oversized, or crossed",
+                    reference.index
+                );
+            }
+            Some((u64::from(width), u64::from(height)))
+        }
+        (None, None) => {
+            if reference.kind != H3FactoryReferenceKind::Audio {
+                bail!(
+                    "MiniMax H3 visual reference {} has no native canvas to price its decode",
+                    reference.index
+                );
+            }
+            None
+        }
+        _ => bail!(
+            "MiniMax H3 reference {} has a half-specified native canvas",
+            reference.index
+        ),
+    };
+    let native_frame_bytes = native_canvas
+        .map(|(width, height)| {
+            width
+                .checked_mul(height)
+                .and_then(|pixels| pixels.checked_mul(3))
+                .ok_or_else(|| anyhow!("MiniMax H3 native frame bytes overflow"))
+        })
+        .transpose()?
+        .unwrap_or(0);
+    // Charge what the decoder actually keeps, which is not the same shape for
+    // the two visual modalities:
+    //
+    // * A still is retained exactly as decoded, at source resolution.
+    // * A video's selected frames are resized to the normalized canvas DURING
+    //   decode (`reference_media.rs` hands `decode_video_from_binding` a
+    //   resize closure) and only the resized frames are retained. Pricing
+    //   those at source resolution is wrong in both directions, and wrong in
+    //   the dangerous direction whenever the normalized canvas is larger — a
+    //   32x32 clip normalized to 384x384 retains 144x what source dims imply.
+    let retained_frame_bytes = match reference.kind {
+        H3FactoryReferenceKind::Image => native_frame_bytes,
+        H3FactoryReferenceKind::Video => frame_bytes,
+        H3FactoryReferenceKind::Audio => 0,
+    };
+    let native_visual_bytes = retained_frames
+        .checked_mul(retained_frame_bytes)
+        .ok_or_else(|| anyhow!("MiniMax H3 native retained visual bytes overflow"))?;
+    let native_audio_bytes = match (
+        reference.native_audio_samples_per_channel,
+        reference.native_audio_channels,
+        expects_audio,
+    ) {
+        (Some(samples), Some(channels), true) => {
+            if samples == 0
+                || channels == 0
+                || channels > contract::MAX_REFERENCE_CHANNELS
+                || samples
+                    > u64::from(contract::MAX_REFERENCE_SAMPLE_RATE)
+                        .saturating_mul(contract::MAX_REFERENCE_DURATION_MS)
+                        .div_ceil(1_000)
+            {
+                bail!(
+                    "MiniMax H3 reference {} native soundtrack is missing or oversized",
+                    reference.index
+                );
+            }
+            samples
+                .checked_mul(u64::from(channels))
+                .and_then(|values| values.checked_mul(std::mem::size_of::<f32>() as u64))
+                .ok_or_else(|| anyhow!("MiniMax H3 native retained audio bytes overflow"))?
+        }
+        (None, None, false) => 0,
+        _ => bail!(
+            "MiniMax H3 reference {} native audio geometry differs from its modality",
+            reference.index
+        ),
+    };
+    let native_host_bytes = native_visual_bytes
+        .checked_add(native_audio_bytes)
+        .ok_or_else(|| anyhow!("MiniMax H3 native retained host bytes overflow"))?;
+
+    Ok(H3ReferenceCharges {
+        visual_rows,
+        audio_rows,
+        qwen_vision_rows,
+        normalized_host_bytes,
+        native_host_bytes,
+    })
+}
+
+/// Validate the complete ordered reference list and return its aggregate
+/// charges as `(visual_rows, audio_rows, qwen_vision_rows, host_bytes)`.
+fn validate_prepared_references(
+    references: &[H3FactoryReferenceInput],
+) -> Result<(u64, u64, u64, H3ReferenceMediaTotals)> {
+    if references.is_empty() {
+        bail!("MiniMax H3 Ref2VA prepared request retains no ordered references");
+    }
+    if references.len() > contract::MAX_REFERENCE_FILES {
+        bail!("MiniMax H3 Ref2VA prepared request exceeds the released reference count");
+    }
+    let mut totals = (0_u64, 0_u64, 0_u64, H3ReferenceMediaTotals::default());
+    for (offset, reference) in references.iter().enumerate() {
+        require_sha256(&reference.content_sha256, "H3 reference content")?;
+        if reference.index != u32::try_from(offset + 1)? {
+            bail!("MiniMax H3 Ref2VA reference indices are not contiguous request order");
+        }
+        if reference.preprocess_version != contract::REFERENCE_PREPROCESS_VERSION {
+            bail!(
+                "MiniMax H3 reference {} was prepared at a different preprocessing contract",
+                reference.index
+            );
+        }
+        let charges = h3_reference_charges(reference)?;
+        if charges.visual_rows != reference.visual_rows
+            || charges.audio_rows != reference.audio_rows
+            || charges.qwen_vision_rows != reference.qwen_vision_rows
+            || charges.normalized_host_bytes != reference.normalized_host_bytes
+            || charges.native_host_bytes != reference.native_host_bytes
+        {
+            bail!(
+                "MiniMax H3 reference {} row or retained-byte charges differ from its frozen geometry",
+                reference.index
+            );
+        }
+        totals.0 = totals
+            .0
+            .checked_add(charges.visual_rows)
+            .ok_or_else(|| anyhow!("MiniMax H3 reference visual row total overflow"))?;
+        totals.1 = totals
+            .1
+            .checked_add(charges.audio_rows)
+            .ok_or_else(|| anyhow!("MiniMax H3 reference audio row total overflow"))?;
+        totals.2 = totals
+            .2
+            .checked_add(charges.qwen_vision_rows)
+            .ok_or_else(|| anyhow!("MiniMax H3 reference vision row total overflow"))?;
+        totals.3.normalized_host_bytes = totals
+            .3
+            .normalized_host_bytes
+            .checked_add(charges.normalized_host_bytes)
+            .ok_or_else(|| anyhow!("MiniMax H3 reference retained host byte total overflow"))?;
+        totals.3.native_host_bytes = totals
+            .3
+            .native_host_bytes
+            .checked_add(charges.native_host_bytes)
+            .ok_or_else(|| anyhow!("MiniMax H3 native retained host byte total overflow"))?;
+        totals.3.largest_native_host_bytes = totals
+            .3
+            .largest_native_host_bytes
+            .max(charges.native_host_bytes);
+        totals.3.largest_normalized_host_bytes = totals
+            .3
+            .largest_normalized_host_bytes
+            .max(charges.normalized_host_bytes);
+    }
+    if totals.0 == 0 {
+        bail!("MiniMax H3 Ref2VA prepared request has no visual reference conditioning");
+    }
+    Ok(totals)
+}
+
 fn validate_prepared_request(request: &H3FactoryPreparedRequestInput) -> Result<()> {
     for (value, label) in [
         (&request.identity_sha256, "H3 prepared request"),
@@ -1379,13 +1916,29 @@ fn validate_prepared_request(request: &H3FactoryPreparedRequestInput) -> Result<
         .map_err(|_| anyhow!("MiniMax H3 endpoint count exceeds u64"))?
         .checked_mul(rows_per_video_latent)
         .ok_or_else(|| anyhow!("MiniMax H3 condition rows overflow"))?;
+    // Conditioning is task-shaped: FL2VA prices boundary endpoints against the
+    // generated canvas, while Ref2VA prices every ordered reference against
+    // its own normalized canvas. The two never mix.
+    let reference_charges = match request.task {
+        Task::Fl2va => {
+            if !request.references.is_empty() {
+                bail!("MiniMax H3 FL2VA prepared request carries Ref2VA references");
+            }
+            None
+        }
+        Task::Ref2va => {
+            if !request.endpoints.is_empty() {
+                bail!("MiniMax H3 Ref2VA prepared request carries FL2VA boundary endpoints");
+            }
+            Some(validate_prepared_references(&request.references)?)
+        }
+    };
     let pixel_count = u64::from(request.width)
         .checked_mul(u64::from(request.height))
         .ok_or_else(|| anyhow!("MiniMax H3 pixel count overflow"))?;
     let aspect_ratio = request.width as f64 / request.height as f64;
     if request.canonical_model != model_contract.canonical_model
         || request.task != model_contract.task
-        || request.task != Task::Fl2va
         || !mode_matches_task
         || actual_anchors != expected_anchors
         || request.denoise_forward_count != expected_denoise_forward_count
@@ -1407,12 +1960,23 @@ fn validate_prepared_request(request: &H3FactoryPreparedRequestInput) -> Result<
         || request.audio_samples_per_channel != expected_audio_samples
         || request.rows.qwen_output_text_rows == 0
         || request.rows.qwen_output_text_rows > H3_FACTORY_QWEN_MODEL_MAX_ROWS
-        || request.rows.condition_audio_rows != 0
         || request.rows.target_video_rows != expected_target_video_rows
         || request.rows.target_audio_rows != expected_audio_rows
         || request.rows.total_packed_rows != packed_rows
-        || request.task == Task::Fl2va
-            && request.rows.condition_visual_rows != expected_condition_rows
+        || match reference_charges {
+            // FL2VA conditions only on boundary frames and never on audio.
+            None => {
+                request.rows.condition_visual_rows != expected_condition_rows
+                    || request.rows.condition_audio_rows != 0
+            }
+            // Ref2VA's three condition row counts are exactly the ordered
+            // reference totals the factory re-derived above.
+            Some((visual_rows, audio_rows, qwen_vision_rows, _)) => {
+                request.rows.condition_visual_rows != visual_rows
+                    || request.rows.condition_audio_rows != audio_rows
+                    || request.rows.qwen_vision_rows != qwen_vision_rows
+            }
+        }
         || request.identity_sha256 != expected_prepared_request_identity(request)
     {
         bail!("MiniMax H3 prepared request authority is internally inconsistent");
@@ -1659,6 +2223,71 @@ fn validate_target_budget(
         "H3 post-Qwen metadata host demand",
     )?;
     let vae_alive_metadata_host = memory.vae_retained_config_host_bytes;
+    // Ref2VA's four leading phases. Media is decoded and normalized on the
+    // host before any model is loaded, so their device demand is the fixed
+    // runtime alone; the retained normalized media then stays charged through
+    // both reference encoders, which are what finally consume it.
+    //
+    // The retained-media charge is re-derived from the frozen reference plan
+    // rather than taken from the budget, for the same reason the prepared
+    // request re-derives its rows: this number is what the host ledger grants.
+    let reference_media = match request.task {
+        Task::Fl2va => H3ReferenceMediaTotals::default(),
+        Task::Ref2va => validate_prepared_references(&request.references)?.3,
+    };
+    let expected_reference_media_host_bytes = reference_media.normalized_host_bytes;
+    // The audio encoder has no measured bound of its own; it borrows the
+    // decoder's, which runs the larger BigVGAN stack. Deriving it from that
+    // already-bound field rather than accepting a caller value keeps it from
+    // being a free parameter the budget can name.
+    let expected_reference_audio_encode_workspace = if request.task == Task::Ref2va {
+        memory.audio_decode_workspace_device_bytes
+    } else {
+        0
+    };
+    // The transients are derived here too, never named by the caller.
+    let expected_reference_decode_staging = reference_media.largest_native_host_bytes;
+    let expected_reference_preprocess_staging = reference_media.largest_normalized_host_bytes;
+    // Decode retains EVERY reference's native payload at once: the
+    // orchestrator decodes the whole ordered set before preprocessing any, and
+    // each decoded slot survives until its own preprocess step removes it. The
+    // transient on top is the one being materialized.
+    let reference_decode_host = checked_u64_sum(
+        [
+            attempt_host,
+            qwen_alive_metadata_host,
+            reference_media.native_host_bytes,
+            expected_reference_decode_staging,
+        ],
+        "H3 reference decode host phase",
+    )?;
+    // Preprocess converts one reference at a time, replacing its native slot
+    // with a normalized one. For any point in that walk the held set is
+    // (natives not yet converted) + (normalized already produced), which is
+    // bounded by both totals together — the honest upper bound, and the only
+    // one that does not depend on the order the two sizes happen to fall in.
+    let reference_preprocess_host = checked_u64_sum(
+        [
+            attempt_host,
+            qwen_alive_metadata_host,
+            reference_media.native_host_bytes,
+            reference_media.normalized_host_bytes,
+            expected_reference_preprocess_staging,
+        ],
+        "H3 reference preprocess host phase",
+    )?;
+    // By the encoders every native payload has been released.
+    let reference_encode_host = checked_u64_sum(
+        [
+            attempt_host,
+            transformer_alive_metadata_host,
+            reference_media.normalized_host_bytes,
+            memory.condition_backing_host_bytes,
+            memory.packed_layout_host_bytes,
+            memory.text_modality_tags_host_bytes,
+        ],
+        "H3 reference encode host phase",
+    )?;
     let vae_load_host = checked_u64_sum(
         [
             attempt_host,
@@ -1774,11 +2403,36 @@ fn validate_target_budget(
         ],
         "H3 mux host phase",
     )?;
+    // A phase that is not in this task's order contributes nothing and must be
+    // recorded as zero, so a budget can never carry a ledger for work the
+    // worker will not perform.
+    let ref2va = request.task == Task::Ref2va;
+    let (
+        expected_reference_decode_host,
+        expected_reference_preprocess_host,
+        expected_reference_visual_encode_host,
+        expected_reference_audio_encode_host,
+        expected_condition_encode_host,
+    ) = if ref2va {
+        (
+            reference_decode_host,
+            reference_preprocess_host,
+            reference_encode_host,
+            reference_encode_host,
+            0,
+        )
+    } else {
+        (0, 0, 0, 0, condition_encode_host)
+    };
     let predicted_host = [
+        expected_reference_decode_host,
+        expected_reference_preprocess_host,
+        expected_reference_visual_encode_host,
+        expected_reference_audio_encode_host,
         vae_load_host,
         qwen_encode_host,
         qwen_transfer_host,
-        condition_encode_host,
+        expected_condition_encode_host,
         noise_allocation_host,
         transformer_load_host,
         denoise_host,
@@ -1862,6 +2516,33 @@ fn validate_target_budget(
     {
         bail!("MiniMax H3 raw checkpoint host artifact does not match opened-file authority");
     }
+    // Host-only phases: nothing model-sized is resident on the device yet.
+    let reference_decode = memory.fixed_runtime_device_bytes;
+    let reference_preprocess = memory.fixed_runtime_device_bytes;
+    // Both reference encoders run against the parked-in VAEs with the Qwen
+    // output already transferred, exactly as FL2VA's condition encode does.
+    let reference_visual_encode = checked_u64_sum(
+        [
+            memory.fixed_runtime_device_bytes,
+            retained_vaes,
+            memory.qwen_output_state_device_bytes,
+            memory.condition_vae_workspace_device_bytes,
+            memory.condition_latent_backing_device_bytes,
+            memory.packed_layout_device_bytes,
+        ],
+        "H3 reference visual encode phase",
+    )?;
+    let reference_audio_encode = checked_u64_sum(
+        [
+            memory.fixed_runtime_device_bytes,
+            retained_vaes,
+            memory.qwen_output_state_device_bytes,
+            memory.reference_audio_encode_workspace_device_bytes,
+            memory.condition_latent_backing_device_bytes,
+            memory.packed_layout_device_bytes,
+        ],
+        "H3 reference audio encode phase",
+    )?;
     let vae_load = checked_u64_sum(
         [
             memory.fixed_runtime_device_bytes,
@@ -2001,11 +2682,32 @@ fn validate_target_budget(
         ],
         "H3 waveform transfer phase",
     )?;
+    let (
+        expected_reference_decode,
+        expected_reference_preprocess,
+        expected_reference_visual_encode,
+        expected_reference_audio_encode,
+        expected_condition_encode,
+    ) = if ref2va {
+        (
+            reference_decode,
+            reference_preprocess,
+            reference_visual_encode,
+            reference_audio_encode,
+            0,
+        )
+    } else {
+        (0, 0, 0, 0, condition_encode)
+    };
     let predicted_device = [
+        expected_reference_decode,
+        expected_reference_preprocess,
+        expected_reference_visual_encode,
+        expected_reference_audio_encode,
         vae_load,
         qwen_encode,
         qwen_transfer,
-        condition_encode,
+        expected_condition_encode,
         noise_allocation,
         transformer_load,
         denoise,
@@ -2044,10 +2746,16 @@ fn validate_target_budget(
         };
     }
 
-    expect!(
+    // Each task has exactly one executable load/drop order, and the budget's
+    // phase ledgers are only meaningful against that order.
+    let expected_load_drop_policy = match request.task {
+        Task::Fl2va => H3FactoryTargetLoadDropPolicy::LoadVaesLoadQwenEncodeTransferDropQwenEncodeConditionsParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux,
+        Task::Ref2va => H3FactoryTargetLoadDropPolicy::DecodeReferencesPreprocessReferencesLoadVaesLoadQwenEncodeVisionTransferDropQwenEncodeVisualReferencesEncodeAudioReferencesParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux,
+    };
+    expect_eq!(
         "load_drop_policy",
-        memory.load_drop_policy
-            == H3FactoryTargetLoadDropPolicy::LoadVaesLoadQwenEncodeTransferDropQwenEncodeConditionsParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux
+        memory.load_drop_policy,
+        expected_load_drop_policy
     );
     expect_eq!(
         "artifact_host_bytes",
@@ -2196,6 +2904,80 @@ fn validate_target_budget(
         checkpoint.fixed_transformer_max_device_weight_staging_bytes
     );
     expect_eq!(
+        "reference_decode_phase_host_bytes",
+        memory.reference_decode_phase_host_bytes,
+        expected_reference_decode_host
+    );
+    expect_eq!(
+        "reference_preprocess_phase_host_bytes",
+        memory.reference_preprocess_phase_host_bytes,
+        expected_reference_preprocess_host
+    );
+    expect_eq!(
+        "reference_visual_encode_phase_host_bytes",
+        memory.reference_visual_encode_phase_host_bytes,
+        expected_reference_visual_encode_host
+    );
+    expect_eq!(
+        "reference_audio_encode_phase_host_bytes",
+        memory.reference_audio_encode_phase_host_bytes,
+        expected_reference_audio_encode_host
+    );
+    expect_eq!(
+        "reference_decode_phase_device_bytes",
+        memory.reference_decode_phase_device_bytes,
+        expected_reference_decode
+    );
+    expect_eq!(
+        "reference_preprocess_phase_device_bytes",
+        memory.reference_preprocess_phase_device_bytes,
+        expected_reference_preprocess
+    );
+    expect_eq!(
+        "reference_visual_encode_phase_device_bytes",
+        memory.reference_visual_encode_phase_device_bytes,
+        expected_reference_visual_encode
+    );
+    expect_eq!(
+        "reference_audio_encode_phase_device_bytes",
+        memory.reference_audio_encode_phase_device_bytes,
+        expected_reference_audio_encode
+    );
+    // Reference charges exist exactly for the task that has references, and
+    // the retained media is pinned to the re-derived plan total.
+    let expected_reference_media_identity =
+        expected_h3_factory_reference_media_identity(&request.references);
+    expect_eq!(
+        "reference_media_identity_sha256",
+        memory.reference_media_identity_sha256.as_str(),
+        expected_reference_media_identity.as_str()
+    );
+    expect_eq!(
+        "reference_normalized_media_host_bytes",
+        memory.reference_normalized_media_host_bytes,
+        expected_reference_media_host_bytes
+    );
+    // Recomputed from the frozen media facts, not merely nonzero-checked: the
+    // phase totals above are derived from these same values, so a caller that
+    // could name them could name its own grant.
+    expect_eq!(
+        "reference_decode_staging_host_bytes",
+        memory.reference_decode_staging_host_bytes,
+        expected_reference_decode_staging
+    );
+    expect_eq!(
+        "reference_preprocess_staging_host_bytes",
+        memory.reference_preprocess_staging_host_bytes,
+        expected_reference_preprocess_staging
+    );
+    // The audio VAE's encoder workspace is only ever charged by Ref2VA, and
+    // its size comes from the qualified bounds record.
+    expect_eq!(
+        "reference_audio_encode_workspace_device_bytes",
+        memory.reference_audio_encode_workspace_device_bytes,
+        expected_reference_audio_encode_workspace
+    );
+    expect_eq!(
         "vae_load_phase_host_bytes",
         memory.vae_load_phase_host_bytes,
         vae_load_host
@@ -2213,7 +2995,7 @@ fn validate_target_budget(
     expect_eq!(
         "condition_encode_phase_host_bytes",
         memory.condition_encode_phase_host_bytes,
-        condition_encode_host
+        expected_condition_encode_host
     );
     expect_eq!(
         "noise_allocation_phase_host_bytes",
@@ -2284,7 +3066,7 @@ fn validate_target_budget(
     expect_eq!(
         "condition_encode_phase_device_bytes",
         memory.condition_encode_phase_device_bytes,
-        condition_encode
+        expected_condition_encode
     );
     expect_eq!(
         "noise_allocation_phase_device_bytes",
@@ -2811,6 +3593,7 @@ pub fn expected_h3_factory_prepared_request_identity(
         hash.update(endpoint.normalized_cpu_bytes.to_le_bytes());
         hash.update(endpoint.normalized_cpu_content_sha256.as_bytes());
     }
+    update_reference_identity(&mut hash, &request.references);
     for value in [
         request.rows.qwen_output_text_rows,
         request.rows.qwen_vision_rows,
@@ -2858,6 +3641,71 @@ pub fn expected_h3_factory_raw_checkpoint_identity(
         }
         hash.update(block.content_sha256.as_bytes());
     }
+    format!("{:x}", hash.finalize())
+}
+
+/// Append the complete ordered reference facts to `hash`.
+///
+/// Shared by the prepared-request identity and the target-budget's own
+/// reference digest so the two can never describe different geometry.
+fn update_reference_identity(hash: &mut Sha256, references: &[H3FactoryReferenceInput]) {
+    hash.update((references.len() as u64).to_le_bytes());
+    for reference in references {
+        hash.update(reference.index.to_le_bytes());
+        hash.update(reference_kind_id(reference.kind));
+        update_string(hash, &reference.content_sha256);
+        hash.update(reference.preprocess_version.to_le_bytes());
+        for value in [
+            reference.normalized_width,
+            reference.normalized_height,
+            reference.normalized_video_frames,
+            reference.video_frames,
+            reference.qwen_video_frames,
+            reference.native_width,
+            reference.native_height,
+        ] {
+            // Absent and zero are different geometries; tag the option so a
+            // missing axis can never hash as a present zero.
+            hash.update([u8::from(value.is_some())]);
+            hash.update(value.unwrap_or_default().to_le_bytes());
+        }
+        for value in [
+            reference.audio_samples_per_channel,
+            reference.native_audio_samples_per_channel,
+        ] {
+            hash.update([u8::from(value.is_some())]);
+            hash.update(value.unwrap_or_default().to_le_bytes());
+        }
+        hash.update([u8::from(reference.native_audio_channels.is_some())]);
+        hash.update(
+            reference
+                .native_audio_channels
+                .unwrap_or_default()
+                .to_le_bytes(),
+        );
+        for value in [
+            reference.visual_rows,
+            reference.audio_rows,
+            reference.qwen_vision_rows,
+            reference.normalized_host_bytes,
+            reference.native_host_bytes,
+        ] {
+            hash.update(value.to_le_bytes());
+        }
+    }
+}
+
+/// The digest a Ref2VA target budget carries so its byte totals are bound to
+/// the exact geometry that produced them. Empty for a reference-free request.
+pub fn expected_h3_factory_reference_media_identity(
+    references: &[H3FactoryReferenceInput],
+) -> String {
+    if references.is_empty() {
+        return String::new();
+    }
+    let mut hash = Sha256::new();
+    hash.update(b"mold.minimax-h3.reference-media-facts.v1\0");
+    update_reference_identity(&mut hash, references);
     format!("{:x}", hash.finalize())
 }
 
@@ -2929,6 +3777,14 @@ fn mode_id(mode: Mode) -> &'static [u8] {
         Mode::LastFrameToAudioVideo => b"last-frame-to-audio-video",
         Mode::FirstAndLastFrameToAudioVideo => b"first-and-last-frame-to-audio-video",
         Mode::ReferenceToAudioVideo => b"reference-to-audio-video",
+    }
+}
+
+fn reference_kind_id(kind: H3FactoryReferenceKind) -> &'static [u8] {
+    match kind {
+        H3FactoryReferenceKind::Image => b"image",
+        H3FactoryReferenceKind::Video => b"video",
+        H3FactoryReferenceKind::Audio => b"audio",
     }
 }
 
@@ -4014,6 +4870,7 @@ mod tests {
                 normalized_cpu_bytes: u64::from(width) * u64::from(height) * 3,
                 normalized_cpu_content_sha256: sha('5'),
             }],
+            references: Vec::new(),
             rows: H3FactoryPreparedRowsInput {
                 qwen_output_text_rows: 1,
                 qwen_vision_rows: 64,
@@ -4029,6 +4886,653 @@ mod tests {
         };
         request.identity_sha256 = expected_h3_factory_prepared_request_identity(&request);
         request
+    }
+
+    /// One 2048-canvas image, one 768-canvas video with a soundtrack, and one
+    /// standalone audio reference — the mixed ordered set the Ref2VA contract
+    /// is specified against. Row and byte charges are written out longhand so
+    /// this fixture is an independent statement of the arithmetic rather than
+    /// a call to the code under test.
+    ///
+    /// Native geometry is deliberately much larger than normalized: a 6000x4000
+    /// still normalizes to 2048x2048, and a 3840x2160 clip to 768x768. That gap
+    /// is the whole point of charging the decode phase natively — it is what a
+    /// normalized-only ledger silently loses.
+    fn ref2va_references() -> Vec<H3FactoryReferenceInput> {
+        let image_rows = (2_048 / 32) * (2_048 / 32);
+        let video_rows_per_frame = (768 / 32) * (768 / 32);
+        // 39 visual-VAE frames land on 5n+2 causal latents over the family's
+        // own 17n+5 grid: (39-5)/17*5+2 = 12.
+        let video_latent_frames = 12;
+        // 48 normalized frames at 24 fps sample 4 cursor frames, which Qwen
+        // consumes as 2 temporal-patch-2 blocks.
+        let video_qwen_blocks = 2;
+        vec![
+            H3FactoryReferenceInput {
+                index: 1,
+                kind: H3FactoryReferenceKind::Image,
+                content_sha256: sha('a'),
+                preprocess_version: contract::REFERENCE_PREPROCESS_VERSION,
+                normalized_width: Some(2_048),
+                normalized_height: Some(2_048),
+                normalized_video_frames: None,
+                video_frames: None,
+                qwen_video_frames: None,
+                audio_samples_per_channel: None,
+                native_width: Some(6_000),
+                native_height: Some(4_000),
+                native_audio_samples_per_channel: None,
+                native_audio_channels: None,
+                visual_rows: image_rows,
+                audio_rows: 0,
+                qwen_vision_rows: image_rows,
+                normalized_host_bytes: 2_048 * 2_048 * 3,
+                native_host_bytes: 6_000 * 4_000 * 3,
+            },
+            H3FactoryReferenceInput {
+                index: 2,
+                kind: H3FactoryReferenceKind::Video,
+                content_sha256: sha('b'),
+                preprocess_version: contract::REFERENCE_PREPROCESS_VERSION,
+                normalized_width: Some(768),
+                normalized_height: Some(768),
+                normalized_video_frames: Some(48),
+                video_frames: Some(39),
+                qwen_video_frames: Some(4),
+                audio_samples_per_channel: Some(64_000),
+                native_width: Some(3_840),
+                native_height: Some(2_160),
+                native_audio_samples_per_channel: Some(96_000),
+                native_audio_channels: Some(6),
+                visual_rows: video_latent_frames * video_rows_per_frame,
+                audio_rows: 64_000_u64.div_ceil(800) * 2,
+                qwen_vision_rows: video_qwen_blocks * video_rows_per_frame,
+                normalized_host_bytes: (39 + 4) * 768 * 768 * 3 + 64_000 * 2 * 4,
+                // Video frames are resized to the normalized canvas DURING
+                // decode, so what is retained between decode and preprocess is
+                // the normalized frame; only the soundtrack stays native.
+                native_host_bytes: (39 + 4) * 768 * 768 * 3 + 96_000 * 6 * 4,
+            },
+            H3FactoryReferenceInput {
+                index: 3,
+                kind: H3FactoryReferenceKind::Audio,
+                content_sha256: sha('c'),
+                preprocess_version: contract::REFERENCE_PREPROCESS_VERSION,
+                normalized_width: None,
+                normalized_height: None,
+                normalized_video_frames: None,
+                video_frames: None,
+                qwen_video_frames: None,
+                audio_samples_per_channel: Some(32_000),
+                native_width: None,
+                native_height: None,
+                native_audio_samples_per_channel: Some(48_000),
+                native_audio_channels: Some(2),
+                visual_rows: 0,
+                audio_rows: 32_000_u64.div_ceil(800) * 2,
+                qwen_vision_rows: 0,
+                normalized_host_bytes: 32_000 * 2 * 4,
+                native_host_bytes: 48_000 * 2 * 4,
+            },
+        ]
+    }
+
+    fn ref2va_prepared_request() -> H3FactoryPreparedRequestInput {
+        let base = prepared_request();
+        let references = ref2va_references();
+        let condition_visual_rows = references
+            .iter()
+            .map(|entry| entry.visual_rows)
+            .sum::<u64>();
+        let condition_audio_rows = references.iter().map(|entry| entry.audio_rows).sum::<u64>();
+        let qwen_vision_rows = references
+            .iter()
+            .map(|entry| entry.qwen_vision_rows)
+            .sum::<u64>();
+        let mut request = H3FactoryPreparedRequestInput {
+            canonical_model: contract::REF2VA_COMFY.into(),
+            task: Task::Ref2va,
+            mode: Mode::ReferenceToAudioVideo,
+            endpoints: Vec::new(),
+            references,
+            rows: H3FactoryPreparedRowsInput {
+                qwen_output_text_rows: base.rows.qwen_output_text_rows,
+                qwen_vision_rows,
+                condition_visual_rows,
+                condition_audio_rows,
+                target_video_rows: base.rows.target_video_rows,
+                target_audio_rows: base.rows.target_audio_rows,
+                total_packed_rows: base.rows.qwen_output_text_rows
+                    + condition_visual_rows
+                    + condition_audio_rows
+                    + base.rows.target_video_rows
+                    + base.rows.target_audio_rows,
+            },
+            ..base
+        };
+        request.identity_sha256 = expected_h3_factory_prepared_request_identity(&request);
+        request
+    }
+
+    #[test]
+    fn ref2va_prepared_request_prices_every_ordered_reference_modality() {
+        let request = ref2va_prepared_request();
+        validate_prepared_request(&request)
+            .expect("the mixed ordered Ref2VA reference set must be admissible");
+
+        // The three condition row counts are exactly the per-reference totals,
+        // and mirror what mold-server's admission pricing already computes.
+        assert_eq!(request.rows.condition_visual_rows, 4_096 + 12 * 576);
+        assert_eq!(request.rows.condition_audio_rows, 80 * 2 + 40 * 2);
+        assert_eq!(request.rows.qwen_vision_rows, 4_096 + 2 * 576);
+        // Retained normalized media is the item-2 host charge: one 2048 RGB8
+        // still, 43 768-square RGB8 frames, and two f32 stereo waveforms.
+        let (_, _, _, media) = validate_prepared_references(&request.references).unwrap();
+        assert_eq!(
+            media.normalized_host_bytes,
+            2_048 * 2_048 * 3 + 43 * 768 * 768 * 3 + 64_000 * 2 * 4 + 32_000 * 2 * 4
+        );
+        assert_eq!(
+            media.normalized_host_bytes,
+            12_582_912 + 76_087_296 + 512_000 + 256_000
+        );
+    }
+
+    #[test]
+    fn ref2va_prepared_request_rejects_every_reference_authority_mutation() {
+        let base = ref2va_prepared_request();
+        let reseal = |mut request: H3FactoryPreparedRequestInput| {
+            request.identity_sha256 = expected_h3_factory_prepared_request_identity(&request);
+            request
+        };
+
+        // An understated row charge is the whole point of re-deriving: it
+        // would otherwise be admitted into a budget that cannot hold it.
+        let mut understated = base.clone();
+        understated.references[0].visual_rows -= 1;
+        understated.rows.condition_visual_rows -= 1;
+        understated.rows.total_packed_rows -= 1;
+        assert!(validate_prepared_request(&reseal(understated)).is_err());
+
+        // Same for the retained host bytes.
+        let mut cheap_media = base.clone();
+        cheap_media.references[1].normalized_host_bytes -= 1;
+        assert!(validate_prepared_request(&reseal(cheap_media)).is_err());
+
+        // Reordered or non-contiguous references break the packed sequence.
+        let mut reordered = base.clone();
+        reordered.references.swap(0, 1);
+        assert!(validate_prepared_request(&reseal(reordered)).is_err());
+
+        // Modality and geometry must agree.
+        let mut audio_with_canvas = base.clone();
+        audio_with_canvas.references[2].normalized_width = Some(64);
+        audio_with_canvas.references[2].normalized_height = Some(64);
+        assert!(validate_prepared_request(&reseal(audio_with_canvas)).is_err());
+
+        let mut image_with_frames = base.clone();
+        image_with_frames.references[0].video_frames = Some(9);
+        assert!(validate_prepared_request(&reseal(image_with_frames)).is_err());
+
+        // The Qwen 2 fps cursor contract is not negotiable.
+        let mut resampled = base.clone();
+        resampled.references[1].qwen_video_frames = Some(3);
+        assert!(validate_prepared_request(&reseal(resampled)).is_err());
+
+        // A prepared shape from a different preprocessing contract cannot be
+        // priced by this factory at all.
+        let mut stale_version = base.clone();
+        stale_version.references[0].preprocess_version = contract::REFERENCE_PREPROCESS_VERSION + 1;
+        assert!(validate_prepared_request(&reseal(stale_version)).is_err());
+
+        // Every reference field participates in the frozen identity.
+        for mutate in [
+            (|request: &mut H3FactoryPreparedRequestInput| request.references[0].index = 9)
+                as fn(&mut H3FactoryPreparedRequestInput),
+            |request| request.references[0].content_sha256 = sha('9'),
+            |request| request.references[2].audio_samples_per_channel = Some(800),
+            |request| request.references.truncate(2),
+        ] {
+            let mut mutated = base.clone();
+            mutate(&mut mutated);
+            assert_ne!(
+                expected_h3_factory_prepared_request_identity(&mutated),
+                base.identity_sha256
+            );
+        }
+    }
+
+    #[test]
+    fn conditioning_contracts_never_cross_between_the_two_tasks() {
+        let reseal = |mut request: H3FactoryPreparedRequestInput| {
+            request.identity_sha256 = expected_h3_factory_prepared_request_identity(&request);
+            request
+        };
+
+        // FL2VA may not carry references, and Ref2VA may not carry endpoints.
+        let mut fl2va_with_references = prepared_request();
+        fl2va_with_references.references = ref2va_references();
+        assert!(validate_prepared_request(&reseal(fl2va_with_references)).is_err());
+
+        let mut ref2va_with_endpoints = ref2va_prepared_request();
+        ref2va_with_endpoints.endpoints = prepared_request().endpoints;
+        assert!(validate_prepared_request(&reseal(ref2va_with_endpoints)).is_err());
+
+        // A Ref2VA request with no references at all has nothing to condition
+        // on and must not be admitted as an unconditioned generation.
+        let mut empty = ref2va_prepared_request();
+        empty.references = Vec::new();
+        empty.rows.condition_visual_rows = 0;
+        empty.rows.condition_audio_rows = 0;
+        empty.rows.qwen_vision_rows = 0;
+        empty.rows.total_packed_rows = empty.rows.qwen_output_text_rows
+            + empty.rows.target_video_rows
+            + empty.rows.target_audio_rows;
+        assert!(validate_prepared_request(&reseal(empty)).is_err());
+
+        // Audio-only references cannot carry a Ref2VA generation either.
+        let mut audio_only = ref2va_prepared_request();
+        audio_only
+            .references
+            .retain(|entry| entry.kind == H3FactoryReferenceKind::Audio);
+        audio_only.references[0].index = 1;
+        audio_only.rows.condition_visual_rows = 0;
+        audio_only.rows.qwen_vision_rows = 0;
+        audio_only.rows.condition_audio_rows = audio_only.references[0].audio_rows;
+        audio_only.rows.total_packed_rows = audio_only.rows.qwen_output_text_rows
+            + audio_only.rows.condition_audio_rows
+            + audio_only.rows.target_video_rows
+            + audio_only.rows.target_audio_rows;
+        assert!(validate_prepared_request(&reseal(audio_only)).is_err());
+    }
+
+    #[test]
+    fn each_task_pins_exactly_one_executable_load_drop_order() {
+        let fl2va = H3FactoryTargetLoadDropPolicy::LoadVaesLoadQwenEncodeTransferDropQwenEncodeConditionsParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux;
+        let ref2va = H3FactoryTargetLoadDropPolicy::DecodeReferencesPreprocessReferencesLoadVaesLoadQwenEncodeVisionTransferDropQwenEncodeVisualReferencesEncodeAudioReferencesParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux;
+        assert_ne!(fl2va, ref2va);
+
+        // The discriminator participates in the target-budget identity, so a
+        // budget measured against one order cannot be replayed as the other.
+        let mut base = target_budget(&prepared_request(), &raw_checkpoint());
+        base.load_drop_policy = fl2va;
+        let fl2va_identity = expected_h3_factory_target_budget_identity(&base);
+        base.load_drop_policy = ref2va;
+        assert_ne!(
+            expected_h3_factory_target_budget_identity(&base),
+            fl2va_identity
+        );
+    }
+
+    /// Drive the ledger authority directly. The prepared-attempt wrapper adds
+    /// identity plumbing that is exercised elsewhere; what matters here is
+    /// that the budget's phase arithmetic agrees with the request's task.
+    fn check_budget(
+        budget: &H3FactoryTargetBudgetInput,
+        request: &H3FactoryPreparedRequestInput,
+        checkpoint: &H3FactoryRawCheckpointInput,
+    ) -> Result<()> {
+        validate_target_budget(
+            budget,
+            request,
+            checkpoint,
+            0,
+            0,
+            H3FactoryConditionerPlacement::HostCpuThenDrop,
+        )
+    }
+
+    #[test]
+    fn ref2va_budget_charges_four_reference_phases_and_drops_condition_encode() {
+        let request = ref2va_prepared_request();
+        let checkpoint = raw_checkpoint();
+        let budget = target_budget(&request, &checkpoint);
+        check_budget(&budget, &request, &checkpoint)
+            .expect("the Ref2VA reference ledgers must validate against their own load/drop order");
+
+        // The retained normalized media is the headline host charge and is
+        // pinned to the re-derived reference plan, not to a flat constant.
+        let (_, _, _, plan_media) = validate_prepared_references(&request.references).unwrap();
+        let plan_media_bytes = plan_media.normalized_host_bytes;
+        assert_eq!(
+            budget.reference_normalized_media_host_bytes,
+            plan_media_bytes
+        );
+        assert!(plan_media_bytes > 88_000_000);
+
+        // Every reference phase is charged, and it outlives decode into both
+        // encoders, so the media appears in all four ledgers.
+        for phase in [
+            budget.reference_decode_phase_host_bytes,
+            budget.reference_preprocess_phase_host_bytes,
+            budget.reference_visual_encode_phase_host_bytes,
+            budget.reference_audio_encode_phase_host_bytes,
+        ] {
+            assert!(phase > plan_media_bytes);
+        }
+        assert!(budget.reference_visual_encode_phase_device_bytes > 0);
+        assert!(budget.reference_audio_encode_phase_device_bytes > 0);
+        // The host-only leading phases hold no model weights.
+        assert_eq!(
+            budget.reference_decode_phase_device_bytes,
+            budget.fixed_runtime_device_bytes
+        );
+        assert_eq!(
+            budget.reference_preprocess_phase_device_bytes,
+            budget.fixed_runtime_device_bytes
+        );
+
+        // Condition encode is not in Ref2VA's order at all.
+        assert_eq!(budget.condition_encode_phase_host_bytes, 0);
+        assert_eq!(budget.condition_encode_phase_device_bytes, 0);
+
+        // The predicted peaks are a max over the phases that actually run, so
+        // the retained media has to be visible in the host grant.
+        assert!(budget.predicted_host_increment_bytes >= plan_media_bytes);
+    }
+
+    /// The decode phase holds EVERY reference's native payload at once.
+    ///
+    /// `pipeline/ref2va.rs` decodes all references before preprocessing any,
+    /// and `reference_media.rs` keeps each decoded slot until that reference's
+    /// own preprocess step removes it. So the peak is the sum of native
+    /// payloads across the whole ordered set, not a per-reference maximum, and
+    /// it is native rather than normalized — the gap between the two is
+    /// unbounded in principle (a 100 MP still normalizes to 2048x2048) and is
+    /// exactly what a normalized-only ledger loses. Under-charging here lets
+    /// the scheduler grant less host memory than the runtime goes on to hold.
+    #[test]
+    fn reference_decode_charges_every_native_payload_held_at_once() {
+        let request = ref2va_prepared_request();
+        let checkpoint = raw_checkpoint();
+        let budget = target_budget(&request, &checkpoint);
+        check_budget(&budget, &request, &checkpoint).unwrap();
+
+        let native_total =
+            6_000 * 4_000 * 3 + (39 + 4) * 768 * 768 * 3 + 96_000 * 6 * 4 + 48_000 * 2 * 4;
+        let normalized_total =
+            2_048 * 2_048 * 3 + (39 + 4) * 768 * 768 * 3 + 64_000 * 2 * 4 + 32_000 * 2 * 4;
+        // The still alone contributes 72 MB natively against 12.6 MB
+        // normalized, which is the gap a normalized-only ledger loses.
+        assert!(native_total > normalized_total);
+
+        let (_, _, _, media) = validate_prepared_references(&request.references).unwrap();
+        assert_eq!(media.native_host_bytes, native_total);
+        assert_eq!(media.normalized_host_bytes, normalized_total);
+
+        // Decode holds every native payload simultaneously.
+        assert!(budget.reference_decode_phase_host_bytes > native_total);
+        // Preprocess converts one at a time, so natives not yet converted and
+        // normalized ones already produced are held together.
+        assert!(budget.reference_preprocess_phase_host_bytes > native_total + normalized_total);
+        // Both encoders run after every native payload is released.
+        assert!(budget.reference_visual_encode_phase_host_bytes > normalized_total);
+        assert!(
+            budget.reference_visual_encode_phase_host_bytes
+                < budget.reference_preprocess_phase_host_bytes
+        );
+
+        // The host grant must cover the true peak.
+        assert!(budget.predicted_host_increment_bytes >= native_total + normalized_total);
+    }
+
+    /// The decoder resizes video frames to the normalized canvas while
+    /// decoding, so a clip whose source is SMALLER than its normalized canvas
+    /// retains more than its source dimensions imply. Pricing retained frames
+    /// at source resolution is safe only when the canvas shrinks; it
+    /// under-charges exactly when it grows, which is the direction that lets
+    /// the runtime exceed its grant.
+    #[test]
+    fn an_upscaled_video_reference_is_charged_at_its_retained_canvas() {
+        let mut references = ref2va_references();
+        references.truncate(1);
+        // A 32x32 source normalized up to 384x384: 144x the pixels per frame.
+        references.push(H3FactoryReferenceInput {
+            index: 2,
+            kind: H3FactoryReferenceKind::Video,
+            content_sha256: sha('d'),
+            preprocess_version: contract::REFERENCE_PREPROCESS_VERSION,
+            normalized_width: Some(384),
+            normalized_height: Some(384),
+            normalized_video_frames: Some(48),
+            video_frames: Some(39),
+            qwen_video_frames: Some(4),
+            audio_samples_per_channel: None,
+            native_width: Some(32),
+            native_height: Some(32),
+            native_audio_samples_per_channel: None,
+            native_audio_channels: None,
+            visual_rows: 12 * (384 / 32) * (384 / 32),
+            audio_rows: 0,
+            qwen_vision_rows: 2 * (384 / 32) * (384 / 32),
+            normalized_host_bytes: (39 + 4) * 384 * 384 * 3,
+            native_host_bytes: (39 + 4) * 384 * 384 * 3,
+        });
+
+        let charges = h3_reference_charges(&references[1]).unwrap();
+        // Charged at the retained canvas, not the source one.
+        assert_eq!(charges.native_host_bytes, (39 + 4) * 384 * 384 * 3);
+        let at_source_dims = (39 + 4) * 32 * 32 * 3;
+        assert_eq!(charges.native_host_bytes, at_source_dims * 144);
+
+        // And it validates end to end through the ledger.
+        let base = ref2va_prepared_request();
+        let condition_visual_rows = references.iter().map(|r| r.visual_rows).sum::<u64>();
+        let condition_audio_rows = references.iter().map(|r| r.audio_rows).sum::<u64>();
+        let qwen_vision_rows = references.iter().map(|r| r.qwen_vision_rows).sum::<u64>();
+        let mut request = H3FactoryPreparedRequestInput {
+            references,
+            rows: H3FactoryPreparedRowsInput {
+                qwen_vision_rows,
+                condition_visual_rows,
+                condition_audio_rows,
+                total_packed_rows: base.rows.qwen_output_text_rows
+                    + condition_visual_rows
+                    + condition_audio_rows
+                    + base.rows.target_video_rows
+                    + base.rows.target_audio_rows,
+                ..base.rows
+            },
+            ..base
+        };
+        request.identity_sha256 = expected_h3_factory_prepared_request_identity(&request);
+        let checkpoint = raw_checkpoint();
+        let budget = target_budget(&request, &checkpoint);
+        check_budget(&budget, &request, &checkpoint).unwrap();
+        assert!(budget.reference_decode_phase_host_bytes > (39 + 4) * 384 * 384 * 3);
+    }
+
+    /// A rehashed budget must not be able to name its own transient charges.
+    #[test]
+    fn reference_transient_charges_are_recomputed_not_merely_nonzero() {
+        let request = ref2va_prepared_request();
+        let checkpoint = raw_checkpoint();
+        let base = target_budget(&request, &checkpoint);
+
+        for mutate in [
+            (|budget: &mut H3FactoryTargetBudgetInput| {
+                budget.reference_decode_staging_host_bytes = 1
+            }) as fn(&mut H3FactoryTargetBudgetInput),
+            |budget| budget.reference_preprocess_staging_host_bytes = 1,
+            |budget| budget.reference_audio_encode_workspace_device_bytes = 1,
+            // A doubled value is as wrong as a token one: both disagree with
+            // the frozen media facts the term is derived from.
+            |budget| budget.reference_decode_staging_host_bytes *= 2,
+            |budget| budget.reference_preprocess_staging_host_bytes *= 2,
+            |budget| budget.reference_audio_encode_workspace_device_bytes *= 2,
+        ] {
+            let mut budget = base.clone();
+            mutate(&mut budget);
+            budget.identity_sha256 = expected_h3_factory_target_budget_identity(&budget);
+            let error = check_budget(&budget, &request, &checkpoint)
+                .expect_err("a caller-named transient charge must be refused")
+                .to_string();
+            // The macro sweep names the offending field, which is what makes a
+            // production failure locatable.
+            assert!(error.contains("reference_"), "{error}");
+        }
+    }
+
+    #[test]
+    fn reference_ledgers_exist_exactly_for_the_task_that_has_references() {
+        let fl2va = prepared_request();
+        let checkpoint = raw_checkpoint();
+        let fl2va_budget = target_budget(&fl2va, &checkpoint);
+        check_budget(&fl2va_budget, &fl2va, &checkpoint).unwrap();
+
+        // FL2VA charges nothing for references and keeps condition encode.
+        assert_eq!(fl2va_budget.reference_normalized_media_host_bytes, 0);
+        assert_eq!(fl2va_budget.reference_decode_phase_host_bytes, 0);
+        assert_eq!(
+            fl2va_budget.reference_audio_encode_workspace_device_bytes,
+            0
+        );
+        assert!(fl2va_budget.condition_encode_phase_device_bytes > 0);
+
+        // A reference ledger on an FL2VA budget is work the worker will never
+        // perform, so it must be refused rather than silently granted.
+        for mutate in [
+            (|budget: &mut H3FactoryTargetBudgetInput| {
+                budget.reference_normalized_media_host_bytes = 4_096
+            }) as fn(&mut H3FactoryTargetBudgetInput),
+            |budget| budget.reference_decode_staging_host_bytes = 1,
+            |budget| budget.reference_preprocess_staging_host_bytes = 1,
+            |budget| budget.reference_audio_encode_workspace_device_bytes = 1,
+            |budget| budget.reference_decode_phase_host_bytes = 1,
+            |budget| budget.reference_visual_encode_phase_device_bytes = 1,
+        ] {
+            let mut budget = fl2va_budget.clone();
+            mutate(&mut budget);
+            budget.identity_sha256 = expected_h3_factory_target_budget_identity(&budget);
+            assert!(check_budget(&budget, &fl2va, &checkpoint).is_err());
+        }
+
+        // And the mirror: a Ref2VA budget may not drop its reference ledgers
+        // or resurrect FL2VA's condition encode.
+        let ref2va = ref2va_prepared_request();
+        let ref2va_budget = target_budget(&ref2va, &checkpoint);
+        for mutate in [
+            (|budget: &mut H3FactoryTargetBudgetInput| {
+                budget.reference_normalized_media_host_bytes = 0
+            }) as fn(&mut H3FactoryTargetBudgetInput),
+            // Understating the retained media is the failure that would admit
+            // a job into a host grant too small to hold its own references.
+            |budget| budget.reference_normalized_media_host_bytes -= 4_096,
+            |budget| budget.reference_decode_phase_host_bytes = 0,
+            |budget| budget.reference_audio_encode_phase_device_bytes = 0,
+            |budget| budget.condition_encode_phase_device_bytes = 4_096,
+            |budget| {
+                budget.load_drop_policy = H3FactoryTargetLoadDropPolicy::LoadVaesLoadQwenEncodeTransferDropQwenEncodeConditionsParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux
+            },
+        ] {
+            let mut budget = ref2va_budget.clone();
+            mutate(&mut budget);
+            budget.identity_sha256 = expected_h3_factory_target_budget_identity(&budget);
+            assert!(check_budget(&budget, &ref2va, &checkpoint).is_err());
+        }
+    }
+
+    /// Turbo and the reference ledgers are orthogonal, and this pins that on
+    /// purpose rather than by accident.
+    ///
+    /// The task-shaped zero rule says a phase outside a task's order must be
+    /// recorded as zero. Turbo is NOT such a phase: it charges into
+    /// transformer load and denoise, which both tasks execute identically, and
+    /// `REVIEWED_TURBO_TIERS` carries a first-class `ref2v-4step` tier with no
+    /// task binding at all. So a Turbo term on a Ref2VA budget is legitimate,
+    /// not a crossed contract, and must not be refused the way a stray
+    /// condition-encode ledger is. Nothing wires a Ref2VA Turbo adapter yet,
+    /// so in practice these terms are zero — allowed-but-zero-until-wired,
+    /// which is a different statement from "forbidden" and must stay so.
+    #[test]
+    fn turbo_terms_are_task_neutral_while_reference_ledgers_are_not() {
+        let checkpoint = raw_checkpoint();
+        let ref2va = ref2va_prepared_request();
+        let budget = target_budget(&ref2va, &checkpoint);
+
+        // Baseline: no adapter is wired, so both terms are zero and the
+        // Ref2VA budget validates.
+        assert_eq!(budget.turbo_adapter_device_bytes, 0);
+        assert_eq!(budget.turbo_adapter_host_staging_bytes, 0);
+        check_budget(&budget, &ref2va, &checkpoint).unwrap();
+
+        // Widening the two shared phases by an adapter's declared cost stays
+        // arithmetically consistent on a Ref2VA budget exactly as it does on
+        // an FL2VA one — the reference ledgers neither absorb nor block it.
+        let mut turbocharged = budget.clone();
+        turbocharged.turbo_adapter_device_bytes = TURBO_DEVICE_BYTES;
+        turbocharged.turbo_adapter_host_staging_bytes = TURBO_HOST_STAGING_BYTES;
+        turbocharged.transformer_load_phase_device_bytes += TURBO_DEVICE_BYTES;
+        turbocharged.denoise_phase_device_bytes += TURBO_DEVICE_BYTES;
+        turbocharged.transformer_load_phase_host_bytes += TURBO_HOST_STAGING_BYTES;
+        turbocharged.predicted_device_peak_bytes = turbocharged
+            .predicted_device_peak_bytes
+            .max(turbocharged.denoise_phase_device_bytes)
+            .max(turbocharged.transformer_load_phase_device_bytes);
+        turbocharged.predicted_host_increment_bytes = turbocharged
+            .predicted_host_increment_bytes
+            .max(turbocharged.transformer_load_phase_host_bytes);
+        turbocharged.identity_sha256 = expected_h3_factory_target_budget_identity(&turbocharged);
+        check_budget(&turbocharged, &ref2va, &checkpoint)
+            .expect("a Ref2VA budget must accept the reviewed ref2v Turbo tier's terms");
+
+        // The reference ledgers remain task-shaped underneath it: a Ref2VA
+        // budget that also resurrects FL2VA's condition encode is still wrong,
+        // Turbo or not.
+        let mut crossed = turbocharged;
+        crossed.condition_encode_phase_device_bytes = 4_096;
+        crossed.identity_sha256 = expected_h3_factory_target_budget_identity(&crossed);
+        assert!(check_budget(&crossed, &ref2va, &checkpoint).is_err());
+    }
+
+    #[test]
+    fn every_reference_ledger_field_participates_in_the_budget_identity() {
+        let request = ref2va_prepared_request();
+        let checkpoint = raw_checkpoint();
+        let base = target_budget(&request, &checkpoint);
+        for mutate in [
+            (|budget: &mut H3FactoryTargetBudgetInput| {
+                budget.reference_normalized_media_host_bytes += 1
+            }) as fn(&mut H3FactoryTargetBudgetInput),
+            |budget| budget.reference_decode_staging_host_bytes += 1,
+            |budget| budget.reference_preprocess_staging_host_bytes += 1,
+            |budget| budget.reference_decode_phase_host_bytes += 1,
+            |budget| budget.reference_preprocess_phase_host_bytes += 1,
+            |budget| budget.reference_visual_encode_phase_host_bytes += 1,
+            |budget| budget.reference_audio_encode_phase_host_bytes += 1,
+            |budget| budget.reference_audio_encode_workspace_device_bytes += 1,
+            |budget| budget.reference_decode_phase_device_bytes += 1,
+            |budget| budget.reference_preprocess_phase_device_bytes += 1,
+            |budget| budget.reference_visual_encode_phase_device_bytes += 1,
+            |budget| budget.reference_audio_encode_phase_device_bytes += 1,
+            |budget| budget.reference_media_identity_sha256 = sha('e'),
+        ] {
+            let mut mutated = base.clone();
+            mutate(&mut mutated);
+            assert_ne!(
+                expected_h3_factory_target_budget_identity(&mutated),
+                base.identity_sha256
+            );
+        }
+
+        // Byte totals collide under a transposed canvas, so the geometry has
+        // to reach the BUDGET identity and not only the request's.
+        let mut transposed = ref2va_prepared_request();
+        let (width, height) = (
+            transposed.references[0].native_width,
+            transposed.references[0].native_height,
+        );
+        transposed.references[0].native_width = height;
+        transposed.references[0].native_height = width;
+        assert_ne!(width, height);
+        let transposed_budget = target_budget(&transposed, &raw_checkpoint());
+        // Same retained bytes...
+        assert_eq!(
+            transposed_budget.reference_decode_phase_host_bytes,
+            base.reference_decode_phase_host_bytes
+        );
+        // ...but a different budget identity.
+        assert_ne!(transposed_budget.identity_sha256, base.identity_sha256);
     }
 
     fn raw_checkpoint() -> H3FactoryRawCheckpointInput {
@@ -4391,7 +5895,116 @@ mod tests {
             10_000,
             2_000,
         ]);
+        // Ref2VA's four leading phases, written out independently of the code
+        // under test so the ledger and its reference stay in lockstep.
+        let ref2va = request.task == Task::Ref2va;
+        let reference_normalized_media_host_bytes = request
+            .references
+            .iter()
+            .map(|reference| reference.normalized_host_bytes)
+            .sum::<u64>();
+        // Every native payload is held at once — the orchestrator decodes the
+        // whole ordered set before preprocessing any of it.
+        let reference_native_media_host_bytes = request
+            .references
+            .iter()
+            .map(|reference| reference.native_host_bytes)
+            .sum::<u64>();
+        let reference_decode_staging_host_bytes = request
+            .references
+            .iter()
+            .map(|reference| reference.native_host_bytes)
+            .max()
+            .unwrap_or(0);
+        let reference_preprocess_staging_host_bytes = request
+            .references
+            .iter()
+            .map(|reference| reference.normalized_host_bytes)
+            .max()
+            .unwrap_or(0);
+        let reference_audio_encode_workspace_device_bytes = if ref2va {
+            audio_decode_workspace_device_bytes
+        } else {
+            0
+        };
+        let reference_decode_phase_host_bytes = if ref2va {
+            sum(&[
+                attempt_host_bytes,
+                qwen_alive_metadata_host_bytes,
+                reference_native_media_host_bytes,
+                reference_decode_staging_host_bytes,
+            ])
+        } else {
+            0
+        };
+        let reference_preprocess_phase_host_bytes = if ref2va {
+            sum(&[
+                attempt_host_bytes,
+                qwen_alive_metadata_host_bytes,
+                reference_native_media_host_bytes,
+                reference_normalized_media_host_bytes,
+                reference_preprocess_staging_host_bytes,
+            ])
+        } else {
+            0
+        };
+        let reference_encode_phase_host_bytes = if ref2va {
+            sum(&[
+                attempt_host_bytes,
+                transformer_alive_metadata_host_bytes,
+                reference_normalized_media_host_bytes,
+                condition_backing_host_bytes,
+                packed_layout_host_bytes,
+                text_modality_tags_host_bytes,
+            ])
+        } else {
+            0
+        };
+        let reference_decode_phase_device_bytes = if ref2va {
+            fixed_runtime_device_bytes
+        } else {
+            0
+        };
+        let reference_preprocess_phase_device_bytes = reference_decode_phase_device_bytes;
+        let reference_visual_encode_phase_device_bytes = if ref2va {
+            sum(&[
+                fixed_runtime_device_bytes,
+                retained_vaes,
+                qwen_output_state_device_bytes,
+                condition_vae_workspace_device_bytes,
+                condition_latent_backing_device_bytes,
+                packed_layout_device_bytes,
+            ])
+        } else {
+            0
+        };
+        let reference_audio_encode_phase_device_bytes = if ref2va {
+            sum(&[
+                fixed_runtime_device_bytes,
+                retained_vaes,
+                qwen_output_state_device_bytes,
+                reference_audio_encode_workspace_device_bytes,
+                condition_latent_backing_device_bytes,
+                packed_layout_device_bytes,
+            ])
+        } else {
+            0
+        };
+        // A phase outside this task's order contributes nothing.
+        let condition_encode_phase_host_bytes = if ref2va {
+            0
+        } else {
+            condition_encode_phase_host_bytes
+        };
+        let condition_encode_phase_device_bytes = if ref2va {
+            0
+        } else {
+            condition_encode_phase_device_bytes
+        };
         let predicted_host_increment_bytes = *[
+            reference_decode_phase_host_bytes,
+            reference_preprocess_phase_host_bytes,
+            reference_encode_phase_host_bytes,
             vae_load_phase_host_bytes,
             qwen_encode_phase_host_bytes,
             qwen_transfer_phase_host_bytes,
@@ -4407,9 +6020,24 @@ mod tests {
         .iter()
         .max()
         .unwrap();
+        let predicted_device_peak_bytes = *[
+            predicted_device_peak_bytes,
+            reference_decode_phase_device_bytes,
+            reference_preprocess_phase_device_bytes,
+            reference_visual_encode_phase_device_bytes,
+            reference_audio_encode_phase_device_bytes,
+            condition_encode_phase_device_bytes,
+        ]
+        .iter()
+        .max()
+        .unwrap();
         let mut budget = H3FactoryTargetBudgetInput {
             identity_sha256: String::new(),
-            load_drop_policy: H3FactoryTargetLoadDropPolicy::LoadVaesLoadQwenEncodeTransferDropQwenEncodeConditionsParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux,
+            load_drop_policy: if ref2va {
+                H3FactoryTargetLoadDropPolicy::DecodeReferencesPreprocessReferencesLoadVaesLoadQwenEncodeVisionTransferDropQwenEncodeVisualReferencesEncodeAudioReferencesParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux
+            } else {
+                H3FactoryTargetLoadDropPolicy::LoadVaesLoadQwenEncodeTransferDropQwenEncodeConditionsParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux
+            },
             artifacts,
             artifact_host_bytes,
             fixed_runtime_host_bytes: 100,
@@ -4424,6 +6052,21 @@ mod tests {
             packed_layout_host_bytes,
             packed_layout_construction_staging_host_bytes,
             packed_layout_freeze_staging_host_bytes,
+            reference_media_identity_sha256: expected_h3_factory_reference_media_identity(
+                &request.references,
+            ),
+            reference_normalized_media_host_bytes,
+            reference_decode_staging_host_bytes,
+            reference_preprocess_staging_host_bytes,
+            reference_decode_phase_host_bytes,
+            reference_preprocess_phase_host_bytes,
+            reference_visual_encode_phase_host_bytes: reference_encode_phase_host_bytes,
+            reference_audio_encode_phase_host_bytes: reference_encode_phase_host_bytes,
+            reference_audio_encode_workspace_device_bytes,
+            reference_decode_phase_device_bytes,
+            reference_preprocess_phase_device_bytes,
+            reference_visual_encode_phase_device_bytes,
+            reference_audio_encode_phase_device_bytes,
             text_modality_tags_host_bytes,
             noise_cpu_staging_host_bytes,
             vae_peak_host_io_buffer_bytes: 1_000,
