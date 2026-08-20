@@ -188,7 +188,6 @@ vi.mock("../api", async (importOriginal) => {
     listGallery: vi.fn(async () => [entry]),
     deleteGalleryImage: vi.fn(async () => undefined),
     upscaleStream: upscaleStreamMock,
-    fetchPromptHistory: vi.fn(async () => []),
     imageUrl: (name: string) => `/api/gallery/image/${name}`,
     thumbnailUrl: (name: string) => `/api/gallery/thumbnail/${name}`,
     fetchChainLimits: fetchChainLimitsMock,
