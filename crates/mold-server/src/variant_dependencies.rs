@@ -1454,26 +1454,108 @@ async fn prepare_inputs_for_devices(
     Ok(prepared)
 }
 
-/// Cancels its token when dropped, so an abandoned preparation stops the
-/// CPU decoding it spawned rather than letting it run to completion.
+/// Cancels its token when dropped UNLESS disarmed, so an abandoned or
+/// unwinding preparation stops the CPU decoding it spawned, while a completed
+/// one leaves its token uncancelled — the admitted evidence and any binding
+/// derived from it must stay valid after preparation returns.
 #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
-struct PreparationCancellationGuard(mold_inference::InferenceCancellationToken);
+struct PreparationCancellationGuard {
+    token: mold_inference::InferenceCancellationToken,
+    armed: bool,
+}
 
 #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 impl PreparationCancellationGuard {
     fn new() -> Self {
-        Self(mold_inference::InferenceCancellationToken::default())
+        Self {
+            token: mold_inference::InferenceCancellationToken::default(),
+            armed: true,
+        }
     }
 
-    fn clone(&self) -> mold_inference::InferenceCancellationToken {
-        self.0.clone()
+    fn token(&self) -> mold_inference::InferenceCancellationToken {
+        self.token.clone()
+    }
+
+    /// Call on the success path only. Every early return and every unwind
+    /// leaves the guard armed, which is what makes abandonment cancel.
+    fn disarm(&mut self) {
+        self.armed = false;
     }
 }
 
 #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 impl Drop for PreparationCancellationGuard {
     fn drop(&mut self) {
-        self.0.cancel();
+        if self.armed {
+            self.token.cancel();
+        }
+    }
+}
+
+#[cfg(all(test, any(feature = "h3", feature = "h3-private-uat")))]
+mod preparation_cancellation_tests {
+    use super::PreparationCancellationGuard;
+
+    /// An abandoned or unwinding preparation must cancel the work it spawned,
+    /// so a cancelled job stops decoding at the next checkpoint instead of
+    /// running to completion on media nobody will use.
+    #[test]
+    fn an_armed_guard_cancels_its_token_on_drop() {
+        let guard = PreparationCancellationGuard::new();
+        let token = guard.token();
+        assert!(!token.is_cancelled());
+        drop(guard);
+        assert!(token.is_cancelled());
+    }
+
+    /// A COMPLETED preparation must not cancel: its admitted evidence and any
+    /// binding derived from it have to stay valid after preparation returns.
+    #[test]
+    fn a_disarmed_guard_leaves_its_token_usable() {
+        let mut guard = PreparationCancellationGuard::new();
+        let token = guard.token();
+        guard.disarm();
+        drop(guard);
+        assert!(!token.is_cancelled());
+    }
+
+    /// The Ref2VA media decode checkpoints through the admission reporter, so
+    /// the reporter — not just the binding step — has to carry the token.
+    /// Binding consults it directly while hashing and retains none, so a token
+    /// installed only there leaves the decode itself uninterruptible.
+    #[test]
+    fn the_admission_reporter_carries_the_cancellation_token_into_decode() {
+        let guard = PreparationCancellationGuard::new();
+        let mut reporter = mold_inference::progress::ProgressReporter::default();
+        reporter.set_cancellation_token(guard.token());
+
+        // Before cancellation the decode proceeds.
+        reporter
+            .checkpoint()
+            .expect("an armed preparation still runs");
+
+        // Dropping the guard is what an abandoned preparation does, and the
+        // next decode checkpoint must observe it.
+        drop(guard);
+        let stopped = reporter.checkpoint().unwrap_err();
+        assert!(mold_inference::is_inference_cancelled(&anyhow::Error::new(
+            stopped
+        )));
+    }
+
+    /// Unwinding is the abandonment case that is easiest to get wrong, since
+    /// it takes no explicit return path.
+    #[test]
+    fn a_panicking_preparation_still_cancels() {
+        let guard = PreparationCancellationGuard::new();
+        let token = guard.token();
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _guard = guard;
+            panic!("preparation failed");
+        }));
+        assert!(unwound.is_err());
+        assert!(token.is_cancelled());
     }
 }
 
@@ -1509,7 +1591,7 @@ async fn prepare_h3_private_inputs_for_devices(
     let mut resolved_request = request.clone();
     // Dropped when this preparation returns or unwinds, which cancels every
     // spawned decode that is still running for it.
-    let preparation_cancellation = PreparationCancellationGuard::new();
+    let mut preparation_cancellation = PreparationCancellationGuard::new();
     let mut evidence_by_device = BTreeMap::new();
     let mut failures = BTreeMap::new();
 
@@ -1535,13 +1617,17 @@ async fn prepare_h3_private_inputs_for_devices(
         // attempt is what keeps descriptor identity fenced to the attempt that
         // verified it.
         let references = resolved_references.clone();
-        let cancellation = preparation_cancellation.clone();
+        let cancellation = preparation_cancellation.token();
         let device_id = device.id.clone();
         let device_ordinal = device.ordinal;
         let available_device_bytes = device.available_vram_bytes;
         let progress_tx = progress.cloned();
         let evidence = tokio::task::spawn_blocking(move || {
             let mut reporter = mold_inference::progress::ProgressReporter::default();
+            // The decode checkpoints through this reporter, so the token has
+            // to live here — bindings retain none, and consulting it only
+            // while hashing would leave the media decode uninterruptible.
+            reporter.set_cancellation_token(cancellation.clone());
             if let Some(progress_tx) = progress_tx {
                 reporter.set_callback(Box::new(move |event| {
                     crate::gpu_worker::record_h3_progress(event, Some(&progress_tx));
@@ -1658,6 +1744,9 @@ async fn prepare_h3_private_inputs_for_devices(
         authority.update(device_id.as_bytes());
         authority.update(evidence.identity_sha256().as_bytes());
     }
+    // Every device admitted, so the work this token guards is finished and
+    // its bindings must remain usable.
+    preparation_cancellation.disarm();
     Ok(PreparedExecutionInputs {
         authority_fingerprint: format!("{:x}", authority.finalize()),
         by_device,

@@ -1091,9 +1091,12 @@ impl H3PrivateFl2VaAdmissionEvidence {
             self.attention.model_contract,
         )
         .map_err(|error| anyhow!(error.to_string()))?;
-        if self.canonical_model != contract::FL2VA_COMFY
-            || self.task != Task::Fl2va
-            || contract::validate_request_contract(&resolved, Task::Fl2va)
+        // The recorded route must be a coherent pinned pair, and the resolved
+        // request must satisfy THAT route. Re-asserting FL2VA here is what
+        // killed the Ref2VA evidence the rest of admission had just derived.
+        let recorded_contract = contract::capability_contract_for_model(&self.canonical_model);
+        if !recorded_contract.is_some_and(|recorded| recorded.task == self.task)
+            || contract::validate_resolved_request_contract(&resolved, self.task)
                 .map_err(|error| anyhow!("{}: {}", error.code, error.message))?
                 != self.mode
             || private_h3_request_identity(&resolved)? != self.resolved_request_identity_sha256
@@ -1206,7 +1209,11 @@ fn prepare_reviewed_h3_private_fl2va_admission(
             H3ComfyPublishedArtifact::Ref2VaPrunedInt8ConvRot,
         ),
     };
-    let mode = contract::validate_request_contract(request, admitted_task)
+    // Admission runs after reference resolution, so Ref2VA media are already
+    // descriptor authorities — the only valid queue/worker form, and the one
+    // the public-boundary validator refuses. FL2VA carries no references, so
+    // this is the same check it always made.
+    let mode = contract::validate_resolved_request_contract(request, admitted_task)
         .map_err(|error| anyhow!("{}: {}", error.code, error.message))?;
     let submitted_request_identity_sha256 = private_h3_request_identity(request)?;
 
