@@ -287,7 +287,7 @@ prepared-work staleness rules.
 "authoritative `infeasible` carries additive `missing_components`; `planned` may carry
 additive `pending_downloads`; previews remain read-only and never start downloads;
 clients must keep queueing nothing on infeasible but may offer the structured repair
-flow"; `.claude/skills/mold/SKILL.md`, `website/` guide pages, `apps/mobile/README.md`
+flow"; `crates/mold-cli/src/skill/SKILL.md`, `website/` guide pages, `apps/mobile/README.md`
 if the iPhone flow changes.
 
 ## Risks / open questions

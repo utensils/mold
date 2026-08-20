@@ -2627,7 +2627,7 @@ Update with each user-facing phase:
 - `CHANGELOG.md`;
 - `README.md`;
 - `CLAUDE.md`/`AGENTS.md`;
-- `.claude/skills/mold/SKILL.md`;
+- `crates/mold-cli/src/skill/SKILL.md`;
 - `apps/mobile/README.md`;
 - desktop docs;
 - website installation/configuration/API/deployment pages;

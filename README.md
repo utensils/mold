@@ -130,6 +130,16 @@ MOLD_HOST=http://gpu-server:7680 mold run "a cat"  # laptop
 See the [remote workflow](https://utensils.io/mold/guide/remote-workflows) and
 [RunPod](https://utensils.io/mold/deployment/runpod-cli) guides.
 
+Install Mold's embedded Agent Skill for your coding agent:
+
+```bash
+mold skill install --detected
+```
+
+`mold skill list` shows all supported agents and paths; explicit targets such
+as `mold skill install claude codex` and project installs with `--project` are
+also supported.
+
 ## Project
 
 Mold is a Rust workspace built on

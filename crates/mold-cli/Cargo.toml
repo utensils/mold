@@ -54,6 +54,7 @@ base64 = "0.22"
 clap = { version = "4", features = ["derive", "env", "unstable-ext"] }
 clap_complete = { version = "4", features = ["unstable-dynamic"] }
 colored = "3"
+comfy-table = "7.2"
 ctrlc = "3"
 image = "0.25"
 libc = "0.2"

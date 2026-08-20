@@ -19,10 +19,15 @@ happens from a laptop, devbox, or remote shell.
 
 ## Install the Skill
 
-Copy the mold skill into your OpenClaw workspace according to the OpenClaw skill
-layout you use today. The repository already keeps the shared mold skill
-definition in `.claude/skills/mold/SKILL.md`, which is intended to stay in sync
-with the codebase and docs.
+Install the embedded skill directly into OpenClaw's user-wide path:
+
+```bash
+mold skill install openclaw
+```
+
+For a project-local workspace, run `mold skill install openclaw --project` from
+its root or pass `--dir <PATH>`. Mold writes `.agents/skills/mold/SKILL.md` for
+project installs and `~/.openclaw/skills/mold/SKILL.md` user-wide.
 
 ## Configure the Connection
 

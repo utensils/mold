@@ -178,7 +178,7 @@ the investigation there.
 
 Flip the default in `select_linear_kind`, drop the `MOLD_QWEN_QMATMUL` opt-in
 (or keep it as an escape hatch), and update the env-var tables in
-`website/guide/configuration.md` and `.claude/skills/mold/SKILL.md` plus the
+`website/guide/configuration.md` and `crates/mold-cli/src/skill/SKILL.md` plus the
 `CLAUDE.md` invariant on the quantized linear arm. Re-run the reproduction above
 and the `bench-qwen.sh` matrix; the whole point of the flip is throughput, so a
 number belongs in the changelog entry.
