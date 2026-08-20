@@ -343,6 +343,15 @@ require_text "flake.nix" \
   '"mold.cachix.org-1:9HBc/bEXDdpbxMjOwpaIDpjZqBh9JYg0h5Fipm+D8m4="'
 require_release_job_need "publish" "release-version"
 require_release_job_need "publish-aur" "release-native"
+require_release_job_text "release-latest" \
+  'sha256sum -- *.tar.gz > SHA256SUMS'
+for checksum_job in release-version release-native release-containers; do
+  require_release_job_text "$checksum_job" \
+    'sha256sum -- *.tar.gz *.dmg *.zip > SHA256SUMS'
+done
+if grep -Fq 'sha256sum ./*' "$repo_root/$release"; then
+  fail "$release must write asset names without a ./ prefix for legacy updater compatibility"
+fi
 require_release_job_text "release-containers" \
   'scripts/create-container-digest-manifest.sh'
 require_release_job_text "release-containers" \
