@@ -26,6 +26,7 @@ mod qwen_nvfp4_runtime;
 mod qwen_quant;
 mod text;
 mod turbo_lora;
+mod turbo_runtime;
 mod vision;
 mod visual_condition;
 mod visual_geometry;
@@ -168,6 +169,7 @@ pub use turbo_lora::{
     H3_TURBO_LORA_SOURCE_REVISION, H3_TURBO_LORA_TARGET_FORMAT, H3_TURBO_LORA_TENSOR_COUNT,
     H3_TURBO_LORA_TRAINING_RANK, H3_TURBO_LORA_WEIGHT_DTYPE,
 };
+pub use turbo_runtime::{H3TurboBlockDeltas, H3TurboLoraDelta, H3TurboLoraRuntime};
 pub use visual_condition::{
     ConditionEncodeMode, SignedRgbPixels, Uint8RgbPixels, UnitRgbPixels, H3_IMAGENET_MEAN,
     H3_IMAGENET_STD, H3_LATENTS_MEAN, H3_LATENTS_STD,

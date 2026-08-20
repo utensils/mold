@@ -26,6 +26,10 @@ use super::attention::{
     H3AttentionRuntimeAuthority, H3FrozenAttentionExecution, H3FrozenAttentionPlan,
 };
 use super::comfy_quant::{H3ComfyInt8ConvRotLinear, H3_COMFY_PORTABLE_ROW_CHUNK};
+use super::turbo_runtime::{
+    apply_optional_turbo_delta, validate_turbo_block_shapes, H3TurboBlockDeltas, H3TurboLoraDelta,
+    H3TurboLoraRuntime,
+};
 
 pub const H3_MODALITY_COUNT: usize = 3;
 
@@ -1219,9 +1223,13 @@ struct H3Attention {
     head_dim: usize,
     inner_dim: usize,
     qkv: nn::Linear,
+    /// Turbo parallel branch over the fused Q/K/V projection. `None` leaves
+    /// the forward bit-identical to the unadapted path.
+    qkv_delta: Option<H3TurboLoraDelta>,
     q_norm: nn::RmsNorm,
     k_norm: nn::RmsNorm,
     out: nn::Linear,
+    out_delta: Option<H3TurboLoraDelta>,
 }
 
 impl H3Attention {
@@ -1229,6 +1237,7 @@ impl H3Attention {
         config: &H3TransformerConfig,
         qkv_layout: H3QkvLayout,
         dtype: DType,
+        turbo: Option<&H3TurboBlockDeltas>,
         vb: VarBuilder,
     ) -> Result<Self> {
         let inner_dim = config.attention_inner_dim();
@@ -1237,6 +1246,7 @@ impl H3Attention {
             head_dim: config.attention_head_dim,
             inner_dim,
             qkv: qkv_linear(config, qkv_layout, dtype, vb.pp("qkv_proj"))?,
+            qkv_delta: turbo.map(|turbo| turbo.qkv.clone()),
             q_norm: rms_norm_with_dtype(
                 config.attention_head_dim,
                 config.qk_norm_eps,
@@ -1256,6 +1266,7 @@ impl H3Attention {
                 dtype,
                 vb.pp("out_proj"),
             )?,
+            out_delta: turbo.map(|turbo| turbo.out.clone()),
         })
     }
 
@@ -1278,7 +1289,11 @@ impl H3Attention {
         capture: bool,
     ) -> Result<H3AttentionMaybeCapture> {
         let (batch, seq_len, _) = hidden.dims3()?;
-        let qkv = self.qkv.forward(hidden)?;
+        // The Turbo delta lands on the FUSED projection before the Q/K/V
+        // narrow: `lora_B` is block-diagonal, so the routing is already baked
+        // into its structural zeros.
+        let qkv =
+            apply_optional_turbo_delta(self.qkv_delta.as_ref(), hidden, self.qkv.forward(hidden)?)?;
         let q = qkv.narrow(2, 0, self.inner_dim)?;
         let k = qkv.narrow(2, self.inner_dim, self.inner_dim)?;
         let v = qkv.narrow(2, 2 * self.inner_dim, self.inner_dim)?;
@@ -1305,7 +1320,11 @@ impl H3Attention {
             .map_err(|error| candle::Error::Msg(error.to_string()))?
             .reshape((batch, seq_len, self.inner_dim))?;
         Ok(H3AttentionMaybeCapture {
-            output: self.out.forward(&output)?,
+            output: apply_optional_turbo_delta(
+                self.out_delta.as_ref(),
+                &output,
+                self.out.forward(&output)?,
+            )?,
             normalized_q,
             normalized_k,
             rotated_q: capture.then_some(q),
@@ -1326,11 +1345,18 @@ struct H3AttentionMaybeCapture {
 struct H3Mlp {
     width: usize,
     fc1: nn::Linear,
+    fc1_delta: Option<H3TurboLoraDelta>,
     fc2: nn::Linear,
+    fc2_delta: Option<H3TurboLoraDelta>,
 }
 
 impl H3Mlp {
-    fn load(config: &H3TransformerConfig, dtype: DType, vb: VarBuilder) -> Result<Self> {
+    fn load(
+        config: &H3TransformerConfig,
+        dtype: DType,
+        turbo: Option<&H3TurboBlockDeltas>,
+        vb: VarBuilder,
+    ) -> Result<Self> {
         Ok(Self {
             width: config.ffn_hidden_size,
             fc1: linear_with_dtype(
@@ -1340,6 +1366,7 @@ impl H3Mlp {
                 dtype,
                 vb.pp("fc1"),
             )?,
+            fc1_delta: turbo.map(|turbo| turbo.fc1.clone()),
             fc2: linear_with_dtype(
                 config.ffn_hidden_size,
                 config.hidden_size,
@@ -1347,14 +1374,19 @@ impl H3Mlp {
                 dtype,
                 vb.pp("fc2"),
             )?,
+            fc2_delta: turbo.map(|turbo| turbo.fc2.clone()),
         })
     }
 
     fn forward(&self, hidden: &Tensor) -> Result<Tensor> {
-        let projected = self.fc1.forward(hidden)?;
+        // fc1's delta must land on the full 2 * ffn projection before the
+        // SwiGLU gate/up narrow, exactly as the published lora_B is shaped.
+        let projected =
+            apply_optional_turbo_delta(self.fc1_delta.as_ref(), hidden, self.fc1.forward(hidden)?)?;
         let gate = projected.narrow(D::Minus1, 0, self.width)?;
         let up = projected.narrow(D::Minus1, self.width, self.width)?;
-        self.fc2.forward(&silu(&gate)?.broadcast_mul(&up)?)
+        let gated = silu(&gate)?.broadcast_mul(&up)?;
+        apply_optional_turbo_delta(self.fc2_delta.as_ref(), &gated, self.fc2.forward(&gated)?)
     }
 }
 
@@ -1371,13 +1403,23 @@ impl H3TokenRefinerBlock {
         config: &H3TransformerConfig,
         qkv_layout: H3QkvLayout,
         dtype: DType,
+        turbo: Option<&H3TurboBlockDeltas>,
         vb: VarBuilder,
     ) -> Result<Self> {
+        if let Some(turbo) = turbo {
+            validate_turbo_block_shapes(
+                turbo,
+                config.hidden_size,
+                config.attention_inner_dim(),
+                config.ffn_hidden_size,
+                vb.device(),
+            )?;
+        }
         Ok(Self {
             norm1: rms_norm_with_dtype(config.hidden_size, config.norm_eps, dtype, vb.pp("norm1"))?,
-            attention: H3Attention::load(config, qkv_layout, dtype, vb.pp("attn"))?,
+            attention: H3Attention::load(config, qkv_layout, dtype, turbo, vb.pp("attn"))?,
             norm2: rms_norm_with_dtype(config.hidden_size, config.norm_eps, dtype, vb.pp("norm2"))?,
-            mlp: H3Mlp::load(config, dtype, vb.pp("mlp"))?,
+            mlp: H3Mlp::load(config, dtype, turbo, vb.pp("mlp"))?,
         })
     }
 
@@ -1472,9 +1514,13 @@ struct H3ComfyInt8Attention {
     head_dim: usize,
     inner_dim: usize,
     qkv: H3ComfyInt8ConvRotLinear,
+    /// Turbo parallel branch in the original, unrotated basis. The INT8
+    /// forward's output is already in that basis, so the sum is exact.
+    qkv_delta: Option<H3TurboLoraDelta>,
     q_norm: nn::RmsNorm,
     k_norm: nn::RmsNorm,
     out: H3ComfyInt8ConvRotLinear,
+    out_delta: Option<H3TurboLoraDelta>,
 }
 
 impl H3ComfyInt8Attention {
@@ -1538,11 +1584,15 @@ impl H3ComfyInt8Attention {
                 qkv_workspace.max(kernel_peak).max(output_projection_peak),
             );
         }
-        let qkv = self.qkv.forward_reference(
+        let qkv = apply_optional_turbo_delta(
+            self.qkv_delta.as_ref(),
             hidden,
-            None,
-            hidden.dtype(),
-            H3_COMFY_PORTABLE_ROW_CHUNK,
+            self.qkv.forward_reference(
+                hidden,
+                None,
+                hidden.dtype(),
+                H3_COMFY_PORTABLE_ROW_CHUNK,
+            )?,
         )?;
         let q = qkv.narrow(2, 0, self.inner_dim)?;
         let k = qkv.narrow(2, self.inner_dim, self.inner_dim)?;
@@ -1563,8 +1613,16 @@ impl H3ComfyInt8Attention {
         let output = execute_h3_attention(attention_plan, &q, &k, &v)
             .map_err(|error| candle::Error::Msg(error.to_string()))?
             .reshape((batch, seq_len, self.inner_dim))?;
-        self.out
-            .forward_reference(&output, None, hidden.dtype(), H3_COMFY_PORTABLE_ROW_CHUNK)
+        apply_optional_turbo_delta(
+            self.out_delta.as_ref(),
+            &output,
+            self.out.forward_reference(
+                &output,
+                None,
+                hidden.dtype(),
+                H3_COMFY_PORTABLE_ROW_CHUNK,
+            )?,
+        )
     }
 }
 
@@ -1572,7 +1630,9 @@ impl H3ComfyInt8Attention {
 struct H3ComfyInt8Mlp {
     width: usize,
     fc1: H3ComfyInt8ConvRotLinear,
+    fc1_delta: Option<H3TurboLoraDelta>,
     fc2: H3ComfyInt8ConvRotLinear,
+    fc2_delta: Option<H3TurboLoraDelta>,
 }
 
 impl H3ComfyInt8Mlp {
@@ -1620,19 +1680,28 @@ impl H3ComfyInt8Mlp {
                 .ok_or_else(|| candle::Error::Msg("MiniMax H3 FFN workspace overflows".into()))?;
             super::private_runtime_observation::observe_ffn(fc1.max(retained_fc2));
         }
-        let projected = self.fc1.forward_reference(
+        let projected = apply_optional_turbo_delta(
+            self.fc1_delta.as_ref(),
             hidden,
-            None,
-            hidden.dtype(),
-            H3_COMFY_PORTABLE_ROW_CHUNK,
+            self.fc1.forward_reference(
+                hidden,
+                None,
+                hidden.dtype(),
+                H3_COMFY_PORTABLE_ROW_CHUNK,
+            )?,
         )?;
         let gate = projected.narrow(D::Minus1, 0, self.width)?;
         let up = projected.narrow(D::Minus1, self.width, self.width)?;
-        self.fc2.forward_reference(
-            &silu(&gate)?.broadcast_mul(&up)?,
-            None,
-            hidden.dtype(),
-            H3_COMFY_PORTABLE_ROW_CHUNK,
+        let gated = silu(&gate)?.broadcast_mul(&up)?;
+        apply_optional_turbo_delta(
+            self.fc2_delta.as_ref(),
+            &gated,
+            self.fc2.forward_reference(
+                &gated,
+                None,
+                hidden.dtype(),
+                H3_COMFY_PORTABLE_ROW_CHUNK,
+            )?,
         )
     }
 }
@@ -1655,6 +1724,9 @@ pub(super) struct H3ComfyInt8BlockMatrices {
     pub out: H3ComfyInt8ConvRotLinear,
     pub fc1: H3ComfyInt8ConvRotLinear,
     pub fc2: H3ComfyInt8ConvRotLinear,
+    /// This block's four Turbo deltas, already resident on the execution
+    /// device. `None` keeps the block bit-identical to the unadapted forward.
+    pub turbo: Option<H3TurboBlockDeltas>,
 }
 
 impl H3ComfyInt8TransformerBlockWeights {
@@ -1684,6 +1756,15 @@ impl H3ComfyInt8TransformerBlockWeights {
                 "MiniMax H3 Comfy INT8 block matrix shapes do not match the frozen config"
             )
         }
+        if let Some(turbo) = &matrices.turbo {
+            validate_turbo_block_shapes(
+                turbo,
+                config.hidden_size,
+                inner_dim,
+                config.ffn_hidden_size,
+                vb.device(),
+            )?;
+        }
         Ok(Self {
             norm1: rms_norm_with_dtype(
                 config.hidden_size,
@@ -1696,6 +1777,7 @@ impl H3ComfyInt8TransformerBlockWeights {
                 head_dim: config.attention_head_dim,
                 inner_dim,
                 qkv: matrices.qkv,
+                qkv_delta: matrices.turbo.as_ref().map(|turbo| turbo.qkv.clone()),
                 q_norm: rms_norm_with_dtype(
                     config.attention_head_dim,
                     config.qk_norm_eps,
@@ -1709,6 +1791,7 @@ impl H3ComfyInt8TransformerBlockWeights {
                     vb.pp("attn.k_norm"),
                 )?,
                 out: matrices.out,
+                out_delta: matrices.turbo.as_ref().map(|turbo| turbo.out.clone()),
             },
             norm2: rms_norm_with_dtype(
                 config.hidden_size,
@@ -1719,7 +1802,9 @@ impl H3ComfyInt8TransformerBlockWeights {
             mlp: H3ComfyInt8Mlp {
                 width: config.ffn_hidden_size,
                 fc1: matrices.fc1,
+                fc1_delta: matrices.turbo.as_ref().map(|turbo| turbo.fc1.clone()),
                 fc2: matrices.fc2,
+                fc2_delta: matrices.turbo.as_ref().map(|turbo| turbo.fc2.clone()),
             },
             // Curve projections are a source-defined FP32-sensitive island.
             adaln: H3AdaLnProjection::load(
@@ -1795,14 +1880,20 @@ impl H3TransformerBlockWeights {
                 compute_dtype,
                 vb.pp("norm1"),
             )?,
-            attention: H3Attention::load(config, mode.qkv_layout(), compute_dtype, vb.pp("attn"))?,
+            attention: H3Attention::load(
+                config,
+                mode.qkv_layout(),
+                compute_dtype,
+                None,
+                vb.pp("attn"),
+            )?,
             norm2: rms_norm_with_dtype(
                 config.hidden_size,
                 config.norm_eps,
                 compute_dtype,
                 vb.pp("norm2"),
             )?,
-            mlp: H3Mlp::load(config, compute_dtype, vb.pp("mlp"))?,
+            mlp: H3Mlp::load(config, compute_dtype, None, vb.pp("mlp"))?,
             adaln: H3AdaLnProjection::load(
                 mode.input_dim(config),
                 config.hidden_size,
@@ -2324,6 +2415,7 @@ fn capture_h3_private_transformer_primitives_with_precision(
         config,
         H3QkvLayout::GroupedPerHead,
         compute_dtype,
+        None,
         vb.pp("token_refiner.blocks.0"),
     )?;
     let main_block =
@@ -2701,6 +2793,7 @@ impl H3StreamedTransformer {
             vb.clone(),
             attention_runtime,
             None,
+            None,
         )?;
         let loader = H3TransformerBlockLoader {
             config,
@@ -2721,6 +2814,7 @@ impl H3StreamedTransformer {
         vb: VarBuilder,
         attention_runtime: H3AttentionRuntimeAuthority,
         checkpoint_identity_sha256: Option<String>,
+        turbo: Option<&H3TurboLoraRuntime>,
     ) -> Result<Self> {
         let compute_dtype = precision.compute_dtype();
         attention_runtime
@@ -2741,12 +2835,28 @@ impl H3StreamedTransformer {
             block_count: config.num_layers,
             live_blocks: AtomicUsize::new(0),
         });
+        // The eight BF16 token-refiner linears are resident, not streamed, so
+        // their deltas attach once at construction.
+        if let Some(turbo) = turbo {
+            if turbo.token_refiner_block_count() != config.token_refiner_num_layers
+                || turbo.block_count() != config.num_layers
+            {
+                candle::bail!(
+                    "MiniMax H3 Turbo adapter covers {}+{} blocks, this transformer has {}+{}",
+                    turbo.block_count(),
+                    turbo.token_refiner_block_count(),
+                    config.num_layers,
+                    config.token_refiner_num_layers
+                )
+            }
+        }
         let mut token_refiner = Vec::with_capacity(config.token_refiner_num_layers);
         for index in 0..config.token_refiner_num_layers {
             token_refiner.push(H3TokenRefinerBlock::load(
                 &config,
                 mode.qkv_layout(),
                 compute_dtype,
+                turbo.and_then(|turbo| turbo.token_refiner_block(index)),
                 vb.pp(format!("token_refiner.blocks.{index}")),
             )?);
         }
@@ -2793,6 +2903,7 @@ impl H3StreamedTransformer {
     /// Internal constructor for the source-pinned Comfy INT8 checkpoint
     /// primitive. It is intentionally not a factory registration or public
     /// runtime activation path.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn load_comfy_int8_resident(
         config: H3TransformerConfig,
         task: H3TransformerTask,
@@ -2801,6 +2912,7 @@ impl H3StreamedTransformer {
         vb: VarBuilder<'static>,
         attention_runtime: H3AttentionRuntimeAuthority,
         checkpoint_identity_sha256: String,
+        turbo: Option<&H3TurboLoraRuntime>,
     ) -> Result<Self> {
         if !matches!(mode, H3AdaLnMode::Curve { .. })
             || precision != H3PrecisionProfile::OfficialMixedBf16F32
@@ -2815,6 +2927,7 @@ impl H3StreamedTransformer {
             vb,
             attention_runtime,
             Some(checkpoint_identity_sha256),
+            turbo,
         )
     }
 
@@ -3761,6 +3874,8 @@ mod tests {
     fn swiglu_uses_gate_then_up_halves() -> Result<()> {
         let device = Device::Cpu;
         let mlp = H3Mlp {
+            fc1_delta: None,
+            fc2_delta: None,
             width: 2,
             fc1: nn::Linear::new(
                 Tensor::from_vec(vec![1f32, 2., 3., 4.], (4, 1), &device)?,
@@ -4100,7 +4215,13 @@ mod tests {
             &config,
             mode,
             precision,
-            H3ComfyInt8BlockMatrices { qkv, out, fc1, fc2 },
+            H3ComfyInt8BlockMatrices {
+                qkv,
+                out,
+                fc1,
+                fc2,
+                turbo: None,
+            },
             vb.pp("blocks.0"),
         )?;
 
@@ -4150,6 +4271,581 @@ mod tests {
             &plan,
         )?;
         assert_close(&expected, &actual, 2e-4)
+    }
+
+    // ------------------------------------------------------ Turbo LoRA branch
+
+    /// Deterministic small `lora_A` / `lora_B` pair plus its merged product.
+    ///
+    /// Returns the delta and `scale * (B @ A)`, the dense weight increment a
+    /// merge would have produced.
+    fn turbo_pair(
+        out_features: usize,
+        in_features: usize,
+        rank: usize,
+        seed: usize,
+        scale: f32,
+        device: &Device,
+    ) -> Result<(H3TurboLoraDelta, Tensor)> {
+        let make = |rows: usize, columns: usize, salt: usize| -> Result<Tensor> {
+            let values = (0..rows * columns)
+                .map(|index| {
+                    ((index.wrapping_mul(29).wrapping_add(seed + salt)) % 19) as f32 / 37.0 - 0.25
+                })
+                .collect::<Vec<_>>();
+            Tensor::from_vec(values, (rows, columns), device)
+        };
+        let down = make(rank, in_features, 0)?;
+        let up = make(out_features, rank, 7)?;
+        let merged = up.matmul(&down)?.affine(f64::from(scale), 0.0)?;
+        let delta = H3TurboLoraDelta::new(&down, &up, scale)
+            .map_err(|error| candle::Error::Msg(error.to_string()))?;
+        Ok((delta, merged))
+    }
+
+    fn zero_pair(
+        out_features: usize,
+        in_features: usize,
+        rank: usize,
+        device: &Device,
+    ) -> Result<H3TurboLoraDelta> {
+        let down = Tensor::zeros((rank, in_features), DType::F32, device)?;
+        let up = Tensor::zeros((out_features, rank), DType::F32, device)?;
+        H3TurboLoraDelta::new(&down, &up, 0.0625)
+            .map_err(|error| candle::Error::Msg(error.to_string()))
+    }
+
+    struct TurboBlockHarness {
+        config: H3TransformerConfig,
+        mode: H3AdaLnMode,
+        precision: H3PrecisionProfile,
+        tensors: HashMap<String, Tensor>,
+        qkv: H3ComfyInt8ConvRotLinear,
+        out: H3ComfyInt8ConvRotLinear,
+        fc1: H3ComfyInt8ConvRotLinear,
+        fc2: H3ComfyInt8ConvRotLinear,
+        hidden: Tensor,
+        adaln_input: Tensor,
+        adaln_indices: Tensor,
+        cos: Tensor,
+        sin: Tensor,
+        rotary_dim: usize,
+        plan: H3FrozenAttentionPlan,
+        device: Device,
+    }
+
+    /// The same tiny INT8 block the dequantized-oracle test uses, kept in one
+    /// place so the Turbo tests compare against the exact same base weights.
+    fn turbo_block_harness() -> Result<TurboBlockHarness> {
+        let device = Device::Cpu;
+        let config = H3TransformerConfig {
+            hidden_size: 256,
+            num_layers: 1,
+            token_refiner_num_layers: 1,
+            num_attention_heads: 2,
+            attention_head_dim: 128,
+            ffn_hidden_size: 256,
+            video_latent_channels: 64,
+            audio_latent_channels: 256,
+            patch_size: [1, 2, 2],
+            text_dim: 256,
+            timestep_input_dim: 64,
+            time_embed_hidden_size: 256,
+            time_embed_dim: 128,
+            rope_inv_freq_len: 16,
+            norm_eps: 1e-5,
+            qk_norm_eps: 1e-5,
+            final_norm_eps: 1e-5,
+        };
+        let mode = H3AdaLnMode::Curve {
+            grid: 5,
+            basis_dim: 64,
+        };
+        let precision = H3PrecisionProfile::SyntheticF32;
+        let specs = expected_h3_weight_specs(&config, mode, precision)?;
+        let mut tensors = tensor_map(&specs, &device)?;
+        let quantized = |out_features: usize,
+                         in_features: usize,
+                         seed: usize|
+         -> Result<(H3ComfyInt8ConvRotLinear, Tensor)> {
+            let raw = (0..out_features * in_features)
+                .map(|index| {
+                    let signed = ((index.wrapping_mul(17).wrapping_add(seed)) % 7) as i8 - 3;
+                    signed.to_ne_bytes()[0]
+                })
+                .collect::<Vec<_>>();
+            let scales = (0..out_features)
+                .map(|row| 0.003 + ((row + seed) % 11) as f32 * 0.0001)
+                .collect::<Vec<_>>();
+            let linear = H3ComfyInt8ConvRotLinear::new(
+                Tensor::from_vec(raw, (out_features, in_features), &device)?,
+                Tensor::from_vec(scales, (out_features, 1), &device)?,
+            )?;
+            let dense = linear.dequantize_weight(DType::F32, &device, 256)?;
+            Ok((linear, dense))
+        };
+        let inner = config.attention_inner_dim();
+        let (qkv, qkv_dense) = quantized(3 * inner, config.hidden_size, 1)?;
+        let (out, out_dense) = quantized(config.hidden_size, inner, 2)?;
+        let (fc1, fc1_dense) = quantized(2 * config.ffn_hidden_size, config.hidden_size, 3)?;
+        let (fc2, fc2_dense) = quantized(config.hidden_size, config.ffn_hidden_size, 4)?;
+        tensors.insert("blocks.0.attn.qkv_proj.weight".into(), qkv_dense);
+        tensors.insert("blocks.0.attn.out_proj.weight".into(), out_dense);
+        tensors.insert("blocks.0.mlp.fc1.weight".into(), fc1_dense);
+        tensors.insert("blocks.0.mlp.fc2.weight".into(), fc2_dense);
+
+        let hidden = Tensor::from_vec(
+            (0..3 * config.hidden_size)
+                .map(|index| index as f32 / 997.0 - 0.35)
+                .collect::<Vec<_>>(),
+            (1, 3, config.hidden_size),
+            &device,
+        )?;
+        let adaln_input = Tensor::from_vec(
+            (0..64)
+                .map(|index| index as f32 / 211.0 - 0.1)
+                .collect::<Vec<_>>(),
+            (1, 64),
+            &device,
+        )?;
+        let adaln_indices = Tensor::new(&[0u32, 1, 2], &device)?;
+        let rotary_dim = 6 * config.rope_inv_freq_len;
+        let cos = Tensor::ones((3, rotary_dim), DType::F32, &device)?;
+        let sin = Tensor::zeros((3, rotary_dim), DType::F32, &device)?;
+        let authority = H3AttentionRuntimeAuthority::bounded_synthetic_math(
+            H3AttentionDevice::Cpu,
+            H3AttentionModelContract {
+                heads: config.num_attention_heads,
+                head_dim: config.attention_head_dim,
+                dtype: H3AttentionDType::F32,
+            },
+        )
+        .map_err(|error| candle::Error::Msg(error.to_string()))?;
+        let plan = authority
+            .freeze_execution(1, 3, 3)
+            .map_err(|error| candle::Error::Msg(error.to_string()))?
+            .packed_transformer;
+        Ok(TurboBlockHarness {
+            config,
+            mode,
+            precision,
+            tensors,
+            qkv,
+            out,
+            fc1,
+            fc2,
+            hidden,
+            adaln_input,
+            adaln_indices,
+            cos,
+            sin,
+            rotary_dim,
+            plan,
+            device,
+        })
+    }
+
+    impl TurboBlockHarness {
+        fn run(&self, turbo: Option<H3TurboBlockDeltas>) -> Result<Tensor> {
+            let vb = VarBuilder::from_tensors(self.tensors.clone(), DType::F32, &self.device);
+            let block = H3ComfyInt8TransformerBlockWeights::load(
+                &self.config,
+                self.mode,
+                self.precision,
+                H3ComfyInt8BlockMatrices {
+                    qkv: self.qkv.clone(),
+                    out: self.out.clone(),
+                    fc1: self.fc1.clone(),
+                    fc2: self.fc2.clone(),
+                    turbo,
+                },
+                vb.pp("blocks.0"),
+            )?;
+            block.forward(
+                &self.hidden,
+                &self.adaln_input,
+                &self.adaln_indices,
+                (&self.cos, &self.sin, self.rotary_dim),
+                &self.plan,
+            )
+        }
+
+        /// The same block with the deltas MERGED into dense weights instead —
+        /// the oracle a parallel branch has to reproduce.
+        fn run_merged_dense(&self, merged: [Option<&Tensor>; 4]) -> Result<Tensor> {
+            let mut tensors = self.tensors.clone();
+            for (name, increment) in [
+                ("blocks.0.attn.qkv_proj.weight", merged[0]),
+                ("blocks.0.attn.out_proj.weight", merged[1]),
+                ("blocks.0.mlp.fc1.weight", merged[2]),
+                ("blocks.0.mlp.fc2.weight", merged[3]),
+            ] {
+                if let Some(increment) = increment {
+                    let base = tensors[name].clone();
+                    tensors.insert(name.into(), base.add(increment)?);
+                }
+            }
+            let vb = VarBuilder::from_tensors(tensors, DType::F32, &self.device);
+            let dense = H3TransformerBlockWeights::load(
+                &self.config,
+                self.mode,
+                self.precision,
+                vb.pp("blocks.0"),
+            )?;
+            dense.forward(
+                &self.hidden,
+                &self.adaln_input,
+                &self.adaln_indices,
+                (&self.cos, &self.sin, self.rotary_dim),
+                &self.plan,
+            )
+        }
+    }
+
+    #[test]
+    fn comfy_int8_block_with_turbo_deltas_matches_the_merged_dense_oracle() -> Result<()> {
+        let harness = turbo_block_harness()?;
+        let config = &harness.config;
+        let inner = config.attention_inner_dim();
+        let scale = 0.0625f32;
+
+        // Fused Q/K/V uses the published 3x rank; alpha is tripled with it so
+        // alpha/rank is the same 0.0625 everywhere.
+        let (qkv, qkv_merged) = turbo_pair(
+            3 * inner,
+            config.hidden_size,
+            12,
+            11,
+            scale,
+            &harness.device,
+        )?;
+        let (out, out_merged) =
+            turbo_pair(config.hidden_size, inner, 4, 22, scale, &harness.device)?;
+        let (fc1, fc1_merged) = turbo_pair(
+            2 * config.ffn_hidden_size,
+            config.hidden_size,
+            4,
+            33,
+            scale,
+            &harness.device,
+        )?;
+        let (fc2, fc2_merged) = turbo_pair(
+            config.hidden_size,
+            config.ffn_hidden_size,
+            4,
+            44,
+            scale,
+            &harness.device,
+        )?;
+
+        let adapted = harness.run(Some(H3TurboBlockDeltas { qkv, out, fc1, fc2 }))?;
+        let oracle = harness.run_merged_dense([
+            Some(&qkv_merged),
+            Some(&out_merged),
+            Some(&fc1_merged),
+            Some(&fc2_merged),
+        ])?;
+
+        // The residual gap is the INT8 base path's own activation-quantization
+        // error, identical to the unadapted oracle test's 2e-4 bound. The
+        // parallel branch itself adds none: the ConvRot Hadamard cancels on
+        // the input axis, so `forward_reference` already produces the original
+        // basis that the adapter was trained against.
+        assert_close(&oracle, &adapted, 2e-4)
+    }
+
+    #[test]
+    fn an_absent_turbo_adapter_is_bit_identical_to_a_zero_adapter() -> Result<()> {
+        let harness = turbo_block_harness()?;
+        let config = &harness.config;
+        let inner = config.attention_inner_dim();
+
+        let baseline = harness.run(None)?;
+        let zeroed = harness.run(Some(H3TurboBlockDeltas {
+            qkv: zero_pair(3 * inner, config.hidden_size, 12, &harness.device)?,
+            out: zero_pair(config.hidden_size, inner, 4, &harness.device)?,
+            fc1: zero_pair(
+                2 * config.ffn_hidden_size,
+                config.hidden_size,
+                4,
+                &harness.device,
+            )?,
+            fc2: zero_pair(
+                config.hidden_size,
+                config.ffn_hidden_size,
+                4,
+                &harness.device,
+            )?,
+        }))?;
+        assert_eq!(baseline.dims(), zeroed.dims());
+        assert_eq!(baseline.dtype(), zeroed.dtype());
+        assert_eq!(
+            baseline.flatten_all()?.to_vec1::<f32>()?,
+            zeroed.flatten_all()?.to_vec1::<f32>()?
+        );
+
+        // And the unadapted forward is reproducible run to run.
+        assert_eq!(
+            baseline.flatten_all()?.to_vec1::<f32>()?,
+            harness.run(None)?.flatten_all()?.to_vec1::<f32>()?
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_turbo_overlay_with_the_wrong_geometry_is_refused_at_load() -> Result<()> {
+        let harness = turbo_block_harness()?;
+        let config = &harness.config;
+        let inner = config.attention_inner_dim();
+
+        // fc1 sized for the un-doubled FFN width — the classic SwiGLU mistake.
+        let error = harness
+            .run(Some(H3TurboBlockDeltas {
+                qkv: zero_pair(3 * inner, config.hidden_size, 12, &harness.device)?,
+                out: zero_pair(config.hidden_size, inner, 4, &harness.device)?,
+                fc1: zero_pair(
+                    config.ffn_hidden_size,
+                    config.hidden_size,
+                    4,
+                    &harness.device,
+                )?,
+                fc2: zero_pair(
+                    config.hidden_size,
+                    config.ffn_hidden_size,
+                    4,
+                    &harness.device,
+                )?,
+            }))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("mlp.fc1"), "{error}");
+
+        // And a qkv delta that forgot the fused 3x output width.
+        let error = harness
+            .run(Some(H3TurboBlockDeltas {
+                qkv: zero_pair(inner, config.hidden_size, 12, &harness.device)?,
+                out: zero_pair(config.hidden_size, inner, 4, &harness.device)?,
+                fc1: zero_pair(
+                    2 * config.ffn_hidden_size,
+                    config.hidden_size,
+                    4,
+                    &harness.device,
+                )?,
+                fc2: zero_pair(
+                    config.hidden_size,
+                    config.ffn_hidden_size,
+                    4,
+                    &harness.device,
+                )?,
+            }))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("attn.qkv_proj"), "{error}");
+        Ok(())
+    }
+
+    #[test]
+    fn every_adapted_block_linear_is_actually_reached() -> Result<()> {
+        let harness = turbo_block_harness()?;
+        let config = &harness.config;
+        let inner = config.attention_inner_dim();
+        let scale = 0.0625f32;
+        let baseline = harness.run(None)?.flatten_all()?.to_vec1::<f32>()?;
+
+        // One live module at a time. The unadapted forward is bitwise
+        // reproducible (see the sibling test), so ANY difference can only come
+        // from that module's delta — which is what proves the site is wired.
+        // The gated residual attenuates the four sites very differently, so a
+        // fixed absolute threshold would be a fixture artifact, not a contract.
+        let shapes = [
+            ("attn.qkv_proj", 3 * inner, config.hidden_size, 12usize),
+            ("attn.out_proj", config.hidden_size, inner, 4),
+            ("mlp.fc1", 2 * config.ffn_hidden_size, config.hidden_size, 4),
+            ("mlp.fc2", config.hidden_size, config.ffn_hidden_size, 4),
+        ];
+        let mut outputs = Vec::new();
+        for (index, (label, out_features, in_features, rank)) in shapes.into_iter().enumerate() {
+            let mut deltas = [
+                zero_pair(3 * inner, config.hidden_size, 12, &harness.device)?,
+                zero_pair(config.hidden_size, inner, 4, &harness.device)?,
+                zero_pair(
+                    2 * config.ffn_hidden_size,
+                    config.hidden_size,
+                    4,
+                    &harness.device,
+                )?,
+                zero_pair(
+                    config.hidden_size,
+                    config.ffn_hidden_size,
+                    4,
+                    &harness.device,
+                )?,
+            ];
+            let (live, merged) = turbo_pair(
+                out_features,
+                in_features,
+                rank,
+                100 + index,
+                scale,
+                &harness.device,
+            )?;
+            deltas[index] = live;
+            let [qkv, out, fc1, fc2] = deltas;
+            let adapted = harness.run(Some(H3TurboBlockDeltas { qkv, out, fc1, fc2 }))?;
+            let adapted_values = adapted.flatten_all()?.to_vec1::<f32>()?;
+            assert!(
+                baseline
+                    .iter()
+                    .zip(adapted_values.iter())
+                    .any(|(base, value)| base != value),
+                "{label} delta did not reach the forward"
+            );
+
+            // And it lands on exactly the linear a merge would have touched.
+            let mut increments: [Option<&Tensor>; 4] = [None, None, None, None];
+            increments[index] = Some(&merged);
+            assert_close(&harness.run_merged_dense(increments)?, &adapted, 2e-4)?;
+            outputs.push((label, adapted_values));
+        }
+
+        // The four sites are genuinely distinct, so no single delta is being
+        // applied to two of them.
+        for (index, (label, values)) in outputs.iter().enumerate() {
+            for (other_label, other) in outputs.iter().skip(index + 1) {
+                assert!(
+                    values.iter().zip(other.iter()).any(|(a, b)| a != b),
+                    "{label} and {other_label} produced identical outputs"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn token_refiner_turbo_deltas_reach_its_four_bf16_linears() -> Result<()> {
+        let device = Device::Cpu;
+        let config = H3TransformerConfig {
+            hidden_size: 256,
+            num_layers: 1,
+            token_refiner_num_layers: 1,
+            num_attention_heads: 2,
+            attention_head_dim: 128,
+            ffn_hidden_size: 256,
+            video_latent_channels: 64,
+            audio_latent_channels: 256,
+            patch_size: [1, 2, 2],
+            text_dim: 256,
+            timestep_input_dim: 64,
+            time_embed_hidden_size: 256,
+            time_embed_dim: 128,
+            rope_inv_freq_len: 16,
+            norm_eps: 1e-5,
+            qk_norm_eps: 1e-5,
+            final_norm_eps: 1e-5,
+        };
+        let mode = H3AdaLnMode::Curve {
+            grid: 5,
+            basis_dim: 64,
+        };
+        let precision = H3PrecisionProfile::SyntheticF32;
+        let specs = expected_h3_weight_specs(&config, mode, precision)?;
+        let tensors = tensor_map(&specs, &device)?;
+        let inner = config.attention_inner_dim();
+        let scale = 0.0625f32;
+
+        let (qkv, qkv_merged) = turbo_pair(3 * inner, config.hidden_size, 12, 55, scale, &device)?;
+        let (out, out_merged) = turbo_pair(config.hidden_size, inner, 4, 66, scale, &device)?;
+        let (fc1, fc1_merged) = turbo_pair(
+            2 * config.ffn_hidden_size,
+            config.hidden_size,
+            4,
+            77,
+            scale,
+            &device,
+        )?;
+        let (fc2, fc2_merged) = turbo_pair(
+            config.hidden_size,
+            config.ffn_hidden_size,
+            4,
+            88,
+            scale,
+            &device,
+        )?;
+
+        let authority = H3AttentionRuntimeAuthority::bounded_synthetic_math(
+            H3AttentionDevice::Cpu,
+            H3AttentionModelContract {
+                heads: config.num_attention_heads,
+                head_dim: config.attention_head_dim,
+                dtype: H3AttentionDType::F32,
+            },
+        )
+        .map_err(|error| candle::Error::Msg(error.to_string()))?;
+        let plan = authority
+            .freeze_execution(1, 3, 3)
+            .map_err(|error| candle::Error::Msg(error.to_string()))?
+            .token_refiner;
+        let hidden = Tensor::from_vec(
+            (0..3 * config.hidden_size)
+                .map(|index| index as f32 / 811.0 - 0.2)
+                .collect::<Vec<_>>(),
+            (1, 3, config.hidden_size),
+            &device,
+        )?;
+
+        let vb = VarBuilder::from_tensors(tensors.clone(), DType::F32, &device);
+        let plain = H3TokenRefinerBlock::load(
+            &config,
+            mode.qkv_layout(),
+            DType::F32,
+            None,
+            vb.pp("token_refiner.blocks.0"),
+        )?;
+        let adapted = H3TokenRefinerBlock::load(
+            &config,
+            mode.qkv_layout(),
+            DType::F32,
+            Some(&H3TurboBlockDeltas { qkv, out, fc1, fc2 }),
+            vb.pp("token_refiner.blocks.0"),
+        )?;
+
+        // A merged-weight refiner is the oracle: the eight BF16 linears carry
+        // no quantization error at all, so the parallel branch must agree to
+        // floating-point noise.
+        let mut merged_tensors = tensors;
+        for (name, increment) in [
+            ("token_refiner.blocks.0.attn.qkv_proj.weight", qkv_merged),
+            ("token_refiner.blocks.0.attn.out_proj.weight", out_merged),
+            ("token_refiner.blocks.0.mlp.fc1.weight", fc1_merged),
+            ("token_refiner.blocks.0.mlp.fc2.weight", fc2_merged),
+        ] {
+            let base = merged_tensors[name].clone();
+            merged_tensors.insert(name.into(), base.add(&increment)?);
+        }
+        let merged_vb = VarBuilder::from_tensors(merged_tensors, DType::F32, &device);
+        let oracle = H3TokenRefinerBlock::load(
+            &config,
+            mode.qkv_layout(),
+            DType::F32,
+            None,
+            merged_vb.pp("token_refiner.blocks.0"),
+        )?;
+
+        let plain_output = plain.forward(&hidden, &plan)?;
+        let adapted_output = adapted.forward(&hidden, &plan)?;
+        let oracle_output = oracle.forward(&hidden, &plan)?;
+
+        assert_close(&oracle_output, &adapted_output, 1e-5)?;
+        assert!(
+            plain_output
+                .flatten_all()?
+                .to_vec1::<f32>()?
+                .iter()
+                .zip(adapted_output.flatten_all()?.to_vec1::<f32>()?.iter())
+                .any(|(plain, adapted)| (plain - adapted).abs() > 1e-6),
+            "token refiner deltas did not reach the forward"
+        );
+        Ok(())
     }
 
     #[test]
