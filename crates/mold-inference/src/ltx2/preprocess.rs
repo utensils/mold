@@ -115,7 +115,9 @@ fn convert_icc_to_srgb(rgb: RgbImage, profile: &[u8], source_layout: moxcms::Lay
     let src_rgb = rgb.into_raw();
     let src: std::borrow::Cow<'_, [u8]> = match source_layout {
         moxcms::Layout::Gray => src_rgb
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .map(|px| px[0])
             .collect::<Vec<_>>()
             .into(),
@@ -459,8 +461,10 @@ mod tests {
         let bytes = fixture_bytes(name);
         assert_eq!(bytes.len(), h * w * 3 * 4, "{name} shape mismatch");
         bytes
-            .chunks_exact(4)
-            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| f32::from_le_bytes(*c))
             .collect()
     }
 
