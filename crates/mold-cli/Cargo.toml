@@ -33,10 +33,10 @@ mp4 = ["mold-inference/mp4", "mold-server/mp4", "mold-tui?/mp4"]
 # manifests and model payloads are never bundled.
 h3 = ["mp4", "mold-core/h3", "mold-inference/h3", "mold-server/h3"]
 # The shipping CUDA H3 route: the family, the CUDA device, and the SM89
-# attention kernel. `mold-server` deliberately gains no `h3-cuda` feature of
-# its own — its reviewed public H3 build graph is exactly `h3` + `cuda`, and a
-# forwarding feature would show up in that graph as an unreviewed member.
-h3-cuda = ["h3", "cuda", "mold-inference/h3-cuda"]
+# attention kernel. EVERY published SM89 recipe must name this rather than
+# `cuda,h3`, which since #1164 builds H3 without its attention kernel; the
+# `mold-server` build fence requires the edge and fails such a recipe.
+h3-cuda = ["h3", "cuda", "mold-inference/h3-cuda", "mold-server/h3-cuda"]
 metrics = ["mold-server/metrics"]
 # LAN auto-discovery: advertise `mold serve` and browse via `mold server
 # discover`. Not in `default`; enabled in the release/Nix feature set.

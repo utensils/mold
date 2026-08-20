@@ -101,7 +101,7 @@ required-features = ["dev-bins", "h3-private-uat"]
 [[bin]]
 name = "h3_runtime_qualification_record"
 path = "src/bin/h3_runtime_qualification_record.rs"
-required-features = ["dev-bins", "h3"]
+required-features = ["dev-bins", "h3-cuda"]
 
 [build-dependencies]
 sha2 = "0.10"

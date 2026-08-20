@@ -20,9 +20,20 @@ pub const CANONICAL_H3_SERVER_FEATURES: &[&str] = &[
     "CARGO_FEATURE_NVML",
 ];
 
+/// The reviewed CUDA H3 build.
+///
+/// `CARGO_FEATURE_H3_CUDA` is REQUIRED, not merely allowed. `h3` alone stopped
+/// implying `cuda` in #1164 so that an Apple Silicon build could be expressed
+/// at all, and the same change stopped it implying the SM89 attention kernel.
+/// A published recipe still written as `cuda,h3` would therefore build a
+/// CUDA H3 binary with no H3 FlashAttention kernel — a graph this fence used
+/// to accept, leaving `scripts/verify-h3-release-exclusion.sh` to reject the
+/// artifact after it was built. Requiring the edge moves that detection to
+/// the build script, before any artifact exists.
 pub const PUBLIC_H3_SERVER_FEATURES: &[&str] = &[
     "CARGO_FEATURE_CUDA",
     "CARGO_FEATURE_H3",
+    "CARGO_FEATURE_H3_CUDA",
     "CARGO_FEATURE_H3_PRIVATE_BRIDGE",
     "CARGO_FEATURE_MP4",
     "CARGO_FEATURE_NVML",
@@ -130,6 +141,25 @@ mod tests {
         let mut unknown = desktop;
         unknown.push("CARGO_FEATURE_TEST_SUPPORT".into());
         assert!(validate_canonical_h3_server_feature_keys(&unknown).is_err());
+    }
+
+    /// The regression this exists for: `cuda,h3` is a complete-looking CUDA
+    /// H3 graph that silently omits the SM89 attention kernel. It must fail
+    /// here, not at artifact verification.
+    #[test]
+    fn a_cuda_h3_recipe_without_the_shipping_edge_is_refused() {
+        let mut without_edge = features(PUBLIC_H3_SERVER_FEATURES);
+        without_edge.retain(|feature| feature != "CARGO_FEATURE_H3_CUDA");
+        assert!(validate_canonical_h3_server_feature_keys(&without_edge).is_err());
+    }
+
+    /// The Metal set is not a back door into a kernel-less CUDA build: the
+    /// selector only reaches it when CUDA is absent entirely.
+    #[test]
+    fn the_metal_set_cannot_stand_in_for_a_cuda_build() {
+        let mut metal_plus_cuda = features(PUBLIC_H3_METAL_SERVER_FEATURES);
+        metal_plus_cuda.push("CARGO_FEATURE_CUDA".into());
+        assert!(validate_canonical_h3_server_feature_keys(&metal_plus_cuda).is_err());
     }
 
     #[test]

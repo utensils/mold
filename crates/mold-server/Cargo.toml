@@ -37,6 +37,12 @@ h3 = [
     "mold-core/h3",
     "mold-inference/h3",
 ]
+# The shipping CUDA H3 route. Every published SM89 recipe names THIS, never
+# `cuda,h3`: the reviewed public build graph requires it (see
+# `build_support/h3_server_features.rs`), so a recipe that drops back to
+# `cuda,h3` fails the build script instead of failing the post-build kernel
+# verifier at publication time.
+h3-cuda = ["h3", "cuda", "mold-inference/h3-cuda"]
 # Structural seam for opaque, one-shot H3 owner attempts. This compiles the
 # scheduler/server contract without making the private runtime runnable.
 h3-private-bridge = []

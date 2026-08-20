@@ -141,9 +141,13 @@ RUN find crates/ -name "*.rs" -exec touch {} +
 ENV MOLD_GIT_SHA=${MOLD_GIT_SHA}
 
 # Build the real binary.
-RUN h3_feature=""; \
-    if [ "${CUDA_COMPUTE_CAP}" = "89" ]; then h3_feature=",h3"; fi; \
-    cargo build --release -p mold-ai --features "cuda${h3_feature},expand,discord,tui,webp,mp4,metrics"
+# SM89 names `h3-cuda`, not `cuda,h3`: since #1164 the bare `h3` feature no
+# longer implies CUDA or the SM89 attention kernel, so `cuda,h3` would build a
+# CUDA H3 binary without its kernel. `h3-cuda` implies `cuda`, which is why it
+# replaces the device feature rather than appending to it.
+RUN gpu_feature="cuda"; \
+    if [ "${CUDA_COMPUTE_CAP}" = "89" ]; then gpu_feature="h3-cuda"; fi; \
+    cargo build --release -p mold-ai --features "${gpu_feature},expand,discord,tui,webp,mp4,metrics"
 RUN scripts/seal-cuda-ptx-manifest.py /build/target/release/mold \
     "${CUDA_COMPUTE_CAP}" /build/target/release/build
 RUN scripts/probe-cuda-embedded-ptx.py /build/target/release/mold \
