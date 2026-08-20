@@ -13,8 +13,8 @@ use thiserror::Error;
 use crate::manifest::{paths_from_downloads, ModelComponent, ModelFile, ModelManifest};
 use crate::ModelPaths;
 
-fn hf_model_repo(repo_id: &str) -> Repo {
-    if let Some(revision) = crate::minimax_h3::repo_revision(repo_id) {
+fn hf_file_repo(repo_id: &str, filename: &str) -> Repo {
+    if let Some(revision) = crate::minimax_h3::file_revision(repo_id, filename) {
         Repo::with_revision(repo_id.to_string(), RepoType::Model, revision.to_string())
     } else {
         Repo::new(repo_id.to_string(), RepoType::Model)
@@ -1326,7 +1326,7 @@ async fn download_and_place_file<P: Progress + Clone + Send + Sync + 'static>(
     skip_verify: bool,
 ) -> Result<PathBuf, DownloadError> {
     with_hf_file_download_flight(&file.hf_repo, &file.hf_filename, async move {
-        let repo = api.repo(hf_model_repo(&file.hf_repo));
+        let repo = api.repo(hf_file_repo(&file.hf_repo, &file.hf_filename));
         let hf_path = match repo
             .download_with_progress(&file.hf_filename, progress)
             .await
@@ -1507,7 +1507,7 @@ where
     let api = builder
         .build()
         .map_err(|e| DownloadError::SyncApiSetup(e.to_string()))?;
-    let repo = api.repo(hf_model_repo(hf_repo));
+    let repo = api.repo(hf_file_repo(hf_repo, hf_filename));
     let hf_path = repo
         .download_with_progress(hf_filename, progress)
         .map_err(|e| {
@@ -1558,7 +1558,7 @@ where
 /// `MOLD_MODELS_DIR`, not the user's home HF cache.
 pub fn cached_file_path_in_mold_cache(hf_repo: &str, hf_filename: &str) -> Option<PathBuf> {
     let cache = Cache::new(hf_cache_dir());
-    let repo = cache.repo(hf_model_repo(hf_repo));
+    let repo = cache.repo(hf_file_repo(hf_repo, hf_filename));
     repo.get(hf_filename)
 }
 
@@ -1594,21 +1594,21 @@ pub fn cached_file_path_in(
 
     // 2. Check new hf-cache location (~/.mold/models/.hf-cache/)
     let new_cache = Cache::new(models_root.join(".hf-cache"));
-    let new_repo = new_cache.repo(hf_model_repo(hf_repo));
+    let new_repo = new_cache.repo(hf_file_repo(hf_repo, hf_filename));
     if let Some(path) = new_repo.get(hf_filename) {
         return Some(path);
     }
 
     // 3. Check old mold models dir (backward compat — HF cached here before .hf-cache/)
     let old_cache = Cache::new(models_root.to_path_buf());
-    let old_repo = old_cache.repo(hf_model_repo(hf_repo));
+    let old_repo = old_cache.repo(hf_file_repo(hf_repo, hf_filename));
     if let Some(path) = old_repo.get(hf_filename) {
         return Some(path);
     }
 
     // 4. Check default HF cache (~/.cache/huggingface/hub/)
     let default_cache = Cache::from_env();
-    let default_repo = default_cache.repo(hf_model_repo(hf_repo));
+    let default_repo = default_cache.repo(hf_file_repo(hf_repo, hf_filename));
     default_repo.get(hf_filename)
 }
 
@@ -1634,7 +1634,7 @@ pub fn cached_file_path_existing_only(
     let lookup = |root: &Path| {
         root.is_dir().then(|| {
             Cache::new(root.to_path_buf())
-                .repo(hf_model_repo(hf_repo))
+                .repo(hf_file_repo(hf_repo, hf_filename))
                 .get(hf_filename)
         })?
     };
@@ -1645,7 +1645,7 @@ pub fn cached_file_path_existing_only(
             cache
                 .path()
                 .is_dir()
-                .then(|| cache.repo(hf_model_repo(hf_repo)).get(hf_filename))?
+                .then(|| cache.repo(hf_file_repo(hf_repo, hf_filename)).get(hf_filename))?
         })
 }
 

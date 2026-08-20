@@ -30,6 +30,104 @@ pub const FL2VA_OFFICIAL: &str = "minimax-h3-fl2va:official-bf16";
 pub const REF2VA_OFFICIAL: &str = "minimax-h3-ref2va:official-bf16";
 pub const FL2VA_COMFY: &str = "minimax-h3-fl2va:comfy-pruned-int8";
 pub const REF2VA_COMFY: &str = "minimax-h3-ref2va:comfy-pruned-int8";
+pub const FL2VA_COMFY_TURBO_8STEP: &str = "minimax-h3-fl2va:comfy-pruned-int8-turbo-8step";
+pub const FL2VA_COMFY_TURBO_4STEP_768P: &str =
+    "minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p";
+
+/// Every reviewed compact identity admissible on the H3 runtime route: the
+/// two base task partitions plus the reviewed FL2VA Turbo LoRA tags. Aliases
+/// are deliberately excluded — policy and validation match exact identities.
+pub const REVIEWED_COMPACT_MODELS: &[&str] = &[
+    FL2VA_COMFY,
+    REF2VA_COMFY,
+    FL2VA_COMFY_TURBO_8STEP,
+    FL2VA_COMFY_TURBO_4STEP_768P,
+];
+
+/// Exact-identity membership test for [`REVIEWED_COMPACT_MODELS`]. This is
+/// deliberately not alias-resolving: `minimax-h3` stays outside the reviewed
+/// set exactly as it does in `model_policy`.
+pub fn is_reviewed_compact_model(value: &str) -> bool {
+    let value = value.trim();
+    REVIEWED_COMPACT_MODELS
+        .iter()
+        .any(|model| value.eq_ignore_ascii_case(model))
+}
+
+/// Pinned Comfy-Org repository revision that first published the reviewed
+/// Turbo LoRA adapters under `loras/`. The compact base stack stays pinned at
+/// [`COMFY_REVISION`]; the adapters do not exist at that older revision, so
+/// their manifest files resolve through [`file_revision`] instead.
+pub const COMFY_TURBO_LORA_REVISION: &str = "dc559027db79c174125df4d827db55cd11178860";
+
+/// The manifest-facing contract of one reviewed Turbo LoRA tier.
+///
+/// This mirrors the runtime tier table owned by `mold-candle`
+/// (`H3TurboLoraTier`) — stable id, published file identity, and the
+/// terminal-inclusive reviewed step count — so acquisition manifests can pin
+/// the adapter without mold-core depending on candle. A contract test in
+/// `mold-inference` pins both tables together.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TurboManifestTier {
+    /// The manifest identity carrying this tier (a tag on the compact task).
+    pub model: &'static str,
+    /// The runtime tier's durable stable id.
+    pub tier_stable_id: &'static str,
+    /// Human-facing tier label ("Turbo 8-step").
+    pub display_label: &'static str,
+    /// Repository-relative adapter path at [`COMFY_TURBO_LORA_REVISION`].
+    pub adapter_hf_filename: &'static str,
+    pub adapter_size_bytes: u64,
+    pub adapter_sha256: &'static str,
+    /// Terminal-inclusive mold steps: published transformer evaluations + 1.
+    pub steps: u32,
+}
+
+/// Reviewed FL2VA Turbo tiers shipped as first-class manifest tags. Ref2VA's
+/// reviewed 4-step tier is deliberately absent until Ref2VA execution exists.
+pub const REVIEWED_TURBO_MANIFEST_TIERS: &[TurboManifestTier] = &[
+    TurboManifestTier {
+        model: FL2VA_COMFY_TURBO_8STEP,
+        tier_stable_id: "minimax-h3.turbo-lora.fl2v-8step-v1.0.comfyui-bf16.v1",
+        display_label: "Turbo 8-step",
+        adapter_hf_filename: "loras/minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors",
+        adapter_size_bytes: 1_956_193_000,
+        adapter_sha256: "2339acdf19bfe123f46b971ea35d367a84adb85de43627e1eceafa5a5b2b111e",
+        steps: 9,
+    },
+    TurboManifestTier {
+        model: FL2VA_COMFY_TURBO_4STEP_768P,
+        tier_stable_id: "minimax-h3.turbo-lora.fl2v-4step-768p-v1.0.comfyui-bf16.v1",
+        display_label: "Turbo 4-step 768p",
+        adapter_hf_filename: "loras/minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors",
+        adapter_size_bytes: 1_956_192_992,
+        adapter_sha256: "c396a9a06f58399e9df9754b18299818d84a2ddd371724ba48fe4a41221437dc",
+        steps: 5,
+    },
+];
+
+/// The base compact identity a reviewed model executes as: a Turbo tag's
+/// underlying task partition, or the resolved identity itself. The internal
+/// engine partition is keyed by this value while the request keeps the full
+/// tag for provenance.
+pub fn base_compact_model(model: &str) -> Option<&'static str> {
+    let canonical = resolve_model_name(model)?;
+    if REVIEWED_TURBO_MANIFEST_TIERS
+        .iter()
+        .any(|tier| tier.model == canonical)
+    {
+        return Some(FL2VA_COMFY);
+    }
+    Some(canonical)
+}
+
+/// Resolve the reviewed Turbo tier a model identity selects, if any.
+pub fn turbo_tier_for_model(model: &str) -> Option<&'static TurboManifestTier> {
+    let canonical = resolve_model_name(model)?;
+    REVIEWED_TURBO_MANIFEST_TIERS
+        .iter()
+        .find(|tier| tier.model == canonical)
+}
 
 pub const DEFAULT_WIDTH: u32 = 1344;
 pub const DEFAULT_HEIGHT: u32 = 768;
@@ -348,6 +446,22 @@ pub fn repo_revision(repo: &str) -> Option<&'static str> {
     }
 }
 
+/// Pinned revision for one exact repository file.
+///
+/// The reviewed Turbo adapters live in the same Comfy repository as the
+/// compact base stack but were published at a later revision; every other
+/// file keeps its repository-wide pinned revision.
+pub fn file_revision(repo: &str, filename: &str) -> Option<&'static str> {
+    if repo == COMFY_REPO
+        && REVIEWED_TURBO_MANIFEST_TIERS
+            .iter()
+            .any(|tier| tier.adapter_hf_filename == filename)
+    {
+        return Some(COMFY_TURBO_LORA_REVISION);
+    }
+    repo_revision(repo)
+}
+
 pub fn task_for_model(model: &str) -> Option<Task> {
     let canonical = resolve_model_name(model)?;
     if canonical.starts_with("minimax-h3-ref2va:") {
@@ -363,7 +477,13 @@ pub fn layout_for_model(model: &str) -> Option<Layout> {
     let canonical = resolve_model_name(model)?;
     if canonical.ends_with(":official-bf16") {
         Some(Layout::OfficialBf16)
-    } else if canonical.ends_with(":comfy-pruned-int8") {
+    } else if canonical.ends_with(":comfy-pruned-int8")
+        || REVIEWED_TURBO_MANIFEST_TIERS
+            .iter()
+            .any(|tier| tier.model == canonical)
+    {
+        // A Turbo tag overlays a reviewed LoRA on the *same* compact INT8
+        // checkpoint; nothing about the weight layout changes.
         Some(Layout::ComfyPrunedInt8ConvrotNvfp4Awq)
     } else {
         None
@@ -379,6 +499,8 @@ pub fn resolve_model_name(input: &str) -> Option<&'static str> {
         value if value == REF2VA_OFFICIAL => Some(REF2VA_OFFICIAL),
         value if value == FL2VA_COMFY => Some(FL2VA_COMFY),
         value if value == REF2VA_COMFY => Some(REF2VA_COMFY),
+        value if value == FL2VA_COMFY_TURBO_8STEP => Some(FL2VA_COMFY_TURBO_8STEP),
+        value if value == FL2VA_COMFY_TURBO_4STEP_768P => Some(FL2VA_COMFY_TURBO_4STEP_768P),
         _ => None,
     }
 }
@@ -1593,6 +1715,8 @@ fn validate_request_contract_with_reference_authority(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArtifactRole {
     TaskTransformer,
+    /// Reviewed Turbo LoRA adapter overlaid on a task transformer.
+    TurboLoraAdapter,
     Qwen3VlConditioner,
     VideoVae,
     AudioVae,
@@ -1702,7 +1826,10 @@ pub fn artifact_contract<'a>(
     let layout = layout_for_model(&manifest.name)?;
     let compatible_tasks = if matches!(
         file.component,
-        ModelComponent::Transformer | ModelComponent::TransformerShard | ModelComponent::TaskConfig
+        ModelComponent::Transformer
+            | ModelComponent::TransformerShard
+            | ModelComponent::DistilledLora
+            | ModelComponent::TaskConfig
     ) {
         match task {
             Task::Fl2va => FL2VA_ONLY,
@@ -1719,6 +1846,11 @@ pub fn artifact_contract<'a>(
                 Layout::ComfyPrunedInt8ConvrotNvfp4Awq => "int8-convrot-pruned",
             },
             "50 blocks; hidden=5376; 56 heads x 128",
+        ),
+        ModelComponent::DistilledLora => (
+            ArtifactRole::TurboLoraAdapter,
+            "bf16",
+            "Diffusers PEFT LoRA; rank 128; 208 modules",
         ),
         ModelComponent::TextEncoder => (
             ArtifactRole::Qwen3VlConditioner,
@@ -1771,7 +1903,7 @@ pub fn artifact_contract<'a>(
     Some(ArtifactContract {
         identity: ArtifactIdentity {
             source_repo: &file.hf_repo,
-            source_revision: repo_revision(&file.hf_repo)?,
+            source_revision: file_revision(&file.hf_repo, &file.hf_filename)?,
             source_path: &file.hf_filename,
             sha256: file.sha256?,
         },
@@ -2258,11 +2390,15 @@ fn comfy_files(task: Task) -> Vec<ModelFile> {
 }
 
 fn defaults(layout: Layout) -> ManifestDefaults {
+    defaults_with_steps(match layout {
+        Layout::OfficialBf16 => DEFAULT_STEPS,
+        Layout::ComfyPrunedInt8ConvrotNvfp4Awq => COMFY_DEFAULT_STEPS,
+    })
+}
+
+fn defaults_with_steps(steps: u32) -> ManifestDefaults {
     ManifestDefaults {
-        steps: match layout {
-            Layout::OfficialBf16 => DEFAULT_STEPS,
-            Layout::ComfyPrunedInt8ConvrotNvfp4Awq => COMFY_DEFAULT_STEPS,
-        },
+        steps,
         guidance: 0.0,
         width: DEFAULT_WIDTH,
         height: DEFAULT_HEIGHT,
@@ -2282,7 +2418,7 @@ fn defaults(layout: Layout) -> ManifestDefaults {
 /// manifests are visible for direct download even when the current host cannot
 /// execute them.
 pub(crate) fn manifests() -> Vec<ModelManifest> {
-    [
+    let mut manifests: Vec<ModelManifest> = [
         (FL2VA_OFFICIAL, Task::Fl2va, Layout::OfficialBf16),
         (REF2VA_OFFICIAL, Task::Ref2va, Layout::OfficialBf16),
         (
@@ -2314,7 +2450,32 @@ pub(crate) fn manifests() -> Vec<ModelManifest> {
         defaults: defaults(layout),
         hidden: layout == Layout::OfficialBf16,
     })
-    .collect()
+    .collect();
+    // The reviewed FL2VA Turbo tiers are the compact FL2VA stack plus one
+    // pinned LoRA adapter each; the tag selects the tier's reviewed step
+    // count and the adapter artifact.
+    manifests.extend(REVIEWED_TURBO_MANIFEST_TIERS.iter().map(|tier| {
+        let mut files = comfy_files(Task::Fl2va);
+        files.push(file(
+            COMFY_REPO,
+            tier.adapter_hf_filename,
+            ModelComponent::DistilledLora,
+            tier.adapter_size_bytes,
+            tier.adapter_sha256,
+        ));
+        ModelManifest {
+            name: tier.model.to_string(),
+            family: FAMILY.to_string(),
+            description: format!(
+                "MiniMax H3 FL2VA Comfy pruned INT8-convrot + NVFP4-AWQ with the reviewed {} LoRA (downloadable; execution requires a qualified CUDA host)",
+                tier.display_label
+            ),
+            files,
+            defaults: defaults_with_steps(tier.steps),
+            hidden: false,
+        }
+    }));
+    manifests
 }
 
 #[cfg(test)]
@@ -3217,6 +3378,18 @@ mod tests {
                 Layout::ComfyPrunedInt8ConvrotNvfp4Awq,
                 REF2VA_MODES,
             ),
+            (
+                FL2VA_COMFY_TURBO_8STEP,
+                Task::Fl2va,
+                Layout::ComfyPrunedInt8ConvrotNvfp4Awq,
+                FL2VA_MODES,
+            ),
+            (
+                FL2VA_COMFY_TURBO_4STEP_768P,
+                Task::Fl2va,
+                Layout::ComfyPrunedInt8ConvrotNvfp4Awq,
+                FL2VA_MODES,
+            ),
         ];
         let mut observed_modes = Vec::new();
         for (model, task, layout, modes) in cases {
@@ -3256,7 +3429,12 @@ mod tests {
             .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(
             advertised_h3,
-            std::collections::BTreeSet::from([FL2VA_COMFY, REF2VA_COMFY])
+            std::collections::BTreeSet::from([
+                FL2VA_COMFY,
+                REF2VA_COMFY,
+                FL2VA_COMFY_TURBO_8STEP,
+                FL2VA_COMFY_TURBO_4STEP_768P,
+            ])
         );
         assert!(advertised
             .iter()
@@ -3270,11 +3448,22 @@ mod tests {
         let ref_official = find_manifest(REF2VA_OFFICIAL).unwrap();
         let fl_comfy = find_manifest(FL2VA_COMFY).unwrap();
         let ref_comfy = find_manifest(REF2VA_COMFY).unwrap();
+        let fl_turbo_8 = find_manifest(FL2VA_COMFY_TURBO_8STEP).unwrap();
+        let fl_turbo_4 = find_manifest(FL2VA_COMFY_TURBO_4STEP_768P).unwrap();
         assert!(fl_official.hidden);
         assert!(ref_official.hidden);
         assert!(!fl_comfy.hidden);
         assert!(!ref_comfy.hidden);
-        for manifest in [fl_official, ref_official, fl_comfy, ref_comfy] {
+        assert!(!fl_turbo_8.hidden);
+        assert!(!fl_turbo_4.hidden);
+        for manifest in [
+            fl_official,
+            ref_official,
+            fl_comfy,
+            ref_comfy,
+            fl_turbo_8,
+            fl_turbo_4,
+        ] {
             let contract = manifest_contract(manifest).unwrap();
             assert!(!contract.runtime_available);
             assert_eq!(contract.license_url, MINIMAX_H3_LICENSE_URL);
@@ -3297,7 +3486,7 @@ mod tests {
                 let metadata = artifact_contract(manifest, artifact).unwrap();
                 assert_eq!(
                     Some(metadata.identity.source_revision),
-                    repo_revision(metadata.identity.source_repo)
+                    file_revision(metadata.identity.source_repo, metadata.identity.source_path)
                 );
                 assert_eq!(metadata.identity.source_path, artifact.hf_filename);
                 assert_eq!(Some(metadata.identity.sha256), artifact.sha256);
@@ -3345,7 +3534,12 @@ mod tests {
             .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(
             visible,
-            std::collections::BTreeSet::from([FL2VA_COMFY, REF2VA_COMFY])
+            std::collections::BTreeSet::from([
+                FL2VA_COMFY,
+                REF2VA_COMFY,
+                FL2VA_COMFY_TURBO_8STEP,
+                FL2VA_COMFY_TURBO_4STEP_768P,
+            ])
         );
 
         let ref_transformer = ref_comfy
@@ -3354,6 +3548,125 @@ mod tests {
             .find(|file| file.component == ModelComponent::Transformer)
             .unwrap();
         assert!(artifact_contract(fl_comfy, ref_transformer).is_none());
+    }
+
+    #[test]
+    fn turbo_tags_are_first_class_compact_fl2va_identities() {
+        for tier in REVIEWED_TURBO_MANIFEST_TIERS {
+            assert_eq!(resolve_model_name(tier.model), Some(tier.model));
+            assert_eq!(
+                resolve_model_name(&tier.model.to_ascii_uppercase()),
+                Some(tier.model)
+            );
+            assert_eq!(task_for_model(tier.model), Some(Task::Fl2va));
+            assert_eq!(
+                layout_for_model(tier.model),
+                Some(Layout::ComfyPrunedInt8ConvrotNvfp4Awq)
+            );
+            assert!(is_reviewed_compact_model(tier.model));
+            assert_eq!(turbo_tier_for_model(tier.model), Some(tier));
+        }
+        // The base compact identities select no Turbo tier, and lookalike
+        // tags resolve to nothing at all.
+        assert_eq!(turbo_tier_for_model(FL2VA_COMFY), None);
+        assert_eq!(turbo_tier_for_model(REF2VA_COMFY), None);
+        for lookalike in [
+            "minimax-h3-fl2va:comfy-pruned-int8-turbo-2step",
+            "minimax-h3-ref2va:comfy-pruned-int8-turbo-4step",
+            "minimax-h3",
+        ] {
+            assert_eq!(turbo_tier_for_model(lookalike), None, "{lookalike}");
+            assert!(!is_reviewed_compact_model(lookalike), "{lookalike}");
+        }
+        assert!(is_reviewed_compact_model(FL2VA_COMFY));
+        assert!(is_reviewed_compact_model(REF2VA_COMFY));
+    }
+
+    #[test]
+    fn turbo_manifests_pin_the_adapter_beside_the_exact_base_stack() {
+        let base = find_manifest(FL2VA_COMFY).unwrap();
+        for tier in REVIEWED_TURBO_MANIFEST_TIERS {
+            let manifest = find_manifest(tier.model).unwrap();
+            assert_eq!(manifest.family, FAMILY);
+            assert!(!manifest.hidden);
+            // The tier moves exactly one manifest default: the reviewed
+            // terminal-inclusive step count.
+            assert_eq!(manifest.defaults.steps, tier.steps);
+            assert_eq!(manifest.defaults.width, DEFAULT_WIDTH);
+            assert_eq!(manifest.defaults.height, DEFAULT_HEIGHT);
+            assert_eq!(manifest.defaults.frames, Some(MIN_FRAMES));
+            assert_eq!(manifest.defaults.fps, Some(FIXED_FPS));
+
+            // Every base compact file is present byte-for-byte, plus exactly
+            // one pinned adapter.
+            for file in &base.files {
+                assert!(
+                    manifest.files.contains(file),
+                    "{} missing base file {}",
+                    tier.model,
+                    file.hf_filename
+                );
+            }
+            let adapters: Vec<_> = manifest
+                .files
+                .iter()
+                .filter(|file| file.component == ModelComponent::DistilledLora)
+                .collect();
+            let [adapter] = adapters.as_slice() else {
+                panic!("{} must pin exactly one Turbo adapter", tier.model);
+            };
+            assert_eq!(adapter.hf_repo, COMFY_REPO);
+            assert_eq!(adapter.hf_filename, tier.adapter_hf_filename);
+            assert_eq!(adapter.size_bytes, tier.adapter_size_bytes);
+            assert_eq!(adapter.sha256, Some(tier.adapter_sha256));
+            assert_eq!(manifest.files.len(), base.files.len() + 1);
+
+            // The adapter downloads from the later revision that published
+            // `loras/`, while the base stack stays on the reviewed pin.
+            assert_eq!(
+                file_revision(&adapter.hf_repo, &adapter.hf_filename),
+                Some(COMFY_TURBO_LORA_REVISION)
+            );
+            let transformer = manifest
+                .files
+                .iter()
+                .find(|file| file.component == ModelComponent::Transformer)
+                .unwrap();
+            assert_eq!(
+                file_revision(&transformer.hf_repo, &transformer.hf_filename),
+                Some(COMFY_REVISION)
+            );
+
+            // Both Turbo tags share one on-disk adapter copy under the
+            // family bucket, keyed by the tier-specific filename.
+            assert_eq!(
+                storage_path(manifest, adapter),
+                std::path::PathBuf::from("shared")
+                    .join(FAMILY)
+                    .join(tier.adapter_hf_filename)
+            );
+
+            // The adapter is an FL2VA-only reviewed artifact.
+            let contract = artifact_contract(manifest, adapter).unwrap();
+            assert_eq!(contract.role, ArtifactRole::TurboLoraAdapter);
+            assert_eq!(contract.compatible_tasks, FL2VA_ONLY);
+            assert_eq!(contract.identity.source_revision, COMFY_TURBO_LORA_REVISION);
+            assert_eq!(contract.identity.sha256, tier.adapter_sha256);
+        }
+    }
+
+    #[test]
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+    fn turbo_requests_validate_at_their_reviewed_step_counts() {
+        for tier in REVIEWED_TURBO_MANIFEST_TIERS {
+            let mut req = request();
+            req.model = tier.model.into();
+            req.steps = tier.steps;
+            assert!(crate::validation::validate_h3_private_uat_request(&req).is_ok());
+        }
+        let mut unreviewed = request();
+        unreviewed.model = "minimax-h3-fl2va:comfy-pruned-int8-turbo-2step".into();
+        assert!(crate::validation::validate_h3_private_uat_request(&unreviewed).is_err());
     }
 
     #[test]

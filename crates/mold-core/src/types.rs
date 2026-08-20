@@ -7462,6 +7462,32 @@ pub struct MiniMaxH3PartitionCapability {
     /// authenticates and validates the retained qualification record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request: Option<MiniMaxH3RequestCapability>,
+    /// Reviewed Turbo LoRA variants of this partition (additive; absent on
+    /// older servers). Deliberately not extra `partitions` entries — clients
+    /// that predate this field parse exactly one partition per task.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub turbo: Vec<MiniMaxH3TurboVariantCapability>,
+}
+
+/// One reviewed Turbo LoRA variant of a compact H3 partition.
+///
+/// The variant is the same base component stack plus one pinned adapter, so
+/// it deliberately does not repeat the partition's `component_ids`; only the
+/// adapter's own install state and the tier's reviewed request envelope are
+/// carried.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct MiniMaxH3TurboVariantCapability {
+    pub model: String,
+    pub display_name: String,
+    /// Human-facing tier label ("Turbo 8-step").
+    pub tier: String,
+    pub adapter_size_bytes: u64,
+    /// Whether the pinned adapter file is already landed on this host.
+    pub installed: bool,
+    /// The tier's reviewed request envelope; present only when this variant
+    /// is executable (base partition and adapter installed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request: Option<MiniMaxH3RequestCapability>,
 }
 
 /// Exact client-visible request shape for one reviewed H3 task partition.
@@ -7683,6 +7709,7 @@ mod minimax_h3_capability_tests {
                     required_endpoint: "first".into(),
                     generation_profile_sha256: "a".repeat(64),
                 }),
+                turbo: Vec::new(),
             }],
             components: vec![MiniMaxH3ComponentCapability {
                 id: "transformer".into(),
