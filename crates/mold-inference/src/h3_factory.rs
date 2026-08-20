@@ -376,6 +376,24 @@ pub struct H3FactoryTargetBudgetInput {
     pub qwen_retained_header_host_bytes: u64,
     pub transformer_retained_header_host_bytes: u64,
     pub vae_retained_config_host_bytes: u64,
+    /// Ref2VA retained normalized media: the RGB8 frames and f32 stereo
+    /// waveforms the backend holds from preprocessing until both reference
+    /// encoders have consumed them. Derived from the frozen reference plan,
+    /// never a flat constant — one 2048-square still is 12 MiB and a 768-square
+    /// video contributes its whole VAE prefix plus Qwen cursor frames. Zero for
+    /// FL2VA, which retains normalized endpoints instead.
+    pub reference_normalized_media_host_bytes: u64,
+    /// Transient host working set while one reference is decoded: the staged
+    /// copy of its verified bytes plus the decoder's own output before
+    /// normalization. Charged once because references decode one at a time.
+    pub reference_decode_staging_host_bytes: u64,
+    /// Transient host working set while one decoded reference is normalized
+    /// (resize and resample scratch), likewise charged once.
+    pub reference_preprocess_staging_host_bytes: u64,
+    pub reference_decode_phase_host_bytes: u64,
+    pub reference_preprocess_phase_host_bytes: u64,
+    pub reference_visual_encode_phase_host_bytes: u64,
+    pub reference_audio_encode_phase_host_bytes: u64,
     pub vae_load_phase_host_bytes: u64,
     pub qwen_encode_phase_host_bytes: u64,
     pub qwen_transfer_phase_host_bytes: u64,
@@ -433,6 +451,15 @@ pub struct H3FactoryTargetBudgetInput {
     /// Transient host bytes the Turbo adapter load peaks at while its deltas
     /// are read and staged one matrix at a time. Zero without one.
     pub turbo_adapter_host_staging_bytes: u64,
+    /// Device workspace the audio VAE's encoder peaks at while one reference
+    /// soundtrack is encoded. Distinct from `audio_decode_workspace_device_bytes`:
+    /// the encoder runs DAC plus the posterior projection, the decoder runs
+    /// BigVGAN. Zero for FL2VA, which never encodes audio.
+    pub reference_audio_encode_workspace_device_bytes: u64,
+    pub reference_decode_phase_device_bytes: u64,
+    pub reference_preprocess_phase_device_bytes: u64,
+    pub reference_visual_encode_phase_device_bytes: u64,
+    pub reference_audio_encode_phase_device_bytes: u64,
     pub vae_load_phase_device_bytes: u64,
     pub qwen_encode_phase_device_bytes: u64,
     pub qwen_transfer_phase_device_bytes: u64,
@@ -488,6 +515,13 @@ impl H3FactoryTargetBudgetInput {
             qwen_retained_header_host_bytes,
             transformer_retained_header_host_bytes,
             vae_retained_config_host_bytes,
+            reference_normalized_media_host_bytes,
+            reference_decode_staging_host_bytes,
+            reference_preprocess_staging_host_bytes,
+            reference_decode_phase_host_bytes,
+            reference_preprocess_phase_host_bytes,
+            reference_visual_encode_phase_host_bytes,
+            reference_audio_encode_phase_host_bytes,
             vae_load_phase_host_bytes,
             qwen_encode_phase_host_bytes,
             qwen_transfer_phase_host_bytes,
@@ -536,6 +570,11 @@ impl H3FactoryTargetBudgetInput {
             turbo_adapter_device_bytes,
             turbo_adapter_device_staging_bytes,
             turbo_adapter_host_staging_bytes,
+            reference_audio_encode_workspace_device_bytes,
+            reference_decode_phase_device_bytes,
+            reference_preprocess_phase_device_bytes,
+            reference_visual_encode_phase_device_bytes,
+            reference_audio_encode_phase_device_bytes,
             vae_load_phase_device_bytes,
             qwen_encode_phase_device_bytes,
             qwen_transfer_phase_device_bytes,
@@ -600,6 +639,13 @@ impl H3FactoryTargetBudgetInput {
             qwen_retained_header_host_bytes,
             transformer_retained_header_host_bytes,
             vae_retained_config_host_bytes,
+            reference_normalized_media_host_bytes,
+            reference_decode_staging_host_bytes,
+            reference_preprocess_staging_host_bytes,
+            reference_decode_phase_host_bytes,
+            reference_preprocess_phase_host_bytes,
+            reference_visual_encode_phase_host_bytes,
+            reference_audio_encode_phase_host_bytes,
             vae_load_phase_host_bytes,
             qwen_encode_phase_host_bytes,
             qwen_transfer_phase_host_bytes,
@@ -664,6 +710,11 @@ impl H3FactoryTargetBudgetInput {
             turbo_adapter_device_bytes,
             turbo_adapter_device_staging_bytes,
             turbo_adapter_host_staging_bytes,
+            reference_audio_encode_workspace_device_bytes,
+            reference_decode_phase_device_bytes,
+            reference_preprocess_phase_device_bytes,
+            reference_visual_encode_phase_device_bytes,
+            reference_audio_encode_phase_device_bytes,
             vae_load_phase_device_bytes,
             qwen_encode_phase_device_bytes,
             qwen_transfer_phase_device_bytes,
@@ -2000,6 +2051,47 @@ fn validate_target_budget(
         "H3 post-Qwen metadata host demand",
     )?;
     let vae_alive_metadata_host = memory.vae_retained_config_host_bytes;
+    // Ref2VA's four leading phases. Media is decoded and normalized on the
+    // host before any model is loaded, so their device demand is the fixed
+    // runtime alone; the retained normalized media then stays charged through
+    // both reference encoders, which are what finally consume it.
+    //
+    // The retained-media charge is re-derived from the frozen reference plan
+    // rather than taken from the budget, for the same reason the prepared
+    // request re-derives its rows: this number is what the host ledger grants.
+    let expected_reference_media_host_bytes = match request.task {
+        Task::Fl2va => 0,
+        Task::Ref2va => validate_prepared_references(&request.references)?.3,
+    };
+    let reference_decode_host = checked_u64_sum(
+        [
+            attempt_host,
+            qwen_alive_metadata_host,
+            memory.reference_normalized_media_host_bytes,
+            memory.reference_decode_staging_host_bytes,
+        ],
+        "H3 reference decode host phase",
+    )?;
+    let reference_preprocess_host = checked_u64_sum(
+        [
+            attempt_host,
+            qwen_alive_metadata_host,
+            memory.reference_normalized_media_host_bytes,
+            memory.reference_preprocess_staging_host_bytes,
+        ],
+        "H3 reference preprocess host phase",
+    )?;
+    let reference_encode_host = checked_u64_sum(
+        [
+            attempt_host,
+            transformer_alive_metadata_host,
+            memory.reference_normalized_media_host_bytes,
+            memory.condition_backing_host_bytes,
+            memory.packed_layout_host_bytes,
+            memory.text_modality_tags_host_bytes,
+        ],
+        "H3 reference encode host phase",
+    )?;
     let vae_load_host = checked_u64_sum(
         [
             attempt_host,
@@ -2115,11 +2207,36 @@ fn validate_target_budget(
         ],
         "H3 mux host phase",
     )?;
+    // A phase that is not in this task's order contributes nothing and must be
+    // recorded as zero, so a budget can never carry a ledger for work the
+    // worker will not perform.
+    let ref2va = request.task == Task::Ref2va;
+    let (
+        expected_reference_decode_host,
+        expected_reference_preprocess_host,
+        expected_reference_visual_encode_host,
+        expected_reference_audio_encode_host,
+        expected_condition_encode_host,
+    ) = if ref2va {
+        (
+            reference_decode_host,
+            reference_preprocess_host,
+            reference_encode_host,
+            reference_encode_host,
+            0,
+        )
+    } else {
+        (0, 0, 0, 0, condition_encode_host)
+    };
     let predicted_host = [
+        expected_reference_decode_host,
+        expected_reference_preprocess_host,
+        expected_reference_visual_encode_host,
+        expected_reference_audio_encode_host,
         vae_load_host,
         qwen_encode_host,
         qwen_transfer_host,
-        condition_encode_host,
+        expected_condition_encode_host,
         noise_allocation_host,
         transformer_load_host,
         denoise_host,
@@ -2203,6 +2320,33 @@ fn validate_target_budget(
     {
         bail!("MiniMax H3 raw checkpoint host artifact does not match opened-file authority");
     }
+    // Host-only phases: nothing model-sized is resident on the device yet.
+    let reference_decode = memory.fixed_runtime_device_bytes;
+    let reference_preprocess = memory.fixed_runtime_device_bytes;
+    // Both reference encoders run against the parked-in VAEs with the Qwen
+    // output already transferred, exactly as FL2VA's condition encode does.
+    let reference_visual_encode = checked_u64_sum(
+        [
+            memory.fixed_runtime_device_bytes,
+            retained_vaes,
+            memory.qwen_output_state_device_bytes,
+            memory.condition_vae_workspace_device_bytes,
+            memory.condition_latent_backing_device_bytes,
+            memory.packed_layout_device_bytes,
+        ],
+        "H3 reference visual encode phase",
+    )?;
+    let reference_audio_encode = checked_u64_sum(
+        [
+            memory.fixed_runtime_device_bytes,
+            retained_vaes,
+            memory.qwen_output_state_device_bytes,
+            memory.reference_audio_encode_workspace_device_bytes,
+            memory.condition_latent_backing_device_bytes,
+            memory.packed_layout_device_bytes,
+        ],
+        "H3 reference audio encode phase",
+    )?;
     let vae_load = checked_u64_sum(
         [
             memory.fixed_runtime_device_bytes,
@@ -2342,11 +2486,32 @@ fn validate_target_budget(
         ],
         "H3 waveform transfer phase",
     )?;
+    let (
+        expected_reference_decode,
+        expected_reference_preprocess,
+        expected_reference_visual_encode,
+        expected_reference_audio_encode,
+        expected_condition_encode,
+    ) = if ref2va {
+        (
+            reference_decode,
+            reference_preprocess,
+            reference_visual_encode,
+            reference_audio_encode,
+            0,
+        )
+    } else {
+        (0, 0, 0, 0, condition_encode)
+    };
     let predicted_device = [
+        expected_reference_decode,
+        expected_reference_preprocess,
+        expected_reference_visual_encode,
+        expected_reference_audio_encode,
         vae_load,
         qwen_encode,
         qwen_transfer,
-        condition_encode,
+        expected_condition_encode,
         noise_allocation,
         transformer_load,
         denoise,
@@ -2543,6 +2708,66 @@ fn validate_target_budget(
         checkpoint.fixed_transformer_max_device_weight_staging_bytes
     );
     expect_eq!(
+        "reference_decode_phase_host_bytes",
+        memory.reference_decode_phase_host_bytes,
+        expected_reference_decode_host
+    );
+    expect_eq!(
+        "reference_preprocess_phase_host_bytes",
+        memory.reference_preprocess_phase_host_bytes,
+        expected_reference_preprocess_host
+    );
+    expect_eq!(
+        "reference_visual_encode_phase_host_bytes",
+        memory.reference_visual_encode_phase_host_bytes,
+        expected_reference_visual_encode_host
+    );
+    expect_eq!(
+        "reference_audio_encode_phase_host_bytes",
+        memory.reference_audio_encode_phase_host_bytes,
+        expected_reference_audio_encode_host
+    );
+    expect_eq!(
+        "reference_decode_phase_device_bytes",
+        memory.reference_decode_phase_device_bytes,
+        expected_reference_decode
+    );
+    expect_eq!(
+        "reference_preprocess_phase_device_bytes",
+        memory.reference_preprocess_phase_device_bytes,
+        expected_reference_preprocess
+    );
+    expect_eq!(
+        "reference_visual_encode_phase_device_bytes",
+        memory.reference_visual_encode_phase_device_bytes,
+        expected_reference_visual_encode
+    );
+    expect_eq!(
+        "reference_audio_encode_phase_device_bytes",
+        memory.reference_audio_encode_phase_device_bytes,
+        expected_reference_audio_encode
+    );
+    // Reference charges exist exactly for the task that has references, and
+    // the retained media is pinned to the re-derived plan total.
+    expect_eq!(
+        "reference_normalized_media_host_bytes",
+        memory.reference_normalized_media_host_bytes,
+        expected_reference_media_host_bytes
+    );
+    expect!(
+        "reference_decode_staging_host_bytes",
+        ref2va == (memory.reference_decode_staging_host_bytes != 0)
+    );
+    expect!(
+        "reference_preprocess_staging_host_bytes",
+        ref2va == (memory.reference_preprocess_staging_host_bytes != 0)
+    );
+    // The audio VAE's encoder workspace is only ever charged by Ref2VA.
+    expect!(
+        "reference_audio_encode_workspace_device_bytes",
+        ref2va == (memory.reference_audio_encode_workspace_device_bytes != 0)
+    );
+    expect_eq!(
         "vae_load_phase_host_bytes",
         memory.vae_load_phase_host_bytes,
         vae_load_host
@@ -2560,7 +2785,7 @@ fn validate_target_budget(
     expect_eq!(
         "condition_encode_phase_host_bytes",
         memory.condition_encode_phase_host_bytes,
-        condition_encode_host
+        expected_condition_encode_host
     );
     expect_eq!(
         "noise_allocation_phase_host_bytes",
@@ -2631,7 +2856,7 @@ fn validate_target_budget(
     expect_eq!(
         "condition_encode_phase_device_bytes",
         memory.condition_encode_phase_device_bytes,
-        condition_encode
+        expected_condition_encode
     );
     expect_eq!(
         "noise_allocation_phase_device_bytes",
@@ -4671,6 +4896,215 @@ mod tests {
         );
     }
 
+    /// Drive the ledger authority directly. The prepared-attempt wrapper adds
+    /// identity plumbing that is exercised elsewhere; what matters here is
+    /// that the budget's phase arithmetic agrees with the request's task.
+    fn check_budget(
+        budget: &H3FactoryTargetBudgetInput,
+        request: &H3FactoryPreparedRequestInput,
+        checkpoint: &H3FactoryRawCheckpointInput,
+    ) -> Result<()> {
+        validate_target_budget(
+            budget,
+            request,
+            checkpoint,
+            0,
+            0,
+            H3FactoryConditionerPlacement::HostCpuThenDrop,
+        )
+    }
+
+    #[test]
+    fn ref2va_budget_charges_four_reference_phases_and_drops_condition_encode() {
+        let request = ref2va_prepared_request();
+        let checkpoint = raw_checkpoint();
+        let budget = target_budget(&request, &checkpoint);
+        check_budget(&budget, &request, &checkpoint)
+            .expect("the Ref2VA reference ledgers must validate against their own load/drop order");
+
+        // The retained normalized media is the headline host charge and is
+        // pinned to the re-derived reference plan, not to a flat constant.
+        let (_, _, _, plan_media_bytes) =
+            validate_prepared_references(&request.references).unwrap();
+        assert_eq!(
+            budget.reference_normalized_media_host_bytes,
+            plan_media_bytes
+        );
+        assert!(plan_media_bytes > 88_000_000);
+
+        // Every reference phase is charged, and it outlives decode into both
+        // encoders, so the media appears in all four ledgers.
+        for phase in [
+            budget.reference_decode_phase_host_bytes,
+            budget.reference_preprocess_phase_host_bytes,
+            budget.reference_visual_encode_phase_host_bytes,
+            budget.reference_audio_encode_phase_host_bytes,
+        ] {
+            assert!(phase > plan_media_bytes);
+        }
+        assert!(budget.reference_visual_encode_phase_device_bytes > 0);
+        assert!(budget.reference_audio_encode_phase_device_bytes > 0);
+        // The host-only leading phases hold no model weights.
+        assert_eq!(
+            budget.reference_decode_phase_device_bytes,
+            budget.fixed_runtime_device_bytes
+        );
+        assert_eq!(
+            budget.reference_preprocess_phase_device_bytes,
+            budget.fixed_runtime_device_bytes
+        );
+
+        // Condition encode is not in Ref2VA's order at all.
+        assert_eq!(budget.condition_encode_phase_host_bytes, 0);
+        assert_eq!(budget.condition_encode_phase_device_bytes, 0);
+
+        // The predicted peaks are a max over the phases that actually run, so
+        // the retained media has to be visible in the host grant.
+        assert!(budget.predicted_host_increment_bytes >= plan_media_bytes);
+    }
+
+    #[test]
+    fn reference_ledgers_exist_exactly_for_the_task_that_has_references() {
+        let fl2va = prepared_request();
+        let checkpoint = raw_checkpoint();
+        let fl2va_budget = target_budget(&fl2va, &checkpoint);
+        check_budget(&fl2va_budget, &fl2va, &checkpoint).unwrap();
+
+        // FL2VA charges nothing for references and keeps condition encode.
+        assert_eq!(fl2va_budget.reference_normalized_media_host_bytes, 0);
+        assert_eq!(fl2va_budget.reference_decode_phase_host_bytes, 0);
+        assert_eq!(
+            fl2va_budget.reference_audio_encode_workspace_device_bytes,
+            0
+        );
+        assert!(fl2va_budget.condition_encode_phase_device_bytes > 0);
+
+        // A reference ledger on an FL2VA budget is work the worker will never
+        // perform, so it must be refused rather than silently granted.
+        for mutate in [
+            (|budget: &mut H3FactoryTargetBudgetInput| {
+                budget.reference_normalized_media_host_bytes = 4_096
+            }) as fn(&mut H3FactoryTargetBudgetInput),
+            |budget| budget.reference_decode_staging_host_bytes = 1,
+            |budget| budget.reference_preprocess_staging_host_bytes = 1,
+            |budget| budget.reference_audio_encode_workspace_device_bytes = 1,
+            |budget| budget.reference_decode_phase_host_bytes = 1,
+            |budget| budget.reference_visual_encode_phase_device_bytes = 1,
+        ] {
+            let mut budget = fl2va_budget.clone();
+            mutate(&mut budget);
+            budget.identity_sha256 = expected_h3_factory_target_budget_identity(&budget);
+            assert!(check_budget(&budget, &fl2va, &checkpoint).is_err());
+        }
+
+        // And the mirror: a Ref2VA budget may not drop its reference ledgers
+        // or resurrect FL2VA's condition encode.
+        let ref2va = ref2va_prepared_request();
+        let ref2va_budget = target_budget(&ref2va, &checkpoint);
+        for mutate in [
+            (|budget: &mut H3FactoryTargetBudgetInput| {
+                budget.reference_normalized_media_host_bytes = 0
+            }) as fn(&mut H3FactoryTargetBudgetInput),
+            // Understating the retained media is the failure that would admit
+            // a job into a host grant too small to hold its own references.
+            |budget| budget.reference_normalized_media_host_bytes -= 4_096,
+            |budget| budget.reference_decode_phase_host_bytes = 0,
+            |budget| budget.reference_audio_encode_phase_device_bytes = 0,
+            |budget| budget.condition_encode_phase_device_bytes = 4_096,
+            |budget| {
+                budget.load_drop_policy = H3FactoryTargetLoadDropPolicy::LoadVaesLoadQwenEncodeTransferDropQwenEncodeConditionsParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux
+            },
+        ] {
+            let mut budget = ref2va_budget.clone();
+            mutate(&mut budget);
+            budget.identity_sha256 = expected_h3_factory_target_budget_identity(&budget);
+            assert!(check_budget(&budget, &ref2va, &checkpoint).is_err());
+        }
+    }
+
+    /// Turbo and the reference ledgers are orthogonal, and this pins that on
+    /// purpose rather than by accident.
+    ///
+    /// The task-shaped zero rule says a phase outside a task's order must be
+    /// recorded as zero. Turbo is NOT such a phase: it charges into
+    /// transformer load and denoise, which both tasks execute identically, and
+    /// `REVIEWED_TURBO_TIERS` carries a first-class `ref2v-4step` tier with no
+    /// task binding at all. So a Turbo term on a Ref2VA budget is legitimate,
+    /// not a crossed contract, and must not be refused the way a stray
+    /// condition-encode ledger is. Nothing wires a Ref2VA Turbo adapter yet,
+    /// so in practice these terms are zero — allowed-but-zero-until-wired,
+    /// which is a different statement from "forbidden" and must stay so.
+    #[test]
+    fn turbo_terms_are_task_neutral_while_reference_ledgers_are_not() {
+        let checkpoint = raw_checkpoint();
+        let ref2va = ref2va_prepared_request();
+        let budget = target_budget(&ref2va, &checkpoint);
+
+        // Baseline: no adapter is wired, so both terms are zero and the
+        // Ref2VA budget validates.
+        assert_eq!(budget.turbo_adapter_device_bytes, 0);
+        assert_eq!(budget.turbo_adapter_host_staging_bytes, 0);
+        check_budget(&budget, &ref2va, &checkpoint).unwrap();
+
+        // Widening the two shared phases by an adapter's declared cost stays
+        // arithmetically consistent on a Ref2VA budget exactly as it does on
+        // an FL2VA one — the reference ledgers neither absorb nor block it.
+        let mut turbocharged = budget.clone();
+        turbocharged.turbo_adapter_device_bytes = TURBO_DEVICE_BYTES;
+        turbocharged.turbo_adapter_host_staging_bytes = TURBO_HOST_STAGING_BYTES;
+        turbocharged.transformer_load_phase_device_bytes += TURBO_DEVICE_BYTES;
+        turbocharged.denoise_phase_device_bytes += TURBO_DEVICE_BYTES;
+        turbocharged.transformer_load_phase_host_bytes += TURBO_HOST_STAGING_BYTES;
+        turbocharged.predicted_device_peak_bytes = turbocharged
+            .predicted_device_peak_bytes
+            .max(turbocharged.denoise_phase_device_bytes)
+            .max(turbocharged.transformer_load_phase_device_bytes);
+        turbocharged.predicted_host_increment_bytes = turbocharged
+            .predicted_host_increment_bytes
+            .max(turbocharged.transformer_load_phase_host_bytes);
+        turbocharged.identity_sha256 = expected_h3_factory_target_budget_identity(&turbocharged);
+        check_budget(&turbocharged, &ref2va, &checkpoint)
+            .expect("a Ref2VA budget must accept the reviewed ref2v Turbo tier's terms");
+
+        // The reference ledgers remain task-shaped underneath it: a Ref2VA
+        // budget that also resurrects FL2VA's condition encode is still wrong,
+        // Turbo or not.
+        let mut crossed = turbocharged;
+        crossed.condition_encode_phase_device_bytes = 4_096;
+        crossed.identity_sha256 = expected_h3_factory_target_budget_identity(&crossed);
+        assert!(check_budget(&crossed, &ref2va, &checkpoint).is_err());
+    }
+
+    #[test]
+    fn every_reference_ledger_field_participates_in_the_budget_identity() {
+        let request = ref2va_prepared_request();
+        let checkpoint = raw_checkpoint();
+        let base = target_budget(&request, &checkpoint);
+        for mutate in [
+            (|budget: &mut H3FactoryTargetBudgetInput| {
+                budget.reference_normalized_media_host_bytes += 1
+            }) as fn(&mut H3FactoryTargetBudgetInput),
+            |budget| budget.reference_decode_staging_host_bytes += 1,
+            |budget| budget.reference_preprocess_staging_host_bytes += 1,
+            |budget| budget.reference_decode_phase_host_bytes += 1,
+            |budget| budget.reference_preprocess_phase_host_bytes += 1,
+            |budget| budget.reference_visual_encode_phase_host_bytes += 1,
+            |budget| budget.reference_audio_encode_phase_host_bytes += 1,
+            |budget| budget.reference_audio_encode_workspace_device_bytes += 1,
+            |budget| budget.reference_decode_phase_device_bytes += 1,
+            |budget| budget.reference_preprocess_phase_device_bytes += 1,
+            |budget| budget.reference_visual_encode_phase_device_bytes += 1,
+            |budget| budget.reference_audio_encode_phase_device_bytes += 1,
+        ] {
+            let mut mutated = base.clone();
+            mutate(&mut mutated);
+            assert_ne!(
+                expected_h3_factory_target_budget_identity(&mutated),
+                base.identity_sha256
+            );
+        }
+    }
+
     fn raw_checkpoint() -> H3FactoryRawCheckpointInput {
         let blocks = (0_u16..50)
             .map(|index| H3FactoryBlockMemoryInput {
@@ -5031,7 +5465,94 @@ mod tests {
             10_000,
             2_000,
         ]);
+        // Ref2VA's four leading phases, written out independently of the code
+        // under test so the ledger and its reference stay in lockstep.
+        let ref2va = request.task == Task::Ref2va;
+        let reference_normalized_media_host_bytes = request
+            .references
+            .iter()
+            .map(|reference| reference.normalized_host_bytes)
+            .sum::<u64>();
+        let reference_decode_staging_host_bytes = if ref2va { 3_000 } else { 0 };
+        let reference_preprocess_staging_host_bytes = if ref2va { 7_000 } else { 0 };
+        let reference_audio_encode_workspace_device_bytes = if ref2va { 4_000 } else { 0 };
+        let reference_decode_phase_host_bytes = if ref2va {
+            sum(&[
+                attempt_host_bytes,
+                qwen_alive_metadata_host_bytes,
+                reference_normalized_media_host_bytes,
+                reference_decode_staging_host_bytes,
+            ])
+        } else {
+            0
+        };
+        let reference_preprocess_phase_host_bytes = if ref2va {
+            sum(&[
+                attempt_host_bytes,
+                qwen_alive_metadata_host_bytes,
+                reference_normalized_media_host_bytes,
+                reference_preprocess_staging_host_bytes,
+            ])
+        } else {
+            0
+        };
+        let reference_encode_phase_host_bytes = if ref2va {
+            sum(&[
+                attempt_host_bytes,
+                transformer_alive_metadata_host_bytes,
+                reference_normalized_media_host_bytes,
+                condition_backing_host_bytes,
+                packed_layout_host_bytes,
+                text_modality_tags_host_bytes,
+            ])
+        } else {
+            0
+        };
+        let reference_decode_phase_device_bytes = if ref2va {
+            fixed_runtime_device_bytes
+        } else {
+            0
+        };
+        let reference_preprocess_phase_device_bytes = reference_decode_phase_device_bytes;
+        let reference_visual_encode_phase_device_bytes = if ref2va {
+            sum(&[
+                fixed_runtime_device_bytes,
+                retained_vaes,
+                qwen_output_state_device_bytes,
+                condition_vae_workspace_device_bytes,
+                condition_latent_backing_device_bytes,
+                packed_layout_device_bytes,
+            ])
+        } else {
+            0
+        };
+        let reference_audio_encode_phase_device_bytes = if ref2va {
+            sum(&[
+                fixed_runtime_device_bytes,
+                retained_vaes,
+                qwen_output_state_device_bytes,
+                reference_audio_encode_workspace_device_bytes,
+                condition_latent_backing_device_bytes,
+                packed_layout_device_bytes,
+            ])
+        } else {
+            0
+        };
+        // A phase outside this task's order contributes nothing.
+        let condition_encode_phase_host_bytes = if ref2va {
+            0
+        } else {
+            condition_encode_phase_host_bytes
+        };
+        let condition_encode_phase_device_bytes = if ref2va {
+            0
+        } else {
+            condition_encode_phase_device_bytes
+        };
         let predicted_host_increment_bytes = *[
+            reference_decode_phase_host_bytes,
+            reference_preprocess_phase_host_bytes,
+            reference_encode_phase_host_bytes,
             vae_load_phase_host_bytes,
             qwen_encode_phase_host_bytes,
             qwen_transfer_phase_host_bytes,
@@ -5047,9 +5568,24 @@ mod tests {
         .iter()
         .max()
         .unwrap();
+        let predicted_device_peak_bytes = *[
+            predicted_device_peak_bytes,
+            reference_decode_phase_device_bytes,
+            reference_preprocess_phase_device_bytes,
+            reference_visual_encode_phase_device_bytes,
+            reference_audio_encode_phase_device_bytes,
+            condition_encode_phase_device_bytes,
+        ]
+        .iter()
+        .max()
+        .unwrap();
         let mut budget = H3FactoryTargetBudgetInput {
             identity_sha256: String::new(),
-            load_drop_policy: H3FactoryTargetLoadDropPolicy::LoadVaesLoadQwenEncodeTransferDropQwenEncodeConditionsParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux,
+            load_drop_policy: if ref2va {
+                H3FactoryTargetLoadDropPolicy::DecodeReferencesPreprocessReferencesLoadVaesLoadQwenEncodeVisionTransferDropQwenEncodeVisualReferencesEncodeAudioReferencesParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux
+            } else {
+                H3FactoryTargetLoadDropPolicy::LoadVaesLoadQwenEncodeTransferDropQwenEncodeConditionsParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux
+            },
             artifacts,
             artifact_host_bytes,
             fixed_runtime_host_bytes: 100,
@@ -5064,6 +5600,18 @@ mod tests {
             packed_layout_host_bytes,
             packed_layout_construction_staging_host_bytes,
             packed_layout_freeze_staging_host_bytes,
+            reference_normalized_media_host_bytes,
+            reference_decode_staging_host_bytes,
+            reference_preprocess_staging_host_bytes,
+            reference_decode_phase_host_bytes,
+            reference_preprocess_phase_host_bytes,
+            reference_visual_encode_phase_host_bytes: reference_encode_phase_host_bytes,
+            reference_audio_encode_phase_host_bytes: reference_encode_phase_host_bytes,
+            reference_audio_encode_workspace_device_bytes,
+            reference_decode_phase_device_bytes,
+            reference_preprocess_phase_device_bytes,
+            reference_visual_encode_phase_device_bytes,
+            reference_audio_encode_phase_device_bytes,
             text_modality_tags_host_bytes,
             noise_cpu_staging_host_bytes,
             vae_peak_host_io_buffer_bytes: 1_000,
