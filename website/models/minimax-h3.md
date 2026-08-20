@@ -128,6 +128,12 @@ The initial compact CUDA implementation supports this request profile:
 - one required first-frame image and no last-frame endpoint
 - MP4 output with synchronized generated audio
 
+When a first-frame image is attached without explicit `--width`/`--height`,
+the CLI and Discord builders submit the fixed `1344x768` envelope regardless
+of the source's aspect ratio — the engine fits the frame internally. The
+aspect-derived short-edge canvas applies only to the hidden official BF16
+reference.
+
 Mold rejects rather than silently resizing, rerouting, changing steps, dropping
 the source image, or falling back to another backend. A downloaded checkpoint
 can remain stored on an unsupported host; Create and request routing become

@@ -737,9 +737,13 @@ fn fit_attachment_dims(
     h: u32,
     defaults: Option<&mold_core::ModelDefaults>,
     family: Option<&str>,
+    model: &str,
 ) -> (u32, u32) {
     if family.is_some_and(mold_core::minimax_h3::is_family) {
-        return mold_core::minimax_h3::recommended_dimensions(w, h);
+        // Compact layouts (base + Turbo tags) must submit the fixed reviewed
+        // envelope regardless of source aspect; only the official BF16
+        // reference keeps the aspect-derived canvas.
+        return mold_core::minimax_h3::source_fit_dimensions(model, w, h);
     }
     let (model_w, model_h) = defaults
         .map(|d| (d.default_width, d.default_height))
@@ -1235,7 +1239,7 @@ pub async fn generate(
                 source_image.as_ref().and_then(|a| a.height),
             ) {
                 (Some(w), Some(h)) => {
-                    let (sw, sh) = fit_attachment_dims(w, h, model_defaults, family);
+                    let (sw, sh) = fit_attachment_dims(w, h, model_defaults, family, &model_name);
                     (Some(sw), Some(sh))
                 }
                 _ => (width, height),
@@ -2185,26 +2189,26 @@ mod tests {
         let d = defaults_1024();
         // Landscape photo is no longer squashed to a square.
         assert_eq!(
-            fit_attachment_dims(1920, 1080, Some(&d), Some("flux")),
+            fit_attachment_dims(1920, 1080, Some(&d), Some("flux"), "flux-dev:q8"),
             (1024, 576)
         );
         // Portrait keeps its orientation.
         assert_eq!(
-            fit_attachment_dims(1080, 1920, Some(&d), Some("flux")),
+            fit_attachment_dims(1080, 1920, Some(&d), Some("flux"), "flux-dev:q8"),
             (576, 1024)
         );
         // Square source fills the model's native square.
         assert_eq!(
-            fit_attachment_dims(1000, 1000, Some(&d), Some("flux")),
+            fit_attachment_dims(1000, 1000, Some(&d), Some("flux"), "flux-dev:q8"),
             (1024, 1024)
         );
         // Missing defaults fall back to a 1024x1024 canvas.
         assert_eq!(
-            fit_attachment_dims(1920, 1080, None, Some("flux")),
+            fit_attachment_dims(1920, 1080, None, Some("flux"), "flux-dev:q8"),
             (1024, 576)
         );
         // Output always lands on the 16px grid.
-        let (w, h) = fit_attachment_dims(777, 513, Some(&d), Some("flux"));
+        let (w, h) = fit_attachment_dims(777, 513, Some(&d), Some("flux"), "flux-dev:q8");
         assert_eq!((w % 16, h % 16), (0, 0));
     }
 
@@ -2223,7 +2227,7 @@ mod tests {
             ..defaults_1024()
         };
         assert_eq!(
-            fit_attachment_dims(1617, 1000, Some(&five_b), Some("wan")),
+            fit_attachment_dims(1617, 1000, Some(&five_b), Some("wan"), "wan22-ti2v-5b:q8"),
             (1120, 704)
         );
 
@@ -2234,7 +2238,13 @@ mod tests {
             ..defaults_1024()
         };
         assert_eq!(
-            fit_attachment_dims(1617, 1000, Some(&fourteen_b), Some("wan")),
+            fit_attachment_dims(
+                1617,
+                1000,
+                Some(&fourteen_b),
+                Some("wan"),
+                "wan22-t2v-a14b:q6"
+            ),
             (1136, 704)
         );
 
@@ -2245,7 +2255,13 @@ mod tests {
             ..defaults_1024()
         };
         assert_eq!(
-            fit_attachment_dims(1617, 1000, Some(&unadvertised), Some("wan")),
+            fit_attachment_dims(
+                1617,
+                1000,
+                Some(&unadvertised),
+                Some("wan"),
+                "wan22-ti2v-5b:q8"
+            ),
             (1136, 704)
         );
     }
@@ -2266,6 +2282,10 @@ mod tests {
         );
     }
 
+    /// The aspect-derived canvas is official-BF16 behavior only; every
+    /// compact identity (base + Turbo tags) must submit the fixed reviewed
+    /// envelope regardless of the attachment's aspect, because compact
+    /// admission validates exact dimensions.
     #[test]
     fn h3_attachment_dims_use_the_official_32px_canvas_authority() {
         for (source_width, source_height) in [(1920, 1080), (1080, 1920)] {
@@ -2274,12 +2294,39 @@ mod tests {
                 source_height,
                 Some(&defaults_1024()),
                 Some("minimax_h3"),
+                mold_core::minimax_h3::FL2VA_OFFICIAL,
             );
             assert_eq!((width % 32, height % 32), (0, 0));
             assert_eq!(
                 (width, height),
                 mold_core::minimax_h3::recommended_dimensions(source_width, source_height)
             );
+        }
+    }
+
+    #[test]
+    fn h3_attachment_dims_keep_the_compact_envelope() {
+        for model in [
+            mold_core::minimax_h3::FL2VA_COMFY,
+            mold_core::minimax_h3::FL2VA_COMFY_TURBO_8STEP,
+            mold_core::minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P,
+        ] {
+            for (source_width, source_height) in [(1024, 1024), (1920, 1080), (1080, 1920)] {
+                assert_eq!(
+                    fit_attachment_dims(
+                        source_width,
+                        source_height,
+                        Some(&defaults_1024()),
+                        Some("minimax-h3"),
+                        model,
+                    ),
+                    (
+                        mold_core::minimax_h3::DEFAULT_WIDTH,
+                        mold_core::minimax_h3::DEFAULT_HEIGHT
+                    ),
+                    "{model} {source_width}x{source_height}"
+                );
+            }
         }
     }
     // --- autocomplete ranking ---
