@@ -91,7 +91,8 @@ use super::vae_runtime::{
 use super::H3ConditionerLease;
 #[cfg(feature = "mp4")]
 use crate::attention::{AttentionBackend, AttentionChunkPolicy};
-#[cfg(feature = "mp4")]
+// Feature-independent: the envelope validators below name this in their
+// signatures in every build, matching how the type itself is defined.
 use crate::h3_factory::H3FactoryTurboAdapterAuthority;
 #[cfg(feature = "mp4")]
 use crate::h3_factory::H3PrivateFl2VaFactoryAuthority;
@@ -1260,10 +1261,6 @@ fn prepare_reviewed_h3_private_fl2va_admission(
         &attention_qualification_sha256,
     )?;
     #[cfg(feature = "h3")]
-    let turbo_steps = turbo_adapter
-        .as_ref()
-        .map(H3FactoryTurboAdapterAuthority::grid_points);
-    #[cfg(feature = "h3")]
     let runtime_qualification = public_runtime_qualification(
         &artifact_report,
         device_id,
@@ -1272,7 +1269,7 @@ fn prepare_reviewed_h3_private_fl2va_admission(
         attention.identity_sha256(),
         attention.kernel().identity(),
         &attention_qualification_sha256,
-        turbo_steps,
+        turbo_adapter.as_ref(),
     )?;
     progress.checkpoint()?;
 
@@ -2317,10 +2314,7 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
         attention.kernel().identity(),
         &attention_qualification_sha256,
         // Whatever admission froze, not a fresh environment read.
-        frozen_factory
-            .quantization()
-            .turbo_adapter()
-            .map(H3FactoryTurboAdapterAuthority::grid_points),
+        frozen_factory.quantization().turbo_adapter(),
     )?;
     if runtime_qualification.identity_sha256() != owner_fence.runtime_qualification_identity_sha256
         || runtime_qualification.artifact_qualification_identity_sha256()
@@ -4458,8 +4452,21 @@ fn public_runtime_qualification(
     attention_runtime_identity_sha256: &str,
     attention_kernel_identity: &str,
     attention_qualification_sha256: &str,
-    turbo_steps: Option<u32>,
+    turbo: Option<&H3FactoryTurboAdapterAuthority>,
 ) -> Result<H3PrivateRuntimeQualificationAuthority> {
+    // This mints an FL2VA-shaped qualification, so a tier reviewed for another
+    // task may not set its step count — the FL2V 768p and Ref2V tiers share a
+    // 5-point schedule, so a bare count cannot tell them apart and the task
+    // identity would be stripped across this boundary.
+    if let Some(turbo) = turbo {
+        if turbo.reviewed_task() != Some(Task::Fl2va) {
+            bail!(
+                "private H3 Turbo adapter {} was not reviewed for the fl2va runtime qualification",
+                turbo.tier_stable_id()
+            )
+        }
+    }
+    let turbo_steps = turbo.map(H3FactoryTurboAdapterAuthority::grid_points);
     if compute_capability != (8, 9)
         || artifact.canonical_model != contract::FL2VA_COMFY
         || artifact.task != "fl2va"
@@ -5208,6 +5215,25 @@ mod tests {
     #[cfg(feature = "mp4")]
     use crate::{H3FactoryEndpointInput, H3FactoryEndpointPreprocess, H3FactoryPreparedRowsInput};
 
+    /// Build the reviewed adapter authority for one tier, so envelope tests
+    /// exercise the same value admission passes rather than a bare step count.
+    ///
+    /// Ungated like its callers: every piece it touches — the authority type,
+    /// its constructor, and the reviewed tier table — is feature-independent.
+    fn turbo_authority_for(
+        tier: mold_candle::minimax_h3::H3TurboLoraTier,
+    ) -> H3FactoryTurboAdapterAuthority {
+        H3FactoryTurboAdapterAuthority::for_reviewed_tier(
+            tier.stable_id(),
+            &sha('7'),
+            &sha('8'),
+            4_096,
+            2_048,
+            1_024,
+        )
+        .expect("reviewed tier must build an adapter authority")
+    }
+
     fn reviewed_envelope(max_steps: u32) -> H3PrivateRuntimeEnvelopeRecord {
         H3PrivateRuntimeEnvelopeRecord {
             width: contract::DEFAULT_WIDTH,
@@ -5306,23 +5332,6 @@ mod tests {
     /// no-adapter authority. If those two ever agree, the call-site choice
     /// stopped mattering and the wiring is unverifiable again.
     #[cfg(feature = "mp4")]
-    /// Build the reviewed adapter authority for one tier, so envelope tests
-    /// exercise the same value admission passes rather than a bare count.
-    #[cfg(feature = "mp4")]
-    fn turbo_authority_for(
-        tier: mold_candle::minimax_h3::H3TurboLoraTier,
-    ) -> H3FactoryTurboAdapterAuthority {
-        H3FactoryTurboAdapterAuthority::for_reviewed_tier(
-            tier.stable_id(),
-            &sha('7'),
-            &sha('8'),
-            4_096,
-            2_048,
-            1_024,
-        )
-        .expect("reviewed tier must build an adapter authority")
-    }
-
     #[test]
     fn a_turbo_prepared_request_validates_only_under_its_own_step_authority() {
         for tier in mold_candle::minimax_h3::H3TurboLoraTier::ALL {
@@ -5377,6 +5386,42 @@ mod tests {
         baseline
             .validate_prepared_with_adapter(&request, None)
             .unwrap();
+    }
+
+    /// The qualification boundary must not strip tier identity either.
+    ///
+    /// `public_runtime_qualification` mints an FL2VA-shaped record. Feeding it
+    /// a bare step count let a Ref2V adapter set that record's envelope from a
+    /// coincident 5-point schedule; the mismatch was caught later, but the
+    /// record in between claimed an authority its adapter never had.
+    #[cfg(all(feature = "h3", feature = "mp4"))]
+    #[test]
+    fn a_cross_task_turbo_adapter_cannot_mint_an_fl2va_qualification() {
+        let ref2v = turbo_authority_for(mold_candle::minimax_h3::H3TurboLoraTier::Ref2v4StepV10);
+        let fl2v = turbo_authority_for(mold_candle::minimax_h3::H3TurboLoraTier::Fl2v768p4StepV10);
+        assert_eq!(ref2v.grid_points(), fl2v.grid_points());
+
+        let artifact = artifact_report();
+        let mint = |turbo| {
+            public_runtime_qualification(
+                &artifact,
+                "gpu-0",
+                0,
+                (8, 9),
+                &sha('a'),
+                "synthetic-qualified-kernel",
+                &sha('b'),
+                turbo,
+            )
+        };
+        let error = mint(Some(&ref2v))
+            .expect_err("a ref2v tier must not mint an fl2va qualification")
+            .to_string();
+        assert!(error.contains("was not reviewed for"), "{error}");
+        // The FL2V tier at the identical step count is accepted, so the
+        // refusal is about task identity and not about the number.
+        assert!(mint(Some(&fl2v)).is_ok());
+        assert!(mint(None).is_ok());
     }
 
     /// A tier's step authority is scoped to the task it was distilled for.

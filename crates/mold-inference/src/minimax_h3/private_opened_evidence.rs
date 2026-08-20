@@ -36,13 +36,13 @@ use super::vae_runtime::{
 };
 use crate::h3_factory::{
     expected_h3_factory_prepared_attempt_identity, expected_h3_factory_prepared_request_identity,
-    expected_h3_factory_raw_checkpoint_identity, expected_h3_factory_target_budget_identity,
-    H3FactoryArtifactHostInput, H3FactoryArtifactHostRole, H3FactoryBlockMemoryInput,
-    H3FactoryEndpointAnchor, H3FactoryEndpointInput, H3FactoryEndpointPreprocess,
-    H3FactoryExecutionBudgetEchoInput, H3FactoryPreparedAttemptInput,
-    H3FactoryPreparedRequestInput, H3FactoryPreparedRowsInput, H3FactoryRawCheckpointInput,
-    H3FactoryTargetBudgetInput, H3FactoryTargetDenoiseCopyPolicy, H3FactoryTargetLoadDropPolicy,
-    H3FactoryTurboAdapterAuthority,
+    expected_h3_factory_raw_checkpoint_identity, expected_h3_factory_reference_media_identity,
+    expected_h3_factory_target_budget_identity, H3FactoryArtifactHostInput,
+    H3FactoryArtifactHostRole, H3FactoryBlockMemoryInput, H3FactoryEndpointAnchor,
+    H3FactoryEndpointInput, H3FactoryEndpointPreprocess, H3FactoryExecutionBudgetEchoInput,
+    H3FactoryPreparedAttemptInput, H3FactoryPreparedRequestInput, H3FactoryPreparedRowsInput,
+    H3FactoryRawCheckpointInput, H3FactoryTargetBudgetInput, H3FactoryTargetDenoiseCopyPolicy,
+    H3FactoryTargetLoadDropPolicy, H3FactoryTurboAdapterAuthority,
 };
 use crate::progress::ProgressReporter;
 
@@ -1820,6 +1820,9 @@ fn build_canonical_private_fl2va_target_budget(
         packed_layout_freeze_staging_host_bytes,
         text_modality_tags_host_bytes,
         noise_cpu_staging_host_bytes,
+        reference_media_identity_sha256: expected_h3_factory_reference_media_identity(
+            &request.references,
+        ),
         reference_normalized_media_host_bytes,
         reference_decode_staging_host_bytes,
         reference_preprocess_staging_host_bytes,
