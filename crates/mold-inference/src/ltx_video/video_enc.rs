@@ -443,6 +443,7 @@ impl Mp4StreamEncoder {
 
         let annex_b = bitstream.to_vec();
         let mut frame_nals = Vec::new();
+        let mut has_vcl_nal = false;
         for nal in split_annex_b_nals(&annex_b) {
             if nal.is_empty() {
                 continue;
@@ -452,6 +453,12 @@ impl Mp4StreamEncoder {
                 7 => self.sps = Some(nal.to_vec()),
                 8 => self.pps = Some(nal.to_vec()),
                 _ => {
+                    // Types 1 (non-IDR slice) and 5 (IDR slice) are the VCL
+                    // NALs this AVC configuration can produce; anything else
+                    // (SEI etc.) rides along but is not a picture.
+                    if matches!(nal_type, 1 | 5) {
+                        has_vcl_nal = true;
+                    }
                     let len = nal.len() as u32;
                     frame_nals.extend_from_slice(&len.to_be_bytes());
                     frame_nals.extend_from_slice(nal);
@@ -459,14 +466,14 @@ impl Mp4StreamEncoder {
             }
         }
         drop(annex_b);
-        if frame_nals.is_empty() {
-            // A pushed frame that yields no picture NALs (a rate-control skip
-            // or a parameter-set-only bitstream) would be silently absent from
-            // the sample table, shortening the track's mdhd duration below the
-            // pushed frame count. Fail loudly instead of publishing a clip
-            // whose duration disagrees with its frame count.
+        if !has_vcl_nal {
+            // A pushed frame that yields no picture slice (a rate-control
+            // skip, a parameter-set-only bitstream, or an SEI-only access
+            // unit) would either be absent from the sample table or sit in it
+            // undecodable — both leave the track disagreeing with the pushed
+            // frame count. Fail loudly instead of publishing such a clip.
             anyhow::bail!(
-                "H.264 encoder produced no picture NALs for a pushed frame \
+                "H.264 encoder produced no VCL NAL for a pushed frame \
                  (frame type {:?})",
                 bitstream.frame_type()
             );
