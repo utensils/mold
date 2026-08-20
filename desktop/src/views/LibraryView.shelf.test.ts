@@ -157,6 +157,11 @@ const riverStudies: Collection = {
 };
 
 const stub = { template: "<div />" };
+const authedMediaStub = {
+  name: "AuthedMedia",
+  props: ["path"],
+  template: "<div data-test='authed-media' :data-path='path' />",
+};
 const historyDrawerStub = { name: "HistoryDrawer", props: ["open"], template: "<div />" };
 
 async function mountView(
@@ -238,7 +243,7 @@ async function mountView(
   const wrapper = mount(LibraryView, {
     global: {
       plugins: [pinia, router],
-      stubs: { AuthedMedia: stub, HistoryDrawer: historyDrawerStub },
+      stubs: { AuthedMedia: authedMediaStub, HistoryDrawer: historyDrawerStub },
     },
   });
   await flushPromises();
@@ -746,6 +751,154 @@ describe("Lightbox wiring", () => {
     expect(gallery.scope).toBe("prints");
     expect(gallery.favoritesOnly).toBe(false);
     expect(wrapper.getComponent({ name: "Lightbox" }).props("item").filename).toBe(plain.filename);
+    wrapper.unmount();
+  });
+});
+
+describe("Trash-aware This-Mac media + file actions", () => {
+  const localTrashed: GalleryImage = {
+    ...base("mold-flux-local-9.png", 8, 42),
+    trashed_at: NOW - 120,
+    purge_at: NOW + 14 * 86_400 - 120,
+  };
+
+  async function mountWithLocalTrash() {
+    const mounted = await mountView("/library?scope=trash");
+    localGalleryTrashList.mockResolvedValue({
+      images: [structuredClone(localTrashed)],
+      target: null,
+      retentionDays: 14,
+    });
+    await mounted.gallery.fetchTrash("local");
+    await flushPromises();
+    await mounted.wrapper.vm.$nextTick();
+    return mounted;
+  }
+
+  it("resolves a trashed This-Mac tile's media into `.trash/` via the view-aware protocol URL", async () => {
+    const { wrapper } = await mountWithLocalTrash();
+    const media = tileFor(wrapper, localTrashed.filename).get("[data-test='authed-media']");
+    expect(media.attributes("data-path")).toBe(
+      `mold-local://localhost/${encodeURIComponent(localTrashed.filename)}?view=trash`,
+    );
+    // Host-backed trash rows stay on the API path (their server resolves
+    // trashed rows itself).
+    const hostMedia = tileFor(wrapper, trashed.filename).get("[data-test='authed-media']");
+    expect(hostMedia.attributes("data-path")).toBe(
+      `/api/gallery/thumbnail/${encodeURIComponent(trashed.filename)}`,
+    );
+    wrapper.unmount();
+  });
+
+  it("Reveal in the Trash lightbox targets the `.trash/` copy of a This-Mac print", async () => {
+    const { wrapper } = await mountWithLocalTrash();
+    await tileFor(wrapper, localTrashed.filename).trigger("dblclick");
+    const lightbox = wrapper.getComponent({ name: "Lightbox" });
+    expect(lightbox.props("trashed")).toBe(true);
+    const reveal = lightbox.findAll("button").find((b) => b.text() === "Reveal in file manager");
+    expect(reveal, "trashed local prints keep a working Reveal").toBeDefined();
+    await reveal!.trigger("click");
+    await flushPromises();
+    expect(vi.mocked((await import("../lib/ipc")).ipc.revealOutputFile)).toHaveBeenCalledWith(
+      localTrashed.filename,
+      true,
+    );
+    wrapper.unmount();
+  });
+
+  it("the Trash banner names This device from the offline retention instead of claiming no trash", async () => {
+    const { wrapper, gallery } = await mountWithLocalTrash();
+    expect(gallery.retentionByHost.map((h) => [h.key, h.retentionDays])).toEqual([
+      ["local", 14],
+      ["plato-7680", 30],
+    ]);
+    expect(wrapper.get("[data-test='trash-banner-summary']").text()).toContain("14 d");
+    wrapper.unmount();
+  });
+});
+
+describe("selection-derived organize gating", () => {
+  /** A second, organize-incapable host (old server) holding one print. */
+  function addLegacyHost(mounted: Awaited<ReturnType<typeof mountView>>, image: GalleryImage) {
+    // The view refetches a newly appeared host's bucket over HTTP — answer
+    // okra's /api/gallery with its single print, plato keeps the shared set.
+    apiJsonTo.mockImplementation(
+      async (target: { baseUrl?: string } | null, path: string): Promise<unknown> => {
+        if (path === "/api/gallery") {
+          return target?.baseUrl === "http://okra:7680"
+            ? [structuredClone(image)]
+            : live.map((p) => structuredClone(p));
+        }
+        if (path.startsWith("/api/gallery/collections/")) return { filenames: [] };
+        return undefined;
+      },
+    );
+    mounted.hosts.extras.push({
+      id: "okra-7680",
+      label: "okra",
+      url: "http://okra:7680",
+      apiKey: null,
+      status: "ready",
+      error: null,
+      instanceId: null,
+    });
+    mounted.hosts.capabilities["okra-7680"] = { gallery: { can_delete: true } };
+    mounted.gallery.buckets["okra-7680"] = {
+      items: [structuredClone(image)],
+      loading: false,
+      error: null,
+      loaded: true,
+    };
+  }
+
+  const legacyOnly = base("mold-flux-okra-1.png", 35, 77);
+
+  it("disables Favorite / Tag / Collection for selections holding a print with no organize-capable copy", async () => {
+    const mounted = await mountView();
+    const { wrapper } = mounted;
+    addLegacyHost(mounted, legacyOnly);
+    await flushPromises();
+
+    await wrapper.get('[aria-label="Toggle select mode"]').trigger("click");
+    await tileFor(wrapper, legacyOnly.filename).trigger("click");
+    await tileFor(wrapper, smurf04.filename).trigger("click", { metaKey: true });
+    const bar = wrapper.get("[data-test='bulk-action-bar']");
+    for (const control of ["bulk-collections", "bulk-tags", "bulk-favorite"]) {
+      const button = bar.get(`[data-test='${control}']`);
+      expect(button.attributes("disabled"), control).toBeDefined();
+      expect(button.attributes("title")).toContain("okra");
+    }
+
+    // Dropping the blocked print re-enables the controls.
+    await tileFor(wrapper, legacyOnly.filename).trigger("click", { metaKey: true });
+    for (const control of ["bulk-collections", "bulk-tags", "bulk-favorite"]) {
+      const button = bar.get(`[data-test='${control}']`);
+      expect(button.attributes("disabled"), control).toBeUndefined();
+    }
+    wrapper.unmount();
+  });
+
+  it("refuses to create a collection when zero selected copies can be added (no empty-collection side effect)", async () => {
+    const mounted = await mountView();
+    const { wrapper } = mounted;
+    addLegacyHost(mounted, legacyOnly);
+    await flushPromises();
+
+    await wrapper.get('[aria-label="Toggle select mode"]').trigger("click");
+    await tileFor(wrapper, legacyOnly.filename).trigger("click");
+    // The bulk control is disabled; ⌘⇧N still opens the dialog around the
+    // selection, so the guard must refuse honestly.
+    key("N", { ctrlKey: true, shiftKey: true });
+    await flushPromises();
+    const dialog = document.body.querySelector("[data-test='rename-dialog']")!;
+    expect(dialog.textContent).toContain("New collection");
+    const input = dialog.querySelector("input") as HTMLInputElement;
+    input.value = "Ghost shelf";
+    input.dispatchEvent(new Event("input"));
+    (dialog.querySelector("[data-test='rename-save']") as HTMLButtonElement).click();
+    await flushPromises();
+    expect(org.createCollection).not.toHaveBeenCalled();
+    expect(useToastStore().items.at(-1)?.message).toContain("no collection was created");
     wrapper.unmount();
   });
 });

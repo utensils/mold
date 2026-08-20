@@ -27,6 +27,10 @@ const props = withDefaults(
     scope: LibraryScope;
     /** Organization affordances (collections / tags / ♥) are available. */
     organize?: boolean;
+    /** Why the CURRENT selection can't be organized (some selected print has
+     *  no copy on an organize-capable host); null when it can. Disables the
+     *  organize controls with this reason as their tooltip. */
+    organizeBlockedReason?: string | null;
     /** Every selected print lives on trash-capable hosts ⇒ "Move to trash". */
     trash?: boolean;
     /** Two-press arming state for the hard-delete path (parent-owned so the
@@ -51,6 +55,7 @@ const props = withDefaults(
   }>(),
   {
     organize: false,
+    organizeBlockedReason: null,
     trash: false,
     confirming: false,
     busy: false,
@@ -86,6 +91,9 @@ const emit = defineEmits<{
 
 const none = computed(() => props.selectedCount === 0);
 const noun = computed(() => (props.selectedCount === 1 ? "print" : "prints"));
+/** Organize controls act on the selection; a blocked selection disables
+ *  them with the reason as tooltip (never a silent no-op mutation). */
+const organizeBlocked = computed(() => props.organizeBlockedReason != null);
 
 const collectionsOpen = ref(false);
 const tagsOpen = ref(false);
@@ -189,7 +197,8 @@ defineExpose({ openCollections, openTags, closePopovers });
               type="button"
               class="ms-bb"
               :class="{ 'ms-bb--on': collectionsOpen }"
-              :disabled="none || busy"
+              :disabled="none || busy || organizeBlocked"
+              :title="organizeBlockedReason ?? undefined"
               :aria-expanded="collectionsOpen"
               data-test="bulk-collections"
               @click="collectionsOpen ? closePopovers() : openCollections()"
@@ -225,7 +234,8 @@ defineExpose({ openCollections, openTags, closePopovers });
               type="button"
               class="ms-bb"
               :class="{ 'ms-bb--on': tagsOpen }"
-              :disabled="none || busy"
+              :disabled="none || busy || organizeBlocked"
+              :title="organizeBlockedReason ?? undefined"
               :aria-expanded="tagsOpen"
               data-test="bulk-tags"
               @click="tagsOpen ? closePopovers() : openTags()"
@@ -254,7 +264,8 @@ defineExpose({ openCollections, openTags, closePopovers });
           type="button"
           class="ms-bb"
           :class="{ 'ms-bb--on': allFavorite && !none }"
-          :disabled="none || busy"
+          :disabled="none || busy || organizeBlocked"
+          :title="organizeBlockedReason ?? undefined"
           :aria-pressed="allFavorite && !none"
           data-test="bulk-favorite"
           @click="emit('favorite', !allFavorite)"
@@ -266,7 +277,8 @@ defineExpose({ openCollections, openTags, closePopovers });
           v-if="collectionName"
           type="button"
           class="ms-bb"
-          :disabled="none || busy"
+          :disabled="none || busy || organizeBlocked"
+          :title="organizeBlockedReason ?? undefined"
           data-test="bulk-remove-from-collection"
           @click="emit('removeFromCollection')"
         >

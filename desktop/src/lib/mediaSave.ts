@@ -12,13 +12,17 @@ export async function saveGalleryMedia(
   filename: string,
   outputFilename = filename,
   exportOptions: VideoExportOptions | null = null,
+  fromTrash = false,
 ): Promise<SavedMedia> {
   if (inTauri()) {
+    // `fromTrash` only steers the native This-Mac path — a host target's
+    // server resolves its own trashed rows into `.trash/`.
     return ipc.saveGalleryMedia(
       target,
       filename,
       outputFilename,
       exportOptions as unknown as Record<string, unknown> | null,
+      fromTrash,
     );
   }
 

@@ -76,6 +76,10 @@ export interface NativeGalleryThumbnail {
 export interface LocalGallerySnapshot {
   images: GalleryImage[];
   target: ApiTarget | null;
+  /** The retention this device's OFFLINE `.trash/` sweep would apply; only
+   * present on the trash listing while the lifecycle proves the server Off
+   * (a running server advertises retention via its capabilities instead). */
+  retentionDays?: number;
 }
 
 /** A remote host the app has connected to before (most recent first). */
@@ -281,9 +285,10 @@ export const ipc = {
     if (!inTauri()) return Promise.resolve(null);
     return invoke<string | null>("get_output_dir");
   },
-  revealOutputFile(filename: string): Promise<void> {
+  /** `fromTrash` reveals the print's `.trash/` copy (Trash view). */
+  revealOutputFile(filename: string, fromTrash = false): Promise<void> {
     if (!inTauri()) return Promise.resolve();
-    return invoke<void>("reveal_output_file", { filename });
+    return invoke<void>("reveal_output_file", { filename, fromTrash });
   },
   localGalleryList(): Promise<LocalGallerySnapshot> {
     if (!inTauri()) return Promise.resolve({ images: [], target: null });
@@ -397,6 +402,7 @@ export const ipc = {
     filename: string,
     outputFilename = filename,
     exportOptions?: Record<string, unknown> | null,
+    fromTrash = false,
   ): Promise<SavedMedia> {
     if (!inTauri()) {
       return Promise.reject(new Error("Native media saves require the desktop app."));
@@ -406,6 +412,7 @@ export const ipc = {
       filename,
       outputFilename,
       exportOptions: exportOptions ?? null,
+      fromTrash,
     });
   },
   /** Effective save folder, including the OS Downloads default. */
@@ -417,10 +424,11 @@ export const ipc = {
     if (!inTauri()) return Promise.resolve();
     return invoke<void>("reveal_saved_media", { path });
   },
-  /** Exact path only when that gallery identity exists on this Mac. */
-  localOutputFilePath(filename: string): Promise<string | null> {
+  /** Exact path only when that gallery identity exists on this Mac.
+   * `fromTrash` resolves a Trash-view row into `.trash/`. */
+  localOutputFilePath(filename: string, fromTrash = false): Promise<string | null> {
     if (!inTauri()) return Promise.resolve(null);
-    return invoke<string | null>("local_output_file_path", { filename });
+    return invoke<string | null>("local_output_file_path", { filename, fromTrash });
   },
   /** Stash the exact img2img source bytes under their sha256 (fire-and-forget
    * at submit) so Reuse settings can restore uploads that live nowhere else. */

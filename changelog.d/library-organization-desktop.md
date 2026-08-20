@@ -5,7 +5,11 @@
   with titles, ♥, tags, and collection membership edited in the lightbox
   aside. Deleting a print moves it to that machine's trash instead of erasing
   it; with the local server off, This device's delete, trash list, restore,
-  and delete-forever still work through the native `.trash/` path.
+  and delete-forever still work through the native `.trash/` path. A second
+  print deleted under an already-trashed filename is kept alongside the first
+  (renamed `name-2.ext`) — previously trashed bytes are never overwritten —
+  and Trash-view media, Save, Reveal, and Copy file path always read the
+  trashed copy even when a newer live file reuses its name.
 - **Print titles from Create.** The Create header's "Untitled print" is
   editable; the name rides every sibling of that print as
   `GenerateRequest.title`, is restored by Reuse settings, and becomes the

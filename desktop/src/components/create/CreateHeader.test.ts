@@ -95,7 +95,9 @@ describe("CreateHeader", () => {
       const input = wrapper.get<HTMLInputElement>("[data-test='print-title-input']");
       expect(input.attributes("aria-label")).toBe("Print title");
       expect(input.attributes("placeholder")).toBe("Untitled print");
-      expect(input.attributes("maxlength")).toBe("120");
+      // No raw maxlength: it counts UTF-16 code units, truncating emoji
+      // titles early. The scalar-aware validator enforces the 120 limit.
+      expect(input.attributes("maxlength")).toBeUndefined();
       await input.setValue("  Smurf village  ");
       await input.trigger("keydown", { key: "Enter" });
       expect(f.title).toBe("Smurf village");
@@ -134,6 +136,32 @@ describe("CreateHeader", () => {
       expect(wrapper.find("[data-test='print-title-input']").exists()).toBe(true);
       expect(input.attributes("aria-invalid")).toBe("true");
       expect(wrapper.get("[data-test='print-title-error']").text()).toContain("control");
+    });
+
+    it("accepts a 120-emoji title and refuses 121 via the scalar-aware validator", async () => {
+      // Each 🦋 is 2 UTF-16 code units but ONE Unicode scalar — a raw
+      // maxlength="120" would have truncated this valid title at 60 emoji.
+      readyLocal();
+      const f = form();
+      const wrapper = mount(CreateHeader, { props: { form: f }, attachTo: document.body });
+      await wrapper.get("[data-test='print-title']").trigger("click");
+      const input = wrapper.get<HTMLInputElement>("[data-test='print-title-input']");
+      const emoji120 = "🦋".repeat(120);
+      await input.setValue(emoji120);
+      await input.trigger("keydown", { key: "Enter" });
+      expect(f.title).toBe(emoji120);
+      expect(wrapper.find("[data-test='print-title-input']").exists()).toBe(false);
+
+      await wrapper.get("[data-test='print-title']").trigger("click");
+      const reopened = wrapper.get<HTMLInputElement>("[data-test='print-title-input']");
+      await reopened.setValue("🦋".repeat(121));
+      await reopened.trigger("keydown", { key: "Enter" });
+      // The commit is blocked: the editor stays open with the inline reason
+      // and the form keeps the previous title.
+      expect(f.title).toBe(emoji120);
+      expect(wrapper.find("[data-test='print-title-input']").exists()).toBe(true);
+      expect(reopened.attributes("aria-invalid")).toBe("true");
+      expect(wrapper.get("[data-test='print-title-error']").text()).toContain("120");
     });
 
     it("uses the sequence placeholder for a sequence draft", async () => {

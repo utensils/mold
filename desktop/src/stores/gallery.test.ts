@@ -1242,6 +1242,85 @@ describe("organization fetch", () => {
     expect(gallery.trashBuckets["local"]!.items).toHaveLength(1);
     expect(gallery.trashBuckets["local"]!.authorityTarget).toBeNull();
   });
+
+  it("orders trash buckets and trashMerged newest-DELETED first (trashed_at desc, timestamp fallback)", async () => {
+    connectLocalPlusHal();
+    advertise("local");
+    advertise("hal9000-7680");
+    // An OLD print deleted recently must sort above a NEWER print deleted
+    // earlier — the server's view=trash contract, not creation order.
+    vi.mocked(ipc.localGalleryTrashList).mockResolvedValue({
+      images: [
+        organized("new-deleted-early.png", 500, { trashed_at: 100 }),
+        organized("old-deleted-late.png", 10, { trashed_at: 900 }),
+      ],
+      target: LOCAL_TARGET,
+    });
+    // A legacy row without a deletion stamp falls back to its timestamp.
+    vi.mocked(organization.listTrash).mockResolvedValue([organized("no-stamp.png", 400)]);
+    const gallery = useGalleryStore();
+    await gallery.fetchTrash();
+    expect(gallery.trashBuckets["local"]!.items.map((i) => i.filename)).toEqual([
+      "old-deleted-late.png",
+      "new-deleted-early.png",
+    ]);
+    expect(gallery.trashMerged.map((e) => e.item.filename)).toEqual([
+      "old-deleted-late.png",
+      "no-stamp.png",
+      "new-deleted-early.png",
+    ]);
+  });
+
+  it("retentionByHost names This device from the offline IPC listing while the server is Off", async () => {
+    // Server Off: there is no "local" capability snapshot, but the offline
+    // `.trash/` is in use — the banner must not claim no machine keeps a
+    // trash while trash items are displayed.
+    const conn = useConnectionStore();
+    conn.info = { mode: "local", baseUrl: "http://127.0.0.1:49152", apiKey: null };
+    conn.status = "error";
+    vi.mocked(ipc.localGalleryTrashList).mockResolvedValue({
+      images: [organized("t1.png", 10, { trashed_at: 1 })],
+      target: null,
+      retentionDays: 14,
+    });
+    const gallery = useGalleryStore();
+    expect(gallery.retentionByHost).toEqual([]);
+    await gallery.fetchTrash("local");
+    expect(gallery.retentionByHost).toEqual([
+      { key: "local", label: "This device", retentionDays: 14 },
+    ]);
+  });
+
+  it("defaults offline retention to 30 days when the listing omits it, and yields to a running server's capabilities", async () => {
+    const conn = useConnectionStore();
+    conn.info = { mode: "local", baseUrl: "http://127.0.0.1:49152", apiKey: null };
+    conn.status = "error";
+    // Trashed items with no retention field (an older native listing):
+    // fall back to the documented 30-day config default. A field-less AND
+    // item-less snapshot is the browser-shell stub and claims nothing.
+    vi.mocked(ipc.localGalleryTrashList).mockResolvedValue({
+      images: [organized("t1.png", 10, { trashed_at: 1 })],
+      target: null,
+    });
+    const gallery = useGalleryStore();
+    await gallery.fetchTrash("local");
+    expect(gallery.retentionByHost).toEqual([
+      { key: "local", label: "This device", retentionDays: 30 },
+    ]);
+
+    // The engine comes back: its capability snapshot is the authority again.
+    connectLocal();
+    advertise("local", { retentionDays: 7 });
+    vi.mocked(ipc.localGalleryTrashList).mockResolvedValue({
+      images: [],
+      target: { baseUrl: "http://127.0.0.1:49152", apiKey: "desktop-key" },
+    });
+    await gallery.fetchTrash("local");
+    expect(gallery.localOfflineTrashRetentionDays).toBeNull();
+    expect(gallery.retentionByHost).toEqual([
+      { key: "local", label: "This device", retentionDays: 7 },
+    ]);
+  });
 });
 
 describe("organization union + filters", () => {

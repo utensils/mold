@@ -218,6 +218,18 @@ const organizeHostNote = computed(() => {
   return labels.length > 0 ? labels.join(" · ") : null;
 });
 
+/** Every SELECTED logical print has at least one copy on an
+ *  organize-capable host — the bulk bar's Favorite / Tag / Collection
+ *  controls act on nothing otherwise. Empty selections stay enabled (the
+ *  buttons already disable on `none`) so the bar reads normally. */
+const selectionOrganizeBlockedReason = computed<string | null>(() => {
+  const blocked = selectedEntries.value.filter((e) => !canOrganizeEntry(e));
+  if (blocked.length === 0) return null;
+  const labels = [...new Set(blocked.flatMap((e) => e.availableOn.map((s) => s.label)))];
+  const n = blocked.length;
+  return `${n} selected ${n === 1 ? "print lives" : "prints live"} only on ${joinNames(labels)}, which can't organize prints.`;
+});
+
 /** Reveal works for files on this Mac: the IPC bucket, or a local-kind
  *  (built-in/external) engine whose output dir is this machine's. */
 const canReveal = (entry: MergedPrint) =>
@@ -451,6 +463,12 @@ async function toggleCollection(
   change: { slug?: string; name?: string; checked: boolean },
 ) {
   if (targets.length === 0) return;
+  // Zero addable copies would "add" nothing (and create-on-demand would
+  // leave an empty collection) — refuse honestly instead.
+  if (change.checked && gallery.organizeTargetsFor(targets).length === 0) {
+    toasts.push("None of the selected prints are on a machine that can organize.", "error");
+    return;
+  }
   if (!change.checked) {
     if (!change.slug) return;
     reportFanout(await gallery.removeFromCollection(targets, change.slug));
@@ -515,6 +533,17 @@ function openNewCollection(targets: MergedPrint[] = []) {
   newCollectionTargets.value = targets;
 }
 async function createCollection(name: string, targets: MergedPrint[] = []) {
+  // Creating for a selection must not leave an empty collection behind when
+  // no selected copy sits on an organize-capable host — refuse honestly
+  // instead of creating everywhere and "adding" nothing.
+  if (targets.length > 0 && gallery.organizeTargetsFor(targets).length === 0) {
+    const n = targets.length;
+    toasts.push(
+      `None of the ${n === 1 ? "selected print's copies live" : `${n} selected prints' copies live`} on a machine that can organize — no collection was created.`,
+      "error",
+    );
+    return;
+  }
   organizeBusy.value = true;
   try {
     const result = await gallery.createCollection(name);
@@ -1242,7 +1271,12 @@ const isAudio = (i: GalleryImage) => isAudioItem(i);
 
 async function copyImage(entry: MergedPrint) {
   try {
-    const path = galleryMediaPath(entry.item.filename, gallery.mediaSourceOf(entry.sourceKey));
+    const path = galleryMediaPath(
+      entry.item.filename,
+      gallery.mediaSourceOf(entry.sourceKey),
+      false,
+      entry.item.trashed_at != null,
+    );
     const target = targetFor(entry);
     await copyImageBytesToClipboard(
       path,
@@ -1879,6 +1913,7 @@ onUnmounted(() => {
                     laid.item.filename,
                     gallery.mediaSourceOf(laid.entry.sourceKey),
                     true,
+                    laid.item.trashed_at != null,
                   )
                 "
                 :target="targetFor(laid.entry)"
@@ -1982,6 +2017,7 @@ onUnmounted(() => {
       :total="entries.length"
       :scope="scope"
       :organize="organizeAvailable"
+      :organize-blocked-reason="selectionOrganizeBlockedReason"
       :trash="selectionTrashCapable"
       :confirming="confirmingBulkDelete"
       :busy="bulkDeleting || organizeBusy"

@@ -2,7 +2,7 @@
 import { computed, nextTick, ref } from "vue";
 import Icon from "@ui/components/Icon.vue";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
-import { PRINT_TITLE_MAX_LEN, validatePrintTitle } from "@studio/lib/libraryOrganization";
+import { validatePrintTitle } from "@studio/lib/libraryOrganization";
 import type { GenerateForm } from "../../lib/generateForm";
 import { outputFamilyLabel } from "@studio/lib/outputShape";
 import HostChip from "./HostChip.vue";
@@ -93,7 +93,6 @@ const summary = computed(() => {
           :aria-invalid="titleError ? 'true' : undefined"
           :aria-describedby="titleError ? 'create-print-title-error' : undefined"
           :placeholder="placeholder"
-          :maxlength="PRINT_TITLE_MAX_LEN"
           autocomplete="off"
           spellcheck="false"
           @keydown.enter.prevent="commitEdit"

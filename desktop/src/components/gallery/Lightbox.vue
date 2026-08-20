@@ -145,6 +145,11 @@ watch(
   () => void copy(String(props.item.metadata.seed)),
 );
 
+/** The open print's bytes live in the trash: resolve media, file paths,
+ *  Reveal, and Save into `.trash/` so a newer same-name live file can never
+ *  shadow them. Derived from the row itself with the view as fallback. */
+const fromTrash = computed(() => props.trashed || props.item.trashed_at != null);
+
 const confirmingDelete = ref(false);
 const confirmingForever = ref(false);
 const exportOpen = ref(false);
@@ -294,7 +299,7 @@ async function copyImage() {
   try {
     const target = props.target;
     await copyImageBytesToClipboard(
-      galleryMediaPath(props.item.filename, props.source),
+      galleryMediaPath(props.item.filename, props.source, false, fromTrash.value),
       target ? { fetchImage: (p) => fetchGalleryMediaBytes(p, target) } : undefined,
     );
     toasts.push("Image copied");
@@ -313,7 +318,7 @@ function imageMenu(): MenuEntry[] {
     {
       label: "Copy file path",
       action: () =>
-        void copyLocalOutputPath(props.item.filename)
+        void copyLocalOutputPath(props.item.filename, fromTrash.value)
           .then(() => toasts.push("File path copied"))
           .catch((error) =>
             toasts.push(error instanceof Error ? error.message : String(error), "error"),
@@ -328,7 +333,7 @@ function imageMenu(): MenuEntry[] {
 
 async function reveal() {
   try {
-    await ipc.revealOutputFile(props.item.filename);
+    await ipc.revealOutputFile(props.item.filename, fromTrash.value);
   } catch (err) {
     toasts.push(String(err), "error");
   }
@@ -361,6 +366,8 @@ async function saveMedia() {
       props.target,
       props.item.filename,
       suggestedSaveName({ ...props.item, title: currentTitle.value }),
+      null,
+      fromTrash.value,
     );
     showSavedMediaToast(toasts, saved);
   } catch (error) {
@@ -429,14 +436,14 @@ async function performVideoExport(options: VideoExportOptions) {
         >
           <div v-if="audio" class="flex w-full max-w-2xl flex-col items-center gap-4 p-4">
             <AuthedMedia
-              :path="galleryMediaPath(item.filename, source, true)"
+              :path="galleryMediaPath(item.filename, source, true, fromTrash)"
               :target="target"
               :cache-key="cacheKey"
               :alt="meta.prompt"
               class="!object-contain"
             />
             <AuthedMedia
-              :path="galleryMediaPath(item.filename, source)"
+              :path="galleryMediaPath(item.filename, source, false, fromTrash)"
               :target="target"
               :cache-key="cacheKey"
               audio
@@ -446,7 +453,7 @@ async function performVideoExport(options: VideoExportOptions) {
           </div>
           <AuthedMedia
             v-else
-            :path="galleryMediaPath(item.filename, source)"
+            :path="galleryMediaPath(item.filename, source, false, fromTrash)"
             :target="target"
             :cache-key="cacheKey"
             :video="video"

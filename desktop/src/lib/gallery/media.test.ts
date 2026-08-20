@@ -336,6 +336,22 @@ describe("galleryMediaPath", () => {
       "mold-local://localhost/print%20one.png",
     );
   });
+
+  it("marks Trash-view local media so the native protocol reads `.trash/`", () => {
+    // A trashed row must never be shadowed by a newer live file under the
+    // same name — the query flips the protocol's live-first resolution.
+    expect(galleryMediaPath("print one.png", "local", true, true)).toBe(
+      "mold-local://localhost/print%20one.png?view=trash",
+    );
+    expect(galleryMediaPath("print one.png", "local", false, true)).toBe(
+      "mold-local://localhost/print%20one.png?view=trash",
+    );
+    // Host media stays on the plain API path: the origin server resolves
+    // its own trashed rows into `.trash/`.
+    expect(galleryMediaPath("print one.png", "host", false, true)).toBe(
+      "/api/gallery/image/print%20one.png",
+    );
+  });
 });
 
 describe("authedMediaUrl host-keyed cache", () => {

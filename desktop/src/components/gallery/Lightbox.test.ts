@@ -449,6 +449,8 @@ describe("Lightbox organization (V3 Shelf)", () => {
       { baseUrl: "http://hal", apiKey: "secret" },
       "print-0001.png",
       "smurf-04.png",
+      null,
+      false,
     );
   });
 });

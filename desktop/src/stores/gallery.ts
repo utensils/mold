@@ -276,6 +276,19 @@ function insertRow(bucket: GalleryBucket, image: GalleryImage) {
   else bucket.items.splice(at, 0, image);
 }
 
+/** Trash order: newest-DELETED first (`trashed_at`, matching the server's
+ *  `view=trash` contract), with the creation `timestamp` only as a fallback
+ *  for rows that never recorded a deletion time. */
+const trashOrderKey = (i: GalleryImage) => i.trashed_at ?? i.timestamp;
+
+/** Insert into a trash bucket in newest-deleted-first order. */
+function insertTrashRow(bucket: GalleryBucket, image: GalleryImage) {
+  if (bucket.items.some((i) => i.filename === image.filename)) return;
+  const at = bucket.items.findIndex((i) => trashOrderKey(i) < trashOrderKey(image));
+  if (at === -1) bucket.items.push(image);
+  else bucket.items.splice(at, 0, image);
+}
+
 function takeRow(bucket: GalleryBucket | undefined, filename: string): GalleryImage | null {
   if (!bucket) return null;
   const at = bucket.items.findIndex((i) => i.filename === filename);
@@ -326,6 +339,12 @@ export const useGalleryStore = defineStore("gallery", {
     /** Per-host trashed prints (`GET /api/gallery?view=trash`). Same keys
      *  as `buckets`; fetched on demand by the Trash scope. */
     trashBuckets: {} as Record<string, GalleryBucket>,
+    /** This Mac's OFFLINE `.trash/` retention, read from the last native
+     *  trash listing while the lifecycle proved the server Off; null while
+     *  a running server's capability snapshot is the authority. Feeds the
+     *  Trash banner so it never claims no machine keeps a trash while
+     *  offline trash items are displayed. */
+    localOfflineTrashRetentionDays: null as number | null,
     /** Per-host collections listings, merged by slug in `mergedCollections`. */
     collectionsByHost: {} as Record<string, CollectionsBucket>,
     /** Per-host tag counts, merged by case-insensitive name in `mergedTags`. */
@@ -379,9 +398,13 @@ export const useGalleryStore = defineStore("gallery", {
     mergedIndex(): Map<string, MergedPrint> {
       return indexCopies(this.merged);
     },
-    /** The trash, merged across hosts with the very same identity rules. */
+    /** The trash, merged across hosts with the very same identity rules —
+     *  but ordered newest-DELETED first (`trashed_at` desc, `timestamp`
+     *  fallback), matching the server's `view=trash` contract. */
     trashMerged(): MergedPrint[] {
-      return mergeBuckets(this.sources, this.trashBuckets, this.pendingDeletions);
+      return mergeBuckets(this.sources, this.trashBuckets, this.pendingDeletions).sort(
+        (a, b) => trashOrderKey(b.item) - trashOrderKey(a.item),
+      );
     },
     trashIndex(): Map<string, MergedPrint> {
       return indexCopies(this.trashMerged);
@@ -419,14 +442,35 @@ export const useGalleryStore = defineStore("gallery", {
       return this.sources.some((s) => this.trashCapable(s.key));
     },
     /** Per-host retention for the Trash banner; trash-capable hosts only,
-     *  This device first (it sets the sentence). */
+     *  This device first (it sets the sentence). With the local server Off
+     *  there is no capability snapshot, but the offline `.trash/` is still
+     *  in use — the native trash listing reports this Mac's configured
+     *  retention, so This device stays represented rather than the banner
+     *  claiming no machine keeps a trash. */
     retentionByHost(): RetentionHostEntry[] {
-      const caps = useHostsStore().capabilities;
+      const hosts = useHostsStore();
+      const caps = hosts.capabilities;
+      // `hostFor("local")` is an action; getters only see state + getters,
+      // so the "engine not ready" check is inlined here.
+      const localEngineReady = hosts.all.some((h) => h.id === "local" && h.status === "ready");
       const out: RetentionHostEntry[] = [];
       for (const source of this.sources) {
         const trash = caps[source.key]?.gallery?.trash;
-        if (!trash?.enabled) continue;
-        out.push({ key: source.key, label: source.label, retentionDays: trash.retention_days });
+        if (trash?.enabled) {
+          out.push({ key: source.key, label: source.label, retentionDays: trash.retention_days });
+          continue;
+        }
+        if (
+          source.key === "local" &&
+          this.localOfflineTrashRetentionDays !== null &&
+          !localEngineReady
+        ) {
+          out.push({
+            key: source.key,
+            label: source.label,
+            retentionDays: this.localOfflineTrashRetentionDays,
+          });
+        }
       }
       return out;
     },
@@ -942,7 +986,7 @@ export const useGalleryStore = defineStore("gallery", {
         if (row && trash?.loaded) {
           const retention = useHostsStore().capabilities[sourceKey]?.gallery?.trash?.retention_days;
           const trashedAt = nowSecs();
-          insertRow(trash, {
+          insertTrashRow(trash, {
             ...row,
             trashed_at: trashedAt,
             purge_at: retention && retention > 0 ? trashedAt + retention * 86_400 : null,
@@ -1083,7 +1127,7 @@ export const useGalleryStore = defineStore("gallery", {
       // one is only inserted when the trash is loaded.
       if (image.trashed_at != null) {
         const trash = this.trashBuckets[key];
-        if (trash?.loaded) insertRow(trash, image);
+        if (trash?.loaded) insertTrashRow(trash, image);
         return;
       }
       insertRow(bucket, image);
@@ -1100,7 +1144,7 @@ export const useGalleryStore = defineStore("gallery", {
       if (!row) return; // trashed before we ever listed it; the next trash fetch has it
       const retention = useHostsStore().capabilities[key]?.gallery?.trash?.retention_days;
       const trashedAt = nowSecs();
-      insertRow(trash, {
+      insertTrashRow(trash, {
         ...row,
         trashed_at: trashedAt,
         purge_at: retention && retention > 0 ? trashedAt + retention * 86_400 : null,
@@ -1224,6 +1268,18 @@ export const useGalleryStore = defineStore("gallery", {
           const snapshot = await ipc.localGalleryTrashList();
           items = snapshot.images;
           authorityTarget = snapshot.target;
+          // The offline listing carries this Mac's retention (read through
+          // the same Config overlay the sweeper uses) so the Trash banner
+          // can name This device while no capability snapshot exists
+          // (server Off ⇒ no /api/capabilities). A native listing missing
+          // the field but holding trashed prints falls back to the config
+          // default of 30 days; a browser-shell stub (no field, no items)
+          // claims nothing — there is no native trash to represent.
+          this.localOfflineTrashRetentionDays =
+            snapshot.target === null &&
+            (snapshot.retentionDays !== undefined || snapshot.images.length > 0)
+              ? (snapshot.retentionDays ?? 30)
+              : null;
         } else {
           const target = this.targetOf(hostKey);
           if (target && this.trashCapable(hostKey)) {
@@ -1233,7 +1289,7 @@ export const useGalleryStore = defineStore("gallery", {
         }
         bucket.authorityTarget = authorityTarget;
         bucket.authorityResolved = true;
-        bucket.items = items.sort((a, b) => b.timestamp - a.timestamp);
+        bucket.items = items.sort((a, b) => trashOrderKey(b) - trashOrderKey(a));
         bucket.loaded = true;
       } catch (err) {
         bucket.error = String(err);
