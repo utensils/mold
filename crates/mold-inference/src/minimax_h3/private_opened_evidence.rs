@@ -1663,40 +1663,29 @@ fn build_canonical_private_fl2va_target_budget(
             .iter()
             .map(|reference| reference.normalized_host_bytes),
     )?;
-    // One reference is decoded at a time, so the transient charge is the
-    // largest single staged file plus its decoded frames before normalization.
-    let reference_decode_staging_host_bytes = if ref2va {
+    // Every reference's NATIVE decoded payload is held simultaneously: the
+    // orchestrator decodes the whole ordered set before preprocessing any.
+    let reference_native_media_host_bytes = checked_sum(
         request
             .references
             .iter()
-            .map(|reference| reference.normalized_host_bytes)
-            .max()
-            .unwrap_or(0)
-            .checked_mul(2)
-            .ok_or_else(|| anyhow!("private H3 reference decode staging overflow"))?
-    } else {
-        0
-    };
-    // A resize holds its source while it writes its destination, so the
-    // normalization transient is one frame of the largest canvas, twice.
-    let reference_preprocess_staging_host_bytes = if ref2va {
-        request
-            .references
-            .iter()
-            .filter_map(|reference| {
-                Some(
-                    u64::from(reference.normalized_width?)
-                        * u64::from(reference.normalized_height?)
-                        * 3,
-                )
-            })
-            .max()
-            .unwrap_or(0)
-            .checked_mul(2)
-            .ok_or_else(|| anyhow!("private H3 reference preprocess staging overflow"))?
-    } else {
-        0
-    };
+            .map(|reference| reference.native_host_bytes),
+    )?;
+    // The transient on top of that is the one reference being materialized.
+    let reference_decode_staging_host_bytes = request
+        .references
+        .iter()
+        .map(|reference| reference.native_host_bytes)
+        .max()
+        .unwrap_or(0);
+    // Preprocess writes one normalized payload while its native source is
+    // still held; the transient is the largest normalized form.
+    let reference_preprocess_staging_host_bytes = request
+        .references
+        .iter()
+        .map(|reference| reference.normalized_host_bytes)
+        .max()
+        .unwrap_or(0);
     // The audio encoder has no FL2VA analogue; it borrows the decoder's
     // measured workspace, which runs the larger BigVGAN stack.
     let reference_audio_encode_workspace_device_bytes = if ref2va {
@@ -1708,7 +1697,7 @@ fn build_canonical_private_fl2va_target_budget(
         checked_sum([
             attempt_host_bytes,
             qwen_alive_metadata_host_bytes,
-            reference_normalized_media_host_bytes,
+            reference_native_media_host_bytes,
             reference_decode_staging_host_bytes,
         ])?
     } else {
@@ -1718,6 +1707,7 @@ fn build_canonical_private_fl2va_target_budget(
         checked_sum([
             attempt_host_bytes,
             qwen_alive_metadata_host_bytes,
+            reference_native_media_host_bytes,
             reference_normalized_media_host_bytes,
             reference_preprocess_staging_host_bytes,
         ])?

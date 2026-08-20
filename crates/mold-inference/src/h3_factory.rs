@@ -140,6 +140,17 @@ pub struct H3FactoryReferenceInput {
     pub qwen_video_frames: Option<u32>,
     /// Normalized 32 kHz stereo sample count. Absent without a soundtrack.
     pub audio_samples_per_channel: Option<u64>,
+    /// NATIVE decoded geometry, before any normalization.
+    ///
+    /// The decoder retains what it decoded, not what preprocessing will
+    /// produce, and every reference stays retained until its own preprocess
+    /// step consumes it. These fields are what make that peak derivable; a
+    /// visual reference without them cannot be priced and is refused.
+    pub native_width: Option<u32>,
+    pub native_height: Option<u32>,
+    /// Native soundtrack sample count and channel count, at the source rate.
+    pub native_audio_samples_per_channel: Option<u64>,
+    pub native_audio_channels: Option<u16>,
     /// Packed condition rows this reference contributes.
     pub visual_rows: u64,
     pub audio_rows: u64,
@@ -149,6 +160,12 @@ pub struct H3FactoryReferenceInput {
     /// and its two encoders: normalized RGB8 frames plus the normalized f32
     /// stereo waveform. Recomputed by the validator from the geometry.
     pub normalized_host_bytes: u64,
+    /// Host bytes the backend retains for this reference between its decode
+    /// and its preprocess: the NATIVE decoded frames it selected plus the
+    /// native f32 soundtrack. Recomputed by the validator from the native
+    /// geometry, and charged for every reference simultaneously because the
+    /// orchestrator decodes the whole ordered set before preprocessing any.
+    pub native_host_bytes: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -883,6 +900,19 @@ impl H3FactoryTurboAdapterAuthority {
         self.grid_points
     }
 
+    /// The task this adapter's tier was reviewed for, resolved from its stable
+    /// id. An unrecognised id yields `None` and must be treated as a mismatch
+    /// rather than as "any task".
+    pub fn reviewed_task(&self) -> Option<Task> {
+        mold_candle::minimax_h3::H3TurboLoraTier::ALL
+            .into_iter()
+            .find(|tier| tier.stable_id() == self.tier_stable_id)
+            .map(|tier| match tier.task() {
+                mold_candle::minimax_h3::H3TransformerTask::Ref2Va => Task::Ref2va,
+                _ => Task::Fl2va,
+            })
+    }
+
     pub const fn resident_device_bytes(&self) -> u64 {
         self.resident_device_bytes
     }
@@ -1390,6 +1420,24 @@ struct H3ReferenceCharges {
     audio_rows: u64,
     qwen_vision_rows: u64,
     normalized_host_bytes: u64,
+    native_host_bytes: u64,
+}
+
+/// Aggregate retained-media totals for one ordered reference set.
+///
+/// The two are charged in different phases and must not be collapsed: natives
+/// are held from decode until preprocess, normalized ones from preprocess
+/// until both encoders finish, and during preprocess the two overlap.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct H3ReferenceMediaTotals {
+    pub(crate) normalized_host_bytes: u64,
+    pub(crate) native_host_bytes: u64,
+    /// The largest single native payload — the transient a decode peaks at
+    /// while it materializes one reference on top of those already held.
+    pub(crate) largest_native_host_bytes: u64,
+    /// The largest single normalized payload, the transient a preprocess peaks
+    /// at while it writes one reference's normalized form.
+    pub(crate) largest_normalized_host_bytes: u64,
 }
 
 /// Re-derive every row and retained-byte charge for one reference from its
@@ -1574,11 +1622,94 @@ fn h3_reference_charges(reference: &H3FactoryReferenceInput) -> Result<H3Referen
         .checked_add(audio_host_bytes)
         .ok_or_else(|| anyhow!("MiniMax H3 reference retained host bytes overflow"))?;
 
+    // Native retention. The decoder keeps what it decoded — the union of the
+    // visual-VAE prefix and the Qwen cursor, at source resolution — plus the
+    // source soundtrack, until this reference's own preprocess step runs.
+    let native_canvas = match (reference.native_width, reference.native_height) {
+        (Some(width), Some(height)) => {
+            // Bound it here, at the request boundary, so the ledger term is
+            // always derivable. An unbounded native payload would leave the
+            // scheduler charging an estimate the runtime can exceed.
+            if width == 0
+                || height == 0
+                || width > contract::MAX_REFERENCE_DIMENSION
+                || height > contract::MAX_REFERENCE_DIMENSION
+                || u64::from(width) * u64::from(height) > contract::MAX_REFERENCE_IMAGE_PIXELS
+                || reference.kind == H3FactoryReferenceKind::Audio
+            {
+                bail!(
+                    "MiniMax H3 reference {} native canvas is missing, oversized, or crossed",
+                    reference.index
+                );
+            }
+            Some((u64::from(width), u64::from(height)))
+        }
+        (None, None) => {
+            if reference.kind != H3FactoryReferenceKind::Audio {
+                bail!(
+                    "MiniMax H3 visual reference {} has no native canvas to price its decode",
+                    reference.index
+                );
+            }
+            None
+        }
+        _ => bail!(
+            "MiniMax H3 reference {} has a half-specified native canvas",
+            reference.index
+        ),
+    };
+    let native_frame_bytes = native_canvas
+        .map(|(width, height)| {
+            width
+                .checked_mul(height)
+                .and_then(|pixels| pixels.checked_mul(3))
+                .ok_or_else(|| anyhow!("MiniMax H3 native frame bytes overflow"))
+        })
+        .transpose()?
+        .unwrap_or(0);
+    let native_visual_bytes = retained_frames
+        .checked_mul(native_frame_bytes)
+        .ok_or_else(|| anyhow!("MiniMax H3 native retained visual bytes overflow"))?;
+    let native_audio_bytes = match (
+        reference.native_audio_samples_per_channel,
+        reference.native_audio_channels,
+        expects_audio,
+    ) {
+        (Some(samples), Some(channels), true) => {
+            if samples == 0
+                || channels == 0
+                || channels > contract::MAX_REFERENCE_CHANNELS
+                || samples
+                    > u64::from(contract::MAX_REFERENCE_SAMPLE_RATE)
+                        .saturating_mul(contract::MAX_REFERENCE_DURATION_MS)
+                        .div_ceil(1_000)
+            {
+                bail!(
+                    "MiniMax H3 reference {} native soundtrack is missing or oversized",
+                    reference.index
+                );
+            }
+            samples
+                .checked_mul(u64::from(channels))
+                .and_then(|values| values.checked_mul(std::mem::size_of::<f32>() as u64))
+                .ok_or_else(|| anyhow!("MiniMax H3 native retained audio bytes overflow"))?
+        }
+        (None, None, false) => 0,
+        _ => bail!(
+            "MiniMax H3 reference {} native audio geometry differs from its modality",
+            reference.index
+        ),
+    };
+    let native_host_bytes = native_visual_bytes
+        .checked_add(native_audio_bytes)
+        .ok_or_else(|| anyhow!("MiniMax H3 native retained host bytes overflow"))?;
+
     Ok(H3ReferenceCharges {
         visual_rows,
         audio_rows,
         qwen_vision_rows,
         normalized_host_bytes,
+        native_host_bytes,
     })
 }
 
@@ -1586,14 +1717,14 @@ fn h3_reference_charges(reference: &H3FactoryReferenceInput) -> Result<H3Referen
 /// charges as `(visual_rows, audio_rows, qwen_vision_rows, host_bytes)`.
 fn validate_prepared_references(
     references: &[H3FactoryReferenceInput],
-) -> Result<(u64, u64, u64, u64)> {
+) -> Result<(u64, u64, u64, H3ReferenceMediaTotals)> {
     if references.is_empty() {
         bail!("MiniMax H3 Ref2VA prepared request retains no ordered references");
     }
     if references.len() > contract::MAX_REFERENCE_FILES {
         bail!("MiniMax H3 Ref2VA prepared request exceeds the released reference count");
     }
-    let mut totals = (0_u64, 0_u64, 0_u64, 0_u64);
+    let mut totals = (0_u64, 0_u64, 0_u64, H3ReferenceMediaTotals::default());
     for (offset, reference) in references.iter().enumerate() {
         require_sha256(&reference.content_sha256, "H3 reference content")?;
         if reference.index != u32::try_from(offset + 1)? {
@@ -1610,6 +1741,7 @@ fn validate_prepared_references(
             || charges.audio_rows != reference.audio_rows
             || charges.qwen_vision_rows != reference.qwen_vision_rows
             || charges.normalized_host_bytes != reference.normalized_host_bytes
+            || charges.native_host_bytes != reference.native_host_bytes
         {
             bail!(
                 "MiniMax H3 reference {} row or retained-byte charges differ from its frozen geometry",
@@ -1628,10 +1760,24 @@ fn validate_prepared_references(
             .2
             .checked_add(charges.qwen_vision_rows)
             .ok_or_else(|| anyhow!("MiniMax H3 reference vision row total overflow"))?;
-        totals.3 = totals
+        totals.3.normalized_host_bytes = totals
             .3
+            .normalized_host_bytes
             .checked_add(charges.normalized_host_bytes)
             .ok_or_else(|| anyhow!("MiniMax H3 reference retained host byte total overflow"))?;
+        totals.3.native_host_bytes = totals
+            .3
+            .native_host_bytes
+            .checked_add(charges.native_host_bytes)
+            .ok_or_else(|| anyhow!("MiniMax H3 native retained host byte total overflow"))?;
+        totals.3.largest_native_host_bytes = totals
+            .3
+            .largest_native_host_bytes
+            .max(charges.native_host_bytes);
+        totals.3.largest_normalized_host_bytes = totals
+            .3
+            .largest_normalized_host_bytes
+            .max(charges.normalized_host_bytes);
     }
     if totals.0 == 0 {
         bail!("MiniMax H3 Ref2VA prepared request has no visual reference conditioning");
@@ -2059,33 +2205,57 @@ fn validate_target_budget(
     // The retained-media charge is re-derived from the frozen reference plan
     // rather than taken from the budget, for the same reason the prepared
     // request re-derives its rows: this number is what the host ledger grants.
-    let expected_reference_media_host_bytes = match request.task {
-        Task::Fl2va => 0,
+    let reference_media = match request.task {
+        Task::Fl2va => H3ReferenceMediaTotals::default(),
         Task::Ref2va => validate_prepared_references(&request.references)?.3,
     };
+    let expected_reference_media_host_bytes = reference_media.normalized_host_bytes;
+    // The audio encoder has no measured bound of its own; it borrows the
+    // decoder's, which runs the larger BigVGAN stack. Deriving it from that
+    // already-bound field rather than accepting a caller value keeps it from
+    // being a free parameter the budget can name.
+    let expected_reference_audio_encode_workspace = if request.task == Task::Ref2va {
+        memory.audio_decode_workspace_device_bytes
+    } else {
+        0
+    };
+    // The transients are derived here too, never named by the caller.
+    let expected_reference_decode_staging = reference_media.largest_native_host_bytes;
+    let expected_reference_preprocess_staging = reference_media.largest_normalized_host_bytes;
+    // Decode retains EVERY reference's native payload at once: the
+    // orchestrator decodes the whole ordered set before preprocessing any, and
+    // each decoded slot survives until its own preprocess step removes it. The
+    // transient on top is the one being materialized.
     let reference_decode_host = checked_u64_sum(
         [
             attempt_host,
             qwen_alive_metadata_host,
-            memory.reference_normalized_media_host_bytes,
-            memory.reference_decode_staging_host_bytes,
+            reference_media.native_host_bytes,
+            expected_reference_decode_staging,
         ],
         "H3 reference decode host phase",
     )?;
+    // Preprocess converts one reference at a time, replacing its native slot
+    // with a normalized one. For any point in that walk the held set is
+    // (natives not yet converted) + (normalized already produced), which is
+    // bounded by both totals together — the honest upper bound, and the only
+    // one that does not depend on the order the two sizes happen to fall in.
     let reference_preprocess_host = checked_u64_sum(
         [
             attempt_host,
             qwen_alive_metadata_host,
-            memory.reference_normalized_media_host_bytes,
-            memory.reference_preprocess_staging_host_bytes,
+            reference_media.native_host_bytes,
+            reference_media.normalized_host_bytes,
+            expected_reference_preprocess_staging,
         ],
         "H3 reference preprocess host phase",
     )?;
+    // By the encoders every native payload has been released.
     let reference_encode_host = checked_u64_sum(
         [
             attempt_host,
             transformer_alive_metadata_host,
-            memory.reference_normalized_media_host_bytes,
+            reference_media.normalized_host_bytes,
             memory.condition_backing_host_bytes,
             memory.packed_layout_host_bytes,
             memory.text_modality_tags_host_bytes,
@@ -2754,18 +2924,25 @@ fn validate_target_budget(
         memory.reference_normalized_media_host_bytes,
         expected_reference_media_host_bytes
     );
-    expect!(
+    // Recomputed from the frozen media facts, not merely nonzero-checked: the
+    // phase totals above are derived from these same values, so a caller that
+    // could name them could name its own grant.
+    expect_eq!(
         "reference_decode_staging_host_bytes",
-        ref2va == (memory.reference_decode_staging_host_bytes != 0)
+        memory.reference_decode_staging_host_bytes,
+        expected_reference_decode_staging
     );
-    expect!(
+    expect_eq!(
         "reference_preprocess_staging_host_bytes",
-        ref2va == (memory.reference_preprocess_staging_host_bytes != 0)
+        memory.reference_preprocess_staging_host_bytes,
+        expected_reference_preprocess_staging
     );
-    // The audio VAE's encoder workspace is only ever charged by Ref2VA.
-    expect!(
+    // The audio VAE's encoder workspace is only ever charged by Ref2VA, and
+    // its size comes from the qualified bounds record.
+    expect_eq!(
         "reference_audio_encode_workspace_device_bytes",
-        ref2va == (memory.reference_audio_encode_workspace_device_bytes != 0)
+        memory.reference_audio_encode_workspace_device_bytes,
+        expected_reference_audio_encode_workspace
     );
     expect_eq!(
         "vae_load_phase_host_bytes",
@@ -3395,16 +3572,25 @@ pub fn expected_h3_factory_prepared_request_identity(
             reference.normalized_video_frames,
             reference.video_frames,
             reference.qwen_video_frames,
+            reference.native_width,
+            reference.native_height,
         ] {
             // Absent and zero are different geometries; tag the option so a
             // missing axis can never hash as a present zero.
             hash.update([u8::from(value.is_some())]);
             hash.update(value.unwrap_or_default().to_le_bytes());
         }
-        hash.update([u8::from(reference.audio_samples_per_channel.is_some())]);
+        for value in [
+            reference.audio_samples_per_channel,
+            reference.native_audio_samples_per_channel,
+        ] {
+            hash.update([u8::from(value.is_some())]);
+            hash.update(value.unwrap_or_default().to_le_bytes());
+        }
+        hash.update([u8::from(reference.native_audio_channels.is_some())]);
         hash.update(
             reference
-                .audio_samples_per_channel
+                .native_audio_channels
                 .unwrap_or_default()
                 .to_le_bytes(),
         );
@@ -3413,6 +3599,7 @@ pub fn expected_h3_factory_prepared_request_identity(
             reference.audio_rows,
             reference.qwen_vision_rows,
             reference.normalized_host_bytes,
+            reference.native_host_bytes,
         ] {
             hash.update(value.to_le_bytes());
         }
@@ -4651,6 +4838,11 @@ mod tests {
     /// is specified against. Row and byte charges are written out longhand so
     /// this fixture is an independent statement of the arithmetic rather than
     /// a call to the code under test.
+    ///
+    /// Native geometry is deliberately much larger than normalized: a 6000x4000
+    /// still normalizes to 2048x2048, and a 3840x2160 clip to 768x768. That gap
+    /// is the whole point of charging the decode phase natively — it is what a
+    /// normalized-only ledger silently loses.
     fn ref2va_references() -> Vec<H3FactoryReferenceInput> {
         let image_rows = (2_048 / 32) * (2_048 / 32);
         let video_rows_per_frame = (768 / 32) * (768 / 32);
@@ -4672,10 +4864,15 @@ mod tests {
                 video_frames: None,
                 qwen_video_frames: None,
                 audio_samples_per_channel: None,
+                native_width: Some(6_000),
+                native_height: Some(4_000),
+                native_audio_samples_per_channel: None,
+                native_audio_channels: None,
                 visual_rows: image_rows,
                 audio_rows: 0,
                 qwen_vision_rows: image_rows,
                 normalized_host_bytes: 2_048 * 2_048 * 3,
+                native_host_bytes: 6_000 * 4_000 * 3,
             },
             H3FactoryReferenceInput {
                 index: 2,
@@ -4688,10 +4885,17 @@ mod tests {
                 video_frames: Some(39),
                 qwen_video_frames: Some(4),
                 audio_samples_per_channel: Some(64_000),
+                native_width: Some(3_840),
+                native_height: Some(2_160),
+                native_audio_samples_per_channel: Some(96_000),
+                native_audio_channels: Some(6),
                 visual_rows: video_latent_frames * video_rows_per_frame,
                 audio_rows: 64_000_u64.div_ceil(800) * 2,
                 qwen_vision_rows: video_qwen_blocks * video_rows_per_frame,
                 normalized_host_bytes: (39 + 4) * 768 * 768 * 3 + 64_000 * 2 * 4,
+                // The decoder retains the union of the VAE prefix and the Qwen
+                // cursor at NATIVE resolution, plus the native soundtrack.
+                native_host_bytes: (39 + 4) * 3_840 * 2_160 * 3 + 96_000 * 6 * 4,
             },
             H3FactoryReferenceInput {
                 index: 3,
@@ -4704,10 +4908,15 @@ mod tests {
                 video_frames: None,
                 qwen_video_frames: None,
                 audio_samples_per_channel: Some(32_000),
+                native_width: None,
+                native_height: None,
+                native_audio_samples_per_channel: Some(48_000),
+                native_audio_channels: Some(2),
                 visual_rows: 0,
                 audio_rows: 32_000_u64.div_ceil(800) * 2,
                 qwen_vision_rows: 0,
                 normalized_host_bytes: 32_000 * 2 * 4,
+                native_host_bytes: 48_000 * 2 * 4,
             },
         ]
     }
@@ -4762,12 +4971,15 @@ mod tests {
         assert_eq!(request.rows.qwen_vision_rows, 4_096 + 2 * 576);
         // Retained normalized media is the item-2 host charge: one 2048 RGB8
         // still, 43 768-square RGB8 frames, and two f32 stereo waveforms.
-        let (_, _, _, host_bytes) = validate_prepared_references(&request.references).unwrap();
+        let (_, _, _, media) = validate_prepared_references(&request.references).unwrap();
         assert_eq!(
-            host_bytes,
+            media.normalized_host_bytes,
             2_048 * 2_048 * 3 + 43 * 768 * 768 * 3 + 64_000 * 2 * 4 + 32_000 * 2 * 4
         );
-        assert_eq!(host_bytes, 12_582_912 + 76_087_296 + 512_000 + 256_000);
+        assert_eq!(
+            media.normalized_host_bytes,
+            12_582_912 + 76_087_296 + 512_000 + 256_000
+        );
     }
 
     #[test]
@@ -4924,8 +5136,8 @@ mod tests {
 
         // The retained normalized media is the headline host charge and is
         // pinned to the re-derived reference plan, not to a flat constant.
-        let (_, _, _, plan_media_bytes) =
-            validate_prepared_references(&request.references).unwrap();
+        let (_, _, _, plan_media) = validate_prepared_references(&request.references).unwrap();
+        let plan_media_bytes = plan_media.normalized_host_bytes;
         assert_eq!(
             budget.reference_normalized_media_host_bytes,
             plan_media_bytes
@@ -4961,6 +5173,79 @@ mod tests {
         // The predicted peaks are a max over the phases that actually run, so
         // the retained media has to be visible in the host grant.
         assert!(budget.predicted_host_increment_bytes >= plan_media_bytes);
+    }
+
+    /// The decode phase holds EVERY reference's native payload at once.
+    ///
+    /// `pipeline/ref2va.rs` decodes all references before preprocessing any,
+    /// and `reference_media.rs` keeps each decoded slot until that reference's
+    /// own preprocess step removes it. So the peak is the sum of native
+    /// payloads across the whole ordered set, not a per-reference maximum, and
+    /// it is native rather than normalized — the gap between the two is
+    /// unbounded in principle (a 100 MP still normalizes to 2048x2048) and is
+    /// exactly what a normalized-only ledger loses. Under-charging here lets
+    /// the scheduler grant less host memory than the runtime goes on to hold.
+    #[test]
+    fn reference_decode_charges_every_native_payload_held_at_once() {
+        let request = ref2va_prepared_request();
+        let checkpoint = raw_checkpoint();
+        let budget = target_budget(&request, &checkpoint);
+        check_budget(&budget, &request, &checkpoint).unwrap();
+
+        let native_total =
+            6_000 * 4_000 * 3 + (39 + 4) * 3_840 * 2_160 * 3 + 96_000 * 6 * 4 + 48_000 * 2 * 4;
+        let normalized_total =
+            2_048 * 2_048 * 3 + (39 + 4) * 768 * 768 * 3 + 64_000 * 2 * 4 + 32_000 * 2 * 4;
+        // Native dominates by more than an order of magnitude here, which is
+        // the realistic case and the reason this must not be approximated.
+        assert!(native_total > normalized_total * 10);
+
+        let (_, _, _, media) = validate_prepared_references(&request.references).unwrap();
+        assert_eq!(media.native_host_bytes, native_total);
+        assert_eq!(media.normalized_host_bytes, normalized_total);
+
+        // Decode holds every native payload simultaneously.
+        assert!(budget.reference_decode_phase_host_bytes > native_total);
+        // Preprocess converts one at a time, so natives not yet converted and
+        // normalized ones already produced are held together.
+        assert!(budget.reference_preprocess_phase_host_bytes > native_total + normalized_total);
+        // Both encoders run after every native payload is released.
+        assert!(budget.reference_visual_encode_phase_host_bytes > normalized_total);
+        assert!(budget.reference_visual_encode_phase_host_bytes < native_total);
+
+        // The host grant must cover the true peak.
+        assert!(budget.predicted_host_increment_bytes >= native_total + normalized_total);
+    }
+
+    /// A rehashed budget must not be able to name its own transient charges.
+    #[test]
+    fn reference_transient_charges_are_recomputed_not_merely_nonzero() {
+        let request = ref2va_prepared_request();
+        let checkpoint = raw_checkpoint();
+        let base = target_budget(&request, &checkpoint);
+
+        for mutate in [
+            (|budget: &mut H3FactoryTargetBudgetInput| {
+                budget.reference_decode_staging_host_bytes = 1
+            }) as fn(&mut H3FactoryTargetBudgetInput),
+            |budget| budget.reference_preprocess_staging_host_bytes = 1,
+            |budget| budget.reference_audio_encode_workspace_device_bytes = 1,
+            // A doubled value is as wrong as a token one: both disagree with
+            // the frozen media facts the term is derived from.
+            |budget| budget.reference_decode_staging_host_bytes *= 2,
+            |budget| budget.reference_preprocess_staging_host_bytes *= 2,
+            |budget| budget.reference_audio_encode_workspace_device_bytes *= 2,
+        ] {
+            let mut budget = base.clone();
+            mutate(&mut budget);
+            budget.identity_sha256 = expected_h3_factory_target_budget_identity(&budget);
+            let error = check_budget(&budget, &request, &checkpoint)
+                .expect_err("a caller-named transient charge must be refused")
+                .to_string();
+            // The macro sweep names the offending field, which is what makes a
+            // production failure locatable.
+            assert!(error.contains("reference_"), "{error}");
+        }
     }
 
     #[test]
@@ -5473,14 +5758,35 @@ mod tests {
             .iter()
             .map(|reference| reference.normalized_host_bytes)
             .sum::<u64>();
-        let reference_decode_staging_host_bytes = if ref2va { 3_000 } else { 0 };
-        let reference_preprocess_staging_host_bytes = if ref2va { 7_000 } else { 0 };
-        let reference_audio_encode_workspace_device_bytes = if ref2va { 4_000 } else { 0 };
+        // Every native payload is held at once — the orchestrator decodes the
+        // whole ordered set before preprocessing any of it.
+        let reference_native_media_host_bytes = request
+            .references
+            .iter()
+            .map(|reference| reference.native_host_bytes)
+            .sum::<u64>();
+        let reference_decode_staging_host_bytes = request
+            .references
+            .iter()
+            .map(|reference| reference.native_host_bytes)
+            .max()
+            .unwrap_or(0);
+        let reference_preprocess_staging_host_bytes = request
+            .references
+            .iter()
+            .map(|reference| reference.normalized_host_bytes)
+            .max()
+            .unwrap_or(0);
+        let reference_audio_encode_workspace_device_bytes = if ref2va {
+            audio_decode_workspace_device_bytes
+        } else {
+            0
+        };
         let reference_decode_phase_host_bytes = if ref2va {
             sum(&[
                 attempt_host_bytes,
                 qwen_alive_metadata_host_bytes,
-                reference_normalized_media_host_bytes,
+                reference_native_media_host_bytes,
                 reference_decode_staging_host_bytes,
             ])
         } else {
@@ -5490,6 +5796,7 @@ mod tests {
             sum(&[
                 attempt_host_bytes,
                 qwen_alive_metadata_host_bytes,
+                reference_native_media_host_bytes,
                 reference_normalized_media_host_bytes,
                 reference_preprocess_staging_host_bytes,
             ])

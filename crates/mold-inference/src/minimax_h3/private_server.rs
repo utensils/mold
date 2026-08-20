@@ -253,7 +253,7 @@ impl H3PrivateRuntimeEnvelopeRecord {
     /// Kept as the no-adapter form so every existing caller is unchanged: the
     /// step count must be exactly [`contract::COMFY_DEFAULT_STEPS`].
     pub(crate) fn validate(&self) -> Result<()> {
-        self.validate_with_reviewed_steps(None)
+        self.validate_with_adapter(None)
     }
 
     /// Validate the envelope against an optional authenticated Turbo adapter.
@@ -263,8 +263,11 @@ impl H3PrivateRuntimeEnvelopeRecord {
     /// the step count, and it may move it only to the count that tier's
     /// distillation was reviewed for. Without an adapter the 21-step pin is
     /// exactly as strict as before.
-    pub(crate) fn validate_with_reviewed_steps(&self, turbo_steps: Option<u32>) -> Result<()> {
-        self.validate_for_task_with_reviewed_steps(Task::Fl2va, turbo_steps)
+    pub(crate) fn validate_with_adapter(
+        &self,
+        turbo: Option<&H3FactoryTurboAdapterAuthority>,
+    ) -> Result<()> {
+        self.validate_for_task_with_adapter(Task::Fl2va, turbo)
     }
 
     /// The record's serialized shape is task-neutral; what a task changes is
@@ -272,14 +275,44 @@ impl H3PrivateRuntimeEnvelopeRecord {
     /// first-frame endpoint and no condition audio, while Ref2VA carries no
     /// endpoint at all and prices its conditioning from ordered references.
     pub(crate) fn validate_for_task(&self, task: Task) -> Result<()> {
-        self.validate_for_task_with_reviewed_steps(task, None)
+        self.validate_for_task_with_adapter(task, None)
     }
 
     /// The general form. The step axis (a reviewed Turbo tier) and the
-    /// conditioning axis (the task) are orthogonal: a `ref2v-4step` tier moves
-    /// the step count on a Ref2VA envelope exactly as an `fl2v-4step` tier
-    /// moves it on an FL2VA one, and neither axis may reinterpret the other.
-    pub(crate) fn validate_for_task_with_reviewed_steps(
+    /// conditioning axis (the task) are orthogonal, but they are not
+    /// independent: a tier may only move the step count of an envelope for the
+    /// task its own distillation was reviewed for. Reducing the adapter to a
+    /// bare step count loses exactly that, and since the FL2V 768p and Ref2V
+    /// tiers are both 5-point schedules, an FL2V adapter would otherwise be
+    /// indistinguishable from a Ref2V one on a Ref2VA envelope.
+    pub(crate) fn validate_for_task_with_adapter(
+        &self,
+        task: Task,
+        turbo: Option<&H3FactoryTurboAdapterAuthority>,
+    ) -> Result<()> {
+        let reviewed_steps = match turbo {
+            None => None,
+            Some(turbo) => {
+                match turbo.reviewed_task() {
+                    Some(adapter_task) if adapter_task == task => {}
+                    // An unrecognised tier id is a mismatch, never a wildcard.
+                    _ => bail!(
+                        "private H3 Turbo adapter {} was not reviewed for the {task:?} envelope",
+                        turbo.tier_stable_id()
+                    ),
+                }
+                Some(turbo.grid_points())
+            }
+        };
+        self.validate_for_task_with_reviewed_steps(task, reviewed_steps)
+    }
+
+    /// Apply a step count whose task scoping the CALLER has already
+    /// established. Only two callers qualify: the adapter form above, which
+    /// has just matched the tier's reviewed task, and the compiled public
+    /// profile, which independently pins `record.task == "fl2va"`. Everything
+    /// else must go through the adapter form so the tier identity is checked.
+    fn validate_for_task_with_reviewed_steps(
         &self,
         task: Task,
         turbo_steps: Option<u32>,
@@ -312,7 +345,7 @@ impl H3PrivateRuntimeEnvelopeRecord {
             || self.frames != contract::MIN_FRAMES
             || self.fps != contract::FIXED_FPS
             || self.batch_size != 1
-            // The step axis is owned by `validate_for_task_with_reviewed_steps`,
+            // The step axis is owned by `validate_for_task_with_adapter`,
             // which is the only place a reviewed Turbo tier may move it.
             || !conditioning_ok
             || [
@@ -336,14 +369,15 @@ impl H3PrivateRuntimeEnvelopeRecord {
     /// step authority silently rejects every Turbo render (it did, in the first
     /// cut of this wiring), so each caller has to name which one it holds.
     #[cfg(feature = "mp4")]
-    fn validate_prepared_with_reviewed_steps(
+    fn validate_prepared_with_adapter(
         &self,
         request: &H3FactoryPreparedRequestInput,
-        turbo_steps: Option<u32>,
+        turbo: Option<&H3FactoryTurboAdapterAuthority>,
     ) -> Result<()> {
-        // The request's own task selects the conditioning contract; the
-        // adapter, if any, selects the step count.
-        self.validate_for_task_with_reviewed_steps(request.task, turbo_steps)?;
+        // The request's own task selects the conditioning contract, and the
+        // adapter must have been reviewed for that same task before its step
+        // count is applied.
+        self.validate_for_task_with_adapter(request.task, turbo)?;
         let endpoint = request.endpoints.first();
         let conditioning_ok = match request.task {
             Task::Fl2va => {
@@ -3178,12 +3212,9 @@ impl H3PrivateFl2VaPreparedRunner for H3PrivateConcretePreparedRunner {
             owner,
             consumption_binding,
         } = *self;
-        runtime_envelope.validate_prepared_with_reviewed_steps(
+        runtime_envelope.validate_prepared_with_adapter(
             prepared.prepared_request_input(),
-            authority
-                .quantization()
-                .turbo_adapter()
-                .map(H3FactoryTurboAdapterAuthority::grid_points),
+            authority.quantization().turbo_adapter(),
         )?;
         let observed_envelope = runtime_envelope_observation(prepared.prepared_request_input())?;
         let observed_compute_capability = match attention.device() {
@@ -3963,10 +3994,6 @@ impl H3PrivateRuntimeQualificationAuthority {
 
     #[cfg(feature = "mp4")]
     #[cfg(feature = "mp4")]
-    fn reviewed_turbo_steps(turbo: Option<&H3FactoryTurboAdapterAuthority>) -> Option<u32> {
-        turbo.map(H3FactoryTurboAdapterAuthority::grid_points)
-    }
-
     /// Validate a prepared request against this qualification's envelope,
     /// admitting a reviewed Turbo tier's own step count when an authenticated
     /// adapter is present. `None` is byte-identical to the previous behaviour.
@@ -3978,7 +4005,7 @@ impl H3PrivateRuntimeQualificationAuthority {
     ) -> Result<()> {
         self.record
             .envelope
-            .validate_prepared_with_reviewed_steps(request, Self::reviewed_turbo_steps(turbo))
+            .validate_prepared_with_adapter(request, turbo)
     }
 
     pub(crate) fn revalidate(&self) -> Result<()> {
@@ -4168,7 +4195,11 @@ fn validate_public_runtime_profile_with_turbo(
     profile_sha256: &str,
     turbo_steps: Option<u32>,
 ) -> Result<()> {
-    record.envelope.validate_with_reviewed_steps(turbo_steps)?;
+    // The record's own task is pinned to fl2va a few lines below, which is
+    // what scopes this step count.
+    record
+        .envelope
+        .validate_for_task_with_reviewed_steps(Task::Fl2va, turbo_steps)?;
     record.bounds.validate()?;
     if record.schema != PUBLIC_RUNTIME_PROFILE_SCHEMA
         || record.decision != PUBLIC_RUNTIME_PROFILE_DECISION
@@ -5216,9 +5247,15 @@ mod tests {
     /// count its own distillation was reviewed for.
     #[test]
     fn a_turbo_tier_moves_only_the_step_axis_of_the_reviewed_envelope() {
-        for reviewed_steps in [5u32, 9] {
+        // Both FL2V tiers, so the default FL2VA task pin applies throughout.
+        for tier in [
+            mold_candle::minimax_h3::H3TurboLoraTier::Fl2v768p4StepV10,
+            mold_candle::minimax_h3::H3TurboLoraTier::Fl2v8StepV10,
+        ] {
+            let adapter = turbo_authority_for(tier);
+            let reviewed_steps = adapter.grid_points();
             reviewed_envelope(reviewed_steps)
-                .validate_with_reviewed_steps(Some(reviewed_steps))
+                .validate_with_adapter(Some(&adapter))
                 .unwrap();
 
             // Any other count, including the baseline 21, is refused for that
@@ -5228,7 +5265,7 @@ mod tests {
                     continue;
                 }
                 let error = reviewed_envelope(wrong)
-                    .validate_with_reviewed_steps(Some(reviewed_steps))
+                    .validate_with_adapter(Some(&adapter))
                     .unwrap_err()
                     .to_string();
                 assert!(
@@ -5240,29 +5277,19 @@ mod tests {
             // And no other axis relaxes just because an adapter is present.
             let mut widened = reviewed_envelope(reviewed_steps);
             widened.width += 64;
-            assert!(widened
-                .validate_with_reviewed_steps(Some(reviewed_steps))
-                .is_err());
+            assert!(widened.validate_with_adapter(Some(&adapter)).is_err());
             let mut longer = reviewed_envelope(reviewed_steps);
             longer.frames += 4;
-            assert!(longer
-                .validate_with_reviewed_steps(Some(reviewed_steps))
-                .is_err());
+            assert!(longer.validate_with_adapter(Some(&adapter)).is_err());
             let mut batched = reviewed_envelope(reviewed_steps);
             batched.batch_size = 2;
-            assert!(batched
-                .validate_with_reviewed_steps(Some(reviewed_steps))
-                .is_err());
+            assert!(batched.validate_with_adapter(Some(&adapter)).is_err());
             let mut anchored = reviewed_envelope(reviewed_steps);
             anchored.endpoint_anchor = "last".into();
-            assert!(anchored
-                .validate_with_reviewed_steps(Some(reviewed_steps))
-                .is_err());
+            assert!(anchored.validate_with_adapter(Some(&adapter)).is_err());
             let mut zeroed = reviewed_envelope(reviewed_steps);
             zeroed.max_total_packed_rows = 0;
-            assert!(zeroed
-                .validate_with_reviewed_steps(Some(reviewed_steps))
-                .is_err());
+            assert!(zeroed.validate_with_adapter(Some(&adapter)).is_err());
         }
     }
 
@@ -5279,9 +5306,28 @@ mod tests {
     /// no-adapter authority. If those two ever agree, the call-site choice
     /// stopped mattering and the wiring is unverifiable again.
     #[cfg(feature = "mp4")]
+    /// Build the reviewed adapter authority for one tier, so envelope tests
+    /// exercise the same value admission passes rather than a bare count.
+    #[cfg(feature = "mp4")]
+    fn turbo_authority_for(
+        tier: mold_candle::minimax_h3::H3TurboLoraTier,
+    ) -> H3FactoryTurboAdapterAuthority {
+        H3FactoryTurboAdapterAuthority::for_reviewed_tier(
+            tier.stable_id(),
+            &sha('7'),
+            &sha('8'),
+            4_096,
+            2_048,
+            1_024,
+        )
+        .expect("reviewed tier must build an adapter authority")
+    }
+
     #[test]
     fn a_turbo_prepared_request_validates_only_under_its_own_step_authority() {
-        for reviewed_steps in [5u32, 9] {
+        for tier in mold_candle::minimax_h3::H3TurboLoraTier::ALL {
+            let adapter = turbo_authority_for(tier);
+            let reviewed_steps = adapter.grid_points();
             // The real reviewed envelope with only the step axis moved, so
             // every other axis still matches the fixture request exactly.
             let mut envelope = record().envelope;
@@ -5291,15 +5337,22 @@ mod tests {
             request.denoise_forward_count = reviewed_steps - 1;
 
             // The path admission must take.
+            // FL2VA fixture request, so only an FL2V tier may move its steps.
+            if adapter.reviewed_task() != Some(Task::Fl2va) {
+                assert!(envelope
+                    .validate_prepared_with_adapter(&request, Some(&adapter))
+                    .is_err());
+                continue;
+            }
             envelope
-                .validate_prepared_with_reviewed_steps(&request, Some(reviewed_steps))
+                .validate_prepared_with_adapter(&request, Some(&adapter))
                 .unwrap();
 
             // The path admission took before this fix. It must fail, loudly and
             // for the step reason — otherwise passing the wrong authority is
             // silently harmless and nothing pins the call site.
             let error = envelope
-                .validate_prepared_with_reviewed_steps(&request, None)
+                .validate_prepared_with_adapter(&request, None)
                 .unwrap_err()
                 .to_string();
             assert!(
@@ -5312,7 +5365,7 @@ mod tests {
             let mut baseline_request = prepared_request_for_compact_quality_envelope();
             baseline_request.grid_points = contract::COMFY_DEFAULT_STEPS;
             assert!(envelope
-                .validate_prepared_with_reviewed_steps(&baseline_request, Some(reviewed_steps))
+                .validate_prepared_with_adapter(&baseline_request, Some(&adapter))
                 .is_err());
         }
 
@@ -5322,8 +5375,45 @@ mod tests {
         let request = prepared_request_for_compact_quality_envelope();
         assert_eq!(request.grid_points, contract::COMFY_DEFAULT_STEPS);
         baseline
-            .validate_prepared_with_reviewed_steps(&request, None)
+            .validate_prepared_with_adapter(&request, None)
             .unwrap();
+    }
+
+    /// A tier's step authority is scoped to the task it was distilled for.
+    ///
+    /// The FL2V 768p and Ref2V tiers are both 5-point schedules, so an
+    /// authority reduced to `Option<u32>` cannot tell them apart: an FL2V
+    /// adapter would validate a Ref2VA envelope on a numeric coincidence.
+    #[cfg(feature = "h3-private-uat")]
+    #[test]
+    fn a_turbo_tier_may_only_move_the_steps_of_its_own_task_envelope() {
+        let fl2v = turbo_authority_for(mold_candle::minimax_h3::H3TurboLoraTier::Fl2v768p4StepV10);
+        let ref2v = turbo_authority_for(mold_candle::minimax_h3::H3TurboLoraTier::Ref2v4StepV10);
+        // Same step count - the coincidence that made this reachable.
+        assert_eq!(fl2v.grid_points(), ref2v.grid_points());
+        assert_eq!(fl2v.reviewed_task(), Some(Task::Fl2va));
+        assert_eq!(ref2v.reviewed_task(), Some(Task::Ref2va));
+
+        let mut ref2va_envelope = capture_runtime_envelope();
+        ref2va_envelope.max_steps = ref2v.grid_points();
+        ref2va_envelope
+            .validate_for_task_with_adapter(Task::Ref2va, Some(&ref2v))
+            .expect("the ref2v tier is the one reviewed for a Ref2VA envelope");
+        let error = ref2va_envelope
+            .validate_for_task_with_adapter(Task::Ref2va, Some(&fl2v))
+            .expect_err("an fl2v tier must not carry a Ref2VA envelope")
+            .to_string();
+        assert!(error.contains("was not reviewed for"), "{error}");
+
+        // And the mirror on the FL2VA side.
+        let mut fl2va_envelope = record().envelope;
+        fl2va_envelope.max_steps = fl2v.grid_points();
+        fl2va_envelope
+            .validate_for_task_with_adapter(Task::Fl2va, Some(&fl2v))
+            .unwrap();
+        assert!(fl2va_envelope
+            .validate_for_task_with_adapter(Task::Fl2va, Some(&ref2v))
+            .is_err());
     }
 
     /// Every reviewed tier's step count must survive the whole prepared-request
@@ -5334,16 +5424,22 @@ mod tests {
     fn every_reviewed_turbo_tier_admits_its_own_prepared_request() {
         for tier_contract in super::super::turbo::REVIEWED_TURBO_TIERS {
             let steps = tier_contract.grid_points;
+            let adapter = turbo_authority_for(tier_contract.tier);
             let mut envelope = record().envelope;
             envelope.max_steps = steps;
             let mut request = prepared_request_for_compact_quality_envelope();
             request.grid_points = steps;
             request.denoise_forward_count = steps - 1;
-            envelope
-                .validate_prepared_with_reviewed_steps(&request, Some(steps))
-                .unwrap_or_else(|error| {
+            // The fixture request is FL2VA; a Ref2V tier is refused on it for
+            // task identity rather than admitted on a matching step count.
+            let outcome = envelope.validate_prepared_with_adapter(&request, Some(&adapter));
+            if adapter.reviewed_task() == Some(Task::Fl2va) {
+                outcome.unwrap_or_else(|error| {
                     panic!("{:?} at {steps} steps: {error}", tier_contract.tier)
                 });
+            } else {
+                assert!(outcome.is_err(), "{:?} crossed tasks", tier_contract.tier);
+            }
         }
     }
 
@@ -5352,9 +5448,16 @@ mod tests {
     #[test]
     fn reviewed_turbo_step_counts_come_from_the_tier_table() {
         for contract_entry in super::super::turbo::REVIEWED_TURBO_TIERS {
-            reviewed_envelope(contract_entry.grid_points)
-                .validate_with_reviewed_steps(Some(contract_entry.grid_points))
-                .unwrap();
+            let adapter = turbo_authority_for(contract_entry.tier);
+            let outcome =
+                reviewed_envelope(contract_entry.grid_points).validate_with_adapter(Some(&adapter));
+            // `reviewed_envelope` is the FL2VA envelope, so only FL2V tiers
+            // may carry it.
+            if adapter.reviewed_task() == Some(Task::Fl2va) {
+                outcome.unwrap();
+            } else {
+                assert!(outcome.is_err());
+            }
             assert!(matches!(contract_entry.grid_points, 5 | 9));
         }
     }
@@ -5579,7 +5682,7 @@ mod tests {
         let envelope = record().envelope;
         let reviewed = prepared_request_for_compact_quality_envelope();
         envelope
-            .validate_prepared_with_reviewed_steps(&reviewed, None)
+            .validate_prepared_with_adapter(&reviewed, None)
             .unwrap();
 
         let mut cases = Vec::new();
@@ -5638,7 +5741,7 @@ mod tests {
 
         for request in cases {
             assert!(envelope
-                .validate_prepared_with_reviewed_steps(&request, None)
+                .validate_prepared_with_adapter(&request, None)
                 .is_err());
         }
     }
