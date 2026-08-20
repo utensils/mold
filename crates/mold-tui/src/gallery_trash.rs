@@ -56,6 +56,15 @@ pub(crate) fn trash_local_print(db: &MetadataDb, path: &Path, now_ms: i64) -> Re
         std::fs::create_dir_all(&trash_dir)
             .with_context(|| format!("creating {}", trash_dir.display()))?;
         let trash_path = trash_dir.join(filename);
+        // `rename` replaces an existing destination on Unix: a same-name
+        // replacement would silently destroy the retained trashed bytes and
+        // orphan their tombstone. Refuse instead — the user can empty the
+        // trash or restore the old print first.
+        if std::fs::symlink_metadata(&trash_path).is_ok() {
+            return Err(anyhow!(
+                "the trash already holds {filename}; empty the trash or restore it first"
+            ));
+        }
         std::fs::rename(path, &trash_path).with_context(|| {
             format!(
                 "moving {} to the gallery trash at {}",
@@ -172,6 +181,39 @@ mod tests {
             "a trashed print leaves the live listing"
         );
         assert_eq!(db.list_trashed(Some(&gallery)).unwrap().len(), 1);
+    }
+
+    /// `std::fs::rename` replaces an existing destination on Unix — a live
+    /// same-name replacement being trashed must never destroy the retained
+    /// trashed bytes or their tombstone.
+    #[test]
+    fn trash_refuses_to_overwrite_an_existing_trash_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let gallery = tmp.path().join("output");
+        std::fs::create_dir_all(&gallery).unwrap();
+        let live = gallery.join("mold-test-0001.png");
+        write_png(&live);
+        let db = open_db(tmp.path());
+        db.reconcile(&gallery).unwrap();
+        trash_local_print(&db, &live, 1_700_000_000_000).unwrap();
+        let trash_dir = mold_db::trash::trash_dir(&gallery);
+        let retained = std::fs::read(trash_dir.join("mold-test-0001.png")).unwrap();
+
+        // A new live file reclaims the name; trashing it must refuse.
+        write_png(&live);
+        db.reconcile(&gallery).unwrap();
+        let err = trash_local_print(&db, &live, 1_700_000_001_000)
+            .expect_err("trashing onto an existing trash entry must refuse");
+        assert!(
+            err.to_string().contains("already holds"),
+            "unexpected error: {err:#}"
+        );
+        assert_eq!(
+            std::fs::read(trash_dir.join("mold-test-0001.png")).unwrap(),
+            retained,
+            "the retained trashed bytes must survive"
+        );
+        assert!(live.is_file(), "the live replacement stays in place");
     }
 
     #[test]
