@@ -4266,3 +4266,507 @@ button:disabled {
     justify-self: center;
   }
 }
+
+/* ── Library organization (V3 "Shelf"): scopes, chips, collections, trash ── */
+
+.mobile-library-heading-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Prints | Collections | Trash. Plain buttons (no pointer capture) so the
+   grid's own two-finger pinch is never intercepted by the scope row. */
+.mobile-library-scope {
+  display: grid;
+  grid-auto-columns: 1fr;
+  grid-auto-flow: column;
+  margin-top: 10px;
+  border: 1px solid var(--control-edge);
+  border-radius: var(--radius-control);
+  background: var(--bench);
+  touch-action: manipulation;
+}
+
+.mobile-library-scope button {
+  display: flex;
+  min-height: 44px;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 0;
+  border-radius: calc(var(--radius-control) - 1px);
+  background: transparent;
+  color: var(--ink-2);
+  font-family: var(--font-utility);
+  font-size: var(--text-data);
+  font-weight: 650;
+}
+
+.mobile-library-scope button[data-on] {
+  background: color-mix(in srgb, var(--safelight) 11%, var(--bench));
+  color: var(--safelight);
+}
+
+.mobile-library-scope-count {
+  color: var(--ink-3);
+  font-family: var(--font-utility);
+  font-size: 11px;
+}
+
+.mobile-library-scope button[data-on] .mobile-library-scope-count {
+  color: inherit;
+}
+
+/* Horizontally scrolling filter chips (♥ Favorites, tags, hosts). */
+.mobile-library-chips {
+  display: flex;
+  margin-top: 10px;
+  gap: 7px;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  touch-action: manipulation;
+  scrollbar-width: none;
+  padding-bottom: 2px;
+}
+
+.mobile-library-chips::-webkit-scrollbar {
+  display: none;
+}
+
+.mobile-library-chip {
+  display: inline-flex;
+  min-height: 44px;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--control-edge);
+  border-radius: var(--radius-pill);
+  background: var(--bench);
+  color: var(--ink-2);
+  font-family: var(--font-utility);
+  font-size: var(--text-data);
+  padding: 8px 14px;
+}
+
+.mobile-library-chip[data-on] {
+  border-color: var(--safelight);
+  background: color-mix(in srgb, var(--safelight) 11%, var(--bench));
+  color: var(--safelight);
+}
+
+.mobile-library-chip-count {
+  color: var(--ink-3);
+  font-family: var(--font-utility);
+  font-size: 11px;
+}
+
+.mobile-library-chip[data-on] .mobile-library-chip-count {
+  color: inherit;
+}
+
+.mobile-library-chip-heart {
+  font-size: 14px;
+  line-height: 1;
+}
+
+/* Trash retention banner — mono numbers, Machines deep link. */
+.mobile-library-banner {
+  display: flex;
+  margin-top: 10px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border: 1px solid var(--edge);
+  border-radius: var(--radius-media);
+  background: var(--bench);
+  color: var(--ink-2);
+  font-size: 13px;
+  padding: 10px 12px;
+}
+
+.mobile-library-banner p {
+  margin: 0;
+}
+
+.mobile-library-mono {
+  font-family: var(--font-utility);
+  color: var(--rebate);
+}
+
+.mobile-library-banner-link {
+  min-height: 44px;
+  flex: none;
+  border: 0;
+  background: transparent;
+  color: var(--safelight);
+  font-family: var(--font-utility);
+  font-size: var(--text-data);
+}
+
+/* Tile overlays: ♥ favorite badge and the trash purge countdown chip. */
+.gallery-favorite-badge {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  z-index: 1;
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border: 1px solid rgba(245, 239, 255, 0.32);
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.68);
+  color: #f5efff;
+  font-size: 13px;
+  line-height: 1;
+  backdrop-filter: blur(8px);
+}
+
+.gallery-item:has(.gallery-video-badge) .gallery-favorite-badge {
+  right: 46px;
+}
+
+.gallery-purge-chip {
+  position: absolute;
+  left: 7px;
+  bottom: 8px;
+  z-index: 1;
+  border-radius: 5px;
+  background: rgba(0, 0, 0, 0.68);
+  color: #f5efff;
+  font-family: var(--font-utility);
+  font-size: 10px;
+  line-height: 1;
+  padding: 4px 6px;
+  backdrop-filter: blur(8px);
+}
+
+/* Collections: card list, drill-in header, inline actions. */
+.mobile-collection-list {
+  display: grid;
+  margin: 12px 0 0;
+  gap: 8px;
+  list-style: none;
+  padding: 0;
+}
+
+.mobile-collection-item {
+  position: relative;
+}
+
+.mobile-collection-row {
+  display: grid;
+  width: 100%;
+  min-height: 64px;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  border: 1px solid var(--edge);
+  border-radius: var(--radius-card);
+  background: var(--bench);
+  color: var(--rebate);
+  text-align: left;
+  padding: 8px 44px 8px 8px;
+}
+
+.mobile-collection-cover {
+  display: grid;
+  width: 48px;
+  height: 48px;
+  flex: none;
+  place-items: center;
+  overflow: hidden;
+  border-radius: var(--radius-media);
+  background: var(--print);
+  color: var(--ink-3);
+  font-size: 20px;
+}
+
+.mobile-collection-cover img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.mobile-collection-copy {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.mobile-collection-copy strong {
+  overflow: hidden;
+  font-size: var(--text-body);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mobile-collection-copy > span {
+  color: var(--ink-3);
+  font-size: 12px;
+}
+
+.mobile-collection-count {
+  font-family: var(--font-utility);
+  color: var(--ink-2);
+}
+
+.mobile-collection-chevron {
+  color: var(--ink-3);
+  font-size: 20px;
+}
+
+.mobile-collection-menu-button {
+  position: absolute;
+  top: 50%;
+  right: 4px;
+  display: grid;
+  min-width: 44px;
+  min-height: 44px;
+  place-items: center;
+  border: 0;
+  background: transparent;
+  color: var(--ink-3);
+  font-size: 18px;
+  transform: translateY(-50%);
+}
+
+.mobile-collection-actions {
+  display: grid;
+  margin-top: 6px;
+  gap: 8px;
+  border: 1px solid var(--edge);
+  border-radius: var(--radius-card);
+  background: var(--bench);
+  padding: 10px;
+}
+
+.mobile-collection-actions .status-line {
+  margin: 0;
+}
+
+.mobile-collection-drillin {
+  display: flex;
+  margin-top: 10px;
+  align-items: center;
+  gap: 10px;
+}
+
+.mobile-collection-drillin-title {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.mobile-collection-drillin-title strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mobile-collection-drillin-title > span {
+  color: var(--ink-3);
+  font-size: 12px;
+}
+
+/* Danger-tinted secondary action (two-step inline confirms). */
+.mobile-inline-danger {
+  border-color: var(--stop);
+  color: var(--stop);
+}
+
+.mobile-inline-danger.is-armed,
+.mobile-library-empty-trash.is-armed {
+  background: color-mix(in srgb, var(--stop) 14%, var(--bench));
+}
+
+/* Host detail Library card row. */
+.mobile-library-trash-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+/* Library bottom sheet (tag editor, collection checklist, viewer info).
+   The MobileSeamSheet pattern: fixed overlay, body owns scroll + insets. */
+.mobile-library-sheet {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 46;
+  flex-direction: column;
+  justify-content: flex-end;
+}
+
+.mobile-library-sheet.is-open {
+  display: flex;
+}
+
+.mobile-library-sheet-backdrop {
+  position: absolute;
+  inset: 0;
+  border: 0;
+  background: color-mix(in srgb, var(--print) 62%, transparent);
+}
+
+.mobile-library-sheet-panel {
+  position: relative;
+  display: flex;
+  min-height: 0;
+  max-height: 86dvh;
+  flex-direction: column;
+  border-top: 1px solid var(--edge);
+  border-radius: 18px 18px 0 0;
+  background: var(--bath);
+  color: var(--rebate);
+  animation: mobile-sheet-in 0.2s ease;
+}
+
+.mobile-library-sheet-grabber {
+  display: block;
+  width: 38px;
+  height: 4px;
+  flex: 0 0 auto;
+  margin: 8px auto 2px;
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--rebate) 22%, transparent);
+}
+
+.mobile-library-sheet-body {
+  display: grid;
+  flex: 1;
+  min-height: 0;
+  gap: 10px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: none;
+  touch-action: manipulation;
+  padding: 10px max(18px, env(safe-area-inset-right)) calc(16px + env(safe-area-inset-bottom))
+    max(18px, env(safe-area-inset-left));
+}
+
+.mobile-library-sheet-head {
+  margin: 0;
+  overflow: hidden;
+  color: var(--ink-3);
+  font-family: var(--font-utility);
+  font-size: var(--text-edge-code);
+  letter-spacing: 0.08em;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.mobile-library-sheet-label {
+  margin: 4px 0 0;
+  color: var(--ink-3);
+  font-family: var(--font-utility);
+  font-size: var(--text-edge-code);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.mobile-library-sheet-done {
+  min-height: 46px;
+  margin-top: 2px;
+  border: 1px solid var(--control-edge);
+  border-radius: var(--radius-control);
+  background: var(--bench);
+  color: var(--rebate);
+  font-family: var(--font-body);
+  font-size: var(--text-body);
+  font-weight: 650;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mobile-library-sheet-panel {
+    animation: none;
+  }
+}
+
+/* Sheet forms: input + one trailing action. */
+.mobile-library-sheet-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 8px;
+}
+
+.mobile-library-sheet-form .field {
+  min-width: 0;
+}
+
+/* Tag chips with an inline × remove target. */
+.mobile-library-tag-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.mobile-library-tag {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  gap: 2px;
+  border: 1px solid var(--control-edge);
+  border-radius: var(--radius-pill);
+  background: var(--bench);
+  color: var(--rebate);
+  font-family: var(--font-utility);
+  font-size: var(--text-data);
+  padding: 0 4px 0 14px;
+}
+
+.mobile-library-tag button {
+  display: grid;
+  min-width: 44px;
+  min-height: 44px;
+  place-items: center;
+  border: 0;
+  background: transparent;
+  color: var(--ink-3);
+  font-size: 17px;
+}
+
+/* Collection checklist (Add to collection / viewer info sheet). */
+.mobile-library-checklist {
+  display: grid;
+  margin: 0;
+  gap: 8px;
+  list-style: none;
+  padding: 0;
+}
+
+.mobile-library-checklist > li > button {
+  display: grid;
+  width: 100%;
+  min-height: 52px;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  border: 1px solid var(--edge);
+  border-radius: var(--radius-card);
+  background: var(--bench);
+  color: var(--rebate);
+  text-align: left;
+  padding: 8px 12px;
+}
+
+.mobile-library-check {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  place-items: center;
+  border: 1px solid var(--control-edge);
+  border-radius: 8px;
+  color: var(--safelight);
+  font-size: 15px;
+}
+
+.mobile-library-checklist > li > button[aria-checked="true"] .mobile-library-check {
+  border-color: var(--safelight);
+  background: color-mix(in srgb, var(--safelight) 11%, var(--bench));
+}

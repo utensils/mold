@@ -22,6 +22,22 @@ import {
   type VideoExportOptions,
 } from "@studio/lib/videoExport";
 import { isNativeIOSRuntime } from "./platform";
+import {
+  collectionSlug,
+  displayTitle,
+  normalizeTagName,
+  purgeCountdownFromPurgeAt,
+  tagKey,
+  validatePrintTitle,
+  type OrganizationUnion,
+} from "@studio/lib/libraryOrganization";
+import type { TagCount } from "@studio/lib/api/galleryOrganization";
+import MobileLibrarySheet from "./MobileLibrarySheet.vue";
+import {
+  validateCollectionName,
+  type MobileCollectionCard,
+  type MobileGalleryImage,
+} from "./libraryOrganization";
 
 const props = withDefaults(
   defineProps<{
@@ -41,6 +57,17 @@ const props = withDefaults(
     usingSource?: boolean;
     mediaUrlOverride?: string;
     exportEnabled?: boolean;
+    /** Merged title / favorite / tags / collections across every copy. */
+    organization?: OrganizationUnion | null;
+    /** A connected host advertises `capabilities.gallery.organize`. */
+    organizeEnabled?: boolean;
+    /** The print is in the trash (info sheet swaps to Restore / Delete). */
+    trashed?: boolean;
+    /** An organization mutation is in flight. */
+    organizing?: boolean;
+    organizationError?: string;
+    tagSuggestions?: TagCount[];
+    collections?: MobileCollectionCard[];
   }>(),
   {
     reusing: false,
@@ -54,6 +81,13 @@ const props = withDefaults(
     usingSource: false,
     mediaUrlOverride: "",
     exportEnabled: true,
+    organization: null,
+    organizeEnabled: false,
+    trashed: false,
+    organizing: false,
+    organizationError: "",
+    tagSuggestions: () => [],
+    collections: () => [],
   },
 );
 
@@ -63,6 +97,12 @@ const emit = defineEmits<{
   previous: [];
   next: [];
   "use-source": [];
+  rename: [title: string | null];
+  favorite: [favorite: boolean];
+  tags: [change: { add?: string[]; remove?: string[] }];
+  collection: [change: { slug: string; name: string; member: boolean }];
+  restore: [];
+  "delete-forever": [];
 }>();
 
 const dialog = ref<HTMLDialogElement | null>(null);
@@ -111,6 +151,99 @@ const exportOpen = ref(false);
 const exportBusy = ref(false);
 const exportError = ref("");
 const exportCapabilities = ref<VideoExportCapabilities>(DEFAULT_VIDEO_EXPORT_CAPABILITIES);
+
+// ── Print info sheet (title / favorite / tags / collections / trash) ────────
+const infoOpen = ref(false);
+const titleDraft = ref("");
+const titleError = ref("");
+const infoTagDraft = ref("");
+const infoCollectionDraft = ref("");
+const infoCollectionError = ref("");
+const deleteForeverArmed = ref(false);
+const infoAvailable = computed(() => props.organizeEnabled || props.trashed);
+const savedTitle = computed(() => props.organization?.title ?? null);
+/** Header line: the print's title, else its prompt, else the filename. */
+const viewerTitle = computed(() =>
+  displayTitle({
+    title: savedTitle.value,
+    metadata: props.item.metadata,
+    filename: props.item.filename,
+  }),
+);
+const favorite = computed(() => props.organization?.favorite ?? false);
+const infoTags = computed(() => props.organization?.tags ?? []);
+const infoTagSuggestions = computed(() => {
+  const present = new Set(infoTags.value.map(tagKey));
+  return props.tagSuggestions.filter((tag) => !present.has(tagKey(tag.name))).slice(0, 12);
+});
+const memberCollectionSlugs = computed(() => new Set(props.organization?.collections ?? []));
+const purgeCopy = computed(() => {
+  if (!props.trashed) return "";
+  const purgeAt =
+    props.organization?.purgeAt ?? (props.item as MobileGalleryImage).purge_at ?? null;
+  return purgeCountdownFromPurgeAt(purgeAt, Date.now()).label;
+});
+
+function openInfo(): void {
+  titleDraft.value = savedTitle.value ?? "";
+  titleError.value = "";
+  infoTagDraft.value = "";
+  infoCollectionDraft.value = "";
+  infoCollectionError.value = "";
+  deleteForeverArmed.value = false;
+  infoOpen.value = true;
+}
+
+/** Done commits the title through PATCH; blank clears it. */
+function commitTitle(): void {
+  const result = validatePrintTitle(titleDraft.value);
+  if (!result.ok) {
+    titleError.value = result.reason;
+    return;
+  }
+  titleError.value = "";
+  if ((result.value ?? null) !== (savedTitle.value ?? null)) emit("rename", result.value);
+}
+
+function addInfoTag(raw: string): void {
+  const name = normalizeTagName(raw);
+  infoTagDraft.value = "";
+  if (!name || infoTags.value.some((tag) => tagKey(tag) === tagKey(name))) return;
+  emit("tags", { add: [name] });
+}
+
+function toggleInfoCollection(card: MobileCollectionCard): void {
+  emit("collection", {
+    slug: card.slug,
+    name: card.name,
+    member: !memberCollectionSlugs.value.has(card.slug),
+  });
+}
+
+function createInfoCollection(): void {
+  const validation = validateCollectionName(infoCollectionDraft.value);
+  if (!validation.ok) {
+    infoCollectionError.value = validation.reason ?? "";
+    return;
+  }
+  infoCollectionError.value = "";
+  infoCollectionDraft.value = "";
+  emit("collection", {
+    slug: collectionSlug(validation.value),
+    name: validation.value,
+    member: true,
+  });
+}
+
+/** Two-step: first tap arms, the second deletes on every host. */
+function deleteForever(): void {
+  if (!deleteForeverArmed.value) {
+    deleteForeverArmed.value = true;
+    return;
+  }
+  deleteForeverArmed.value = false;
+  emit("delete-forever");
+}
 
 let restoreFocusElement: HTMLElement | null = null;
 let loadEpoch = 0;
@@ -454,7 +587,7 @@ onBeforeUnmount(() => {
         <span>Close</span>
       </button>
       <div class="gallery-viewer-origin">
-        <h1 id="gallery-viewer-title">Print preview</h1>
+        <h1 id="gallery-viewer-title" data-test="gallery-viewer-title">{{ viewerTitle }}</h1>
         <span>{{ hostName }}</span>
         <span
           v-if="showNavigation"
@@ -620,6 +753,15 @@ onBeforeUnmount(() => {
           </button>
         </template>
         <button
+          v-if="infoAvailable"
+          class="secondary-button gallery-viewer-info"
+          type="button"
+          data-test="gallery-viewer-info"
+          @click="openInfo"
+        >
+          Info
+        </button>
+        <button
           v-if="canUseSource"
           class="secondary-button gallery-viewer-source"
           type="button"
@@ -659,6 +801,186 @@ onBeforeUnmount(() => {
       @close="exportOpen = false"
       @export="performVideoExport"
     />
+    <MobileLibrarySheet
+      :open="infoOpen"
+      :title="viewerTitle"
+      test-id="gallery-viewer-info-sheet"
+      @close="infoOpen = false"
+    >
+      <p
+        v-if="organizationError"
+        class="status-line error-text"
+        role="alert"
+        data-test="gallery-viewer-info-error"
+      >
+        {{ organizationError }}
+      </p>
+      <template v-if="organizeEnabled && !trashed">
+        <form class="mobile-library-sheet-form" @submit.prevent="commitTitle">
+          <label class="field">
+            <span>Title</span>
+            <input
+              v-model="titleDraft"
+              class="control"
+              autocomplete="off"
+              enterkeyhint="done"
+              placeholder="Untitled print"
+              data-test="gallery-viewer-title-input"
+              @blur="commitTitle"
+            />
+          </label>
+          <button
+            class="secondary-button"
+            type="submit"
+            :disabled="organizing"
+            data-test="gallery-viewer-title-save"
+          >
+            Save
+          </button>
+        </form>
+        <p v-if="titleError" class="status-line error-text" role="alert">{{ titleError }}</p>
+        <button
+          class="secondary-button gallery-viewer-favorite"
+          type="button"
+          :aria-pressed="favorite"
+          :disabled="organizing"
+          data-test="gallery-viewer-favorite"
+          @click="emit('favorite', !favorite)"
+        >
+          <span aria-hidden="true">{{ favorite ? "♥" : "♡" }}</span>
+          {{ favorite ? "Favorited" : "Favorite" }}
+        </button>
+        <p class="mobile-library-sheet-label">Tags</p>
+        <div class="mobile-library-tag-list" data-test="gallery-viewer-tags">
+          <span v-if="infoTags.length === 0" class="mobile-empty-note">No tags yet.</span>
+          <span v-for="tag in infoTags" :key="tag" class="mobile-library-tag">
+            <span>{{ tag }}</span>
+            <button
+              type="button"
+              :aria-label="`Remove tag ${tag}`"
+              :disabled="organizing"
+              data-test="gallery-viewer-tag-remove"
+              @click="emit('tags', { remove: [tag] })"
+            >
+              ×
+            </button>
+          </span>
+        </div>
+        <form class="mobile-library-sheet-form" @submit.prevent="addInfoTag(infoTagDraft)">
+          <label class="field">
+            <span>Add a tag</span>
+            <input
+              v-model="infoTagDraft"
+              class="control"
+              autocomplete="off"
+              autocapitalize="off"
+              enterkeyhint="done"
+              placeholder="smurf"
+              data-test="gallery-viewer-tag-input"
+            />
+          </label>
+          <button
+            class="secondary-button"
+            type="submit"
+            :disabled="organizing || !infoTagDraft.trim()"
+            data-test="gallery-viewer-tag-add"
+          >
+            Add
+          </button>
+        </form>
+        <div
+          v-if="infoTagSuggestions.length"
+          class="mobile-library-tag-list"
+          data-test="gallery-viewer-tag-suggestions"
+        >
+          <button
+            v-for="tag in infoTagSuggestions"
+            :key="`suggest-${tag.name}`"
+            class="mobile-library-chip"
+            type="button"
+            :disabled="organizing"
+            @click="addInfoTag(tag.name)"
+          >
+            {{ tag.name }}<span class="mobile-library-chip-count">{{ tag.count }}</span>
+          </button>
+        </div>
+        <p class="mobile-library-sheet-label">In collections</p>
+        <ul class="mobile-library-checklist" data-test="gallery-viewer-collections">
+          <li v-for="card in collections" :key="card.slug">
+            <button
+              type="button"
+              role="checkbox"
+              :aria-checked="memberCollectionSlugs.has(card.slug)"
+              :disabled="organizing"
+              data-test="gallery-viewer-collection-option"
+              @click="toggleInfoCollection(card)"
+            >
+              <span class="mobile-library-check" aria-hidden="true">{{
+                memberCollectionSlugs.has(card.slug) ? "✓" : ""
+              }}</span>
+              <span class="mobile-collection-copy">
+                <strong>{{ card.name }}</strong>
+                <span
+                  ><span class="mobile-collection-count">{{ card.count }}</span>
+                  <template v-if="card.hostsLabel"> · {{ card.hostsLabel }}</template></span
+                >
+              </span>
+            </button>
+          </li>
+          <li v-if="collections.length === 0" class="mobile-empty-note">
+            No collections yet — name one below.
+          </li>
+        </ul>
+        <form class="mobile-library-sheet-form" @submit.prevent="createInfoCollection">
+          <label class="field">
+            <span>New collection</span>
+            <input
+              v-model="infoCollectionDraft"
+              class="control"
+              autocomplete="off"
+              enterkeyhint="done"
+              placeholder="Collection name"
+              data-test="gallery-viewer-collection-input"
+            />
+          </label>
+          <button
+            class="secondary-button"
+            type="submit"
+            :disabled="organizing || !infoCollectionDraft.trim()"
+            data-test="gallery-viewer-collection-create"
+          >
+            New
+          </button>
+        </form>
+        <p v-if="infoCollectionError" class="status-line error-text" role="alert">
+          {{ infoCollectionError }}
+        </p>
+      </template>
+      <template v-if="trashed">
+        <p class="status-line" data-test="gallery-viewer-purge">{{ purgeCopy }}</p>
+        <button
+          class="primary-button"
+          type="button"
+          :disabled="organizing"
+          data-test="gallery-viewer-restore"
+          @click="emit('restore')"
+        >
+          Restore
+        </button>
+        <p v-if="deleteForeverArmed" class="status-line" data-test="gallery-viewer-delete-prompt">
+          Delete this print forever?
+        </p>
+        <button
+          class="danger-button"
+          type="button"
+          :disabled="organizing"
+          data-test="gallery-viewer-delete-forever"
+          @click="deleteForever"
+        >
+          {{ deleteForeverArmed ? "Confirm" : "Delete forever" }}
+        </button>
+      </template>
+    </MobileLibrarySheet>
   </dialog>
 </template>
 

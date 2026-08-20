@@ -60,6 +60,11 @@ more connected machines are reachable it also offers:
 - **Most capable** — the strongest GPU that has it: CUDA before Metal, then
   VRAM, then queue depth.
 
+An optional **Title** above the prompt names the print: it is embedded in the
+saved metadata, folded into the output filename as a slug, and shown across
+every Library. Batch siblings and prepared variations inherit it, and **Use as
+prompt** restores it from a print.
+
 Under either policy the model list is the union of every reachable machine's
 installed models, and a model that is not on all of them is tagged with the
 machine that has it. Mold asks each candidate machine for a placement plan
@@ -202,6 +207,41 @@ Prints added since the prior Library visit carry a **New** badge. Images enlarge
 by post-generation or standalone upscaling carry an **Upscaled** badge on both
 iPhone and desktop.
 
+### Collections, favorites, tags, and titles
+
+When a connected host supports Library organization, a **Prints | Collections |
+Trash** row appears under the Library header (each scope with its count — the
+row only appears when a host supports it). In **Prints**, a scrolling chip row
+filters the grid: ♥ Favorites, your most-used tags (the rest behind **More…**),
+and a chip per machine when several are connected. Favorite prints carry a ♥
+badge on their tiles.
+
+In Select mode the action bar gains **Add to collection** (a checklist with a
+New-collection input), **Tag** (add or remove tags, with suggestions from every
+host), and a ♥ toggle. Edits apply to every copy of the print on every
+reachable machine; if one machine cannot be updated, Library says so inline and
+keeps the rest.
+
+**Collections** lists your collections merged across machines — cover, name,
+count, and which machines hold them — with a **New collection** row. The **…**
+menu renames or deletes a collection (two taps; its prints stay in the
+Library). Tap a collection to browse it; Select there offers **Remove from
+collection**.
+
+Tap a print and use **Info** to edit it in place: the title (Done saves; blank
+clears it), ♥, tags, and its collections. The viewer's title line shows the
+print's title, or its prompt while untitled.
+
+### Trash
+
+On hosts with the server-side trash, deleting moves prints to the **Trash**
+scope instead of erasing them. The Trash grid shows how long each machine keeps
+trashed prints (change it from the host's detail screen), and each tile counts
+down to its purge ("Purges in N d"). Select offers **Restore** and a two-step
+**Delete forever**; **Empty trash** in the header purges everything after a
+confirming second tap. Machines without a trash keep the old immediate delete,
+and Mold's wording never promises recoverability there.
+
 Reusing settings switches to the print's host and restores the model when it is
 installed there. If the original model is unavailable, Mold clearly identifies
 the compatible fallback and removes non-portable adapter/component choices. On
@@ -263,6 +303,12 @@ Tap a saved host to inspect its current state. The detail screen shows:
   work and active singleton generations on current hosts, and loaded models;
 - queued/active model downloads with progress; and
 - the models installed on that host.
+
+Hosts with the server-side Library trash add a **Library** card: choose how
+long that machine keeps trashed prints (**Trash retention**, `0` keeps them
+forever; a value pinned by an environment variable is read-only and names the
+variable) and see **Prints in trash: N** with a two-step **Empty trash**. The
+setting lives on the host itself — it applies to every app that talks to it.
 
 From the same screen you can rename or retry the host, select it for Create,
 unload a model, open it in Models, or forget it. Forgetting a host also deletes

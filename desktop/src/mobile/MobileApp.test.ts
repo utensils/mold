@@ -5781,6 +5781,32 @@ describe("MobileApp gallery", () => {
     expect(wrapper.text()).toContain("1 host unavailable");
   });
 
+  it("settles a host whose capabilities endpoint stalls instead of leaving the Library loading", async () => {
+    vi.useFakeTimers();
+    try {
+      apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+        if (path === "/api/status") return Promise.resolve(status);
+        if (path === "/api/models") return Promise.resolve([model]);
+        // The capabilities read never settles: the host deadline alone must
+        // resolve this host so the multi-host refresh can finish.
+        if (path === "/api/capabilities") return new Promise(() => {});
+        if (path === "/api/gallery") return Promise.resolve([print]);
+        if (path === "/api/activity")
+          return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
+        return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      });
+
+      wrapper = mountMobileApp();
+      await vi.advanceTimersByTimeAsync(0);
+      await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+      await vi.advanceTimersByTimeAsync(9_000);
+
+      expect(wrapper.find("[data-test='gallery-item']").exists()).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("refreshes the Library when a previously offline host recovers", async () => {
     const recoveredTarget = { baseUrl: "http://halcyon.tailnet.ts.net:7680", apiKey: "secret" };
     localStorage.setItem(
@@ -6225,7 +6251,7 @@ describe("MobileApp gallery", () => {
     await vi.waitFor(() => expect(wrapper?.find("[data-test='gallery-item']").exists()).toBe(true));
 
     const tile = wrapper.get("[data-test='gallery-item']");
-    expect(tile.attributes("aria-label")).toBe("Open storm clip.mp4 from Studio");
+    expect(tile.attributes("aria-label")).toBe("Open a ship crossing violet lightning from Studio");
     await tile.trigger("click");
     await flushPromises();
 
@@ -8002,5 +8028,583 @@ describe("MobileApp routing target consistency", () => {
       vi.useRealTimers();
     }
     expect(openStreams[0]?.options.target).toEqual(renderTarget);
+  });
+});
+
+describe("MobileApp Library organization", () => {
+  const nowSecs = Math.floor(Date.now() / 1000);
+  const organizedCapabilities = {
+    gallery: {
+      can_delete: true,
+      organize: true,
+      trash: { enabled: true, retention_days: 30 },
+    },
+  };
+
+  function libraryPrint(
+    filename: string,
+    timestamp: number,
+    extra: Record<string, unknown> = {},
+  ): GalleryImage {
+    return {
+      filename,
+      timestamp,
+      format: "png",
+      metadata: {
+        prompt: `prompt for ${filename}`,
+        model: model.name,
+        seed: 7,
+        steps: 4,
+        guidance: 3.5,
+        width: 512,
+        height: 512,
+      },
+      ...extra,
+    } as GalleryImage;
+  }
+
+  const favoritePrint = libraryPrint("fav.png", nowSecs + 4, {
+    favorite: true,
+    tags: ["Blue"],
+    collections: ["c1"],
+  });
+  const plainPrint = libraryPrint("plain.png", nowSecs + 3);
+  const trashedPrint = libraryPrint("gone.png", nowSecs + 2, {
+    trashed_at: nowSecs - 86_400,
+    purge_at: nowSecs + 3 * 86_400,
+  });
+
+  function installLibraryApi(): void {
+    apiJsonTo.mockImplementation((_target: unknown, path: string, init?: RequestInit) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/capabilities") return Promise.resolve(organizedCapabilities);
+      if (path === "/api/gallery") return Promise.resolve([favoritePrint, plainPrint]);
+      if (path === "/api/gallery?view=trash") return Promise.resolve([trashedPrint]);
+      if (path === "/api/gallery/collections") {
+        return Promise.resolve([
+          {
+            id: "c1",
+            name: "Portraits",
+            slug: "portraits",
+            description: null,
+            cover_filename: "fav.png",
+            count: 1,
+            created_at: 1,
+            updated_at: 1,
+          },
+        ]);
+      }
+      if (path === "/api/gallery/tags") return Promise.resolve([{ name: "Blue", count: 1 }]);
+      if (path === "/api/gallery/trash" && init?.method === "DELETE") {
+        return Promise.resolve({ purged: 1 });
+      }
+      if (path === "/api/activity")
+        return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    // Thumbnails read blobs; organization mutations read empty JSON bodies.
+    apiFetchTo.mockImplementation(() =>
+      Promise.resolve({
+        status: 204,
+        blob: () => Promise.resolve(new Blob(["thumbnail"])),
+        text: () => Promise.resolve(""),
+      } as unknown as Response),
+    );
+  }
+
+  async function openLibrary(): Promise<void> {
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await vi.waitFor(() => expect(wrapper?.find("[data-test='gallery-item']").exists()).toBe(true));
+    await flushPromises();
+  }
+
+  function organizeCalls(path: string): Array<[unknown, string, RequestInit | undefined]> {
+    return apiFetchTo.mock.calls.filter(([, calledPath]) => calledPath === path) as Array<
+      [unknown, string, RequestInit | undefined]
+    >;
+  }
+
+  it("hides every organization affordance when no host advertises it", async () => {
+    await openLibrary();
+
+    expect(wrapper?.find("[data-test='mobile-library-scope']").exists()).toBe(false);
+    expect(wrapper?.find("[data-test='mobile-library-chips']").exists()).toBe(false);
+
+    await wrapper?.get("[data-test='mobile-gallery-select']").trigger("click");
+    expect(wrapper?.find("[data-test='mobile-gallery-favorite']").exists()).toBe(false);
+    expect(wrapper?.find("[data-test='mobile-gallery-tag']").exists()).toBe(false);
+    expect(wrapper?.find("[data-test='mobile-gallery-collect']").exists()).toBe(false);
+
+    // Legacy hosts keep today's hard-delete wording.
+    await wrapper?.get("[data-test='gallery-item']").trigger("click");
+    await wrapper?.get("[data-test='mobile-gallery-delete']").trigger("click");
+    expect(wrapper?.get("[data-test='mobile-gallery-actions']").text()).toContain(
+      "Delete 1 everywhere?",
+    );
+  });
+
+  it("renders the scope row with counts and lazily loads the trash", async () => {
+    installLibraryApi();
+    await openLibrary();
+
+    const scope = wrapper!.get("[data-test='mobile-library-scope']");
+    expect(scope.get("[data-test='mobile-library-scope-prints']").text()).toContain("Prints");
+    expect(scope.get("[data-test='mobile-library-scope-prints']").text()).toContain("2");
+    expect(scope.get("[data-test='mobile-library-scope-collections']").text()).toContain("1");
+    expect(apiJsonTo).not.toHaveBeenCalledWith(
+      target,
+      "/api/gallery?view=trash",
+      expect.anything(),
+    );
+
+    await scope.get("[data-test='mobile-library-scope-trash']").trigger("click");
+    await flushPromises();
+    await vi.waitFor(() =>
+      expect(apiJsonTo).toHaveBeenCalledWith(target, "/api/gallery?view=trash", expect.anything()),
+    );
+    await vi.waitFor(() => expect(wrapper?.find("[data-test='purge-chip']").exists()).toBe(true));
+
+    expect(wrapper?.get("[data-test='purge-chip']").text()).toBe("Purges in 3 d");
+    const banner = wrapper!.get("[data-test='mobile-library-trash-banner']");
+    expect(banner.text()).toContain("Prints stay in the trash");
+    expect(banner.text()).toContain("30 d");
+    expect(scope.get("[data-test='mobile-library-scope-trash']").text()).toContain("1");
+  });
+
+  it("filters the grid with the Favorites chip and marks favorite tiles", async () => {
+    installLibraryApi();
+    await openLibrary();
+
+    expect(wrapper?.findAll("[data-test='gallery-item']")).toHaveLength(2);
+    expect(wrapper?.findAll("[data-test='favorite-badge']")).toHaveLength(1);
+
+    await wrapper?.get("[data-test='mobile-library-chip-favorites']").trigger("click");
+    await flushPromises();
+    await vi.waitFor(() => expect(wrapper?.findAll("[data-test='gallery-item']")).toHaveLength(1));
+    expect(wrapper?.get("[data-test='gallery-item']").attributes("aria-label")).toContain(
+      "fav.png",
+    );
+
+    // The host's tags ride the chip row (single host: no host chips).
+    expect(wrapper?.find("[data-test='mobile-library-chip-tag']").text()).toContain("Blue");
+    expect(wrapper?.find("[data-test='mobile-library-chip-host']").exists()).toBe(false);
+  });
+
+  it("lists collections as cards and drills into a member grid", async () => {
+    installLibraryApi();
+    await openLibrary();
+
+    await wrapper?.get("[data-test='mobile-library-scope-collections']").trigger("click");
+    await flushPromises();
+
+    const card = wrapper!.get("[data-test='mobile-collection-portraits']");
+    expect(card.text()).toContain("Portraits");
+    expect(card.text()).toContain("1");
+
+    await card.get("[data-test='mobile-collection-open']").trigger("click");
+    await flushPromises();
+    await vi.waitFor(() => expect(wrapper?.findAll("[data-test='gallery-item']")).toHaveLength(1));
+    expect(wrapper?.get("[data-test='mobile-collection-drillin']").text()).toContain("Portraits");
+
+    await wrapper?.get("[data-test='mobile-collection-back']").trigger("click");
+    await flushPromises();
+    expect(wrapper?.find("[data-test='mobile-collection-list']").exists()).toBe(true);
+  });
+
+  it("fans a bulk favorite out through /api/gallery/organize", async () => {
+    installLibraryApi();
+    await openLibrary();
+
+    await wrapper?.get("[data-test='mobile-gallery-select']").trigger("click");
+    const tiles = wrapper!.findAll("[data-test='gallery-item']");
+    const plainTile = tiles.find((tile) => tile.attributes("aria-label")?.includes("plain.png"));
+    await plainTile!.trigger("click");
+    await wrapper?.get("[data-test='mobile-gallery-favorite']").trigger("click");
+    await flushPromises();
+
+    const calls = organizeCalls("/api/gallery/organize");
+    expect(calls).toHaveLength(1);
+    expect(JSON.parse(String(calls[0]?.[2]?.body))).toEqual({
+      filenames: ["plain.png"],
+      favorite: true,
+    });
+    expect(wrapper?.findAll("[data-test='favorite-badge']")).toHaveLength(0); // select mode hides badges
+    await wrapper?.get("[data-test='mobile-gallery-select']").trigger("click");
+    expect(wrapper?.findAll("[data-test='favorite-badge']")).toHaveLength(2);
+  });
+
+  it("adds a tag to the selection from the tag sheet", async () => {
+    installLibraryApi();
+    await openLibrary();
+
+    await wrapper?.get("[data-test='mobile-gallery-select']").trigger("click");
+    await wrapper?.get("[data-test='gallery-item']").trigger("click");
+    await wrapper?.get("[data-test='mobile-gallery-tag']").trigger("click");
+
+    await wrapper?.get("[data-test='mobile-tag-sheet-input']").setValue("Grain");
+    await wrapper?.get("[data-test='mobile-tag-sheet-add']").trigger("submit");
+    await flushPromises();
+
+    const calls = organizeCalls("/api/gallery/organize");
+    expect(calls).toHaveLength(1);
+    expect(JSON.parse(String(calls[0]?.[2]?.body))).toEqual({
+      filenames: ["fav.png"],
+      add_tags: ["Grain"],
+    });
+  });
+
+  it("drops an unfavorited print from the grid while the Favorites filter is on", async () => {
+    installLibraryApi();
+    await openLibrary();
+
+    await wrapper?.get("[data-test='mobile-library-chip-favorites']").trigger("click");
+    await flushPromises();
+    await vi.waitFor(() => expect(wrapper?.findAll("[data-test='gallery-item']")).toHaveLength(1));
+
+    await wrapper?.get("[data-test='mobile-gallery-select']").trigger("click");
+    await wrapper?.get("[data-test='gallery-item']").trigger("click");
+    // Every selected print is a favorite, so ♥ unfavorites — the print no
+    // longer matches the active filter and must leave the grid immediately.
+    await wrapper?.get("[data-test='mobile-gallery-favorite']").trigger("click");
+    await flushPromises();
+
+    await vi.waitFor(() => expect(wrapper?.findAll("[data-test='gallery-item']")).toHaveLength(0));
+  });
+
+  it("drops a print from the grid when its active-filter tag is removed", async () => {
+    installLibraryApi();
+    await openLibrary();
+
+    await wrapper?.get("[data-test='mobile-library-chip-tag']").trigger("click");
+    await flushPromises();
+    await vi.waitFor(() => expect(wrapper?.findAll("[data-test='gallery-item']")).toHaveLength(1));
+
+    await wrapper?.get("[data-test='mobile-gallery-select']").trigger("click");
+    await wrapper?.get("[data-test='gallery-item']").trigger("click");
+    await wrapper?.get("[data-test='mobile-gallery-tag']").trigger("click");
+    await wrapper?.get("[data-test='mobile-tag-sheet-remove']").trigger("click");
+    await flushPromises();
+
+    await vi.waitFor(() => expect(wrapper?.findAll("[data-test='gallery-item']")).toHaveLength(0));
+  });
+
+  it("keeps an incomplete trash snapshot retry-eligible instead of authoritative", async () => {
+    installLibraryApi();
+    const base = apiJsonTo.getMockImplementation()!;
+    let trashReads = 0;
+    apiJsonTo.mockImplementation(
+      (requestTarget: unknown, path: string, init?: RequestInit): Promise<unknown> => {
+        if (path === "/api/gallery?view=trash") {
+          trashReads += 1;
+          return trashReads === 1
+            ? Promise.reject(new Error("trash listing failed"))
+            : Promise.resolve([trashedPrint]);
+        }
+        return base(requestTarget, path, init) as Promise<unknown>;
+      },
+    );
+    await openLibrary();
+
+    await wrapper?.get("[data-test='mobile-library-scope-trash']").trigger("click");
+    await flushPromises();
+    await vi.waitFor(() => expect(trashReads).toBe(1));
+    expect(wrapper?.text()).toContain("unavailable");
+
+    // The failed pass never becomes the authoritative snapshot: re-entering
+    // the Trash scope refetches instead of trusting the incomplete read.
+    await wrapper?.get("[data-test='mobile-library-scope-prints']").trigger("click");
+    await flushPromises();
+    await wrapper?.get("[data-test='mobile-library-scope-trash']").trigger("click");
+    await vi.waitFor(() => expect(trashReads).toBe(2));
+    await vi.waitFor(() => expect(wrapper?.find("[data-test='purge-chip']").exists()).toBe(true));
+  });
+
+  it("removes a disconnected machine's tag chips from the merged Library", async () => {
+    const platoTarget = { baseUrl: "http://plato.tailnet.ts.net:7680", apiKey: "secret" };
+    localStorage.setItem(
+      "mold.mobile.hosts.v1",
+      JSON.stringify([
+        {
+          id: "studio-id",
+          name: "Studio",
+          baseUrl: target.baseUrl,
+          hostname: "studio",
+          version: "0.18.0",
+          online: false,
+        },
+        {
+          id: "plato-id",
+          name: "Plato",
+          baseUrl: platoTarget.baseUrl,
+          hostname: "plato",
+          version: "0.18.0",
+          online: false,
+        },
+      ]),
+    );
+    apiJsonTo.mockImplementation((requestTarget: unknown, path: string) => {
+      const fromPlato = (requestTarget as { baseUrl: string }).baseUrl === platoTarget.baseUrl;
+      if (path === "/api/status") {
+        return Promise.resolve(
+          fromPlato ? { ...status, hostname: "plato", instance_id: "plato-id" } : status,
+        );
+      }
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/capabilities") return Promise.resolve(organizedCapabilities);
+      if (path === "/api/gallery")
+        return Promise.resolve(fromPlato ? [plainPrint] : [favoritePrint]);
+      if (path === "/api/gallery/collections") return Promise.resolve([]);
+      if (path === "/api/gallery/tags") {
+        return Promise.resolve(
+          fromPlato ? [{ name: "Haunt", count: 1 }] : [{ name: "Blue", count: 1 }],
+        );
+      }
+      if (path === "/api/activity")
+        return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    apiFetchTo.mockImplementation(() =>
+      Promise.resolve({
+        status: 204,
+        blob: () => Promise.resolve(new Blob(["thumbnail"])),
+        text: () => Promise.resolve(""),
+      } as unknown as Response),
+    );
+    await openLibrary();
+    const chipNames = () =>
+      wrapper!.findAll("[data-test='mobile-library-chip-tag']").map((chip) => chip.text());
+    await vi.waitFor(() => expect(chipNames().join(" ")).toContain("Haunt"));
+
+    // Disconnect Plato from Machines, then return to the Library.
+    const machinesTab = wrapper!
+      .findAll("button.mobile-tab")
+      .find((button) => button.text() === "Machines");
+    await machinesTab!.trigger("click");
+    await flushPromises();
+    const platoRow = wrapper!
+      .findAll("[data-test='mobile-host-row']")
+      .find((row) => row.text().includes("Plato"));
+    await platoRow!.trigger("click");
+    await flushPromises();
+    await wrapper!.get("[data-test='host-detail-disconnect']").trigger("click");
+    await flushPromises();
+    await wrapper!.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await flushPromises();
+    await vi.waitFor(() => expect(wrapper?.find("[data-test='gallery-item']").exists()).toBe(true));
+
+    const chips = chipNames().join(" ");
+    expect(chips).toContain("Blue");
+    expect(chips).not.toContain("Haunt");
+  });
+
+  it("moves a selection to the trash behind the two-tap confirm", async () => {
+    installLibraryApi();
+    await openLibrary();
+
+    await wrapper?.get("[data-test='mobile-gallery-select']").trigger("click");
+    await wrapper?.get("[data-test='gallery-item']").trigger("click");
+
+    const deleteButton = wrapper!.get("[data-test='mobile-gallery-delete']");
+    expect(deleteButton.text()).toBe("Trash");
+    await deleteButton.trigger("click");
+    expect(wrapper?.get("[data-test='mobile-gallery-actions']").text()).toContain(
+      "Move 1 to trash?",
+    );
+    expect(organizeCalls("/api/gallery/trash")).toHaveLength(0);
+
+    await deleteButton.trigger("click");
+    await flushPromises();
+    const calls = organizeCalls("/api/gallery/trash");
+    expect(calls).toHaveLength(1);
+    expect(JSON.parse(String(calls[0]?.[2]?.body))).toEqual({ filenames: ["fav.png"] });
+    await vi.waitFor(() => expect(wrapper?.findAll("[data-test='gallery-item']")).toHaveLength(1));
+  });
+
+  async function openTrashScope(): Promise<void> {
+    await wrapper?.get("[data-test='mobile-library-scope-trash']").trigger("click");
+    await vi.waitFor(() => expect(wrapper?.find("[data-test='purge-chip']").exists()).toBe(true));
+  }
+
+  it("restores a trashed selection back into the Library", async () => {
+    installLibraryApi();
+    await openLibrary();
+    await openTrashScope();
+
+    await wrapper?.get("[data-test='mobile-gallery-select']").trigger("click");
+    await wrapper?.get("[data-test='gallery-item']").trigger("click");
+
+    // Restore is the primary action.
+    await wrapper?.get("[data-test='mobile-gallery-restore']").trigger("click");
+    await flushPromises();
+    const restores = organizeCalls("/api/gallery/trash/restore");
+    expect(restores).toHaveLength(1);
+    expect(JSON.parse(String(restores[0]?.[2]?.body))).toEqual({ filenames: ["gone.png"] });
+    await vi.waitFor(() =>
+      expect(wrapper?.find("[data-test='mobile-library-empty']").exists()).toBe(true),
+    );
+
+    // The restored print rejoined the live Library locally.
+    await wrapper?.get("[data-test='mobile-library-scope-prints']").trigger("click");
+    await flushPromises();
+    await vi.waitFor(() => expect(wrapper?.findAll("[data-test='gallery-item']")).toHaveLength(3));
+  });
+
+  it("deletes forever from the Trash scope behind the two-tap confirm", async () => {
+    installLibraryApi();
+    await openLibrary();
+    await openTrashScope();
+
+    await wrapper?.get("[data-test='mobile-gallery-select']").trigger("click");
+    const tiles = wrapper!.findAll("[data-test='gallery-item']");
+    const trashedTile = tiles.find((tile) => tile.attributes("aria-label")?.includes("gone.png"));
+    await trashedTile!.trigger("click");
+
+    const deleteButton = wrapper!.get("[data-test='mobile-gallery-delete']");
+    expect(deleteButton.text()).toBe("Delete forever");
+    await deleteButton.trigger("click");
+    expect(wrapper?.get("[data-test='mobile-gallery-actions']").text()).toContain(
+      "Delete 1 forever?",
+    );
+    expect(organizeCalls("/api/gallery/image/gone.png?permanent=true")).toHaveLength(0);
+    await deleteButton.trigger("click");
+    await flushPromises();
+    const forever = organizeCalls("/api/gallery/image/gone.png?permanent=true");
+    expect(forever).toHaveLength(1);
+    expect(forever[0]?.[2]?.method).toBe("DELETE");
+  });
+
+  it("empties the trash from the header behind a two-step confirm", async () => {
+    installLibraryApi();
+    await openLibrary();
+    await openTrashScope();
+
+    const emptyCalls = () =>
+      apiJsonTo.mock.calls.filter(
+        ([, path, init]) =>
+          path === "/api/gallery/trash" && (init as RequestInit | undefined)?.method === "DELETE",
+      );
+
+    const button = wrapper!.get("[data-test='mobile-library-empty-trash']");
+    await button.trigger("click");
+    expect(emptyCalls()).toHaveLength(0);
+    expect(wrapper?.get("[data-test='mobile-library-empty-prompt']").text()).toContain(
+      "Delete everything in the trash forever?",
+    );
+
+    await button.trigger("click");
+    await flushPromises();
+    expect(emptyCalls()).toHaveLength(1);
+    await vi.waitFor(() =>
+      expect(wrapper?.find("[data-test='mobile-library-empty']").exists()).toBe(true),
+    );
+  });
+});
+
+describe("MobileApp Create title", () => {
+  it("carries a trimmed title on the outgoing request and omits it when blank", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    await fieldControl("Title").setValue("  Grain test 01 ");
+    await fieldControl("Prompt").setValue("a lighthouse");
+    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+
+    expect(openStreams).toHaveLength(1);
+    expect(openStreams[0]?.options.body.title).toBe("Grain test 01");
+
+    await fieldControl("Title").setValue("   ");
+    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+    expect(openStreams).toHaveLength(2);
+    expect(openStreams[1]?.options.body.title).toBeUndefined();
+  });
+
+  it("hides the Title field for Sequence output behind a note instead of dropping a typed title", async () => {
+    const sequenceModel: ModelEntry = {
+      ...model,
+      name: "ltx-video-0.9.8-2b-dev:bf16",
+      family: "ltx-video",
+      default_steps: 7,
+      default_guidance: 1,
+      default_width: 704,
+      default_height: 480,
+      default_frames: 25,
+      default_fps: 30,
+    };
+    apiJsonTo.mockImplementation((_target: unknown, path: string, init?: RequestInit) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([model, sequenceModel]);
+      if (path === "/api/capabilities") return Promise.resolve({});
+      if (path === "/api/gallery") return Promise.resolve([]);
+      if (path.startsWith("/api/capabilities/chain-limits")) {
+        return Promise.resolve({
+          model: sequenceModel.name,
+          frames_per_clip_cap: 97,
+          frames_per_clip_recommended: 97,
+          max_stages: 8,
+          max_total_frames: 777,
+          fade_frames_max: 32,
+          transition_modes: ["smooth", "cut", "fade"],
+          quantization_family: "bf16",
+          supports_audio: false,
+          supports_sequence: true,
+        });
+      }
+      if (path === "/api/chain-jobs" && init?.method === "POST") {
+        return Promise.resolve({ job_id: "sequence-job-1" });
+      }
+      if (path.startsWith("/api/chain-jobs/")) return new Promise(() => {});
+      if (path === "/api/activity")
+        return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    await fieldControl("Title").setValue("Storm study");
+    const sequenceSegment = wrapper
+      .get("[data-test='mobile-output-mode']")
+      .findAll("button")
+      .find((candidate) => candidate.text() === "Sequence");
+    await sequenceSegment!.trigger("click");
+    await flushPromises();
+
+    // The chain wire (`ChainRequestWire`) has no title slot: the field is
+    // hidden with a one-line note rather than silently ignored.
+    expect(
+      wrapper.findAll("label.field").some((field) => field.find("span").text() === "Title"),
+    ).toBe(false);
+    expect(wrapper.get("[data-test='mobile-sequence-title-note']").text()).toMatch(/title/i);
+
+    const prompts = wrapper.findAll("[data-test='mobile-sequence-clip'] textarea");
+    await prompts[0]!.setValue("a paper boat");
+    await prompts[1]!.setValue("fireflies gather");
+    await wrapper.get("[data-test='mobile-generate-sequence']").trigger("click");
+    await flushPromises();
+
+    const post = apiJsonTo.mock.calls.find(
+      ([, path, init]) =>
+        path === "/api/chain-jobs" && (init as RequestInit | undefined)?.method === "POST",
+    );
+    expect(post).toBeTruthy();
+    expect(JSON.parse(String((post![2] as RequestInit).body))).not.toHaveProperty("title");
+  });
+
+  it("refuses an over-long title with an inline error instead of dropping it", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    await fieldControl("Title").setValue("x".repeat(121));
+    expect(wrapper.get("[data-test='mobile-create-title-error']").text()).toBe(
+      "Titles are at most 120 characters.",
+    );
+    await fieldControl("Prompt").setValue("a lighthouse");
+    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+    expect(openStreams).toHaveLength(0);
   });
 });
