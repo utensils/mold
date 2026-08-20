@@ -210,6 +210,18 @@ impl H3CandleBackendDevice {
         }
     }
 
+    /// The one device-resident conditioner execution this backend class admits.
+    ///
+    /// Every backend has exactly one, which is what makes a mismatch decidable
+    /// rather than a judgement call: a `CudaResident` conditioner under a Metal
+    /// plan is wrong no matter which device id it names.
+    const fn device_resident_conditioner_execution(self) -> H3ConditionerExecution {
+        match self {
+            Self::Cuda { .. } => H3ConditionerExecution::CudaResident,
+            Self::Metal => H3ConditionerExecution::MetalResident,
+        }
+    }
+
     fn stable_id(self) -> String {
         match self {
             Self::Cuda {
@@ -384,10 +396,23 @@ impl FrozenH3Fl2VaCandlePlan {
         if self.conditioner_placement.execution_fingerprint != self.execution_fingerprint {
             bail!("MiniMax H3 conditioner and backend execution authorities disagree");
         }
-        if self.conditioner_placement.execution == H3ConditionerExecution::CudaResident
-            && self.conditioner_placement.device_id != self.device_id
-        {
-            bail!("MiniMax H3 resident conditioner is assigned to another CUDA device");
+        // A device-resident conditioner must name BOTH the same device and the
+        // same backend class as the plan. Checking the id alone let a Metal
+        // plan carry a `CudaResident` conditioner on the Metal device's own id
+        // -- the id matched, so nothing objected.
+        if self.conditioner_placement.execution.is_device_resident() {
+            if self.conditioner_placement.device_id != self.device_id {
+                bail!("MiniMax H3 resident conditioner is assigned to another device");
+            }
+            if self.conditioner_placement.execution
+                != self.backend.device_resident_conditioner_execution()
+            {
+                bail!(
+                    "MiniMax H3 {:?} conditioner placement contradicts the frozen {:?} backend",
+                    self.conditioner_placement.execution,
+                    self.backend
+                );
+            }
         }
         self.block_streaming.validate()?;
         if self.block_streaming.device_id != self.device_id
@@ -1307,6 +1332,84 @@ mod tests {
             metal.identity_sha256(),
             plan(contract::FL2VA_OFFICIAL).identity_sha256()
         );
+    }
+
+    /// The structural half of the same guard the factory enforces at
+    /// construction. Checking only the device id let a Metal plan carry a
+    /// `CudaResident` conditioner on the Metal device's own id -- the id
+    /// matched, so nothing objected, and the authority then hashed as
+    /// `qwen-cuda` under a Metal backend.
+    #[test]
+    fn a_device_resident_conditioner_must_match_the_frozen_backend_class() {
+        let contradictory = FrozenH3Fl2VaCandlePlan::new_unavailable(
+            contract::FL2VA_OFFICIAL,
+            "gpu-0",
+            H3CandleBackendDevice::Metal,
+            EXECUTION,
+            FrozenH3ConditionerPlacement::new(
+                // Same device id as the plan: the old check passed on this.
+                "gpu-0",
+                H3ConditionerExecution::CudaResident,
+                EXECUTION,
+                0,
+                mold_candle::minimax_h3::H3_BF16_PARAMETER_BYTES,
+                1_024,
+            )
+            .unwrap(),
+            FrozenH3BlockStreamingPlan::new("gpu-0", EXECUTION, 8, 1).unwrap(),
+            authorities(),
+        );
+        let error = contradictory.unwrap_err().to_string();
+        assert!(error.contains("contradicts"), "{error}");
+
+        // The matching pair on the same backend is accepted, so the guard is
+        // about the disagreement rather than about Metal.
+        FrozenH3Fl2VaCandlePlan::new_unavailable(
+            contract::FL2VA_OFFICIAL,
+            "gpu-0",
+            H3CandleBackendDevice::Metal,
+            EXECUTION,
+            FrozenH3ConditionerPlacement::new(
+                "gpu-0",
+                H3ConditionerExecution::MetalResident,
+                EXECUTION,
+                0,
+                mold_candle::minimax_h3::H3_BF16_PARAMETER_BYTES,
+                1_024,
+            )
+            .unwrap(),
+            FrozenH3BlockStreamingPlan::new("gpu-0", EXECUTION, 8, 1).unwrap(),
+            authorities(),
+        )
+        .unwrap();
+    }
+
+    /// The inverse direction, which is the one that ships today: a CUDA plan
+    /// must not accept a Metal-resident conditioner either.
+    #[test]
+    fn a_cuda_plan_refuses_a_metal_resident_conditioner() {
+        let error = FrozenH3Fl2VaCandlePlan::new_unavailable(
+            contract::FL2VA_OFFICIAL,
+            "gpu-0",
+            H3CandleBackendDevice::Cuda {
+                compute_capability: (8, 9),
+            },
+            EXECUTION,
+            FrozenH3ConditionerPlacement::new(
+                "gpu-0",
+                H3ConditionerExecution::MetalResident,
+                EXECUTION,
+                0,
+                mold_candle::minimax_h3::H3_BF16_PARAMETER_BYTES,
+                1_024,
+            )
+            .unwrap(),
+            FrozenH3BlockStreamingPlan::new("gpu-0", EXECUTION, 8, 1).unwrap(),
+            authorities(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("contradicts"), "{error}");
     }
 
     #[test]

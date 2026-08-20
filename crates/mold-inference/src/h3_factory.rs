@@ -66,6 +66,15 @@ impl H3FactoryComponentAuthority {
     }
 }
 
+/// Where the scheduler placed the Qwen conditioner for one frozen attempt.
+///
+/// `AssignedCudaThenDrop` is CUDA-named on purpose and is NOT auto-mapped onto
+/// Apple Silicon. A Metal route reaches this enum with
+/// `compute_capability: None`, and silently reading a CUDA-named placement as
+/// `MetalResident` would freeze a plan whose recorded intent nobody wrote --
+/// so the pair is refused at construction instead (#1164). A Metal
+/// device-resident conditioner needs its own variant, added when Metal
+/// execution is qualified and something actually places one.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum H3FactoryConditionerPlacement {
     AssignedCudaThenDrop,
@@ -2525,6 +2534,19 @@ impl FrozenH3FactoryAuthority {
                 })
                 .collect::<Result<Vec<_>>>()?,
         )?;
+        // A CUDA-named placement on a route with no compute capability is a
+        // Metal route wearing a CUDA plan: the conditioner would freeze as
+        // `CudaResident`, hash into the authority identity as `qwen-cuda`, and
+        // then be validated only for device-id equality -- which a Metal
+        // device id satisfies. Refuse it rather than translate it.
+        if input.compute_capability.is_none()
+            && input.conditioner_placement == H3FactoryConditionerPlacement::AssignedCudaThenDrop
+        {
+            bail!(
+                "MiniMax H3 Metal route cannot freeze the CUDA-assigned conditioner placement; \
+                 Metal has no device-resident conditioner placement yet"
+            );
+        }
         let conditioner_execution = match input.conditioner_placement {
             H3FactoryConditionerPlacement::AssignedCudaThenDrop => {
                 H3ConditionerExecution::CudaResident
@@ -3924,6 +3946,90 @@ mod tests {
             execution_budget_echo: Some(execution_budget_echo),
             components: components(),
         }
+    }
+
+    /// A Metal route's attention tuple, which the factory requires to agree
+    /// with the absent compute capability.
+    fn metal_attention() -> H3FactoryAttentionInput {
+        let runtime_backend = H3AttentionBackend::MetalChunkedDenseMath;
+        let kernel = H3AttentionKernel::CandleDenseChunkedF32V011;
+        let activation = H3AttentionActivation::MetalCorrectnessOnly;
+        let device = H3AttentionDevice::Metal;
+        let model_contract = H3AttentionModelContract::released_bf16();
+        let runtime_identity_sha256 = H3AttentionRuntimeAuthority::expected_identity_for(
+            runtime_backend,
+            kernel,
+            activation,
+            device,
+            model_contract,
+        )
+        .unwrap();
+        H3FactoryAttentionInput {
+            generic_backend: AttentionBackend::Math,
+            generic_chunk: AttentionChunkPolicy::Off,
+            runtime_backend,
+            kernel,
+            activation,
+            device,
+            model_contract,
+            runtime_identity_sha256,
+            qualification_kernel_identity: kernel.identity().into(),
+            qualification_sha256: sha('b'),
+            full_noncausal: true,
+            lossless: true,
+        }
+    }
+
+    /// Move an otherwise-exact input onto the Metal route: no compute
+    /// capability, plus the Metal attention tuple the factory demands
+    /// alongside it. Everything else -- budgets included -- is left exactly as
+    /// the caller built it, so a test can isolate one disagreement.
+    fn onto_metal(mut input: H3FactoryAuthorityInput) -> H3FactoryAuthorityInput {
+        let attention = metal_attention();
+        input.compute_capability = None;
+        input.attention_backend = attention.generic_backend;
+        input.attention_kernel_identity = attention.qualification_kernel_identity.clone();
+        input.attention_runtime = Some(attention);
+        input
+    }
+
+    /// A Metal route carries no compute capability, so a CUDA-NAMED
+    /// conditioner placement is a contradiction rather than a translation
+    /// problem: it would freeze as `CudaResident`, hash into the authority
+    /// identity as `qwen-cuda`, and then pass a device-id-only check because
+    /// the Metal device id is the one it names. Refuse it at construction.
+    #[test]
+    fn a_metal_route_refuses_the_cuda_assigned_conditioner_placement() {
+        // `exact_cuda_input` is the fully consistent device-resident input, so
+        // the ONLY thing wrong here is the route it is placed on.
+        let input = onto_metal(exact_cuda_input());
+        assert_eq!(
+            input.conditioner_placement,
+            H3FactoryConditionerPlacement::AssignedCudaThenDrop
+        );
+        let error = FrozenH3FactoryAuthority::new_contract_only(input)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Metal"), "{error}");
+        assert!(error.contains("conditioner"), "{error}");
+
+        // And the same input on its own CUDA route is accepted, which is what
+        // proves the refusal is about the contradiction and not the fixture.
+        FrozenH3FactoryAuthority::new_contract_only(exact_cuda_input()).unwrap();
+    }
+
+    /// The refusal is specific to the device-resident pair. A Metal route with
+    /// a host-placed conditioner is not contradictory and must keep working,
+    /// or the guard would simply ban Metal instead of banning the mismatch.
+    #[test]
+    fn a_metal_route_still_accepts_the_host_conditioner_placement() {
+        let input = onto_metal(exact_input());
+        assert_eq!(
+            input.conditioner_placement,
+            H3FactoryConditionerPlacement::HostCpuThenDrop
+        );
+        let authority = FrozenH3FactoryAuthority::new_contract_only(input).unwrap();
+        assert_eq!(authority.compute_capability(), None);
     }
 
     fn exact_cuda_input() -> H3FactoryAuthorityInput {
