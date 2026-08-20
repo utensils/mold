@@ -583,8 +583,11 @@ pub fn build_generate_request(params: BuildParams<'_>) -> GenerateRequest {
         } else {
             def_h
         }),
-        steps: params.steps.unwrap_or(if is_h3 {
-            mold_core::minimax_h3::DEFAULT_STEPS
+        // H3's step authority is per model tier (21 compact, 9/5 Turbo), so
+        // the server-advertised default is the answer; only a caller with no
+        // advertised defaults at all falls back to the compact constant.
+        steps: params.steps.unwrap_or(if is_h3 && params.defaults.is_none() {
+            mold_core::minimax_h3::COMFY_DEFAULT_STEPS
         } else {
             def_steps
         }),
@@ -1780,7 +1783,7 @@ mod tests {
             default_fps: Some(mold_core::minimax_h3::FIXED_FPS),
             default_width: mold_core::minimax_h3::DEFAULT_WIDTH,
             default_height: mold_core::minimax_h3::DEFAULT_HEIGHT,
-            default_steps: mold_core::minimax_h3::DEFAULT_STEPS,
+            default_steps: mold_core::minimax_h3::COMFY_DEFAULT_STEPS,
             default_guidance: 0.0,
             frame_step: Some(mold_core::minimax_h3::FRAME_STEP),
             frame_offset: Some(mold_core::minimax_h3::FRAME_OFFSET),
@@ -1804,7 +1807,9 @@ mod tests {
         assert_eq!(req.enable_audio, Some(true));
         assert_eq!(req.frames, Some(124));
         assert_eq!(req.fps, Some(24));
-        assert_eq!(req.steps, 50);
+        // The advertised model default (21 compact, 9/5 Turbo) is the step
+        // authority, never the official BF16 constant.
+        assert_eq!(req.steps, mold_core::minimax_h3::COMFY_DEFAULT_STEPS);
         assert_eq!(req.guidance, 0.0);
         assert_eq!(req.strength, 1.0);
         assert_eq!(req.negative_prompt, None);
@@ -1822,6 +1827,29 @@ mod tests {
         );
         assert_eq!(without_server_defaults.frames, Some(124));
         assert_eq!(without_server_defaults.fps, Some(24));
+        assert_eq!(
+            without_server_defaults.steps,
+            mold_core::minimax_h3::COMFY_DEFAULT_STEPS
+        );
+
+        // A Turbo row's advertised default rides through unchanged.
+        let turbo_defs = mold_core::ModelDefaults {
+            default_steps: 9,
+            ..defs.clone()
+        };
+        let turbo = build_generate_request(BuildParams {
+            family: Some("minimax_h3"),
+            defaults: Some(&turbo_defs),
+            ..base_params(
+                "a quiet shoreline",
+                mold_core::minimax_h3::FL2VA_COMFY_TURBO_8STEP,
+            )
+        });
+        assert_eq!(turbo.steps, 9);
+        assert_eq!(
+            turbo.model,
+            mold_core::minimax_h3::FL2VA_COMFY_TURBO_8STEP
+        );
     }
 
     #[test]

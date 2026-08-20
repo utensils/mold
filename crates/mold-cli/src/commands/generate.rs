@@ -226,6 +226,32 @@ fn effective_dimensions(
     }
 }
 
+/// Steps the request submits when the user passed no `--steps`.
+///
+/// MiniMax H3's step authority is per manifest tier — 21 for the compact
+/// base, 9/5 for the reviewed Turbo tags, 50 for the hidden official BF16
+/// references — so the resolved model config's manifest-merged default is the
+/// answer. Neither the official-BF16 constant nor the global image default
+/// may leak in: the server refuses off-envelope steps only after the whole
+/// admission cost has been paid.
+fn effective_generation_steps(
+    is_h3: bool,
+    model_cfg: &mold_core::ModelConfig,
+    config: &Config,
+    steps: Option<u32>,
+) -> u32 {
+    if let Some(steps) = steps {
+        return steps;
+    }
+    if is_h3 {
+        model_cfg
+            .default_steps
+            .unwrap_or(mold_core::minimax_h3::COMFY_DEFAULT_STEPS)
+    } else {
+        model_cfg.effective_steps(config)
+    }
+}
+
 fn effective_negative_prompt(
     family: Option<&str>,
     guidance: f64,
@@ -301,7 +327,12 @@ fn refit_request_after_pull(
         }
     }
     if cli_steps.is_none() {
-        req.steps = model_cfg.effective_steps(config);
+        req.steps = effective_generation_steps(
+            family.is_some_and(mold_core::minimax_h3::is_family),
+            model_cfg,
+            config,
+            None,
+        );
     }
     if cli_guidance.is_none() {
         req.guidance = model_cfg.effective_guidance();
@@ -801,11 +832,7 @@ pub async fn run(
         source_image.as_deref(),
         edit_images.as_deref(),
     )?;
-    let effective_steps = if is_h3 {
-        steps.unwrap_or(mold_core::minimax_h3::DEFAULT_STEPS)
-    } else {
-        steps.unwrap_or_else(|| model_cfg.effective_steps(&config))
-    };
+    let effective_steps = effective_generation_steps(is_h3, &model_cfg, &config, steps);
     let guidance_caps = mold_core::GuidanceCapabilities::for_recipe(
         family.as_deref().unwrap_or_default(),
         model,
@@ -4351,6 +4378,63 @@ mod tests {
         let mut buf = std::io::Cursor::new(Vec::new());
         img.write_to(&mut buf, image::ImageFormat::Png).unwrap();
         buf.into_inner()
+    }
+
+    /// #4 of the Turbo-manifests work: `mold run` submitted the official
+    /// BF16 constant (50 steps) and generic image defaults for compact H3,
+    /// which the server refuses only after admission. Every H3 identity must
+    /// default to its own manifest tier's envelope: 1344x768 and 21 / 9 / 5
+    /// steps.
+    #[test]
+    fn h3_defaults_come_from_the_manifest_tier_not_generic_image_defaults() {
+        let config = Config::default();
+        for (model, expected_steps) in [
+            (mold_core::minimax_h3::FL2VA_COMFY, 21),
+            (mold_core::minimax_h3::FL2VA_COMFY_TURBO_8STEP, 9),
+            (mold_core::minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P, 5),
+        ] {
+            let model_cfg = config.resolved_model_config(model);
+            assert_eq!(
+                resolve_family(model, &config).as_deref(),
+                Some("minimax-h3"),
+                "{model}"
+            );
+            assert_eq!(
+                effective_generation_steps(true, &model_cfg, &config, None),
+                expected_steps,
+                "{model}"
+            );
+            // An explicit --steps always wins.
+            assert_eq!(
+                effective_generation_steps(true, &model_cfg, &config, Some(2)),
+                2
+            );
+            assert_eq!(
+                effective_dimensions(
+                    &config,
+                    &model_cfg,
+                    model,
+                    Some("minimax-h3"),
+                    None,
+                    None,
+                    None,
+                    None
+                )
+                .unwrap(),
+                (
+                    mold_core::minimax_h3::DEFAULT_WIDTH,
+                    mold_core::minimax_h3::DEFAULT_HEIGHT
+                ),
+                "{model}"
+            );
+        }
+        // The hidden official BF16 reference keeps its 50-step manifest
+        // default through the same path.
+        let official = config.resolved_model_config(mold_core::minimax_h3::FL2VA_OFFICIAL);
+        assert_eq!(
+            effective_generation_steps(true, &official, &config, None),
+            mold_core::minimax_h3::DEFAULT_STEPS
+        );
     }
 
     #[test]
