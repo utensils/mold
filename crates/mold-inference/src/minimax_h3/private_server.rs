@@ -54,8 +54,8 @@ use super::private_fl2va_runtime::{
 #[cfg(feature = "mp4")]
 use super::private_opened_evidence::{
     build_private_fl2va_admission_attempt, prepare_private_fl2va_admission_request,
-    prepare_private_ref2va_admission_request, H3PrivateComfyStorageAuthority,
-    H3PrivatePreparedFl2VaAttempt,
+    prepare_private_ref2va_admission_request, qwen_activation_workspace_demand_bytes,
+    H3PrivateComfyStorageAuthority, H3PrivatePreparedFl2VaAttempt,
 };
 use super::private_opened_evidence::{
     H3PrivateOpenedActivationFacts, H3PrivatePreparedFl2VaFactoryInputs,
@@ -1485,9 +1485,15 @@ fn prepare_reviewed_h3_private_fl2va_admission(
             qwen_parameter_bytes: qwen_memory.source_parameter_bytes,
             qwen_host_resident_parameter_bytes: qwen_memory.host_resident_parameter_bytes,
             qwen_device_resident_parameter_bytes: qwen_memory.device_resident_parameter_bytes,
-            qwen_activation_workspace_bytes: runtime_qualification
-                .bounds()
-                .qwen_activation_workspace_bytes,
+            // Request-derived for Ref2VA, the reviewed grant verbatim for
+            // FL2VA — the same seam the budget builder charges through, so
+            // the freeze-time projection comparison cannot drift.
+            qwen_activation_workspace_bytes: qwen_activation_workspace_demand_bytes(
+                &admission_request.request,
+                runtime_qualification
+                    .bounds()
+                    .qwen_activation_workspace_bytes,
+            )?,
             qwen_maximum_tensor_staging_bytes: qwen_memory.maximum_tensor_staging_bytes,
             qwen_retained_raw_header_bytes: qwen_memory.retained_raw_header_bytes,
             qwen_output_text_rows: admission_request.request.rows.qwen_output_text_rows,
@@ -4537,13 +4543,16 @@ const fn capture_grid_ceiling(bytes: u64) -> u64 {
 ///   canvas) = x 2048^2/(512x384) = x64/3, grid-rounded: 7.85 GB. Charged in
 ///   the reference visual-encode phase, far below the denoise peak.
 /// * `qwen_activation` — 2x the corrected public ceiling (2 x 3.96 GB =
-///   7.92 GB). The campaign's ordered sets keep the multimodal sequence
-///   within ~2x FL2VA's (text 1,058 + one to three references' vision pads
-///   vs FL2VA's 5,090-row envelope); the envelope's twelve-still maximum
-///   (50,210 Qwen rows) is deliberately NOT the sizing point — granting it
-///   would exceed the campaign host headroom beside the 19.1 GB CPU-placed
-///   conditioner, and a larger set is refused by the exact per-attempt
-///   check rather than pre-granted here.
+///   7.92 GB). This is the provisional GRANT ceiling only, not the charge:
+///   the exact budget charges each request's own derived demand — the
+///   corrected observed per-row cost scaled by the request's text+vision
+///   rows (`qwen_activation_workspace_demand_bytes`) — and a Ref2VA
+///   sequence whose demand exceeds this grant is a named refusal at budget
+///   build, never an undercharged admit. The 2x sizing covers the
+///   campaign's ordered sets (~2x FL2VA's 5,090-row measured sequence);
+///   the envelope's twelve-still maximum (50,210 Qwen rows) is
+///   deliberately NOT the sizing point — granting it would exceed the
+///   campaign host headroom beside the 19.1 GB CPU-placed conditioner.
 /// * `fixed_runtime_host` / `fixed_runtime_device` /
 ///   `decoder_tile` / `audio_decode` — fixed runtime state and
 ///   generated-side output whose geometry the capture envelope shares with
