@@ -1259,7 +1259,11 @@ mod tests {
         AudioSoundtrackAssociation, ConditionEncodeMode, H3Modality, H3ModalityTag, H3PackedLayout,
         RefPresentation, RefPresentationKind,
     };
+    #[cfg(feature = "mp4")]
+    use mold_core::GenerationReferenceKind;
     use serde_json::json;
+    #[cfg(feature = "mp4")]
+    use sha2::{Digest, Sha256};
 
     use super::*;
     use crate::progress::{is_inference_cancelled, InferenceCancelled};
@@ -2533,6 +2537,423 @@ mod tests {
                 "streamed-denoise",
                 "decode-video",
                 "decode-audio",
+            ]
+        );
+    }
+
+    /// Ref2VA components whose reference decode and preprocessing are the
+    /// production [`H3ReferenceMediaAdapter`], not metadata-only stubs. Only
+    /// the three weight-bearing seams (Qwen, both VAEs, and the transformer)
+    /// stay synthetic, so the reference geometry every encoder receives is the
+    /// geometry real media actually produced.
+    #[cfg(feature = "mp4")]
+    struct RealMediaRefComponents {
+        device: Device,
+        identity: H3PipelineBackendIdentity,
+        trace: Arc<Mutex<Vec<String>>>,
+        media: crate::minimax_h3::reference_media::H3ReferenceMediaAdapter,
+    }
+
+    #[cfg(feature = "mp4")]
+    impl H3Ref2VaBackend for RealMediaRefComponents {
+        fn identity(&self) -> H3PipelineBackendIdentity {
+            self.identity.clone()
+        }
+
+        fn device(&self) -> &Device {
+            &self.device
+        }
+
+        fn maximum_packed_rows(&self) -> usize {
+            100_000
+        }
+
+        fn reference_media_adapter(
+            &mut self,
+        ) -> Option<&mut crate::minimax_h3::reference_media::H3ReferenceMediaAdapter> {
+            Some(&mut self.media)
+        }
+
+        fn encode_text(
+            &mut self,
+            prompt: &str,
+            references: &[H3ReferencePresentation],
+            _checkpoint: &mut dyn H3PipelineCheckpoint,
+        ) -> Result<H3TextConditioning> {
+            assert!(!prompt.is_empty());
+            let mut tags = vec![H3ModalityTag::Text];
+            for reference in references {
+                let vision = match &reference.presentation.kind {
+                    RefPresentationKind::Audio => 0,
+                    RefPresentationKind::Image { vision_tokens } => *vision_tokens,
+                    RefPresentationKind::Video { blocks } => {
+                        blocks.iter().map(|block| block.vision_tokens).sum()
+                    }
+                };
+                self.trace
+                    .lock()
+                    .unwrap()
+                    .push(format!("vision:{}:{vision}", reference.index));
+                tags.extend(std::iter::repeat_n(H3ModalityTag::Vision, vision));
+            }
+            tags.push(H3ModalityTag::Text);
+            Ok(H3TextConditioning {
+                states: Tensor::zeros((1, tags.len(), 5_120), DType::F32, &self.device)?,
+                tags,
+                #[cfg(test)]
+                lifetime_probe: None,
+            })
+        }
+
+        fn encode_visual_reference(
+            &mut self,
+            reference: &H3PreparedReference,
+            mode: ConditionEncodeMode,
+            _checkpoint: &mut dyn H3PipelineCheckpoint,
+        ) -> Result<Tensor> {
+            use crate::minimax_h3::reference_media::H3NormalizedReference;
+
+            assert_eq!(mode, ConditionEncodeMode::OfficialFreshSeed42);
+            let index = reference.metadata.index;
+            // A real visual VAE encodes the normalized media the adapter
+            // retained. Prove that media is exactly the canvas the frozen
+            // placement shape promised before returning its latent shape.
+            let (width, height, frames) = match self
+                .media
+                .normalized(index)
+                .expect("the production adapter must retain normalized visual media")
+            {
+                H3NormalizedReference::Image { image, .. } => {
+                    (image.width(), image.height(), 1_usize)
+                }
+                H3NormalizedReference::Video { vae_frames, .. } => {
+                    let first = vae_frames.first().expect("normalized video has no frames");
+                    (first.width(), first.height(), vae_frames.len())
+                }
+                H3NormalizedReference::Audio { .. } => {
+                    panic!("audio reference reached the visual encoder")
+                }
+            };
+            assert_eq!(Some(width), reference.shape.normalized_width);
+            assert_eq!(Some(height), reference.shape.normalized_height);
+            if reference.metadata.kind == GenerationReferenceKind::Video {
+                assert_eq!(Some(frames as u32), reference.shape.video_frames);
+            }
+            self.trace
+                .lock()
+                .unwrap()
+                .push(format!("encode-visual:{index}:{width}x{height}x{frames}"));
+            let latent_frames = if reference.metadata.kind == GenerationReferenceKind::Image {
+                1
+            } else {
+                mold_candle::minimax_h3::VisualTemporalGeometry::default().encoded_frames(frames)?
+            };
+            Tensor::zeros(
+                (
+                    1,
+                    24,
+                    latent_frames,
+                    usize::try_from(height)? / 16,
+                    usize::try_from(width)? / 16,
+                ),
+                DType::F32,
+                &self.device,
+            )
+            .map_err(Into::into)
+        }
+
+        fn encode_audio_reference(
+            &mut self,
+            reference: &H3PreparedReference,
+            mode: H3AudioConditionEncodeMode,
+            _checkpoint: &mut dyn H3PipelineCheckpoint,
+        ) -> Result<StereoLatents> {
+            use crate::minimax_h3::reference_media::H3NormalizedReference;
+
+            assert_eq!(mode, H3AudioConditionEncodeMode::OfficialPosteriorModeF32);
+            let index = reference.metadata.index;
+            let audio = match self
+                .media
+                .normalized(index)
+                .expect("the production adapter must retain normalized audio media")
+            {
+                H3NormalizedReference::Audio { audio } => audio,
+                H3NormalizedReference::Video { audio, .. } => audio
+                    .as_ref()
+                    .expect("video reference with audio rows lost its soundtrack"),
+                H3NormalizedReference::Image { .. } => {
+                    panic!("image reference reached the audio encoder")
+                }
+            };
+            // The audio VAE compresses 800 samples per stereo latent, so the
+            // adapter's normalized sample count is what makes the frozen
+            // `audio_rows` reachable at all.
+            assert_eq!(audio.sample_rate, contract::AUDIO_SAMPLE_RATE_HZ);
+            assert_eq!(
+                Some(u64::try_from(audio.samples_per_channel())?),
+                reference.shape.audio_samples_per_channel
+            );
+            let latents = u64::try_from(audio.samples_per_channel())?.div_ceil(800);
+            assert_eq!(
+                latents * u64::from(contract::AUDIO_CHANNELS),
+                reference.shape.audio_rows
+            );
+            self.trace
+                .lock()
+                .unwrap()
+                .push(format!("encode-audio:{index}:{latents}"));
+            StereoLatents::new(
+                Tensor::zeros(
+                    (1, 32, 2, usize::try_from(latents)?),
+                    DType::F32,
+                    &self.device,
+                )?,
+                &mold_candle::minimax_h3::AudioVaeConfig::default(),
+            )
+            .map_err(Into::into)
+        }
+
+        fn denoise(
+            &mut self,
+            _input: H3ForwardInput<'_>,
+            _layout: &H3FrozenPackedLayout,
+            _checkpoint: &mut dyn H3PipelineCheckpoint,
+        ) -> Result<H3TransformerOutput> {
+            unreachable!("the composed backend must route denoise to its streamed authority")
+        }
+
+        fn decode_video(
+            &mut self,
+            latents: &Tensor,
+            sink: &mut H3VideoEncodeSink,
+            checkpoint: &mut dyn H3PipelineCheckpoint,
+        ) -> Result<()> {
+            self.trace
+                .lock()
+                .unwrap()
+                .push(format!("decode-video:{:?}", latents.dims()));
+            for frame in 0..124 {
+                sink.push(
+                    &RgbImage::from_pixel(32, 32, Rgb([frame as u8, 7, 11])),
+                    checkpoint,
+                )?;
+            }
+            Ok(())
+        }
+
+        fn decode_audio(
+            &mut self,
+            latents: &StereoLatents,
+            _checkpoint: &mut dyn H3PipelineCheckpoint,
+        ) -> Result<StereoWaveform> {
+            let samples = latents.normalized().dims()[3];
+            self.trace
+                .lock()
+                .unwrap()
+                .push(format!("decode-audio:{samples}"));
+            StereoWaveform::new(
+                Tensor::zeros((1, 2, samples * 800), DType::F32, &self.device)?,
+                contract::AUDIO_SAMPLE_RATE_HZ as usize,
+                AudioSoundtrackAssociation::Generated,
+            )
+            .map_err(Into::into)
+        }
+    }
+
+    #[cfg(feature = "mp4")]
+    #[derive(Default)]
+    struct PhaseRecorder {
+        phases: Vec<H3PipelinePhase>,
+    }
+
+    #[cfg(feature = "mp4")]
+    impl H3PipelineObserver for PhaseRecorder {
+        fn observe(&mut self, event: H3PipelineEvent) {
+            if self.phases.last() != Some(&event.phase) {
+                self.phases.push(event.phase);
+            }
+        }
+    }
+
+    /// One file-backed reference binding plus the request-side descriptor whose
+    /// digest, dimensions, and duration are the real fixture's.
+    #[cfg(feature = "mp4")]
+    fn media_reference(
+        index: usize,
+        reference: mold_core::GenerationReference,
+        bytes: &[u8],
+    ) -> (mold_core::GenerationReference, GenerationReferenceBinding) {
+        use std::io::Write;
+
+        let metadata = reference.redacted_metadata_lossless(index);
+        assert_eq!(metadata.sha256, format!("{:x}", Sha256::digest(bytes)));
+        let mut staged = tempfile::NamedTempFile::new().unwrap();
+        staged.write_all(bytes).unwrap();
+        staged.flush().unwrap();
+        let binding = GenerationReferenceBinding::from_opened_file(
+            metadata,
+            staged.reopen().unwrap(),
+            u64::try_from(bytes.len()).unwrap(),
+            None,
+        )
+        .unwrap();
+        (reference, binding)
+    }
+
+    /// The full ordered Ref2VA phase sequence over production media
+    /// preprocessing: real PNG/WAV decode, the contract's own normalization
+    /// canvas, Qwen presentation geometry, both reference encoders, streamed
+    /// denoise, and synchronized decode/mux.
+    #[cfg(feature = "mp4")]
+    #[test]
+    fn ref2va_runtime_executes_the_phase_sequence_over_production_media_preprocessing() {
+        use std::io::Cursor;
+
+        use image::{DynamicImage, ImageFormat};
+        use mold_core::{GenerationReference, GenerationReferenceAuthority};
+
+        use crate::ltx2::media::encode_wav_f32_interleaved;
+
+        let image_bytes = {
+            let image = RgbImage::from_fn(48, 48, |x, y| {
+                Rgb([(x * 5) as u8, (y * 5) as u8, ((x + y) * 3) as u8])
+            });
+            let mut bytes = Cursor::new(Vec::new());
+            DynamicImage::ImageRgb8(image)
+                .write_to(&mut bytes, ImageFormat::Png)
+                .unwrap();
+            bytes.into_inner()
+        };
+        let audio_samples = (0..96_000)
+            .map(|sample| ((sample as f32 / 48_000.0) * std::f32::consts::TAU * 110.0).sin() * 0.25)
+            .collect::<Vec<_>>();
+        let audio_bytes = encode_wav_f32_interleaved(&audio_samples, 48_000, 1).unwrap();
+
+        let (image_reference, image_binding) = media_reference(
+            0,
+            GenerationReference::Image {
+                media: GenerationReferenceAuthority::Descriptor,
+                provenance: mold_core::GenerationReferenceProvenance {
+                    name: Some("portrait.png".into()),
+                    sha256: Some(format!("{:x}", Sha256::digest(&image_bytes))),
+                },
+                mime_type: "image/png".into(),
+                width: 48,
+                height: 48,
+            },
+            &image_bytes,
+        );
+        let (audio_reference, audio_binding) = media_reference(
+            1,
+            GenerationReference::Audio {
+                media: GenerationReferenceAuthority::Descriptor,
+                provenance: mold_core::GenerationReferenceProvenance {
+                    name: Some("voice.wav".into()),
+                    sha256: Some(format!("{:x}", Sha256::digest(&audio_bytes))),
+                },
+                mime_type: "audio/wav".into(),
+                duration_ms: 2_000,
+                sample_rate: 48_000,
+                channels: 1,
+                sample_count: Some(96_000),
+            },
+            &audio_bytes,
+        );
+
+        let mut request = request();
+        request.model = contract::REF2VA_COMFY.into();
+        request.references = Some(vec![image_reference, audio_reference]);
+        let bindings = vec![image_binding, audio_binding];
+
+        let authority = authority_for(contract::REF2VA_COMFY);
+        let identity = H3PipelineBackendIdentity {
+            kind: crate::minimax_h3::pipeline::H3PipelineBackendKind::SyntheticCpu,
+            device_id: authority.device_id().to_string(),
+            execution_fingerprint: authority.execution_fingerprint().to_string(),
+        };
+        let trace = Arc::new(Mutex::new(Vec::new()));
+        let composed = H3StreamedRef2VaPipelineBackend::new(
+            RealMediaRefComponents {
+                device: Device::Cpu,
+                identity: identity.clone(),
+                trace: Arc::clone(&trace),
+                media: Default::default(),
+            },
+            StructuralDenoiser {
+                identity,
+                trace: Arc::new(Mutex::new(Vec::new())),
+            },
+            authority.component_set_identity_sha256().to_string(),
+        )
+        .unwrap();
+        let runtime = H3Ref2VaPipelineRuntime::new(composed, &authority).unwrap();
+
+        let mut observer = PhaseRecorder::default();
+        let output = Box::new(runtime)
+            .generate(
+                &request,
+                &bindings,
+                &ProgressReporter::default(),
+                &mut observer,
+            )
+            .unwrap();
+
+        assert_eq!(output.mode, Mode::ReferenceToAudioVideo);
+        assert!(!output.mp4.is_empty());
+        assert!(!output.thumbnail_png.is_empty());
+        assert_eq!(output.frames, 124);
+        assert_eq!(output.audio_sample_rate, contract::AUDIO_SAMPLE_RATE_HZ);
+
+        // The image is normalized onto the contract's own 2048 short-edge
+        // canvas, so Qwen sees (2048/32)^2 vision pads and the visual VAE
+        // receives that exact canvas. The audio reference contributes no
+        // vision pads and one 32 kHz stereo condition block.
+        assert_eq!(
+            *trace.lock().unwrap(),
+            vec![
+                "vision:1:4096".to_string(),
+                "vision:2:0".into(),
+                "encode-visual:1:2048x2048x1".into(),
+                "encode-audio:2:80".into(),
+                "decode-video:[1, 24, 37, 2, 2]".into(),
+                "decode-audio:207".into(),
+            ]
+        );
+        // Chunk phases interleave with their parent, so drop them and then
+        // collapse the runs. Visual decode reappears after `VideoEncode`
+        // because the H.264 sink encodes each frame as the decoder pushes it.
+        let mut phases = observer
+            .phases
+            .iter()
+            .copied()
+            .filter(|phase| {
+                !matches!(
+                    phase,
+                    H3PipelinePhase::ReferenceDecodeChunk
+                        | H3PipelinePhase::ReferencePreprocessChunk
+                        | H3PipelinePhase::VisualDecodeChunk
+                )
+            })
+            .collect::<Vec<_>>();
+        phases.dedup();
+        assert_eq!(
+            phases,
+            vec![
+                H3PipelinePhase::Validate,
+                H3PipelinePhase::ReferenceDecode,
+                H3PipelinePhase::ReferencePreprocess,
+                H3PipelinePhase::QwenEncode,
+                H3PipelinePhase::ReferenceVisualEncode,
+                H3PipelinePhase::ReferenceAudioEncode,
+                H3PipelinePhase::NoiseAllocation,
+                H3PipelinePhase::Denoise,
+                H3PipelinePhase::VisualDecode,
+                H3PipelinePhase::VideoEncode,
+                H3PipelinePhase::VisualDecode,
+                H3PipelinePhase::AudioDecode,
+                H3PipelinePhase::Staged,
+                H3PipelinePhase::Mux,
+                H3PipelinePhase::Complete,
             ]
         );
     }
