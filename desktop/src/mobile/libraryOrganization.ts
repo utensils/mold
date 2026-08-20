@@ -268,12 +268,16 @@ export function filterLibraryPrints<T extends { hostId: string; filename: string
 // ── Tags across hosts ───────────────────────────────────────────────────────
 
 /** Case-insensitive union of every host's tag counts (counts summed — an
- * upper bound when a print is mirrored, same caveat as collections). */
+ * upper bound when a print is mirrored, same caveat as collections). Pass
+ * `hostIds` to scope the merge to the currently connected hosts so a
+ * disconnected or forgotten machine's retained bucket leaves no ghost chips. */
 export function mergeHostTags(
   perHost: Record<string, readonly TagCount[] | undefined>,
+  hostIds?: readonly string[],
 ): TagCount[] {
+  const buckets = hostIds ? hostIds.map((id) => perHost[id]) : Object.values(perHost);
   const byKey = new Map<string, TagCount>();
-  for (const tags of Object.values(perHost)) {
+  for (const tags of buckets) {
     for (const tag of tags ?? []) {
       const key = tagKey(tag.name);
       if (!key) continue;
@@ -395,6 +399,48 @@ export function trashRetentionHosts(
   return hosts
     .filter((host) => support.trashHostIds.has(host.id))
     .map((host) => ({ label: host.name, retentionDays: support.retentionDays[host.id] ?? 0 }));
+}
+
+export interface TrashSnapshotInput<T extends { hostId: string; timestamp: number }> {
+  /** The previous merged trash listing (last good per-host reads). */
+  previous: readonly T[];
+  /** Copies read this pass. */
+  refreshed: readonly T[];
+  /** Hosts whose listing was actually read this pass. */
+  refreshedHostIds: ReadonlySet<string>;
+  /** Every currently connected trash-capable host. */
+  trashCapableHostIds: ReadonlySet<string>;
+  /** Hosts whose read rejected. */
+  rejectedHosts: number;
+  /** Trash-capable hosts skipped before the fetch (known offline). */
+  skippedHosts: number;
+}
+
+export interface TrashSnapshotOutcome<T extends { hostId: string; timestamp: number }> {
+  copies: T[];
+  /** True only when every trash-capable host was read this pass. A partial
+   * snapshot must never be authoritative — the scope stays retry-eligible. */
+  complete: boolean;
+  /** Rejected + skipped hosts, for the "N hosts unavailable" disclosure. */
+  failedHosts: number;
+}
+
+/** Merge one trash refresh pass over the previous snapshot: refreshed hosts
+ * are replaced, unread trash-capable hosts keep their prior copies, and
+ * hosts that are no longer connected/trash-capable are dropped. */
+export function mergeTrashSnapshot<T extends { hostId: string; timestamp: number }>(
+  input: TrashSnapshotInput<T>,
+): TrashSnapshotOutcome<T> {
+  const retained = input.previous.filter(
+    (copy) =>
+      input.trashCapableHostIds.has(copy.hostId) && !input.refreshedHostIds.has(copy.hostId),
+  );
+  const failedHosts = input.rejectedHosts + input.skippedHosts;
+  return {
+    copies: [...retained, ...input.refreshed].sort((a, b) => b.timestamp - a.timestamp),
+    complete: failedHosts === 0,
+    failedHosts,
+  };
 }
 
 /** Tile chip for a trashed print; null when the host keeps trash forever. */

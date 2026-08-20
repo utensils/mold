@@ -1588,6 +1588,42 @@ describe("MobileHostDetail Library card", () => {
     ).toBe("7");
   });
 
+  it("keeps the selector read-only with a Retry when the retention probe fails", async () => {
+    installLibraryApi();
+    const base = apiJsonTo.getMockImplementation()!;
+    let failConfig = true;
+    apiJsonTo.mockImplementation(
+      (target: { baseUrl: string }, path: string, init?: RequestInit): Promise<unknown> => {
+        if (
+          path === "/api/config/gallery.trash_retention_days" &&
+          init?.method !== "PUT" &&
+          failConfig
+        ) {
+          return Promise.reject(new Error("config unavailable"));
+        }
+        return base(target, path, init);
+      },
+    );
+    const view = await mountDetail();
+    await flushPromises();
+
+    // Unknown authority = read-only: an env-pinned key must never become
+    // editable because its probe failed transiently.
+    expect(view.get("[data-test='host-detail-retention']").attributes("disabled")).toBeDefined();
+    const failure = view.get("[data-test='host-detail-retention-error']");
+    expect(failure.text()).toContain("retention");
+
+    failConfig = false;
+    await view.get("[data-test='host-detail-retention-retry']").trigger("click");
+    await flushPromises();
+
+    expect(view.find("[data-test='host-detail-retention-error']").exists()).toBe(false);
+    expect(view.get("[data-test='host-detail-retention']").attributes("disabled")).toBeUndefined();
+    expect(
+      (view.get("[data-test='host-detail-retention']").element as HTMLSelectElement).value,
+    ).toBe("30");
+  });
+
   it("keeps an env-pinned retention read-only and says which variable owns it", async () => {
     installLibraryApi({ locked: true });
     const view = await mountDetail();

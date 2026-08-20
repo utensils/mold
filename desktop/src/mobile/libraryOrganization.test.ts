@@ -13,6 +13,7 @@ import {
   logicalCopiesOf,
   mergedCollectionsFor,
   mergeHostTags,
+  mergeTrashSnapshot,
   purgeChipLabel,
   requestTitle,
   reusedPrintTitle,
@@ -210,6 +211,19 @@ describe("organization index and filters", () => {
     expect(tagChipPlan(many, null, 8).overflow).toHaveLength(4);
   });
 
+  it("scopes the tag merge to the given hosts so a forgotten machine leaves no ghost chips", () => {
+    const buckets = {
+      studio: [{ name: "Blue", count: 2 }],
+      ghost: [{ name: "Haunt", count: 4 }],
+    };
+    expect(mergeHostTags(buckets, ["studio"])).toEqual([{ name: "Blue", count: 2 }]);
+    // Without a scope every retained bucket still merges (legacy behaviour).
+    expect(mergeHostTags(buckets)).toEqual([
+      { name: "Haunt", count: 4 },
+      { name: "Blue", count: 2 },
+    ]);
+  });
+
   it("merges collections across hosts into cards with host labels", () => {
     const merged = mergedCollectionsFor(perHost, hosts);
     const cards = collectionCards(merged, { studio: "Studio", plato: "plato" });
@@ -243,6 +257,54 @@ describe("trash helpers", () => {
     expect(purgeChipLabel(now / 1000 + 3 * 86_400, now)).toBe("Purges in 3 d");
     expect(purgeChipLabel(now / 1000 - 1, now)).toBe("Purges today");
     expect(purgeChipLabel(null, now)).toBeNull();
+  });
+
+  it("retains the last snapshot for trash-capable hosts a pass could not read", () => {
+    const previous = [
+      copy("studio", "stale.png", { timestamp: 5 }),
+      copy("plato", "kept.png", { timestamp: 9 }),
+      copy("forgotten", "orphan.png", { timestamp: 3 }),
+    ];
+    const outcome = mergeTrashSnapshot({
+      previous,
+      refreshed: [copy("studio", "fresh.png", { timestamp: 7 })],
+      refreshedHostIds: new Set(["studio"]),
+      trashCapableHostIds: new Set(["studio", "plato"]),
+      rejectedHosts: 0,
+      skippedHosts: 1,
+    });
+    // plato (skipped offline) keeps its prior prints; studio is replaced by
+    // the fresh read; the no-longer-capable host's copies are dropped.
+    expect(outcome.copies.map((entry) => entry.filename)).toEqual(["kept.png", "fresh.png"]);
+    expect(outcome.failedHosts).toBe(1);
+    // An incomplete snapshot is never authoritative: the scope stays
+    // retry-eligible so re-entering Trash refetches.
+    expect(outcome.complete).toBe(false);
+  });
+
+  it("marks the trash snapshot complete only when every capable host was read", () => {
+    const outcome = mergeTrashSnapshot({
+      previous: [copy("studio", "old.png", { timestamp: 1 })],
+      refreshed: [copy("studio", "new.png", { timestamp: 2 })],
+      refreshedHostIds: new Set(["studio"]),
+      trashCapableHostIds: new Set(["studio"]),
+      rejectedHosts: 0,
+      skippedHosts: 0,
+    });
+    expect(outcome.copies.map((entry) => entry.filename)).toEqual(["new.png"]);
+    expect(outcome.complete).toBe(true);
+    expect(outcome.failedHosts).toBe(0);
+
+    const rejected = mergeTrashSnapshot({
+      previous: [],
+      refreshed: [],
+      refreshedHostIds: new Set<string>(),
+      trashCapableHostIds: new Set(["studio"]),
+      rejectedHosts: 1,
+      skippedHosts: 0,
+    });
+    expect(rejected.complete).toBe(false);
+    expect(rejected.failedHosts).toBe(1);
   });
 });
 

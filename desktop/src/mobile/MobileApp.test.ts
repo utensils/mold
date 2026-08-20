@@ -5781,6 +5781,32 @@ describe("MobileApp gallery", () => {
     expect(wrapper.text()).toContain("1 host unavailable");
   });
 
+  it("settles a host whose capabilities endpoint stalls instead of leaving the Library loading", async () => {
+    vi.useFakeTimers();
+    try {
+      apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+        if (path === "/api/status") return Promise.resolve(status);
+        if (path === "/api/models") return Promise.resolve([model]);
+        // The capabilities read never settles: the host deadline alone must
+        // resolve this host so the multi-host refresh can finish.
+        if (path === "/api/capabilities") return new Promise(() => {});
+        if (path === "/api/gallery") return Promise.resolve([print]);
+        if (path === "/api/activity")
+          return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
+        return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      });
+
+      wrapper = mountMobileApp();
+      await vi.advanceTimersByTimeAsync(0);
+      await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+      await vi.advanceTimersByTimeAsync(9_000);
+
+      expect(wrapper.find("[data-test='gallery-item']").exists()).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("refreshes the Library when a previously offline host recovers", async () => {
     const recoveredTarget = { baseUrl: "http://halcyon.tailnet.ts.net:7680", apiKey: "secret" };
     localStorage.setItem(
@@ -8230,6 +8256,150 @@ describe("MobileApp Library organization", () => {
     });
   });
 
+  it("drops an unfavorited print from the grid while the Favorites filter is on", async () => {
+    installLibraryApi();
+    await openLibrary();
+
+    await wrapper?.get("[data-test='mobile-library-chip-favorites']").trigger("click");
+    await flushPromises();
+    await vi.waitFor(() => expect(wrapper?.findAll("[data-test='gallery-item']")).toHaveLength(1));
+
+    await wrapper?.get("[data-test='mobile-gallery-select']").trigger("click");
+    await wrapper?.get("[data-test='gallery-item']").trigger("click");
+    // Every selected print is a favorite, so ♥ unfavorites — the print no
+    // longer matches the active filter and must leave the grid immediately.
+    await wrapper?.get("[data-test='mobile-gallery-favorite']").trigger("click");
+    await flushPromises();
+
+    await vi.waitFor(() => expect(wrapper?.findAll("[data-test='gallery-item']")).toHaveLength(0));
+  });
+
+  it("drops a print from the grid when its active-filter tag is removed", async () => {
+    installLibraryApi();
+    await openLibrary();
+
+    await wrapper?.get("[data-test='mobile-library-chip-tag']").trigger("click");
+    await flushPromises();
+    await vi.waitFor(() => expect(wrapper?.findAll("[data-test='gallery-item']")).toHaveLength(1));
+
+    await wrapper?.get("[data-test='mobile-gallery-select']").trigger("click");
+    await wrapper?.get("[data-test='gallery-item']").trigger("click");
+    await wrapper?.get("[data-test='mobile-gallery-tag']").trigger("click");
+    await wrapper?.get("[data-test='mobile-tag-sheet-remove']").trigger("click");
+    await flushPromises();
+
+    await vi.waitFor(() => expect(wrapper?.findAll("[data-test='gallery-item']")).toHaveLength(0));
+  });
+
+  it("keeps an incomplete trash snapshot retry-eligible instead of authoritative", async () => {
+    installLibraryApi();
+    const base = apiJsonTo.getMockImplementation()!;
+    let trashReads = 0;
+    apiJsonTo.mockImplementation(
+      (requestTarget: unknown, path: string, init?: RequestInit): Promise<unknown> => {
+        if (path === "/api/gallery?view=trash") {
+          trashReads += 1;
+          return trashReads === 1
+            ? Promise.reject(new Error("trash listing failed"))
+            : Promise.resolve([trashedPrint]);
+        }
+        return base(requestTarget, path, init) as Promise<unknown>;
+      },
+    );
+    await openLibrary();
+
+    await wrapper?.get("[data-test='mobile-library-scope-trash']").trigger("click");
+    await flushPromises();
+    await vi.waitFor(() => expect(trashReads).toBe(1));
+    expect(wrapper?.text()).toContain("unavailable");
+
+    // The failed pass never becomes the authoritative snapshot: re-entering
+    // the Trash scope refetches instead of trusting the incomplete read.
+    await wrapper?.get("[data-test='mobile-library-scope-prints']").trigger("click");
+    await flushPromises();
+    await wrapper?.get("[data-test='mobile-library-scope-trash']").trigger("click");
+    await vi.waitFor(() => expect(trashReads).toBe(2));
+    await vi.waitFor(() => expect(wrapper?.find("[data-test='purge-chip']").exists()).toBe(true));
+  });
+
+  it("removes a disconnected machine's tag chips from the merged Library", async () => {
+    const platoTarget = { baseUrl: "http://plato.tailnet.ts.net:7680", apiKey: "secret" };
+    localStorage.setItem(
+      "mold.mobile.hosts.v1",
+      JSON.stringify([
+        {
+          id: "studio-id",
+          name: "Studio",
+          baseUrl: target.baseUrl,
+          hostname: "studio",
+          version: "0.18.0",
+          online: false,
+        },
+        {
+          id: "plato-id",
+          name: "Plato",
+          baseUrl: platoTarget.baseUrl,
+          hostname: "plato",
+          version: "0.18.0",
+          online: false,
+        },
+      ]),
+    );
+    apiJsonTo.mockImplementation((requestTarget: unknown, path: string) => {
+      const fromPlato = (requestTarget as { baseUrl: string }).baseUrl === platoTarget.baseUrl;
+      if (path === "/api/status") {
+        return Promise.resolve(
+          fromPlato ? { ...status, hostname: "plato", instance_id: "plato-id" } : status,
+        );
+      }
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/capabilities") return Promise.resolve(organizedCapabilities);
+      if (path === "/api/gallery")
+        return Promise.resolve(fromPlato ? [plainPrint] : [favoritePrint]);
+      if (path === "/api/gallery/collections") return Promise.resolve([]);
+      if (path === "/api/gallery/tags") {
+        return Promise.resolve(
+          fromPlato ? [{ name: "Haunt", count: 1 }] : [{ name: "Blue", count: 1 }],
+        );
+      }
+      if (path === "/api/activity")
+        return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    apiFetchTo.mockImplementation(() =>
+      Promise.resolve({
+        status: 204,
+        blob: () => Promise.resolve(new Blob(["thumbnail"])),
+        text: () => Promise.resolve(""),
+      } as unknown as Response),
+    );
+    await openLibrary();
+    const chipNames = () =>
+      wrapper!.findAll("[data-test='mobile-library-chip-tag']").map((chip) => chip.text());
+    await vi.waitFor(() => expect(chipNames().join(" ")).toContain("Haunt"));
+
+    // Disconnect Plato from Machines, then return to the Library.
+    const machinesTab = wrapper!
+      .findAll("button.mobile-tab")
+      .find((button) => button.text() === "Machines");
+    await machinesTab!.trigger("click");
+    await flushPromises();
+    const platoRow = wrapper!
+      .findAll("[data-test='mobile-host-row']")
+      .find((row) => row.text().includes("Plato"));
+    await platoRow!.trigger("click");
+    await flushPromises();
+    await wrapper!.get("[data-test='host-detail-disconnect']").trigger("click");
+    await flushPromises();
+    await wrapper!.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await flushPromises();
+    await vi.waitFor(() => expect(wrapper?.find("[data-test='gallery-item']").exists()).toBe(true));
+
+    const chips = chipNames().join(" ");
+    expect(chips).toContain("Blue");
+    expect(chips).not.toContain("Haunt");
+  });
+
   it("moves a selection to the trash behind the two-tap confirm", async () => {
     installLibraryApi();
     await openLibrary();
@@ -8351,6 +8521,77 @@ describe("MobileApp Create title", () => {
     await flushPromises();
     expect(openStreams).toHaveLength(2);
     expect(openStreams[1]?.options.body.title).toBeUndefined();
+  });
+
+  it("hides the Title field for Sequence output behind a note instead of dropping a typed title", async () => {
+    const sequenceModel: ModelEntry = {
+      ...model,
+      name: "ltx-video-0.9.8-2b-dev:bf16",
+      family: "ltx-video",
+      default_steps: 7,
+      default_guidance: 1,
+      default_width: 704,
+      default_height: 480,
+      default_frames: 25,
+      default_fps: 30,
+    };
+    apiJsonTo.mockImplementation((_target: unknown, path: string, init?: RequestInit) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([model, sequenceModel]);
+      if (path === "/api/capabilities") return Promise.resolve({});
+      if (path === "/api/gallery") return Promise.resolve([]);
+      if (path.startsWith("/api/capabilities/chain-limits")) {
+        return Promise.resolve({
+          model: sequenceModel.name,
+          frames_per_clip_cap: 97,
+          frames_per_clip_recommended: 97,
+          max_stages: 8,
+          max_total_frames: 777,
+          fade_frames_max: 32,
+          transition_modes: ["smooth", "cut", "fade"],
+          quantization_family: "bf16",
+          supports_audio: false,
+          supports_sequence: true,
+        });
+      }
+      if (path === "/api/chain-jobs" && init?.method === "POST") {
+        return Promise.resolve({ job_id: "sequence-job-1" });
+      }
+      if (path.startsWith("/api/chain-jobs/")) return new Promise(() => {});
+      if (path === "/api/activity")
+        return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    await fieldControl("Title").setValue("Storm study");
+    const sequenceSegment = wrapper
+      .get("[data-test='mobile-output-mode']")
+      .findAll("button")
+      .find((candidate) => candidate.text() === "Sequence");
+    await sequenceSegment!.trigger("click");
+    await flushPromises();
+
+    // The chain wire (`ChainRequestWire`) has no title slot: the field is
+    // hidden with a one-line note rather than silently ignored.
+    expect(
+      wrapper.findAll("label.field").some((field) => field.find("span").text() === "Title"),
+    ).toBe(false);
+    expect(wrapper.get("[data-test='mobile-sequence-title-note']").text()).toMatch(/title/i);
+
+    const prompts = wrapper.findAll("[data-test='mobile-sequence-clip'] textarea");
+    await prompts[0]!.setValue("a paper boat");
+    await prompts[1]!.setValue("fireflies gather");
+    await wrapper.get("[data-test='mobile-generate-sequence']").trigger("click");
+    await flushPromises();
+
+    const post = apiJsonTo.mock.calls.find(
+      ([, path, init]) =>
+        path === "/api/chain-jobs" && (init as RequestInit | undefined)?.method === "POST",
+    );
+    expect(post).toBeTruthy();
+    expect(JSON.parse(String((post![2] as RequestInit).body))).not.toHaveProperty("title");
   });
 
   it("refuses an over-long title with an inline error instead of dropping it", async () => {

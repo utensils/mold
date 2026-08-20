@@ -9,6 +9,7 @@ vi.mock("../lib/api/client", async (importOriginal) => ({
 import {
   TRASH_RETENTION_CONFIG_KEY,
   fetchHostConfigKey,
+  hostConfigEditable,
   hostConfigLocked,
   retentionDaysFromConfigValue,
   setHostConfigKey,
@@ -55,5 +56,15 @@ describe("mobile host config client", () => {
     expect(hostConfigLocked({ key: "k", value: 1, source: "env", env_var: "X" })).toBe(true);
     expect(hostConfigLocked({ key: "k", value: 1, source: "db" })).toBe(false);
     expect(hostConfigLocked(null)).toBe(false);
+  });
+
+  it("treats unknown config authority as read-only, never editable", () => {
+    // A failed probe leaves no entry: the control must stay disabled because
+    // an env-pinned key would otherwise become editable on a transient error.
+    expect(hostConfigEditable(null)).toBe(false);
+    expect(hostConfigEditable({ key: "k", value: 1, source: "env", env_var: "X" })).toBe(false);
+    expect(hostConfigEditable({ key: "k", value: 1, source: "db" })).toBe(true);
+    expect(hostConfigEditable({ key: "k", value: 1, source: "file" })).toBe(true);
+    expect(hostConfigEditable({ key: "k", value: 1, source: "default" })).toBe(true);
   });
 });

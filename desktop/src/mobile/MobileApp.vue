@@ -285,6 +285,7 @@ import {
   libraryOrganizationSupport,
   logicalCopiesOf,
   mergeHostTags,
+  mergeTrashSnapshot,
   mergedCollectionsFor,
   purgeChipLabel,
   requestTitle,
@@ -2326,6 +2327,18 @@ async function pollMobileActivity(): Promise<void> {
   if (!unmounted) liveActivityTimer = setTimeout(pollMobileActivity, 5_000);
 }
 
+/** Drop a departed host's organization buckets so its tags and collections
+ * stop feeding the merged Library, and release a tag filter that no longer
+ * resolves against any connected host. */
+function pruneHostOrganization(id: string): void {
+  delete hostTags[id];
+  delete hostCollections[id];
+  const active = libraryFilters.tag;
+  if (active && !mergedTags.value.some((tag) => tagKey(tag.name) === active)) {
+    libraryFilters.tag = null;
+  }
+}
+
 function disconnectHost(id: string): void {
   cancelHostProbe(id);
   const host = hosts.value.find((candidate) => candidate.id === id);
@@ -2333,6 +2346,7 @@ function disconnectHost(id: string): void {
   host.connected = false;
   host.online = false;
   delete hostTelemetry[id];
+  pruneHostOrganization(id);
   if (selectedHostId.value === id) {
     selectedHostId.value = connectedHosts.value[0]?.id ?? "";
     models.value = [];
@@ -2355,6 +2369,7 @@ function reconnectHost(id: string): void {
 function removeHost(id: string): void {
   cancelHostProbe(id);
   knownHostReachability.delete(id);
+  pruneHostOrganization(id);
   const removedSelectedHost = selectedHostId.value === id;
   const removedCatalogHost = catalogHostId.value === id;
   if (hostDetailId.value === id) hostDetailId.value = "";
@@ -5059,15 +5074,29 @@ async function performGalleryRefresh(): Promise<void> {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), GALLERY_HOST_TIMEOUT_MS);
       let prints: MobileGalleryImage[];
+      let capabilities: ServerCapabilities | undefined;
       // Capabilities ride along so the Library can gate organization and the
       // trash per host; a refusal keeps whatever this host last advertised.
-      const capabilitiesRead = apiJsonTo<ServerCapabilities>(target, "/api/capabilities", {
-        signal: controller.signal,
-      }).catch(() => undefined);
-      try {
-        prints = await apiJsonTo<MobileGalleryImage[]>(target, "/api/gallery", {
+      // BOTH reads settle under the shared deadline: a stalled capabilities
+      // endpoint must never leave this host's promise pending forever (the
+      // outer allSettled would wait on it and keep the whole Library
+      // loading). The abort race guarantees settlement at the deadline even
+      // if a transport ignores the signal.
+      const capabilitiesRead = Promise.race<ServerCapabilities | undefined>([
+        apiJsonTo<ServerCapabilities>(target, "/api/capabilities", {
           signal: controller.signal,
-        });
+        }).catch(() => undefined),
+        new Promise<undefined>((resolve) =>
+          controller.signal.addEventListener("abort", () => resolve(undefined), { once: true }),
+        ),
+      ]);
+      try {
+        [prints, capabilities] = await Promise.all([
+          apiJsonTo<MobileGalleryImage[]>(target, "/api/gallery", {
+            signal: controller.signal,
+          }),
+          capabilitiesRead,
+        ]);
       } finally {
         clearTimeout(timeout);
       }
@@ -5075,7 +5104,6 @@ async function performGalleryRefresh(): Promise<void> {
       if (!currentHost || mobileGalleryCacheKey(currentHost) !== cacheKey) {
         throw new Error("Gallery host identity changed while refreshing");
       }
-      const capabilities = await capabilitiesRead;
       if (capabilities !== undefined) serverCapabilities[host.id] = capabilities;
       await storeCachedGallery(cacheKey, prints);
       return { host, cacheKey, target, prints };
@@ -5507,7 +5535,14 @@ const hostNamesById = computed(() =>
 const libraryCollectionCards = computed<MobileCollectionCard[]>(() =>
   collectionCards(mergedCollectionsFor(hostCollections, connectedHosts.value), hostNamesById.value),
 );
-const mergedTags = computed(() => mergeHostTags(hostTags));
+// Scoped to connected hosts so a disconnected or forgotten machine's
+// retained bucket leaves no ghost chips (its bucket is also pruned below).
+const mergedTags = computed(() =>
+  mergeHostTags(
+    hostTags,
+    connectedHosts.value.map((host) => host.id),
+  ),
+);
 const libraryTagChips = computed(() => tagChipPlan(mergedTags.value, libraryFilters.tag));
 const libraryHostChips = computed(() =>
   connectedHosts.value.length > 1
@@ -5856,6 +5891,9 @@ async function setFavoriteFor(
     favorite ? "favorite these prints" : "unfavorite these prints",
   );
   await applyOrganizationPatch(copies, () => ({ favorite }), outcome.failedHostIds);
+  // The mutation changed the active filter's predicate: rebuild the paged
+  // grid so a print that no longer matches leaves immediately.
+  if (libraryFilters.favoritesOnly) await requeueGallery();
 }
 
 async function setTitleFor(
@@ -5883,6 +5921,14 @@ async function addTagsFor(copies: readonly PendingGalleryPrint[], tags: string[]
     outcome.failedHostIds,
   );
   await refreshHostOrganization([...new Set(copies.map((copy) => copy.hostId))]);
+  await requeueIfTagFilterAffected(tags);
+}
+
+/** Rebuild the paged grid when a tag mutation touched the active tag filter,
+ * so prints that stopped (or started) matching move immediately. */
+async function requeueIfTagFilterAffected(tags: readonly string[]): Promise<void> {
+  const active = libraryFilters.tag;
+  if (active && tags.some((tag) => tagKey(tag) === active)) await requeueGallery();
 }
 
 async function removeTagsFor(
@@ -5902,6 +5948,7 @@ async function removeTagsFor(
     outcome.failedHostIds,
   );
   await refreshHostOrganization([...new Set(copies.map((copy) => copy.hostId))]);
+  await requeueIfTagFilterAffected(tags);
 }
 
 async function setCollectionMembershipFor(
@@ -6169,9 +6216,13 @@ function refreshTrash(): Promise<void> {
   return enqueueGalleryOperation(async () => {
     trashLoading.value = true;
     trashError.value = "";
-    const hosts = connectedHosts.value.filter(
-      (host) => librarySupport.value.trashHostIds.has(host.id) && host.online,
+    const trashCapable = connectedHosts.value.filter((host) =>
+      librarySupport.value.trashHostIds.has(host.id),
     );
+    // A known-offline trash-capable host is skipped, not silently dropped:
+    // it counts against completeness so the snapshot stays retry-eligible.
+    const hosts = trashCapable.filter((host) => host.online);
+    const skippedHosts = trashCapable.length - hosts.length;
     const results = await Promise.allSettled(
       hosts.map(async (host) => {
         const target = mobileHostTarget(host);
@@ -6179,16 +6230,18 @@ function refreshTrash(): Promise<void> {
         return { host, target, prints };
       }),
     );
-    const copies: PendingGalleryPrint[] = [];
-    let failed = 0;
+    const refreshed: PendingGalleryPrint[] = [];
+    const refreshedHostIds = new Set<string>();
+    let rejectedHosts = 0;
     results.forEach((result) => {
       if (result.status !== "fulfilled") {
-        failed += 1;
+        rejectedHosts += 1;
         return;
       }
       const { host, target, prints } = result.value;
+      refreshedHostIds.add(host.id);
       for (const print of prints) {
-        copies.push({
+        refreshed.push({
           ...print,
           hostId: host.id,
           cacheKey: mobileGalleryCacheKey(host),
@@ -6197,10 +6250,23 @@ function refreshTrash(): Promise<void> {
         });
       }
     });
-    trashCopies = copies.sort((a, b) => b.timestamp - a.timestamp);
-    trashLoaded.value = true;
-    if (failed > 0) {
-      trashError.value = `${failed} host${failed === 1 ? "" : "s"} unavailable · Trash may be incomplete`;
+    const outcome = mergeTrashSnapshot({
+      previous: trashCopies,
+      refreshed,
+      refreshedHostIds,
+      trashCapableHostIds: new Set(trashCapable.map((host) => host.id)),
+      rejectedHosts,
+      skippedHosts,
+    });
+    trashCopies = outcome.copies;
+    // An incomplete pass is never the authoritative snapshot: leaving
+    // `trashLoaded` false keeps the scope retry-eligible so re-entering
+    // Trash refetches the hosts this pass could not read.
+    trashLoaded.value = outcome.complete;
+    if (outcome.failedHosts > 0) {
+      trashError.value = `${outcome.failedHosts} host${
+        outcome.failedHosts === 1 ? "" : "s"
+      } unavailable · Trash may be incomplete`;
     }
     rebuildGalleryOrganization();
     if (libraryScope.value === "trash") await resetGalleryPaging();
@@ -7263,6 +7329,11 @@ onBeforeUnmount(() => {
           </div>
 
           <template v-if="isSequence">
+            <!-- The chain wire has no title slot (`ChainRequestWire`): the
+                 Title field is hidden here instead of silently dropped. -->
+            <p class="mobile-empty-note" data-test="mobile-sequence-title-note">
+              Sequences don't carry a title — rename the stitched print in the Library.
+            </p>
             <div
               v-if="sequenceModels.length === 0"
               class="mobile-sequence-empty"

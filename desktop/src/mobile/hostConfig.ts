@@ -53,3 +53,10 @@ export function retentionDaysFromConfigValue(value: unknown): number | null {
 export function hostConfigLocked(entry: HostConfigEntry | null): boolean {
   return entry?.source === "env";
 }
+
+/** Whether a config control may be edited at all. Unknown authority (no
+ * entry — the probe failed or has not answered yet) is read-only: enabling
+ * the control on a failed probe would let an env-pinned key be edited. */
+export function hostConfigEditable(entry: HostConfigEntry | null): boolean {
+  return entry !== null && !hostConfigLocked(entry);
+}

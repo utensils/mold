@@ -39,6 +39,7 @@ import { RETENTION_OPTIONS, retentionLabel } from "@studio/lib/libraryOrganizati
 import {
   TRASH_RETENTION_CONFIG_KEY,
   fetchHostConfigKey,
+  hostConfigEditable,
   hostConfigLocked,
   retentionDaysFromConfigValue,
   setHostConfigKey,
@@ -88,6 +89,7 @@ const cancellingQueueIds = ref(new Set<string>());
 // ── Library card (per-host trash retention, #4 iPhone V3) ───────────────────
 const retentionEntry = ref<HostConfigEntry | null>(null);
 const retentionValue = ref<number | null>(null);
+const retentionProbeFailed = ref(false);
 const retentionError = ref("");
 const retentionSaving = ref(false);
 const trashCount = ref<number | null>(null);
@@ -367,6 +369,9 @@ const hostTrashCapability = computed(
 const libraryCardVisible = computed(() => hostTrashCapability.value?.enabled === true);
 /** An env-pinned key is read-only on every client (`mold config` semantics). */
 const retentionLocked = computed(() => hostConfigLocked(retentionEntry.value));
+/** Unknown authority (probe failed / unanswered) is read-only too: enabling
+ * the selector on a failed probe could expose an env-pinned key to edits. */
+const retentionEditable = computed(() => hostConfigEditable(retentionEntry.value));
 const retentionChoices = computed(() => {
   const days = retentionValue.value;
   return days !== null && !RETENTION_OPTIONS.includes(days)
@@ -383,9 +388,13 @@ async function refreshLibraryCard(epoch = loadEpoch): Promise<void> {
   ]);
   if (epoch !== loadEpoch) return;
   if (entry.status === "fulfilled") {
+    retentionProbeFailed.value = false;
     retentionEntry.value = entry.value;
     retentionValue.value = retentionDaysFromConfigValue(entry.value.value);
   } else {
+    // No entry = unknown authority: the selector stays disabled (see
+    // `retentionEditable`) and the failure line offers an explicit Retry.
+    retentionProbeFailed.value = true;
     retentionEntry.value = null;
     retentionValue.value = hostTrashCapability.value?.retention_days ?? null;
   }
@@ -450,6 +459,7 @@ async function loadHost(): Promise<void> {
   cancellingQueueIds.value = new Set();
   retentionEntry.value = null;
   retentionValue.value = null;
+  retentionProbeFailed.value = false;
   retentionError.value = "";
   trashCount.value = null;
   emptyTrashArmed.value = false;
@@ -947,7 +957,7 @@ onBeforeUnmount(() => {
           <select
             class="control"
             :value="retentionValue ?? ''"
-            :disabled="retentionSaving || retentionLocked"
+            :disabled="retentionSaving || !retentionEditable"
             data-test="host-detail-retention"
             @change="saveRetention(($event.target as HTMLSelectElement).value)"
           >
@@ -962,6 +972,22 @@ onBeforeUnmount(() => {
           data-test="host-detail-retention-locked"
         >
           Set by {{ retentionEntry?.env_var }} on this host — edit it there.
+        </p>
+        <p
+          v-if="retentionProbeFailed"
+          class="status-line error-text"
+          role="alert"
+          data-test="host-detail-retention-error"
+        >
+          Couldn't read this host's retention setting — it stays read-only.
+          <button
+            class="secondary-button"
+            type="button"
+            data-test="host-detail-retention-retry"
+            @click="refreshLibraryCard()"
+          >
+            Retry
+          </button>
         </p>
         <p v-if="retentionError" class="status-line error-text" role="alert">
           {{ retentionError }}
