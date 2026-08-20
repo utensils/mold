@@ -111,21 +111,58 @@ fn wrap_snapshot(snapshot: AuthoritySnapshot) -> anyhow::Result<ChecksummedSnaps
     })
 }
 
-fn validate_envelope(
-    envelope: ChecksummedSnapshot,
+/// Which serialization the stored checksum was computed over.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CheckpointShape {
+    /// The checksum matches the snapshot re-serialized by THIS build.
+    Current,
+    /// The checksum matches the bytes actually on disk, but not this build's
+    /// re-serialization — a checkpoint written before a field was added to a
+    /// record. Valid, and rewritten in the current shape once loaded.
+    Legacy,
+}
+
+/// Envelope that keeps the snapshot as the raw bytes it was stored as.
+///
+/// `digest_json` hashes the RE-SERIALIZED struct, so any additive
+/// `#[serde(default)]` field changes the digest of an unchanged file. Keeping
+/// the original bytes lets an old checkpoint prove it is the file we wrote.
+#[derive(Deserialize)]
+struct RawEnvelope {
+    version: u32,
+    payload_sha256: String,
+    snapshot: Box<serde_json::value::RawValue>,
+}
+
+fn validate_envelope_bytes(
+    bytes: &[u8],
     path: &Path,
-) -> anyhow::Result<AuthoritySnapshot> {
+) -> anyhow::Result<(AuthoritySnapshot, CheckpointShape)> {
+    let envelope: RawEnvelope = serde_json::from_slice(bytes)
+        .with_context(|| format!("reading gallery authority {}", path.display()))?;
+    let snapshot: AuthoritySnapshot = serde_json::from_str(envelope.snapshot.get())
+        .with_context(|| format!("reading gallery authority {}", path.display()))?;
     ensure!(
-        envelope.version == STORAGE_VERSION && envelope.snapshot.version == STORAGE_VERSION,
+        envelope.version == STORAGE_VERSION && snapshot.version == STORAGE_VERSION,
         "unsupported gallery authority checkpoint version in {}",
         path.display()
     );
+    if digest_json(&snapshot)? == envelope.payload_sha256 {
+        return Ok((snapshot, CheckpointShape::Current));
+    }
+    // #1181: #1173 added three defaulted fields to `GenerationRecord`, so
+    // every checkpoint written before it re-serializes to a different digest
+    // and startup hard-failed on all three generations. The checksum still
+    // authenticates the stored bytes, which is the property that matters —
+    // this is the same content we wrote, in the shape we wrote it. Accept it,
+    // and let the caller rewrite it in the current shape.
     ensure!(
-        digest_json(&envelope.snapshot)? == envelope.payload_sha256,
+        format!("{:x}", Sha256::digest(envelope.snapshot.get().as_bytes()))
+            == envelope.payload_sha256,
         "gallery authority checkpoint checksum mismatch in {}",
         path.display()
     );
-    Ok(envelope.snapshot)
+    Ok((snapshot, CheckpointShape::Legacy))
 }
 
 fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> anyhow::Result<T> {
@@ -133,11 +170,20 @@ fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> anyhow::Result<T> {
         .with_context(|| format!("reading gallery authority {}", path.display()))
 }
 
-fn read_checkpoint_at(path: &Path) -> anyhow::Result<AuthoritySnapshot> {
-    validate_envelope(read_json(path)?, path)
+fn read_checkpoint_shaped_at(path: &Path) -> anyhow::Result<(AuthoritySnapshot, CheckpointShape)> {
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(
+        &mut crate::batch_transaction::open_regular_file_no_follow(path)?,
+        &mut bytes,
+    )?;
+    validate_envelope_bytes(&bytes, path)
 }
 
-fn read_checkpoint(root: &Path) -> anyhow::Result<Option<AuthoritySnapshot>> {
+fn read_checkpoint_at(path: &Path) -> anyhow::Result<AuthoritySnapshot> {
+    Ok(read_checkpoint_shaped_at(path)?.0)
+}
+
+fn read_checkpoint(root: &Path) -> anyhow::Result<Option<(AuthoritySnapshot, CheckpointShape)>> {
     let candidates = [
         ("current", checkpoint_path(root)),
         ("backup", backup_checkpoint_path(root)),
@@ -146,15 +192,23 @@ fn read_checkpoint(root: &Path) -> anyhow::Result<Option<AuthoritySnapshot>> {
     let mut errors = Vec::new();
     let mut any_present = false;
     for (label, path) in candidates {
-        match read_checkpoint_at(&path) {
-            Ok(snapshot) => {
+        match read_checkpoint_shaped_at(&path) {
+            Ok((snapshot, shape)) => {
                 if label != "current" {
                     tracing::warn!(
                         checkpoint = label,
                         "using fallback checksummed gallery authority checkpoint"
                     );
                 }
-                return Ok(Some(snapshot));
+                if shape == CheckpointShape::Legacy {
+                    tracing::info!(
+                        checkpoint = label,
+                        path = %path.display(),
+                        "gallery authority checkpoint predates the current record shape; \
+                         migrating it in place"
+                    );
+                }
+                return Ok(Some((snapshot, shape)));
             }
             Err(error)
                 if error
@@ -279,8 +333,11 @@ fn remove_wal(root: &Path) -> anyhow::Result<()> {
     }
 }
 
-fn recover_storage(root: &Path) -> anyhow::Result<Option<AuthoritySnapshot>> {
-    let checkpoint = read_checkpoint(root)?;
+fn recover_storage(root: &Path) -> anyhow::Result<(Option<AuthoritySnapshot>, CheckpointShape)> {
+    let (checkpoint, mut shape) = match read_checkpoint(root)? {
+        Some((snapshot, shape)) => (Some(snapshot), shape),
+        None => (None, CheckpointShape::Current),
+    };
     let marker = read_marker(root)?;
     let wal = match read_checkpoint_at(&wal_path(root)) {
         Ok(snapshot) => Some(snapshot),
@@ -325,6 +382,7 @@ fn recover_storage(root: &Path) -> anyhow::Result<Option<AuthoritySnapshot>> {
             remove_wal(root)?;
             backup_checkpoint(root, wal_snapshot)?;
             current = Some(wal_snapshot.clone());
+            shape = CheckpointShape::Current;
         } else {
             write_marker(
                 root,
@@ -349,6 +407,7 @@ fn recover_storage(root: &Path) -> anyhow::Result<Option<AuthoritySnapshot>> {
             )?;
             backup_checkpoint(root, &wal_snapshot)?;
             current = Some(wal_snapshot);
+            shape = CheckpointShape::Current;
         }
         remove_wal(root)?;
     }
@@ -364,7 +423,7 @@ fn recover_storage(root: &Path) -> anyhow::Result<Option<AuthoritySnapshot>> {
             )?;
         }
     }
-    Ok(current)
+    Ok((current, shape))
 }
 
 pub(crate) fn read_generation(
@@ -387,8 +446,19 @@ pub(crate) fn load_or_initialize(
 ) -> anyhow::Result<LoadedAuthority> {
     guard.ensure_root(root)?;
     let root = guard.canonical_root();
-    let mut snapshot = match recover_storage(root)? {
-        Some(snapshot) => snapshot,
+    let (recovered, shape) = recover_storage(root)?;
+    let mut snapshot = match recovered {
+        Some(snapshot) => {
+            if shape == CheckpointShape::Legacy {
+                // Rewrite through the ordinary write path so backup rotation
+                // and the generation guard behave exactly as they always do;
+                // the fresh checksum is over the current shape, so the next
+                // start takes the plain path.
+                write_checkpoint(root, &snapshot)?;
+                backup_checkpoint(root, &snapshot)?;
+            }
+            snapshot
+        }
         None => {
             let mut index = legacy()?;
             populate_missing_facts(root, &mut index)?;
@@ -467,7 +537,9 @@ pub(crate) fn commit_snapshot(
 ) -> anyhow::Result<u64> {
     guard.ensure_root(root)?;
     let root = guard.canonical_root();
-    let current = recover_storage(root)?.context("gallery authority checkpoint is missing")?;
+    let current = recover_storage(root)?
+        .0
+        .context("gallery authority checkpoint is missing")?;
     ensure!(
         current.generation == expected_generation,
         "gallery authority generation changed from {expected_generation} to {}",
@@ -704,6 +776,210 @@ mod tests {
             index: CommittedArchiveIndex::default(),
             legacy_evidence_epochs: Default::default(),
         }
+    }
+
+    /// The exact `GenerationRecord` shape every build before #1173 wrote.
+    /// Frozen on purpose: it is the historical fixture this migration exists
+    /// for, and it must not follow the live struct.
+    #[derive(Serialize)]
+    struct LegacyGenerationRecordV2 {
+        id: Option<i64>,
+        filename: String,
+        output_dir: String,
+        created_at_ms: i64,
+        file_mtime_ms: Option<i64>,
+        file_size_bytes: Option<i64>,
+        format: mold_core::OutputFormat,
+        metadata: mold_core::OutputMetadata,
+        generation_time_ms: Option<i64>,
+        backend: Option<String>,
+        hostname: Option<String>,
+        source: mold_db::RecordSource,
+        metadata_synthetic: bool,
+    }
+
+    impl From<&mold_db::GenerationRecord> for LegacyGenerationRecordV2 {
+        fn from(record: &mold_db::GenerationRecord) -> Self {
+            Self {
+                id: record.id,
+                filename: record.filename.clone(),
+                output_dir: record.output_dir.clone(),
+                created_at_ms: record.created_at_ms,
+                file_mtime_ms: record.file_mtime_ms,
+                file_size_bytes: record.file_size_bytes,
+                format: record.format,
+                metadata: record.metadata.clone(),
+                generation_time_ms: record.generation_time_ms,
+                backend: record.backend.clone(),
+                hostname: record.hostname.clone(),
+                source: record.source,
+                metadata_synthetic: record.metadata_synthetic,
+            }
+        }
+    }
+
+    /// Re-serialize `snapshot` with every record in the pre-#1173 shape and
+    /// write it as a checkpoint whose checksum is over exactly those bytes —
+    /// byte-for-byte what an 0.23.3 install has on disk.
+    fn write_legacy_checkpoint(root: &Path, snapshot: &AuthoritySnapshot) {
+        let mut value = serde_json::to_value(snapshot).unwrap();
+        for bucket in ["entries", "retired_entries"] {
+            let Some(entries) = value["index"][bucket].as_object_mut() else {
+                continue;
+            };
+            for entry in entries.values_mut() {
+                let record: mold_db::GenerationRecord =
+                    serde_json::from_value(entry["record"].clone()).unwrap();
+                entry["record"] =
+                    serde_json::to_value(LegacyGenerationRecordV2::from(&record)).unwrap();
+            }
+        }
+        let payload = serde_json::to_vec(&value).unwrap();
+        let envelope = serde_json::json!({
+            "version": STORAGE_VERSION,
+            "payload_sha256": format!("{:x}", Sha256::digest(&payload)),
+            "snapshot": value,
+        });
+        fs::create_dir_all(authority_dir(root)).unwrap();
+        for path in [
+            checkpoint_path(root),
+            backup_checkpoint_path(root),
+            previous_checkpoint_path(root),
+        ] {
+            atomic_write_json(&path, &envelope).unwrap();
+        }
+        write_marker(
+            root,
+            &MutationMarker {
+                version: STORAGE_VERSION,
+                committed_generation: snapshot.generation,
+                pending: None,
+            },
+        )
+        .unwrap();
+    }
+
+    /// A snapshot whose single entry has a real file behind it, so loading
+    /// validates it instead of quarantining it and bumping the generation.
+    fn snapshot_with_one_record(root: &Path, generation: u64) -> AuthoritySnapshot {
+        let mut snapshot = empty_snapshot(generation);
+        let bytes = vec![7_u8; 2_048];
+        fs::create_dir_all(root).unwrap();
+        fs::write(root.join("print.png"), &bytes).unwrap();
+        let checksum =
+            crate::batch_transaction::checksum_file_for_authority(&root.join("print.png")).unwrap();
+        let record = mold_db::GenerationRecord {
+            id: Some(7),
+            filename: "print.png".into(),
+            output_dir: "/tmp/out".into(),
+            created_at_ms: 1_700_000_000_000,
+            file_mtime_ms: Some(1_700_000_000_001),
+            file_size_bytes: Some(2_048),
+            format: mold_core::OutputFormat::Png,
+            metadata: mold_core::OutputMetadata::from_generate_request(
+                &serde_json::from_value(serde_json::json!({
+                    "prompt": "fixture",
+                    "model": "test",
+                    "width": 64,
+                    "height": 64,
+                    "steps": 1,
+                    "guidance": 1.0
+                }))
+                .unwrap(),
+                42,
+                None,
+                "test",
+            ),
+            generation_time_ms: Some(1_234),
+            backend: Some("cuda".into()),
+            hostname: Some("hal9000".into()),
+            source: mold_db::RecordSource::Server,
+            metadata_synthetic: false,
+            title: None,
+            favorite: false,
+            trashed_at_ms: None,
+        };
+        snapshot.index.entries.insert(
+            record.filename.clone(),
+            CommittedArchiveEntry {
+                identity: crate::batch_transaction::ArchivedChildIdentity {
+                    parent_id: "parent".into(),
+                    attempt_generation: 0,
+                    child_index: 0,
+                    final_name: record.filename.clone(),
+                    checksum_sha256: checksum,
+                    size_bytes: bytes.len() as u64,
+                },
+                record,
+                facts: None,
+            },
+        );
+        snapshot
+    }
+
+    /// #1181: #1173 added three `#[serde(default)]` fields to
+    /// `GenerationRecord`, and the checksum is over the RE-SERIALIZED
+    /// snapshot, so every checkpoint written before it hashed differently
+    /// under the new struct and startup hard-failed on all three generations.
+    #[test]
+    fn checkpoint_written_before_the_record_gained_fields_still_loads_and_migrates() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = acquire_gallery_bookkeeping_lock(dir.path()).unwrap();
+        let snapshot = snapshot_with_one_record(dir.path(), 3);
+        write_legacy_checkpoint(dir.path(), &snapshot);
+
+        // The stored checksum must not match the current shape, or this test
+        // would pass without the migration doing anything.
+        let stored: ChecksummedSnapshot = read_json(&checkpoint_path(dir.path())).unwrap();
+        assert_ne!(
+            digest_json(&stored.snapshot).unwrap(),
+            stored.payload_sha256
+        );
+
+        let loaded = load_or_initialize(dir.path(), &guard, || unreachable!()).unwrap();
+        assert_eq!(loaded.generation, 3);
+        assert!(loaded.index.get("print.png").is_some());
+
+        // Migrated in place: the rewritten checkpoint validates under the
+        // current shape with no fallback, and the record carries the new
+        // fields at their defaults.
+        let migrated: ChecksummedSnapshot = read_json(&checkpoint_path(dir.path())).unwrap();
+        assert_eq!(
+            digest_json(&migrated.snapshot).unwrap(),
+            migrated.payload_sha256
+        );
+        let record = &migrated.snapshot.index.entries["print.png"].record;
+        assert_eq!(record.title, None);
+        assert!(!record.favorite);
+        assert_eq!(record.trashed_at_ms, None);
+        assert_eq!(migrated.snapshot.generation, 3);
+    }
+
+    #[test]
+    fn genuinely_corrupt_checkpoints_still_hard_fail() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = acquire_gallery_bookkeeping_lock(dir.path()).unwrap();
+        let snapshot = snapshot_with_one_record(dir.path(), 2);
+        write_legacy_checkpoint(dir.path(), &snapshot);
+
+        // Corrupt the payload without touching the checksum: neither the
+        // current shape nor the legacy bytes can validate it now.
+        for path in [
+            checkpoint_path(dir.path()),
+            backup_checkpoint_path(dir.path()),
+            previous_checkpoint_path(dir.path()),
+        ] {
+            let mut envelope: serde_json::Value = read_json(&path).unwrap();
+            envelope["snapshot"]["generation"] =
+                serde_json::Value::Number(serde_json::Number::from(99_u64));
+            atomic_write_json(&path, &envelope).unwrap();
+        }
+
+        let error = load_or_initialize(dir.path(), &guard, || unreachable!()).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("checksum mismatch"),
+            "expected a checksum failure, got: {error:#}"
+        );
     }
 
     #[test]
