@@ -328,7 +328,7 @@ impl H3PrivateComfyStorageAuthority {
     pub(crate) fn vae_plan(&self, staging_root: &Path) -> Result<FrozenH3ComfyVaeLoadPlan> {
         self.validate()?;
         FrozenH3ComfyVaeLoadPlan::from_hidden_storage(
-            contract::FL2VA_COMFY,
+            contract::base_compact_model_for_task(self.task),
             &self.models_root,
             staging_root,
         )
@@ -338,16 +338,17 @@ impl H3PrivateComfyStorageAuthority {
     fn open_task_config(&self) -> Result<H3PrivateOpenedTaskConfigAuthority> {
         self.validate()?;
         let manifest = private_comfy_manifest(self.task)?;
+        let (_, task_config_source) = comfy_task_sources(self.task);
         let matches = manifest
             .files
             .iter()
             .filter(|file| {
-                file.hf_filename == FL2VA_TASK_CONFIG_SOURCE
+                file.hf_filename == task_config_source
                     && file.component == ModelComponent::TaskConfig
             })
             .collect::<Vec<_>>();
         let [file] = matches.as_slice() else {
-            bail!("hidden MiniMax H3 manifest requires exactly one FL2VA task config")
+            bail!("hidden MiniMax H3 manifest requires exactly one task config")
         };
         if self.task_config != self.models_root.join(storage_path(manifest, file)) {
             bail!("private H3 task config path differs from hidden storage authority")
@@ -450,6 +451,10 @@ impl H3PrivateComfyStorageAuthority {
 
     pub(crate) fn validate(&self) -> Result<()> {
         let (root, root_identity) = validate_storage_root(&self.models_root)?;
+        // Recompute through the same task-keyed source resolution `resolve`
+        // used; re-deriving from one task's constants would refuse the other
+        // task's authority at its own first validation.
+        let (transformer_source, task_config_source) = comfy_task_sources(self.task);
         if root != self.models_root
             || root_identity != self.root_identity
             || self.identity_sha256 != storage_authority_identity(self)
@@ -457,7 +462,7 @@ impl H3PrivateComfyStorageAuthority {
                 != resolve_component(
                     private_comfy_manifest(self.task)?,
                     &root,
-                    FL2VA_TRANSFORMER_SOURCE,
+                    transformer_source,
                     ModelComponent::Transformer,
                 )?
             || self.qwen_weights
@@ -471,7 +476,7 @@ impl H3PrivateComfyStorageAuthority {
                 != resolve_component(
                     private_comfy_manifest(self.task)?,
                     &root,
-                    FL2VA_TASK_CONFIG_SOURCE,
+                    task_config_source,
                     ModelComponent::TaskConfig,
                 )?
         {
@@ -2395,6 +2400,38 @@ mod tests {
             .task_config_path()
             .ends_with(FL2VA_TASK_CONFIG_SOURCE));
         assert_eq!(authority.identity_sha256().len(), 64);
+    }
+
+    /// A Ref2VA storage authority must survive its own revalidation:
+    /// `validate` recomputes the transformer and task-config paths through
+    /// the same task-keyed `comfy_task_sources` resolution `resolve` used.
+    /// Recomputing them from FL2VA's source constants made every Ref2VA
+    /// authority fail at construction (resolve validates before returning),
+    /// so this is the pin that the two path derivations stay one authority.
+    #[test]
+    fn ref2va_hidden_storage_resolution_survives_its_own_revalidation() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path().canonicalize().unwrap();
+        let authority = H3PrivateComfyStorageAuthority::resolve(&root, Task::Ref2va).unwrap();
+        authority.validate().unwrap();
+        assert!(authority
+            .transformer_path()
+            .ends_with(REF2VA_TRANSFORMER_SOURCE));
+        assert!(authority.qwen_weights_path().ends_with(QWEN_WEIGHT_SOURCE));
+        assert!(authority
+            .task_config_path()
+            .ends_with(REF2VA_TASK_CONFIG_SOURCE));
+        assert_eq!(authority.identity_sha256().len(), 64);
+
+        // The derived VAE plan follows the task's own manifest as well,
+        // rather than re-deriving from the FL2VA constant.
+        let staging = tempfile::tempdir().unwrap();
+        let staging = staging.path().canonicalize().unwrap();
+        authority.vae_plan(&staging).unwrap();
+
+        // And the two tasks keep distinct storage identities.
+        let fl2va = H3PrivateComfyStorageAuthority::resolve(&root, Task::Fl2va).unwrap();
+        assert_ne!(fl2va.identity_sha256(), authority.identity_sha256());
     }
 
     #[cfg(unix)]

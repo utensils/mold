@@ -726,17 +726,23 @@ pub struct H3PrivateFl2VaMediaContract {
 impl H3PrivateFl2VaMediaContract {
     fn validate(&self) -> Result<()> {
         // The request keeps its full reviewed identity — a Turbo tag included
-        // — while the engine partition it executes as must be compact FL2VA.
-        if contract::base_compact_model(&self.canonical_model) != Some(contract::FL2VA_COMFY)
+        // — while the engine partition it executes as must be its own task's
+        // compact base, and the mode must be the task's own conditioning
+        // shape. For FL2VA this is exactly the old constant pin.
+        let mode_matches_task = match self.task {
+            Task::Fl2va => self.mode != Mode::ReferenceToAudioVideo,
+            Task::Ref2va => self.mode == Mode::ReferenceToAudioVideo,
+        };
+        if contract::base_compact_model(&self.canonical_model)
+            != Some(contract::base_compact_model_for_task(self.task))
             || !contract::is_reviewed_compact_model(&self.canonical_model)
-            || self.task != Task::Fl2va
-            || self.mode == Mode::ReferenceToAudioVideo
+            || !mode_matches_task
             || self.width == 0
             || self.height == 0
             || self.frames == 0
             || self.fps != contract::FIXED_FPS
         {
-            bail!("private H3 frozen media contract is not exact FL2VA")
+            bail!("private H3 frozen media contract does not pair with its exact task")
         }
         Ok(())
     }
@@ -2346,9 +2352,11 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
     {
         bail!("private H3 owner fence differs from immutable admission evidence")
     }
-    validate_base_factory(frozen_factory, &owner_fence)?;
-    let mode = contract::validate_request_contract(request, Task::Fl2va)
-        .map_err(|error| anyhow!("{}: {}", error.code, error.message))?;
+    // Every gate from here on is keyed on what admission froze — the frozen
+    // factory's own task and its compact engine partition — never on an
+    // FL2VA constant, so a frozen Ref2VA attempt reaches its own validators.
+    let frozen_route = validate_frozen_reopen_route(request, frozen_factory, &owner_fence)?;
+    let mode = frozen_route.mode;
     #[cfg(not(feature = "h3"))]
     let reviewed_runtime_qualification = open_reviewed_h3_private_runtime_qualification(
         paths.runtime_qualification_record,
@@ -2363,7 +2371,7 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
 
     let artifact_report = qualify_private_artifacts_with_control(
         paths.models_root,
-        contract::FL2VA_COMFY,
+        frozen_route.partition_model,
         paths.authorization_record,
         |hash| {
             progress.checkpoint()?;
@@ -2440,25 +2448,17 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
     progress.checkpoint()?;
 
     // The reopen must follow what admission froze, never a fresh constant.
-    let reopened_task = frozen_factory.task();
-    let reopened_model = frozen_factory.canonical_model().to_owned();
-    let (reopened_transformer_task, reopened_published_artifact) = match reopened_task {
-        Task::Fl2va => (
-            H3TransformerTask::T2VaFl2Va,
-            H3ComfyPublishedArtifact::Fl2VaPrunedInt8ConvRot,
-        ),
-        Task::Ref2va => (
-            H3TransformerTask::Ref2Va,
-            H3ComfyPublishedArtifact::Ref2VaPrunedInt8ConvRot,
-        ),
-    };
+    // The route above already validated the base factory and keyed the
+    // request contract and artifact qualification on the frozen task.
+    let reopened_task = frozen_route.task;
     let storage = H3PrivateComfyStorageAuthority::resolve(paths.models_root, reopened_task)?;
-    let qwen_support = load_qualified_private_qwen_support(paths.models_root, &reopened_model)?;
+    let qwen_support =
+        load_qualified_private_qwen_support(paths.models_root, frozen_route.partition_model)?;
     let transformer_cancellation = H3PrivatePreparationCancellation { progress };
     let opened_transformer = open_h3_comfy_published_int8_checkpoint(
         storage.transformer_path(),
-        reopened_transformer_task,
-        reopened_published_artifact,
+        frozen_route.transformer_task,
+        frozen_route.published_artifact,
         &transformer_cancellation,
     )
     .map_err(|error| anyhow!(error.to_string()))?;
@@ -2581,7 +2581,7 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
     }
     let media = H3PrivateFl2VaMediaContract {
         canonical_model: request.model.clone(),
-        task: Task::Fl2va,
+        task: reopened_task,
         mode,
         seed,
         width: request.width,
@@ -2679,8 +2679,13 @@ fn validate_base_factory(
     factory: &FrozenH3FactoryAuthority,
     owner: &H3PrivateFl2VaOwnerFenceFacts,
 ) -> Result<()> {
-    if factory.canonical_model() != contract::FL2VA_COMFY
-        || factory.task() != Task::Fl2va
+    // The gate is keyed on the FROZEN task: the canonical model must be that
+    // task's own compact engine partition, and the task must have reviewed
+    // runtime availability in this build — which is what keeps a frozen
+    // Ref2VA attempt refused everywhere outside the developer campaign build.
+    let task = factory.task();
+    if !reviewed_h3_private_runtime_available_for_task(task)
+        || factory.canonical_model() != contract::base_compact_model_for_task(task)
         || factory.device_id() != owner.device_id
         || factory.device_ordinal() != owner.device_ordinal
         || factory.compute_capability() != Some(owner.compute_capability)
@@ -2689,9 +2694,58 @@ fn validate_base_factory(
         || factory.attention_backend() != AttentionBackend::Flash
         || factory.attention_chunk() != AttentionChunkPolicy::Off
     {
-        bail!("private H3 base factory differs from the exact FL2VA owner route")
+        bail!("private H3 base factory differs from the exact frozen owner route")
     }
     Ok(())
+}
+
+/// The route every reopen gate below the fence is keyed on, derived from the
+/// frozen factory rather than from a task constant. `partition_model` is the
+/// frozen task's compact engine partition — the identity artifact
+/// qualification, storage, and Qwen support key on — mirroring admission's
+/// `H3AdmittedRoute` split.
+#[cfg(feature = "mp4")]
+#[derive(Debug)]
+struct H3FrozenReopenRoute {
+    task: Task,
+    partition_model: &'static str,
+    transformer_task: H3TransformerTask,
+    published_artifact: H3ComfyPublishedArtifact,
+    mode: Mode,
+}
+
+/// Validate the frozen factory against the owner fence and the request
+/// against the FROZEN task's contract, then hand back the task-keyed route.
+/// The request at reopen is the resolved queue/worker form, so Ref2VA
+/// references must be descriptor authorities — the same contract admission
+/// validated; for FL2VA the resolved and submitted contracts are identical.
+#[cfg(feature = "mp4")]
+fn validate_frozen_reopen_route(
+    request: &GenerateRequest,
+    frozen_factory: &FrozenH3FactoryAuthority,
+    owner_fence: &H3PrivateFl2VaOwnerFenceFacts,
+) -> Result<H3FrozenReopenRoute> {
+    validate_base_factory(frozen_factory, owner_fence)?;
+    let task = frozen_factory.task();
+    let (transformer_task, published_artifact) = match task {
+        Task::Fl2va => (
+            H3TransformerTask::T2VaFl2Va,
+            H3ComfyPublishedArtifact::Fl2VaPrunedInt8ConvRot,
+        ),
+        Task::Ref2va => (
+            H3TransformerTask::Ref2Va,
+            H3ComfyPublishedArtifact::Ref2VaPrunedInt8ConvRot,
+        ),
+    };
+    let mode = contract::validate_resolved_request_contract(request, task)
+        .map_err(|error| anyhow!("{}: {}", error.code, error.message))?;
+    Ok(H3FrozenReopenRoute {
+        task,
+        partition_model: contract::base_compact_model_for_task(task),
+        transformer_task,
+        published_artifact,
+        mode,
+    })
 }
 
 #[cfg(feature = "mp4")]
@@ -6153,8 +6207,14 @@ mod tests {
     }
 
     fn base_factory() -> FrozenH3FactoryAuthority {
+        contract_factory(contract::FL2VA_COMFY)
+    }
+
+    /// The same contract-only frozen factory the FL2VA reopen fixtures use,
+    /// parameterized so a Ref2VA route can freeze one too.
+    fn contract_factory(model: &str) -> FrozenH3FactoryAuthority {
         FrozenH3FactoryAuthority::new_contract_only(H3FactoryAuthorityInput {
-            model: contract::FL2VA_COMFY.into(),
+            model: model.into(),
             device_id: DEVICE_0.into(),
             device_ordinal: 0,
             compute_capability: Some((8, 9)),
@@ -6381,6 +6441,173 @@ mod tests {
             reviewed_h3_private_runtime_available_for_task(Task::Ref2va),
             cfg!(feature = "h3-private-uat")
         );
+    }
+
+    /// An owner fence agreeing with the frozen factory's own route, so a test
+    /// isolates the task keying rather than a crossed device.
+    #[cfg(feature = "mp4")]
+    fn owner_fence_for(factory: &FrozenH3FactoryAuthority) -> H3PrivateFl2VaOwnerFenceFacts {
+        H3PrivateFl2VaOwnerFenceFacts {
+            work_identity_sha256: sha('1'),
+            cancellation_scope_identity_sha256: sha('2'),
+            device_id: factory.device_id().into(),
+            device_ordinal: factory.device_ordinal(),
+            compute_capability: factory
+                .compute_capability()
+                .expect("contract fixtures freeze a CUDA route"),
+            memory_ledger_sequence: 9,
+            admission_evidence_identity_sha256: sha('3'),
+            artifact_qualification_identity_sha256: sha('4'),
+            runtime_qualification_identity_sha256: sha('5'),
+            prepared_attempt_identity_sha256: sha('6'),
+            target_budget_identity_sha256: sha('7'),
+            predicted_device_peak_bytes: 7,
+            predicted_host_increment_bytes: 8,
+        }
+    }
+
+    /// The resolved queue/worker form of an FL2VA request, matching what the
+    /// reopen receives from the durable queue.
+    #[cfg(feature = "mp4")]
+    fn fl2va_reopen_request() -> GenerateRequest {
+        serde_json::from_value(serde_json::json!({
+            "model": contract::FL2VA_COMFY,
+            "prompt": "a calm scene",
+            "width": 1344,
+            "height": 768,
+            "steps": 21,
+            "guidance": 0.0,
+            "strength": 1.0,
+            "batch_size": 1,
+            "output_format": "mp4",
+            "frames": 124,
+            "fps": contract::FIXED_FPS,
+            "seed": 42
+        }))
+        .unwrap()
+    }
+
+    /// The resolved Ref2VA form: references are descriptor authorities, which
+    /// is the only shape the queue and worker may hold.
+    #[cfg(feature = "mp4")]
+    fn ref2va_reopen_request() -> GenerateRequest {
+        use mold_core::{
+            GenerationReference, GenerationReferenceAuthority, GenerationReferenceProvenance,
+        };
+
+        let mut request = fl2va_reopen_request();
+        request.model = contract::REF2VA_COMFY.into();
+        request.references = Some(vec![GenerationReference::Image {
+            media: GenerationReferenceAuthority::Descriptor,
+            provenance: GenerationReferenceProvenance {
+                name: Some("portrait.png".to_string()),
+                sha256: Some(sha('9')),
+            },
+            mime_type: "image/png".into(),
+            width: 48,
+            height: 48,
+        }]);
+        request
+    }
+
+    /// A frozen Ref2VA attempt must reach and pass the task-aware reopen
+    /// validators: the base-factory gate, the resolved request contract, and
+    /// the qualification partition are all keyed on the FROZEN task, never on
+    /// an FL2VA constant. Validating the request as `Task::Fl2va` and
+    /// qualifying `contract::FL2VA_COMFY` before the frozen-task logic ran is
+    /// exactly what made the Ref2VA reopen path unreachable.
+    #[cfg(all(feature = "mp4", feature = "h3-private-uat"))]
+    #[test]
+    fn frozen_ref2va_attempt_passes_the_task_aware_reopen_validators() {
+        let factory = contract_factory(contract::REF2VA_COMFY);
+        assert_eq!(factory.task(), Task::Ref2va);
+        let fence = owner_fence_for(&factory);
+        let route =
+            validate_frozen_reopen_route(&ref2va_reopen_request(), &factory, &fence).unwrap();
+        assert_eq!(route.task, Task::Ref2va);
+        assert_eq!(route.partition_model, contract::REF2VA_COMFY);
+        assert_eq!(route.transformer_task, H3TransformerTask::Ref2Va);
+        assert_eq!(
+            route.published_artifact,
+            H3ComfyPublishedArtifact::Ref2VaPrunedInt8ConvRot
+        );
+        assert_eq!(route.mode, Mode::ReferenceToAudioVideo);
+
+        // A crossed request — the other task's shape on this frozen route —
+        // is refused by the same task-keyed validator.
+        assert!(validate_frozen_reopen_route(&fl2va_reopen_request(), &factory, &fence).is_err());
+    }
+
+    /// The FL2VA reopen route is unchanged by the task keying.
+    #[cfg(feature = "mp4")]
+    #[test]
+    fn frozen_fl2va_attempt_keeps_its_exact_reopen_route() {
+        let factory = base_factory();
+        let fence = owner_fence_for(&factory);
+        let route =
+            validate_frozen_reopen_route(&fl2va_reopen_request(), &factory, &fence).unwrap();
+        assert_eq!(route.task, Task::Fl2va);
+        assert_eq!(route.partition_model, contract::FL2VA_COMFY);
+        assert_eq!(route.transformer_task, H3TransformerTask::T2VaFl2Va);
+        assert_eq!(
+            route.published_artifact,
+            H3ComfyPublishedArtifact::Fl2VaPrunedInt8ConvRot
+        );
+        assert_eq!(route.mode, Mode::TextToAudioVideo);
+        assert!(validate_frozen_reopen_route(&ref2va_reopen_request(), &factory, &fence).is_err());
+    }
+
+    /// Without the developer campaign build a frozen Ref2VA factory must stay
+    /// refused at the reopen's first gate: task availability is per task, and
+    /// an FL2VA qualification never authorizes Ref2VA.
+    #[cfg(all(feature = "mp4", not(feature = "h3-private-uat")))]
+    #[test]
+    fn frozen_ref2va_attempt_stays_refused_without_the_campaign_build() {
+        let factory = contract_factory(contract::REF2VA_COMFY);
+        let fence = owner_fence_for(&factory);
+        let error = validate_frozen_reopen_route(&ref2va_reopen_request(), &factory, &fence)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("frozen owner route"), "{error}");
+    }
+
+    /// The frozen media contract pairs mode and partition with its own task
+    /// in both directions.
+    #[test]
+    fn frozen_media_contract_is_task_paired() {
+        media().validate().unwrap();
+
+        let ref2va = H3PrivateFl2VaMediaContract {
+            canonical_model: contract::REF2VA_COMFY.into(),
+            task: Task::Ref2va,
+            mode: Mode::ReferenceToAudioVideo,
+            ..media()
+        };
+        ref2va.validate().unwrap();
+
+        // Each axis crossed against the task is refused: the FL2VA mode on a
+        // Ref2VA contract, the Ref2VA mode on an FL2VA contract, and either
+        // task carrying the other task's partition model.
+        let crossed_mode = H3PrivateFl2VaMediaContract {
+            mode: Mode::TextToAudioVideo,
+            ..ref2va.clone()
+        };
+        assert!(crossed_mode.validate().is_err());
+        let crossed_fl2va = H3PrivateFl2VaMediaContract {
+            mode: Mode::ReferenceToAudioVideo,
+            ..media()
+        };
+        assert!(crossed_fl2va.validate().is_err());
+        let crossed_model = H3PrivateFl2VaMediaContract {
+            canonical_model: contract::FL2VA_COMFY.into(),
+            ..ref2va
+        };
+        assert!(crossed_model.validate().is_err());
+        let crossed_task = H3PrivateFl2VaMediaContract {
+            canonical_model: contract::REF2VA_COMFY.into(),
+            ..media()
+        };
+        assert!(crossed_task.validate().is_err());
     }
 
     /// The capture-scope profile must never be mistakable for a qualified one.

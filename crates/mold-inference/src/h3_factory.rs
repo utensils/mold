@@ -5600,21 +5600,51 @@ mod tests {
 
     /// FL2VA's frozen plan must be byte-identical across the Ref2VA work.
     ///
-    /// The prepared-attempt identity covers the request, the raw checkpoint,
-    /// and the whole target budget, so pinning it to a literal digest is the
-    /// cheapest complete statement that adding a second task changed nothing
-    /// about the first. Recomputed from the fixture, which is path- and
-    /// machine-independent by construction.
+    /// Two pinned literals, each with its own coverage:
     ///
-    /// If this digest changes, an FL2VA frozen plan changed. That is either a
-    /// deliberate FL2VA change — update the literal and say so — or a Ref2VA
-    /// change that leaked, which is a bug.
+    /// * The prepared-attempt digest (862ae3c2…) is
+    ///   `expected_h3_factory_prepared_attempt_identity` over the
+    ///   hand-assembled fixture, so it covers the identity FUNCTIONS — the
+    ///   request, endpoint, raw-checkpoint, and target-budget hash layouts and
+    ///   every field they bind — but NOT the production budget builder
+    ///   (`build_canonical_private_fl2va_target_budget`), which needs opened
+    ///   weights and is exercised by the budget arithmetic tests instead.
+    /// * The backend-plan digest (b9e5fe2e…) is taken from an authority built
+    ///   by `FrozenH3FactoryAuthority::new_contract_only` — the same
+    ///   constructor server admission calls — so it covers what the production
+    ///   builder actually freezes for an FL2VA route: canonical model, task,
+    ///   layout, device route, execution fingerprint, conditioner placement,
+    ///   block streaming, and the component-authority set (the
+    ///   `backend_plan_identity` domain in `minimax_h3/backend.rs`). Captured
+    ///   2026-08-20 from that builder over `exact_input()`, which is path- and
+    ///   machine-independent by construction.
+    ///
+    /// Still uncovered without weights on disk: storage-authority resolution
+    /// and opened-component digests (pinned functionally by the
+    /// `private_opened_evidence` tests).
+    ///
+    /// If either digest changes, an FL2VA frozen plan changed. That is either
+    /// a deliberate FL2VA change — update the literal and say so — or a
+    /// Ref2VA change that leaked, which is a bug.
     #[test]
     fn fl2va_frozen_plan_identity_is_pinned() {
         let attempt = prepared_attempt();
         assert_eq!(
             expected_h3_factory_prepared_attempt_identity(&attempt),
             "862ae3c24e6956fece01b429f8361da5028a0efa8b175470900cb7cb0087219c"
+        );
+
+        // Through the production builder: the frozen authority must preserve
+        // the pinned attempt identity unchanged, and its backend plan — the
+        // part that hashes canonical model + task — must stay pinned too.
+        let authority = FrozenH3FactoryAuthority::new_contract_only(exact_input()).unwrap();
+        let (attempt_identity, budget_identity) =
+            authority.prepared_target_attempt_identities().unwrap();
+        assert_eq!(attempt_identity, attempt.identity_sha256);
+        assert_eq!(budget_identity, attempt.target_budget.identity_sha256);
+        assert_eq!(
+            authority.backend_plan.identity_sha256(),
+            "b9e5fe2ebf3a61852578c9d208c2b6e35ba8e7cce95016367a6600b00d82cb4e"
         );
     }
 
