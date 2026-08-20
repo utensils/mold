@@ -1314,6 +1314,7 @@ mod tests {
                 transformer_policy_sha256: sha('c'),
                 qwen_policy_sha256: sha('d'),
                 pruned_adaln_table_sha256: sha('e'),
+                turbo_adapter: None,
             },
             components: [
                 H3FactoryComponentRole::Conditioner,

@@ -1748,6 +1748,9 @@ pub(crate) fn bind_h3_factory_authority(
             transformer_policy_sha256: transformer_policy_fingerprint.clone(),
             qwen_policy_sha256: qwen_policy_fingerprint.clone(),
             pruned_adaln_table_sha256: table_fingerprint.clone(),
+            // The server-side contract-only authority never carries a Turbo
+            // adapter; the private admission path owns that selection.
+            turbo_adapter: None,
         },
         _ => {
             return Err(H3AdmissionError::InvalidCheckpointFacts(

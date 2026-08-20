@@ -376,6 +376,13 @@ pub(crate) trait H3Fl2VaBackend {
         H3SamplerKind::OfficialEuler
     }
 
+    /// Video shift the sigma grid is built with. Only a reviewed Turbo tier
+    /// moves it (the 768p 4-step checkpoint is documented at shift 6); every
+    /// other backend keeps the family constant.
+    fn sampler_video_shift(&self) -> f32 {
+        super::sampler::H3_VIDEO_SHIFT
+    }
+
     fn encode_text(
         &mut self,
         prompt: &str,
@@ -760,7 +767,11 @@ pub(crate) fn execute_staged(
     validate_packed_rows(&video_rows, &audio_rows, &text.states, &packed)?;
 
     let sampler_kind = backend.sampler_kind();
-    let schedule = H3DualSchedule::new_for_sampler(prepared.grid_points, sampler_kind)?;
+    let schedule = H3DualSchedule::new_for_sampler_with_video_shift(
+        prepared.grid_points,
+        sampler_kind,
+        backend.sampler_video_shift(),
+    )?;
     let mut sampler = H3DualSampler::new(sampler_kind);
     let counts = schedule.counts();
     control.checkpoint(H3PipelineEvent {
