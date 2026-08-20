@@ -704,10 +704,7 @@ impl H3FactorySamplerKind {
 /// have frozen exactly that tier's adapter, and a base identity requires no
 /// adapter — except under the capture-scope `h3-private-uat` feature, whose
 /// env override legitimately overlays an adapter on the base model.
-pub fn media_model_matches_h3_authority(
-    model: &str,
-    authority: &FrozenH3FactoryAuthority,
-) -> bool {
+pub fn media_model_matches_h3_authority(model: &str, authority: &FrozenH3FactoryAuthority) -> bool {
     if mold_core::minimax_h3::base_compact_model(model) != Some(authority.canonical_model()) {
         return false;
     }

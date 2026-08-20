@@ -586,11 +586,13 @@ pub fn build_generate_request(params: BuildParams<'_>) -> GenerateRequest {
         // H3's step authority is per model tier (21 compact, 9/5 Turbo), so
         // the server-advertised default is the answer; only a caller with no
         // advertised defaults at all falls back to the compact constant.
-        steps: params.steps.unwrap_or(if is_h3 && params.defaults.is_none() {
-            mold_core::minimax_h3::COMFY_DEFAULT_STEPS
-        } else {
-            def_steps
-        }),
+        steps: params
+            .steps
+            .unwrap_or(if is_h3 && params.defaults.is_none() {
+                mold_core::minimax_h3::COMFY_DEFAULT_STEPS
+            } else {
+                def_steps
+            }),
         // H3 has no CFG path; an explicit Discord override cannot weaken the
         // model contract even when this builder is called independently.
         guidance: if is_h3 {
@@ -1846,10 +1848,7 @@ mod tests {
             )
         });
         assert_eq!(turbo.steps, 9);
-        assert_eq!(
-            turbo.model,
-            mold_core::minimax_h3::FL2VA_COMFY_TURBO_8STEP
-        );
+        assert_eq!(turbo.model, mold_core::minimax_h3::FL2VA_COMFY_TURBO_8STEP);
     }
 
     #[test]

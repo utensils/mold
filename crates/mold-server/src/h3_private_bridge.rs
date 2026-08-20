@@ -1924,14 +1924,15 @@ mod tests {
         );
     }
 
-    fn place_turbo_adapter(models: &std::path::Path, tier: &mold_core::minimax_h3::TurboManifestTier) {
+    fn place_turbo_adapter(
+        models: &std::path::Path,
+        tier: &mold_core::minimax_h3::TurboManifestTier,
+    ) {
         let manifest = mold_core::manifest::find_manifest(tier.model).unwrap();
         let adapter = manifest
             .files
             .iter()
-            .find(|file| {
-                file.component == mold_core::manifest::ModelComponent::DistilledLora
-            })
+            .find(|file| file.component == mold_core::manifest::ModelComponent::DistilledLora)
             .unwrap();
         private_file(
             &models.join(mold_core::manifest::storage_path(manifest, adapter)),
@@ -1986,10 +1987,9 @@ mod tests {
             request.generation_profile_sha256,
             base_request.generation_profile_sha256
         );
-        assert!(turbo
-            .iter()
-            .any(|variant| variant.model == mold_core::minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P
-                && !variant.installed));
+        assert!(turbo.iter().any(|variant| variant.model
+            == mold_core::minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P
+            && !variant.installed));
 
         let rows = super::authenticated_h3_private_model_rows(&capability);
         assert_eq!(rows.len(), 2);
@@ -2018,7 +2018,10 @@ mod tests {
             .as_mut()
             .unwrap()
             .steps = mold_core::minimax_h3::COMFY_DEFAULT_STEPS;
-        assert_eq!(super::authenticated_h3_private_model_rows(&widened).len(), 1);
+        assert_eq!(
+            super::authenticated_h3_private_model_rows(&widened).len(),
+            1
+        );
     }
 
     #[test]

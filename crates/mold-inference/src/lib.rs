@@ -125,14 +125,14 @@ pub use h3_factory::{
     expected_h3_factory_prepared_attempt_identity, expected_h3_factory_prepared_request_identity,
     expected_h3_factory_raw_checkpoint_identity, expected_h3_factory_target_budget_identity,
     h3_factory_activation_prerequisites, media_model_matches_h3_authority,
-    FrozenH3FactoryAuthority, H3FactoryActivationPrerequisite,
-    H3FactoryArtifactHostInput, H3FactoryArtifactHostRole, H3FactoryAttentionInput,
-    H3FactoryAuthorityInput, H3FactoryBlockMemoryInput, H3FactoryComponentAuthority,
-    H3FactoryComponentRole, H3FactoryConditionerPlacement, H3FactoryEndpointAnchor,
-    H3FactoryEndpointInput, H3FactoryEndpointPreprocess, H3FactoryExecutionBudgetEchoInput,
-    H3FactoryPreparedAttemptInput, H3FactoryPreparedRequestInput, H3FactoryPreparedRowsInput,
-    H3FactoryQuantizationAuthority, H3FactoryRawCheckpointInput, H3FactoryTargetBudgetInput,
-    H3FactoryTargetDenoiseCopyPolicy, H3FactoryTargetLoadDropPolicy,
+    FrozenH3FactoryAuthority, H3FactoryActivationPrerequisite, H3FactoryArtifactHostInput,
+    H3FactoryArtifactHostRole, H3FactoryAttentionInput, H3FactoryAuthorityInput,
+    H3FactoryBlockMemoryInput, H3FactoryComponentAuthority, H3FactoryComponentRole,
+    H3FactoryConditionerPlacement, H3FactoryEndpointAnchor, H3FactoryEndpointInput,
+    H3FactoryEndpointPreprocess, H3FactoryExecutionBudgetEchoInput, H3FactoryPreparedAttemptInput,
+    H3FactoryPreparedRequestInput, H3FactoryPreparedRowsInput, H3FactoryQuantizationAuthority,
+    H3FactoryRawCheckpointInput, H3FactoryTargetBudgetInput, H3FactoryTargetDenoiseCopyPolicy,
+    H3FactoryTargetLoadDropPolicy,
 };
 pub use ltx2::Ltx2Engine;
 pub use ltx_video::LtxVideoEngine;

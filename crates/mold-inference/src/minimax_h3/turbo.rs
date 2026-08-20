@@ -552,19 +552,14 @@ mod tests {
         std::env::set_var(TURBO_ADAPTER_TIER_VARIABLE, "fl2v-8step");
 
         let root = std::path::Path::new("/models");
-        let with_manifest = resolve_turbo_selection(
-            mold_core::minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P,
-            root,
-        );
+        let with_manifest =
+            resolve_turbo_selection(mold_core::minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P, root);
         let env_only = resolve_turbo_selection(mold_core::minimax_h3::FL2VA_COMFY, root);
         if cfg!(feature = "h3-private-uat") {
             // Capture-scope override: the env pair wins in both shapes.
             for result in [with_manifest, env_only] {
                 let (path, tier) = result.unwrap().expect("UAT env pair selects");
-                assert_eq!(
-                    path,
-                    std::path::PathBuf::from("/uat/adapter.safetensors")
-                );
+                assert_eq!(path, std::path::PathBuf::from("/uat/adapter.safetensors"));
                 assert_eq!(tier, H3TurboLoraTier::Fl2v8StepV10);
             }
         } else {
@@ -592,12 +587,10 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        let (_, tier) = resolve_turbo_selection(
-            mold_core::minimax_h3::FL2VA_COMFY_TURBO_8STEP,
-            root,
-        )
-        .unwrap()
-        .expect("turbo tag selects");
+        let (_, tier) =
+            resolve_turbo_selection(mold_core::minimax_h3::FL2VA_COMFY_TURBO_8STEP, root)
+                .unwrap()
+                .expect("turbo tag selects");
         assert_eq!(tier, H3TurboLoraTier::Fl2v8StepV10);
     }
 

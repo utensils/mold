@@ -1642,10 +1642,11 @@ pub fn cached_file_path_existing_only(
         .or_else(|| lookup(models_root))
         .or_else(|| {
             let cache = Cache::from_env();
-            cache
-                .path()
-                .is_dir()
-                .then(|| cache.repo(hf_file_repo(hf_repo, hf_filename)).get(hf_filename))?
+            cache.path().is_dir().then(|| {
+                cache
+                    .repo(hf_file_repo(hf_repo, hf_filename))
+                    .get(hf_filename)
+            })?
         })
 }
 
