@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { flushPromises, mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
+import { createMemoryHistory, createRouter } from "vue-router";
 import AccordionSection from "@ui/components/AccordionSection.vue";
 
 // The top cards and accordion bodies pull in stores and IPC that aren't the
@@ -113,6 +114,20 @@ describe("SettingsView shell", () => {
     // Clicking the open one again closes it.
     await toggleAccordion(wrapper, "generation");
     expect(wrapper.find("[data-test='stub-generation']").exists()).toBe(false);
+  });
+
+  it("opens the accordion named by ?section= (the Library trash banner's deep link)", async () => {
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: "/settings", component: { template: "<div />" } }],
+    });
+    await router.push({ path: "/settings", query: { section: "library" } });
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const wrapper = mount(SettingsView, { global: { plugins: [pinia, router] } });
+    await flushPromises();
+    expect(wrapper.find("[data-test='stub-library']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='stub-performance']").exists()).toBe(false);
   });
 
   it("search opens the owning accordion and hides the rest", async () => {
