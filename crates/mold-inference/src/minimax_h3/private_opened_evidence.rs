@@ -1349,8 +1349,12 @@ fn build_canonical_private_fl2va_target_budget(
         checkpoint.fixed_transformer_max_device_weight_staging_bytes;
     // Both terms come from the authority that declared the adapter, so the
     // builder and `validate_target_budget` cannot disagree about its cost.
-    let turbo_adapter_device_bytes = turbo.map_or(0, |turbo| turbo.resident_device_bytes);
-    let turbo_adapter_host_staging_bytes = turbo.map_or(0, |turbo| turbo.host_staging_peak_bytes);
+    let turbo_adapter_device_bytes =
+        turbo.map_or(0, H3FactoryTurboAdapterAuthority::resident_device_bytes);
+    let turbo_adapter_device_staging_bytes =
+        turbo.map_or(0, H3FactoryTurboAdapterAuthority::device_staging_peak_bytes);
+    let turbo_adapter_host_staging_bytes =
+        turbo.map_or(0, H3FactoryTurboAdapterAuthority::host_staging_peak_bytes);
     let protected_block_device_bytes = checked_sum(
         checkpoint
             .blocks
@@ -1717,6 +1721,7 @@ fn build_canonical_private_fl2va_target_budget(
         max_device_weight_staging_bytes,
         fixed_transformer_load_device_staging_bytes,
         turbo_adapter_device_bytes,
+        turbo_adapter_device_staging_bytes,
         turbo_adapter_host_staging_bytes,
         vae_load_phase_device_bytes,
         qwen_encode_phase_device_bytes,
