@@ -9,10 +9,10 @@ Mold does not bundle or mirror the weights.
 ::: warning CUDA FL2VA is the first supported runtime
 Both compact variants can be downloaded on any Mold host. Mold's SM89 CUDA
 release can run the compact FL2VA model for the supported request profile below.
-Ref2VA execution and the CPU backend remain unavailable. Broader request shapes also
-remain unavailable until those paths are implemented and tested; Mold reports
-that limitation normally rather than treating it as a licensing or
-authorization failure.
+Ref2VA execution and the CPU backend remain unavailable. Broader request
+shapes also remain unavailable until those paths are implemented and
+tested; Mold reports that limitation normally rather than treating it as a
+licensing or authorization failure.
 :::
 
 ::: info Apple Metal is a correctness-only path in progress
