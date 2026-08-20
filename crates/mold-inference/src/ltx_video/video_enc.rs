@@ -395,6 +395,13 @@ impl Mp4StreamEncoder {
             .max_frame_rate(FrameRate::from_hz(fps as f32))
             .bitrate(openh264::encoder::BitRate::from_bps(10_000_000))
             .rate_control_mode(openh264::encoder::RateControlMode::Quality)
+            // Every pushed frame must become exactly one MP4 sample: generated
+            // clips promise an exact frame count and duration downstream
+            // (H3's publication contract validates mdhd duration against
+            // frames/fps). openh264 defaults to rate-control frame skipping,
+            // which emits an empty bitstream for the skipped frame and would
+            // silently shorten the track.
+            .skip_frames(false)
             .profile(openh264::encoder::Profile::High)
             .vui(VuiConfig::bt601()); // BT.601 limited range — matches YUVBuffer::from_rgb_source()
 
@@ -452,20 +459,30 @@ impl Mp4StreamEncoder {
             }
         }
         drop(annex_b);
-        if !frame_nals.is_empty() {
-            let payload_bytes = self
-                .sample_payload_bytes
-                .checked_add(frame_nals.len())
-                .context("H.264 sample payload size overflowed")?;
-            if self
-                .max_mp4_bytes
-                .is_some_and(|max_bytes| payload_bytes > max_bytes)
-            {
-                anyhow::bail!("H.264 sample payload exceeds its bounded MP4 limit");
-            }
-            self.sample_payload_bytes = payload_bytes;
-            self.samples.push((frame_nals.into_boxed_slice(), is_key));
+        if frame_nals.is_empty() {
+            // A pushed frame that yields no picture NALs (a rate-control skip
+            // or a parameter-set-only bitstream) would be silently absent from
+            // the sample table, shortening the track's mdhd duration below the
+            // pushed frame count. Fail loudly instead of publishing a clip
+            // whose duration disagrees with its frame count.
+            anyhow::bail!(
+                "H.264 encoder produced no picture NALs for a pushed frame \
+                 (frame type {:?})",
+                bitstream.frame_type()
+            );
         }
+        let payload_bytes = self
+            .sample_payload_bytes
+            .checked_add(frame_nals.len())
+            .context("H.264 sample payload size overflowed")?;
+        if self
+            .max_mp4_bytes
+            .is_some_and(|max_bytes| payload_bytes > max_bytes)
+        {
+            anyhow::bail!("H.264 sample payload exceeds its bounded MP4 limit");
+        }
+        self.sample_payload_bytes = payload_bytes;
+        self.samples.push((frame_nals.into_boxed_slice(), is_key));
         Ok(())
     }
 
@@ -1028,6 +1045,34 @@ mod tests {
             "MP4 768x512 output too small: {} bytes (expected >50KB)",
             data.len()
         );
+    }
+
+    /// Every pushed frame must land in the sample table so the track's mdhd
+    /// duration is exactly frames/fps — H3's publication contract validates
+    /// the muxed duration against the request. A rate-control frame skip
+    /// (openh264's default) breaks this silently; `skip_frames(false)` plus
+    /// the empty-bitstream bail in `push()` keep it structural.
+    #[cfg(feature = "mp4")]
+    #[test]
+    fn mp4_track_duration_is_exactly_frames_over_fps() {
+        for (n, fps) in [(3u32, 10u32), (8, 24)] {
+            let frames = test_frames(64, 64, n as usize);
+            let data = encode_mp4(&frames, fps).unwrap();
+            let size = data.len() as u64;
+            let reader = mp4_rs::Mp4Reader::read_header(std::io::Cursor::new(data), size).unwrap();
+            let (_, track) = reader
+                .tracks()
+                .iter()
+                .find(|(_, t)| matches!(t.track_type(), Ok(mp4_rs::TrackType::Video)))
+                .expect("video track");
+            assert_eq!(track.sample_count(), n, "one sample per pushed frame");
+            assert_eq!(track.timescale(), fps * 1000);
+            assert_eq!(
+                track.trak.mdia.mdhd.duration,
+                u64::from(n) * 1000,
+                "mdhd duration must be exactly frames x 1000 ticks"
+            );
+        }
     }
 
     #[cfg(feature = "mp4")]
