@@ -105,6 +105,52 @@ pub struct H3FactoryEndpointInput {
     pub normalized_cpu_content_sha256: String,
 }
 
+/// Modality of one ordered Ref2VA reference. This mirrors
+/// [`mold_core::GenerationReferenceKind`] as a factory-local domain so the
+/// authority never inherits a wire enum's future variants.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum H3FactoryReferenceKind {
+    Image,
+    Video,
+    Audio,
+}
+
+/// One ordered Ref2VA reference, frozen at its normalized preprocessing shape.
+///
+/// Every geometry field is the exact value
+/// `mold_core::minimax_h3::reference_prepared_shapes_for_target` derived at
+/// admission. The validator recomputes the row and retained-byte charges from
+/// that geometry, so an understated charge is rejected rather than trusted.
+/// There is deliberately no path, upload handle, or byte buffer here.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct H3FactoryReferenceInput {
+    /// One-based request order.
+    pub index: u32,
+    pub kind: H3FactoryReferenceKind,
+    pub content_sha256: String,
+    /// Prepared-shape contract version the admission geometry was derived at.
+    pub preprocess_version: u32,
+    /// Normalized visual canvas. Absent exactly for audio-only references.
+    pub normalized_width: Option<u32>,
+    pub normalized_height: Option<u32>,
+    /// Exact CFR-normalized frame count, the visual-VAE prefix taken from it,
+    /// and the 2 fps Qwen cursor sample count. Video references only.
+    pub normalized_video_frames: Option<u32>,
+    pub video_frames: Option<u32>,
+    pub qwen_video_frames: Option<u32>,
+    /// Normalized 32 kHz stereo sample count. Absent without a soundtrack.
+    pub audio_samples_per_channel: Option<u64>,
+    /// Packed condition rows this reference contributes.
+    pub visual_rows: u64,
+    pub audio_rows: u64,
+    /// Qwen vision pads this reference contributes to `qwen_vision_rows`.
+    pub qwen_vision_rows: u64,
+    /// Host bytes the backend retains for this reference between preprocessing
+    /// and its two encoders: normalized RGB8 frames plus the normalized f32
+    /// stereo waveform. Recomputed by the validator from the geometry.
+    pub normalized_host_bytes: u64,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct H3FactoryPreparedRowsInput {
     pub qwen_output_text_rows: u64,
@@ -147,6 +193,9 @@ pub struct H3FactoryPreparedRequestInput {
     pub conditioning_fingerprint: String,
     pub reference_fingerprint: String,
     pub endpoints: Vec<H3FactoryEndpointInput>,
+    /// Ordered Ref2VA references. Always empty for FL2VA, whose conditioning
+    /// rides the endpoint contract instead.
+    pub references: Vec<H3FactoryReferenceInput>,
     pub rows: H3FactoryPreparedRowsInput,
 }
 
@@ -193,6 +242,13 @@ pub struct H3FactoryRawCheckpointInput {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum H3FactoryTargetLoadDropPolicy {
     LoadVaesLoadQwenEncodeTransferDropQwenEncodeConditionsParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux,
+    /// Ref2VA's real order. It diverges from FL2VA before the conditioner:
+    /// media is decoded and normalized on the host first (that retained media
+    /// is what the two reference encoders later consume), Qwen encodes the
+    /// prompt *with* the reference vision pads, and conditioning is then
+    /// encoded twice — once through the visual VAE and once through the audio
+    /// VAE — before the VAEs park for denoise and reload for decode.
+    DecodeReferencesPreprocessReferencesLoadVaesLoadQwenEncodeVisionTransferDropQwenEncodeVisualReferencesEncodeAudioReferencesParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux,
     /// Test-only marker proving that the policy discriminator participates in
     /// the target-budget identity without advertising another executable plan.
     #[cfg(test)]
@@ -497,6 +553,9 @@ impl H3FactoryTargetBudgetInput {
         hash.update(match load_drop_policy {
             H3FactoryTargetLoadDropPolicy::LoadVaesLoadQwenEncodeTransferDropQwenEncodeConditionsParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux => {
                 b"load-vaes-load-qwen-encode-transfer-drop-qwen-encode-conditions-park-vaes-allocate-noise-load-transformer-denoise-drop-transformer-reload-vaes-decode-visual-audio-drop-vaes-mux".as_slice()
+            }
+            H3FactoryTargetLoadDropPolicy::DecodeReferencesPreprocessReferencesLoadVaesLoadQwenEncodeVisionTransferDropQwenEncodeVisualReferencesEncodeAudioReferencesParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux => {
+                b"decode-references-preprocess-references-load-vaes-load-qwen-encode-vision-transfer-drop-qwen-encode-visual-references-encode-audio-references-park-vaes-allocate-noise-load-transformer-denoise-drop-transformer-reload-vaes-decode-visual-audio-drop-vaes-mux".as_slice()
             }
             #[cfg(test)]
             H3FactoryTargetLoadDropPolicy::IdentityMutationSentinel => {
@@ -1274,6 +1333,261 @@ impl H3FactoryPreparedAttemptAuthority {
     }
 }
 
+/// Recomputed charges for one ordered Ref2VA reference.
+struct H3ReferenceCharges {
+    visual_rows: u64,
+    audio_rows: u64,
+    qwen_vision_rows: u64,
+    normalized_host_bytes: u64,
+}
+
+/// Re-derive every row and retained-byte charge for one reference from its
+/// frozen normalized geometry.
+///
+/// This deliberately repeats `mold_core::minimax_h3`'s own arithmetic instead
+/// of trusting the supplied totals: admission computes the shape, but the
+/// factory is the authority that a scheduler grant is sized from, and a
+/// reference whose rows were understated would be admitted into a budget that
+/// cannot hold it.
+fn h3_reference_charges(reference: &H3FactoryReferenceInput) -> Result<H3ReferenceCharges> {
+    let visual_canvas = match (reference.normalized_width, reference.normalized_height) {
+        (Some(width), Some(height)) => {
+            if width == 0
+                || height == 0
+                || !width.is_multiple_of(32)
+                || !height.is_multiple_of(32)
+                // The visual VAE downsamples 16x and the DiT packs 2x2 latent
+                // patches, so a canvas that is not 32-divisible cannot be
+                // patchified at all.
+                || reference.kind == H3FactoryReferenceKind::Audio
+            {
+                bail!(
+                    "MiniMax H3 reference {} has an invalid normalized visual canvas",
+                    reference.index
+                );
+            }
+            Some((u64::from(width), u64::from(height)))
+        }
+        (None, None) => {
+            if reference.kind != H3FactoryReferenceKind::Audio {
+                bail!(
+                    "MiniMax H3 visual reference {} lost its normalized canvas",
+                    reference.index
+                );
+            }
+            None
+        }
+        _ => bail!(
+            "MiniMax H3 reference {} has a half-specified normalized canvas",
+            reference.index
+        ),
+    };
+    let rows_per_latent_frame = visual_canvas
+        .map(|(width, height)| {
+            (width / 32)
+                .checked_mul(height / 32)
+                .ok_or_else(|| anyhow!("MiniMax H3 reference rows per latent frame overflow"))
+        })
+        .transpose()?
+        .unwrap_or(0);
+
+    // Frame geometry. Images occupy exactly one latent frame; videos take the
+    // `5n+2` causal latent count over their visual-VAE prefix; audio has none.
+    let (latent_frames, qwen_blocks) = match reference.kind {
+        H3FactoryReferenceKind::Image => {
+            if reference.normalized_video_frames.is_some()
+                || reference.video_frames.is_some()
+                || reference.qwen_video_frames.is_some()
+            {
+                bail!(
+                    "MiniMax H3 image reference {} carries video frame geometry",
+                    reference.index
+                );
+            }
+            (1_u64, 1_u64)
+        }
+        H3FactoryReferenceKind::Video => {
+            let normalized_frames = reference.normalized_video_frames.ok_or_else(|| {
+                anyhow!(
+                    "MiniMax H3 video reference {} lost its normalized frame count",
+                    reference.index
+                )
+            })?;
+            let video_frames = reference.video_frames.ok_or_else(|| {
+                anyhow!(
+                    "MiniMax H3 video reference {} lost its visual-VAE frame prefix",
+                    reference.index
+                )
+            })?;
+            let qwen_video_frames = reference.qwen_video_frames.ok_or_else(|| {
+                anyhow!(
+                    "MiniMax H3 video reference {} lost its Qwen cursor sample count",
+                    reference.index
+                )
+            })?;
+            if normalized_frames == 0 || video_frames == 0 || video_frames > normalized_frames {
+                bail!(
+                    "MiniMax H3 video reference {} has an invalid frame prefix",
+                    reference.index
+                );
+            }
+            if qwen_video_frames != normalized_frames.div_ceil(contract::FIXED_FPS / 2) {
+                bail!(
+                    "MiniMax H3 video reference {} Qwen 2 fps sampling differs from the contract",
+                    reference.index
+                );
+            }
+            let latent_frames = if video_frames <= 5 {
+                2_u64
+            } else {
+                u64::from((video_frames - 5) / contract::FRAME_STEP) * 5 + 2
+            };
+            // Qwen consumes temporal-patch-2 blocks over its 2 fps cursor.
+            (latent_frames, u64::from(qwen_video_frames).div_ceil(2))
+        }
+        H3FactoryReferenceKind::Audio => {
+            if reference.normalized_video_frames.is_some()
+                || reference.video_frames.is_some()
+                || reference.qwen_video_frames.is_some()
+            {
+                bail!(
+                    "MiniMax H3 audio reference {} carries video frame geometry",
+                    reference.index
+                );
+            }
+            (0, 0)
+        }
+    };
+
+    let visual_rows = latent_frames
+        .checked_mul(rows_per_latent_frame)
+        .ok_or_else(|| anyhow!("MiniMax H3 reference visual rows overflow"))?;
+    let qwen_vision_rows = qwen_blocks
+        .checked_mul(rows_per_latent_frame)
+        .ok_or_else(|| anyhow!("MiniMax H3 reference Qwen vision rows overflow"))?;
+
+    // Audio. Present exactly for standalone audio and for a video carrying a
+    // soundtrack; the VAE compresses 800 normalized samples per stereo latent.
+    let expects_audio = match reference.kind {
+        H3FactoryReferenceKind::Image => false,
+        H3FactoryReferenceKind::Video => reference.audio_samples_per_channel.is_some(),
+        H3FactoryReferenceKind::Audio => true,
+    };
+    let audio_samples = match (reference.audio_samples_per_channel, expects_audio) {
+        (Some(samples), true) if samples > 0 => samples,
+        (None, false) => 0,
+        _ => bail!(
+            "MiniMax H3 reference {} audio geometry differs from its modality",
+            reference.index
+        ),
+    };
+    let audio_rows = audio_samples
+        .div_ceil(800)
+        .checked_mul(u64::from(contract::AUDIO_CHANNELS))
+        .ok_or_else(|| anyhow!("MiniMax H3 reference audio rows overflow"))?;
+
+    // Retained host bytes. The backend holds the normalized RGB8 frames the
+    // visual VAE will encode plus the normalized f32 stereo waveform the audio
+    // VAE will encode; for a video the Qwen cursor frames are borrowed from
+    // that same prefix wherever they overlap and materialized beyond it.
+    let frame_bytes = visual_canvas
+        .map(|(width, height)| {
+            width
+                .checked_mul(height)
+                .and_then(|pixels| pixels.checked_mul(3))
+                .ok_or_else(|| anyhow!("MiniMax H3 reference frame bytes overflow"))
+        })
+        .transpose()?
+        .unwrap_or(0);
+    let retained_frames = match reference.kind {
+        H3FactoryReferenceKind::Image => 1,
+        H3FactoryReferenceKind::Video => {
+            let video_frames = u64::from(reference.video_frames.unwrap_or_default());
+            let qwen_frames = u64::from(reference.qwen_video_frames.unwrap_or_default());
+            // Cursor samples inside the VAE prefix are clones of frames that
+            // are already retained, so both sets are charged.
+            video_frames
+                .checked_add(qwen_frames)
+                .ok_or_else(|| anyhow!("MiniMax H3 reference retained frames overflow"))?
+        }
+        H3FactoryReferenceKind::Audio => 0,
+    };
+    let visual_host_bytes = retained_frames
+        .checked_mul(frame_bytes)
+        .ok_or_else(|| anyhow!("MiniMax H3 reference retained visual bytes overflow"))?;
+    let audio_host_bytes = audio_samples
+        .checked_mul(u64::from(contract::AUDIO_CHANNELS))
+        .and_then(|samples| samples.checked_mul(std::mem::size_of::<f32>() as u64))
+        .ok_or_else(|| anyhow!("MiniMax H3 reference retained audio bytes overflow"))?;
+    let normalized_host_bytes = visual_host_bytes
+        .checked_add(audio_host_bytes)
+        .ok_or_else(|| anyhow!("MiniMax H3 reference retained host bytes overflow"))?;
+
+    Ok(H3ReferenceCharges {
+        visual_rows,
+        audio_rows,
+        qwen_vision_rows,
+        normalized_host_bytes,
+    })
+}
+
+/// Validate the complete ordered reference list and return its aggregate
+/// charges as `(visual_rows, audio_rows, qwen_vision_rows, host_bytes)`.
+fn validate_prepared_references(
+    references: &[H3FactoryReferenceInput],
+) -> Result<(u64, u64, u64, u64)> {
+    if references.is_empty() {
+        bail!("MiniMax H3 Ref2VA prepared request retains no ordered references");
+    }
+    if references.len() > contract::MAX_REFERENCE_FILES {
+        bail!("MiniMax H3 Ref2VA prepared request exceeds the released reference count");
+    }
+    let mut totals = (0_u64, 0_u64, 0_u64, 0_u64);
+    for (offset, reference) in references.iter().enumerate() {
+        require_sha256(&reference.content_sha256, "H3 reference content")?;
+        if reference.index != u32::try_from(offset + 1)? {
+            bail!("MiniMax H3 Ref2VA reference indices are not contiguous request order");
+        }
+        if reference.preprocess_version != contract::REFERENCE_PREPROCESS_VERSION {
+            bail!(
+                "MiniMax H3 reference {} was prepared at a different preprocessing contract",
+                reference.index
+            );
+        }
+        let charges = h3_reference_charges(reference)?;
+        if charges.visual_rows != reference.visual_rows
+            || charges.audio_rows != reference.audio_rows
+            || charges.qwen_vision_rows != reference.qwen_vision_rows
+            || charges.normalized_host_bytes != reference.normalized_host_bytes
+        {
+            bail!(
+                "MiniMax H3 reference {} row or retained-byte charges differ from its frozen geometry",
+                reference.index
+            );
+        }
+        totals.0 = totals
+            .0
+            .checked_add(charges.visual_rows)
+            .ok_or_else(|| anyhow!("MiniMax H3 reference visual row total overflow"))?;
+        totals.1 = totals
+            .1
+            .checked_add(charges.audio_rows)
+            .ok_or_else(|| anyhow!("MiniMax H3 reference audio row total overflow"))?;
+        totals.2 = totals
+            .2
+            .checked_add(charges.qwen_vision_rows)
+            .ok_or_else(|| anyhow!("MiniMax H3 reference vision row total overflow"))?;
+        totals.3 = totals
+            .3
+            .checked_add(charges.normalized_host_bytes)
+            .ok_or_else(|| anyhow!("MiniMax H3 reference retained host byte total overflow"))?;
+    }
+    if totals.0 == 0 {
+        bail!("MiniMax H3 Ref2VA prepared request has no visual reference conditioning");
+    }
+    Ok(totals)
+}
+
 fn validate_prepared_request(request: &H3FactoryPreparedRequestInput) -> Result<()> {
     for (value, label) in [
         (&request.identity_sha256, "H3 prepared request"),
@@ -1379,13 +1693,29 @@ fn validate_prepared_request(request: &H3FactoryPreparedRequestInput) -> Result<
         .map_err(|_| anyhow!("MiniMax H3 endpoint count exceeds u64"))?
         .checked_mul(rows_per_video_latent)
         .ok_or_else(|| anyhow!("MiniMax H3 condition rows overflow"))?;
+    // Conditioning is task-shaped: FL2VA prices boundary endpoints against the
+    // generated canvas, while Ref2VA prices every ordered reference against
+    // its own normalized canvas. The two never mix.
+    let reference_charges = match request.task {
+        Task::Fl2va => {
+            if !request.references.is_empty() {
+                bail!("MiniMax H3 FL2VA prepared request carries Ref2VA references");
+            }
+            None
+        }
+        Task::Ref2va => {
+            if !request.endpoints.is_empty() {
+                bail!("MiniMax H3 Ref2VA prepared request carries FL2VA boundary endpoints");
+            }
+            Some(validate_prepared_references(&request.references)?)
+        }
+    };
     let pixel_count = u64::from(request.width)
         .checked_mul(u64::from(request.height))
         .ok_or_else(|| anyhow!("MiniMax H3 pixel count overflow"))?;
     let aspect_ratio = request.width as f64 / request.height as f64;
     if request.canonical_model != model_contract.canonical_model
         || request.task != model_contract.task
-        || request.task != Task::Fl2va
         || !mode_matches_task
         || actual_anchors != expected_anchors
         || request.denoise_forward_count != expected_denoise_forward_count
@@ -1407,12 +1737,23 @@ fn validate_prepared_request(request: &H3FactoryPreparedRequestInput) -> Result<
         || request.audio_samples_per_channel != expected_audio_samples
         || request.rows.qwen_output_text_rows == 0
         || request.rows.qwen_output_text_rows > H3_FACTORY_QWEN_MODEL_MAX_ROWS
-        || request.rows.condition_audio_rows != 0
         || request.rows.target_video_rows != expected_target_video_rows
         || request.rows.target_audio_rows != expected_audio_rows
         || request.rows.total_packed_rows != packed_rows
-        || request.task == Task::Fl2va
-            && request.rows.condition_visual_rows != expected_condition_rows
+        || match reference_charges {
+            // FL2VA conditions only on boundary frames and never on audio.
+            None => {
+                request.rows.condition_visual_rows != expected_condition_rows
+                    || request.rows.condition_audio_rows != 0
+            }
+            // Ref2VA's three condition row counts are exactly the ordered
+            // reference totals the factory re-derived above.
+            Some((visual_rows, audio_rows, qwen_vision_rows, _)) => {
+                request.rows.condition_visual_rows != visual_rows
+                    || request.rows.condition_audio_rows != audio_rows
+                    || request.rows.qwen_vision_rows != qwen_vision_rows
+            }
+        }
         || request.identity_sha256 != expected_prepared_request_identity(request)
     {
         bail!("MiniMax H3 prepared request authority is internally inconsistent");
@@ -2044,10 +2385,16 @@ fn validate_target_budget(
         };
     }
 
-    expect!(
+    // Each task has exactly one executable load/drop order, and the budget's
+    // phase ledgers are only meaningful against that order.
+    let expected_load_drop_policy = match request.task {
+        Task::Fl2va => H3FactoryTargetLoadDropPolicy::LoadVaesLoadQwenEncodeTransferDropQwenEncodeConditionsParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux,
+        Task::Ref2va => H3FactoryTargetLoadDropPolicy::DecodeReferencesPreprocessReferencesLoadVaesLoadQwenEncodeVisionTransferDropQwenEncodeVisualReferencesEncodeAudioReferencesParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux,
+    };
+    expect_eq!(
         "load_drop_policy",
-        memory.load_drop_policy
-            == H3FactoryTargetLoadDropPolicy::LoadVaesLoadQwenEncodeTransferDropQwenEncodeConditionsParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux
+        memory.load_drop_policy,
+        expected_load_drop_policy
     );
     expect_eq!(
         "artifact_host_bytes",
@@ -2811,6 +3158,40 @@ pub fn expected_h3_factory_prepared_request_identity(
         hash.update(endpoint.normalized_cpu_bytes.to_le_bytes());
         hash.update(endpoint.normalized_cpu_content_sha256.as_bytes());
     }
+    hash.update((request.references.len() as u64).to_le_bytes());
+    for reference in &request.references {
+        hash.update(reference.index.to_le_bytes());
+        hash.update(reference_kind_id(reference.kind));
+        update_string(&mut hash, &reference.content_sha256);
+        hash.update(reference.preprocess_version.to_le_bytes());
+        for value in [
+            reference.normalized_width,
+            reference.normalized_height,
+            reference.normalized_video_frames,
+            reference.video_frames,
+            reference.qwen_video_frames,
+        ] {
+            // Absent and zero are different geometries; tag the option so a
+            // missing axis can never hash as a present zero.
+            hash.update([u8::from(value.is_some())]);
+            hash.update(value.unwrap_or_default().to_le_bytes());
+        }
+        hash.update([u8::from(reference.audio_samples_per_channel.is_some())]);
+        hash.update(
+            reference
+                .audio_samples_per_channel
+                .unwrap_or_default()
+                .to_le_bytes(),
+        );
+        for value in [
+            reference.visual_rows,
+            reference.audio_rows,
+            reference.qwen_vision_rows,
+            reference.normalized_host_bytes,
+        ] {
+            hash.update(value.to_le_bytes());
+        }
+    }
     for value in [
         request.rows.qwen_output_text_rows,
         request.rows.qwen_vision_rows,
@@ -2929,6 +3310,14 @@ fn mode_id(mode: Mode) -> &'static [u8] {
         Mode::LastFrameToAudioVideo => b"last-frame-to-audio-video",
         Mode::FirstAndLastFrameToAudioVideo => b"first-and-last-frame-to-audio-video",
         Mode::ReferenceToAudioVideo => b"reference-to-audio-video",
+    }
+}
+
+fn reference_kind_id(kind: H3FactoryReferenceKind) -> &'static [u8] {
+    match kind {
+        H3FactoryReferenceKind::Image => b"image",
+        H3FactoryReferenceKind::Video => b"video",
+        H3FactoryReferenceKind::Audio => b"audio",
     }
 }
 
@@ -4014,6 +4403,7 @@ mod tests {
                 normalized_cpu_bytes: u64::from(width) * u64::from(height) * 3,
                 normalized_cpu_content_sha256: sha('5'),
             }],
+            references: Vec::new(),
             rows: H3FactoryPreparedRowsInput {
                 qwen_output_text_rows: 1,
                 qwen_vision_rows: 64,
@@ -4029,6 +4419,256 @@ mod tests {
         };
         request.identity_sha256 = expected_h3_factory_prepared_request_identity(&request);
         request
+    }
+
+    /// One 2048-canvas image, one 768-canvas video with a soundtrack, and one
+    /// standalone audio reference — the mixed ordered set the Ref2VA contract
+    /// is specified against. Row and byte charges are written out longhand so
+    /// this fixture is an independent statement of the arithmetic rather than
+    /// a call to the code under test.
+    fn ref2va_references() -> Vec<H3FactoryReferenceInput> {
+        let image_rows = (2_048 / 32) * (2_048 / 32);
+        let video_rows_per_frame = (768 / 32) * (768 / 32);
+        // 39 visual-VAE frames land on 5n+2 causal latents over the family's
+        // own 17n+5 grid: (39-5)/17*5+2 = 12.
+        let video_latent_frames = 12;
+        // 48 normalized frames at 24 fps sample 4 cursor frames, which Qwen
+        // consumes as 2 temporal-patch-2 blocks.
+        let video_qwen_blocks = 2;
+        vec![
+            H3FactoryReferenceInput {
+                index: 1,
+                kind: H3FactoryReferenceKind::Image,
+                content_sha256: sha('a'),
+                preprocess_version: contract::REFERENCE_PREPROCESS_VERSION,
+                normalized_width: Some(2_048),
+                normalized_height: Some(2_048),
+                normalized_video_frames: None,
+                video_frames: None,
+                qwen_video_frames: None,
+                audio_samples_per_channel: None,
+                visual_rows: image_rows,
+                audio_rows: 0,
+                qwen_vision_rows: image_rows,
+                normalized_host_bytes: 2_048 * 2_048 * 3,
+            },
+            H3FactoryReferenceInput {
+                index: 2,
+                kind: H3FactoryReferenceKind::Video,
+                content_sha256: sha('b'),
+                preprocess_version: contract::REFERENCE_PREPROCESS_VERSION,
+                normalized_width: Some(768),
+                normalized_height: Some(768),
+                normalized_video_frames: Some(48),
+                video_frames: Some(39),
+                qwen_video_frames: Some(4),
+                audio_samples_per_channel: Some(64_000),
+                visual_rows: video_latent_frames * video_rows_per_frame,
+                audio_rows: 64_000_u64.div_ceil(800) * 2,
+                qwen_vision_rows: video_qwen_blocks * video_rows_per_frame,
+                normalized_host_bytes: (39 + 4) * 768 * 768 * 3 + 64_000 * 2 * 4,
+            },
+            H3FactoryReferenceInput {
+                index: 3,
+                kind: H3FactoryReferenceKind::Audio,
+                content_sha256: sha('c'),
+                preprocess_version: contract::REFERENCE_PREPROCESS_VERSION,
+                normalized_width: None,
+                normalized_height: None,
+                normalized_video_frames: None,
+                video_frames: None,
+                qwen_video_frames: None,
+                audio_samples_per_channel: Some(32_000),
+                visual_rows: 0,
+                audio_rows: 32_000_u64.div_ceil(800) * 2,
+                qwen_vision_rows: 0,
+                normalized_host_bytes: 32_000 * 2 * 4,
+            },
+        ]
+    }
+
+    fn ref2va_prepared_request() -> H3FactoryPreparedRequestInput {
+        let base = prepared_request();
+        let references = ref2va_references();
+        let condition_visual_rows = references
+            .iter()
+            .map(|entry| entry.visual_rows)
+            .sum::<u64>();
+        let condition_audio_rows = references.iter().map(|entry| entry.audio_rows).sum::<u64>();
+        let qwen_vision_rows = references
+            .iter()
+            .map(|entry| entry.qwen_vision_rows)
+            .sum::<u64>();
+        let mut request = H3FactoryPreparedRequestInput {
+            canonical_model: contract::REF2VA_COMFY.into(),
+            task: Task::Ref2va,
+            mode: Mode::ReferenceToAudioVideo,
+            endpoints: Vec::new(),
+            references,
+            rows: H3FactoryPreparedRowsInput {
+                qwen_output_text_rows: base.rows.qwen_output_text_rows,
+                qwen_vision_rows,
+                condition_visual_rows,
+                condition_audio_rows,
+                target_video_rows: base.rows.target_video_rows,
+                target_audio_rows: base.rows.target_audio_rows,
+                total_packed_rows: base.rows.qwen_output_text_rows
+                    + condition_visual_rows
+                    + condition_audio_rows
+                    + base.rows.target_video_rows
+                    + base.rows.target_audio_rows,
+            },
+            ..base
+        };
+        request.identity_sha256 = expected_h3_factory_prepared_request_identity(&request);
+        request
+    }
+
+    #[test]
+    fn ref2va_prepared_request_prices_every_ordered_reference_modality() {
+        let request = ref2va_prepared_request();
+        validate_prepared_request(&request)
+            .expect("the mixed ordered Ref2VA reference set must be admissible");
+
+        // The three condition row counts are exactly the per-reference totals,
+        // and mirror what mold-server's admission pricing already computes.
+        assert_eq!(request.rows.condition_visual_rows, 4_096 + 12 * 576);
+        assert_eq!(request.rows.condition_audio_rows, 80 * 2 + 40 * 2);
+        assert_eq!(request.rows.qwen_vision_rows, 4_096 + 2 * 576);
+        // Retained normalized media is the item-2 host charge: one 2048 RGB8
+        // still, 43 768-square RGB8 frames, and two f32 stereo waveforms.
+        let (_, _, _, host_bytes) = validate_prepared_references(&request.references).unwrap();
+        assert_eq!(
+            host_bytes,
+            2_048 * 2_048 * 3 + 43 * 768 * 768 * 3 + 64_000 * 2 * 4 + 32_000 * 2 * 4
+        );
+        assert_eq!(host_bytes, 12_582_912 + 76_087_296 + 512_000 + 256_000);
+    }
+
+    #[test]
+    fn ref2va_prepared_request_rejects_every_reference_authority_mutation() {
+        let base = ref2va_prepared_request();
+        let reseal = |mut request: H3FactoryPreparedRequestInput| {
+            request.identity_sha256 = expected_h3_factory_prepared_request_identity(&request);
+            request
+        };
+
+        // An understated row charge is the whole point of re-deriving: it
+        // would otherwise be admitted into a budget that cannot hold it.
+        let mut understated = base.clone();
+        understated.references[0].visual_rows -= 1;
+        understated.rows.condition_visual_rows -= 1;
+        understated.rows.total_packed_rows -= 1;
+        assert!(validate_prepared_request(&reseal(understated)).is_err());
+
+        // Same for the retained host bytes.
+        let mut cheap_media = base.clone();
+        cheap_media.references[1].normalized_host_bytes -= 1;
+        assert!(validate_prepared_request(&reseal(cheap_media)).is_err());
+
+        // Reordered or non-contiguous references break the packed sequence.
+        let mut reordered = base.clone();
+        reordered.references.swap(0, 1);
+        assert!(validate_prepared_request(&reseal(reordered)).is_err());
+
+        // Modality and geometry must agree.
+        let mut audio_with_canvas = base.clone();
+        audio_with_canvas.references[2].normalized_width = Some(64);
+        audio_with_canvas.references[2].normalized_height = Some(64);
+        assert!(validate_prepared_request(&reseal(audio_with_canvas)).is_err());
+
+        let mut image_with_frames = base.clone();
+        image_with_frames.references[0].video_frames = Some(9);
+        assert!(validate_prepared_request(&reseal(image_with_frames)).is_err());
+
+        // The Qwen 2 fps cursor contract is not negotiable.
+        let mut resampled = base.clone();
+        resampled.references[1].qwen_video_frames = Some(3);
+        assert!(validate_prepared_request(&reseal(resampled)).is_err());
+
+        // A prepared shape from a different preprocessing contract cannot be
+        // priced by this factory at all.
+        let mut stale_version = base.clone();
+        stale_version.references[0].preprocess_version = contract::REFERENCE_PREPROCESS_VERSION + 1;
+        assert!(validate_prepared_request(&reseal(stale_version)).is_err());
+
+        // Every reference field participates in the frozen identity.
+        for mutate in [
+            (|request: &mut H3FactoryPreparedRequestInput| request.references[0].index = 9)
+                as fn(&mut H3FactoryPreparedRequestInput),
+            |request| request.references[0].content_sha256 = sha('9'),
+            |request| request.references[2].audio_samples_per_channel = Some(800),
+            |request| request.references.truncate(2),
+        ] {
+            let mut mutated = base.clone();
+            mutate(&mut mutated);
+            assert_ne!(
+                expected_h3_factory_prepared_request_identity(&mutated),
+                base.identity_sha256
+            );
+        }
+    }
+
+    #[test]
+    fn conditioning_contracts_never_cross_between_the_two_tasks() {
+        let reseal = |mut request: H3FactoryPreparedRequestInput| {
+            request.identity_sha256 = expected_h3_factory_prepared_request_identity(&request);
+            request
+        };
+
+        // FL2VA may not carry references, and Ref2VA may not carry endpoints.
+        let mut fl2va_with_references = prepared_request();
+        fl2va_with_references.references = ref2va_references();
+        assert!(validate_prepared_request(&reseal(fl2va_with_references)).is_err());
+
+        let mut ref2va_with_endpoints = ref2va_prepared_request();
+        ref2va_with_endpoints.endpoints = prepared_request().endpoints;
+        assert!(validate_prepared_request(&reseal(ref2va_with_endpoints)).is_err());
+
+        // A Ref2VA request with no references at all has nothing to condition
+        // on and must not be admitted as an unconditioned generation.
+        let mut empty = ref2va_prepared_request();
+        empty.references = Vec::new();
+        empty.rows.condition_visual_rows = 0;
+        empty.rows.condition_audio_rows = 0;
+        empty.rows.qwen_vision_rows = 0;
+        empty.rows.total_packed_rows = empty.rows.qwen_output_text_rows
+            + empty.rows.target_video_rows
+            + empty.rows.target_audio_rows;
+        assert!(validate_prepared_request(&reseal(empty)).is_err());
+
+        // Audio-only references cannot carry a Ref2VA generation either.
+        let mut audio_only = ref2va_prepared_request();
+        audio_only
+            .references
+            .retain(|entry| entry.kind == H3FactoryReferenceKind::Audio);
+        audio_only.references[0].index = 1;
+        audio_only.rows.condition_visual_rows = 0;
+        audio_only.rows.qwen_vision_rows = 0;
+        audio_only.rows.condition_audio_rows = audio_only.references[0].audio_rows;
+        audio_only.rows.total_packed_rows = audio_only.rows.qwen_output_text_rows
+            + audio_only.rows.condition_audio_rows
+            + audio_only.rows.target_video_rows
+            + audio_only.rows.target_audio_rows;
+        assert!(validate_prepared_request(&reseal(audio_only)).is_err());
+    }
+
+    #[test]
+    fn each_task_pins_exactly_one_executable_load_drop_order() {
+        let fl2va = H3FactoryTargetLoadDropPolicy::LoadVaesLoadQwenEncodeTransferDropQwenEncodeConditionsParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux;
+        let ref2va = H3FactoryTargetLoadDropPolicy::DecodeReferencesPreprocessReferencesLoadVaesLoadQwenEncodeVisionTransferDropQwenEncodeVisualReferencesEncodeAudioReferencesParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux;
+        assert_ne!(fl2va, ref2va);
+
+        // The discriminator participates in the target-budget identity, so a
+        // budget measured against one order cannot be replayed as the other.
+        let mut base = target_budget(&prepared_request(), &raw_checkpoint());
+        base.load_drop_policy = fl2va;
+        let fl2va_identity = expected_h3_factory_target_budget_identity(&base);
+        base.load_drop_policy = ref2va;
+        assert_ne!(
+            expected_h3_factory_target_budget_identity(&base),
+            fl2va_identity
+        );
     }
 
     fn raw_checkpoint() -> H3FactoryRawCheckpointInput {

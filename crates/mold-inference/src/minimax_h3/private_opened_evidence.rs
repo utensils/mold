@@ -1065,6 +1065,7 @@ fn prepared_request_input(
         conditioning_fingerprint,
         reference_fingerprint,
         endpoints,
+        references: Vec::new(),
         rows: H3FactoryPreparedRowsInput {
             qwen_output_text_rows,
             qwen_vision_rows,
@@ -1883,6 +1884,7 @@ mod tests {
             conditioning_fingerprint: conditioning_fingerprint(&current_endpoints),
             reference_fingerprint: sha256(b"mold.minimax-h3.fl2va-no-references.v1"),
             endpoints: vec![factory_endpoint],
+            references: Vec::new(),
             rows: H3FactoryPreparedRowsInput {
                 qwen_output_text_rows: 3,
                 qwen_vision_rows: 64,
