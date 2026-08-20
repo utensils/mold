@@ -88,6 +88,8 @@ pub(crate) enum H3ArtifactRole {
     QuantizationSidecar,
     /// Comfy's pruned AdaLN curves are not interchangeable with full AdaLN.
     PrunedAdaLnTable,
+    /// A reviewed Turbo LoRA adapter pinned by its manifest tag.
+    TurboLoraAdapter,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -178,6 +180,7 @@ impl H3ArtifactInventory {
                         role
                     }
                     ModelComponent::AudioVae => H3ArtifactRole::AudioVae,
+                    ModelComponent::DistilledLora => H3ArtifactRole::TurboLoraAdapter,
                     ModelComponent::VideoScheduler => H3ArtifactRole::VideoScheduler,
                     ModelComponent::AudioScheduler => H3ArtifactRole::AudioScheduler,
                     ModelComponent::TaskConfig => {
@@ -1817,6 +1820,12 @@ fn h3_factory_component_authorities(
     let mut grouped = BTreeMap::<FactoryRole, Vec<&H3ArtifactFact>>::new();
     for artifact in &artifacts.artifacts {
         let role = match &artifact.role {
+            // The reviewed Turbo adapter is additive artifact authority: its
+            // authenticated identity rides the frozen plan's quantization
+            // authority (`turbo_adapter`), so the logical component
+            // fingerprints stay the base checkpoint's and keep agreeing with
+            // the private admission's component digests.
+            H3ArtifactRole::TurboLoraAdapter => continue,
             H3ArtifactRole::QwenShard(_) | H3ArtifactRole::ProcessorAsset(_) => {
                 FactoryRole::Conditioner
             }
