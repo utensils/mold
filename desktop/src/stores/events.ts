@@ -90,6 +90,20 @@ export const useEventsStore = defineStore("events", {
         case "gallery_removed":
           gallery.applyRemoved(ev.filename);
           break;
+        // Library organization (titles / favorites / tags / collections /
+        // trash) — primary-only like the two frames above.
+        case "gallery_updated":
+          gallery.applyUpdated(ev);
+          break;
+        case "gallery_trashed":
+          gallery.applyTrashed(ev.filename);
+          break;
+        case "gallery_restored":
+          gallery.applyRestored(ev);
+          break;
+        case "gallery_collections_changed":
+          gallery.applyCollectionsChanged();
+          break;
         // Queue pause state broadcast — another client (or this one) toggled
         // the primary host's queue; keep the Jobs view chip in sync live.
         case "queue_paused":

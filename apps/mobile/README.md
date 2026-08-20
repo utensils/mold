@@ -72,6 +72,11 @@ pushed screen opened from the header.
   target-host estimates, proportional resolution choices, and explicit Random
   or Fixed seeds. Deeper options open in a full-screen **Advanced** sheet, and
   prompt **style** presets compose at submit without rewriting the prompt text.
+  A **Title** field above the prompt names the print: the trimmed value rides
+  every mobile-built `GenerateRequest` as additive `title` (batch siblings and
+  prepared Batch N inherit it), an over-long or control-character title is
+  refused inline before anything queues, and **Use as prompt** restores the
+  print's saved title (a later Library rename wins over the metadata stamp).
   A **↺ Reset** beside the Advanced trigger restores every generation setting
   to the selected model's defaults while preserving the prompt, model choice,
   and any prepared batch size; the Advanced sheet keeps its narrower
@@ -134,6 +139,37 @@ pushed screen opened from the header.
   the partial cleanup.
   Persistent New badges match desktop Library visits, and post-generation
   upscaled images carry the shared Upscaled badge.
+  Library organization (V3) rides each host's advertised
+  `capabilities.gallery`: when a connected host advertises `organize` or
+  `trash`, a 44pt **Prints | Collections | Trash** scope row (with counts)
+  appears under the header — plain buttons that never capture the grid's
+  two-finger pinch. Prints gains a horizontally scrolling chip row (♥
+  Favorites, the top tags with counts behind a **More…** sheet, and host chips
+  when several machines are connected) filtering the grid client-side; tiles
+  show a ♥ badge on favorites. Select mode adds **Add to collection** (checklist
+  sheet with a New-collection input), **Tag** (chip editor with merged
+  suggestions), ♥ toggle, and **Trash**, which replaces Delete on trash-capable
+  hosts with the two-tap copy "Move N to trash?" → "Confirm" (hosts without a
+  trash keep today's hard delete and its wording). Collections lists merged
+  cross-host collection cards (cover, name, mono count, host labels) with a
+  **New collection** row; the … menu offers Rename and an inline two-step
+  Delete collection whose copy says the prints stay in the Library; tapping a
+  card drills into its grid behind a back chevron, where Select offers
+  **Remove from collection**. Trash lists trashed prints with a per-host
+  retention banner (mono numbers, **Change · Machines** link), per-tile
+  "Purges in N d" chips, Select-mode **Restore** (primary) and a two-step
+  **Delete forever**, and a two-step **Empty trash** header button. The
+  full-screen viewer titles itself with the print's `displayTitle` and gains a
+  44pt **Info** control opening a bottom sheet: editable title (≥16px input;
+  Done commits via `PATCH`, blank clears), ♥ toggle, a tags chip editor with
+  suggestions, an "In collections" checklist with a New input, and — for
+  trashed prints — the purge countdown with Restore / two-step Delete forever.
+  Every mutation fans out to each physical copy's exact Keychain-authenticated
+  host via the shared `planOrganizationFanout` plan
+  (`desktop/src/mobile/libraryOrganization.ts` holds the mobile state
+  helpers); failures are reported in a persistent inline banner, never a
+  toast, and edits patch the offline IndexedDB cache behind its mutation
+  fence.
 - **Models** merges installed models with Hugging Face and Civitai results,
   supports host/media/source/family/kind filters with a downloads/rating/recent
   sort (the family list and a failed search reload themselves when the browsed
@@ -158,6 +194,13 @@ pushed screen opened from the header.
   generations have a 44pt two-tap **Cancel** action against that exact
   Keychain-authenticated host when it advertises cooperative cancellation;
   older hosts keep running work visible and read-only.
+  When a host advertises `capabilities.gallery.trash`, host detail adds a
+  **Library** card: a **Trash retention** select reading and writing that
+  host's `gallery.trash_retention_days` through `GET`/`PUT /api/config/:key`
+  (the first mobile `/api/config` client, `desktop/src/mobile/hostConfig.ts`;
+  an env-pinned key renders read-only and names the variable) plus a
+  "Prints in trash: N" row with a two-step **Empty trash**. Retention is a
+  server setting — `mold.mobile.settings.v1` stays three local fields.
   Host detail's RAM card colors off the server's additive `host_memory`
   admission telemetry (headroom vs safety floor, mirroring the shared
   `studio/lib/hostMemory` levels; older servers keep the uncolored card), and

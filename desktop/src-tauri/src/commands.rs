@@ -219,12 +219,17 @@ pub fn set_dock_badge(app: tauri::AppHandle, count: Option<i64>) -> Result<(), S
         .map_err(|e| e.to_string())
 }
 
-/// Reveal an engine-written file in Finder (local mode only).
+/// Reveal an engine-written file in Finder (local mode only). A trash-view
+/// print (`from_trash`) resolves into the gallery's `.trash/` directory —
+/// after a normal delete the bytes live only there — while either view
+/// falls back to the other location so a same-name replacement never hides
+/// the file being revealed.
 #[tauri::command]
 pub async fn reveal_output_file(
     state: tauri::State<'_, AppState>,
     app: tauri::AppHandle,
     filename: String,
+    from_trash: Option<bool>,
 ) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
     // Gallery filenames are server-generated basenames; refuse traversal.
@@ -233,10 +238,19 @@ pub async fn reveal_output_file(
     }
     let _ = state;
     let dir = mold_core::Config::load_or_default().effective_output_dir();
-    let path = dir.join(&filename);
-    if !path.exists() {
+    let trash_dir = mold_db::trash::trash_dir(&dir);
+    let (first, second) = if from_trash.unwrap_or(false) {
+        (trash_dir.join(&filename), dir.join(&filename))
+    } else {
+        (dir.join(&filename), trash_dir.join(&filename))
+    };
+    let path = if first.exists() {
+        first
+    } else if second.exists() {
+        second
+    } else {
         return Err("The file is no longer on disk.".into());
-    }
+    };
     app.opener()
         .reveal_item_in_dir(&path)
         .map_err(|e| e.to_string())

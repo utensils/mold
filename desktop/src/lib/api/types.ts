@@ -15,6 +15,24 @@ import type { GenerationScheduler } from "@studio/lib/generationCapabilities";
 import type { MiniMaxH3Capability } from "@studio/lib/minimaxH3Inventory";
 import type { GenerationProfileSet } from "@studio/lib/generationProfile";
 import type { SourceFitPolicy } from "@studio/lib/sourceFit";
+import type {
+  GalleryCollectionsChangedEvent,
+  GalleryOrganizationFields,
+  GalleryRestoredEvent,
+  GalleryTrashCapabilities,
+  GalleryTrashedEvent,
+  GalleryUpdatedEvent,
+} from "@studio/lib/api/galleryOrganization";
+
+// Library organization wire shapes are shared across surfaces; re-export the
+// pieces desktop consumers reach for so `lib/api/types` stays the single
+// desktop import for wire types.
+export type {
+  Collection,
+  GalleryOrganizationFields,
+  GalleryTrashCapabilities,
+  TagCount,
+} from "@studio/lib/api/galleryOrganization";
 
 export interface GpuSnapshot {
   ordinal: number;
@@ -96,7 +114,15 @@ export interface ExpandCapabilities {
 
 export interface ServerCapabilities {
   generation_profile_v1?: boolean;
-  gallery: { can_delete: boolean };
+  gallery: {
+    can_delete: boolean;
+    /** Trash support (soft delete + retention). Absent on older servers,
+     * which hard-delete, and when the metadata DB is disabled. */
+    trash?: GalleryTrashCapabilities | null;
+    /** Titles / favorites / tags / collections can be edited here. Absent
+     * on older servers ⇒ hide the organization UI. */
+    organize?: boolean;
+  };
   /** Server-enforced model families that are not activated in this build. */
   model_access?: {
     restrictions: Array<{
@@ -457,6 +483,10 @@ export interface GenerateRequest {
   lora?: LoraWeight;
   expand?: boolean;
   original_prompt?: string;
+  /** User-authored print title (Library organization, D5). Additive: the
+   * server embeds it into `OutputMetadata.title`, seeds the gallery row, and
+   * folds a lossy slug into the output filename. Absent = untitled. */
+  title?: string;
   /** Durable prepared-batch provenance. Index is one-based. */
   batch_id?: string;
   batch_index?: number;
@@ -611,6 +641,8 @@ export interface OutputMetadata {
   /** User-facing authoring mode; independent of internal auto-chaining. */
   output_mode?: "one-shot" | "sequence" | null;
   prompt: string;
+  /** Creation-time print title; the gallery row is the editable authority. */
+  title?: string | null;
   negative_prompt?: string | null;
   original_prompt?: string | null;
   batch_id?: string | null;
@@ -689,7 +721,7 @@ export interface OutputMetadata {
   video_fps?: number | null;
 }
 
-export interface GalleryImage {
+export interface GalleryImage extends GalleryOrganizationFields {
   filename: string;
   metadata: OutputMetadata;
   timestamp: number;
@@ -788,6 +820,10 @@ export type ServerEvent =
   | { type: "job_ended"; id: string }
   | { type: "gallery_added"; filename: string; image?: GalleryImage | null }
   | { type: "gallery_removed"; filename: string }
+  | GalleryUpdatedEvent<GalleryImage>
+  | GalleryTrashedEvent
+  | GalleryRestoredEvent<GalleryImage>
+  | GalleryCollectionsChangedEvent
   | { type: "queue_paused" }
   | { type: "queue_resumed" }
   | { type: "queue_plan_changed"; plan: import("@studio/api/queuePlan").QueuePlan }

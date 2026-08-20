@@ -232,7 +232,7 @@ jobs:
         env:
           CUDA_COMPUTE_CAP: "89"
           LIBRARY_PATH: /usr/local/cuda/lib64/stubs
-        run: cargo build --release -p mold-ai --features cuda,h3,preview,discord,expand,tui,webp,mp4,metrics,mdns
+        run: cargo build --release -p mold-ai --features h3-cuda,preview,discord,expand,tui,webp,mp4,metrics,mdns
 
       - name: Seal generated CUDA PTX manifest
         run: scripts/seal-cuda-ptx-manifest.py target/release/mold 89 target/release/build
@@ -608,7 +608,7 @@ jobs:
           merge-multiple: true
 
       - name: Generate checksums
-        run: cd artifacts && sha256sum ./*.tar.gz > SHA256SUMS
+        run: cd artifacts && sha256sum -- *.tar.gz > SHA256SUMS
 
       - name: Verify rolling release source is current main
         run: scripts/check-desktop-nightly-main-head.sh "$GITHUB_SHA"
@@ -786,7 +786,7 @@ jobs:
         run: cp artifacts/Mold_*_aarch64.dmg artifacts/Mold-macos-arm64.dmg
 
       - name: Generate checksums
-        run: cd artifacts && sha256sum ./*.tar.gz ./*.dmg ./*.zip > SHA256SUMS
+        run: cd artifacts && sha256sum -- *.tar.gz *.dmg *.zip > SHA256SUMS
 
       - name: Create Apple-first release
         uses: softprops/action-gh-release@v2
@@ -927,7 +927,7 @@ jobs:
           set -euo pipefail
           (
             cd artifacts
-            sha256sum ./*.tar.gz ./*.dmg ./*.zip > SHA256SUMS
+            sha256sum -- *.tar.gz *.dmg *.zip > SHA256SUMS
           )
           gh release upload "$GITHUB_REF_NAME" \
             artifacts/mold-x86_64-unknown-linux-gnu-cuda-sm86.tar.gz \
@@ -964,7 +964,7 @@ jobs:
           set -euo pipefail
           (
             cd artifacts
-            sha256sum ./*.tar.gz ./*.dmg ./*.zip > SHA256SUMS
+            sha256sum -- *.tar.gz *.dmg *.zip > SHA256SUMS
           )
           scripts/create-container-digest-manifest.sh \
             artifacts/mold-container-digests.json \

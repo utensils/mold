@@ -34,6 +34,18 @@ import { modelDisplayName, modelDisplayNameForId, modelSizeLabels } from "../lib
 import { applyDownloadEvent, emptyDownloadsState, type DownloadsState } from "../stores/downloads";
 import type { QueueEntry } from "../stores/jobs";
 import { mobileHostTarget, type MobileHost } from "./hosts";
+import { emptyTrash as emptyHostTrash, listTrash } from "@studio/api/galleryOrganization";
+import { RETENTION_OPTIONS, retentionLabel } from "@studio/lib/libraryOrganization";
+import {
+  TRASH_RETENTION_CONFIG_KEY,
+  fetchHostConfigKey,
+  hostConfigEditable,
+  hostConfigLocked,
+  retentionDaysFromConfigValue,
+  setHostConfigKey,
+  type HostConfigEntry,
+} from "./hostConfig";
+import { galleryCapabilitiesOf } from "./libraryOrganization";
 
 type DetailSnapshot = ResourceSnapshot & {
   cpu?: { cores: number; usage_percent: number } | null;
@@ -74,6 +86,15 @@ const forgetPending = ref(false);
 const unloading = ref<Set<string>>(new Set());
 const cancelConfirmId = ref<string | null>(null);
 const cancellingQueueIds = ref(new Set<string>());
+// ── Library card (per-host trash retention, #4 iPhone V3) ───────────────────
+const retentionEntry = ref<HostConfigEntry | null>(null);
+const retentionValue = ref<number | null>(null);
+const retentionProbeFailed = ref(false);
+const retentionError = ref("");
+const retentionSaving = ref(false);
+const trashCount = ref<number | null>(null);
+const emptyTrashArmed = ref(false);
+const emptyingTrash = ref(false);
 let loadEpoch = 0;
 let queueRequestGeneration = 0;
 let deviceRequestGeneration = 0;
@@ -340,6 +361,82 @@ function startLiveServices(epoch: number): void {
   scheduleLivePoll(epoch);
 }
 
+/** The host's own trash capability; the Library card renders only when the
+ * exact Keychain-authenticated host advertises `gallery.trash.enabled`. */
+const hostTrashCapability = computed(
+  () => galleryCapabilitiesOf(deviceCapabilities.value)?.trash ?? null,
+);
+const libraryCardVisible = computed(() => hostTrashCapability.value?.enabled === true);
+/** An env-pinned key is read-only on every client (`mold config` semantics). */
+const retentionLocked = computed(() => hostConfigLocked(retentionEntry.value));
+/** Unknown authority (probe failed / unanswered) is read-only too: enabling
+ * the selector on a failed probe could expose an env-pinned key to edits. */
+const retentionEditable = computed(() => hostConfigEditable(retentionEntry.value));
+const retentionChoices = computed(() => {
+  const days = retentionValue.value;
+  return days !== null && !RETENTION_OPTIONS.includes(days)
+    ? [...RETENTION_OPTIONS, days].sort((a, b) => (a === 0 ? 1 : b === 0 ? -1 : a - b))
+    : RETENTION_OPTIONS;
+});
+
+async function refreshLibraryCard(epoch = loadEpoch): Promise<void> {
+  if (!libraryCardVisible.value) return;
+  const requestTarget = target.value;
+  const [entry, trashed] = await Promise.allSettled([
+    fetchHostConfigKey(requestTarget, TRASH_RETENTION_CONFIG_KEY),
+    listTrash(requestTarget),
+  ]);
+  if (epoch !== loadEpoch) return;
+  if (entry.status === "fulfilled") {
+    retentionProbeFailed.value = false;
+    retentionEntry.value = entry.value;
+    retentionValue.value = retentionDaysFromConfigValue(entry.value.value);
+  } else {
+    // No entry = unknown authority: the selector stays disabled (see
+    // `retentionEditable`) and the failure line offers an explicit Retry.
+    retentionProbeFailed.value = true;
+    retentionEntry.value = null;
+    retentionValue.value = hostTrashCapability.value?.retention_days ?? null;
+  }
+  trashCount.value = trashed.status === "fulfilled" ? trashed.value.length : null;
+}
+
+async function saveRetention(rawDays: string): Promise<void> {
+  const days = Number(rawDays);
+  if (!Number.isFinite(days) || days < 0 || retentionSaving.value) return;
+  retentionSaving.value = true;
+  retentionError.value = "";
+  try {
+    const entry = await setHostConfigKey(target.value, TRASH_RETENTION_CONFIG_KEY, days);
+    retentionEntry.value = entry;
+    retentionValue.value = retentionDaysFromConfigValue(entry.value);
+  } catch (caught) {
+    retentionError.value = describeTransportError(caught, props.host.name);
+  } finally {
+    retentionSaving.value = false;
+  }
+}
+
+/** Two-step inline confirm: first tap arms, the second purges the trash. */
+async function emptyTrashNow(): Promise<void> {
+  if (emptyingTrash.value) return;
+  if (!emptyTrashArmed.value) {
+    emptyTrashArmed.value = true;
+    return;
+  }
+  emptyTrashArmed.value = false;
+  emptyingTrash.value = true;
+  retentionError.value = "";
+  try {
+    await emptyHostTrash(target.value);
+    trashCount.value = 0;
+  } catch (caught) {
+    retentionError.value = describeTransportError(caught, props.host.name);
+  } finally {
+    emptyingTrash.value = false;
+  }
+}
+
 async function loadHost(): Promise<void> {
   const epoch = ++loadEpoch;
   stopLiveServices();
@@ -360,6 +457,12 @@ async function loadHost(): Promise<void> {
   forgetPending.value = false;
   cancelConfirmId.value = null;
   cancellingQueueIds.value = new Set();
+  retentionEntry.value = null;
+  retentionValue.value = null;
+  retentionProbeFailed.value = false;
+  retentionError.value = "";
+  trashCount.value = null;
+  emptyTrashArmed.value = false;
   if (props.host.connected === false) {
     loading.value = false;
     return;
@@ -376,6 +479,7 @@ async function loadHost(): Promise<void> {
     emit("status", { id: props.host.id, status: nextStatus });
     await refreshDevicesSafely(epoch);
     if (epoch !== loadEpoch) return;
+    void refreshLibraryCard(epoch);
     startLiveServices(epoch);
   } catch (caught) {
     if (epoch !== loadEpoch) return;
@@ -837,6 +941,76 @@ onBeforeUnmount(() => {
           </li>
         </ul>
         <p v-else class="mobile-empty-note">No installed models reported.</p>
+      </section>
+
+      <section
+        v-if="libraryCardVisible"
+        class="mobile-detail-section"
+        aria-labelledby="host-library-title"
+        data-test="host-detail-library"
+      >
+        <div class="mobile-section-head">
+          <h2 id="host-library-title">Library</h2>
+        </div>
+        <label class="field">
+          <span>Trash retention</span>
+          <select
+            class="control"
+            :value="retentionValue ?? ''"
+            :disabled="retentionSaving || !retentionEditable"
+            data-test="host-detail-retention"
+            @change="saveRetention(($event.target as HTMLSelectElement).value)"
+          >
+            <option v-for="days in retentionChoices" :key="days" :value="days">
+              {{ retentionLabel(days) }}
+            </option>
+          </select>
+        </label>
+        <p
+          v-if="retentionLocked"
+          class="mobile-empty-note"
+          data-test="host-detail-retention-locked"
+        >
+          Set by {{ retentionEntry?.env_var }} on this host — edit it there.
+        </p>
+        <p
+          v-if="retentionProbeFailed"
+          class="status-line error-text"
+          role="alert"
+          data-test="host-detail-retention-error"
+        >
+          Couldn't read this host's retention setting — it stays read-only.
+          <button
+            class="secondary-button"
+            type="button"
+            data-test="host-detail-retention-retry"
+            @click="refreshLibraryCard()"
+          >
+            Retry
+          </button>
+        </p>
+        <p v-if="retentionError" class="status-line error-text" role="alert">
+          {{ retentionError }}
+        </p>
+        <div class="mobile-library-trash-row" data-test="host-detail-trash-row">
+          <span
+            >Prints in trash: <span class="mobile-library-mono">{{ trashCount ?? "–" }}</span></span
+          >
+          <button
+            class="secondary-button mobile-inline-danger"
+            type="button"
+            :class="{ 'is-armed': emptyTrashArmed }"
+            :disabled="emptyingTrash || trashCount === 0"
+            data-test="host-detail-empty-trash"
+            @click="emptyTrashNow"
+            @blur="emptyTrashArmed = false"
+          >
+            {{ emptyingTrash ? "Emptying…" : emptyTrashArmed ? "Confirm" : "Empty trash" }}
+          </button>
+        </div>
+        <p v-if="emptyTrashArmed" class="status-line" data-test="host-detail-empty-prompt">
+          Delete everything in this host's trash forever?
+        </p>
       </section>
 
       <!-- Specialized capability detail reads below the live instruments. -->

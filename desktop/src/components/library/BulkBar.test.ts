@@ -1,0 +1,133 @@
+import { afterEach, describe, expect, it } from "vitest";
+import { mount } from "@vue/test-utils";
+import BulkBar from "./BulkBar.vue";
+import type { MergedCollection } from "@studio/lib/libraryOrganization";
+
+const collections: MergedCollection[] = [
+  { slug: "smurfs", name: "Smurfs", count: 9, hosts: [], cover: null },
+  { slug: "river", name: "River studies", count: 6, hosts: [], cover: null },
+];
+
+function mountBar(props: Record<string, unknown> = {}) {
+  return mount(BulkBar, {
+    props: {
+      selectedCount: 5,
+      total: 24,
+      scope: "prints",
+      organize: true,
+      trash: true,
+      collections,
+      collectionSelected: ["smurfs"],
+      collectionMixed: ["river"],
+      tags: ["blue"],
+      tagSuggestions: [{ name: "outdoor", count: 3 }],
+      hostNote: "This Mac · plato",
+      ...props,
+    },
+  });
+}
+
+afterEach(() => {
+  document.body.innerHTML = "";
+});
+
+describe("BulkBar (Prints)", () => {
+  it("offers Add to collection · Tag · ♥ Favorite · Move to trash with the count", async () => {
+    const wrapper = mountBar();
+    expect(wrapper.text()).toContain("5 / 24 selected");
+    expect(wrapper.get("[data-test='bulk-collections']").text()).toContain("Add to collection");
+    expect(wrapper.get("[data-test='bulk-tags']").text()).toContain("Tag");
+    expect(wrapper.get("[data-test='bulk-favorite']").text()).toContain("Favorite");
+    const trash = wrapper.get("[data-test='bulk-delete']");
+    expect(trash.text()).toContain("Move 5 prints to trash");
+    await trash.trigger("click");
+    expect(wrapper.emitted("trash")).toHaveLength(1);
+    expect(wrapper.emitted("delete")).toBeUndefined();
+  });
+
+  it("toggles favorite: any unfavorited ⇒ favorite all, else unfavorite all", async () => {
+    const wrapper = mountBar({ allFavorite: false });
+    await wrapper.get("[data-test='bulk-favorite']").trigger("click");
+    expect(wrapper.emitted("favorite")).toEqual([[true]]);
+    await wrapper.setProps({ allFavorite: true });
+    expect(wrapper.get("[data-test='bulk-favorite']").text()).toContain("Unfavorite");
+    await wrapper.get("[data-test='bulk-favorite']").trigger("click");
+    expect(wrapper.emitted("favorite")?.at(-1)).toEqual([false]);
+  });
+
+  it("opens the collection picker with mixed state and relays toggle / create", async () => {
+    const wrapper = mountBar();
+    await wrapper.get("[data-test='bulk-collections']").trigger("click");
+    const panel = document.body.querySelector("[data-test='bulk-collections-panel']")!;
+    expect(panel).not.toBeNull();
+    expect(panel.textContent).toContain("Add 5 prints to");
+    expect(panel.textContent).toContain("fans out to This Mac · plato");
+    const rows = panel.querySelectorAll("[data-test='collection-row']");
+    expect(rows[0]!.getAttribute("aria-checked")).toBe("true");
+    expect(rows[1]!.getAttribute("aria-checked")).toBe("mixed");
+    (rows[1] as HTMLButtonElement).click();
+    expect(wrapper.emitted("toggleCollection")).toEqual([["river", true]]);
+    (panel.querySelector("[data-test='collection-new']") as HTMLButtonElement).click();
+    await wrapper.vm.$nextTick();
+    const input = panel.querySelector("[data-test='collection-new-input']") as HTMLInputElement;
+    input.value = "Halcyon";
+    input.dispatchEvent(new Event("input"));
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
+    expect(wrapper.emitted("createCollection")).toEqual([["Halcyon"]]);
+  });
+
+  it("opens the tag editor over the intersection and relays add / remove", async () => {
+    const wrapper = mountBar();
+    await wrapper.get("[data-test='bulk-tags']").trigger("click");
+    const panel = document.body.querySelector("[data-test='bulk-tags-panel']")!;
+    expect(panel.querySelectorAll("[data-test='tag-chip']")).toHaveLength(1);
+    (panel.querySelector("[data-test='tag-remove']") as HTMLButtonElement).click();
+    expect(wrapper.emitted("removeTags")).toEqual([[["blue"]]]);
+    const input = panel.querySelector("[data-test='tag-input']") as HTMLInputElement;
+    input.value = "outdoor";
+    input.dispatchEvent(new Event("input"));
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
+    expect(wrapper.emitted("addTags")).toEqual([[["outdoor"]]]);
+  });
+
+  it("keeps the two-press hard-delete arming on hosts without a trash", async () => {
+    const wrapper = mountBar({ trash: false, selectedCount: 2 });
+    const button = wrapper.get("[data-test='bulk-delete']");
+    expect(button.text()).toBe("Delete selected");
+    await button.trigger("click");
+    expect(wrapper.emitted("update:confirming")).toEqual([[true]]);
+    expect(wrapper.emitted("delete")).toBeUndefined();
+    await wrapper.setProps({ confirming: true });
+    expect(wrapper.get("[data-test='bulk-delete']").text()).toBe(
+      "Delete 2 prints? This can't be undone.",
+    );
+    await wrapper.get("[data-test='bulk-delete']").trigger("click");
+    expect(wrapper.emitted("delete")).toHaveLength(1);
+  });
+
+  it("hides organization actions when no host can organize", () => {
+    const wrapper = mountBar({ organize: false });
+    expect(wrapper.find("[data-test='bulk-collections']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='bulk-tags']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='bulk-favorite']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='bulk-delete']").exists()).toBe(true);
+  });
+
+  it("offers Remove from collection inside a drill-in", async () => {
+    const wrapper = mountBar({ collectionName: "Smurfs" });
+    await wrapper.get("[data-test='bulk-remove-from-collection']").trigger("click");
+    expect(wrapper.emitted("removeFromCollection")).toHaveLength(1);
+  });
+});
+
+describe("BulkBar (Trash)", () => {
+  it("offers Restore and Delete forever only", async () => {
+    const wrapper = mountBar({ scope: "trash", selectedCount: 2 });
+    expect(wrapper.find("[data-test='bulk-collections']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='bulk-delete']").exists()).toBe(false);
+    await wrapper.get("[data-test='bulk-restore']").trigger("click");
+    expect(wrapper.emitted("restore")).toHaveLength(1);
+    await wrapper.get("[data-test='bulk-delete-forever']").trigger("click");
+    expect(wrapper.emitted("deleteForever")).toHaveLength(1);
+  });
+});

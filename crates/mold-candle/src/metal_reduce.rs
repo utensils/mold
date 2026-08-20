@@ -20,10 +20,10 @@
 //! same groups while staying on a shape Metal reduces correctly. It is a no-op
 //! reshape on contiguous data, so CUDA and CPU are unaffected.
 
-use candle_core::{Result, Tensor};
+use candle::{Result, Tensor};
 
 /// Mean over `dim`, keeping rank, on shapes Metal reduces correctly.
-pub(crate) fn mean_keepdim_stable(x: &Tensor, dim: usize) -> Result<Tensor> {
+pub fn mean_keepdim_stable(x: &Tensor, dim: usize) -> Result<Tensor> {
     let dims = x.dims().to_vec();
     if dims.len() <= 3 || dim + 1 == dims.len() {
         return x.mean_keepdim(dim);
@@ -41,7 +41,7 @@ pub(crate) fn mean_keepdim_stable(x: &Tensor, dim: usize) -> Result<Tensor> {
 }
 
 /// Sum over `dim`, keeping rank, on shapes Metal reduces correctly.
-pub(crate) fn sum_keepdim_stable(x: &Tensor, dim: usize) -> Result<Tensor> {
+pub fn sum_keepdim_stable(x: &Tensor, dim: usize) -> Result<Tensor> {
     let dims = x.dims().to_vec();
     if dims.len() <= 3 || dim + 1 == dims.len() {
         return x.sum_keepdim(dim);
@@ -59,14 +59,14 @@ pub(crate) fn sum_keepdim_stable(x: &Tensor, dim: usize) -> Result<Tensor> {
 }
 
 /// Mean over `dim`, dropping it, on shapes Metal reduces correctly.
-pub(crate) fn mean_stable(x: &Tensor, dim: usize) -> Result<Tensor> {
+pub fn mean_stable(x: &Tensor, dim: usize) -> Result<Tensor> {
     mean_keepdim_stable(x, dim)?.squeeze(dim)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{mean_keepdim_stable, mean_stable, sum_keepdim_stable};
-    use candle_core::{Device, Tensor};
+    use candle::{Device, Tensor};
 
     fn sample(device: &Device, dims: &[usize]) -> Tensor {
         let count: usize = dims.iter().product();
@@ -138,8 +138,9 @@ mod tests {
     ///
     /// Rank-5 dim 1 is both video decoders' channel norm (LTX-2's
     /// `PerChannelRmsNorm`, Wan's `WanRmsNorm`); rank-4 dim 2 is LTX-2's
-    /// per-token text RMS; rank-6 dim 2 is Wan's `AvgDown3d` group mean. All
-    /// returned wrong values through the direct reductions on Metal.
+    /// per-token text RMS; rank-6 dim 2 is Wan's `AvgDown3d` group mean;
+    /// rank-4 dim 1 is the MiniMax H3 audio VAE's causal-attention head mean.
+    /// All returned wrong values through the direct reductions on Metal.
     #[cfg(feature = "metal")]
     #[test]
     fn metal_matches_the_cpu_on_the_shapes_the_engines_reduce() {
@@ -149,6 +150,7 @@ mod tests {
             (vec![2usize, 6, 8, 4], 2usize),
             (vec![2usize, 8, 3, 4, 4], 4usize),
             (vec![1usize, 4, 4, 3, 4, 4], 2usize),
+            (vec![1usize, 8, 16, 4], 1usize),
         ] {
             let context = format!("{dims:?} dim {dim}");
             let cpu = sample(&Device::Cpu, &dims);

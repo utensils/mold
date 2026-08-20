@@ -111,7 +111,26 @@ surface powers it, so anything the app does maps to a documented endpoint.
   matching saved prints, prefers the copy on **This device**, and labels every
   host where a print is available; source filters retain each host's full
   gallery. Still images offer full-resolution **Copy image** from tile and
-  lightbox right-click menus.
+  lightbox right-click menus. The Library header is segmented **Prints |
+  Collections | Trash**: Prints keeps the grid plus a filter-chip row
+  (♥ Favorites · tag chips · host chips); Collections is a shelf of cards you
+  can drill into and edit; Trash holds deleted prints with a retention banner,
+  a per-tile "Purges in N d" countdown, **Restore** / **Delete forever**, and
+  a header **Empty trash** behind a plain confirm. Titles, ♥, tags, and
+  collection membership are edited in the lightbox aside; the raw filename
+  becomes a detail line. Everything lives on the machine that holds the print
+  (its `mold.db`) and is merged across machines — collections by name, tags
+  case-insensitively — and every change is applied to every copy of a print.
+  Deleting moves a print to that machine's trash (the 6 s Undo stays); prints
+  are purged after **Settings ▸ Library ▸ Keep deleted prints for** on this
+  device (1 day … 1 year, or Forever) and after each remote machine's own
+  setting in **Machines ▸ machine ▸ Storage**, which also shows "Prints in
+  trash: N" and an **Empty trash** action. Naming a print starts in Create: the
+  header's "Untitled print" is editable (click, Enter/blur commits, Escape
+  reverts); the name travels with every sibling of that print, is restored by
+  **Reuse settings**, and becomes the suggested filename when you save or
+  export. Older servers without organization simply hide these controls and
+  keep the previous delete wording.
 - **Models** — one searchable model workspace split into **Installed** and
   **Discover** segments: installed models in the Installed segment, above
   the live Hugging Face/Civitai catalog in Discover, filtered by
@@ -305,7 +324,12 @@ release is published.
 | Cmd/Ctrl+.          | Cancel the running job                          |
 | Cmd/Ctrl+\          | Toggle sidebar                                  |
 | Space               | Quick Look in Library                           |
-| ←/→, ⌫              | Library navigate / delete                       |
+| ←/→                 | Library navigate                                |
+| ⌫                   | Library: move to trash (Undo for 6 s)           |
+| Cmd/Ctrl+⌫          | Library: delete forever (confirm)               |
+| F                   | Library: favorite / unfavorite                  |
+| T                   | Library: tag the selected print                 |
+| Shift+Cmd/Ctrl+N    | Library: new collection                         |
 | Shift+Cmd/Ctrl+C    | Copy seed (lightbox)                            |
 | Cmd/Ctrl+0 / + / −  | Interface size reset/larger/smaller             |
 

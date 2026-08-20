@@ -232,14 +232,18 @@ once prints span more than one, and a dim `· 1 host offline` suffix when a
 host didn't answer the scan. Offline hosts never break the merge — their
 prints just drop out until the next rescan (entering the Library rescans
 automatically when the last scan is stale or a host was added/removed).
+Only **live** prints are listed — a print moved to the trash keeps its row
+and its bytes but leaves the Library until restored from a Trash view.
 
 On wide terminals a **Details side panel** shows the selected print: its
-thumbnail, the wrapped prompt (plus a dim `neg:` line), and Model / Seed /
+thumbnail, the print's title when it has one (bold, above the prompt), the
+wrapped prompt (plus a dim `neg:` line), and Model / Seed /
 Size / optional video **Pipeline** / **Machine** rows — Pipeline is the recipe
 the engine actually ran, including an Auto-selected LTX-2 recipe, while Machine
 names the host the print lives on ("This Mac", a host name, or `2 machines`
 when copies exist on several). The panel hides automatically on narrow
-terminals. Full detail mode shows the same runtime pipeline when recorded.
+terminals. Full detail mode shows the title and the same runtime pipeline
+when recorded.
 
 ### Grid Mode
 
@@ -250,17 +254,23 @@ terminals. Full detail mode shows the same runtime pipeline when recorded.
 | Enter      | Open detail view                                |
 | e or r     | Recall into Create (edit)                       |
 | u          | Upscale with AI model (runs on the owning host) |
-| d          | Delete print (with confirmation)                |
+| d          | Move print to the trash (with confirmation)     |
 | o          | Open in system viewer                           |
 | /          | Filter by prompt, model, or filename            |
 | Esc        | Clear the filter, then back to Create           |
 
 Typing after **/** filters live (case-insensitive, matching prompt, model
 name, and filename); **Enter** keeps the filter applied, **Esc** clears
-it. Deleting a print that exists on several machines removes it from
-**all** of them — the confirmation says so before anything happens.
-Recall, upscale, and delete work on remote prints exactly like local
-ones; requests route to the machine that owns the print.
+it. `d` moves a print to the trash on **every** machine that holds it —
+the confirmation names the machine count before anything happens. The
+trash wording appears only when every owning machine can actually trash:
+the local move needs the metadata DB (the bytes land in
+`<output_dir>/.trash/` beside a tombstone, recoverable from any Trash
+view), and a server must advertise `gallery.trash` in its capabilities.
+Otherwise the hint and the confirmation fall back to honest
+permanent-delete wording — an older server or a DB-less local scan really
+does delete. Recall, upscale, and removal work on remote prints exactly
+like local ones; requests route to the machine that owns the print.
 
 ### Detail Mode
 
@@ -271,7 +281,7 @@ Press **Enter** on a grid thumbnail to see the full image with all metadata.
 | e   | Load into Create (edit) |
 | r   | Regenerate immediately  |
 | u   | Upscale with AI model   |
-| d   | Delete image            |
+| d   | Move to trash           |
 | o   | Open in system viewer   |
 | j/k | Previous / next image   |
 | Esc | Back to grid            |
@@ -413,6 +423,14 @@ toggle persists to `mold.db` the moment it flips.
 | Reduce Motion | `tui.reduce_motion`       | `off`   | Disables TUI motion effects (consumed by upcoming releases)                                                                               |
 | Show Timeline | `tui.show_timeline`       | `on`    | Shows the Timeline on the Create view (consumed by upcoming releases)                                                                     |
 | Confirmations | `tui.confirm_destructive` | `on`    | When off, destructive actions — deleting a print, removing a model, deleting a chain stage — run immediately without a confirmation popup |
+
+A **Library** section follows: **Trash (days)** edits the shared
+`gallery.trash_retention_days` key — how long trashed prints survive
+before the server's retention sweeper purges them (`0` keeps them
+forever, max 3650, default 30). The value persists through the same
+settings-DB surface `mold config set` and the server's config API use,
+so every surface reads one window; `MOLD_GALLERY_TRASH_RETENTION_DAYS`
+overrides it with the usual **(env)** indicator.
 
 ### Field Types
 

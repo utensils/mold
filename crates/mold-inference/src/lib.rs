@@ -26,7 +26,12 @@ pub mod latent_preview;
 pub mod loader;
 pub mod ltx2;
 pub mod ltx_video;
-pub(crate) mod metal_reduce;
+/// Reductions on shapes candle's Metal backend gets right.
+///
+/// The implementation lives in `mold-candle` because the H3 audio VAE needs it
+/// too and `mold-candle` cannot depend on this crate. This alias keeps every
+/// existing `crate::metal_reduce::…` call site pointing at that one authority.
+pub(crate) use mold_candle::metal_reduce;
 // The deterministic scheduler contract lands ahead of the license-gated H3
 // engine. Keeping these primitives crate-private avoids advertising a runnable
 // family while leaving exact math and conditioner lifecycle ready for the

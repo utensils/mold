@@ -306,6 +306,8 @@ impl H3PipelineCheckpoint for PipelineControl<'_> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum H3PipelineBackendKind {
     Cuda,
+    /// Apple Silicon's correctness route (#1164).
+    Metal,
     /// This class is accepted only by `cfg(test)` unit binaries.
     SyntheticCpu,
 }
@@ -326,6 +328,10 @@ impl H3PipelineBackendIdentity {
             H3PipelineBackendKind::Cuda if device.is_cuda() => Ok(()),
             H3PipelineBackendKind::Cuda => {
                 bail!("MiniMax H3 production pipeline requires one CUDA device")
+            }
+            H3PipelineBackendKind::Metal if device.is_metal() => Ok(()),
+            H3PipelineBackendKind::Metal => {
+                bail!("MiniMax H3 Metal pipeline requires one Metal device")
             }
             H3PipelineBackendKind::SyntheticCpu if cfg!(test) && device.is_cpu() => Ok(()),
             H3PipelineBackendKind::SyntheticCpu => {

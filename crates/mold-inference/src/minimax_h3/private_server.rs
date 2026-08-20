@@ -292,11 +292,11 @@ impl H3PrivateRuntimeEnvelopeRecord {
         Ok(())
     }
 
-    #[cfg(feature = "mp4")]
-    fn validate_prepared(&self, request: &H3FactoryPreparedRequestInput) -> Result<()> {
-        self.validate_prepared_with_reviewed_steps(request, None)
-    }
-
+    /// Validate a prepared request against this envelope.
+    ///
+    /// There is deliberately no `None`-defaulting wrapper: passing the wrong
+    /// step authority silently rejects every Turbo render (it did, in the first
+    /// cut of this wiring), so each caller has to name which one it holds.
     #[cfg(feature = "mp4")]
     fn validate_prepared_with_reviewed_steps(
         &self,
@@ -1000,7 +1000,10 @@ impl H3PrivateFl2VaAdmissionEvidence {
             || self.base_factory_authority.task() != self.task
             || self.base_factory_authority.device_id() != self.device_id
             || self.base_factory_authority.device_ordinal() != self.device_ordinal
-            || self.base_factory_authority.compute_capability() != self.compute_capability
+            // The public runtime profile is CUDA SM89 only, so a Metal factory
+            // authority (which carries no compute capability) can never match
+            // here and fails closed without a separate branch.
+            || self.base_factory_authority.compute_capability() != Some(self.compute_capability)
             || self.base_factory_authority.execution_fingerprint() != self.execution_fingerprint
             || self.base_factory_authority.component_set_identity_sha256()
                 != self.component_set_identity_sha256
@@ -1152,6 +1155,12 @@ fn prepare_reviewed_h3_private_fl2va_admission(
         full_noncausal: true,
         lossless: true,
     };
+    // Authenticating here reads and digests the adapter but allocates no device
+    // memory; the deltas are materialized in the transformer-load phase, which
+    // is the phase whose budget charges them. It has to happen before the
+    // runtime qualification so the envelope can be minted at the tier's own
+    // reviewed step count.
+    let turbo_adapter = super::turbo::resolve_requested_turbo_authority()?;
     #[cfg(not(feature = "h3"))]
     let runtime_qualification = reviewed_runtime_qualification.authenticate(
         &artifact_report,
@@ -1163,13 +1172,10 @@ fn prepare_reviewed_h3_private_fl2va_admission(
         &attention_qualification_sha256,
     )?;
     #[cfg(feature = "h3")]
-    // Authenticating here reads and digests the adapter but allocates no device
-    // memory; the deltas are materialized in the transformer-load phase, which
-    // is the phase whose budget charges them. It has to happen before the
-    // runtime qualification so the envelope can be minted at the tier's own
-    // reviewed step count.
-    let turbo_adapter = super::turbo::resolve_requested_turbo_authority()?;
-    let turbo_steps = turbo_adapter.as_ref().map(|turbo| turbo.grid_points);
+    let turbo_steps = turbo_adapter
+        .as_ref()
+        .map(H3FactoryTurboAdapterAuthority::grid_points);
+    #[cfg(feature = "h3")]
     let runtime_qualification = public_runtime_qualification(
         &artifact_report,
         device_id,
@@ -1205,7 +1211,13 @@ fn prepare_reviewed_h3_private_fl2va_admission(
         progress,
         &mut prepare_observer,
     )?;
-    runtime_qualification.validate_prepared_envelope(&admission_request.request)?;
+    // The qualification above was minted at this tier's reviewed step count;
+    // validating the prepared request against the baseline 21-step envelope
+    // would reject every Turbo attempt.
+    runtime_qualification.validate_prepared_envelope_with_turbo(
+        &admission_request.request,
+        turbo_adapter.as_ref(),
+    )?;
     let seed = admission_request.seed;
     let mut resolved_request = request.clone();
     resolved_request.seed = Some(seed);
@@ -1262,7 +1274,10 @@ fn prepare_reviewed_h3_private_fl2va_admission(
             model: contract::FL2VA_COMFY.into(),
             device_id: device_id.into(),
             device_ordinal,
-            compute_capability,
+            // The public H3 runtime profile is CUDA SM89, so this is always a
+            // CUDA route; the factory input is optional only because a Metal
+            // plan carries no compute capability.
+            compute_capability: Some(compute_capability),
             execution_fingerprint: execution_fingerprint.clone(),
             conditioner_placement: H3FactoryConditionerPlacement::HostCpuThenDrop,
             qwen_parameter_bytes: qwen_memory.source_parameter_bytes,
@@ -1304,7 +1319,7 @@ fn prepare_reviewed_h3_private_fl2va_admission(
         &qwen_support,
         device_id,
         device_ordinal,
-        compute_capability,
+        Some(compute_capability),
         &qwen_artifact.sha256,
         qwen_header_identity,
         qwen_policy_identity,
@@ -2217,7 +2232,7 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
         frozen_factory
             .quantization()
             .turbo_adapter()
-            .map(|turbo| turbo.grid_points),
+            .map(H3FactoryTurboAdapterAuthority::grid_points),
     )?;
     if runtime_qualification.identity_sha256() != owner_fence.runtime_qualification_identity_sha256
         || runtime_qualification.artifact_qualification_identity_sha256()
@@ -2291,7 +2306,7 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
         &qwen_support,
         &owner_fence.device_id,
         owner_fence.device_ordinal,
-        owner_fence.compute_capability,
+        Some(owner_fence.compute_capability),
         &qwen_artifact.sha256,
         qwen_header_identity,
         qwen_policy_identity,
@@ -2444,7 +2459,7 @@ fn validate_base_factory(
         || factory.task() != Task::Fl2va
         || factory.device_id() != owner.device_id
         || factory.device_ordinal() != owner.device_ordinal
-        || factory.compute_capability() != owner.compute_capability
+        || factory.compute_capability() != Some(owner.compute_capability)
         || factory.prepared_target_attempt_identities().is_some()
         || !factory.attention_runtime_identity_sha256().is_empty()
         || factory.attention_backend() != AttentionBackend::Flash
@@ -2572,7 +2587,11 @@ impl H3PrivateQwenConditionerLease for H3PrivateServerConditionerLease {
 struct H3PrivateServerExecutionLease {
     lease_id: String,
     device_id: String,
-    compute_capability: (u16, u16),
+    /// Mirrors the factory's own optional capability: `None` is the Metal
+    /// route. The lease reports the class the factory froze rather than
+    /// asserting CUDA, so a crossed route is caught by the plan comparison
+    /// instead of by an unwrap here.
+    compute_capability: Option<(u16, u16)>,
     execution_fingerprint: String,
     device: Device,
     active: bool,
@@ -2614,9 +2633,7 @@ impl H3BackendExecutionLease for H3PrivateServerExecutionLease {
     }
 
     fn backend(&self) -> H3CandleBackendDevice {
-        H3CandleBackendDevice::Cuda {
-            compute_capability: self.compute_capability,
-        }
+        H3CandleBackendDevice::from_compute_capability(self.compute_capability)
     }
 
     fn execution_fingerprint(&self) -> &str {
@@ -3107,7 +3124,13 @@ impl H3PrivateFl2VaPreparedRunner for H3PrivateConcretePreparedRunner {
             owner,
             consumption_binding,
         } = *self;
-        runtime_envelope.validate_prepared(prepared.prepared_request_input())?;
+        runtime_envelope.validate_prepared_with_reviewed_steps(
+            prepared.prepared_request_input(),
+            authority
+                .quantization()
+                .turbo_adapter()
+                .map(H3FactoryTurboAdapterAuthority::grid_points),
+        )?;
         let observed_envelope = runtime_envelope_observation(prepared.prepared_request_input())?;
         let observed_compute_capability = match attention.device() {
             H3AttentionDevice::Cuda {
@@ -3885,13 +3908,9 @@ impl H3PrivateRuntimeQualificationAuthority {
     }
 
     #[cfg(feature = "mp4")]
-    fn validate_prepared_envelope(&self, request: &H3FactoryPreparedRequestInput) -> Result<()> {
-        self.validate_prepared_envelope_with_turbo(request, None)
-    }
-
     #[cfg(feature = "mp4")]
     fn reviewed_turbo_steps(turbo: Option<&H3FactoryTurboAdapterAuthority>) -> Option<u32> {
-        turbo.map(|turbo| turbo.grid_points)
+        turbo.map(H3FactoryTurboAdapterAuthority::grid_points)
     }
 
     /// Validate a prepared request against this qualification's envelope,
@@ -4950,6 +4969,87 @@ mod tests {
         }
     }
 
+    /// The bug this pins: admission mints the qualification at the tier's step
+    /// count and then has to validate the prepared request against THAT
+    /// envelope. Validating it against the baseline 21-step envelope instead
+    /// rejects every Turbo render.
+    ///
+    /// The earlier tests all asked "given an envelope, are wrong steps
+    /// refused?", which is true whichever step authority the caller passes — so
+    /// they passed while the positive admission path was broken. This one asks
+    /// the question that actually distinguishes them: a Turbo envelope must
+    /// ACCEPT its own tier's request and REJECT the same request under the
+    /// no-adapter authority. If those two ever agree, the call-site choice
+    /// stopped mattering and the wiring is unverifiable again.
+    #[cfg(feature = "mp4")]
+    #[test]
+    fn a_turbo_prepared_request_validates_only_under_its_own_step_authority() {
+        for reviewed_steps in [5u32, 9] {
+            // The real reviewed envelope with only the step axis moved, so
+            // every other axis still matches the fixture request exactly.
+            let mut envelope = record().envelope;
+            envelope.max_steps = reviewed_steps;
+            let mut request = prepared_request_for_compact_quality_envelope();
+            request.grid_points = reviewed_steps;
+            request.denoise_forward_count = reviewed_steps - 1;
+
+            // The path admission must take.
+            envelope
+                .validate_prepared_with_reviewed_steps(&request, Some(reviewed_steps))
+                .unwrap();
+
+            // The path admission took before this fix. It must fail, loudly and
+            // for the step reason — otherwise passing the wrong authority is
+            // silently harmless and nothing pins the call site.
+            let error = envelope
+                .validate_prepared_with_reviewed_steps(&request, None)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains(&format!("allows {} steps", contract::COMFY_DEFAULT_STEPS)),
+                "{reviewed_steps}: {error}"
+            );
+
+            // And the baseline request is still refused under the Turbo
+            // authority, so the tier's count is a pin rather than a widening.
+            let mut baseline_request = prepared_request_for_compact_quality_envelope();
+            baseline_request.grid_points = contract::COMFY_DEFAULT_STEPS;
+            assert!(envelope
+                .validate_prepared_with_reviewed_steps(&baseline_request, Some(reviewed_steps))
+                .is_err());
+        }
+
+        // The unadapted baseline is untouched: 21 steps under the None
+        // authority still validates exactly as it always did.
+        let baseline = record().envelope;
+        let request = prepared_request_for_compact_quality_envelope();
+        assert_eq!(request.grid_points, contract::COMFY_DEFAULT_STEPS);
+        baseline
+            .validate_prepared_with_reviewed_steps(&request, None)
+            .unwrap();
+    }
+
+    /// Every reviewed tier's step count must survive the whole prepared-request
+    /// envelope, not just the bare step comparison — this is the shape an
+    /// admission-path request actually has.
+    #[cfg(feature = "mp4")]
+    #[test]
+    fn every_reviewed_turbo_tier_admits_its_own_prepared_request() {
+        for tier_contract in super::super::turbo::REVIEWED_TURBO_TIERS {
+            let steps = tier_contract.grid_points;
+            let mut envelope = record().envelope;
+            envelope.max_steps = steps;
+            let mut request = prepared_request_for_compact_quality_envelope();
+            request.grid_points = steps;
+            request.denoise_forward_count = steps - 1;
+            envelope
+                .validate_prepared_with_reviewed_steps(&request, Some(steps))
+                .unwrap_or_else(|error| {
+                    panic!("{:?} at {steps} steps: {error}", tier_contract.tier)
+                });
+        }
+    }
+
     /// The reviewed Turbo step counts are exactly the ones the tier table
     /// declares, so the envelope and the sampler cannot drift apart.
     #[test]
@@ -5180,7 +5280,9 @@ mod tests {
     fn compact_quality_envelope_rejects_every_unreviewed_request_axis() {
         let envelope = record().envelope;
         let reviewed = prepared_request_for_compact_quality_envelope();
-        envelope.validate_prepared(&reviewed).unwrap();
+        envelope
+            .validate_prepared_with_reviewed_steps(&reviewed, None)
+            .unwrap();
 
         let mut cases = Vec::new();
         let mut request = reviewed.clone();
@@ -5237,7 +5339,9 @@ mod tests {
         cases.push(request);
 
         for request in cases {
-            assert!(envelope.validate_prepared(&request).is_err());
+            assert!(envelope
+                .validate_prepared_with_reviewed_steps(&request, None)
+                .is_err());
         }
     }
 
@@ -5404,7 +5508,7 @@ mod tests {
             model: contract::FL2VA_COMFY.into(),
             device_id: DEVICE_0.into(),
             device_ordinal: 0,
-            compute_capability: (8, 9),
+            compute_capability: Some((8, 9)),
             execution_fingerprint: sha('4'),
             conditioner_placement: H3FactoryConditionerPlacement::HostCpuThenDrop,
             qwen_parameter_bytes: 10,

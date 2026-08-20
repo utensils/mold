@@ -1,4 +1,5 @@
 import type { IconName } from "@ui/icons";
+import { RETENTION_OPTIONS, retentionLabel } from "@studio/lib/libraryOrganization";
 
 /**
  * The Darkroom Bench: curated metadata for the Settings surface.
@@ -15,6 +16,7 @@ export type SectionId =
   | "performance"
   | "generation"
   | "media"
+  | "library"
   | "expansion"
   | "accounts"
   | "app"
@@ -45,6 +47,7 @@ export const SECTIONS: SectionInfo[] = [
   { id: "performance", label: "Performance" },
   { id: "generation", label: "Generation" },
   { id: "media", label: "Saved media" },
+  { id: "library", label: "Library" },
   { id: "expansion", label: "Prompt expansion" },
   { id: "accounts", label: "Accounts & tokens" },
   { id: "app", label: "Appearance & app" },
@@ -90,6 +93,13 @@ export const ACCORDION_SECTIONS: AccordionSectionInfo[] = [
       "photo",
       "video",
     ],
+  },
+  {
+    id: "library",
+    label: "Library",
+    icon: "library",
+    summary: "Trash retention on this device",
+    keywords: ["trash", "retention", "collections", "deleted prints", "purge", "library"],
   },
   {
     id: "expansion",
@@ -245,6 +255,17 @@ export const ENGINE_KEY_SCHEMAS: KeySchema[] = [
       { value: "q5_k_m", label: "q5_k_m" },
       { value: "q4_k_m", label: "q4_k_m" },
     ],
+  },
+  {
+    key: "gallery.trash_retention_days",
+    section: "library",
+    label: "Keep deleted prints for",
+    help: "Prints moved to the trash are deleted forever after this long. 0 keeps them until you empty the trash.",
+    editor: "select",
+    options: RETENTION_OPTIONS.map((days) => ({
+      value: String(days),
+      label: retentionLabel(days),
+    })),
   },
   {
     key: "expand.enabled",

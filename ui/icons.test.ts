@@ -7,6 +7,7 @@ describe("icon registry", () => {
       "tag",
       "collection",
       "heart",
+      "pencil",
     ] as const satisfies readonly IconName[];
     for (const name of organization) {
       expect(ICON_NAMES).toContain(name);

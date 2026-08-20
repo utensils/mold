@@ -5,6 +5,7 @@
 //! frozen placement and issued component lease.
 
 pub(crate) mod backend;
+pub(crate) mod dtype;
 pub(crate) mod engine;
 pub(crate) mod offload;
 pub(crate) mod pipeline;
@@ -48,10 +49,25 @@ use tokenizers::Tokenizer;
 
 use crate::progress::{InferenceCancelled, ProgressReporter};
 
+/// Where the Qwen conditioner's weights live for one frozen plan.
+///
+/// `MetalResident` is Apple Silicon's arm of `CudaResident`: the same
+/// device-resident placement, on a backend whose memory is unified with the
+/// host. It stays a separate variant rather than a renamed shared one because
+/// the charge and the lease it accepts must remain device-exact -- a CUDA plan
+/// must never validate a Metal lease, and the reverse.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum H3ConditionerExecution {
     CudaResident,
+    MetalResident,
     CpuOffloaded,
+}
+
+impl H3ConditionerExecution {
+    /// Whether this placement keeps the conditioner's weights on the GPU.
+    pub const fn is_device_resident(self) -> bool {
+        matches!(self, Self::CudaResident | Self::MetalResident)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -88,12 +104,16 @@ impl FrozenH3ConditionerPlacement {
             ));
         }
         let (charged_host_bytes, charged_vram_bytes) = match execution {
-            H3ConditionerExecution::CudaResident if device_resident_parameter_bytes > 0 => (
-                host_resident_parameter_bytes,
-                device_resident_parameter_bytes
-                    .checked_add(activation_workspace_bytes)
-                    .ok_or_else(|| anyhow!("H3 conditioner VRAM charge overflow"))?,
-            ),
+            H3ConditionerExecution::CudaResident | H3ConditionerExecution::MetalResident
+                if device_resident_parameter_bytes > 0 =>
+            {
+                (
+                    host_resident_parameter_bytes,
+                    device_resident_parameter_bytes
+                        .checked_add(activation_workspace_bytes)
+                        .ok_or_else(|| anyhow!("H3 conditioner VRAM charge overflow"))?,
+                )
+            }
             H3ConditionerExecution::CpuOffloaded
                 if host_resident_parameter_bytes > 0 && device_resident_parameter_bytes == 0 =>
             {
@@ -138,11 +158,16 @@ impl FrozenH3ConditionerPlacement {
                 self.device_id
             ));
         }
+        // Each placement admits exactly one backend. Metal is now a placement
+        // of its own rather than a blanket refusal, but the exactness is what
+        // matters: a CUDA plan handed a Metal lease is still a cross-routed
+        // lease, and is still refused here.
         let backend_matches = match self.execution {
             H3ConditionerExecution::CudaResident => lease.device().is_cuda(),
+            H3ConditionerExecution::MetalResident => lease.device().is_metal(),
             H3ConditionerExecution::CpuOffloaded => lease.device().is_cpu(),
         };
-        if !backend_matches || lease.device().is_metal() {
+        if !backend_matches {
             return Err(anyhow!(
                 "H3 conditioner lease backend does not match frozen {:?} placement",
                 self.execution
@@ -502,5 +527,76 @@ mod tests {
         )
         .unwrap();
         assert!(placement.validate_lease(&lease).is_err());
+    }
+
+    /// Metal is now a placement of its own, but placements stay device-exact:
+    /// a Metal plan must refuse a CUDA or CPU lease exactly as a CUDA plan
+    /// refuses a Metal one. Only the CPU arm is exercisable without hardware,
+    /// which is why `matches_candle` carries the rest.
+    #[test]
+    fn a_metal_placement_still_refuses_a_lease_from_another_backend() {
+        let lease = TestLease {
+            id: "lease".into(),
+            device_id: "metal0".into(),
+            device: Device::Cpu,
+            released: Arc::new(AtomicBool::new(false)),
+        };
+        let placement = FrozenH3ConditionerPlacement::new(
+            "metal0",
+            H3ConditionerExecution::MetalResident,
+            "frozen",
+            0,
+            mold_candle::minimax_h3::H3_BF16_PARAMETER_BYTES,
+            1,
+        )
+        .unwrap();
+        assert!(placement.validate_lease(&lease).is_err());
+    }
+
+    /// Metal charges its conditioner exactly as CUDA does. Unified memory is
+    /// an admission concern, not a reason to book the same bytes twice or to
+    /// silently reclassify a device-resident placement as host-resident.
+    #[test]
+    fn a_metal_placement_charges_device_residency_like_cuda() {
+        let parameters = mold_candle::minimax_h3::H3_BF16_PARAMETER_BYTES;
+        let metal = FrozenH3ConditionerPlacement::new(
+            "metal0",
+            H3ConditionerExecution::MetalResident,
+            "frozen",
+            0,
+            parameters,
+            4096,
+        )
+        .unwrap();
+        let cuda = FrozenH3ConditionerPlacement::new(
+            "cuda0",
+            H3ConditionerExecution::CudaResident,
+            "frozen",
+            0,
+            parameters,
+            4096,
+        )
+        .unwrap();
+        assert_eq!(metal.memory, cuda.memory);
+        assert_eq!(metal.memory.charged_host_bytes, 0);
+        assert_eq!(metal.memory.charged_vram_bytes, parameters + 4096);
+        assert!(H3ConditionerExecution::MetalResident.is_device_resident());
+        assert!(!H3ConditionerExecution::CpuOffloaded.is_device_resident());
+    }
+
+    /// A Metal placement with no device-resident bytes is the same
+    /// contradiction a CUDA one is, and must not fall through to the offloaded
+    /// charge.
+    #[test]
+    fn a_metal_placement_without_device_bytes_is_refused() {
+        assert!(FrozenH3ConditionerPlacement::new(
+            "metal0",
+            H3ConditionerExecution::MetalResident,
+            "frozen",
+            mold_candle::minimax_h3::H3_BF16_PARAMETER_BYTES,
+            0,
+            4096,
+        )
+        .is_err());
     }
 }

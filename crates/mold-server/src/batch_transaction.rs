@@ -5803,6 +5803,12 @@ pub(crate) fn restore_trashed_archive_filename(
     if !crate::gallery_authority::file_matches_entry_at(trash_path, &entry)? {
         return Ok(RestoreArchiveDisposition::Conflict);
     }
+    // A live file that reclaimed the name while the print sat in the trash
+    // must never be replaced (the route 409s on this under the same lock;
+    // this keeps the invariant even for future callers).
+    if fs::symlink_metadata(output_dir.join(filename)).is_ok() {
+        return Ok(RestoreArchiveDisposition::Conflict);
+    }
     let generation = crate::gallery_authority::read_generation(output_dir, &bookkeeping)?
         .context("gallery authority generation is missing")?;
     index.retired_names.remove(filename);
@@ -5880,6 +5886,15 @@ pub(crate) fn move_gallery_file_to_trash(
 ) -> anyhow::Result<PathBuf> {
     let trash = ensure_gallery_trash_dir(output_dir)?;
     let trash_path = trash.join(filename);
+    // `fs::rename` replaces an existing destination on Unix: a live
+    // same-name replacement being trashed would silently destroy the
+    // previously trashed bytes and orphan their tombstone. Refuse — the
+    // caller surfaces a conflict and the user empties or restores first.
+    if fs::symlink_metadata(&trash_path).is_ok() {
+        anyhow::bail!(
+            "the gallery trash already holds {filename}; empty the trash or restore it first"
+        );
+    }
     fs::rename(live_path, &trash_path).with_context(|| {
         format!(
             "moving {} to the gallery trash at {}",
@@ -5900,6 +5915,13 @@ pub(crate) fn move_gallery_file_from_trash(
     filename: &str,
 ) -> anyhow::Result<PathBuf> {
     let live_path = output_dir.join(filename);
+    // Mirror of the trash-side guard: never replace a live file that
+    // reclaimed the name while the print sat in the trash.
+    if fs::symlink_metadata(&live_path).is_ok() {
+        anyhow::bail!(
+            "the gallery already holds a live {filename}; the restore would overwrite it"
+        );
+    }
     fs::rename(trash_path, &live_path).with_context(|| {
         format!(
             "restoring {} from the gallery trash to {}",
@@ -11044,5 +11066,54 @@ mod tests {
 
         assert_eq!(loaded.protocol_version(), 1);
         assert_eq!(loaded.manifest.children[0].size_bytes, Some(6));
+    }
+
+    /// `fs::rename` replaces an existing destination on Unix, so a live
+    /// same-name replacement being trashed would silently destroy the
+    /// previously trashed bytes. The move helper must refuse instead.
+    #[test]
+    fn trash_move_refuses_to_overwrite_an_existing_trash_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let trash = ensure_gallery_trash_dir(dir.path()).unwrap();
+        fs::write(trash.join("twin.png"), b"retained trashed bytes").unwrap();
+        let live = dir.path().join("twin.png");
+        fs::write(&live, b"replacement").unwrap();
+
+        let err = move_gallery_file_to_trash(dir.path(), &live, "twin.png")
+            .expect_err("moving onto an existing trash entry must refuse");
+        assert!(
+            err.to_string().contains("already holds"),
+            "unexpected error: {err:#}"
+        );
+        assert_eq!(
+            fs::read(trash.join("twin.png")).unwrap(),
+            b"retained trashed bytes",
+            "the retained trashed bytes must survive"
+        );
+        assert!(live.is_file(), "the live replacement must stay in place");
+    }
+
+    /// The restore-side mirror: a live file already holding the name must
+    /// never be replaced by the trashed bytes.
+    #[test]
+    fn restore_move_refuses_to_overwrite_a_live_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let trash = ensure_gallery_trash_dir(dir.path()).unwrap();
+        let trash_path = trash.join("twin.png");
+        fs::write(&trash_path, b"trashed bytes").unwrap();
+        fs::write(dir.path().join("twin.png"), b"live bytes").unwrap();
+
+        let err = move_gallery_file_from_trash(dir.path(), &trash_path, "twin.png")
+            .expect_err("restoring onto a live file must refuse");
+        assert!(
+            err.to_string().contains("already holds"),
+            "unexpected error: {err:#}"
+        );
+        assert_eq!(
+            fs::read(dir.path().join("twin.png")).unwrap(),
+            b"live bytes",
+            "the live bytes must survive"
+        );
+        assert!(trash_path.is_file(), "the trashed bytes must stay in place");
     }
 }

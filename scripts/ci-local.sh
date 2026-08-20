@@ -349,9 +349,9 @@ if wants gpu; then
     *)
       if command -v nvcc >/dev/null 2>&1; then
         step "gpu: CUDA forced-local clippy" \
-          cargo clippy -p mold-ai --features cuda,h3,preview,expand,tui,webp,mp4,mdns --all-targets -- -D warnings
+          cargo clippy -p mold-ai --features h3-cuda,preview,expand,tui,webp,mp4,mdns --all-targets -- -D warnings
         step "gpu: clippy h3_runtime_qualification_record" \
-          cargo clippy -p mold-ai-inference --features dev-bins,h3 \
+          cargo clippy -p mold-ai-inference --features dev-bins,h3-cuda \
           --bin h3_runtime_qualification_record -- -D warnings
         step "gpu: CUDA private H3 server bridge" \
           cargo clippy -p mold-ai-server --features h3-private-uat --all-targets -- -D warnings

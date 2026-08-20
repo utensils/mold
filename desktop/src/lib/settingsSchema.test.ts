@@ -74,6 +74,7 @@ describe("Settings accordion sections", () => {
       "performance",
       "generation",
       "media",
+      "library",
       "expansion",
       "accounts",
       "profiles",
@@ -96,6 +97,23 @@ describe("Settings accordion sections", () => {
     const media = ACCORDION_SECTIONS.find((section) => section.id === "media")!;
     expect(sectionMatchesSearch("save location", media)).toBe(true);
     expect(sectionMatchesSearch("default save location", media)).toBe(true);
+  });
+
+  it("owns the Library trash-retention setting with a Forever option", () => {
+    expect(sectionForConfigKey("gallery.trash_retention_days")).toBe("library");
+    const schema = schemaFor("gallery.trash_retention_days")!;
+    expect(schema.editor).toBe("select");
+    expect(schema.label).toBe("Keep deleted prints for");
+    expect(schema.options?.map((o) => o.value)).toEqual(["1", "7", "30", "90", "365", "0"]);
+    expect(schema.options?.find((o) => o.value === "0")?.label).toBe("Forever");
+    expect(schema.options?.find((o) => o.value === "30")?.label).toBe("30 days");
+    expect(schema.help).toContain("0 keeps them until you empty the trash");
+    const library = ACCORDION_SECTIONS.find((section) => section.id === "library")!;
+    expect(library.label).toBe("Library");
+    expect(library.icon).toBe("library");
+    expect(sectionMatchesSearch("trash", library)).toBe(true);
+    expect(sectionMatchesSearch("retention", library)).toBe(true);
+    expect(sectionMatchesSearch("collections", library)).toBe(true);
   });
 
   it("collects the curated schemas that belong to a section", () => {

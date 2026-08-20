@@ -1764,7 +1764,10 @@ pub(crate) fn bind_h3_factory_authority(
             model: artifacts.model.clone(),
             device_id: plan.device_id.clone(),
             device_ordinal: plan.device_ordinal,
-            compute_capability,
+            // Admission still binds a CUDA route only (`DeviceUnsupported`
+            // above), so the capability is always present here; the factory
+            // input is optional because a Metal plan carries none.
+            compute_capability: Some(compute_capability),
             execution_fingerprint: plan.execution_fingerprint.clone(),
             conditioner_placement,
             qwen_parameter_bytes: plan.qwen_memory.source_parameter_bytes,
@@ -3210,7 +3213,7 @@ mod tests {
         assert_eq!(authority.device_id(), plan.device_id);
         assert_eq!(authority.device_ordinal(), plan.device_ordinal);
         assert_eq!(plan.compute_capability, (8, 9));
-        assert_eq!(authority.compute_capability(), (8, 9));
+        assert_eq!(authority.compute_capability(), Some((8, 9)));
         assert_eq!(
             authority.execution_fingerprint(),
             plan.execution_fingerprint
@@ -3584,7 +3587,7 @@ mod tests {
             .unwrap();
         let authority = engine_config.h3_factory_authority.as_ref().unwrap();
         assert_eq!(authority.canonical_model(), minimax_h3::FL2VA_OFFICIAL);
-        assert_eq!(authority.compute_capability(), (8, 9));
+        assert_eq!(authority.compute_capability(), Some((8, 9)));
         assert!(matches!(
             authority.quantization(),
             mold_inference::H3FactoryQuantizationAuthority::OfficialBf16

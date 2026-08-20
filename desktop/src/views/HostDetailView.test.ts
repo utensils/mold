@@ -20,6 +20,20 @@ vi.mock("@studio/api/devices", () => ({
   listDevices,
   setDeviceEnabled,
 }));
+const { listTrash, emptyTrash, fetchHostConfigKey, setHostConfigKey } = vi.hoisted(() => ({
+  listTrash: vi.fn(),
+  emptyTrash: vi.fn(),
+  fetchHostConfigKey: vi.fn(),
+  setHostConfigKey: vi.fn(),
+}));
+vi.mock("@studio/api/galleryOrganization", () => ({
+  listTrash: (...a: unknown[]) => listTrash(...a),
+  emptyTrash: (...a: unknown[]) => emptyTrash(...a),
+}));
+vi.mock("../lib/api/hostConfig", () => ({
+  fetchHostConfigKey: (...a: unknown[]) => fetchHostConfigKey(...a),
+  setHostConfigKey: (...a: unknown[]) => setHostConfigKey(...a),
+}));
 
 interface SseCall {
   path: string;
@@ -251,6 +265,14 @@ function lastStream(path = "/api/resources/stream"): SseCall {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  listTrash.mockResolvedValue([]);
+  emptyTrash.mockResolvedValue({ purged: 0 });
+  fetchHostConfigKey.mockResolvedValue({
+    key: "gallery.trash_retention_days",
+    value: 30,
+    source: "default",
+  });
+  setHostConfigKey.mockResolvedValue(new Response(null, { status: 200 }));
   listDevices.mockRejectedValue(new Error("legacy server in tests"));
   setDeviceEnabled.mockResolvedValue(undefined);
   unloadModel.mockResolvedValue(undefined);
@@ -1123,5 +1145,135 @@ describe("HostDetailView forget", () => {
     expect(useHostsStore().extras).toHaveLength(0);
     expect(router.currentRoute.value.path).toBe("/machines");
     document.body.innerHTML = "";
+  });
+});
+
+describe("HostDetailView storage (Library trash)", () => {
+  const TARGET = { baseUrl: "http://hal9000:7680", apiKey: "sekrit" };
+  const trashCapable: ServerCapabilities = {
+    gallery: { can_delete: true, trash: { enabled: true, retention_days: 30 }, organize: true },
+  };
+
+  it("hides the card when the host's capabilities lack gallery.trash", async () => {
+    const wrapper = await mountView(undefined, undefined, {
+      devices: [],
+      capabilities: { gallery: { can_delete: true } },
+    });
+    expect(wrapper.find("[data-test='host-storage']").exists()).toBe(false);
+    expect(fetchHostConfigKey).not.toHaveBeenCalled();
+    expect(listTrash).not.toHaveBeenCalled();
+  });
+
+  it("shows that host's retention and trash count, read from the host itself", async () => {
+    fetchHostConfigKey.mockResolvedValue({
+      key: "gallery.trash_retention_days",
+      value: 7,
+      source: "db",
+    });
+    listTrash.mockResolvedValue([
+      { filename: "a.png" },
+      { filename: "b.png" },
+      { filename: "c.mp4" },
+    ]);
+    const wrapper = await mountView(undefined, undefined, {
+      devices: [],
+      capabilities: trashCapable,
+    });
+    expect(wrapper.find("[data-test='host-storage']").exists()).toBe(true);
+    expect(fetchHostConfigKey).toHaveBeenCalledWith(
+      TARGET,
+      "gallery.trash_retention_days",
+      expect.any(AbortSignal),
+    );
+    expect(listTrash).toHaveBeenCalledWith(TARGET, expect.any(AbortSignal));
+    const select = wrapper.get<HTMLSelectElement>("[data-test='host-trash-retention']");
+    expect(select.element.value).toBe("7");
+    const labels = select.findAll("option").map((o) => o.text());
+    expect(labels).toEqual(["1 day", "7 days", "30 days", "90 days", "1 year", "Forever"]);
+    expect(wrapper.get("[data-test='host-trash-count']").text()).toContain("3");
+  });
+
+  it("keeps an off-menu retention visible instead of lying about it", async () => {
+    fetchHostConfigKey.mockResolvedValue({
+      key: "gallery.trash_retention_days",
+      value: 14,
+      source: "db",
+    });
+    const wrapper = await mountView(undefined, undefined, {
+      devices: [],
+      capabilities: trashCapable,
+    });
+    const select = wrapper.get<HTMLSelectElement>("[data-test='host-trash-retention']");
+    expect(select.element.value).toBe("14");
+    expect(select.findAll("option").map((o) => o.text())).toContain("14 days");
+  });
+
+  it("writes a new retention to THAT host's /api/config, never the primary's", async () => {
+    // The host's own row reflects the write on the re-read that follows.
+    setHostConfigKey.mockImplementation(async (_t: unknown, key: string, value: number) => {
+      fetchHostConfigKey.mockResolvedValue({ key, value, source: "db" });
+      return new Response(null, { status: 200 });
+    });
+    const wrapper = await mountView(undefined, undefined, {
+      devices: [],
+      capabilities: trashCapable,
+    });
+    const select = wrapper.get<HTMLSelectElement>("[data-test='host-trash-retention']");
+    await select.setValue("0");
+    await flushPromises();
+    expect(setHostConfigKey).toHaveBeenCalledWith(TARGET, "gallery.trash_retention_days", 0);
+    expect(select.element.value).toBe("0");
+  });
+
+  it("locks the select when the host's env var owns the value", async () => {
+    fetchHostConfigKey.mockResolvedValue({
+      key: "gallery.trash_retention_days",
+      value: 90,
+      source: "env",
+      env_var: "MOLD_GALLERY_TRASH_RETENTION_DAYS",
+    });
+    const wrapper = await mountView(undefined, undefined, {
+      devices: [],
+      capabilities: trashCapable,
+    });
+    const select = wrapper.get<HTMLSelectElement>("[data-test='host-trash-retention']");
+    expect(select.attributes("disabled")).toBeDefined();
+    expect(select.attributes("title")).toContain("MOLD_GALLERY_TRASH_RETENTION_DAYS");
+  });
+
+  it("empties the trash only after the plain shared confirm naming host and count", async () => {
+    listTrash.mockResolvedValue([{ filename: "a.png" }, { filename: "b.png" }]);
+    emptyTrash.mockImplementation(async () => {
+      listTrash.mockResolvedValue([]);
+      return { purged: 2 };
+    });
+    const wrapper = await mountView(undefined, undefined, {
+      devices: [],
+      capabilities: trashCapable,
+    });
+    await wrapper.get("[data-test='host-empty-trash']").trigger("click");
+    expect(emptyTrash).not.toHaveBeenCalled();
+
+    const dialog = document.querySelector("[data-test='confirm-dialog']");
+    expect(dialog?.textContent).toContain("Empty trash?");
+    expect(dialog?.textContent).toContain(
+      "Delete 2 prints in the trash on hal9000 forever? This can't be undone.",
+    );
+    // No typed-phrase gate anywhere (design amendment).
+    expect(dialog?.querySelector("input")).toBeNull();
+
+    (document.querySelector("[data-test='confirm-accept']") as HTMLButtonElement).click();
+    await flushPromises();
+    expect(emptyTrash).toHaveBeenCalledWith(TARGET);
+    expect(wrapper.get("[data-test='host-trash-count']").text()).toContain("0");
+    document.body.innerHTML = "";
+  });
+
+  it("disables Empty trash when the trash is empty", async () => {
+    const wrapper = await mountView(undefined, undefined, {
+      devices: [],
+      capabilities: trashCapable,
+    });
+    expect(wrapper.get("[data-test='host-empty-trash']").attributes("disabled")).toBeDefined();
   });
 });

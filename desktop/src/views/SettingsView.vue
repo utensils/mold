@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
+import { useRoute } from "vue-router";
 import AccordionSection from "@ui/components/AccordionSection.vue";
 import CardSurface from "@ui/components/CardSurface.vue";
 import PairingAccessPanel from "@studio/components/PairingAccessPanel.vue";
@@ -10,6 +11,7 @@ import HostsSection from "../components/settings/HostsSection.vue";
 import PerformanceSection from "../components/settings/PerformanceSection.vue";
 import GenerationSection from "../components/settings/GenerationSection.vue";
 import MediaSection from "../components/settings/MediaSection.vue";
+import LibrarySection from "../components/settings/LibrarySection.vue";
 import ExpansionSection from "../components/settings/ExpansionSection.vue";
 import AccountsSection from "../components/settings/AccountsSection.vue";
 import ProfilesSection from "../components/settings/ProfilesSection.vue";
@@ -37,6 +39,19 @@ const query = ref("");
 /** Which "All settings" accordion is open (one at a time) when not searching. */
 const openSection = ref<SectionId | null>(null);
 
+// Deep link: /settings?section=<id> opens that accordion (the Library trash
+// banner's "Change retention" lands on Settings ▸ Library this way). The view
+// also mounts router-less in tests, so the route is optional.
+const route = useRoute();
+watch(
+  () => route?.query.section,
+  (section) => {
+    if (typeof section !== "string") return;
+    if (ACCORDION_SECTIONS.some((s) => s.id === section)) openSection.value = section as SectionId;
+  },
+  { immediate: true },
+);
+
 watch(
   () => conn.ready,
   (ready) => {
@@ -55,6 +70,7 @@ const componentFor: Record<string, unknown> = {
   performance: PerformanceSection,
   generation: GenerationSection,
   media: MediaSection,
+  library: LibrarySection,
   expansion: ExpansionSection,
   accounts: AccountsSection,
   profiles: ProfilesSection,

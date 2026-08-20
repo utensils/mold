@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { flushPromises, mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
+import { createMemoryHistory, createRouter } from "vue-router";
 import AccordionSection from "@ui/components/AccordionSection.vue";
 
 // The top cards and accordion bodies pull in stores and IPC that aren't the
@@ -17,6 +18,7 @@ vi.mock("../components/settings/HostsSection.vue", () => stub("stub-hosts"));
 vi.mock("../components/settings/PerformanceSection.vue", () => stub("stub-performance"));
 vi.mock("../components/settings/GenerationSection.vue", () => stub("stub-generation"));
 vi.mock("../components/settings/MediaSection.vue", () => stub("stub-media"));
+vi.mock("../components/settings/LibrarySection.vue", () => stub("stub-library"));
 vi.mock("../components/settings/ExpansionSection.vue", () => stub("stub-expansion"));
 vi.mock("../components/settings/AccountsSection.vue", () => stub("stub-accounts"));
 vi.mock("../components/settings/ProfilesSection.vue", () => stub("stub-profiles"));
@@ -61,6 +63,7 @@ describe("SettingsView shell", () => {
       "performance",
       "generation",
       "media",
+      "library",
       "expansion",
       "accounts",
       "profiles",
@@ -74,7 +77,7 @@ describe("SettingsView shell", () => {
     const wrapper = await mountView();
     const accordions = wrapper.findAllComponents(AccordionSection);
 
-    expect(accordions).toHaveLength(7);
+    expect(accordions).toHaveLength(8);
     for (const accordion of accordions) {
       expect(accordion.props("icon")).toBeTruthy();
       expect(accordion.props("summary")).toBeTruthy();
@@ -88,6 +91,7 @@ describe("SettingsView shell", () => {
       "performance",
       "generation",
       "media",
+      "library",
       "expansion",
       "accounts",
       "profiles",
@@ -112,6 +116,20 @@ describe("SettingsView shell", () => {
     expect(wrapper.find("[data-test='stub-generation']").exists()).toBe(false);
   });
 
+  it("opens the accordion named by ?section= (the Library trash banner's deep link)", async () => {
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: "/settings", component: { template: "<div />" } }],
+    });
+    await router.push({ path: "/settings", query: { section: "library" } });
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const wrapper = mount(SettingsView, { global: { plugins: [pinia, router] } });
+    await flushPromises();
+    expect(wrapper.find("[data-test='stub-library']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='stub-performance']").exists()).toBe(false);
+  });
+
   it("search opens the owning accordion and hides the rest", async () => {
     const wrapper = await mountView();
     await typeSearch(wrapper, "temperature");
@@ -131,6 +149,16 @@ describe("SettingsView shell", () => {
     await typeSearch(wrapper, "civitai");
     expect(wrapper.find("[data-test='stub-accounts']").exists()).toBe(true);
     expect(wrapper.find("[data-test='accordion-expansion']").exists()).toBe(false);
+  });
+
+  it("opens the Library accordion for trash / retention searches", async () => {
+    const wrapper = await mountView();
+    await typeSearch(wrapper, "trash");
+    expect(wrapper.find("[data-test='accordion-library']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='stub-library']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='accordion-expansion']").exists()).toBe(false);
+    await typeSearch(wrapper, "retention");
+    expect(wrapper.find("[data-test='stub-library']").exists()).toBe(true);
   });
 
   it("reports when a search matches nothing", async () => {

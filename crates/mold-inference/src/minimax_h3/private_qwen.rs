@@ -72,7 +72,7 @@ pub(crate) struct H3PrivateQwenOpenRouteAuthority {
     route: H3PrivateQwenLoaderMemoryRoute,
     device_id: String,
     device_ordinal: usize,
-    compute_capability: (u16, u16),
+    compute_capability: Option<(u16, u16)>,
     factory_identity_sha256: String,
     execution_fingerprint: String,
     component_set_identity_sha256: String,
@@ -92,7 +92,7 @@ impl H3PrivateQwenOpenRouteAuthority {
         support: &H3PrivateQwenSupport,
         device_id: &str,
         device_ordinal: usize,
-        compute_capability: (u16, u16),
+        compute_capability: Option<(u16, u16)>,
         weight_identity_sha256: &str,
         weight_header_identity_sha256: &str,
         weight_policy_identity_sha256: &str,
@@ -796,10 +796,13 @@ where
             || self.execution_lease.execution_fingerprint()
                 != self.authority.execution_fingerprint()
             || self.execution_lease.backend()
-                != (H3CandleBackendDevice::Cuda {
-                    compute_capability: self.authority.compute_capability(),
-                })
-            || !self.execution_lease.device().is_cuda()
+                != H3CandleBackendDevice::from_compute_capability(
+                    self.authority.compute_capability(),
+                )
+            || !self
+                .execution_lease
+                .backend()
+                .matches_candle(self.execution_lease.device())
             || !self.artifact_lease.is_active()
             || self.artifact_lease.factory_identity_sha256() != self.authority.identity_sha256()
             || self.artifact_lease.component_set_identity()
@@ -882,7 +885,7 @@ struct FrozenBindingClaims {
     execution_fingerprint: String,
     conditioner_placement: H3FactoryConditionerPlacement,
     qwen_policy_identity_sha256: String,
-    compute_capability: (u16, u16),
+    compute_capability: Option<(u16, u16)>,
 }
 
 #[derive(Clone, Debug)]
@@ -1154,10 +1157,8 @@ where
         || execution.device_id() != authority.device_id()
         || execution.execution_fingerprint() != authority.execution_fingerprint()
         || execution.backend()
-            != (H3CandleBackendDevice::Cuda {
-                compute_capability: authority.compute_capability(),
-            })
-        || !execution.device().is_cuda()
+            != H3CandleBackendDevice::from_compute_capability(authority.compute_capability())
+        || !execution.backend().matches_candle(execution.device())
         || !artifact.is_active()
         || artifact.factory_identity_sha256() != authority.identity_sha256()
         || artifact.component_set_identity() != authority.component_set_identity_sha256()
@@ -1252,9 +1253,8 @@ fn validate_binding(
     if !conditioner_route_matches {
         bail!("private H3 Qwen loaded device differs from frozen conditioner placement")
     }
-    let expected_backend = H3CandleBackendDevice::Cuda {
-        compute_capability: frozen.compute_capability,
-    };
+    let expected_backend =
+        H3CandleBackendDevice::from_compute_capability(frozen.compute_capability);
     if !leases.execution_active
         || leases.execution_lease_id.trim().is_empty()
         || leases.execution_device_id != frozen.device_id
@@ -1839,7 +1839,7 @@ mod tests {
             model: contract::FL2VA_COMFY.into(),
             device_id: "gpu-0".into(),
             device_ordinal: 0,
-            compute_capability: (8, 9),
+            compute_capability: Some((8, 9)),
             execution_fingerprint: sha('9'),
             conditioner_placement: H3FactoryConditionerPlacement::HostCpuThenDrop,
             qwen_parameter_bytes,
@@ -1897,7 +1897,7 @@ mod tests {
             execution_fingerprint: sha('9'),
             conditioner_placement: H3FactoryConditionerPlacement::AssignedCudaThenDrop,
             qwen_policy_identity_sha256: sha('4'),
-            compute_capability: (8, 9),
+            compute_capability: Some((8, 9)),
         };
         let leases = LeaseBindingClaims {
             conditioner_factory_identity_sha256: sha('5'),
@@ -2804,7 +2804,7 @@ mod tests {
         }
         fn backend(&self) -> H3CandleBackendDevice {
             H3CandleBackendDevice::Cuda {
-                compute_capability: (8, 9),
+                compute_capability: Some((8, 9)),
             }
         }
         fn execution_fingerprint(&self) -> &str {
@@ -2948,7 +2948,7 @@ mod tests {
             model: model_name,
             device_id: "cuda:0".into(),
             device_ordinal: 0,
-            compute_capability: (8, 9),
+            compute_capability: Some((8, 9)),
             execution_fingerprint: execution.clone(),
             conditioner_placement: H3FactoryConditionerPlacement::AssignedCudaThenDrop,
             qwen_parameter_bytes: memory_facts.effective_parameter_bytes,

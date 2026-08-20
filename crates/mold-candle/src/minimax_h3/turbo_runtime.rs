@@ -332,6 +332,7 @@ pub struct H3TurboLoraRuntime {
     main_blocks: Vec<H3TurboBlockDeltas>,
     token_refiner_blocks: Vec<H3TurboBlockDeltas>,
     device_bytes: u64,
+    device_staging_peak_bytes: u64,
     host_staging_peak_bytes: u64,
 }
 
@@ -380,6 +381,26 @@ impl H3TurboLoraRuntime {
         self.device_bytes
     }
 
+    /// Transient *device* bytes the load peaks at above the residents.
+    ///
+    /// [`H3TurboLoraDelta::new`] materializes `A^T` and `B^T` while the freshly
+    /// uploaded `A` and `B` are still alive, so during module `i` the device
+    /// holds every finished module plus `2*b_i`, where `b_i = |A_i| + |B_i|`:
+    ///
+    /// ```text
+    /// peak = max_i [ sum_{j<i} b_j + 2*b_i ] = max_i [ sum_{j<=i} b_j + b_i ]
+    ///      <= (sum_j b_j) + max_i b_i = device_bytes + device_staging_peak_bytes
+    /// ```
+    ///
+    /// so charging this on top of [`Self::device_bytes`] is a sound upper
+    /// bound. For the published tiers the widest module is the fused
+    /// `attn.qkv_proj` at 20,643,840 bytes. The transposes are released before
+    /// the denoise begins, which is why only the transformer-load phase pays
+    /// it.
+    pub const fn device_staging_peak_bytes(&self) -> u64 {
+        self.device_staging_peak_bytes
+    }
+
     /// Transient host bytes the load peaks at.
     ///
     /// Tensors are read one at a time into a `Vec<u8>` and then materialized as
@@ -419,12 +440,21 @@ impl H3TurboLoraRuntime {
             BTreeMap::<usize, BTreeMap<H3TurboLoraModuleKind, H3TurboLoraDelta>>::new();
         let mut device_bytes = 0u64;
         let mut widest_matrix_bytes = 0u64;
+        let mut widest_module_bytes = 0u64;
         for module in inspection.modules.values() {
             cancellation_boundary(cancellation)?;
+            let mut module_bytes = 0u64;
             for reference in [&module.lora_a, &module.lora_b] {
-                widest_matrix_bytes =
-                    widest_matrix_bytes.max(reference.data_offsets[1] - reference.data_offsets[0]);
+                let bytes = reference.data_offsets[1] - reference.data_offsets[0];
+                widest_matrix_bytes = widest_matrix_bytes.max(bytes);
+                module_bytes = module_bytes.checked_add(bytes).ok_or_else(|| {
+                    failure(
+                        H3TurboLoraErrorCode::ConfigMismatch,
+                        "H3 Turbo module byte count overflows",
+                    )
+                })?;
             }
+            widest_module_bytes = widest_module_bytes.max(module_bytes);
             let delta = load_module_delta(module, file, data_start, device, dtype, cancellation)?;
             device_bytes = device_bytes
                 .checked_add(delta.device_bytes())
@@ -456,6 +486,7 @@ impl H3TurboLoraRuntime {
             main_blocks: collect_contiguous_blocks(main, "main")?,
             token_refiner_blocks: collect_contiguous_blocks(refiner, "token refiner")?,
             device_bytes,
+            device_staging_peak_bytes: widest_module_bytes,
             host_staging_peak_bytes: widest_matrix_bytes.checked_mul(2).ok_or_else(|| {
                 failure(
                     H3TurboLoraErrorCode::ConfigMismatch,
