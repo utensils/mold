@@ -386,6 +386,13 @@ done
 require_text "$ci" \
   "bash scripts/tests/desktop-candle-nix-source-hash.sh" \
   "release CI does not verify the Nix hash for the locked desktop Candle source"
+require_text "$ci" \
+  "bash scripts/tests/desktop-dmg-packaging.sh" \
+  "release CI does not exercise retrying desktop DMG packaging"
+grep -Fxq "              - 'scripts/create-desktop-dmg.sh'" <<< "$release_filter" \
+  || fail "release classifier omits the desktop DMG packager"
+grep -Fxq "              - 'scripts/tests/desktop-dmg-packaging.sh'" <<< "$release_filter" \
+  || fail "release classifier omits the desktop DMG packaging contract"
 grep -Fq "'.github/workflows/**'" <<< "$release_filter" \
   || fail "workflow changes do not reach protected actionlint and routing contracts"
 
@@ -402,6 +409,10 @@ grep -Fq "needs.changes.outputs.workflow == 'true'" <<< "$nix_job" \
 desktop_classifier="$(extract_job "$desktop" changes)"
 require_text "$desktop" 'name: Classify desktop changes' \
   "desktop workflow has no path classifier"
+require_text "$desktop" '      - "scripts/create-desktop-dmg.sh"' \
+  "desktop workflow does not run when its DMG packager changes"
+require_text "$desktop" '      - "scripts/tests/desktop-dmg-packaging.sh"' \
+  "desktop workflow does not run when its DMG packaging contract changes"
 require_text "$desktop" \
   "if: github.event_name != 'pull_request' || needs.changes.outputs.frontend == 'true'" \
   "desktop frontend job is not path-gated on PRs"
