@@ -769,7 +769,10 @@ fn validate_prepared_facts_against_plan(
         || facts.component_set_identity_sha256 != authority.component_set_identity_sha256()
         || facts.predicted_device_peak_bytes != plan.predicted_vram_peak_bytes
         || facts.predicted_host_increment_bytes != plan.predicted_host_increment_bytes
-        || facts.media.canonical_model != authority.canonical_model()
+        || !mold_inference::media_model_matches_h3_authority(
+            &facts.media.canonical_model,
+            authority,
+        )
         || facts.media.task != authority.task()
         || facts.media.fps != mold_core::minimax_h3::FIXED_FPS
         || !valid_sha256(&facts.prepared_attempt_identity_sha256)

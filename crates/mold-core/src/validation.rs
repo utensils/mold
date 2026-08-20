@@ -1753,10 +1753,7 @@ pub fn validate_generate_request_with_family(
 /// public compliance gate before applying the same field validation.
 #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 pub fn validate_h3_private_uat_request(req: &GenerateRequest) -> Result<(), String> {
-    if !matches!(
-        req.model.as_str(),
-        crate::minimax_h3::FL2VA_COMFY | crate::minimax_h3::REF2VA_COMFY
-    ) {
+    if !crate::minimax_h3::is_reviewed_compact_model(&req.model) {
         return Err(
             "private MiniMax H3 validation requires an exact reviewed task model".to_string(),
         );

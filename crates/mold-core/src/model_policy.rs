@@ -209,16 +209,12 @@ fn is_minimax_h3_identity(value: &str) -> bool {
 }
 
 fn is_reviewed_minimax_h3_acquisition_identity(value: &str) -> bool {
-    matches!(
-        value.trim().to_ascii_lowercase().as_str(),
-        "minimax-h3" | "minimax-h3-fl2va:comfy-pruned-int8" | "minimax-h3-ref2va:comfy-pruned-int8"
-    )
+    let normalized = value.trim().to_ascii_lowercase();
+    normalized == "minimax-h3" || minimax_h3::is_reviewed_compact_model(&normalized)
 }
 
 pub fn is_reviewed_minimax_h3_model(value: &str) -> bool {
-    let value = value.trim();
-    value.eq_ignore_ascii_case(minimax_h3::FL2VA_COMFY)
-        || value.eq_ignore_ascii_case(minimax_h3::REF2VA_COMFY)
+    minimax_h3::is_reviewed_compact_model(value)
 }
 
 fn is_minimax_h3_compact_alias(token: &str) -> bool {
@@ -303,6 +299,8 @@ mod tests {
         for identifier in [
             "minimax-h3-fl2va:comfy-pruned-int8",
             "minimax-h3-ref2va:comfy-pruned-int8",
+            "minimax-h3-fl2va:comfy-pruned-int8-turbo-8step",
+            "minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p",
         ] {
             assert_eq!(
                 model_acquisition(identifier, Some("minimax-h3")),
@@ -324,6 +322,8 @@ mod tests {
         for unreviewed in [
             "hf:Comfy-Org/MiniMax-H3",
             "minimax-h3:custom",
+            "minimax-h3-fl2va:comfy-pruned-int8-turbo-2step",
+            "minimax-h3-ref2va:comfy-pruned-int8-turbo-4step",
             "transformer/high_noise.safetensors",
         ] {
             assert_eq!(
@@ -424,13 +424,23 @@ mod tests {
         for reviewed in [
             "minimax-h3-fl2va:comfy-pruned-int8",
             "minimax-h3-ref2va:comfy-pruned-int8",
+            "minimax-h3-fl2va:comfy-pruned-int8-turbo-8step",
+            "minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p",
         ] {
             assert_eq!(
                 model_acquisition(reviewed, Some("minimax-h3")),
                 ModelActivation::Available
             );
+            assert_eq!(
+                model_activation(reviewed, Some("minimax-h3")),
+                ModelActivation::Available
+            );
         }
-        for unreviewed in ["hf:Comfy-Org/MiniMax-H3", "minimax-h3:custom"] {
+        for unreviewed in [
+            "hf:Comfy-Org/MiniMax-H3",
+            "minimax-h3:custom",
+            "minimax-h3-fl2va:comfy-pruned-int8-turbo-2step",
+        ] {
             assert_eq!(
                 model_acquisition(unreviewed, Some("minimax-h3")),
                 ModelActivation::ComplianceGated

@@ -40,6 +40,10 @@ export const MINIMAX_H3_FL2VA_OFFICIAL = "minimax-h3-fl2va:official-bf16";
 export const MINIMAX_H3_REF2VA_OFFICIAL = "minimax-h3-ref2va:official-bf16";
 export const MINIMAX_H3_FL2VA_COMFY = "minimax-h3-fl2va:comfy-pruned-int8";
 export const MINIMAX_H3_REF2VA_COMFY = "minimax-h3-ref2va:comfy-pruned-int8";
+export const MINIMAX_H3_FL2VA_COMFY_TURBO_8STEP =
+  "minimax-h3-fl2va:comfy-pruned-int8-turbo-8step";
+export const MINIMAX_H3_FL2VA_COMFY_TURBO_4STEP_768P =
+  "minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p";
 
 /** Browser-owned first/last-frame authority. The raw bytes live in IndexedDB
  * when a draft/template is persisted; only the small descriptor is allowed in
@@ -115,7 +119,9 @@ export function canonicalMinimaxH3ModelName(
     value === MINIMAX_H3_FL2VA_OFFICIAL ||
     value === MINIMAX_H3_REF2VA_OFFICIAL ||
     value === MINIMAX_H3_FL2VA_COMFY ||
-    value === MINIMAX_H3_REF2VA_COMFY
+    value === MINIMAX_H3_REF2VA_COMFY ||
+    value === MINIMAX_H3_FL2VA_COMFY_TURBO_8STEP ||
+    value === MINIMAX_H3_FL2VA_COMFY_TURBO_4STEP_768P
   ) {
     return value;
   }

@@ -3236,9 +3236,10 @@ async fn list_models(
             &current_device_state(&state),
         )
     };
-    if let Some(row) = private_capability
+    for row in private_capability
         .as_ref()
-        .and_then(authenticated_private_h3_model_row)
+        .map(authenticated_private_h3_model_rows)
+        .unwrap_or_default()
     {
         models.retain(|entry| entry.info.name != row.info.name);
         models.push(row);
@@ -5284,17 +5285,17 @@ fn advertised_private_h3_capability(
 }
 
 #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
-fn authenticated_private_h3_model_row(
+fn authenticated_private_h3_model_rows(
     capability: &mold_core::MiniMaxH3Capability,
-) -> Option<mold_core::ModelInfoExtended> {
-    crate::h3_private_bridge::authenticated_h3_private_model_row(capability)
+) -> Vec<mold_core::ModelInfoExtended> {
+    crate::h3_private_bridge::authenticated_h3_private_model_rows(capability)
 }
 
 #[cfg(not(any(feature = "h3", feature = "h3-private-uat")))]
-fn authenticated_private_h3_model_row(
+fn authenticated_private_h3_model_rows(
     _capability: &mold_core::MiniMaxH3Capability,
-) -> Option<mold_core::ModelInfoExtended> {
-    None
+) -> Vec<mold_core::ModelInfoExtended> {
+    Vec::new()
 }
 
 #[cfg(not(any(feature = "h3", feature = "h3-private-uat")))]

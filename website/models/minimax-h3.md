@@ -30,22 +30,46 @@ a portability path, not a speed one.
 
 ## Compact variants
 
-| Model                                 | Task                                     | Total pull | Runtime status                       |
-| ------------------------------------- | ---------------------------------------- | ---------: | ------------------------------------ |
-| `minimax-h3-fl2va:comfy-pruned-int8`  | First/last-frame conditioning with audio |  42.482 GB | CUDA generation; first-frame profile |
-| `minimax-h3-ref2va:comfy-pruned-int8` | Reference media to video with audio      |  42.482 GB | Downloadable; execution unavailable  |
+| Model                                                 | Task                                              | Total pull | Runtime status                       |
+| ----------------------------------------------------- | ------------------------------------------------- | ---------: | ------------------------------------ |
+| `minimax-h3-fl2va:comfy-pruned-int8`                  | First/last-frame conditioning with audio          |  42.482 GB | CUDA generation; first-frame profile |
+| `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step`      | FL2VA + reviewed Turbo 8-step LoRA (9 steps)      |  44.438 GB | CUDA generation; first-frame profile |
+| `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p` | FL2VA + reviewed Turbo 4-step 768p LoRA (5 steps) |  44.438 GB | CUDA generation; first-frame profile |
+| `minimax-h3-ref2va:comfy-pruned-int8`                 | Reference media to video with audio               |  42.482 GB | Downloadable; execution unavailable  |
 
 Pull a variant from the CLI, or install it from **Models → Discover** in Mold
 Studio:
 
 ```bash
 mold pull minimax-h3-fl2va:comfy-pruned-int8
+mold pull minimax-h3-fl2va:comfy-pruned-int8-turbo-8step
 mold pull minimax-h3-ref2va:comfy-pruned-int8
 ```
 
 The files are revision-pinned and SHA-256 verified before Mold marks the model
 complete. Raw repository IDs, custom manifests, configured aliases, and live
-catalog recipes cannot substitute for either registered graph.
+catalog recipes cannot substitute for any registered graph.
+
+## Reviewed Turbo tiers
+
+A Turbo tier is a reviewed LoRA adapter overlaid on the **same** compact INT8
+FL2VA checkpoint — nothing about the base artifact contract relaxes, and the
+only request axis a tier moves is its fixed step count. Each Turbo model tag
+pulls the complete base stack plus one pinned adapter
+(1,956,193,000 bytes for 8-step, 1,956,192,992 bytes for 4-step 768p, stored
+once under `shared/minimax-h3/loras/` and shared by both tags):
+
+- `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step` — 9 terminal-inclusive
+  sampler grid points (8 model evaluations)
+- `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p` — 5 terminal-inclusive
+  sampler grid points (4 model evaluations)
+
+Selecting a Turbo model resolves the base INT8 transformer, the tier's pinned
+adapter, and the tier's reviewed step count with no extra configuration. The
+`MOLD_H3_TURBO_ADAPTER` / `MOLD_H3_TURBO_TIER` environment pair is a
+capture-scope UAT override honored only by `h3-private-uat` builds; ordinary
+builds refuse a set pair rather than letting two selection authorities
+disagree.
 
 ## Download size and sources
 
@@ -60,6 +84,13 @@ transformer:
 | FP32 audio VAE                                         |        605,254,808 |      0.605 GB | `Comfy-Org/MiniMax-H3`                                                                                              |
 | Tokenizer, processor, scheduler, and component configs |         11,504,847 |      0.012 GB | [`MiniMaxAI/MiniMax-H3`](https://huggingface.co/MiniMaxAI/MiniMax-H3/tree/bfc8ed0353f5a9733be73e6b2c98ec0948195b86) |
 | **One complete variant**                               | **42,482,090,318** | **42.482 GB** | Both pinned repositories                                                                                            |
+
+A Turbo tag adds one adapter to this graph:
+[`Comfy-Org/MiniMax-H3`](https://huggingface.co/Comfy-Org/MiniMax-H3/tree/dc559027db79c174125df4d827db55cd11178860)
+`loras/` at pinned revision `dc559027db79c174125df4d827db55cd11178860`
+(1,956,193,000 bytes for `-turbo-8step`, 1,956,192,992 bytes for
+`-turbo-4step-768p`), bringing one complete Turbo variant to 44,438,283,318 or
+44,438,283,310 bytes (44.438 GB).
 
 The encoder, VAEs, and common support files are shared between the variants.
 After one complete variant is installed, adding the other downloads its 20.970
@@ -78,7 +109,9 @@ The initial compact CUDA implementation supports this request profile:
 - an SM89 CUDA GPU with sufficient VRAM and the H3 attention/runtime operators enabled
 - `1344x768`, batch size 1
 - exactly 124 frames at 24 fps
-- exactly 21 terminal-inclusive sampler grid points (20 model evaluations)
+- exactly 21 terminal-inclusive sampler grid points (20 model evaluations) for
+  the base model; a reviewed Turbo tag instead requires exactly its tier's own
+  count (9 for `-turbo-8step`, 5 for `-turbo-4step-768p`)
 - one required first-frame image and no last-frame endpoint
 - MP4 output with synchronized generated audio
 

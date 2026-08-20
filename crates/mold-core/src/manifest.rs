@@ -64,7 +64,7 @@ pub enum ModelComponent {
     Upscaler, // Upscaler model weights (Real-ESRGAN, etc.)
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelFile {
     pub hf_repo: String,
     pub hf_filename: String,
@@ -339,6 +339,18 @@ pub fn storage_path(manifest: &ModelManifest, file: &ModelFile) -> PathBuf {
     if manifest.family == crate::minimax_h3::FAMILY
         && file.component == ModelComponent::TaskConfig
         && file.hf_repo == crate::minimax_h3::OFFICIAL_REPO
+    {
+        return PathBuf::from("shared")
+            .join(crate::minimax_h3::FAMILY)
+            .join(&file.hf_filename);
+    }
+
+    // H3's reviewed Turbo adapters are keyed by their own task-specific
+    // filenames (`loras/minimax_h3_fl2v_turbo_...`), so both Turbo tags — and
+    // any future tier — share one on-disk copy under the family bucket
+    // instead of duplicating ~1.8 GB per manifest name.
+    if manifest.family == crate::minimax_h3::FAMILY
+        && file.component == ModelComponent::DistilledLora
     {
         return PathBuf::from("shared")
             .join(crate::minimax_h3::FAMILY)
@@ -7366,7 +7378,7 @@ mod tests {
 
     #[test]
     fn known_manifests_count() {
-        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 9 Flux.2 + 29 Qwen-Image/Qwen-Image-Edit + 1 Wuerstchen + 5 LTX Video + 6 LTX-2 + 14 Wan + 4 MiniMax H3 contracts (2 visible compact + 2 hidden official) + 7 LTX-2 controls + 7 LTX-2 camera controls + 3 ControlNet + 2 Qwen3-Expand + 7 Upscaler + 20 Companion = 157
+        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 9 Flux.2 + 29 Qwen-Image/Qwen-Image-Edit + 1 Wuerstchen + 5 LTX Video + 6 LTX-2 + 14 Wan + 6 MiniMax H3 contracts (2 visible compact + 2 visible FL2VA Turbo tags + 2 hidden official) + 7 LTX-2 controls + 7 LTX-2 camera controls + 3 ControlNet + 2 Qwen3-Expand + 7 Upscaler + 20 Companion = 159
         // Wan fp8 bump (#777): +wan22-{t2v,i2v}-a14b:fp8 — the Comfy-Org
         // fp8-scaled expert pairs.
         // Wan bump: +wan22-{t2v,i2v}-a14b:{q5,q8} — the two-expert A14B tiers.
@@ -7384,7 +7396,7 @@ mod tests {
         // GGUFs for the dense 2.1 14B, which the engine already shape-detects.
         // Qwen distilled bump (#1042): +qwen-image-flash:{q4,q8} (NVIDIA DMD2
         // 4-step), +qwen-image-distill:{q4,q8} (DiffSynth Distill-Full 15-step),
-        assert_eq!(known_manifests().len(), 157);
+        assert_eq!(known_manifests().len(), 159);
     }
 
     #[test]

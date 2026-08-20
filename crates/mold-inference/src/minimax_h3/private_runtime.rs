@@ -455,6 +455,10 @@ pub(crate) struct H3PrivateBoundComfyStream {
     /// The reviewed Turbo adapter this attempt was admitted with, frozen at
     /// bind time. `None` keeps the load byte-identical to the unadapted path.
     turbo: Option<H3FactoryTurboAdapterAuthority>,
+    /// Canonical models root the manifest-selected adapter resolves under at
+    /// transformer-load time. Carried from the storage authority so the load
+    /// phase never re-derives storage from config.
+    models_root: std::path::PathBuf,
 }
 
 impl H3PrivateBoundComfyStream {
@@ -535,6 +539,7 @@ pub(crate) fn bind_private_comfy_stream(
     attention: H3AttentionRuntimeAuthority,
     expected: H3PrivateComfyBindingExpectation,
     turbo: Option<H3FactoryTurboAdapterAuthority>,
+    models_root: std::path::PathBuf,
 ) -> Result<H3PrivateBoundComfyStream> {
     let actual_device = H3AttentionDevice::from_candle(device);
     validate_private_attention_facts(
@@ -573,6 +578,7 @@ pub(crate) fn bind_private_comfy_stream(
         attention,
         authority,
         turbo,
+        models_root,
     })
 }
 
@@ -597,6 +603,7 @@ pub(crate) fn load_and_pair_private_comfy_stream(
         attention,
         authority,
         turbo,
+        models_root,
     } = bound;
     // The adapter's deltas become device-resident here, inside the phase whose
     // budget charges `turbo_adapter_device_bytes`. Loading it at admission
@@ -606,6 +613,7 @@ pub(crate) fn load_and_pair_private_comfy_stream(
         .map(|authority| {
             super::turbo::load_reviewed_turbo_runtime(
                 authority,
+                &models_root,
                 &device,
                 opened
                     .candidate()

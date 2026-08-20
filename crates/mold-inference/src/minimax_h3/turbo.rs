@@ -6,10 +6,14 @@
 //! and video shift — plus the adapter's own authenticated identity and its
 //! resident cost.
 //!
-//! Selection is currently by `MOLD_H3_TURBO_ADAPTER` (path) and
-//! `MOLD_H3_TURBO_TIER` (tier id). Both are registered engine-shaping
-//! variables. Manifests replace this knob in the follow-up; the tier table and
-//! the authority it produces do not change when they do.
+//! Selection is by model identity: the reviewed Turbo manifest tags
+//! (`mold_core::minimax_h3::REVIEWED_TURBO_MANIFEST_TIERS`) name a tier and
+//! pin its adapter file inside the model's own manifest. The historical
+//! `MOLD_H3_TURBO_ADAPTER` (path) + `MOLD_H3_TURBO_TIER` (tier id) pair
+//! remains a capture-scope UAT override honored only under the
+//! `h3-private-uat` feature; ordinary builds refuse a set pair outright so
+//! there is never a second, contradictory selection authority. Both variables
+//! stay registered engine-shaping variables.
 
 use anyhow::{anyhow, bail, Context, Result};
 use mold_candle::minimax_h3::{
@@ -113,6 +117,82 @@ pub(crate) const fn short_tier_alias(tier: H3TurboLoraTier) -> &'static str {
     }
 }
 
+/// Resolve the manifest-selected Turbo tier and adapter path for a model
+/// identity, if the identity is a reviewed Turbo tag.
+///
+/// The adapter path is derived from the tag's own manifest through
+/// `storage_path`, so admission, `mold pull`, and repair all agree on the one
+/// shared on-disk copy.
+pub(crate) fn manifest_turbo_selection(
+    model: &str,
+    models_root: &std::path::Path,
+) -> Result<Option<(std::path::PathBuf, H3TurboLoraTier)>> {
+    let Some(manifest_tier) = mold_core::minimax_h3::turbo_tier_for_model(model) else {
+        return Ok(None);
+    };
+    let tier = parse_turbo_tier(manifest_tier.tier_stable_id)?;
+    Ok(Some((
+        manifest_adapter_path(models_root, manifest_tier)?,
+        tier,
+    )))
+}
+
+/// The manifest-pinned on-disk location of one reviewed tier's adapter.
+fn manifest_adapter_path(
+    models_root: &std::path::Path,
+    manifest_tier: &mold_core::minimax_h3::TurboManifestTier,
+) -> Result<std::path::PathBuf> {
+    let manifest = mold_core::manifest::find_manifest(manifest_tier.model).ok_or_else(|| {
+        anyhow!(
+            "MiniMax H3 Turbo model {} has no registered manifest",
+            manifest_tier.model
+        )
+    })?;
+    let adapter = manifest
+        .files
+        .iter()
+        .find(|file| file.component == mold_core::manifest::ModelComponent::DistilledLora)
+        .ok_or_else(|| {
+            anyhow!(
+                "MiniMax H3 Turbo manifest {} pins no adapter file",
+                manifest_tier.model
+            )
+        })?;
+    Ok(models_root.join(mold_core::manifest::storage_path(manifest, adapter)))
+}
+
+/// The one Turbo selection rule shared by admission and the transformer load.
+///
+/// - A reviewed Turbo model tag selects its manifest-pinned adapter.
+/// - The `MOLD_H3_TURBO_ADAPTER`/`MOLD_H3_TURBO_TIER` pair is a capture-scope
+///   UAT override: under the `h3-private-uat` feature it wins over (or, for a
+///   base model, supplies) the selection. In every other build a set pair is
+///   a hard error — never silently ignored — because two selection
+///   authorities that can disagree must not both stay live.
+pub(crate) fn resolve_turbo_selection(
+    model: &str,
+    models_root: &std::path::Path,
+) -> Result<Option<(std::path::PathBuf, H3TurboLoraTier)>> {
+    let manifest_selection = manifest_turbo_selection(model, models_root)?;
+    let env_selection = requested_turbo_selection()?;
+    match (manifest_selection, env_selection) {
+        (selection, None) => Ok(selection),
+        (_, Some(env)) if cfg!(feature = "h3-private-uat") => Ok(Some(env)),
+        (Some(_), Some(_)) => bail!(
+            "{TURBO_ADAPTER_PATH_VARIABLE}/{TURBO_ADAPTER_TIER_VARIABLE} contradict the \
+             manifest-selected Turbo model {model}; unset the environment pair — it is a \
+             capture-scope UAT override honored only under the h3-private-uat feature"
+        ),
+        (None, Some(_)) => bail!(
+            "{TURBO_ADAPTER_PATH_VARIABLE}/{TURBO_ADAPTER_TIER_VARIABLE} are a capture-scope \
+             UAT override honored only under the h3-private-uat feature; select a reviewed \
+             Turbo model tag ({} or {}) instead",
+            mold_core::minimax_h3::FL2VA_COMFY_TURBO_8STEP,
+            mold_core::minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P
+        ),
+    }
+}
+
 /// The selection the environment currently requests, if any.
 ///
 /// Both variables must be present together: a path with no tier cannot be
@@ -164,9 +244,11 @@ pub(crate) fn turbo_adapter_authority(
 /// the budget charges them. The resident and staging figures are derived from
 /// the validated structure rather than assumed, so the budget term and the
 /// eventual allocation agree.
-pub(crate) fn resolve_requested_turbo_authority() -> Result<Option<H3FactoryTurboAdapterAuthority>>
-{
-    let Some((path, tier)) = requested_turbo_selection()? else {
+pub(crate) fn resolve_turbo_authority_for_request(
+    model: &str,
+    models_root: &std::path::Path,
+) -> Result<Option<H3FactoryTurboAdapterAuthority>> {
+    let Some((path, tier)) = resolve_turbo_selection(model, models_root)? else {
         return Ok(None);
     };
     let contract = authenticate_h3_turbo_lora_adapter(&path, tier, &H3ComfyNeverCancel)
@@ -217,19 +299,44 @@ pub(crate) fn resolve_requested_turbo_authority() -> Result<Option<H3FactoryTurb
 /// the deltas must come from the exact descriptor whose digest was verified.
 pub(crate) fn load_reviewed_turbo_runtime(
     authority: &H3FactoryTurboAdapterAuthority,
+    models_root: &std::path::Path,
     device: &candle_core::Device,
     dtype: candle_core::DType,
 ) -> Result<H3TurboLoraRuntime> {
-    let Some((path, tier)) = requested_turbo_selection()? else {
-        bail!("MiniMax H3 Turbo authority is present but no adapter selection is configured")
+    let tier = parse_turbo_tier(authority.tier_stable_id())?;
+    // Re-resolve the selection with the same rule admission used, keyed by the
+    // frozen tier. A UAT env override must still name the admitted tier; an
+    // env pair set in an ordinary build stays a hard error rather than a
+    // silently divergent authority; otherwise the tier's own manifest tag
+    // names the shared on-disk adapter.
+    let path = match requested_turbo_selection()? {
+        Some((path, env_tier)) if cfg!(feature = "h3-private-uat") => {
+            if env_tier.stable_id() != authority.tier_stable_id() {
+                bail!(
+                    "MiniMax H3 Turbo selection changed from {} to {} after admission",
+                    authority.tier_stable_id(),
+                    env_tier.stable_id()
+                )
+            }
+            path
+        }
+        Some(_) => bail!(
+            "{TURBO_ADAPTER_PATH_VARIABLE}/{TURBO_ADAPTER_TIER_VARIABLE} are a capture-scope \
+             UAT override honored only under the h3-private-uat feature"
+        ),
+        None => {
+            let manifest_tier = mold_core::minimax_h3::REVIEWED_TURBO_MANIFEST_TIERS
+                .iter()
+                .find(|manifest_tier| manifest_tier.tier_stable_id == tier.stable_id())
+                .ok_or_else(|| {
+                    anyhow!(
+                        "MiniMax H3 Turbo tier {} has no manifest tag and no UAT selection",
+                        tier.stable_id()
+                    )
+                })?;
+            manifest_adapter_path(models_root, manifest_tier)?
+        }
     };
-    if tier.stable_id() != authority.tier_stable_id() {
-        bail!(
-            "MiniMax H3 Turbo selection changed from {} to {} after admission",
-            authority.tier_stable_id(),
-            tier.stable_id()
-        )
-    }
     // The frozen authority's distillation triple must still be the reviewed
     // one for this tier. The constructor derives it, so this catches a value
     // mutated between admission and load rather than a bad build.
@@ -375,6 +482,116 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(error.contains("not a reviewed tier"), "{error}");
+    }
+
+    /// The mold-core manifest tier table and the mold-candle runtime tier
+    /// table describe the same reviewed artifacts. This is the pin that keeps
+    /// acquisition (manifest name, file identity, default steps) and runtime
+    /// (tier authentication, distillation triple) from drifting apart.
+    #[test]
+    fn manifest_tiers_pin_the_exact_reviewed_runtime_tiers() {
+        for manifest_tier in mold_core::minimax_h3::REVIEWED_TURBO_MANIFEST_TIERS {
+            let tier = parse_turbo_tier(manifest_tier.tier_stable_id).unwrap();
+            assert_eq!(tier.stable_id(), manifest_tier.tier_stable_id);
+            assert_eq!(tier.repository_path(), manifest_tier.adapter_hf_filename);
+            assert_eq!(tier.file_bytes(), manifest_tier.adapter_size_bytes);
+            assert_eq!(tier.content_sha256(), manifest_tier.adapter_sha256);
+            let contract = turbo_tier_contract(tier).unwrap();
+            assert_eq!(contract.grid_points, manifest_tier.steps);
+        }
+        assert_eq!(
+            mold_candle::minimax_h3::H3_TURBO_LORA_SOURCE_REVISION,
+            mold_core::minimax_h3::COMFY_TURBO_LORA_REVISION
+        );
+        assert_eq!(
+            mold_candle::minimax_h3::H3_TURBO_LORA_REPOSITORY,
+            mold_core::minimax_h3::COMFY_REPO
+        );
+    }
+
+    #[test]
+    fn manifest_selection_resolves_the_shared_family_adapter_path() {
+        let root = std::path::Path::new("/models");
+        for manifest_tier in mold_core::minimax_h3::REVIEWED_TURBO_MANIFEST_TIERS {
+            let (path, tier) = manifest_turbo_selection(manifest_tier.model, root)
+                .unwrap()
+                .expect("turbo tag selects a tier");
+            assert_eq!(tier.stable_id(), manifest_tier.tier_stable_id);
+            assert_eq!(
+                path,
+                root.join("shared")
+                    .join("minimax-h3")
+                    .join(manifest_tier.adapter_hf_filename)
+            );
+        }
+        assert!(
+            manifest_turbo_selection(mold_core::minimax_h3::FL2VA_COMFY, root)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    /// The env pair and a manifest-selected Turbo tag are two selection
+    /// authorities; outside the capture-scope `h3-private-uat` feature a set
+    /// pair is refused instead of silently losing or winning.
+    /// Serializes the tests that read or write the process-global env pair.
+    static TURBO_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn env_pair_is_uat_only_and_contradicts_a_manifest_selection() {
+        let _lock = TURBO_ENV_LOCK.lock().unwrap();
+        struct EnvPairGuard;
+        impl Drop for EnvPairGuard {
+            fn drop(&mut self) {
+                std::env::remove_var(TURBO_ADAPTER_PATH_VARIABLE);
+                std::env::remove_var(TURBO_ADAPTER_TIER_VARIABLE);
+            }
+        }
+        let _guard = EnvPairGuard;
+        std::env::set_var(TURBO_ADAPTER_PATH_VARIABLE, "/uat/adapter.safetensors");
+        std::env::set_var(TURBO_ADAPTER_TIER_VARIABLE, "fl2v-8step");
+
+        let root = std::path::Path::new("/models");
+        let with_manifest =
+            resolve_turbo_selection(mold_core::minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P, root);
+        let env_only = resolve_turbo_selection(mold_core::minimax_h3::FL2VA_COMFY, root);
+        if cfg!(feature = "h3-private-uat") {
+            // Capture-scope override: the env pair wins in both shapes.
+            for result in [with_manifest, env_only] {
+                let (path, tier) = result.unwrap().expect("UAT env pair selects");
+                assert_eq!(path, std::path::PathBuf::from("/uat/adapter.safetensors"));
+                assert_eq!(tier, H3TurboLoraTier::Fl2v8StepV10);
+            }
+        } else {
+            let contradiction = with_manifest.unwrap_err().to_string();
+            assert!(contradiction.contains("contradict"), "{contradiction}");
+            let refused = env_only.unwrap_err().to_string();
+            assert!(refused.contains("h3-private-uat"), "{refused}");
+            assert!(
+                refused.contains(mold_core::minimax_h3::FL2VA_COMFY_TURBO_8STEP),
+                "{refused}"
+            );
+        }
+    }
+
+    /// With the env pair unset, the manifest tag is the whole selection and a
+    /// base model selects nothing.
+    #[test]
+    fn manifest_tags_select_without_any_environment() {
+        let _lock = TURBO_ENV_LOCK.lock().unwrap();
+        std::env::remove_var(TURBO_ADAPTER_PATH_VARIABLE);
+        std::env::remove_var(TURBO_ADAPTER_TIER_VARIABLE);
+        let root = std::path::Path::new("/models");
+        assert!(
+            resolve_turbo_selection(mold_core::minimax_h3::FL2VA_COMFY, root)
+                .unwrap()
+                .is_none()
+        );
+        let (_, tier) =
+            resolve_turbo_selection(mold_core::minimax_h3::FL2VA_COMFY_TURBO_8STEP, root)
+                .unwrap()
+                .expect("turbo tag selects");
+        assert_eq!(tier, H3TurboLoraTier::Fl2v8StepV10);
     }
 
     #[test]

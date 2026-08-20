@@ -209,10 +209,7 @@ fn classify_h3_private_ingress_with_runtime(
             .is_some_and(|references| !references.is_empty()),
     };
     let exact_partition = request.model == contract.canonical_model
-        && matches!(
-            contract.canonical_model,
-            mold_core::minimax_h3::FL2VA_COMFY | mold_core::minimax_h3::REF2VA_COMFY
-        )
+        && mold_core::minimax_h3::is_reviewed_compact_model(contract.canonical_model)
         && contract.layout == mold_core::minimax_h3::Layout::ComfyPrunedInt8ConvrotNvfp4Awq
         && request.batch_size == 1
         && output_format == mold_core::OutputFormat::Mp4
@@ -480,6 +477,53 @@ fn build_fl2va_capability(models_root: &std::path::Path) -> Option<mold_core::Mi
         .map(|component| component.id.to_string())
         .collect();
     let generation_profile_sha256 = reviewed_h3_private_generation_profile()?.0.profile_hash;
+    let base_installed = components.iter().all(|component| component.installed);
+    // Reviewed Turbo variants ride the same partition additively: older
+    // clients parse exactly one partition per task, so a Turbo tier must not
+    // become a second `fl2va` entry. A variant advertises its adapter's own
+    // install state and carries its reviewed request envelope only once the
+    // base stack and the adapter are both landed.
+    let turbo = mold_core::minimax_h3::REVIEWED_TURBO_MANIFEST_TIERS
+        .iter()
+        .map(|tier| {
+            let manifest = find_manifest(tier.model)?;
+            let adapter = manifest
+                .files
+                .iter()
+                .find(|file| file.component == ModelComponent::DistilledLora)?;
+            let path = models_root.join(storage_path(manifest, adapter));
+            let installed = path.symlink_metadata().is_ok_and(|metadata| {
+                metadata.file_type().is_file()
+                    && !metadata.file_type().is_symlink()
+                    && metadata.len() == adapter.size_bytes
+            });
+            let request = (installed && base_installed)
+                .then(|| {
+                    let (profile, _, _) =
+                        reviewed_h3_private_generation_profile_for(tier.model, tier.steps)?;
+                    Some(mold_core::MiniMaxH3RequestCapability {
+                        width: mold_core::minimax_h3::DEFAULT_WIDTH,
+                        height: mold_core::minimax_h3::DEFAULT_HEIGHT,
+                        frames: mold_core::minimax_h3::MIN_FRAMES,
+                        fps: mold_core::minimax_h3::FIXED_FPS,
+                        steps: tier.steps,
+                        batch_size: 1,
+                        output_format: "mp4".into(),
+                        required_endpoint: "first".into(),
+                        generation_profile_sha256: profile.profile_hash,
+                    })
+                })
+                .flatten();
+            Some(mold_core::MiniMaxH3TurboVariantCapability {
+                model: tier.model.into(),
+                display_name: format!("MiniMax H3 FL2VA {}", tier.display_label),
+                tier: tier.display_label.into(),
+                adapter_size_bytes: tier.adapter_size_bytes,
+                installed,
+                request,
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
     Some(mold_core::MiniMaxH3Capability {
         runtime_available: true,
         qualification: mold_core::MiniMaxH3QualificationCapability {
@@ -523,6 +567,7 @@ fn build_fl2va_capability(models_root: &std::path::Path) -> Option<mold_core::Mi
                 required_endpoint: "first".into(),
                 generation_profile_sha256,
             }),
+            turbo,
         }],
         components: components
             .into_iter()
@@ -546,15 +591,28 @@ fn build_fl2va_capability(models_root: &std::path::Path) -> Option<mold_core::Mi
 
 #[cfg(any(test, feature = "h3", feature = "h3-private-uat"))]
 fn reviewed_h3_private_generation_profile() -> Option<(mold_core::GenerationProfileSet, u32, u64)> {
+    reviewed_h3_private_generation_profile_for(
+        mold_core::minimax_h3::FL2VA_COMFY,
+        mold_core::minimax_h3::COMFY_DEFAULT_STEPS,
+    )
+}
+
+/// The reviewed single-quality-point profile for one compact FL2VA identity.
+/// A Turbo tag renders the same canvas/duration envelope; the only axis its
+/// reviewed tier moves is the fixed step count.
+#[cfg(any(test, feature = "h3", feature = "h3-private-uat"))]
+fn reviewed_h3_private_generation_profile_for(
+    model: &str,
+    steps: u32,
+) -> Option<(mold_core::GenerationProfileSet, u32, u64)> {
     use mold_core::generation_profile::{ControlMode, FpsControl, ResolutionDomain};
 
     let width = mold_core::minimax_h3::DEFAULT_WIDTH;
     let height = mold_core::minimax_h3::DEFAULT_HEIGHT;
     let frames = mold_core::minimax_h3::MIN_FRAMES;
     let fps = mold_core::minimax_h3::FIXED_FPS;
-    let steps = mold_core::minimax_h3::COMFY_DEFAULT_STEPS;
     let mut profile = mold_core::resolve_generation_profile(mold_core::GenerationProfileInput {
-        model: mold_core::minimax_h3::FL2VA_COMFY,
+        model,
         family: mold_core::minimax_h3::FAMILY,
         sub_family: None,
         default_width: width,
@@ -684,9 +742,90 @@ pub(crate) fn authenticated_h3_private_model_row(
         return None;
     }
 
+    h3_model_row(
+        &partition.model,
+        &partition.display_name,
+        "Compact FL2VA CUDA runtime with synchronized audio; supported first-frame quality profile.",
+        request,
+        disk_usage_bytes,
+        (generation_profile, alignment, pixels),
+    )
+}
+
+/// Every executable model row the authenticated capability advertises: the
+/// base FL2VA partition plus each reviewed Turbo variant whose adapter is
+/// landed and whose advertised envelope matches its reviewed tier exactly.
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+pub(crate) fn authenticated_h3_private_model_rows(
+    capability: &mold_core::MiniMaxH3Capability,
+) -> Vec<mold_core::ModelInfoExtended> {
+    let Some(base) = authenticated_h3_private_model_row(capability) else {
+        return Vec::new();
+    };
+    let base_disk = base.disk_usage_bytes.unwrap_or(0);
+    let mut rows = vec![base];
+    let Some(partition) = capability.partitions.first() else {
+        return rows;
+    };
+    for variant in &partition.turbo {
+        let Some(tier) = mold_core::minimax_h3::turbo_tier_for_model(&variant.model) else {
+            continue;
+        };
+        let Some(request) = variant.request.as_ref() else {
+            continue;
+        };
+        if !variant.installed
+            || request.width != mold_core::minimax_h3::DEFAULT_WIDTH
+            || request.height != mold_core::minimax_h3::DEFAULT_HEIGHT
+            || request.frames != mold_core::minimax_h3::MIN_FRAMES
+            || request.fps != mold_core::minimax_h3::FIXED_FPS
+            || request.steps != tier.steps
+            || request.batch_size != 1
+            || request.output_format != "mp4"
+            || request.required_endpoint != "first"
+        {
+            continue;
+        }
+        let Some((profile, alignment, pixels)) =
+            reviewed_h3_private_generation_profile_for(tier.model, tier.steps)
+        else {
+            continue;
+        };
+        if request.generation_profile_sha256 != profile.profile_hash {
+            continue;
+        }
+        let Some(disk_usage_bytes) = base_disk.checked_add(variant.adapter_size_bytes) else {
+            continue;
+        };
+        if let Some(row) = h3_model_row(
+            &variant.model,
+            &variant.display_name,
+            "Compact FL2VA CUDA runtime with synchronized audio; reviewed Turbo distillation quality profile.",
+            request,
+            disk_usage_bytes,
+            (profile, alignment, pixels),
+        ) {
+            rows.push(row);
+        }
+    }
+    rows
+}
+
+/// One executable compact-FL2VA `/api/models` row. Shared by the base
+/// partition and its reviewed Turbo variants so the two can never advertise
+/// diverging envelope shapes.
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+fn h3_model_row(
+    model: &str,
+    display_name: &str,
+    description: &str,
+    request: &mold_core::MiniMaxH3RequestCapability,
+    disk_usage_bytes: u64,
+    (generation_profile, alignment, pixels): (mold_core::GenerationProfileSet, u32, u64),
+) -> Option<mold_core::ModelInfoExtended> {
     Some(mold_core::ModelInfoExtended {
         info: mold_core::ModelInfo {
-            name: partition.model.clone(),
+            name: model.to_string(),
             family: mold_core::minimax_h3::FAMILY.into(),
             size_gb: disk_usage_bytes as f32 / 1_000_000_000.0,
             is_loaded: false,
@@ -700,7 +839,7 @@ pub(crate) fn authenticated_h3_private_model_row(
             default_guidance: 0.0,
             default_width: request.width,
             default_height: request.height,
-            description: "Compact FL2VA CUDA runtime with synchronized audio; supported first-frame quality profile.".into(),
+            description: description.into(),
             default_frames: Some(request.frames),
             default_fps: Some(request.fps),
             min_frames: Some(request.frames),
@@ -721,7 +860,7 @@ pub(crate) fn authenticated_h3_private_model_row(
         downloaded: true,
         disk_usage_bytes: Some(disk_usage_bytes),
         remaining_download_bytes: Some(0),
-        display_name: Some(partition.display_name.clone()),
+        display_name: Some(display_name.to_string()),
         kind: Some("checkpoint".into()),
         modality: Some("video".into()),
         nsfw: None,
@@ -1782,6 +1921,106 @@ mod tests {
         assert_eq!(
             temporal.frames.mode,
             mold_core::generation_profile::ControlMode::Fixed
+        );
+    }
+
+    fn place_turbo_adapter(
+        models: &std::path::Path,
+        tier: &mold_core::minimax_h3::TurboManifestTier,
+    ) {
+        let manifest = mold_core::manifest::find_manifest(tier.model).unwrap();
+        let adapter = manifest
+            .files
+            .iter()
+            .find(|file| file.component == mold_core::manifest::ModelComponent::DistilledLora)
+            .unwrap();
+        private_file(
+            &models.join(mold_core::manifest::storage_path(manifest, adapter)),
+            adapter.size_bytes,
+        );
+    }
+
+    #[test]
+    fn turbo_variants_ride_the_partition_additively_and_gate_on_the_adapter() {
+        let (_root, models) = capability_fixture();
+
+        // Base stack only: both reviewed variants advertise as not installed
+        // and carry no request envelope, and the model rows stay base-only.
+        let capability = super::build_fl2va_capability(&models).unwrap();
+        assert_eq!(capability.partitions.len(), 1, "one partition per task");
+        let turbo = &capability.partitions[0].turbo;
+        assert_eq!(
+            turbo.len(),
+            mold_core::minimax_h3::REVIEWED_TURBO_MANIFEST_TIERS.len()
+        );
+        for variant in turbo {
+            assert!(!variant.installed);
+            assert!(variant.request.is_none());
+        }
+        let rows = super::authenticated_h3_private_model_rows(&capability);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].info.name, mold_core::minimax_h3::FL2VA_COMFY);
+
+        // Landing the 8-step adapter makes exactly that variant executable:
+        // its envelope moves only the step axis, its profile hash is its own,
+        // and its model row advertises the tier's reviewed step default.
+        let eight_step = &mold_core::minimax_h3::REVIEWED_TURBO_MANIFEST_TIERS[0];
+        assert_eq!(
+            eight_step.model,
+            mold_core::minimax_h3::FL2VA_COMFY_TURBO_8STEP
+        );
+        place_turbo_adapter(&models, eight_step);
+        let capability = super::build_fl2va_capability(&models).unwrap();
+        let turbo = &capability.partitions[0].turbo;
+        let variant = turbo
+            .iter()
+            .find(|variant| variant.model == eight_step.model)
+            .unwrap();
+        assert!(variant.installed);
+        let request = variant.request.as_ref().unwrap();
+        assert_eq!(request.steps, eight_step.steps);
+        assert_eq!(request.width, mold_core::minimax_h3::DEFAULT_WIDTH);
+        assert_eq!(request.height, mold_core::minimax_h3::DEFAULT_HEIGHT);
+        assert_eq!(request.frames, mold_core::minimax_h3::MIN_FRAMES);
+        let base_request = capability.partitions[0].request.as_ref().unwrap();
+        assert_ne!(
+            request.generation_profile_sha256,
+            base_request.generation_profile_sha256
+        );
+        assert!(turbo.iter().any(|variant| variant.model
+            == mold_core::minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P
+            && !variant.installed));
+
+        let rows = super::authenticated_h3_private_model_rows(&capability);
+        assert_eq!(rows.len(), 2);
+        let turbo_row = rows
+            .iter()
+            .find(|row| row.info.name == eight_step.model)
+            .unwrap();
+        assert_eq!(turbo_row.defaults.default_steps, eight_step.steps);
+        assert_eq!(turbo_row.defaults.default_width, 1344);
+        assert_eq!(turbo_row.defaults.default_height, 768);
+        assert!(turbo_row.downloaded);
+        assert_eq!(
+            turbo_row.disk_usage_bytes.unwrap(),
+            rows[0].disk_usage_bytes.unwrap() + eight_step.adapter_size_bytes
+        );
+        let profile = turbo_row.generation_profile.as_ref().unwrap();
+        assert_eq!(profile.profile_hash, request.generation_profile_sha256);
+        let recipe = profile.default_recipe().unwrap();
+        assert_eq!(recipe.steps.min, eight_step.steps);
+        assert_eq!(recipe.steps.max, eight_step.steps);
+
+        // A widened variant envelope is refused rather than advertised.
+        let mut widened = capability.clone();
+        widened.partitions[0].turbo[0]
+            .request
+            .as_mut()
+            .unwrap()
+            .steps = mold_core::minimax_h3::COMFY_DEFAULT_STEPS;
+        assert_eq!(
+            super::authenticated_h3_private_model_rows(&widened).len(),
+            1
         );
     }
 

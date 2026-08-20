@@ -832,6 +832,30 @@ impl H3FactorySamplerKind {
     }
 }
 
+/// Whether one media-facts model identity is exactly the identity a frozen H3
+/// factory authority renders.
+///
+/// The frozen authority's `canonical_model` is the engine PARTITION (the base
+/// compact task), while the request — and therefore media facts and saved
+/// provenance — keeps the full reviewed identity, Turbo tag included. The
+/// pairing is strict in both directions: a Turbo tag requires the authority to
+/// have frozen exactly that tier's adapter, and a base identity requires no
+/// adapter — except under the capture-scope `h3-private-uat` feature, whose
+/// env override legitimately overlays an adapter on the base model.
+pub fn media_model_matches_h3_authority(model: &str, authority: &FrozenH3FactoryAuthority) -> bool {
+    if mold_core::minimax_h3::base_compact_model(model) != Some(authority.canonical_model()) {
+        return false;
+    }
+    let adapter_tier = authority
+        .quantization()
+        .turbo_adapter()
+        .map(H3FactoryTurboAdapterAuthority::tier_stable_id);
+    match mold_core::minimax_h3::turbo_tier_for_model(model) {
+        Some(tier) => adapter_tier == Some(tier.tier_stable_id),
+        None => adapter_tier.is_none() || cfg!(feature = "h3-private-uat"),
+    }
+}
+
 /// Identity of one authenticated Turbo LoRA adapter overlaid on the compact
 /// INT8 checkpoint, together with the sampler contract its distillation
 /// implies.
@@ -6654,6 +6678,50 @@ mod tests {
         assert!(transformer_load_phase_device_bytes(device_terms(u64::MAX, u64::MAX)).is_err());
         assert!(denoise_phase_device_bytes(denoise_terms(u64::MAX)).is_err());
         assert!(transformer_load_phase_host_bytes(host_terms(u64::MAX)).is_err());
+    }
+
+    /// Media facts keep the request's full reviewed identity, so the pairing
+    /// between that identity and the frozen authority's adapter tier is the
+    /// gate that stops a Turbo tag rendering without its adapter (or with the
+    /// wrong tier) and a base render claiming a Turbo identity.
+    #[test]
+    fn media_model_pairing_requires_the_exact_frozen_turbo_tier() {
+        let baseline = FrozenH3FactoryAuthority::new_contract_only(exact_input()).unwrap();
+        assert!(media_model_matches_h3_authority(
+            contract::FL2VA_COMFY,
+            &baseline
+        ));
+        for mismatched in [
+            contract::FL2VA_COMFY_TURBO_8STEP,
+            contract::FL2VA_COMFY_TURBO_4STEP_768P,
+            contract::REF2VA_COMFY,
+            "minimax-h3-fl2va:comfy-pruned-int8-turbo-2step",
+        ] {
+            assert!(
+                !media_model_matches_h3_authority(mismatched, &baseline),
+                "{mismatched}"
+            );
+        }
+
+        let turbo = turbo_authority_for(TURBO_4STEP_TIER);
+        let mut input = exact_input();
+        apply_turbo_budget(&mut input, &turbo);
+        with_turbo_adapter(&mut input, Some(turbo));
+        let frozen = FrozenH3FactoryAuthority::new_contract_only(input).unwrap();
+        assert!(media_model_matches_h3_authority(
+            contract::FL2VA_COMFY_TURBO_4STEP_768P,
+            &frozen
+        ));
+        assert!(!media_model_matches_h3_authority(
+            contract::FL2VA_COMFY_TURBO_8STEP,
+            &frozen
+        ));
+        // A base identity over a frozen adapter is the capture-scope UAT
+        // env-override shape and stays valid only under that feature.
+        assert_eq!(
+            media_model_matches_h3_authority(contract::FL2VA_COMFY, &frozen),
+            cfg!(feature = "h3-private-uat")
+        );
     }
 
     /// A budget whose phase fields were produced by the production formulas is
