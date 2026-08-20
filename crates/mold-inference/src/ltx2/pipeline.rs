@@ -59,7 +59,10 @@ use crate::progress::{InferenceCancellationToken, ProgressCallback};
 /// `1 - strength = 0.6`, so the denoiser blends ~60% generated / ~40%
 /// reference on every step — a gentle pull toward the source image rather
 /// than a hard pin (hard-pinning a single pixel frame past the motion tail
-/// would make continuations feel like cuts back to the starting shot).
+/// would make continuations feel like cuts back to the starting shot). This
+/// value was retained after correcting the appended-token initialization:
+/// seeded two-clip LTX-2 19B distilled UAT showed no visible seam regression,
+/// and the seam-frame luma delta improved slightly versus the old path.
 const CHAIN_SOFT_ANCHOR_STRENGTH: f32 = 0.4;
 
 /// Waveform thumbnail raster for audio-only gallery tiles. 16:9 so an audio
@@ -1384,6 +1387,8 @@ impl Ltx2Engine {
             // `CHAIN_SOFT_ANCHOR_STRENGTH = 0.4` gives the denoise mask a
             // value of `1 - 0.4 = 0.6` at the anchor token, so the
             // denoiser blends ~60% generated / ~40% reference every step.
+            // Seeded two-clip UAT revalidated this value after the soft
+            // appended-token noiser was aligned with upstream semantics.
             let anchor_frame = motion_tail_pixel_frames;
             for image in plan.conditioning.images.iter_mut() {
                 if image.frame == 0 {

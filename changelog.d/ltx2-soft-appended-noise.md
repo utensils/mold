@@ -1,0 +1,1 @@
+- **LTX-2 chain anchors now start at the noise level their soft timestep declares.** Smooth multi-clip continuations preserve the intended evolving identity anchor instead of repeatedly pinning its appended token clean ([#1080](https://github.com/utensils/mold/issues/1080)).

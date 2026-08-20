@@ -878,7 +878,7 @@ async fn civitai_search_paged(
             // the walk resumes from the stored cursor on the next request
             // and `total()` keeps advertising more rows either way.
             if chain.next_page == opts.page && !chain.leftover.is_empty() {
-                let entries: Vec<CatalogEntry> = chain.leftover.drain(..).collect();
+                let entries = std::mem::take(&mut chain.leftover);
                 chain.emitted += entries.len();
                 let page_result = LiveSearchResult {
                     entries,
