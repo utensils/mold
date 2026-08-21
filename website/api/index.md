@@ -1413,20 +1413,44 @@ server that answered — a multi-host client must ask each one.
 ### Accepting a license
 
 `POST /api/downloads` and `POST /api/models/pull` take an additive
-`accept_licenses` array of ids. The server records them in **its own**
-`$MOLD_HOME/license-acceptances.json` (owner-only, `0600`) before the pull
-starts:
+`accept_licenses` array. Each entry carries the **exact terms the user was
+shown**, not just an id:
 
 ```bash
 curl -X POST http://localhost:7680/api/downloads \
   -H "Content-Type: application/json" \
-  -d '{"model":"pulid-flux","accept_licenses":["insightface-antelopev2"]}'
+  -d '{
+    "model": "pulid-flux",
+    "accept_licenses": [{
+      "id": "insightface-antelopev2",
+      "url": "https://raw.githubusercontent.com/deepinsight/insightface/7fadd420c2351d0ffa8cac403421c1a3ed733365/README.md",
+      "sha256": "84606d9ab37a38606b12c10d96172c6343768d2ef72c802a16482e476f8baf22"
+    }]
+  }'
 ```
 
-Omitting the field means "accept nothing", which is what every existing client
-sends. An id this server does not know is a `400` with code `UNKNOWN_LICENSE`,
-and nothing is written — resolution happens for the whole list before the first
-write, so one bad id cannot leave the request half-applied.
+An id alone would not be safe. The client and the server may be on different
+Mold releases pinning different revisions of the same license, and a bare id
+would let the server resolve terms of its own choosing and record consent for
+text the user never read. So the server compares the submitted `(url, sha256)`
+against its own pin and only records a match. Read `GET /api/licenses` first,
+display what it returned, and send back exactly that.
+
+The server records into **its own** `$MOLD_HOME/license-acceptances.json`
+(owner-only, `0600`) before the pull starts. Omitting the field means "accept
+nothing", which is what every existing client sends.
+
+Nothing is written unless every entry passes, so a rejected request leaves the
+root untouched:
+
+| Condition                                | Status | Code                     |
+| ---------------------------------------- | ------ | ------------------------ |
+| Id this server does not know             | `400`  | `UNKNOWN_LICENSE`        |
+| Known id, terms this server does not pin | `409`  | `LICENSE_TERMS_MISMATCH` |
+
+A `409` carries the server's own `url`, `sha256`, and `canonical` in the
+`license` object, so a client can display the server's terms and retry without
+a second round trip.
 
 ### Refusals
 
@@ -1442,6 +1466,7 @@ and code `LICENSE_NOT_ACCEPTED`, before any bytes move:
     "name": "InsightFace pretrained models (antelopev2)",
     "url": "https://raw.githubusercontent.com/deepinsight/insightface/7fadd420c2351d0ffa8cac403421c1a3ed733365/README.md",
     "canonical": "https://github.com/deepinsight/insightface#license",
+    "sha256": "84606d9ab37a38606b12c10d96172c6343768d2ef72c802a16482e476f8baf22",
     "summary": "InsightFace pretrained models (antelopev2: scrfd_10g_bnkps, glintr100) are licensed for non-commercial research purposes only."
   }
 }

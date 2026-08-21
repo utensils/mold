@@ -175,41 +175,141 @@ fn print_unknown_model_error(model: &str) {
     eprintln!("Usage: mold pull <model>");
 }
 
+/// A license the user was shown, and the exact payload that must be sent as a
+/// result.
+pub struct AcceptedLicense {
+    /// Precisely the identity that was displayed. Sending anything else would
+    /// mean the recorded consent is not the consent that was given.
+    pub acceptance: mold_core::LicenseAcceptance,
+    /// This build's pinned license, when the displayed terms were ours.
+    /// `None` when a server showed terms from a different Mold release — in
+    /// which case we must not record locally, because we would be storing our
+    /// own text under an agreement made to theirs.
+    pub local: Option<&'static mold_core::license_acceptance::ThirdPartyLicense>,
+}
+
+fn print_known_licenses_error(id: &str, known: impl Iterator<Item = (String, String)>) {
+    eprintln!(
+        "{} unknown license id '{}'",
+        theme::prefix_error(),
+        id.bold()
+    );
+    eprintln!();
+    eprintln!("  Known licenses:");
+    for (license_id, name) in known {
+        eprintln!("    {} — {}", license_id.bold(), name);
+    }
+}
+
+fn show(name: &str, summary: &str, url: &str, canonical: &str) {
+    status!("{} {}", theme::icon_info(), name.bold());
+    status!("  {}", summary);
+    status!("  Terms (pinned): {}", url);
+    status!("  Project terms:  {}", canonical);
+    status!("");
+}
+
+/// Read the terms from the SERVER that will record the acceptance.
+///
+/// Returns `Ok(None)` only when there is genuinely no such server to ask —
+/// a connection failure, or an older build without `capabilities.licenses` —
+/// in which case the pull will land locally (or on a server with no license
+/// gate at all) and this build's own constants are the right thing to display.
+/// A server that answered but could not be read (auth, 5xx, malformed body)
+/// is an error naming the host: showing this build's terms in its place
+/// would prompt the user to consent to text the recording machine never saw.
+async fn server_license_terms(
+    ctx: &CliContext,
+) -> Result<Option<Vec<mold_core::ThirdPartyLicenseStatus>>> {
+    let host = ctx.client().host().to_string();
+    let capabilities = match ctx.client().capabilities().await {
+        Ok(capabilities) => capabilities,
+        Err(error) => return terms_fetch_failure(&error, &host, "capabilities"),
+    };
+    if !capabilities.licenses {
+        return Ok(None);
+    }
+    match ctx.client().list_licenses().await {
+        Ok(listing) => Ok(Some(listing)),
+        Err(error) => terms_fetch_failure(&error, &host, "licenses"),
+    }
+}
+
+/// Connection failures mean "no server to consult"; everything else is a
+/// server that answered and must not be silently replaced by local terms.
+fn terms_fetch_failure<T>(error: &anyhow::Error, host: &str, what: &str) -> Result<Option<T>> {
+    match mold_core::classify_server_error(error) {
+        mold_core::ServerAvailability::FallbackLocal => Ok(None),
+        mold_core::ServerAvailability::SurfaceError => Err(anyhow::anyhow!(
+            "{host} did not report its {what}, so its license terms cannot be shown for acceptance: {error}"
+        )),
+    }
+}
+
 /// Resolve a `--accept-license` id and SHOW the user what they are accepting.
 ///
-/// Always called before the pull is dispatched, on both the local and the
-/// server route, so the terms appear in the same invocation that agrees to
-/// them — a flag that silently consents is not consent.
+/// The terms displayed are the ones held by the machine that will RECORD the
+/// acceptance, and the payload sent back is byte-for-byte what was displayed.
+/// Showing our own pinned revision and then letting a server on a different
+/// release resolve the bare id to its own would record consent for text the
+/// user never read.
 ///
-/// Deliberately offline: the terms are pinned to an exact upstream commit
-/// whose digest was verified when the pin landed, so there is nothing a
-/// network round-trip could add, and accepting must work on an air-gapped
-/// host.
+/// Still offline in the local case: the terms are pinned to an exact upstream
+/// commit whose digest was verified when the pin landed, so accepting works on
+/// an air-gapped host.
 pub fn resolve_and_show_license(
     id: &str,
-) -> Result<&'static mold_core::license_acceptance::ThirdPartyLicense> {
+    server_terms: Option<&[mold_core::ThirdPartyLicenseStatus]>,
+) -> Result<AcceptedLicense> {
     use mold_core::license_acceptance;
 
-    let Some(license) = license_acceptance::license_by_id(id) else {
-        eprintln!(
-            "{} unknown license id '{}'",
-            theme::prefix_error(),
-            id.bold()
+    if let Some(terms) = server_terms {
+        let Some(status) = terms.iter().find(|entry| entry.id == id) else {
+            print_known_licenses_error(
+                id,
+                terms
+                    .iter()
+                    .map(|entry| (entry.id.clone(), entry.name.clone())),
+            );
+            return Err(AlreadyReported.into());
+        };
+        show(
+            &status.name,
+            &status.summary,
+            &status.url,
+            &status.canonical,
         );
-        eprintln!();
-        eprintln!("  Known licenses:");
-        for known in license_acceptance::THIRD_PARTY_LICENSES {
-            eprintln!("    {} — {}", known.id.bold(), known.name);
-        }
+        let local = license_acceptance::license_by_id(id)
+            .filter(|ours| ours.url == status.url && ours.sha256 == status.sha256);
+        return Ok(AcceptedLicense {
+            acceptance: mold_core::LicenseAcceptance {
+                id: status.id.clone(),
+                url: status.url.clone(),
+                sha256: status.sha256.clone(),
+            },
+            local,
+        });
+    }
+
+    let Some(license) = license_acceptance::license_by_id(id) else {
+        print_known_licenses_error(
+            id,
+            license_acceptance::THIRD_PARTY_LICENSES
+                .iter()
+                .map(|known| (known.id.to_string(), known.name.to_string())),
+        );
         return Err(AlreadyReported.into());
     };
-
-    status!("{} {}", theme::icon_info(), license.name.bold());
-    status!("  {}", license.summary);
-    status!("  Terms (pinned): {}", license.url);
-    status!("  Project terms:  {}", license.canonical);
-    status!("");
-    Ok(license)
+    show(
+        license.name,
+        license.summary,
+        license.url,
+        license.canonical,
+    );
+    Ok(AcceptedLicense {
+        acceptance: license_acceptance::acceptance_for(license),
+        local: Some(license),
+    })
 }
 
 /// Write the acceptance into THIS machine's Mold data root.
@@ -219,9 +319,20 @@ pub fn resolve_and_show_license(
 /// it in its own root — recording here and pulling there is exactly the bug
 /// that made the documented `--accept-license` command fail against a remote
 /// `MOLD_HOST`.
-pub fn record_license_locally(
-    license: &mold_core::license_acceptance::ThirdPartyLicense,
-) -> Result<()> {
+pub fn record_license_locally(accepted: &AcceptedLicense) -> Result<()> {
+    // The displayed terms came from a server on a different release, and the
+    // pull has since fallen back to this machine. Recording our own text under
+    // an agreement made to theirs would be exactly the substitution this whole
+    // payload shape exists to prevent.
+    let Some(license) = accepted.local else {
+        eprintln!(
+            "{} the terms shown for '{}' came from the server, but the pull fell back to this machine.",
+            theme::prefix_error(),
+            accepted.acceptance.id.bold()
+        );
+        eprintln!("  Re-run the command to review and accept this machine's terms.");
+        return Err(AlreadyReported.into());
+    };
     let Some(mold_home) = Config::mold_dir() else {
         eprintln!(
             "{} could not resolve the Mold data directory to record acceptance",
@@ -261,18 +372,32 @@ pub async fn run(
         }
     };
 
+    let ctx = CliContext::new(None);
+
+    // Ask the machine that will RECORD the acceptance for its terms before
+    // displaying anything — only skipped entirely when nothing is being
+    // accepted, so an ordinary pull pays no extra round trip.
+    let server_terms = if accept_licenses.is_empty() {
+        None
+    } else {
+        server_license_terms(&ctx).await?
+    };
+
     // Resolve and display before anything is dispatched: an unknown id must
     // fail here rather than after a download has been enqueued somewhere.
     let mut licenses = Vec::with_capacity(accept_licenses.len());
     for id in accept_licenses {
-        licenses.push(resolve_and_show_license(id)?);
+        licenses.push(resolve_and_show_license(id, server_terms.as_deref())?);
     }
+    let payload: Vec<mold_core::LicenseAcceptance> = licenses
+        .iter()
+        .map(|accepted| accepted.acceptance.clone())
+        .collect();
 
-    let ctx = CliContext::new(None);
-    // The server path carries the ids on the wire so the SERVER records them
-    // in its own root; the local path records them here. Which machine runs
-    // the pull decides which machine's acceptance counts.
-    match pull_via_server(&ctx, manifest, accept_licenses).await {
+    // The server path carries the accepted terms on the wire so the SERVER
+    // records them in its own root; the local path records them here. Which
+    // machine runs the pull decides which machine's acceptance counts.
+    match pull_via_server(&ctx, manifest, &payload).await {
         Ok(()) => {}
         Err(e) => match classify_server_error(&e) {
             ServerAvailability::FallbackLocal => {
@@ -455,7 +580,7 @@ pub async fn run_recipe(
 async fn pull_via_server(
     ctx: &CliContext,
     manifest: &ModelManifest,
-    accept_licenses: &[String],
+    accept_licenses: &[mold_core::LicenseAcceptance],
 ) -> Result<()> {
     status!(
         "{} Pulling {} on {}",
@@ -484,8 +609,85 @@ async fn pull_via_server(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_server_that_answered_but_could_not_be_read_is_an_error_naming_the_host() {
+        let error = anyhow::anyhow!("401 Unauthorized");
+        let outcome = super::terms_fetch_failure::<()>(&error, "http://box:7680", "licenses");
+        let message = outcome
+            .expect_err("a non-connection failure must surface")
+            .to_string();
+        assert!(message.contains("http://box:7680"), "{message}");
+        assert!(message.contains("licenses"), "{message}");
+        assert!(message.contains("401 Unauthorized"), "{message}");
+    }
+
     use super::*;
     use mold_catalog::entry::{DownloadRecipe, RecipeFile, RecipeFileRole};
+
+    fn server_status(url: &str, sha256: &str) -> mold_core::ThirdPartyLicenseStatus {
+        mold_core::ThirdPartyLicenseStatus {
+            id: "insightface-antelopev2".into(),
+            name: "Server's name for it".into(),
+            url: url.into(),
+            canonical: "https://example.invalid/terms".into(),
+            sha256: sha256.into(),
+            summary: "Server's summary".into(),
+            accepted: false,
+            required_by: vec!["pulid-flux".into()],
+        }
+    }
+
+    /// The consent-integrity rule at the client end: whatever identity was
+    /// displayed is exactly what gets sent. A server on a different release
+    /// pins a different revision, we show THAT, and we send THAT — never our
+    /// own constant under the server's summary.
+    #[test]
+    fn the_payload_is_exactly_the_displayed_identity() {
+        let their_url = "https://raw.githubusercontent.com/deepinsight/insightface/1111111111111111111111111111111111111111/README.md";
+        let their_sha = "1".repeat(64);
+        let terms = vec![server_status(their_url, &their_sha)];
+
+        let accepted = resolve_and_show_license("insightface-antelopev2", Some(&terms)).unwrap();
+        assert_eq!(accepted.acceptance.id, "insightface-antelopev2");
+        assert_eq!(accepted.acceptance.url, their_url);
+        assert_eq!(accepted.acceptance.sha256, their_sha);
+        assert!(
+            accepted.local.is_none(),
+            "terms that are not ours must not be recordable locally"
+        );
+    }
+
+    /// When the server pins what we pin, the payload still comes from the
+    /// server's row, and the local handle is available for a fallback pull.
+    #[test]
+    fn matching_server_terms_stay_recordable_locally() {
+        let ours = &mold_core::license_acceptance::INSIGHTFACE_ANTELOPEV2;
+        let terms = vec![server_status(ours.url, ours.sha256)];
+
+        let accepted = resolve_and_show_license("insightface-antelopev2", Some(&terms)).unwrap();
+        assert_eq!(accepted.acceptance.url, ours.url);
+        assert_eq!(accepted.acceptance.sha256, ours.sha256);
+        assert_eq!(accepted.local.map(|license| license.id), Some(ours.id));
+    }
+
+    /// No server to ask (older build, or unreachable): this build's own pinned
+    /// constant is displayed and sent.
+    #[test]
+    fn without_server_terms_the_local_pin_is_displayed_and_sent() {
+        let ours = &mold_core::license_acceptance::INSIGHTFACE_ANTELOPEV2;
+        let accepted = resolve_and_show_license("insightface-antelopev2", None).unwrap();
+        assert_eq!(accepted.acceptance.url, ours.url);
+        assert_eq!(accepted.acceptance.sha256, ours.sha256);
+        assert_eq!(accepted.local.map(|license| license.id), Some(ours.id));
+    }
+
+    #[test]
+    fn an_id_the_server_does_not_know_is_refused() {
+        let ours = &mold_core::license_acceptance::INSIGHTFACE_ANTELOPEV2;
+        let terms = vec![server_status(ours.url, ours.sha256)];
+        assert!(resolve_and_show_license("not-a-license", Some(&terms)).is_err());
+        assert!(resolve_and_show_license("not-a-license", None).is_err());
+    }
 
     #[test]
     fn rendered_primary_dest_skips_explicit_companion_roles() {
