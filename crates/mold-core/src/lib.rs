@@ -26,6 +26,7 @@ pub mod manifest;
 pub mod media_paths;
 pub mod minimax_h3;
 pub mod model_policy;
+pub mod organization;
 pub mod print_title;
 pub mod reference_upload;
 pub mod removal;
@@ -79,9 +80,13 @@ pub use model_policy::{
     MINIMAX_H3_AUTHORIZATION_ISSUE_URL, MINIMAX_H3_AUTHORIZATION_REQUIRED,
     MINIMAX_H3_LICENSE_SHA256, MINIMAX_H3_LICENSE_URL,
 };
+pub use organization::{
+    collection_slug, normalize_request_tags, normalize_tag_name, validate_collection_name,
+    MAX_COLLECTION_NAME_CHARS, MAX_COLLECTION_SLUG_CHARS, MAX_REQUEST_TAGS, MAX_TAG_CHARS,
+};
 pub use print_title::{
-    default_output_filename_titled, strip_title_slug, title_slug, validate_print_title,
-    PRINT_TITLE_MAX_CHARS, TITLE_SLUG_MAX_LEN, TITLE_SLUG_SEPARATOR,
+    default_output_filename_titled, download_file_name, strip_title_slug, title_slug,
+    validate_print_title, PRINT_TITLE_MAX_CHARS, TITLE_SLUG_MAX_LEN, TITLE_SLUG_SEPARATOR,
 };
 pub use reference_upload::{ReferenceUploadLease, ReferenceUploadSource};
 pub use types::GenerateRequest;

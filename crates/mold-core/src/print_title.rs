@@ -103,6 +103,64 @@ pub fn default_output_filename_titled(
     format!("{stem}{TITLE_SLUG_SEPARATOR}{slug}.{ext}")
 }
 
+/// Separator between the components of a *download* file name.
+pub const DOWNLOAD_NAME_SEPARATOR: &str = "__";
+
+/// Name to suggest when the user saves or exports a print, which is a
+/// different question from what the gallery calls the file on disk.
+///
+/// The gallery filename is an identity — timestamped, never renamed, and
+/// stable across a rename of the print ([`title_slug`] folds the
+/// creation-time title in once and that is that). A download name is a
+/// *label*: it is read by a human in a Downloads folder, so it leads with
+/// the print's current title and drops the timestamp entirely:
+///
+/// ```text
+/// {title-slug}__{model}__s{seed}.{ext}
+/// ```
+///
+/// An untitled print (or a title that slugs to nothing) falls back to
+/// `{model}__s{seed}.{ext}`. The model is sanitized so `flux-dev:q4` becomes
+/// `flux-dev-q4` and the name stays portable across filesystems. `__`
+/// separates the components because a single `-` is legal *inside* every one
+/// of them.
+///
+/// This is the Rust authority; the browser surfaces mirror it.
+pub fn download_file_name(title: Option<&str>, model: &str, seed: u64, ext: &str) -> String {
+    let model = sanitize_download_component(model);
+    let model = if model.is_empty() {
+        "mold".to_string()
+    } else {
+        model
+    };
+    let tail = format!("{model}{DOWNLOAD_NAME_SEPARATOR}s{seed}.{ext}");
+    match title.and_then(title_slug) {
+        Some(slug) => format!("{slug}{DOWNLOAD_NAME_SEPARATOR}{tail}"),
+        None => tail,
+    }
+}
+
+/// Reduce one download-name component to filesystem-portable characters:
+/// ASCII alphanumerics survive as lowercase, everything else collapses to a
+/// single `-`, and the edges are trimmed. Deliberately never emits `_`, so
+/// the `__` separator stays unambiguous.
+fn sanitize_download_component(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut pending_dash = false;
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() {
+            if pending_dash && !out.is_empty() {
+                out.push('-');
+            }
+            pending_dash = false;
+            out.push(ch.to_ascii_lowercase());
+        } else {
+            pending_dash = true;
+        }
+    }
+    out.trim_matches('-').to_string()
+}
+
 /// Strip a trailing `~<slug>` from a filename stem (no extension), returning
 /// the legacy stem. Stems without a separator are returned unchanged.
 pub fn strip_title_slug(stem: &str) -> &str {
@@ -242,6 +300,58 @@ mod tests {
             strip_title_slug("mold-sdxl-1700000000000-2"),
             "mold-sdxl-1700000000000-2"
         );
+    }
+
+    #[test]
+    fn download_name_leads_with_the_title_slug() {
+        assert_eq!(
+            download_file_name(Some("Smurf Village at Dusk"), "flux-dev:q4", 42, "png"),
+            "smurf-village-at-dusk__flux-dev-q4__s42.png"
+        );
+    }
+
+    #[test]
+    fn download_name_falls_back_to_model_and_seed_without_a_usable_title() {
+        for title in [None, Some(""), Some("   "), Some("!!!"), Some("日本語")] {
+            assert_eq!(
+                download_file_name(title, "sdxl", 7, "jpeg"),
+                "sdxl__s7.jpeg",
+                "title {title:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn download_name_sanitizes_the_model_and_keeps_exactly_two_separators() {
+        let name = download_file_name(Some("Owl"), "ltx-2-19b-distilled:fp8", 1, "mp4");
+        assert_eq!(name, "owl__ltx-2-19b-distilled-fp8__s1.mp4");
+        assert_eq!(name.matches(DOWNLOAD_NAME_SEPARATOR).count(), 2, "{name}");
+        // A model that sanitizes to nothing still yields a usable name.
+        assert_eq!(download_file_name(None, "???", 3, "png"), "mold__s3.png");
+    }
+
+    #[test]
+    fn download_name_carries_the_full_seed_range() {
+        assert_eq!(
+            download_file_name(None, "flux-dev", u64::MAX, "png"),
+            format!("flux-dev__s{}.png", u64::MAX)
+        );
+        assert_eq!(
+            download_file_name(None, "flux-dev", 0, "png"),
+            "flux-dev__s0.png"
+        );
+    }
+
+    /// The download name is a label; the gallery filename is an identity.
+    /// They must not converge — no timestamp here, no `~` separator there.
+    #[test]
+    fn download_name_is_not_the_gallery_filename() {
+        let gallery =
+            default_output_filename_titled("flux-dev:q4", 1700000000000, "png", 1, 0, Some("owl"));
+        let download = download_file_name(Some("Owl"), "flux-dev:q4", 42, "png");
+        assert_ne!(gallery, download);
+        assert!(!download.contains("1700000000000"), "{download}");
+        assert!(!download.contains(TITLE_SLUG_SEPARATOR), "{download}");
     }
 
     #[test]
