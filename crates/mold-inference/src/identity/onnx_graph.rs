@@ -336,15 +336,19 @@ impl AuthenticatedBytes {
             }
             None => reported,
         };
-        let capacity = usize::try_from(limit)
-            .with_context(|| format!("{} does not fit in memory on this target", path.display()))?;
-
         // `limit + 1` so a file that GREW between the stat and the read
         // overshoots the bound and is refused below, rather than being
-        // silently truncated to a prefix that happens to parse.
+        // silently truncated to a prefix that happens to parse. The buffer
+        // is reserved at that same `limit + 1` up front: `read_to_end` grows
+        // a full vector geometrically, so reserving only `limit` would let
+        // the one sentinel byte double a 260 MiB (or 1 GiB) allocation on
+        // exactly the concurrent-growth race this bound exists to survive.
+        let bounded = limit.saturating_add(1);
+        let capacity = usize::try_from(bounded)
+            .with_context(|| format!("{} does not fit in memory on this target", path.display()))?;
         let mut bytes = Vec::with_capacity(capacity);
         file.by_ref()
-            .take(limit.saturating_add(1))
+            .take(bounded)
             .read_to_end(&mut bytes)
             .with_context(|| format!("failed to read the ONNX model at {}", path.display()))?;
         if bytes.len() as u64 != limit {
