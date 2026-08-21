@@ -1,0 +1,1 @@
+- **Restore iPhone media viewing.** Keep the full-screen Library viewer aligned to the viewport and recover generated videos from transient iOS loading failures ([#1250](https://github.com/utensils/mold/pull/1250)).
