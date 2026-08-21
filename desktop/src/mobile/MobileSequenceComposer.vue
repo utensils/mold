@@ -303,7 +303,6 @@ function removeClip(id: string): void {
   if (openSeamId.value === id) openSeamId.value = null;
   draft.removeClip(id);
 }
-
 </script>
 
 <template>
