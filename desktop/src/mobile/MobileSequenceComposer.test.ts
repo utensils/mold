@@ -76,8 +76,12 @@ const shared = {
 
 let wrapper: VueWrapper | null = null;
 
-function mountComposer(props: Record<string, unknown> = {}): VueWrapper {
+function mountComposer(
+  props: Record<string, unknown> = {},
+  slots: Record<string, string> = {},
+): VueWrapper {
   wrapper = mount(MobileSequenceComposer, {
+    slots,
     props: {
       selectedModel: ltx2,
       form: newGenerateForm(),
@@ -155,6 +159,11 @@ describe("MobileSequenceComposer clips", () => {
       (wrapper!.get("[data-test='mobile-sequence-source-fit']").element as HTMLSelectElement)
         .disabled,
     ).toBe(true);
+    const button = wrapper!.get("[data-test='mobile-generate-sequence']");
+    expect(button.attributes("disabled")).toBeUndefined();
+    expect(button.text()).toContain("Cancel · Preparing sequence");
+    await button.trigger("click");
+    expect(wrapper!.emitted("cancel")).toHaveLength(1);
   });
 
   it("renders the shared draft's clips instead of private component state", async () => {
@@ -428,11 +437,13 @@ describe("MobileSequenceComposer guardrails", () => {
     expect(wrapper!.emitted("submit")).toHaveLength(1);
   });
 
-  it("blocks a stale clip above the active fps cap without silently clamping it", async () => {
+  it("blocks a stale clip above the model's clip cap without silently clamping it", async () => {
     const draft = useSequenceDraftStore();
     draft.clips[0]!.prompt = "opening";
     draft.clips[1]!.prompt = "ending";
     draft.clips[0]!.frames = 481;
+    // An older host advertising the family's 241-frame duration budget still
+    // cannot raise the cap past LTX-2's own 97-frame clip size.
     mountComposer({
       chainLimits: {
         ...limits,
@@ -443,7 +454,7 @@ describe("MobileSequenceComposer guardrails", () => {
 
     expect(draft.clips[0]!.frames).toBe(481);
     expect(wrapper!.get("[data-test='mobile-sequence-error']").text()).toContain(
-      "Reduce clip 1 to 241 frames or fewer.",
+      "Reduce clip 1 to 97 frames or fewer.",
     );
     expect(
       (wrapper!.get("[data-test='mobile-generate-sequence']").element as HTMLButtonElement)
@@ -604,5 +615,87 @@ describe("MobileSequenceComposer — wan clip grid", () => {
     const values = Array.from(select.element.options).map((option) => Number(option.value));
     expect(values).toContain(53);
     for (const value of values) expect((value - 1) % 4).toBe(0);
+  });
+});
+
+describe("MobileSequenceComposer opening image placement", () => {
+  it("renders the opening image in the primary stack, not the Advanced sheet", () => {
+    mountComposer({}, { settings: '<div data-test="host-params">shared</div>' });
+
+    const disclosure = wrapper!.get("[data-test='mobile-sequence-source-disclosure']");
+    expect(disclosure.element.closest(".mobile-advanced-sheet")).toBeNull();
+    expect(
+      wrapper!
+        .get("[data-test='mobile-sequence-source-pick']")
+        .element.closest(".mobile-advanced-sheet"),
+    ).toBeNull();
+    expect(wrapper!.find("[data-test='mobile-sequence-advanced-opening']").exists()).toBe(false);
+    // Same seat one-shot gives its source disclosure: immediately above the
+    // shared-parameter block.
+    const settings = wrapper!.get("[data-test='mobile-sequence-settings']");
+    expect(disclosure.element.compareDocumentPosition(settings.element)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+  });
+
+  it("opens the disclosure once an opening image is attached", async () => {
+    const draft = useSequenceDraftStore();
+    mountComposer();
+    expect(
+      wrapper!.get("[data-test='mobile-sequence-source-disclosure']").attributes("open"),
+    ).toBeUndefined();
+
+    draft.openingImage = { filename: "opening.png", base64: "QUJD" };
+    await wrapper!.vm.$nextTick();
+    expect(
+      wrapper!.get("[data-test='mobile-sequence-source-disclosure']").attributes("open"),
+    ).toBeDefined();
+  });
+
+  it("hides the opening image for a checkpoint that reads no source image", () => {
+    mountComposer({ selectedModel: { ...ltx2, source_image: "unsupported" } });
+    expect(wrapper!.find("[data-test='mobile-sequence-source-disclosure']").exists()).toBe(false);
+    expect(wrapper!.find("[data-test='mobile-sequence-source-pick']").exists()).toBe(false);
+  });
+
+  it("keeps the opening image for an older server that advertises no contract", () => {
+    mountComposer({ selectedModel: { ...ltx2, source_image: null } });
+    expect(wrapper!.find("[data-test='mobile-sequence-source-disclosure']").exists()).toBe(true);
+  });
+
+  it("leaves the opening image, strength and fit alone on an Advanced reset", async () => {
+    const form = newGenerateForm();
+    const draft = useSequenceDraftStore();
+    draft.openingImage = { filename: "opening.png", base64: "QUJD" };
+    mountComposer({ form });
+    await wrapper!.get("[data-test='mobile-sequence-source-strength']").setValue("0.6");
+    await wrapper!.get("[data-test='mobile-sequence-source-fit']").setValue("pad-fit");
+    draft.clips[0]!.negativePrompt = "flicker";
+    draft.clips[0]!.cameraControl = "dolly-in";
+
+    wrapper!.getComponent(MobileAdvancedSheet).vm.$emit("reset");
+    await wrapper!.vm.$nextTick();
+
+    expect(draft.openingImage).toEqual({ filename: "opening.png", base64: "QUJD" });
+    expect(form.strength).toBe(0.6);
+    expect(form.sourceFit.mode).toBe("pad-fit");
+    // The sheet's own controls still reset.
+    expect(draft.clips[0]?.negativePrompt).toBe("");
+    expect(draft.clips[0]?.cameraControl).toBeNull();
+  });
+
+  it("omits the opening image from the Advanced count", async () => {
+    const draft = useSequenceDraftStore();
+    mountComposer();
+    const trigger = () => wrapper!.get("[data-test='mobile-sequence-open-advanced']");
+    expect(trigger().text()).not.toContain("·");
+
+    draft.openingImage = { filename: "opening.png", base64: "QUJD" };
+    await wrapper!.vm.$nextTick();
+    expect(trigger().text()).not.toContain("·");
+
+    draft.clips[0]!.cameraControl = "dolly-in";
+    await wrapper!.vm.$nextTick();
+    expect(trigger().text()).toContain("· 1 on");
   });
 });

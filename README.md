@@ -23,13 +23,22 @@ Discord bot, and REST/SSE API built on the same engine.
 
 ## Install
 
+Stable release:
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/utensils/mold/main/install.sh | sh
 ```
 
+Nightly CLI from the latest published `main` build:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/utensils/mold/main/install.sh | MOLD_CHANNEL=nightly sh
+```
+
 The installer picks the right prebuilt binary for your GPU and verifies its
-checksum. Nix (`nix run github:utensils/mold`), Arch (`paru -S mold-ai-bin`),
-and source builds are covered in the
+checksum. Use `mold update` to stay on stable or `mold update --nightly` to
+install the newest nightly. Nix (`nix run github:utensils/mold`), Arch
+(`paru -S mold-ai-bin`), and source builds are covered in the
 [installation guide](https://utensils.io/mold/guide/installation);
 binaries and checksums are on the
 [releases page](https://github.com/utensils/mold/releases/latest).

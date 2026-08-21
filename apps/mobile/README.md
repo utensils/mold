@@ -332,6 +332,17 @@ form fields One shot uses, lent to the bench through its Sequence settings
 disclosure and read live at submit time — there are no private copies to
 drift.
 
+The **Opening sequence image** — the still clip 1 is conditioned on, with its
+source strength and fit-to-video-frame controls — is a primary-stack
+disclosure, the seat One shot gives its own source media, not an Advanced
+control; it is hidden entirely for a checkpoint whose `source_image` contract
+is `unsupported`, and an older server that advertises no contract keeps it.
+**Advanced sequence controls** therefore hosts only the active clip's negative
+prompt and camera motion, and its Reset clears exactly those two — the staged
+opening image, strength, and fit survive it, exactly as One shot's staged
+media survives the Advanced sheet's Reset. The primary **↺ Reset** is the one
+that discards the opening image, alongside every other generation setting.
+
 **Validate plan** sends that live draft to the selected Keychain-authenticated
 host's read-only `/api/generate/chain/validate` endpoint. The result names each
 clip's normalized input/output frames, transition, conditioning inputs,

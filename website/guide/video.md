@@ -228,6 +228,11 @@ Returns per-model caps used by every sequence UI:
 }
 ```
 
+`frames_per_clip_cap` is the model's own clip size — what one generation
+renders when a long one-shot request is chained automatically (97 for LTX-2;
+for Wan the checkpoint's own manifest default over a 53-frame A14B /
+121-frame floor, e.g. 121 for TI2V-5B) — so a sequence clip can never be longer
+than the clips the Duration slider would have produced.
 `frames_per_clip_recommended` follows the model's own default frame count — 97
 for LTX-2, 25 for LTX-Video — so clients do not have to hardcode one.
 `supports_sequence` is model-specific and is also advertised per model on

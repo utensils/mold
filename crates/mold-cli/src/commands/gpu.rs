@@ -1,6 +1,15 @@
+use std::collections::BTreeMap;
+
 use anyhow::{bail, Context, Result};
+use clap_complete::engine::CompletionCandidate;
 use colored::Colorize;
-use mold_core::{DeviceAdminState, DeviceHealth, DeviceInfo, MoldClient, ServerCapabilities};
+use mold_core::{
+    classify_server_error, DeviceActivity, DeviceAdminState, DeviceHealth, DeviceInfo,
+    DeviceMemoryInfo, DeviceState, DeviceTelemetry, MoldClient, ServerAvailability,
+    ServerCapabilities,
+};
+
+use crate::control::is_loopback_host;
 
 fn ensure_supported(
     capabilities: &ServerCapabilities,
@@ -44,7 +53,7 @@ fn human_state(device: &DeviceInfo) -> String {
     }
 }
 
-fn format_device_line(device: &DeviceInfo) -> String {
+pub(crate) fn format_device_line(device: &DeviceInfo) -> String {
     let ordinal = device
         .ordinal
         .map(|value| format!("GPU {value}"))
@@ -83,16 +92,36 @@ fn format_device_line(device: &DeviceInfo) -> String {
 }
 
 pub async fn list(json: bool) -> Result<()> {
-    let state = MoldClient::from_env()
-        .devices()
-        .await
-        .context("failed to read server devices")?;
+    let client = MoldClient::from_env();
+    let (state, local) = match client.devices().await {
+        Ok(state) => (state, false),
+        Err(error)
+            if is_loopback_host(client.host())
+                && classify_server_error(&error) == ServerAvailability::FallbackLocal =>
+        {
+            (local_device_state()?, true)
+        }
+        Err(error) => return Err(error).context("failed to read server devices"),
+    };
     if json {
+        if local {
+            eprintln!(
+                "server unavailable at {}; returning local runtime inventory",
+                client.host()
+            );
+        }
         println!("{}", serde_json::to_string_pretty(&state)?);
         return Ok(());
     }
+    if local {
+        println!("No mold server is running; showing this machine's runtime-visible devices.");
+        println!("States below are startup preferences; live activity requires `mold serve`.\n");
+    }
     if state.devices.is_empty() {
-        println!("No compute devices visible.");
+        println!("No runtime-visible compute devices on this machine.");
+        if mold_inference::compiled_backend_label() == "cpu" {
+            println!("This mold binary was built without a GPU backend.");
+        }
         return Ok(());
     }
     for device in &state.devices {
@@ -103,7 +132,157 @@ pub async fn list(json: bool) -> Result<()> {
 
 pub async fn set(selector: &str, enabled: bool) -> Result<()> {
     let client = MoldClient::from_env();
-    set_enabled_with_client(&client, selector, enabled).await
+    match set_enabled_with_client(&client, selector, enabled).await {
+        Ok(()) => Ok(()),
+        Err(error)
+            if is_loopback_host(client.host())
+                && classify_server_error(&error) == ServerAvailability::FallbackLocal =>
+        {
+            set_local_preference(selector, enabled)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Dynamic completion candidates for local stable device IDs.
+///
+/// Completion deliberately performs no network request: it remains useful
+/// with the server stopped and never substitutes local IDs for a remote host.
+pub fn complete_device_id() -> Vec<CompletionCandidate> {
+    complete_device_id_for_host(MoldClient::from_env().host())
+}
+
+fn complete_device_id_for_host(host: &str) -> Vec<CompletionCandidate> {
+    if !is_loopback_host(host) {
+        return Vec::new();
+    }
+    let mut ids = mold_inference::device::discover_gpus()
+        .into_iter()
+        .filter_map(|device| device.stable_id)
+        .collect::<Vec<_>>();
+    ids.sort();
+    ids.into_iter().map(CompletionCandidate::new).collect()
+}
+
+pub(crate) fn local_device_state() -> Result<DeviceState> {
+    let preferences = crate::metadata_db::handle()
+        .map(|db| mold_db::DevicePreferences::new(db).list())
+        .transpose()?
+        .unwrap_or_default();
+    Ok(project_local_devices(
+        mold_inference::device::discover_gpus(),
+        &preferences,
+    ))
+}
+
+fn project_local_devices(
+    discovered: Vec<mold_inference::device::DiscoveredGpu>,
+    preferences: &BTreeMap<String, mold_db::DevicePreference>,
+) -> DeviceState {
+    let devices = discovered
+        .into_iter()
+        .map(|device| {
+            let stable = device.stable_id.is_some();
+            let id = device.stable_id.unwrap_or_else(|| {
+                format!("{}:unavailable-{}", device.backend.as_str(), device.ordinal)
+            });
+            let desired_enabled = preferences
+                .get(&id)
+                .map(|preference| preference.desired_enabled)
+                .unwrap_or(true);
+            let total = (device.total_vram_bytes > 0).then_some(device.total_vram_bytes);
+            let used = total.map(|total| total.saturating_sub(device.free_vram_bytes));
+            let device_kind = match device.device_kind {
+                Some(mold_inference::device::CudaDeviceKind::FullGpu) => {
+                    mold_core::DeviceKind::FullGpu
+                }
+                Some(mold_inference::device::CudaDeviceKind::Mig) => mold_core::DeviceKind::Mig,
+                Some(mold_inference::device::CudaDeviceKind::UnknownCuda) => {
+                    mold_core::DeviceKind::UnknownCuda
+                }
+                None => mold_core::DeviceKind::Metal,
+            };
+            DeviceInfo {
+                id,
+                backend: device.backend,
+                ordinal: Some(device.ordinal),
+                device_kind,
+                nvml_uuid: None,
+                physical_uuid: None,
+                mig_uuid: None,
+                mig_parent_uuid: None,
+                mig_profile: None,
+                name: device.name,
+                pci_bus_id: device.pci_bus_id,
+                compute_capability: device
+                    .compute_capability
+                    .map(|(major, minor)| format!("{major}.{minor}")),
+                memory: DeviceMemoryInfo {
+                    total_bytes: total,
+                    used_bytes: used,
+                    mold_used_bytes: None,
+                    other_used_bytes: None,
+                },
+                telemetry: DeviceTelemetry {
+                    utilization_percent: None,
+                    temperature_c: None,
+                    power_w: None,
+                },
+                desired_enabled,
+                restart_required: false,
+                admin_state: if desired_enabled {
+                    DeviceAdminState::Enabled
+                } else {
+                    DeviceAdminState::Disabled
+                },
+                health: if stable {
+                    DeviceHealth::Healthy
+                } else {
+                    DeviceHealth::Unavailable
+                },
+                activity: DeviceActivity::Idle,
+                schedulable: false,
+                unschedulable_reason: Some(
+                    device
+                        .identity_error
+                        .unwrap_or_else(|| "mold server is not running".into()),
+                ),
+                loaded_models: vec![],
+                active_work_id: None,
+                planned_work_ids: vec![],
+            }
+        })
+        .collect();
+    DeviceState {
+        devices,
+        plan_version: 0,
+    }
+}
+
+fn set_local_preference(selector: &str, enabled: bool) -> Result<()> {
+    let state = local_device_state()?;
+    let device = resolve_device(&state.devices, selector)?;
+    if device.health == DeviceHealth::Unavailable {
+        bail!(
+            "{} is visible but has no stable identity; its startup preference cannot be persisted",
+            device.name
+        );
+    }
+    let Some(db) = crate::metadata_db::handle() else {
+        bail!(
+            "cannot persist the device preference because the metadata DB is disabled or unavailable"
+        );
+    };
+    let preferences = mold_db::DevicePreferences::new(db);
+    let previous = preferences.get(&device.id)?;
+    preferences.set(&device.id, enabled)?;
+    let action = if enabled { "enabled" } else { "disabled" };
+    if previous == Some(enabled) {
+        println!("{}: already {action} for the next server start", device.id);
+    } else {
+        println!("{}: {action} for the next server start", device.id);
+    }
+    Ok(())
 }
 
 async fn set_enabled_with_client(client: &MoldClient, selector: &str, enabled: bool) -> Result<()> {
@@ -134,6 +313,11 @@ async fn set_enabled_with_client(client: &MoldClient, selector: &str, enabled: b
 mod tests {
     use super::*;
     use mold_core::{DeviceActivity, DeviceKind, DeviceMemoryInfo, DeviceTelemetry, GpuBackend};
+
+    #[test]
+    fn remote_completion_never_substitutes_local_device_ids() {
+        assert!(complete_device_id_for_host("https://gpu-box:7680").is_empty());
+    }
 
     fn device(id: &str, ordinal: usize) -> DeviceInfo {
         DeviceInfo {
@@ -246,6 +430,67 @@ mod tests {
         unknown.memory.total_bytes = None;
         assert!(format_device_line(&unknown).contains("VRAM —"));
         assert!(!format_device_line(&unknown).contains("0.0/0.0"));
+    }
+
+    #[test]
+    fn local_projection_preserves_stable_identity_preferences_and_unknown_telemetry() {
+        let discovered = mold_inference::device::DiscoveredGpu {
+            ordinal: 2,
+            stable_id: Some("cuda:stable".into()),
+            raw_cuda_uuid: None,
+            device_kind: Some(mold_inference::device::CudaDeviceKind::FullGpu),
+            identity_error: None,
+            backend: GpuBackend::Cuda,
+            name: "Local GPU".into(),
+            compute_capability: Some((8, 9)),
+            pci_bus_id: Some("0000:01:00.0".into()),
+            total_vram_bytes: 24 << 30,
+            free_vram_bytes: 20 << 30,
+        };
+        let mut preferences = BTreeMap::new();
+        preferences.insert(
+            "cuda:stable".into(),
+            mold_db::DevicePreference {
+                device_id: "cuda:stable".into(),
+                desired_enabled: false,
+                updated_at: 1,
+            },
+        );
+
+        let state = project_local_devices(vec![discovered], &preferences);
+        let device = &state.devices[0];
+        assert_eq!(device.id, "cuda:stable");
+        assert_eq!(device.ordinal, Some(2));
+        assert_eq!(device.compute_capability.as_deref(), Some("8.9"));
+        assert_eq!(device.memory.used_bytes, Some(4 << 30));
+        assert_eq!(device.telemetry.utilization_percent, None);
+        assert!(!device.desired_enabled);
+        assert_eq!(device.admin_state, DeviceAdminState::Disabled);
+        assert!(!device.schedulable);
+    }
+
+    #[test]
+    fn local_projection_keeps_identity_failures_visible_but_not_addressable() {
+        let discovered = mold_inference::device::DiscoveredGpu {
+            ordinal: 0,
+            stable_id: None,
+            raw_cuda_uuid: None,
+            device_kind: Some(mold_inference::device::CudaDeviceKind::UnknownCuda),
+            identity_error: Some("UUID unavailable".into()),
+            backend: GpuBackend::Cuda,
+            name: "Broken GPU".into(),
+            compute_capability: None,
+            pci_bus_id: None,
+            total_vram_bytes: 0,
+            free_vram_bytes: 0,
+        };
+        let state = project_local_devices(vec![discovered], &BTreeMap::new());
+        assert_eq!(state.devices[0].health, DeviceHealth::Unavailable);
+        assert_eq!(state.devices[0].memory.total_bytes, None);
+        assert_eq!(
+            state.devices[0].unschedulable_reason.as_deref(),
+            Some("UUID unavailable")
+        );
     }
 
     #[tokio::test]

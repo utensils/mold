@@ -289,14 +289,26 @@ export function quickExpansionRouteIsCurrent(
 /** Monotonic guard used to reject late refreshes and discarded requests. */
 export class PreparationRequestGuard {
   private token = 0;
+  private controller: AbortController | null = null;
 
   begin(): number {
+    this.controller?.abort(new Error("superseded"));
     this.token += 1;
+    this.controller = new AbortController();
     return this.token;
   }
 
   invalidate(): void {
+    this.controller?.abort(new Error("cancelled"));
+    this.controller = null;
     this.token += 1;
+  }
+
+  signalFor(token: number): AbortSignal {
+    if (token !== this.token || !this.controller) {
+      throw new Error("request token is no longer current");
+    }
+    return this.controller.signal;
   }
 
   isCurrent(token: number): boolean {

@@ -558,6 +558,7 @@ describe("useHostRouting", () => {
       expect.anything(),
       expect.objectContaining({ batch_size: 1 }),
       4,
+      {},
     );
     expect(request.batch_size).toBe(4);
   });

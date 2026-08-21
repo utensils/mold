@@ -1189,12 +1189,17 @@ the server enforces, and the server-side validator stays authoritative.
 
 `GET /api/capabilities/chain-limits?model=<name>&fps=<n>` reports
 `frames_per_clip_recommended` from the same per-model default, and its
-`frames_per_clip_cap` follows the same duration budget: a chain clip is
-denoised as one generation, so it is bound by exactly the single-request
-ceiling. The response echoes the `fps` it was computed at and, for families
-with a duration budget, `frames_per_clip_runtime_seconds`. Pass `fps` when the
-user is editing that control so the advertised cap matches what the server will
-hold the request to.
+`frames_per_clip_cap` is the model's own clip size — the number of frames one
+generation renders when a long request is chained automatically (97 for
+LTX-2; for Wan the checkpoint's own manifest default over a 53-frame A14B /
+121-frame floor, e.g. 121 for TI2V-5B),
+bounded above by the family's single-request ceiling at `fps` when that is
+smaller. Every sequence picker locks its per-clip choices to this value. The
+response echoes the `fps` it was computed at and, for families with a duration
+budget, `frames_per_clip_runtime_seconds`. Chain admission itself enforces the
+family's single-request ceiling, which is what an explicit CLI `--clip-frames`
+may reach. Pass `fps` when the user is editing that control so the advertised
+cap matches what the server will hold the request to.
 
 ## `/api/status`
 

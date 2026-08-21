@@ -364,7 +364,12 @@ progress and cancellation attached to the exact host — sequences share one
 queue list with single prints. Between clips, a seam control opens a sheet
 naming the transition in words (**Smooth**, **Cut**, **Fade**) with the
 fade-length stepper. New clips take their frame count from the selected model's
-own advertised default. An interrupted sequence can reconnect after relaunch
+own advertised default, and clip durations stop at that model's own clip size
+(the clip one generation renders), never at the family's longer single-request
+budget. An optional opening image — with its source strength and fit controls —
+is a disclosure in the primary Create stack, beside the other source media,
+rather than inside the Advanced sheet; the primary **↺ Reset** clears it while
+**Reset advanced** leaves it alone. An interrupted sequence can reconnect after relaunch
 without storing the host API key outside the Keychain; if the saved server
 identity cannot be verified, Mold discards the recovery record instead of
 attaching to an unproven machine. LTX-Video joins independent clips without a

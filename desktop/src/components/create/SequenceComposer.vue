@@ -16,6 +16,7 @@ import {
   defaultClipFrames,
   formatFrameDuration,
   sequenceDuration,
+  sequenceClipFrameCap,
   sequenceFrameOptions,
   sequenceFrameStep,
   sequenceMotionTailFrames,
@@ -39,6 +40,8 @@ import type { GenerateForm } from "../../lib/generateForm";
 import type { ModelEntry } from "../../lib/api/types";
 import { useHostsStore } from "../../stores/hosts";
 import { useToastStore } from "../../stores/toasts";
+import { useContextMenuStore, type MenuEntry } from "../../stores/contextMenu";
+import { clipContextEntries, railContextEntries } from "@studio/lib/sequenceContextMenu";
 import type { ClipRailMedia } from "@ui/components/types";
 import { validateChain } from "@studio/api/chains";
 import type { ApiTarget } from "@studio/api/client";
@@ -74,14 +77,22 @@ const props = withDefaults(
 const emit = defineEmits<{
   /** Generate sequence / Update sequence (create vs amend is the parent's call). */
   submit: [];
+  /** Stop source preparation / placement before the sequence is queued. */
+  cancel: [];
   /** Edit session: submit the current clips as a NEW job instead of amending. */
   duplicate: [];
   "play-clip": [clipId: string];
 }>();
 
+function submitOrCancel() {
+  if (props.submitting) emit("cancel");
+  else emit("submit");
+}
+
 const draft = useSequenceDraftStore();
 const hosts = useHostsStore();
 const toasts = useToastStore();
+const contextMenu = useContextMenuStore();
 
 const motionTail = computed(() => sequenceMotionTailFrames(props.selectedModel));
 // Sequence stage images existed before the additive per-model contract, so an
@@ -102,9 +113,21 @@ const maxStages = computed(() => props.chainLimits?.max_stages ?? 16);
 const newClipFrames = computed(() =>
   defaultClipFrames(props.selectedModel, props.chainLimits, motionTail.value),
 );
+/** The model's own clip size bounds the picker and the validator alike —
+ *  even against an older host that still advertises the family's
+ *  single-request budget (481 LTX-2 frames at 24 fps). */
+const clipFrameCap = computed(() =>
+  sequenceClipFrameCap(
+    {
+      name: props.selectedModel?.name ?? props.form.model,
+      family: props.selectedModel?.family ?? props.form.family,
+    },
+    props.chainLimits,
+  ),
+);
 const frameOptions = computed(() => {
   const options = sequenceFrameOptions(
-    props.chainLimits?.frames_per_clip_cap ?? 97,
+    clipFrameCap.value,
     motionTail.value,
     // Wan's VAE compresses time by 4, so its clips sit on `4k+1`; offering
     // the LTX grid hid its own 53-frame routing default (#783).
@@ -194,7 +217,7 @@ const validation = computed(() =>
   sequenceValidation(stages.value, {
     maxStages: maxStages.value,
     maxTotalFrames: props.chainLimits?.max_total_frames ?? Number.MAX_SAFE_INTEGER,
-    ...(props.chainLimits ? { maxFramesPerClip: props.chainLimits.frames_per_clip_cap } : {}),
+    maxFramesPerClip: clipFrameCap.value,
     frameStep: sequenceFrameStep(props.selectedModel?.family ?? props.form.family),
     frameOffset: 1,
     motionTailFrames: motionTail.value,
@@ -419,10 +442,77 @@ async function copyToml() {
     toasts.push(err instanceof Error ? err.message : String(err), "error");
   }
 }
+
+// ── Context menus ────────────────────────────────────────────────────────────
+// One right-click handler for the whole bench, discriminated by target:
+// text fields keep their own menu, a seam pill keeps its transition editor
+// (SeamPill turns `contextmenu` into a `click`), a clip pill gets the clip
+// menu, and everything else gets the bench menu. Entries come from the
+// shared builder so web renders exactly the same actions.
+const CONTEXT_MENU_TEXT_TARGETS = "textarea, input, select, [contenteditable], [data-selectable]";
+
+function clipMenuEntries(clipId: string, index: number): MenuEntry[] {
+  return clipContextEntries(
+    {
+      index,
+      count: draft.clips.length,
+      maxStages: maxStages.value,
+      canPlay: Boolean(props.stageMediaByClipId?.[clipId]),
+      locked: props.submitting,
+    },
+    {
+      play: () => onPlayClip(clipId),
+      duplicate: () => void draft.duplicateClip(clipId),
+      insertBefore: () => void draft.insertClip(index, newClipFrames.value),
+      insertAfter: () => void draft.insertClip(index + 1, newClipFrames.value),
+      moveTo: (to) => draft.moveClip(clipId, to),
+      remove: () => draft.removeClip(clipId),
+    },
+  );
+}
+
+function railMenuEntries(): MenuEntry[] {
+  return railContextEntries(
+    {
+      count: draft.clips.length,
+      maxStages: maxStages.value,
+      locked: props.submitting,
+      canValidate:
+        disabledReason.value === null &&
+        !props.submitting &&
+        !validating.value &&
+        props.target !== null,
+    },
+    {
+      addClip: () => draft.addClip(newClipFrames.value),
+      validate: () => void validatePlan(),
+      importToml: () => tomlInput.value?.click(),
+      exportToml: () => exportToml(),
+      copyToml: () => void copyToml(),
+      clear: () => (clearConfirmOpen.value = true),
+    },
+  );
+}
+
+function onBenchContextMenu(event: MouseEvent) {
+  const node = event.target as HTMLElement | null;
+  if (!node || typeof node.closest !== "function") return;
+  if (node.closest(CONTEXT_MENU_TEXT_TARGETS)) return;
+  if (node.closest(".ms-seam")) return;
+  const clipId = node.closest("[data-clip-id]")?.getAttribute("data-clip-id") ?? null;
+  if (clipId) {
+    const index = draft.clips.findIndex((clip) => clip.id === clipId);
+    if (index < 0) return;
+    draft.activeClipId = clipId;
+    contextMenu.open(event, clipMenuEntries(clipId, index));
+    return;
+  }
+  contextMenu.open(event, railMenuEntries());
+}
 </script>
 
 <template>
-  <div data-test="sequence-composer" class="ms-seqbench">
+  <div data-test="sequence-composer" class="ms-seqbench" @contextmenu="onBenchContextMenu">
     <!-- Edit-session banner -->
     <div v-if="editBanner" data-test="edit-banner" class="ms-seqbench__banner">
       <span class="ms-seqbench__banner-text">{{ editBanner }}</span>
@@ -451,6 +541,7 @@ async function copyToml() {
       label="Transition editor"
       class="ms-seqbench__railwrap"
       @update:open="(open) => !open && (openSeamId = null)"
+      @contextmenu="onBenchContextMenu"
     >
       <template #trigger>
         <ClipRail
@@ -650,10 +741,16 @@ async function copyToml() {
         type="button"
         data-test="generate-sequence"
         class="ms-seqbench__generate"
-        :disabled="disabledReason !== null || submitting"
-        @click="submit"
+        :disabled="disabledReason !== null && !submitting"
+        @click="submitOrCancel"
       >
-        {{ submitting ? "Starting…" : draft.editing ? "Update sequence" : "Generate sequence" }}
+        {{
+          submitting
+            ? "Cancel · Preparing sequence…"
+            : draft.editing
+              ? "Update sequence"
+              : "Generate sequence"
+        }}
       </button>
     </div>
 

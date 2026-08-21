@@ -47,6 +47,7 @@ const props = withDefaults(
 
 const emit = defineEmits<{
   generate: [];
+  cancel: [];
   expand: [];
   remix: [];
   restore: [];
@@ -56,7 +57,7 @@ const emit = defineEmits<{
 
 // Disabled state and corrective guidance are intentionally separate: obvious
 // requirements such as an empty prompt do not need a persistent warning.
-const generateDisabled = computed(() => props.disabled || props.submitting);
+const generateDisabled = computed(() => props.disabled && !props.submitting);
 const placeholder = computed(() =>
   promptPlaceholder(props.form, "Describe the image you want to create…"),
 );
@@ -105,7 +106,7 @@ function onPromptInput(event: Event) {
 function onKeydown(e: KeyboardEvent) {
   if (e.key === "Enter" && primaryModifierPressed(e)) {
     e.preventDefault();
-    if (!generateDisabled.value) emit("generate");
+    if (!generateDisabled.value) submitOrCancel();
   } else if ((e.key === "e" || e.key === "E") && primaryModifierPressed(e)) {
     e.preventDefault();
     expandControl.value?.expand();
@@ -114,6 +115,11 @@ function onKeydown(e: KeyboardEvent) {
   } else if (e.key === "ArrowDown" && promptEl.value && caretOnLastLine(promptEl.value)) {
     if (cycleHistory("next")) e.preventDefault();
   }
+}
+
+function submitOrCancel() {
+  if (props.submitting) emit("cancel");
+  else emit("generate");
 }
 
 function focus() {
@@ -174,7 +180,7 @@ defineExpose({ focus, expand, record });
           data-test="generate-button"
           class="ms-composer__generate"
           :disabled="generateDisabled"
-          @click="emit('generate')"
+          @click="submitOrCancel"
         >
           <Icon name="sparkle" :size="16" />
           {{ buttonLabel }}

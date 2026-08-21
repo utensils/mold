@@ -319,7 +319,7 @@ describe("GenerateView prepared expansion batches", () => {
     ).toEqual(prompts);
   });
 
-  it("acknowledges placement planning immediately and ignores duplicate submits", async () => {
+  it("exposes responsive cancellation while placement planning is pending", async () => {
     useGenerateFormStore().form.batchSize = 1;
     const preview = deferred<unknown>();
     placementPreview.mockReset().mockImplementation(() => preview.promise);
@@ -334,12 +334,19 @@ describe("GenerateView prepared expansion batches", () => {
     await nextTick();
 
     const planningButton = wrapper.get('[data-test="generate-button"]');
-    expect(planningButton.text()).toContain("Planning…");
-    expect(planningButton.attributes("disabled")).toBeDefined();
-    wrapper.findComponent({ name: "ComposerCard" }).vm.$emit("generate");
+    expect(planningButton.text()).toContain("Cancel");
+    expect(wrapper.get('[data-test="preprocessing-status"]').text()).toContain(
+      "Checking machine fit",
+    );
+    expect(planningButton.attributes("disabled")).toBeUndefined();
+    await planningButton.trigger("click");
     await nextTick();
     expect(placementPreview).toHaveBeenCalledTimes(1);
     expect(submit).not.toHaveBeenCalled();
+
+    const previewOptions = placementPreview.mock.calls[0]?.[3];
+    expect(previewOptions?.signal?.aborted).toBe(true);
+    expect(wrapper.get('[data-test="generate-button"]').text()).toContain("Generate");
 
     preview.resolve({
       version: 1,
@@ -359,7 +366,7 @@ describe("GenerateView prepared expansion batches", () => {
     });
     await flushPromises();
 
-    expect(submit).toHaveBeenCalledTimes(1);
+    expect(submit).not.toHaveBeenCalled();
     const readyButton = wrapper.get('[data-test="generate-button"]');
     expect(readyButton.text()).toContain("Generate");
     expect(readyButton.text()).not.toContain("Planning");
@@ -394,7 +401,12 @@ describe("GenerateView prepared expansion batches", () => {
 
     expect(submit).toHaveBeenCalledTimes(1);
     expect(preview).toHaveBeenCalledTimes(1);
-    expect(preview).toHaveBeenCalledWith("local", expect.anything(), 3);
+    expect(preview).toHaveBeenCalledWith(
+      "local",
+      expect.anything(),
+      3,
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
     const [, count, submittedRoute, , options] = submit.mock.calls[0]!;
     expect(count).toBe(3);
     expect(submittedRoute).toMatchObject({
@@ -617,7 +629,12 @@ describe("GenerateView prepared expansion batches", () => {
       await flushPromises();
 
       expect(finalizedPreview).toHaveBeenCalledTimes(1);
-      expect(finalizedPreview).toHaveBeenCalledWith(route.hostId, expect.anything(), 3);
+      expect(finalizedPreview).toHaveBeenCalledWith(
+        route.hostId,
+        expect.anything(),
+        3,
+        expect.objectContaining({ signal: expect.any(AbortSignal) }),
+      );
       expect(submit).not.toHaveBeenCalled();
       const preserved = wrapper.findComponent(PreparedExpansionBatch);
       expect(preserved.exists()).toBe(true);

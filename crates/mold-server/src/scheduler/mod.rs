@@ -3553,12 +3553,26 @@ impl Coordinator {
         )
     }
 
+    #[cfg(test)]
     fn placement_preview(
         &self,
         request: &mold_core::GenerateRequest,
         copies: u32,
         prepared_inputs: &crate::execution_plan::PreparedExecutionInputs,
     ) -> mold_core::GenerationPlacementPreview {
+        self.placement_preview_cancellable(request, copies, prepared_inputs, &|| false)
+    }
+
+    fn placement_preview_cancellable(
+        &self,
+        request: &mold_core::GenerateRequest,
+        copies: u32,
+        prepared_inputs: &crate::execution_plan::PreparedExecutionInputs,
+        cancelled: &dyn Fn() -> bool,
+    ) -> mold_core::GenerationPlacementPreview {
+        if cancelled() {
+            return self.cancelled_placement_preview();
+        }
         if !(1..=64).contains(&copies) {
             return mold_core::GenerationPlacementPreview {
                 version: 1,
@@ -3601,20 +3615,52 @@ impl Coordinator {
                 missing_components: Vec::new(),
             };
         }
-        self.placement_preview_dag(request, copies, prepared_inputs)
+        self.placement_preview_dag_cancellable(request, copies, prepared_inputs, cancelled)
+    }
+
+    fn cancelled_placement_preview(&self) -> mold_core::GenerationPlacementPreview {
+        mold_core::GenerationPlacementPreview {
+            version: 1,
+            authoritative: false,
+            state_version: self.state_version,
+            plan_version: self.plan_version,
+            outcome: "temporarily_unavailable".to_string(),
+            reason: Some("placement preview cancelled".to_string()),
+            candidate: None,
+            stage_candidates: Vec::new(),
+            pending_downloads: Vec::new(),
+            missing_components: Vec::new(),
+        }
     }
 
     /// Non-mutating scheduler projection for the complete ordinary-generation
     /// DAG. Utility stages exercise this path in tests, but the public preview
     /// remains non-authoritative until their CPU/GPU execution plans and host
     /// reservations are frozen rather than dynamically selected at runtime.
+    #[cfg(test)]
     fn placement_preview_dag(
         &self,
         request: &mold_core::GenerateRequest,
         copies: u32,
         prepared_inputs: &crate::execution_plan::PreparedExecutionInputs,
     ) -> mold_core::GenerationPlacementPreview {
-        self.placement_preview_dag_for_device(request, copies, prepared_inputs, None)
+        self.placement_preview_dag_cancellable(request, copies, prepared_inputs, &|| false)
+    }
+
+    fn placement_preview_dag_cancellable(
+        &self,
+        request: &mold_core::GenerateRequest,
+        copies: u32,
+        prepared_inputs: &crate::execution_plan::PreparedExecutionInputs,
+        cancelled: &dyn Fn() -> bool,
+    ) -> mold_core::GenerationPlacementPreview {
+        self.placement_preview_dag_for_device_cancellable(
+            request,
+            copies,
+            prepared_inputs,
+            None,
+            cancelled,
+        )
     }
 
     /// Return one exact singleton timing profile for every currently eligible
@@ -3625,13 +3671,25 @@ impl Coordinator {
     /// device for arbitrary parent sizes, so it profiles each device against
     /// one immutable coordinator snapshot and leaves child-count scaling to
     /// `BatchPartitionPlanner`.
+    #[cfg(test)]
     fn batch_device_profiles(
         &self,
         request: &mold_core::GenerateRequest,
         parent_size: u32,
         prepared_inputs: &crate::execution_plan::PreparedExecutionInputs,
     ) -> anyhow::Result<Vec<mold_core::GenerationPlacementCandidate>> {
+        self.batch_device_profiles_cancellable(request, parent_size, prepared_inputs, &|| false)
+    }
+
+    fn batch_device_profiles_cancellable(
+        &self,
+        request: &mold_core::GenerateRequest,
+        parent_size: u32,
+        prepared_inputs: &crate::execution_plan::PreparedExecutionInputs,
+        cancelled: &dyn Fn() -> bool,
+    ) -> anyhow::Result<Vec<mold_core::GenerationPlacementCandidate>> {
         anyhow::ensure!(parent_size > 0, "batch parent size must be positive");
+        anyhow::ensure!(!cancelled(), "placement preview cancelled");
         let device_ids = self
             .device_snapshots()
             .into_iter()
@@ -3640,11 +3698,13 @@ impl Coordinator {
         let mut profiles = Vec::with_capacity(device_ids.len());
         let mut rejection = None;
         for device_id in device_ids {
-            let preview = self.placement_preview_dag_for_device(
+            anyhow::ensure!(!cancelled(), "placement preview cancelled");
+            let preview = self.placement_preview_dag_for_device_cancellable(
                 request,
                 1,
                 prepared_inputs,
                 Some(&device_id),
+                cancelled,
             );
             if preview.authoritative && preview.outcome == "planned" {
                 let generation_stage = preview
@@ -3682,12 +3742,30 @@ impl Coordinator {
         Ok(profiles)
     }
 
+    #[cfg(test)]
     fn placement_preview_dag_for_device(
         &self,
         request: &mold_core::GenerateRequest,
         copies: u32,
         prepared_inputs: &crate::execution_plan::PreparedExecutionInputs,
         required_device_id: Option<&str>,
+    ) -> mold_core::GenerationPlacementPreview {
+        self.placement_preview_dag_for_device_cancellable(
+            request,
+            copies,
+            prepared_inputs,
+            required_device_id,
+            &|| false,
+        )
+    }
+
+    fn placement_preview_dag_for_device_cancellable(
+        &self,
+        request: &mold_core::GenerateRequest,
+        copies: u32,
+        prepared_inputs: &crate::execution_plan::PreparedExecutionInputs,
+        required_device_id: Option<&str>,
+        cancelled: &dyn Fn() -> bool,
     ) -> mold_core::GenerationPlacementPreview {
         let empty = |outcome: &str, reason: String| mold_core::GenerationPlacementPreview {
             version: 1,
@@ -3703,6 +3781,9 @@ impl Coordinator {
         };
         if !(1..=64).contains(&copies) {
             return empty("infeasible", "copies must be between 1 and 64".to_string());
+        }
+        if cancelled() {
+            return self.cancelled_placement_preview();
         }
         if self.state.queue_pause.is_paused() {
             return empty(
@@ -3733,6 +3814,9 @@ impl Coordinator {
             })
             .collect::<BTreeMap<_, _>>();
         let (mut snapshot, _) = self.planner_snapshot(&owner_plan_cache);
+        if cancelled() {
+            return self.cancelled_placement_preview();
+        }
         let device_facts = self.device_facts_from_snapshots(&snapshot.devices);
         let config = match self.state.config.try_read() {
             Ok(config) => config,
@@ -3757,6 +3841,9 @@ impl Coordinator {
             Ok(plans) => plans,
             Err(error) => return empty("infeasible", error.to_string()),
         };
+        if cancelled() {
+            return self.cancelled_placement_preview();
+        }
         let local_expansion_model = if request.expand == Some(true) {
             let settings = config.expand.clone().with_env_overrides();
             settings.is_local().then(|| settings.model.clone())
@@ -3796,6 +3883,9 @@ impl Coordinator {
             .filter(|plan| !failed.contains(&plan.device_ordinal))
             .filter(|plan| required_device_id.is_none_or(|device_id| plan.device_id == device_id))
             .filter_map(|plan| {
+                if cancelled() {
+                    return None;
+                }
                 let worker = self.state.gpu_pool.worker_by_ordinal(plan.device_ordinal)?;
                 let key = generation_estimate_key(
                     &self.state,
@@ -3828,6 +3918,9 @@ impl Coordinator {
                 )
             })
             .collect::<Vec<_>>();
+        if cancelled() {
+            return self.cancelled_placement_preview();
+        }
         if candidates.is_empty() {
             return empty(
                 "infeasible",
@@ -3853,6 +3946,9 @@ impl Coordinator {
         let mut generation_stage_index = 0_u32;
 
         if let Some(expansion_model) = &local_expansion_model {
+            if cancelled() {
+                return self.cancelled_placement_preview();
+            }
             snapshot.work.push(self.owner_work_snapshot(
                 OwnerWorkSchedulingView {
                     id: &format!("{expansion_prefix}parent"),
@@ -3875,6 +3971,9 @@ impl Coordinator {
                 &snapshot.devices,
             ));
             rank_cursor = rank_cursor.saturating_add(1);
+            if cancelled() {
+                return self.cancelled_placement_preview();
+            }
             let expansion_plan = match self.planner.plan(&snapshot) {
                 Ok(plan) => plan,
                 Err(error) => {
@@ -3884,6 +3983,9 @@ impl Coordinator {
                     )
                 }
             };
+            if cancelled() {
+                return self.cancelled_placement_preview();
+            }
             let expansion_assignments = expansion_plan
                 .lanes
                 .iter()
@@ -3920,6 +4022,9 @@ impl Coordinator {
         }
 
         for index in 0..copies {
+            if cancelled() {
+                return self.cancelled_placement_preview();
+            }
             snapshot.work.push(
                 WorkSnapshot::new(
                     WorkId::new(format!("{generation_prefix}{index}")),
@@ -3930,6 +4035,9 @@ impl Coordinator {
             );
             rank_cursor = rank_cursor.saturating_add(1);
         }
+        if cancelled() {
+            return self.cancelled_placement_preview();
+        }
         let generation_plan = match self.planner.plan(&snapshot) {
             Ok(plan) => plan,
             Err(error) => {
@@ -3939,6 +4047,9 @@ impl Coordinator {
                 )
             }
         };
+        if cancelled() {
+            return self.cancelled_placement_preview();
+        }
         let mut selected = generation_plan
             .lanes
             .iter()
@@ -3972,6 +4083,9 @@ impl Coordinator {
                 .unwrap_or(snapshot.now_ms);
         }
         for (index, assignment) in selected.iter().enumerate() {
+            if cancelled() {
+                return self.cancelled_placement_preview();
+            }
             ready_at[index] = assignment.estimated_finish_ms;
             let confidence = confidence_by_edge
                 .get(&(
@@ -3994,6 +4108,9 @@ impl Coordinator {
 
         if let Some((upscale_model, estimated_vram_bytes)) = &post_upscale {
             for index in 0..copies {
+                if cancelled() {
+                    return self.cancelled_placement_preview();
+                }
                 snapshot.work.push(self.owner_work_snapshot(
                     OwnerWorkSchedulingView {
                         id: &format!("{upscale_prefix}{index}"),
@@ -4017,6 +4134,9 @@ impl Coordinator {
                 ));
                 rank_cursor = rank_cursor.saturating_add(1);
             }
+            if cancelled() {
+                return self.cancelled_placement_preview();
+            }
             let upscale_plan = match self.planner.plan(&snapshot) {
                 Ok(plan) => plan,
                 Err(error) => {
@@ -4026,6 +4146,9 @@ impl Coordinator {
                     )
                 }
             };
+            if cancelled() {
+                return self.cancelled_placement_preview();
+            }
             let mut upscale_assignments = upscale_plan
                 .lanes
                 .iter()
@@ -4050,6 +4173,9 @@ impl Coordinator {
                 .max()
                 .unwrap_or(predicted_finish_ms);
             for (index, assignment) in upscale_assignments.iter().enumerate() {
+                if cancelled() {
+                    return self.cancelled_placement_preview();
+                }
                 stage_candidates.push(stage_placement_candidate(
                     generation_stage_index.saturating_add(1),
                     Some(index as u32),
@@ -4060,6 +4186,10 @@ impl Coordinator {
                 ));
             }
             final_plan_version = upscale_plan.plan_version;
+        }
+
+        if cancelled() {
+            return self.cancelled_placement_preview();
         }
 
         let warm = snapshot.devices.iter().any(|device| {
@@ -4113,6 +4243,9 @@ impl Coordinator {
             .unwrap_or_default();
         let mut pending_by_identity = BTreeMap::new();
         for assignment in &selected {
+            if cancelled() {
+                return self.cancelled_placement_preview();
+            }
             for download in
                 prepared_inputs.pending_downloads_for_device(assignment.device_id.as_str())
             {
@@ -4132,12 +4265,18 @@ impl Coordinator {
             confidence = mold_core::QueueEstimateConfidence::Low;
         }
         for stage in &mut stage_candidates {
+            if cancelled() {
+                return self.cancelled_placement_preview();
+            }
             if !prepared_inputs
                 .pending_downloads_for_device(&stage.candidate.device_id)
                 .is_empty()
             {
                 stage.candidate.estimate_confidence = mold_core::QueueEstimateConfidence::Low;
             }
+        }
+        if cancelled() {
+            return self.cancelled_placement_preview();
         }
         mold_core::GenerationPlacementPreview {
             version: 1,
@@ -5258,12 +5397,18 @@ pub async fn run_scheduler_coordinator(
                             prepared_inputs,
                             reply_tx,
                         } => {
-                            let response = coordinator.placement_preview(
-                                &request,
-                                copies,
-                                &prepared_inputs,
-                            );
-                            let _ = reply_tx.send(response);
+                            // Dropping the HTTP request drops the oneshot
+                            // receiver. Do not spend scheduler time planning a
+                            // print the caller has already cancelled.
+                            if !reply_tx.is_closed() {
+                                let response = coordinator.placement_preview_cancellable(
+                                    &request,
+                                    copies,
+                                    &prepared_inputs,
+                                    &|| reply_tx.is_closed(),
+                                );
+                                let _ = reply_tx.send(response);
+                            }
                         }
                         PlacementPreviewQuery::BatchDevices {
                             request,
@@ -5271,10 +5416,17 @@ pub async fn run_scheduler_coordinator(
                             prepared_inputs,
                             reply_tx,
                         } => {
-                            let response = coordinator
-                                .batch_device_profiles(&request, parent_size, &prepared_inputs)
-                                .map_err(|error| format!("{error:#}"));
-                            let _ = reply_tx.send(response);
+                            if !reply_tx.is_closed() {
+                                let response = coordinator
+                                    .batch_device_profiles_cancellable(
+                                        &request,
+                                        parent_size,
+                                        &prepared_inputs,
+                                        &|| reply_tx.is_closed(),
+                                    )
+                                    .map_err(|error| format!("{error:#}"));
+                                let _ = reply_tx.send(response);
+                            }
                         }
                         PlacementPreviewQuery::SetQueuePaused { paused, reply_tx } => {
                             let response = coordinator.set_queue_paused_and_publish(paused);
@@ -12324,6 +12476,21 @@ mod tests {
 
         let first = coordinator.placement_preview(&request, 1, &prepared);
         assert_eq!(first.outcome, "planned", "{:?}", first.reason);
+        let cancellation_checks = std::cell::Cell::new(0_u32);
+        let cancelled_after_planning =
+            coordinator.placement_preview_cancellable(&request, 1, &prepared, &|| {
+                let next = cancellation_checks.get().saturating_add(1);
+                cancellation_checks.set(next);
+                next >= 9
+            });
+        assert_eq!(
+            cancelled_after_planning.reason.as_deref(),
+            Some("placement preview cancelled")
+        );
+        assert!(
+            cancellation_checks.get() >= 9,
+            "cancellation must be observed after generation planning starts"
+        );
         assert_eq!(
             first
                 .candidate
@@ -12897,6 +13064,45 @@ mod tests {
         let unavailable = coordinator.placement_preview(&request, 1, &prepared);
         assert_eq!(unavailable.outcome, "infeasible");
         assert!(unavailable.candidate.is_none());
+    }
+
+    #[test]
+    fn placement_preview_stops_when_the_reply_receiver_is_dropped() {
+        let pool = Arc::new(GpuPool {
+            workers: Vec::new().into(),
+        });
+        let (ingress_tx, _ingress_rx) = tokio::sync::mpsc::channel(1);
+        let state = AppState::empty(
+            mold_core::Config::default(),
+            QueueHandle::new(ingress_tx),
+            pool,
+            1,
+        );
+        let coordinator = Coordinator::with_preparer_and_memory(
+            state,
+            Arc::new(ImmediatePreparer),
+            ample_memory(),
+        );
+        let request: mold_core::GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"","model":"missing","width":512,"height":512,"steps":4,"guidance":1.0,"batch_size":1}"#,
+        )
+        .unwrap();
+        let prepared = crate::execution_plan::PreparedExecutionInputs::default();
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel::<()>();
+        drop(reply_rx);
+
+        let preview = coordinator
+            .placement_preview_cancellable(&request, 1, &prepared, &|| reply_tx.is_closed());
+        assert_eq!(preview.outcome, "temporarily_unavailable");
+        assert_eq!(
+            preview.reason.as_deref(),
+            Some("placement preview cancelled")
+        );
+        assert!(coordinator
+            .batch_device_profiles_cancellable(&request, 1, &prepared, &|| reply_tx.is_closed(),)
+            .unwrap_err()
+            .to_string()
+            .contains("cancelled"));
     }
 
     #[test]
