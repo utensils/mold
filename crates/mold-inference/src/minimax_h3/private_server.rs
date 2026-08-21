@@ -526,6 +526,35 @@ fn precheck_private_h3_admission_capacity(
     Ok(())
 }
 
+/// Refuse an exact prepared target the admission sample cannot hold.
+///
+/// Device VRAM and host headroom are two independent resources with two
+/// independent samples, so they are two independent checks: one OR'd message
+/// could not tell an operator which one fell short, and printed neither
+/// sample (#1214). Both refusals are ordinary insufficient-memory errors —
+/// nothing here may route through the fatal-CUDA quarantine.
+#[cfg(feature = "mp4")]
+fn check_private_h3_target_budget_fits(
+    predicted_device_peak_bytes: u64,
+    predicted_host_increment_bytes: u64,
+    available_device_bytes: u64,
+    available_host_headroom_bytes: u64,
+) -> Result<()> {
+    if predicted_device_peak_bytes > available_device_bytes {
+        bail!(
+            "private H3 canonical target needs {predicted_device_peak_bytes} device bytes but the \
+             admission sample offers {available_device_bytes}"
+        )
+    }
+    if predicted_host_increment_bytes > available_host_headroom_bytes {
+        bail!(
+            "private H3 canonical target needs {predicted_host_increment_bytes} host bytes but \
+             the admission headroom sample offers {available_host_headroom_bytes}"
+        )
+    }
+    Ok(())
+}
+
 impl H3PrivateRuntimeBoundRecord {
     fn into_authority(self) -> H3PrivateQualifiedRuntimeBounds {
         H3PrivateQualifiedRuntimeBounds {
@@ -1555,14 +1584,12 @@ fn prepare_reviewed_h3_private_fl2va_admission(
     let predicted_host_increment_bytes = prepared_attempt
         .target_budget
         .predicted_host_increment_bytes;
-    if predicted_device_peak_bytes > available_device_bytes
-        || predicted_host_increment_bytes > available_host_headroom_bytes
-    {
-        bail!(
-            "private H3 canonical target needs {predicted_device_peak_bytes} device and \
-             {predicted_host_increment_bytes} host bytes, exceeding the admission sample"
-        )
-    }
+    check_private_h3_target_budget_fits(
+        predicted_device_peak_bytes,
+        predicted_host_increment_bytes,
+        available_device_bytes,
+        available_host_headroom_bytes,
+    )?;
     let budget_echo = H3FactoryExecutionBudgetEchoInput {
         prepared_attempt_identity_sha256: prepared_attempt.identity_sha256.clone(),
         device_peak_bytes: predicted_device_peak_bytes,
@@ -7794,6 +7821,48 @@ mod tests {
                 precheck_private_h3_admission_capacity(bounds, device_floor, host_floor).is_ok()
             );
         }
+    }
+
+    /// The exact per-attempt budget refusal has to tell an operator WHICH
+    /// resource fell short and by how much. The single OR'd message named
+    /// neither the failing resource nor either sample, so a host-headroom
+    /// refusal read exactly like a VRAM one (#1214).
+    #[cfg(feature = "mp4")]
+    #[test]
+    fn the_exact_target_budget_refusal_names_its_own_resource_and_both_numbers() {
+        check_private_h3_target_budget_fits(
+            9_000_000_000,
+            7_000_000_000,
+            9_000_000_000,
+            7_000_000_000,
+        )
+        .unwrap();
+
+        let device = check_private_h3_target_budget_fits(
+            9_000_000_001,
+            7_000_000_000,
+            9_000_000_000,
+            7_000_000_000,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(device.contains("9000000001"), "{device}");
+        assert!(device.contains("9000000000"), "{device}");
+        assert!(device.contains("device"), "{device}");
+        assert!(!device.contains("host"), "{device}");
+
+        let host = check_private_h3_target_budget_fits(
+            9_000_000_000,
+            7_000_000_001,
+            9_000_000_000,
+            7_000_000_000,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(host.contains("7000000001"), "{host}");
+        assert!(host.contains("7000000000"), "{host}");
+        assert!(host.contains("host"), "{host}");
+        assert!(!host.contains("device"), "{host}");
     }
 
     #[cfg(feature = "h3")]
