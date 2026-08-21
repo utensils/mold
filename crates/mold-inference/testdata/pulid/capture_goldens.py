@@ -70,15 +70,29 @@ def main() -> int:
     recognizer.prepare(-1)
     print("onnxruntime", onnxruntime.__version__, "| opencv", cv2.__version__)
 
-    # `.exif6.jpg` is the orientation twin of another fixture: it exists to
-    # prove the decoder rights it, and has no golden of its own.
-    names = sorted(
-        n
-        for n in os.listdir(args.faces)
-        if n.endswith((".jpg", ".png")) and ".exif6." not in n
-    )
+    # The face list comes from `sources.json`, never from a directory glob.
+    #
+    # A glob is not idempotent here: this script WRITES `.arcface112.png` and
+    # `.eva512.png` beside its inputs, so the second run would treat its own
+    # output as a face to capture — producing goldens of goldens. It would also
+    # pick up `.exif6.jpg`, the orientation twin that deliberately has no
+    # golden of its own (it is checked against the upright fixture's).
+    #
+    # `sources.json` is written by `fetch_faces.py` and names exactly the
+    # downloaded source photographs, so rerunning this script any number of
+    # times converges on the same fixture set.
+    sources_path = os.path.join(args.faces, "sources.json")
+    if not os.path.exists(sources_path):
+        print(f"missing {sources_path}; run fetch_faces.py first", file=sys.stderr)
+        return 1
+    with open(sources_path) as handle:
+        names = sorted(entry["file"] for entry in json.load(handle))
     if not names:
-        print("no fixture faces found", file=sys.stderr)
+        print("sources.json lists no fixture faces", file=sys.stderr)
+        return 1
+    missing = [n for n in names if not os.path.exists(os.path.join(args.faces, n))]
+    if missing:
+        print(f"sources.json names absent files: {missing}", file=sys.stderr)
         return 1
 
     for name in names:
