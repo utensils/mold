@@ -2725,6 +2725,8 @@ mod tests {
 
     fn request() -> GenerateRequest {
         GenerateRequest {
+            collection: None,
+            tags: None,
             title: None,
             source_fit: None,
             hdr_exr_dir: None,

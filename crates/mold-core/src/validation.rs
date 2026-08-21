@@ -1737,6 +1737,68 @@ pub fn source_image_contract_violation(
 /// Variant of [`validate_generate_request`] that accepts an explicit family
 /// hint. The hint takes precedence over the manifest lookup, letting the HTTP
 /// server feed in the catalog-resolved family for `cv:` / `hf:` model IDs.
+/// Normalized creation-time filing resolved from a request's `tags` /
+/// `collection` fields.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RequestOrganization {
+    /// Tags in first-seen order, empties dropped and case-insensitive
+    /// duplicates collapsed. Empty when the request filed under none.
+    pub tags: Vec<String>,
+    /// The collection reference exactly as it must be resolved at
+    /// publication: `Ok(name)` for a create-by-name, `Err(id)` for an exact
+    /// row this host still has to look up. `None` when no collection was
+    /// requested.
+    pub collection: Option<Result<String, String>>,
+}
+
+/// Validate the creation-time filing a request carries.
+///
+/// Refuses (422 at admission) an invalid tag, more than
+/// [`crate::MAX_REQUEST_TAGS`] distinct tags, an invalid collection name, and
+/// a `CollectionRef` with neither `id` nor `name` set. Everything else — an
+/// empty tag, a repeated tag — is normalized away silently, because neither
+/// is a mistake the user can see.
+///
+/// A `name` always wins over an `id` when both are present: the name is what
+/// the print's embedded provenance will record, so resolving the id would
+/// risk filing under one collection and recording another.
+pub fn validate_request_organization(
+    tags: Option<&[String]>,
+    collection: Option<&crate::CollectionRef>,
+) -> Result<RequestOrganization, String> {
+    let tags = match tags {
+        Some(raw) => crate::normalize_request_tags(raw)?,
+        None => Vec::new(),
+    };
+    let collection = match collection {
+        None => None,
+        Some(reference) => {
+            if reference.is_unset() {
+                return Err(
+                    "collection must set either 'name' (resolved by slug, created when absent) \
+                     or 'id' (an existing collection on the generating host)"
+                        .to_string(),
+                );
+            }
+            match reference
+                .name
+                .as_deref()
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+            {
+                Some(name) => Some(Ok(crate::validate_collection_name(name)?.0)),
+                None => Some(Err(reference
+                    .id
+                    .as_deref()
+                    .map(str::trim)
+                    .unwrap_or_default()
+                    .to_string())),
+            }
+        }
+    };
+    Ok(RequestOrganization { tags, collection })
+}
+
 pub fn validate_generate_request_with_family(
     req: &GenerateRequest,
     family_hint: Option<&str>,
@@ -1776,6 +1838,11 @@ fn validate_generate_request_after_activation(
                 .to_string(),
         );
     }
+
+    // Creation-time filing is validated before anything expensive: a bad tag
+    // or an unset collection ref is a client mistake, and paying for a model
+    // load to discover it is the wrong trade.
+    validate_request_organization(req.tags.as_deref(), req.collection.as_ref())?;
 
     if req.prompt.trim().is_empty() && prompt_required_for(req, family_hint) {
         return Err("prompt must not be empty".to_string());
@@ -3407,6 +3474,8 @@ mod tests {
 
     fn valid_req() -> GenerateRequest {
         GenerateRequest {
+            collection: None,
+            tags: None,
             title: None,
             source_fit: None,
             hdr_exr_dir: None,
@@ -7263,5 +7332,112 @@ mod tests {
         assert!(validate_generate_request(&req)
             .unwrap_err()
             .contains("temporal_upscale"));
+    }
+
+    // ── creation-time filing (tags / collection) ────────────────────────
+
+    #[test]
+    fn organization_validation_normalizes_tags_and_a_collection_name() {
+        let org = validate_request_organization(
+            Some(&[
+                "  Smurfs  ".into(),
+                "smurfs".into(),
+                "".into(),
+                "village".into(),
+            ]),
+            Some(&crate::CollectionRef::by_name("  Smurf   Village ")),
+        )
+        .unwrap();
+        assert_eq!(org.tags, vec!["Smurfs".to_string(), "village".to_string()]);
+        assert_eq!(org.collection, Some(Ok("Smurf Village".to_string())));
+    }
+
+    #[test]
+    fn organization_validation_keeps_an_id_reference_unresolved() {
+        let org =
+            validate_request_organization(None, Some(&crate::CollectionRef::by_id("  col-1  ")))
+                .unwrap();
+        assert!(org.tags.is_empty());
+        assert_eq!(org.collection, Some(Err("col-1".to_string())));
+    }
+
+    /// A name and an id together resolve as the name: the name is what the
+    /// print's embedded provenance records, so honouring the id could file
+    /// under one collection and record another.
+    #[test]
+    fn organization_validation_prefers_the_name_when_both_are_present() {
+        let org = validate_request_organization(
+            None,
+            Some(&crate::CollectionRef {
+                id: Some("col-1".into()),
+                name: Some("Smurf Village".into()),
+            }),
+        )
+        .unwrap();
+        assert_eq!(org.collection, Some(Ok("Smurf Village".to_string())));
+    }
+
+    #[test]
+    fn organization_validation_refuses_a_collection_ref_with_neither_field() {
+        for reference in [
+            crate::CollectionRef::default(),
+            crate::CollectionRef {
+                id: Some("   ".into()),
+                name: Some("".into()),
+            },
+        ] {
+            let err = validate_request_organization(None, Some(&reference)).unwrap_err();
+            assert!(err.contains("name"), "{err}");
+            assert!(err.contains("id"), "{err}");
+        }
+    }
+
+    #[test]
+    fn organization_validation_refuses_invalid_tags_and_collection_names() {
+        assert!(validate_request_organization(Some(&["ok\u{1b}[0m".into()]), None).is_err());
+        assert!(
+            validate_request_organization(Some(&["x".repeat(crate::MAX_TAG_CHARS + 1)]), None)
+                .is_err()
+        );
+        let over: Vec<String> = (0..crate::MAX_REQUEST_TAGS + 1)
+            .map(|i| format!("t{i}"))
+            .collect();
+        assert!(validate_request_organization(Some(&over), None).is_err());
+        // A name with no ASCII alphanumeric has no slug to merge on.
+        assert!(validate_request_organization(
+            None,
+            Some(&crate::CollectionRef::by_name("日本語"))
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn organization_validation_accepts_absence() {
+        let org = validate_request_organization(None, None).unwrap();
+        assert_eq!(org, RequestOrganization::default());
+        assert_eq!(
+            validate_request_organization(Some(&[]), None).unwrap(),
+            RequestOrganization::default()
+        );
+    }
+
+    /// Admission runs the filing check, so a bad tag is refused before any
+    /// model work is paid for.
+    #[test]
+    fn generate_request_validation_refuses_bad_filing() {
+        let mut req = valid_req();
+        req.tags = Some(vec!["nul\0".into()]);
+        let err = validate_generate_request(&req).unwrap_err();
+        assert!(err.contains("control characters"), "{err}");
+
+        let mut req = valid_req();
+        req.collection = Some(crate::CollectionRef::default());
+        assert!(validate_generate_request(&req).is_err());
+
+        // Valid filing passes through untouched.
+        let mut req = valid_req();
+        req.tags = Some(vec!["smurfs".into()]);
+        req.collection = Some(crate::CollectionRef::by_name("Smurf Village"));
+        assert!(validate_generate_request(&req).is_ok());
     }
 }

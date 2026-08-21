@@ -460,6 +460,8 @@ fn build_stage_generate_request(
     idx: usize,
 ) -> GenerateRequest {
     GenerateRequest {
+        collection: None,
+        tags: None,
         title: None,
         source_fit: None,
         hdr_exr_dir: None,

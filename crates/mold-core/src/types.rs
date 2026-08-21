@@ -1119,6 +1119,59 @@ fn redacted_reference_name(provenance: &GenerationReferenceProvenance) -> Option
     redacted_media_name(provenance.name.as_deref())
 }
 
+/// Which collection a generation should file its finished print into.
+///
+/// Exactly one of the two fields must be present — a `CollectionRef` with
+/// neither set is a 422 at admission rather than a deserialization failure,
+/// so the error names the field instead of the JSON shape.
+///
+/// Clients normally send `name`: collections merge across hosts by slug, so
+/// "file this under Smurf Village" is the portable instruction and each host
+/// resolves (or creates) its own row. `id` is the exact-row form, used when a
+/// client is already looking at one specific host's collection list; the id
+/// is resolved to its name at admission so the print's embedded provenance
+/// records what it was actually filed under.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct CollectionRef {
+    /// Exact collection id (a UUID) on the host that will render this print.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// Collection display name, resolved by slug and created when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(example = "Smurf Village")]
+    pub name: Option<String>,
+}
+
+impl CollectionRef {
+    /// A reference by display name — the portable, cross-host form.
+    pub fn by_name(name: impl Into<String>) -> Self {
+        Self {
+            id: None,
+            name: Some(name.into()),
+        }
+    }
+
+    /// A reference to one host's exact collection row.
+    pub fn by_id(id: impl Into<String>) -> Self {
+        Self {
+            id: Some(id.into()),
+            name: None,
+        }
+    }
+
+    /// True when neither field carries anything usable. Whitespace-only
+    /// values count as absent: `{"name": "  "}` is the same mistake as `{}`.
+    pub fn is_unset(&self) -> bool {
+        let blank = |value: &Option<String>| {
+            value
+                .as_deref()
+                .map(|text| text.trim().is_empty())
+                .unwrap_or(true)
+        };
+        blank(&self.id) && blank(&self.name)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct GenerateRequest {
     #[schema(example = "a cat sitting on a windowsill at sunset")]
@@ -1237,6 +1290,20 @@ pub struct GenerateRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(example = "Smurf village at dusk")]
     pub title: Option<String>,
+    /// Tags to file the finished print under. Normalized and capped by
+    /// [`crate::normalize_request_tags`] at admission, embedded into
+    /// `OutputMetadata.tags`, and seeded onto the gallery row exactly once at
+    /// insert. Additive; absent means "file under nothing".
+    ///
+    /// Organization is user-owned once the print exists — these values seed
+    /// the row and are never re-applied on a later refresh or re-publication.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<String>>,
+    /// Collection to file the finished print into. Clients normally send
+    /// `{ "name": "Smurf Village" }`; the server resolves it by slug and
+    /// creates it when it does not exist yet. Additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collection: Option<CollectionRef>,
     /// Durable client-generated identifier shared by prepared batch siblings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batch_id: Option<String>,
@@ -2001,6 +2068,17 @@ pub struct OutputMetadata {
     /// untitled and legacy print.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// Tags the print was filed under at creation, exactly as applied. The
+    /// gallery row's `generation_tags` links are the editable authority once
+    /// the print exists; this embedded copy is what lets a mirror or a
+    /// reconcile-from-disk recover the filing. Additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<String>>,
+    /// Display name of the collection the print was filed into at creation,
+    /// as applied — never the requested id, and never a name the host did not
+    /// actually resolve. Additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collection: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub negative_prompt: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2211,6 +2289,17 @@ impl OutputMetadata {
         Self {
             prompt: req.prompt.clone(),
             title: req.title.clone(),
+            // Creation-time filing rides through as requested. Admission has
+            // already normalized the tags and resolved the collection ref to
+            // a concrete name, so what lands here is what will be applied.
+            tags: req.tags.as_ref().filter(|tags| !tags.is_empty()).cloned(),
+            collection: req
+                .collection
+                .as_ref()
+                .and_then(|reference| reference.name.as_deref())
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned),
             negative_prompt: req.negative_prompt.clone(),
             original_prompt: req.original_prompt.clone(),
             prompt_transform: req.prompt_transform.clone(),
@@ -4476,6 +4565,8 @@ mod tests {
     #[test]
     fn generate_request_serde_roundtrip() {
         let req = GenerateRequest {
+            collection: None,
+            tags: None,
             title: None,
             source_fit: None,
             hdr_exr_dir: None,
@@ -4677,6 +4768,8 @@ mod tests {
     #[test]
     fn generate_request_negative_prompt_roundtrip() {
         let req = GenerateRequest {
+            collection: None,
+            tags: None,
             title: None,
             source_fit: None,
             hdr_exr_dir: None,
@@ -4745,6 +4838,8 @@ mod tests {
     #[test]
     fn generate_request_negative_prompt_omitted_when_none() {
         let req = GenerateRequest {
+            collection: None,
+            tags: None,
             title: None,
             source_fit: None,
             hdr_exr_dir: None,
@@ -4865,6 +4960,8 @@ mod tests {
     #[test]
     fn output_metadata_omits_strength_without_source_image() {
         let req = GenerateRequest {
+            collection: None,
+            tags: None,
             title: None,
             source_fit: None,
             hdr_exr_dir: None,
@@ -4945,6 +5042,8 @@ mod tests {
     #[test]
     fn output_metadata_records_source_image_provenance() {
         let mut req = GenerateRequest {
+            collection: None,
+            tags: None,
             title: None,
             source_fit: None,
             hdr_exr_dir: None,
@@ -5179,6 +5278,8 @@ mod tests {
     #[test]
     fn output_metadata_includes_negative_prompt_when_provided() {
         let req = GenerateRequest {
+            collection: None,
+            tags: None,
             title: None,
             source_fit: None,
             hdr_exr_dir: None,
@@ -5244,6 +5345,8 @@ mod tests {
     #[test]
     fn output_metadata_includes_strength_and_scheduler_when_applicable() {
         let req = GenerateRequest {
+            collection: None,
+            tags: None,
             title: None,
             source_fit: None,
             hdr_exr_dir: None,
@@ -5312,6 +5415,8 @@ mod tests {
     #[test]
     fn output_metadata_preserves_recreate_knobs() {
         let req = GenerateRequest {
+            collection: None,
+            tags: None,
             title: None,
             source_fit: None,
             hdr_exr_dir: None,
@@ -5951,6 +6056,8 @@ mod tests {
         // Minimal PNG-like bytes for testing
         let image_bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
         let req = GenerateRequest {
+            collection: None,
+            tags: None,
             title: None,
             source_fit: None,
             hdr_exr_dir: None,
@@ -6022,6 +6129,8 @@ mod tests {
         let image_a = vec![0x89, 0x50, 0x4E, 0x47];
         let image_b = vec![0xFF, 0xD8, 0xFF, 0xE0];
         let req = GenerateRequest {
+            collection: None,
+            tags: None,
             title: None,
             source_fit: None,
             hdr_exr_dir: None,
@@ -6106,6 +6215,8 @@ mod tests {
     #[test]
     fn generate_request_source_image_omitted_in_json_when_none() {
         let req = GenerateRequest {
+            collection: None,
+            tags: None,
             title: None,
             source_fit: None,
             hdr_exr_dir: None,
@@ -6175,6 +6286,8 @@ mod tests {
     fn generate_request_control_image_base64_roundtrip() {
         let control_bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
         let req = GenerateRequest {
+            collection: None,
+            tags: None,
             title: None,
             source_fit: None,
             hdr_exr_dir: None,
@@ -6307,6 +6420,8 @@ mod tests {
         let mask_bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
         let source_bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
         let req = GenerateRequest {
+            collection: None,
+            tags: None,
             title: None,
             source_fit: None,
             hdr_exr_dir: None,
@@ -8464,6 +8579,105 @@ mod server_event_tests {
         assert_eq!(metadata.title.as_deref(), Some("Smurf village"));
         let wire = serde_json::to_value(&metadata).unwrap();
         assert_eq!(wire["title"], "Smurf village");
+    }
+
+    /// `tags` / `collection` are additive on both halves of the wire: an
+    /// older client's request omits them, and an untagged print's embedded
+    /// metadata carries neither key.
+    #[test]
+    fn generate_request_filing_is_additive_and_flows_into_metadata() {
+        let without: GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"a cat","model":"flux-dev:q4","width":1024,"height":1024,"steps":4}"#,
+        )
+        .unwrap();
+        assert_eq!(without.tags, None);
+        assert_eq!(without.collection, None);
+        let metadata = OutputMetadata::from_generate_request(&without, 7, None, "test");
+        assert_eq!(metadata.tags, None);
+        assert_eq!(metadata.collection, None);
+        let wire = serde_json::to_value(&metadata).unwrap();
+        assert!(wire.get("tags").is_none(), "{wire}");
+        assert!(wire.get("collection").is_none(), "{wire}");
+        assert!(serde_json::to_value(&without)
+            .unwrap()
+            .get("tags")
+            .is_none());
+
+        let with: GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"a cat","model":"flux-dev:q4","width":1024,"height":1024,"steps":4,
+                "tags":["smurfs","village"],"collection":{"name":"Smurf Village"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            with.tags.as_deref(),
+            Some(["smurfs".to_string(), "village".to_string()].as_slice())
+        );
+        assert_eq!(
+            with.collection,
+            Some(CollectionRef::by_name("Smurf Village"))
+        );
+        let metadata = OutputMetadata::from_generate_request(&with, 7, None, "test");
+        assert_eq!(
+            metadata.tags.as_deref(),
+            Some(["smurfs".to_string(), "village".to_string()].as_slice())
+        );
+        assert_eq!(metadata.collection.as_deref(), Some("Smurf Village"));
+        let wire = serde_json::to_value(&metadata).unwrap();
+        assert_eq!(wire["tags"], serde_json::json!(["smurfs", "village"]));
+        assert_eq!(wire["collection"], "Smurf Village");
+    }
+
+    /// The embedded copy records the collection NAME, never the requested
+    /// id — a request that arrives as an id has been resolved by admission,
+    /// and one that was not must not stamp a UUID into provenance.
+    #[test]
+    fn metadata_collection_records_the_name_never_an_unresolved_id() {
+        let mut req: GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"a cat","model":"flux-dev:q4","width":1024,"height":1024,"steps":4}"#,
+        )
+        .unwrap();
+        req.collection = Some(CollectionRef::by_id("11111111-2222-3333-4444-555555555555"));
+        let metadata = OutputMetadata::from_generate_request(&req, 7, None, "test");
+        assert_eq!(metadata.collection, None);
+
+        // Once admission resolves the id, the name is what lands.
+        req.collection = Some(CollectionRef {
+            id: Some("11111111-2222-3333-4444-555555555555".into()),
+            name: Some("Smurf Village".into()),
+        });
+        let metadata = OutputMetadata::from_generate_request(&req, 7, None, "test");
+        assert_eq!(metadata.collection.as_deref(), Some("Smurf Village"));
+    }
+
+    /// An empty tag list is the same as no tags — it must not stamp an empty
+    /// array into every print's provenance.
+    #[test]
+    fn metadata_omits_an_empty_tag_list() {
+        let mut req: GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"a cat","model":"flux-dev:q4","width":1024,"height":1024,"steps":4}"#,
+        )
+        .unwrap();
+        req.tags = Some(Vec::new());
+        let metadata = OutputMetadata::from_generate_request(&req, 7, None, "test");
+        assert_eq!(metadata.tags, None);
+    }
+
+    #[test]
+    fn collection_ref_detects_the_unset_shape() {
+        assert!(CollectionRef::default().is_unset());
+        assert!(CollectionRef {
+            id: Some("  ".into()),
+            name: Some("".into())
+        }
+        .is_unset());
+        assert!(!CollectionRef::by_name("Smurf Village").is_unset());
+        assert!(!CollectionRef::by_id("abc").is_unset());
+
+        // `{}` deserializes rather than failing, so the 422 can name the
+        // field instead of the JSON shape.
+        let bare: CollectionRef = serde_json::from_str("{}").unwrap();
+        assert!(bare.is_unset());
+        assert_eq!(serde_json::to_value(&bare).unwrap(), serde_json::json!({}));
     }
 
     #[test]

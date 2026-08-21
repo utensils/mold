@@ -1207,6 +1207,8 @@ mod tests {
         loras: Option<Vec<mold_core::LoraWeight>>,
     ) -> mold_core::GenerateRequest {
         mold_core::GenerateRequest {
+            collection: None,
+            tags: None,
             title: None,
             source_fit: None,
             hdr_exr_dir: None,

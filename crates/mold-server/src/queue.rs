@@ -3222,6 +3222,8 @@ mod tests {
     /// hand to `OutputMetadata::from_generate_request` in tests.
     fn fake_request(model: &str) -> GenerateRequest {
         GenerateRequest {
+            collection: None,
+            tags: None,
             title: None,
             source_fit: None,
             hdr_exr_dir: None,

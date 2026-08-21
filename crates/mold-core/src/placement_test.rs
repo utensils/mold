@@ -117,6 +117,8 @@ fn advanced_placement_defaults_to_auto_pair() {
 fn generate_request_placement_round_trips() {
     use super::GenerateRequest;
     let req = GenerateRequest {
+        collection: None,
+        tags: None,
         title: None,
         source_fit: None,
         hdr_exr_dir: None,

@@ -170,6 +170,8 @@ mod tests {
 
     fn meta() -> OutputMetadata {
         OutputMetadata {
+            collection: None,
+            tags: None,
             title: None,
             source_fit: None,
             guidance_overrides: None,

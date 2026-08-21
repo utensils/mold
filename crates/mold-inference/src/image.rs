@@ -363,6 +363,8 @@ mod tests {
     fn test_encode_png_with_metadata_chunks() {
         let tensor = solid_red_tensor(4, 4);
         let metadata = OutputMetadata {
+            collection: None,
+            tags: None,
             title: None,
             source_fit: None,
             guidance_overrides: None,
@@ -462,6 +464,8 @@ mod tests {
     #[test]
     fn test_build_output_metadata_respects_opt_out() {
         let req = GenerateRequest {
+            collection: None,
+            tags: None,
             title: None,
             source_fit: None,
             hdr_exr_dir: None,
@@ -527,6 +531,8 @@ mod tests {
     #[test]
     fn test_update_output_metadata_size_overrides_dimensions() {
         let mut metadata = Some(OutputMetadata {
+            collection: None,
+            tags: None,
             title: None,
             source_fit: None,
             guidance_overrides: None,
@@ -598,6 +604,8 @@ mod tests {
 
     fn test_metadata() -> OutputMetadata {
         OutputMetadata {
+            collection: None,
+            tags: None,
             title: None,
             source_fit: None,
             guidance_overrides: None,
@@ -762,6 +770,8 @@ mod tests {
     fn test_encode_jpeg_metadata_roundtrip() {
         let tensor = solid_red_tensor(8, 8);
         let metadata = OutputMetadata {
+            collection: None,
+            tags: None,
             title: None,
             source_fit: None,
             guidance_overrides: None,

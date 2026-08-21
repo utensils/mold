@@ -2989,6 +2989,8 @@ mod tests {
             CachedTensor::from_tensor(&cap_feats).unwrap(),
         );
         let req = GenerateRequest {
+            collection: None,
+            tags: None,
             title: None,
             source_fit: None,
             hdr_exr_dir: None,

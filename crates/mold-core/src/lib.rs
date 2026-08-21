@@ -102,8 +102,9 @@ pub use validation::{
     require_generate_request_model_activation, validate_generate_request,
     validate_generate_request_with_family, validate_generation_dimensions,
     validate_generation_dimensions_composed, validate_generation_dimensions_for_model,
-    validate_upscale_request, wan_dimension_alignment, Ltx2OutputRung, Ltx2SpatialComposition,
-    LORA_CAPABLE_FAMILIES, LTX2_OUTPUT_RUNGS,
+    validate_request_organization, validate_upscale_request, wan_dimension_alignment,
+    Ltx2OutputRung, Ltx2SpatialComposition, RequestOrganization, LORA_CAPABLE_FAMILIES,
+    LTX2_OUTPUT_RUNGS,
 };
 
 pub use expand::{

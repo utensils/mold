@@ -7555,6 +7555,8 @@ impl App {
                         && !saved_path.as_os_str().is_empty()
                     {
                         let meta = mold_core::OutputMetadata {
+                            collection: None,
+                            tags: None,
                             title: None,
                             source_fit: None,
                             guidance_overrides: submitted_params
@@ -7978,6 +7980,8 @@ impl App {
                         .map(|e| e.metadata.clone());
 
                     let meta = mold_core::OutputMetadata {
+                        collection: None,
+                        tags: None,
                         title: None,
                         source_fit: None,
                         guidance_overrides: None,
@@ -9190,6 +9194,8 @@ mod tests {
         let entry = GalleryEntry {
             path: std::path::PathBuf::from("/home/user/.mold/output/mold-flux-1234.png"),
             metadata: mold_core::OutputMetadata {
+                collection: None,
+                tags: None,
                 title: None,
                 source_fit: None,
                 guidance_overrides: None,
@@ -9263,6 +9269,8 @@ mod tests {
         let entry = GalleryEntry {
             path: std::path::PathBuf::new(),
             metadata: mold_core::OutputMetadata {
+                collection: None,
+                tags: None,
                 title: None,
                 source_fit: None,
                 guidance_overrides: None,
@@ -9397,6 +9405,8 @@ mod tests {
 
     fn make_test_metadata() -> mold_core::OutputMetadata {
         mold_core::OutputMetadata {
+            collection: None,
+            tags: None,
             title: None,
             source_fit: None,
             guidance_overrides: None,

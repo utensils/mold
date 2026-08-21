@@ -2047,6 +2047,8 @@ mod tests {
 
     fn request(output_format: OutputFormat, enable_audio: Option<bool>) -> GenerateRequest {
         GenerateRequest {
+            collection: None,
+            tags: None,
             title: None,
             source_fit: None,
             hdr_exr_dir: None,
@@ -2300,6 +2302,8 @@ mod tests {
 
     fn bare_t2v_req(model: &str) -> GenerateRequest {
         GenerateRequest {
+            collection: None,
+            tags: None,
             title: None,
             source_fit: None,
             hdr_exr_dir: None,
@@ -2369,6 +2373,8 @@ mod tests {
             0,
         );
         let req = GenerateRequest {
+            collection: None,
+            tags: None,
             title: None,
             source_fit: None,
             hdr_exr_dir: None,
@@ -2611,6 +2617,8 @@ mod tests {
             0,
         );
         let req = GenerateRequest {
+            collection: None,
+            tags: None,
             title: None,
             source_fit: None,
             hdr_exr_dir: None,
