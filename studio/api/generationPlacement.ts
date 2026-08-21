@@ -56,11 +56,20 @@ export type PlacementPreviewClassification =
 
 /** Reference-conditioned requests require the v1 authoritative preview.
  * Property presence is deliberate: `references: null` and `references: []`
- * are still an H3/reference wire shape and must never reach legacy routing. */
+ * are still an H3/reference wire shape and must never reach legacy routing.
+ *
+ * A face-identity request (#1224) is held to the same rule for a different
+ * reason: a server old enough to answer the preview with 404/405 predates the
+ * identity partition and would ignore `id_image` outright, returning a print
+ * of a stranger rather than an error. Here the VALUE matters — the field only
+ * ever rides the wire with bytes in it. */
 export function requiresAuthoritativePlacement(
   request: Record<string, unknown>,
 ): boolean {
-  return Object.prototype.hasOwnProperty.call(request, "references");
+  return (
+    Object.prototype.hasOwnProperty.call(request, "references") ||
+    Boolean(request.id_image)
+  );
 }
 
 function nonNegativeSafeInteger(value: unknown): value is number {

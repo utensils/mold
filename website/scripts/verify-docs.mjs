@@ -222,6 +222,10 @@ const ignoredEnvVars = new Set([
   'MOLD_TEST_GEMMA_GGUF',
   'MOLD_TEST_GEMMA_ROOT',
   'MOLD_TEST_LTX2_CHECKPOINT',
+  // Opt-in PuLID/InsightFace parity fixtures: the antelopev2 weights are
+  // non-commercial and never downloaded by the test, so this only points an
+  // ignored parity test at an existing local directory.
+  'MOLD_TEST_PULID_ASSETS',
   // Private H3 qualification/capture inputs. These are feature-gated evidence
   // authorities, not supported configuration for ordinary Mold releases.
   'MOLD_H3_AUTHORIZATION_RECORD',

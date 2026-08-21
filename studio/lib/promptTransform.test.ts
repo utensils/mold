@@ -80,6 +80,18 @@ describe("prompt remix contract", () => {
     );
   });
 
+  it("treats an identity photo as conditioning media", () => {
+    // A face reference conditions the render exactly like a source image
+    // does, so swapping or removing one has to stale reviewed work through
+    // the SAME rule rather than a second, identity-only staleness check.
+    expect(conditioningFingerprint({ id_image: "a" })).not.toBe(
+      conditioningFingerprint({ id_image: "b" }),
+    );
+    expect(conditioningFingerprint({ id_image: "a" })).not.toBe(
+      conditioningFingerprint({}),
+    );
+  });
+
   it("treats ordered H3 reference reordering as stale conditioning", () => {
     const first = { kind: "image", provenance: { sha256: "a" } };
     const second = { kind: "audio", provenance: { sha256: "b" } };

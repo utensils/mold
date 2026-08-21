@@ -29,6 +29,10 @@ export interface ExpansionTaskRequest {
   retake_range?: unknown;
   references?: readonly unknown[] | null;
   frames?: number | null;
+  /** Face-identity reference (#1224). It never changes the expansion TASK —
+   * a face photo does not make a text-to-image print an img2img one — but it
+   * IS conditioning media, so `conditioningFingerprint` reads it. */
+  id_image?: unknown;
 }
 
 function presentPath(path: string | null | undefined): boolean {

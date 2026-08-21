@@ -128,6 +128,53 @@ lists or numeric ranges stay in the Advanced sheet with inline feedback and
 cannot queue a request; **Reset advanced**, templates, and Library reuse share
 the same saved override state as desktop.
 
+### Identity photos (PuLID)
+
+An identity photo conditions the print on a person's face: the render keeps
+that likeness while the prompt decides everything else. The photo itself is
+never composited into the output, and — unlike a source image — it is never
+cropped or fitted to the canvas. It is a reference, not a composition input.
+
+An **Identity** well sits in the Create form beside the source wells whenever
+the selected model and the machine you are developing on both support it; when
+they do not, the control is not there at all rather than present and disabled.
+Tap it to pick a PNG or JPEG (at most 16 MiB, 8192 px per side, 32 MP) with the
+usual iOS photo/camera picker. Identity conditioning is offered only for the
+identity-qualified checkpoints on a server built with the feature, and it
+cannot be combined with a LoRA or an img2img source image — see
+[Identity Photos (PuLID)](/guide/generating#identity-photos-pulid) for the full
+rule and the one-time InsightFace licence acceptance.
+
+Switching to a model that cannot use an identity photo does not throw yours
+away and does not stop you developing: the photo is parked, the request goes
+out without it, and the well comes back with the photo still in it when you
+select a qualified model again.
+
+Two knobs live in the Advanced sheet, count toward its badge, and clear with
+**Reset**. Both stay absent from the request until you touch them, so the
+server's own defaults keep applying:
+
+- **Identity strength** — how strongly the face is held, `0.0`–`3.0`
+  (default `1.0`). Higher preserves the likeness; lower lets the prompt reshape
+  it.
+- **Identity start step** — the first denoise step the face is applied at
+  (default `0`, always fewer than the print's step count). Delaying it lets the
+  composition settle before the likeness is pinned.
+
+If the combination cannot be submitted — a photo alongside a LoRA or a source
+image, a knob set with no photo, an oversized or unsupported file — the reason
+reads inline beside the control and Develop stays blocked. Prepared Batch N
+siblings inherit the photo and both knobs (and the reviewed card names the same
+reason on its own Develop), and changing the photo stales reviewed prompt work
+exactly as changing a source image does.
+
+Under **Auto** or **Most capable**, an identity print is only ever sent to a
+machine that advertises identity support for that model itself — the model list
+is merged across your machines, so the one you staged the photo against is not
+necessarily the one that develops it. If the machine that was chosen cannot
+hold the face, or is running a Mold old enough to ignore the photo, Mold says
+so and queues nothing rather than returning a print of someone else.
+
 Choose resolution through proportionally drawn shape tiles — the canonical
 families (1:1, 4:3, 3:2, 16:9, 21:9 and their portrait twins) the selected
 model can actually express, plus **Source** when an image is attached — then a
@@ -248,6 +295,13 @@ collection**.
 Tap a print and use **Info** to edit it in place: the title (Done saves; blank
 clears it), ♥, tags, and its collections. The viewer's title line shows the
 print's title, or its prompt while untitled.
+
+A print developed with an identity photo also lists that provenance in **Info**
+— the photo's filename, the first characters of its SHA-256, and the effective
+strength and start step. Saved metadata records the digest, never the face
+bytes, so **Use as prompt** restores the two knobs and re-attaches the photo
+only when this device still holds it; when it does not, Mold says so instead of
+rendering a different person.
 
 ### Trash
 
