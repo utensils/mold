@@ -7,8 +7,11 @@
   ([#1229](https://github.com/utensils/mold/issues/1229)).
 - **The EVA02-CLIP release is converted, never loaded as a pickle.** Its
   official distribution is a torch pickle, so Mold converts it once to
-  vision-only safetensors from the SHA-verified source — opened without
-  following symlinks, hashed through the retained descriptor, inode-fenced
-  across the read, and published through an fsynced atomic rename with the
-  derived digest recorded in a sidecar. The runtime only ever loads the
-  derived file ([#1229](https://github.com/utensils/mold/issues/1229)).
+  vision-only safetensors from the SHA-verified source: opened without
+  following symlinks, parsed from a private copy taken from that descriptor and
+  hashed on the same stream, and published by renaming out of an owner-only
+  staging directory so a symlink planted at the destination cannot redirect the
+  write. A converted file is reused only when it hashes to the digest this
+  build pins — a tampered one is reconverted even if the provenance record
+  beside it was forged to match
+  ([#1229](https://github.com/utensils/mold/issues/1229)).
