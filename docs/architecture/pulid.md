@@ -102,7 +102,9 @@ reader to open paths inside it by name. It also cannot be the model directory
 itself: `CLAUDE.md`'s model-storage rule makes shared, group-writable model
 roots legitimate, so staging has to happen somewhere mold owns outright.
 
-### Why every publish is a rename
+### Why every publish is a `renameat` between descriptors
+
+Two separate hazards, one helper.
 
 `std::fs::write` **follows** a symlink at its destination, so a link
 pre-planted at the sidecar or the weights path would redirect the write into a
@@ -110,6 +112,32 @@ file of the attacker's choosing. `rename` replaces the link itself. Every write
 in the module — weights and sidecar alike — goes through the one `publish`
 helper for that reason, and two tests plant a symlink over a victim file and
 assert the victim is untouched.
+
+But a *pathname* rename is still not enough, and this is the subtler half.
+Renaming an entry needs write permission on the **parent** directory, not on
+the entry, so in the group-writable model root that `CLAUDE.md` explicitly
+supports another member can rename our 0o700 staging directory away and drop
+their own at the same name — between the hash and the publish. A pathname
+rename would then publish their file under our authenticated digest.
+
+So both endpoints are retained directory descriptors and the publish is a
+`renameat` through them. Descriptors refer to inodes, so this reaches the
+directory we created no matter what its name now points at.
+`encoders::secure_dir` holds that primitive; the staging directory is created
+with `mkdirat` and then proven to be ours (uid and mode) to close the window
+before the `openat`. Afterwards the published file's `(device, inode)` is
+re-read through the destination's parent descriptor and compared with the
+staged file's, so the artifact the caller receives is provably the one that was
+hashed.
+
+`serialize_to_file` insists on a pathname and is the one step that is not
+descriptor-bound. That is a liveness concern only: if the staging name were
+stolen mid-write the bytes would land in the impostor, and the next step —
+which re-opens through the retained staging descriptor — would fail to find
+them and error. It cannot silently succeed on someone else's bytes, because the
+hash and the publish both go through that descriptor.
+`a_stolen_staging_name_cannot_substitute_the_published_bytes` performs exactly
+this swap through a test hook placed between the hash and the publish.
 
 ### Why the sidecar is not trusted
 
@@ -225,6 +253,12 @@ built before the loop.
   latents attend to themselves as well as the context.
 - Its scale is `dim_head^-0.25` applied to **both** q and k before the matmul,
   which is what upstream ships.
+- The L2 normalization of the CLIP projection happens in the tower's working
+  dtype, not in f32. Upstream's `torch.norm` / `torch.div`
+  (`pipeline_flux.py:178-179`) operate on the tensor the tower returned, and
+  the tower ran in `weight_dtype` (`:176`) — bfloat16 by default. Widening
+  looks like a free accuracy win and is a divergence; it would also leave an
+  f32 half in the concatenation with the ArcFace embedding.
 - Its softmax is widened to f32 and cast straight back
   (`torch.softmax(weight.float(), -1).type(weight.dtype)`,
   `encoders_transformer.py:114`). This is not a rounding detail: BF16 carries
