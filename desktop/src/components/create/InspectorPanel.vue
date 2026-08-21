@@ -59,6 +59,10 @@ import { useModelStore } from "../../stores/models";
 import { useHostModelsStore } from "../../stores/hostModels";
 import { useHostsStore } from "../../stores/hosts";
 import { useAppPrefsStore } from "../../stores/appPrefs";
+import { useGalleryStore } from "../../stores/gallery";
+import { useLibraryPrefsStore } from "../../stores/libraryPrefs";
+import { fileUnderAvailable, matchCollection, type FileUnderState } from "@studio/lib/fileUnder";
+import FileUnderGroup from "./FileUnderGroup.vue";
 import { dragWidth } from "../../lib/panelResize";
 import ModelPicker from "./ModelPicker.vue";
 import AdvancedSettings from "./AdvancedSettings.vue";
@@ -93,6 +97,8 @@ const models = useModelStore();
 const hostModels = useHostModelsStore();
 const hosts = useHostsStore();
 const appPrefs = useAppPrefsStore();
+const gallery = useGalleryStore();
+const libraryPrefs = useLibraryPrefsStore();
 const controlAdapters = ref<Ltx2ControlAdapterInfo[]>([]);
 const cameraControls = ref<Ltx2CameraControlInfo[]>([]);
 const cameraControlsLoaded = ref(false);
@@ -499,6 +505,57 @@ const batchLocked = computed(
 );
 const batchMax = computed(() => (batchLocked.value ? 1 : MAX_BATCH_SIZE));
 
+// ── File under (Create-time Library filing) ────────────────────────────────
+
+// Positive knowledge only, exactly like the V3 Library's own gate: an older
+// server, `MOLD_DB_DISABLE=1`, and a capability snapshot nobody has read yet
+// all answer false and the group stays hidden. A PINNED machine is the one
+// that will file this print, so it alone decides; automatic routing could
+// land on any machine whose capabilities we have actually read.
+const fileUnderHostIds = computed<string[]>(() => {
+  const sticky = stickyTarget.value;
+  if (sticky && sticky !== "capable") return [sticky];
+  return hosts.all.map((host) => host.id);
+});
+const showFileUnder = computed(() =>
+  fileUnderHostIds.value.some((id) => fileUnderAvailable(hosts.capabilities[id])),
+);
+
+// Suggestions and the collection picker are the Library's own merged views —
+// one tag list and one collection shelf across every connected machine.
+const fileUnderTags = computed(() => gallery.mergedTags);
+const fileUnderCollections = computed(() => gallery.mergedCollections);
+
+watch(
+  showFileUnder,
+  (visible) => {
+    if (!visible) return;
+    gallery.syncBuckets();
+    void gallery.fetchCollections();
+    void gallery.fetchTags();
+  },
+  { immediate: true },
+);
+
+// The title match is re-derived from the LIVE title on every keystroke, and
+// the form carries the winner so `buildRequest` can offer it without knowing
+// about stores. Nothing here creates a collection.
+watch(
+  [() => props.form.title, fileUnderCollections],
+  ([title, collections]) => {
+    props.form.fileUnderMatch = matchCollection(title, collections);
+  },
+  { immediate: true },
+);
+
+// The preview names the file the print will land as, so it follows the same
+// extension `buildRequest` ships.
+const fileUnderExtension = computed(() => props.form.outputFormat);
+
+function setFileUnder(next: FileUnderState) {
+  props.form.fileUnder = next;
+}
+
 // Same contract as the Advanced pane's Reset, surfaced without opening it:
 // the prompt, the model, and any prepared batch size survive.
 function resetSettings() {
@@ -798,6 +855,22 @@ function resetSettings() {
       <p v-else-if="batchLocked" class="ms-field__hint -mt-2">
         Locked to 1 — edit models render one at a time.
       </p>
+
+      <!-- File under — where this print lands in the Library, decided before
+           Generate rather than discovered after it. -->
+      <FileUnderGroup
+        v-if="showFileUnder"
+        :title="form.title"
+        :state="form.fileUnder"
+        :auto-tag-title="libraryPrefs.autoTagTitle"
+        :tags="fileUnderTags"
+        :collections="fileUnderCollections"
+        :model="form.model"
+        :extension="fileUnderExtension"
+        :batch-size="isSequence ? 1 : form.batchSize"
+        :output-kind="isSequence ? 'sequence' : 'print'"
+        @update:state="setFileUnder"
+      />
 
       <!-- Advanced -->
       <button
