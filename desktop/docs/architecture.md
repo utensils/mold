@@ -21,11 +21,11 @@ no server or inference crates enter the phone build. The first scaffold targets
 SDK 36 with minimum SDK 24 and builds through `scripts/android.sh`; Android
 Studio, SDK/NDK, AVD, Gradle, Cargo, and Bun caches default to external storage.
 
-The remaining native boundary is explicit: implement Keystore-backed host keys,
-Android NSD for `_mold._tcp`, MediaStore/share intents, barcode scanning, and
-system-bar/viewport behavior behind the existing command contracts. Until the
-Keystore bridge lands, Android refuses to persist API keys instead of copying
-them into WebView storage or plain SharedPreferences.
+The Android-native boundary lives in `apps/mobile/plugins`. It encrypts per-host
+keys with a non-exportable Android Keystore AES-GCM key, retains only ciphertext
+in private preferences, and uses Tauri's Android barcode scanner for the shared
+one-time pairing flow. Android NSD for `_mold._tcp`, MediaStore/share intents,
+and system-bar/viewport behavior remain behind the existing command contracts.
 
 ## iOS companion
 

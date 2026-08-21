@@ -154,6 +154,14 @@ case "$ACTION" in
     cd "$MOBILE"
     cargo tauri android build --debug --apk --target aarch64 --ci "$@"
     ;;
+  test)
+    require_android_toolchain
+    prepare_frontend
+    cd "$MOBILE"
+    cargo tauri android build --debug --apk --target aarch64 --ci
+    cd gen/android
+    ./gradlew --no-daemon :tauri-plugin-mold-mobile-native:connectedDebugAndroidTest "$@"
+    ;;
   dev)
     require_android_toolchain
     prepare_frontend
@@ -178,7 +186,7 @@ case "$ACTION" in
     open "$STUDIO_APP" --args "$MOBILE/gen/android"
     ;;
   *)
-    echo "usage: scripts/android.sh {setup|doctor|init|emulator|check|dev|run|build|studio} [args...]" >&2
+    echo "usage: scripts/android.sh {setup|doctor|init|emulator|check|test|dev|run|build|studio} [args...]" >&2
     exit 2
     ;;
 esac

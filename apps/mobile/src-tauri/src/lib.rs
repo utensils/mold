@@ -8,6 +8,9 @@ mod keychain;
 mod media;
 mod viewport;
 
+#[cfg(target_os = "android")]
+use tauri_plugin_mold_mobile_native as mobile_native;
+
 fn app_context() -> tauri::Context<tauri::Wry> {
     tauri::generate_context!()
 }
@@ -26,11 +29,15 @@ pub fn run() {
     #[cfg(target_os = "ios")]
     install_network_crypto_provider();
 
-    tauri::Builder::default()
-        .plugin(tauri_plugin_deep_link::init())
+    let builder = tauri::Builder::default().plugin(tauri_plugin_deep_link::init());
+    #[cfg(target_os = "android")]
+    let builder = builder.plugin(mobile_native::init());
+
+    builder
         .setup(|_app| {
-            #[cfg(target_os = "ios")]
+            #[cfg(any(target_os = "ios", target_os = "android"))]
             {
+                #[cfg(target_os = "ios")]
                 media::cleanup_stale_animation_exports();
                 _app.handle().plugin(tauri_plugin_barcode_scanner::init())?;
             }

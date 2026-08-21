@@ -7670,18 +7670,35 @@ describe("MobileApp host and catalog coordination", () => {
     await flushPromises();
   }
 
-  it("shows the honest Android scaffold instead of unsupported native controls", async () => {
+  it("offers secure Android pairing while discovery remains explicitly unavailable", async () => {
     isNativeAndroidRuntime.mockReturnValue(true);
     wrapper = mountMobileApp();
     await flushPromises();
     await wrapper.get("[data-test='mobile-tab-hosts']").trigger("click");
 
     expect(wrapper.get("[data-test='mobile-android-foundation-note']").text()).toContain(
-      "secure keys, camera pairing, and nearby discovery are next",
+      "Android secure pairing is active",
     );
-    expect(wrapper.find("[data-test='mobile-scan-pairing']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='mobile-scan-pairing']").exists()).toBe(true);
     expect(wrapper.text()).not.toContain("Discover nearby");
-    expect(wrapper.text()).not.toContain("API key");
+    expect(wrapper.text()).toContain("API key");
+  });
+
+  it("claims Android pairing codes with an Android client identity", async () => {
+    isNativeAndroidRuntime.mockReturnValue(true);
+    scanPairingQr.mockResolvedValue({ content: pairingPayload() });
+    claimPairingSession.mockResolvedValue({
+      api_key: "paired-key",
+      instance_id: "wrong-host",
+      hostname: "impostor",
+    });
+
+    await scanFromMachines();
+
+    expect(claimPairingSession).toHaveBeenCalledWith("http://pair.local:7680", "one-time-token", {
+      name: "Mold on Android",
+      kind: "android",
+    });
   });
 
   it("settles first-run camera permission before opening the pairing scanner", async () => {

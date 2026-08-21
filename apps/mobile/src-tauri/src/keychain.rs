@@ -8,10 +8,18 @@ pub fn keychain_set_api_key(host_id: String, api_key: String) -> Result<(), Stri
         .map_err(|error| format!("could not save API key: {error}"))
 }
 
-#[cfg(not(target_vendor = "apple"))]
+#[cfg(target_os = "android")]
 #[tauri::command]
-pub fn keychain_set_api_key(_host_id: String, _api_key: String) -> Result<(), String> {
-    Err("secure Android API key storage is not implemented yet".into())
+pub fn keychain_set_api_key(
+    app: tauri::AppHandle,
+    host_id: String,
+    api_key: String,
+) -> Result<(), String> {
+    use tauri_plugin_mold_mobile_native::MoldMobileNativeExt;
+
+    app.mold_mobile_native()
+        .set_api_key(host_id, api_key)
+        .map_err(|error| error.to_string())
 }
 
 #[cfg(target_vendor = "apple")]
@@ -26,10 +34,17 @@ pub fn keychain_get_api_key(host_id: String) -> Result<Option<String>, String> {
     }
 }
 
-#[cfg(not(target_vendor = "apple"))]
+#[cfg(target_os = "android")]
 #[tauri::command]
-pub fn keychain_get_api_key(_host_id: String) -> Result<Option<String>, String> {
-    Ok(None)
+pub fn keychain_get_api_key(
+    app: tauri::AppHandle,
+    host_id: String,
+) -> Result<Option<String>, String> {
+    use tauri_plugin_mold_mobile_native::MoldMobileNativeExt;
+
+    app.mold_mobile_native()
+        .get_api_key(host_id)
+        .map_err(|error| error.to_string())
 }
 
 #[cfg(target_vendor = "apple")]
@@ -41,8 +56,12 @@ pub fn keychain_delete_api_key(host_id: String) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(not(target_vendor = "apple"))]
+#[cfg(target_os = "android")]
 #[tauri::command]
-pub fn keychain_delete_api_key(_host_id: String) -> Result<(), String> {
-    Ok(())
+pub fn keychain_delete_api_key(app: tauri::AppHandle, host_id: String) -> Result<(), String> {
+    use tauri_plugin_mold_mobile_native::MoldMobileNativeExt;
+
+    app.mold_mobile_native()
+        .delete_api_key(host_id)
+        .map_err(|error| error.to_string())
 }

@@ -1,0 +1,19 @@
+[package]
+name = "tauri-plugin-mold-mobile-native"
+version = "0.23.3"
+authors = ["James Brink", "Jeffrey Dilley"]
+description = "Android native bridges for the Mold mobile companion"
+edition = "2024"
+rust-version = "1.85"
+exclude = ["/examples", "/dist-js", "/guest-js", "/node_modules"]
+links = "tauri-plugin-mold-mobile-native"
+
+[workspace]
+
+[dependencies]
+tauri = { version = "2.11.3", default-features = false }
+serde = { version = "1.0", features = ["derive"] }
+thiserror = "2"
+
+[build-dependencies]
+tauri-plugin = { version = "2.6.3", features = ["build"] }

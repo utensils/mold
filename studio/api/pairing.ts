@@ -17,7 +17,7 @@ export interface PairingClaim {
 
 export interface PairingClientIdentity {
   name: string;
-  kind: "iphone" | "ipad" | "mobile";
+  kind: "iphone" | "ipad" | "android" | "mobile";
 }
 
 export interface PairedClient {

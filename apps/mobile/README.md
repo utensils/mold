@@ -7,9 +7,9 @@ Mold mobile is a remote-only Tauri 2 client. It never links or embeds the GPU
 inference stack; a saved Mold server owns the models, queue, downloads,
 generation work, and gallery media. The iPhone app is the shipped product. The
 Android project is buildable groundwork that deliberately reuses this crate and
-Vue frontend; secure API-key storage, Android NSD discovery, native media
-actions, QR scanning, Android-specific polish, CI, and Play distribution remain
-implementation work before an Android release.
+Vue frontend. Keystore-backed API-key storage and native QR pairing are active;
+Android NSD discovery, native media actions, system-chrome polish, CI, and Play
+distribution remain implementation work before an Android release.
 
 The app is designed for iPhone first and supports iOS 17 or later. iPad is a
 responsive secondary target.
@@ -41,9 +41,10 @@ Native commands are intentionally limited to platform responsibilities:
 - Bonjour/DNS-SD discovery of `_mold._tcp`
 - UIKit appearance synchronization for readable system chrome
 
-Android must provide those same contracts through Android Keystore, NSD,
-MediaStore/share intents, system-bar appearance, and a barcode-scanner plugin.
-Do not fork the product UI or remote HTTP/SSE logic to implement them.
+Android provides secure credentials and pairing through the local
+`apps/mobile/plugins` Kotlin bridge plus Tauri's barcode-scanner plugin. Keep
+implementing NSD, MediaStore/share intents, and system-bar appearance behind the
+same command contracts; do not fork the product UI or remote HTTP/SSE logic.
 
 Everything a remote Mold server can answer uses the same authenticated HTTP
 and SSE contract as desktop. Do not import desktop stores that assume a local
@@ -454,9 +455,10 @@ WebView local storage contains non-secret mobile state:
   per-host latest-print timestamps and the first-visit marker for New badges
 
 Per-host API keys live in the iOS Keychain under
-`com.utensils.mold.remote-api-key`. Android must use Keystore-backed encrypted
-storage before authenticated hosts are enabled there. Never move keys into
-local storage, query parameters, logs, generated project files, or plain Android
+`com.utensils.mold.remote-api-key`. Android encrypts them with a non-exportable
+AES-GCM key under `com.utensils.mold.remote-api-key.v1` in Android Keystore; only
+ciphertext is stored in private preferences. Never move keys into local storage,
+query parameters, logs, generated project files, or plain Android
 SharedPreferences.
 
 Mobile pairing uses authenticated `POST /api/pairing/sessions` and the
@@ -464,7 +466,7 @@ one-time-token `POST /api/pairing/claim`. The claim route is intentionally the
 only unauthenticated credential handoff: tokens are 256-bit random values,
 stored server-side only as an HMAC, capped, single-use, and expire after two
 minutes. Both responses are `no-store`; the QR must never contain the durable
-API key. Pairing QR codes use the registered `mold://pair` scheme so the iOS
+API key. Pairing QR codes use the registered `mold://pair` scheme so the mobile
 Camera app offers to open them directly in Mold; cold-launch and already-open
 links share the same claim, instance-verification, and Keychain path as Mold's
 in-app scanner.
@@ -497,6 +499,7 @@ android-doctor             # print and verify every resolved path
 android-emulator           # boot Mold_API_37 (Pixel 9 Pro / Android 17)
 android-dev                # Tauri hot reload
 android-check              # debug ARM64 APK build
+android-test               # Keystore instrumentation test on the emulator
 android-run                # production-mode run
 android-build              # ARM64/ARMv7 Google Play AAB
 ```

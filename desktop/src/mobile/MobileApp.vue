@@ -41,7 +41,11 @@ import {
   validateRemixVariants,
   DEFAULT_REMIX_VARIATIONS,
 } from "@studio/lib/promptTransform";
-import { claimPairingSession, parseMobilePairingPayload } from "@studio/api/pairing";
+import {
+  claimPairingSession,
+  parseMobilePairingPayload,
+  type PairingClientIdentity,
+} from "@studio/api/pairing";
 import { imageDimensionsFromBase64 } from "@studio/lib/imageDimensions";
 import {
   resolveDefaultSourceResolution,
@@ -2228,11 +2232,6 @@ async function hydrateApiKeys(): Promise<void> {
 
 async function connectHost(address?: string, discoveredName?: string): Promise<void> {
   hostError.value = "";
-  if (androidNativeRuntime && hostInput.apiKey.trim()) {
-    hostError.value =
-      "Secure Android API key storage is not implemented yet. Use a host without authentication for this scaffold.";
-    return;
-  }
   try {
     const baseUrl = normalizeRemoteAddress(address ?? hostInput.address);
     const target = { baseUrl, apiKey: hostInput.apiKey.trim() || null };
@@ -2295,11 +2294,6 @@ async function discoverHosts(): Promise<void> {
 
 async function pairFromCode(code: () => Promise<string>): Promise<void> {
   if (pairing.value) return;
-  if (androidNativeRuntime) {
-    hostError.value =
-      "Android pairing requires secure API key storage and is not available in this scaffold.";
-    return;
-  }
   pairing.value = true;
   hostError.value = "";
   try {
@@ -2311,10 +2305,10 @@ async function pairFromCode(code: () => Promise<string>): Promise<void> {
     const iPad =
       /iPad/i.test(navigator.userAgent) ||
       (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
-    const claim = await claimPairingSession(baseUrl, payload.token, {
-      name: iPad ? "Mold on iPad" : "Mold on iPhone",
-      kind: iPad ? "ipad" : "iphone",
-    });
+    const client: PairingClientIdentity = androidNativeRuntime
+      ? { name: "Mold on Android", kind: "android" }
+      : { name: iPad ? "Mold on iPad" : "Mold on iPhone", kind: iPad ? "ipad" : "iphone" };
+    const claim = await claimPairingSession(baseUrl, payload.token, client);
     if (claim.instance_id !== payload.instance_id) {
       throw new Error("The pairing code was redeemed by a different Mold host.");
     }
@@ -9603,7 +9597,6 @@ onBeforeUnmount(() => {
             {{ MOBILE_CAPABLE_ROUTING_HINT }}
           </p>
           <button
-            v-if="!androidNativeRuntime"
             class="primary-button mobile-pair-button"
             type="button"
             :disabled="pairing"
@@ -9613,7 +9606,7 @@ onBeforeUnmount(() => {
             <span aria-hidden="true">▦</span>
             {{ pairing ? "Opening camera…" : "Scan pairing code" }}
           </button>
-          <p v-if="!androidNativeRuntime" class="mobile-pair-note">
+          <p class="mobile-pair-note">
             On your host, open Settings → Mobile pairing.
           </p>
           <p
@@ -9621,8 +9614,7 @@ onBeforeUnmount(() => {
             class="section-note"
             data-test="mobile-android-foundation-note"
           >
-            Android groundwork is active. Use a host without authentication for now; secure keys,
-            camera pairing, and nearby discovery are next.
+            Android secure pairing is active. Nearby discovery and native media actions are next.
           </p>
           <button
             v-if="!androidNativeRuntime"
@@ -9671,7 +9663,7 @@ onBeforeUnmount(() => {
                 autocomplete="url"
                 required
             /></label>
-            <label v-if="!androidNativeRuntime" class="field"
+            <label class="field"
               ><span>API key</span
               ><input
                 v-model="hostInput.apiKey"

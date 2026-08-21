@@ -392,6 +392,7 @@ fn normalized_client_kind(value: &str) -> String {
     match value.trim() {
         "iphone" => "iphone",
         "ipad" => "ipad",
+        "android" => "android",
         _ => "mobile",
     }
     .to_string()
@@ -869,6 +870,24 @@ mod tests {
         assert!(ks.revoke_paired_client(&id).unwrap());
         assert!(!ks.contains(&paired));
         assert!(ks.contains("phone-key"));
+    }
+
+    #[test]
+    fn pairing_preserves_android_client_identity() {
+        let ks = ApiKeySet::new_with_metadata_db(
+            HashSet::from(["operator-key".to_string()]),
+            Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap())),
+            "server-a",
+        );
+        let (token, _) = ks.issue_pairing_token().unwrap();
+
+        ks.claim_pairing_token(&token, "Mold on Android", "android")
+            .unwrap()
+            .unwrap();
+
+        let client = &ks.paired_clients()[0];
+        assert_eq!(client.name, "Mold on Android");
+        assert_eq!(client.client_kind, "android");
     }
 
     #[test]

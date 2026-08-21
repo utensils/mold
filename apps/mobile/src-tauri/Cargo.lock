@@ -1828,6 +1828,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-barcode-scanner",
  "tauri-plugin-deep-link",
+ "tauri-plugin-mold-mobile-native",
 ]
 
 [[package]]
@@ -3393,6 +3394,16 @@ dependencies = [
  "url",
  "windows-registry",
  "windows-result 0.3.4",
+]
+
+[[package]]
+name = "tauri-plugin-mold-mobile-native"
+version = "0.23.3"
+dependencies = [
+ "serde",
+ "tauri",
+ "tauri-plugin",
+ "thiserror 2.0.19",
 ]
 
 [[package]]

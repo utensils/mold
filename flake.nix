@@ -1315,6 +1315,12 @@
               }
               {
                 category = "android";
+                name = "android-test";
+                help = "build Android and run native instrumentation tests on an emulator";
+                command = "./scripts/android.sh test \"$@\"";
+              }
+              {
+                category = "android";
                 name = "android-build";
                 help = "build Android ARM64/ARMv7 app bundles for Google Play";
                 command = "./scripts/android.sh build \"$@\"";
