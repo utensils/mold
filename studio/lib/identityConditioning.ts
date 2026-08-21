@@ -121,8 +121,6 @@ export interface IdentityFormInput {
   steps: number;
   hasLora: boolean;
   hasSourceImage: boolean;
-  /** Named in the not-qualified message; display only. */
-  model?: string | null;
 }
 
 /** Decoded byte length of a base64 payload, without decoding it. */
@@ -309,6 +307,16 @@ export function identityValidationError(
     input.image != null || input.weight != null || input.startStep != null;
   if (!mentions) return null;
 
+  // A checkpoint that cannot take an identity photo PARKS the partition, it
+  // does not refuse it. Nothing here reaches the wire (`identityRequestFields`
+  // gates on the same flag), so there is nothing for the server to reject and
+  // nothing for Generate to block on — exactly how staged source video,
+  // keyframes, and audio survive a switch away from LTX-2. The photo stays in
+  // form state and the well reappears with it when a qualified model is
+  // selected again. Positive capability only: an unread or absent
+  // `supports_identity` is this same parked state, never a refusal.
+  if (!input.supported) return null;
+
   if (!input.image) {
     return `Attach an ${IDENTITY_PHOTO_LABEL.toLowerCase()}, or clear ${IDENTITY_WEIGHT_LABEL} and ${IDENTITY_START_STEP_LABEL}.`;
   }
@@ -318,10 +326,6 @@ export function identityValidationError(
   // different person — but it says what to do rather than reporting an empty
   // payload the user never chose.
   if (!input.image.base64) return IDENTITY_PHOTO_UNAVAILABLE;
-  if (!input.supported) {
-    const named = input.model?.trim();
-    return `${named || "This model"} does not support identity photos. Choose an identity-qualified model, or remove the photo.`;
-  }
   if (input.hasLora) {
     return "An identity photo cannot be combined with a LoRA yet. Remove the LoRA or the photo.";
   }

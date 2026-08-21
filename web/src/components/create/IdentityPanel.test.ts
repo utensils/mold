@@ -152,17 +152,29 @@ describe("IdentityPanel — the capability gate", () => {
     );
   });
 
-  it("keeps a staged photo reachable on a checkpoint that lost the capability", () => {
-    // `toRequest` already keeps it off the wire, but hiding the well outright
-    // would leave the inline refusal pointing at a control the user cannot
-    // see — and no way to remove the photo that is blocking Generate.
+  it("parks a staged photo on a checkpoint that lost the capability", () => {
+    // The card disappears and the photo stays in form state: `toRequest`
+    // keeps the partition off the wire, so there is nothing to refuse and
+    // nothing to block on — the same treatment staged LTX-2 media gets.
+    const form = baseForm({ identityImage: photo() });
+    const wrapper = mount(IdentityPanel, {
+      props: { modelValue: form, models: [recipeModel(false)] },
+    });
+    expect(wrapper.find("[data-test='identity-panel']").exists()).toBe(false);
+    expect(
+      wrapper.find("[data-test='identity-conditioning-error']").exists(),
+    ).toBe(false);
+    expect(form.identityImage).toMatchObject({ filename: "ada.png" });
+  });
+
+  it("brings the parked photo back when a qualified model returns", async () => {
     const wrapper = factory([recipeModel(false)], { identityImage: photo() });
+    expect(wrapper.find("[data-test='identity-panel']").exists()).toBe(false);
+    await wrapper.setProps({ models: [recipeModel(true)] });
     expect(wrapper.find("[data-test='identity-photo-well']").exists()).toBe(
       true,
     );
-    expect(
-      wrapper.get("[data-test='identity-conditioning-error']").text(),
-    ).toContain("does not support identity photos");
+    expect(wrapper.find("[data-test='identity-remove']").exists()).toBe(true);
   });
 });
 

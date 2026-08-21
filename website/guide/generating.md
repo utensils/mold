@@ -202,6 +202,11 @@ are generating on both support it — when they do not, the control is not there
 at all, rather than present and disabled. Drop or pick a PNG or JPEG (at most
 16 MiB, 8192 px per side, 32 MP) and the print takes that likeness.
 
+Switching to a model that cannot use an identity photo does not throw yours
+away and does not stop you generating: the photo is parked, the request goes
+out without it, and the well comes back with the photo still in it when you
+select a qualified model again.
+
 Two knobs live in Advanced and stay absent from the request until you touch
 them, so the server's own defaults keep applying:
 

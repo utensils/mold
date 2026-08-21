@@ -229,14 +229,12 @@ const showSourceMedia = computed(
  * absent `supports_identity` renders nothing at all rather than a control for
  * a feature this host does not have. Sequence clips carry no identity slot.
  *
- * A staged photo keeps the well on screen even after a switch to a checkpoint
- * that cannot use it: `buildRequest` already keeps it off the wire, but the
- * submit gate still reports why the print is blocked, and hiding the control
- * would point that reason at something the user cannot see — with no way to
- * remove the photo that is blocking Generate. Web applies the same rule. */
-const showIdentity = computed(
-  () => !isSequence.value && (props.form.identitySupported === true || !!props.form.identityImage),
-);
+ * A staged photo PARKS rather than blocking: `buildRequest` keeps it off the
+ * wire, `identityConditioningValidationError` reports nothing for a checkpoint
+ * that cannot take it, and selecting a qualified model again brings the well
+ * back with the photo still in it — the same treatment staged LTX-2 media
+ * gets. Web applies the same rule. */
+const showIdentity = computed(() => !isSequence.value && props.form.identitySupported === true);
 const activeRecipe = computed(() =>
   effectiveGenerationRecipe(selectedModel.value, props.form.pipeline),
 );

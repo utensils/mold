@@ -70,14 +70,13 @@ const stagedPhoto = computed(() =>
 );
 
 /**
- * A staged photo keeps the card on screen even where the checkpoint cannot
- * use it. `toRequest` already keeps it off the wire, but hiding the well
- * outright would point the inline refusal at a control the user cannot see —
- * and leave no way to remove the photo that is blocking Generate.
+ * Positive capability only. A checkpoint that cannot take an identity photo
+ * renders no card at all, and the staged photo PARKS in form state: nothing
+ * reaches the wire (`toRequest` gates on the same flag), nothing blocks
+ * Generate, and selecting a qualified model again brings the card back with
+ * the photo still in it — exactly how staged LTX-2 media survives a switch.
  */
-const visible = computed(
-  () => supported.value || props.modelValue.identityImage != null,
-);
+const visible = computed(() => supported.value);
 
 const uploadError = ref<string | null>(null);
 
@@ -91,7 +90,6 @@ const conditioningError = computed(() =>
     steps: props.modelValue.steps,
     hasLora: props.modelValue.loras.length > 0,
     hasSourceImage: props.modelValue.imageAttachments.length > 0,
-    model: props.modelValue.model,
   }),
 );
 

@@ -343,13 +343,20 @@ describe("identityConditioningValidationError", () => {
     expect(identityConditioningValidationError(form)).toContain("Attach an identity photo");
   });
 
-  it("refuses a checkpoint that is not identity-qualified, and names it", () => {
+  it("parks — never refuses — on a checkpoint that is not identity-qualified", () => {
+    // The partition never reaches the wire on such a checkpoint, so there is
+    // nothing for Generate to block on: the photo stays staged and the well
+    // is simply not rendered, exactly as staged LTX-2 media behaves.
     const form = identityForm();
     form.identitySupported = false;
-    expect(identityConditioningValidationError(form)).toContain("flux-dev:q8");
-    // An unread capability is not evidence of support either.
+    expect(identityConditioningValidationError(form)).toBeNull();
+    // An unread capability is the same parked state, never a refusal.
     form.identitySupported = null;
-    expect(identityConditioningValidationError(form)).toContain("flux-dev:q8");
+    expect(identityConditioningValidationError(form)).toBeNull();
+    // Not even a combination the qualified path refuses outright.
+    form.loras = [{ path: "style.safetensors", name: "style", scale: 1, trainedWords: [] }];
+    form.identityWeight = 99;
+    expect(identityConditioningValidationError(form)).toBeNull();
   });
 
   it("refuses the combination with a LoRA", () => {

@@ -297,6 +297,10 @@ export function sourceConditioningValidationError(
  * image a checkpoint drops in `buildRequest` must not refuse an identity
  * photo it never travels with — the same reading
  * {@link sourceConditioningValidationError} takes.
+ *
+ * A checkpoint that cannot take an identity photo reports NOTHING: the whole
+ * partition parks, off the wire and out of the inspector, so blocking Generate
+ * on it would refuse a print the server would happily render.
  */
 export function identityConditioningValidationError(form: GenerateForm): string | null {
   const caps = generationCapabilitiesForFamily(
@@ -319,7 +323,6 @@ export function identityConditioningValidationError(form: GenerateForm): string 
     steps: form.steps,
     hasLora: form.loras.length > 0,
     hasSourceImage,
-    model: form.model,
   });
 }
 

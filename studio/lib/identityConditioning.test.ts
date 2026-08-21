@@ -174,7 +174,6 @@ describe("identityValidationError", () => {
     steps: 20,
     hasLora: false,
     hasSourceImage: false,
-    model: "flux-dev:q8",
   };
 
   it("says nothing when identity is not used at all", () => {
@@ -196,10 +195,34 @@ describe("identityValidationError", () => {
     ).toMatch(/identity photo/i);
   });
 
-  it("refuses a photo on a model that is not qualified", () => {
-    const message = identityValidationError({ ...base, supported: false });
-    expect(message).toMatch(/flux-dev:q8/);
-    expect(message).toMatch(/identity/i);
+  it("parks the whole partition on a checkpoint that cannot take a photo", () => {
+    // Nothing reaches the wire, so there is nothing to refuse: the staged
+    // photo survives the switch, Generate stays enabled, and the well simply
+    // is not rendered — the same treatment staged LTX-2 media gets.
+    expect(identityValidationError({ ...base, supported: false })).toBeNull();
+    expect(
+      identityValidationError({
+        ...base,
+        supported: false,
+        hasLora: true,
+        hasSourceImage: true,
+        weight: 99,
+        startStep: 999,
+      }),
+    ).toBeNull();
+    expect(
+      identityValidationError({
+        ...base,
+        supported: false,
+        image: null,
+        weight: 2,
+      }),
+    ).toBeNull();
+  });
+
+  it("never treats an unread capability as a refusal", () => {
+    // Absence is the parked state, exactly as it is for visibility.
+    expect(identityValidationError({ ...base, supported: false })).toBeNull();
   });
 
   it("refuses identity combined with a LoRA", () => {

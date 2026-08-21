@@ -1562,7 +1562,6 @@ const identityError = computed(() =>
         steps: form.state.value.steps,
         hasLora: form.state.value.loras.length > 0,
         hasSourceImage: form.state.value.imageAttachments.length > 0,
-        model: form.state.value.model,
       }),
 );
 

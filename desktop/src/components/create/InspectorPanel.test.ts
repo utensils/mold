@@ -12,7 +12,7 @@ import SwitchToggle from "@ui/components/SwitchToggle.vue";
 import BadgePill from "@ui/components/BadgePill.vue";
 import PanelResizeHandle from "../shell/PanelResizeHandle.vue";
 import { aspectIdFor } from "../../lib/resolutions";
-import { newGenerateForm, type GenerateForm } from "../../lib/generateForm";
+import { buildRequest, newGenerateForm, type GenerateForm } from "../../lib/generateForm";
 import { useGenerateFormStore } from "../../stores/generateForm";
 import { useModelStore } from "../../stores/models";
 import { useConnectionStore } from "../../stores/connection";
@@ -941,21 +941,30 @@ describe("InspectorPanel — source media in the primary form", () => {
     expect(wrapper.find("[data-test='inspector-identity']").exists()).toBe(false);
   });
 
-  it("keeps a staged photo reachable after the capability is lost", async () => {
+  it("parks a staged photo when the capability is lost, and restores it", async () => {
     const form = formFor("flux");
     form.model = "flux-dev:q8";
     form.identitySupported = true;
     form.identityImage = { filename: "ada.png", base64: "AAAA" };
     const wrapper = mount(InspectorPanel, { props: { form } });
-    // Switching to an unqualified checkpoint parks the photo rather than
-    // erasing it; the submit gate names the refusal, so the control that can
-    // clear it must stay on screen instead of becoming a dead end.
+    expect(wrapper.find("[data-test='inspector-identity']").exists()).toBe(true);
+
+    // Switching to an unqualified checkpoint hides the well and retains the
+    // photo — nothing is erased, nothing is refused, and `buildRequest` keeps
+    // the partition off the wire.
     form.identitySupported = false;
     await flushPromises();
+    expect(wrapper.find("[data-test='inspector-identity']").exists()).toBe(false);
+    expect(form.identityImage).toEqual({ filename: "ada.png", base64: "AAAA" });
+    expect(buildRequest(form).id_image).toBeUndefined();
+
+    // Selecting a qualified checkpoint again brings the well back with the
+    // photo still in it.
+    form.identitySupported = true;
+    await flushPromises();
     expect(wrapper.find("[data-test='inspector-identity']").exists()).toBe(true);
-    expect(wrapper.find("[data-test='identity-conditioning-error']").text()).toContain(
-      "does not support identity photos",
-    );
+    expect(wrapper.find("[data-test='identity-remove']").exists()).toBe(true);
+    expect(form.identityImage).toEqual({ filename: "ada.png", base64: "AAAA" });
   });
 
   it("keeps identity out of sequence mode", () => {

@@ -3,10 +3,11 @@
   strength** (0.0–3.0, default 1.0) and **Identity start step** in Advanced.
   The whole control is capability-gated by the server's own
   `supports_identity` authority, so an unqualified checkpoint or an older host
-  hides it rather than offering work the server would refuse. Attaching a
-  photo alongside a LoRA or a source image, or leaving a knob set with no
-  photo, reports the reason inline beside the control — never a toast — and
-  blocks Generate. The photo is never cropped or fitted to the canvas: it is a
+  hides it rather than offering work the server would refuse; a photo already
+  attached is parked, not discarded, and comes back when a qualified model is
+  selected again. On a qualified model, attaching a photo alongside a LoRA or
+  a source image, or leaving a knob set with no photo, reports the reason
+  inline beside the control — never a toast — and blocks Generate. The photo is never cropped or fitted to the canvas: it is a
   face reference, and the picked bytes travel untouched. Batch siblings and
   prepared variations inherit it
   ([#1224](https://github.com/utensils/mold/issues/1224)).
