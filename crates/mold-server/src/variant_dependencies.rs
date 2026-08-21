@@ -31,29 +31,39 @@ struct DownloadKey {
 }
 
 #[derive(Clone, Copy)]
-struct DependencySpec<'a> {
-    models_root: &'a Path,
-    repo: &'a str,
-    filename: &'a str,
-    expected_bytes: Option<u64>,
-    quantization: Option<crate::execution_plan::QuantizationVariant>,
-    subdir: &'a str,
+pub(crate) struct DependencySpec<'a> {
+    pub(crate) models_root: &'a Path,
+    pub(crate) repo: &'a str,
+    pub(crate) filename: &'a str,
+    pub(crate) expected_bytes: Option<u64>,
+    /// What a read-only preview reports this dependency as. A `kind` of
+    /// `text_encoder` is the encoder ladders' answer; identity assets name
+    /// their own component so a client can tell a face model from a prompt
+    /// encoder in `pending_downloads`.
+    pub(crate) kind: &'a str,
+    /// Registry-declared container. A preview has not read the file, so this
+    /// is the only honest source — claiming GGUF for every pending dependency
+    /// mislabels the identity bundle's safetensors, `.pt`, and `.onnx` files.
+    pub(crate) container: crate::execution_plan::PendingArtifactContainer,
+    pub(crate) quantization: Option<crate::execution_plan::QuantizationVariant>,
+    pub(crate) subdir: &'a str,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct MissingDependency {
-    download: mold_core::PendingModelDownload,
-    path: PathBuf,
-    quantization: crate::execution_plan::QuantizationVariant,
+pub(crate) struct MissingDependency {
+    pub(crate) download: mold_core::PendingModelDownload,
+    pub(crate) path: PathBuf,
+    pub(crate) container: crate::execution_plan::PendingArtifactContainer,
+    pub(crate) quantization: Option<crate::execution_plan::QuantizationVariant>,
 }
 
-enum ResolvedDependency {
+pub(crate) enum ResolvedDependency {
     Available(PathBuf),
     Pending(MissingDependency),
 }
 
 impl ResolvedDependency {
-    fn into_path(self, pending: &mut Vec<MissingDependency>) -> PathBuf {
+    pub(crate) fn into_path(self, pending: &mut Vec<MissingDependency>) -> PathBuf {
         match self {
             Self::Available(path) => path,
             Self::Pending(dependency) => {
@@ -186,7 +196,7 @@ fn send_dependency_wait(
     }
 }
 
-async fn ensure_downloaded(
+pub(crate) async fn ensure_downloaded(
     state: Option<&AppState>,
     work_id: &str,
     dependency: DependencySpec<'_>,
@@ -198,6 +208,8 @@ async fn ensure_downloaded(
         repo,
         filename,
         expected_bytes,
+        kind,
+        container,
         quantization,
         subdir,
     } = dependency;
@@ -220,19 +232,26 @@ async fn ensure_downloaded(
                 "required local dependency '{filename}' from '{repo}' is not installed and has no known materialization record"
             )
         })?;
-        let quantization = quantization.ok_or_else(|| {
-            format!(
+        // A GGUF's quantization IS its storage record, so a registry entry
+        // that cannot name one is not previewable. Containers that carry no
+        // quantization at all (safetensors, `.pt`, `.onnx`) are declared by
+        // `container` instead and legitimately have `None` here.
+        if container == crate::execution_plan::PendingArtifactContainer::Gguf
+            && quantization.is_none()
+        {
+            return Err(format!(
                 "required local dependency '{filename}' from '{repo}' is not installed and has no known storage record"
-            )
-        })?;
+            ));
+        }
         return Ok(ResolvedDependency::Pending(MissingDependency {
             download: mold_core::PendingModelDownload {
-                kind: "text_encoder".to_string(),
+                kind: kind.to_string(),
                 name: filename.to_string(),
                 repo: repo.to_string(),
                 bytes,
             },
             path: mold_core::download::planned_single_file_path_in(models_root, filename, subdir),
+            container,
             quantization,
         }));
     }
@@ -644,16 +663,16 @@ fn flux2_uses_qwen3_8b(model: &str, paths: &ModelPaths) -> bool {
         > 12_000_000_000
 }
 
-struct DependencyContext<'a> {
-    state: Option<&'a AppState>,
-    models_root: &'a Path,
-    work_id: &'a str,
-    progress: Option<&'a tokio::sync::mpsc::UnboundedSender<SseMessage>>,
-    policy: DependencyMaterializationPolicy,
+pub(crate) struct DependencyContext<'a> {
+    pub(crate) state: Option<&'a AppState>,
+    pub(crate) models_root: &'a Path,
+    pub(crate) work_id: &'a str,
+    pub(crate) progress: Option<&'a tokio::sync::mpsc::UnboundedSender<SseMessage>>,
+    pub(crate) policy: DependencyMaterializationPolicy,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum DependencyMaterializationPolicy {
+pub(crate) enum DependencyMaterializationPolicy {
     Admission,
     ExistingOnly,
 }
@@ -699,6 +718,8 @@ async fn materialize_t5(
                 repo: variant.hf_repo,
                 filename: variant.hf_filename,
                 expected_bytes: Some(variant.size_bytes),
+                kind: "text_encoder",
+                container: crate::execution_plan::PendingArtifactContainer::Gguf,
                 quantization: registry_quantization(variant.tag),
                 subdir: "shared/t5-gguf",
             },
@@ -772,6 +793,8 @@ async fn materialize_umt5(
             repo: variant.hf_repo,
             filename: variant.hf_filename,
             expected_bytes: Some(variant.size_bytes),
+            kind: "text_encoder",
+            container: crate::execution_plan::PendingArtifactContainer::Gguf,
             quantization: registry_quantization(variant.tag),
             subdir: "shared/wan/umt5-gguf",
         },
@@ -857,6 +880,8 @@ async fn materialize_qwen3(
                 repo: variant.hf_repo,
                 filename: variant.hf_filename,
                 expected_bytes: Some(variant.size_bytes),
+                kind: "text_encoder",
+                container: crate::execution_plan::PendingArtifactContainer::Gguf,
                 quantization: registry_quantization(variant.tag),
                 subdir,
             },
@@ -908,6 +933,8 @@ async fn materialize_qwen2(
             repo: variant.hf_repo,
             filename: variant.hf_filename,
             expected_bytes: Some(variant.size_bytes),
+            kind: "text_encoder",
+            container: crate::execution_plan::PendingArtifactContainer::Gguf,
             quantization: registry_quantization(variant.tag),
             subdir: "shared/qwen2-vl-gguf",
         },
@@ -1165,7 +1192,7 @@ fn materialize_gemma(
 // Keep the generic dependency inputs explicit: private admission must validate
 // its ingress context before any model-path resolution or materialization.
 #[allow(clippy::too_many_arguments)]
-async fn prepare_inputs_for_devices(
+pub(crate) async fn prepare_inputs_for_devices(
     state: Option<&AppState>,
     work_id: &str,
     request: &GenerateRequest,
@@ -1390,6 +1417,23 @@ async fn prepare_inputs_for_devices(
             }
             _ => Ok(()),
         };
+        // Identity assets are orthogonal to the encoder ladder above: the
+        // request asks for a face, not for a variant, so this runs after
+        // whichever family arm applied and is inert for every request that
+        // does not condition on one.
+        let materialized = match materialized {
+            Ok(()) => {
+                crate::identity_dependencies::materialize_identity_assets(
+                    &dependency_context,
+                    request,
+                    &family,
+                    &mut frozen,
+                    &mut pending,
+                )
+                .await
+            }
+            Err(error) => Err(error),
+        };
         if let Err(error) = materialized {
             failures.insert(device.id, error);
             continue;
@@ -1409,6 +1453,7 @@ async fn prepare_inputs_for_devices(
                                 repo: dependency.download.repo.clone(),
                                 filename: dependency.download.name.clone(),
                                 bytes: dependency.download.bytes,
+                                container: dependency.container,
                                 quantization: dependency.quantization,
                             },
                         )
@@ -2004,6 +2049,8 @@ mod tests {
                 repo: &repo,
                 filename: "missing.safetensors",
                 expected_bytes: Some(123_456),
+                kind: "text_encoder",
+                container: crate::execution_plan::PendingArtifactContainer::Gguf,
                 quantization: Some(crate::execution_plan::QuantizationVariant::Q4),
                 subdir: "preview-test",
             },
@@ -2051,6 +2098,8 @@ mod tests {
                 repo: "preview/no-create",
                 filename: "missing.gguf",
                 expected_bytes: Some(42),
+                kind: "text_encoder",
+                container: crate::execution_plan::PendingArtifactContainer::Gguf,
                 quantization: Some(crate::execution_plan::QuantizationVariant::Q4),
                 subdir: "shared/test",
             },
@@ -2096,6 +2145,8 @@ mod tests {
             repo: &repo,
             filename,
             expected_bytes: Some(12),
+            kind: "text_encoder",
+            container: crate::execution_plan::PendingArtifactContainer::Gguf,
             quantization: Some(crate::execution_plan::QuantizationVariant::Q4),
             subdir,
         };
@@ -2160,6 +2211,8 @@ mod tests {
             repo: &repo,
             filename: "encoder.gguf",
             expected_bytes: Some(12),
+            kind: "text_encoder",
+            container: crate::execution_plan::PendingArtifactContainer::Gguf,
             quantization: Some(crate::execution_plan::QuantizationVariant::Q4),
             subdir: "shared/dedupe",
         };
@@ -2280,7 +2333,7 @@ mod tests {
             &pending_component.precision.storage,
             crate::execution_plan::ComponentStorageFormat::PendingPreview {
                 container: crate::execution_plan::PendingArtifactContainer::Gguf,
-                quantization: crate::execution_plan::QuantizationVariant::Q8,
+                quantization: Some(crate::execution_plan::QuantizationVariant::Q8),
                 ..
             }
         ));

@@ -290,6 +290,10 @@ mod tests {
             spatial_upscale: None,
             temporal_upscale: None,
             placement: None,
+            id_image: None,
+            id_image_name: None,
+            id_weight: None,
+            id_start_step: None,
         }
     }
 

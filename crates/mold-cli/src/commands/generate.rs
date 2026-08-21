@@ -790,6 +790,10 @@ pub async fn run(
                         spatial_upscale: None,
                         temporal_upscale: None,
                         placement: placement.clone(),
+                        id_image: None,
+                        id_image_name: None,
+                        id_weight: None,
+                        id_start_step: None,
                     };
                     materialize_local_builtin_control(&mut probe_req, &config).await?;
                     let control_loras = probe_req.loras.take().unwrap_or_default();
@@ -932,6 +936,10 @@ pub async fn run(
         spatial_upscale,
         temporal_upscale,
         placement,
+        id_image: None,
+        id_image_name: None,
+        id_weight: None,
+        id_start_step: None,
     };
     // A continuation that named no overlap renders with its family's own
     // carryover, and the metadata `record_local_save` builds resolves the

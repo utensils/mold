@@ -130,7 +130,7 @@ pub async fn run(models: &[String], force: bool) -> Result<()> {
                 .or_else(|| {
                     mold_core::manifest::known_manifests()
                         .iter()
-                        .filter(|m| !m.is_utility() && !m.is_upscaler())
+                        .filter(|m| m.is_generation_model())
                         .filter(|m| m.name != canonical)
                         .find(|m| config.manifest_model_is_downloaded(&m.name))
                         .map(|m| m.name.clone())
@@ -138,8 +138,7 @@ pub async fn run(models: &[String], force: bool) -> Result<()> {
                 .unwrap_or_else(|| "flux2-klein".to_string());
             let has_remaining = !config.models.is_empty()
                 || mold_core::manifest::known_manifests().iter().any(|m| {
-                    !m.is_utility()
-                        && !m.is_upscaler()
+                    m.is_generation_model()
                         && m.name != canonical
                         && config.manifest_model_is_downloaded(&m.name)
                 });

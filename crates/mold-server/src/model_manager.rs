@@ -847,6 +847,9 @@ fn installed_catalog_models(
             modality: Some(sidecar.modality.clone()),
             nsfw: sidecar.nsfw,
             supports_audio,
+            // Same authority as `capabilities.supports_identity` — never a
+            // second predicate about which checkpoints are qualified.
+            supports_identity: Some(generation_profile.supports_identity()),
             // One authority, `mold_core::catalog::extend_capable_model`: the
             // whole ltx2 family continues through its latent motion tail,
             // while wan continues only from a checkpoint that conditions on
@@ -1435,6 +1438,14 @@ fn manifest_component_kind(component: mold_core::manifest::ModelComponent) -> &'
         | ModelComponent::TaskConfig => "config",
         ModelComponent::Decoder => "decoder",
         ModelComponent::Upscaler => "upscaler",
+        // PuLID's bundle is auxiliary conditioning, not a generator's parts.
+        // Each artifact gets its own kind rather than being folded into
+        // `transformer`/`clip`, which name slots in a diffusion pipeline the
+        // bundle does not participate in.
+        ModelComponent::IdentityAdapter => "identity_adapter",
+        ModelComponent::IdentityVisionEncoder => "identity_vision_encoder",
+        ModelComponent::FaceDetector => "face_detector",
+        ModelComponent::FaceRecognizer => "face_recognizer",
     }
 }
 
@@ -1465,6 +1476,10 @@ fn manifest_component_name(component: mold_core::manifest::ModelComponent, filen
         ModelComponent::TaskConfig => "task config",
         ModelComponent::Decoder => "decoder",
         ModelComponent::Upscaler => filename,
+        ModelComponent::IdentityAdapter => "identity adapter",
+        ModelComponent::IdentityVisionEncoder => "identity vision encoder",
+        ModelComponent::FaceDetector => "face detector",
+        ModelComponent::FaceRecognizer => "face recognizer",
     }
 }
 
@@ -4926,6 +4941,10 @@ mod tests {
             spatial_upscale: None,
             temporal_upscale: None,
             placement: None,
+            id_image: None,
+            id_image_name: None,
+            id_weight: None,
+            id_start_step: None,
         };
 
         // FLUX is guidance-distilled → batch=1 even with guidance > 1.

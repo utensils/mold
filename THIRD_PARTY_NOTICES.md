@@ -119,3 +119,64 @@ SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
 CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
 OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+## PuLID (identity conditioning)
+
+Mold's PuLID-FLUX identity conditioning follows
+[PuLID](https://github.com/ToTheBeginning/PuLID) by ByteDance as its reference
+implementation, and pulls the published PuLID-FLUX v0.9.1 adapter weights from
+the Hugging Face repository `guozinan/PuLID`. No PuLID source file is vendored
+in Mold; the port is original Rust against candle.
+
+PuLID is licensed under the Apache License, Version 2.0
+(<https://github.com/ToTheBeginning/PuLID/blob/main/LICENSE>).
+
+    Copyright 2024 ByteDance Inc.
+
+## EVA-CLIP (identity vision tower)
+
+PuLID conditions on the `EVA02-CLIP-L-14-336` vision tower from
+[EVA](https://github.com/baaivision/EVA) by BAAI. Mold downloads the published
+checkpoint `EVA02_CLIP_L_336_psz14_s6B.pt` from the Hugging Face repository
+`QuanSun/EVA-CLIP` and converts it locally; no EVA source file is vendored in
+Mold.
+
+EVA and EVA-CLIP are licensed under the MIT License
+(<https://github.com/baaivision/EVA/blob/master/LICENSE>).
+
+    Copyright (c) 2022 BAAI
+
+## InsightFace antelopev2 (face detection and recognition)
+
+PuLID's identity embedding is produced by two InsightFace antelopev2 models —
+the `scrfd_10g_bnkps` face detector and the `glintr100` ArcFace recognizer.
+
+**Mold does not bundle, redistribute, or ship these files.** They are not part
+of any Mold release artifact, container image, or package. Mold downloads them
+on demand, and only after the user has explicitly recorded acceptance of the
+InsightFace model license:
+
+    mold pull pulid-flux --accept-license insightface-antelopev2
+
+The acceptance is written to `$MOLD_HOME/license-acceptances.json` and is bound
+to the exact license text Mold pinned; if the upstream terms change, the
+recorded acceptance no longer counts and the user is asked again. Without an
+acceptance, every download path — the CLI, the server's auto-pull, and every
+automatic client-driven pull — refuses before any byte is fetched.
+
+[InsightFace](https://github.com/deepinsight/insightface) splits its terms. The
+InsightFace **code** is licensed under the MIT License with no usage
+limitation. The **pretrained models**, including antelopev2, are stated by the
+project to be available for **non-commercial research purposes only**, and that
+restriction applies to both manually downloaded models and models fetched
+automatically by their tooling (InsightFace `README.md`, "License").
+
+    Copyright (c) 2018-2024 InsightFace (DeepInsight)
+
+Provenance of the files Mold pulls: InsightFace publishes the antelopev2 pack
+as an archive on GitHub releases and Google Drive, which Mold's Hugging
+Face-based downloader cannot address. PuLID itself resolves the pack from the
+Hugging Face mirror `DIAMONIK7777/antelopev2`
+(`pulid/pipeline_flux.py`, `snapshot_download('DIAMONIK7777/antelopev2', ...)`),
+and Mold pulls the same two files from the same mirror, pinned by SHA-256 and
+verified on download.

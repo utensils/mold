@@ -1174,12 +1174,14 @@ impl Config {
                 };
             }
         }
-        // 5. Single downloaded model (exclude utility and upscaler models)
+        // 5. Single downloaded model. Only a model that can actually be the
+        //    primary counts — utility, upscaler, and auxiliary bundles (a
+        //    hidden LTX-2 adapter, PuLID's identity assets) are installable but
+        //    never generate, so one of them on disk must not become the
+        //    "only downloaded model".
         let downloaded: Vec<String> = crate::manifest::known_manifests()
             .iter()
-            .filter(|m| {
-                !m.is_utility() && !m.is_upscaler() && self.manifest_model_is_downloaded(&m.name)
-            })
+            .filter(|m| m.is_generation_model() && self.manifest_model_is_downloaded(&m.name))
             .map(|m| m.name.clone())
             .collect();
         if downloaded.len() == 1 {
@@ -1373,9 +1375,13 @@ impl Config {
         if self.incomplete_pull_blocks_manifest(manifest) {
             return false;
         }
-        // Upscaler and utility models don't produce full ModelPaths (no VAE).
-        // Check file existence directly instead of going through ModelPaths::resolve.
-        if manifest.is_upscaler() || manifest.is_utility() {
+        // Upscaler, utility, and files-only bundles don't produce full
+        // ModelPaths (no VAE, sometimes no transformer at all). Check file
+        // existence directly instead of going through ModelPaths::resolve —
+        // and read the same `is_files_only_bundle` predicate the pull path
+        // does, so a bundle cannot be pulled by one rule and then reported
+        // missing by another.
+        if manifest.is_upscaler() || manifest.is_files_only_bundle() {
             return self.manifest_files_exist(manifest);
         }
         self.resolved_local_manifest_model_config(name).is_some()
@@ -1406,13 +1412,30 @@ impl Config {
     /// match. That's the load-bearing change for the "downloaded model
     /// sometimes doesn't show up" gallery race.
     fn manifest_files_exist(&self, manifest: &crate::manifest::ModelManifest) -> bool {
+        manifest
+            .files
+            .iter()
+            .all(|file| self.complete_manifest_file_path(manifest, file).is_some())
+    }
+
+    /// Resolve one manifest file to a complete on-disk path, or `None` when it
+    /// is absent or only partially downloaded.
+    ///
+    /// Exposed because files-only bundles (PuLID's identity assets) have no
+    /// [`ModelPaths`] to resolve through and must ask about their files one at
+    /// a time — while still using exactly the acceptance rules
+    /// [`Self::manifest_files_exist`] documents, so "installed" means the same
+    /// thing on both routes.
+    pub fn complete_manifest_file_path(
+        &self,
+        manifest: &crate::manifest::ModelManifest,
+        file: &crate::manifest::ModelFile,
+    ) -> Option<PathBuf> {
         let models_dir = self.resolved_models_dir();
-        manifest.files.iter().all(|file| {
-            crate::manifest::storage_path_candidates(manifest, file)
-                .into_iter()
-                .map(|path| models_dir.join(path))
-                .any(|path| Self::file_is_complete(&path, file.size_bytes))
-        })
+        crate::manifest::storage_path_candidates(manifest, file)
+            .into_iter()
+            .map(|path| models_dir.join(path))
+            .find(|path| Self::file_is_complete(path, file.size_bytes))
     }
 
     /// True when the on-disk file at `path` should be treated as a fully
@@ -1858,6 +1881,13 @@ fn resolved_manifest_paths_exist(
         | ModelComponent::AudioScheduler
         | ModelComponent::ModelConfig
         | ModelComponent::TaskConfig => false,
+        // PuLID's identity assets are a files-only bundle: `ModelPaths` has no
+        // slot for any of them, so a `ModelPaths` can never prove the bundle
+        // is present. `crate::pulid_assets` answers that question instead.
+        ModelComponent::IdentityAdapter
+        | ModelComponent::IdentityVisionEncoder
+        | ModelComponent::FaceDetector
+        | ModelComponent::FaceRecognizer => false,
         ModelComponent::Decoder => paths.decoder.as_ref().is_some_and(|path| path.exists()),
         ModelComponent::Upscaler => paths.transformer.exists(),
     })

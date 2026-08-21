@@ -1435,6 +1435,10 @@ fn build_generate_request(
         spatial_upscale: None,
         temporal_upscale: None,
         placement: None,
+        id_image: None,
+        id_image_name: None,
+        id_weight: None,
+        id_start_step: None,
     })
 }
 
@@ -2308,6 +2312,10 @@ mod tests {
             spatial_upscale: None,
             temporal_upscale: None,
             placement: None,
+            id_image: None,
+            id_image_name: None,
+            id_weight: None,
+            id_start_step: None,
         };
 
         let id = jobs.create(&req).await;
@@ -2426,6 +2434,10 @@ mod tests {
                 chain_job_id: None,
                 chain: None,
                 version: "test".into(),
+                id_image_name: None,
+                id_image_sha256: None,
+                id_weight: None,
+                id_start_step: None,
             },
             timestamp,
             format: Some(OutputFormat::Png),
