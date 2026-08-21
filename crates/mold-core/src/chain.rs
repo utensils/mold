@@ -482,6 +482,13 @@ pub struct ChainResponse {
     /// Reserved for sub-project D; `None` in this release.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vram_estimate: Option<VramEstimate>,
+
+    /// Advisories the server attached to this response — see
+    /// [`crate::GenerateResponse::request_warnings`]. For a chain the one that
+    /// matters is a stitched-print filing the host could not apply.
+    /// Populated by [`crate::MoldClient`] from `x-mold-request-warning`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub request_warnings: Vec<String>,
 }
 
 /// SSE completion event for a successful chain run. Streamed as the final

@@ -1765,7 +1765,75 @@ pub(crate) fn reconcile_video_format_with_output_extension(
 
 /// Remote generation: try SSE streaming first, fall back to blocking API.
 #[allow(clippy::too_many_arguments)]
+/// Print the advisories a server attached to an accepted request.
+///
+/// The server says what it had to adjust or drop — a lip-dub retiming, a
+/// filing a host with no metadata database could not apply — on the
+/// `x-mold-request-warning` header. Nothing else in the CLI reads it, so
+/// without this the feature's own "never a silent drop" promise would hold
+/// on the wire and break at the terminal.
+///
+/// Goes to the `status!` path so it lands on stderr when output is piped,
+/// keeping `mold run ... | viu -` byte-clean.
+pub(crate) fn report_request_warnings(warnings: &[String]) {
+    for warning in warnings {
+        status!("{} {warning}", theme::icon_warn());
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn generate_remote(
+    client: &MoldClient,
+    req: &GenerateRequest,
+    config: &Config,
+    model: &str,
+    piped: bool,
+    effective_width: u32,
+    effective_height: u32,
+    effective_steps: u32,
+    gpus: Option<String>,
+    t5_variant: Option<String>,
+    qwen3_variant: Option<String>,
+    qwen2_variant: Option<String>,
+    qwen2_text_encoder_mode: Option<String>,
+    eager: bool,
+    offload: bool,
+    cli_width: Option<u32>,
+    cli_height: Option<u32>,
+    cli_steps: Option<u32>,
+    cli_guidance: Option<f64>,
+) -> Result<GenerateResponse> {
+    // One reporting point for every remote path — SSE, the blocking
+    // fallback, and the pull-and-retry — so a new branch inside cannot
+    // silently skip the advisory.
+    let response = generate_remote_inner(
+        client,
+        req,
+        config,
+        model,
+        piped,
+        effective_width,
+        effective_height,
+        effective_steps,
+        gpus,
+        t5_variant,
+        qwen3_variant,
+        qwen2_variant,
+        qwen2_text_encoder_mode,
+        eager,
+        offload,
+        cli_width,
+        cli_height,
+        cli_steps,
+        cli_guidance,
+    )
+    .await?;
+    report_request_warnings(&response.request_warnings);
+    Ok(response)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn generate_remote_inner(
     client: &MoldClient,
     req: &GenerateRequest,
     config: &Config,
@@ -2706,6 +2774,7 @@ impl BatchOutputs {
     /// carry the last item's artifact; every image is retained.
     fn finish(self) -> GenerateResponse {
         GenerateResponse {
+            request_warnings: Vec::new(),
             audio: self.audio,
             images: self.images,
             video: self.video,
@@ -4377,6 +4446,7 @@ mod tests {
         let prompts = vec!["first clip".to_string(), "second clip".to_string()];
         let batch_requests = local_batch_requests(&request, 2, 91, Some(&prompts));
         let response = GenerateResponse {
+            request_warnings: Vec::new(),
             audio: None,
             images: Vec::new(),
             video: Some(mold_core::VideoData {
@@ -5425,6 +5495,7 @@ mod audio_batch_passthrough_tests {
 
     fn audio_response(seed: u64, bytes: &[u8]) -> GenerateResponse {
         GenerateResponse {
+            request_warnings: Vec::new(),
             audio: Some(mold_core::AudioData {
                 data: bytes.to_vec(),
                 format: OutputFormat::Wav,

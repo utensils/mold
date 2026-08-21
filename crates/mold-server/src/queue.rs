@@ -1155,6 +1155,7 @@ async fn upscale_generated_image_on_single_worker(
         .map_err(|e| format!("upscale failed: {e}"))?;
 
     let mut response = mold_core::GenerateResponse {
+        request_warnings: Vec::new(),
         audio: None,
         images: vec![],
         video: None,
@@ -3997,6 +3998,7 @@ mod tests {
             journal: None,
         };
         let response = mold_core::GenerateResponse {
+            request_warnings: Vec::new(),
             audio: None,
             images: Vec::new(),
             video: None,
@@ -4920,6 +4922,7 @@ mod tests {
             audio_channels: Some(mold_core::minimax_h3::AUDIO_CHANNELS),
         };
         let response = mold_core::GenerateResponse {
+            request_warnings: Vec::new(),
             images: Vec::new(),
             video: Some(video.clone()),
             audio: None,
@@ -5073,6 +5076,7 @@ mod tests {
             audio_channels: Some(mold_core::minimax_h3::AUDIO_CHANNELS),
         };
         let response = mold_core::GenerateResponse {
+            request_warnings: Vec::new(),
             images: Vec::new(),
             video: Some(video.clone()),
             audio: None,
@@ -5332,6 +5336,7 @@ mod tests {
     fn build_sse_complete_event_audio_carries_wav_payload_and_no_video_fields() {
         let audio = fake_audio(48_000);
         let resp = mold_core::GenerateResponse {
+            request_warnings: Vec::new(),
             audio: Some(audio.clone()),
             images: vec![],
             video: None,
@@ -5377,6 +5382,7 @@ mod tests {
     #[test]
     fn build_sse_complete_event_audio_omits_media_for_metadata_only_payloads() {
         let resp = mold_core::GenerateResponse {
+            request_warnings: Vec::new(),
             audio: Some(fake_audio(24_000)),
             images: vec![],
             video: None,
@@ -5456,6 +5462,7 @@ mod tests {
             audio_channels: Some(2),
         };
         let resp = mold_core::GenerateResponse {
+            request_warnings: Vec::new(),
             audio: None,
             images: vec![],
             video: Some(video.clone()),
@@ -5561,6 +5568,7 @@ mod tests {
             audio_channels: None,
         };
         let resp = mold_core::GenerateResponse {
+            request_warnings: Vec::new(),
             audio: None,
             images: vec![],
             video: Some(video),
@@ -5584,6 +5592,7 @@ mod tests {
     #[test]
     fn build_sse_complete_event_image_clears_all_video_fields() {
         let resp = mold_core::GenerateResponse {
+            request_warnings: Vec::new(),
             audio: None,
             images: vec![fake_image()],
             video: None,
@@ -5616,6 +5625,7 @@ mod tests {
         req.batch_index = Some(2);
         req.batch_count = Some(3);
         let resp = mold_core::GenerateResponse {
+            request_warnings: Vec::new(),
             audio: None,
             images: vec![fake_image()],
             video: None,
@@ -5673,6 +5683,7 @@ mod tests {
     #[test]
     fn metadata_only_completion_fails_when_the_output_was_not_saved() {
         let response = mold_core::GenerateResponse {
+            request_warnings: Vec::new(),
             audio: None,
             images: vec![fake_image()],
             video: None,
@@ -5700,6 +5711,7 @@ mod tests {
         let mut req = fake_request("flux-dev:q4");
         req.upscale_model = Some("real-esrgan-x4plus:fp16".to_string());
         let mut response = mold_core::GenerateResponse {
+            request_warnings: Vec::new(),
             audio: None,
             images: vec![],
             video: None,
@@ -5790,6 +5802,7 @@ mod tests {
             audio_channels: None,
         };
         let mut response = mold_core::GenerateResponse {
+            request_warnings: Vec::new(),
             audio: None,
             images: vec![],
             video: Some(video),

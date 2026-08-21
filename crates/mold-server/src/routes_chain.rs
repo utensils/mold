@@ -628,6 +628,7 @@ fn shim_build_response_and_cleanup(
             .flatten(),
     };
     let response = ChainResponse {
+        request_warnings: Vec::new(),
         video,
         stage_count: manifest.stage_status.len() as u32,
         gpu: None,

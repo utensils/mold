@@ -832,6 +832,7 @@ mod tests {
     #[test]
     fn generation_result_basic() {
         let resp = GenerateResponse {
+            request_warnings: Vec::new(),
             audio: None,
             images: vec![ImageData {
                 data: vec![],
@@ -873,6 +874,7 @@ mod tests {
     fn generation_result_truncates_long_prompt() {
         let long_prompt = "a".repeat(300);
         let resp = GenerateResponse {
+            request_warnings: Vec::new(),
             audio: None,
             images: vec![ImageData {
                 data: vec![],
@@ -895,6 +897,7 @@ mod tests {
     #[test]
     fn generation_result_video_has_frame_and_format_fields() {
         let resp = GenerateResponse {
+            request_warnings: Vec::new(),
             audio: None,
             images: vec![],
             video: Some(mold_core::VideoData {
@@ -942,6 +945,7 @@ mod tests {
     #[test]
     fn generation_result_video_gif_shows_gif_label() {
         let resp = GenerateResponse {
+            request_warnings: Vec::new(),
             audio: None,
             images: vec![],
             video: Some(mold_core::VideoData {
@@ -980,6 +984,7 @@ mod tests {
         // Multi-byte characters: each is 4 bytes in UTF-8
         let long_prompt = "\u{1F600}".repeat(300); // 300 emoji characters
         let resp = GenerateResponse {
+            request_warnings: Vec::new(),
             audio: None,
             images: vec![ImageData {
                 data: vec![],

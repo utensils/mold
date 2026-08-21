@@ -2040,6 +2040,7 @@ impl WanEngine {
         ));
 
         Ok(GenerateResponse {
+            request_warnings: Vec::new(),
             audio: None,
             images: vec![],
             video: Some(VideoData {
@@ -2088,6 +2089,7 @@ fn still_response(
     let metadata = crate::image::build_output_metadata(req, seed, None);
     let data = crate::image::encode_rgb_image(frame, format, metadata.as_ref())?;
     Ok(GenerateResponse {
+        request_warnings: Vec::new(),
         audio: None,
         images: vec![ImageData {
             data,

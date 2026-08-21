@@ -2319,6 +2319,7 @@ mod tests {
         jobs.finish(
             &id,
             Ok(GenerateResponse {
+                request_warnings: Vec::new(),
                 audio: None,
                 images: vec![mold_core::ImageData {
                     data: vec![1, 2, 3],

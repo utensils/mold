@@ -12103,6 +12103,7 @@ mod tests {
 
         // Inject a GenerationComplete with model A (the model that actually ran)
         let response = GenerateResponse {
+            request_warnings: Vec::new(),
             audio: None,
             images: vec![mold_core::ImageData {
                 data: vec![0u8; 4],
@@ -12169,6 +12170,7 @@ mod tests {
             app.generate.params.guidance_overrides = submitted_guidance.clone();
 
             let response = GenerateResponse {
+                request_warnings: Vec::new(),
                 audio: None,
                 images: vec![mold_core::ImageData {
                     data: vec![0u8; 4],
@@ -12222,6 +12224,7 @@ mod tests {
             app.generate.params.guidance = 4.0;
 
             let response = GenerateResponse {
+                request_warnings: Vec::new(),
                 audio: None,
                 images: Vec::new(),
                 generation_time_ms: 100,
@@ -12313,6 +12316,7 @@ mod tests {
             app.generate.prompt = TextArea::from(["a timeline test"]);
 
             let response = GenerateResponse {
+                request_warnings: Vec::new(),
                 audio: None,
                 images: vec![mold_core::ImageData {
                     data: vec![0u8; 4],

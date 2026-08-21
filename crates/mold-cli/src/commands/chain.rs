@@ -532,7 +532,12 @@ async fn run_chain_remote(client: &MoldClient, req: &ChainRequest) -> Result<Vid
     let _ = render.await;
 
     match stream_result {
-        Ok(Some(resp)) => Ok(resp.video),
+        Ok(Some(resp)) => {
+            // A sequence's filing rides the stitched print, so a host that
+            // could not apply it says so on the same header a one-shot uses.
+            crate::commands::generate::report_request_warnings(&resp.request_warnings);
+            Ok(resp.video)
+        }
         Ok(None) => {
             // Server predates chain endpoint; fall back to non-streaming.
             status!(
@@ -540,6 +545,7 @@ async fn run_chain_remote(client: &MoldClient, req: &ChainRequest) -> Result<Vid
                 theme::prefix_warning(),
             );
             let resp = client.generate_chain(req).await?;
+            crate::commands::generate::report_request_warnings(&resp.request_warnings);
             Ok(resp.video)
         }
         Err(e) => Err(e),

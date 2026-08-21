@@ -1610,6 +1610,7 @@ impl ZImageEngine {
         );
 
         Ok(GenerateResponse {
+            request_warnings: Vec::new(),
             audio: None,
             images: vec![ImageData {
                 data: image_bytes,
@@ -2045,6 +2046,7 @@ impl ZImageEngine {
         tracing::info!(generation_time_ms, seed, "Z-Image generation complete");
 
         Ok(GenerateResponse {
+            request_warnings: Vec::new(),
             audio: None,
             images: vec![ImageData {
                 data: image_bytes,

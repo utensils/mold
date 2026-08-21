@@ -992,6 +992,7 @@ impl Ltx2Engine {
             .map(|probe| probe.fps)
             .unwrap_or(plan.frame_rate);
         Ok(GenerateResponse {
+            request_warnings: Vec::new(),
             audio: None,
             images: vec![],
             video: Some(VideoData {
@@ -1169,6 +1170,7 @@ impl Ltx2Engine {
         };
 
         Ok(GenerateResponse {
+            request_warnings: Vec::new(),
             audio: None,
             images: vec![],
             video: Some(VideoData {
@@ -1276,6 +1278,7 @@ impl Ltx2Engine {
         Self::log_timing("pipeline.encode_native_audio", start);
 
         Ok(GenerateResponse {
+            request_warnings: Vec::new(),
             images: vec![],
             video: None,
             audio: Some(AudioData {

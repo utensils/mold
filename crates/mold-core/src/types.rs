@@ -1917,6 +1917,17 @@ pub struct GenerateResponse {
     /// Which GPU ordinal handled this request (multi-GPU only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpu: Option<usize>,
+    /// Advisories the server attached to this response: the request was
+    /// accepted and the print rendered, but something the caller asked for
+    /// was adjusted or dropped (a lip-dub retiming, a filing the host could
+    /// not apply).
+    ///
+    /// Populated by [`crate::MoldClient`] from the `x-mold-request-warning`
+    /// response header, which is why it is empty on the server side — the
+    /// route builds that header from its own `RequestWarnings` instead.
+    /// Additive; empty on every response that carried no advisory.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub request_warnings: Vec<String>,
 }
 
 /// Ordered response for a server-owned atomic batch submitted through
