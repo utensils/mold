@@ -158,11 +158,21 @@ InsightFace model license:
 
     mold pull pulid-flux --accept-license insightface-antelopev2
 
-The acceptance is written to `$MOLD_HOME/license-acceptances.json` and is bound
-to the exact license text Mold pinned; if the upstream terms change, the
-recorded acceptance no longer counts and the user is asked again. Without an
-acceptance, every download path — the CLI, the server's auto-pull, and every
-automatic client-driven pull — refuses before any byte is fetched.
+The acceptance is written to `$MOLD_HOME/license-acceptances.json`. Without
+one, every download path — the CLI, the server's auto-pull, and every automatic
+client-driven pull — refuses before any byte is fetched.
+
+The terms Mold shows are pinned to an exact upstream revision:
+`deepinsight/insightface` commit `7fadd420c2351d0ffa8cac403421c1a3ed733365`,
+whose `README.md` was fetched on 2026-08-21 and verified to hash to
+`84606d9ab37a38606b12c10d96172c6343768d2ef72c802a16482e476f8baf22`. A
+commit-addressed URL is immutable, so that digest cannot go stale against its
+own source — which a `master` branch link could, leaving Mold recording consent
+for text that had since been rewritten. Each stored acceptance is bound to that
+`(url, sha256)` pair, so a Mold release that re-pins the license to a newer
+upstream revision invalidates every existing acceptance and asks again.
+Recording an acceptance is entirely offline; Mold never fetches the license
+text.
 
 [InsightFace](https://github.com/deepinsight/insightface) splits its terms. The
 InsightFace **code** is licensed under the MIT License with no usage

@@ -35,13 +35,43 @@ pub struct ThirdPartyLicense {
     pub id: &'static str,
     /// Human-readable name for prompts and error messages.
     pub name: &'static str,
-    /// Canonical URL of the license text mold pinned.
+    /// **Immutable** URL of the exact license text mold pinned — a
+    /// content-addressed upstream revision, never a moving branch ref.
+    ///
+    /// This is load-bearing, not cosmetic. A `.../master/README.md` URL is
+    /// mutable: upstream can rewrite the terms, and mold would go on
+    /// recording a hard-coded digest of text nobody can fetch any more while
+    /// showing the user a link whose contents no longer match. Old
+    /// acceptances would keep passing and the "changed terms require
+    /// re-acceptance" promise would be hollow. Pinning the revision makes
+    /// `(url, sha256)` a closed pair: the bytes at this URL cannot change, so
+    /// the digest cannot go stale, and adopting new terms is necessarily a
+    /// visible edit to this constant.
     pub url: &'static str,
-    /// SHA-256 of the exact license text fetched from `url`. An acceptance
-    /// recorded against a different digest does not count.
+    /// SHA-256 of the exact license text served at [`Self::url`]. Verified at
+    /// pin time; an acceptance recorded against a different digest does not
+    /// count.
     pub sha256: &'static str,
+    /// Human-readable landing page for the project's current terms.
+    ///
+    /// Shown alongside [`Self::url`] so a user can read today's terms in
+    /// context, but deliberately NOT part of the accepted identity — its
+    /// contents move, which is exactly what `url` must not do.
+    pub canonical: &'static str,
     /// One-sentence statement of the restriction the user is accepting.
     pub summary: &'static str,
+}
+
+impl ThirdPartyLicense {
+    /// The identity an acceptance is bound to: the immutable text location
+    /// and its digest.
+    ///
+    /// Re-pinning either half — a new upstream revision, or a corrected
+    /// digest — invalidates every stored acceptance, which is the whole point
+    /// of binding both.
+    pub fn accepted_identity(&self) -> (&'static str, &'static str) {
+        (self.url, self.sha256)
+    }
 }
 
 /// InsightFace pretrained models (the antelopev2 pack PuLID conditions on).
@@ -52,14 +82,19 @@ pub struct ThirdPartyLicense {
 /// and that applies to both manually downloaded and auto-downloaded models
 /// (InsightFace README, "License" section).
 ///
-/// `sha256` is the digest of the README as fetched on 2026-08-21 from the
-/// pinned raw URL. A change upstream invalidates existing acceptances so the
-/// user is re-shown the terms.
+/// The terms are pinned to upstream commit
+/// `7fadd420c2351d0ffa8cac403421c1a3ed733365`, whose `README.md` was fetched
+/// and verified on 2026-08-21 to hash to `sha256` below. GitHub serves a
+/// commit-addressed raw URL immutably, so that digest can never go stale
+/// against its own URL — re-pinning to a later revision is a deliberate edit
+/// here, and it invalidates every recorded acceptance so users are re-shown
+/// whatever the new text says.
 pub const INSIGHTFACE_ANTELOPEV2: ThirdPartyLicense = ThirdPartyLicense {
     id: "insightface-antelopev2",
     name: "InsightFace pretrained models (antelopev2)",
-    url: "https://raw.githubusercontent.com/deepinsight/insightface/master/README.md",
+    url: "https://raw.githubusercontent.com/deepinsight/insightface/7fadd420c2351d0ffa8cac403421c1a3ed733365/README.md",
     sha256: "84606d9ab37a38606b12c10d96172c6343768d2ef72c802a16482e476f8baf22",
+    canonical: "https://github.com/deepinsight/insightface#license",
     summary: "InsightFace pretrained models (antelopev2: scrfd_10g_bnkps, glintr100) are licensed for non-commercial research purposes only.",
 };
 
@@ -129,13 +164,20 @@ fn load(mold_home: &Path) -> AcceptanceRecord {
 
 /// True when `license` has been accepted against its CURRENT pinned text.
 ///
-/// A record whose `sha256` differs from the const does not count: the terms
-/// mold would show today are not the terms the user agreed to.
+/// The record must match the license's whole [`ThirdPartyLicense::accepted_identity`]
+/// — BOTH the immutable text URL and the digest — not just the id. Either
+/// half moving means the terms mold would show today are not the terms the
+/// user agreed to, so a Mold release that re-pins the license to a newer
+/// upstream revision asks every user again rather than silently inheriting
+/// consent given for different text. Checking only the digest would let a
+/// re-pin whose text happens to be byte-identical slip through, and checking
+/// only the URL would miss a corrected digest.
 pub fn is_accepted(mold_home: &Path, license: &ThirdPartyLicense) -> bool {
+    let (url, sha256) = license.accepted_identity();
     load(mold_home).acceptances.iter().any(|accepted| {
         accepted.id == license.id
-            && accepted.sha256.eq_ignore_ascii_case(license.sha256)
-            && accepted.url == license.url
+            && accepted.sha256.eq_ignore_ascii_case(sha256)
+            && accepted.url == url
     })
 }
 
@@ -150,12 +192,13 @@ pub fn is_accepted_by_id(mold_home: &Path, id: &str) -> bool {
 /// Written owner-only through a temp file and an atomic rename so a partially
 /// written record can never be read as an acceptance.
 pub fn record_acceptance(mold_home: &Path, license: &ThirdPartyLicense) -> io::Result<()> {
+    let (url, sha256) = license.accepted_identity();
     let mut record = load(mold_home);
     record.acceptances.retain(|entry| entry.id != license.id);
     record.acceptances.push(Acceptance {
         id: license.id.to_string(),
-        url: license.url.to_string(),
-        sha256: license.sha256.to_string(),
+        url: url.to_string(),
+        sha256: sha256.to_string(),
         accepted_at_unix_ms: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|elapsed| elapsed.as_millis() as u64)
@@ -206,8 +249,8 @@ fn write_owner_only(path: &Path, record: &AcceptanceRecord) -> io::Result<()> {
 /// proceed is a dead end.
 pub fn acceptance_required_message(model: &str, license: &ThirdPartyLicense) -> String {
     format!(
-        "{model} includes files under a license that must be accepted before download.\n\n  {}\n  {}\n  Terms: {}\n\nReview the terms, then accept explicitly:\n\n  mold pull {model} --accept-license {}\n",
-        license.name, license.summary, license.url, license.id
+        "{model} includes files under a license that must be accepted before download.\n\n  {}\n  {}\n  Terms (pinned): {}\n  Project terms: {}\n\nReview the terms, then accept explicitly:\n\n  mold pull {model} --accept-license {}\n",
+        license.name, license.summary, license.url, license.canonical, license.id
     )
 }
 
@@ -257,6 +300,71 @@ mod tests {
         assert!(!is_accepted(home.path(), &revised));
     }
 
+    /// The other half of the binding: a Mold release that re-pins the license
+    /// to a NEWER upstream revision must ask again, even in the degenerate
+    /// case where the new revision's text hashes the same. Consent was given
+    /// for one exact document, identified by where it lives as well as what
+    /// it says.
+    #[test]
+    fn re_pinning_to_a_new_revision_invalidates_the_acceptance() {
+        let home = tempfile::tempdir().unwrap();
+        record_acceptance(home.path(), &INSIGHTFACE_ANTELOPEV2).unwrap();
+        assert!(is_accepted(home.path(), &INSIGHTFACE_ANTELOPEV2));
+
+        let repinned = ThirdPartyLicense {
+            url: "https://raw.githubusercontent.com/deepinsight/insightface/0000000000000000000000000000000000000000/README.md",
+            ..INSIGHTFACE_ANTELOPEV2
+        };
+        assert!(
+            !is_accepted(home.path(), &repinned),
+            "a new pinned revision must require a fresh acceptance"
+        );
+
+        // And accepting the re-pin replaces rather than accumulates, so the
+        // superseded revision does not linger as a second standing consent.
+        record_acceptance(home.path(), &repinned).unwrap();
+        assert!(is_accepted(home.path(), &repinned));
+        assert!(!is_accepted(home.path(), &INSIGHTFACE_ANTELOPEV2));
+        assert_eq!(load(home.path()).acceptances.len(), 1);
+    }
+
+    /// The guarantee this whole design rests on: the accepted URL must be
+    /// content-addressed. A branch ref such as `.../master/README.md` can be
+    /// rewritten upstream, which would leave the pinned digest describing
+    /// text nobody can fetch while old acceptances kept passing.
+    #[test]
+    fn every_pinned_license_url_is_immutable() {
+        for license in THIRD_PARTY_LICENSES {
+            let url = license.url;
+            assert!(
+                !url.contains("/master/") && !url.contains("/main/") && !url.contains("/HEAD/"),
+                "{} pins a mutable branch ref: {url}",
+                license.id
+            );
+            // GitHub raw URLs are immutable only when the ref is a full
+            // 40-hex commit SHA.
+            let looks_commit_pinned = url.split('/').any(|segment| {
+                segment.len() == 40 && segment.chars().all(|c| c.is_ascii_hexdigit())
+            });
+            assert!(
+                looks_commit_pinned,
+                "{} must pin an exact upstream commit: {url}",
+                license.id
+            );
+            assert_eq!(
+                license.sha256.len(),
+                64,
+                "{} must pin a full sha256",
+                license.id
+            );
+            assert_ne!(
+                license.url, license.canonical,
+                "{} must keep the browsable page separate from the accepted identity",
+                license.id
+            );
+        }
+    }
+
     #[test]
     fn re_accepting_replaces_rather_than_appends() {
         let home = tempfile::tempdir().unwrap();
@@ -292,6 +400,7 @@ mod tests {
         let message = acceptance_required_message("pulid-flux", &INSIGHTFACE_ANTELOPEV2);
         assert!(message.contains("non-commercial research"));
         assert!(message.contains(INSIGHTFACE_ANTELOPEV2.url));
+        assert!(message.contains(INSIGHTFACE_ANTELOPEV2.canonical));
         assert!(message.contains("mold pull pulid-flux --accept-license insightface-antelopev2"));
     }
 
