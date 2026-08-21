@@ -144,11 +144,11 @@ jobs:
       - name: Build Android debug APK
         if: github.event_name != 'push'
         working-directory: apps/mobile/src-tauri
-        run: cargo tauri android build --debug --apk true --target aarch64 --ci
+        run: cargo tauri android build --debug --apk --target aarch64 --ci
       - name: Build Android nightly APK
         if: github.event_name == 'push'
         working-directory: apps/mobile/src-tauri
-        run: cargo tauri android build --apk true --target aarch64 --target armv7 --ci
+        run: cargo tauri android build --apk --target aarch64 --target armv7 --ci
       - name: Upload Android nightly APK
         if: github.event_name == 'push'
         uses: actions/upload-artifact@v7

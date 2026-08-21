@@ -514,10 +514,10 @@ require_text "$android" 'targets: aarch64-linux-android' \
 require_text "$android" '"ndk;27.0.12077973"' \
   "Android workflow does not pin the repository NDK"
 require_text "$android" \
-  'run: cargo tauri android build --debug --apk true --target aarch64 --ci' \
+  'run: cargo tauri android build --debug --apk --target aarch64 --ci' \
   "Android workflow does not build the ARM64 APK"
 require_text "$android" \
-  'run: cargo tauri android build --apk true --target aarch64 --target armv7 --ci' \
+  'run: cargo tauri android build --apk --target aarch64 --target armv7 --ci' \
   "Android workflow does not build the ARM64/ARMv7 nightly APK"
 require_text "$android" 'name: mold-android-nightly-apk' \
   "Android workflow does not retain its nightly APK"
