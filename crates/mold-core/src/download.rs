@@ -561,6 +561,69 @@ fn verify_file_integrity(
     Ok(())
 }
 
+/// Prove one already-placed file against a manifest-pinned SHA-256, writing
+/// the shared `.sha256-verified` marker on success.
+///
+/// This is [`verify_file_integrity`]'s contract for callers that hold a pin
+/// but not a [`ModelFile`] — per-file dependency materialization, which never
+/// routes through `pull_model` and so never reaches the manifest pull path's
+/// verification. Hugging Face `main` revisions are mutable, so a dependency
+/// downloaded by hash-free bytes-and-size alone could be a different file than
+/// the one the manifest pinned; nothing downstream would notice, because the
+/// frozen plan proves only that the path is local.
+///
+/// A file already carrying a marker that records this exact digest is accepted
+/// without rehashing — that marker is the manifest pull path's own proof. A
+/// marker recording a DIFFERENT digest is not proof of anything and is
+/// re-verified. On mismatch both the file and its stale marker are removed, so
+/// a retry re-downloads instead of resurrecting the rejected bytes.
+pub fn verify_pinned_file(
+    path: &Path,
+    expected_sha256: &str,
+    filename: &str,
+    model: &str,
+) -> Result<(), DownloadError> {
+    if recorded_sha256_marker(path)
+        .is_some_and(|recorded| recorded.trim().eq_ignore_ascii_case(expected_sha256.trim()))
+    {
+        return Ok(());
+    }
+    // Unverifiable is not verified: a pinned dependency whose bytes cannot be
+    // read fails closed rather than being accepted unproven, because nothing
+    // downstream re-asks — the frozen plan proves only that the path is local.
+    let actual = compute_sha256(path).map_err(|error| {
+        DownloadError::Other(format!(
+            "cannot verify the pinned SHA-256 of {filename} at {}: {error}",
+            path.display()
+        ))
+    })?;
+    if !actual.eq_ignore_ascii_case(expected_sha256) {
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(sha256_marker_path(path));
+        return Err(DownloadError::Sha256Mismatch {
+            filename: filename.to_string(),
+            expected: expected_sha256.to_string(),
+            actual,
+            model: model.to_string(),
+        });
+    }
+    if let Err(error) = write_sha256_marker(path, &actual) {
+        // Same policy as the manifest pull path: the bytes are proven, so the
+        // attempt succeeds, but a missing marker means the next installed-state
+        // check reports the file incomplete. Log loudly rather than fail.
+        eprintln!("warning: failed to write .sha256-verified marker for {filename}: {error}");
+    }
+    Ok(())
+}
+
+/// The digest a `.sha256-verified` marker records, if one is readable.
+pub fn recorded_sha256_marker(path: &Path) -> Option<String> {
+    std::fs::read_to_string(sha256_marker_path(path))
+        .ok()
+        .map(|recorded| recorded.trim().to_string())
+        .filter(|recorded| !recorded.is_empty())
+}
+
 /// Truncate a string to fit within `max_len`, replacing the middle with "..." if needed.
 fn truncate_filename(name: &str, max_len: usize) -> String {
     if name.len() <= max_len || max_len < 8 {

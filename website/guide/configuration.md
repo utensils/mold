@@ -345,12 +345,23 @@ until you record acceptance once per `MOLD_HOME`:
 mold pull pulid-flux --accept-license insightface-antelopev2
 ```
 
-The command prints the restriction and the pinned terms URL before it writes
-the record. Acceptances live in owner-only `$MOLD_HOME/license-acceptances.json`
-and are bound to the SHA-256 of the license text you were shown, so if the
-upstream terms change you are asked again. A refused download names the license
-and the exact command to run; there is no environment-variable bypass. See
-`THIRD_PARTY_NOTICES.md` for the full notice.
+The command prints the restriction and both terms URLs before it writes the
+record. Acceptances live in owner-only `$MOLD_HOME/license-acceptances.json`.
+
+The terms are pinned to an **exact upstream commit**, not to a branch: Mold
+stores the commit-addressed URL of the license text alongside its SHA-256, and
+verified that pair when the pin landed. A commit URL serves the same bytes
+forever, so the digest can never drift away from the document it describes —
+which a `master` link would, quietly leaving you consented to text that had
+since been rewritten. Each acceptance is bound to that `(url, sha256)` pair, so
+a Mold release that re-pins a license to a newer upstream revision invalidates
+your existing acceptance and asks again with the new text.
+
+Recording an acceptance is entirely offline — Mold never fetches the license
+text, so `--accept-license` works on an air-gapped host. A refused download
+names the license and the exact command to run; there is no
+environment-variable bypass. See `THIRD_PARTY_NOTICES.md` for the full notice,
+including the pinned commit and digest.
 
 ### Gallery Metadata Database
 
