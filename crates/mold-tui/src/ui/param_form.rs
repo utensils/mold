@@ -208,6 +208,9 @@ fn adjustable(field: ParamField) -> bool {
             | ParamField::MaskImage
             | ParamField::ControlImage
             | ParamField::ControlModel
+            | ParamField::Title
+            | ParamField::Tags
+            | ParamField::Collection
     )
 }
 

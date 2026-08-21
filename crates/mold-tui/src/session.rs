@@ -709,6 +709,12 @@ mod tests {
             control_image_path: None,
             control_model: None,
             control_scale: 0.8,
+            // Creation-time filing is per-print intent, deliberately not
+            // session state — `TuiSession` has no slot for it.
+            title: None,
+            tags: Vec::new(),
+            collection: None,
+            auto_tag_title: true,
         };
 
         let session = TuiSession::from_params("a sunset", "blurry", &params);

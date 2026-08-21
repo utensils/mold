@@ -847,10 +847,29 @@ fn build_request(
         })
     });
 
+    // Creation-time filing is a client decision (see
+    // `mold_core::compose_client_tags`): the server never auto-tags, so the
+    // title's slug is composed here, exactly as the CLI composes it. Both
+    // File-under editors and `start_generation`'s guard already refuse a
+    // list the auto tag would push past the cap, so the error arm is
+    // defensive — it keeps the tags the user typed rather than dropping them.
+    let composed = crate::ui::create_form::compose_filing_tags(
+        &params.tags,
+        params.title.as_deref(),
+        params.auto_tag_title,
+    )
+    .unwrap_or_else(|_| mold_core::ComposedClientTags {
+        tags: params.tags.clone(),
+        auto_tagged: None,
+    });
+
     GenerateRequest {
-        collection: None,
-        tags: None,
-        title: None,
+        collection: params
+            .collection
+            .as_deref()
+            .map(mold_core::CollectionRef::by_name),
+        tags: (!composed.tags.is_empty()).then_some(composed.tags),
+        title: params.title.clone(),
         source_fit: None,
         hdr_exr_dir: None,
         hdr_exr_full_float: false,
@@ -1192,6 +1211,94 @@ mod tests {
         assert_eq!(params.batch, 1);
         let req = build_request(&params, "test prompt", &None);
         assert_eq!(req.batch_size, 1);
+    }
+
+    // ── creation-time filing ("File under") ────────────────────
+
+    /// Absent-until-touched: an untouched Create form submits exactly the
+    /// request it always did, with no filing fields on the wire.
+    #[test]
+    fn build_request_omits_filing_until_the_form_is_touched() {
+        let config = mold_core::Config::load_or_default();
+        let params = GenerateParams::from_config(&config);
+        let req = build_request(&params, "p", &None);
+        assert_eq!(req.title, None);
+        assert_eq!(req.tags, None);
+        assert!(req.collection.is_none());
+    }
+
+    #[test]
+    fn build_request_carries_the_title_tags_and_collection() {
+        let config = mold_core::Config::load_or_default();
+        let mut params = GenerateParams::from_config(&config);
+        params.auto_tag_title = false;
+        params.title = Some("Smurf Village".to_string());
+        params.tags = vec!["village".to_string(), "blue".to_string()];
+        params.collection = Some("Blue Period".to_string());
+
+        let req = build_request(&params, "p", &None);
+        assert_eq!(req.title.as_deref(), Some("Smurf Village"));
+        assert_eq!(
+            req.tags,
+            Some(vec!["village".to_string(), "blue".to_string()])
+        );
+        // Collections travel by display name — the portable, cross-host
+        // form; ids belong to one host's rows.
+        let collection = req.collection.expect("collection rides the request");
+        assert_eq!(collection.name.as_deref(), Some("Blue Period"));
+        assert_eq!(collection.id, None);
+    }
+
+    /// The server never auto-tags, so the title's slug is composed here —
+    /// the same `mold_core::compose_client_tags` decision the CLI makes.
+    #[test]
+    fn build_request_auto_tags_a_titled_print_only_while_the_preference_is_on() {
+        let config = mold_core::Config::load_or_default();
+        let mut params = GenerateParams::from_config(&config);
+        params.title = Some("Smurf Village".to_string());
+        params.tags = vec!["village".to_string()];
+
+        params.auto_tag_title = true;
+        assert_eq!(
+            build_request(&params, "p", &None).tags,
+            Some(vec!["village".to_string(), "smurf-village".to_string()])
+        );
+
+        params.auto_tag_title = false;
+        assert_eq!(
+            build_request(&params, "p", &None).tags,
+            Some(vec!["village".to_string()])
+        );
+
+        // A title alone still files the print under its own slug.
+        params.auto_tag_title = true;
+        params.tags.clear();
+        assert_eq!(
+            build_request(&params, "p", &None).tags,
+            Some(vec!["smurf-village".to_string()])
+        );
+
+        // …and an untitled form with the preference on carries nothing.
+        params.title = None;
+        assert_eq!(build_request(&params, "p", &None).tags, None);
+    }
+
+    #[test]
+    fn build_request_carries_filing_on_every_family() {
+        // Filing is not a generation parameter: a video request carries it
+        // exactly as an image request does.
+        let config = mold_core::Config::load_or_default();
+        let mut params = GenerateParams::from_config(&config);
+        params.model = "ltx2".to_string();
+        params.auto_tag_title = false;
+        params.title = Some("Smurf Village".to_string());
+        params.collection = Some("Blue Period".to_string());
+        let req = build_request(&params, "p", &None);
+        assert_eq!(req.title.as_deref(), Some("Smurf Village"));
+        assert_eq!(
+            req.collection.and_then(|c| c.name).as_deref(),
+            Some("Blue Period")
+        );
     }
 
     #[test]
