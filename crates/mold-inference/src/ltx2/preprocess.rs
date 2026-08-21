@@ -22,11 +22,9 @@
 //! `testdata/preprocess/README.md`). Saved metadata records the codec
 //! actually used — never a CRF claim.
 
-use std::io::Cursor;
-
 use anyhow::{Context, Result};
 use candle_core::{DType, Device, Tensor};
-use image::{DynamicImage, ImageDecoder, RgbImage};
+use image::RgbImage;
 use mold_core::ltx2_preprocess::Ltx2ImagePreprocessingProfile;
 
 /// Codec identity recorded in provenance metadata for the constant-QP
@@ -39,98 +37,13 @@ pub(crate) fn roundtrip_codec_label(profile: &Ltx2ImagePreprocessingProfile) -> 
 /// Fit policy identity recorded in provenance metadata.
 pub(crate) const FIT_POLICY_LABEL: &str = "fill-center-crop";
 
-/// Decode image bytes into an upright sRGB image: EXIF orientation is
-/// applied, alpha is flattened, and an embedded ICC profile is converted
-/// to sRGB (malformed profiles warn and assume sRGB, mirroring upstream
-/// decode.py:164-166).
-pub(crate) fn decode_oriented_srgb(bytes: &[u8]) -> Result<RgbImage> {
-    let reader = image::ImageReader::new(Cursor::new(bytes))
-        .with_guessed_format()
-        .context("failed to sniff source image format")?;
-    let mut decoder = reader
-        .into_decoder()
-        .context("failed to decode source image")?;
-    let orientation = decoder
-        .orientation()
-        .unwrap_or(image::metadata::Orientation::NoTransforms);
-    let icc = decoder.icc_profile().unwrap_or_default();
-    let mut decoded =
-        DynamicImage::from_decoder(decoder).context("failed to decode source image")?;
-    // Upstream order (decode.py:143-163): orient, flatten to RGB, then
-    // convert color to sRGB.
-    decoded.apply_orientation(orientation);
-    // A grayscale source with a Gray ICC profile must be transformed in
-    // its own layout — moxcms (correctly) refuses an Rgb-layout transform
-    // from a Gray profile, and pre-flattening to RGB would turn the
-    // conversion into the assume-sRGB fallback (codex review, PR #1072).
-    let is_grayscale = matches!(
-        decoded.color(),
-        image::ColorType::L8
-            | image::ColorType::La8
-            | image::ColorType::L16
-            | image::ColorType::La16
-    );
-    let rgb = decoded.to_rgb8();
-    Ok(match icc {
-        Some(profile) if !profile.is_empty() => {
-            let layout = if is_grayscale {
-                moxcms::Layout::Gray
-            } else {
-                moxcms::Layout::Rgb
-            };
-            convert_icc_to_srgb(rgb, &profile, layout)
-        }
-        _ => rgb,
-    })
-}
-
-/// Convert `rgb` from the embedded `profile` to sRGB, reading the source
-/// pixels in `source_layout` (`Gray` collapses the flattened RGB back to
-/// one channel — the three are identical for a decoded grayscale image).
-/// Any failure — malformed profile, unsupported connection — logs and
-/// returns the pixels unchanged (assume-sRGB), exactly upstream's
-/// fallback.
-fn convert_icc_to_srgb(rgb: RgbImage, profile: &[u8], source_layout: moxcms::Layout) -> RgbImage {
-    let source = match moxcms::ColorProfile::new_from_slice(profile) {
-        Ok(profile) => profile,
-        Err(error) => {
-            tracing::warn!("ignoring malformed embedded ICC profile: {error}");
-            return rgb;
-        }
-    };
-    let srgb = moxcms::ColorProfile::new_srgb();
-    let options = moxcms::TransformOptions {
-        rendering_intent: moxcms::RenderingIntent::Perceptual,
-        ..Default::default()
-    };
-    let transform =
-        match source.create_transform_8bit(source_layout, &srgb, moxcms::Layout::Rgb, options) {
-            Ok(transform) => transform,
-            Err(error) => {
-                tracing::warn!("cannot convert embedded ICC profile to sRGB: {error}");
-                return rgb;
-            }
-        };
-    let (width, height) = rgb.dimensions();
-    let src_rgb = rgb.into_raw();
-    let src: std::borrow::Cow<'_, [u8]> = match source_layout {
-        moxcms::Layout::Gray => src_rgb
-            .as_chunks::<3>()
-            .0
-            .iter()
-            .map(|px| px[0])
-            .collect::<Vec<_>>()
-            .into(),
-        _ => (&src_rgb).into(),
-    };
-    let mut dst = vec![0u8; width as usize * height as usize * 3];
-    if let Err(error) = transform.transform(&src, &mut dst) {
-        tracing::warn!("ICC-to-sRGB conversion failed: {error}");
-        return RgbImage::from_raw(width, height, src_rgb)
-            .expect("source buffer matches dimensions");
-    }
-    RgbImage::from_raw(width, height, dst).expect("destination buffer matches dimensions")
-}
+/// EXIF-oriented, ICC-corrected decode.
+///
+/// Lived here until #1222 needed the same upright decode for identity
+/// images; it now sits in [`crate::img_utils`] so there is exactly one
+/// orientation path in the crate, and is re-exported under its original
+/// name so every LTX-2 call site and citation still reads the same.
+pub(crate) use crate::img_utils::decode_oriented_srgb;
 
 /// An image resized/cropped in float space. Upstream never re-quantizes
 /// after its bilinear resize (the float tensor flows straight into
@@ -443,6 +356,10 @@ pub(crate) fn fit_conditioning_image(
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The ICC fallback tests below still exercise this directly; it moved to
+    // `img_utils` with `decode_oriented_srgb` but its behaviour is LTX-2's
+    // upstream-parity requirement, so the coverage stays here.
+    use crate::img_utils::convert_icc_to_srgb;
     use mold_core::ltx2_preprocess::{ltx2_image_preprocessing_profile, Ltx2Generation};
 
     const TESTDATA: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/ltx2/testdata/preprocess/");
