@@ -1115,6 +1115,8 @@ pub struct WanActivationGeometry {
     pub ffn_dim: u64,
     /// Attention heads — every shipped variant uses a 128-wide head.
     pub num_heads: u64,
+    /// Transformer block count, read from the highest `blocks.{i}` index.
+    pub num_layers: u64,
     /// VAE generation, which sets the latent grid.
     pub vae: WanVaeGeneration,
     /// The DiT patch's spatial width (`patch_size.1`), which halves each
@@ -1136,6 +1138,7 @@ impl WanActivationGeometry {
             dim: 1536,
             ffn_dim: 8960,
             num_heads: 12,
+            num_layers: 30,
             vae: WanVaeGeneration::V21,
             patch_spatial: 2,
             per_token_timesteps: false,
@@ -1148,6 +1151,7 @@ impl WanActivationGeometry {
             dim: 5120,
             ffn_dim: 13824,
             num_heads: 40,
+            num_layers: 40,
             vae: WanVaeGeneration::V21,
             patch_spatial: 2,
             per_token_timesteps: false,
@@ -1160,6 +1164,7 @@ impl WanActivationGeometry {
             dim: 3072,
             ffn_dim: 14336,
             num_heads: 24,
+            num_layers: 30,
             vae: WanVaeGeneration::V22,
             patch_spatial: 2,
             per_token_timesteps: true,
