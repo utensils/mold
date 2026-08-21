@@ -225,6 +225,7 @@ import { isUpscaledImage } from "../lib/gallery/upscaled";
 import { percent } from "../lib/format";
 import { composeStyle, mergeStyleNegative, styleHint } from "../lib/stylePresets";
 import {
+  identityConditioningValidationError,
   profileGuidanceValidationError,
   profileStepsValidationError,
   inlineGenerationMediaBytes,
@@ -264,6 +265,13 @@ import {
   restoreGenerationSourceMedia,
   sha256HexOfBase64,
 } from "@studio/lib/generationSourceMedia";
+import { persistIdentityPhoto, restoreIdentityPhoto } from "@studio/lib/identityConditioning";
+import {
+  mobileIdentityAdvancedCount,
+  mobileIdentityNeedsReattach,
+  resolveMobileIdentityRestore,
+  showMobileIdentityWell,
+} from "./identity";
 import {
   isCancelledError,
   jobPhase,
@@ -342,6 +350,7 @@ import MobileFileUnder from "./MobileFileUnder.vue";
 import MobileGalleryViewer from "./MobileGalleryViewer.vue";
 import MobileGenerateParameters from "./MobileGenerateParameters.vue";
 import MobileHostDetail from "./MobileHostDetail.vue";
+import MobileIdentityWell from "./MobileIdentityWell.vue";
 import MobileLibrarySheet from "./MobileLibrarySheet.vue";
 import MobileLoraControls from "./MobileLoraControls.vue";
 import MobilePromptTools from "./MobilePromptTools.vue";
@@ -654,6 +663,9 @@ const advancedActiveCount = computed(() => {
   if (generationCapabilitiesForFamily(form.family, form.model).wanRecipe.supported) {
     count += wanRecipeCount(form.wanRecipe);
   }
+  // The identity PHOTO is primary-form media beside the source wells; only its
+  // two knobs are Advanced, and only on a checkpoint that accepts them.
+  count += mobileIdentityAdvancedCount(form);
   return count;
 });
 
@@ -1551,6 +1563,17 @@ const sourceControlsValid = computed(() => !caps.value.supportsImg2img || source
  * advertised text-to-video checkpoint hides the well entirely.
  */
 const sourceConditioningError = computed(() => sourceConditioningValidationError(form));
+/**
+ * Face identity (#1224). The well renders on positive capability only, and a
+ * photo staged before a capability-losing model switch is PARKED — retained in
+ * the form, kept off the wire by `buildRequest`, and back in the well the
+ * moment a qualified checkpoint is selected again. Nothing about a parked
+ * partition blocks Develop.
+ */
+const showIdentity = computed(() => showMobileIdentityWell(form, isSequence.value));
+/** Why the identity partition would be refused, repeated beside Develop so a
+ * disabled button is never a dead end. */
+const identityError = computed(() => identityConditioningValidationError(form));
 const fixedRecipeControls = computed(() =>
   fixedRecipeControlOverrides(
     effectiveGenerationRecipe(selectedGenerationModel.value, form.pipeline),
@@ -1628,6 +1651,7 @@ const developBlockerReason = computed<string | null>(() => {
   if (guidanceError.value) return guidanceError.value;
   if (mobileMediaBudgetError.value) return mobileMediaBudgetError.value;
   if (sourceConditioningError.value) return sourceConditioningError.value;
+  if (identityError.value) return identityError.value;
   if (h3AuthoringError.value) return h3AuthoringError.value;
   if (!sourceControlsValid.value) return "Correct the source image settings above.";
   if (!parameterValid.value) return "Open Advanced and correct the highlighted settings.";
@@ -4838,6 +4862,15 @@ async function generate(): Promise<void> {
     if (request.source_image && originalSource) {
       void persistGenerationSourceMedia(request.source_image, originalSource);
     }
+    if (request.id_image) {
+      // Saved metadata records `id_image_sha256`, never the face bytes, so the
+      // photo has to be kept locally under the digest of exactly what shipped
+      // or Use as prompt has nothing to look up. Best-effort: a failed write
+      // costs a reattach later, never this print.
+      void persistIdentityPhoto(request.id_image, {
+        filename: request.id_image_name ?? "identity photo",
+      });
+    }
     if (appliedRemix.value && appliedRemix.value.prompt === form.prompt) {
       request.prompt_transform = {
         operation: "remix",
@@ -5626,6 +5659,14 @@ async function reusePrint(print: GalleryPrint): Promise<void> {
         )
       : null;
     if (cancelledReuse(epoch, controller)) return;
+    // Independent of the source restore above: identity is its own partition,
+    // and a print may carry a face photo on a checkpoint that takes no source
+    // image at all — the source restore's own early-outs must not skip it.
+    const identityRestoreNotice = await restoreReusedIdentityPhoto(
+      print.metadata,
+      () => !cancelledReuse(epoch, controller),
+    );
+    if (cancelledReuse(epoch, controller)) return;
     if (reuse.sequence) {
       // A sequence print reloads the clip rail as a NEW draft: no edit
       // session, nothing cached (iPhone has no chain-detail recovery route,
@@ -5675,6 +5716,7 @@ async function reusePrint(print: GalleryPrint): Promise<void> {
       notes.push("Prompt settings restored");
     }
     if (sourceRestoreNotice) notes.push(sourceRestoreNotice);
+    if (identityRestoreNotice) notes.push(identityRestoreNotice);
     // A first/last-frame print restores every knob except its closing still:
     // saved metadata records each keyframe's name and digest, never the bytes
     // (`applyMetadataToForm` already cleared `form.endFrame`). Say so, the same
@@ -5688,7 +5730,10 @@ async function reusePrint(print: GalleryPrint): Promise<void> {
       Boolean(print.metadata.source_image_sha256 ?? print.metadata.source_image_name),
     );
     if (endFrameNotice) notes.push(endFrameNotice);
-    setGenerationStatus(notes.join(" · "), !!endFrameNotice || !!sourceRestoreNotice);
+    setGenerationStatus(
+      notes.join(" · "),
+      !!endFrameNotice || !!sourceRestoreNotice || !!identityRestoreNotice,
+    );
     // FL2VA reuse leaves bytes-less boundary descriptors; when the original
     // was a gallery image its bytes are still on the print's host — fetch
     // them so the wells fill instead of demanding a reattach.
@@ -5780,6 +5825,34 @@ async function readReusePresentation(
     signal.removeEventListener("abort", abort);
     rejectCancellation = null;
   }
+}
+
+/**
+ * Fill in the bytes behind a reused print's identity photo.
+ *
+ * `applyMetadataToForm` restores the recorded strength and start step plus a
+ * bytes-less reattach descriptor; the photo itself lives only in this device's
+ * content-addressed stash, keyed by the digest of exactly what shipped. A miss
+ * is DISCLOSED in the persistent inline status line — rendering a different
+ * face would be worse than saying the original is gone.
+ */
+async function restoreReusedIdentityPhoto(
+  metadata: OutputMetadata,
+  isCurrent: () => boolean,
+): Promise<string | null> {
+  const wanted = form.identityImage;
+  if (!mobileIdentityNeedsReattach(wanted)) return null;
+  const stored = await restoreIdentityPhoto(metadata.id_image_sha256).catch(() => null);
+  if (!isCurrent()) return null;
+  const slot = form.identityImage;
+  // Cleared, reattached, or replaced while the lookup ran — the user wins.
+  if (!slot || slot.base64 || slot.filename !== wanted?.filename) return null;
+  const outcome = resolveMobileIdentityRestore(slot, stored);
+  if (outcome.kind === "attached") {
+    form.identityImage = outcome.image;
+    return null;
+  }
+  return outcome.kind === "missing" ? outcome.note : null;
 }
 
 async function restoreOrdinaryReusedSource(
@@ -8350,6 +8423,13 @@ onBeforeUnmount(() => {
                 @validity-change="sourceValid = $event"
               />
             </details>
+
+            <!-- Identity photo: its own conditioning partition, not source
+                 media, so it sits beside the source wells rather than inside
+                 them and is never fitted to the canvas. Mounted only for a
+                 checkpoint that advertises identity support; a photo staged on
+                 a checkpoint that loses it is parked, not discarded. -->
+            <MobileIdentityWell v-if="showIdentity" :form="form" />
 
             <MobileSharedParams
               :form="form"

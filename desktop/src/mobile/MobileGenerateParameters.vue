@@ -67,6 +67,20 @@ import {
   type Ltx2GuidanceOverridesState,
 } from "@studio/lib/guidanceOverrides";
 import { schedulerLabel } from "@studio/lib/generationCapabilities";
+import {
+  IDENTITY_SECTION_LABEL,
+  IDENTITY_START_STEP_HINT,
+  IDENTITY_START_STEP_LABEL,
+  IDENTITY_WEIGHT_HINT,
+  IDENTITY_WEIGHT_LABEL,
+  ID_START_STEP_DEFAULT,
+  ID_WEIGHT_DEFAULT,
+  ID_WEIGHT_MAX,
+  ID_WEIGHT_MIN,
+  ID_WEIGHT_STEP,
+} from "@studio/lib/identityConditioning";
+import { mobileIdentityStartStepMax } from "./identity";
+import { identityConditioningValidationError } from "../lib/generateValidation";
 import { effectiveGenerationRecipe } from "@studio/lib/generationProfile";
 import {
   MAX_WAN_DISTILL_STRENGTH,
@@ -367,6 +381,24 @@ function numberOrNull(raw: string): number | null {
   if (!trimmed) return null;
   const value = Number(trimmed);
   return Number.isFinite(value) ? value : null;
+}
+
+// ── Face identity (PuLID, #1224) ────────────────────────────────────────────
+// Only the two KNOBS live in Advanced; the photo well is primary-form media
+// beside the source wells. Both stay absent from the request until touched, so
+// the server's own defaults remain authoritative — an empty field is untouched,
+// not zero.
+const identitySupported = computed(() => props.form.identitySupported === true);
+const identityStartStepMax = computed(() => mobileIdentityStartStepMax(props.form.steps));
+const identityError = computed(() => identityConditioningValidationError(props.form));
+
+function setIdentityWeight(raw: string): void {
+  props.form.identityWeight = numberOrNull(raw);
+}
+
+function setIdentityStartStep(raw: string): void {
+  const value = numberOrNull(raw);
+  props.form.identityStartStep = value === null ? null : Math.trunc(value);
 }
 
 function setRetake(edge: "start" | "end", raw: string): void {
@@ -730,6 +762,62 @@ const fpsErrorId = `mobile-fps-error-${useId()}`;
           </option>
         </select>
       </label>
+    </fieldset>
+
+    <!--
+      Identity knobs. The photo itself is picked in the primary Create stack;
+      these two only ever ride the wire alongside it, and only on a checkpoint
+      that advertises identity support (a parked partition shows nothing).
+    -->
+    <fieldset
+      v-if="identitySupported"
+      class="mobile-generate-section"
+      data-test="mobile-identity-section"
+    >
+      <legend class="mobile-generate-legend">{{ IDENTITY_SECTION_LABEL }}</legend>
+
+      <label class="field mobile-generate-field">
+        <span>{{ IDENTITY_WEIGHT_LABEL }}</span>
+        <input
+          class="control"
+          type="number"
+          inputmode="decimal"
+          :step="ID_WEIGHT_STEP"
+          :min="ID_WEIGHT_MIN"
+          :max="ID_WEIGHT_MAX"
+          :placeholder="String(ID_WEIGHT_DEFAULT)"
+          data-test="mobile-identity-weight"
+          :value="form.identityWeight ?? ''"
+          @input="setIdentityWeight(($event.target as HTMLInputElement).value)"
+        />
+        <small>{{ IDENTITY_WEIGHT_HINT }}</small>
+      </label>
+
+      <label class="field mobile-generate-field">
+        <span>{{ IDENTITY_START_STEP_LABEL }}</span>
+        <input
+          class="control"
+          type="number"
+          inputmode="numeric"
+          step="1"
+          min="0"
+          :max="identityStartStepMax"
+          :placeholder="String(ID_START_STEP_DEFAULT)"
+          data-test="mobile-identity-start-step"
+          :value="form.identityStartStep ?? ''"
+          @input="setIdentityStartStep(($event.target as HTMLInputElement).value)"
+        />
+        <small>{{ IDENTITY_START_STEP_HINT }}</small>
+      </label>
+
+      <p
+        v-if="identityError"
+        class="mobile-generate-validation"
+        role="alert"
+        data-test="mobile-identity-error"
+      >
+        {{ identityError }}
+      </p>
     </fieldset>
 
     <!-- H3 Ref2VA ordered references. FL2VA boundaries render as the shared

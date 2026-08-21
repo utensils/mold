@@ -127,6 +127,10 @@ export function conditioningFingerprint(request: ExpansionTaskRequest): string {
     pipeline: request.pipeline ?? null,
     retake_range: request.retake_range ?? null,
     references: request.references?.map(referenceFingerprint) ?? null,
+    // The identity photo is conditioning media like any other: swapping the
+    // face behind a reviewed rewrite must stale it through this one rule, not
+    // a second identity-only staleness check.
+    id_image: request.id_image ?? null,
   });
   let hash = 2166136261;
   for (let index = 0; index < value.length; index += 1) {

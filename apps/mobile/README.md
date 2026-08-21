@@ -92,6 +92,32 @@ pushed screen opened from the header.
   `capabilities.gallery.organize`, and an unread snapshot hides the group and
   files nothing. Typed tag text loses a leading `#`; a suggestion a machine
   actually reported is added verbatim, so a real `#grain` files as `#grain`.
+  An **Identity** photo well (`desktop/src/mobile/MobileIdentityWell.vue` over
+  the shared `@studio/components/IdentityPhotoWell.vue`) sits in the primary
+  Create stack beside the source wells, mounted only while the resolved recipe
+  or the model row's additive `supports_identity` says yes — positive knowledge
+  only, so an unread or older host renders nothing rather than a disabled
+  control. Picking uses the well's own file input, which is the native
+  photo/camera picker; the gallery escape hatch the source wells offer is
+  deliberately absent, because a gallery print is a render, not a reference
+  photograph. The bytes travel VERBATIM: an identity photo is never routed
+  through source-fit preprocessing and carries no `source_fit` provenance. A
+  photo staged before a capability-losing model switch is PARKED — retained in
+  the form, kept off the wire by `buildRequest`, Develop still enabled — and
+  the well returns with it when a qualified checkpoint is selected again.
+  **Identity strength** (`0.0`–`3.0`, step `0.05`, default `1.0`) and
+  **Identity start step** live in the Advanced sheet, count toward its badge,
+  clear on its Reset (which keeps the attached face), and stay absent from the
+  request until touched so the server's defaults remain authoritative. Every
+  refusal — a photo with a LoRA or a source image, a knob with no photo, an
+  oversized or unsupported file, a photo over the 45 MiB combined request-media
+  budget — renders inline beside the control and blocks Develop, never as a
+  toast. Prepared Batch N siblings inherit the whole partition, and a changed
+  photo stales reviewed prompt work through the shared conditioning
+  fingerprint, exactly as a changed source image does. Every rule comes from
+  `@studio/lib/identityConditioning`; `desktop/src/mobile/identity.ts` holds
+  only the phone-shaped parts (budget, native ingest, Info rows, reuse
+  outcome).
   A **↺ Reset** beside the Advanced trigger restores every generation setting
   to the selected model's defaults while preserving the prompt, model choice,
   and any prepared batch size; the Advanced sheet keeps its narrower
@@ -179,6 +205,13 @@ pushed screen opened from the header.
   Done commits via `PATCH`, blank clears), ♥ toggle, a tags chip editor with
   suggestions, an "In collections" checklist with a New input, and — for
   trashed prints — the purge countdown with Restore / two-step Delete forever.
+  A print developed with an identity photo also lists its provenance there
+  (filename, short SHA-256, effective strength, and start step), which opens
+  the Info sheet even on a host with no organization capability at all; **Use
+  as prompt** restores both knobs and re-attaches the photo from this device's
+  content-addressed stash, disclosing the miss in the persistent inline status
+  line when the stash no longer holds it — saved metadata carries the digest,
+  never the face bytes.
   Every mutation fans out to each physical copy's exact Keychain-authenticated
   host via the shared `planOrganizationFanout` plan
   (`desktop/src/mobile/libraryOrganization.ts` holds the mobile state
