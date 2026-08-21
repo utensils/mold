@@ -211,16 +211,39 @@ fn show(name: &str, summary: &str, url: &str, canonical: &str) {
 
 /// Read the terms from the SERVER that will record the acceptance.
 ///
-/// Returns `None` when there is no such server to ask — unreachable, or an
-/// older build without `capabilities.licenses` — in which case the pull will
-/// land locally (or on a server with no license gate at all) and this build's
-/// own constants are the right thing to display.
-async fn server_license_terms(ctx: &CliContext) -> Option<Vec<mold_core::ThirdPartyLicenseStatus>> {
-    let capabilities = ctx.client().capabilities().await.ok()?;
+/// Returns `Ok(None)` only when there is genuinely no such server to ask —
+/// a connection failure, or an older build without `capabilities.licenses` —
+/// in which case the pull will land locally (or on a server with no license
+/// gate at all) and this build's own constants are the right thing to display.
+/// A server that answered but could not be read (auth, 5xx, malformed body)
+/// is an error naming the host: showing this build's terms in its place
+/// would prompt the user to consent to text the recording machine never saw.
+async fn server_license_terms(
+    ctx: &CliContext,
+) -> Result<Option<Vec<mold_core::ThirdPartyLicenseStatus>>> {
+    let host = ctx.client().host().to_string();
+    let capabilities = match ctx.client().capabilities().await {
+        Ok(capabilities) => capabilities,
+        Err(error) => return terms_fetch_failure(&error, &host, "capabilities"),
+    };
     if !capabilities.licenses {
-        return None;
+        return Ok(None);
     }
-    ctx.client().list_licenses().await.ok()
+    match ctx.client().list_licenses().await {
+        Ok(listing) => Ok(Some(listing)),
+        Err(error) => terms_fetch_failure(&error, &host, "licenses"),
+    }
+}
+
+/// Connection failures mean "no server to consult"; everything else is a
+/// server that answered and must not be silently replaced by local terms.
+fn terms_fetch_failure<T>(error: &anyhow::Error, host: &str, what: &str) -> Result<Option<T>> {
+    match mold_core::classify_server_error(error) {
+        mold_core::ServerAvailability::FallbackLocal => Ok(None),
+        mold_core::ServerAvailability::SurfaceError => Err(anyhow::anyhow!(
+            "{host} did not report its {what}, so its license terms cannot be shown for acceptance: {error}"
+        )),
+    }
 }
 
 /// Resolve a `--accept-license` id and SHOW the user what they are accepting.
@@ -357,7 +380,7 @@ pub async fn run(
     let server_terms = if accept_licenses.is_empty() {
         None
     } else {
-        server_license_terms(&ctx).await
+        server_license_terms(&ctx).await?
     };
 
     // Resolve and display before anything is dispatched: an unknown id must
@@ -586,6 +609,18 @@ async fn pull_via_server(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_server_that_answered_but_could_not_be_read_is_an_error_naming_the_host() {
+        let error = anyhow::anyhow!("401 Unauthorized");
+        let outcome = super::terms_fetch_failure::<()>(&error, "http://box:7680", "licenses");
+        let message = outcome
+            .expect_err("a non-connection failure must surface")
+            .to_string();
+        assert!(message.contains("http://box:7680"), "{message}");
+        assert!(message.contains("licenses"), "{message}");
+        assert!(message.contains("401 Unauthorized"), "{message}");
+    }
+
     use super::*;
     use mold_catalog::entry::{DownloadRecipe, RecipeFile, RecipeFileRole};
 
