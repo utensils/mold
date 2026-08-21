@@ -1472,6 +1472,9 @@ mod tests {
 
     fn req(format: OutputFormat) -> ChainRequest {
         ChainRequest {
+            collection: None,
+            tags: None,
+            title: None,
             model: "ltx-2-19b-distilled:mock".into(),
             stages: vec![
                 ChainStage {

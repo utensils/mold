@@ -731,6 +731,9 @@ mod tests {
 
     fn chain_req(stages: Vec<ChainStage>, motion_tail_frames: u32) -> ChainRequest {
         ChainRequest {
+            collection: None,
+            tags: None,
+            title: None,
             model: "ltx-2-19b-distilled:fp8".into(),
             stages,
             motion_tail_frames,
@@ -1334,6 +1337,9 @@ mod tests {
         // build_auto_expand_stages produce exactly `count` stages for
         // total_frames = 97 * count (no ceil rounding complication).
         let req = ChainRequest {
+            collection: None,
+            tags: None,
+            title: None,
             model: "ltx-2-19b-distilled:fp8".into(),
             stages: Vec::new(),
             motion_tail_frames: 0,

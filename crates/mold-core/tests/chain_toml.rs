@@ -95,6 +95,9 @@ fn write_then_read_is_identity() {
 fn normalised_request_survives_round_trip() {
     // Build a ChainRequest → normalise → project to ChainScript → TOML → back → compare.
     let req = ChainRequest {
+        collection: None,
+        tags: None,
+        title: None,
         model: "ltx-2-19b-distilled:fp8".into(),
         stages: script_under_test().stages,
         motion_tail_frames: 25,

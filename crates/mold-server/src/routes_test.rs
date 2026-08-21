@@ -563,6 +563,9 @@ mod tests {
 
     fn route_chain_request() -> ChainRequest {
         ChainRequest {
+            collection: None,
+            tags: None,
+            title: None,
             model: "ltx-2-19b-distilled:fp8".into(),
             stages: vec![route_chain_stage("first shot", TransitionMode::Smooth)],
             motion_tail_frames: 1,

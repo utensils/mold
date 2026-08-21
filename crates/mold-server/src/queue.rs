@@ -338,7 +338,22 @@ pub(crate) fn save_video_to_dir(
     }
     let ts = mold_core::time::now_epoch_ms_u64();
     let ext = format.extension();
-    let desired = mold_core::default_output_filename(model, ts, ext, 1, 0);
+    // A titled video carries the same lossy `~slug` an image does — a
+    // sequence's stitched print reaches this path, and a title the user typed
+    // must reach the filename on both media kinds or the two disagree.
+    let desired = titled_output_filename(
+        model,
+        ts,
+        ext,
+        1,
+        0,
+        None,
+        metadata
+            .title
+            .as_deref()
+            .and_then(mold_core::title_slug)
+            .as_deref(),
+    );
     let (filename, path, reservation) = match write_gallery_bytes_no_replace(dir, &desired, bytes) {
         Ok(saved) => saved,
         Err(e) => {

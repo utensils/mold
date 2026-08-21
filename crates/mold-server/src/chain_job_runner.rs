@@ -2194,7 +2194,7 @@ fn finalize_job(
                 .iter()
                 .filter_map(|stage| stage.generation_time_ms)
                 .sum();
-            let gallery_filename = chain_gallery_filename(&job.id, take);
+            let gallery_filename = chain_gallery_filename(&job.id, take, metadata.title.as_deref());
             save_video_to_dir_named(
                 output_dir,
                 &gallery_filename,
@@ -2239,11 +2239,23 @@ fn finalize_job(
     Ok(Some(output))
 }
 
-fn chain_gallery_filename(job_id: &str, take: u32) -> String {
-    format!(
-        "mold-chain-{:x}-take-{take}.mp4",
+/// Gallery filename for a durable chain job's stitched print.
+///
+/// The stem must stay a pure function of `(job_id, take)`: replay publishes
+/// idempotently by writing the same name, so a wall-clock component would
+/// leave a permanently un-mergeable duplicate. A title only appends the same
+/// lossy `~slug` a one-shot uses, and it is equally deterministic — the title
+/// is frozen in the job manifest's effective request, so a resumed job
+/// derives the identical name.
+fn chain_gallery_filename(job_id: &str, take: u32, title: Option<&str>) -> String {
+    let stem = format!(
+        "mold-chain-{:x}-take-{take}",
         Sha256::digest(job_id.as_bytes())
-    )
+    );
+    match title.and_then(mold_core::title_slug) {
+        Some(slug) => format!("{stem}{}{slug}.mp4", mold_core::TITLE_SLUG_SEPARATOR),
+        None => format!("{stem}.mp4"),
+    }
 }
 
 fn publish_file_idempotently(staged: &Path, final_path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
@@ -3899,6 +3911,53 @@ mod tests {
         MetadataDb::open_in_memory().unwrap()
     }
 
+    /// Replay publishes idempotently by writing the same gallery filename,
+    /// so the stem must stay a pure function of `(job_id, take)`. A title
+    /// appends the same lossy `~slug` a one-shot uses and is equally
+    /// deterministic — the title is frozen in the job manifest.
+    #[test]
+    fn chain_gallery_filename_is_deterministic_and_titled() {
+        let untitled = chain_gallery_filename("01JBR55TEST", 0, None);
+        assert_eq!(
+            untitled,
+            chain_gallery_filename("01JBR55TEST", 0, None),
+            "same inputs must produce the same name"
+        );
+        assert!(untitled.starts_with("mold-chain-"), "{untitled}");
+        assert!(untitled.ends_with("-take-0.mp4"), "{untitled}");
+        assert!(
+            !untitled.contains(mold_core::TITLE_SLUG_SEPARATOR),
+            "{untitled}"
+        );
+
+        let titled = chain_gallery_filename("01JBR55TEST", 0, Some("Smurf Village"));
+        assert_eq!(
+            titled,
+            chain_gallery_filename("01JBR55TEST", 0, Some("Smurf Village"))
+        );
+        assert_eq!(
+            titled,
+            format!(
+                "{}~smurf-village.mp4",
+                untitled.strip_suffix(".mp4").unwrap()
+            )
+        );
+        // The legacy stem survives the slug strip, so the existing parser
+        // still reads the job hash and take out of a titled name.
+        assert_eq!(
+            mold_core::strip_title_slug(titled.strip_suffix(".mp4").unwrap()),
+            untitled.strip_suffix(".mp4").unwrap()
+        );
+
+        // A title with no usable slug leaves the legacy name byte-identical.
+        for title in [Some(""), Some("   "), Some("日本語")] {
+            assert_eq!(chain_gallery_filename("01JBR55TEST", 0, title), untitled);
+        }
+        // Take and job id both still vary the name.
+        assert_ne!(untitled, chain_gallery_filename("01JBR55TEST", 1, None));
+        assert_ne!(untitled, chain_gallery_filename("01JBR55OTHER", 0, None));
+    }
+
     fn claim_test_pool(worker_count: usize) -> Arc<GpuPool> {
         let workers = (0..worker_count)
             .map(|ordinal| {
@@ -4096,6 +4155,9 @@ mod tests {
 
     fn request(transitions: Vec<TransitionMode>) -> ChainRequest {
         ChainRequest {
+            collection: None,
+            tags: None,
+            title: None,
             model: "ltx-2-19b-distilled:fp8".into(),
             stages: transitions
                 .into_iter()
