@@ -136,7 +136,9 @@ Use the full 5-warmup / 20-run protocol. A short run is not a measurement: at
 `--runs 2` the p95 is simply the larger of two samples, and one scheduler stall
 on a busy machine reports a blown budget. The same host that measured 588.4 ms
 p95 under a load average of 83 with the real protocol reported 2533.7 ms from
-two.
+two. The probe enforces this rather than trusting the reader: `--runs 0` is
+refused outright (a percentile of no samples used to report 0 ms and PASS), and
+anything below the protocol prints an ADVISORY banner instead of GATE.
 
 **halcyon** — Apple M4 Max, 16 cores, 48 GiB, macOS (aarch64-darwin):
 
@@ -237,8 +239,18 @@ portrait stored 1000x800 with orientation 6. It detects landmarks within
 ### Both graphs are authenticated on every load
 
 `load_onnx_model` takes the expected SHA-256 and refuses a mismatch *before*
-decoding, against the digest of the same retained descriptor the bytes are read
-from. The pin comes from `mold_core::pulid_assets::pulid_manifest()` via
+decoding, against the digest of the exact bytes it decodes.
+
+That last clause is load-bearing and cost a review round. Retaining the
+descriptor is not enough: hashing it and then reading it is **two** passes over
+the file, and on shared storage an in-place write landing between them
+authenticates one set of bytes and executes another. The private
+`AuthenticatedBytes` type makes that unrepresentable — a single `read_to_end`,
+a digest of the buffer it produced, and no way to obtain a digest and a buffer
+that did not come from the same call. `mold_core::secure_file::sha256_open_file`
+is deliberately unused here for exactly that reason: it takes a `&File`, which
+necessarily leaves the bytes to a second read. A structural test pins the
+module to one read. The pin comes from `mold_core::pulid_assets::pulid_manifest()` via
 `onnx_graph::pinned_sha256`, never a second copy in this crate.
 
 The downloader's `.sha256-verified` marker is not a substitute: it records that

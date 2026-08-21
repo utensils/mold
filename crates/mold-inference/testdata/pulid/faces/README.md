@@ -51,6 +51,12 @@ non-commercial-research-only pretrained models (see `THIRD_PARTY_NOTICES.md`).
 Regenerate the goldens with a scratch venv holding `insightface onnxruntime
 opencv-python-headless numpy scikit-image pillow`:
 
+`capture_goldens.py` takes its face list from `sources.json`, never from a
+directory glob — it writes `.arcface112.png` and `.eva512.png` beside its
+inputs, so a glob would capture goldens of goldens on the second run (and would
+also pick up the orientation twin, which has none). Rerunning it in place any
+number of times converges on the same fixture set.
+
 ```bash
 python3 crates/mold-inference/testdata/pulid/fetch_faces.py crates/mold-inference/testdata/pulid/faces
 python3 crates/mold-inference/testdata/pulid/capture_goldens.py \
