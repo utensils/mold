@@ -1584,8 +1584,9 @@ pub enum SettingsKey {
     T5Variant,
     Qwen3Variant,
     DefaultNegativePrompt,
-    // Library (DB-surface `gallery.*` keys)
+    // Library (DB-surface `gallery.*` / `generate.*` keys)
     GalleryTrashRetentionDays,
+    GenerateAutoTagTitle,
     // Expand
     ExpandEnabled,
     ExpandBackend,
@@ -6072,6 +6073,15 @@ impl App {
                 step: 1.0,
             },
         });
+        // Whether a titled print picks up its own slug as a tag. Mirrors web
+        // Settings > Library "Tag new prints with their title"; this is a
+        // client decision, so the Create form's File under section reads it
+        // and discloses the tag before Generate.
+        rows.push(SettingsRow::Field {
+            key: SettingsKey::GenerateAutoTagTitle,
+            label: "Tag with title",
+            field_type: SettingsFieldType::Bool,
+        });
 
         // ── Expand ──────────────────────────────────────────────
         rows.push(SettingsRow::SectionHeader {
@@ -6322,6 +6332,12 @@ impl App {
             SettingsKey::GalleryTrashRetentionDays => {
                 trash_retention_display(cfg.gallery.trash_retention_days)
             }
+            SettingsKey::GenerateAutoTagTitle => if cfg.generate.auto_tag_title {
+                "on"
+            } else {
+                "off"
+            }
+            .into(),
             // Expand
             SettingsKey::ExpandEnabled => if cfg.expand.enabled { "on" } else { "off" }.into(),
             SettingsKey::ExpandBackend => cfg.expand.backend.clone(),
@@ -6715,6 +6731,16 @@ impl App {
                 self.config.expand.thinking = !self.config.expand.thinking;
             }
             SettingsKey::LogFile => self.config.logging.file = !self.config.logging.file,
+            SettingsKey::GenerateAutoTagTitle => {
+                self.config.generate.auto_tag_title = !self.config.generate.auto_tag_title;
+                // `generate.*` is a DB-surface key: persist it through the
+                // shared config_sync writer so `mold run`, the server, and
+                // every other surface read the same preference.
+                self.persist_db_surface_key(mold_core::config_keys::GENERATE_AUTO_TAG_TITLE_KEY);
+                // The Create form holds a snapshot so its summary and its
+                // request can never disagree; refresh it now.
+                self.generate.params.auto_tag_title = self.config.generate.auto_tag_title;
+            }
             _ => return,
         }
         self.save_config();
@@ -13324,6 +13350,52 @@ mod tests {
             .expect("the refusal is reported");
         assert!(error.contains("Tag with title"), "{error}");
         assert!(!error.contains("--no-auto-tag"), "{error}");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(mold_env)]
+    async fn settings_tag_with_title_row_round_trips_through_the_db_surface() {
+        // `generate.auto_tag_title` is a DB-surface key: toggling the row
+        // must land in the settings table `mold run` and the other surfaces
+        // read, and refresh the Create form's snapshot so its disclosure
+        // and its request agree.
+        crate::test_env::with_isolated_env(|_home| {
+            let mut app = make_settings_test_app();
+            let row = find_settings_row(&app, SettingsKey::GenerateAutoTagTitle);
+            match &app.build_settings_rows()[row] {
+                SettingsRow::Field {
+                    label, field_type, ..
+                } => {
+                    assert_eq!(*label, "Tag with title");
+                    assert!(matches!(field_type, SettingsFieldType::Bool));
+                }
+                other => panic!("expected a field row, got {other:?}"),
+            }
+            assert_eq!(
+                app.settings_display_value(&SettingsKey::GenerateAutoTagTitle),
+                "on",
+                "the preference defaults on"
+            );
+
+            app.generate.params.auto_tag_title = true;
+            app.settings_toggle_bool(SettingsKey::GenerateAutoTagTitle);
+            assert!(!app.config.generate.auto_tag_title);
+            assert_eq!(
+                app.settings_display_value(&SettingsKey::GenerateAutoTagTitle),
+                "off"
+            );
+            assert!(
+                !app.generate.params.auto_tag_title,
+                "the Create form's snapshot follows the preference"
+            );
+
+            let db = mold_db::open_default().unwrap().expect("isolated DB");
+            let mut stored = mold_core::config::GenerateSettings::default();
+            let applied =
+                mold_db::config_sync::hydrate_generate_settings_from_db(&db, &mut stored).unwrap();
+            assert!(applied, "the DB surface holds the generate row");
+            assert!(!stored.auto_tag_title);
+        });
     }
 
     #[tokio::test]
