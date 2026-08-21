@@ -59,8 +59,8 @@ web/*.tsbuildinfo
 # PuLID face-extraction parity fixtures (#1222): public-domain portraits and
 # the warp goldens captured from them. Un-ignored rather than force-added,
 # because release-plz refuses to run while a tracked file is also gitignored.
-!testdata/pulid/faces/*.jpg
-!testdata/pulid/faces/*.png
+!crates/mold-inference/testdata/pulid/faces/*.jpg
+!crates/mold-inference/testdata/pulid/faces/*.png
 apps/mobile/src-tauri/gen/schemas/
 result
 result-*

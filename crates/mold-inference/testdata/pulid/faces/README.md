@@ -44,12 +44,12 @@ Regenerate the goldens with a scratch venv holding `insightface onnxruntime
 opencv-python-headless numpy scikit-image pillow`:
 
 ```bash
-python3 testdata/pulid/fetch_faces.py testdata/pulid/faces
-python3 testdata/pulid/capture_goldens.py \
-    --assets /path/to/antelopev2 --faces testdata/pulid/faces
+python3 crates/mold-inference/testdata/pulid/fetch_faces.py crates/mold-inference/testdata/pulid/faces
+python3 crates/mold-inference/testdata/pulid/capture_goldens.py \
+    --assets /path/to/antelopev2 --faces crates/mold-inference/testdata/pulid/faces
 cargo run --release -p mold-ai-inference --features dev-bins,pulid \
     --bin pulid_face_probe -- inventory /path/to/antelopev2 \
-    --write testdata/pulid/onnx-inventory.json
+    --write crates/mold-inference/testdata/pulid/onnx-inventory.json
 ```
 
 Captured 2026-08-21 on macOS aarch64 with onnxruntime 1.29.0, OpenCV 5.0.0,

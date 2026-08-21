@@ -279,9 +279,9 @@ pixels. The deviation is free.
 
 ## Parity
 
-Captured by `testdata/pulid/capture_goldens.py` from the SHA-pinned models
+Captured by `crates/mold-inference/testdata/pulid/capture_goldens.py` from the SHA-pinned models
 (onnxruntime 1.29.0, OpenCV 5.0.0, insightface 1.0.1), on four public-domain
-portraits — see `testdata/pulid/faces/README.md` for licenses and sources.
+portraits — see `crates/mold-inference/testdata/pulid/faces/README.md` for licenses and sources.
 
 **Hermetic** (no weights; the committed landmarks are enough):
 
@@ -363,4 +363,4 @@ Also not done here: the CLI's `--id-image` path handling
 | `identity/warp.rs` | OpenCV-convention resize and affine warp |
 | `bin/pulid_face_probe.rs` | the inventory and benchmark tool this record cites |
 | `tests/pulid_face_parity.rs` | hermetic + weight-gated parity |
-| `testdata/pulid/` | inventory fixture, faces, goldens, capture scripts |
+| `crates/mold-inference/testdata/pulid/` | inventory fixture, faces, goldens, capture scripts |
