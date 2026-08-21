@@ -127,6 +127,10 @@ The initial compact CUDA implementation supports this request profile:
   count (9 for `-turbo-8step`, 5 for `-turbo-4step-768p`)
 - one required first-frame image and no last-frame endpoint
 - MP4 output with synchronized generated audio
+- a prompt of roughly 1,000 tokens or fewer: the reviewed conditioner sequence
+  budgets 2,048 rows, of which the first-frame image's vision pads and label
+  take 1,014, and a longer prompt is refused immediately with its exact budget
+  named rather than after artifact verification
 
 When a first-frame image is attached without explicit `--width`/`--height`,
 the CLI and Discord builders submit the fixed `1344x768` envelope regardless

@@ -106,7 +106,7 @@ use crate::{
 use crate::{
     H3FactoryAuthorityInput, H3FactoryComponentAuthority, H3FactoryComponentRole,
     H3FactoryConditionerPlacement, H3FactoryEndpointAnchor, H3FactoryExecutionBudgetEchoInput,
-    H3FactoryPreparedRequestInput, H3FactoryQuantizationAuthority,
+    H3FactoryPreparedRequestInput, H3FactoryPreparedRowsInput, H3FactoryQuantizationAuthority,
 };
 
 pub(crate) const RUNTIME_QUALIFICATION_SCHEMA: &str =
@@ -457,47 +457,7 @@ impl H3PrivateRuntimeEnvelopeRecord {
         if !conditioning_ok {
             mismatches.push(format!("conditioning shape for {:?}", request.task));
         }
-        fn cap_into(mismatches: &mut Vec<String>, name: &str, requested: u64, reviewed: u64) {
-            if requested > reviewed {
-                mismatches.push(format!("{name} {requested} (cap {reviewed})"));
-            }
-        }
-        cap_into(
-            &mut mismatches,
-            "qwen_output_text_rows",
-            request.rows.qwen_output_text_rows,
-            self.max_qwen_output_text_rows,
-        );
-        cap_into(
-            &mut mismatches,
-            "qwen_vision_rows",
-            request.rows.qwen_vision_rows,
-            self.max_qwen_vision_rows,
-        );
-        cap_into(
-            &mut mismatches,
-            "condition_visual_rows",
-            request.rows.condition_visual_rows,
-            self.max_condition_visual_rows,
-        );
-        cap_into(
-            &mut mismatches,
-            "target_video_rows",
-            request.rows.target_video_rows,
-            self.max_target_video_rows,
-        );
-        cap_into(
-            &mut mismatches,
-            "target_audio_rows",
-            request.rows.target_audio_rows,
-            self.max_target_audio_rows,
-        );
-        cap_into(
-            &mut mismatches,
-            "total_packed_rows",
-            request.rows.total_packed_rows,
-            self.max_total_packed_rows,
-        );
+        mismatches.extend(self.row_cap_mismatches(&request.rows));
         if !mismatches.is_empty() {
             bail!(
                 "private H3 request differs from the reviewed compact-quality envelope: {}",
@@ -505,6 +465,56 @@ impl H3PrivateRuntimeEnvelopeRecord {
             )
         }
         Ok(())
+    }
+
+    /// Every row ceiling this envelope imposes, named individually.
+    ///
+    /// Split out of the shape check above because the row ceilings — unlike
+    /// the canvas, the step count, or the conditioning shape — are knowable
+    /// from the tokenized presentation alone, which admission produces long
+    /// before it has an authenticated runtime qualification. The precheck at
+    /// [`precheck_private_h3_prepared_rows`] asks exactly this question first
+    /// so an over-budget prompt is refused in seconds instead of after the
+    /// artifact pass has hashed ~37 GB; the shape check keeps asking it as the
+    /// backstop, from the authenticated record rather than the compiled one.
+    #[cfg(feature = "mp4")]
+    fn row_cap_mismatches(&self, rows: &H3FactoryPreparedRowsInput) -> Vec<String> {
+        [
+            (
+                "qwen_output_text_rows",
+                rows.qwen_output_text_rows,
+                self.max_qwen_output_text_rows,
+            ),
+            (
+                "qwen_vision_rows",
+                rows.qwen_vision_rows,
+                self.max_qwen_vision_rows,
+            ),
+            (
+                "condition_visual_rows",
+                rows.condition_visual_rows,
+                self.max_condition_visual_rows,
+            ),
+            (
+                "target_video_rows",
+                rows.target_video_rows,
+                self.max_target_video_rows,
+            ),
+            (
+                "target_audio_rows",
+                rows.target_audio_rows,
+                self.max_target_audio_rows,
+            ),
+            (
+                "total_packed_rows",
+                rows.total_packed_rows,
+                self.max_total_packed_rows,
+            ),
+        ]
+        .into_iter()
+        .filter(|(_, requested, reviewed)| requested > reviewed)
+        .map(|(name, requested, reviewed)| format!("{name} {requested} (cap {reviewed})"))
+        .collect()
     }
 
     fn update_identity(&self, digest: &mut Sha256) {
@@ -609,6 +619,54 @@ fn precheck_private_h3_admission_capacity(
             "private H3 admission needs at least {device_floor} device and {host_floor} host \
              bytes before any request-specific term, exceeding the {available_device_bytes} \
              device and {available_host_headroom_bytes} host admission sample"
+        )
+    }
+    Ok(())
+}
+
+/// Refuse an over-budget prompt as soon as the tokenized presentation exists.
+///
+/// The row ceilings are the one part of the reviewed envelope a request can
+/// violate purely by being typed, and the prompt is the only axis a user
+/// controls: everything else in the packed sequence is the reviewed canvas.
+/// Asking about them here — before the artifact pass walks ~37 GB of weights —
+/// is what turns "the app hung for ninety seconds and then said the request
+/// differs from the reviewed envelope" into an immediate sentence naming the
+/// budget (#1245).
+///
+/// The budget is DERIVED, never transcribed: the presentation overhead is
+/// whatever the tokenized sequence held beyond the prompt's own tokens (the
+/// `"<Picture N>: "` labels and the endpoint's merged vision pads), so the
+/// number reported to the user is the number this build would actually accept.
+///
+/// This is a lower bound of the authenticated envelope check the runtime
+/// qualification performs later, not a replacement for it: the compiled
+/// reviewed ceilings and the authenticated record's ceilings are the same
+/// values, so a refusal here always implies a refusal there.
+#[cfg(feature = "mp4")]
+fn precheck_private_h3_prepared_rows(
+    envelope: &H3PrivateRuntimeEnvelopeRecord,
+    rows: &H3FactoryPreparedRowsInput,
+    prompt_tokens: u64,
+) -> Result<()> {
+    if rows.qwen_output_text_rows > envelope.max_qwen_output_text_rows {
+        let presentation_overhead_rows = rows.qwen_output_text_rows.saturating_sub(prompt_tokens);
+        let prompt_budget_tokens = envelope
+            .max_qwen_output_text_rows
+            .saturating_sub(presentation_overhead_rows);
+        bail!(
+            "prompt is {prompt_tokens} tokens; the reviewed MiniMax H3 envelope has room for \
+             {prompt_budget_tokens} prompt tokens (the conditioner sequence would be {} rows \
+             against a reviewed ceiling of {})",
+            rows.qwen_output_text_rows,
+            envelope.max_qwen_output_text_rows
+        )
+    }
+    let mismatches = envelope.row_cap_mismatches(rows);
+    if !mismatches.is_empty() {
+        bail!(
+            "private H3 request exceeds the reviewed compact-quality envelope: {}",
+            mismatches.join("; ")
         )
     }
     Ok(())
@@ -1409,6 +1467,60 @@ fn prepare_reviewed_h3_private_fl2va_admission(
         available_device_bytes,
         available_host_headroom_bytes,
     )?;
+    // The prepared request is built BEFORE that artifact pass for the same
+    // reason the capacity floors are checked before it: the conditioner
+    // presentation is a tokenizer call and some CPU image normalization, while
+    // the pass that follows walks ~37 GB of weights. An over-budget prompt is
+    // the one refusal ordinary users hit repeatedly (#1245), and paying ninety
+    // seconds of SHA-256 to learn it was undebuggable. Nothing here opens a
+    // CUDA device, and nothing it produces is trusted on its own — the
+    // authenticated envelope check below still validates the same request
+    // against the record the artifact pass authorizes.
+    let storage = H3PrivateComfyStorageAuthority::resolve(paths.models_root, admitted_task)?;
+    let qwen_support = load_qualified_private_qwen_support(paths.models_root, partition_model)?;
+    let mut prepare_observer = H3EngineProgressObserver::new(progress);
+    // Conditioning is task-shaped: FL2VA normalizes its boundary endpoints
+    // here, Ref2VA decodes and normalizes its ordered references through the
+    // same media adapter the runtime uses. Both run CPU-only, before the
+    // allocation commit, and neither opens a CUDA device.
+    let admission_request = match admitted_task {
+        Task::Fl2va => {
+            if !references.is_empty() {
+                bail!("private H3 FL2VA admission was handed Ref2VA reference bindings")
+            }
+            prepare_private_fl2va_admission_request(
+                request,
+                &qwen_support,
+                progress,
+                &mut prepare_observer,
+            )?
+        }
+        Task::Ref2va => {
+            if references.is_empty() {
+                bail!("private H3 Ref2VA admission has no staged reference bindings")
+            }
+            prepare_private_ref2va_admission_request(
+                request,
+                references,
+                &qwen_support,
+                progress,
+                &mut prepare_observer,
+            )?
+        }
+    };
+    // The default-step envelope is the right one to ask even for a Turbo tag:
+    // a reviewed tier moves ONLY `max_steps`, and this precheck reads only row
+    // ceilings. The authenticated backstop below still validates the step axis
+    // against the tier's own minted envelope.
+    #[cfg(feature = "h3")]
+    let precheck_envelope = public_runtime_envelope();
+    #[cfg(not(feature = "h3"))]
+    let precheck_envelope = runtime_qualification_source.precheck_envelope();
+    precheck_private_h3_prepared_rows(
+        &precheck_envelope,
+        &admission_request.request.rows,
+        admission_request.prompt_tokens,
+    )?;
     let artifact_report = qualify_private_artifacts_with_control(
         paths.models_root,
         partition_model,
@@ -1483,8 +1595,6 @@ fn prepare_reviewed_h3_private_fl2va_admission(
     )?;
     progress.checkpoint()?;
 
-    let storage = H3PrivateComfyStorageAuthority::resolve(paths.models_root, admitted_task)?;
-    let qwen_support = load_qualified_private_qwen_support(paths.models_root, partition_model)?;
     let transformer_cancellation = H3PrivatePreparationCancellation { progress };
     let opened_transformer = open_h3_comfy_published_int8_checkpoint(
         storage.transformer_path(),
@@ -1498,39 +1608,11 @@ fn prepare_reviewed_h3_private_fl2va_admission(
     let opened_vae = open_h3_comfy_vae_authority(&vae_plan, &mut vae_observer);
     let opened_vae = vae_observer.finish(opened_vae)?;
 
-    let mut prepare_observer = H3EngineProgressObserver::new(progress);
-    // Conditioning is task-shaped: FL2VA normalizes its boundary endpoints
-    // here, Ref2VA decodes and normalizes its ordered references through the
-    // same media adapter the runtime uses. Both run CPU-only, before the
-    // allocation commit, and neither opens a CUDA device.
-    let admission_request = match admitted_task {
-        Task::Fl2va => {
-            if !references.is_empty() {
-                bail!("private H3 FL2VA admission was handed Ref2VA reference bindings")
-            }
-            prepare_private_fl2va_admission_request(
-                request,
-                &qwen_support,
-                progress,
-                &mut prepare_observer,
-            )?
-        }
-        Task::Ref2va => {
-            if references.is_empty() {
-                bail!("private H3 Ref2VA admission has no staged reference bindings")
-            }
-            prepare_private_ref2va_admission_request(
-                request,
-                references,
-                &qwen_support,
-                progress,
-                &mut prepare_observer,
-            )?
-        }
-    };
     // The qualification above was minted at this tier's reviewed step count;
     // validating the prepared request against the baseline 21-step envelope
-    // would reject every Turbo attempt.
+    // would reject every Turbo attempt. The row ceilings were already asked
+    // before the artifact pass; this is the authenticated backstop over every
+    // axis, the compiled precheck's ceilings included.
     runtime_qualification.validate_prepared_envelope_with_turbo(
         &admission_request.request,
         turbo_adapter.as_ref(),
@@ -4402,10 +4484,11 @@ const PUBLIC_RUNTIME_PROFILE_DECISION: &str = "supported-compact-fl2va-sm89";
 /// [`PUBLIC_RUNTIME_BOUND_GRID_BYTES`].
 ///
 /// One render is one sample. 15% covers allocator and driver variance plus the
-/// small shape headroom the envelope still allows — the qualifying render used
-/// 39,768 of the envelope's 39,776 packed rows and 1,050 of its 1,058 text
-/// rows, so it sat essentially at the ceiling and the margin does not have to
-/// absorb a much larger shape.
+/// small shape headroom the envelope still allows — the #1245 re-measurement
+/// used 40,751 of the envelope's 40,766 packed rows and 2,033 of its 2,048
+/// text rows, so it sat essentially at the ceiling and the margin does not
+/// have to absorb a much larger shape. (The original #827 render sat the same
+/// way against the old, smaller envelope.)
 #[cfg(feature = "h3")]
 const PUBLIC_RUNTIME_BOUND_MARGIN_PERCENT: u64 = 115;
 
@@ -4425,17 +4508,38 @@ const fn public_runtime_bound(observed_bytes: u64) -> u64 {
 
 /// Compiled bounds for the reviewed compact FL2VA runtime.
 ///
-/// Every workspace figure is `public_runtime_bound(observed)` over the first
-/// real FL2VA render: 2026-08-19 on hal9000 (RTX 4090, SM89, 24 GB), 1344x768,
-/// 124 frames at 24 fps, 21 steps, 1216 s, captured by
-/// `private_runtime_observer` and recorded on issue #827. The observations are
-/// named beside each value so a future re-measurement can be applied by
-/// changing one number and re-running the same policy.
+/// Every workspace figure is `public_runtime_bound(observed)` over a real
+/// FL2VA render, captured by `private_runtime_observer`. The observations are
+/// named beside each value so a re-measurement is applied by changing one
+/// number and re-running the same policy — which is exactly what #1245 did.
+///
+/// Two campaigns contribute, and which one owns a bound follows from what the
+/// bound depends on:
+///
+/// * #827, 2026-08-19 on hal9000 (RTX 4090, SM89, 24 GB), 1344x768, 124 frames
+///   at 24 fps, 21 steps, 1216 s — the original qualification.
+/// * #1245, 2026-08-21 on the same host, same canvas, 9 steps (`-turbo-8step`)
+///   at the raised prompt budget: a 1,017-token prompt packing 2,033 text rows
+///   and 40,751 of the envelope's 40,766 packed rows, 977 s. It re-measures
+///   the three bounds the Qwen sequence and the packed sequence actually
+///   move — attention, FFN, and the Qwen activation workspace — and
+///   REPRODUCED `condition_vae`, `decoder_tile`, and `audio_decode` byte for
+///   byte, which is the evidence that the two campaigns are comparable.
+///
+/// `fixed_runtime_device_bytes` deliberately keeps #827's observation. That
+/// term is sampled as `global_total - global_free` at attempt entry, so on a
+/// card shared with another process it measures the CO-TENANT, not Mold: the
+/// #1245 host had ~1.5 GB of someone else's VRAM resident and reported
+/// 2,075,197,440. It is not a sequence-dependent quantity, and re-pinning it
+/// from a contaminated sample would inflate the admission device floor on
+/// every host forever. `fixed_runtime_host_bytes` keeps #827's for the
+/// opposite reason: #1245 observed 558,260,224, below it, so the existing
+/// bound already covers it.
 ///
 /// The policy reproduces four of the previous L40S-era caps exactly
 /// (`fixed_runtime_device`, `condition_vae`, `decoder_tile`, `audio_decode`),
 /// which is the reason to trust it, and corrects the two that were guesses:
-/// attention fell 10.13 -> 7.11 GB and FFN 15.30 -> 8.79 GB. Two rose, because
+/// attention fell 10.13 -> 7.31 GB and FFN 15.30 -> 9.06 GB. Two rose, because
 /// the old values carried less than this margin over what the hardware
 /// actually used; the policy is applied uniformly rather than only where it
 /// flatters the result.
@@ -4451,8 +4555,10 @@ fn public_runtime_bounds() -> H3PrivateRuntimeBoundRecord {
         fixed_runtime_host_bytes: public_runtime_bound(659_701_760),
         // observed 477_298_688
         fixed_runtime_device_bytes: public_runtime_bound(477_298_688),
-        // observed 3_400_171_520
-        qwen_activation_workspace_bytes: public_runtime_bound(3_400_171_520),
+        // observed 4_168_069_120 (#1245 re-measurement; 3_400_171_520 at the
+        // old 1,058-row text ceiling — this is the one bound the raised
+        // prompt budget moves materially, +22.6%)
+        qwen_activation_workspace_bytes: public_runtime_bound(4_168_069_120),
         // Observed 0: the VAE construction transient never rose above the
         // weights themselves in the qualifying render. A zero bound is not
         // admissible (the reload stages through it and the validator refuses
@@ -4460,10 +4566,13 @@ fn public_runtime_bounds() -> H3PrivateRuntimeBoundRecord {
         vae_construction_device_workspace_bytes: 67_108_864,
         // observed 366_027_840
         condition_vae_workspace_device_bytes: public_runtime_bound(366_027_840),
-        // observed 6_172_029_280
-        attention_workspace_device_bytes: public_runtime_bound(6_172_029_280),
-        // observed 7_641_748_832
-        ffn_workspace_device_bytes: public_runtime_bound(7_641_748_832),
+        // observed 6_323_525_308 (#1245 re-measurement; 6_172_029_280 at the
+        // old envelope — the denoise transients are linear in packed rows and
+        // the sequence grew 2.5%)
+        attention_workspace_device_bytes: public_runtime_bound(6_323_525_308),
+        // observed 7_826_714_044 (#1245 re-measurement; 7_641_748_832 at the
+        // old envelope)
+        ffn_workspace_device_bytes: public_runtime_bound(7_826_714_044),
         // observed 1_338_688_660
         decoder_tile_workspace_device_bytes: public_runtime_bound(1_338_688_660),
         // observed 204_867_120
@@ -4474,6 +4583,56 @@ fn public_runtime_bounds() -> H3PrivateRuntimeBoundRecord {
         aac_mux_staging_host_bytes: super::pipeline::SMALL_AAC_MUX_STAGING_HOST_BYTES,
     }
 }
+
+// ---------------------------------------------------------------------------
+// The reviewed compact FL2VA row ceilings.
+//
+// Every one of these is a property of the reviewed canvas except the text
+// ceiling, which is a reviewed BUDGET: the conditioner sequence is
+// `"<Picture 1>: "` + the boundary endpoint's merged vision pads + the
+// prompt's own tokens (`build_fl2va_presentation`), so whatever the ceiling
+// leaves above that fixed presentation overhead is exactly the prompt a user
+// may write. The original 1,058 was transcribed from the qualifying render's
+// own 1,050-row observation, which left room for about forty prompt tokens and
+// refused everything the apps actually send (#1245). The conditioner's own
+// context is `QWEN_MAXIMUM_TOKENS` = 262,144, so the model was never the
+// limit — the capture was.
+// ---------------------------------------------------------------------------
+
+/// One boundary endpoint's merged vision pads, the fixed part of the FL2VA
+/// presentation overhead.
+const REVIEWED_FL2VA_VISION_PAD_ROWS: u64 = 1_008;
+
+/// The reviewed conditioner text ceiling: the vision pads above, the
+/// `"<Picture 1>: "` label, and roughly a thousand prompt tokens on top — a
+/// prompt long enough for the paragraph-scale descriptions the Studio surfaces
+/// compose, and still two orders of magnitude inside the conditioner's own
+/// 262,144-token context. The exact prompt budget is never hard-coded: the
+/// admission precheck derives it as this ceiling minus the presentation
+/// overhead the tokenizer actually produced, so a template change cannot make
+/// the reported budget a lie.
+const REVIEWED_MAX_QWEN_OUTPUT_TEXT_ROWS: u64 = 2_048;
+
+/// Pre-merge vision patches for the same endpoint (4 x the merged pads).
+const REVIEWED_MAX_QWEN_VISION_ROWS: u64 = 4 * REVIEWED_FL2VA_VISION_PAD_ROWS;
+
+/// The boundary endpoint's conditioning latent rows.
+const REVIEWED_MAX_CONDITION_VISUAL_ROWS: u64 = REVIEWED_FL2VA_VISION_PAD_ROWS;
+
+/// 1344x768 x 124 frames of generated video latents.
+const REVIEWED_MAX_TARGET_VIDEO_ROWS: u64 = 37_296;
+
+/// The same duration of generated audio latents.
+const REVIEWED_MAX_TARGET_AUDIO_ROWS: u64 = 414;
+
+/// The packed sequence is exactly the four axes the FL2VA prepared request
+/// sums (`prepared_request_input`), so it is derived rather than transcribed:
+/// raising the text ceiling raises this by the same amount and nothing else
+/// moves.
+const REVIEWED_MAX_TOTAL_PACKED_ROWS: u64 = REVIEWED_MAX_QWEN_OUTPUT_TEXT_ROWS
+    + REVIEWED_MAX_CONDITION_VISUAL_ROWS
+    + REVIEWED_MAX_TARGET_VIDEO_ROWS
+    + REVIEWED_MAX_TARGET_AUDIO_ROWS;
 
 #[cfg(feature = "h3")]
 fn public_runtime_envelope() -> H3PrivateRuntimeEnvelopeRecord {
@@ -4497,12 +4656,12 @@ fn public_runtime_envelope_for_steps(max_steps: u32) -> H3PrivateRuntimeEnvelope
         max_steps,
         endpoint_count: 1,
         endpoint_anchor: "first".into(),
-        max_qwen_output_text_rows: 1_058,
-        max_qwen_vision_rows: 4_032,
-        max_condition_visual_rows: 1_008,
-        max_target_video_rows: 37_296,
-        max_target_audio_rows: 414,
-        max_total_packed_rows: 39_776,
+        max_qwen_output_text_rows: REVIEWED_MAX_QWEN_OUTPUT_TEXT_ROWS,
+        max_qwen_vision_rows: REVIEWED_MAX_QWEN_VISION_ROWS,
+        max_condition_visual_rows: REVIEWED_MAX_CONDITION_VISUAL_ROWS,
+        max_target_video_rows: REVIEWED_MAX_TARGET_VIDEO_ROWS,
+        max_target_audio_rows: REVIEWED_MAX_TARGET_AUDIO_ROWS,
+        max_total_packed_rows: REVIEWED_MAX_TOTAL_PACKED_ROWS,
     }
 }
 
@@ -4564,7 +4723,8 @@ const CAPTURE_RUNTIME_PROFILE_DECISION: &str =
 /// generated-side caps are identical and directly comparable. Conditioning is
 /// what differs, and its caps come from the released reference limits rather
 /// than from a measurement: at most [`contract::MAX_REFERENCE_FILES`] ordered
-/// references, each normalized onto its own canvas.
+/// references, each normalized onto its own canvas. The text cap stays at
+/// FL2VA's pre-#1245 value; see [`public_style_generated_caps`].
 #[cfg(feature = "h3-private-uat")]
 fn capture_runtime_envelope() -> H3PrivateRuntimeEnvelopeRecord {
     let public = public_style_generated_caps();
@@ -4591,28 +4751,47 @@ fn capture_runtime_envelope() -> H3PrivateRuntimeEnvelopeRecord {
     }
 }
 
-/// The generated-side caps shared with the FL2VA compact envelope:
+/// The generated-side caps the capture envelope prices against:
 /// `(qwen_output_text_rows, target_video_rows, target_audio_rows)`.
+///
+/// The two generated-side rows are FL2VA's own — same canvas, same duration.
+/// The text cap deliberately is NOT: it stays at the pre-#1245 1,058 rows
+/// because every provisional ceiling in `capture_runtime_bounds` is derived
+/// from this envelope's packed-row count, and re-deriving them at FL2VA's
+/// raised prompt budget would move campaign-scope ceilings on the strength of
+/// an FL2VA measurement. Ref2VA's own campaign owns that decision; until it
+/// runs, its prompt budget is unchanged.
 #[cfg(feature = "h3-private-uat")]
 const fn public_style_generated_caps() -> (u64, u64, u64) {
-    (1_058, 37_296, 414)
+    (
+        1_058,
+        REVIEWED_MAX_TARGET_VIDEO_ROWS,
+        REVIEWED_MAX_TARGET_AUDIO_ROWS,
+    )
 }
 
-/// FL2VA's corrected observed workspace measurements — the identical figures
-/// `public_runtime_bounds` applies its margin policy to (2026-08-19 on
-/// hal9000, RTX 4090 SM89, 1344x768, 124 frames, 21 steps, recorded on issue
-/// #827). Restated here because that function is compiled only under `h3`
-/// while the capture build runs without it; a divergence is a review error.
+/// FL2VA's observed workspace measurements — the identical figures
+/// `public_runtime_bounds` applies its margin policy to. The two denoise
+/// transients and their envelope come from the #1245 re-measurement at the
+/// raised prompt budget (2026-08-21 on hal9000, RTX 4090 SM89, 1344x768, 124
+/// frames, 9 steps); the condition-VAE transient is #827's, which #1245
+/// reproduced byte for byte. Restated here because `public_runtime_bounds` is
+/// compiled only under `h3` while the capture build runs without it; a
+/// divergence is a review error.
+///
+/// The capture-scope ceilings these feed scale the observation by the ratio of
+/// the two envelopes' packed rows, and both halves of that ratio moved by the
+/// same ~2.5%, so the derived Ref2VA ceilings are unchanged.
 #[cfg(feature = "h3-private-uat")]
 mod fl2va_observed {
-    pub(super) const ATTENTION_WORKSPACE_DEVICE_BYTES: u64 = 6_172_029_280;
-    pub(super) const FFN_WORKSPACE_DEVICE_BYTES: u64 = 7_641_748_832;
+    pub(super) const ATTENTION_WORKSPACE_DEVICE_BYTES: u64 = 6_323_525_308;
+    pub(super) const FFN_WORKSPACE_DEVICE_BYTES: u64 = 7_826_714_044;
     pub(super) const CONDITION_VAE_WORKSPACE_DEVICE_BYTES: u64 = 366_027_840;
     /// The packed-row count of the reviewed FL2VA envelope the two denoise
     /// transients above were measured under (`max_total_packed_rows`,
-    /// `public_runtime_envelope_for_steps`); the qualifying render used
-    /// 39,768 of these 39,776 rows, so the observation IS the envelope's.
-    pub(super) const ENVELOPE_TOTAL_PACKED_ROWS: u64 = 39_776;
+    /// `public_runtime_envelope_for_steps`); the qualifying render packed the
+    /// envelope's own maximum sequence, so the observation IS the envelope's.
+    pub(super) const ENVELOPE_TOTAL_PACKED_ROWS: u64 = super::REVIEWED_MAX_TOTAL_PACKED_ROWS;
     /// The conditioning canvas the FL2VA condition-VAE transient was
     /// measured encoding (one 512x384 boundary frame).
     pub(super) const CONDITION_ENCODE_PIXELS: u64 = 512 * 384;
@@ -4646,7 +4825,9 @@ const fn capture_grid_ceiling(bytes: u64) -> u64 {
 ///   matrix — the old x5 "quadratic" argument sized a matrix the kernel
 ///   never allocates) and the FFN materializes per-row projections. Ceiling =
 ///   observed x (capture envelope rows / FL2VA envelope rows) =
-///   x 88,334/39,776, grid-rounded: attention 13.76 GB, FFN 16.98 GB. The
+///   x 88,334/40,766, grid-rounded: attention 13.76 GB, FFN 16.98 GB —
+///   unchanged by #1245, which grew observation and envelope by the same
+///   2.5%. The
 ///   provisional headroom is structural: the envelope prices twelve
 ///   2048-square references while the instrumented campaign request packs a
 ///   small ordered set (~43k rows, barely above FL2VA's 39.8k), so the grant
@@ -4657,15 +4838,17 @@ const fn capture_grid_ceiling(bytes: u64) -> u64 {
 ///   observed x (largest reference canvas / FL2VA's measured condition
 ///   canvas) = x 2048^2/(512x384) = x64/3, grid-rounded: 7.85 GB. Charged in
 ///   the reference visual-encode phase, far below the denoise peak.
-/// * `qwen_activation` — 2x the corrected public ceiling (2 x 3.96 GB =
-///   7.92 GB). This is the provisional GRANT ceiling only, not the charge:
+/// * `qwen_activation` — 2x the public ceiling (2 x 4.83 GB = 9.66 GB; it
+///   tracked 2 x 3.96 GB before #1245 re-measured the FL2VA observation at
+///   the raised prompt budget, and the relationship is what is pinned, not
+///   the number). This is the provisional GRANT ceiling only, not the charge:
 ///   the exact budget charges each request's own derived demand — the
-///   corrected observed per-row cost scaled by the request's text+vision
-///   rows (`qwen_activation_workspace_demand_bytes`) — and a Ref2VA
-///   sequence whose demand exceeds this grant is a named refusal at budget
-///   build, never an undercharged admit. The 2x sizing covers the
-///   campaign's ordered sets (~2x FL2VA's 5,090-row measured sequence);
-///   the envelope's twelve-still maximum (50,210 Qwen rows) is
+///   observed per-row cost scaled by the request's text+vision rows
+///   (`qwen_activation_workspace_demand_bytes`) — and a Ref2VA sequence whose
+///   demand exceeds this grant is a named refusal at budget build, never an
+///   undercharged admit. The 2x sizing covers the campaign's ordered sets
+///   (~2x FL2VA's 6,065-row measured sequence); the envelope's twelve-still
+///   maximum (50,210 Qwen rows) is
 ///   deliberately NOT the sizing point — granting it would exceed the
 ///   campaign host headroom beside the 19.1 GB CPU-placed conditioner.
 /// * `fixed_runtime_host` / `fixed_runtime_device` /
@@ -4694,7 +4877,9 @@ fn capture_runtime_bounds() -> H3PrivateRuntimeBoundRecord {
     H3PrivateRuntimeBoundRecord {
         fixed_runtime_host_bytes: 805_306_368,
         fixed_runtime_device_bytes: 603_979_776,
-        qwen_activation_workspace_bytes: 2 * 3_959_422_976,
+        // 2x the FL2VA public ceiling, restated here for the same reason
+        // `fl2va_observed` is: `public_runtime_bounds` is `h3`-only.
+        qwen_activation_workspace_bytes: 2 * 4_831_838_208,
         vae_construction_device_workspace_bytes: 67_108_864,
         condition_vae_workspace_device_bytes: capture_grid_ceiling(
             fl2va_observed::CONDITION_VAE_WORKSPACE_DEVICE_BYTES * largest_reference_pixels
@@ -5124,6 +5309,18 @@ impl H3PrivateRuntimeQualificationSource {
             Self::ReviewedRecord(reviewed) => reviewed.record.bounds.clone(),
             #[cfg(feature = "h3-private-uat")]
             Self::CaptureCompiled => capture_runtime_bounds(),
+        }
+    }
+
+    /// The envelope the cheap prepared-row precheck is derived from. It is the
+    /// same record `authenticate` later vouches for, read before the artifact
+    /// pass so an over-budget prompt never pays for one.
+    #[cfg(feature = "mp4")]
+    fn precheck_envelope(&self) -> H3PrivateRuntimeEnvelopeRecord {
+        match self {
+            Self::ReviewedRecord(reviewed) => reviewed.record.envelope.clone(),
+            #[cfg(feature = "h3-private-uat")]
+            Self::CaptureCompiled => capture_runtime_envelope(),
         }
     }
 
@@ -5781,13 +5978,166 @@ mod tests {
             max_steps,
             endpoint_count: 1,
             endpoint_anchor: "first".into(),
-            max_qwen_output_text_rows: 1_058,
-            max_qwen_vision_rows: 4_032,
-            max_condition_visual_rows: 1_008,
-            max_target_video_rows: 37_296,
-            max_target_audio_rows: 414,
-            max_total_packed_rows: 39_776,
+            max_qwen_output_text_rows: REVIEWED_MAX_QWEN_OUTPUT_TEXT_ROWS,
+            max_qwen_vision_rows: REVIEWED_MAX_QWEN_VISION_ROWS,
+            max_condition_visual_rows: REVIEWED_MAX_CONDITION_VISUAL_ROWS,
+            max_target_video_rows: REVIEWED_MAX_TARGET_VIDEO_ROWS,
+            max_target_audio_rows: REVIEWED_MAX_TARGET_AUDIO_ROWS,
+            max_total_packed_rows: REVIEWED_MAX_TOTAL_PACKED_ROWS,
         }
+    }
+
+    /// The reviewed rows a maximum-length FL2VA request packs.
+    #[cfg(feature = "mp4")]
+    fn reviewed_rows(qwen_output_text_rows: u64) -> H3FactoryPreparedRowsInput {
+        H3FactoryPreparedRowsInput {
+            qwen_output_text_rows,
+            qwen_vision_rows: REVIEWED_MAX_QWEN_VISION_ROWS,
+            condition_visual_rows: REVIEWED_MAX_CONDITION_VISUAL_ROWS,
+            condition_audio_rows: 0,
+            target_video_rows: REVIEWED_MAX_TARGET_VIDEO_ROWS,
+            target_audio_rows: REVIEWED_MAX_TARGET_AUDIO_ROWS,
+            total_packed_rows: qwen_output_text_rows
+                + REVIEWED_MAX_CONDITION_VISUAL_ROWS
+                + REVIEWED_MAX_TARGET_VIDEO_ROWS
+                + REVIEWED_MAX_TARGET_AUDIO_ROWS,
+        }
+    }
+
+    /// The reviewed text ceiling is a PROMPT budget, and it has to be one a
+    /// person can actually spend. The captured 1,058 left about forty tokens
+    /// and refused ordinary app prompts after ninety seconds of hashing
+    /// (#1245); the packed total is derived from it rather than transcribed,
+    /// so the two can never disagree.
+    #[test]
+    fn the_reviewed_envelope_budgets_a_real_prompt_and_derives_its_packed_total() {
+        let envelope = reviewed_envelope(contract::COMFY_DEFAULT_STEPS);
+        // One `"<Picture 1>: "` label is a handful of tokens; whatever it is,
+        // a thousand prompt tokens must survive beside the vision pads.
+        let generous_label_allowance = 32;
+        let prompt_budget = envelope.max_qwen_output_text_rows
+            - REVIEWED_FL2VA_VISION_PAD_ROWS
+            - generous_label_allowance;
+        assert!(
+            prompt_budget >= 1_000,
+            "reviewed prompt budget is only {prompt_budget} tokens"
+        );
+        // Nothing but the text axis moved: the canvas rows are untouched and
+        // the packed total is exactly their sum.
+        assert_eq!(envelope.max_qwen_vision_rows, 4_032);
+        assert_eq!(envelope.max_condition_visual_rows, 1_008);
+        assert_eq!(envelope.max_target_video_rows, 37_296);
+        assert_eq!(envelope.max_target_audio_rows, 414);
+        assert_eq!(
+            envelope.max_total_packed_rows,
+            envelope.max_qwen_output_text_rows
+                + envelope.max_condition_visual_rows
+                + envelope.max_target_video_rows
+                + envelope.max_target_audio_rows
+        );
+    }
+
+    /// An over-budget prompt must be refused by NAME, with the budget it
+    /// actually has, and the budget must be derived from the presentation the
+    /// tokenizer produced rather than a second transcribed constant: the
+    /// overhead here is 1,008 vision pads plus a ten-token label, so the
+    /// reported budget moves with it.
+    #[cfg(feature = "mp4")]
+    #[test]
+    fn an_over_budget_prompt_is_refused_by_name_with_its_own_budget() {
+        let envelope = reviewed_envelope(contract::COMFY_DEFAULT_STEPS);
+        let label_rows = 10;
+        let overhead = REVIEWED_FL2VA_VISION_PAD_ROWS + label_rows;
+        let expected_budget = envelope.max_qwen_output_text_rows - overhead;
+
+        // Exactly at the budget: admitted.
+        precheck_private_h3_prepared_rows(
+            &envelope,
+            &reviewed_rows(overhead + expected_budget),
+            expected_budget,
+        )
+        .unwrap();
+
+        // One token past it: refused, naming both numbers.
+        let prompt_tokens = expected_budget + 1;
+        let error = precheck_private_h3_prepared_rows(
+            &envelope,
+            &reviewed_rows(overhead + prompt_tokens),
+            prompt_tokens,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains(&format!("prompt is {prompt_tokens} tokens")),
+            "{error}"
+        );
+        assert!(
+            error.contains(&format!("room for {expected_budget} prompt tokens")),
+            "{error}"
+        );
+
+        // A larger presentation overhead leaves a smaller budget, and the
+        // message says so — nothing here is a constant.
+        let wide_overhead = overhead + 500;
+        let wide_budget = envelope.max_qwen_output_text_rows - wide_overhead;
+        let wide = precheck_private_h3_prepared_rows(
+            &envelope,
+            &reviewed_rows(wide_overhead + wide_budget + 1),
+            wide_budget + 1,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            wide.contains(&format!("room for {wide_budget} prompt tokens")),
+            "{wide}"
+        );
+    }
+
+    /// The precheck is only allowed to refuse what the authenticated envelope
+    /// backstop would also refuse — that is what makes hoisting it before the
+    /// artifact pass safe. Swept across the text axis, the two answers agree
+    /// exactly.
+    #[cfg(feature = "mp4")]
+    #[test]
+    fn the_prompt_precheck_and_the_envelope_backstop_agree_on_every_row_count() {
+        let envelope = reviewed_envelope(contract::COMFY_DEFAULT_STEPS);
+        for text_rows in [
+            1,
+            1_058,
+            REVIEWED_MAX_QWEN_OUTPUT_TEXT_ROWS - 1,
+            REVIEWED_MAX_QWEN_OUTPUT_TEXT_ROWS,
+            REVIEWED_MAX_QWEN_OUTPUT_TEXT_ROWS + 1,
+            REVIEWED_MAX_QWEN_OUTPUT_TEXT_ROWS * 4,
+        ] {
+            let rows = reviewed_rows(text_rows);
+            let precheck = precheck_private_h3_prepared_rows(&envelope, &rows, 1).is_err();
+            let backstop = !envelope.row_cap_mismatches(&rows).is_empty();
+            assert_eq!(precheck, backstop, "text rows {text_rows}");
+        }
+    }
+
+    /// The whole point of the precheck is WHERE it runs: a prompt refusal must
+    /// not cost the ~37 GB artifact SHA-256 pass first. Ordering inside one
+    /// function is not observable from a unit test, so this pins it in the one
+    /// place it is decided — the source of the admission function itself.
+    #[cfg(feature = "mp4")]
+    #[test]
+    fn the_prepared_row_precheck_runs_before_the_artifact_verification_pass() {
+        let source = include_str!("private_server.rs");
+        let body = source
+            .split_once("fn prepare_reviewed_h3_private_fl2va_admission(")
+            .expect("the admission function must exist")
+            .1;
+        let precheck = body
+            .find("precheck_private_h3_prepared_rows(")
+            .expect("admission must precheck the prepared rows");
+        let artifacts = body
+            .find("qualify_private_artifacts_with_control(")
+            .expect("admission must qualify the artifacts");
+        assert!(
+            precheck < artifacts,
+            "the prepared-row precheck must run before artifact verification"
+        );
     }
 
     /// Without an authenticated adapter the reviewed envelope is exactly as
@@ -7111,10 +7461,10 @@ mod tests {
         // above it.
         let ceilings = capture_runtime_bounds();
         ceilings.validate().unwrap();
-        assert!(ceilings.attention_workspace_device_bytes > 6_172_029_280);
-        assert!(ceilings.ffn_workspace_device_bytes > 7_641_748_832);
+        assert!(ceilings.attention_workspace_device_bytes > 6_323_525_308);
+        assert!(ceilings.ffn_workspace_device_bytes > 7_826_714_044);
         assert!(ceilings.condition_vae_workspace_device_bytes > 366_027_840);
-        assert!(ceilings.qwen_activation_workspace_bytes > 3_400_171_520);
+        assert!(ceilings.qwen_activation_workspace_bytes > 4_168_069_120);
 
         // The admission floors these ceilings imply must clear the SM89
         // campaign card the profile exists to measure on. Campaign attempt 5
@@ -7144,18 +7494,24 @@ mod tests {
             assert_eq!(host_floor, 805_306_368 + 19_066_444_664);
         }
 
-        // The two sequence-linear denoise transients are the corrected FL2VA
+        // The two sequence-linear denoise transients are the FL2VA
         // observations scaled by the exact envelope packed-row ratio, then
-        // rounded up to the 64 MiB grant grid.
+        // rounded up to the 64 MiB grant grid. #1245 moved BOTH halves of that
+        // ratio — the observation by +2.5% and the FL2VA envelope by the same
+        // +2.5% — so the derived Ref2VA ceilings are byte-identical to the
+        // pre-#1245 ones, which is why the two device-floor pins below did not
+        // move either.
         let rows = capture_runtime_envelope().max_total_packed_rows;
         assert_eq!(rows, 88_334);
         assert_eq!(
             ceilings.attention_workspace_device_bytes,
-            (6_172_029_280_u64 * rows / 39_776).next_multiple_of(64 * 1024 * 1024)
+            (6_323_525_308_u64 * rows / REVIEWED_MAX_TOTAL_PACKED_ROWS)
+                .next_multiple_of(64 * 1024 * 1024)
         );
         assert_eq!(
             ceilings.ffn_workspace_device_bytes,
-            (7_641_748_832_u64 * rows / 39_776).next_multiple_of(64 * 1024 * 1024)
+            (7_826_714_044_u64 * rows / REVIEWED_MAX_TOTAL_PACKED_ROWS)
+                .next_multiple_of(64 * 1024 * 1024)
         );
 
         // The report renders observation against ceiling so a reviewer
@@ -7822,7 +8178,7 @@ mod tests {
             H3PrivateRuntimeBoundRecord {
                 fixed_runtime_host_bytes: host,
                 fixed_runtime_device_bytes: device,
-                qwen_activation_workspace_bytes: 3_959_422_976,
+                qwen_activation_workspace_bytes: 4_831_838_208,
                 vae_construction_device_workspace_bytes: 67_108_864,
                 condition_vae_workspace_device_bytes: 469_762_048,
                 attention_workspace_device_bytes: attention,
@@ -7842,7 +8198,7 @@ mod tests {
 
         let sweep = [
             record(1, 1, 1, 1),
-            record(7_113_539_584, 8_791_261_184, 603_979_776, 805_306_368),
+            record(7_314_866_176, 9_059_696_640, 603_979_776, 805_306_368),
             record(15_300_820_992, 10_133_438_464, 603_979_776, 671_088_640),
             record(u32::MAX.into(), 1, u32::MAX.into(), u32::MAX.into()),
             // The derived capture-scope ceilings themselves, so the floor
@@ -7978,11 +8334,11 @@ mod tests {
             H3PrivateFl2VaRuntimeBounds {
                 fixed_runtime_host_bytes: 805_306_368,
                 fixed_runtime_device_bytes: 603_979_776,
-                qwen_activation_workspace_bytes: 3_959_422_976,
+                qwen_activation_workspace_bytes: 4_831_838_208,
                 vae_construction_device_workspace_bytes: 67_108_864,
                 condition_vae_workspace_device_bytes: 469_762_048,
-                attention_workspace_device_bytes: 7_113_539_584,
-                ffn_workspace_device_bytes: 8_791_261_184,
+                attention_workspace_device_bytes: 7_314_866_176,
+                ffn_workspace_device_bytes: 9_059_696_640,
                 decoder_tile_workspace_device_bytes: 1_543_503_872,
                 audio_decode_workspace_device_bytes: 268_435_456,
                 encoded_video_host_bytes_bound:
@@ -8006,12 +8362,15 @@ mod tests {
                 max_steps: 21,
                 endpoint_count: 1,
                 endpoint_anchor: "first".into(),
-                max_qwen_output_text_rows: 1_058,
+                // The reviewed prompt budget: 1,008 vision pads and the
+                // `"<Picture 1>: "` label leave about a thousand prompt
+                // tokens under this ceiling (#1245).
+                max_qwen_output_text_rows: 2_048,
                 max_qwen_vision_rows: 4_032,
                 max_condition_visual_rows: 1_008,
                 max_target_video_rows: 37_296,
                 max_target_audio_rows: 414,
-                max_total_packed_rows: 39_776,
+                max_total_packed_rows: 40_766,
             }
         );
 
