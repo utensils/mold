@@ -10641,4 +10641,179 @@ describe("MobileApp identity photo", () => {
     );
     expect(wrapper.get("[data-test='mobile-develop-button']").attributes("disabled")).toBe("");
   });
+
+  it("blocks the prepared set's own Develop when the photo is cleared under a live knob", async () => {
+    // The reviewed card has its own Develop, which never consults the
+    // composer's blocker. Without the identity reason travelling with the
+    // reviewed work, `buildRequest` would silently drop the partition and
+    // every variation would render without the face.
+    serveIdentity([identityModel]);
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await attachPhoto();
+    await wrapper.get("[data-test='mobile-identity-weight']").setValue("0.6");
+    await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
+    await fieldControl("Prompt").setValue("two portrait studies");
+    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+    const preparedDevelop = wrapper.get("[data-test='mobile-develop-prepared']");
+    expect(preparedDevelop.attributes("disabled")).toBeUndefined();
+
+    well().vm.$emit("clear");
+    await flushPromises();
+
+    const card = wrapper.get("[data-test='mobile-prepared-expansion']");
+    expect(card.text()).toContain("Attach an identity photo");
+    expect(wrapper.get("[data-test='mobile-develop-prepared']").attributes("disabled")).toBe("");
+    await wrapper.get("[data-test='mobile-develop-prepared']").trigger("click");
+    await flushPromises();
+    expect(openStreams).toHaveLength(0);
+
+    // Reattaching the same face makes the reviewed set submittable again.
+    await attachPhoto();
+    expect(
+      wrapper.get("[data-test='mobile-develop-prepared']").attributes("disabled"),
+    ).toBeUndefined();
+    await wrapper.get("[data-test='mobile-develop-prepared']").trigger("click");
+    await flushPromises();
+    expect(openStreams).toHaveLength(2);
+    for (const stream of openStreams) {
+      expect((stream.options.body as Record<string, unknown>).id_image).toBe(PNG_1X1);
+    }
+  });
+
+  it("never routes an identity print to a co-owner that does not advertise support", async () => {
+    // The picker row is the deduplicated fleet union under Auto, so the
+    // machine it came from is not necessarily the machine that runs the
+    // print. Only the owners that advertise identity themselves may be asked
+    // for a plan — even when the other one would answer sooner.
+    const renderTarget = {
+      baseUrl: "http://render.tailnet.ts.net:7680",
+      apiKey: "render-secret",
+    };
+    localStorage.setItem(
+      "mold.mobile.hosts.v1",
+      JSON.stringify([
+        {
+          id: "studio-id",
+          name: "Studio",
+          baseUrl: target.baseUrl,
+          hostname: "studio",
+          instanceId: "studio-id",
+        },
+        {
+          id: "render-id",
+          name: "Render",
+          baseUrl: renderTarget.baseUrl,
+          hostname: "render",
+          instanceId: "render-id",
+        },
+      ]),
+    );
+    invoke.mockImplementation((command: string, args?: { hostId?: string }) =>
+      Promise.resolve(
+        command === "keychain_get_api_key"
+          ? args?.hostId === "render-id"
+            ? renderTarget.apiKey
+            : target.apiKey
+          : null,
+      ),
+    );
+    apiJsonTo.mockImplementation((route: { baseUrl: string }, path: string) => {
+      const render = route.baseUrl === renderTarget.baseUrl;
+      if (path === "/api/status") {
+        return Promise.resolve({
+          ...status,
+          hostname: render ? "render" : "studio",
+          instance_id: render ? "render-id" : "studio-id",
+        });
+      }
+      if (path === "/api/models") {
+        // Both machines hold the model; only Studio links the adapter.
+        return Promise.resolve([
+          render ? { ...identityModel, supports_identity: false } : identityModel,
+        ]);
+      }
+      if (path === "/api/capabilities") return Promise.resolve({});
+      if (path === "/api/gallery") return Promise.resolve([]);
+      if (path === "/api/activity") {
+        return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
+      }
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    // Render would win on speed alone.
+    previewGenerationPlacement.mockImplementation((probe: { baseUrl: string }) => {
+      const preview = plannedPlacement();
+      preview.candidate.predicted_completion_after_ms =
+        probe.baseUrl === renderTarget.baseUrl ? 10 : 9_000;
+      return Promise.resolve(preview);
+    });
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await attachPhoto();
+    await develop("a routed portrait");
+
+    const probed = previewGenerationPlacement.mock.calls.map(
+      (call: unknown[]) => (call[0] as { baseUrl: string }).baseUrl,
+    );
+    expect(probed).toEqual([target.baseUrl]);
+    expect(openStreams).toHaveLength(1);
+    expect(openStreams[0]?.options.target).toEqual(target);
+    expect((openStreams[0]?.options.body as Record<string, unknown>).id_image).toBe(PNG_1X1);
+  });
+
+  it("refuses an identity print on a server too old to answer the placement preview", async () => {
+    // That server predates the identity partition: it would ignore the face
+    // and return a print of a stranger rather than an error, so the legacy
+    // placement fallback is closed for identity work.
+    serveIdentity([identityModel]);
+    previewGenerationPlacement.mockRejectedValue(new ApiError("not found", 404));
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await attachPhoto();
+    await develop("a portrait on an old machine");
+
+    expect(openStreams).toHaveLength(0);
+    const status = wrapper.get("[data-test='mobile-generation-summary']").text();
+    expect(status).toContain("older Mold");
+    expect(status).toContain("Nothing was queued.");
+  });
+
+  it("refuses an oversized photo without ever reading it", async () => {
+    serveIdentity([identityModel]);
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    const arrayBuffer = vi.fn(() => Promise.resolve(new ArrayBuffer(0)));
+    const huge = {
+      name: "huge.png",
+      type: "image/png",
+      size: 17 * 1024 * 1024,
+      arrayBuffer,
+    } as unknown as File;
+    well().vm.$emit("file", huge);
+    await flushPromises();
+
+    expect(arrayBuffer).not.toHaveBeenCalled();
+    expect(wrapper.get("[data-test='identity-conditioning-error']").text()).toContain(
+      "16 MiB or smaller",
+    );
+    expect(well().props("image")).toBeNull();
+  });
+
+  it("keeps a fractional start step and names the whole-number rule", async () => {
+    serveIdentity([identityModel]);
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await attachPhoto();
+    await fieldControl("Prompt").setValue("a portrait at 2.9 steps");
+    await wrapper.get("[data-test='mobile-identity-start-step']").setValue("2.9");
+    await flushPromises();
+
+    expect(wrapper.get("[data-test='mobile-identity-error']").text()).toContain("whole number");
+    expect(wrapper.get("[data-test='mobile-develop-button']").attributes("disabled")).toBe("");
+    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+    expect(openStreams).toHaveLength(0);
+  });
 });

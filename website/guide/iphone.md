@@ -164,8 +164,16 @@ server's own defaults keep applying:
 If the combination cannot be submitted — a photo alongside a LoRA or a source
 image, a knob set with no photo, an oversized or unsupported file — the reason
 reads inline beside the control and Develop stays blocked. Prepared Batch N
-siblings inherit the photo and both knobs, and changing the photo stales
-reviewed prompt work exactly as changing a source image does.
+siblings inherit the photo and both knobs (and the reviewed card names the same
+reason on its own Develop), and changing the photo stales reviewed prompt work
+exactly as changing a source image does.
+
+Under **Auto** or **Most capable**, an identity print is only ever sent to a
+machine that advertises identity support for that model itself — the model list
+is merged across your machines, so the one you staged the photo against is not
+necessarily the one that develops it. If the machine that was chosen cannot
+hold the face, or is running a Mold old enough to ignore the photo, Mold says
+so and queues nothing rather than returning a print of someone else.
 
 Choose resolution through proportionally drawn shape tiles — the canonical
 families (1:1, 4:3, 3:2, 16:9, 21:9 and their portrait twins) the selected

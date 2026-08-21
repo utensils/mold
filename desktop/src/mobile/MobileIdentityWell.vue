@@ -8,6 +8,7 @@ import {
   ingestMobileIdentityPhoto,
   mobileIdentityBudgetBytes,
   mobileIdentityFileRefusal,
+  mobileIdentityFileSizeRefusal,
   mobileIdentityMimeType,
 } from "./identity";
 
@@ -40,6 +41,15 @@ async function onFile(file: File): Promise<void> {
     ingestError.value = refused;
     return;
   }
+  // Size is judged from the File itself, BEFORE it is read: a phone has no
+  // room to spare, and reading a 40 MP photo into a base64 string only to
+  // refuse it is exactly the allocation this check exists to avoid.
+  const budget = mobileIdentityBudgetBytes(props.form);
+  const tooLarge = mobileIdentityFileSizeRefusal(file.size, budget);
+  if (tooLarge) {
+    ingestError.value = tooLarge;
+    return;
+  }
   let base64: string;
   try {
     base64 = await fileToBase64(file);
@@ -47,10 +57,7 @@ async function onFile(file: File): Promise<void> {
     ingestError.value = "Couldn’t read that photo.";
     return;
   }
-  const result = ingestMobileIdentityPhoto(
-    { filename: file.name, base64 },
-    mobileIdentityBudgetBytes(props.form),
-  );
+  const result = ingestMobileIdentityPhoto({ filename: file.name, base64 }, budget);
   if (!result.ok) {
     ingestError.value = result.error;
     return;

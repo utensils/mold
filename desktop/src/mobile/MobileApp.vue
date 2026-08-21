@@ -265,10 +265,16 @@ import {
   restoreGenerationSourceMedia,
   sha256HexOfBase64,
 } from "@studio/lib/generationSourceMedia";
-import { persistIdentityPhoto, restoreIdentityPhoto } from "@studio/lib/identityConditioning";
+import {
+  persistIdentityPhoto,
+  restoreIdentityPhoto,
+  supportsIdentity,
+} from "@studio/lib/identityConditioning";
 import {
   mobileIdentityAdvancedCount,
+  mobileIdentityFleetRefusal,
   mobileIdentityNeedsReattach,
+  mobileIdentityRouteRefusal,
   resolveMobileIdentityRestore,
   showMobileIdentityWell,
 } from "./identity";
@@ -1225,7 +1231,7 @@ const expansionMissingModel = computed(() => {
 const preparedStaleReasons = computed(() => {
   const batch = preparedBatch.value;
   if (!batch) return [];
-  return preparedExpansionStaleReasons(batch, {
+  const reasons = preparedExpansionStaleReasons(batch, {
     sourcePrompt:
       batch.kind === "remix"
         ? promptSource(form.prompt, form.originalPrompt, batch.sourceKind).prompt
@@ -1256,6 +1262,14 @@ const preparedStaleReasons = computed(() => {
       ]),
     ),
   });
+  // The reviewed set has its OWN Develop, which never consults the composer's
+  // `developBlockerReason` — so an identity partition that stopped being
+  // submittable after the batch was prepared (the photo cleared while a knob
+  // stayed set, say) has to travel with the reviewed work itself. Without
+  // this the child action stays enabled, `buildRequest` drops the partition,
+  // and every reviewed variation renders without the face.
+  if (identityError.value) reasons.push(identityError.value);
+  return reasons;
 });
 const quickStaleReasons = computed(() => {
   const snapshot = quickExpansionSnapshot.value;
@@ -1574,6 +1588,25 @@ const showIdentity = computed(() => showMobileIdentityWell(form, isSequence.valu
 /** Why the identity partition would be refused, repeated beside Develop so a
  * disabled button is never a dead end. */
 const identityError = computed(() => identityConditioningValidationError(form));
+/** Whether the CURRENT form would put a face on the wire. */
+const formCarriesIdentity = computed(
+  () => form.identitySupported === true && Boolean(form.identityImage?.base64),
+);
+/**
+ * Whether one machine's OWN copy of a model accepts an identity photo.
+ *
+ * `form.identitySupported` is snapshotted from the picker, which under an
+ * automatic policy is the deduplicated fleet UNION — one row standing in for
+ * several machines. Routing must not inherit that: the machine the placement
+ * fan-out freezes has to advertise identity itself. Positive knowledge only,
+ * exactly as `supportsIdentity` requires — a machine whose `/api/models` has
+ * not been read is not evidence of support.
+ */
+function hostAdvertisesIdentity(hostId: string, model: string): boolean {
+  const entry = modelsByHost.value[hostId]?.find((candidate) => candidate.name === model);
+  if (!entry) return false;
+  return supportsIdentity(effectiveGenerationRecipe(entry, form.pipeline), entry);
+}
 const fixedRecipeControls = computed(() =>
   fixedRecipeControlOverrides(
     effectiveGenerationRecipe(selectedGenerationModel.value, form.pipeline),
@@ -2889,6 +2922,7 @@ type MobileAutomaticRoute =
 function automaticRoutingCandidates(
   model: string,
   family: string,
+  options: { requiresIdentity?: boolean } = {},
 ): { hosts: MobileHost[]; error: string | null } {
   const restrictions: string[] = [];
   const allowed = routingHosts.value.filter((host) => {
@@ -2921,11 +2955,21 @@ function automaticRoutingCandidates(
         `No connected machine can run ${model}. Choose another model or machine. Nothing was queued.`,
     };
   }
+  // A request that carries a face may only be dispatched to a machine that
+  // advertises identity support for this model ITSELF. The picker's row is the
+  // fleet union under an automatic policy, so without this narrowing the
+  // fan-out could freeze a co-owner that would quietly render a stranger.
+  const identityCandidates = options.requiresIdentity
+    ? candidates.filter((host) => hostAdvertisesIdentity(host.id, model))
+    : candidates;
+  if (identityCandidates.length === 0) {
+    return { hosts: [], error: mobileIdentityFleetRefusal(model) };
+  }
   const conflict = profileHashConflict(
     modelsByHost.value,
     model,
-    candidates.map((host) => host.id),
-    Object.fromEntries(candidates.map((host) => [host.id, host.version ?? null])),
+    identityCandidates.map((host) => host.id),
+    Object.fromEntries(identityCandidates.map((host) => [host.id, host.version ?? null])),
   );
   if (conflict) {
     return {
@@ -2939,15 +2983,23 @@ function automaticRoutingCandidates(
       ),
     };
   }
-  return { hosts: candidates, error: null };
+  return { hosts: identityCandidates, error: null };
 }
 
 /** The machine an automatic policy would pick from telemetry alone. Used for
  *  the provisional target of source preparation, before any machine has been
  *  asked for a placement plan. */
-function provisionalAutomaticHost(model: string, family: string): MobileHost | null {
-  const { hosts: candidates } = automaticRoutingCandidates(model, family);
-  const views = (candidates.length > 0 ? candidates : routingHosts.value).map(routingHostView);
+function provisionalAutomaticHost(
+  model: string,
+  family: string,
+  requiresIdentity = false,
+): MobileHost | null {
+  const { hosts: candidates } = automaticRoutingCandidates(model, family, { requiresIdentity });
+  // The usual fallback to the whole fleet is deliberately skipped for identity
+  // work: a machine that cannot hold the face is not a better provisional
+  // target than none at all.
+  const fallback = requiresIdentity ? [] : routingHosts.value;
+  const views = (candidates.length > 0 ? candidates : fallback).map(routingHostView);
   const chosen =
     generateTarget.value === CAPABLE_TARGET_ID
       ? pickMostCapableHost(views, null, { lowestIdWins: true })
@@ -2996,7 +3048,12 @@ async function routeAutomaticGeneration(options: {
   signal?: AbortSignal;
 }): Promise<MobileAutomaticRoute> {
   const isCurrent = options.isCurrent ?? (() => true);
-  const { hosts: candidates, error } = automaticRoutingCandidates(options.model, options.family);
+  // The frozen request is the authority on whether a face travels — never the
+  // live form, which may have moved while the fan-out ran.
+  const carriesIdentity = Boolean(options.request.id_image);
+  const { hosts: candidates, error } = automaticRoutingCandidates(options.model, options.family, {
+    requiresIdentity: carriesIdentity,
+  });
   if (error) return { kind: "error", message: error };
   const probes: MobilePlacementProbe[] = [];
   const controllers = candidates.map(() => new AbortController());
@@ -3106,7 +3163,10 @@ async function routeAutomaticGeneration(options: {
   const legacy = settledProbes.filter(
     (probe) => probe.legacyUnsupported || classifyPlacementPreview(probe.preview) === "unsupported",
   );
-  if (!options.requireAuthoritative && legacy.length > 0) {
+  // An older server answers the placement preview with 404/405 and would
+  // ignore the additive identity fields outright, so an identity request never
+  // takes this fallback — it is refused by the failure message below.
+  if (!options.requireAuthoritative && !carriesIdentity && legacy.length > 0) {
     const views = legacy.map((probe) => routingHostView(probe.host));
     const fallback =
       generateTarget.value === CAPABLE_TARGET_ID
@@ -4729,7 +4789,7 @@ async function generate(): Promise<void> {
   // placement fan-out below replaces it before anything is queued.
   const automaticOrdinary = automaticRouting.value && !preparedSubmission && !quickSubmission;
   const provisionalHost = automaticOrdinary
-    ? provisionalAutomaticHost(form.model, form.family)
+    ? provisionalAutomaticHost(form.model, form.family, formCarriesIdentity.value)
     : null;
   const host = preparedSubmission
     ? hosts.value.find((candidate) => candidate.id === preparedSubmission.route.hostId)
@@ -4779,6 +4839,11 @@ async function generate(): Promise<void> {
     !basicParametersValid.value ||
     !!mobileMediaBudgetError.value ||
     !!sourceConditioningError.value ||
+    // Re-read at the tap, not just in `developBlockerReason`: the prepared
+    // reviewed set has its own Develop, and a partition that stopped being
+    // submittable must never reach `buildRequest`, which would silently drop
+    // it and render the whole batch without the face.
+    !!identityError.value ||
     !!h3AuthoringError.value ||
     preparingGeneration.value
   )
@@ -5009,8 +5074,17 @@ async function generate(): Promise<void> {
       }
       if (error instanceof ApiError && (error.status === 404 || error.status === 405)) {
         if (requireAuthoritativePlacement) {
+          // An identity request lands here for its own reason — that server
+          // predates the partition and would ignore the face rather than
+          // refuse it — so it says that instead of talking about references.
           setGenerationStatus(
-            `${route.label} does not provide the authoritative placement preview required for reference media. Nothing was queued.`,
+            mobileIdentityRouteRefusal({
+              carriesIdentity: Boolean(request.id_image),
+              hostLabel: route.label,
+              hostAdvertisesIdentity: true,
+              legacyPlacement: true,
+            }) ??
+              `${route.label} does not provide the authoritative placement preview required for reference media. Nothing was queued.`,
             true,
           );
           releasePreparedSubmission();
@@ -5031,7 +5105,13 @@ async function generate(): Promise<void> {
   const classification: string = classifyPlacementPreview(placement);
   if (requireAuthoritativePlacement && classification === "unsupported") {
     setGenerationStatus(
-      `${route.label} does not provide the authoritative placement preview required for reference media. Nothing was queued.`,
+      mobileIdentityRouteRefusal({
+        carriesIdentity: Boolean(request.id_image),
+        hostLabel: route.label,
+        hostAdvertisesIdentity: true,
+        legacyPlacement: true,
+      }) ??
+        `${route.label} does not provide the authoritative placement preview required for reference media. Nothing was queued.`,
       true,
     );
     releasePreparedSubmission();
@@ -5049,6 +5129,23 @@ async function generate(): Promise<void> {
     )
   ) {
     expansionError.value = `${route.label}'s connection details changed while checking placement.`;
+    releasePreparedSubmission();
+    return;
+  }
+  // The last word on identity, applied to the machine that was actually
+  // frozen — a pinned one, or the fan-out's winner. `form.identitySupported`
+  // came from one deduplicated picker row and cannot answer for this machine,
+  // and a legacy placement fallback would ignore the fields outright. Either
+  // way the print would come back as someone else, so nothing is queued.
+  const identityRefusal = mobileIdentityRouteRefusal({
+    carriesIdentity: Boolean(request.id_image),
+    hostLabel: route.label,
+    hostAdvertisesIdentity: hostAdvertisesIdentity(route.hostId, request.model),
+    legacyPlacement: legacyUnsupported,
+  });
+  if (identityRefusal) {
+    setGenerationStatus(identityRefusal, true);
+    generationAnnouncement.value = identityRefusal;
     releasePreparedSubmission();
     return;
   }

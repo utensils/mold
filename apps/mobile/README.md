@@ -112,9 +112,18 @@ pushed screen opened from the header.
   refusal — a photo with a LoRA or a source image, a knob with no photo, an
   oversized or unsupported file, a photo over the 45 MiB combined request-media
   budget — renders inline beside the control and blocks Develop, never as a
-  toast. Prepared Batch N siblings inherit the whole partition, and a changed
-  photo stales reviewed prompt work through the shared conditioning
-  fingerprint, exactly as a changed source image does. Every rule comes from
+  toast. Prepared Batch N siblings inherit the whole partition — and because
+  the reviewed card owns its own Develop, an identity refusal travels with the
+  reviewed work as a named stale reason rather than relying on the composer's
+  blocker. A changed photo stales reviewed prompt work through the shared
+  conditioning fingerprint, exactly as a changed source image does. Routing is
+  identity-aware: `automaticRoutingCandidates` narrows Auto / Most capable to
+  the machines whose OWN `/api/models` row advertises `supports_identity` for
+  that model (the picker row is the fleet union and cannot answer for the
+  winner), the frozen route is re-checked before submission, and
+  `requiresAuthoritativePlacement` now covers `id_image` so an identity request
+  can never take the legacy 404/405 placement fallback on a server that would
+  ignore the face. Every rule comes from
   `@studio/lib/identityConditioning`; `desktop/src/mobile/identity.ts` holds
   only the phone-shaped parts (budget, native ingest, Info rows, reuse
   outcome).

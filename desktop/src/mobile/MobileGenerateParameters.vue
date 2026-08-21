@@ -397,8 +397,11 @@ function setIdentityWeight(raw: string): void {
 }
 
 function setIdentityStartStep(raw: string): void {
-  const value = numberOrNull(raw);
-  props.form.identityStartStep = value === null ? null : Math.trunc(value);
+  // Deliberately NOT truncated: a fractional step is a mistake the shared
+  // policy names inline ("must be a whole number from 0 to N"), and silently
+  // rounding it would submit a step the user never typed. `identityRequestFields`
+  // keeps a non-integer off the wire either way.
+  props.form.identityStartStep = numberOrNull(raw);
 }
 
 function setRetake(edge: "start" | "end", raw: string): void {

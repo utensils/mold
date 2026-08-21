@@ -1,16 +1,23 @@
 import { describe, expect, it } from "vitest";
 import {
   IDENTITY_PHOTO_UNAVAILABLE,
+  ID_IMAGE_LIMITS,
   ID_START_STEP_DEFAULT,
   ID_WEIGHT_DEFAULT,
 } from "@studio/lib/identityConditioning";
 import { newGenerateForm, type GenerateForm } from "../lib/generateForm";
-import { MAX_MOBILE_GENERATION_REQUEST_MEDIA_BYTES } from "../lib/generateValidation";
+import {
+  MAX_MOBILE_GENERATION_REQUEST_MEDIA_BYTES,
+  MOBILE_MEDIA_BUDGET_ERROR,
+} from "../lib/generateValidation";
 import {
   ingestMobileIdentityPhoto,
   mobileIdentityAdvancedCount,
   mobileIdentityBudgetBytes,
   mobileIdentityFileRefusal,
+  mobileIdentityFileSizeRefusal,
+  mobileIdentityFleetRefusal,
+  mobileIdentityRouteRefusal,
   mobileIdentityMimeType,
   mobileIdentityNeedsReattach,
   mobileIdentityProvenanceRows,
@@ -223,5 +230,71 @@ describe("resolveMobileIdentityRestore", () => {
       kind: "missing",
       note: IDENTITY_PHOTO_UNAVAILABLE,
     });
+  });
+});
+
+describe("mobileIdentityFileSizeRefusal", () => {
+  it("passes a photo inside both the identity limit and the request budget", () => {
+    expect(
+      mobileIdentityFileSizeRefusal(2 * 1024 * 1024, MAX_MOBILE_GENERATION_REQUEST_MEDIA_BYTES),
+    ).toBeNull();
+  });
+
+  it("refuses past the shared 16 MiB identity limit before anything is read", () => {
+    expect(
+      mobileIdentityFileSizeRefusal(
+        ID_IMAGE_LIMITS.maxEncodedBytes + 1,
+        MAX_MOBILE_GENERATION_REQUEST_MEDIA_BYTES,
+      ),
+    ).toContain("16 MiB");
+  });
+
+  it("refuses past the remaining phone request budget", () => {
+    expect(mobileIdentityFileSizeRefusal(1024, 512)).toBe(MOBILE_MEDIA_BUDGET_ERROR);
+  });
+});
+
+describe("mobileIdentityRouteRefusal", () => {
+  const base = {
+    carriesIdentity: true,
+    hostLabel: "Render",
+    hostAdvertisesIdentity: true,
+    legacyPlacement: false,
+  };
+
+  it("says nothing about a request that carries no identity photo", () => {
+    expect(
+      mobileIdentityRouteRefusal({
+        ...base,
+        carriesIdentity: false,
+        hostAdvertisesIdentity: false,
+        legacyPlacement: true,
+      }),
+    ).toBeNull();
+  });
+
+  it("clears a machine that advertises identity for this model", () => {
+    expect(mobileIdentityRouteRefusal(base)).toBeNull();
+  });
+
+  it("refuses the machine that would silently drop the face", () => {
+    const refusal = mobileIdentityRouteRefusal({ ...base, hostAdvertisesIdentity: false });
+    expect(refusal).toContain("Render");
+    expect(refusal).toContain("Nothing was queued.");
+  });
+
+  it("refuses a legacy machine whose placement preview is not authoritative", () => {
+    const refusal = mobileIdentityRouteRefusal({ ...base, legacyPlacement: true });
+    expect(refusal).toContain("Render");
+    expect(refusal).toContain("older");
+    expect(refusal).toContain("Nothing was queued.");
+  });
+});
+
+describe("mobileIdentityFleetRefusal", () => {
+  it("names the model and says nothing was queued", () => {
+    const message = mobileIdentityFleetRefusal("flux-dev:q8");
+    expect(message).toContain("flux-dev:q8");
+    expect(message).toContain("Nothing was queued.");
   });
 });

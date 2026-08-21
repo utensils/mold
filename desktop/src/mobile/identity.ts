@@ -12,6 +12,7 @@ import {
   IDENTITY_PHOTO_LABEL,
   IDENTITY_PHOTO_UNAVAILABLE,
   IDENTITY_WEIGHT_LABEL,
+  ID_IMAGE_LIMITS,
   identityActiveCount,
   identityImageError,
   identityProvenance,
@@ -86,6 +87,56 @@ export function mobileIdentityFileRefusal(file: { type: string; name: string }):
   if (file.type === "image/png" || file.type === "image/jpeg") return null;
   if (!file.type && isStillImageFile(file.name)) return null;
   return `${IDENTITY_PHOTO_LABEL} must be a PNG or JPEG image.`;
+}
+
+/**
+ * Why a picked file is too large — judged from `File.size` BEFORE it is read.
+ *
+ * `File.size` is raw bytes, which is exactly what both limits are expressed
+ * in: the shared 16 MiB encoded ceiling and the phone's remaining inline
+ * request budget. Checking here means an oversized photo is refused without
+ * ever materializing a base64 copy of it in the WebView — the same order the
+ * source wells use, and the reason `ingestMobileIdentityPhoto` is only ever
+ * handed bytes worth reading.
+ */
+export function mobileIdentityFileSizeRefusal(size: number, budgetBytes: number): string | null {
+  if (size > ID_IMAGE_LIMITS.maxEncodedBytes) {
+    return `${IDENTITY_PHOTO_LABEL} must be 16 MiB or smaller.`;
+  }
+  if (size > budgetBytes) return MOBILE_MEDIA_BUDGET_ERROR;
+  return null;
+}
+
+/**
+ * Why the machine a print was routed to cannot be trusted with an identity
+ * photo — or `null` when it can (including "this print carries no photo").
+ *
+ * `form.identitySupported` is snapshotted from ONE deduplicated fleet row,
+ * but under Auto / Most capable the placement fan-out may freeze a different
+ * owner. That machine's own `/api/models` row is the authority, and a server
+ * old enough to answer the placement preview with 404/405 would ignore the
+ * additive identity fields entirely. Either way the print would render a
+ * stranger's face, so it is refused inline and nothing is queued.
+ */
+export function mobileIdentityRouteRefusal(input: {
+  carriesIdentity: boolean;
+  hostLabel: string;
+  hostAdvertisesIdentity: boolean;
+  legacyPlacement?: boolean;
+}): string | null {
+  if (!input.carriesIdentity) return null;
+  if (input.legacyPlacement) {
+    return `${input.hostLabel} is running an older Mold that would ignore the ${IDENTITY_PHOTO_LABEL.toLowerCase()}. Update it, choose another machine, or remove the photo. Nothing was queued.`;
+  }
+  if (!input.hostAdvertisesIdentity) {
+    return `${input.hostLabel} doesn't advertise identity support for this model, so it would render without the face. Choose another machine or remove the ${IDENTITY_PHOTO_LABEL.toLowerCase()}. Nothing was queued.`;
+  }
+  return null;
+}
+
+/** No machine in the fleet can run this model WITH an identity photo. */
+export function mobileIdentityFleetRefusal(model: string): string {
+  return `No connected machine advertises identity support for ${model}. Remove the ${IDENTITY_PHOTO_LABEL.toLowerCase()}, or choose a machine that has it. Nothing was queued.`;
 }
 
 export type MobileIdentityIngest = { ok: true; image: PickedImage } | { ok: false; error: string };
