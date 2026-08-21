@@ -6255,12 +6255,32 @@ mod tests {
 
     /// The shared validator delegates to `crate::identity` — proving the
     /// wiring here, not restating the rules, which are table-driven there.
+    ///
+    /// Written for both values of `IDENTITY_RUNTIME_READY`: while the runtime
+    /// adapter is pending, the delegation is proven by the pending refusal
+    /// arriving through this entry point instead.
     #[cfg(feature = "pulid")]
     #[test]
     fn generate_request_validation_enforces_identity_conditioning() {
         let mut req = valid_req();
         req.model = "flux-dev".to_string();
         req.id_image = Some(IDENTITY_PNG_1X1.to_vec());
+
+        if !crate::identity::IDENTITY_RUNTIME_READY {
+            assert_eq!(
+                validate_generate_request_with_family(&req, None).unwrap_err(),
+                crate::identity::IDENTITY_RUNTIME_PENDING
+            );
+            let mut bare = valid_req();
+            bare.model = "flux-dev:q8".to_string();
+            bare.id_weight = Some(1.5);
+            assert_eq!(
+                validate_generate_request_with_family(&bare, None).unwrap_err(),
+                crate::identity::IDENTITY_RUNTIME_PENDING
+            );
+            return;
+        }
+
         validate_generate_request_with_family(&req, None)
             .expect("flux-dev resolves to the qualified flux-dev:q8");
 
@@ -6277,7 +6297,26 @@ mod tests {
         assert!(error.contains("id_image is required"), "{error}");
     }
 
-    /// Without the adapter the shared validator refuses the request and names
+    /// Whatever the feature, a build that cannot execute identity refuses the
+    /// request through the shared validator rather than rendering a print
+    /// that silently has no face in it.
+    #[test]
+    fn generate_request_validation_never_admits_identity_it_cannot_execute() {
+        if crate::identity::identity_runtime_available() {
+            return;
+        }
+        let mut req = valid_req();
+        req.model = "flux-dev:q8".to_string();
+        req.id_image = Some(IDENTITY_PNG_1X1.to_vec());
+        let error = validate_generate_request_with_family(&req, None).unwrap_err();
+        assert!(
+            error == crate::identity::IDENTITY_BUILD_UNSUPPORTED
+                || error == crate::identity::IDENTITY_RUNTIME_PENDING,
+            "unexpected refusal: {error}"
+        );
+    }
+
+    /// Without the feature the shared validator refuses the request and names
     /// the missing build support, so no print renders silently face-less.
     #[cfg(not(feature = "pulid"))]
     #[test]
