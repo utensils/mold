@@ -32,6 +32,7 @@ import { effectiveGenerationRecipe } from "@studio/lib/generationProfile";
 import { profileConflictMessage } from "@studio/lib/profileFleet";
 import { useLiveActivityStore } from "../stores/liveActivity";
 import { imageDimensionsFromBase64 } from "@studio/lib/imageDimensions";
+import { attachPickedImage } from "../lib/sourceAttachment";
 import {
   resolveDefaultSourceResolution,
   resolveSourceConditioningTarget,
@@ -2021,6 +2022,26 @@ function canvasMenu(): MenuEntry[] {
           .catch((error) =>
             toasts.push(error instanceof Error ? error.message : String(error), "error"),
           );
+      },
+    },
+    {
+      label: "Use as source",
+      disabled:
+        j.status !== "complete" || !j.result?.image || !!j.result.video_frames || isAudioResult(j),
+      action: () => {
+        if (!j.result?.image) return;
+        attachPickedImage(form, {
+          filename:
+            j.result.filename ??
+            suggestOutputFilename(
+              j.result.model,
+              j.result.seed_used,
+              j.result.format,
+              j.submittedAtUnixMs,
+            ),
+          base64: j.result.image,
+        });
+        toasts.push("Loaded as source");
       },
     },
     {

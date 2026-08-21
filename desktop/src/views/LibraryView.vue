@@ -62,7 +62,7 @@ import { copyImageBytesToClipboard } from "../lib/clipboard";
 import { copyLocalOutputPath } from "../lib/localOutputPath";
 import { formatBytes } from "../lib/format";
 import { primaryModifierPressed } from "../lib/platform";
-import { allowsNativeContextMenu } from "../lib/shortcuts";
+import { allowsNativeContextMenu, allowsNativeSelectAll, isSelectAllChord } from "../lib/shortcuts";
 import { modelDisplayNameForId } from "../lib/models";
 import type { GalleryImage } from "../lib/api/types";
 import { isUpscaledImage } from "../lib/gallery/upscaled";
@@ -82,6 +82,9 @@ const PAD = 16;
 const EXTRA_POLL_MS = 15_000;
 /** Tags offered in the tile menu's Tags ▸ submenu. */
 const MENU_TAG_LIMIT = 12;
+/** Pointer sweep selection auto-scrolls near the top/bottom of the grid. */
+const DRAG_SCROLL_EDGE = 72;
+const DRAG_SCROLL_MAX = 18;
 
 const router = useRouter();
 const route = useRoute();
@@ -896,6 +899,43 @@ function tileMenu(entry: MergedPrint): MenuEntry[] {
   const organize = canOrganizeEntry(entry);
   const favorite = isFavorite(entry);
   const trashable = entryTrashCapable(entry);
+  if (selectedForBulk) {
+    const targets = selectedEntries.value;
+    const allFavorite = targets.every(isFavorite);
+    const allOrganizable = targets.every(canOrganizeEntry);
+    const allTrashable = targets.every(entryTrashCapable);
+    return [
+      ...(allOrganizable
+        ? [
+            {
+              label: allFavorite
+                ? `Unfavorite ${bulkCount} selected`
+                : `Favorite ${bulkCount} selected`,
+              checked: allFavorite,
+              action: () => void setFavorite(targets, !allFavorite),
+            },
+            { label: "Tags", children: tagSubmenu(entry) },
+            { label: "Add to collection", children: collectionSubmenu(entry) },
+            ...(gallery.collectionSlug && inCollections.value
+              ? [
+                  {
+                    label: `Remove ${bulkCount} selected from collection`,
+                    action: () => void removeFromOpenCollection(targets),
+                  },
+                ]
+              : []),
+            { separator: true } as MenuEntry,
+          ]
+        : []),
+      {
+        label: allTrashable
+          ? `Move ${bulkCount} selected to trash`
+          : `Delete ${bulkCount} selected`,
+        danger: true,
+        action: () => void deleteSelectedPrints(),
+      },
+    ];
+  }
   return [
     ...(isSequencePrint(entry)
       ? [
@@ -1074,14 +1114,21 @@ function clearFilters() {
 // ── Bulk select mode ───────────────────────────────────────────────────────
 // Selection is keyed by print identity (filename — the merged grid's
 // cross-host identity), never row index: the virtualized grid re-flows.
-// Drag-marquee selection is a deliberate follow-up — it fights the
-// virtualized justified grid; click / shift-range / meta-toggle ship first.
+// Pointer sweep selection samples the path across visible virtual rows and
+// edge-scrolls, matching the iPhone Library gesture without relying on indexes.
 const selectMode = ref(false);
 const bulkSelection = ref<Set<string>>(new Set());
 const bulkAnchor = ref<string | null>(null);
 const confirmingBulkDelete = ref(false);
 const bulkDeleting = ref(false);
 const bulkBar = ref<InstanceType<typeof BulkBar> | null>(null);
+let dragPointerId: number | null = null;
+let dragSelect = true;
+let dragClientX = 0;
+let dragClientY = 0;
+let dragFrame: number | null = null;
+let dragPendingClicks = 0;
+const dragVisited = new Set<string>();
 
 const selectedEntries = computed(() =>
   entries.value.filter((e) => bulkSelection.value.has(e.item.filename)),
@@ -1115,6 +1162,7 @@ const selectionTrashCapable = computed(
 );
 
 function setSelectMode(next: boolean) {
+  if (!next) finishSelectionDrag();
   selectMode.value = next;
   if (!next) {
     bulkSelection.value = new Set();
@@ -1125,7 +1173,31 @@ function setSelectMode(next: boolean) {
 }
 
 function onTileClick(entry: MergedPrint, e: MouseEvent) {
+  if (selectMode.value && dragPendingClicks > 0 && e.detail !== 0) {
+    dragPendingClicks -= 1;
+    return;
+  }
   if (!selectMode.value) {
+    const extend = e.shiftKey;
+    // Accept both platform conventions here: Command-click on macOS and
+    // Control-click on Windows/Linux, including browser-based desktop QA.
+    const toggle = e.metaKey || e.ctrlKey;
+    if (extend || toggle) {
+      const current = selectedEntry.value;
+      const initial = new Set(current ? [current.item.filename] : []);
+      const anchor = current?.item.filename ?? null;
+      selectMode.value = true;
+      const next = applySelectionClick(
+        initial,
+        anchor,
+        entries.value.map((x) => x.item.filename),
+        entry.item.filename,
+        { shift: extend, meta: toggle },
+      );
+      bulkSelection.value = next.selection;
+      bulkAnchor.value = next.anchor;
+      return;
+    }
     select(entry);
     return;
   }
@@ -1140,6 +1212,122 @@ function onTileClick(entry: MergedPrint, e: MouseEvent) {
   bulkAnchor.value = next.anchor;
 }
 
+function entryAtPoint(x: number, y: number): MergedPrint | null {
+  // The floating bulk bar may overlap the grid during edge scrolling, so use
+  // the complete hit stack and find the first tile underneath it.
+  const elements = document.elementsFromPoint?.(x, y) ?? [document.elementFromPoint(x, y)];
+  const tile = elements
+    .map((element) => element?.closest<HTMLElement>("[data-filename]") ?? null)
+    .find((element) => element !== null);
+  const filename = tile?.dataset.filename;
+  return filename
+    ? (entries.value.find((entry) => entry.item.filename === filename) ?? null)
+    : null;
+}
+
+function applyDragSelection(entry: MergedPrint): void {
+  const filename = entry.item.filename;
+  if (dragVisited.has(filename)) return;
+  dragVisited.add(filename);
+  const next = new Set(bulkSelection.value);
+  if (dragSelect) next.add(filename);
+  else next.delete(filename);
+  bulkSelection.value = next;
+  bulkAnchor.value = filename;
+  confirmingBulkDelete.value = false;
+}
+
+function applyDragAtPoint(): void {
+  const entry = entryAtPoint(dragClientX, dragClientY);
+  if (entry) applyDragSelection(entry);
+}
+
+function applyDragSegment(fromX: number, fromY: number, toX: number, toY: number): void {
+  const distance = Math.hypot(toX - fromX, toY - fromY);
+  // Sampling prevents a quick mouse sweep from jumping over narrow tiles.
+  const steps = Math.max(1, Math.ceil(distance / 12));
+  for (let step = 1; step <= steps; step += 1) {
+    const progress = step / steps;
+    const entry = entryAtPoint(fromX + (toX - fromX) * progress, fromY + (toY - fromY) * progress);
+    if (entry) applyDragSelection(entry);
+  }
+}
+
+function runDragFrame(): void {
+  dragFrame = null;
+  if (dragPointerId === null || !selectMode.value) return;
+  const scroller = scrollEl.value;
+  if (scroller) {
+    const bounds = scroller.getBoundingClientRect();
+    const topDepth = Math.max(0, bounds.top + DRAG_SCROLL_EDGE - dragClientY);
+    const bottomDepth = Math.max(0, dragClientY - (bounds.bottom - DRAG_SCROLL_EDGE));
+    const direction = bottomDepth > 0 ? 1 : topDepth > 0 ? -1 : 0;
+    const depth = Math.max(topDepth, bottomDepth);
+    if (direction && depth) {
+      const speed = Math.min(
+        DRAG_SCROLL_MAX,
+        Math.max(2, (depth / DRAG_SCROLL_EDGE) * DRAG_SCROLL_MAX),
+      );
+      scroller.scrollTop += direction * speed;
+      applyDragAtPoint();
+    }
+  }
+  dragFrame = requestAnimationFrame(runDragFrame);
+}
+
+function beginSelectionDrag(event: PointerEvent, entry: MergedPrint): void {
+  if (
+    !selectMode.value ||
+    event.isPrimary === false ||
+    event.shiftKey ||
+    // macOS synthesizes a context menu from Control-click. Let the click /
+    // contextmenu path handle it; Windows/Linux Ctrl-click still toggles via
+    // onTileClick, while no platform needs Ctrl-modified sweep selection.
+    (event.ctrlKey && !event.metaKey) ||
+    (event.pointerType === "mouse" && event.button !== 0)
+  ) {
+    return;
+  }
+  event.preventDefault();
+  dragPointerId = event.pointerId;
+  dragSelect = !bulkSelection.value.has(entry.item.filename);
+  dragClientX = event.clientX;
+  dragClientY = event.clientY;
+  dragVisited.clear();
+  applyDragSelection(entry);
+  (event.currentTarget as HTMLElement | null)?.setPointerCapture?.(event.pointerId);
+  if (dragFrame === null) dragFrame = requestAnimationFrame(runDragFrame);
+}
+
+function moveSelectionDrag(event: PointerEvent): void {
+  if (event.pointerId !== dragPointerId) return;
+  event.preventDefault();
+  const points = [...(event.getCoalescedEvents?.() ?? []), event];
+  for (const point of points) {
+    applyDragSegment(dragClientX, dragClientY, point.clientX, point.clientY);
+    dragClientX = point.clientX;
+    dragClientY = point.clientY;
+  }
+}
+
+function finishSelectionDrag(event?: PointerEvent): void {
+  if (event && event.pointerId !== dragPointerId) return;
+  if (event?.type === "pointerup") dragPendingClicks += 1;
+  dragPointerId = null;
+  dragVisited.clear();
+  if (dragFrame !== null) cancelAnimationFrame(dragFrame);
+  dragFrame = null;
+}
+
+function onTileContextMenu(entry: MergedPrint, event: MouseEvent): void {
+  if (selectMode.value && !bulkSelection.value.has(entry.item.filename)) {
+    bulkSelection.value = new Set([entry.item.filename]);
+    bulkAnchor.value = entry.item.filename;
+  }
+  select(entry);
+  contextMenu.open(event, tileMenu(entry));
+}
+
 function onTileDblclick(entry: MergedPrint) {
   if (selectMode.value) return;
   select(entry);
@@ -1148,6 +1336,13 @@ function onTileDblclick(entry: MergedPrint) {
 
 function selectAllInFilter() {
   bulkSelection.value = new Set(entries.value.map((e) => e.item.filename));
+}
+
+function selectAllFromShortcut() {
+  if (entries.value.length === 0) return;
+  selectMode.value = true;
+  selectAllInFilter();
+  bulkAnchor.value = entries.value[0]!.item.filename;
 }
 
 function clearBulkSelection() {
@@ -1324,6 +1519,12 @@ function onKeydown(e: KeyboardEvent) {
   }
   // The history drawer owns the keyboard while it's open.
   if (historyOpen.value) return;
+  // ⌘A selects exactly the current filtered result set, never hidden prints.
+  if (isSelectAllChord(e) && !allowsNativeSelectAll(document.activeElement)) {
+    e.preventDefault();
+    selectAllFromShortcut();
+    return;
+  }
   // ⌘⇧N — new collection (organize-capable hosts only).
   if ((e.key === "n" || e.key === "N") && e.shiftKey && primaryModifierPressed(e)) {
     if (!organizeAvailable.value || allowsNativeContextMenu(e.target as Element | null)) return;
@@ -1692,6 +1893,10 @@ watch(
 
 onMounted(() => {
   window.addEventListener("keydown", onKeydown);
+  window.addEventListener("mold:library-select-all", selectAllFromShortcut);
+  window.addEventListener("pointermove", moveSelectionDrag, { passive: false });
+  window.addEventListener("pointerup", finishSelectionDrag);
+  window.addEventListener("pointercancel", finishSelectionDrag);
   pollTimer = setInterval(() => void gallery.pollExtras(), EXTRA_POLL_MS);
   if (scrollEl.value) {
     containerWidth.value = scrollEl.value.clientWidth;
@@ -1703,6 +1908,11 @@ onMounted(() => {
 });
 onUnmounted(() => {
   window.removeEventListener("keydown", onKeydown);
+  window.removeEventListener("mold:library-select-all", selectAllFromShortcut);
+  window.removeEventListener("pointermove", moveSelectionDrag);
+  window.removeEventListener("pointerup", finishSelectionDrag);
+  window.removeEventListener("pointercancel", finishSelectionDrag);
+  finishSelectionDrag();
   if (pollTimer) clearInterval(pollTimer);
   pollTimer = null;
   resizeObserver?.disconnect();
@@ -1895,17 +2105,16 @@ onUnmounted(() => {
             "
             :style="{ width: `${laid.width}px`, height: `${laid.height}px` }"
             :data-filename="laid.item.filename"
+            @pointerdown="beginSelectionDrag($event, laid.entry)"
             @click="onTileClick(laid.entry, $event)"
-            @contextmenu="
-              select(laid.entry);
-              contextMenu.open($event, tileMenu(laid.entry));
-            "
+            @contextmenu="onTileContextMenu(laid.entry, $event)"
             @dblclick="onTileDblclick(laid.entry)"
           >
             <button
               type="button"
               class="absolute inset-0 block h-full w-full overflow-hidden text-left"
               :aria-label="tileTitle(laid.entry)"
+              :aria-pressed="selectMode ? bulkSelection.has(laid.item.filename) : undefined"
             >
               <AuthedMedia
                 :path="
