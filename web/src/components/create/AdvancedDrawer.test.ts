@@ -8,7 +8,6 @@ import {
 import type { GenerateFormState, ModelInfoExtended } from "../../types";
 import { createPinia, setActivePinia } from "pinia";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
-import ImageDropWell from "@studio/components/ImageDropWell.vue";
 
 // The upscale section reads the host's model list. Only upscalers matter here.
 const UPSCALERS: ModelInfoExtended[] = [
@@ -126,9 +125,19 @@ describe("AdvancedDrawer sequence contract", () => {
 
   it("shows only sequence-owned controls", () => {
     const wrapper = factory("ltx2", {}, { output: "sequence" });
+    // The opening frame is primary-form source media, not an Advanced knob.
     expect(
       wrapper.find("[data-test='sequence-section-opening-image']").exists(),
-    ).toBe(true);
+    ).toBe(false);
+    expect(
+      wrapper.find("[data-test='sequence-opening-image-well']").exists(),
+    ).toBe(false);
+    expect(
+      wrapper.find("[data-test='sequence-source-strength']").exists(),
+    ).toBe(false);
+    expect(wrapper.find("[data-test='sequence-source-fit']").exists()).toBe(
+      false,
+    );
     expect(
       wrapper.find("[data-test='sequence-section-negative']").exists(),
     ).toBe(true);
@@ -139,75 +148,6 @@ describe("AdvancedDrawer sequence contract", () => {
     expect(wrapper.find("[data-test='section-lora']").exists()).toBe(false);
     expect(wrapper.find("[data-test='section-output']").exists()).toBe(false);
     expect(wrapper.find("[data-test='section-video']").exists()).toBe(false);
-  });
-
-  it("exposes strength and maskless fit controls for an opening image", async () => {
-    const wrapper = factory(
-      "ltx2",
-      { strength: 0.8, sourceFitPolicy: { mode: "crop-fill" } },
-      { output: "sequence" },
-    );
-    useSequenceDraftStore().openingImage = {
-      filename: "opening.png",
-      base64: "QUJD",
-    };
-    await wrapper.vm.$nextTick();
-
-    expect(
-      wrapper.get("[data-test='sequence-source-strength']").text(),
-    ).toContain("0.80");
-    const fit = wrapper.get("[data-test='sequence-source-fit']");
-    expect((fit.element as HTMLSelectElement).value).toBe("crop-fill");
-    expect(fit.findAll("option").map((option) => option.text())).toEqual([
-      "Crop to fill",
-      "Fit with borders",
-      "Stretch to fill",
-      "Upscale, then crop",
-    ]);
-    await fit.setValue("lanczos-resize");
-    expect(wrapper.emitted("update:modelValue")?.at(-1)?.[0]).toMatchObject({
-      sourceFitPolicy: { mode: "lanczos-resize" },
-    });
-  });
-
-  it("renders the shared one-shot thumbnail for the sequence opening image", async () => {
-    const wrapper = factory("ltx2", {}, { output: "sequence" });
-    useSequenceDraftStore().openingImage = {
-      filename: "opening.jpg",
-      base64: "QUJD",
-    };
-    await wrapper.vm.$nextTick();
-
-    const image = wrapper.get(
-      "[data-test='sequence-section-opening-image'] .image-well__preview img",
-    );
-    expect(image.attributes("src")).toBe("data:image/jpeg;base64,QUJD");
-    expect(image.attributes("alt")).toBe("Opening sequence image");
-    expect(
-      wrapper.find("[data-test='sequence-opening-image-remove']").exists(),
-    ).toBe(true);
-  });
-
-  it("clears a rejected-file error before opening the gallery picker", async () => {
-    const wrapper = factory("ltx2", {}, { output: "sequence" });
-    wrapper.findComponent(ImageDropWell).vm.$emit(
-      "file",
-      new File([new Uint8Array([0x47, 0x49, 0x46, 0x38])], "bad.gif", {
-        type: "image/gif",
-      }),
-    );
-    await flushPromises();
-    expect(
-      wrapper.find("[data-test='sequence-opening-image-error']").exists(),
-    ).toBe(true);
-
-    await wrapper
-      .get("[data-test='sequence-opening-image-gallery']")
-      .trigger("click");
-    expect(
-      wrapper.find("[data-test='sequence-opening-image-error']").exists(),
-    ).toBe(false);
-    expect(wrapper.emitted("open-picker")).toHaveLength(1);
   });
 
   it("edits and resets camera motion on the active clip", async () => {

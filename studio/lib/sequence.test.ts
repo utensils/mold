@@ -10,6 +10,7 @@ import {
   modelSupportsSequence,
   modelsForOutput,
   sequenceDuration,
+  sequenceClipFrameCap,
   sequenceFrameOptions,
   sequenceMotionTailFrames,
   sequenceValidation,
@@ -275,6 +276,150 @@ describe("sequence authoring", () => {
       defaultClipFrames(
         { default_frames: 53, family: "wan" },
         { frames_per_clip_cap: 257, frames_per_clip_recommended: 53 },
+        1,
+      ),
+    ).toBe(53);
+  });
+
+  it("caps a clip at the model's routing clip size, not the family budget", () => {
+    // An LTX-2 host advertising its family's 20 s duration budget (481 frames
+    // at 24 fps) must still be capped at the 97-frame clip ONE generation
+    // renders — otherwise a composer authors a clip the one-shot path would
+    // have split into five.
+    expect(
+      sequenceClipFrameCap(
+        { name: "ltx-2-19b-distilled:fp8", family: "ltx2" },
+        { frames_per_clip_cap: 481 },
+      ),
+    ).toBe(97);
+    // 12 fps advertises 241; same answer.
+    expect(
+      sequenceClipFrameCap(
+        { name: "ltx-2.3-22b-dev:fp8", family: "ltx2" },
+        { frames_per_clip_cap: 241 },
+      ),
+    ).toBe(97);
+    // A newer server already advertising the routing size agrees.
+    expect(
+      sequenceClipFrameCap(
+        { name: "ltx-2-19b-distilled:fp8", family: "ltx2" },
+        { frames_per_clip_cap: 97 },
+      ),
+    ).toBe(97);
+    // No limits read yet → the LTX-2 routing size, never Infinity.
+    expect(
+      sequenceClipFrameCap(
+        { name: "ltx-2-19b-distilled:fp8", family: "ltx2" },
+        null,
+      ),
+    ).toBe(97);
+
+    // Wan is per checkpoint: the single-expert 5B has room for 121, the
+    // two-expert A14B pair does not.
+    expect(
+      sequenceClipFrameCap(
+        { name: "wan22-ti2v-5b:fp16", family: "wan" },
+        { frames_per_clip_cap: 257 },
+      ),
+    ).toBe(121);
+    expect(
+      sequenceClipFrameCap(
+        { name: "wan22-t2v-a14b:q5", family: "wan" },
+        { frames_per_clip_cap: 257 },
+      ),
+    ).toBe(53);
+    // A14B tiers whose manifest default was raised past the 53-frame floor
+    // (Q5/Q4 at 81) render that default as one clip: the server advertises
+    // 81, and the browser must not clamp it back to the floor — whether the
+    // default arrives on the model row or as the chain-limits recommendation.
+    expect(
+      sequenceClipFrameCap(
+        { name: "wan22-t2v-a14b:q5", family: "wan", default_frames: 81 },
+        { frames_per_clip_cap: 81, frames_per_clip_recommended: 81 },
+      ),
+    ).toBe(81);
+    expect(
+      sequenceClipFrameCap(
+        { name: "wan22-t2v-a14b:q5", family: "wan" },
+        { frames_per_clip_cap: 257, frames_per_clip_recommended: 81 },
+      ),
+    ).toBe(81);
+    expect(
+      sequenceClipFrameCap(
+        { name: "wan22-t2v-a14b:q8", family: "wan", default_frames: 73 },
+        { frames_per_clip_cap: 257, frames_per_clip_recommended: 73 },
+      ),
+    ).toBe(73);
+    // A default BELOW the floor (fp8 A14B ships 33) keeps the floor.
+    expect(
+      sequenceClipFrameCap(
+        { name: "wan22-t2v-a14b:fp8", family: "wan", default_frames: 33 },
+        { frames_per_clip_cap: 257, frames_per_clip_recommended: 33 },
+      ),
+    ).toBe(53);
+
+    // LTX-Video's flat 97 is unchanged.
+    expect(
+      sequenceClipFrameCap(
+        { name: "ltx-video-0.9.6:bf16", family: "ltx-video" },
+        { frames_per_clip_cap: 97 },
+      ),
+    ).toBe(97);
+
+    // A server advertising a SMALLER cap than the routing size wins — the
+    // family's duration budget still binds below 97 at very low fps.
+    expect(
+      sequenceClipFrameCap(
+        { name: "ltx-2-19b-distilled:fp8", family: "ltx2" },
+        { frames_per_clip_cap: 17 },
+      ),
+    ).toBe(17);
+
+    // An unknown / non-video family adds no bound of its own.
+    expect(
+      sequenceClipFrameCap(
+        { name: "flux-dev:q4", family: "flux" },
+        { frames_per_clip_cap: 481 },
+      ),
+    ).toBe(481);
+    expect(sequenceClipFrameCap(null, { frames_per_clip_cap: 481 })).toBe(481);
+    expect(sequenceClipFrameCap(null, null)).toBe(97);
+
+    // No limits read yet on a wan checkpoint → the checkpoint's own routing
+    // size, not LTX-2's 97.
+    expect(
+      sequenceClipFrameCap({ name: "wan22-ti2v-5b:fp16", family: "wan" }, null),
+    ).toBe(121);
+    expect(
+      sequenceClipFrameCap({ name: "wan22-t2v-a14b:q5", family: "wan" }, null),
+    ).toBe(53);
+  });
+
+  it("defaults clip frames against the routing cap too", () => {
+    // An older server advertising 481 must not hand a 481-frame default clip
+    // to a model whose own default is missing.
+    expect(
+      defaultClipFrames(
+        { name: "ltx-2-19b-distilled:fp8", family: "ltx2" },
+        { frames_per_clip_cap: 481, frames_per_clip_recommended: 481 },
+        17,
+      ),
+    ).toBe(97);
+    // An A14B clip defaults to its own tier default (81 for Q5) even when an
+    // older host advertises the family's 257-frame ceiling; an opaque A14B
+    // id with no recorded default lands on the 53-frame floor the server
+    // advertises for it.
+    expect(
+      defaultClipFrames(
+        { name: "wan22-t2v-a14b:q5", family: "wan", default_frames: 81 },
+        { frames_per_clip_cap: 257, frames_per_clip_recommended: 81 },
+        1,
+      ),
+    ).toBe(81);
+    expect(
+      defaultClipFrames(
+        { name: "cv:wan-a14b", family: "wan" },
+        { frames_per_clip_cap: 53, frames_per_clip_recommended: 53 },
         1,
       ),
     ).toBe(53);

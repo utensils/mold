@@ -13,7 +13,7 @@ mod theme;
 mod ui;
 
 use clap::{builder::ValueHint, CommandFactory, Parser, Subcommand};
-use clap_complete::engine::ArgValueCandidates;
+use clap_complete::engine::{ArgValueCandidates, CompletionCandidate};
 use mold_core::{OutputFormat, Scheduler};
 
 /// Value parser for OutputFormat with tab-completion candidates.
@@ -185,11 +185,13 @@ enum GpuAction {
     /// Stop assigning new work to a device; active work drains first.
     Disable {
         /// Opaque stable ID (preferred) or current display ordinal.
+        #[arg(add = ArgValueCandidates::new(commands::gpu::complete_device_id))]
         device: String,
     },
     /// Return a disabled or draining device to service.
     Enable {
         /// Opaque stable ID (preferred) or current display ordinal.
+        #[arg(add = ArgValueCandidates::new(commands::gpu::complete_device_id))]
         device: String,
     },
 }
@@ -1542,6 +1544,7 @@ Examples:
         after_long_help = "\
 Examples:
   mold update                   Update to latest release
+  mold update --nightly         Update to latest rolling build from main
   mold update --check           Check for updates without installing
   mold update --version v0.7.0  Install a specific version
   mold update --force           Reinstall even if already up-to-date"
@@ -1554,6 +1557,10 @@ Examples:
         /// Reinstall even if the current version matches
         #[arg(long)]
         force: bool,
+
+        /// Install the latest rolling build from main
+        #[arg(long, conflicts_with = "version")]
+        nightly: bool,
 
         /// Install a specific version tag (e.g. v0.7.0)
         #[arg(long)]
@@ -1643,8 +1650,16 @@ Examples:
 
     Completions {
         /// Shell to generate completions for (bash, zsh, fish, elvish, powershell)
+        #[arg(add = ArgValueCandidates::new(complete_shell))]
         shell: String,
     },
+}
+
+fn complete_shell() -> Vec<CompletionCandidate> {
+    ["bash", "zsh", "fish", "elvish", "powershell"]
+        .into_iter()
+        .map(CompletionCandidate::new)
+        .collect()
 }
 
 /// Republish `--spatial-tile` as `MOLD_LTX2_SPATIAL_TILE`.
@@ -2501,9 +2516,10 @@ async fn run() -> anyhow::Result<()> {
         Commands::Update {
             check,
             force,
+            nightly,
             version,
         } => {
-            commands::update::run(check, force, version).await?;
+            commands::update::run(check, force, nightly, version).await?;
         }
         #[cfg(feature = "discord")]
         Commands::Discord => {

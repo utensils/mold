@@ -4,9 +4,14 @@ import {
 } from "@ui/lib/seam";
 import { FALLBACK_VIDEO_FPS } from "@ui/lib/duration";
 
-// One owner for the wan seam size; `./chainRouting` computes the routing that
-// applies it, so the constant lives there and authoring reads it.
-import { WAN_HANDOFF_DUPLICATED_FRAMES } from "./chainRouting";
+// One owner for the wan seam size and the per-model routing clip size;
+// `./chainRouting` computes the routing that applies them, so they live there
+// and authoring reads them.
+import {
+  LTX2_DEFAULT_CLIP_FRAMES,
+  WAN_HANDOFF_DUPLICATED_FRAMES,
+  wanRoutingClipFrames,
+} from "./chainRouting";
 
 // The seam vocabulary is presentational and lives beside the SeamPill /
 // SeamEditor primitives in ui/; re-exported here so studio consumers keep
@@ -250,6 +255,76 @@ export function defaultVideoFps(
 }
 
 /**
+ * Largest clip a model renders as ONE generation.
+ *
+ * `frames_per_clip_cap` from `/api/capabilities/chain-limits` is the server's
+ * answer, but a server predating the per-model fix advertises the FAMILY's
+ * single-request ceiling instead — 481 LTX-2 frames at 24 fps — which is a
+ * clip the one-shot auto-chain router would have split into five. Bounding it
+ * by the model's own routing clip size (`./chainRouting`) keeps every picker
+ * locked to what actually renders as one clip, on old and new hosts alike, and
+ * a server advertising something SMALLER (the duration budget still binds
+ * below 97 at very low fps) still wins.
+ *
+ * A family with no routing clip size adds no bound of its own.
+ */
+export function sequenceClipFrameCap(
+  model:
+    | {
+        name?: string | null;
+        family?: string | null;
+        default_frames?: number | null;
+      }
+    | null
+    | undefined,
+  limits:
+    | { frames_per_clip_cap: number; frames_per_clip_recommended?: number }
+    | null
+    | undefined,
+): number {
+  const routing = routingClipFrames(model, limits);
+  const advertised =
+    limits?.frames_per_clip_cap ?? routing ?? LTX2_DEFAULT_CLIP_FRAMES;
+  return routing === null ? advertised : Math.min(advertised, routing);
+}
+
+/**
+ * The model's own routing clip size, mirroring
+ * `mold_core::chain::routing_clip_frames`. `null` = the family publishes none,
+ * so nothing bounds the server's advertised cap.
+ */
+function routingClipFrames(
+  model:
+    | {
+        name?: string | null;
+        family?: string | null;
+        default_frames?: number | null;
+      }
+    | null
+    | undefined,
+  limits: { frames_per_clip_recommended?: number } | null | undefined,
+): number | null {
+  switch (model?.family?.trim().toLowerCase()) {
+    case "ltx2":
+    case "ltx-2":
+    case "ltx-video":
+      return LTX2_DEFAULT_CLIP_FRAMES;
+    case "wan":
+      // Wan's routing size is the checkpoint's own recorded default over the
+      // family floor (`mold_core::chain::wan_default_clip_frames`). The
+      // browser has no manifest, but it has the same default on
+      // `/api/models.default_frames` and on chain-limits'
+      // `frames_per_clip_recommended`, which old and new servers both send.
+      return wanRoutingClipFrames(
+        model?.name ?? "",
+        model?.default_frames ?? limits?.frames_per_clip_recommended ?? null,
+      );
+    default:
+      return null;
+  }
+}
+
+/**
  * Default frames for a NEW clip: the model's own server-advertised default
  * (`/api/models.default_frames` — LTX-2 ships 97, LTX-Video 25), then the
  * chain-limits recommendation, then the conservative 25-frame floor; the
@@ -260,7 +335,11 @@ export function defaultVideoFps(
  */
 export function defaultClipFrames(
   model:
-    | { default_frames?: number | null; family?: string | null }
+    | {
+        name?: string | null;
+        default_frames?: number | null;
+        family?: string | null;
+      }
     | null
     | undefined,
   limits:
@@ -270,7 +349,12 @@ export function defaultClipFrames(
   motionTailFrames: number,
 ): number {
   const step = sequenceFrameStep(model?.family);
-  const cap = limits?.frames_per_clip_cap ?? Number.MAX_SAFE_INTEGER;
+  // The same cap the picker offers, so a default can never exceed its own
+  // options — including on a host that still advertises the family ceiling.
+  const cap =
+    limits || model?.family
+      ? sequenceClipFrameCap(model, limits)
+      : Number.MAX_SAFE_INTEGER;
   const preferred =
     model?.default_frames ??
     limits?.frames_per_clip_recommended ??

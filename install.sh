@@ -10,6 +10,7 @@
 #
 # Options (via environment):
 #   MOLD_INSTALL_DIR  — install directory (default: ~/.local/bin)
+#   MOLD_CHANNEL      — release channel: stable or nightly (default: stable)
 #   MOLD_VERSION      — release tag to install (default: resolved from the
 #                       GitHub "latest release" redirect). Pin to a specific
 #                       tag like "v0.8.0" to reproduce an older install.
@@ -22,7 +23,8 @@ REPO="utensils/mold"
 # Empty / "latest" means "whatever /releases/latest currently redirects to".
 # We resolve this to a concrete tag name below so the status line reports the
 # real version and the download URL is deterministic.
-VERSION="${MOLD_VERSION:-latest}"
+CHANNEL="${MOLD_CHANNEL:-stable}"
+REQUESTED_VERSION="${MOLD_VERSION:-}"
 INSTALL_DIR="${MOLD_INSTALL_DIR:-$HOME/.local/bin}"
 
 # Detect platform
@@ -57,9 +59,25 @@ resolve_latest_tag() {
     echo "${RESOLVED_TAG}"
 }
 
-if [ "${VERSION}" = "latest" ] || [ -z "${VERSION}" ]; then
-    VERSION="$(resolve_latest_tag)"
-fi
+case "${CHANNEL}" in
+    stable)
+        VERSION="${REQUESTED_VERSION:-latest}"
+        if [ "${VERSION}" = "latest" ]; then
+            VERSION="$(resolve_latest_tag)"
+        fi
+        ;;
+    nightly)
+        if [ -n "${REQUESTED_VERSION}" ]; then
+            echo "Error: MOLD_CHANNEL=nightly cannot be combined with MOLD_VERSION." >&2
+            exit 1
+        fi
+        VERSION="latest"
+        ;;
+    *)
+        echo "Error: unsupported MOLD_CHANNEL=${CHANNEL}; expected stable or nightly." >&2
+        exit 1
+        ;;
+esac
 
 # Print the compute capability of every CUDA-visible GPU or MIG instance.
 # NVIDIA's management API sees the whole machine, so apply

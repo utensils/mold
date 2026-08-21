@@ -323,6 +323,45 @@ export const useSequenceDraftStore = defineStore("sequence-draft", () => {
     return clip;
   }
 
+  /**
+   * Insert a fresh clip at `index` (clamped into the list) and make it
+   * active. `addClip` stays the append-only rail affordance; this is the
+   * context menu's "Insert clip before/after".
+   */
+  function insertClip(index: number, defaultFrames: number) {
+    const clip = newSequenceClip(defaultFrames);
+    const clamped = Math.max(0, Math.min(index, clips.length));
+    clips.splice(clamped, 0, clip);
+    activeClipId.value = clip.id;
+    return clip;
+  }
+
+  /**
+   * Copy a clip in place, right after its source, and make the copy active.
+   * The copy takes a FRESH id and drops the source's `draftId` so the next
+   * persist pass mints its own media record — sharing one would make
+   * `removeClip`'s blob cleanup delete the survivor's image. The stage cap
+   * is the caller's business (it owns the host's chain limits).
+   */
+  function duplicateClip(id: string) {
+    const index = clips.findIndex((clip) => clip.id === id);
+    const source = clips[index];
+    if (!source) return null;
+    const copy = newSequenceClip(source.frames);
+    copy.prompt = source.prompt;
+    copy.negativePrompt = source.negativePrompt;
+    copy.cameraControl = source.cameraControl;
+    copy.transition = source.transition;
+    copy.fadeFrames = source.fadeFrames;
+    if (source.sourceImage) {
+      const { draftId: _draftId, ...image } = source.sourceImage;
+      copy.sourceImage = { ...image };
+    }
+    clips.splice(index + 1, 0, copy);
+    activeClipId.value = copy.id;
+    return copy;
+  }
+
   /** Reset the model-owned duration field without disturbing prompts, media,
    * transitions, seeds, or the active clip. Model selectors call this only
    * after the new model's authoritative chain limits have arrived. */
@@ -436,6 +475,17 @@ export const useSequenceDraftStore = defineStore("sequence-draft", () => {
   }
 
   /**
+   * Drop only the opening image — the primary-form Reset's share of the
+   * draft. Clips, audio, and any edit session stay; the persisted media blob
+   * is reclaimed so a reset draft does not leave an orphan behind.
+   */
+  function clearOpeningImage() {
+    if (openingImage.value?.draftId)
+      void deleteDraftMedia(openingImage.value.draftId);
+    openingImage.value = null;
+  }
+
+  /**
    * Clear the whole sequence: back to two fresh clips, no audio, and no
    * edit session. Stays in Sequence — clearing means "start this story
    * over", not "leave sequence mode" (that's the Output control's job).
@@ -496,6 +546,8 @@ export const useSequenceDraftStore = defineStore("sequence-draft", () => {
     hydrate,
     ensureClips,
     addClip,
+    insertClip,
+    duplicateClip,
     resetClipFrames,
     adoptSequenceModel,
     bindSequenceModel,
@@ -506,6 +558,7 @@ export const useSequenceDraftStore = defineStore("sequence-draft", () => {
     setOutput,
     loadFromJob,
     stopEditing,
+    clearOpeningImage,
     clearSequence,
     reset,
   };

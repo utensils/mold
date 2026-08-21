@@ -87,7 +87,7 @@ describe("GenerateView layout", () => {
   // without taking over the composer with corrective guidance.
   it("keeps Generate gating separate from visible blocker guidance", () => {
     expect(tagFor(composerCardSource, "generate-button")).toContain(':disabled="generateDisabled"');
-    expect(composerCardSource).toContain("props.disabled || props.submitting");
+    expect(composerCardSource).toContain("props.disabled && !props.submitting");
     expect(composerCardSource).toContain('<ActionBlocker v-if="disabledReason"');
     expect(composerCardSource).not.toContain("!form.prompt.trim() || !form.model");
 

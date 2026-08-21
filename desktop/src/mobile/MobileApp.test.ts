@@ -456,7 +456,7 @@ describe("MobileApp sequence generation", () => {
     expect(wrapper.find("[data-test='mobile-quick-expansion-stale']").exists()).toBe(true);
   });
 
-  it("acknowledges a tap through placement preview and blocks duplicate submission", async () => {
+  it("lets the user cancel a placement preview before anything is queued", async () => {
     const preview = deferred<ReturnType<typeof plannedPlacement>>();
     previewGenerationPlacement.mockReturnValueOnce(preview.promise);
     wrapper = mountMobileApp();
@@ -467,15 +467,18 @@ describe("MobileApp sequence generation", () => {
     await vi.waitFor(() => expect(previewGenerationPlacement).toHaveBeenCalledTimes(1));
 
     const button = wrapper.get("[data-test='mobile-develop-button']");
-    expect(button.text()).toBe("Checking placement…");
-    expect(button.attributes("disabled")).toBe("");
+    expect(button.text()).toBe("Cancel · Checking placement…");
+    expect(button.attributes("disabled")).toBeUndefined();
     await button.trigger("click");
     expect(previewGenerationPlacement).toHaveBeenCalledTimes(1);
     expect(openStreams).toHaveLength(0);
 
+    const previewOptions = previewGenerationPlacement.mock.calls[0]?.[3];
+    expect(previewOptions?.signal?.aborted).toBe(true);
+
     preview.resolve(plannedPlacement());
     await flushPromises();
-    expect(openStreams).toHaveLength(1);
+    expect(openStreams).toHaveLength(0);
     expect(button.text()).toContain("Develop print");
   });
 
@@ -901,7 +904,12 @@ describe("MobileApp sequence generation", () => {
     });
     await flushPromises();
 
-    expect(previewChainPlacement).toHaveBeenCalledWith(target, expect.anything());
+    expect(previewChainPlacement).toHaveBeenCalledWith(
+      target,
+      expect.anything(),
+      1,
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
     expect(apiJsonTo).toHaveBeenCalledWith(
       target,
       "/api/chain-jobs",
@@ -925,6 +933,148 @@ describe("MobileApp sequence generation", () => {
     });
     expect(recovery).not.toContain(target.apiKey);
     expect(wrapper.get("[data-test='mobile-sequence-job']").text()).toContain("queued");
+  });
+
+  it("parks a retained opening image when the checkpoint reads no source image", async () => {
+    // The well is hidden for an advertised text-to-video checkpoint, so the
+    // request must not ship the image the user can no longer see or remove.
+    const sequenceModel = {
+      ...model,
+      name: "wan22-t2v-a14b:q5",
+      family: "wan",
+      default_steps: 20,
+      default_guidance: 5,
+      default_frames: 81,
+      default_fps: 16,
+      source_image: "unsupported",
+      supports_sequence: true,
+    };
+    localStorage.setItem("mold.mobile.create-mode.v1", "sequence");
+    apiJsonTo.mockImplementation((_target: unknown, path: string, init?: RequestInit) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([sequenceModel]);
+      if (path === "/api/capabilities") return Promise.resolve({});
+      if (path.startsWith("/api/capabilities/chain-limits")) {
+        return Promise.resolve({
+          model: sequenceModel.name,
+          frames_per_clip_cap: 81,
+          frames_per_clip_recommended: 81,
+          max_stages: 8,
+          max_total_frames: 648,
+          fade_frames_max: 32,
+          transition_modes: ["smooth", "cut", "fade"],
+          quantization_family: "q5",
+          supports_audio: false,
+          supports_sequence: true,
+        });
+      }
+      if (path === "/api/chain-jobs" && init?.method === "POST") {
+        return Promise.resolve({ job_id: "sequence-job-2" });
+      }
+      if (path === "/api/chain-jobs/sequence-job-2") {
+        return new Promise(() => {});
+      }
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    previewChainPlacement.mockResolvedValueOnce({
+      ...plannedPlacement(),
+      authoritative: false,
+      outcome: "unsupported",
+      candidate: null,
+    });
+    wrapper = mountMobileApp();
+    await flushPromises();
+    const draft = useSequenceDraftStore();
+    draft.openingImage = { filename: "opening.png", base64: btoa("stale opening") };
+    const prompts = wrapper.findAll("[data-test='mobile-sequence-clip'] textarea");
+    await prompts[0]!.setValue("A paper boat crosses a moonlit pond");
+    await prompts[1]!.setValue("Fireflies gather as the sky brightens");
+    await flushPromises();
+
+    expect(wrapper.find("[data-test='mobile-sequence-source-disclosure']").exists()).toBe(false);
+    await wrapper.get("[data-test='mobile-generate-sequence']").trigger("click");
+    await flushPromises();
+
+    const createCall = apiJsonTo.mock.calls.find(
+      (call) => call[1] === "/api/chain-jobs" && (call[2] as RequestInit)?.method === "POST",
+    );
+    expect(createCall).toBeDefined();
+    const request = JSON.parse(String((createCall?.[2] as RequestInit)?.body));
+    expect(request.stages[0]).not.toHaveProperty("source_image");
+    expect(String((createCall?.[2] as RequestInit)?.body)).not.toContain(btoa("stale opening"));
+  });
+
+  it("cancels the exact sequence when cancellation arrives before its id", async () => {
+    const sequenceModel = {
+      ...model,
+      name: "ltx-video-0.9.8-2b-distilled:bf16",
+      family: "ltx-video",
+      default_steps: 7,
+      default_guidance: 1,
+    };
+    localStorage.setItem("mold.mobile.create-mode.v1", "sequence");
+    let finishCreate!: (value: { job_id: string }) => void;
+    apiJsonTo.mockImplementation((_target: unknown, path: string, init?: RequestInit) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([sequenceModel]);
+      if (path === "/api/capabilities") return Promise.resolve({});
+      if (path.startsWith("/api/capabilities/chain-limits")) {
+        return Promise.resolve({
+          model: sequenceModel.name,
+          frames_per_clip_cap: 97,
+          frames_per_clip_recommended: 97,
+          max_stages: 8,
+          max_total_frames: 777,
+          fade_frames_max: 32,
+          transition_modes: ["smooth", "cut", "fade"],
+          quantization_family: "bf16",
+          supports_audio: false,
+        });
+      }
+      if (path === "/api/chain-jobs" && init?.method === "POST") {
+        return new Promise((resolve) => (finishCreate = resolve));
+      }
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    previewChainPlacement.mockResolvedValue({
+      ...plannedPlacement(),
+      authoritative: false,
+      outcome: "unsupported",
+      candidate: null,
+    });
+    wrapper = mountMobileApp();
+    await flushPromises();
+    const prompts = wrapper.findAll("[data-test='mobile-sequence-clip'] textarea");
+    await prompts[0]!.setValue("opening");
+    await prompts[1]!.setValue("ending");
+
+    await wrapper.get("[data-test='mobile-generate-sequence']").trigger("click");
+    await vi.waitFor(() => expect(finishCreate).toBeTypeOf("function"));
+    const create = apiJsonTo.mock.calls.find(
+      (call) => call[1] === "/api/chain-jobs" && (call[2] as RequestInit)?.method === "POST",
+    );
+    expect((create?.[2] as RequestInit).signal).toBeUndefined();
+    const operationId = new Headers((create?.[2] as RequestInit).headers).get(
+      "x-mold-operation-id",
+    );
+    expect(operationId).toMatch(/^[0-9a-f-]{36}$/);
+    const cancel = wrapper.get("[data-test='mobile-generate-sequence']");
+    expect(cancel.text()).toContain("Cancel");
+    await cancel.trigger("click");
+    await vi.waitFor(() =>
+      expect(apiFetchTo).toHaveBeenCalledWith(
+        target,
+        `/api/chain-jobs/${operationId}/operations/${operationId}/cancel`,
+        { method: "POST", keepalive: true },
+      ),
+    );
+    finishCreate({ job_id: "late-sequence" });
+    await flushPromises();
+
+    expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/chain-jobs/late-sequence/cancel", {
+      method: "POST",
+    });
+    expect(localStorage.getItem("mold.mobile.sequence-job.v1")).toBeNull();
   });
 
   it("refuses recovery when a saved server identity cannot be verified", async () => {
@@ -2443,6 +2593,7 @@ describe("MobileApp generation queue", () => {
       target,
       expect.objectContaining({ batch_size: 1 }),
       3,
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
     expect(wrapper.findAll("[data-test='mobile-generation-job']")).toHaveLength(3);
     expect(document.activeElement).toBe(fieldControl("Prompt").element);
@@ -2502,6 +2653,7 @@ describe("MobileApp generation queue", () => {
         target,
         expect.objectContaining({ batch_size: 1 }),
         count,
+        expect.objectContaining({ signal: expect.any(AbortSignal) }),
       );
 
       apiJsonTo.mockImplementation((_target: unknown, path: string) => {
@@ -4731,6 +4883,116 @@ describe("MobileApp wan source conditioning", () => {
     expect(wrapper.find("[data-test='mobile-h3-authoring-error']").exists()).toBe(false);
   });
 
+  it("snaps a stale steps value onto the recipe's fixed control instead of blocking Develop", async () => {
+    // The reviewed compact H3 tags pin steps at their tier count. Gallery
+    // reuse restores a print saved before that pin by writing straight into
+    // the live form (`applyMetadataToForm`), leaving the model alone and
+    // only moving `steps` — so the model-pick reconcile never runs. The
+    // submit-time snap cannot rescue it either: `stepsError` disables
+    // Develop and `basicParametersValid` returns `generate()` early, both
+    // first. The live form has to re-assert the fixed value itself.
+    const fixedStepsProfile = {
+      schema_version: 1,
+      profile_id: "minimax-h3.minimax-h3-fl2va",
+      profile_hash: "h3-compact-hash",
+      default_recipe_id: "default",
+      recipes: [
+        {
+          id: "default",
+          label: "Default",
+          request_selector: {},
+          defaults: { width: 1344, height: 768, steps: 21, guidance: 0, frames: 124, fps: 24 },
+          resolution: {
+            domain: "buckets" as const,
+            alignment: 32,
+            min_width: 64,
+            min_height: 64,
+            max_pixels: 1344 * 768,
+            off_bucket: "reject" as const,
+            aspect_groups: [
+              {
+                id: "7:4",
+                label: "7:4",
+                presets: [
+                  { id: "1344x768", width: 1344, height: 768, tier: "recommended" as const },
+                ],
+              },
+            ],
+          },
+          steps: { default: 21, min: 21, max: 21, step: 1, mode: "fixed" as const },
+          guidance: { default: 0, min: 0, max: 0, step: 0.1, mode: "fixed" as const },
+          temporal: {
+            frames: { default: 124, min: 124, max: 124, step: 17, mode: "fixed" as const },
+            frame_offset: 5,
+            fps: { mode: "fixed" as const, value: 24 },
+          },
+          capabilities: {
+            guidance: {
+              adjustable: false,
+              supports_negative_prompt: false,
+              fixed_scale: 0,
+            },
+            negative_prompt: { mode: "hidden" as const, required: false },
+            supports_lora: false,
+            supports_controlnet: false,
+            supports_sequence: false,
+            supports_extend: false,
+            supports_audio: true,
+            source_video: { mode: "hidden" as const, required: false },
+            mask: { mode: "hidden" as const, required: false },
+            keyframes: { mode: "hidden" as const, required: false },
+            audio: { mode: "hidden" as const, required: false },
+            lora: { mode: "hidden" as const, max_count: 0 },
+            controlnet: { mode: "hidden" as const, max_count: 0 },
+            output: {
+              default_format: "mp4" as const,
+              formats: ["mp4" as const],
+              audio_requires_mp4: true,
+            },
+            wan_recipe: {
+              mode: "hidden" as const,
+              supports_distill_strength: false,
+              supports_first_last_frame: false,
+            },
+            schedulers: [],
+          },
+          provenance: [],
+        },
+      ],
+    };
+    const h3Model = {
+      ...wanModel,
+      name: "minimax-h3-fl2va:comfy-pruned-int8",
+      family: "minimax-h3",
+      hf_repo: "Comfy-Org/MiniMax-H3",
+      default_steps: 21,
+      default_guidance: 0,
+      default_width: 1344,
+      default_height: 768,
+      default_frames: 124,
+      default_fps: 24,
+      generation_profile: fixedStepsProfile,
+    } as unknown as ModelEntry;
+    serveWan(h3Model);
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    const liveForm = wrapper.getComponent(MobileLoraControls).props("form") as GenerateForm;
+    expect(liveForm.steps).toBe(21);
+
+    // Exactly what reuse does for a print saved at the old flexible ladder:
+    // a direct write, same model, no reconcile.
+    liveForm.steps = 30;
+    await flushPromises();
+
+    expect(liveForm.steps).toBe(21);
+    await fieldControl("Prompt").setValue("a ship crossing violet lightning");
+    await flushPromises();
+    expect(wrapper.get("[data-test='mobile-develop-button']").attributes()).not.toHaveProperty(
+      "disabled",
+    );
+  });
+
   it("shows the H3 first-frame blocker before prompt entry and clears it after picking", async () => {
     const h3Model: ModelEntry = {
       ...wanModel,
@@ -5487,6 +5749,27 @@ describe("MobileApp create settings reset", () => {
     await flushPromises();
     await wrapper.get("[data-test='mobile-settings-reset']").trigger("click");
     expect(draft.enableAudio).toBe(false);
+  });
+
+  it("discards the sequence opening image on the primary Reset", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    // Read the live form while One shot still mounts the LoRA controls; the
+    // sequence bench renders a different subtree over the same form object.
+    const liveForm = wrapper.getComponent(MobileLoraControls).props("form") as GenerateForm;
+
+    const draft = useSequenceDraftStore();
+    draft.output = "sequence";
+    draft.openingImage = { filename: "opening.png", base64: "QUJD" };
+    liveForm.strength = 0.4;
+    await flushPromises();
+
+    await wrapper.get("[data-test='mobile-settings-reset']").trigger("click");
+    await flushPromises();
+
+    expect(draft.openingImage).toBeNull();
+    expect(liveForm.strength).not.toBe(0.4);
   });
 
   it("badges and resets LTX-2 guidance overrides from the Advanced sheet", async () => {
@@ -6439,6 +6722,38 @@ describe("MobileApp gallery", () => {
       "false",
       "true",
     ]);
+  });
+
+  it("leaves a vertical Select-mode swipe to native Library scrolling", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await vi.waitFor(() => expect(wrapper?.find("[data-test='gallery-item']").exists()).toBe(true));
+    await wrapper.get("[data-test='mobile-gallery-select']").trigger("click");
+    const tile = wrapper.get("[data-test='gallery-item']");
+
+    await tile.trigger("pointerdown", {
+      pointerId: 43,
+      pointerType: "touch",
+      isPrimary: true,
+      clientX: 40,
+      clientY: 300,
+    });
+    const verticalMove = new PointerEvent("pointermove", {
+      pointerId: 43,
+      pointerType: "touch",
+      isPrimary: true,
+      clientX: 43,
+      clientY: 360,
+      cancelable: true,
+    });
+    window.dispatchEvent(verticalMove);
+    window.dispatchEvent(new PointerEvent("pointercancel", { pointerId: 43 }));
+    await wrapper.vm.$nextTick();
+
+    expect(verticalMove.defaultPrevented).toBe(false);
+    expect(tile.attributes("aria-pressed")).toBe("false");
+    expect(wrapper.get("[data-test='mobile-gallery-actions']").text()).toContain("0 selected");
   });
 
   it("deletes one selected print from every host that contains a copy", async () => {
@@ -7790,7 +8105,7 @@ describe("mobile Library pinch-to-resize", () => {
     const app = await openLibrary();
     await app.get("[data-test='mobile-gallery-select']").trigger("click");
 
-    // The first finger paints its tile before any movement proves intent.
+    // The first finger remains pending until movement proves drag intent.
     await app.get("[data-test='gallery-item']").trigger("pointerdown", {
       pointerId: 91,
       pointerType: "touch",
@@ -7798,9 +8113,9 @@ describe("mobile Library pinch-to-resize", () => {
       clientX: 0,
       clientY: 0,
     });
-    expect(app.get("[data-test='mobile-gallery-actions']").text()).toContain("1 selected");
+    expect(app.get("[data-test='mobile-gallery-actions']").text()).toContain("0 selected");
 
-    // The second finger makes it a pinch, so that paint was never intended.
+    // The second finger makes it a pinch without changing the selection.
     touchDown(app.get("[data-test='mobile-gallery-grid']").element, 92, 200);
     touchMove(91, 0, 900);
     touchMove(92, 340);

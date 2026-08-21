@@ -17,6 +17,7 @@ env:
   # Rolling binaries route to the rolling GHCR map; stable tag builds embed the
   # exact release used to resolve its published target-to-digest manifest.
   MOLD_DISTRIBUTION_IMAGE_VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'latest' }}
+  MOLD_BUILD_CHANNEL: ${{ startsWith(github.ref, 'refs/tags/v') && 'stable' || 'nightly' }}
 
 jobs:
   build-macos:
@@ -661,7 +662,7 @@ jobs:
 
             The install script auto-detects your GPU:
             ```bash
-            curl -fsSL https://raw.githubusercontent.com/utensils/mold/main/install.sh | sh
+            curl -fsSL https://raw.githubusercontent.com/utensils/mold/main/install.sh | MOLD_CHANNEL=nightly sh
             ```
 
             Manual install:

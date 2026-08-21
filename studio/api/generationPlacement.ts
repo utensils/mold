@@ -323,9 +323,9 @@ export function redactGenerationForPlacement<T extends Record<string, unknown>>(
  * cold H3 host legitimately verifies its full checkpoint set once (tens of
  * GB — minutes on slow storage), so the bound is deliberately enormous: it
  * exists only so a hung or unreachable host eventually surfaces as a normal
- * placement failure instead of an unbounded Planning spinner. The server
- * keeps verifying after a client abort and its digest cache retains the
- * work, so a retry after a rare timeout completes quickly. */
+ * placement failure instead of an unbounded planning state. A client abort
+ * disconnects the request so the scheduler can discard work that has not
+ * started yet. */
 export const PLACEMENT_PREVIEW_TIMEOUT_MS = 900_000;
 
 interface PlacementPreviewBound {

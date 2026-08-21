@@ -1,6 +1,7 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use colored::Colorize;
 use mold_core::types::{DeviceAdminState, DeviceHealth, GpuWorkerState, QueuePlan, QueueWorkItem};
+use mold_core::{classify_server_error, ServerAvailability};
 
 use crate::control::CliContext;
 use crate::procinfo;
@@ -121,12 +122,29 @@ pub async fn run() -> Result<()> {
                 }
             }
         }
-        Err(_) => {
-            println!(
-                "  {} no mold server running — start with {}",
-                theme::prefix_hint(),
-                "mold serve".bold()
-            );
+        Err(error) => {
+            if crate::control::is_loopback_host(ctx.client().host())
+                && classify_server_error(&error) == ServerAvailability::FallbackLocal
+            {
+                println!(
+                    "  {} no mold server running — start with {}",
+                    theme::prefix_hint(),
+                    "mold serve".bold()
+                );
+                let local = crate::commands::gpu::local_device_state()?;
+                if !local.devices.is_empty() {
+                    println!();
+                    println!("Local compute (startup preferences):");
+                    for device in &local.devices {
+                        println!("  {}", crate::commands::gpu::format_device_line(device));
+                    }
+                }
+            } else {
+                return Err(error).context(format!(
+                    "failed to read mold server status from {}",
+                    ctx.client().host()
+                ));
+            }
         }
     }
 

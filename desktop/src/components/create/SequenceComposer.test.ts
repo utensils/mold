@@ -22,6 +22,7 @@ import { newGenerateForm, type GenerateForm } from "../../lib/generateForm";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import { useConnectionStore } from "../../stores/connection";
 import { useHostsStore } from "../../stores/hosts";
+import { useContextMenuStore, type MenuItem } from "../../stores/contextMenu";
 import type { ChainLimits } from "@studio/lib/api/chainTypes";
 import type { ModelEntry } from "../../lib/api/types";
 import { validateChain } from "@studio/api/chains";
@@ -146,6 +147,17 @@ describe("SequenceComposer — active clip editor", () => {
 });
 
 describe("SequenceComposer — footer", () => {
+  it("keeps the preparing action responsive and emits cancel", async () => {
+    seedDraft();
+    const wrapper = mountComposer({ submitting: true });
+    const button = wrapper.get("[data-test='generate-sequence']");
+    expect(button.attributes("disabled")).toBeUndefined();
+    expect(button.text()).toContain("Cancel · Preparing sequence");
+    await button.trigger("click");
+    expect(wrapper.emitted("cancel")).toHaveLength(1);
+    expect(wrapper.emitted("submit")).toBeUndefined();
+  });
+
   it("discards an in-flight validation when the rendering host changes", async () => {
     let resolveValidation!: (value: Awaited<ReturnType<typeof validateChain>>) => void;
     validateChainMock.mockReturnValue(
@@ -518,5 +530,121 @@ describe("SequenceComposer — wan clip grid", () => {
     expect(values).toContain(53);
     for (const value of values) expect((value - 1) % 4).toBe(0);
     await flushPromises();
+  });
+});
+
+/**
+ * Right-click on the bench: the clip pills get their own reorder/duplicate
+ * menu and the rail background gets the bench actions. Both go through the
+ * app-wide context-menu store, and both share `studio/lib/sequenceContextMenu`
+ * with web so the two surfaces cannot drift.
+ */
+describe("SequenceComposer — context menus", () => {
+  const rightClick = { clientX: 40, clientY: 60 };
+
+  function menuLabels() {
+    return useContextMenuStore()
+      .entries.filter((entry): entry is MenuItem => !("separator" in entry))
+      .map((entry) => entry.label);
+  }
+
+  function menuItem(label: string): MenuItem {
+    const found = useContextMenuStore().entries.find(
+      (entry): entry is MenuItem => !("separator" in entry) && entry.label === label,
+    );
+    if (!found) throw new Error(`no context-menu item labelled ${label}`);
+    return found;
+  }
+
+  it("opens the clip menu on a clip pill and makes that clip active", async () => {
+    const draft = seedDraft();
+    draft.activeClipId = draft.clips[0]!.id;
+    const wrapper = mountComposer();
+    const menu = useContextMenuStore();
+
+    await wrapper.findAll("[data-clip-id]")[1]!.trigger("contextmenu", rightClick);
+
+    expect(menu.visible).toBe(true);
+    expect(draft.activeClipId).toBe(draft.clips[1]!.id);
+    expect(menuLabels()).toEqual([
+      "Duplicate clip",
+      "Insert clip before",
+      "Insert clip after",
+      "Move to start",
+      "Move left",
+      "Move right",
+      "Move to end",
+      "Remove clip",
+    ]);
+  });
+
+  it("duplicates, inserts, moves, and removes through the clip menu", async () => {
+    const draft = seedDraft(["one", "two"]);
+    const wrapper = mountComposer();
+
+    await wrapper.findAll("[data-clip-id]")[0]!.trigger("contextmenu", rightClick);
+    menuItem("Duplicate clip").action!();
+    await flushPromises();
+    expect(draft.clips).toHaveLength(3);
+    expect(draft.clips[1]!.prompt).toBe("one");
+
+    await wrapper.findAll("[data-clip-id]")[0]!.trigger("contextmenu", rightClick);
+    menuItem("Insert clip after").action!();
+    await flushPromises();
+    expect(draft.clips).toHaveLength(4);
+    expect(draft.clips[1]!.prompt).toBe("");
+
+    const moved = draft.clips[0]!.id;
+    await wrapper.findAll("[data-clip-id]")[0]!.trigger("contextmenu", rightClick);
+    menuItem("Move to end").action!();
+    await flushPromises();
+    expect(draft.clips[draft.clips.length - 1]!.id).toBe(moved);
+
+    const removed = draft.clips[0]!.id;
+    await wrapper.findAll("[data-clip-id]")[0]!.trigger("contextmenu", rightClick);
+    menuItem("Remove clip").action!();
+    await flushPromises();
+    expect(draft.clips.some((clip) => clip.id === removed)).toBe(false);
+  });
+
+  it("disables Remove clip at the two-clip floor", async () => {
+    seedDraft();
+    const wrapper = mountComposer();
+    await wrapper.findAll("[data-clip-id]")[0]!.trigger("contextmenu", rightClick);
+    expect(menuItem("Remove clip").disabled).toBe(true);
+    expect(menuItem("Remove clip").danger).toBe(true);
+  });
+
+  it("opens the rail menu on the bench background and adds a clip", async () => {
+    const draft = seedDraft();
+    const wrapper = mountComposer();
+    const menu = useContextMenuStore();
+
+    await wrapper.get(".ms-rail").trigger("contextmenu", rightClick);
+
+    expect(menu.visible).toBe(true);
+    expect(menuLabels()).toEqual([
+      "Add clip",
+      "Validate plan",
+      "Import TOML…",
+      "Export TOML",
+      "Copy TOML",
+      "Clear sequence",
+    ]);
+    menuItem("Add clip").action!();
+    expect(draft.clips).toHaveLength(3);
+  });
+
+  it("leaves the prompt textarea and the seam pill alone", async () => {
+    seedDraft();
+    const wrapper = mountComposer();
+    const menu = useContextMenuStore();
+
+    await wrapper.get("[data-test='clip-prompt']").trigger("contextmenu", rightClick);
+    expect(menu.visible).toBe(false);
+
+    // The seam's own right-click opens the transition editor instead.
+    await wrapper.get(".ms-seam").trigger("contextmenu", rightClick);
+    expect(menu.visible).toBe(false);
   });
 });

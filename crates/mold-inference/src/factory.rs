@@ -76,6 +76,14 @@ pub struct FrozenEngineConfig {
     /// Exact Wan UMT5 encoder file admission materialized, when it chose a
     /// GGUF variant. `None` means the manifest's FP16 encoder.
     pub selected_umt5_path: Option<PathBuf>,
+    /// Exact PuLID identity-conditioning assets admission materialized for a
+    /// request that asks for face identity with a non-zero effective weight.
+    ///
+    /// `None` is the whole story for every other request: no identity fields,
+    /// or `id_weight` 0, plans no assets, downloads nothing, and adds no
+    /// memory demand. Populated, these four paths are verified local below
+    /// exactly like the selected encoder artifacts.
+    pub identity_assets: Option<mold_core::pulid_assets::PulidPaths>,
     /// Exact contract-only MiniMax H3 admission/factory authority. This is
     /// `None` for every runnable family and cannot activate H3 by itself.
     pub h3_factory_authority: Option<crate::FrozenH3FactoryAuthority>,
@@ -126,6 +134,7 @@ impl FrozenEngineConfig {
             selected_qwen2_path: None,
             selected_gemma_paths: Vec::new(),
             selected_umt5_path: None,
+            identity_assets: None,
             h3_factory_authority: None,
             runtime_environment,
             attention_backend: crate::attention::AttentionBackend::resolve(),
@@ -483,6 +492,17 @@ where
              attention/chunk/VAE authority"
         );
     }
+    // Identity assets join the encoder artifacts here rather than in a second
+    // loop: the rule is one rule — a populated frozen path must already be
+    // local, so a leased worker can never trigger a network download.
+    let identity_paths = frozen.identity_assets.iter().flat_map(|assets| {
+        [
+            &assets.adapter,
+            &assets.vision_encoder_source,
+            &assets.face_detector,
+            &assets.face_recognizer,
+        ]
+    });
     for path in frozen
         .selected_t5_path
         .iter()
@@ -490,10 +510,11 @@ where
         .chain(frozen.selected_qwen2_path.iter())
         .chain(frozen.selected_gemma_paths.iter())
         .chain(frozen.selected_umt5_path.iter())
+        .chain(identity_paths)
     {
         if !path.is_file() {
             bail!(
-                "prepared encoder artifact '{}' is not locally available; \
+                "prepared engine artifact '{}' is not locally available; \
                  refusing post-lease dependency resolution",
                 path.display()
             );

@@ -60,6 +60,9 @@ mold run "a sunset over mountains"
 # That's it — the model downloads on first run (~12GB for flux-schnell:q8)
 ```
 
+For the latest rolling CLI build from `main`, add `MOLD_CHANNEL=nightly` on
+the `sh` side of the install pipe.
+
 ## What You Get
 
 - **Broad model support** — FLUX.1, SDXL, SD 1.5, SD 3.5, Z-Image, Flux.2 Klein

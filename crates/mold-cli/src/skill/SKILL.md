@@ -505,7 +505,7 @@ mold run ltx-2-19b-distilled:fp8 \
 - Validation endpoint: `POST /api/generate/chain/validate` accepts the same body and returns a normalized, no-queue plan (per-stage input/output frames, transitions, source/negative presence, warnings, and optional `vram_estimate`). It never creates a job, starts a download, or touches inference. Web, desktop, and iPhone expose it as **Validate plan** on the exact selected host and discard stale responses after live draft changes.
 - Capabilities: `GET /api/capabilities/chain-limits?model=<name>&fps=<n>` — also carries `frames_per_clip_recommended` (the model's own default), the echoed `fps`, `frames_per_clip_runtime_seconds` for duration-budgeted families, `supports_audio`, and model-specific `supports_sequence` + `sequence_unsupported_reason`
 - Per-model frame semantics ride on each `GET /api/models` row (flattened, video models only): `default_frames`, `default_fps`, `max_frames` (ceiling at `default_fps`), `max_runtime_seconds` + `max_frames_absolute` when the ceiling is a duration, `frame_step` (valid counts are `k·step+1`). Absent on image models — never substitute a constant
-- Max stages: 16. Default clip size 97 frames; the per-clip cap is the family's single-request ceiling at the chain's fps (484 for LTX-2 at 24 fps, a flat 97 for LTX-Video), and the server rejects any stage above it.
+- Max stages: 16. `frames_per_clip_cap` is the model's own clip size — the clip one generation renders when auto-chaining (97 for LTX-2, a flat 97 for LTX-Video, and for Wan the checkpoint's own manifest default frame count over a 53-frame A14B / 121-frame floor — 81 for A14B Q5, 121 for TI2V-5B) — and every Studio sequence picker locks to it. Chain admission rejects a stage above the family's single-request ceiling at the chain's fps (481 on-grid for LTX-2 at 24 fps), which is the most an explicit `--clip-frames` can reach.
 
 ### mold jobs CLI
 
@@ -762,6 +762,16 @@ license text it was shown; changed terms require accepting again. A refusal
 names the license, its URL, and that exact command. `mold rm pulid-flux`
 removes the bundle; `mold pull pulid-flux` repairs a partial one.
 
+You do not have to pull it by hand. A request that actually conditions on a
+face plans the bundle through the same dependency preparation the encoder
+ladders use: `POST /api/generate/placement-preview` reports whatever is missing
+under `pending_downloads` (kinds `identity_adapter`, `identity_vision_encoder`,
+`face_detector`, `face_recognizer`) without fetching anything, and admission
+materializes it into `shared/pulid/` — after the license gate, so an unaccepted
+antelopev2 fails the job with that same `--accept-license` message instead of
+downloading. An `id_weight` of `0` applies no identity at all and is completely
+inert: it plans no assets, downloads nothing, and adds no memory demand.
+
 ### ControlNet (SD1.5 only)
 
 ```bash
@@ -943,6 +953,7 @@ On first launch after upgrading from a pre-#265 release, mold imports the `[expa
 
 ```bash
 mold update                       # Update to latest GitHub release
+mold update --nightly             # Install latest rolling build from main
 mold update --check               # Check for updates without installing
 mold update --version v0.6.0      # Install a specific version
 mold update --force               # Reinstall even if already up-to-date
