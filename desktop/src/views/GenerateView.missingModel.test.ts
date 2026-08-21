@@ -239,6 +239,9 @@ describe("GenerateView missing-model pull before submit", () => {
       jobId: "pull-job-1",
     });
     expect(pullResume.pending?.request.prompt).toBe("a lighthouse at dusk");
+    expect(Object.values(useDownloadsStore().notificationActions)).toContainEqual(
+      expect.objectContaining({ action: { kind: "create" } }),
+    );
   });
 
   it("offers the pull from the picker's Not installed row without queueing", async () => {

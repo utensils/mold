@@ -9,6 +9,7 @@ import type {
 import type { GalleryImage, OutputMetadata } from "./api/types";
 import type { ApiTarget } from "./api/client";
 import type { DesktopImageImport } from "./desktopImageDrop";
+import type { NotificationAction } from "./notificationAction";
 import type { Theme, ThemeFamily } from "./theme";
 
 export type { Theme, ThemeFamily } from "./theme";
@@ -454,7 +455,7 @@ export const ipc = {
   sendNativeNotification(
     title: string,
     body?: string,
-    action?: { kind: "gallery"; filename: string },
+    action?: NotificationAction,
   ): Promise<boolean> {
     if (!inTauri()) return Promise.resolve(false);
     return invoke<boolean>("send_native_notification", {
@@ -464,9 +465,9 @@ export const ipc = {
     }).catch(() => false);
   },
   /** Consume a notification activation retained during native/cold startup. */
-  takeNotificationAction(): Promise<{ kind: "gallery"; filename: string } | null> {
+  takeNotificationAction(): Promise<NotificationAction | null> {
     if (!inTauri()) return Promise.resolve(null);
-    return invoke<{ kind: "gallery"; filename: string } | null>("take_notification_action");
+    return invoke<NotificationAction | null>("take_notification_action");
   },
   /** Open the engine's log directory in Finder. */
   openLogsDir(): Promise<void> {

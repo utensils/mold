@@ -17,7 +17,15 @@ vi.mock("@tauri-apps/plugin-notification", () => ({
   sendNotification,
 }));
 
-import { notifyGenerated, notifyUpdateAvailable } from "./notify";
+import {
+  notifyChainFinished,
+  notifyGenerated,
+  notifyGenerationFailed,
+  notifyPulled,
+  notifyPullFailed,
+  notifyUpdateAvailable,
+} from "./notify";
+import { notificationRoute } from "./notificationAction";
 
 describe("desktop notifications", () => {
   beforeEach(() => {
@@ -61,9 +69,47 @@ describe("desktop notifications", () => {
       expect(sendNativeNotification).toHaveBeenCalledWith(
         "Mold 0.18.0 is available",
         "Open Mold to update and restart.",
-        undefined,
+        { kind: "updates" },
       ),
     );
+  });
+
+  it.each([
+    [
+      () => notifyGenerated("a deer at sunrise"),
+      "Generated — a deer at sunrise",
+      { kind: "gallery" },
+    ],
+    [() => notifyGenerationFailed("host offline"), "Generation failed", { kind: "create" }],
+    [() => notifyChainFinished(81), "Chain finished · 81 frames", { kind: "gallery" }],
+    [() => notifyPulled("flux-dev:q4"), "Pulled flux-dev:q4", { kind: "models" }],
+    [
+      () => notifyPullFailed("flux-dev:q4", "disk full"),
+      "Couldn't pull flux-dev:q4",
+      { kind: "models" },
+    ],
+  ])("gives %s an intentional click destination", async (dispatch, title, action) => {
+    sendNativeNotification.mockResolvedValue(true);
+
+    dispatch();
+
+    await vi.waitFor(() => expect(sendNativeNotification).toHaveBeenCalled());
+    expect(sendNativeNotification.mock.calls.at(-1)?.[0]).toBe(title);
+    expect(sendNativeNotification.mock.calls.at(-1)?.[2]).toEqual(action);
+  });
+
+  it("maps every native action through the internal route allowlist", () => {
+    expect(notificationRoute({ kind: "gallery", filename: "print.png" })).toEqual({
+      path: "/library",
+      query: { print: "print.png" },
+    });
+    expect(notificationRoute({ kind: "gallery" })).toEqual({ path: "/library" });
+    expect(notificationRoute({ kind: "create" })).toEqual({ path: "/create" });
+    expect(notificationRoute({ kind: "models" })).toEqual({ path: "/models" });
+    expect(notificationRoute({ kind: "updates" })).toEqual({
+      path: "/settings",
+      query: { section: "updates" },
+    });
   });
 
   it("keeps notification delivery failures best effort", async () => {
