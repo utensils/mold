@@ -3855,6 +3855,7 @@ fn private_run_output(
     };
     let response = GenerateResponse {
         images: Vec::new(),
+        request_warnings: Vec::new(),
         video: Some(VideoData {
             data: output.mp4,
             format: OutputFormat::Mp4,
