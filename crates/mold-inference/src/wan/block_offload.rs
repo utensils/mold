@@ -60,6 +60,7 @@ use std::sync::Arc;
 
 use candle_core::quantized::{ggml_file, QTensor};
 use candle_core::{Device, Result};
+use mold_core::GpuBackend;
 
 /// Checkpoint-name prefix for the tensors belonging to block `index`.
 ///
@@ -192,6 +193,65 @@ fn resolve_forced_block_count(blocks: Option<&str>, offload: Option<&str>) -> Op
 
 fn forced_offload_requested(value: Option<&str>) -> bool {
     matches!(value.map(str::trim), Some("1" | "true" | "yes"))
+}
+
+/// Block-parking authority admission may rely on for a selected backend.
+///
+/// Automatic parking needs a device-local free-VRAM reading, which the Wan
+/// runtime currently has only for CUDA. An explicit block count or the generic
+/// offload override still engages parking on Metal because it does not need to
+/// infer a shortfall from that missing reading.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AdmissionPolicy {
+    Disabled,
+    Automatic,
+    ForcedFinite(usize),
+    ForcedAll,
+}
+
+impl AdmissionPolicy {
+    pub fn from_values(backend: GpuBackend, blocks: Option<&str>, offload: Option<&str>) -> Self {
+        if let Some(raw) = blocks {
+            return match raw.trim().parse::<usize>() {
+                Ok(0) => Self::Disabled,
+                Ok(blocks) => Self::ForcedFinite(blocks),
+                Err(_) if backend == GpuBackend::Cuda => Self::Automatic,
+                Err(_) => Self::Disabled,
+            };
+        }
+        if forced_offload_requested(offload) {
+            Self::ForcedAll
+        } else if backend == GpuBackend::Cuda {
+            Self::Automatic
+        } else {
+            Self::Disabled
+        }
+    }
+
+    /// Whether this policy parks any blocks for the given fit check.
+    pub fn will_park(self, predicted_peak_bytes: u64, available_bytes: u64) -> bool {
+        match self {
+            Self::Disabled => false,
+            Self::Automatic => predicted_peak_bytes > available_bytes,
+            Self::ForcedFinite(blocks) => blocks > 0,
+            Self::ForcedAll => true,
+        }
+    }
+
+    /// Whether admission may credit the measured maximum parking relief.
+    ///
+    /// A finite count engages parking but only proves the measured maximum
+    /// when it covers every checkpoint block. Crediting that maximum for a
+    /// partial count can admit a request the pinned count cannot fit.
+    pub fn supports_max_relief(self, total_blocks: Option<usize>) -> bool {
+        match self {
+            Self::Automatic | Self::ForcedAll => true,
+            Self::ForcedFinite(blocks) => {
+                total_blocks.is_some_and(|total| total > 0 && blocks >= total)
+            }
+            Self::Disabled => false,
+        }
+    }
 }
 
 /// Whether a render at this shape will park blocks at all.
@@ -349,6 +409,41 @@ mod tests {
     use super::*;
     use candle_core::quantized::GgmlDType;
     use candle_core::{DType, Tensor};
+
+    #[test]
+    fn admission_policy_matches_backend_and_override_precedence() {
+        assert_eq!(
+            AdmissionPolicy::from_values(GpuBackend::Cuda, None, None),
+            AdmissionPolicy::Automatic
+        );
+        assert_eq!(
+            AdmissionPolicy::from_values(GpuBackend::Metal, None, None),
+            AdmissionPolicy::Disabled
+        );
+        assert_eq!(
+            AdmissionPolicy::from_values(GpuBackend::Metal, Some("12"), None),
+            AdmissionPolicy::ForcedFinite(12)
+        );
+        assert_eq!(
+            AdmissionPolicy::from_values(GpuBackend::Metal, None, Some("1")),
+            AdmissionPolicy::ForcedAll
+        );
+        assert_eq!(
+            AdmissionPolicy::from_values(GpuBackend::Cuda, Some("0"), Some("1")),
+            AdmissionPolicy::Disabled
+        );
+        assert_eq!(
+            AdmissionPolicy::from_values(GpuBackend::Metal, Some("invalid"), Some("1")),
+            AdmissionPolicy::Disabled
+        );
+
+        assert!(!AdmissionPolicy::ForcedFinite(1).supports_max_relief(Some(40)));
+        assert!(AdmissionPolicy::ForcedFinite(1).will_park(1, 2));
+        assert!(AdmissionPolicy::ForcedFinite(40).supports_max_relief(Some(40)));
+        assert!(AdmissionPolicy::ForcedFinite(999).supports_max_relief(Some(40)));
+        assert!(!AdmissionPolicy::ForcedFinite(40).supports_max_relief(None));
+        assert!(AdmissionPolicy::ForcedAll.supports_max_relief(None));
+    }
 
     fn quantized(name: &str, rows: usize, cols: usize) -> (String, Arc<QTensor>) {
         let device = Device::Cpu;
