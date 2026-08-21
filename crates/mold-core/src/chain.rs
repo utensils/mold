@@ -911,12 +911,31 @@ impl ChainRequest {
 
         // The stitched print's title and filing are validated here, on the
         // same normalise pass every chain entry point runs, so a bad tag is
-        // refused before a durable job dir exists.
+        // refused before a durable job dir exists. The filing is also
+        // MATERIALIZED: the manifest stores this request verbatim and
+        // `stitched_output_metadata` embeds it, so leaving raw spellings here
+        // would put a different filing in the print's provenance than the one
+        // the row receives — and a chain's request outlives the submission,
+        // so the divergence survives every resume.
         if let Some(title) = self.title.as_deref() {
             crate::validate_print_title(title).map_err(MoldError::Validation)?;
         }
-        crate::validate_request_organization(self.tags.as_deref(), self.collection.as_ref())
-            .map_err(MoldError::Validation)?;
+        let organization =
+            crate::validate_request_organization(self.tags.as_deref(), self.collection.as_ref())
+                .map_err(MoldError::Validation)?;
+        if self.tags.is_some() {
+            self.tags = (!organization.tags.is_empty()).then_some(organization.tags);
+        }
+        if let Some(Ok(name)) = organization.collection {
+            let id = self
+                .collection
+                .as_ref()
+                .and_then(|reference| reference.id.clone());
+            self.collection = Some(crate::CollectionRef {
+                id,
+                name: Some(name),
+            });
+        }
 
         if self.stages.is_empty() {
             let prompt = self.prompt.take().ok_or_else(|| {
@@ -2344,6 +2363,48 @@ mod tests {
         })
         .unwrap();
         assert_eq!(ok.title.as_deref(), Some("  Smurf Village  "));
+    }
+
+    /// `normalise` materializes the stitched print's filing, not just checks
+    /// it. The manifest keeps this request verbatim and
+    /// `stitched_output_metadata` embeds it, so a raw spelling left here
+    /// would record a different filing than the row receives — and it would
+    /// survive every resume of the job.
+    #[test]
+    fn chain_normalise_materializes_the_filing_into_the_request() {
+        let mut req = auto_expand_request("a cat", 190, 97, 17, None);
+        req.tags = Some(vec![
+            "  Smurfs ".into(),
+            "smurfs".into(),
+            "".into(),
+            " village  green ".into(),
+        ]);
+        req.collection = Some(crate::CollectionRef::by_name("  Smurf   Village  "));
+        let req = req.normalise().unwrap();
+
+        assert_eq!(
+            req.tags.as_deref(),
+            Some(["Smurfs".to_string(), "village green".to_string()].as_slice())
+        );
+        assert_eq!(
+            req.collection,
+            Some(crate::CollectionRef::by_name("Smurf Village"))
+        );
+
+        // The stitched print's provenance agrees with what will be applied.
+        let metadata = req.stitched_output_metadata(OutputFormat::Mp4, 190, None);
+        assert_eq!(
+            metadata.tags.as_deref(),
+            Some(["Smurfs".to_string(), "village green".to_string()].as_slice())
+        );
+        assert_eq!(metadata.collection.as_deref(), Some("Smurf Village"));
+
+        // An unfiled chain gains nothing.
+        let bare = auto_expand_request("a cat", 190, 97, 17, None)
+            .normalise()
+            .unwrap();
+        assert_eq!(bare.tags, None);
+        assert_eq!(bare.collection, None);
     }
 
     /// A sequence whose clips carry distinct prompts must not record the

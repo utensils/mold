@@ -1064,6 +1064,14 @@ async fn prepare_generation(
     // provenance equal to what actually rendered (#783).
     mold_core::validation::materialize_extend_overlap_frames(request, resolved_family.as_deref());
 
+    // Same discipline for the creation-time filing: `OutputMetadata` is built
+    // from this request while the gallery row is seeded through a path that
+    // re-normalizes, so raw spellings left here would put a different filing
+    // in the print's provenance than the one it actually receives. First-party
+    // clients normalize before sending; a direct HTTP caller does not.
+    // Refusal is reported by the validation below, which runs the same check.
+    let _ = mold_core::validation::materialize_request_organization(request);
+
     // A model with no deliverable recipe cannot reach media-dependent
     // preparation. Preserve basic request/unknown-model diagnostics first,
     // then fail before control planning, LipDub probing, reference resolution,
@@ -8736,6 +8744,39 @@ mod tests {
         assert!(super::resolve_request_filing(&state, &mut plain)
             .await
             .is_empty());
+    }
+
+    /// Admission rewrites the filing into the form that will actually be
+    /// applied, so the queue journal, `OutputMetadata`, and the gallery row
+    /// all carry one canonical spelling. A direct HTTP caller is the one who
+    /// needs this — every first-party client normalizes before sending.
+    #[test]
+    fn admission_materializes_the_filing_a_raw_http_caller_sent() {
+        let mut request = filed_request(&[], None);
+        request.tags = Some(vec![
+            "  Smurfs  ".into(),
+            "smurfs".into(),
+            "".into(),
+            " village  green ".into(),
+        ]);
+        request.collection = Some(mold_core::CollectionRef::by_name("  Smurf   Village  "));
+
+        mold_core::validation::materialize_request_organization(&mut request).unwrap();
+
+        assert_eq!(
+            request.tags.as_deref(),
+            Some(["Smurfs".to_string(), "village green".to_string()].as_slice())
+        );
+        assert_eq!(
+            request.collection,
+            Some(mold_core::CollectionRef::by_name("Smurf Village"))
+        );
+        // The journal stores the admitted request, so a replay files the same
+        // print the original run did.
+        let journaled: mold_core::GenerateRequest =
+            serde_json::from_str(&serde_json::to_string(&request).unwrap()).unwrap();
+        assert_eq!(journaled.tags, request.tags);
+        assert_eq!(journaled.collection, request.collection);
     }
 
     /// The advisory names what was dropped, in the singular or the plural,

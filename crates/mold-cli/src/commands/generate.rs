@@ -1014,6 +1014,11 @@ pub async fn run(
     // having used LTX-2's 17 (#783). Server admission materializes the same
     // field from the same helper, so a remote run records the same value.
     mold_core::validation::materialize_extend_overlap_frames(&mut req, family.as_deref());
+    // The forced-local path builds its own metadata and seeds its own row, so
+    // it needs the same canonical filing server admission materializes — a
+    // local run must record what a remote one would.
+    mold_core::validation::materialize_request_organization(&mut req)
+        .map_err(|error| anyhow::anyhow!(error))?;
     let base_seed = req.seed.unwrap_or_else(|| rand::thread_rng().gen());
     let mut reference_session = None;
     if local {

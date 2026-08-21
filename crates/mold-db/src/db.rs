@@ -1486,6 +1486,58 @@ mod tests {
         assert!(got.is_some(), "the print still publishes");
     }
 
+    /// The point of materializing the filing at admission: what a print's
+    /// embedded metadata records and what its row actually holds must be the
+    /// same values, byte for byte. Before materialization a raw-spelling HTTP
+    /// client stamped `[" Smurfs ", "smurfs"]` into provenance while the row
+    /// seeded one `Smurfs`, so Reuse restored duplicates.
+    #[test]
+    fn embedded_metadata_and_the_seeded_row_agree_after_materialization() {
+        let db = MetadataDb::open_in_memory().unwrap();
+
+        let mut request: mold_core::GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"a cat","model":"flux-dev:q4","width":64,"height":64,"steps":1,"guidance":1.0}"#,
+        )
+        .unwrap();
+        // Exactly what a curl caller might send.
+        request.tags = Some(vec![
+            "  Smurfs  ".into(),
+            "smurfs".into(),
+            "".into(),
+            " village  green ".into(),
+        ]);
+        request.collection = Some(mold_core::CollectionRef::by_name("  Smurf   Village  "));
+        mold_core::validation::materialize_request_organization(&mut request).unwrap();
+
+        let metadata = mold_core::OutputMetadata::from_generate_request(&request, 42, None, "test");
+        let mut rec = rec();
+        rec.metadata = metadata.clone();
+        db.upsert(&rec).unwrap();
+
+        let org = db
+            .print_organization(Path::new("/tmp/out"), &rec.filename)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            org.tags,
+            metadata.tags.clone().unwrap(),
+            "the row holds exactly the tags provenance claims"
+        );
+        let collections = db.list_collections().unwrap();
+        assert_eq!(collections.len(), 1);
+        assert_eq!(
+            collections[0].name,
+            metadata.collection.clone().unwrap(),
+            "and exactly the collection name provenance claims"
+        );
+        // And those values are the canonical ones, not the raw spellings.
+        assert_eq!(
+            org.tags,
+            vec!["Smurfs".to_string(), "village green".to_string()]
+        );
+        assert_eq!(collections[0].name, "Smurf Village");
+    }
+
     /// The overwhelmingly common case: an unfiled print costs nothing and
     /// reports nothing.
     #[test]

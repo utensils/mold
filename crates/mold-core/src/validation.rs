@@ -1799,6 +1799,49 @@ pub fn validate_request_organization(
     Ok(RequestOrganization { tags, collection })
 }
 
+/// Rewrite a request's creation-time filing into the exact form that will be
+/// applied, so saved provenance records what actually happened.
+///
+/// [`validate_request_organization`] already computes the normalized tags and
+/// collection name, but checking is not enough: `OutputMetadata` is built
+/// from the REQUEST while the gallery row is seeded through a path that
+/// re-normalizes. Leave the raw spellings in place and the two disagree — a
+/// direct HTTP client sending `[" Smurfs ", "smurfs"]` stamps both into the
+/// embedded metadata while the row holds one `Smurfs`, and Reuse restores the
+/// duplicates. First-party clients normalize before they send, so this is
+/// invisible until someone drives the API with curl, which is exactly when a
+/// provenance bug is hardest to explain.
+///
+/// Same discipline as [`materialize_extend_overlap_frames`]: the admitted
+/// request is the record, so it must carry the effective value rather than
+/// the requested one. Idempotent, and absent stays absent — a tag list that
+/// normalizes away entirely becomes `None`, never `Some([])`, so an unfiled
+/// print's provenance is unchanged.
+///
+/// A `{id}` collection reference is left alone: resolving it needs the host's
+/// own collection table, which happens at admission in the server.
+pub fn materialize_request_organization(req: &mut GenerateRequest) -> Result<(), String> {
+    let organization = validate_request_organization(req.tags.as_deref(), req.collection.as_ref())?;
+
+    if req.tags.is_some() {
+        req.tags = (!organization.tags.is_empty()).then_some(organization.tags);
+    }
+    if let Some(Ok(name)) = organization.collection {
+        // Keep any id the caller sent beside the canonical name — the server
+        // reports the id it could not resolve, and the name is what the row
+        // records.
+        let id = req
+            .collection
+            .as_ref()
+            .and_then(|reference| reference.id.clone());
+        req.collection = Some(crate::CollectionRef {
+            id,
+            name: Some(name),
+        });
+    }
+    Ok(())
+}
+
 pub fn validate_generate_request_with_family(
     req: &GenerateRequest,
     family_hint: Option<&str>,
@@ -7480,6 +7523,93 @@ mod tests {
             Some(&crate::CollectionRef::by_name("日本語"))
         )
         .is_err());
+    }
+
+    /// Admission must not merely *check* the filing — it must write the
+    /// normalized form back into the request, because the request is what
+    /// `OutputMetadata::from_generate_request` embeds while the DB row seeds
+    /// through a re-normalizing path. A raw-spelling HTTP client (curl, a
+    /// script) would otherwise stamp `[" Smurfs ", "smurfs"]` into provenance
+    /// while the row holds `["Smurfs"]`, and Reuse would restore the
+    /// duplicates.
+    #[test]
+    fn materializing_organization_rewrites_the_request_to_what_will_apply() {
+        let mut req = valid_req();
+        req.tags = Some(vec![
+            "  Smurfs  ".into(),
+            "smurfs".into(),
+            "".into(),
+            " village  green ".into(),
+        ]);
+        req.collection = Some(crate::CollectionRef::by_name("  Smurf   Village  "));
+
+        materialize_request_organization(&mut req).unwrap();
+
+        assert_eq!(
+            req.tags.as_deref(),
+            Some(["Smurfs".to_string(), "village green".to_string()].as_slice()),
+            "the request now carries exactly the tags the row will hold"
+        );
+        assert_eq!(
+            req.collection,
+            Some(crate::CollectionRef::by_name("Smurf Village")),
+            "and the collection name the row will resolve by slug"
+        );
+
+        // The whole point: embedded provenance and the applied row agree.
+        let metadata = crate::OutputMetadata::from_generate_request(&req, 7, None, "test");
+        assert_eq!(
+            metadata.tags.as_deref(),
+            Some(["Smurfs".to_string(), "village green".to_string()].as_slice())
+        );
+        assert_eq!(metadata.collection.as_deref(), Some("Smurf Village"));
+    }
+
+    /// An already-canonical request is left byte-identical — materialization
+    /// must not churn what every first-party client already sends.
+    #[test]
+    fn materializing_organization_leaves_a_canonical_request_untouched() {
+        let mut req = valid_req();
+        req.tags = Some(vec!["Smurfs".into(), "village green".into()]);
+        req.collection = Some(crate::CollectionRef::by_name("Smurf Village"));
+        let before = req.clone();
+
+        materialize_request_organization(&mut req).unwrap();
+        assert_eq!(req.tags, before.tags);
+        assert_eq!(req.collection, before.collection);
+    }
+
+    /// An unfiled request gains nothing — never an empty list that would
+    /// stamp `"tags": []` into every print's provenance.
+    #[test]
+    fn materializing_organization_leaves_an_unfiled_request_absent() {
+        let mut req = valid_req();
+        materialize_request_organization(&mut req).unwrap();
+        assert_eq!(req.tags, None);
+        assert_eq!(req.collection, None);
+
+        // A list that normalizes away entirely collapses to absent, not `[]`.
+        req.tags = Some(vec!["".into(), "   ".into()]);
+        materialize_request_organization(&mut req).unwrap();
+        assert_eq!(req.tags, None);
+    }
+
+    /// An `{id}` reference is left for the server to resolve against its own
+    /// collection table — materialization normalizes names, it does not
+    /// invent one.
+    #[test]
+    fn materializing_organization_preserves_an_unresolved_id_reference() {
+        let mut req = valid_req();
+        req.collection = Some(crate::CollectionRef::by_id("col-1"));
+        materialize_request_organization(&mut req).unwrap();
+        assert_eq!(req.collection, Some(crate::CollectionRef::by_id("col-1")));
+    }
+
+    #[test]
+    fn materializing_organization_refuses_what_validation_refuses() {
+        let mut req = valid_req();
+        req.tags = Some(vec!["nul\0".into()]);
+        assert!(materialize_request_organization(&mut req).is_err());
     }
 
     #[test]
