@@ -223,6 +223,15 @@ Filing is per-print intent rather than a preference: it is not restored on the
 next launch, it is not saved per model, and only **↺ Reset to model defaults**
 clears it. Generating keeps it, so a batch's siblings share the filing.
 
+If a host cannot apply what you filed — it is running without a metadata
+database, or the collection went away between listing it and pressing Generate
+— the print is still rendered and saved, and the TUI says what was dropped: a
+one-line `!` advisory on the Create view (several are joined with `·`) plus an
+entry per advisory in the Timeline. It is an advisory rather than an error
+because the render succeeded, and starting the next generation clears the line.
+The same row carries any other adjustment a host reports about an accepted
+request, such as a lip-dub clip retimed to its reference.
+
 A titled print's file is named `mold-{model}-{ts}[-{idx}]~{title-slug}.{ext}`,
 the same shape the server's gallery writes — renaming the print later never
 renames the file.

@@ -579,9 +579,11 @@ dropped and reported on the `x-mold-request-warning` header — never silently,
 never as a refusal. `MoldClient` reads that header on all four response paths
 into additive `GenerateResponse.request_warnings` / `ChainResponse
 .request_warnings`; `mold run` prints each one through `status!` (stderr when
-piped), and the TUI reads the same field off `GenerationComplete`. Never split
-the header on `; ` — the advisory prose contains that sequence, so a split
-renders one advisory as two half-sentences.
+piped), and the TUI shows them on the Create view — the `!` advisory row, never
+the error slot, since the host accepted and rendered the request — and records
+each one in the Timeline. Starting the next generation clears the row. Never
+split the header on `; ` — the advisory prose contains that sequence, so a
+split renders one advisory as two half-sentences.
 
 ## Reference implementations
 
