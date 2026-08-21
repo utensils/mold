@@ -48,9 +48,13 @@ verified before use.
 | --- | --- |
 | `eva02_clip_l_336_vision.safetensors` (514 tensors, f16, ~609 MB) | `2b0b0ab0baed6ee968c8a08a9dcba908fb602630303faa3515eeaf8e264f136b` |
 
-That digest is asserted by `conversion_is_deterministic_on_the_pinned_source`,
-so a re-uploaded source or a changed retention rule fails loudly rather than
-silently producing different weights.
+That digest is compiled in as `eva_clip_convert::DERIVED_SHA256` and asserted
+by `conversion_is_deterministic_on_the_pinned_source`, so a re-uploaded source,
+a changed retention rule, or a `safetensors` layout change fails loudly rather
+than silently producing different weights. It is also what authenticates a
+derived file that is being reused — the sidecar beside it is provenance for a
+human and is never trusted, because mold writes it and anything able to tamper
+with the weights could forge it to match.
 
 ## Files
 

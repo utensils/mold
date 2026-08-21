@@ -44,7 +44,7 @@ EVA02_CLIP_L_336_psz14_s6B.pt          856 MB, f16, 712 tensors (visual + text)
   |  ensure_eva_clip_vision_safetensors
   v
 eva02_clip_l_336_vision.safetensors    ~609 MB, f16, 514 tensors, `visual.` stripped
-eva02_clip_l_336_vision.json           { source_sha256, derived_sha256, derived_filename }
+eva02_clip_l_336_vision.json           provenance only, never trusted
 ```
 
 ### What the conversion does
@@ -52,48 +52,92 @@ eva02_clip_l_336_vision.json           { source_sha256, derived_sha256, derived_
 1. **Open no-follow and retain.** `mold_core::secure_file` walks every parent
    component with `O_NOFOLLOW | O_DIRECTORY` and opens the file itself
    `O_NOFOLLOW`, then checks it is a regular file.
-2. **Hash through the descriptor**, not through the pathname, and require the
-   manifest's pinned source SHA-256.
-3. **Fence the pathname.** candle's `PthTensors` re-opens by pathname for every
-   tensor, so `(device, inode)` is re-checked on a fresh no-follow open both
-   before and after candle reads. The retained descriptor keeps the inode
-   allocated for that whole window, so it cannot be recycled: a swap-and-swap
-   back would have to hand back an inode number that is provably still ours.
-
-   A `/dev/fd/N` pathname derived from the retained descriptor would be the
-   obvious alternative and does not work — on macOS opening `/dev/fd/N` is
-   `dup(N)`, so candle's second open would inherit an exhausted offset and read
-   nothing.
+2. **Copy the descriptor's bytes into a private file, hashing that same
+   stream**, and require the manifest's pinned source SHA-256.
+3. **Parse the private copy**, never the caller's pathname.
 4. **Keep `visual.*` only**, minus the 48 per-block RoPE buffers, which are
    byte-identical copies of the shared `visual.rope.*` tables (upstream builds
    one `VisionRotaryEmbeddingFast` and gives it to every block). The single
    top-level pair is retained so mold's derived table can be checked against
    the checkpoint's own numbers.
-5. **Write atomically and deterministically.** A sibling `.staging` file — same
-   directory, therefore same filesystem, therefore a real `rename` — is
-   fsynced, then renamed, then the parent directory is fsynced. `safetensors`'
-   own `prepare` sorts tensors before laying out the buffer, so the byte image
-   does not depend on read order and the recorded digest is meaningful. A
-   `.staging` file left by an interrupted run was never published and is
-   replaced outright, never resumed.
-6. **Record the derived SHA-256** in a sidecar named after the artifact.
+5. **Write atomically and deterministically.** The bytes are built inside the
+   private staging directory and then `rename`d into place — same directory,
+   therefore same filesystem, therefore a real rename — fsynced first, with the
+   parent directory fsynced after. `safetensors`' own `prepare` sorts tensors
+   before laying out the buffer, so the byte image does not depend on read
+   order, which is what makes the derived pin meaningful.
+6. **Record provenance** in a sidecar named after the artifact. Nothing reads
+   it back to decide anything.
 
 The conversion is a **re-container, not a cast**: f16 stays f16, so the derived
 file is ~609 MB rather than 1.2 GB, and the loading `VarBuilder` picks the
 compute dtype.
 
+### Why a private copy, and not an inode fence
+
+candle's `PthTensors` re-opens its file **by pathname** for every tensor ("We
+hope that the file has not changed since first reading it",
+`pickle.rs:770-772`). Hashing the retained descriptor and then handing candle
+the original pathname authenticates nothing: the name can be renamed away and
+back between the hash and any of those opens, and the parse would read bytes
+the hash never saw.
+
+Re-checking `(device, inode)` on a fresh no-follow open either side of the
+parse does not close it either. It samples the pathname at two instants, and
+candle re-opens hundreds of times between them.
+
+A `/dev/fd/N` pathname derived from the retained descriptor is the obvious
+alternative and does not work: on macOS opening `/dev/fd/N` is `dup(N)`, so
+candle's second open would inherit an exhausted offset and read nothing.
+
+So the bytes are copied out of the descriptor into a file only mold can reach,
+and hashed on that same stream. The digest and the parse observe identical
+bytes by construction. The cost is one transient 856 MB copy, on an
+install-time path that is about to write 609 MB anyway.
+
+The staging directory is created with `create_dir` — which fails rather than
+reusing an existing entry — at mode `0o700`, and is removed on every exit path.
+That exclusivity is what makes it safe for `serialize_to_file` and the pickle
+reader to open paths inside it by name. It also cannot be the model directory
+itself: `CLAUDE.md`'s model-storage rule makes shared, group-writable model
+roots legitimate, so staging has to happen somewhere mold owns outright.
+
+### Why every publish is a rename
+
+`std::fs::write` **follows** a symlink at its destination, so a link
+pre-planted at the sidecar or the weights path would redirect the write into a
+file of the attacker's choosing. `rename` replaces the link itself. Every write
+in the module — weights and sidecar alike — goes through the one `publish`
+helper for that reason, and two tests plant a symlink over a victim file and
+assert the victim is untouched.
+
+### Why the sidecar is not trusted
+
+The sidecar is written by mold. Anything able to tamper with the derived
+weights could rewrite it to match, so authenticating the weights against it
+would mean authenticating them against the attacker's own claim.
+
+`DERIVED_SHA256` is a compiled-in constant instead. The conversion is
+deterministic, so converting the pinned source always produces exactly those
+bytes; the weight-gated `conversion_is_deterministic_on_the_pinned_source`
+re-derives the constant from the real checkpoint, so a `safetensors` layout
+change or a re-uploaded source fails loudly rather than silently shipping
+different weights. The sidecar stays as provenance for a human.
+
 ### When it runs
 
 `ensure_eva_clip_vision_safetensors(&PulidPaths)` converts **on first use** and
-is idempotent — a derived file whose SHA-256 matches its sidecar is accepted
-as-is; a missing file, a missing sidecar, or a mismatched digest reconverts,
-because a half-written or hand-edited artifact must never be loaded as weights.
+is idempotent on the *bytes*: a derived file is reused only when it hashes to
+`DERIVED_SHA256`. Anything else — missing, truncated, tampered with, or
+carrying a forged sidecar — reconverts from the pinned source, and a source
+that fails its own pin errors rather than falling back to what is on disk. A
+fresh conversion that does not reproduce the pin is a hard error, not a silent
+reconvert on every later call.
 
 This is deliberately convert-on-first-use rather than a download post-hook.
 Admission calls it once it has resolved a complete bundle. Hanging an 856 MB
 pickle read off the download path would couple asset installation to model
-loading for no benefit, and the idempotence check makes the cost a single
-`stat` plus one hash on every later call.
+loading for no benefit, and the reuse check costs one hash of a local file.
 
 ## The encoders
 
@@ -181,6 +225,14 @@ built before the loop.
   latents attend to themselves as well as the context.
 - Its scale is `dim_head^-0.25` applied to **both** q and k before the matmul,
   which is what upstream ships.
+- Its softmax is widened to f32 and cast straight back
+  (`torch.softmax(weight.float(), -1).type(weight.dtype)`,
+  `encoders_transformer.py:114`). This is not a rounding detail: BF16 carries
+  8 mantissa bits, and running the softmax in it is measurably 4x further from
+  the f32 reference than widening (5.98e-3 against 1.51e-3 of scale). It is
+  also upstream-specific — the EVA02 tower's own attention does a plain
+  `attn.softmax(dim=-1)` with no cast (`eva_vit_model.py:236`) and mold matches
+  that, so the two must not be "harmonized".
 - `proj_out` is a bare parameter used as `latents @ proj_out`, stored
   `[1024, 2048]`. It must **not** be transposed the way an `nn.Linear` weight
   would be.
