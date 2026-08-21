@@ -1,4 +1,7 @@
 pub(crate) mod clip;
+pub(crate) mod eva_clip_convert;
+pub(crate) mod eva_clip_preprocess;
+pub(crate) mod eva_clip_vision;
 pub(crate) mod mistral3;
 pub(crate) mod park;
 pub(crate) mod qwen2_text;
