@@ -9611,9 +9611,7 @@ onBeforeUnmount(() => {
             <span aria-hidden="true">▦</span>
             {{ pairing ? "Opening camera…" : "Scan pairing code" }}
           </button>
-          <p class="mobile-pair-note">
-            On your host, open Settings → Mobile pairing.
-          </p>
+          <p class="mobile-pair-note">On your host, open Settings → Mobile pairing.</p>
           <button
             class="secondary-button"
             type="button"
