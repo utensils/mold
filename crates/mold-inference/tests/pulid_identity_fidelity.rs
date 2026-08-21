@@ -58,15 +58,15 @@ fn extractor() -> Option<IdentityExtractor> {
             .unwrap_or(candidate)
     };
     Some(
-        IdentityExtractor::from_paths(
-            &direct("scrfd_10g_bnkps.onnx"),
-            &direct("glintr100.onnx"),
-        )
-        .expect("the antelopev2 models load"),
+        IdentityExtractor::from_paths(&direct("scrfd_10g_bnkps.onnx"), &direct("glintr100.onnx"))
+            .expect("the antelopev2 models load"),
     )
 }
 
-fn embed(extractor: &IdentityExtractor, path: &Path) -> mold_inference::identity::arcface::ArcFaceEmbedding {
+fn embed(
+    extractor: &IdentityExtractor,
+    path: &Path,
+) -> mold_inference::identity::arcface::ArcFaceEmbedding {
     let bytes = std::fs::read(path)
         .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
     extractor

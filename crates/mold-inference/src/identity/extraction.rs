@@ -69,6 +69,7 @@ use super::{IdentityError, IdentityExtractor};
 pub const EXTRACTION_HOST_PEAK_BYTES: u64 = 1_400_000_000;
 
 /// What one extraction produced.
+#[derive(Debug)]
 pub struct IdentityExtraction {
     /// The immutable identity every sibling of the parent request reuses.
     pub embedding: FrozenIdentityEmbedding,
@@ -88,8 +89,7 @@ pub fn extract_identity_embedding(
     // The bounded-decode limits are the request contract's, checked before any
     // decoder sees the bytes. Admission has already applied them, but this is
     // a public entry point and the check costs a header read.
-    mold_core::identity::validate_id_image_bytes(image_bytes)
-        .map_err(|reason| IdentityError::Decode(reason))?;
+    mold_core::identity::validate_id_image_bytes(image_bytes).map_err(IdentityError::Decode)?;
 
     let extractor = IdentityExtractor::load(paths, &Device::Cpu)
         .context("loading the PuLID face-extraction models")?;
@@ -200,13 +200,13 @@ pub(crate) fn compose_identity_tokens(
         .context("running the PuLID IDFormer")?;
 
     let tokens = tokens.i(0).context("the IDFormer returned no batch")?;
-    Ok(tokens
+    tokens
         .flatten_all()
         .context("flattening the identity tokens")?
         .to_dtype(DType::F32)
         .context("the identity tokens are numeric")?
         .to_vec1::<f32>()
-        .context("reading the identity tokens")?)
+        .context("reading the identity tokens")
 }
 
 #[cfg(test)]

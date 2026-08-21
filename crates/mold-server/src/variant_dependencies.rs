@@ -1602,11 +1602,8 @@ pub(crate) async fn prepare_inputs_for_devices(
             let identity_paths = by_device
                 .values()
                 .find_map(|device| device.engine_config.identity_assets.clone());
-            crate::identity_extraction::resolve_identity_embedding(
-                request,
-                identity_paths.as_ref(),
-            )
-            .await?
+            crate::identity_extraction::resolve_identity_embedding(request, identity_paths.as_ref())
+                .await?
         }
     };
 

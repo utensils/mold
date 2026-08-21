@@ -57,8 +57,7 @@ use std::path::{Path, PathBuf};
 /// than restated.
 pub(crate) const DERIVED_FILENAME: &str = mold_core::pulid_assets::DERIVED_VISION_FILENAME;
 /// Informational provenance beside the derived artifact.
-pub(crate) const SIDECAR_FILENAME: &str =
-    mold_core::pulid_assets::DERIVED_VISION_SIDECAR_FILENAME;
+pub(crate) const SIDECAR_FILENAME: &str = mold_core::pulid_assets::DERIVED_VISION_SIDECAR_FILENAME;
 
 /// Source pin, mirrored from `mold_core::manifest`'s `pulid-flux` entry. Kept
 /// here as well so the conversion refuses to read anything else even if it is

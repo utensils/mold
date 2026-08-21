@@ -271,7 +271,10 @@ mod tests {
             },
         ] {
             let error = args.resolve().unwrap_err();
-            assert!(format!("{error:#}").contains("require --id-image"), "{error:#}");
+            assert!(
+                format!("{error:#}").contains("require --id-image"),
+                "{error:#}"
+            );
         }
     }
 

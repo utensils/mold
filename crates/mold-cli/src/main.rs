@@ -3837,10 +3837,7 @@ mod tests {
                 panic!("{extra:?}: identity with img2img or a LoRA is not yet qualified");
             };
             let error = error.to_string();
-            assert!(
-                error.contains("cannot be used with"),
-                "{extra:?}: {error}"
-            );
+            assert!(error.contains("cannot be used with"), "{extra:?}: {error}");
         }
     }
 

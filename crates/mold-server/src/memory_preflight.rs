@@ -2481,10 +2481,12 @@ mod fail_closed_tests {
 
         // The old declared placeholder charged the CPU-side extraction to the
         // device. It must not creep back.
-        assert!(
-            IDENTITY_VRAM_OVERHEAD_BYTES < 2_300_000_000,
-            "the extraction runs on the host and must not be charged as VRAM"
-        );
+        const {
+            assert!(
+                IDENTITY_VRAM_OVERHEAD_BYTES < 2_300_000_000,
+                "the extraction runs on the host and must not be charged as VRAM"
+            )
+        };
     }
 
     /// Every artifact the extraction touches is host demand, and the adapter —

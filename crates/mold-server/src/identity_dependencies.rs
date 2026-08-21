@@ -824,7 +824,6 @@ mod tests {
             DependencyMaterializationPolicy::ExistingOnly,
             DependencyPreparationContext {
                 frozen_identity: Some(frozen.clone()),
-                ..DependencyPreparationContext::default()
             },
         )
         .await
@@ -836,7 +835,10 @@ mod tests {
             "a child must never re-extract the identity its parent already froze"
         );
         assert_eq!(
-            prepared.identity_embedding.as_ref().map(|e| e.fingerprint()),
+            prepared
+                .identity_embedding
+                .as_ref()
+                .map(|e| e.fingerprint()),
             Some(frozen.fingerprint()),
             "the child must carry the parent's exact identity, not an equivalent one"
         );

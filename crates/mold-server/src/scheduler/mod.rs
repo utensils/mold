@@ -1743,19 +1743,23 @@ impl Coordinator {
                     .as_ref()
                     .map(crate::reference_uploads::ResolvedReferenceSet::admission_view),
             };
-            #[cfg(not(any(feature = "h3", feature = "h3-private-uat")))]
-            let mut context = crate::variant_dependencies::DependencyPreparationContext::default();
-            #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
-            let mut context = context;
             // A batch child arrives already holding the parent's frozen
             // identity. Handing it to preparation is what keeps ONE extraction
             // per parent request: without it this re-preparation would run the
             // extractor again for every sibling and then overwrite the
             // parent's value with its own.
-            context.frozen_identity = pending
+            let frozen_identity = pending
                 .prepared_inputs
                 .as_ref()
                 .and_then(|inputs| inputs.identity_embedding.clone());
+            #[cfg(not(any(feature = "h3", feature = "h3-private-uat")))]
+            let context =
+                crate::variant_dependencies::DependencyPreparationContext { frozen_identity };
+            #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+            let context = crate::variant_dependencies::DependencyPreparationContext {
+                frozen_identity,
+                ..context
+            };
             let preparer = self.preparer.clone();
             let tx = self.preparation_tx.clone();
             let slots = self.preparation_slots.clone();
