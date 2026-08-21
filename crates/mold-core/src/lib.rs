@@ -87,7 +87,8 @@ pub use organization::{
 };
 pub use print_title::{
     default_output_filename_titled, download_file_name, strip_title_slug, title_slug,
-    validate_print_title, PRINT_TITLE_MAX_CHARS, TITLE_SLUG_MAX_LEN, TITLE_SLUG_SEPARATOR,
+    validate_print_title, DOWNLOAD_FALLBACK_STEM, DOWNLOAD_MODEL_SLUG_MAX_LEN,
+    DOWNLOAD_NAME_SEPARATOR, PRINT_TITLE_MAX_CHARS, TITLE_SLUG_MAX_LEN, TITLE_SLUG_SEPARATOR,
 };
 pub use reference_upload::{ReferenceUploadLease, ReferenceUploadSource};
 pub use types::GenerateRequest;

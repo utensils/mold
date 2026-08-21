@@ -106,6 +106,18 @@ pub fn default_output_filename_titled(
 /// Separator between the components of a *download* file name.
 pub const DOWNLOAD_NAME_SEPARATOR: &str = "__";
 
+/// Maximum length, in bytes, of the model component of a download name.
+///
+/// Capped for a filesystem reason, not a cosmetic one: `cv:` / `hf:` ids are
+/// caller-supplied and unbounded, and `title(40) + model + s<20 digits> + ext`
+/// has to stay under the 255-byte filename limit every common filesystem
+/// enforces. Two very long model ids sharing a truncated name is a cosmetic
+/// annoyance in a Downloads folder; `ENAMETOOLONG` is a failed save.
+pub const DOWNLOAD_MODEL_SLUG_MAX_LEN: usize = 80;
+
+/// Last-resort stem when nothing about a print slugs to anything usable.
+pub const DOWNLOAD_FALLBACK_STEM: &str = "print";
+
 /// Name to suggest when the user saves or exports a print, which is a
 /// different question from what the gallery calls the file on disk.
 ///
@@ -119,40 +131,70 @@ pub const DOWNLOAD_NAME_SEPARATOR: &str = "__";
 /// {title-slug}__{model}__s{seed}.{ext}
 /// ```
 ///
-/// An untitled print (or a title that slugs to nothing) falls back to
-/// `{model}__s{seed}.{ext}`. The model is sanitized so `flux-dev:q4` becomes
-/// `flux-dev-q4` and the name stays portable across filesystems. `__`
-/// separates the components because a single `-` is legal *inside* every one
-/// of them.
+/// The three components are independent: each is dropped when it has nothing
+/// to contribute, and the survivors are joined with `__` (chosen because a
+/// single `-` is legal *inside* every one of them). An untitled print is
+/// `{model}__s{seed}.{ext}`; a model that slugs to nothing is
+/// `{title-slug}__s{seed}.{ext}`; and if nothing at all survives the stem is
+/// [`DOWNLOAD_FALLBACK_STEM`]. The model is sanitized so `flux-dev:q4`
+/// becomes `flux-dev-q4` and `cv:12345` becomes `cv-12345`, keeping the name
+/// portable across filesystems.
+///
+/// `seed` is not optional here because Rust never has an unresolved one — a
+/// saved print's `OutputMetadata.seed` is a `u64`. Browser mirrors that can
+/// hold a seedless gallery entry drop that segment, which is exactly what
+/// this function would do if it could.
 ///
 /// This is the Rust authority; the browser surfaces mirror it.
 pub fn download_file_name(title: Option<&str>, model: &str, seed: u64, ext: &str) -> String {
-    let model = sanitize_download_component(model);
-    let model = if model.is_empty() {
-        "mold".to_string()
-    } else {
-        model
-    };
-    let tail = format!("{model}{DOWNLOAD_NAME_SEPARATOR}s{seed}.{ext}");
-    match title.and_then(title_slug) {
-        Some(slug) => format!("{slug}{DOWNLOAD_NAME_SEPARATOR}{tail}"),
-        None => tail,
+    let mut segments: Vec<String> = Vec::with_capacity(3);
+    segments.extend(title.and_then(title_slug));
+    let model = sanitize_download_component(model, DOWNLOAD_MODEL_SLUG_MAX_LEN);
+    if !model.is_empty() {
+        segments.push(model);
     }
+    segments.push(format!("s{seed}"));
+
+    let stem = if segments.is_empty() {
+        DOWNLOAD_FALLBACK_STEM.to_string()
+    } else {
+        segments.join(DOWNLOAD_NAME_SEPARATOR)
+    };
+    match normalize_download_extension(ext) {
+        Some(ext) => format!("{stem}.{ext}"),
+        None => stem,
+    }
+}
+
+/// Normalize a caller-supplied extension: a leading `.` is stripped (so
+/// `".PNG"` and `"png"` agree), the rest is lowercased, and anything that
+/// leaves nothing behind yields `None` — a bare trailing dot is not a
+/// filename anyone wants.
+fn normalize_download_extension(ext: &str) -> Option<String> {
+    let trimmed = ext.trim().trim_start_matches('.').trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_ascii_lowercase())
 }
 
 /// Reduce one download-name component to filesystem-portable characters:
 /// ASCII alphanumerics survive as lowercase, everything else collapses to a
-/// single `-`, and the edges are trimmed. Deliberately never emits `_`, so
-/// the `__` separator stays unambiguous.
-fn sanitize_download_component(raw: &str) -> String {
-    let mut out = String::with_capacity(raw.len());
+/// single `-`, the edges are trimmed, and the result is capped at `max_len`
+/// bytes (re-trimmed so the cut never leaves a dangling `-`). Deliberately
+/// never emits `_`, so the `__` separator stays unambiguous.
+fn sanitize_download_component(raw: &str, max_len: usize) -> String {
+    let mut out = String::with_capacity(raw.len().min(max_len));
     let mut pending_dash = false;
     for ch in raw.chars() {
         if ch.is_ascii_alphanumeric() {
             if pending_dash && !out.is_empty() {
+                if out.len() + 1 >= max_len {
+                    break;
+                }
                 out.push('-');
             }
             pending_dash = false;
+            if out.len() >= max_len {
+                break;
+            }
             out.push(ch.to_ascii_lowercase());
         } else {
             pending_dash = true;
@@ -326,8 +368,81 @@ mod tests {
         let name = download_file_name(Some("Owl"), "ltx-2-19b-distilled:fp8", 1, "mp4");
         assert_eq!(name, "owl__ltx-2-19b-distilled-fp8__s1.mp4");
         assert_eq!(name.matches(DOWNLOAD_NAME_SEPARATOR).count(), 2, "{name}");
-        // A model that sanitizes to nothing still yields a usable name.
-        assert_eq!(download_file_name(None, "???", 3, "png"), "mold__s3.png");
+        // Catalog ids keep their source prefix, readably.
+        assert_eq!(
+            download_file_name(None, "cv:12345", 9, "png"),
+            "cv-12345__s9.png"
+        );
+    }
+
+    /// Each component is independent: an absent one is dropped rather than
+    /// substituted, so the name never carries a placeholder word that looks
+    /// like a real title or model.
+    #[test]
+    fn download_name_drops_unusable_components_rather_than_substituting_them() {
+        // No title.
+        assert_eq!(
+            download_file_name(None, "flux-dev:q4", 42, "png"),
+            "flux-dev-q4__s42.png"
+        );
+        // No sluggable model.
+        assert_eq!(
+            download_file_name(Some("Owl"), "???", 42, "png"),
+            "owl__s42.png"
+        );
+        // Neither — the seed alone still names the file.
+        assert_eq!(download_file_name(None, "???", 42, "png"), "s42.png");
+    }
+
+    /// The model component is capped so a caller-supplied `cv:` / `hf:` id
+    /// cannot push the whole name past the 255-byte filename limit.
+    #[test]
+    fn download_name_caps_the_model_without_a_dangling_dash() {
+        let long = format!("hf:{}", "Segment/".repeat(40));
+        let name = download_file_name(Some("Owl"), &long, 42, "png");
+        let model = name
+            .strip_prefix("owl__")
+            .and_then(|rest| rest.strip_suffix("__s42.png"))
+            .expect("the model sits between the title and the seed");
+        assert!(model.len() <= DOWNLOAD_MODEL_SLUG_MAX_LEN, "{model}");
+        assert!(!model.ends_with('-'), "{model}");
+        assert!(!model.starts_with('-'), "{model}");
+        assert!(name.len() < 255, "{} bytes: {name}", name.len());
+        // A model exactly at the cap is kept whole.
+        let exact = "z".repeat(DOWNLOAD_MODEL_SLUG_MAX_LEN);
+        assert_eq!(
+            download_file_name(None, &exact, 1, "png"),
+            format!("{exact}__s1.png")
+        );
+    }
+
+    /// Extensions are caller-supplied on the browser side too, so `.PNG`,
+    /// `png`, and `""` must all agree — and an absent one must never leave a
+    /// bare trailing dot.
+    #[test]
+    fn download_name_normalizes_the_extension() {
+        for ext in ["png", ".png", "PNG", ".PNG", "  .Png "] {
+            assert_eq!(
+                download_file_name(Some("Owl"), "flux-dev", 1, ext),
+                "owl__flux-dev__s1.png",
+                "ext {ext:?}"
+            );
+        }
+        for ext in ["", "   ", "."] {
+            assert_eq!(
+                download_file_name(Some("Owl"), "flux-dev", 1, ext),
+                "owl__flux-dev__s1",
+                "ext {ext:?}"
+            );
+        }
+    }
+
+    /// A defensive last resort the Rust side cannot actually reach — `seed`
+    /// is a `u64`, so `s{seed}` is always a segment — but the browser mirror
+    /// can hold a seedless entry, and both must land on the same word.
+    #[test]
+    fn download_name_falls_back_to_a_shared_stem_word() {
+        assert_eq!(DOWNLOAD_FALLBACK_STEM, "print");
     }
 
     #[test]
