@@ -5899,7 +5899,11 @@ watch(
  */
 function applyFileUnderPolicy(draft: GenerateForm): GenerateForm {
   if (fileUnderEnabled.value) {
-    draft.fileUnderMatch = form.fileUnderMatch ? { ...form.fileUnderMatch } : null;
+    // Read the match from its computed rather than the mirrored form field:
+    // the mirror's watcher has not necessarily flushed for a title edited in
+    // the same tick as the tap.
+    const match = fileUnderMatch.value;
+    draft.fileUnderMatch = match ? { ...match } : null;
     return draft;
   }
   draft.fileUnder = emptyFileUnderState();
