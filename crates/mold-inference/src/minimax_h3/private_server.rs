@@ -397,24 +397,112 @@ impl H3PrivateRuntimeEnvelopeRecord {
                     && request.rows.condition_audio_rows <= self.max_target_audio_rows
             }
         };
-        if request.width != self.width
-            || request.height != self.height
-            || request.frames != self.frames
-            || request.fps != self.fps
-            || request.batch_size != self.batch_size
-            || request.grid_points != self.max_steps
-            || !request.synchronized_audio
-            || !request.mp4_output
-            || request.endpoints.len() != usize::try_from(self.endpoint_count)?
-            || !conditioning_ok
-            || request.rows.qwen_output_text_rows > self.max_qwen_output_text_rows
-            || request.rows.qwen_vision_rows > self.max_qwen_vision_rows
-            || request.rows.condition_visual_rows > self.max_condition_visual_rows
-            || request.rows.target_video_rows > self.max_target_video_rows
-            || request.rows.target_audio_rows > self.max_target_audio_rows
-            || request.rows.total_packed_rows > self.max_total_packed_rows
-        {
-            bail!("private H3 request differs from the reviewed compact-quality envelope")
+        // Name every differing axis: one bare mismatch sentence made a
+        // wrong-tier step count, an off-canvas size, and an over-cap prompt
+        // all read identically, which is undebuggable from a client.
+        let mut mismatches: Vec<String> = Vec::new();
+        fn exact_into(mismatches: &mut Vec<String>, name: &str, requested: u64, reviewed: u64) {
+            if requested != reviewed {
+                mismatches.push(format!("{name} {requested} (reviewed {reviewed})"));
+            }
+        }
+        exact_into(
+            &mut mismatches,
+            "width",
+            u64::from(request.width),
+            u64::from(self.width),
+        );
+        exact_into(
+            &mut mismatches,
+            "height",
+            u64::from(request.height),
+            u64::from(self.height),
+        );
+        exact_into(
+            &mut mismatches,
+            "frames",
+            u64::from(request.frames),
+            u64::from(self.frames),
+        );
+        exact_into(
+            &mut mismatches,
+            "fps",
+            u64::from(request.fps),
+            u64::from(self.fps),
+        );
+        exact_into(
+            &mut mismatches,
+            "batch_size",
+            u64::from(request.batch_size),
+            u64::from(self.batch_size),
+        );
+        exact_into(
+            &mut mismatches,
+            "grid_points",
+            u64::from(request.grid_points),
+            u64::from(self.max_steps),
+        );
+        if !request.synchronized_audio {
+            mismatches.push("synchronized_audio off".to_string());
+        }
+        if !request.mp4_output {
+            mismatches.push("mp4_output off".to_string());
+        }
+        exact_into(
+            &mut mismatches,
+            "endpoints",
+            request.endpoints.len() as u64,
+            u64::from(self.endpoint_count),
+        );
+        if !conditioning_ok {
+            mismatches.push(format!("conditioning shape for {:?}", request.task));
+        }
+        fn cap_into(mismatches: &mut Vec<String>, name: &str, requested: u64, reviewed: u64) {
+            if requested > reviewed {
+                mismatches.push(format!("{name} {requested} (cap {reviewed})"));
+            }
+        }
+        cap_into(
+            &mut mismatches,
+            "qwen_output_text_rows",
+            request.rows.qwen_output_text_rows,
+            self.max_qwen_output_text_rows,
+        );
+        cap_into(
+            &mut mismatches,
+            "qwen_vision_rows",
+            request.rows.qwen_vision_rows,
+            self.max_qwen_vision_rows,
+        );
+        cap_into(
+            &mut mismatches,
+            "condition_visual_rows",
+            request.rows.condition_visual_rows,
+            self.max_condition_visual_rows,
+        );
+        cap_into(
+            &mut mismatches,
+            "target_video_rows",
+            request.rows.target_video_rows,
+            self.max_target_video_rows,
+        );
+        cap_into(
+            &mut mismatches,
+            "target_audio_rows",
+            request.rows.target_audio_rows,
+            self.max_target_audio_rows,
+        );
+        cap_into(
+            &mut mismatches,
+            "total_packed_rows",
+            request.rows.total_packed_rows,
+            self.max_total_packed_rows,
+        );
+        if !mismatches.is_empty() {
+            bail!(
+                "private H3 request differs from the reviewed compact-quality envelope: {}",
+                mismatches.join("; ")
+            )
         }
         Ok(())
     }
