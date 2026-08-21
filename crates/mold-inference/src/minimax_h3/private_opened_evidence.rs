@@ -1618,7 +1618,7 @@ const FL2VA_OBSERVED_QWEN_SEQUENCE_ROWS: u64 = 2_033 + 4_032;
 /// while the request's Qwen sequence varies by an order of magnitude with
 /// the ordered reference set, so charging the grant as a constant
 /// undercharges any request past the grant's sizing point (three
-/// maximum-canvas references already reach 2.62x the measured sequence).
+/// maximum-canvas references already reach 2.20x the measured sequence).
 /// The exact budget therefore charges the REQUEST-derived demand — the
 /// corrected observed per-row cost scaled by the request's own text+vision
 /// rows, under the same x1.15 + 64 MiB-grid policy as the corrected public
@@ -2560,7 +2560,7 @@ mod tests {
     /// keeps its reviewed grant verbatim (its envelope caps the sequence at
     /// the rows the grant was measured over), the scripted one-reference
     /// campaign shape stays admitted at its own derived demand, and a
-    /// three-reference maximum-canvas request — 2.62x FL2VA's measured
+    /// three-reference maximum-canvas request — 2.20x FL2VA's measured
     /// sequence, above the capture profile's 2x provisional grant — is a
     /// named refusal instead of an undercharged admit.
     #[test]

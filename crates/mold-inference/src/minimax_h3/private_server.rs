@@ -380,23 +380,6 @@ impl H3PrivateRuntimeEnvelopeRecord {
         // adapter must have been reviewed for that same task before its step
         // count is applied.
         self.validate_for_task_with_adapter(request.task, turbo)?;
-        let endpoint = request.endpoints.first();
-        let conditioning_ok = match request.task {
-            Task::Fl2va => {
-                request.mode == Mode::FirstFrameToAudioVideo
-                    && endpoint
-                        .is_some_and(|endpoint| endpoint.anchor == H3FactoryEndpointAnchor::First)
-                    && request.rows.condition_audio_rows == 0
-            }
-            Task::Ref2va => {
-                request.mode == Mode::ReferenceToAudioVideo
-                    && endpoint.is_none()
-                    && !request.references.is_empty()
-                    // The reference soundtrack cap rides the target-audio cap:
-                    // both are 32 kHz stereo latents over the same duration.
-                    && request.rows.condition_audio_rows <= self.max_target_audio_rows
-            }
-        };
         // Name every differing axis: one bare mismatch sentence made a
         // wrong-tier step count, an off-canvas size, and an over-cap prompt
         // all read identically, which is undebuggable from a client.
@@ -443,10 +426,10 @@ impl H3PrivateRuntimeEnvelopeRecord {
             u64::from(self.max_steps),
         );
         if !request.synchronized_audio {
-            mismatches.push("synchronized_audio off".to_string());
+            mismatches.push("synchronized_audio false (reviewed true)".to_string());
         }
         if !request.mp4_output {
-            mismatches.push("mp4_output off".to_string());
+            mismatches.push("mp4_output false (reviewed true)".to_string());
         }
         exact_into(
             &mut mismatches,
@@ -454,9 +437,7 @@ impl H3PrivateRuntimeEnvelopeRecord {
             request.endpoints.len() as u64,
             u64::from(self.endpoint_count),
         );
-        if !conditioning_ok {
-            mismatches.push(format!("conditioning shape for {:?}", request.task));
-        }
+        mismatches.extend(self.conditioning_mismatches(request));
         mismatches.extend(self.row_cap_mismatches(&request.rows));
         if !mismatches.is_empty() {
             bail!(
@@ -465,6 +446,69 @@ impl H3PrivateRuntimeEnvelopeRecord {
             )
         }
         Ok(())
+    }
+
+    /// Every conditioning axis this envelope pins, named individually.
+    ///
+    /// This used to be one boolean `conditioning_ok` reported as "conditioning
+    /// shape for Fl2va", which told a client four different things could be
+    /// wrong and which of them was not one of them. Each sub-axis is now its
+    /// own entry carrying the requested value beside the reviewed one, and a
+    /// request that breaks several names all of them.
+    #[cfg(feature = "mp4")]
+    fn conditioning_mismatches(&self, request: &H3FactoryPreparedRequestInput) -> Vec<String> {
+        /// The envelope stores its anchor as one of these three names, so the
+        /// requested side is rendered into the same domain to be comparable.
+        fn requested_anchor(request: &H3FactoryPreparedRequestInput) -> &'static str {
+            match request.endpoints.first().map(|endpoint| endpoint.anchor) {
+                Some(H3FactoryEndpointAnchor::First) => "first",
+                Some(H3FactoryEndpointAnchor::Last) => "last",
+                None => "none",
+            }
+        }
+
+        let mut mismatches = Vec::new();
+        let reviewed_mode = match request.task {
+            Task::Fl2va => Mode::FirstFrameToAudioVideo,
+            Task::Ref2va => Mode::ReferenceToAudioVideo,
+        };
+        if request.mode != reviewed_mode {
+            mismatches.push(format!(
+                "mode {:?} (reviewed {reviewed_mode:?} for {:?})",
+                request.mode, request.task
+            ));
+        }
+        let anchor = requested_anchor(request);
+        if anchor != self.endpoint_anchor {
+            mismatches.push(format!(
+                "endpoint_anchor {anchor} (reviewed {})",
+                self.endpoint_anchor
+            ));
+        }
+        match request.task {
+            Task::Fl2va => {
+                if request.rows.condition_audio_rows != 0 {
+                    mismatches.push(format!(
+                        "condition_audio_rows {} (reviewed 0 for Fl2va)",
+                        request.rows.condition_audio_rows
+                    ));
+                }
+            }
+            Task::Ref2va => {
+                if request.references.is_empty() {
+                    mismatches.push("references 0 (reviewed at least 1 for Ref2va)".to_string());
+                }
+                // The reference soundtrack cap rides the target-audio cap:
+                // both are 32 kHz stereo latents over the same duration.
+                if request.rows.condition_audio_rows > self.max_target_audio_rows {
+                    mismatches.push(format!(
+                        "condition_audio_rows {} (cap {})",
+                        request.rows.condition_audio_rows, self.max_target_audio_rows
+                    ));
+                }
+            }
+        }
+        mismatches
     }
 
     /// Every row ceiling this envelope imposes, named individually.
@@ -4830,7 +4874,7 @@ const fn capture_grid_ceiling(bytes: u64) -> u64 {
 ///   2.5%. The
 ///   provisional headroom is structural: the envelope prices twelve
 ///   2048-square references while the instrumented campaign request packs a
-///   small ordered set (~43k rows, barely above FL2VA's 39.8k), so the grant
+///   small ordered set (~43k rows, barely above FL2VA's 40.8k), so the grant
 ///   sits ~2x above the expected observation. Device floor:
 ///   0.60 + 16.98 = 17.58 GB — clears the campaign card's 24.97 GB sample
 ///   with the transformer's own denoise-phase terms still fitting beside it.
@@ -6731,6 +6775,80 @@ mod tests {
                 .validate_prepared_with_adapter(&request, None)
                 .is_err());
         }
+    }
+
+    /// Refusing is half the job: the message has to say WHICH axes differ and
+    /// what each one's requested and reviewed values are. The composite
+    /// "conditioning shape for Fl2va" entry this replaced named four possible
+    /// faults at once and none of them specifically, and the two output flags
+    /// read as a bare "off" with nothing to compare against.
+    #[cfg(feature = "mp4")]
+    #[test]
+    fn an_envelope_refusal_names_every_failed_axis_with_both_values() {
+        let envelope = record().envelope;
+        let reviewed = prepared_request_for_compact_quality_envelope();
+
+        // One request breaking six axes at once, three of them inside the old
+        // conditioning composite. Every one must appear by name.
+        let mut multi = reviewed.clone();
+        multi.width = 544;
+        multi.grid_points += 1;
+        multi.synchronized_audio = false;
+        multi.mode = Mode::TextToAudioVideo;
+        multi.endpoints[0].anchor = H3FactoryEndpointAnchor::Last;
+        multi.rows.condition_audio_rows = 7;
+        let error = envelope
+            .validate_prepared_with_adapter(&multi, None)
+            .unwrap_err()
+            .to_string();
+        for expected in [
+            &format!("width 544 (reviewed {})", envelope.width),
+            "grid_points",
+            "synchronized_audio false (reviewed true)",
+            "mode TextToAudioVideo (reviewed FirstFrameToAudioVideo for Fl2va)",
+            &format!(
+                "endpoint_anchor last (reviewed {})",
+                envelope.endpoint_anchor
+            ),
+            "condition_audio_rows 7 (reviewed 0 for Fl2va)",
+        ] {
+            assert!(error.contains(expected), "missing {expected:?} in {error}");
+        }
+        // The composite wording is gone, not merely supplemented.
+        assert!(!error.contains("conditioning shape"), "{error}");
+
+        // A Ref2VA envelope decomposes its own conditioning the same way: an
+        // empty reference set and an over-cap soundtrack are separate,
+        // separately numbered entries.
+        let mut ref2va_envelope = envelope.clone();
+        ref2va_envelope.endpoint_count = 0;
+        ref2va_envelope.endpoint_anchor = "none".into();
+        let mut ref2va = reviewed;
+        ref2va.task = Task::Ref2va;
+        ref2va.canonical_model = contract::REF2VA_COMFY.into();
+        ref2va.mode = Mode::ReferenceToAudioVideo;
+        ref2va.endpoints.clear();
+        ref2va.rows.condition_audio_rows = ref2va_envelope.max_target_audio_rows + 3;
+        let error = ref2va_envelope
+            .validate_prepared_with_adapter(&ref2va, None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("references 0 (reviewed at least 1 for Ref2va)"),
+            "{error}"
+        );
+        assert!(
+            error.contains(&format!(
+                "condition_audio_rows {} (cap {})",
+                ref2va_envelope.max_target_audio_rows + 3,
+                ref2va_envelope.max_target_audio_rows
+            )),
+            "{error}"
+        );
+        // Its mode and anchor are the reviewed ones here, so neither is named:
+        // the decomposition reports only what actually differs.
+        assert!(!error.contains("mode "), "{error}");
+        assert!(!error.contains("endpoint_anchor"), "{error}");
     }
 
     fn write_record(record: &H3PrivateRuntimeQualificationRecord) -> (tempfile::TempDir, PathBuf) {
