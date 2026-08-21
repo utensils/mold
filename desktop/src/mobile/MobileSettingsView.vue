@@ -342,7 +342,7 @@ onBeforeUnmount(() => {
       </div>
       <fieldset class="mobile-settings-fieldset">
         <legend>File under</legend>
-        <label class="mobile-photo-setting">
+        <label class="mobile-settings-switch">
           <span>
             <!-- Never a silent write: the tag this files is always shown on
                  Create as the removable ghost chip, before Generate. -->
