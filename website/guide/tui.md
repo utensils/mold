@@ -122,7 +122,7 @@ memory telemetry live in the Machines workspace and the chrome host chip.
 
 ### Essentials
 
-| Row             | Shows                                   | ◀▶ / +/-           | Enter                |
+| Row             | Shows                                   | ◀▶ / +/-             | Enter                |
 | --------------- | --------------------------------------- | -------------------- | -------------------- |
 | Model           | human-readable model name + description | —                    | fuzzy model selector |
 | Size            | `1024 × 1024`                           | cycle aspect presets | type an exact `WxH`  |
