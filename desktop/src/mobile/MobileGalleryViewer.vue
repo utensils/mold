@@ -32,6 +32,7 @@ import {
   type OrganizationUnion,
 } from "@studio/lib/libraryOrganization";
 import type { TagCount } from "@studio/lib/api/galleryOrganization";
+import { mobileIdentityProvenanceRows } from "./identity";
 import MobileLibrarySheet from "./MobileLibrarySheet.vue";
 import {
   validateCollectionName,
@@ -160,7 +161,16 @@ const infoTagDraft = ref("");
 const infoCollectionDraft = ref("");
 const infoCollectionError = ref("");
 const deleteForeverArmed = ref(false);
-const infoAvailable = computed(() => props.organizeEnabled || props.trashed);
+/**
+ * Face-identity provenance (#1224): names and digests only — saved metadata
+ * never carries the photo itself, which is exactly why the digest is shown.
+ */
+const identityRows = computed(() => mobileIdentityProvenanceRows(props.item.metadata));
+// Identity provenance is worth reading on a host that has no organization
+// capability at all, so it opens the Info sheet in its own right.
+const infoAvailable = computed(
+  () => props.organizeEnabled || props.trashed || identityRows.value !== null,
+);
 const savedTitle = computed(() => props.organization?.title ?? null);
 /** Header line: the print's title, else its prompt, else the filename. */
 const viewerTitle = computed(() =>
@@ -955,6 +965,15 @@ onBeforeUnmount(() => {
           {{ infoCollectionError }}
         </p>
       </template>
+      <template v-if="identityRows">
+        <p class="mobile-library-sheet-label">Identity</p>
+        <dl class="gallery-viewer-identity" data-test="gallery-viewer-identity">
+          <template v-for="row in identityRows" :key="row.label">
+            <dt>{{ row.label }}</dt>
+            <dd :title="row.title">{{ row.value }}</dd>
+          </template>
+        </dl>
+      </template>
       <template v-if="trashed">
         <p class="status-line" data-test="gallery-viewer-purge">{{ purgeCopy }}</p>
         <button
@@ -984,6 +1003,25 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.gallery-viewer-identity {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 4px 12px;
+  margin: 0;
+}
+
+.gallery-viewer-identity dt {
+  color: var(--ink-3);
+  font-size: 13px;
+}
+
+.gallery-viewer-identity dd {
+  margin: 0;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
 .gallery-viewer-media,
 .gallery-viewer-placeholder {
   touch-action: pan-y;

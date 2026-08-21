@@ -148,6 +148,7 @@ vi.mock("../lib/generationRecovery", async (importOriginal) => {
 });
 
 import MobileApp from "./MobileApp.vue";
+import IdentityPhotoWell from "@studio/components/IdentityPhotoWell.vue";
 import MobileImagePickerSheet from "./MobileImagePickerSheet.vue";
 import MobileLoraControls from "./MobileLoraControls.vue";
 import MobileSourceControls from "./MobileSourceControls.vue";
@@ -10285,5 +10286,534 @@ describe("MobileApp Create File under", () => {
     expect(wrapper!.get("[data-test='mobile-file-under-filename']").text()).toMatch(
       /files as mold-ltx2-q8-\d+~smurfs\./,
     );
+  });
+});
+
+describe("MobileApp identity photo", () => {
+  /** A 1×1 PNG the shared header pre-checks accept. */
+  const PNG_1X1 =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+
+  const identityModel: ModelEntry = {
+    name: "flux-dev:q8",
+    family: "flux",
+    size_gb: 12,
+    is_loaded: false,
+    hf_repo: "example/flux",
+    default_steps: 20,
+    default_guidance: 3.5,
+    default_width: 1024,
+    default_height: 1024,
+    description: "Identity-qualified checkpoint",
+    downloaded: true,
+    supports_identity: true,
+  };
+  const plainModel: ModelEntry = {
+    ...identityModel,
+    name: "flux-schnell:q8",
+    description: "No identity adapter",
+    supports_identity: false,
+  };
+
+  function serveIdentity(models: ModelEntry[], gallery: GalleryImage[] = []): void {
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve(models);
+      if (path === "/api/gallery") return Promise.resolve(gallery);
+      if (path === "/api/capabilities") return Promise.resolve({});
+      if (path === "/api/activity") {
+        return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
+      }
+      if (path.startsWith("/api/catalog/installed")) return Promise.resolve([]);
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+  }
+
+  function photoFile(name = "ada.png"): File {
+    const binary = atob(PNG_1X1);
+    const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+    return new File([bytes], name, { type: "image/png" });
+  }
+
+  function well() {
+    const found = wrapper?.findComponent(IdentityPhotoWell);
+    if (!found?.exists()) throw new Error("Identity well is not mounted");
+    return found;
+  }
+
+  async function attachPhoto(name = "ada.png"): Promise<void> {
+    well().vm.$emit("file", photoFile(name));
+    await flushPromises();
+  }
+
+  async function develop(prompt = "a portrait in warm light"): Promise<void> {
+    await fieldControl("Prompt").setValue(prompt);
+    await wrapper!.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+  }
+
+  it("mounts the well and the two knobs only for a checkpoint that advertises support", async () => {
+    serveIdentity([identityModel, plainModel]);
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    expect(wrapper.find("[data-test='mobile-identity-well']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='mobile-identity-section']").exists()).toBe(true);
+
+    await fieldControl("Model").setValue(plainModel.name);
+    await flushPromises();
+
+    // Absent, not disabled: a control for a capability this checkpoint does
+    // not have would be a dead end.
+    expect(wrapper.find("[data-test='mobile-identity-well']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='mobile-identity-section']").exists()).toBe(false);
+  });
+
+  it("parks a staged photo across a capability-losing model switch instead of blocking Develop", async () => {
+    serveIdentity([identityModel, plainModel]);
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await attachPhoto();
+    expect(well().props("image")).toBe(PNG_1X1);
+
+    await fieldControl("Model").setValue(plainModel.name);
+    await fieldControl("Prompt").setValue("a parked identity print");
+    await flushPromises();
+
+    expect(wrapper.find("[data-test='mobile-identity-well']").exists()).toBe(false);
+    // Parking is not a refusal: the partition simply does not travel.
+    expect(
+      wrapper.get("[data-test='mobile-develop-button']").attributes("disabled"),
+    ).toBeUndefined();
+
+    await develop("a parked identity print");
+    expect(openStreams).toHaveLength(1);
+    const parked = openStreams[0]!.options.body as Record<string, unknown>;
+    expect(parked.id_image).toBeUndefined();
+    expect(parked.id_image_name).toBeUndefined();
+
+    // Selecting a qualified checkpoint again brings the photo back untouched.
+    await fieldControl("Model").setValue(identityModel.name);
+    await flushPromises();
+    expect(well().props("image")).toBe(PNG_1X1);
+    expect(well().props("filename")).toBe("ada.png");
+  });
+
+  it("ships the four request fields, with the photo never fitted to the canvas", async () => {
+    serveIdentity([identityModel]);
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await attachPhoto();
+    await wrapper.get("[data-test='mobile-identity-weight']").setValue("0.75");
+    await wrapper.get("[data-test='mobile-identity-start-step']").setValue("3");
+    await flushPromises();
+
+    await develop();
+
+    const body = openStreams[0]!.options.body as Record<string, unknown>;
+    expect(body.id_image).toBe(PNG_1X1);
+    expect(body.id_image_name).toBe("ada.png");
+    expect(body.id_weight).toBe(0.75);
+    expect(body.id_start_step).toBe(3);
+    // A face reference is not a composition input: no source-fit provenance,
+    // and the bytes are exactly what was picked.
+    expect(body.source_fit).toBeUndefined();
+    // The photo is kept under the digest of what shipped so Use as prompt can
+    // look it back up; metadata records the digest, never the face.
+    expect(persistGenerationSourceMedia).toHaveBeenCalledWith(
+      PNG_1X1,
+      expect.objectContaining({ filename: "ada.png" }),
+    );
+  });
+
+  it("leaves the knobs absent until touched so the server's defaults apply", async () => {
+    serveIdentity([identityModel]);
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await attachPhoto();
+
+    await develop();
+
+    const body = openStreams[0]!.options.body as Record<string, unknown>;
+    expect(body.id_image).toBe(PNG_1X1);
+    expect(body.id_weight).toBeUndefined();
+    expect(body.id_start_step).toBeUndefined();
+  });
+
+  it("counts only the two knobs in the Advanced badge", async () => {
+    serveIdentity([identityModel]);
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await attachPhoto();
+    await flushPromises();
+
+    // The photo well is primary-form media, exactly like the source wells.
+    expect(wrapper.find("[data-test='mobile-advanced-trigger-count']").exists()).toBe(false);
+
+    await wrapper.get("[data-test='mobile-identity-weight']").setValue("1.4");
+    await flushPromises();
+    expect(wrapper.get("[data-test='mobile-advanced-trigger-count']").text()).toBe("1");
+
+    await wrapper.get("[data-test='mobile-identity-start-step']").setValue("2");
+    await flushPromises();
+    expect(wrapper.get("[data-test='mobile-advanced-trigger-count']").text()).toBe("2");
+
+    // Reset clears the knobs and keeps the attached face where the user put it.
+    await wrapper.get("[data-test='mobile-advanced-reset']").trigger("click");
+    await flushPromises();
+    expect(wrapper.find("[data-test='mobile-advanced-trigger-count']").exists()).toBe(false);
+    expect(well().props("image")).toBe(PNG_1X1);
+  });
+
+  it("refuses an unsupported photo inline and never stages it", async () => {
+    serveIdentity([identityModel]);
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    well().vm.$emit("file", new File(["nope"], "face.gif", { type: "image/gif" }));
+    await flushPromises();
+
+    expect(wrapper.get("[data-test='identity-conditioning-error']").text()).toContain(
+      "PNG or JPEG",
+    );
+    expect(well().props("image")).toBeNull();
+  });
+
+  it("names the refusal inline and blocks Develop when a knob has no photo", async () => {
+    serveIdentity([identityModel]);
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    await wrapper.get("[data-test='mobile-identity-weight']").setValue("1.4");
+    await fieldControl("Prompt").setValue("a portrait with no face attached");
+    await flushPromises();
+
+    expect(wrapper.get("[data-test='mobile-identity-error']").text()).toContain(
+      "Attach an identity photo",
+    );
+    expect(wrapper.get("[data-test='mobile-develop-button']").attributes("disabled")).toBe("");
+    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+    expect(openStreams).toHaveLength(0);
+  });
+
+  it("carries the identity partition onto every prepared Batch N sibling", async () => {
+    serveIdentity([identityModel]);
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await attachPhoto();
+    await wrapper.get("[data-test='mobile-identity-weight']").setValue("0.6");
+    await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
+    await fieldControl("Prompt").setValue("two portrait studies");
+    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+
+    const editors = wrapper.findAll(".mobile-prepared-editor");
+    expect(editors).toHaveLength(2);
+    await wrapper.get("[data-test='mobile-develop-prepared']").trigger("click");
+    await flushPromises();
+
+    expect(openStreams).toHaveLength(2);
+    for (const stream of openStreams) {
+      const body = stream.options.body as Record<string, unknown>;
+      expect(body.id_image).toBe(PNG_1X1);
+      expect(body.id_weight).toBe(0.6);
+    }
+  });
+
+  it("stales reviewed work when the identity photo changes, like any conditioning media", async () => {
+    serveIdentity([identityModel]);
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    await fieldControl("Prompt").setValue("a portrait at dusk");
+    await wrapper.get("[data-test='mobile-prompt-remix']").trigger("click");
+    await flushPromises();
+    expect(wrapper.get("[data-test='mobile-remix-review']").text()).not.toContain(
+      "Conditioning media changed",
+    );
+
+    await attachPhoto();
+
+    expect(wrapper.get("[data-test='mobile-remix-review']").text()).toContain(
+      "Conditioning media changed after this remix was prepared.",
+    );
+  });
+
+  it("shows identity provenance in the Library viewer's Info sheet", async () => {
+    const identityPrint: GalleryImage = {
+      ...print,
+      filename: "portrait.png",
+      format: "png",
+      metadata: {
+        ...print.metadata,
+        model: identityModel.name,
+        id_image_name: "ada.png",
+        id_image_sha256: "b".repeat(64),
+        id_weight: 0.8,
+        id_start_step: 2,
+      },
+    };
+    serveIdentity([identityModel], [identityPrint]);
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await vi.waitFor(() => expect(wrapper?.find("[data-test='gallery-item']").exists()).toBe(true));
+    await wrapper.get("[data-test='gallery-item']").trigger("click");
+    await flushPromises();
+    await wrapper.get("[data-test='gallery-viewer-info']").trigger("click");
+    await flushPromises();
+
+    const facts = wrapper.get("[data-test='gallery-viewer-identity']").text();
+    expect(facts).toContain(`ada.png · ${"b".repeat(12)}`);
+    expect(facts).toContain("0.8 · from step 2");
+  });
+
+  it("restores the knobs and re-attaches the photo on Use as prompt", async () => {
+    const identityPrint: GalleryImage = {
+      ...print,
+      filename: "portrait.png",
+      format: "png",
+      metadata: {
+        ...print.metadata,
+        model: identityModel.name,
+        id_image_name: "ada.png",
+        id_image_sha256: "c".repeat(64),
+        id_weight: 0.9,
+        id_start_step: 1,
+      },
+    };
+    serveIdentity([identityModel], [identityPrint]);
+    restoreGenerationSourceMedia.mockImplementation((sha256: string | null | undefined) =>
+      Promise.resolve(sha256 === "c".repeat(64) ? { base64: PNG_1X1, filename: "ada.png" } : null),
+    );
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await vi.waitFor(() => expect(wrapper?.find("[data-test='gallery-item']").exists()).toBe(true));
+    await wrapper.get("[data-test='gallery-item']").trigger("click");
+    await wrapper.get("[data-test='gallery-viewer-reuse']").trigger("click");
+    await flushPromises();
+
+    expect(well().props("image")).toBe(PNG_1X1);
+    expect(well().props("filename")).toBe("ada.png");
+    expect(
+      (wrapper.get("[data-test='mobile-identity-weight']").element as HTMLInputElement).value,
+    ).toBe("0.9");
+    expect(
+      (wrapper.get("[data-test='mobile-identity-start-step']").element as HTMLInputElement).value,
+    ).toBe("1");
+  });
+
+  it("discloses a stash miss inline rather than rendering a different face", async () => {
+    const identityPrint: GalleryImage = {
+      ...print,
+      filename: "portrait.png",
+      format: "png",
+      metadata: {
+        ...print.metadata,
+        model: identityModel.name,
+        id_image_name: "ada.png",
+        id_image_sha256: "d".repeat(64),
+        id_weight: 0.9,
+      },
+    };
+    serveIdentity([identityModel], [identityPrint]);
+    restoreGenerationSourceMedia.mockResolvedValue(null);
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await vi.waitFor(() => expect(wrapper?.find("[data-test='gallery-item']").exists()).toBe(true));
+    await wrapper.get("[data-test='gallery-item']").trigger("click");
+    await wrapper.get("[data-test='gallery-viewer-reuse']").trigger("click");
+    await flushPromises();
+
+    // Persistent inline copy, never a toast — and the well says the same thing
+    // beside the control the user has to correct.
+    expect(wrapper.get("[data-test='mobile-generation-summary']").text()).toContain(
+      "not on this device",
+    );
+    expect(wrapper.get("[data-test='identity-conditioning-error']").text()).toContain(
+      "not on this device",
+    );
+    expect(wrapper.get("[data-test='mobile-develop-button']").attributes("disabled")).toBe("");
+  });
+
+  it("blocks the prepared set's own Develop when the photo is cleared under a live knob", async () => {
+    // The reviewed card has its own Develop, which never consults the
+    // composer's blocker. Without the identity reason travelling with the
+    // reviewed work, `buildRequest` would silently drop the partition and
+    // every variation would render without the face.
+    serveIdentity([identityModel]);
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await attachPhoto();
+    await wrapper.get("[data-test='mobile-identity-weight']").setValue("0.6");
+    await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
+    await fieldControl("Prompt").setValue("two portrait studies");
+    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+    const preparedDevelop = wrapper.get("[data-test='mobile-develop-prepared']");
+    expect(preparedDevelop.attributes("disabled")).toBeUndefined();
+
+    well().vm.$emit("clear");
+    await flushPromises();
+
+    const card = wrapper.get("[data-test='mobile-prepared-expansion']");
+    expect(card.text()).toContain("Attach an identity photo");
+    expect(wrapper.get("[data-test='mobile-develop-prepared']").attributes("disabled")).toBe("");
+    await wrapper.get("[data-test='mobile-develop-prepared']").trigger("click");
+    await flushPromises();
+    expect(openStreams).toHaveLength(0);
+
+    // Reattaching the same face makes the reviewed set submittable again.
+    await attachPhoto();
+    expect(
+      wrapper.get("[data-test='mobile-develop-prepared']").attributes("disabled"),
+    ).toBeUndefined();
+    await wrapper.get("[data-test='mobile-develop-prepared']").trigger("click");
+    await flushPromises();
+    expect(openStreams).toHaveLength(2);
+    for (const stream of openStreams) {
+      expect((stream.options.body as Record<string, unknown>).id_image).toBe(PNG_1X1);
+    }
+  });
+
+  it("never routes an identity print to a co-owner that does not advertise support", async () => {
+    // The picker row is the deduplicated fleet union under Auto, so the
+    // machine it came from is not necessarily the machine that runs the
+    // print. Only the owners that advertise identity themselves may be asked
+    // for a plan — even when the other one would answer sooner.
+    const renderTarget = {
+      baseUrl: "http://render.tailnet.ts.net:7680",
+      apiKey: "render-secret",
+    };
+    localStorage.setItem(
+      "mold.mobile.hosts.v1",
+      JSON.stringify([
+        {
+          id: "studio-id",
+          name: "Studio",
+          baseUrl: target.baseUrl,
+          hostname: "studio",
+          instanceId: "studio-id",
+        },
+        {
+          id: "render-id",
+          name: "Render",
+          baseUrl: renderTarget.baseUrl,
+          hostname: "render",
+          instanceId: "render-id",
+        },
+      ]),
+    );
+    invoke.mockImplementation((command: string, args?: { hostId?: string }) =>
+      Promise.resolve(
+        command === "keychain_get_api_key"
+          ? args?.hostId === "render-id"
+            ? renderTarget.apiKey
+            : target.apiKey
+          : null,
+      ),
+    );
+    apiJsonTo.mockImplementation((route: { baseUrl: string }, path: string) => {
+      const render = route.baseUrl === renderTarget.baseUrl;
+      if (path === "/api/status") {
+        return Promise.resolve({
+          ...status,
+          hostname: render ? "render" : "studio",
+          instance_id: render ? "render-id" : "studio-id",
+        });
+      }
+      if (path === "/api/models") {
+        // Both machines hold the model; only Studio links the adapter.
+        return Promise.resolve([
+          render ? { ...identityModel, supports_identity: false } : identityModel,
+        ]);
+      }
+      if (path === "/api/capabilities") return Promise.resolve({});
+      if (path === "/api/gallery") return Promise.resolve([]);
+      if (path === "/api/activity") {
+        return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
+      }
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    // Render would win on speed alone.
+    previewGenerationPlacement.mockImplementation((probe: { baseUrl: string }) => {
+      const preview = plannedPlacement();
+      preview.candidate.predicted_completion_after_ms =
+        probe.baseUrl === renderTarget.baseUrl ? 10 : 9_000;
+      return Promise.resolve(preview);
+    });
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await attachPhoto();
+    await develop("a routed portrait");
+
+    const probed = previewGenerationPlacement.mock.calls.map(
+      (call: unknown[]) => (call[0] as { baseUrl: string }).baseUrl,
+    );
+    expect(probed).toEqual([target.baseUrl]);
+    expect(openStreams).toHaveLength(1);
+    expect(openStreams[0]?.options.target).toEqual(target);
+    expect((openStreams[0]?.options.body as Record<string, unknown>).id_image).toBe(PNG_1X1);
+  });
+
+  it("refuses an identity print on a server too old to answer the placement preview", async () => {
+    // That server predates the identity partition: it would ignore the face
+    // and return a print of a stranger rather than an error, so the legacy
+    // placement fallback is closed for identity work.
+    serveIdentity([identityModel]);
+    previewGenerationPlacement.mockRejectedValue(new ApiError("not found", 404));
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await attachPhoto();
+    await develop("a portrait on an old machine");
+
+    expect(openStreams).toHaveLength(0);
+    const status = wrapper.get("[data-test='mobile-generation-summary']").text();
+    expect(status).toContain("older Mold");
+    expect(status).toContain("Nothing was queued.");
+  });
+
+  it("refuses an oversized photo without ever reading it", async () => {
+    serveIdentity([identityModel]);
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    const arrayBuffer = vi.fn(() => Promise.resolve(new ArrayBuffer(0)));
+    const huge = {
+      name: "huge.png",
+      type: "image/png",
+      size: 17 * 1024 * 1024,
+      arrayBuffer,
+    } as unknown as File;
+    well().vm.$emit("file", huge);
+    await flushPromises();
+
+    expect(arrayBuffer).not.toHaveBeenCalled();
+    expect(wrapper.get("[data-test='identity-conditioning-error']").text()).toContain(
+      "16 MiB or smaller",
+    );
+    expect(well().props("image")).toBeNull();
+  });
+
+  it("keeps a fractional start step and names the whole-number rule", async () => {
+    serveIdentity([identityModel]);
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await attachPhoto();
+    await fieldControl("Prompt").setValue("a portrait at 2.9 steps");
+    await wrapper.get("[data-test='mobile-identity-start-step']").setValue("2.9");
+    await flushPromises();
+
+    expect(wrapper.get("[data-test='mobile-identity-error']").text()).toContain("whole number");
+    expect(wrapper.get("[data-test='mobile-develop-button']").attributes("disabled")).toBe("");
+    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+    expect(openStreams).toHaveLength(0);
   });
 });

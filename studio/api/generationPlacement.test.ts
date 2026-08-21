@@ -50,6 +50,22 @@ describe("generation placement preview", () => {
     ).toBe(true);
   });
 
+  test("requires authority for an identity request so it never routes legacy", () => {
+    // A server that answers the preview with 404/405 predates the identity
+    // partition and would ignore `id_image`, rendering a stranger's face
+    // instead of refusing. Unlike `references`, the VALUE is what matters —
+    // the field only ever ships with bytes in it.
+    expect(
+      requiresAuthoritativePlacement({ model: "flux", id_image: "AAAA" }),
+    ).toBe(true);
+    expect(
+      requiresAuthoritativePlacement({ model: "flux", id_image: "" }),
+    ).toBe(false);
+    expect(
+      requiresAuthoritativePlacement({ model: "flux", id_weight: 1.2 }),
+    ).toBe(false);
+  });
+
   test("previews sibling fanout as copies of a one-image request without mutating input", () => {
     const request = { model: "preview", batch_size: 4, prompt: "reviewed" };
     expect(previewRequestForSiblingFanout(request, 4)).toEqual({
