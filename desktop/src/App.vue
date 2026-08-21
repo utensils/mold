@@ -144,6 +144,12 @@ function onKeydown(e: KeyboardEvent) {
   // chrome as selected. Editable fields keep their native in-field Select All.
   if (isSelectAllChord(e) && !allowsNativeSelectAll(document.activeElement)) {
     e.preventDefault();
+    // Library owns a real Select All operation. Dispatch from the shell so it
+    // remains reliable even when WebKit delivers the native command to this
+    // long-lived listener before the route view's listener.
+    if (router.currentRoute.value.path === "/library") {
+      window.dispatchEvent(new CustomEvent("mold:library-select-all"));
+    }
     return;
   }
   const action = resolveShellShortcut(e);

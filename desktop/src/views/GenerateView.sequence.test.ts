@@ -120,7 +120,7 @@ beforeEach(() => {
 afterEach(() => (document.body.innerHTML = ""));
 
 describe("GenerateView — sequence output", () => {
-  it("offers Save image and Copy file path on a completed still", async () => {
+  it("offers Save image, Use as source, and Copy file path on a completed still", async () => {
     readyLocal();
     installedPayload = [imageModel];
     useModelStore().all = [imageModel];
@@ -155,7 +155,17 @@ describe("GenerateView — sequence output", () => {
       "separator" in entry ? [] : [entry.label],
     );
     expect(labels).toContain("Save image");
+    expect(labels).toContain("Use as source");
     expect(labels).toContain("Copy file path");
+
+    const useAsSource = useContextMenuStore().entries.find(
+      (entry) => !("separator" in entry) && entry.label === "Use as source",
+    );
+    expect(useAsSource).toMatchObject({ disabled: false });
+    useContextMenuStore().activate(useAsSource!);
+    expect(useGenerateFormStore().form.sourceImage).toBe("aW1hZ2U=");
+    expect(useGenerateFormStore().form.sourceImageName).toBe("remote-print.png");
+    expect(useGenerateFormStore().form.sourceFit).toEqual({ mode: "lanczos-resize" });
   });
 
   it.each([
