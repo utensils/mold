@@ -2006,7 +2006,7 @@ mod tests {
             crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests(),
         );
         let request = freezable_amend_request(&state, home.path()).await;
-        let (_status, Json(created)) = with_mold_home(home.path(), || {
+        let (_status, _headers, Json(created)) = with_mold_home(home.path(), || {
             futures::executor::block_on(create_chain_job(
                 State(state.clone()),
                 HeaderMap::new(),
