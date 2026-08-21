@@ -9,7 +9,7 @@ product
 Mold serves developers, artists, technical creators, automation authors, and
 agents generating images and video locally or through a remote Mold engine.
 They may work from the CLI, a shell script, CI, a custom API client, a dense
-desktop studio, or an iPhone remote companion. Across those interfaces, model
+desktop studio, or a phone remote companion. Across those interfaces, model
 choice, host health, GPU constraints, queue and download state, parameters, and
 output provenance must stay legible and predictable.
 
@@ -24,7 +24,7 @@ that foundation rather than replacing it.
 Mold makes local AI image and video generation observable and controllable.
 The desktop app should let users configure an engine, compose and queue work,
 understand what the GPU is doing, inspect results, and reuse successful settings
-without leaving the task. The iPhone app should make the remote parts of that
+without leaving the task. The phone apps should make the remote parts of that
 loop first-class without pretending the phone is an inference host: connect and
 inspect servers, queue generation, manage models, browse media, and reuse
 successful work from anywhere the host is reachable. Pairing should be a
@@ -46,7 +46,7 @@ Avoid generic AI dashboards, decorative glass panels, neon-on-black cyberpunk sh
 - Treat generated media as the work, with chrome supporting it rather than competing with it.
 - Use color semantically: latent, active, complete, and failed states must remain distinguishable in every theme.
 - Keep expert workflows compact and familiar: keyboard-first on desktop,
-  direct and touch-first on iPhone.
+  direct and touch-first on phones.
 - Preserve CLI parity and composability: graphical conveniences must not make
   core workflows inaccessible to scripts, agents, or headless environments.
 - Let themes change atmosphere without changing information hierarchy or control behavior.

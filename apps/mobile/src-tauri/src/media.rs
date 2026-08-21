@@ -165,7 +165,9 @@ pub async fn copy_image_to_clipboard(
             #[cfg(not(target_os = "ios"))]
             {
                 let _ = (_webview, bytes);
-                let _ = sender.send(Ok(()));
+                let _ = sender.send(Err(
+                    "copying images is not implemented on Android yet".to_string(),
+                ));
             }
         })
         .map_err(|error| format!("could not copy image: {error}"))?;
@@ -219,7 +221,9 @@ pub async fn save_image_to_photos(
             #[cfg(not(target_os = "ios"))]
             {
                 let _ = (_webview, bytes);
-                let _ = sender.send(Ok(()));
+                let _ = sender.send(Err(
+                    "saving images is not implemented on Android yet".to_string(),
+                ));
             }
         })
         .map_err(|error| format!("could not save image to Photos: {error}"))?;
@@ -318,7 +322,7 @@ pub async fn save_video_to_photos(url: String) -> Result<(), String> {
     return download_and_save_video(url).await;
 
     #[cfg(not(target_os = "ios"))]
-    Ok(())
+    Err("saving videos is not implemented on Android yet".to_string())
 }
 
 #[tauri::command]
@@ -497,7 +501,7 @@ pub async fn share_exported_animation(
     #[cfg(not(target_os = "ios"))]
     {
         let _ = (window, api_key, request, filename, reuse_key);
-        Ok("shared".to_string())
+        Err("sharing animations is not implemented on Android yet".to_string())
     }
 }
 

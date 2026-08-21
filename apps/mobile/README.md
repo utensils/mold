@@ -1,11 +1,15 @@
-# Mold for iPhone
+# Mold mobile
 
 Mold is equally owned and maintained by core contributors James Brink and
 Jeffrey Dilley.
 
-Mold for iPhone is a remote-only Tauri 2 client. It never links or embeds the
-GPU inference stack; a saved Mold server owns the models, queue, downloads,
-generation work, and gallery media.
+Mold mobile is a remote-only Tauri 2 client. It never links or embeds the GPU
+inference stack; a saved Mold server owns the models, queue, downloads,
+generation work, and gallery media. The iPhone app is the shipped product. The
+Android project is buildable groundwork that deliberately reuses this crate and
+Vue frontend; secure API-key storage, Android NSD discovery, native media
+actions, QR scanning, Android-specific polish, CI, and Play distribution remain
+implementation work before an Android release.
 
 The app is designed for iPhone first and supports iOS 17 or later. iPad is a
 responsive secondary target.
@@ -24,16 +28,22 @@ path.
   host targets, SSE handling, generation capabilities, the form/request
   builder, source fitting, gallery media, catalog helpers, and themes
 - Generated Apple project: `apps/mobile/src-tauri/gen/apple`
+- Generated Android project: `apps/mobile/src-tauri/gen/android`
 - Bundle identifier: `com.utensils.mold`
 - Minimum iOS version: 17.0
+- Android compile/target SDK: 36; minimum SDK: 24
 
-The thin mobile crate is excluded from the root Cargo workspace so an iOS build
-never cross-compiles the desktop server or inference dependency tree. Native
-commands are intentionally limited to platform responsibilities:
+The thin mobile crate is excluded from the root Cargo workspace so a phone
+build never cross-compiles the desktop server or inference dependency tree.
+Native commands are intentionally limited to platform responsibilities:
 
 - Keychain storage for per-host API keys
 - Bonjour/DNS-SD discovery of `_mold._tcp`
 - UIKit appearance synchronization for readable system chrome
+
+Android must provide those same contracts through Android Keystore, NSD,
+MediaStore/share intents, system-bar appearance, and a barcode-scanner plugin.
+Do not fork the product UI or remote HTTP/SSE logic to implement them.
 
 Everything a remote Mold server can answer uses the same authenticated HTTP
 and SSE contract as desktop. Do not import desktop stores that assume a local
@@ -444,8 +454,10 @@ WebView local storage contains non-secret mobile state:
   per-host latest-print timestamps and the first-visit marker for New badges
 
 Per-host API keys live in the iOS Keychain under
-`com.utensils.mold.remote-api-key`. Never move them into local storage, query
-parameters, logs, or generated project files.
+`com.utensils.mold.remote-api-key`. Android must use Keystore-backed encrypted
+storage before authenticated hosts are enabled there. Never move keys into
+local storage, query parameters, logs, generated project files, or plain Android
+SharedPreferences.
 
 Mobile pairing uses authenticated `POST /api/pairing/sessions` and the
 one-time-token `POST /api/pairing/claim`. The claim route is intentionally the
@@ -471,6 +483,31 @@ seeking without exposing the long-lived API key. Keep the image-only fallback
 for older hosts, but never buffer a whole video as that fallback.
 
 ## Local development
+
+### Android
+
+The default setup keeps Android Studio and the large SDK, NDK, emulator, AVD,
+Gradle, Cargo, and Bun caches under `/Volumes/ExternalStorage/Android`. Override
+the root with `MOLD_ANDROID_ROOT` when the volume is mounted elsewhere.
+
+```bash
+nix develop
+./scripts/android.sh setup # first machine setup only
+android-doctor             # print and verify every resolved path
+android-emulator           # boot Mold_API_37 (Pixel 9 Pro / Android 17)
+android-dev                # Tauri hot reload
+android-check              # debug ARM64 APK build
+android-run                # production-mode run
+android-build              # ARM64/ARMv7 Google Play AAB
+```
+
+`android-studio` is installed as
+`/Volumes/ExternalStorage/Android/Android Studio.app`. Open the generated
+project with `./scripts/android.sh studio`. The helper defaults to NDK
+`27.0.12077973`, which is pinned by the generated Tauri project; change it only
+with a deliberate template/toolchain upgrade.
+
+### iOS
 
 Enter the Nix development shell on macOS. Xcode and CocoaPods are required.
 
@@ -521,6 +558,8 @@ bun run test
 bun run build:mobile
 
 cd ..
+android-doctor
+android-check
 ./scripts/tests/ios-release-assets.sh
 ./scripts/ios.sh check
 ./scripts/ios.sh simulator

@@ -1,5 +1,6 @@
-//! Thin native shell for Mold on iPhone. Generation and gallery logic use the
-//! shared Vue wire types while the phone connects only to remote Mold servers.
+//! Thin native shell for Mold on iPhone and Android. Generation and gallery
+//! logic use the shared Vue wire types while the phone connects only to remote
+//! Mold servers.
 
 mod appearance;
 mod discovery;
@@ -106,12 +107,27 @@ mod tests {
 
     #[test]
     fn ios_registers_mobile_pairing_deep_links() {
-        let config = include_str!("../tauri.conf.json");
+        let config: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).expect("valid Tauri config");
         let generated_plist = include_str!("../gen/apple/mold-mobile_iOS/Info.plist");
-        assert!(config.contains("\"deep-link\""));
-        assert!(config.contains("\"scheme\": [\"mold\"]"));
+        assert_eq!(
+            config["plugins"]["deep-link"]["mobile"][0]["scheme"][0],
+            "mold"
+        );
         assert!(generated_plist.contains("<key>CFBundleURLTypes</key>"));
         assert!(generated_plist.contains("<string>mold</string>"));
+    }
+
+    #[test]
+    fn native_capabilities_cover_ios_and_android() {
+        let capability: serde_json::Value =
+            serde_json::from_str(include_str!("../capabilities/default.json"))
+                .expect("valid mobile capability");
+        let platforms = capability["platforms"]
+            .as_array()
+            .expect("mobile capability platforms");
+        assert!(platforms.iter().any(|platform| platform == "iOS"));
+        assert!(platforms.iter().any(|platform| platform == "android"));
     }
 
     #[cfg(target_os = "ios")]

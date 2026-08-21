@@ -38,6 +38,7 @@ const {
   getCurrentDeepLinks,
   onOpenDeepLinks,
   unlistenDeepLinks,
+  isNativeAndroidRuntime,
   isNativeIOSRuntime,
 } = vi.hoisted(() => ({
   invoke: vi.fn(),
@@ -63,6 +64,7 @@ const {
   getCurrentDeepLinks: vi.fn(),
   onOpenDeepLinks: vi.fn(),
   unlistenDeepLinks: vi.fn(),
+  isNativeAndroidRuntime: vi.fn(),
   isNativeIOSRuntime: vi.fn(),
 }));
 
@@ -114,7 +116,7 @@ vi.mock("@studio/lib/generationSourceMedia", () => ({
   persistGenerationSourceMedia,
   restoreGenerationSourceMedia,
 }));
-vi.mock("./platform", () => ({ isNativeIOSRuntime }));
+vi.mock("./platform", () => ({ isNativeAndroidRuntime, isNativeIOSRuntime }));
 
 function plannedPlacement() {
   return {
@@ -373,6 +375,7 @@ beforeEach(() => {
   getCurrentDeepLinks.mockReset().mockResolvedValue(null);
   unlistenDeepLinks.mockReset();
   onOpenDeepLinks.mockReset().mockResolvedValue(unlistenDeepLinks);
+  isNativeAndroidRuntime.mockReset().mockReturnValue(false);
   isNativeIOSRuntime.mockReset().mockReturnValue(false);
   objectUrlSequence = 0;
   URL.createObjectURL = vi.fn(() => `blob:thumbnail-${++objectUrlSequence}`);
@@ -7666,6 +7669,20 @@ describe("MobileApp host and catalog coordination", () => {
     await wrapper.get("[data-test='mobile-scan-pairing']").trigger("click");
     await flushPromises();
   }
+
+  it("shows the honest Android scaffold instead of unsupported native controls", async () => {
+    isNativeAndroidRuntime.mockReturnValue(true);
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-hosts']").trigger("click");
+
+    expect(wrapper.get("[data-test='mobile-android-foundation-note']").text()).toContain(
+      "secure keys, camera pairing, and nearby discovery are next",
+    );
+    expect(wrapper.find("[data-test='mobile-scan-pairing']").exists()).toBe(false);
+    expect(wrapper.text()).not.toContain("Discover nearby");
+    expect(wrapper.text()).not.toContain("API key");
+  });
 
   it("settles first-run camera permission before opening the pairing scanner", async () => {
     checkBarcodeScannerPermissions.mockResolvedValue("prompt");

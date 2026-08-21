@@ -14,15 +14,21 @@ export ANDROID_SDK_ROOT="$ANDROID_HOME"
 export ANDROID_USER_HOME="${MOLD_ANDROID_USER_HOME:-$ANDROID_ROOT/user-home}"
 export ANDROID_AVD_HOME="${MOLD_ANDROID_AVD_HOME:-$ANDROID_ROOT/avd}"
 export GRADLE_USER_HOME="${MOLD_ANDROID_GRADLE_HOME:-$ANDROID_ROOT/gradle}"
+export CARGO_TARGET_DIR="${MOLD_ANDROID_CARGO_TARGET_DIR:-$ANDROID_ROOT/cargo-target}"
+export BUN_INSTALL_CACHE_DIR="${MOLD_ANDROID_BUN_CACHE_DIR:-$ANDROID_ROOT/bun-cache}"
 
 STUDIO_APP="${MOLD_ANDROID_STUDIO_APP:-$ANDROID_ROOT/Android Studio.app}"
-if [[ -z "${JAVA_HOME:-}" && -d "$STUDIO_APP/Contents/jbr/Contents/Home" ]]; then
+if [[ -n "${MOLD_ANDROID_JAVA_HOME:-}" ]]; then
+  export JAVA_HOME="$MOLD_ANDROID_JAVA_HOME"
+elif command -v java >/dev/null; then
+  export JAVA_HOME="$(cd "$(dirname "$(realpath "$(command -v java)")")/.." && pwd)"
+elif [[ -d "$STUDIO_APP/Contents/jbr/Contents/Home" ]]; then
   export JAVA_HOME="$STUDIO_APP/Contents/jbr/Contents/Home"
 fi
 
 NDK_VERSION="${MOLD_ANDROID_NDK_VERSION:-27.0.12077973}"
 export NDK_HOME="${NDK_HOME:-$ANDROID_HOME/ndk/$NDK_VERSION}"
-export PATH="$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$PATH"
+export PATH="${JAVA_HOME:+$JAVA_HOME/bin:}$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$PATH"
 
 AVD_NAME="${MOLD_ANDROID_AVD:-Mold_API_37}"
 SYSTEM_IMAGE="${MOLD_ANDROID_SYSTEM_IMAGE:-system-images;android-37.0;google_apis;arm64-v8a}"
@@ -68,7 +74,18 @@ require_android_toolchain() {
     exit 1
   }
   command -v java >/dev/null || { echo "Java 21 is required." >&2; exit 1; }
+  java_major="$(java -version 2>&1 | sed -n '1s/.*version "\([0-9][0-9]*\).*/\1/p')"
+  [[ "$java_major" == "21" ]] || {
+    echo "Java 21 is required; resolved Java $java_major from $JAVA_HOME" >&2
+    echo "Set MOLD_ANDROID_JAVA_HOME to a Java 21 installation." >&2
+    exit 1
+  }
   command -v adb >/dev/null || { echo "Android platform-tools are required." >&2; exit 1; }
+}
+
+prepare_frontend() {
+  mkdir -p "$BUN_INSTALL_CACHE_DIR"
+  (cd "$ROOT" && bun install --frozen-lockfile)
 }
 
 create_avd() {
@@ -95,7 +112,7 @@ case "$ACTION" in
     "$(android_cli sdkmanager)" --sdk_root="$ANDROID_HOME" \
       platform-tools emulator \
       'platforms;android-36' 'platforms;android-37.0' \
-      'build-tools;36.0.0' 'build-tools;37.0.0' \
+      'build-tools;35.0.0' 'build-tools;36.0.0' 'build-tools;37.0.0' \
       "ndk;$NDK_VERSION" "$SYSTEM_IMAGE"
     rustup target add \
       aarch64-linux-android armv7-linux-androideabi \
@@ -110,6 +127,8 @@ case "$ACTION" in
     echo "Android NDK:    $NDK_HOME"
     echo "Android AVD:    $ANDROID_AVD_HOME/$AVD_NAME"
     echo "Gradle cache:   $GRADLE_USER_HOME"
+    echo "Cargo target:   $CARGO_TARGET_DIR"
+    echo "Bun cache:      $BUN_INSTALL_CACHE_DIR"
     java -version
     adb version | head -1
     emulator_revision="$(sed -n 's/^Pkg.Revision=//p' "$ANDROID_HOME/emulator/source.properties")"
@@ -131,21 +150,25 @@ case "$ACTION" in
     ;;
   check)
     require_android_toolchain
+    prepare_frontend
     cd "$MOBILE"
     cargo tauri android build --debug --apk --target aarch64 --ci "$@"
     ;;
   dev)
     require_android_toolchain
+    prepare_frontend
     cd "$MOBILE"
     cargo tauri android dev "$@"
     ;;
   run)
     require_android_toolchain
+    prepare_frontend
     cd "$MOBILE"
     cargo tauri android run "$@"
     ;;
   build)
     require_android_toolchain
+    prepare_frontend
     cd "$MOBILE"
     cargo tauri android build --aab --target aarch64 --target armv7 --ci "$@"
     ;;

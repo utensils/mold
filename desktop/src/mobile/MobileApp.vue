@@ -381,7 +381,7 @@ import {
   type MobileSettings,
 } from "./settings";
 import { useMobileDownloadsStore } from "./mobileDownloads";
-import { isNativeIOSRuntime } from "./platform";
+import { isNativeAndroidRuntime, isNativeIOSRuntime } from "./platform";
 import {
   createMobileExpansionRecovery,
   mobileExpansionRecoveryStaleReason,
@@ -540,6 +540,7 @@ const OUTPUT_OPTIONS = [
   { value: "single" as const, label: "One shot" },
   { value: "sequence" as const, label: "Sequence" },
 ];
+const androidNativeRuntime = isNativeAndroidRuntime();
 const tab = ref<Tab>("generate");
 // Output is a setting of Create, not a place. The store hydrates here (before
 // first paint) so the legacy `mold.mobile.create-mode.v1` key migrates into
@@ -2227,6 +2228,11 @@ async function hydrateApiKeys(): Promise<void> {
 
 async function connectHost(address?: string, discoveredName?: string): Promise<void> {
   hostError.value = "";
+  if (androidNativeRuntime && hostInput.apiKey.trim()) {
+    hostError.value =
+      "Secure Android API key storage is not implemented yet. Use a host without authentication for this scaffold.";
+    return;
+  }
   try {
     const baseUrl = normalizeRemoteAddress(address ?? hostInput.address);
     const target = { baseUrl, apiKey: hostInput.apiKey.trim() || null };
@@ -2289,6 +2295,11 @@ async function discoverHosts(): Promise<void> {
 
 async function pairFromCode(code: () => Promise<string>): Promise<void> {
   if (pairing.value) return;
+  if (androidNativeRuntime) {
+    hostError.value =
+      "Android pairing requires secure API key storage and is not available in this scaffold.";
+    return;
+  }
   pairing.value = true;
   hostError.value = "";
   try {
@@ -9592,6 +9603,7 @@ onBeforeUnmount(() => {
             {{ MOBILE_CAPABLE_ROUTING_HINT }}
           </p>
           <button
+            v-if="!androidNativeRuntime"
             class="primary-button mobile-pair-button"
             type="button"
             :disabled="pairing"
@@ -9601,8 +9613,19 @@ onBeforeUnmount(() => {
             <span aria-hidden="true">▦</span>
             {{ pairing ? "Opening camera…" : "Scan pairing code" }}
           </button>
-          <p class="mobile-pair-note">On your host, open Settings → Mobile pairing.</p>
+          <p v-if="!androidNativeRuntime" class="mobile-pair-note">
+            On your host, open Settings → Mobile pairing.
+          </p>
+          <p
+            v-if="androidNativeRuntime"
+            class="section-note"
+            data-test="mobile-android-foundation-note"
+          >
+            Android groundwork is active. Use a host without authentication for now; secure keys,
+            camera pairing, and nearby discovery are next.
+          </p>
           <button
+            v-if="!androidNativeRuntime"
             class="secondary-button"
             type="button"
             :disabled="discovering"
@@ -9610,7 +9633,11 @@ onBeforeUnmount(() => {
           >
             {{ discovering ? "Scanning…" : "Discover nearby" }}
           </button>
-          <div v-for="host in discovered" :key="`${host.host}:${host.port}`" class="host-row">
+          <div
+            v-for="host in androidNativeRuntime ? [] : discovered"
+            :key="`${host.host}:${host.port}`"
+            class="host-row"
+          >
             <div class="host-row-head">
               <div>
                 <div class="host-name">{{ host.name }}</div>
@@ -9644,7 +9671,7 @@ onBeforeUnmount(() => {
                 autocomplete="url"
                 required
             /></label>
-            <label class="field"
+            <label v-if="!androidNativeRuntime" class="field"
               ><span>API key</span
               ><input
                 v-model="hostInput.apiKey"
