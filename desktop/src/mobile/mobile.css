@@ -971,6 +971,36 @@ textarea.control {
   font-size: 20px;
 }
 
+/* Create ▸ File under — what an automatic route dropped. A warning, not an
+   error: the print developed, it just is not filed. */
+.mobile-file-under-dropped {
+  display: grid;
+  align-items: center;
+  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  margin: 0 0 14px;
+  border: 1px solid color-mix(in srgb, var(--warning) 45%, var(--edge));
+  border-radius: var(--radius-control);
+  background: color-mix(in srgb, var(--warning) 10%, var(--bench));
+  padding: 10px 12px;
+}
+
+.mobile-file-under-dropped p {
+  margin: 0;
+  color: var(--rebate);
+  font-size: var(--text-caption);
+  line-height: 1.4;
+}
+
+.mobile-file-under-dropped button {
+  min-height: 44px;
+  border: 0;
+  background: transparent;
+  color: var(--warning);
+  font-size: 15px;
+  padding: 0 4px;
+}
+
 .mobile-resolution-note {
   margin: 8px 0 0;
   color: var(--ink-3);

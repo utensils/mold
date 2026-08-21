@@ -356,6 +356,7 @@ import MobileTemplates from "./MobileTemplates.vue";
 import { mobileFileUnderAvailable, mobileFileUnderCollections } from "./fileUnder";
 import {
   emptyFileUnderState,
+  fileUnderAvailable,
   matchCollection,
   type FileUnderCollectionLike,
 } from "@studio/lib/fileUnder";
@@ -3104,6 +3105,7 @@ async function submitMobileSequence(): Promise<void> {
     cancelMobileSequenceSubmission();
     return;
   }
+  fileUnderDropNotice.value = "";
   const automatic = automaticRouting.value;
   // Under an automatic policy the machine is provisional until the placement
   // fan-out answers; source fitting only ever uses it for an optional upscale,
@@ -3191,7 +3193,9 @@ async function submitMobileSequence(): Promise<void> {
     // The stitched print is the only artifact a sequence puts in the gallery,
     // so it is what carries the Create title and the File under choice; an
     // intermediate clip never reaches the Library and is never filed.
-    const request: ChainCreateRequest = {
+    // Reassigned once an automatic route freezes its winner, which may not
+    // be able to file what this body carries.
+    let request: ChainCreateRequest = {
       ...buildChainRequest(sequenceParams(requestForm, entry), clips, {
         motionTailFrames,
         enableAudio,
@@ -3249,6 +3253,10 @@ async function submitMobileSequence(): Promise<void> {
     if (!sameFrozenHost(frozenRoute, fenceHost)) {
       throw new Error("The selected host changed while checking this sequence.");
     }
+    // `frozenRoute` is final for both paths here — the fan-out's winner or the
+    // browsed machine — so this is where the stitched print's filing is
+    // measured against the machine that will actually publish it.
+    request = fileUnderForFrozenRoute(request, frozenRoute);
     const operationId = createUuid();
     sequenceCancellationRequest = () =>
       apiFetchTo(
@@ -4637,6 +4645,7 @@ async function prepareGenerationRequest(
 }
 
 async function generate(): Promise<void> {
+  fileUnderDropNotice.value = "";
   const prepared = preparedBatch.value;
   if (effectiveBatchSize.value > 1 && !prepared) {
     await expandForCurrentBatch();
@@ -5019,6 +5028,10 @@ async function generate(): Promise<void> {
         batchId: preparedSubmission.batchId,
       }
     : {};
+  // `route` is final for every path here — the automatic fan-out's winner, a
+  // prepared/quick submission's frozen route, or the pinned machine. Every
+  // Batch sibling spreads this one request, so they share the outcome.
+  request = fileUnderForFrozenRoute(request, route);
   const { settled } = generation.submitBatch(
     request,
     batchSize,
@@ -6056,8 +6069,10 @@ const libraryHostChips = computed(() =>
 // ── Create ▸ File under ─────────────────────────────────────────────────────
 // The Create-time half of Library organization. Positive knowledge only: a
 // pinned machine answers for itself, an automatic policy is satisfied by any
-// reachable machine that can file, and an unread capability snapshot hides the
-// group and sends nothing.
+// CANDIDATE machine that can file, and an unread capability snapshot hides the
+// group and sends nothing. Under an automatic policy the group is therefore an
+// offer, not a promise — `fileUnderForFrozenRoute` settles it against the one
+// machine the fan-out actually picked.
 const fileUnderEnabled = computed(() =>
   mobileFileUnderAvailable(
     generateTarget.value,
@@ -6074,6 +6089,14 @@ const fileUnderEnabled = computed(() =>
 const fileUnderCollections = computed(() =>
   mobileFileUnderCollections(libraryCollectionCards.value),
 );
+/**
+ * What an automatic route dropped, and where.
+ *
+ * A persistent inline banner — iPhone deliberately has no toasts — held until
+ * the user dismisses it or the next submission supersedes it. It reports an
+ * outcome, never a failure: the print itself developed.
+ */
+const fileUnderDropNotice = ref("");
 /**
  * The fleet collection whose slug equals the live title's.
  *
@@ -6117,6 +6140,36 @@ function applyFileUnderPolicy(draft: GenerateForm): GenerateForm {
   draft.fileUnderAutoTag = false;
   draft.fileUnderMatch = null;
   return draft;
+}
+
+/** Fields `fileUnderForFrozenRoute` removes; shared by the print and the
+ * chain wire, which carry the identical additive slice. */
+type FiledRequest = { tags?: string[]; collection?: { id?: string; name?: string } };
+
+/**
+ * Re-ask the machine an automatic policy actually chose.
+ *
+ * `fileUnderEnabled` reads the CANDIDATE set, so ANY machine that could file
+ * qualifies the group — but Auto / Most capable then pick exactly one out of
+ * that set on model and capacity grounds, and routing is deliberately NOT
+ * narrowed by filing: a machine that cannot organize is still the right
+ * machine to render on. So the winner is re-asked once its route is frozen. A
+ * winner that cannot file has the filing removed from its own submission and
+ * SAYS so, rather than being sent fields it would quietly ignore — the whole
+ * point of the group is that nothing is filed, or unfiled, in silence.
+ *
+ * Positive knowledge only, exactly like the gate: an unread snapshot is not
+ * evidence that the machine can file. The pinned path never reaches here — the
+ * group is already hidden there and `applyFileUnderPolicy` emptied the draft.
+ */
+function fileUnderForFrozenRoute<T extends FiledRequest>(request: T, route: HostRoute): T {
+  if (request.tags === undefined && request.collection === undefined) return request;
+  if (fileUnderAvailable(serverCapabilities[route.hostId])) return request;
+  const kept: FiledRequest = { ...request };
+  delete kept.tags;
+  delete kept.collection;
+  fileUnderDropNotice.value = `Filed nothing: ${route.label} can’t organize prints. The print still develops.`;
+  return kept as T;
 }
 
 const libraryChipRowVisible = computed(
@@ -7973,6 +8026,24 @@ onBeforeUnmount(() => {
             :batch-size="effectiveBatchSize"
             :output-kind="isSequence ? 'sequence' : 'print'"
           />
+          <!-- Persistent inline, never a toast: iPhone has no transient
+               chrome, and an outcome the user did not choose has to stay
+               readable until they retire it. -->
+          <div
+            v-if="fileUnderDropNotice"
+            class="mobile-file-under-dropped"
+            role="alert"
+            data-test="mobile-file-under-dropped"
+          >
+            <p>{{ fileUnderDropNotice }}</p>
+            <button
+              type="button"
+              data-test="mobile-file-under-dropped-dismiss"
+              @click="fileUnderDropNotice = ''"
+            >
+              Dismiss
+            </button>
+          </div>
 
           <template v-if="isSequence">
             <div

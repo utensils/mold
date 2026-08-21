@@ -9820,6 +9820,317 @@ describe("MobileApp Create File under", () => {
     expect(openStreams[0]?.options.body.collection).toBeUndefined();
   });
 
+  // ── The machine an automatic policy actually picked ───────────────────────
+  // The group's gate reads the CANDIDATE set, so any machine that could file
+  // qualifies it. Auto then picks exactly ONE out of that set on model and
+  // capacity grounds. A winner that cannot organize must not be sent fields it
+  // would quietly ignore.
+  const filerTarget = { baseUrl: "http://render.tailnet.ts.net:7680", apiKey: "render-secret" };
+
+  function twoMachines(): void {
+    localStorage.setItem(
+      "mold.mobile.hosts.v1",
+      JSON.stringify([
+        {
+          id: "studio-id",
+          name: "Studio",
+          baseUrl: target.baseUrl,
+          hostname: "studio",
+          instanceId: "studio-id",
+        },
+        {
+          id: "render-id",
+          name: "Render",
+          baseUrl: filerTarget.baseUrl,
+          hostname: "render",
+          instanceId: "render-id",
+        },
+      ]),
+    );
+    invoke.mockImplementation((command: string, args?: { hostId?: string }) =>
+      Promise.resolve(
+        command === "keychain_get_api_key"
+          ? args?.hostId === "render-id"
+            ? filerTarget.apiKey
+            : target.apiKey
+          : null,
+      ),
+    );
+  }
+
+  /** Both machines hold the model; only Studio can organize. */
+  function fleetFilingApi(): void {
+    apiJsonTo.mockImplementation((probe: { baseUrl: string }, path: string) => {
+      const render = probe.baseUrl === filerTarget.baseUrl;
+      if (path === "/api/status")
+        return Promise.resolve({
+          ...status,
+          hostname: render ? "render" : "studio",
+          instance_id: render ? "render-id" : "studio-id",
+        });
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/capabilities") {
+        return Promise.resolve(
+          render ? { gallery: { can_delete: true, organize: false } } : filingCapabilities,
+        );
+      }
+      if (path === "/api/gallery") return Promise.resolve([]);
+      if (path === "/api/gallery/collections") {
+        return Promise.resolve(
+          render
+            ? []
+            : [
+                {
+                  id: "c1",
+                  name: "Smurfs",
+                  slug: "smurfs",
+                  description: null,
+                  cover_filename: null,
+                  count: 12,
+                  created_at: 1,
+                  updated_at: 1,
+                },
+              ],
+        );
+      }
+      if (path === "/api/gallery/tags") return Promise.resolve([]);
+      if (path === "/api/activity")
+        return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+  }
+
+  /** Steer Auto: the named base URL plans soonest and wins. Both fan-outs are
+   * driven, since a sequence previews through the chain endpoint. */
+  function autoWinner(baseUrl: string): void {
+    const plan = (probe: { baseUrl: string }) => {
+      const preview = plannedPlacement();
+      preview.candidate.predicted_completion_after_ms = probe.baseUrl === baseUrl ? 100 : 9_000;
+      return Promise.resolve(preview);
+    };
+    previewGenerationPlacement.mockImplementation(plan);
+    previewChainPlacement.mockImplementation(plan);
+  }
+
+  async function openFleetCreate(): Promise<void> {
+    twoMachines();
+    fleetFilingApi();
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await vi.waitFor(() =>
+      expect(wrapper?.find("[data-test='mobile-file-under']").exists()).toBe(true),
+    );
+  }
+
+  it("drops the filing and names the machine when Auto lands on one that can't organize", async () => {
+    await openFleetCreate();
+    autoWinner(filerTarget.baseUrl);
+
+    await fieldControl("Title").setValue("Smurfs");
+    // The group is offered because Studio, a candidate, can file.
+    expect(wrapper!.get("[data-test='mobile-file-under-ghost']").text()).toContain("smurfs");
+    await fieldControl("Prompt").setValue("a lighthouse");
+    await wrapper!.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+
+    // Routing is a model/capacity decision and is NOT narrowed by filing: the
+    // incapable machine still won, and the print still develops on it.
+    expect(openStreams).toHaveLength(1);
+    expect(openStreams[0]?.options.target).toEqual(filerTarget);
+    expect(openStreams[0]?.options.body.tags).toBeUndefined();
+    expect(openStreams[0]?.options.body.collection).toBeUndefined();
+    // The title is not filing — it rides regardless.
+    expect(openStreams[0]?.options.body.title).toBe("Smurfs");
+
+    const banner = wrapper!.get("[data-test='mobile-file-under-dropped']");
+    expect(banner.text()).toContain("Render");
+    expect(banner.text()).toContain("The print still develops.");
+  });
+
+  it("keeps the filing when Auto lands on a machine that can organize", async () => {
+    await openFleetCreate();
+    autoWinner(target.baseUrl);
+
+    await fieldControl("Title").setValue("Smurfs");
+    await fieldControl("Prompt").setValue("a lighthouse");
+    await wrapper!.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+
+    expect(openStreams[0]?.options.target).toEqual(target);
+    expect(openStreams[0]?.options.body.tags).toEqual(["smurfs"]);
+    expect(openStreams[0]?.options.body.collection).toEqual({ name: "Smurfs" });
+    expect(wrapper!.find("[data-test='mobile-file-under-dropped']").exists()).toBe(false);
+  });
+
+  it("gives every prepared Batch N sibling the same dropped outcome, once", async () => {
+    // Prepared work never re-routes: it freezes the BROWSED machine at
+    // preparation and develops there, which under an automatic policy need not
+    // be a machine the candidate-set gate spoke for. Browsing Render while
+    // Studio keeps the group visible is exactly that seam.
+    localStorage.setItem("mold.mobile.selected-host.v1", "render-id");
+    await openFleetCreate();
+
+    await fieldControl("Title").setValue("Smurfs");
+    await wrapper!.get("[data-test='mobile-batch-increment']").trigger("click");
+    await wrapper!.get("[data-test='mobile-batch-increment']").trigger("click");
+    await fieldControl("Prompt").setValue("three variations of a storm");
+    await wrapper!.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+    await wrapper!.get("[data-test='mobile-develop-prepared']").trigger("click");
+    await flushPromises();
+
+    expect(openStreams).toHaveLength(3);
+    for (const stream of openStreams) {
+      expect(stream.options.target).toEqual(filerTarget);
+      expect(stream.options.body.title).toBe("Smurfs");
+      expect(stream.options.body.tags).toBeUndefined();
+      expect(stream.options.body.collection).toBeUndefined();
+    }
+    // One outcome for the whole batch, reported once.
+    expect(wrapper!.findAll("[data-test='mobile-file-under-dropped']")).toHaveLength(1);
+    expect(wrapper!.get("[data-test='mobile-file-under-dropped']").text()).toContain("Render");
+  });
+
+  it("leaves the pinned path alone — the group hides and nothing is dropped", async () => {
+    await openFleetCreate();
+    await wrapper!.get("[data-test='mobile-generate-host']").setValue("render-id");
+    await flushPromises();
+
+    // Pinned to the machine that cannot file: the group is simply not offered,
+    // so there is nothing to drop and nothing to explain.
+    expect(wrapper!.find("[data-test='mobile-file-under']").exists()).toBe(false);
+
+    await fieldControl("Title").setValue("Smurfs");
+    await fieldControl("Prompt").setValue("a lighthouse");
+    await wrapper!.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+
+    expect(openStreams[0]?.options.body.tags).toBeUndefined();
+    expect(wrapper!.find("[data-test='mobile-file-under-dropped']").exists()).toBe(false);
+  });
+
+  it("keeps the dropped notice as a persistent inline banner, never a toast", async () => {
+    await openFleetCreate();
+    autoWinner(filerTarget.baseUrl);
+
+    await fieldControl("Title").setValue("Smurfs");
+    await fieldControl("Prompt").setValue("a lighthouse");
+    await wrapper!.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+
+    const banner = wrapper!.get("[data-test='mobile-file-under-dropped']");
+    expect(banner.attributes("role")).toBe("alert");
+    // Inline in the Create stack, not floating chrome.
+    expect(banner.element.closest(".mobile-content")).not.toBeNull();
+
+    // Nothing retires it on a timer: it is still there after the queue settles.
+    await flushPromises();
+    await flushPromises();
+    expect(wrapper!.find("[data-test='mobile-file-under-dropped']").exists()).toBe(true);
+
+    // Only an explicit 44pt action does.
+    await wrapper!.get("[data-test='mobile-file-under-dropped-dismiss']").trigger("click");
+    expect(wrapper!.find("[data-test='mobile-file-under-dropped']").exists()).toBe(false);
+  });
+
+  it("supersedes the notice when the next print files successfully", async () => {
+    await openFleetCreate();
+    autoWinner(filerTarget.baseUrl);
+
+    await fieldControl("Title").setValue("Smurfs");
+    await fieldControl("Prompt").setValue("a lighthouse");
+    await wrapper!.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+    expect(wrapper!.find("[data-test='mobile-file-under-dropped']").exists()).toBe(true);
+
+    autoWinner(target.baseUrl);
+    await wrapper!.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+
+    expect(openStreams).toHaveLength(2);
+    expect(openStreams[1]?.options.body.tags).toEqual(["smurfs"]);
+    expect(wrapper!.find("[data-test='mobile-file-under-dropped']").exists()).toBe(false);
+  });
+
+  it("drops the stitched print's filing when the sequence machine can't organize", async () => {
+    // A sequence freezes the browsed machine unless the fan-out replaces it,
+    // and its filing rides the chain body — the same silent-loss seam, one
+    // endpoint over.
+    localStorage.setItem("mold.mobile.selected-host.v1", "render-id");
+    twoMachines();
+    const sequenceModel: ModelEntry = {
+      ...model,
+      name: "ltx-video-0.9.8-2b-dev:bf16",
+      family: "ltx-video",
+      default_steps: 7,
+      default_guidance: 1,
+      default_width: 704,
+      default_height: 480,
+      default_frames: 25,
+      default_fps: 30,
+    };
+    apiJsonTo.mockImplementation((probe: { baseUrl: string }, path: string, init?: RequestInit) => {
+      const render = probe.baseUrl === filerTarget.baseUrl;
+      if (path === "/api/status")
+        return Promise.resolve({
+          ...status,
+          hostname: render ? "render" : "studio",
+          instance_id: render ? "render-id" : "studio-id",
+        });
+      if (path === "/api/models") return Promise.resolve([model, sequenceModel]);
+      if (path === "/api/capabilities") {
+        return Promise.resolve(
+          render ? { gallery: { can_delete: true, organize: false } } : filingCapabilities,
+        );
+      }
+      if (path === "/api/gallery") return Promise.resolve([]);
+      if (path === "/api/gallery/collections") return Promise.resolve([]);
+      if (path === "/api/gallery/tags") return Promise.resolve([]);
+      if (path.startsWith("/api/capabilities/chain-limits")) {
+        return Promise.resolve({
+          model: sequenceModel.name,
+          frames_per_clip_cap: 97,
+          frames_per_clip_recommended: 97,
+          max_stages: 8,
+          max_total_frames: 777,
+          fade_frames_max: 32,
+          transition_modes: ["smooth", "cut", "fade"],
+          quantization_family: "bf16",
+          supports_audio: false,
+          supports_sequence: true,
+        });
+      }
+      if (path === "/api/chain-jobs" && init?.method === "POST") {
+        return Promise.resolve({ job_id: "sequence-job-1" });
+      }
+      if (path.startsWith("/api/chain-jobs/")) return new Promise(() => {});
+      if (path === "/api/activity")
+        return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await vi.waitFor(() =>
+      expect(wrapper?.find("[data-test='mobile-file-under']").exists()).toBe(true),
+    );
+    autoWinner(filerTarget.baseUrl);
+
+    await fieldControl("Title").setValue("Smurfs");
+    await chooseSequenceOutput();
+    const prompts = wrapper!.findAll("[data-test='mobile-sequence-clip'] textarea");
+    await prompts[0]!.setValue("a paper boat");
+    await prompts[1]!.setValue("fireflies gather");
+    await wrapper!.get("[data-test='mobile-generate-sequence']").trigger("click");
+    await flushPromises();
+
+    const body = chainBody();
+    // The timeline still renders; only the filing is withheld, and said.
+    expect(body.title).toBe("Smurfs");
+    expect(body.tags).toBeUndefined();
+    expect(body.collection).toBeUndefined();
+    expect(wrapper!.get("[data-test='mobile-file-under-dropped']").text()).toContain("Render");
+  });
+
   it("previews the creation-time filename with the title slug", async () => {
     await openCreateWithFiling();
 

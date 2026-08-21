@@ -35,8 +35,10 @@
   every prepared variation, and a sequence's stitched print, and **Reuse
   settings** restores what a print was actually filed under. The group hides
   entirely on a machine whose `capabilities.gallery.organize` is not true; on
-  iPhone under **Auto** or **Most capable**, any reachable machine that can
-  file is enough. Settings ▸ Library gains **Tag new prints with their title**
+  iPhone under **Auto** or **Most capable** it is offered when any machine
+  that could run the print can file, and if the machine the print actually
+  lands on cannot, the filing is left off that submission and an inline notice
+  names the machine — the print still develops. Settings ▸ Library gains **Tag new prints with their title**
   (on by default); turning it off changes nothing about prints you already
   made.
 - **The TUI files a print while you make it.** A **File under** section joins
