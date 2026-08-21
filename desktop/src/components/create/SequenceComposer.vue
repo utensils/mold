@@ -77,10 +77,17 @@ const props = withDefaults(
 const emit = defineEmits<{
   /** Generate sequence / Update sequence (create vs amend is the parent's call). */
   submit: [];
+  /** Stop source preparation / placement before the sequence is queued. */
+  cancel: [];
   /** Edit session: submit the current clips as a NEW job instead of amending. */
   duplicate: [];
   "play-clip": [clipId: string];
 }>();
+
+function submitOrCancel() {
+  if (props.submitting) emit("cancel");
+  else emit("submit");
+}
 
 const draft = useSequenceDraftStore();
 const hosts = useHostsStore();
@@ -734,10 +741,16 @@ function onBenchContextMenu(event: MouseEvent) {
         type="button"
         data-test="generate-sequence"
         class="ms-seqbench__generate"
-        :disabled="disabledReason !== null || submitting"
-        @click="submit"
+        :disabled="disabledReason !== null && !submitting"
+        @click="submitOrCancel"
       >
-        {{ submitting ? "Starting…" : draft.editing ? "Update sequence" : "Generate sequence" }}
+        {{
+          submitting
+            ? "Cancel · Preparing sequence…"
+            : draft.editing
+              ? "Update sequence"
+              : "Generate sequence"
+        }}
       </button>
     </div>
 

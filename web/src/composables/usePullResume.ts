@@ -45,7 +45,7 @@ export interface UsePullResume {
    */
   arm: (next: PendingPull, baseline?: readonly string[]) => Promise<void>;
   captureBaseline: (hostId: string) => Promise<string[]>;
-  cancel: () => void;
+  cancel: (expected?: PendingPull) => void;
   /** Test seam: run one poll now instead of waiting for the interval. */
   check: () => Promise<void>;
 }
@@ -126,7 +126,8 @@ export function usePullResume(): UsePullResume {
     async captureBaseline(hostId: string) {
       return terminalPullJobIds(await jobsFor(hostId));
     },
-    cancel() {
+    cancel(expected?: PendingPull) {
+      if (expected && pending.value !== expected) return;
       pending.value = null;
       stop();
     },

@@ -159,6 +159,11 @@ describe("MobileSequenceComposer clips", () => {
       (wrapper!.get("[data-test='mobile-sequence-source-fit']").element as HTMLSelectElement)
         .disabled,
     ).toBe(true);
+    const button = wrapper!.get("[data-test='mobile-generate-sequence']");
+    expect(button.attributes("disabled")).toBeUndefined();
+    expect(button.text()).toContain("Cancel · Preparing sequence");
+    await button.trigger("click");
+    expect(wrapper!.emitted("cancel")).toHaveLength(1);
   });
 
   it("renders the shared draft's clips instead of private component state", async () => {

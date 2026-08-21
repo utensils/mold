@@ -82,7 +82,12 @@ const props = withDefaults(
   },
 );
 
-const emit = defineEmits<{ submit: [] }>();
+const emit = defineEmits<{ submit: []; cancel: [] }>();
+
+function submitOrCancel(): void {
+  if (props.submitting) emit("cancel");
+  else emit("submit");
+}
 
 const draft = useSequenceDraftStore();
 const guidanceCaps = computed(() =>
@@ -299,10 +304,6 @@ function removeClip(id: string): void {
   draft.removeClip(id);
 }
 
-function submit(): void {
-  if (locked.value || blockingReason.value) return;
-  emit("submit");
-}
 </script>
 
 <template>
@@ -508,10 +509,10 @@ function submit(): void {
       class="primary-button mobile-sequence-generate"
       type="button"
       data-test="mobile-generate-sequence"
-      :disabled="locked || !!blockingReason"
-      @click="submit"
+      :disabled="(locked || !!blockingReason) && !submitting"
+      @click="submitOrCancel"
     >
-      {{ submitting ? "Starting…" : "Generate sequence" }}
+      {{ submitting ? "Cancel · Preparing sequence…" : "Generate sequence" }}
     </button>
 
     <MobileSeamSheet

@@ -74,6 +74,7 @@ const props = withDefaults(
       Record<string, ClipRailMedia | undefined>
     > | null;
     playingClipId?: string | null;
+    submitting?: boolean;
   }>(),
   {
     sourceImage: null,
@@ -81,11 +82,13 @@ const props = withDefaults(
     chainLevelDirty: false,
     stageMediaByClipId: null,
     playingClipId: null,
+    submitting: false,
   },
 );
 
 const emit = defineEmits<{
   submit: [];
+  cancel: [];
   "duplicate-as-new": [];
   "discard-edit": [];
   "expand-clip": [clipId: string, prompt: string];
@@ -392,6 +395,10 @@ function formatBytes(bytes: number): string {
 }
 
 function trySubmit() {
+  if (props.submitting) {
+    emit("cancel");
+    return;
+  }
   if (!canGenerate.value) return;
   emit("submit");
 }
@@ -879,11 +886,17 @@ defineExpose({ importTomlText });
             ? 'bg-safelight text-on-accent hover:brightness-110'
             : 'cursor-not-allowed border border-edge bg-bath text-ink-3'
         "
-        :disabled="!canGenerate"
+        :disabled="!canGenerate && !submitting"
         data-test="sequence-generate"
         @click="trySubmit"
       >
-        {{ draft.editing ? "Update sequence" : "Generate sequence" }}
+        {{
+          submitting
+            ? "Cancel · Preparing sequence…"
+            : draft.editing
+              ? "Update sequence"
+              : "Generate sequence"
+        }}
       </button>
     </div>
 

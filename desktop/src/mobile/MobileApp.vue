@@ -26,9 +26,13 @@ import { remixPrompt } from "../lib/api/remix";
 import { summarizeStatusGpuMemory } from "../lib/api/gpuStatus";
 import { SourceFitPreprocessCache } from "@ui/lib/sourceFitPreprocessCache";
 import { createUuid } from "@studio/lib/id";
+import { confirmCancellation } from "@studio/lib/cancellationRetry";
 import { filterRestrictedModels, modelAccessRestrictionFor } from "@studio/lib/modelAccess";
 import { expansionTaskForRequest } from "@studio/lib/expandTask";
-import { effectiveGenerationRecipe } from "@studio/lib/generationProfile";
+import {
+  effectiveGenerationRecipe,
+  fixedRecipeControlOverrides,
+} from "@studio/lib/generationProfile";
 import {
   conditioningFingerprint,
   defaultRemixDimensions,
@@ -576,6 +580,7 @@ const loadingModels = ref(false);
 const modelLoadError = ref("");
 const sequenceJob = ref<ChainJobDetail | null>(null);
 const sequenceStarting = ref(false);
+let sequenceCancellationRequest: (() => Promise<unknown>) | null = null;
 const sequenceError = ref("");
 const sequenceProgress = ref<{ step: number; total: number } | null>(null);
 const chainLimits = ref<ChainLimits | null>(null);
@@ -687,6 +692,7 @@ const quickExpansionNegative = ref<{ before: string; baked: string } | null>(nul
 const preparedSubmitting = ref(false);
 const preparationGuard = new PreparationRequestGuard();
 const submissionGuard = new PreparationRequestGuard();
+const sequenceSubmissionGuard = new PreparationRequestGuard();
 let expansionPullRequestId = 0;
 let expansionRecoveryId = 0;
 let submissionUiId = 0;
@@ -1484,6 +1490,50 @@ const sourceControlsValid = computed(() => !caps.value.supportsImg2img || source
  * advertised text-to-video checkpoint hides the well entirely.
  */
 const sourceConditioningError = computed(() => sourceConditioningValidationError(form));
+const fixedRecipeControls = computed(() =>
+  fixedRecipeControlOverrides(
+    effectiveGenerationRecipe(selectedGenerationModel.value, form.pipeline),
+  ),
+);
+/**
+ * A fixed recipe control is authority the moment the recipe is known, and
+ * the gates below read the LIVE form: `stepsError` disables Develop through
+ * `developBlockerReason`, and `basicParametersValid` returns `generate()`
+ * early — both before the submit-time snap in `prepareGenerationRequest`
+ * can run. So a stale value would strand Develop behind an error on a
+ * control the user cannot edit.
+ *
+ * `applyModelDefaults` already reconciles a model *pick*; what it cannot
+ * cover is a later write straight into the form — gallery reuse restoring a
+ * print saved before the envelope was pinned goes through
+ * `applyMetadataToForm`, which can leave the model alone and only move
+ * `steps`. So this watches the VALUES, not just the recipe identity, and
+ * re-asserts only the fields that disagree (assigning an equal value would
+ * re-trigger it for nothing). Shared policy with desktop's
+ * `reconcileModelCapabilities`.
+ */
+watch(
+  () =>
+    [
+      fixedRecipeControls.value,
+      form.steps,
+      form.guidance,
+      form.width,
+      form.height,
+      form.frames,
+    ] as const,
+  () => {
+    const fixed = fixedRecipeControls.value;
+    if (fixed.steps !== undefined && form.steps !== fixed.steps) form.steps = fixed.steps;
+    if (fixed.guidance !== undefined && form.guidance !== fixed.guidance) {
+      form.guidance = fixed.guidance;
+    }
+    if (fixed.width !== undefined && form.width !== fixed.width) form.width = fixed.width;
+    if (fixed.height !== undefined && form.height !== fixed.height) form.height = fixed.height;
+    if (fixed.frames !== undefined && form.frames !== fixed.frames) form.frames = fixed.frames;
+  },
+  { immediate: true },
+);
 const stepsError = computed(() =>
   profileStepsValidationError(form.steps, selectedGenerationModel.value, form.pipeline),
 );
@@ -1522,9 +1572,7 @@ const developBlockerReason = computed<string | null>(() => {
   if (!parameterValid.value) return "Open Advanced and correct the highlighted settings.";
   return null;
 });
-const developDisabled = computed(
-  () => promptMissing.value || developBlockerReason.value !== null || preparingGeneration.value,
-);
+const developDisabled = computed(() => promptMissing.value || developBlockerReason.value !== null);
 const estimateRequest = computed(() => {
   if (!form.model) return null;
   return buildGenerationEstimateRequest(buildRequest(form), form.family);
@@ -1900,8 +1948,8 @@ const resultPreviewError = computed(() => {
 const developButtonLabel = computed(() =>
   generationSubmissionPhase.value
     ? generationSubmissionPhase.value === "placement"
-      ? "Checking placement…"
-      : "Preparing source…"
+      ? "Cancel · Checking placement…"
+      : "Cancel · Preparing source…"
     : `${form.batchSize > 1 ? `Develop ${form.batchSize} prints` : "Develop print"}${
         queuedJobs.value.length > 0 ? ` (+${queuedJobs.value.length} queued)` : ""
       }`,
@@ -2860,6 +2908,7 @@ async function routeAutomaticGeneration(options: {
   subject: "print" | "sequence";
   requireAuthoritative: boolean;
   isCurrent?: () => boolean;
+  signal?: AbortSignal;
 }): Promise<MobileAutomaticRoute> {
   const isCurrent = options.isCurrent ?? (() => true);
   const { hosts: candidates, error } = automaticRoutingCandidates(options.model, options.family);
@@ -2873,9 +2922,13 @@ async function routeAutomaticGeneration(options: {
   const firstPlanned = new Promise<void>((resolve) => (resolveFirstPlanned = resolve));
   candidates.forEach((host, index) => {
     void (async () => {
+      const controller = controllers[index]!;
+      const abortFromCaller = () => controller.abort(options.signal?.reason);
+      if (options.signal?.aborted) abortFromCaller();
+      else options.signal?.addEventListener("abort", abortFromCaller, { once: true });
       const started = performance.now();
       const elapsed = () => Math.max(0, performance.now() - started);
-      const probeOptions = { signal: controllers[index]!.signal };
+      const probeOptions = { signal: controller.signal };
       // Frozen before the request leaves: the winner carries this snapshot, so
       // a URL, key, or instance that changed mid-flight is caught by the
       // caller's connection fence instead of silently replacing the endpoint
@@ -2912,6 +2965,7 @@ async function routeAutomaticGeneration(options: {
             (probeError.status === 404 || probeError.status === 405),
         });
       } finally {
+        options.signal?.removeEventListener("abort", abortFromCaller);
         pending -= 1;
         if (pending === 0) resolveAllSettled();
       }
@@ -2988,6 +3042,10 @@ async function routeAutomaticGeneration(options: {
 }
 
 async function submitMobileSequence(): Promise<void> {
+  if (sequenceStarting.value) {
+    cancelMobileSequenceSubmission();
+    return;
+  }
   const automatic = automaticRouting.value;
   // Under an automatic policy the machine is provisional until the placement
   // fan-out answers; source fitting only ever uses it for an optional upscale,
@@ -3008,7 +3066,7 @@ async function submitMobileSequence(): Promise<void> {
     return;
   }
   const entry = selectedGenerationModel.value;
-  if (!initialHost || !entry || sequenceStarting.value) return;
+  if (!initialHost || !entry) return;
   let host: MobileHost = initialHost;
   let target = { ...mobileHostTarget(host) };
   let frozenRoute: HostRoute = {
@@ -3033,10 +3091,15 @@ async function submitMobileSequence(): Promise<void> {
   const enableAudio = draft.enableAudio;
   const motionTailFrames = sequenceMotionTail.value;
   sequenceStarting.value = true;
+  sequenceCancellationRequest = null;
+  const token = sequenceSubmissionGuard.begin();
+  const signal = sequenceSubmissionGuard.signalFor(token);
+  const isCurrent = () => sequenceSubmissionGuard.isCurrent(token) && !signal.aborted;
   sequenceError.value = "";
   try {
     // Stale limits would mis-gate audio and frame caps for the routed host.
     if (!chainLimits.value || chainLimits.value.model !== entry.name) await loadChainLimits();
+    if (!isCurrent()) return;
     requestForm.sourceImage = openingSnapshot?.base64 ?? null;
     requestForm.maskImage = null;
     if (requestForm.sourceImage) {
@@ -3050,10 +3113,11 @@ async function submitMobileSequence(): Promise<void> {
         {
           ops: domCanvasOps,
           cache: sourceFitCache,
-          upscale: (image, model) => upscaleImage({ image, model, target }),
+          upscale: (image, model) => upscaleImage({ image, model, target, signal }),
           onStatus: setGenerationStatus,
         },
       );
+      if (!isCurrent()) return;
       requestForm.sourceImage = result.source;
     }
     const openingImage = openingSnapshot
@@ -3075,6 +3139,8 @@ async function submitMobileSequence(): Promise<void> {
         family: form.family,
         subject: "sequence",
         requireAuthoritative: false,
+        isCurrent,
+        signal,
       });
       if (routed.kind === "abandoned") return;
       if (routed.kind === "error") throw new Error(routed.message);
@@ -3090,6 +3156,8 @@ async function submitMobileSequence(): Promise<void> {
         preview = await previewChainPlacement(
           target,
           request as unknown as Record<string, unknown>,
+          1,
+          { signal },
         );
       } catch (error) {
         if (error instanceof ApiError && (error.status === 404 || error.status === 405)) {
@@ -3100,6 +3168,7 @@ async function submitMobileSequence(): Promise<void> {
       }
     }
     const classification: string = classifyPlacementPreview(preview);
+    if (!isCurrent()) return;
     if (!legacyUnsupported && classification !== "unsupported" && classification !== "planned") {
       throw new Error(mobilePlacementFailure(preview, host.name, "sequence"));
     }
@@ -3109,21 +3178,61 @@ async function submitMobileSequence(): Promise<void> {
     if (!sameFrozenHost(frozenRoute, fenceHost)) {
       throw new Error("The selected host changed while checking this sequence.");
     }
+    const operationId = createUuid();
+    sequenceCancellationRequest = () =>
+      apiFetchTo(
+        target,
+        `/api/chain-jobs/${encodeURIComponent(operationId)}/operations/${encodeURIComponent(operationId)}/cancel`,
+        { method: "POST", keepalive: true },
+      );
     const response = await apiJsonTo<CreateChainJobResponse>(target, "/api/chain-jobs", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "x-mold-operation-id": operationId,
+      },
       body: JSON.stringify(request),
     });
+    if (!isCurrent()) {
+      await apiFetchTo(target, `/api/chain-jobs/${encodeURIComponent(response.job_id)}/cancel`, {
+        method: "POST",
+      }).catch(() => {});
+      return;
+    }
     persistSequenceRecovery(host, response.job_id);
     watchSequenceJob(host.id, target, response.job_id, {
       model: entry.name,
       stageCount: clips.length,
     });
   } catch (error) {
+    if (!isCurrent()) return;
     sequenceError.value = describeTransportError(error, host.name);
   } finally {
-    sequenceStarting.value = false;
+    if (sequenceSubmissionGuard.isCurrent(token)) {
+      sequenceStarting.value = false;
+      sequenceCancellationRequest = null;
+    }
   }
+}
+
+function cancelMobileSequenceSubmission(): void {
+  if (!sequenceStarting.value) return;
+  sequenceSubmissionGuard.invalidate();
+  const cancellation = sequenceCancellationRequest;
+  sequenceCancellationRequest = null;
+  sequenceStarting.value = false;
+  sequenceError.value = "";
+  if (!cancellation) {
+    setGenerationStatus("Sequence preparation cancelled — nothing was queued");
+    return;
+  }
+  setGenerationStatus("Cancelling sequence creation…");
+  void confirmCancellation(cancellation)
+    .then(() => setGenerationStatus("Sequence creation cancelled — nothing was queued"))
+    .catch(() => {
+      sequenceError.value = "Cancellation could not be confirmed. Check the queue before retrying.";
+      setGenerationStatus(sequenceError.value);
+    });
 }
 
 async function cancelMobileSequence(): Promise<void> {
@@ -4322,7 +4431,19 @@ async function prepareGenerationRequest(
   target: ApiTarget,
   draft: GenerateForm,
   isCurrent: () => boolean = () => true,
+  signal?: AbortSignal,
 ) {
+  // Fixed recipe controls are not user choices: a stale draft value (restored
+  // before the recipe landed, model swapped under it) snaps to what the
+  // disabled control displays instead of queueing a shape the host refuses.
+  // It runs before the source fits below so their target is the canvas that
+  // actually renders. Shared with desktop and web.
+  Object.assign(
+    draft,
+    fixedRecipeControlOverrides(
+      effectiveGenerationRecipe(selectedGenerationModel.value, draft.pipeline),
+    ),
+  );
   const draftCaps = generationCapabilitiesForFamily(
     draft.family,
     draft.model,
@@ -4345,6 +4466,7 @@ async function prepareGenerationRequest(
               image,
               model,
               target,
+              ...(signal ? { signal } : {}),
               onProgress: (message) => {
                 if (isCurrent()) setGenerationStatus(message);
               },
@@ -4375,6 +4497,7 @@ async function prepareGenerationRequest(
             image,
             model,
             target,
+            ...(signal ? { signal } : {}),
             onProgress: (message) => {
               if (isCurrent()) setGenerationStatus(message);
             },
@@ -4407,6 +4530,7 @@ async function prepareGenerationRequest(
             image,
             model,
             target,
+            ...(signal ? { signal } : {}),
             onProgress: (message) => {
               if (isCurrent()) setGenerationStatus(message);
             },
@@ -4593,6 +4717,7 @@ async function generate(): Promise<void> {
   const guardedSubmission = !!preparedSubmission || !!quickSubmission;
   const liveFormIdentity = guardedSubmission ? JSON.stringify(cloneGenerateForm(form)) : "";
   const token = submissionGuard.begin();
+  const submitSignal = submissionGuard.signalFor(token);
   const uiId = ++submissionUiId;
   const ownsPreparedSubmission = () =>
     !unmounted &&
@@ -4611,7 +4736,12 @@ async function generate(): Promise<void> {
   generationSubmissionPhase.value = "preparing";
   preparedSubmitting.value = !!preparedSubmission;
   try {
-    request = await prepareGenerationRequest(target, draft, () => submissionGuard.isCurrent(token));
+    request = await prepareGenerationRequest(
+      target,
+      draft,
+      () => submissionGuard.isCurrent(token),
+      submitSignal,
+    );
     if (request.source_image && originalSource) {
       void persistGenerationSourceMedia(request.source_image, originalSource);
     }
@@ -4719,6 +4849,7 @@ async function generate(): Promise<void> {
       subject: "print",
       requireAuthoritative: requireAuthoritativePlacement,
       isCurrent: () => submissionGuard.isCurrent(token),
+      signal: submitSignal,
     });
     if (routed.kind === "abandoned") {
       releasePreparedSubmission();
@@ -4739,8 +4870,12 @@ async function generate(): Promise<void> {
     try {
       placement =
         chainRouting.kind === "chain"
-          ? await previewChainPlacement(target, previewRequest, batchSize)
-          : await previewGenerationPlacement(target, previewRequest, batchSize);
+          ? await previewChainPlacement(target, previewRequest, batchSize, {
+              signal: submitSignal,
+            })
+          : await previewGenerationPlacement(target, previewRequest, batchSize, {
+              signal: submitSignal,
+            });
     } catch (error) {
       if (!submissionGuard.isCurrent(token)) {
         releasePreparedSubmission();
@@ -4984,6 +5119,17 @@ async function cancelGeneration(job: Job): Promise<void> {
     setGenerationStatus(describeTransportError(error, job.hostLabel), true);
     generationAnnouncement.value = `Cancellation failed. ${progress.value}`;
   }
+}
+
+function cancelGenerationSubmission(): void {
+  if (!preparingGeneration.value) return;
+  submissionGuard.invalidate();
+  submissionUiId += 1;
+  preparingGeneration.value = false;
+  preparedSubmitting.value = false;
+  generationSubmissionPhase.value = null;
+  setGenerationStatus("Cancelled before generation started");
+  generationAnnouncement.value = "Generation planning cancelled. Nothing was queued.";
 }
 
 function renewGeneratedResult(force: boolean): void {
@@ -7362,6 +7508,12 @@ onBeforeUnmount(() => {
   }
   preparationGuard.invalidate();
   submissionGuard.invalidate();
+  sequenceSubmissionGuard.invalidate();
+  const sequenceCancellation = sequenceCancellationRequest;
+  sequenceCancellationRequest = null;
+  if (sequenceCancellation) {
+    void confirmCancellation(sequenceCancellation).catch(() => {});
+  }
   submissionUiId += 1;
   recoveryRetryId += 1;
   expansionPullRequestId += 1;
@@ -7648,6 +7800,7 @@ onBeforeUnmount(() => {
               :camera-controls-loaded="cameraControlsLoaded"
               :camera-unsupported-reason="cameraUnsupportedReason"
               @submit="submitMobileSequence"
+              @cancel="cancelMobileSequenceSubmission"
             >
               <template #settings>
                 <MobileSharedParams
@@ -7848,6 +8001,7 @@ onBeforeUnmount(() => {
               @refresh="replacePreparedPrompts(false)"
               @discard="discardPreparedBatch"
               @generate="generate"
+              @cancel="cancelGenerationSubmission"
             />
             <p
               v-if="mobileMediaBudgetError"
@@ -9129,7 +9283,7 @@ onBeforeUnmount(() => {
         type="button"
         :disabled="developDisabled"
         data-test="mobile-develop-button"
-        @click="generate"
+        @click="preparingGeneration ? cancelGenerationSubmission() : generate()"
       >
         {{ developButtonLabel }}
       </button>

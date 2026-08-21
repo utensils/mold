@@ -185,6 +185,7 @@ try {
 }
 
 const ignoredEnvVars = new Set([
+  'MOLD_BUILD_CHANNEL',
   'MOLD_BUILD_DATE',
   'MOLD_GIT_SHA',
   'MOLD_GIT_SHA_SHORT',

@@ -147,6 +147,17 @@ describe("SequenceComposer — active clip editor", () => {
 });
 
 describe("SequenceComposer — footer", () => {
+  it("keeps the preparing action responsive and emits cancel", async () => {
+    seedDraft();
+    const wrapper = mountComposer({ submitting: true });
+    const button = wrapper.get("[data-test='generate-sequence']");
+    expect(button.attributes("disabled")).toBeUndefined();
+    expect(button.text()).toContain("Cancel · Preparing sequence");
+    await button.trigger("click");
+    expect(wrapper.emitted("cancel")).toHaveLength(1);
+    expect(wrapper.emitted("submit")).toBeUndefined();
+  });
+
   it("discards an in-flight validation when the rendering host changes", async () => {
     let resolveValidation!: (value: Awaited<ReturnType<typeof validateChain>>) => void;
     validateChainMock.mockReturnValue(

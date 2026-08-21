@@ -12,6 +12,7 @@ import {
   previewRequestForSiblingFanout,
   requiresAuthoritativePlacement,
   type MissingModelPlacement,
+  type PlacementPreviewOptions,
   type PlacementMissingComponent,
 } from "@studio/api/generationPlacement";
 import { ApiError, apiJsonTo, type ApiTarget } from "../lib/api/client";
@@ -635,6 +636,7 @@ export const useHostsStore = defineStore("hosts", {
       selection: string | null,
       request: GenerateRequest | ChainRequest | AutoChainRequest,
       copies = 1,
+      options: PlacementPreviewOptions = {},
     ): Promise<FeasibleRouteResult> {
       const requireAuthoritative = requiresAuthoritativePlacement(
         request as unknown as Record<string, unknown>,
@@ -778,6 +780,10 @@ export const useHostsStore = defineStore("hosts", {
         const firstPlanned = new Promise<void>((resolve) => (resolveFirstPlanned = resolve));
         candidates.forEach((host, index) => {
           void (async () => {
+            const controller = controllers[index]!;
+            const abortFromCaller = () => controller.abort(options.signal?.reason);
+            if (options.signal?.aborted) abortFromCaller();
+            else options.signal?.addEventListener("abort", abortFromCaller, { once: true });
             const started = performance.now();
             try {
               const target = { baseUrl: host.baseUrl!, apiKey: host.apiKey };
@@ -790,7 +796,7 @@ export const useHostsStore = defineStore("hosts", {
                         copies,
                       ),
                       copies,
-                      { signal: controllers[index]!.signal },
+                      { signal: controller.signal },
                     )
                   : await previewGenerationPlacement(
                       target,
@@ -799,7 +805,7 @@ export const useHostsStore = defineStore("hosts", {
                         copies,
                       ),
                       copies,
-                      { signal: controllers[index]!.signal },
+                      { signal: controller.signal },
                     );
               probes.push({
                 host,
@@ -822,6 +828,7 @@ export const useHostsStore = defineStore("hosts", {
                 roundTripMs: Math.max(0, performance.now() - started),
               });
             } finally {
+              options.signal?.removeEventListener("abort", abortFromCaller);
               pendingProbes -= 1;
               if (pendingProbes === 0) resolveAllProbes();
             }
@@ -1058,8 +1065,9 @@ export const useHostsStore = defineStore("hosts", {
       selection: string | null,
       request: GenerateRequest | ChainRequest | AutoChainRequest,
       copies = 1,
+      options: PlacementPreviewOptions = {},
     ): Promise<HostRoute | null> {
-      const result = await this.resolveFeasible(selection, request, copies);
+      const result = await this.resolveFeasible(selection, request, copies, options);
       return result.kind === "route" ? result.route : null;
     },
     /** Pull queue depth/capacity from every live host. */

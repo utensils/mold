@@ -36,7 +36,12 @@ import { addHost, ORIGIN_HOST_ID } from "../lib/hostRegistry";
 import { AUTO_TARGET_ID, CAPABLE_TARGET_ID } from "../lib/hostRouting";
 import type { GalleryImage, ModelInfoExtended, OutputMetadata } from "../types";
 import type { Job } from "../composables/useGenerateStream";
-import type { ChainJobDetail } from "@studio/lib/api/chainTypes";
+import type {
+  ChainJobDetail,
+  ChainRequestWire,
+  CreateChainJobResponse,
+} from "@studio/lib/api/chainTypes";
+import type { StreamTarget } from "../api";
 
 const routeQuery = vi.hoisted(() => ({ value: {} as Record<string, unknown> }));
 const routerReplaceMock = vi.hoisted(() =>
@@ -85,7 +90,13 @@ const upscaleStreamMock = vi.hoisted(() =>
   >(async () => undefined),
 );
 const createChainJobMock = vi.hoisted(() =>
-  vi.fn(async () => ({ job_id: "job-1" })),
+  vi.fn<
+    (
+      request: ChainRequestWire,
+      target?: StreamTarget,
+      operationId?: string,
+    ) => Promise<CreateChainJobResponse>
+  >(async () => ({ job_id: "job-1" })),
 );
 const expandPromptMock = vi.hoisted(() =>
   vi.fn(async (request: { variations: number }) => ({
@@ -105,7 +116,7 @@ const streamSelectedJobRef = vi.hoisted(() => ({
 }));
 const streamSelectMock = vi.hoisted(() => vi.fn());
 const placementPreviewMock = vi.hoisted(() =>
-  vi.fn(async (): Promise<Record<string, unknown>> => ({
+  vi.fn(async (..._args: unknown[]): Promise<Record<string, unknown>> => ({
     version: 1,
     authoritative: true,
     state_version: 1,
@@ -155,6 +166,9 @@ const listChainJobsMock = vi.hoisted(() =>
 );
 const getChainJobMock = vi.hoisted(() => vi.fn());
 const cancelChainJobMock = vi.hoisted(() => vi.fn(async () => ({})));
+const cancelChainJobMutationMock = vi.hoisted(() =>
+  vi.fn(async () => undefined),
+);
 const resumeChainJobMock = vi.hoisted(() => vi.fn(async () => ({})));
 const deleteChainJobMock = vi.hoisted(() => vi.fn(async () => undefined));
 const gcChainJobsMock = vi.hoisted(() =>
@@ -194,6 +208,7 @@ vi.mock("../api", async (importOriginal) => {
     listChainJobs: listChainJobsMock,
     getChainJob: getChainJobMock,
     cancelChainJob: cancelChainJobMock,
+    cancelChainJobMutation: cancelChainJobMutationMock,
     resumeChainJob: resumeChainJobMock,
     retakeChainJob: vi.fn(async () => ({})),
     deleteChainJob: deleteChainJobMock,
@@ -360,6 +375,7 @@ describe("CreatePage layout and behavior", () => {
     listChainJobsMock.mockResolvedValue({ jobs: [] });
     getChainJobMock.mockReset();
     cancelChainJobMock.mockClear();
+    cancelChainJobMutationMock.mockClear();
     resumeChainJobMock.mockClear();
     deleteChainJobMock.mockClear();
     gcChainJobsMock.mockClear();
@@ -1703,6 +1719,7 @@ describe("CreatePage layout and behavior", () => {
         ],
       }),
       expect.objectContaining({ baseUrl: expect.any(String) }),
+      expect.stringMatching(/^[0-9a-f-]{36}$/),
     );
     expect(placementPreviewMock).toHaveBeenCalledWith(
       expect.objectContaining({ baseUrl: expect.any(String) }),
@@ -1714,6 +1731,7 @@ describe("CreatePage layout and behavior", () => {
         ],
       }),
       1,
+      expect.any(Object),
     );
     expect(submitMock).not.toHaveBeenCalled();
   });
@@ -2013,6 +2031,7 @@ describe("CreatePage layout and behavior", () => {
       expect.anything(),
       expect.objectContaining({ batch_size: 1 }),
       3,
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
   });
 
@@ -3054,6 +3073,7 @@ describe("CreatePage layout and behavior", () => {
         ],
       }),
       expect.objectContaining({ baseUrl: expect.any(String) }),
+      expect.stringMatching(/^[0-9a-f-]{36}$/),
     );
     expect(amendChainJobMock.mock.calls[0]?.[1]).toEqual(
       expect.objectContaining({ strength: 1 }),
@@ -3096,6 +3116,7 @@ describe("CreatePage layout and behavior", () => {
       false,
     );
     await flushPromises();
+    await flushPromises();
     amendChainJobMock.mockRejectedValue(
       new ApiHttpError("POST /api/chain-jobs/job-9/amend", 409, "moved on"),
     );
@@ -3112,6 +3133,105 @@ describe("CreatePage layout and behavior", () => {
     expect(wrapper.get("[data-test='sequence-submit-error']").text()).toContain(
       "Your edits are still here",
     );
+  });
+
+  it("compensates a cancelled in-flight sequence amendment on its frozen target", async () => {
+    hostModelsMock.mockResolvedValue([
+      {
+        name: "ltx-2-19b-distilled:fp8",
+        family: "ltx2",
+        size_gb: 20,
+        is_loaded: false,
+        last_used: null,
+        hf_repo: "",
+        downloaded: true,
+        default_steps: 8,
+        default_guidance: 3,
+        default_width: 1216,
+        default_height: 704,
+        description: "Sequence model",
+        supports_sequence: true,
+      },
+    ]);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const draft = enterSequenceMode();
+    draft.clips[0]!.prompt = "one";
+    draft.clips[1]!.prompt = "two";
+    draft.loadFromJob(
+      {
+        jobId: "job-9",
+        hostId: ORIGIN_HOST_ID,
+        baseline: draft.clips.map((clip) => ({ ...clip })),
+        completedStages: 1,
+      },
+      draft.clips.map((clip) => ({ ...clip })),
+      false,
+    );
+    await flushPromises();
+    let finishAmend!: (value: { preserved_stages: number }) => void;
+    amendChainJobMock.mockReturnValueOnce(
+      new Promise((resolve) => (finishAmend = resolve)),
+    );
+
+    await wrapper.get("[data-test='sequence-generate']").trigger("click");
+    await vi.waitFor(() => expect(amendChainJobMock).toHaveBeenCalledTimes(1));
+    const frozenTarget = amendChainJobMock.mock.calls[0]?.[2];
+    const operationId = amendChainJobMock.mock.calls[0]?.[3];
+    expect(operationId).toMatch(/^[0-9a-f-]{36}$/);
+    const cancel = wrapper.get("[data-test='sequence-generate']");
+    expect(cancel.text()).toContain("Cancel");
+    await cancel.trigger("click");
+    await vi.waitFor(() =>
+      expect(cancelChainJobMutationMock).toHaveBeenCalledWith(
+        "job-9",
+        operationId,
+        frozenTarget,
+      ),
+    );
+    finishAmend({ preserved_stages: 0 });
+    await flushPromises();
+
+    expect(cancelChainJobMock).toHaveBeenCalledWith("job-9", frozenTarget);
+    expect(draft.editing).toMatchObject({ jobId: "job-9" });
+  });
+
+  it("cancels sequence creation before a lost job-id response", async () => {
+    hostModelsMock.mockResolvedValue([
+      {
+        name: "ltx-2-19b-distilled:fp8",
+        family: "ltx2",
+        downloaded: true,
+        supports_sequence: true,
+        default_width: 1216,
+        default_height: 704,
+        default_steps: 8,
+        default_guidance: 3,
+      },
+    ]);
+    createChainJobMock.mockReturnValueOnce(new Promise(() => {}));
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const draft = enterSequenceMode();
+    draft.clips[0]!.prompt = "one";
+    draft.clips[1]!.prompt = "two";
+    await flushPromises();
+
+    await wrapper.get("[data-test='sequence-generate']").trigger("click");
+    await vi.waitFor(() => expect(createChainJobMock).toHaveBeenCalledTimes(1));
+    const target = createChainJobMock.mock.calls[0]?.[1];
+    const operationId = createChainJobMock.mock.calls[0]?.[2];
+    expect(operationId).toMatch(/^[0-9a-f-]{36}$/);
+    await wrapper.get("[data-test='sequence-generate']").trigger("click");
+
+    await vi.waitFor(() =>
+      expect(cancelChainJobMutationMock).toHaveBeenCalledWith(
+        operationId,
+        operationId,
+        target,
+      ),
+    );
+    expect(cancelChainJobMock).not.toHaveBeenCalled();
   });
 
   it("keeps one stage playing while later stages finish and stops invalidated media", async () => {
@@ -3490,6 +3610,97 @@ describe("CreatePage host routing", () => {
       },
     });
   }
+
+  it("cancels an in-flight placement check without queueing late work", async () => {
+    hostModelsMock.mockResolvedValue([flux]);
+    let release!: (
+      value: Awaited<ReturnType<typeof placementPreviewMock>>,
+    ) => void;
+    placementPreviewMock.mockImplementationOnce(
+      () => new Promise((resolve) => (release = resolve)),
+    );
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    const form = useGenerateForm();
+    form.state.value.prompt = "cancel this plan";
+    await flushPromises();
+
+    await wrapper.get("[data-test='composer-submit']").trigger("click");
+    await vi.waitFor(() =>
+      expect(placementPreviewMock).toHaveBeenCalledTimes(1),
+    );
+    const button = wrapper.get("[data-test='composer-submit']");
+    expect(button.text()).toContain("Cancel");
+    expect(wrapper.text()).toContain("Checking machine fit");
+    expect(button.attributes("disabled")).toBeUndefined();
+
+    await button.trigger("click");
+    const previewOptions = placementPreviewMock.mock.calls[0]?.[3] as
+      { signal?: AbortSignal } | undefined;
+    expect(previewOptions?.signal?.aborted).toBe(true);
+    expect(submitMock).not.toHaveBeenCalled();
+
+    release({
+      version: 1,
+      authoritative: true,
+      state_version: 1,
+      plan_version: 1,
+      outcome: "planned",
+      candidate: {
+        device_id: "cuda:0",
+        execution_fingerprint: "test",
+        predicted_start_after_ms: 0,
+        predicted_completion_after_ms: 100,
+        setup_ms: 0,
+        setup_kind: "warm",
+        estimate_confidence: "high",
+      },
+    });
+    await flushPromises();
+    expect(submitMock).not.toHaveBeenCalled();
+    expect(button.text()).toContain("Generate");
+  });
+
+  it("aborts an in-flight placement check when Create unmounts", async () => {
+    hostModelsMock.mockResolvedValue([flux]);
+    let release!: (
+      value: Awaited<ReturnType<typeof placementPreviewMock>>,
+    ) => void;
+    placementPreviewMock.mockImplementationOnce(
+      () => new Promise((resolve) => (release = resolve)),
+    );
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    const form = useGenerateForm();
+    form.state.value.prompt = "leave this plan";
+    await flushPromises();
+
+    await wrapper.get("[data-test='composer-submit']").trigger("click");
+    await vi.waitFor(() =>
+      expect(placementPreviewMock).toHaveBeenCalledTimes(1),
+    );
+    const previewOptions = placementPreviewMock.mock.calls[0]?.[3] as
+      { signal?: AbortSignal } | undefined;
+    wrapper.unmount();
+    expect(previewOptions?.signal?.aborted).toBe(true);
+
+    release({
+      version: 1,
+      authoritative: true,
+      state_version: 1,
+      plan_version: 1,
+      outcome: "planned",
+      candidate: {
+        device_id: "cuda:0",
+        execution_fingerprint: "test",
+        predicted_start_after_ms: 0,
+        predicted_completion_after_ms: 100,
+        setup_ms: 0,
+        setup_kind: "warm",
+        estimate_confidence: "high",
+      },
+    });
+    await flushPromises();
+    expect(submitMock).not.toHaveBeenCalled();
+  });
 
   it("expands on a machine that has the expander while the print stays put", async () => {
     const studio = addHost({
@@ -3955,6 +4166,57 @@ describe("CreatePage host routing", () => {
     expect(toasts.some((t) => /can't run this print/.test(t.text))).toBe(false);
   });
 
+  it("does not arm a late missing-model resume after planning is cancelled", async () => {
+    hostModelsMock.mockResolvedValue([flux]);
+    placementPreviewMock.mockResolvedValue({
+      version: 1,
+      authoritative: true,
+      state_version: 1,
+      plan_version: 1,
+      outcome: "infeasible",
+      reason: "model 'z-image-turbo:q6' has no concrete local artifacts",
+      missing_components: [
+        {
+          kind: "transformer",
+          name: "transformer",
+          present: false,
+          repair_model: "z-image-turbo:q6",
+        },
+      ],
+    });
+    let finishDownload!: () => void;
+    postDownloadMock.mockClear();
+    postDownloadMock.mockImplementationOnce(
+      () =>
+        new Promise<undefined>(
+          (resolve) => (finishDownload = () => resolve(undefined)),
+        ),
+    );
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = "z-image-turbo:q6";
+    form.state.value.modelFamily = "zimage";
+    form.state.value.prompt = "cancel the repair";
+    await nextTick();
+
+    await wrapper.get("[data-test='composer-submit']").trigger("click");
+    await vi.waitFor(() => expect(finishDownload).toBeTypeOf("function"));
+    const cancel = wrapper.get("[data-test='composer-submit']");
+    expect(cancel.text()).toContain("Cancel");
+    await cancel.trigger("click");
+    finishDownload();
+    await flushPromises();
+
+    expect(submitMock).not.toHaveBeenCalled();
+    expect(cancel.text()).toContain("Generate");
+    expect(
+      useNotifications().toasts.some((toast) =>
+        /generation starts when it's ready/.test(toast.text),
+      ),
+    ).toBe(false);
+  });
+
   // The pull is only ever offered on a machine that reported the model
   // absent; one that refused for capacity would refuse again after a repair.
   it("never offers a machine that refused for capacity as a pull target", async () => {
@@ -4221,9 +4483,9 @@ function pageStubs() {
     },
     ComposerCard: {
       name: "ComposerCard",
-      props: ["busy", "disabledReason"],
+      props: ["busy", "cancellable", "busyLabel", "disabledReason"],
       template:
-        '<div><div data-test="prompt-style-stub"/><slot name="mobile-controls"/><p v-if="disabledReason" data-test="page-generation-blocker">{{ disabledReason }}</p><button data-test="composer-submit" @click="$emit(\'submit\')">go</button><button data-test="composer-expand" @click="$emit(\'expand\')">expand</button><button data-test="composer-undo" @click="$emit(\'undo-expand\')">undo</button></div>',
+        '<div><div data-test="prompt-style-stub"/><slot name="mobile-controls"/><p v-if="disabledReason" data-test="page-generation-blocker">{{ disabledReason }}</p><p v-if="cancellable">{{ busyLabel }}</p><button data-test="composer-submit" @click="$emit(cancellable ? \'cancel\' : \'submit\')">{{ cancellable ? "Cancel" : "Generate" }}</button><button data-test="composer-expand" @click="$emit(\'expand\')">expand</button><button data-test="composer-undo" @click="$emit(\'undo-expand\')">undo</button></div>',
       // The page calls these through its template ref on submit / new-print;
       // a stub without them throws an unhandled TypeError mid-run.
       methods: { record: vi.fn(), focus: vi.fn() },
@@ -4270,9 +4532,11 @@ function pageStubs() {
         "chainLevelDirty",
         "stageMediaByClipId",
         "playingClipId",
+        "submitting",
       ],
       emits: [
         "submit",
+        "cancel",
         "duplicate-as-new",
         "discard-edit",
         "expand-clip",
@@ -4281,7 +4545,7 @@ function pageStubs() {
       ],
       template:
         "<div data-test='sequence-composer-stub'>" +
-        "<button data-test='sequence-generate' @click=\"$emit('submit')\">go</button>" +
+        "<button data-test='sequence-generate' @click=\"$emit(submitting ? 'cancel' : 'submit')\">{{ submitting ? 'Cancel' : 'go' }}</button>" +
         "<button v-if='Object.keys(stageMediaByClipId || {}).length' data-test='stub-play-first' @click=\"$emit('play-clip', Object.keys(stageMediaByClipId)[0])\">play</button>" +
         "<button data-test='clip-expand' @click=\"$emit('expand-clip', 'clip-x', 'a stage prompt')\">expand</button>" +
         "</div>",

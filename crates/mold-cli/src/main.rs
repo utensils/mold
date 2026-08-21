@@ -1536,6 +1536,7 @@ Examples:
         after_long_help = "\
 Examples:
   mold update                   Update to latest release
+  mold update --nightly         Update to latest rolling build from main
   mold update --check           Check for updates without installing
   mold update --version v0.7.0  Install a specific version
   mold update --force           Reinstall even if already up-to-date"
@@ -1548,6 +1549,10 @@ Examples:
         /// Reinstall even if the current version matches
         #[arg(long)]
         force: bool,
+
+        /// Install the latest rolling build from main
+        #[arg(long, conflicts_with = "version")]
+        nightly: bool,
 
         /// Install a specific version tag (e.g. v0.7.0)
         #[arg(long)]
@@ -2488,9 +2493,10 @@ async fn run() -> anyhow::Result<()> {
         Commands::Update {
             check,
             force,
+            nightly,
             version,
         } => {
-            commands::update::run(check, force, version).await?;
+            commands::update::run(check, force, nightly, version).await?;
         }
         #[cfg(feature = "discord")]
         Commands::Discord => {

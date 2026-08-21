@@ -889,6 +889,7 @@ On first launch after upgrading from a pre-#265 release, mold imports the `[expa
 
 ```bash
 mold update                       # Update to latest GitHub release
+mold update --nightly             # Install latest rolling build from main
 mold update --check               # Check for updates without installing
 mold update --version v0.6.0      # Install a specific version
 mold update --force               # Reinstall even if already up-to-date
