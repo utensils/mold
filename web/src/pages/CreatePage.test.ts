@@ -34,7 +34,12 @@ import { ApiHttpError } from "../api";
 import { ApiError } from "@studio/api/client";
 import { addHost, ORIGIN_HOST_ID } from "../lib/hostRegistry";
 import { AUTO_TARGET_ID, CAPABLE_TARGET_ID } from "../lib/hostRouting";
-import type { GalleryImage, ModelInfoExtended, OutputMetadata } from "../types";
+import type {
+  GalleryImage,
+  GenerateFormState,
+  ModelInfoExtended,
+  OutputMetadata,
+} from "../types";
 import type { Job } from "../composables/useGenerateStream";
 import type {
   ChainJobDetail,
@@ -4470,6 +4475,74 @@ describe("CreatePage host routing", () => {
     await flushPromises();
 
     expect(submitMock.mock.calls[0]?.[2]).toMatchObject({ hostId: studio.id });
+  });
+
+  // ── Face identity (PuLID, #1224) ──────────────────────────────────────
+  // The photo is dropped from the wire whenever the combination is invalid,
+  // so the submit gate is what stops Generate from quietly rendering a
+  // different face under the same prompt and seed.
+  const pulid = {
+    ...flux,
+    name: "flux-dev-pulid:bf16",
+    family: "flux",
+    supports_identity: true,
+  };
+  const PHOTO = "iVBORw0KGgoAAAANSUhEUgAAAAcAAAAECAIAAAAmkwkpAAAAAElFTkSuQmCC";
+
+  function stageIdentity(extra: Partial<GenerateFormState> = {}) {
+    const form = useGenerateForm();
+    form.state.value.model = pulid.name;
+    form.state.value.modelFamily = "flux";
+    form.state.value.prompt = "a portrait";
+    form.state.value.identityImage = {
+      kind: "upload",
+      filename: "ada.png",
+      base64: PHOTO,
+    };
+    Object.assign(form.state.value, extra);
+    return form;
+  }
+
+  it("ships the identity photo on an identity-qualified checkpoint", async () => {
+    hostModelsMock.mockResolvedValue([pulid]);
+    stageIdentity({ identityWeight: 1.2 });
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+
+    await wrapper.get("[data-test='composer-submit']").trigger("click");
+    await flushPromises();
+
+    expect(submitMock.mock.calls[0]?.[0]).toMatchObject({
+      id_image: PHOTO,
+      id_image_name: "ada.png",
+      id_weight: 1.2,
+    });
+  });
+
+  it("blocks Generate for a combination admission would refuse", async () => {
+    hostModelsMock.mockResolvedValue([pulid]);
+    stageIdentity({ loras: [{ path: "style.safetensors", scale: 1 }] });
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+
+    await wrapper.get("[data-test='composer-submit']").trigger("click");
+    await flushPromises();
+
+    expect(submitMock).not.toHaveBeenCalled();
+    expect(wrapper.get("[data-test='composer-submit-error']").text()).toContain(
+      "cannot be combined with a LoRA",
+    );
+  });
+
+  it("renders the identity well beside the source media, not in Advanced", async () => {
+    hostModelsMock.mockResolvedValue([pulid]);
+    stageIdentity();
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+
+    // AdvancedDrawer is stubbed out entirely here, so finding the well proves
+    // it lives in the primary form.
+    expect(wrapper.find("[data-test='identity-panel']").exists()).toBe(true);
   });
 });
 

@@ -53,6 +53,11 @@ import {
   syncCameraMotionLora,
 } from "@studio/lib/cameraMotion";
 import { pipelineForControlId } from "@studio/lib/ltx2Control";
+import {
+  identityRequestFields,
+  identityReuse,
+  supportsIdentity,
+} from "@studio/lib/identityConditioning";
 import { validatePrintTitle } from "@studio/lib/libraryOrganization";
 import { firstLastFrameKeyframes } from "@studio/lib/sourceImageCapability";
 import { stripAudioOnlyIncompatibleFields } from "@studio/lib/ltx2Pipeline";
@@ -144,6 +149,10 @@ function defaultForm(): GenerateFormState {
     guidanceCapabilities: null,
     sourceImageCapability: null,
     endFrame: null,
+    identityImage: null,
+    identityWeight: null,
+    identityStartStep: null,
+    identitySupported: null,
     seedMode: "random",
     seed: null,
     batchSize: 1,
@@ -203,6 +212,7 @@ export function sanitizePersistedForm(
   const {
     imageAttachments,
     endFrame,
+    identityImage,
     maskImage,
     controlImage,
     audioFile,
@@ -217,6 +227,10 @@ export function sanitizePersistedForm(
     version: FORM_VERSION,
     imageAttachments: imageAttachments.map(stripMediaBytes),
     endFrame: endFrame ? stripMediaBytes(endFrame) : null,
+    // A face photo is the last payload that should sit in localStorage: the
+    // descriptor is kept so the well can offer a reattach, the bytes live in
+    // IndexedDB under the draft id like every other staged image.
+    identityImage: identityImage ? stripMediaBytes(identityImage) : null,
     maskImage: maskImage ? stripMediaBytes(maskImage) : null,
     controlImage: controlImage ? stripMediaBytes(controlImage) : null,
     audioFile: audioFile ? stripMediaBytes(audioFile) : null,
@@ -256,9 +270,24 @@ function modelDefaultsPatch(
     // after the catalog row went out of scope, and a stale snapshot from the
     // previously selected checkpoint would be worse than none.
     sourceImageCapability: model.source_image ?? null,
+    // Same reason: `toRequest` re-asks the resolved row when it has one, and
+    // this snapshot is what answers when it does not.
+    identitySupported: supportsIdentity(
+      effectiveGenerationRecipe(model, null),
+      model,
+    ),
     loras: [],
     icLoraControl: null,
   };
+  // Staged media survives a capability-losing switch (see the source-media
+  // bridge below); the identity SETTINGS do not. A weight left set on a
+  // checkpoint whose Identity group no longer renders is an inline error the
+  // user cannot see, let alone clear — the same reason the LTX-2 knobs clear
+  // while its audio/video stays parked.
+  if (!next.identitySupported) {
+    next.identityWeight = null;
+    next.identityStartStep = null;
+  }
   // #787: a Negative field still showing the previous model's advertised
   // default follows the new model (that is also how the default first
   // appears); typed text and an explicit clear are user authority. The
@@ -582,6 +611,12 @@ export function applyMetadataToForm(
         ]
       : []);
   const outputFormat = metadata.output_format ?? options.format ?? null;
+  // Saved provenance carries the identity photo's NAME and digest, never its
+  // bytes, so reuse restores a bytes-less reattach descriptor and the page
+  // looks the payload back up in the local stash by `id_image_sha256`. An
+  // empty payload is refused by `identityRequestFields`, so the descriptor
+  // can never smuggle a blank `id_image` onto the wire.
+  const identity = identityReuse(metadata);
   const camera = normalizeCameraMotionLoraState(
     loras.slice(0, MAX_LORA_STACK),
     null,
@@ -657,6 +692,15 @@ export function applyMetadataToForm(
     // first/last-frame render's closing still cannot be rebuilt from it. The
     // page says so out loud rather than leaving Generate looking ready.
     endFrame: null,
+    identityImage: identity
+      ? {
+          kind: "upload",
+          filename: identity.name || "identity photo",
+          base64: "",
+        }
+      : null,
+    identityWeight: identity ? identity.weight : null,
+    identityStartStep: identity ? identity.startStep : null,
     maskImage: null,
     controlImage: null,
     audioFile: null,
@@ -723,6 +767,7 @@ function ensureDraftIds(state: GenerateFormState) {
   };
   state.imageAttachments.forEach(ensure);
   ensure(state.endFrame);
+  ensure(state.identityImage ?? null);
   ensure(state.maskImage);
   ensure(state.controlImage);
   ensure(state.audioFile);
@@ -764,6 +809,7 @@ function mediaFromState(state: GenerateFormState): DraftMediaRecord[] {
   const ordinary = [
     ...state.imageAttachments,
     state.endFrame,
+    state.identityImage ?? null,
     state.maskImage,
     state.controlImage,
     state.audioFile,
@@ -811,6 +857,12 @@ async function hydrateDraftMedia(state: GenerateFormState) {
   const endFrameId = state.endFrame?.draftId ?? "";
   const endFrame = await hydrate(state.endFrame);
   if ((state.endFrame?.draftId ?? "") === endFrameId) state.endFrame = endFrame;
+
+  const identityId = state.identityImage?.draftId ?? "";
+  const identity = await hydrate(state.identityImage ?? null);
+  if ((state.identityImage?.draftId ?? "") === identityId) {
+    state.identityImage = identity;
+  }
 
   const maskId = state.maskImage?.draftId ?? "";
   const mask = await hydrate(state.maskImage);
@@ -1304,6 +1356,26 @@ export function useGenerateForm(): UseGenerateForm {
         // key at all, which is what keeps the resolved tier's own shift and
         // distill strengths in place.
         ...wanRecipeToWire(s.wanRecipe, capabilities.wanRecipe),
+        // Face identity (#1224). The resolved catalog row is the final
+        // authority at submit time exactly as it is for `enable_audio`; the
+        // snapshot covers a form restored before the inventory landed. The
+        // photo travels untouched — it is never fitted against the canvas.
+        ...identityRequestFields({
+          supported: model
+            ? supportsIdentity(
+                effectiveGenerationRecipe(model, s.pipeline),
+                model,
+              )
+            : (s.identitySupported ?? false),
+          image: s.identityImage?.base64
+            ? {
+                base64: s.identityImage.base64,
+                filename: s.identityImage.filename,
+              }
+            : null,
+          weight: s.identityWeight ?? null,
+          startStep: s.identityStartStep ?? null,
+        }),
       };
       const finalized = stripAudioOnlyIncompatibleFields(
         serializeMinimaxH3Authoring(

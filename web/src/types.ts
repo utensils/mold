@@ -92,6 +92,15 @@ export interface OutputMetadata {
   /** Source-image provenance supplied by newer servers. */
   source_image_name?: string | null;
   source_image_sha256?: string | null;
+  /** Face-identity (PuLID) provenance — names and digests only, never the
+   * face payload (#1224). Additive: absent on servers that predate identity
+   * conditioning AND on every print that carried no identity photo. Read it
+   * through `@studio/lib/identityConditioning`'s `identityProvenance`. */
+  id_image_name?: string | null;
+  id_image_sha256?: string | null;
+  /** Effective values the render actually applied, not the request's. */
+  id_weight?: number | null;
+  id_start_step?: number | null;
   /** Client-shaped source-fit provenance echoed verbatim by newer servers.
    * Parse defensively before restoring. */
   source_fit?: unknown;
@@ -335,6 +344,18 @@ export interface GenerateRequestWire {
   edit_images?: string[] | null;
   /** Ordered heterogeneous MiniMax H3 Ref2VA inputs. */
   references?: GenerationReference[] | null;
+  /** Face-identity (PuLID) reference, base64 PNG/JPEG with no data-URI
+   * prefix (#1224). Never fitted or cropped against the canvas — it is a
+   * face reference, not a composition input. Admission accepts it only on an
+   * identity-qualified checkpoint, and never beside a LoRA or `source_image`;
+   * every rule lives in `@studio/lib/identityConditioning`. */
+  id_image?: string | null;
+  /** Upload label recorded as provenance only when `id_image` exists. */
+  id_image_name?: string | null;
+  /** `0.0..=3.0`; omit to let the server's own default (1.0) apply. */
+  id_weight?: number | null;
+  /** First identity-conditioned step, `< steps`; omit for the default (0). */
+  id_start_step?: number | null;
   strength?: number;
   mask_image?: string | null;
   control_image?: string | null;
@@ -428,6 +449,12 @@ export interface ModelInfoExtended extends ModelDefaults {
   nsfw?: boolean | null;
   /** Model-specific LTX-2 audio output support; absent on older servers. */
   supports_audio?: boolean | null;
+  /** Model accepts a face-identity (PuLID) photo. Absent on servers that
+   * predate identity conditioning — read absence as "no", which is what
+   * keeps the control hidden instead of queueing work the host refuses.
+   * Always read it through `@studio/lib/identityConditioning`'s
+   * `supportsIdentity`, which prefers the server-authored recipe. */
+  supports_identity?: boolean | null;
   /** Model can continue an existing video in one request. Absent on servers
    * that predate continuation — read absence as "no". */
   supports_extend?: boolean | null;
@@ -988,6 +1015,21 @@ export interface GenerateFormState {
    * and meaningless without one — the pair ships as the two-entry `keyframes`
    * layout, never a lone keyframe. */
   endFrame: SourceImageState | null;
+  /** Face-identity (PuLID) photo staged in the primary form (#1224). It is
+   * never fitted against the canvas, so it carries no fit policy. Optional so
+   * persisted pre-identity drafts keep loading; `null`/absent = none. */
+  identityImage?: SourceImageState | null;
+  /** `null` = untouched, which keeps `id_weight` off the wire so the
+   * server's own default stays authoritative. Optional for the same reason
+   * as `identityImage`. */
+  identityWeight?: number | null;
+  /** `null` = untouched; see `identityWeight`. */
+  identityStartStep?: number | null;
+  /** The selected model's advertised identity support, snapshotted on model
+   * change exactly like `guidanceCapabilities` / `sourceImageCapability`:
+   * request assembly runs long after the catalog row went out of scope.
+   * `null`/absent means nothing has been read yet, which reads as "no". */
+  identitySupported?: boolean | null;
   seedMode: SeedMode;
   seed: number | null; // null = random
   batchSize: number;

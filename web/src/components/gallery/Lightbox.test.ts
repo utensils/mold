@@ -493,3 +493,55 @@ describe("Lightbox multi-host media", () => {
     expect(wrapper.text()).toContain("Can't stream this clip");
   });
 });
+
+// ── Face-identity provenance (PuLID, #1224) ─────────────────────────────
+//
+// Metadata records the photo's NAME and digest, never the face itself, so the
+// aside is the only place a viewer can see which likeness a print was
+// conditioned on and how strongly.
+describe("Lightbox identity provenance", () => {
+  const identityItem: GalleryImage = {
+    ...item,
+    metadata: {
+      ...item.metadata,
+      id_image_name: "ada.png",
+      id_image_sha256: "9f".repeat(32),
+      id_weight: 1.25,
+      id_start_step: 2,
+    },
+  };
+
+  it("shows the photo name, short digest, strength and start step", () => {
+    const wrapper = mountWide({ item: identityItem });
+    const row = wrapper.get("[data-test='lightbox-identity']").text();
+    expect(row).toContain("ada.png");
+    expect(row).toContain("9f9f9f9f9f9f");
+    expect(row).toContain("1.25");
+    expect(row).toContain("2");
+  });
+
+  it("says nothing for a print that carried no identity photo", () => {
+    const wrapper = mountWide();
+    expect(wrapper.find("[data-test='lightbox-identity']").exists()).toBe(
+      false,
+    );
+  });
+
+  it("carries the same provenance on the phone layout", () => {
+    setViewportWidth(500);
+    const wrapper = mount(Lightbox, {
+      props: {
+        item: identityItem,
+        index: 0,
+        total: 1,
+        hasPrev: false,
+        hasNext: false,
+        muted: true,
+      },
+      global: { stubs: { Transition: false } },
+    });
+    expect(wrapper.get("[data-test='lightbox-identity']").text()).toContain(
+      "ada.png",
+    );
+  });
+});

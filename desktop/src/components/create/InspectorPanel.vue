@@ -227,8 +227,16 @@ const showSourceMedia = computed(
 );
 /** Identity is capability-gated on positive knowledge only: an unread or
  * absent `supports_identity` renders nothing at all rather than a control for
- * a feature this host does not have. Sequence clips carry no identity slot. */
-const showIdentity = computed(() => !isSequence.value && props.form.identitySupported === true);
+ * a feature this host does not have. Sequence clips carry no identity slot.
+ *
+ * A staged photo keeps the well on screen even after a switch to a checkpoint
+ * that cannot use it: `buildRequest` already keeps it off the wire, but the
+ * submit gate still reports why the print is blocked, and hiding the control
+ * would point that reason at something the user cannot see — with no way to
+ * remove the photo that is blocking Generate. Web applies the same rule. */
+const showIdentity = computed(
+  () => !isSequence.value && (props.form.identitySupported === true || !!props.form.identityImage),
+);
 const activeRecipe = computed(() =>
   effectiveGenerationRecipe(selectedModel.value, props.form.pipeline),
 );

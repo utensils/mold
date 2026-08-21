@@ -43,6 +43,16 @@ describe("advancedActiveCount", () => {
     expect(advancedActiveCount(params())).toBe(0);
   });
 
+  it("counts each touched identity knob, and nothing while both are untouched", () => {
+    // The photo well is primary form (like source images) and never counts;
+    // only the two Advanced knobs do, and only once the user touches them.
+    expect(advancedActiveCount(params({ identity: 0 }))).toBe(0);
+    expect(advancedActiveCount(params({ identity: 1 }))).toBe(1);
+    expect(advancedActiveCount(params({ identity: 2 }))).toBe(2);
+    // Absent (an unsupported family, or a caller that predates identity).
+    expect(advancedActiveCount(params())).toBe(0);
+  });
+
   it("counts the LTX-2 video suite once", () => {
     expect(advancedActiveCount(params({ videoSuite: true }))).toBe(1);
     expect(advancedActiveCount(params({ videoSuite: false }))).toBe(0);
@@ -60,8 +70,9 @@ describe("advancedActiveCount", () => {
           videoNonDefault: true,
           videoSuite: true,
           wanRecipe: 2,
+          identity: 2,
         }),
       ),
-    ).toBe(10);
+    ).toBe(12);
   });
 });

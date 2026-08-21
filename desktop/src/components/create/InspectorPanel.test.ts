@@ -941,6 +941,23 @@ describe("InspectorPanel — source media in the primary form", () => {
     expect(wrapper.find("[data-test='inspector-identity']").exists()).toBe(false);
   });
 
+  it("keeps a staged photo reachable after the capability is lost", async () => {
+    const form = formFor("flux");
+    form.model = "flux-dev:q8";
+    form.identitySupported = true;
+    form.identityImage = { filename: "ada.png", base64: "AAAA" };
+    const wrapper = mount(InspectorPanel, { props: { form } });
+    // Switching to an unqualified checkpoint parks the photo rather than
+    // erasing it; the submit gate names the refusal, so the control that can
+    // clear it must stay on screen instead of becoming a dead end.
+    form.identitySupported = false;
+    await flushPromises();
+    expect(wrapper.find("[data-test='inspector-identity']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='identity-conditioning-error']").text()).toContain(
+      "does not support identity photos",
+    );
+  });
+
   it("keeps identity out of sequence mode", () => {
     useSequenceDraftStore().output = "sequence";
     const form = formFor("flux");
