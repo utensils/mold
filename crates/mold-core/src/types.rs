@@ -2147,6 +2147,12 @@ pub struct OutputMetadata {
     pub extend_overlap_frames: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pipeline: Option<Ltx2PipelineMode>,
+    /// Whether `pipeline` was explicitly present on the authored request.
+    /// `pipeline` itself records the runtime-resolved mode, so reuse clients
+    /// need this additive provenance bit to avoid promoting a default into an
+    /// override. Absent on legacy metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pipeline_requested: Option<bool>,
     /// Persisted terminal runtime provenance for pipelines that expose an
     /// exact additive SHA-256 identity. Absent for legacy and other outputs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2342,6 +2348,7 @@ impl OutputMetadata {
             extend_overlap_frames: (req.extend_video.is_some() || req.extend_video_path.is_some())
                 .then_some(req.effective_extend_overlap_frames()),
             pipeline: req.pipeline,
+            pipeline_requested: Some(req.pipeline.is_some()),
             pipeline_provenance_sha256: None,
             source_preprocessing: None,
             ic_lora_control: req.ic_lora_control.clone(),
@@ -4385,7 +4392,7 @@ mod tests {
             height: 432,
             frames: 124,
             fps: 24,
-            pipeline: None,
+            pipeline: Some(Ltx2PipelineMode::Distilled),
             pipeline_provenance_sha256: Some(provenance.clone()),
             source_preprocessing: None,
             thumbnail: vec![2],
@@ -4399,6 +4406,8 @@ mod tests {
 
         metadata.apply_video_output(&video);
 
+        assert_eq!(metadata.pipeline, Some(Ltx2PipelineMode::Distilled));
+        assert_eq!(metadata.pipeline_requested, Some(false));
         assert_eq!(
             metadata.pipeline_provenance_sha256.as_deref(),
             Some(provenance.as_str())
@@ -5601,6 +5610,7 @@ mod tests {
             Some("/srv/mold/source.mp4")
         );
         assert_eq!(metadata.pipeline, Some(Ltx2PipelineMode::Retake));
+        assert_eq!(metadata.pipeline_requested, Some(true));
         assert_eq!(
             metadata.loras.as_ref().unwrap()[0].path,
             "/loras/camera.safetensors"
@@ -9355,6 +9365,7 @@ mod queue_plan_wire_tests {
         }))
         .unwrap();
         assert_eq!(legacy_metadata.job_id, None);
+        assert_eq!(legacy_metadata.pipeline_requested, None);
         assert!(
             !serde_json::to_value(&legacy_metadata)
                 .unwrap()

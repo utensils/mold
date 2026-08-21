@@ -38,6 +38,7 @@ const metadata: OutputMetadata = {
   frames: 121,
   fps: 30,
   pipeline: "two-stage-hq",
+  pipeline_requested: true,
   spatial_upscale: "x2",
   temporal_upscale: "x2",
   guidance_overrides: {
@@ -53,6 +54,7 @@ describe("applyMobileGalleryMetadata", () => {
       form,
       {
         ...metadata,
+        pipeline_requested: false,
         output_mode: "one-shot",
         chain_job_id: "internal-chain",
         chain: {
@@ -70,6 +72,32 @@ describe("applyMobileGalleryMetadata", () => {
 
     expect(result.sequence).toBeNull();
     expect(form.frames).toBe(metadata.frames);
+    expect(form.pipeline).toBeNull();
+  });
+
+  it("does not promote an ordinary nightly output's resolved pipeline to an override", () => {
+    const form = newGenerateForm();
+    applyMobileGalleryMetadata(
+      form,
+      {
+        prompt: "the live nightly metadata shape",
+        model: "ltx-2.3-22b-distilled:fp8",
+        seed: 44,
+        steps: 8,
+        guidance: 1,
+        width: 768,
+        height: 768,
+        frames: 217,
+        fps: 24,
+        pipeline: "distilled",
+        output_mode: "one-shot",
+        version: "0.23.3 (b3e803c 2026-08-21)",
+      },
+      [{ ...model, name: "ltx-2.3-22b-distilled:fp8" }],
+    );
+
+    expect(form.pipeline).toBeNull();
+    expect(buildRequest(form).pipeline).toBeUndefined();
   });
 
   it("restores the desktop's full-fidelity metadata for mobile generation", () => {
