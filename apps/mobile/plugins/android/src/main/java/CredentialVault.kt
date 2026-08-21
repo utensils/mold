@@ -2,12 +2,13 @@ package com.utensils.mold.mobile_native
 
 import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyPermanentlyInvalidatedException
 import android.security.keystore.KeyProperties
 import android.util.Base64
 import java.nio.charset.StandardCharsets
 import java.security.KeyStore
 import java.security.MessageDigest
-import java.security.GeneralSecurityException
+import javax.crypto.AEADBadTagException
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
@@ -37,21 +38,28 @@ internal class CredentialVault(private val context: Context) {
         val payload = preferences.getString(preferenceKey(hostId), null) ?: return null
         return try {
             val pieces = payload.split('.', limit = 2)
-            check(pieces.size == 2) { "encrypted credential is malformed" }
+            if (pieces.size != 2) {
+                discardUnreadable(hostId)
+                return null
+            }
+            val key = getExistingKey() ?: run {
+                discardUnreadable(hostId)
+                return null
+            }
 
             val cipher = Cipher.getInstance(TRANSFORMATION)
             val iv = Base64.decode(pieces[0], Base64.NO_WRAP)
             val ciphertext = Base64.decode(pieces[1], Base64.NO_WRAP)
-            cipher.init(Cipher.DECRYPT_MODE, getOrCreateKey(), GCMParameterSpec(128, iv))
+            cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(128, iv))
             cipher.updateAAD(hostId.toByteArray(StandardCharsets.UTF_8))
             String(cipher.doFinal(ciphertext), StandardCharsets.UTF_8)
-        } catch (_: GeneralSecurityException) {
+        } catch (_: AEADBadTagException) {
+            discardUnreadable(hostId)
+            null
+        } catch (_: KeyPermanentlyInvalidatedException) {
             discardUnreadable(hostId)
             null
         } catch (_: IllegalArgumentException) {
-            discardUnreadable(hostId)
-            null
-        } catch (_: IllegalStateException) {
             discardUnreadable(hostId)
             null
         }
@@ -71,13 +79,22 @@ internal class CredentialVault(private val context: Context) {
         check(preferences.edit().putString(preferenceKey(hostId), payload).commit())
     }
 
+    internal fun deleteKeyForTesting() {
+        val store = KeyStore.getInstance(KEYSTORE).apply { load(null) }
+        store.deleteEntry(KEY_ALIAS)
+    }
+
+    internal fun hasKeyForTesting(): Boolean {
+        val store = KeyStore.getInstance(KEYSTORE).apply { load(null) }
+        return store.containsAlias(KEY_ALIAS)
+    }
+
     private fun discardUnreadable(hostId: String) {
         preferences.edit().remove(preferenceKey(hostId)).commit()
     }
 
     private fun getOrCreateKey(): SecretKey {
-        val store = KeyStore.getInstance(KEYSTORE).apply { load(null) }
-        (store.getKey(KEY_ALIAS, null) as? SecretKey)?.let { return it }
+        getExistingKey()?.let { return it }
 
         val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, KEYSTORE)
         generator.init(
@@ -91,6 +108,11 @@ internal class CredentialVault(private val context: Context) {
                 .build(),
         )
         return generator.generateKey()
+    }
+
+    private fun getExistingKey(): SecretKey? {
+        val store = KeyStore.getInstance(KEYSTORE).apply { load(null) }
+        return store.getKey(KEY_ALIAS, null) as? SecretKey
     }
 
     private fun preferenceKey(hostId: String): String {

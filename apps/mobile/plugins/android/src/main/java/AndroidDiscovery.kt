@@ -27,7 +27,7 @@ internal class AndroidDiscovery(
     private val pending = ArrayDeque<NsdServiceInfo>()
     private val hosts = linkedMapOf<String, DiscoveredService>()
     private val finished = AtomicBoolean(false)
-    private var discoveryStarted = false
+    private var discoveryRequested = false
     private var resolving = false
     private var multicastLock: WifiManager.MulticastLock? = null
 
@@ -37,6 +37,7 @@ internal class AndroidDiscovery(
                 acquireMulticastLock()
                 handler.postDelayed(::stopAndResolve, timeoutMs)
                 manager.discoverServices(SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, listener)
+                discoveryRequested = true
             } catch (error: Exception) {
                 reject("could not start nearby discovery: ${error.message ?: error.javaClass.simpleName}")
             }
@@ -45,7 +46,7 @@ internal class AndroidDiscovery(
 
     private val listener = object : NsdManager.DiscoveryListener {
         override fun onDiscoveryStarted(serviceType: String) {
-            onHandler { discoveryStarted = true }
+            // Registration is tracked when discoverServices returns.
         }
 
         override fun onServiceFound(serviceInfo: NsdServiceInfo) {
@@ -64,18 +65,21 @@ internal class AndroidDiscovery(
 
         override fun onDiscoveryStopped(serviceType: String) {
             onHandler {
-                discoveryStarted = false
+                discoveryRequested = false
                 beginResolving()
             }
         }
 
         override fun onStartDiscoveryFailed(serviceType: String, errorCode: Int) {
-            onHandler { reject("nearby discovery could not start (Android NSD error $errorCode)") }
+            onHandler {
+                discoveryRequested = false
+                reject("nearby discovery could not start (Android NSD error $errorCode)")
+            }
         }
 
         override fun onStopDiscoveryFailed(serviceType: String, errorCode: Int) {
             onHandler {
-                discoveryStarted = false
+                discoveryRequested = false
                 beginResolving()
             }
         }
@@ -84,13 +88,14 @@ internal class AndroidDiscovery(
     private fun stopAndResolve() {
         if (finished.get()) return
         handler.removeCallbacksAndMessages(null)
-        if (discoveryStarted) {
+        if (discoveryRequested) {
             try {
                 manager.stopServiceDiscovery(listener)
+                discoveryRequested = false
                 handler.postDelayed(::beginResolving, STOP_TIMEOUT_MS)
                 return
             } catch (_: Exception) {
-                discoveryStarted = false
+                discoveryRequested = false
             }
         }
         beginResolving()
@@ -165,7 +170,8 @@ internal class AndroidDiscovery(
     }
 
     private fun onHandler(block: () -> Unit) {
-        if (Looper.myLooper() == handler.looper) block() else handler.post(block)
+        val guarded = { if (!finished.get()) block() }
+        if (Looper.myLooper() == handler.looper) guarded() else handler.post(guarded)
     }
 
     private fun acquireMulticastLock() {
@@ -178,13 +184,13 @@ internal class AndroidDiscovery(
 
     private fun cleanup() {
         handler.removeCallbacksAndMessages(null)
-        if (discoveryStarted) {
+        if (discoveryRequested) {
             try {
                 manager.stopServiceDiscovery(listener)
             } catch (_: Exception) {
                 // Discovery is already stopping or stopped.
             }
-            discoveryStarted = false
+            discoveryRequested = false
         }
         multicastLock?.let { lock -> if (lock.isHeld) lock.release() }
         multicastLock = null

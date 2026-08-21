@@ -157,6 +157,7 @@ async fn platform_copy_image(
         .app_handle()
         .mold_mobile_native()
         .copy_image_to_clipboard(data_b64)
+        .await
         .map_err(|error| error.to_string())
 }
 
@@ -222,6 +223,7 @@ async fn platform_save_image(
         .app_handle()
         .mold_mobile_native()
         .save_image_to_photos(data_b64)
+        .await
         .map_err(|error| error.to_string())
 }
 
@@ -383,6 +385,7 @@ async fn platform_save_video(app: tauri::AppHandle, url: String) -> Result<(), S
 
     app.mold_mobile_native()
         .save_video_to_photos(url)
+        .await
         .map_err(|error| error.to_string())
 }
 
@@ -583,6 +586,7 @@ pub async fn share_exported_animation(
                     filename,
                     reuse_key,
                 })
+                .await
                 .map_err(|error| error.to_string());
         }
 

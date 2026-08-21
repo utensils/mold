@@ -49,30 +49,34 @@ impl<R: Runtime> MoldMobileNative<R> {
             .map_err(Into::into)
     }
 
-    pub fn copy_image_to_clipboard(&self, data_b64: String) -> crate::Result<()> {
+    pub async fn copy_image_to_clipboard(&self, data_b64: String) -> crate::Result<()> {
         self.0
-            .run_mobile_plugin("copyImageToClipboard", ImageDataRequest { data_b64 })
+            .run_mobile_plugin_async("copyImageToClipboard", ImageDataRequest { data_b64 })
+            .await
             .map_err(Into::into)
     }
 
-    pub fn save_image_to_photos(&self, data_b64: String) -> crate::Result<()> {
+    pub async fn save_image_to_photos(&self, data_b64: String) -> crate::Result<()> {
         self.0
-            .run_mobile_plugin("saveImageToPhotos", ImageDataRequest { data_b64 })
+            .run_mobile_plugin_async("saveImageToPhotos", ImageDataRequest { data_b64 })
+            .await
             .map_err(Into::into)
     }
 
-    pub fn save_video_to_photos(&self, url: String) -> crate::Result<()> {
+    pub async fn save_video_to_photos(&self, url: String) -> crate::Result<()> {
         self.0
-            .run_mobile_plugin("saveVideoToPhotos", VideoUrlRequest { url })
+            .run_mobile_plugin_async("saveVideoToPhotos", VideoUrlRequest { url })
+            .await
             .map_err(Into::into)
     }
 
-    pub fn share_exported_animation(
+    pub async fn share_exported_animation(
         &self,
         request: ShareAnimationRequest,
     ) -> crate::Result<String> {
         self.0
-            .run_mobile_plugin::<ShareAnimationResponse>("shareExportedAnimation", request)
+            .run_mobile_plugin_async::<ShareAnimationResponse>("shareExportedAnimation", request)
+            .await
             .map(|response| response.outcome)
             .map_err(Into::into)
     }

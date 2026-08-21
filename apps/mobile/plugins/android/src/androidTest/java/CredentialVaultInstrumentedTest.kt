@@ -5,6 +5,7 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class CredentialVaultInstrumentedTest {
@@ -14,6 +15,7 @@ class CredentialVaultInstrumentedTest {
     @After
     fun cleanUp() {
         vault.delete(hostId)
+        vault.deleteKeyForTesting()
     }
 
     @Test
@@ -35,5 +37,24 @@ class CredentialVaultInstrumentedTest {
 
         assertNull(vault.get(hostId))
         assertNull(vault.storedCiphertext(hostId))
+    }
+
+    @Test
+    fun discardsCiphertextWhenTheKeystoreAliasWasRemoved() {
+        vault.set(hostId, "key-that-can-no-longer-be-decrypted")
+        assertTrue(vault.hasKeyForTesting())
+        vault.deleteKeyForTesting()
+
+        assertNull(vault.get(hostId))
+        assertNull(vault.storedCiphertext(hostId))
+    }
+
+    @Test
+    fun emptyReadDoesNotCreateAKey() {
+        vault.delete(hostId)
+        vault.deleteKeyForTesting()
+
+        assertNull(vault.get(hostId))
+        assertFalse(vault.hasKeyForTesting())
     }
 }

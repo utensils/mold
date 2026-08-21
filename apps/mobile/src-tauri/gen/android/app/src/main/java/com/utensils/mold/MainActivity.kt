@@ -12,8 +12,16 @@ class MainActivity : TauriActivity() {
     super.onCreate(savedInstanceState)
     val content = findViewById<android.view.View>(R.id.content)
     ViewCompat.setOnApplyWindowInsetsListener(content) { view, insets ->
-      val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
-      view.setPadding(systemBars.left, systemBars.top, systemBars.right, systemBars.bottom)
+      val safeChrome = insets.getInsets(
+        WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout(),
+      )
+      val keyboard = insets.getInsets(WindowInsetsCompat.Type.ime())
+      view.setPadding(
+        safeChrome.left,
+        safeChrome.top,
+        safeChrome.right,
+        maxOf(safeChrome.bottom, keyboard.bottom),
+      )
       insets
     }
     ViewCompat.requestApplyInsets(content)
