@@ -3878,6 +3878,7 @@ fn private_run_output(
         model: owner.media.canonical_model,
         seed_used: owner.media.seed,
         gpu: Some(owner.device_ordinal),
+        request_warnings: Vec::new(),
     };
     Ok(H3PrivateFl2VaRunOutput {
         response,
