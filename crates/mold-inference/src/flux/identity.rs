@@ -74,6 +74,65 @@ impl ResolvedIdentity {
     }
 }
 
+/// The identity conditioning for one render, and the engine slot it came from.
+///
+/// The adapter is reachable through **two** owners — the render's
+/// [`ResolvedIdentity`] and [`EngineIdentityState`]'s resident slot — so
+/// releasing one of them frees nothing. This handle exists so a render never
+/// holds those two references separately and cannot release half of them: it
+/// is what the denoise loop is handed, and [`Self::release`] drops both at
+/// once.
+///
+/// That matters at exactly one moment. Every FLUX path that drops the
+/// transformer before VAE decode does it to create decode headroom — the
+/// sequential and offloaded paths always, the eager path unless
+/// `MOLD_FLUX_KEEP_TRANSFORMER` keeps it hot — and those are the constrained
+/// machines that chose those paths in the first place. An adapter still alive
+/// there is 0.8–1.7 GB the VAE's conv2d intermediates have to compete with, on
+/// the render that could least afford it.
+pub(crate) struct RenderIdentity<'a> {
+    resolved: Option<ResolvedIdentity>,
+    state: &'a mut EngineIdentityState,
+}
+
+impl RenderIdentity<'_> {
+    /// The runtime the denoise loop drives, or `None` when this render does
+    /// not condition on a face — which is the whole PuLID gate.
+    pub(crate) fn runtime(&self) -> Option<PulidRuntime<'_>> {
+        self.resolved.as_ref().map(ResolvedIdentity::runtime)
+    }
+
+    /// Whether this render conditions on a face at all.
+    pub(crate) fn is_active(&self) -> bool {
+        self.resolved.is_some()
+    }
+
+    /// Cross-attention modules the render is driving, for the progress line.
+    pub(crate) fn module_count(&self) -> usize {
+        self.resolved
+            .as_ref()
+            .map_or(0, |resolved| resolved.runtime().adapter().len())
+    }
+
+    /// Release the adapter's device memory now.
+    ///
+    /// Called at the transformer drop point, before the device sync and the
+    /// VAE load, so the freed bytes are actually available to the decode.
+    /// Idempotent, and harmless on a render that never conditioned.
+    /// `FluxEngine::generate`'s end-of-render check remains the backstop for
+    /// any path that returns without reaching a drop point at all.
+    pub(crate) fn release(&mut self) {
+        self.resolved = None;
+        self.state.drop_adapter();
+    }
+
+    /// Device bytes still held, across both references.
+    #[cfg(test)]
+    pub(crate) fn resident_bytes(&self) -> u64 {
+        self.state.resident_bytes()
+    }
+}
+
 /// A resident adapter and the exact shape it was built for.
 struct ResidentAdapter {
     adapter: Arc<PulidAdapter>,
@@ -149,6 +208,37 @@ impl EngineIdentityState {
             .map_or(0, |resident| resident.adapter.resident_bytes())
     }
 
+    /// A render handle over whatever is currently resident, with a synthetic
+    /// context — the same TWO references `resolve_for_render` produces (the
+    /// engine slot and the render's own clone), so a test can prove both are
+    /// released rather than only the one it can see.
+    #[cfg(test)]
+    pub(crate) fn render_identity_for_test(&mut self) -> RenderIdentity<'_> {
+        let resolved = self.resident.as_ref().map(|resident| ResolvedIdentity {
+            adapter: Arc::clone(&resident.adapter),
+            context: crate::flux::pulid::tests::synthetic_context(
+                resident.adapter.config(),
+                1.0,
+                0,
+                resident.dtype,
+                &resident.device,
+            ),
+        });
+        RenderIdentity {
+            resolved,
+            state: self,
+        }
+    }
+
+    /// The resident adapter handle, for a test that wants to watch its
+    /// reference count.
+    #[cfg(test)]
+    pub(crate) fn resident_adapter_for_test(&self) -> Option<Arc<PulidAdapter>> {
+        self.resident
+            .as_ref()
+            .map(|resident| Arc::clone(&resident.adapter))
+    }
+
     /// Install a resident adapter without loading 1.7 GB of real weights.
     #[cfg(test)]
     pub(crate) fn install_resident_for_test(
@@ -168,13 +258,33 @@ impl EngineIdentityState {
         });
     }
 
+    /// Resolve identity conditioning for one render.
+    ///
+    /// This is what the render paths call. The result borrows the engine's
+    /// resident slot, so the render cannot end up holding the adapter through
+    /// a reference the transformer drop point does not know about — see
+    /// [`RenderIdentity`].
+    pub(crate) fn resolve_for_render(
+        &mut self,
+        req: &GenerateRequest,
+        device: &Device,
+        dtype: DType,
+        cfg: &flux::model::Config,
+    ) -> Result<RenderIdentity<'_>> {
+        let resolved = self.resolve(req, device, dtype, cfg)?;
+        Ok(RenderIdentity {
+            resolved,
+            state: self,
+        })
+    }
+
     /// Resolve identity conditioning for one request.
     ///
     /// Returns `None` for every request that does not condition on a face, and
     /// drops the adapter on the way out so an unconditioned render does not
     /// keep ~1.7 GB alive. A conditioned request loads the adapter if the
     /// resident one does not match this device, dtype, and transformer shape.
-    pub(crate) fn resolve(
+    fn resolve(
         &mut self,
         req: &GenerateRequest,
         device: &Device,
@@ -330,6 +440,54 @@ pub(crate) mod tests {
             0,
             "the adapter must not survive a request that does not condition on a face"
         );
+    }
+
+    /// The sequential and offloaded paths drop the transformer unconditionally
+    /// before VAE decode, and call `release()` at that exact point. Both of the
+    /// render's references have to go: releasing only one frees nothing.
+    #[test]
+    fn releasing_a_render_drops_both_references_to_the_adapter() {
+        let mut state = state_holding_an_adapter();
+        let watched = state
+            .resident_adapter_for_test()
+            .expect("the fixture holds an adapter");
+        let mut identity = state.render_identity_for_test();
+        assert!(identity.is_active());
+        assert!(identity.module_count() > 0);
+        assert!(identity.runtime().is_some());
+        assert_eq!(
+            Arc::strong_count(&watched),
+            3,
+            "the engine slot, the render's clone, and this test's watch"
+        );
+
+        identity.release();
+
+        assert_eq!(identity.resident_bytes(), 0);
+        assert!(!identity.is_active());
+        assert!(identity.runtime().is_none());
+        assert_eq!(
+            Arc::strong_count(&watched),
+            1,
+            "the engine slot and the render's clone must both go"
+        );
+
+        // Idempotent: `generate`'s end-of-render backstop runs after this.
+        identity.release();
+        assert_eq!(identity.resident_bytes(), 0);
+    }
+
+    /// A render that never conditioned holds nothing, so the release the drop
+    /// point performs unconditionally must be harmless.
+    #[test]
+    fn releasing_an_inactive_render_is_harmless() {
+        let mut state = EngineIdentityState::new(None);
+        let mut identity = state.render_identity_for_test();
+        assert!(!identity.is_active());
+        assert_eq!(identity.module_count(), 0);
+        assert!(identity.runtime().is_none());
+        identity.release();
+        assert_eq!(identity.resident_bytes(), 0);
     }
 
     /// The parking path: `ModelCache` calls `unload()`, zeroes the entry's

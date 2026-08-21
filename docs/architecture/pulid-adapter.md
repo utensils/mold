@@ -111,11 +111,24 @@ only while the transformer is**:
 - Kept across subsequent conditioned requests that agree on device, dtype, and
   transformer shape.
 - Dropped the moment a request does not condition on a face.
-- Dropped at the end of any render the transformer did not survive — the
-  sequential path always, the eager path unless `MOLD_FLUX_KEEP_TRANSFORMER`
-  or the quantized stay-hot path kept it. `FluxEngine::generate` applies this
-  once, at the end, so neither in-render drop site carries its own copy of the
-  rule and neither can forget it.
+- **Released at the transformer drop point, not at the end of the render.**
+  Every path that drops the transformer before VAE decode does it to create
+  decode headroom — the sequential and offloaded paths always, the eager path
+  unless `MOLD_FLUX_KEEP_TRANSFORMER` keeps it hot — and those are the
+  constrained machines that took that path in the first place. An adapter still
+  resident there hands 0.8–1.7 GB of that headroom straight back to the VAE's
+  conv2d intermediates. So the release happens beside the transformer drop,
+  before the device sync and before the VAE is loaded, on both paths; the eager
+  path's keep/drop decision and the release live in one function
+  (`free_gpu_state_before_vae_decode`) so the pair cannot drift.
+  `FluxEngine::generate` still checks at the end, but only as a backstop for a
+  path that returns without reaching a drop point at all.
+- The adapter is reachable through **two** owners — the render's
+  `ResolvedIdentity` and the engine's resident slot — so releasing one frees
+  nothing. `RenderIdentity` is what the denoise loop is handed precisely so a
+  render cannot hold those separately: `release()` drops both, and the tests
+  assert on `Arc::strong_count` rather than on a byte counter that one of the
+  two could still be propping up.
 - **Released by `unload()`.** This one is not an optimisation. `ModelCache`
   parks an engine by calling `unload()`, setting the entry's `vram_bytes` to
   0, and keeping the engine alive in the cache. An adapter that survived that

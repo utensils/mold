@@ -24,7 +24,7 @@ use crate::engine_base::EngineBase;
 use crate::image::{build_output_metadata, encode_image};
 use crate::progress::{ProgressCallback, ProgressReporter};
 
-use super::identity::{EngineIdentityState, ResolvedIdentity};
+use super::identity::{EngineIdentityState, RenderIdentity};
 use super::transformer::FluxTransformer;
 
 /// Some FLUX safetensors checkpoints store transformer tensors at the root
@@ -1102,6 +1102,33 @@ impl FluxEngine {
     /// leaving device memory nothing accounts for.
     pub fn identity_resident_bytes(&self) -> u64 {
         self.identity.resident_bytes()
+    }
+
+    /// Free the GPU state VAE decode competes with, before the decode starts.
+    ///
+    /// The eager path's decision to keep the transformer hot is
+    /// `MOLD_FLUX_KEEP_TRANSFORMER` minus the headroom override; whatever it
+    /// decides, the PuLID adapter follows. Both live here rather than at the
+    /// call site so the pair cannot drift — a drop that released the
+    /// transformer and left 0.8–1.7 GB of adapter resident would hand the VAE
+    /// back part of the headroom the drop just created, on exactly the
+    /// machines that needed it.
+    ///
+    /// Takes `&mut Option<FluxTransformer>` rather than `&mut LoadedFlux` so a
+    /// test can drive it with a synthetic transformer and no encoders or VAE.
+    /// Returns whether the transformer was dropped.
+    fn free_gpu_state_before_vae_decode(
+        flux_model: &mut Option<FluxTransformer>,
+        identity: &mut RenderIdentity<'_>,
+        keep_transformer_env: bool,
+        force_drop_for_headroom: bool,
+    ) -> bool {
+        if keep_transformer_env && !force_drop_for_headroom {
+            return false;
+        }
+        *flux_model = None;
+        identity.release();
+        true
     }
 
     /// The adapter's residency follows the transformer's.
@@ -2230,14 +2257,15 @@ impl FluxEngine {
 
         // Face identity. Resolved against the working dtype the state tensors
         // were just cast to, so the adapter feeds the transformer what it
-        // expects; `None` here is the whole "no PuLID compute" story.
-        let identity = self
-            .identity
-            .resolve(req, &device, img_state.dtype(), &flux_cfg)?;
-        if let Some(identity) = &identity {
+        // expects; an inactive handle here is the whole "no PuLID compute"
+        // story. The handle is released below, at the transformer drop point.
+        let mut identity =
+            self.identity
+                .resolve_for_render(req, &device, img_state.dtype(), &flux_cfg)?;
+        if identity.is_active() {
             self.base.progress.info(&format!(
                 "PuLID identity conditioning active ({} cross-attention modules, resident)",
-                identity.runtime().adapter().len()
+                identity.module_count()
             ));
         }
 
@@ -2257,7 +2285,7 @@ impl FluxEngine {
             &self.base.progress,
             inpaint_ctx.as_ref(),
             Some(&previewer),
-            identity.as_ref().map(ResolvedIdentity::runtime),
+            identity.runtime(),
         )?;
 
         let img = flux::sampling::unpack(&img, height, width)?;
@@ -2268,6 +2296,14 @@ impl FluxEngine {
         // Drop transformer + state to free memory for VAE decode
         drop(inpaint_ctx);
         drop(flux_model);
+        // The PuLID adapter goes with it, before the sync below and before the
+        // VAE is loaded. This path drops the transformer precisely because the
+        // machine cannot hold it and the decode at once, so leaving 0.8–1.7 GB
+        // of adapter resident would hand the VAE back a chunk of the headroom
+        // this drop just created. `generate`'s end-of-render check is only the
+        // backstop for paths that never reach here.
+        identity.release();
+        drop(identity);
         self.base.progress.info("Freed FLUX transformer");
         drop(state);
         drop(t5_emb_state);
@@ -2374,39 +2410,6 @@ impl FluxEngine {
             return self.generate_sequential(req);
         }
 
-        // Face identity, resolved before `progress` takes its long-lived
-        // borrow of `self`. An unconditioned request drops any resident
-        // adapter here and yields `None`, which is what makes the denoise loop
-        // below take the exact code path a build with no identity request
-        // takes.
-        let identity = {
-            let (device, dtype, is_schnell) = self
-                .base
-                .loaded
-                .as_ref()
-                .map(|loaded| {
-                    (
-                        loaded.device.clone(),
-                        // The quantized transformer's state tensors are F32
-                        // (see `generate_with_embeddings`), so that — not the
-                        // loaded weight dtype — is what the adapter must feed.
-                        if loaded.is_quantized {
-                            DType::F32
-                        } else {
-                            loaded.dtype
-                        },
-                        loaded.is_schnell,
-                    )
-                })
-                .ok_or_else(|| anyhow::anyhow!("model not loaded — call load() first"))?;
-            let cfg = if is_schnell {
-                flux::model::Config::schnell()
-            } else {
-                flux::model::Config::dev()
-            };
-            self.identity.resolve(req, &device, dtype, &cfg)?
-        };
-
         // Eager mode: use pre-loaded components
         // LoRA is supported — the transformer is rebuilt from disk on each generation
         // (dropped for VAE decode), so LoRA is applied during the rebuild via a
@@ -2440,6 +2443,41 @@ impl FluxEngine {
         // OptionRestoreGuard below — once that borrow is live, calling
         // `self.lora_delta_cache_handle()` would conflict.
         let cache_handle = self.lora_delta_cache_handle();
+
+        // Face identity. Resolved here — after the last whole-`self` borrow
+        // above and before `loaded` is taken — because the handle borrows the
+        // engine's resident adapter slot for the rest of the render, which is
+        // what lets the transformer drop point release it. An inactive handle
+        // is the whole "no PuLID compute" story: the denoise loop then takes
+        // the exact code path a build with no identity request takes.
+        let mut identity = {
+            let (device, dtype, is_schnell) = self
+                .base
+                .loaded
+                .as_ref()
+                .map(|loaded| {
+                    (
+                        loaded.device.clone(),
+                        // The quantized transformer's state tensors are F32
+                        // (see `generate_with_embeddings`), so that — not the
+                        // loaded weight dtype — is what the adapter must feed.
+                        if loaded.is_quantized {
+                            DType::F32
+                        } else {
+                            loaded.dtype
+                        },
+                        loaded.is_schnell,
+                    )
+                })
+                .ok_or_else(|| anyhow::anyhow!("model not loaded — call load() first"))?;
+            let cfg = if is_schnell {
+                flux::model::Config::schnell()
+            } else {
+                flux::model::Config::dev()
+            };
+            self.identity
+                .resolve_for_render(req, &device, dtype, &cfg)?
+        };
 
         let mut loaded = OptionRestoreGuard::take(&mut self.base.loaded)
             .ok_or_else(|| anyhow::anyhow!("model not loaded — call load() first"))?;
@@ -2585,7 +2623,7 @@ impl FluxEngine {
                     height,
                     start,
                     self.base.gpu_ordinal,
-                    identity.as_ref(),
+                    &mut identity,
                 );
             }
 
@@ -2727,7 +2765,7 @@ impl FluxEngine {
                 height,
                 start,
                 self.base.gpu_ordinal,
-                identity.as_ref(),
+                &mut identity,
             )
         })()
     }
@@ -2821,7 +2859,7 @@ impl FluxEngine {
         height: usize,
         start: Instant,
         gpu_ordinal: usize,
-        identity: Option<&ResolvedIdentity>,
+        identity: &mut RenderIdentity<'_>,
     ) -> Result<GenerateResponse> {
         // 3. Generate initial noise (F32 for quantized, gpu_dtype for BF16)
         let noise_dtype = if loaded.is_quantized {
@@ -2962,7 +3000,7 @@ impl FluxEngine {
                 Some(&crate::latent_preview::LatentPreviewer::flux1(
                     height, width,
                 )),
-                identity.map(ResolvedIdentity::runtime),
+                identity.runtime(),
             )?;
 
         // 7. Unpack latent to spatial
@@ -3010,8 +3048,15 @@ impl FluxEngine {
         let force_drop_for_headroom =
             keep_transformer_env && free_before_vae > 0 && free_before_vae < vae_headroom_bytes;
 
-        if !keep_transformer_env || force_drop_for_headroom {
-            loaded.flux_model = None;
+        // The PuLID adapter follows the transformer, and is released here —
+        // before the sync below — so the bytes are actually available to the
+        // decode rather than freed after it.
+        if Self::free_gpu_state_before_vae_decode(
+            &mut loaded.flux_model,
+            identity,
+            keep_transformer_env,
+            force_drop_for_headroom,
+        ) {
             if force_drop_for_headroom {
                 tracing::info!(
                     free_mb = free_before_vae / 1024 / 1024,
@@ -3115,6 +3160,7 @@ mod tests {
     use mold_core::{GenerateRequest, LoraWeight, ModelPaths, OutputFormat};
     use std::collections::HashMap;
     use std::path::PathBuf;
+    use std::sync::Arc;
 
     /// `MOLD_LORA_BYPASS=on` and `=off` are the two boundaries we
     /// document. Any other value (including unset) must collapse to
@@ -3282,6 +3328,85 @@ mod tests {
         );
         engine.release_identity_adapter_unless_transformer_resident();
         assert_eq!(engine.identity_resident_bytes(), 0);
+    }
+
+    /// The P1 this exists for: every path that drops the transformer before
+    /// VAE decode does it to create decode headroom, on machines that took
+    /// that path precisely because they could not hold both at once. An
+    /// adapter still resident at that moment hands part of that headroom
+    /// straight back to the VAE.
+    ///
+    /// Driven with a real synthetic transformer and a real `RenderIdentity`
+    /// carrying BOTH references the render holds, so the assertion is that the
+    /// engine slot and the render's own clone go together — releasing one
+    /// would free nothing.
+    #[test]
+    fn dropping_the_transformer_for_vae_headroom_releases_the_adapter() {
+        for (keep_env, force_drop) in [(false, false), (false, true), (true, true)] {
+            let mut state = super::super::identity::tests::state_holding_an_adapter();
+            let watched = state
+                .resident_adapter_for_test()
+                .expect("the fixture holds an adapter");
+            let mut identity = state.render_identity_for_test();
+            assert!(identity.is_active(), "the fixture conditions on a face");
+            assert!(identity.resident_bytes() > 0);
+            assert_eq!(
+                Arc::strong_count(&watched),
+                3,
+                "the engine slot, the render's clone, and this test's watch"
+            );
+
+            let mut flux_model = Some(crate::flux::pulid_variants::tiny_dense_transformer());
+            let dropped = super::FluxEngine::free_gpu_state_before_vae_decode(
+                &mut flux_model,
+                &mut identity,
+                keep_env,
+                force_drop,
+            );
+
+            assert!(dropped, "keep_env={keep_env} force_drop={force_drop}");
+            assert!(flux_model.is_none(), "the transformer must be gone");
+            assert_eq!(
+                identity.resident_bytes(),
+                0,
+                "the adapter must be gone before VAE decode, not after generate returns"
+            );
+            assert_eq!(
+                Arc::strong_count(&watched),
+                1,
+                "both of the render's references must go, or the memory is still held"
+            );
+        }
+    }
+
+    /// The stay-hot path keeps the transformer, so it keeps the adapter: there
+    /// is no headroom being created for the adapter to eat into, and the next
+    /// conditioned request would only reload it.
+    #[test]
+    fn keeping_the_transformer_hot_keeps_the_adapter() {
+        let mut state = super::super::identity::tests::state_holding_an_adapter();
+        let mut identity = state.render_identity_for_test();
+        let before = identity.resident_bytes();
+        assert!(before > 0);
+
+        let mut flux_model = Some(crate::flux::pulid_variants::tiny_dense_transformer());
+        let dropped = super::FluxEngine::free_gpu_state_before_vae_decode(
+            &mut flux_model,
+            &mut identity,
+            /* keep_transformer_env */ true,
+            /* force_drop_for_headroom */ false,
+        );
+
+        assert!(!dropped);
+        assert!(
+            flux_model.is_some(),
+            "MOLD_FLUX_KEEP_TRANSFORMER=1 keeps it"
+        );
+        assert_eq!(identity.resident_bytes(), before);
+        assert!(
+            identity.is_active(),
+            "and the render keeps its conditioning"
+        );
     }
 
     #[test]

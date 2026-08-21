@@ -48,7 +48,7 @@ const VEC_IN_DIM: usize = 16;
 const TXT_TOKENS: usize = 5;
 const IMG_TOKENS: usize = 6;
 
-fn tiny_flux_config() -> flux::model::Config {
+pub(crate) fn tiny_flux_config() -> flux::model::Config {
     flux::model::Config {
         in_channels: IN_CHANNELS,
         vec_in_dim: VEC_IN_DIM,
@@ -72,7 +72,7 @@ fn tiny_flux_config() -> flux::model::Config {
 /// `VarBuilder::from_varmap` creates a tensor on first request, so building
 /// the dense model is also how the parameter set is discovered — no hand-kept
 /// list of tensor names that could drift from candle's.
-fn shared_weights(cfg: &flux::model::Config) -> HashMap<String, Tensor> {
+pub(crate) fn shared_weights(cfg: &flux::model::Config) -> HashMap<String, Tensor> {
     let varmap = VarMap::new();
     let vb = VarBuilder::from_varmap(&varmap, DType::F32, &Device::Cpu);
     flux::model::Flux::new(cfg, vb).expect("the tiny dense model builds");
@@ -109,6 +109,15 @@ fn gguf_weights(weights: &HashMap<String, Tensor>, path: &std::path::Path) -> Re
     let mut file = std::fs::File::create(path)?;
     candle_core::quantized::gguf_file::write(&mut file, &[], &refs)?;
     Ok(())
+}
+
+/// Just the dense arm, for a caller that needs a `FluxTransformer` and does
+/// not care which one — `pipeline`'s VAE-headroom test, which is about the
+/// drop, not the arithmetic.
+pub(crate) fn tiny_dense_transformer() -> FluxTransformer {
+    let cfg = tiny_flux_config();
+    let vb = VarBuilder::from_tensors(shared_weights(&cfg), DType::F32, &Device::Cpu);
+    FluxTransformer::BF16(flux::model::Flux::new(&cfg, vb).expect("dense variant"))
 }
 
 struct Inputs {
