@@ -26,7 +26,7 @@
 #![allow(dead_code)]
 
 use anyhow::{ensure, Context, Result};
-use candle_core::{IndexOp, Tensor, D};
+use candle_core::{DType, IndexOp, Tensor, D};
 use candle_nn::{LayerNorm, Linear, Module, VarBuilder};
 
 /// Residual width (`dim`).
@@ -115,6 +115,27 @@ fn leaky_relu(xs: &Tensor) -> Result<Tensor> {
     Ok((positive + negative)?)
 }
 
+/// `torch.softmax(weight.float(), dim=-1).type(weight.dtype)`
+/// (`pulid/encoders_transformer.py:114`, and identically at `:67` for
+/// `PerceiverAttentionCA`).
+///
+/// Upstream widens to f32 for the softmax and casts straight back, so a
+/// narrow-dtype run normalizes over f32 exponentials rather than over BF16
+/// ones. That is not a rounding detail: BF16 carries 8 mantissa bits, so
+/// `exp()` of scores that differ by a little quantizes hard and the weights
+/// stop summing to one. Reproducing the widening is what makes a BF16 or F16
+/// deployment agree with the f32 goldens.
+///
+/// Note this is upstream-specific, not a house rule — the EVA02 tower's own
+/// attention does a plain `attn.softmax(dim=-1)` with no cast
+/// (`eva_clip/eva_vit_model.py:236`), and `encoders::eva_clip_vision` matches
+/// it. Do not "harmonize" the two.
+fn softmax_in_f32(scores: &Tensor) -> Result<Tensor> {
+    let dtype = scores.dtype();
+    let widened = candle_nn::ops::softmax_last_dim(&scores.to_dtype(DType::F32)?)?;
+    Ok(widened.to_dtype(dtype)?)
+}
+
 /// `PerceiverAttention` (`encoders_transformer.py:75-119`).
 ///
 /// Two things differ from an ordinary cross-attention and both matter:
@@ -122,7 +143,7 @@ fn leaky_relu(xs: &Tensor) -> Result<Tensor> {
 /// themselves as well as the context (`:104`), and the scale is applied to
 /// **both** q and k as `dim_head^-0.25` before the matmul rather than once
 /// afterwards (`:112-113`) — mathematically the same, numerically what
-/// upstream ships.
+/// upstream ships. The softmax is widened to f32; see [`softmax_in_f32`].
 #[derive(Debug)]
 struct PerceiverAttention {
     norm1: LayerNorm,
@@ -168,7 +189,7 @@ impl PerceiverAttention {
 
         let scale = 1.0 / (HEAD_DIM as f64).sqrt().sqrt();
         let scores = (q * scale)?.matmul(&(k * scale)?.transpose(D::Minus2, D::Minus1)?)?;
-        let weights = candle_nn::ops::softmax_last_dim(&scores)?;
+        let weights = softmax_in_f32(&scores)?;
         let attended = weights
             .matmul(&v)?
             .transpose(1, 2)?
@@ -333,6 +354,200 @@ mod tests {
         let out = leaky_relu(&xs).unwrap().to_vec1::<f32>().unwrap();
         let (absolute, _) = max_errors(&out, &[-0.02, -0.005, 0.0, 3.0]);
         assert!(absolute < 1e-7, "{out:?}");
+    }
+
+    /// Build a `PerceiverAttention` at `dtype` from one deterministic weight
+    /// set, so the F32 and BF16 modules differ only in storage.
+    fn attention_at(dtype: DType, device: &Device) -> (PerceiverAttention, Tensor, Tensor) {
+        let mut stream = DeterministicStream::new(SEED_IDFORMER_ID);
+        let mut weight = |rows: usize| stream.tensor(&[rows, DIM], device).to_dtype(dtype).unwrap();
+        let inner = HEAD_DIM * NUM_HEADS;
+        let ones = Tensor::ones(DIM, dtype, device).unwrap();
+        let zeros = Tensor::zeros(DIM, dtype, device).unwrap();
+        let attention = PerceiverAttention {
+            norm1: LayerNorm::new(ones.clone(), zeros.clone(), LAYER_NORM_EPS),
+            norm2: LayerNorm::new(ones, zeros, LAYER_NORM_EPS),
+            to_q: Linear::new(weight(inner), None),
+            to_kv: Linear::new(weight(inner * 2), None),
+            to_out: Linear::new(weight(DIM), None),
+        };
+        // A wide score spread is the regime that separates the two softmaxes;
+        // scale the context up so the logits are not all within a BF16 ulp.
+        let mut inputs = DeterministicStream::new(SEED_IDFORMER_VIT);
+        let context = (inputs.tensor(&[1, 48, DIM], device) * 6.0).unwrap();
+        let latents = inputs.tensor(&[1, NUM_QUERIES, DIM], device);
+        (
+            attention,
+            context.to_dtype(dtype).unwrap(),
+            latents.to_dtype(dtype).unwrap(),
+        )
+    }
+
+    /// The same arithmetic as `PerceiverAttention::forward`, but with the
+    /// softmax left in the working dtype — i.e. the port upstream's
+    /// `.float()` cast exists to prevent.
+    fn forward_without_widening(
+        attention: &PerceiverAttention,
+        context: &Tensor,
+        latents: &Tensor,
+    ) -> Tensor {
+        let context = attention.norm1.forward(context).unwrap();
+        let latents = attention.norm2.forward(latents).unwrap();
+        let (batch, queries, _) = latents.dims3().unwrap();
+        let inner = HEAD_DIM * NUM_HEADS;
+        let q =
+            PerceiverAttention::split_heads(&attention.to_q.forward(&latents).unwrap()).unwrap();
+        let kv_input = Tensor::cat(&[&context, &latents], 1)
+            .unwrap()
+            .contiguous()
+            .unwrap();
+        let kv = attention.to_kv.forward(&kv_input).unwrap();
+        let k = PerceiverAttention::split_heads(
+            &kv.narrow(D::Minus1, 0, inner)
+                .unwrap()
+                .contiguous()
+                .unwrap(),
+        )
+        .unwrap();
+        let v = PerceiverAttention::split_heads(
+            &kv.narrow(D::Minus1, inner, inner)
+                .unwrap()
+                .contiguous()
+                .unwrap(),
+        )
+        .unwrap();
+        let scale = 1.0 / (HEAD_DIM as f64).sqrt().sqrt();
+        let scores = (q * scale)
+            .unwrap()
+            .matmul(
+                &(k * scale)
+                    .unwrap()
+                    .transpose(D::Minus2, D::Minus1)
+                    .unwrap(),
+            )
+            .unwrap();
+        let weights = candle_nn::ops::softmax_last_dim(&scores).unwrap();
+        let attended = weights
+            .matmul(&v)
+            .unwrap()
+            .transpose(1, 2)
+            .unwrap()
+            .reshape((batch, queries, inner))
+            .unwrap();
+        attention.to_out.forward(&attended).unwrap()
+    }
+
+    /// Isolate the cast: ONE set of logits, two softmaxes.
+    ///
+    /// The reference is the softmax of those same narrow logits read as f32,
+    /// so logit rounding — which both paths share and which otherwise dominates
+    /// — cancels out and the only remaining variable is where the softmax ran.
+    /// A whole-attention comparison cannot show this at all: narrow storage of
+    /// the weights and of every matmul swamps it and both paths land on the
+    /// same number.
+    fn softmax_errors(dtype: DType, spread: f64) -> (f32, f32) {
+        let device = Device::Cpu;
+        // A wide logit spread is the regime that separates the two: after
+        // exp(), scores far apart in a narrow dtype quantize hard.
+        let narrow = (DeterministicStream::new(SEED_IDFORMER_VIT).tensor(&[1, 4, 32, 64], &device)
+            * spread)
+            .unwrap()
+            .to_dtype(dtype)
+            .unwrap();
+        let flatten = |tensor: Tensor| {
+            tensor
+                .to_dtype(DType::F32)
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap()
+        };
+        let expected = flatten(
+            candle_nn::ops::softmax_last_dim(&narrow.to_dtype(DType::F32).unwrap()).unwrap(),
+        );
+        let widened = flatten(softmax_in_f32(&narrow).unwrap());
+        let in_dtype = flatten(candle_nn::ops::softmax_last_dim(&narrow).unwrap());
+        let peak = expected.iter().fold(0.0_f32, |peak, &v| peak.max(v.abs()));
+        (
+            scale_relative_error(&widened, &expected, peak),
+            scale_relative_error(&in_dtype, &expected, peak),
+        )
+    }
+
+    /// Upstream does `torch.softmax(weight.float(), -1).type(weight.dtype)`
+    /// (`encoders_transformer.py:114`, and identically at `:67`). Widening must
+    /// move a narrow-dtype softmax measurably CLOSER to the f32 reference,
+    /// otherwise the cast is cargo cult and reproducing it is pointless.
+    ///
+    /// BF16 is the dtype the pipeline runs in and the one that gains most —
+    /// 8 mantissa bits against F16's 10 — and a softmax needs no matmul, so
+    /// unlike the attention it can be exercised on CPU directly.
+    #[test]
+    fn widening_the_softmax_beats_running_it_in_a_narrow_dtype() {
+        for (dtype, name) in [(DType::BF16, "bf16"), (DType::F16, "f16")] {
+            let (widened, in_dtype) = softmax_errors(dtype, 12.0);
+            println!("{name}: widened {widened:.3e}, in-dtype {in_dtype:.3e}");
+            assert!(
+                widened < in_dtype,
+                "{name}: widening did not help ({widened:.3e} vs {in_dtype:.3e})"
+            );
+            // All the widened path can cost is one rounding of the final
+            // weights into the storage dtype: 2^-9 for BF16, 2^-11 for F16.
+            let storage_eps = if dtype == DType::BF16 { 2e-3 } else { 5e-4 };
+            assert!(
+                widened < storage_eps,
+                "{name}: widened drifted by {widened}, above one rounding"
+            );
+        }
+    }
+
+    /// The cast has to come back. A widened softmax that forgot to return to
+    /// the working dtype would poison every downstream matmul with an F32
+    /// operand — and on CUDA that is an error, not a slowdown.
+    ///
+    /// F16 rather than the shipping BF16 because candle's CPU backend has no
+    /// BF16 matmul ("unsupported dtype BF16 for op matmul").
+    #[test]
+    fn the_attention_preserves_its_working_dtype() {
+        let device = Device::Cpu;
+        let (narrow, context, latents) = attention_at(DType::F16, &device);
+        let output = narrow.forward(&context, &latents).unwrap();
+        assert_eq!(output.dtype(), DType::F16, "the working dtype was lost");
+        assert_eq!(output.dims(), &[1, NUM_QUERIES, DIM]);
+        let values = output
+            .to_dtype(DType::F32)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
+        assert!(
+            values.iter().all(|value| value.is_finite()),
+            "the narrow-dtype attention produced non-finite values"
+        );
+        // Not a parity bound: with random biasless 1024-wide projections, F16
+        // accumulation alone moves this far more than the softmax does. The
+        // f32 goldens are what pin the arithmetic.
+        assert!(values.iter().any(|value| value.abs() > 1.0));
+    }
+
+    /// The helper is the cast, nothing else: f32 in, f32 out, unchanged.
+    #[test]
+    fn widening_an_f32_softmax_is_the_identity() {
+        let device = Device::Cpu;
+        let scores = DeterministicStream::new(SEED_IDFORMER_VIT).tensor(&[1, 2, 4, 9], &device);
+        let widened = softmax_in_f32(&scores).unwrap();
+        assert_eq!(widened.dtype(), DType::F32);
+        let plain = candle_nn::ops::softmax_last_dim(&scores).unwrap();
+        let (absolute, _) = max_errors(
+            &widened.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+            &plain.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+        );
+        assert_eq!(absolute, 0.0);
+        // ...and a BF16 input comes back as BF16, not silently widened.
+        let narrow = scores.to_dtype(DType::BF16).unwrap();
+        assert_eq!(softmax_in_f32(&narrow).unwrap().dtype(), DType::BF16);
     }
 
     fn load_encoder(device: &Device) -> IdFormer {
