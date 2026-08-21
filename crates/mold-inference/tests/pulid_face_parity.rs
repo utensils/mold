@@ -14,8 +14,8 @@
 //!     --test pulid_face_parity -- --ignored --nocapture
 //!   ```
 //!
-//! The goldens were captured by `testdata/pulid/capture_goldens.py` from the
-//! SHA-pinned models; `testdata/pulid/faces/README.md` records the licenses,
+//! The goldens were captured by `crates/mold-inference/testdata/pulid/capture_goldens.py` from the
+//! SHA-pinned models; `crates/mold-inference/testdata/pulid/faces/README.md` records the licenses,
 //! the capture commit, and every tolerance below with the number that earned
 //! it.
 
@@ -85,9 +85,9 @@ struct InventoryFixture {
 
 fn testdata() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../testdata/pulid")
+        .join("testdata/pulid")
         .canonicalize()
-        .expect("testdata/pulid is committed")
+        .expect("crates/mold-inference/testdata/pulid is committed")
 }
 
 fn goldens() -> Vec<(Golden, PathBuf)> {

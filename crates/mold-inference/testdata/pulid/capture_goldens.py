@@ -4,9 +4,9 @@
 Provenance only: this is committed so the fixtures can be regenerated and
 audited. It is NOT run by the test suite, and mold ships no Python.
 
-    python3 testdata/pulid/capture_goldens.py \\
+    python3 crates/mold-inference/testdata/pulid/capture_goldens.py \\
         --assets /path/to/antelopev2 \\
-        --faces testdata/pulid/faces
+        --faces crates/mold-inference/testdata/pulid/faces
 
 Requires a scratch venv with `insightface onnxruntime opencv-python-headless
 numpy` (see `docs/architecture/pulid-face-extraction.md`). The antelopev2 ONNX
@@ -61,7 +61,7 @@ FACEXLIB_BORDER_BGR = (135, 133, 132)
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--assets", required=True, help="directory holding the antelopev2 ONNX files")
-    parser.add_argument("--faces", default="testdata/pulid/faces")
+    parser.add_argument("--faces", default="crates/mold-inference/testdata/pulid/faces")
     args = parser.parse_args()
 
     detector = SCRFD(os.path.join(args.assets, "scrfd_10g_bnkps.onnx"))

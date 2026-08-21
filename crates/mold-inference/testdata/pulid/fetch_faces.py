@@ -6,7 +6,7 @@ audited, never run by the test suite. It downloads from Wikimedia Commons,
 records each file's license metadata, and downscales so the committed images
 stay small.
 
-    python3 testdata/pulid/fetch_faces.py testdata/pulid/faces
+    python3 crates/mold-inference/testdata/pulid/fetch_faces.py crates/mold-inference/testdata/pulid/faces
 
 Every selected file must be public domain or CC0. The script refuses anything
 else rather than quietly committing a restrictively licensed portrait.
@@ -114,4 +114,4 @@ def main(out_dir: str) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main(sys.argv[1] if len(sys.argv) > 1 else "testdata/pulid/faces"))
+    raise SystemExit(main(sys.argv[1] if len(sys.argv) > 1 else "crates/mold-inference/testdata/pulid/faces"))

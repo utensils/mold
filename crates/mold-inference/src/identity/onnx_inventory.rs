@@ -21,7 +21,7 @@
 //! touching the crate is the 0.11.0 version bump). It is a hand-maintained
 //! mirror on purpose: mold cannot introspect another crate's `match`, so the
 //! *inventory* is derived from the pinned model bytes and only the *capability
-//! set* is transcribed. Both halves are frozen in `testdata/pulid/` so a
+//! set* is transcribed. Both halves are frozen in `crates/mold-inference/testdata/pulid/` so a
 //! candle bump that changes either is a failing test rather than a surprise.
 
 use std::collections::{BTreeMap, BTreeSet};
