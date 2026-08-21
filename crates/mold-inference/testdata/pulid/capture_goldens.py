@@ -70,7 +70,13 @@ def main() -> int:
     recognizer.prepare(-1)
     print("onnxruntime", onnxruntime.__version__, "| opencv", cv2.__version__)
 
-    names = sorted(n for n in os.listdir(args.faces) if n.endswith((".jpg", ".png")))
+    # `.exif6.jpg` is the orientation twin of another fixture: it exists to
+    # prove the decoder rights it, and has no golden of its own.
+    names = sorted(
+        n
+        for n in os.listdir(args.faces)
+        if n.endswith((".jpg", ".png")) and ".exif6." not in n
+    )
     if not names:
         print("no fixture faces found", file=sys.stderr)
         return 1

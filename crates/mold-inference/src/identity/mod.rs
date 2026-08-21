@@ -29,6 +29,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use image::RgbImage;
+use mold_core::manifest::ModelComponent;
 use mold_core::pulid_assets::PulidPaths;
 
 use align::{estimate_facexlib_512, Landmarks5};
@@ -111,11 +112,25 @@ impl IdentityExtractor {
         Self::from_paths(&paths.face_detector, &paths.face_recognizer)
     }
 
-    /// Load from explicit model paths. Used by tests and the benchmark binary,
-    /// which hold the files without a configured mold home.
+    /// Load from explicit model paths. Used by tests, which hold the files
+    /// without a configured mold home.
+    ///
+    /// Both graphs are authenticated against the manifest's SHA-256 pins
+    /// before they are decoded — the paths may be arbitrary, but the bytes at
+    /// them may not. There is deliberately no unverified variant of this
+    /// constructor: an extractor built from a graph nobody vouched for is the
+    /// thing the pin exists to prevent. Tools that inspect arbitrary graphs
+    /// call [`onnx_graph::load_onnx_model`] with `None` instead, and get no
+    /// extractor out of it.
     pub fn from_paths(detector: &Path, recognizer: &Path) -> Result<Self> {
-        let det = onnx_graph::load_onnx_model(detector)?;
-        let rec = onnx_graph::load_onnx_model(recognizer)?;
+        let det = onnx_graph::load_onnx_model(
+            detector,
+            onnx_graph::pinned_sha256(ModelComponent::FaceDetector),
+        )?;
+        let rec = onnx_graph::load_onnx_model(
+            recognizer,
+            onnx_graph::pinned_sha256(ModelComponent::FaceRecognizer),
+        )?;
         Ok(Self {
             detector: ScrfdDetector::new(det.model).context("loading the SCRFD detector")?,
             recognizer: ArcFaceRecognizer::new(rec.model)
@@ -136,13 +151,27 @@ impl IdentityExtractor {
     }
 
     /// Extract identity features from encoded image bytes.
+    ///
+    /// The decode is EXIF-oriented, through the crate's single orientation
+    /// path ([`crate::img_utils::decode_oriented_srgb`]). A phone photograph
+    /// carries its rotation in an EXIF tag rather than in the pixels, so a
+    /// plain `load_from_memory` hands SCRFD a sideways face: the detector
+    /// either misses it outright or reports landmarks in a frame every
+    /// downstream crop then inherits. Upstream orients too — PuLID reads
+    /// through `cv2.imread` (`pipeline_flux.py:124`), and OpenCV applies EXIF
+    /// orientation unless `IMREAD_IGNORE_ORIENTATION` is set.
+    ///
+    /// It additionally converts an embedded ICC profile to sRGB, which
+    /// `cv2.imread` does not. That is a deliberate improvement, not a parity
+    /// gap: an untagged sRGB image — every parity fixture — takes the
+    /// identical path, and a tagged one would otherwise have its colors
+    /// misread into the embedding.
     pub fn extract(
         &self,
         image_bytes: &[u8],
     ) -> std::result::Result<IdentityFeatures, IdentityError> {
-        let image = image::load_from_memory(image_bytes)
-            .map_err(|e| IdentityError::Decode(e.to_string()))?
-            .to_rgb8();
+        let image = crate::img_utils::decode_oriented_srgb(image_bytes)
+            .map_err(|e| IdentityError::Decode(format!("{e:#}")))?;
         self.extract_rgb(&image)
     }
 
