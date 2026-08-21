@@ -561,6 +561,126 @@ fn verify_file_integrity(
     Ok(())
 }
 
+/// Identity of an open regular file, as read from the descriptor that is about
+/// to be hashed.
+///
+/// Keying the digest memo on this — and reading it via `fstat` on the retained
+/// descriptor rather than by re-`stat`ing the path — is what makes the memo
+/// sound: a cache hit means "this exact inode, at this exact size and these
+/// exact timestamps, hashed to D earlier in this process", not "a file with
+/// this name did".
+///
+/// `ctime` is in the tuple deliberately. `mtime` alone is forgeable with
+/// `utimes(2)` by anyone who can write the file, which in the group-writable
+/// models roots the model-storage invariant supports is not the owner alone.
+/// `ctime` updates on every inode change and cannot be set directly at all, so
+/// an in-place rewrite that restores size and mtime still misses the cache.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct PinnedFileIdentity {
+    len: u64,
+    platform: [u64; 6],
+}
+
+fn pinned_file_identity(file: &std::fs::File) -> std::io::Result<PinnedFileIdentity> {
+    let metadata = file.metadata()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Ok(PinnedFileIdentity {
+            len: metadata.len(),
+            platform: [
+                metadata.dev(),
+                metadata.ino(),
+                metadata.mtime() as u64,
+                metadata.mtime_nsec() as u64,
+                metadata.ctime() as u64,
+                metadata.ctime_nsec() as u64,
+            ],
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        // No inode identity is available here, so the memo degrades to
+        // (size, mtime). That is weaker, never wrong-in-the-unsafe-direction
+        // for the pinned check itself — the digest is still of real bytes read
+        // through a retained descriptor — but it can hold a stale entry for a
+        // same-size same-mtime replacement. Unix is every shipped server
+        // target; if Windows ever becomes one, key this on the file index from
+        // `GetFileInformationByHandleEx` as `execution_plan` already does.
+        let mtime = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok());
+        Ok(PinnedFileIdentity {
+            len: metadata.len(),
+            platform: [
+                mtime.map_or(0, |value| value.as_secs()),
+                mtime.map_or(0, |value| u64::from(value.subsec_nanos())),
+                0,
+                0,
+                0,
+                0,
+            ],
+        })
+    }
+}
+
+type PinnedDigestCache = std::sync::Mutex<std::collections::HashMap<PinnedFileIdentity, String>>;
+
+fn pinned_digest_cache() -> &'static PinnedDigestCache {
+    static CACHE: std::sync::OnceLock<PinnedDigestCache> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+static PINNED_DIGEST_HASHES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How many times this process has actually read a file end-to-end to answer a
+/// pinned-digest question.
+///
+/// Exported so tests can prove the memo is doing its job: a 2.3 GB bundle must
+/// be hashed once per process per unchanged file, not once per admission.
+pub fn pinned_digest_hash_count() -> u64 {
+    PINNED_DIGEST_HASHES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// SHA-256 of a file's CURRENT bytes, read through a retained no-follow
+/// descriptor and memoized on that descriptor's identity.
+///
+/// The descriptor is the point. Opening no-follow, checking that the target is
+/// a regular file, and hashing that same open file means the bytes proven are
+/// the bytes at the inode the check resolved — a symlink swap or a path
+/// replacement between the check and the read cannot substitute different
+/// content.
+pub fn pinned_file_digest(path: &Path) -> anyhow::Result<String> {
+    let file = crate::secure_file::open_regular_file_no_follow(path)?;
+    let identity = pinned_file_identity(&file)?;
+    if let Some(digest) = pinned_digest_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&identity)
+        .cloned()
+    {
+        return Ok(digest);
+    }
+    let digest = crate::secure_file::sha256_open_file(&file)?;
+    PINNED_DIGEST_HASHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    pinned_digest_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(identity, digest.clone());
+    Ok(digest)
+}
+
+/// Read-only pinned check: do this file's current bytes hash to `expected`?
+///
+/// Deletes nothing, writes nothing, and answers `false` for any file it cannot
+/// open or hash. This is the form a read-only placement preview may ask.
+pub fn pinned_file_matches(path: &Path, expected_sha256: &str) -> bool {
+    pinned_file_digest(path)
+        .map(|digest| digest.eq_ignore_ascii_case(expected_sha256))
+        .unwrap_or(false)
+}
+
 /// Prove one already-placed file against a manifest-pinned SHA-256, writing
 /// the shared `.sha256-verified` marker on success.
 ///
@@ -572,28 +692,31 @@ fn verify_file_integrity(
 /// the one the manifest pinned; nothing downstream would notice, because the
 /// frozen plan proves only that the path is local.
 ///
-/// A file already carrying a marker that records this exact digest is accepted
-/// without rehashing — that marker is the manifest pull path's own proof. A
-/// marker recording a DIFFERENT digest is not proof of anything and is
-/// re-verified. On mismatch both the file and its stale marker are removed, so
-/// a retry re-downloads instead of resurrecting the rejected bytes.
+/// **The `.sha256-verified` marker is never accepted as proof here.** It is an
+/// ordinary file sitting beside the artifact, so in a group-writable models
+/// root — which the model-storage invariant explicitly supports, `0664` and
+/// all — anyone who can write the weights can also write a sidecar naming the
+/// expected digest, and a stale marker can outlive a replace. A writable
+/// attestation is not content authentication. The bytes are hashed every time;
+/// the cost is paid once per process per unchanged file by
+/// [`pinned_file_digest`]'s memo. The marker is still WRITTEN, because
+/// `Config::manifest_files_exist` and the partial-cleanup sweep read it as an
+/// "this file is fully written" signal.
+///
+/// On mismatch both the file and its marker are removed, so a retry
+/// re-downloads instead of resurrecting the rejected bytes.
 pub fn verify_pinned_file(
     path: &Path,
     expected_sha256: &str,
     filename: &str,
     model: &str,
 ) -> Result<(), DownloadError> {
-    if recorded_sha256_marker(path)
-        .is_some_and(|recorded| recorded.trim().eq_ignore_ascii_case(expected_sha256.trim()))
-    {
-        return Ok(());
-    }
     // Unverifiable is not verified: a pinned dependency whose bytes cannot be
     // read fails closed rather than being accepted unproven, because nothing
     // downstream re-asks — the frozen plan proves only that the path is local.
-    let actual = compute_sha256(path).map_err(|error| {
+    let actual = pinned_file_digest(path).map_err(|error| {
         DownloadError::Other(format!(
-            "cannot verify the pinned SHA-256 of {filename} at {}: {error}",
+            "cannot verify the pinned SHA-256 of {filename} at {}: {error:#}",
             path.display()
         ))
     })?;
@@ -3165,6 +3288,142 @@ mod tests {
             "mixed-case must match"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The pinned-digest read counter is process-global, so the tests that
+    /// assert on it have to be the only ones hashing at the time.
+    fn pinned_digest_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// A `.sha256-verified` marker is an ordinary file beside the artifact.
+    /// The model-storage invariant explicitly supports group-writable model
+    /// roots (`0664` and collaborative umasks are valid), so anyone who can
+    /// drop weights there can also drop a sidecar naming the expected digest —
+    /// and a stale marker can outlive a replace. A pinned check that trusted
+    /// it would authenticate nothing.
+    #[test]
+    fn a_forged_marker_is_never_accepted_as_proof_of_content() {
+        let _serial = pinned_digest_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("adapter.safetensors");
+        std::fs::write(&path, b"attacker bytes").unwrap();
+        let expected = {
+            let honest = dir.path().join("honest.bin");
+            std::fs::write(&honest, b"the real pinned bytes").unwrap();
+            compute_sha256(&honest).unwrap()
+        };
+        // The forgery: bytes that are not the pin, attested as if they were.
+        write_sha256_marker(&path, &expected).unwrap();
+        assert_eq!(recorded_sha256_marker(&path).as_deref(), Some(&*expected));
+
+        let error = verify_pinned_file(&path, &expected, "adapter.safetensors", "pinned-bundle")
+            .expect_err("a forged marker must not authenticate the bytes beside it");
+
+        assert!(
+            matches!(error, DownloadError::Sha256Mismatch { .. }),
+            "{error}"
+        );
+        let rendered = error.to_string();
+        assert!(rendered.contains("adapter.safetensors"), "{rendered}");
+        assert!(rendered.contains(&expected), "{rendered}");
+        assert!(!path.exists(), "the rejected bytes must be removed");
+        assert!(
+            !has_sha256_marker(&path),
+            "the forged attestation must not outlive the file it lied about"
+        );
+
+        // Read-only form: same verdict, and it deletes nothing.
+        std::fs::write(&path, b"attacker bytes").unwrap();
+        write_sha256_marker(&path, &expected).unwrap();
+        assert!(!pinned_file_matches(&path, &expected));
+        assert!(path.exists());
+    }
+
+    /// Hashing every admission would re-read a 2.3 GB bundle per job. The memo
+    /// is keyed on the descriptor's own identity, so an unchanged file costs
+    /// one read per process.
+    #[test]
+    fn an_unchanged_pinned_file_is_read_once_per_process() {
+        let _serial = pinned_digest_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stable.bin");
+        std::fs::write(&path, b"the real pinned bytes").unwrap();
+        let expected = compute_sha256(&path).unwrap();
+
+        let before = pinned_digest_hash_count();
+        verify_pinned_file(&path, &expected, "stable.bin", "pinned-bundle").unwrap();
+        let after_first = pinned_digest_hash_count();
+        assert_eq!(
+            after_first,
+            before + 1,
+            "the first check must read the file"
+        );
+
+        for _ in 0..3 {
+            verify_pinned_file(&path, &expected, "stable.bin", "pinned-bundle").unwrap();
+            assert!(pinned_file_matches(&path, &expected));
+        }
+        assert_eq!(
+            pinned_digest_hash_count(),
+            after_first,
+            "an unchanged file must not be re-read once it is memoized"
+        );
+        // The marker is still written — `manifest_files_exist` and the
+        // partial-cleanup sweep read it as a "fully written" signal. It is
+        // just never read back as proof of content.
+        assert_eq!(recorded_sha256_marker(&path).as_deref(), Some(&*expected));
+    }
+
+    /// The memo must not become the hole the marker was: a file whose bytes
+    /// change has a new identity (`ctime` alone guarantees it — `utimes` can
+    /// forge `mtime`, nothing can set `ctime`), so it is re-read and refused.
+    #[test]
+    fn a_rewritten_pinned_file_is_reread_and_refused() {
+        let _serial = pinned_digest_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("swapped.bin");
+        std::fs::write(&path, b"the real pinned bytes").unwrap();
+        let expected = compute_sha256(&path).unwrap();
+        verify_pinned_file(&path, &expected, "swapped.bin", "pinned-bundle").unwrap();
+        let after_good = pinned_digest_hash_count();
+
+        // Same path, same length, different content — the shape of an
+        // in-place substitution in a shared models root.
+        std::fs::write(&path, b"the fake pinned bytes").unwrap();
+        let error = verify_pinned_file(&path, &expected, "swapped.bin", "pinned-bundle")
+            .expect_err("replaced bytes must be caught, not served from the memo");
+
+        assert!(
+            matches!(error, DownloadError::Sha256Mismatch { .. }),
+            "{error}"
+        );
+        assert_eq!(
+            pinned_digest_hash_count(),
+            after_good + 1,
+            "a changed file identity must force a fresh read"
+        );
+        assert!(!path.exists());
+    }
+
+    /// A symlink is not a regular file, and the check must refuse it rather
+    /// than hash whatever it happens to point at.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_pinned_artifact_is_refused_rather_than_followed() {
+        let _serial = pinned_digest_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real.bin");
+        std::fs::write(&real, b"the real pinned bytes").unwrap();
+        let expected = compute_sha256(&real).unwrap();
+        let link = dir.path().join("link.bin");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        assert!(!pinned_file_matches(&link, &expected));
+        let error = verify_pinned_file(&link, &expected, "link.bin", "pinned-bundle")
+            .expect_err("a pinned artifact reached through a symlink is not proven");
+        assert!(matches!(error, DownloadError::Other(_)), "{error}");
     }
 
     #[test]

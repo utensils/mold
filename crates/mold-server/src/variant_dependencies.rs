@@ -229,12 +229,15 @@ enum CachedDependencyVerdict {
 
 /// Prove an already-placed dependency against its manifest pin.
 ///
-/// Admission is the enforcing policy: it hashes (short-circuiting on a
-/// `.sha256-verified` marker that records the pin, which is the manifest pull
-/// path's own proof), deletes a file that does not match, and attests one that
-/// does. A read-only placement preview must not delete, must not attest, and
-/// must not refuse — it only decides whether the copy on disk counts as
-/// evidence that nothing needs downloading.
+/// Admission is the enforcing policy: it hashes the file's current bytes,
+/// deletes a file that does not match, and attests one that does. A read-only
+/// placement preview must not delete, must not attest, and must not refuse —
+/// it only decides whether the copy on disk counts as evidence that nothing
+/// needs downloading.
+///
+/// Neither policy reads the `.sha256-verified` marker as proof. Content
+/// authentication cannot come from a sidecar anyone who can write the artifact
+/// can also write.
 fn verify_cached_dependency(
     path: &Path,
     filename: &str,
@@ -245,10 +248,13 @@ fn verify_cached_dependency(
         return CachedDependencyVerdict::Usable;
     };
     if policy == DependencyMaterializationPolicy::ExistingOnly {
-        let proven = mold_core::download::recorded_sha256_marker(path)
-            .is_some_and(|recorded| recorded.eq_ignore_ascii_case(pin.sha256))
-            || mold_core::download::verify_sha256(path, pin.sha256).unwrap_or(false);
-        return if proven {
+        // Read-only: hash the current bytes through a retained descriptor and
+        // answer. Never the `.sha256-verified` marker — it is a writable
+        // sidecar in a models root the model-storage invariant lets a group
+        // write, so it attests nothing about content. The hash is memoized per
+        // file identity, so a preview of an unchanged installed bundle costs
+        // one `fstat` per asset after the first.
+        return if mold_core::download::pinned_file_matches(path, pin.sha256) {
             CachedDependencyVerdict::Usable
         } else {
             CachedDependencyVerdict::Unproven
@@ -2282,6 +2288,65 @@ mod tests {
             Some(PINNED_CONTENT_SHA256),
             "a proven download must be attested with the digest it hashed to"
         );
+    }
+
+    /// The `.sha256-verified` sidecar is writable by anyone who can write the
+    /// artifact — the model-storage invariant supports group-writable model
+    /// roots on purpose — so it can never be the thing that authenticates
+    /// content. Neither policy may accept it, and a stale one left behind by a
+    /// replaced file must not resurrect the replacement either.
+    #[tokio::test]
+    async fn a_forged_attestation_beside_wrong_bytes_is_refused_by_both_policies() {
+        let cache = TempDir::new().unwrap();
+        let repo = unique_test_repo("mold-pin-forged");
+        let path = mold_core::download::planned_single_file_path_in(
+            cache.path(),
+            "pinned.safetensors",
+            "shared/pin-test",
+        );
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let forge = || {
+            std::fs::write(&path, TAMPERED_CONTENT).unwrap();
+            mold_core::download::write_sha256_marker(&path, PINNED_CONTENT_SHA256).unwrap();
+        };
+        forge();
+
+        // Read-only: the forged attestation buys nothing, and the preview
+        // still neither deletes nor refuses.
+        let resolved = ensure_downloaded(
+            None,
+            "placement-preview",
+            pinned_spec(cache.path(), &repo, PINNED_CONTENT_SHA256),
+            None,
+            DependencyMaterializationPolicy::ExistingOnly,
+        )
+        .await
+        .expect("a preview never refuses");
+        assert!(
+            matches!(resolved, ResolvedDependency::Pending(_)),
+            "a self-served attestation is not evidence the file is installed"
+        );
+        assert!(path.exists());
+
+        // Admission: refused on the bytes, and the lying sidecar goes with the
+        // file it lied about. No download adapter is installed, so reaching
+        // the downloader would be real network I/O — the cached branch must
+        // refuse first.
+        forge();
+        let error = ensure_downloaded(
+            None,
+            "admission",
+            pinned_spec(cache.path(), &repo, PINNED_CONTENT_SHA256),
+            None,
+            DependencyMaterializationPolicy::Admission,
+        )
+        .await
+        .err()
+        .expect("a forged attestation must not authenticate the bytes beside it");
+        assert!(error.contains(PINNED_CONTENT_SHA256), "{error}");
+        assert!(error.contains(TAMPERED_CONTENT_SHA256), "{error}");
+        assert!(!path.exists());
+        assert!(!mold_core::download::has_sha256_marker(&path));
     }
 
     /// A copy already on disk is not evidence of anything until it is proven:

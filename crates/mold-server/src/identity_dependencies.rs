@@ -344,15 +344,16 @@ mod tests {
         }
     }
 
-    /// Write a stand-in for every bundle file, attested with the manifest's
-    /// own pinned digest.
+    /// Place a stand-in for every bundle file, each carrying a
+    /// `.sha256-verified` marker that names the manifest's pinned digest while
+    /// the bytes beside it are something else entirely.
     ///
-    /// A `.sha256-verified` marker recording the pin is exactly what the
-    /// manifest pull path leaves behind on a proven download, and it is the
-    /// only way a test can present a "correctly installed" 1.14 GB artifact
-    /// without producing 1.14 GB of preimage. `pulid_assets`' own tests use
-    /// the same fixture.
-    fn install_attested_bundle(config: &Config) {
+    /// This is not a fixture for "correctly installed" — no test can produce
+    /// a 1.14 GB preimage of a fixed digest. It is the ATTACK: a group-writable
+    /// models root, which the model-storage invariant explicitly supports, lets
+    /// anyone who can drop weights also drop the sidecar that vouches for them.
+    /// Every use below asserts that mold refuses it.
+    fn install_forged_bundle(config: &Config) {
         let manifest = mold_core::pulid_assets::pulid_manifest();
         let models_dir = config.resolved_models_dir();
         for file in &manifest.files {
@@ -527,20 +528,26 @@ mod tests {
         ));
     }
 
-    /// An installed bundle plans no download at all and freezes the concrete
-    /// paths the worker will construct the engine from.
+    /// A bundle that is merely PRESENT is not installed. Presence plus a
+    /// self-served attestation is what an attacker with write access to a
+    /// shared models root can manufacture; only bytes that hash to the
+    /// manifest pin count.
+    ///
+    /// The read-only preview says so by planning the download anyway, and
+    /// admission says so by refusing. Neither is allowed to read the sidecar
+    /// and call it installed.
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
-    async fn an_installed_bundle_is_frozen_and_plans_nothing() {
+    async fn a_forged_attestation_never_makes_a_bundle_count_as_installed() {
         let models = TempDir::new().unwrap();
         let home = TempDir::new().unwrap();
         let _env = EnvGuard::new(home.path(), models.path());
         let (_root, config) = flux_case(models.path());
-        install_attested_bundle(&config);
+        install_forged_bundle(&config);
 
         let prepared = prepare_inputs_for_devices(
             None,
-            "installed",
+            "placement-preview",
             &request(None, true),
             &config,
             vec![device()],
@@ -551,11 +558,20 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(prepared.pending_downloads_for_device("cuda:0").is_empty());
-        let device_inputs = &prepared.by_device["cuda:0"];
-        assert!(device_inputs.pending_artifacts.is_empty());
         assert_eq!(
-            device_inputs.engine_config.identity_assets,
+            prepared.pending_downloads_for_device("cuda:0").len(),
+            4,
+            "unproven bytes are not evidence that nothing needs downloading"
+        );
+        // The preview stays read-only about them: nothing deleted, nothing
+        // attested, nothing refused.
+        for path in mold_core::pulid_assets::pulid_storage_paths(&config) {
+            assert!(path.exists(), "{}", path.display());
+        }
+        // The planned paths are still frozen — they are where admission will
+        // land the real bytes.
+        assert_eq!(
+            prepared.by_device["cuda:0"].engine_config.identity_assets,
             Some(expected_paths(models.path()))
         );
     }
@@ -640,31 +656,23 @@ mod tests {
             "a refused acquisition must not have started a download"
         );
 
-        // Recording the acceptance is what unblocks it. The bundle is present
-        // here so the test stays offline; what it proves is that the gate
-        // itself no longer refuses.
+        // Recording the acceptance is what clears the gate. This half is a
+        // direct call rather than another admission: with the gate open and
+        // no files on disk, admission's next move is a real download, and a
+        // forged bundle can no longer stand in for one (which is the point of
+        // the pinned check).
+        let manifest = mold_core::pulid_assets::pulid_manifest();
+        assert!(require_identity_licenses(manifest, models.path(), Some(home.path())).is_err());
         mold_core::license_acceptance::record_acceptance(
             home.path(),
             &mold_core::license_acceptance::INSIGHTFACE_ANTELOPEV2,
         )
         .unwrap();
-        install_attested_bundle(&config);
-        let prepared = prepare_inputs_for_devices(
-            None,
-            "admission",
-            &request(None, true),
-            &config,
-            vec![device()],
-            None,
-            DependencyMaterializationPolicy::Admission,
-            DependencyPreparationContext::default(),
-        )
-        .await
-        .expect("an accepted license admits the request");
-        assert_eq!(
-            prepared.by_device["cuda:0"].engine_config.identity_assets,
-            Some(expected_paths(models.path()))
-        );
+        require_identity_licenses(manifest, models.path(), Some(home.path()))
+            .expect("a recorded acceptance clears the gate");
+        // An unresolvable Mold data root stays closed: unverifiable is not
+        // accepted.
+        assert!(require_identity_licenses(manifest, models.path(), None).is_err());
     }
 
     /// Every identity asset is SHA-256 pinned in the manifest, and this is the
@@ -685,11 +693,11 @@ mod tests {
             &mold_core::license_acceptance::INSIGHTFACE_ANTELOPEV2,
         )
         .unwrap();
-        install_attested_bundle(&config);
+        install_forged_bundle(&config);
 
-        // Swap the adapter's attested content for something else and drop its
-        // marker — the exact shape of a mutated upstream revision, or of an
-        // attacker pre-placing a file in a shared models root.
+        // The adapter's bytes are not its pin, and its forged marker is left
+        // deliberately IN PLACE — the whole point is that the sidecar buys the
+        // attacker nothing.
         let manifest = mold_core::pulid_assets::pulid_manifest();
         let adapter_file = manifest
             .files
@@ -699,8 +707,11 @@ mod tests {
         let adapter = models
             .path()
             .join(mold_core::manifest::storage_path(manifest, adapter_file));
-        std::fs::write(&adapter, b"not the pinned adapter").unwrap();
-        std::fs::remove_file(mold_core::download::sha256_marker_path(&adapter)).unwrap();
+        assert_eq!(
+            mold_core::download::recorded_sha256_marker(&adapter).as_deref(),
+            adapter_file.sha256,
+            "the fixture must present a marker that vouches for the pin"
+        );
 
         let error = prepare_inputs_for_devices(
             None,

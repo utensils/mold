@@ -363,6 +363,32 @@ names the license and the exact command to run; there is no
 environment-variable bypass. See `THIRD_PARTY_NOTICES.md` for the full notice,
 including the pinned commit and digest.
 
+#### Which machine records the acceptance
+
+The acceptance has to live on the machine that does the downloading, and
+`mold pull` follows the pull:
+
+- **A server answers at `MOLD_HOST`** (including the local `mold serve`): the
+  id is sent with the request and the **server** writes it into its own
+  `$MOLD_HOME`. Nothing is recorded on the calling machine.
+- **No server, or `--local`**: the pull runs here, so the acceptance is
+  recorded here.
+
+Either way the terms are printed before the request goes out. Run
+`mold licenses` to see what needs accepting and which root was read:
+
+```bash
+mold licenses
+```
+
+Over HTTP, `GET /api/licenses` returns each license with `accepted` and
+`required_by`, and `POST /api/downloads` / `POST /api/models/pull` accept an
+additive `accept_licenses` array. A gated download without one is refused with
+`403` and code `LICENSE_NOT_ACCEPTED`, carrying a structured `license` object a
+UI can build its own prompt from. Servers that support this advertise
+`capabilities.licenses: true`; older ones do not, and can only be accepted by
+running `mold pull --accept-license` in a shell on that host.
+
 ### Gallery Metadata Database
 
 mold persists generation metadata in a SQLite database at `MOLD_HOME/mold.db`

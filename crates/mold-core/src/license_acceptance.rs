@@ -136,6 +136,118 @@ pub fn manifest_requires_license(
         .find_map(|file| license_for_manifest_file(&manifest.name, &file.hf_filename))
 }
 
+/// Manifest names that cannot be downloaded until `license` is accepted.
+///
+/// Derived from the manifest registry rather than hard-coded, so adding a
+/// gated file to a manifest cannot leave `GET /api/licenses` telling users the
+/// wrong thing about what they are unblocking.
+pub fn manifests_requiring(license: &ThirdPartyLicense) -> Vec<String> {
+    crate::manifest::known_manifests()
+        .iter()
+        .filter(|manifest| {
+            manifest.files.iter().any(|file| {
+                license_for_manifest_file(&manifest.name, &file.hf_filename)
+                    .is_some_and(|found| found.id == license.id)
+            })
+        })
+        .map(|manifest| manifest.name.clone())
+        .collect()
+}
+
+/// Every known license plus this root's acceptance state, for `GET /api/licenses`.
+pub fn license_statuses(mold_home: &Path) -> Vec<crate::types::ThirdPartyLicenseStatus> {
+    THIRD_PARTY_LICENSES
+        .iter()
+        .map(|license| crate::types::ThirdPartyLicenseStatus {
+            id: license.id.to_string(),
+            name: license.name.to_string(),
+            url: license.url.to_string(),
+            canonical: license.canonical.to_string(),
+            sha256: license.sha256.to_string(),
+            summary: license.summary.to_string(),
+            accepted: is_accepted(mold_home, license),
+            required_by: manifests_requiring(license),
+        })
+        .collect()
+}
+
+/// The machine-readable refusal payload for `license`.
+pub fn refusal(license: &ThirdPartyLicense) -> crate::types::LicenseRefusal {
+    crate::types::LicenseRefusal {
+        id: license.id.to_string(),
+        name: license.name.to_string(),
+        url: license.url.to_string(),
+        canonical: license.canonical.to_string(),
+        summary: license.summary.to_string(),
+    }
+}
+
+/// An `accept_licenses` entry naming a license this build does not know.
+///
+/// Rejected rather than ignored: silently dropping an unrecognised id would
+/// let a client believe it had accepted something, then fail the download with
+/// a refusal that looks like a server bug.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownLicenseId(pub String);
+
+impl std::fmt::Display for UnknownLicenseId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let known = THIRD_PARTY_LICENSES
+            .iter()
+            .map(|license| license.id)
+            .collect::<Vec<_>>()
+            .join(", ");
+        write!(
+            f,
+            "unknown license id '{}'. Known licenses: {known}",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for UnknownLicenseId {}
+
+/// Resolve every id, then record all of them.
+///
+/// Resolution happens for the WHOLE list before the first write, so one bad id
+/// cannot leave a request half-applied — the caller's 400 then describes a
+/// root that was not touched.
+pub fn record_acceptances(
+    mold_home: &Path,
+    ids: &[String],
+) -> Result<Vec<&'static ThirdPartyLicense>, RecordAcceptancesError> {
+    let mut resolved = Vec::with_capacity(ids.len());
+    for id in ids {
+        let license = license_by_id(id)
+            .ok_or_else(|| RecordAcceptancesError::Unknown(UnknownLicenseId(id.clone())))?;
+        resolved.push(license);
+    }
+    for license in &resolved {
+        record_acceptance(mold_home, license).map_err(RecordAcceptancesError::Io)?;
+    }
+    Ok(resolved)
+}
+
+/// Failure modes of [`record_acceptances`].
+#[derive(Debug)]
+pub enum RecordAcceptancesError {
+    /// The request named a license this build does not know — a client error.
+    Unknown(UnknownLicenseId),
+    /// The record could not be written — a server error.
+    Io(io::Error),
+}
+
+impl std::fmt::Display for RecordAcceptancesError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unknown(error) => write!(f, "{error}"),
+            Self::Io(error) => write!(f, "failed to record license acceptance: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for RecordAcceptancesError {}
+
 /// Path of the acceptance record inside a Mold data root.
 pub fn acceptance_path(mold_home: &Path) -> PathBuf {
     mold_home.join(ACCEPTANCE_FILE)

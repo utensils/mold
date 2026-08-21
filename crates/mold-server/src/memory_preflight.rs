@@ -1929,8 +1929,8 @@ mod fail_closed_tests {
                 request,
                 &model_paths,
                 activation,
+                offload(AdmissionPolicy::Disabled),
                 Some(24_000_000_000),
-                false,
                 false,
                 false,
             )

@@ -49,6 +49,7 @@ clients, and custom integrations on one generation contract.
 | `POST`   | `/api/downloads`                              | Queue a manifest model download                                                                                   |
 | `DELETE` | `/api/downloads/:id`                          | Cancel a queued or active download                                                                                |
 | `GET`    | `/api/downloads/stream`                       | Download queue updates as SSE                                                                                     |
+| `GET`    | `/api/licenses`                               | Third-party model licenses and whether this server has accepted them                                              |
 | `GET`    | `/api/catalog/families`                       | Live catalog family/kind metadata                                                                                 |
 | `GET`    | `/api/catalog/search`                         | Search the live HF/Civitai catalog; sort by downloads, recent additions, or rating                                |
 | `GET`    | `/api/catalog/installed`                      | List installed catalog entries and LoRAs                                                                          |
@@ -108,6 +109,11 @@ only request
 `GET /api/discovery/peers` when that discovery flag is true. Older servers may
 omit these fields; clients must treat missing arrays as empty and missing
 booleans as `false`.
+
+`licenses` is `true` on a server that exposes `GET /api/licenses` and honours
+`accept_licenses` on its download routes. Absent (`false`) means acceptance can
+only be recorded by running `mold pull --accept-license` in a shell on that
+host, so a client must not offer an in-app acceptance flow it cannot deliver.
 
 `GET /api/capabilities/ltx2-control-adapters?model=<id>` returns only the
 controls compatible with that host's effective installed model profile. Each
@@ -1359,6 +1365,93 @@ data: {"type":"download_progress","filename":"flux1-schnell-Q8_0.gguf","file_ind
 event: progress
 data: {"type":"pull_complete","model":"flux-schnell:q8"}
 ```
+
+The body also accepts an additive `accept_licenses` array — see
+[`/api/licenses`](#api-licenses). A model whose files need an unaccepted
+license is refused with `403` / `LICENSE_NOT_ACCEPTED` before the pull is
+enqueued.
+
+## `/api/licenses`
+
+Some auxiliary weights carry terms Mold's own license does not cover — the
+InsightFace antelopev2 face models that PuLID identity conditioning needs are
+licensed for non-commercial research only. Mold refuses to download them until
+an acceptance is on record.
+
+**Acceptance is per Mold data root, and the root that matters is the one on the
+machine doing the downloading.** A client that records acceptance locally and
+then asks a remote server to pull has told the wrong machine, which is why the
+ids travel on the request instead.
+
+```bash
+curl http://localhost:7680/api/licenses
+```
+
+```json
+{
+  "licenses": [
+    {
+      "id": "insightface-antelopev2",
+      "name": "InsightFace pretrained models (antelopev2)",
+      "url": "https://raw.githubusercontent.com/deepinsight/insightface/7fadd420c2351d0ffa8cac403421c1a3ed733365/README.md",
+      "canonical": "https://github.com/deepinsight/insightface#license",
+      "sha256": "84606d9ab37a38606b12c10d96172c6343768d2ef72c802a16482e476f8baf22",
+      "summary": "InsightFace pretrained models (antelopev2: scrfd_10g_bnkps, glintr100) are licensed for non-commercial research purposes only.",
+      "accepted": false,
+      "required_by": ["pulid-flux"]
+    }
+  ]
+}
+```
+
+`url` is a commit-pinned, immutable link to the exact text; `canonical` is the
+browsable project page and is presentation only. An acceptance is bound to the
+`(url, sha256)` pair, so `accepted` reads `false` again after a Mold release
+re-pins the license to a newer upstream revision. `accepted` describes only the
+server that answered — a multi-host client must ask each one.
+
+### Accepting a license
+
+`POST /api/downloads` and `POST /api/models/pull` take an additive
+`accept_licenses` array of ids. The server records them in **its own**
+`$MOLD_HOME/license-acceptances.json` (owner-only, `0600`) before the pull
+starts:
+
+```bash
+curl -X POST http://localhost:7680/api/downloads \
+  -H "Content-Type: application/json" \
+  -d '{"model":"pulid-flux","accept_licenses":["insightface-antelopev2"]}'
+```
+
+Omitting the field means "accept nothing", which is what every existing client
+sends. An id this server does not know is a `400` with code `UNKNOWN_LICENSE`,
+and nothing is written — resolution happens for the whole list before the first
+write, so one bad id cannot leave the request half-applied.
+
+### Refusals
+
+A download whose model still needs an unaccepted license is refused with `403`
+and code `LICENSE_NOT_ACCEPTED`, before any bytes move:
+
+```json
+{
+  "error": "pulid-flux includes files under a license that must be accepted before download. …",
+  "code": "LICENSE_NOT_ACCEPTED",
+  "license": {
+    "id": "insightface-antelopev2",
+    "name": "InsightFace pretrained models (antelopev2)",
+    "url": "https://raw.githubusercontent.com/deepinsight/insightface/7fadd420c2351d0ffa8cac403421c1a3ed733365/README.md",
+    "canonical": "https://github.com/deepinsight/insightface#license",
+    "summary": "InsightFace pretrained models (antelopev2: scrfd_10g_bnkps, glintr100) are licensed for non-commercial research purposes only."
+  }
+}
+```
+
+`error` is the human message (it names the exact CLI command); the additive
+`license` object is the machine-readable half, so a UI can render its own
+acceptance prompt and retry with `accept_licenses` rather than parsing prose.
+`license` is absent on every other error. There is no environment-variable
+bypass.
 
 ## `/api/expand`
 

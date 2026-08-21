@@ -1805,7 +1805,7 @@ async fn generate_remote(
                     require_remote_auto_pull_activation(req, config)
                         .map_err(|error| tag_remote(client, error))?;
                     print_server_pull_missing_model(model);
-                    stream_server_pull(client, model)
+                    stream_server_pull(client, model, &[])
                         .await
                         .map_err(|e| tag_remote(client, e))?;
 
@@ -1924,7 +1924,7 @@ async fn generate_remote_blocking(
                     require_remote_auto_pull_activation(req, config)
                         .map_err(|error| tag_remote(client, error))?;
                     print_server_pull_missing_model(model);
-                    stream_server_pull(client, model)
+                    stream_server_pull(client, model, &[])
                         .await
                         .map_err(|e| tag_remote(client, e))?;
                     status!("{} Generating...", theme::icon_info());
