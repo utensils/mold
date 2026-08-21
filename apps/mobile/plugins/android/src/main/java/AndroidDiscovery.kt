@@ -79,7 +79,6 @@ internal class AndroidDiscovery(
 
         override fun onStopDiscoveryFailed(serviceType: String, errorCode: Int) {
             onHandler {
-                discoveryRequested = false
                 beginResolving()
             }
         }

@@ -40,6 +40,15 @@ class CredentialVaultInstrumentedTest {
     }
 
     @Test
+    fun discardsCiphertextWithInvalidGcmParameters() {
+        vault.set(hostId, "key-used-to-create-the-keystore-alias")
+        vault.storeCiphertextForTesting(hostId, "AA.AA")
+
+        assertNull(vault.get(hostId))
+        assertNull(vault.storedCiphertext(hostId))
+    }
+
+    @Test
     fun discardsCiphertextWhenTheKeystoreAliasWasRemoved() {
         vault.set(hostId, "key-that-can-no-longer-be-decrypted")
         assertTrue(vault.hasKeyForTesting())

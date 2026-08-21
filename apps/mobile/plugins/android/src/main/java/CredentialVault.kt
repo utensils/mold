@@ -6,6 +6,7 @@ import android.security.keystore.KeyPermanentlyInvalidatedException
 import android.security.keystore.KeyProperties
 import android.util.Base64
 import java.nio.charset.StandardCharsets
+import java.security.InvalidAlgorithmParameterException
 import java.security.KeyStore
 import java.security.MessageDigest
 import javax.crypto.AEADBadTagException
@@ -57,6 +58,9 @@ internal class CredentialVault(private val context: Context) {
             discardUnreadable(hostId)
             null
         } catch (_: KeyPermanentlyInvalidatedException) {
+            discardUnreadable(hostId)
+            null
+        } catch (_: InvalidAlgorithmParameterException) {
             discardUnreadable(hostId)
             null
         } catch (_: IllegalArgumentException) {
