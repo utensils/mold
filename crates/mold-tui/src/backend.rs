@@ -254,7 +254,17 @@ pub async fn run_generation(
             let mut fell_through = false;
             if let Some(ref url) = effective_url {
                 let client = crate::hosts::client_for(url, api_key.as_deref());
-                let mut req = build_request(&iter_params, &iter_prompt, &negative_prompt);
+                let mut req = match build_request(&iter_params, &iter_prompt, &negative_prompt) {
+                    Ok(req) => req,
+                    Err(message) => {
+                        // The identity photo went away between picking it
+                        // and pressing Generate. Refusing is the whole
+                        // point: an ordinary render would look fine and
+                        // simply not be that person.
+                        let _ = tx.send(BackgroundEvent::Error(message));
+                        return;
+                    }
+                };
                 let mut reference_session = if iter_params.reference_paths.is_empty() {
                     None
                 } else {
@@ -732,7 +742,13 @@ async fn run_local_generation(
     };
 
     let offload = params.offload;
-    let req = build_request(&params, &prompt, &negative_prompt);
+    let req = match build_request(&params, &prompt, &negative_prompt) {
+        Ok(req) => req,
+        Err(message) => {
+            let _ = tx.send(BackgroundEvent::Error(message));
+            return;
+        }
+    };
     let tx_clone = tx.clone();
 
     let result = tokio::task::spawn_blocking(move || {
@@ -792,11 +808,20 @@ fn canonicalize_generation_authority(
     (params, negative_prompt)
 }
 
+/// Build the wire request for one generation.
+///
+/// Fallible because of the identity photo alone: every other conditioning
+/// input degrades to "absent" when it cannot be read, but an identity
+/// reference that silently vanishes turns the run into an ordinary render
+/// that produces a plausible print with the wrong face and says nothing. A
+/// file accepted at entry can still be deleted, truncated, or swapped for a
+/// symlink before Generate is pressed, so the load is re-checked here and a
+/// failure aborts dispatch with `mold_core::identity`'s own wording.
 fn build_request(
     params: &GenerateParams,
     prompt: &str,
     negative_prompt: &Option<String>,
-) -> GenerateRequest {
+) -> Result<GenerateRequest, String> {
     let config = mold_core::Config::load_or_default();
     let (normalized_params, normalized_negative_prompt) =
         canonicalize_generation_authority(params.clone(), negative_prompt.clone(), &config);
@@ -847,8 +872,46 @@ fn build_request(
         })
     });
 
-    GenerateRequest {
-        title: None,
+    // Identity conditioning ships as a group or not at all: the two knobs
+    // without a photo are exactly the incomplete form
+    // `mold_core::identity::validate_identity_conditioning` refuses. The
+    // photo is re-read here (it was validated at entry) so the request
+    // carries the file as it is right now, and the label is the basename —
+    // never the local path.
+    let identity_image = match params.identity_image_path.as_deref() {
+        Some(path) => Some(crate::identity::load_identity_image(path)?),
+        None => None,
+    };
+    let identity_image_name = identity_image.as_ref().and_then(|_| {
+        params
+            .identity_image_path
+            .as_deref()
+            .and_then(crate::identity::identity_image_name)
+    });
+
+    // Creation-time filing is a client decision (see
+    // `mold_core::compose_client_tags`): the server never auto-tags, so the
+    // title's slug is composed here, exactly as the CLI composes it. Both
+    // File-under editors and `start_generation`'s guard already refuse a
+    // list the auto tag would push past the cap, so the error arm is
+    // defensive — it keeps the tags the user typed rather than dropping them.
+    let composed = crate::ui::create_form::compose_filing_tags(
+        &params.tags,
+        params.title.as_deref(),
+        params.auto_tag_title,
+    )
+    .unwrap_or_else(|_| mold_core::ComposedClientTags {
+        tags: params.tags.clone(),
+        auto_tagged: None,
+    });
+
+    Ok(GenerateRequest {
+        collection: params
+            .collection
+            .as_deref()
+            .map(mold_core::CollectionRef::by_name),
+        tags: (!composed.tags.is_empty()).then_some(composed.tags),
+        title: params.title.clone(),
         source_fit: None,
         hdr_exr_dir: None,
         hdr_exr_full_float: false,
@@ -905,11 +968,11 @@ fn build_request(
         spatial_upscale: params.spatial_upscale,
         temporal_upscale: params.temporal_upscale,
         placement: None,
-        id_image: None,
-        id_image_name: None,
-        id_weight: None,
-        id_start_step: None,
-    }
+        id_weight: identity_image.as_ref().map(|_| params.id_weight),
+        id_start_step: identity_image.as_ref().map(|_| params.id_start_step),
+        id_image_name: identity_image_name,
+        id_image: identity_image,
+    })
 }
 
 /// Build a map of file_path -> list of model names that reference it.
@@ -1183,7 +1246,7 @@ mod tests {
         let config = mold_core::Config::load_or_default();
         let mut params = GenerateParams::from_config(&config);
         params.batch = 4;
-        let req = build_request(&params, "test prompt", &None);
+        let req = build_request(&params, "test prompt", &None).unwrap();
         assert_eq!(req.batch_size, 4);
     }
 
@@ -1192,8 +1255,96 @@ mod tests {
         let config = mold_core::Config::load_or_default();
         let params = GenerateParams::from_config(&config);
         assert_eq!(params.batch, 1);
-        let req = build_request(&params, "test prompt", &None);
+        let req = build_request(&params, "test prompt", &None).unwrap();
         assert_eq!(req.batch_size, 1);
+    }
+
+    // ── creation-time filing ("File under") ────────────────────
+
+    /// Absent-until-touched: an untouched Create form submits exactly the
+    /// request it always did, with no filing fields on the wire.
+    #[test]
+    fn build_request_omits_filing_until_the_form_is_touched() {
+        let config = mold_core::Config::load_or_default();
+        let params = GenerateParams::from_config(&config);
+        let req = build_request(&params, "p", &None).unwrap();
+        assert_eq!(req.title, None);
+        assert_eq!(req.tags, None);
+        assert!(req.collection.is_none());
+    }
+
+    #[test]
+    fn build_request_carries_the_title_tags_and_collection() {
+        let config = mold_core::Config::load_or_default();
+        let mut params = GenerateParams::from_config(&config);
+        params.auto_tag_title = false;
+        params.title = Some("Smurf Village".to_string());
+        params.tags = vec!["village".to_string(), "blue".to_string()];
+        params.collection = Some("Blue Period".to_string());
+
+        let req = build_request(&params, "p", &None).unwrap();
+        assert_eq!(req.title.as_deref(), Some("Smurf Village"));
+        assert_eq!(
+            req.tags,
+            Some(vec!["village".to_string(), "blue".to_string()])
+        );
+        // Collections travel by display name — the portable, cross-host
+        // form; ids belong to one host's rows.
+        let collection = req.collection.expect("collection rides the request");
+        assert_eq!(collection.name.as_deref(), Some("Blue Period"));
+        assert_eq!(collection.id, None);
+    }
+
+    /// The server never auto-tags, so the title's slug is composed here —
+    /// the same `mold_core::compose_client_tags` decision the CLI makes.
+    #[test]
+    fn build_request_auto_tags_a_titled_print_only_while_the_preference_is_on() {
+        let config = mold_core::Config::load_or_default();
+        let mut params = GenerateParams::from_config(&config);
+        params.title = Some("Smurf Village".to_string());
+        params.tags = vec!["village".to_string()];
+
+        params.auto_tag_title = true;
+        assert_eq!(
+            build_request(&params, "p", &None).unwrap().tags,
+            Some(vec!["village".to_string(), "smurf-village".to_string()])
+        );
+
+        params.auto_tag_title = false;
+        assert_eq!(
+            build_request(&params, "p", &None).unwrap().tags,
+            Some(vec!["village".to_string()])
+        );
+
+        // A title alone still files the print under its own slug.
+        params.auto_tag_title = true;
+        params.tags.clear();
+        assert_eq!(
+            build_request(&params, "p", &None).unwrap().tags,
+            Some(vec!["smurf-village".to_string()])
+        );
+
+        // …and an untitled form with the preference on carries nothing.
+        params.title = None;
+        assert_eq!(build_request(&params, "p", &None).unwrap().tags, None);
+    }
+
+    #[test]
+    fn build_request_carries_filing_on_every_family() {
+        // Filing is not a generation parameter: a video request carries it
+        // exactly as an image request does.
+        let config = mold_core::Config::load_or_default();
+        let mut params = GenerateParams::from_config(&config);
+        params.model = "ltx2".to_string();
+        params.auto_tag_title = false;
+        params.title = Some("Smurf Village".to_string());
+        params.collection = Some("Blue Period".to_string());
+        let req = build_request(&params, "p", &None).unwrap();
+        assert_eq!(req.title.as_deref(), Some("Smurf Village"));
+        assert_eq!(
+            req.collection.and_then(|c| c.name).as_deref(),
+            Some("Blue Period")
+        );
     }
 
     #[test]
@@ -1203,33 +1354,143 @@ mod tests {
         let config = mold_core::Config::load_or_default();
         let mut params = GenerateParams::from_config(&config);
         assert_eq!(
-            build_request(&params, "p", &None).upscale_model,
+            build_request(&params, "p", &None).unwrap().upscale_model,
             None,
             "off by default"
         );
         params.upscale_model = Some("real-esrgan-x4plus:fp16".to_string());
-        let req = build_request(&params, "p", &None);
+        let req = build_request(&params, "p", &None).unwrap();
         assert_eq!(
             req.upscale_model.as_deref(),
             Some("real-esrgan-x4plus:fp16")
         );
     }
 
+    /// The four identity fields ship as one group. A request carrying a knob
+    /// but no photo is exactly the incomplete form
+    /// `mold_core::identity::validate_identity_conditioning` refuses, so the
+    /// builder must never produce it — not even from a form whose knobs were
+    /// moved before a photo was picked.
+    #[test]
+    fn build_request_ships_identity_as_a_group_or_not_at_all() {
+        let config = mold_core::Config::load_or_default();
+        let mut params = GenerateParams::from_config(&config);
+
+        let req = build_request(&params, "p", &None).unwrap();
+        assert!(req.id_image.is_none());
+        assert!(req.id_image_name.is_none());
+        assert!(req.id_weight.is_none());
+        assert!(req.id_start_step.is_none());
+        assert!(!mold_core::identity::request_mentions_identity(&req));
+
+        // Knobs alone never reach the wire.
+        params.id_weight = 2.0;
+        params.id_start_step = 2;
+        let req = build_request(&params, "p", &None).unwrap();
+        assert!(
+            !mold_core::identity::request_mentions_identity(&req),
+            "a knob without a photo must stay absent"
+        );
+
+        // A path that no longer resolves builds NO request at all. Dropping
+        // the group and rendering anyway would produce a plausible print with
+        // the wrong face and say nothing about it.
+        params.identity_image_path = Some("/nonexistent/face.png".into());
+        assert!(build_request(&params, "p", &None).is_err());
+
+        let dir = tempfile::tempdir().unwrap();
+        let photo = dir.path().join("ada.png");
+        std::fs::write(&photo, PNG_1X1).unwrap();
+        params.identity_image_path = Some(photo.to_string_lossy().to_string());
+        let req = build_request(&params, "p", &None).unwrap();
+        assert_eq!(req.id_image.as_deref(), Some(&PNG_1X1[..]));
+        assert_eq!(
+            req.id_image_name.as_deref(),
+            Some("ada.png"),
+            "the label is the basename, never the local path"
+        );
+        assert_eq!(req.id_weight, Some(2.0));
+        assert_eq!(req.id_start_step, Some(2));
+        assert_eq!(mold_core::identity::effective_id_weight(&req), 2.0);
+        assert_eq!(mold_core::identity::effective_id_start_step(&req), 2);
+    }
+
+    /// The photo is validated when it is picked, but the filesystem keeps
+    /// moving: between accepting it and pressing Generate the file can be
+    /// deleted, truncated, or swapped for a symlink. Every such case must
+    /// abort dispatch with `mold_core::identity`'s wording rather than
+    /// quietly building an ordinary request.
+    #[test]
+    fn a_photo_that_changed_after_it_was_accepted_refuses_to_build_a_request() {
+        let config = mold_core::Config::load_or_default();
+        let mut params = GenerateParams::from_config(&config);
+        let dir = tempfile::tempdir().unwrap();
+        let photo = dir.path().join("ada.png");
+        std::fs::write(&photo, PNG_1X1).unwrap();
+        params.identity_image_path = Some(photo.to_string_lossy().to_string());
+        // Accepted, and it builds.
+        assert!(build_request(&params, "p", &None).is_ok());
+
+        // Replaced by a symlink to an equally valid photo: still refused,
+        // because the bytes that would be sent are no longer the file that
+        // passed the check.
+        let real = dir.path().join("someone-else.png");
+        std::fs::write(&real, PNG_1X1).unwrap();
+        std::fs::remove_file(&photo).unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&real, &photo).unwrap();
+            let error = build_request(&params, "p", &None).unwrap_err();
+            assert!(
+                error.starts_with("Identity photo could not be opened"),
+                "{error}"
+            );
+            std::fs::remove_file(&photo).unwrap();
+        }
+
+        // Deleted outright.
+        assert!(build_request(&params, "p", &None).is_err());
+
+        // Replaced by something that is no longer an image: mold-core's own
+        // refusal, not a restatement.
+        std::fs::write(&photo, b"not an image").unwrap();
+        assert_eq!(
+            build_request(&params, "p", &None).unwrap_err(),
+            mold_core::identity::validate_id_image_bytes(b"not an image").unwrap_err()
+        );
+    }
+
+    /// A genuine 1x1 RGBA PNG — the smallest payload
+    /// `identity::validate_id_image_bytes` accepts.
+    const PNG_1X1: [u8; 67] = [
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
+        0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00,
+        0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49,
+        0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
+
     #[test]
     fn build_request_preserves_explicit_audio_choice() {
         let config = mold_core::Config::load_or_default();
         let mut params = GenerateParams::from_config(&config);
         assert_eq!(
-            build_request(&params, "p", &None).enable_audio,
+            build_request(&params, "p", &None).unwrap().enable_audio,
             None,
             "untouched TUI state must preserve the server's pipeline default"
         );
 
         params.enable_audio = Some(true);
-        assert_eq!(build_request(&params, "p", &None).enable_audio, Some(true));
+        assert_eq!(
+            build_request(&params, "p", &None).unwrap().enable_audio,
+            Some(true)
+        );
 
         params.enable_audio = Some(false);
-        assert_eq!(build_request(&params, "p", &None).enable_audio, Some(false));
+        assert_eq!(
+            build_request(&params, "p", &None).unwrap().enable_audio,
+            Some(false)
+        );
     }
 
     #[test]
@@ -1237,14 +1498,14 @@ mod tests {
         let config = mold_core::Config::load_or_default();
         let mut params = GenerateParams::from_config(&config);
         assert_eq!(
-            build_request(&params, "p", &None).pipeline,
+            build_request(&params, "p", &None).unwrap().pipeline,
             None,
             "untouched TUI state must preserve server pipeline selection"
         );
 
         params.pipeline = Some(mold_core::Ltx2PipelineMode::TwoStageHq);
         assert_eq!(
-            build_request(&params, "p", &None).pipeline,
+            build_request(&params, "p", &None).unwrap().pipeline,
             Some(mold_core::Ltx2PipelineMode::TwoStageHq)
         );
     }
@@ -1253,13 +1514,13 @@ mod tests {
     fn build_request_preserves_ltx2_upscale_choices() {
         let config = mold_core::Config::load_or_default();
         let mut params = GenerateParams::from_config(&config);
-        let default_request = build_request(&params, "p", &None);
+        let default_request = build_request(&params, "p", &None).unwrap();
         assert_eq!(default_request.spatial_upscale, None);
         assert_eq!(default_request.temporal_upscale, None);
 
         params.spatial_upscale = Some(mold_core::Ltx2SpatialUpscale::X1_5);
         params.temporal_upscale = Some(mold_core::Ltx2TemporalUpscale::X2);
-        let request = build_request(&params, "p", &None);
+        let request = build_request(&params, "p", &None).unwrap();
         assert_eq!(
             request.spatial_upscale,
             Some(mold_core::Ltx2SpatialUpscale::X1_5)
@@ -1275,7 +1536,9 @@ mod tests {
         let config = mold_core::Config::load_or_default();
         let mut params = GenerateParams::from_config(&config);
         assert_eq!(
-            build_request(&params, "p", &None).guidance_overrides,
+            build_request(&params, "p", &None)
+                .unwrap()
+                .guidance_overrides,
             None,
             "untouched TUI state must preserve pipeline guidance defaults"
         );
@@ -1288,7 +1551,9 @@ mod tests {
             skip_step: Some(2),
         };
         assert_eq!(
-            build_request(&params, "p", &None).guidance_overrides,
+            build_request(&params, "p", &None)
+                .unwrap()
+                .guidance_overrides,
             Some(params.guidance_overrides.clone())
         );
     }
@@ -1333,7 +1598,7 @@ mod tests {
             "p".into(),
             canonical_negative.clone(),
         );
-        let request = build_request(&canonical_params, "p", &canonical_negative);
+        let request = build_request(&canonical_params, "p", &canonical_negative).unwrap();
 
         assert_eq!(request.frames, Some(mold_core::minimax_h3::MIN_FRAMES));
         assert_eq!(request.fps, Some(mold_core::minimax_h3::FIXED_FPS));
@@ -1372,7 +1637,7 @@ mod tests {
         params.batch_index = Some(2);
         params.batch_count = Some(3);
 
-        let request = build_request(&params, "reviewed sibling", &None);
+        let request = build_request(&params, "reviewed sibling", &None).unwrap();
         assert_eq!(request.batch_id.as_deref(), Some("remix-0123"));
         assert_eq!(request.batch_index, Some(2));
         assert_eq!(request.batch_count, Some(3));

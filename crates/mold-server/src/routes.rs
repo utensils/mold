@@ -343,6 +343,7 @@ use crate::queue::clean_error_message;
     ),
     components(schemas(
         mold_core::GenerateRequest,
+        mold_core::CollectionRef,
         mold_core::Ltx2ControlAdapterInfo,
         mold_core::Ltx2CameraControlInfo,
         mold_core::Ltx2GuidanceOverrides,
@@ -1181,6 +1182,14 @@ async fn prepare_generation(
     // provenance equal to what actually rendered (#783).
     mold_core::validation::materialize_extend_overlap_frames(request, resolved_family.as_deref());
 
+    // Same discipline for the creation-time filing: `OutputMetadata` is built
+    // from this request while the gallery row is seeded through a path that
+    // re-normalizes, so raw spellings left here would put a different filing
+    // in the print's provenance than the one it actually receives. First-party
+    // clients normalize before sending; a direct HTTP caller does not.
+    // Refusal is reported by the validation below, which runs the same check.
+    let _ = mold_core::validation::materialize_request_organization(request);
+
     // A model with no deliverable recipe cannot reach media-dependent
     // preparation. Preserve basic request/unknown-model diagnostics first,
     // then fail before control planning, LipDub probing, reference resolution,
@@ -1233,6 +1242,15 @@ async fn prepare_generation(
         let _ = model_manager::check_model_available(state, &request.model).await?;
     }
     enforce_source_image_capability(state, request, resolved_family.as_deref()).await?;
+
+    // Resolve the creation-time filing against this host now that the
+    // request is otherwise admissible. Publication only ever files by name,
+    // so an `{id}` reference is turned into its name here — that is also the
+    // name the print's embedded provenance will record, and resolving it
+    // later would risk filing under one collection and recording another.
+    warnings
+        .other
+        .extend(resolve_request_filing(state, request).await);
 
     let resolved_references = if request.references.is_some() {
         let identity = reference_identity
@@ -1544,6 +1562,136 @@ pub(crate) fn materialize_default_negative_prompt(
 /// admitted for 97 frames that then rendered a 20-second reference would be
 /// five times the size it was measured at.
 ///
+/// Resolve the creation-time filing a request carries against this host,
+/// rewriting `request.collection` into the `{name}` form publication files
+/// by. Returns advisories for anything that was dropped.
+///
+/// Three things can go wrong, and none of them may refuse the render — a
+/// print is the expensive artifact and its filing is not:
+///
+/// * **No metadata DB** (`MOLD_DB_DISABLE=1`): there is nowhere to file. The
+///   filing is dropped and said so on `x-mold-request-warning`, never
+///   silently and never as a refusal.
+/// * **An `{id}` that no longer exists**: the collection was deleted between
+///   the client reading the list and pressing Generate. Dropped and reported.
+/// * **A DB read failure**: reported the same way rather than escalated.
+///
+/// A `{name}` reference needs no resolution at all: publication creates it
+/// when absent, which is the cross-host create-by-name rule.
+async fn resolve_request_filing(
+    state: &AppState,
+    request: &mut mold_core::GenerateRequest,
+) -> Vec<String> {
+    let filing = describe_request_filing(request);
+    if filing.is_none() {
+        return Vec::new();
+    }
+
+    let Some(db) = state.metadata_db.as_ref().as_ref() else {
+        let filing = filing.expect("checked above");
+        request.tags = None;
+        request.collection = None;
+        return vec![format!(
+            "this host has no metadata database, so {filing} was not applied; \
+             the print was generated and saved normally"
+        )];
+    };
+
+    resolve_collection_reference(db, &mut request.collection)
+}
+
+/// Rewrite an `{id}` collection reference into the `{id, name}` form
+/// publication files by, dropping it with an advisory when this host cannot
+/// resolve it. A `{name}` reference needs no lookup — publication creates it
+/// when absent — and is left exactly as it arrived.
+///
+/// Shared by the one-shot and chain admission paths so a sequence and a
+/// single print resolve their filing identically.
+pub(crate) fn resolve_collection_reference(
+    db: &mold_db::MetadataDb,
+    collection: &mut Option<mold_core::CollectionRef>,
+) -> Vec<String> {
+    let Some(id) = collection
+        .as_ref()
+        .filter(|reference| reference.name.is_none())
+        .and_then(|reference| reference.id.as_deref())
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
+    else {
+        return Vec::new();
+    };
+
+    match db.get_collection(&id) {
+        Ok(Some(row)) => {
+            *collection = Some(mold_core::CollectionRef {
+                id: Some(row.id),
+                name: Some(row.name),
+            });
+            Vec::new()
+        }
+        Ok(None) => {
+            *collection = None;
+            vec![format!(
+                "collection '{id}' no longer exists on this host, so the print was not filed \
+                 into it; its tags and everything else were applied normally"
+            )]
+        }
+        Err(error) => {
+            tracing::warn!("collection lookup failed for '{id}': {error:#}");
+            *collection = None;
+            vec![format!(
+                "collection '{id}' could not be read on this host, so the print was not filed \
+                 into it; its tags and everything else were applied normally"
+            )]
+        }
+    }
+}
+
+/// Build the `x-mold-request-warning` header for a set of advisories, or an
+/// empty map when there are none.
+///
+/// The generate path assembles this header from [`RequestWarnings`] on its
+/// own response; the chain endpoints have no such struct, so they share this
+/// so a dropped filing is never a silent drop there either.
+pub(crate) fn request_warning_headers(warnings: &[String]) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    if warnings.is_empty() {
+        return headers;
+    }
+    let joined = warnings.join("; ").replace('\n', " ");
+    match HeaderValue::from_str(&joined) {
+        Ok(value) => {
+            headers.insert("x-mold-request-warning", value);
+        }
+        Err(e) => tracing::warn!("request warning could not be encoded as a header: {e}"),
+    }
+    headers
+}
+
+/// Human-readable summary of what a request asked to be filed under, for the
+/// advisory text. `None` when it asked for nothing.
+fn describe_request_filing(request: &mold_core::GenerateRequest) -> Option<String> {
+    let tags = request.tags.as_deref().filter(|tags| !tags.is_empty());
+    let collection = request
+        .collection
+        .as_ref()
+        .filter(|reference| !reference.is_unset());
+    match (tags, collection) {
+        (None, None) => None,
+        (Some(tags), None) => Some(format!("the requested {}", tag_phrase(tags))),
+        (None, Some(_)) => Some("the requested collection".to_string()),
+        (Some(tags), Some(_)) => Some(format!("the requested collection and {}", tag_phrase(tags))),
+    }
+}
+
+fn tag_phrase(tags: &[String]) -> String {
+    match tags.len() {
+        1 => "tag".to_string(),
+        n => format!("{n} tags"),
+    }
+}
+
 /// Returns anything the caller asked for that the reference overrode, so the
 /// client is told rather than quietly retimed.
 async fn apply_lip_dub_reference_timing(
@@ -8656,6 +8804,190 @@ mod tests {
             "a timing substitution must not be published as a dimension adjustment"
         );
         assert!(super::RequestWarnings::default().is_empty());
+    }
+
+    // ── creation-time filing at admission ───────────────────────────────
+
+    fn filed_request(
+        tags: &[&str],
+        collection: Option<mold_core::CollectionRef>,
+    ) -> mold_core::GenerateRequest {
+        let mut request: mold_core::GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "a cat",
+            "model": "flux-dev:q4",
+            "width": 512,
+            "height": 512,
+            "steps": 4,
+            "guidance": 3.5,
+        }))
+        .unwrap();
+        if !tags.is_empty() {
+            request.tags = Some(tags.iter().map(|t| t.to_string()).collect());
+        }
+        request.collection = collection;
+        request
+    }
+
+    /// An `{id}` reference becomes the `{id, name}` form publication files
+    /// by; a `{name}` reference is left exactly as it arrived, because
+    /// publication creates it when absent.
+    #[test]
+    fn admission_resolves_a_collection_id_to_its_name_and_leaves_a_name_alone() {
+        let db = mold_db::MetadataDb::open_in_memory().unwrap();
+        let created = db.create_collection("Smurf Village", None).unwrap();
+
+        let mut by_id = Some(mold_core::CollectionRef::by_id(created.id.clone()));
+        assert!(super::resolve_collection_reference(&db, &mut by_id).is_empty());
+        assert_eq!(
+            by_id,
+            Some(mold_core::CollectionRef {
+                id: Some(created.id.clone()),
+                name: Some("Smurf Village".to_string()),
+            })
+        );
+
+        let mut by_name = Some(mold_core::CollectionRef::by_name("Somewhere Else"));
+        assert!(super::resolve_collection_reference(&db, &mut by_name).is_empty());
+        assert_eq!(
+            by_name,
+            Some(mold_core::CollectionRef::by_name("Somewhere Else")),
+            "a name needs no lookup and must not be rewritten"
+        );
+
+        let mut none = None;
+        assert!(super::resolve_collection_reference(&db, &mut none).is_empty());
+        assert_eq!(none, None);
+    }
+
+    /// A collection deleted between the client reading the list and pressing
+    /// Generate drops the filing with an advisory — never a refusal, because
+    /// the print is the expensive artifact and its filing is not.
+    #[test]
+    fn admission_drops_an_unknown_collection_id_with_an_advisory() {
+        let db = mold_db::MetadataDb::open_in_memory().unwrap();
+        let mut gone = Some(mold_core::CollectionRef::by_id(
+            "11111111-2222-3333-4444-555555555555",
+        ));
+        let warnings = super::resolve_collection_reference(&db, &mut gone);
+        assert_eq!(gone, None, "the filing is dropped, not carried forward");
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("no longer exists"), "{}", warnings[0]);
+        assert!(
+            warnings[0].contains("11111111-2222-3333-4444-555555555555"),
+            "the advisory must name the collection: {}",
+            warnings[0]
+        );
+    }
+
+    /// A host with no metadata DB has nowhere to file. The print still
+    /// generates; the filing is dropped and said so.
+    #[tokio::test]
+    async fn a_host_without_a_metadata_db_drops_the_filing_with_a_warning() {
+        let mut state = AppState::for_tests();
+        state.metadata_db = std::sync::Arc::new(None);
+
+        let mut request = filed_request(
+            &["smurfs", "village"],
+            Some(mold_core::CollectionRef::by_name("Sequences")),
+        );
+        let warnings = super::resolve_request_filing(&state, &mut request).await;
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].contains("no metadata database"),
+            "{}",
+            warnings[0]
+        );
+        assert!(warnings[0].contains("2 tags"), "{}", warnings[0]);
+        assert!(warnings[0].contains("collection"), "{}", warnings[0]);
+        assert_eq!(request.tags, None, "the filing is dropped from the request");
+        assert_eq!(request.collection, None);
+
+        // An unfiled request on the same host is silent — the advisory must
+        // not become boilerplate on every print.
+        let mut plain = filed_request(&[], None);
+        assert!(super::resolve_request_filing(&state, &mut plain)
+            .await
+            .is_empty());
+    }
+
+    /// Admission rewrites the filing into the form that will actually be
+    /// applied, so the queue journal, `OutputMetadata`, and the gallery row
+    /// all carry one canonical spelling. A direct HTTP caller is the one who
+    /// needs this — every first-party client normalizes before sending.
+    #[test]
+    fn admission_materializes_the_filing_a_raw_http_caller_sent() {
+        let mut request = filed_request(&[], None);
+        request.tags = Some(vec![
+            "  Smurfs  ".into(),
+            "smurfs".into(),
+            "".into(),
+            " village  green ".into(),
+        ]);
+        request.collection = Some(mold_core::CollectionRef::by_name("  Smurf   Village  "));
+
+        mold_core::validation::materialize_request_organization(&mut request).unwrap();
+
+        assert_eq!(
+            request.tags.as_deref(),
+            Some(["Smurfs".to_string(), "village green".to_string()].as_slice())
+        );
+        assert_eq!(
+            request.collection,
+            Some(mold_core::CollectionRef::by_name("Smurf Village"))
+        );
+        // The journal stores the admitted request, so a replay files the same
+        // print the original run did.
+        let journaled: mold_core::GenerateRequest =
+            serde_json::from_str(&serde_json::to_string(&request).unwrap()).unwrap();
+        assert_eq!(journaled.tags, request.tags);
+        assert_eq!(journaled.collection, request.collection);
+    }
+
+    /// The advisory names what was dropped, in the singular or the plural,
+    /// so the user can tell which part of their filing did not land.
+    #[test]
+    fn the_filing_advisory_names_what_was_requested() {
+        assert_eq!(
+            super::describe_request_filing(&filed_request(&[], None)),
+            None
+        );
+        assert_eq!(
+            super::describe_request_filing(&filed_request(&["one"], None)).as_deref(),
+            Some("the requested tag")
+        );
+        assert_eq!(
+            super::describe_request_filing(&filed_request(&["one", "two"], None)).as_deref(),
+            Some("the requested 2 tags")
+        );
+        assert_eq!(
+            super::describe_request_filing(&filed_request(
+                &[],
+                Some(mold_core::CollectionRef::by_name("Sequences"))
+            ))
+            .as_deref(),
+            Some("the requested collection")
+        );
+        assert_eq!(
+            super::describe_request_filing(&filed_request(
+                &["one"],
+                Some(mold_core::CollectionRef::by_name("Sequences"))
+            ))
+            .as_deref(),
+            Some("the requested collection and tag")
+        );
+    }
+
+    /// Advisories ride the general `x-mold-request-warning` header, joined
+    /// with `; ` and stripped of newlines so the value stays a legal header.
+    #[test]
+    fn filing_advisories_become_a_single_request_warning_header() {
+        assert!(super::request_warning_headers(&[]).is_empty());
+        let headers =
+            super::request_warning_headers(&["first\nadvisory".to_string(), "second".to_string()]);
+        assert_eq!(
+            headers.get("x-mold-request-warning").unwrap(),
+            "first advisory; second"
+        );
     }
 
     #[tokio::test]

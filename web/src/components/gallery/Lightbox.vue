@@ -18,6 +18,10 @@ import VideoExportDialog from "@ui/components/VideoExportDialog.vue";
 import PrintOrganizer from "../library/PrintOrganizer.vue";
 import type { CollectionPickerRow } from "../library/CollectionPicker.vue";
 import { purgeCountdownFromPurgeAt } from "@studio/lib/libraryOrganization";
+import {
+  identityProvenance,
+  identityProvenanceSummary,
+} from "@studio/lib/identityConditioning";
 import { downloadFilename } from "../../lib/libraryOrganization";
 import { imageUrl, thumbnailUrl } from "../../api";
 import { getHost } from "../../lib/hostRegistry";
@@ -99,7 +103,7 @@ const purgeLabel = computed(() =>
     : "",
 );
 const downloadName = computed(() =>
-  props.item ? downloadFilename(props.item.title, props.item.filename) : "",
+  props.item ? downloadFilename(props.item) : "",
 );
 function onRestore() {
   menuOpen.value = false;
@@ -241,6 +245,16 @@ const negativePrompt = computed(
 const originalPrompt = computed(
   () => props.item?.metadata.original_prompt?.trim() ?? "",
 );
+/**
+ * Face-identity provenance (#1224). Saved metadata carries the photo's name
+ * and digest — never the face — so this row is the only record of which
+ * likeness conditioned the print, and how strongly. Absent on prints that
+ * carried no identity photo and on hosts that predate the field.
+ */
+const identityLabel = computed(() => {
+  const provenance = identityProvenance(props.item?.metadata);
+  return provenance ? identityProvenanceSummary(provenance) : "";
+});
 const loraLabel = computed(() => {
   const metadata = props.item?.metadata;
   const stack = metadata?.loras?.length
@@ -647,6 +661,14 @@ async function performVideoExport(options: VideoExportOptions) {
             <div v-if="loraLabel" class="lb__row">
               <span class="lb__rowk">LoRA</span><span>{{ loraLabel }}</span>
             </div>
+            <div
+              v-if="identityLabel"
+              class="lb__row lb__row--long"
+              data-test="lightbox-identity"
+            >
+              <span class="lb__rowk">Identity</span
+              ><span>{{ identityLabel }}</span>
+            </div>
             <div v-if="negativePrompt" class="lb__row lb__row--long">
               <span class="lb__rowk">Negative</span
               ><span>{{ negativePrompt }}</span>
@@ -956,6 +978,13 @@ async function performVideoExport(options: VideoExportOptions) {
           </p>
           <p v-if="loraLabel" class="lb__mobile-meta">
             <b>LoRA:</b> {{ loraLabel }}
+          </p>
+          <p
+            v-if="identityLabel"
+            class="lb__mobile-meta"
+            data-test="lightbox-identity"
+          >
+            <b>Identity:</b> {{ identityLabel }}
           </p>
           <template v-if="inTrash">
             <button class="lb__reuse" @click="onRestore">Restore</button>

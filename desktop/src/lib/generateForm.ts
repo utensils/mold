@@ -29,6 +29,16 @@ import {
   parseSourceFitPolicy,
   type SourceFitPolicy,
 } from "@studio/lib/sourceFit";
+import {
+  addTag,
+  buildFileUnderRequestFields,
+  deriveGhostTag,
+  emptyFileUnderState,
+  pickCollection,
+  requestTagKey,
+  type FileUnderCollectionLike,
+  type FileUnderState,
+} from "@studio/lib/fileUnder";
 import { defaultVideoFps } from "@studio/lib/sequence";
 import { videoFramesForModelSelection } from "@studio/lib/videoDuration";
 import { pipelineForSettingsReuse } from "@studio/lib/outputReuse";
@@ -59,6 +69,11 @@ import {
   restoredNegativePrompt,
 } from "@studio/lib/negativePrompt";
 import { pipelineForControlId } from "@studio/lib/ltx2Control";
+import {
+  identityRequestFields,
+  identityReuse,
+  supportsIdentity,
+} from "@studio/lib/identityConditioning";
 import { validatePrintTitle } from "@studio/lib/libraryOrganization";
 import { firstLastFrameKeyframes } from "@studio/lib/sourceImageCapability";
 import { effectiveGenerationGuidance, isWanFamily } from "@studio/lib/generationCapabilities";
@@ -120,6 +135,29 @@ export interface GenerateForm {
    * never clears it (a named session wants its siblings and re-rolls to share
    * the name); only the explicit ⌘N "new print" (`clearComposer`) does. */
   title: string;
+  /** "File under" — the Create-time Library filing draft (ghost-tag opt-out,
+   * typed tags, collection pick). Reducers live in `@studio/lib/fileUnder`;
+   * `buildRequest` materializes it into the additive `tags` / `collection`
+   * wire fields, so every one-shot, Batch N sibling, and prepared variation
+   * built from this form files identically — exactly like `title`. */
+  fileUnder: FileUnderState;
+  /** Settings ▸ Library "Tag new prints with their title", mirrored onto the
+   * form so `buildRequest` stays a pure function of it. Not a form value: a
+   * wholesale reset preserves it and the owning surface re-syncs it from its
+   * own preference store.
+   *
+   * Defaults to FALSE, which is not the product default (that is on) — it is
+   * the safe default for a surface that has not wired the group up. A ghost
+   * tag files the print on the user's behalf and must be visible before
+   * Generate, so a shell with no File under UI has to opt in rather than
+   * inherit the behaviour invisibly. Desktop opts in at boot
+   * (`libraryPrefs.init()`). */
+  fileUnderAutoTag: boolean;
+  /** The fleet collection whose slug equals the current title's slug, as last
+   * resolved from the merged Library listings. Held here (rather than the
+   * whole listing) so the request builder can offer the auto-match without
+   * knowing about stores; the inspector keeps it in sync. */
+  fileUnderMatch: FileUnderCollectionLike | null;
   model: string;
   family: string;
   width: number;
@@ -171,6 +209,22 @@ export interface GenerateForm {
    * source image, and meaningless without `sourceImage` — the pair ships as
    * the two-entry `keyframes` layout, never a lone keyframe. */
   endFrame: PickedImage | null;
+  /** Face-identity (PuLID) reference photo. Primary-form media beside the
+   * source wells, and deliberately NOT source conditioning: it is never
+   * fitted against the canvas and ships verbatim. A bytes-less entry is the
+   * reattach descriptor Reuse settings leaves behind when the local stash no
+   * longer holds the photo the print recorded. */
+  identityImage: PickedImage | null;
+  /** Identity strength; null = untouched, so the server default applies. */
+  identityWeight: number | null;
+  /** First identity-conditioned step; null = untouched. */
+  identityStartStep: number | null;
+  /** Whether the selected checkpoint accepts an identity photo, snapshotted
+   * from its resolved recipe / `/api/models` row exactly like
+   * `sourceImageCapability` — `buildRequest` takes only the form, and the
+   * capability is what decides whether the partition may ride the wire. Null
+   * means nothing has been read yet, which reads as "no". */
+  identitySupported: boolean | null;
   /** Ordered edit/reference strip, base64 each (no data-URI prefix). For Qwen,
    * index 0 is the edit Target and the rest are References. FLUX.2 Dev treats
    * every entry as an ordered Reference. Empty in single-source mode. */
@@ -233,6 +287,9 @@ export function newGenerateForm(): GenerateForm {
     prompt: "",
     originalPrompt: null,
     title: "",
+    fileUnder: emptyFileUnderState(),
+    fileUnderAutoTag: false,
+    fileUnderMatch: null,
     model: "",
     family: "",
     width: 1024,
@@ -256,6 +313,10 @@ export function newGenerateForm(): GenerateForm {
     sourceImageWidth: null,
     sourceImageHeight: null,
     endFrame: null,
+    identityImage: null,
+    identityWeight: null,
+    identityStartStep: null,
+    identitySupported: null,
     imageAttachments: [],
     sourceFit: { mode: "pad-repaint" },
     maskImage: null,
@@ -298,12 +359,19 @@ export function cloneGenerateForm(form: GenerateForm): GenerateForm {
   return {
     ...form,
     imageAttachments: [...form.imageAttachments],
+    fileUnder: {
+      ...form.fileUnder,
+      manualTags: [...form.fileUnder.manualTags],
+      picked: form.fileUnder.picked ? { ...form.fileUnder.picked } : null,
+    },
+    fileUnderMatch: form.fileUnderMatch ? { ...form.fileUnderMatch } : null,
     sourceFit,
     loras: form.loras.map((lora) => ({
       ...lora,
       trainedWords: [...lora.trainedWords],
     })),
     endFrame: form.endFrame ? { ...form.endFrame } : null,
+    identityImage: form.identityImage ? { ...form.identityImage } : null,
     sourceVideo: form.sourceVideo ? { ...form.sourceVideo } : null,
     extendVideo: form.extendVideo ? { ...form.extendVideo } : null,
     keyframes: form.keyframes.map((keyframe) => ({
@@ -377,6 +445,10 @@ export function applyRecipeDefaults(
   const recipe = effectiveGenerationRecipe(m, pipeline);
   if (!recipe) return false;
 
+  // The pipeline chooses the recipe, and identity support is a recipe
+  // capability — re-resolve it here or a pipeline switch would keep the
+  // previous recipe's answer.
+  form.identitySupported = supportsIdentity(recipe, m);
   form.width = recipe.defaults.width;
   form.height = recipe.defaults.height;
   form.steps = recipe.defaults.steps;
@@ -462,6 +534,12 @@ export function reconcileModelCapabilities(form: GenerateForm, m: ModelEntry): v
     form.negativeExplicitClear = false;
   }
   const recipe = effectiveGenerationRecipe(m, form.pipeline);
+  // Identity is a property of the checkpoint, snapshotted here for the same
+  // reason as `sourceImageCapability`: the request builder takes only the
+  // form. The staged photo deliberately survives a switch that loses the
+  // capability — `buildRequest` keeps it off the wire, and the inline reason
+  // beside the well (plus the blocked submit) is what tells the user.
+  form.identitySupported = supportsIdentity(recipe, m);
   // A row refresh can resolve a persisted/template form against a newer
   // authoritative recipe. Fixed controls are not user choices: normalize the
   // hidden form value to the same value the disabled control displays, or the
@@ -656,10 +734,35 @@ export function normalizeLegacyNegativeSnapshot(
 }
 
 /**
+ * Run a wholesale form rewrite while the print keeps its own identity.
+ *
+ * `title`, `fileUnder`, and `fileUnderMatch` name and file THIS print; none of
+ * them is a model-owned generation control, and the desktop contract is that
+ * only ⌘N (`useGenerateFormStore.clearComposer`) clears them. Every rewrite
+ * short of that — both inspector Resets and a loaded template — goes through
+ * here so it restores parameters without renaming or re-filing the print in
+ * progress. `fileUnderAutoTag` rides along for a related reason: it mirrors
+ * Settings ▸ Library, and a form rewrite is not a preference change.
+ *
+ * Deliberately NOT applied to `applyRequestToForm` / `applyMetadataToForm`,
+ * which restore a recorded print and therefore restore its recorded identity
+ * too.
+ */
+export function keepingPrintIdentity(form: GenerateForm, rewrite: () => void): void {
+  const { title, fileUnder, fileUnderAutoTag, fileUnderMatch } = form;
+  rewrite();
+  form.title = title;
+  form.fileUnder = fileUnder;
+  form.fileUnderAutoTag = fileUnderAutoTag;
+  form.fileUnderMatch = fileUnderMatch;
+}
+
+/**
  * Restore every generation knob to the selected model's defaults. The prompt
  * (with its expand provenance), the model/family, and the batch size survive:
  * the prompt is the user's authored work, and prepared batch siblings must
- * never be silently resized by an unrelated control.
+ * never be silently resized by an unrelated control. The print's name and
+ * filing survive too — see {@link keepingPrintIdentity}.
  *
  * With no `ModelEntry` — an uninstalled or not-yet-resolved model — the named
  * model and family are kept and the form falls back to `newGenerateForm()`
@@ -670,7 +773,7 @@ export function resetFormToModelDefaults(
   m: ModelEntry | null | undefined,
 ): void {
   const { prompt, originalPrompt, batchSize, model, family } = form;
-  Object.assign(form, newGenerateForm());
+  keepingPrintIdentity(form, () => Object.assign(form, newGenerateForm()));
   if (m) {
     applyModelDefaults(form, m);
   } else {
@@ -702,6 +805,12 @@ export function resetAdvancedToModelDefaults(
     sourceImageWidth: form.sourceImageWidth,
     sourceImageHeight: form.sourceImageHeight,
     endFrame: form.endFrame,
+    // The identity photo is media, not a knob: Reset clears the strength and
+    // start step beside it (they rebuild from `newGenerateForm`) and leaves
+    // the attached face where the user put it. `identitySupported` is
+    // deliberately NOT preserved — the reset restores the model's default
+    // pipeline, and the capability belongs to the recipe that resolves.
+    identityImage: form.identityImage,
     imageAttachments: form.imageAttachments,
     sourceFit: form.sourceFit,
     maskImage: form.maskImage,
@@ -796,6 +905,18 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
   // header refuses to commit one, so this only guards stale snapshots).
   const title = validatePrintTitle(form.title ?? "");
   if (title.ok && title.value) req.title = title.value;
+  // "File under" rides every request built from this form, so a Batch N
+  // sibling and a prepared variation file exactly like the one-shot does.
+  // Both fields stay ABSENT when nothing is filed.
+  Object.assign(
+    req,
+    buildFileUnderRequestFields(
+      form.fileUnder,
+      form.title,
+      form.fileUnderAutoTag,
+      form.fileUnderMatch ? [form.fileUnderMatch] : [],
+    ),
+  );
   if (caps.supportsNegativePrompt) {
     // Tri-state (#787): text equal to the advertised default stays absent
     // (older servers behave identically), a cleared defaulted field ships
@@ -853,6 +974,21 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
       if (caps.supportsMask && form.maskImage) req.mask_image = form.maskImage;
     }
   }
+
+  // Face identity is its own conditioning partition (#1224), gated on the
+  // checkpoint's own advertised support. The photo is NEVER routed through
+  // source-fit preprocessing — it is a face reference, not a composition
+  // input — and an untouched knob stays absent so the server's own default
+  // remains authoritative. The shared policy owns every one of those rules.
+  Object.assign(
+    req,
+    identityRequestFields({
+      supported: form.identitySupported === true,
+      image: form.identityImage,
+      weight: form.identityWeight,
+      startStep: form.identityStartStep,
+    }),
+  );
 
   // ControlNet is independent conditioning, not an img2img derivative. An
   // SD1.5 request may carry a control image without a source image; nesting it
@@ -934,6 +1070,71 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
   return finalized;
 }
 
+/**
+ * Title and creation-time filing for a SEQUENCE, which carries them on the
+ * `POST /api/chain-jobs` body rather than a `GenerateRequest`.
+ *
+ * They apply to the stitched print only — an intermediate clip is a working
+ * artifact inside the job dir and never reaches the gallery — so this is one
+ * timeline's filing, not one per clip. Same validation and same absent-when-
+ * empty shape as `buildRequest`, because it is the same wire contract.
+ */
+export function chainFilingFields(form: GenerateForm): {
+  title?: string;
+  tags?: string[];
+  collection?: { name: string };
+} {
+  const fields: { title?: string; tags?: string[]; collection?: { name: string } } = {};
+  const title = validatePrintTitle(form.title ?? "");
+  if (title.ok && title.value) fields.title = title.value;
+  return Object.assign(
+    fields,
+    buildFileUnderRequestFields(
+      form.fileUnder,
+      form.title,
+      form.fileUnderAutoTag,
+      form.fileUnderMatch ? [form.fileUnderMatch] : [],
+    ),
+  );
+}
+
+/**
+ * Rebuild the "File under" draft from a print's recorded filing (Reuse
+ * settings, or restoring an exact queued request).
+ *
+ * The ghost chip is never restored as a chip: it stays derived from the live
+ * title, so a recorded copy of the title slug is dropped from the manual list
+ * rather than coming back as a duplicate. Its ABSENCE is restored though — a
+ * print whose recorded tags don't include its own title slug was filed with
+ * the ghost removed, and re-offering it would quietly re-file the reuse under
+ * a tag the original never carried. Absent tags are legacy silence, not an
+ * opt-out, so they restore the untouched default.
+ */
+export function restoredFileUnderState(
+  title: string,
+  autoTagEnabled: boolean,
+  tags: readonly string[] | null | undefined,
+  collectionName: string | null | undefined,
+): FileUnderState {
+  let state = emptyFileUnderState();
+  const ghost = deriveGhostTag(title, autoTagEnabled);
+  if (Array.isArray(tags)) {
+    const ghostKey = ghost === null ? null : requestTagKey(ghost);
+    let sawGhost = false;
+    for (const tag of tags) {
+      if (ghostKey !== null && requestTagKey(tag) === ghostKey) {
+        sawGhost = true;
+        continue;
+      }
+      state = addTag(state, tag);
+    }
+    if (ghostKey !== null && !sawGhost) state = { ...state, ghostRemoved: true };
+  }
+  const name = collectionName?.trim();
+  if (name) state = pickCollection(state, { name });
+  return state;
+}
+
 const KNOWN_SCHEDULERS: readonly Scheduler[] = [
   "default",
   "ddim",
@@ -993,6 +1194,13 @@ export function applyMetadataToForm(
   form.prompt = metadata.prompt ?? "";
   form.originalPrompt = metadata.original_prompt ?? null;
   form.title = metadata.title ?? "";
+  form.fileUnder = restoredFileUnderState(
+    form.title,
+    form.fileUnderAutoTag,
+    metadata.tags,
+    metadata.collection,
+  );
+  form.fileUnderMatch = null;
   // Absence predates truthful recording: on a defaulted model it means the
   // default conditioned the render, so restore shows it rather than
   // silently flipping the reuse into an explicit empty-uncond opt-out.
@@ -1070,6 +1278,17 @@ export function applyMetadataToForm(
   // be rebuilt from metadata).
   form.endFrame = null;
   form.audioFile = null;
+  // Identity: the knobs restore exactly, and the photo becomes a bytes-less
+  // reattach descriptor the async stash lookup fills in. Metadata records the
+  // digest, never the face, so an unresolved lookup must show the reattach
+  // state rather than silently render a different person. `identityRequestFields`
+  // refuses an empty payload, so this descriptor can never reach the wire.
+  const identity = identityReuse(metadata);
+  form.identityImage = identity
+    ? { filename: identity.name ?? "identity photo", base64: "" }
+    : null;
+  form.identityWeight = identity ? identity.weight : null;
+  form.identityStartStep = identity ? identity.startStep : null;
   form.h3Authoring = {
     ...emptyMinimaxH3AuthoringState(),
     firstFrame:
@@ -1119,12 +1338,22 @@ export function applyRequestToForm(
   request: GenerateRequest,
   models: ModelEntry[],
 ): void {
+  // The auto-tag mirror is a Settings preference, not part of the request.
+  const fileUnderAutoTag = form.fileUnderAutoTag;
   Object.assign(form, newGenerateForm());
+  form.fileUnderAutoTag = fileUnderAutoTag;
   const model = findInstalledModel(models, request.model);
   if (model) applyModelDefaults(form, model);
   form.prompt = request.prompt;
   form.originalPrompt = request.original_prompt ?? null;
   form.title = request.title ?? "";
+  form.fileUnder = restoredFileUnderState(
+    form.title,
+    form.fileUnderAutoTag,
+    request.tags,
+    request.collection?.name,
+  );
+  form.fileUnderMatch = null;
   form.negativePrompt = restoredNegativePrompt(request.negative_prompt, form.negativePromptDefault);
   form.negativeExplicitClear = restoredNegativeExplicitClear(request.negative_prompt);
   form.model = request.model;
@@ -1144,6 +1373,13 @@ export function applyRequestToForm(
   form.sourceImageWidth = null;
   form.sourceImageHeight = null;
   form.sourceFit = parseSourceFitPolicy(request.source_fit) ?? form.sourceFit;
+  // A running job's exact request still carries the identity bytes, so this
+  // restore is lossless where the metadata one is not.
+  form.identityImage = request.id_image
+    ? { filename: request.id_image_name ?? "identity photo", base64: request.id_image }
+    : null;
+  form.identityWeight = request.id_weight ?? null;
+  form.identityStartStep = request.id_start_step ?? null;
   form.imageAttachments = [...(request.edit_images ?? [])];
   form.maskImage = request.mask_image ?? null;
   form.controlImage = request.control_image ?? null;

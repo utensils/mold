@@ -18,7 +18,9 @@ export interface GenerationSourceMedia extends DraftMediaRecord {
   width?: number | null;
   height?: number | null;
   mime?: string | null;
-  sourceFit: SourceFitPolicy;
+  /** How the source was mapped onto the canvas. Absent for records that are
+   * never fitted at all — an identity photo travels untouched (#1224). */
+  sourceFit?: SourceFitPolicy;
 }
 
 export interface GenerationSourceMediaInput {
@@ -28,7 +30,7 @@ export interface GenerationSourceMediaInput {
   width?: number | null;
   height?: number | null;
   mime?: string | null;
-  sourceFit: SourceFitPolicy;
+  sourceFit?: SourceFitPolicy;
 }
 
 export interface GenerationSourceMediaPersistence {

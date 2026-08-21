@@ -37,6 +37,7 @@ import { modelDisplayName } from "../../lib/models";
 import { generationCapabilitiesForFamily } from "../../lib/capabilities";
 import { sourceMediaPlan } from "@studio/lib/sourceMediaPlan";
 import SourceImageWell from "../generate/SourceImageWell.vue";
+import IdentityWell from "./IdentityWell.vue";
 import { advancedActiveCount } from "../../lib/advancedCount";
 import { effectiveGenerationRecipe } from "@studio/lib/generationProfile";
 import {
@@ -59,6 +60,10 @@ import { useModelStore } from "../../stores/models";
 import { useHostModelsStore } from "../../stores/hostModels";
 import { useHostsStore } from "../../stores/hosts";
 import { useAppPrefsStore } from "../../stores/appPrefs";
+import { useGalleryStore } from "../../stores/gallery";
+import { useLibraryPrefsStore } from "../../stores/libraryPrefs";
+import { fileUnderAvailable, matchCollection, type FileUnderState } from "@studio/lib/fileUnder";
+import FileUnderGroup from "./FileUnderGroup.vue";
 import { dragWidth } from "../../lib/panelResize";
 import ModelPicker from "./ModelPicker.vue";
 import AdvancedSettings from "./AdvancedSettings.vue";
@@ -94,6 +99,8 @@ const models = useModelStore();
 const hostModels = useHostModelsStore();
 const hosts = useHostsStore();
 const appPrefs = useAppPrefsStore();
+const gallery = useGalleryStore();
+const libraryPrefs = useLibraryPrefsStore();
 const controlAdapters = ref<Ltx2ControlAdapterInfo[]>([]);
 const cameraControls = ref<Ltx2CameraControlInfo[]>([]);
 const cameraControlsLoaded = ref(false);
@@ -224,6 +231,16 @@ const showSourceMedia = computed(
     sourcePlan.value.kind !== "none" &&
     sourcePlan.value.kind !== "h3-references",
 );
+/** Identity is capability-gated on positive knowledge only: an unread or
+ * absent `supports_identity` renders nothing at all rather than a control for
+ * a feature this host does not have. Sequence clips carry no identity slot.
+ *
+ * A staged photo PARKS rather than blocking: `buildRequest` keeps it off the
+ * wire, `identityConditioningValidationError` reports nothing for a checkpoint
+ * that cannot take it, and selecting a qualified model again brings the well
+ * back with the photo still in it — the same treatment staged LTX-2 media
+ * gets. Web applies the same rule. */
+const showIdentity = computed(() => !isSequence.value && props.form.identitySupported === true);
 const activeRecipe = computed(() =>
   effectiveGenerationRecipe(selectedModel.value, props.form.pipeline),
 );
@@ -500,6 +517,57 @@ const batchLocked = computed(
 );
 const batchMax = computed(() => (batchLocked.value ? 1 : MAX_BATCH_SIZE));
 
+// ── File under (Create-time Library filing) ────────────────────────────────
+
+// Positive knowledge only, exactly like the V3 Library's own gate: an older
+// server, `MOLD_DB_DISABLE=1`, and a capability snapshot nobody has read yet
+// all answer false and the group stays hidden. A PINNED machine is the one
+// that will file this print, so it alone decides; automatic routing could
+// land on any machine whose capabilities we have actually read.
+const fileUnderHostIds = computed<string[]>(() => {
+  const sticky = stickyTarget.value;
+  if (sticky && sticky !== "capable") return [sticky];
+  return hosts.all.map((host) => host.id);
+});
+const showFileUnder = computed(() =>
+  fileUnderHostIds.value.some((id) => fileUnderAvailable(hosts.capabilities[id])),
+);
+
+// Suggestions and the collection picker are the Library's own merged views —
+// one tag list and one collection shelf across every connected machine.
+const fileUnderTags = computed(() => gallery.mergedTags);
+const fileUnderCollections = computed(() => gallery.mergedCollections);
+
+watch(
+  showFileUnder,
+  (visible) => {
+    if (!visible) return;
+    gallery.syncBuckets();
+    void gallery.fetchCollections();
+    void gallery.fetchTags();
+  },
+  { immediate: true },
+);
+
+// The title match is re-derived from the LIVE title on every keystroke, and
+// the form carries the winner so `buildRequest` can offer it without knowing
+// about stores. Nothing here creates a collection.
+watch(
+  [() => props.form.title, fileUnderCollections],
+  ([title, collections]) => {
+    props.form.fileUnderMatch = matchCollection(title, collections);
+  },
+  { immediate: true },
+);
+
+// The preview names the file the print will land as, so it follows the same
+// extension `buildRequest` ships.
+const fileUnderExtension = computed(() => props.form.outputFormat);
+
+function setFileUnder(next: FileUnderState) {
+  props.form.fileUnder = next;
+}
+
 // Same contract as the Advanced pane's Reset, surfaced without opening it:
 // the prompt, the model, and any prepared batch size survive.
 function resetSettings() {
@@ -585,6 +653,13 @@ function resetSettings() {
            whether (and how) it renders, exactly like resolutions. -->
       <div v-if="showSourceMedia" class="ms-field" data-test="inspector-source-media">
         <SourceImageWell :form="form" :selected-model="selectedModel" />
+      </div>
+
+      <!-- Identity photo — face conditioning is its own partition, not source
+           media, so it sits beside the source wells in the primary form and is
+           mounted only for a checkpoint that advertises identity support. -->
+      <div v-if="showIdentity" class="ms-field" data-test="inspector-identity">
+        <IdentityWell :form="form" />
       </div>
 
       <!-- The sequence's opening image sits in the same primary slot: staged
@@ -815,6 +890,22 @@ function resetSettings() {
       <p v-else-if="batchLocked" class="ms-field__hint -mt-2">
         Locked to 1 — edit models render one at a time.
       </p>
+
+      <!-- File under — where this print lands in the Library, decided before
+           Generate rather than discovered after it. -->
+      <FileUnderGroup
+        v-if="showFileUnder"
+        :title="form.title"
+        :state="form.fileUnder"
+        :auto-tag-title="libraryPrefs.autoTagTitle"
+        :tags="fileUnderTags"
+        :collections="fileUnderCollections"
+        :model="form.model"
+        :extension="fileUnderExtension"
+        :batch-size="isSequence ? 1 : form.batchSize"
+        :output-kind="isSequence ? 'sequence' : 'print'"
+        @update:state="setFileUnder"
+      />
 
       <!-- Advanced -->
       <button

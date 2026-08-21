@@ -149,6 +149,25 @@ describe("batch sequencing", () => {
     expect(plans[0]!.model).toBe(req.model);
   });
 
+  it("gives every sibling the same File under choice, prepared ones included", () => {
+    const filed = { ...req, title: "Smurf Village", tags: ["smurf-village", "blue"] };
+    const plain = planBatchRequests(filed, 3, 100);
+    expect(plain.map((p) => p.title)).toEqual(["Smurf Village", "Smurf Village", "Smurf Village"]);
+    expect(plain.map((p) => p.tags)).toEqual([
+      ["smurf-village", "blue"],
+      ["smurf-village", "blue"],
+      ["smurf-village", "blue"],
+    ]);
+    const prepared = planBatchRequests({ ...filed, collection: { name: "River studies" } }, 2, 1, {
+      prompts: ["a", "b"],
+      batchId: "batch-abc",
+    });
+    expect(prepared.map((p) => p.collection)).toEqual([
+      { name: "River studies" },
+      { name: "River studies" },
+    ]);
+  });
+
   it("maps ordered prompts to seeds with one shared original prompt", () => {
     const prompts = ["storm-lit lighthouse", "lighthouse through sea mist", "aerial coast"];
     const plans = planBatchRequests(req, 3, 40, {

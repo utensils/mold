@@ -4,7 +4,7 @@
  * once the OpenAPI harness lands (see desktop/docs/architecture.md §5).
  */
 
-import type { ChainOutputMetadata } from "@studio/lib/api/chainTypes";
+import type { ChainOutputMetadata, ChainRequestWire } from "@studio/lib/api/chainTypes";
 import type { HostMemorySnapshot } from "@studio/lib/hostMemory";
 import type {
   GenerationReference,
@@ -228,6 +228,12 @@ export interface ModelEntry {
   nsfw?: boolean | null;
   /** Model-specific LTX-2 audio output support; absent on older servers. */
   supports_audio?: boolean | null;
+  /** Checkpoint accepts a face-identity (PuLID) photo. Additive: absent on a
+   * server that predates identity conditioning and on a build without the
+   * adapter, and absence reads as "no" — offering the control optimistically
+   * would only queue work the host refuses. Read it through
+   * `@studio/lib/identityConditioning`, never raw. */
+  supports_identity?: boolean | null;
   /** Model can continue an existing video in one request. Absent on servers
    * that predate continuation — read absence as "no". */
   supports_extend?: boolean | null;
@@ -467,6 +473,18 @@ export interface GenerateRequest {
   /** Client-shaped source-fit policy provenance, echoed verbatim into
    * OutputMetadata so crop controls restore on reuse. Engine never reads it. */
   source_fit?: SourceFitPolicy;
+  /** Face-identity (PuLID) reference photo, base64 (no data-URI prefix).
+   * Deliberately NOT a composition input: it is never fitted, cropped, or
+   * resized against the canvas and carries no `source_fit` provenance. */
+  id_image?: string;
+  /** Provenance label for `id_image` — recorded into OutputMetadata (with the
+   * digest, never the bytes) so Reuse settings can look the photo back up. */
+  id_image_name?: string;
+  /** Identity strength, `0.0..=3.0`. Absent takes the server's own default. */
+  id_weight?: number;
+  /** First identity-conditioned denoise step; must be below `steps`. Absent
+   * takes the server's own default. */
+  id_start_step?: number;
   /** Qwen-Image-Edit multi-image inputs, base64 each (no data-URI prefix).
    * Order is load-bearing: first = primary edit target, rest = references. */
   edit_images?: string[];
@@ -487,6 +505,14 @@ export interface GenerateRequest {
    * server embeds it into `OutputMetadata.title`, seeds the gallery row, and
    * folds a lossy slug into the output filename. Absent = untitled. */
   title?: string;
+  /** Creation-time filing ("File under"): tags applied to the print the
+   * moment it lands. Additive and ABSENT when nothing is filed — never `[]`.
+   * Normalized and capped server-side; `mold_core::MAX_REQUEST_TAGS`. */
+  tags?: string[];
+  /** Creation-time collection. Clients send `{ name }` and let the routed
+   * host get-or-create it by slug, so one request files correctly on any
+   * machine in the fleet; `id` is only ever a host-local `Collection.id`. */
+  collection?: { id?: string; name?: string };
   /** Durable prepared-batch provenance. Index is one-based. */
   batch_id?: string;
   batch_index?: number;
@@ -643,6 +669,12 @@ export interface OutputMetadata {
   prompt: string;
   /** Creation-time print title; the gallery row is the editable authority. */
   title?: string | null;
+  /** Tags the print was filed under at creation, exactly as applied. The
+   * gallery row's tag links are the editable authority once it exists. */
+  tags?: string[] | null;
+  /** Display name of the collection the print was filed into at creation —
+   * never the requested id, and never a name the host did not resolve. */
+  collection?: string | null;
   negative_prompt?: string | null;
   original_prompt?: string | null;
   batch_id?: string | null;
@@ -666,6 +698,16 @@ export interface OutputMetadata {
   /** Client-shaped source-fit provenance echoed verbatim by the server
    * (additive; newer servers only). Parse defensively before restoring. */
   source_fit?: unknown;
+  /** Provenance label of the identity photo (additive; newer servers only). */
+  id_image_name?: string | null;
+  /** SHA-256 (hex) of the exact identity-photo bytes that rendered — the local
+   * stash key Reuse settings looks the face back up with. Metadata never
+   * carries the photo itself. */
+  id_image_sha256?: string | null;
+  /** Effective identity strength / first conditioned step the render applied
+   * (the server records what actually applied, not what the request asked). */
+  id_weight?: number | null;
+  id_start_step?: number | null;
   /** Ordered content keys for Qwen Image Edit inputs (newer servers only). */
   edit_image_sha256s?: string[] | null;
   /** Redacted ordered H3 reference provenance (newer servers only). */
@@ -1009,7 +1051,27 @@ export interface ChainRequest {
   batch_count?: number | null;
   output_mode?: "one-shot" | "sequence" | null;
   placement?: DevicePlacement | null;
+  /** Title for the STITCHED print (mold-core `ChainRequest.title`). An
+   * intermediate clip is a working artifact inside the job dir and never
+   * reaches the gallery, so filing applies to the finished timeline only. */
+  title?: string;
+  /** Creation-time tags for the stitched print. */
+  tags?: string[];
+  /** Creation-time collection for the stitched print, by name. */
+  collection?: { id?: string; name?: string };
 }
+
+/**
+ * The exact `POST /api/chain-jobs` body desktop submits: studio's canonical
+ * clip wire plus the additive creation-time filing the stitched print
+ * carries. Kept here rather than in `@studio` because the shared wire is
+ * every surface's contract and this is the desktop composer's body type.
+ */
+export type ChainCreateRequest = ChainRequestWire & {
+  title?: string;
+  tags?: string[];
+  collection?: { id?: string; name?: string };
+};
 
 /**
  * Auto-expand request accepted by `POST /api/generate/chain/stream`. The
@@ -1038,6 +1100,11 @@ export interface AutoChainRequest {
   batch_index?: number | null;
   batch_count?: number | null;
   output_mode?: "one-shot" | "sequence" | null;
+  /** A stitched long video is still ONE print, so it carries the same title
+   * and creation-time filing an unstitched one-shot would. */
+  title?: string;
+  tags?: string[];
+  collection?: { id?: string; name?: string };
 }
 
 /**

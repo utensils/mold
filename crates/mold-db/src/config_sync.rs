@@ -17,7 +17,9 @@
 //!   gallery.* keys.
 
 use anyhow::{Context, Result};
-use mold_core::config::{Config, GallerySettings, ModelConfig, SchedulerSettings};
+use mold_core::config::{
+    Config, GallerySettings, GenerateSettings, ModelConfig, SchedulerSettings,
+};
 use mold_core::expand::ExpandSettings;
 use std::path::Path;
 use std::sync::OnceLock;
@@ -239,6 +241,29 @@ pub fn hydrate_gallery_from_db(db: &MetadataDb, gallery: &mut GallerySettings) -
     }
 }
 
+/// Persist the `[generate]` preference slice (`generate.auto_tag_title`)
+/// into `settings`.
+///
+/// Kept apart from [`save_generate_globals_to_db`], which writes the older
+/// flat globals (`default_width`, `embed_metadata`, …) that happen to live
+/// under `generate.*` DB row names but keep their historical CLI spelling.
+pub fn save_generate_settings_to_db(db: &MetadataDb, generate: GenerateSettings) -> Result<()> {
+    Settings::new(db).set_bool(keys::GENERATE_AUTO_TAG_TITLE, generate.auto_tag_title)
+}
+
+/// Overlay the stored `[generate]` slice onto `generate`. Returns true if a
+/// row applied.
+pub fn hydrate_generate_settings_from_db(
+    db: &MetadataDb,
+    generate: &mut GenerateSettings,
+) -> Result<bool> {
+    let Some(value) = Settings::new(db).get_bool(keys::GENERATE_AUTO_TAG_TITLE)? else {
+        return Ok(false);
+    };
+    generate.auto_tag_title = value;
+    Ok(true)
+}
+
 /// Snapshot the user-editable per-model generation defaults out of a
 /// `ModelConfig` into a `ModelPrefs` row (the path fields stay in TOML).
 fn model_prefs_from_config(mc: &ModelConfig) -> ModelPrefs {
@@ -323,6 +348,11 @@ pub fn migrate_config_toml_to_db(db: &MetadataDb, cfg: &Config) -> Result<bool> 
     // still reaches untouched installs.
     if cfg.gallery != GallerySettings::default() {
         save_gallery_to_db(db, cfg.gallery)?;
+    }
+    // Same rule as `[gallery]`: only a hand-written section is imported, so
+    // a later change to the compiled default still reaches untouched installs.
+    if cfg.generate != GenerateSettings::default() {
+        save_generate_settings_to_db(db, cfg.generate)?;
     }
 
     // Per-model user prefs. Skip rows that carry nothing but paths — we
@@ -457,6 +487,7 @@ pub fn hydrate_config_from_db(db: &MetadataDb, cfg: &mut Config) -> Result<()> {
     hydrate_generate_globals_from_db(db, cfg)?;
     hydrate_scheduler_from_db(db, &mut cfg.scheduler)?;
     hydrate_gallery_from_db(db, &mut cfg.gallery)?;
+    hydrate_generate_settings_from_db(db, &mut cfg.generate)?;
 
     // Pass 1: overlay prefs for each model already in cfg.models. Keyed
     // on the canonical resolution so `flux-dev` and `flux-dev:q4` hit
@@ -585,6 +616,13 @@ pub fn persist_config_key(db: &MetadataDb, config: &Config, key: &str) -> Result
     }
     if key.starts_with("gallery.") {
         save_gallery_to_db(db, config.gallery)?;
+        return Ok(());
+    }
+    // The `[generate]` preference slice is addressed by its own `generate.*`
+    // key, unlike the flat legacy globals below which persist under
+    // `generate.*` row names but keep their historical CLI spelling.
+    if key == keys::GENERATE_AUTO_TAG_TITLE {
+        save_generate_settings_to_db(db, config.generate)?;
         return Ok(());
     }
     // All the global generation defaults ride one writer — cheap and
@@ -767,6 +805,57 @@ mod tests {
         assert_eq!(target.default_negative_prompt.as_deref(), Some("ugly"));
         assert_eq!(target.t5_variant.as_deref(), Some("q8"));
         assert_eq!(target.qwen3_variant.as_deref(), Some("bf16"));
+    }
+
+    /// `generate.auto_tag_title` persists and hydrates like any other
+    /// DB-surface preference, and an absent row leaves the compiled default
+    /// (on) alone.
+    #[test]
+    fn generate_auto_tag_title_roundtrip_via_db() {
+        let db = db();
+        let mut target = GenerateSettings::default();
+        assert!(target.auto_tag_title);
+        assert!(!hydrate_generate_settings_from_db(&db, &mut target).unwrap());
+        assert!(target.auto_tag_title, "an absent row keeps the default");
+
+        save_generate_settings_to_db(
+            &db,
+            GenerateSettings {
+                auto_tag_title: false,
+            },
+        )
+        .unwrap();
+        assert!(hydrate_generate_settings_from_db(&db, &mut target).unwrap());
+        assert!(!target.auto_tag_title);
+
+        // Reaching it through the key dispatcher writes the same row.
+        let mut cfg = Config::default();
+        mold_core::config_keys::set_value(
+            &mut cfg,
+            mold_core::config_keys::GENERATE_AUTO_TAG_TITLE_KEY,
+            "false",
+        )
+        .unwrap();
+        let fresh = MetadataDb::open_in_memory().unwrap();
+        persist_config_key(
+            &fresh,
+            &cfg,
+            mold_core::config_keys::GENERATE_AUTO_TAG_TITLE_KEY,
+        )
+        .unwrap();
+        assert_eq!(
+            Settings::new(&fresh)
+                .get_bool(keys::GENERATE_AUTO_TAG_TITLE)
+                .unwrap(),
+            Some(false)
+        );
+        // …and it did NOT fall through to the flat-globals writer.
+        assert_eq!(
+            Settings::new(&fresh)
+                .get_int(keys::GENERATE_DEFAULT_WIDTH)
+                .unwrap(),
+            None
+        );
     }
 
     #[test]

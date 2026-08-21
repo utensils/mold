@@ -24,6 +24,9 @@ fn mold_error(err: &anyhow::Error) -> &MoldError {
 
 fn sample_request() -> ChainRequest {
     ChainRequest {
+        collection: None,
+        tags: None,
+        title: None,
         model: "ltx-2-19b-distilled:fp8".into(),
         stages: vec![ChainStage {
             prompt: "a cat walking".into(),

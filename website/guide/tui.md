@@ -122,7 +122,7 @@ memory telemetry live in the Machines workspace and the chrome host chip.
 
 ### Essentials
 
-| Row             | Shows                                   | ◀▶ / +/-             | Enter                |
+| Row             | Shows                                   | ◀▶ / +/-           | Enter                |
 | --------------- | --------------------------------------- | -------------------- | -------------------- |
 | Model           | human-readable model name + description | —                    | fuzzy model selector |
 | Size            | `1024 × 1024`                           | cycle aspect presets | type an exact `WxH`  |
@@ -151,10 +151,12 @@ open state and expanded section persist across sessions
 | Scheduler & sampling   | Scheduler (CFG models), Expand prompt, Offload                                                                                                                                       |
 | Negative prompt        | inline editor (CFG models; **Alt+N** jumps here). Wan models prefill their tuned default — leave it for the default, edit to replace it, clear it to send an explicit empty negative |
 | Source image           | Source, Strength, Mask, ControlNet (per model)                                                                                                                                       |
+| Identity photo         | Photo, Strength, Start step (only for a checkpoint the server advertises as identity-capable)                                                                                        |
 | LoRA                   | LoRA path + scale                                                                                                                                                                    |
 | Upscale after generate | post-generate upscaler (Enter picks, `(off)` clears)                                                                                                                                 |
 | Output format          | png / jpeg / gif / apng / webp / mp4                                                                                                                                                 |
 | Video                  | Frames, FPS; Wan Flow shift; LTX-2 Pipeline, Audio default/on/off, Spatial native/1.5×/2×, Temporal native/2×, STG scale/blocks, CFG rescale, Modality scale, Guidance skip          |
+| File under             | Title, Tags, Collection — where the print lands in the Library                                                                                                                       |
 
 The LTX-2 Pipeline row cycles through **Auto**, **one-stage**, **two-stage**,
 **two-stage-hq**, and **distilled**. Auto omits the request field so the server
@@ -171,6 +173,34 @@ until touched and never appears for other families. LTX-2's optional STG
 scale/blocks, CFG rescale, modality scale, and guidance-skip rows keep their
 request fields absent until edited, so pipeline constants stay authoritative.
 
+#### Identity photo (PuLID-FLUX)
+
+The **Identity photo** section appears only while the selected checkpoint's
+`/api/models[]` entry advertises `supports_identity` — face-identity
+conditioning is qualified for the FLUX dev tiers, on a server built with PuLID
+support. It is never inferred from the family or from how your local `mold` was
+compiled, because the render happens on the server.
+
+**Enter** on the **Photo** row opens a path picker. The file is opened without
+following symlinks and bounds-checked (PNG or JPEG, at most 16 MiB encoded,
+8192 px per axis, 32 MP) before it is accepted, so a bad path is refused in the
+picker rather than after your job has taken a queue slot. Leaving the field
+empty clears the photo. **Strength** moves in 0.1 steps across `0.0`–`3.0`
+(default `1.0`) and **Start step** across `0`–`steps-1` (default `0`), so the
+form cannot express a value the server would reject; lowering the step count
+pulls Start step back with it.
+
+Switching to a model that cannot take the photo **keeps** it — the photo is
+your choice, and switching back must not have lost it — but shows the server's
+refusal on the Photo row and blocks Generate. That is deliberate: rendering
+silently without the face would produce a print that looks fine and is simply
+not the person you asked for. `↺ Reset to model defaults` clears the photo and
+both knobs.
+
+Prints that carried a face reference show `Identity` in Library **Details** and
+in the full print view: the photo's name, a short digest, the strength, and the
+start step. The face bytes themselves are never recorded.
+
 The Audio row is capability-driven: a checkpoint that advertises missing
 audio assets does not show it. `default` leaves the field absent so the
 server's pipeline constant remains authoritative; `on` and `off` send an
@@ -181,6 +211,59 @@ The Spatial and Temporal rows use the same optional latent-upscale fields as
 the other generation surfaces. `native` omits the matching request field;
 explicit choices are summarized on the collapsed Video row and reset when the
 model changes to a family that cannot use them.
+
+#### File under
+
+The last section files the print as you make it, so it arrives in the Library
+already named and organized instead of needing a second pass through the
+gallery. It has no capability gate — every model produces a print.
+
+| Row            | What it takes                                                                     |
+| -------------- | --------------------------------------------------------------------------------- |
+| **Title**      | The print's name (≤120 characters). Blank clears it.                              |
+| **Tags**       | Comma-separated, up to 20 of 1–64 characters. Blank clears them.                  |
+| **Collection** | One collection by name; created on the host when it does not exist. Blank clears. |
+
+**Enter** on a row opens its editor. Entry is checked before the editor will
+close: an over-long title, a tag with a control character, or a collection name
+with no letters or digits keeps the popup open with the reason beneath what you
+typed, so nothing the host would refuse reaches a request. **Esc** abandons the
+edit. Tags are trimmed and de-duplicated case-insensitively, and a collection
+name's whitespace is collapsed so the same name means the same collection on
+every machine.
+
+All three are absent until you touch them — an untouched form sends exactly the
+request it always did.
+
+While **Tag by title** is on (Settings ▸ Library, on by default), a titled print
+also picks up its own title slug as a tag. That is a client decision, not the
+host's, so the TUI shows it before you generate: the Tags row reads
+`auto: smurf-village` and the collapsed section summary repeats it. Turn the
+setting off and the derived tag disappears; the tags you typed stay.
+
+```
+ ▾ File under  “Smurf Village” · 2 tags · in Blue Period · auto: smurf-village
+  Title         Smurf Village
+  Tags          village, blue · auto: smurf-village
+  Collection    Blue Period
+```
+
+Filing is per-print intent rather than a preference: it is not restored on the
+next launch, it is not saved per model, and only **↺ Reset to model defaults**
+clears it. Generating keeps it, so a batch's siblings share the filing.
+
+If a host cannot apply what you filed — it is running without a metadata
+database, or the collection went away between listing it and pressing Generate
+— the print is still rendered and saved, and the TUI says what was dropped: a
+one-line `!` advisory on the Create view (several are joined with `·`) plus an
+entry per advisory in the Timeline. It is an advisory rather than an error
+because the render succeeded, and starting the next generation clears the line.
+The same row carries any other adjustment a host reports about an accepted
+request, such as a lip-dub clip retimed to its reference.
+
+A titled print's file is named `mold-{model}-{ts}[-{idx}]~{title-slug}.{ext}`,
+the same shape the server's gallery writes — renaming the print later never
+renames the file.
 
 The `↺ Reset to model defaults` action row at the bottom restores every
 parameter (keeping the model and your prompt). `qwen-image-edit` shows a
@@ -431,6 +514,14 @@ forever, max 3650, default 30). The value persists through the same
 settings-DB surface `mold config set` and the server's config API use,
 so every surface reads one window; `MOLD_GALLERY_TRASH_RETENTION_DAYS`
 overrides it with the usual **(env)** indicator.
+
+**Tag by title** sits beside it and edits `generate.auto_tag_title` (on by
+default): whether a titled print also picks up its own title slug as a tag.
+That is a client decision — the server never auto-tags, because it cannot
+tell a typed title from a scripted one — so the same key drives `mold run`
+and Create ▸ Advanced ▸ [File under](#file-under), which discloses the derived
+tag before you generate. Turning it off changes nothing about prints you
+already made.
 
 ### Field Types
 

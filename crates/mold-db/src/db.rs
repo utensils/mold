@@ -5,7 +5,7 @@ use std::sync::Mutex;
 use anyhow::{bail, Context, Result};
 use mold_core::{OutputFormat, OutputMetadata, Scheduler};
 use rusqlite::backup::{Backup, StepResult};
-use rusqlite::{params, Connection, ErrorCode};
+use rusqlite::{params, Connection, ErrorCode, OptionalExtension};
 
 use crate::migrations;
 use crate::path::canonical_dir_string;
@@ -375,6 +375,22 @@ impl MetadataDb {
         upsert_with_conn(&conn, rec)
     }
 
+    /// [`Self::upsert`], additionally reporting the creation-time filing
+    /// that was seeded onto a freshly inserted row.
+    ///
+    /// The seeding happens on every `upsert` — it is part of what an insert
+    /// means, so no publication path can forget it. This variant exists only
+    /// so the server can emit `gallery_updated` (and
+    /// `gallery_collections_changed`, when the seed had to create the
+    /// collection) without re-reading the row it just wrote.
+    pub fn upsert_reporting_organization(
+        &self,
+        rec: &GenerationRecord,
+    ) -> Result<(i64, crate::organization::SeededOrganization)> {
+        let conn = self.conn.lock().expect("metadata db mutex poisoned");
+        upsert_with_conn_reporting_organization(&conn, rec)
+    }
+
     /// Insert or update a set of gallery rows in one SQLite transaction.
     ///
     /// Batch publication uses this after every final file has been linked
@@ -665,6 +681,15 @@ impl MetadataDb {
 /// server used the raw `config.effective_output_dir()`). The canonical form
 /// is what actually lands in the DB — callers get consistent keys for free.
 pub(crate) fn upsert_with_conn(conn: &Connection, rec: &GenerationRecord) -> Result<i64> {
+    upsert_with_conn_reporting_organization(conn, rec).map(|(id, _)| id)
+}
+
+/// [`upsert_with_conn`], additionally reporting the creation-time filing
+/// seeded onto a freshly inserted row.
+pub(crate) fn upsert_with_conn_reporting_organization(
+    conn: &Connection,
+    rec: &GenerationRecord,
+) -> Result<(i64, crate::organization::SeededOrganization)> {
     let dir_key = canonical_dir_string(Path::new(&rec.output_dir));
     let scheduler_str = rec
         .metadata
@@ -673,6 +698,19 @@ pub(crate) fn upsert_with_conn(conn: &Connection, rec: &GenerationRecord) -> Res
         .map(scheduler_to_str)
         .map(str::to_string);
     let metadata_json = serde_json::to_string(&rec.metadata)?;
+    // Whether this is an insert has to be known BEFORE the upsert: it is
+    // what makes the creation-time filing seed-once. Tags and collection
+    // membership are user-owned the moment the print exists, exactly like
+    // `title`, so a reconcile refresh or a re-publication must not resurrect
+    // a tag the user removed.
+    let is_insert = conn
+        .query_row(
+            "SELECT 1 FROM generations WHERE output_dir = ?1 AND filename = ?2",
+            params![dir_key, rec.filename],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_none();
     // `title`, `favorite`, and `trashed_at_ms` are user-owned: `title` is
     // seeded on insert and kept on conflict (an existing title always wins
     // over the incoming one), while `favorite` / `trashed_at_ms` are only
@@ -756,7 +794,23 @@ pub(crate) fn upsert_with_conn(conn: &Connection, rec: &GenerationRecord) -> Res
         params![dir_key, rec.filename],
         |r| r.get::<_, i64>(0),
     )?;
-    Ok(id)
+    // Seed the creation-time filing from the embedded metadata, on the
+    // insert branch only. Doing it here rather than at each publication site
+    // means every path — server queue, per-GPU worker, chain runner, CLI,
+    // TUI, and reconcile-from-disk for a file that lost its row — files the
+    // print identically, and none of them can forget to.
+    let seeded = if is_insert {
+        crate::organization::seed_creation_organization(
+            conn,
+            id,
+            &rec.metadata,
+            mold_core::time::now_epoch_ms(),
+        )
+        .map_err(|e| anyhow::anyhow!("seeding creation-time organization failed: {e}"))?
+    } else {
+        crate::organization::SeededOrganization::default()
+    };
+    Ok((id, seeded))
 }
 
 pub(crate) fn delete_with_conn(
@@ -785,6 +839,8 @@ pub(crate) fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<Generat
     let scheduler_s: Option<String> = row.get(17)?;
     let scheduler = scheduler_s.as_deref().and_then(scheduler_from_str);
     let legacy_metadata = OutputMetadata {
+        collection: None,
+        tags: None,
         title: None,
         source_fit: None,
         guidance_overrides: None,
@@ -961,6 +1017,8 @@ mod tests {
 
     fn meta() -> OutputMetadata {
         OutputMetadata {
+            collection: None,
+            tags: None,
             title: None,
             source_fit: None,
             guidance_overrides: None,
@@ -1305,6 +1363,193 @@ mod tests {
         assert_eq!(got.title.as_deref(), Some("Seeded"));
         assert!(got.favorite);
         assert_eq!(got.trashed_at_ms, Some(5));
+    }
+
+    // ── creation-time filing (tags / collection) ────────────────────────
+
+    /// A print that arrives already tagged and filed lands with its tags
+    /// attached and its collection created, resolved by slug.
+    #[test]
+    fn insert_seeds_creation_time_tags_and_creates_the_collection() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        let mut r = rec();
+        r.metadata.tags = Some(vec!["smurfs".into(), "village".into()]);
+        r.metadata.collection = Some("Smurf Village".into());
+
+        let (_, seeded) = db.upsert_reporting_organization(&r).unwrap();
+        assert_eq!(
+            seeded.tags,
+            vec!["smurfs".to_string(), "village".to_string()]
+        );
+        assert_eq!(seeded.collection.as_deref(), Some("Smurf Village"));
+        assert!(seeded.created_collection);
+
+        let org = db
+            .print_organization(Path::new("/tmp/out"), &r.filename)
+            .unwrap()
+            .unwrap();
+        assert_eq!(org.tags, vec!["smurfs".to_string(), "village".to_string()]);
+        let collections = db.list_collections().unwrap();
+        assert_eq!(collections.len(), 1);
+        assert_eq!(collections[0].name, "Smurf Village");
+        assert_eq!(collections[0].slug, "smurf-village");
+        assert_eq!(collections[0].count, 1);
+    }
+
+    /// A second print filed under the same name joins the EXISTING
+    /// collection — the slug is the identity, which is what lets one name
+    /// mean one collection across a fleet.
+    #[test]
+    fn seeding_reuses_an_existing_collection_by_slug() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        let mut first = rec();
+        first.filename = "first.png".into();
+        first.metadata.collection = Some("Smurf Village".into());
+        let (_, seeded) = db.upsert_reporting_organization(&first).unwrap();
+        assert!(seeded.created_collection);
+
+        let mut second = rec();
+        second.filename = "second.png".into();
+        // Different spelling, same slug.
+        second.metadata.collection = Some("  smurf   VILLAGE  ".into());
+        let (_, seeded) = db.upsert_reporting_organization(&second).unwrap();
+        assert!(
+            !seeded.created_collection,
+            "the second print must join the existing collection, not make a new one"
+        );
+
+        let collections = db.list_collections().unwrap();
+        assert_eq!(collections.len(), 1, "{collections:?}");
+        // The original display name survives — a later print does not rename
+        // the collection it joins.
+        assert_eq!(collections[0].name, "Smurf Village");
+        assert_eq!(collections[0].count, 2);
+    }
+
+    /// Organization is user-owned the moment the print exists. A reconcile
+    /// refresh or a re-publication carrying the original metadata must NOT
+    /// resurrect a tag the user removed, nor re-file a print they took out
+    /// of a collection.
+    #[test]
+    fn seeding_is_once_and_a_later_upsert_never_re_applies_it() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        let mut r = rec();
+        r.metadata.tags = Some(vec!["smurfs".into()]);
+        r.metadata.collection = Some("Smurf Village".into());
+        db.upsert(&r).unwrap();
+
+        // The user removes the tag and empties the collection.
+        db.replace_tags(Path::new("/tmp/out"), &r.filename, &[])
+            .unwrap();
+        let collection_id = db.list_collections().unwrap()[0].id.clone();
+        db.collection_remove(&collection_id, Path::new("/tmp/out"), &[r.filename.clone()])
+            .unwrap();
+
+        // A reconcile refresh re-upserts the very same record.
+        let (_, seeded) = db.upsert_reporting_organization(&r).unwrap();
+        assert!(
+            seeded.is_empty(),
+            "a conflicting upsert must seed nothing: {seeded:?}"
+        );
+        let org = db
+            .print_organization(Path::new("/tmp/out"), &r.filename)
+            .unwrap()
+            .unwrap();
+        assert!(org.tags.is_empty(), "{org:?}");
+        assert_eq!(
+            db.collection_filenames(&collection_id).unwrap(),
+            Vec::<String>::new()
+        );
+    }
+
+    /// Embedded metadata is bytes on disk, so a hand-edited or
+    /// foreign-written chunk must not smuggle an invalid tag or a slugless
+    /// collection past the rules — and must never fail the publication of a
+    /// render that already succeeded.
+    #[test]
+    fn seeding_drops_invalid_values_instead_of_failing_the_publication() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        let mut r = rec();
+        r.metadata.tags = Some(vec![
+            "good".into(),
+            "bad\u{0}".into(),
+            "x".repeat(mold_core::MAX_TAG_CHARS + 1),
+            "  ".into(),
+            "GOOD".into(),
+        ]);
+        r.metadata.collection = Some("日本語".into());
+
+        let (_, seeded) = db.upsert_reporting_organization(&r).unwrap();
+        assert_eq!(seeded.tags, vec!["good".to_string()]);
+        assert_eq!(seeded.collection, None);
+        assert!(!seeded.created_collection);
+        assert!(db.list_collections().unwrap().is_empty());
+        let got = db.get(Path::new("/tmp/out"), &r.filename).unwrap();
+        assert!(got.is_some(), "the print still publishes");
+    }
+
+    /// The point of materializing the filing at admission: what a print's
+    /// embedded metadata records and what its row actually holds must be the
+    /// same values, byte for byte. Before materialization a raw-spelling HTTP
+    /// client stamped `[" Smurfs ", "smurfs"]` into provenance while the row
+    /// seeded one `Smurfs`, so Reuse restored duplicates.
+    #[test]
+    fn embedded_metadata_and_the_seeded_row_agree_after_materialization() {
+        let db = MetadataDb::open_in_memory().unwrap();
+
+        let mut request: mold_core::GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"a cat","model":"flux-dev:q4","width":64,"height":64,"steps":1,"guidance":1.0}"#,
+        )
+        .unwrap();
+        // Exactly what a curl caller might send.
+        request.tags = Some(vec![
+            "  Smurfs  ".into(),
+            "smurfs".into(),
+            "".into(),
+            " village  green ".into(),
+        ]);
+        request.collection = Some(mold_core::CollectionRef::by_name("  Smurf   Village  "));
+        mold_core::validation::materialize_request_organization(&mut request).unwrap();
+
+        let metadata = mold_core::OutputMetadata::from_generate_request(&request, 42, None, "test");
+        let mut rec = rec();
+        rec.metadata = metadata.clone();
+        db.upsert(&rec).unwrap();
+
+        let org = db
+            .print_organization(Path::new("/tmp/out"), &rec.filename)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            org.tags,
+            metadata.tags.clone().unwrap(),
+            "the row holds exactly the tags provenance claims"
+        );
+        let collections = db.list_collections().unwrap();
+        assert_eq!(collections.len(), 1);
+        assert_eq!(
+            collections[0].name,
+            metadata.collection.clone().unwrap(),
+            "and exactly the collection name provenance claims"
+        );
+        // And those values are the canonical ones, not the raw spellings.
+        assert_eq!(
+            org.tags,
+            vec!["Smurfs".to_string(), "village green".to_string()]
+        );
+        assert_eq!(collections[0].name, "Smurf Village");
+    }
+
+    /// The overwhelmingly common case: an unfiled print costs nothing and
+    /// reports nothing.
+    #[test]
+    fn an_unfiled_print_seeds_nothing() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        let (_, seeded) = db.upsert_reporting_organization(&rec()).unwrap();
+        assert!(seeded.is_empty());
+        assert_eq!(seeded, crate::organization::SeededOrganization::default());
+        assert!(db.list_tags().unwrap().is_empty());
+        assert!(db.list_collections().unwrap().is_empty());
     }
 
     #[test]

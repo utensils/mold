@@ -1686,6 +1686,7 @@ mod tests {
     fn committed_video_batch_retains_preview_under_final_gallery_name() {
         let result = GenerationJobResult {
             response: mold_core::GenerateResponse {
+                request_warnings: Vec::new(),
                 audio: None,
                 images: Vec::new(),
                 video: Some(mold_core::VideoData {
@@ -1728,6 +1729,7 @@ mod tests {
     fn audio_job_result(wav: &[u8], waveform: &[u8]) -> GenerationJobResult {
         GenerationJobResult {
             response: mold_core::GenerateResponse {
+                request_warnings: Vec::new(),
                 audio: Some(mold_core::AudioData {
                     data: wav.to_vec(),
                     format: mold_core::OutputFormat::Wav,
@@ -1848,6 +1850,7 @@ mod tests {
         std::fs::write(directory.path().join("child.png"), b"committed-image").unwrap();
         let compact = CompactBatchResult {
             response: mold_core::GenerateResponse {
+                request_warnings: Vec::new(),
                 audio: None,
                 images: Vec::new(),
                 video: None,

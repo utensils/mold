@@ -37,6 +37,10 @@ pub fn embed_data_to_create_embed(data: &EmbedData) -> CreateEmbed {
 /// with progress events and attaching the final image.
 pub async fn run_generation(ctx: Context<'_>, req: GenerateRequest) -> Result<()> {
     let prompt = req.prompt.clone();
+    // The response carries no metadata, so the identity note is derived from
+    // the request the bot is about to send — the only place that knows which
+    // photo went out.
+    let identity_note = format::identity_note(&req);
     let client = &ctx.data().client;
 
     let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -82,7 +86,7 @@ pub async fn run_generation(ctx: Context<'_>, req: GenerateRequest) -> Result<()
 
     match result {
         Some(resp) => {
-            send_result_edit(&reply_handle, ctx, &resp, &prompt).await?;
+            send_result_edit(&reply_handle, ctx, &resp, &prompt, identity_note.as_deref()).await?;
         }
         None => {
             if requires_secure_generation_stream(&req) {
@@ -92,7 +96,7 @@ pub async fn run_generation(ctx: Context<'_>, req: GenerateRequest) -> Result<()
             }
             // Server doesn't support SSE — fall back to non-streaming
             let resp = client.generate(req).await?;
-            send_result_edit(&reply_handle, ctx, &resp, &prompt).await?;
+            send_result_edit(&reply_handle, ctx, &resp, &prompt, identity_note.as_deref()).await?;
         }
     }
 
@@ -176,8 +180,9 @@ async fn send_result_edit(
     ctx: Context<'_>,
     resp: &mold_core::GenerateResponse,
     prompt: &str,
+    identity: Option<&str>,
 ) -> Result<()> {
-    let embed_data = format::format_generation_result(resp, prompt);
+    let embed_data = format::format_generation_result(resp, prompt, identity);
     let mut embed = embed_data_to_create_embed(&embed_data);
 
     let mut reply = poise::CreateReply::default();
@@ -220,6 +225,7 @@ mod tests {
 
     fn video_response(data: Vec<u8>, preview: Vec<u8>, format: OutputFormat) -> GenerateResponse {
         GenerateResponse {
+            request_warnings: Vec::new(),
             audio: None,
             images: vec![],
             video: Some(VideoData {
@@ -314,6 +320,7 @@ mod tests {
     #[test]
     fn select_attachment_falls_back_to_images_when_no_video() {
         let resp = GenerateResponse {
+            request_warnings: Vec::new(),
             audio: None,
             images: vec![ImageData {
                 data: vec![1, 2, 3],
@@ -336,6 +343,7 @@ mod tests {
     #[test]
     fn select_attachment_returns_none_when_empty() {
         let resp = GenerateResponse {
+            request_warnings: Vec::new(),
             audio: None,
             images: vec![],
             video: None,

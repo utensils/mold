@@ -20,16 +20,23 @@ pub(crate) const DETAIL_MAX: u32 = 50;
 const DETAIL_DOT_COUNT: u32 = 8;
 
 /// The Advanced accordion sections, in display order. `Video` is a
-/// capability-gated TUI addition beyond the spec's six image sections.
+/// capability-gated TUI addition beyond the spec's six image sections;
+/// `Identity` is the PuLID-FLUX face-reference section — gated on the
+/// selected checkpoint's advertised `/api/models[].supports_identity`, never
+/// on the family or on a locally compiled feature; and `Filing` is the
+/// creation-time "File under" section, which is about where the print lands
+/// in the Library rather than how it renders, so it sits last.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdvSection {
     Sampling,
     Negative,
     Source,
+    Identity,
     Lora,
     Upscale,
     Output,
     Video,
+    Filing,
 }
 
 impl AdvSection {
@@ -38,10 +45,12 @@ impl AdvSection {
             Self::Sampling => "Scheduler & sampling",
             Self::Negative => "Negative prompt",
             Self::Source => "Source image",
+            Self::Identity => "Identity photo",
             Self::Lora => "LoRA",
             Self::Upscale => "Upscale after generate",
             Self::Output => "Output format",
             Self::Video => "Video",
+            Self::Filing => "File under",
         }
     }
 
@@ -51,10 +60,12 @@ impl AdvSection {
             Self::Sampling => "sampling",
             Self::Negative => "negative",
             Self::Source => "source",
+            Self::Identity => "identity",
             Self::Lora => "lora",
             Self::Upscale => "upscale",
             Self::Output => "output",
             Self::Video => "video",
+            Self::Filing => "filing",
         }
     }
 
@@ -63,10 +74,12 @@ impl AdvSection {
             "sampling" => Some(Self::Sampling),
             "negative" => Some(Self::Negative),
             "source" => Some(Self::Source),
+            "identity" => Some(Self::Identity),
             "lora" => Some(Self::Lora),
             "upscale" => Some(Self::Upscale),
             "output" => Some(Self::Output),
             "video" => Some(Self::Video),
+            "filing" => Some(Self::Filing),
             _ => None,
         }
     }
@@ -150,6 +163,12 @@ pub fn advanced_sections(caps: &ModelCapabilities) -> Vec<AdvSection> {
     {
         sections.push(AdvSection::Source);
     }
+    // Identity sits beside Source because it is the other conditioning
+    // reference, and above LoRA because `mold_core::identity` refuses the
+    // two together — the neighbouring rows say so without a warning.
+    if caps.supports_identity {
+        sections.push(AdvSection::Identity);
+    }
     if caps.supports_lora {
         sections.push(AdvSection::Lora);
     }
@@ -158,6 +177,10 @@ pub fn advanced_sections(caps: &ModelCapabilities) -> Vec<AdvSection> {
     if caps.supports_video {
         sections.push(AdvSection::Video);
     }
+    // Creation-time filing is not a generation parameter and has no
+    // capability gate: every model produces a print, and every print can be
+    // named and filed.
+    sections.push(AdvSection::Filing);
     sections
 }
 
@@ -196,6 +219,11 @@ pub fn section_fields(sec: AdvSection, caps: &ModelCapabilities) -> Vec<ParamFie
             }
             fields
         }
+        AdvSection::Identity => vec![
+            ParamField::IdentityImage,
+            ParamField::IdentityWeight,
+            ParamField::IdentityStartStep,
+        ],
         AdvSection::Lora => vec![ParamField::Lora],
         AdvSection::Upscale => vec![ParamField::Upscale],
         AdvSection::Output => vec![ParamField::Format],
@@ -221,6 +249,7 @@ pub fn section_fields(sec: AdvSection, caps: &ModelCapabilities) -> Vec<ParamFie
             }
             fields
         }
+        AdvSection::Filing => vec![ParamField::Title, ParamField::Tags, ParamField::Collection],
     }
 }
 
@@ -305,6 +334,18 @@ pub fn section_summary(sec: AdvSection, params: &GenerateParams, negative_empty:
             .or(params.control_image_path.as_deref())
             .map(file_name_of)
             .unwrap_or_else(|| "off".into()),
+        AdvSection::Identity => params
+            .identity_image_path
+            .as_deref()
+            .map(|path| {
+                format!(
+                    "{} \u{00b7} {:.2} \u{00b7} step {}",
+                    file_name_of(path),
+                    params.id_weight,
+                    params.id_start_step
+                )
+            })
+            .unwrap_or_else(|| "off".into()),
         AdvSection::Lora => params
             .lora_path
             .as_deref()
@@ -342,6 +383,31 @@ pub fn section_summary(sec: AdvSection, params: &GenerateParams, negative_empty:
             }
             summary
         }
+        AdvSection::Filing => {
+            let mut parts: Vec<String> = Vec::new();
+            if let Some(title) = params.title.as_deref() {
+                parts.push(format!("\u{201c}{title}\u{201d}"));
+            }
+            match params.tags.len() {
+                0 => {}
+                1 => parts.push("1 tag".into()),
+                count => parts.push(format!("{count} tags")),
+            }
+            if let Some(collection) = params.collection.as_deref() {
+                parts.push(format!("in {collection}"));
+            }
+            // A tag the user did not type must be visible before Generate,
+            // not discovered later in the Library — the same disclosure the
+            // CLI prints on stderr.
+            if let Some(slug) = auto_tag_disclosure(params) {
+                parts.push(format!("auto: {slug}"));
+            }
+            if parts.is_empty() {
+                "none".into()
+            } else {
+                parts.join(" \u{00b7} ")
+            }
+        }
     }
 }
 
@@ -370,6 +436,18 @@ pub fn advanced_active_count(params: &GenerateParams, negative_empty: bool) -> u
         || params.mask_image_path.is_some()
         || params.control_image_path.is_some()
     {
+        count += 1;
+    }
+    // The identity photo counts once; each knob counts only when it differs
+    // from the value `mold_core::identity` would apply anyway, so an attached
+    // photo on stock settings reads as one active control, not three.
+    if params.identity_image_path.is_some() {
+        count += 1;
+    }
+    if params.id_weight != mold_core::identity::ID_WEIGHT_DEFAULT {
+        count += 1;
+    }
+    if params.id_start_step != mold_core::identity::ID_START_STEP_DEFAULT {
         count += 1;
     }
     if params.lora_path.is_some() {
@@ -402,8 +480,126 @@ pub fn advanced_active_count(params: &GenerateParams, negative_empty: bool) -> u
     if params.sample_shift.is_some() {
         count += 1;
     }
+    // Creation-time filing counts one per touched field. The auto tag is
+    // derived from the title and is not counted twice.
+    if params.title.is_some() {
+        count += 1;
+    }
+    if !params.tags.is_empty() {
+        count += 1;
+    }
+    if params.collection.is_some() {
+        count += 1;
+    }
     count += guidance_override_count(params);
     count
+}
+
+// ── creation-time filing ("File under") ─────────────────────────────
+//
+// The rules themselves are `mold_core::organization`'s — admission has to
+// refuse a bad tag before any model work is paid for, so mold-core owns
+// them and every client delegates. What lives here is the *editor* shape:
+// the comma-separated string the one-line Tags row speaks, the decision of
+// which errors the popup shows, and the auto-tag disclosure the section
+// summary renders.
+
+/// Split a comma-separated tag entry into raw names. Normalization,
+/// case-insensitive deduplication, and the request cap all belong to
+/// [`mold_core::normalize_request_tags`]; this is only the CSV shape.
+pub fn parse_tag_input(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Render a stored tag list back into the editor's comma-separated form.
+pub fn format_tag_input(tags: &[String]) -> String {
+    tags.join(", ")
+}
+
+/// Compose the tags this form will submit, disclosing a tag added from the
+/// title.
+///
+/// Delegates to [`mold_core::compose_client_tags`] — the shared client
+/// policy the CLI uses — and only rewrites its one cap-overflow message,
+/// which names `--no-auto-tag`, a flag the TUI has not got.
+pub fn compose_filing_tags(
+    tags: &[String],
+    title: Option<&str>,
+    auto_tag_title: bool,
+) -> Result<mold_core::ComposedClientTags, String> {
+    // Explicit-list failures (control characters, over-long names, more than
+    // the cap of typed tags) carry the shared wording, which reads correctly
+    // on every surface.
+    mold_core::normalize_request_tags(tags)?;
+    mold_core::compose_client_tags(tags, title, auto_tag_title).map_err(|_| {
+        format!(
+            "the title's tag would exceed the {}-tag limit \u{2014} drop a tag, clear the title, \
+             or turn off Settings \u{25b8} Library \u{25b8} Tag by title",
+            mold_core::MAX_REQUEST_TAGS
+        )
+    })
+}
+
+/// The tag this form would add from its title, when it would add one.
+/// `None` whenever the setting is off, the title is unset or slugless, the
+/// user already typed that tag, or the list is too full to take it.
+pub fn auto_tag_disclosure(params: &GenerateParams) -> Option<String> {
+    compose_filing_tags(&params.tags, params.title.as_deref(), params.auto_tag_title)
+        .ok()
+        .and_then(|composed| composed.auto_tagged)
+}
+
+/// One committed edit from a File-under editor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FilingEdit {
+    Title(Option<String>),
+    Tags(Vec<String>),
+    Collection(Option<String>),
+}
+
+/// Validate one File-under editor's text against the rest of the form,
+/// returning either the value to store or the message the popup keeps
+/// showing. Nothing invalid ever reaches a generation request.
+///
+/// Title and Tags are validated *against each other* — the title may add a
+/// tag — so the form can never reach a state whose only symptom is a 422 at
+/// submit time.
+pub fn commit_filing_input(
+    field: ParamField,
+    raw: &str,
+    params: &GenerateParams,
+) -> Result<FilingEdit, String> {
+    match field {
+        ParamField::Title => {
+            let title = mold_core::validate_print_title(raw)?;
+            compose_filing_tags(&params.tags, title.as_deref(), params.auto_tag_title)?;
+            Ok(FilingEdit::Title(title))
+        }
+        ParamField::Tags => {
+            let parsed = parse_tag_input(raw);
+            compose_filing_tags(&parsed, params.title.as_deref(), params.auto_tag_title)?;
+            // Store the normalized *explicit* list only. The auto tag stays
+            // derived, so clearing the title (or the setting) removes it
+            // instead of leaving a tag the user never typed behind.
+            Ok(FilingEdit::Tags(mold_core::normalize_request_tags(
+                &parsed,
+            )?))
+        }
+        ParamField::Collection => {
+            if raw.trim().is_empty() {
+                // An emptied editor is an explicit clear, exactly like the
+                // Seed row's.
+                return Ok(FilingEdit::Collection(None));
+            }
+            let (name, _slug) = mold_core::validate_collection_name(raw)?;
+            Ok(FilingEdit::Collection(Some(name)))
+        }
+        other => Err(format!("{} is not a File under field", other.label())),
+    }
 }
 
 /// Wire value for the Negative editor given the model's advertised default
@@ -747,6 +943,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         assert_eq!(
             section_fields(AdvSection::Source, &caps),
@@ -920,6 +1117,116 @@ mod tests {
                 }
             }
         }
+    }
+
+    // ── identity (PuLID-FLUX) ───────────────────────────────────
+
+    /// The Identity section is advertised-only. `capabilities_for_model`
+    /// reads `/api/models[].supports_identity`; the family says nothing, an
+    /// absent field is "no", and an explicit `false` is also "no" — so the
+    /// row can never be offered against a server that would refuse it.
+    #[test]
+    fn identity_section_appears_only_for_an_advertising_checkpoint() {
+        for advertised in [None, Some(false)] {
+            let caps = crate::model_info::capabilities_for_model(
+                "flux",
+                "flux-dev:q8",
+                None,
+                None,
+                None,
+                advertised,
+            );
+            assert!(!caps.supports_identity, "advertised: {advertised:?}");
+            let rows = visible_rows(&caps, &open_state(None));
+            assert!(
+                !rows.contains(&CreateRow::Section(AdvSection::Identity)),
+                "an unadvertised checkpoint must not offer the Identity section"
+            );
+        }
+
+        let caps = crate::model_info::capabilities_for_model(
+            "flux",
+            "flux-dev:q8",
+            None,
+            None,
+            None,
+            Some(true),
+        );
+        assert!(caps.supports_identity);
+        let rows = visible_rows(&caps, &open_state(Some(AdvSection::Identity)));
+        assert!(rows.contains(&CreateRow::Section(AdvSection::Identity)));
+        assert_eq!(
+            section_fields(AdvSection::Identity, &caps),
+            vec![
+                ParamField::IdentityImage,
+                ParamField::IdentityWeight,
+                ParamField::IdentityStartStep,
+            ]
+        );
+        for field in section_fields(AdvSection::Identity, &caps) {
+            assert!(
+                rows.contains(&CreateRow::SectionField(AdvSection::Identity, field)),
+                "{field:?} must be visible while Identity is expanded"
+            );
+        }
+    }
+
+    /// Identity is a conditioning reference, so it sits next to Source and
+    /// above LoRA — the pairing `mold_core::identity` refuses.
+    #[test]
+    fn identity_section_sits_between_source_and_lora() {
+        let caps = crate::model_info::capabilities_for_model(
+            "flux",
+            "flux-dev:q8",
+            None,
+            None,
+            None,
+            Some(true),
+        );
+        let sections = advanced_sections(&caps);
+        let index = |sec| sections.iter().position(|entry| *entry == sec).unwrap();
+        assert!(index(AdvSection::Source) < index(AdvSection::Identity));
+        assert!(index(AdvSection::Identity) < index(AdvSection::Lora));
+    }
+
+    #[test]
+    fn identity_summary_and_active_count_track_the_photo_and_its_knobs() {
+        let mut params = fresh_params();
+        assert_eq!(section_summary(AdvSection::Identity, &params, true), "off");
+        assert_eq!(advanced_active_count(&params, true), 0);
+
+        params.identity_image_path = Some("/photos/ada.png".into());
+        assert_eq!(
+            section_summary(AdvSection::Identity, &params, true),
+            "ada.png \u{00b7} 1.00 \u{00b7} step 0"
+        );
+        assert_eq!(
+            advanced_active_count(&params, true),
+            1,
+            "a photo on stock knobs is one active control, not three"
+        );
+
+        params.id_weight = 1.5;
+        params.id_start_step = 3;
+        assert_eq!(
+            section_summary(AdvSection::Identity, &params, true),
+            "ada.png \u{00b7} 1.50 \u{00b7} step 3"
+        );
+        assert_eq!(advanced_active_count(&params, true), 3);
+    }
+
+    /// The defaults the fresh form starts on are `mold_core::identity`'s, not
+    /// a second copy — a drifted default would record provenance that does
+    /// not describe what rendered.
+    #[test]
+    fn identity_defaults_come_from_mold_core() {
+        let params = fresh_params();
+        assert_eq!(params.id_weight, mold_core::identity::ID_WEIGHT_DEFAULT);
+        assert_eq!(
+            params.id_start_step,
+            mold_core::identity::ID_START_STEP_DEFAULT
+        );
+        assert!(mold_core::identity::validate_id_weight(params.id_weight).is_ok());
     }
 
     // ── section summaries + active count ────────────────────────
@@ -1144,14 +1451,294 @@ mod tests {
             AdvSection::Sampling,
             AdvSection::Negative,
             AdvSection::Source,
+            AdvSection::Identity,
             AdvSection::Lora,
             AdvSection::Upscale,
             AdvSection::Output,
             AdvSection::Video,
+            AdvSection::Filing,
         ] {
             assert_eq!(AdvSection::from_slug(sec.slug()), Some(sec));
         }
         assert_eq!(AdvSection::from_slug("nope"), None);
+    }
+
+    // ── File under (creation-time filing) ───────────────────────
+
+    /// Filing has no capability gate: every model produces a print, and
+    /// every print can be named and filed. It sits last, after the
+    /// generation parameters.
+    #[test]
+    fn filing_section_is_available_for_every_family_and_lists_its_three_fields() {
+        for family in ["sd15", "flux", "ltx2", "wan", mold_core::minimax_h3::FAMILY] {
+            let caps = capabilities_for_family(family);
+            let sections = advanced_sections(&caps);
+            assert_eq!(
+                sections.last(),
+                Some(&AdvSection::Filing),
+                "{family} must end the accordion with File under"
+            );
+            assert_eq!(
+                section_fields(AdvSection::Filing, &caps),
+                vec![ParamField::Title, ParamField::Tags, ParamField::Collection],
+                "{family}"
+            );
+        }
+    }
+
+    #[test]
+    fn visible_rows_expanding_filing_shows_title_tags_and_collection() {
+        let caps = capabilities_for_family("sd15");
+
+        // Collapsed: the section row exists, its fields do not.
+        let rows = visible_rows(&caps, &open_state(None));
+        assert!(rows.contains(&CreateRow::Section(AdvSection::Filing)));
+        assert!(!rows
+            .iter()
+            .any(|row| matches!(row, CreateRow::SectionField(AdvSection::Filing, _))));
+
+        let rows = visible_rows(&caps, &open_state(Some(AdvSection::Filing)));
+        let sec_idx = rows
+            .iter()
+            .position(|r| *r == CreateRow::Section(AdvSection::Filing))
+            .unwrap();
+        assert_eq!(
+            &rows[sec_idx + 1..sec_idx + 4],
+            &[
+                CreateRow::SectionField(AdvSection::Filing, ParamField::Title),
+                CreateRow::SectionField(AdvSection::Filing, ParamField::Tags),
+                CreateRow::SectionField(AdvSection::Filing, ParamField::Collection),
+            ]
+        );
+    }
+
+    /// Absent-until-touched: an untouched form has nothing filed, so the
+    /// summary says so and the accordion badge stays at zero.
+    #[test]
+    fn filing_summary_and_active_count_are_empty_until_touched() {
+        let params = fresh_params();
+        assert_eq!(section_summary(AdvSection::Filing, &params, true), "none");
+        assert_eq!(advanced_active_count(&params, true), 0);
+        assert_eq!(auto_tag_disclosure(&params), None);
+    }
+
+    #[test]
+    fn filing_summary_names_title_tags_collection_and_discloses_the_auto_tag() {
+        let mut params = fresh_params();
+        params.auto_tag_title = true;
+
+        params.title = Some("Smurf Village".into());
+        assert_eq!(
+            section_summary(AdvSection::Filing, &params, true),
+            "\u{201c}Smurf Village\u{201d} \u{00b7} auto: smurf-village",
+            "a tag the user did not type must be visible before Generate"
+        );
+
+        params.tags = vec!["village".into()];
+        params.collection = Some("Blue Period".into());
+        assert_eq!(
+            section_summary(AdvSection::Filing, &params, true),
+            "\u{201c}Smurf Village\u{201d} \u{00b7} 1 tag \u{00b7} in Blue Period \
+             \u{00b7} auto: smurf-village"
+        );
+
+        params.tags = vec!["village".into(), "blue".into()];
+        assert!(section_summary(AdvSection::Filing, &params, true).contains("2 tags"));
+
+        // The preference off removes only the derived tag.
+        params.auto_tag_title = false;
+        let summary = section_summary(AdvSection::Filing, &params, true);
+        assert!(!summary.contains("auto:"), "{summary}");
+        assert!(
+            summary.contains("\u{201c}Smurf Village\u{201d}"),
+            "{summary}"
+        );
+    }
+
+    #[test]
+    fn filing_contributes_one_active_count_per_touched_field() {
+        let mut params = fresh_params();
+        params.title = Some("Smurf Village".into());
+        assert_eq!(
+            advanced_active_count(&params, true),
+            1,
+            "the derived auto tag must not be counted a second time"
+        );
+        params.tags = vec!["village".into()];
+        assert_eq!(advanced_active_count(&params, true), 2);
+        params.collection = Some("Blue Period".into());
+        assert_eq!(advanced_active_count(&params, true), 3);
+    }
+
+    /// The disclosure is exactly `compose_client_tags`' decision, so a tag
+    /// the user already typed is theirs and is never announced as added.
+    #[test]
+    fn auto_tag_disclosure_stays_silent_when_the_user_already_typed_that_tag() {
+        let mut params = fresh_params();
+        params.auto_tag_title = true;
+        params.title = Some("Smurf Village".into());
+        params.tags = vec!["Smurf-Village".into()];
+        assert_eq!(auto_tag_disclosure(&params), None);
+        assert_eq!(
+            section_summary(AdvSection::Filing, &params, true),
+            "\u{201c}Smurf Village\u{201d} \u{00b7} 1 tag"
+        );
+    }
+
+    // ── the editors ────────────────────────────────────────────
+
+    #[test]
+    fn tag_input_round_trips_through_the_comma_separated_editor() {
+        assert_eq!(
+            parse_tag_input(" smurfs , village ,, "),
+            vec!["smurfs".to_string(), "village".to_string()]
+        );
+        assert!(parse_tag_input("   ").is_empty());
+        assert_eq!(
+            format_tag_input(&["smurfs".into(), "village".into()]),
+            "smurfs, village"
+        );
+        assert_eq!(
+            parse_tag_input(&format_tag_input(&["smurfs".into(), "village".into()])),
+            vec!["smurfs".to_string(), "village".to_string()]
+        );
+    }
+
+    #[test]
+    fn commit_title_validates_and_treats_an_emptied_editor_as_a_clear() {
+        let mut params = fresh_params();
+        assert_eq!(
+            commit_filing_input(ParamField::Title, "  Smurf Village  ", &params),
+            Ok(FilingEdit::Title(Some("Smurf Village".into())))
+        );
+        assert_eq!(
+            commit_filing_input(ParamField::Title, "   ", &params),
+            Ok(FilingEdit::Title(None))
+        );
+        assert!(commit_filing_input(ParamField::Title, "nul\0", &params).is_err());
+        let long = "x".repeat(mold_core::PRINT_TITLE_MAX_CHARS + 1);
+        assert!(commit_filing_input(ParamField::Title, &long, &params).is_err());
+        // Untouched by an unrelated field's state.
+        params.tags = vec!["village".into()];
+        assert!(commit_filing_input(ParamField::Title, "Smurf Village", &params).is_ok());
+    }
+
+    #[test]
+    fn commit_tags_normalizes_dedupes_and_refuses_what_admission_would() {
+        let params = fresh_params();
+        assert_eq!(
+            commit_filing_input(ParamField::Tags, "Smurfs, smurfs,  village ", &params),
+            Ok(FilingEdit::Tags(vec![
+                "Smurfs".to_string(),
+                "village".to_string()
+            ])),
+            "case-insensitive duplicates collapse, first spelling wins"
+        );
+        assert_eq!(
+            commit_filing_input(ParamField::Tags, "  ", &params),
+            Ok(FilingEdit::Tags(Vec::new())),
+            "an emptied editor clears the tags"
+        );
+        assert!(commit_filing_input(ParamField::Tags, "nul\0", &params).is_err());
+        let over: Vec<String> = (0..mold_core::MAX_REQUEST_TAGS + 1)
+            .map(|i| format!("t{i}"))
+            .collect();
+        assert!(commit_filing_input(ParamField::Tags, &over.join(","), &params).is_err());
+    }
+
+    #[test]
+    fn commit_collection_normalizes_clears_and_refuses_a_slugless_name() {
+        let params = fresh_params();
+        assert_eq!(
+            commit_filing_input(ParamField::Collection, "  Smurf   Village  ", &params),
+            Ok(FilingEdit::Collection(Some("Smurf Village".into()))),
+            "whitespace runs collapse so the same name merges across hosts"
+        );
+        assert_eq!(
+            commit_filing_input(ParamField::Collection, "   ", &params),
+            Ok(FilingEdit::Collection(None))
+        );
+        // No ASCII alphanumeric survives, so there is no slug to merge on.
+        assert!(
+            commit_filing_input(ParamField::Collection, "\u{65e5}\u{672c}\u{8a9e}", &params)
+                .is_err()
+        );
+        assert!(commit_filing_input(ParamField::Collection, "nul\0", &params).is_err());
+    }
+
+    #[test]
+    fn compose_filing_tags_adds_the_title_slug_only_while_the_preference_is_on() {
+        let composed =
+            compose_filing_tags(&["village".into()], Some("Smurf Village"), true).unwrap();
+        assert_eq!(
+            composed.tags,
+            vec!["village".to_string(), "smurf-village".to_string()]
+        );
+        assert_eq!(composed.auto_tagged.as_deref(), Some("smurf-village"));
+
+        let composed =
+            compose_filing_tags(&["village".into()], Some("Smurf Village"), false).unwrap();
+        assert_eq!(composed.tags, vec!["village".to_string()]);
+        assert_eq!(composed.auto_tagged, None);
+
+        // No title, nothing derived.
+        let composed = compose_filing_tags(&["village".into()], None, true).unwrap();
+        assert_eq!(composed.tags, vec!["village".to_string()]);
+    }
+
+    /// The shared helper's cap-overflow message names `--no-auto-tag`, a
+    /// flag the TUI has not got. Both editors refuse the state instead, in
+    /// words that name a control the TUI actually has.
+    #[test]
+    fn filing_editors_refuse_the_auto_tag_overflow_without_naming_a_cli_flag() {
+        let full: Vec<String> = (0..mold_core::MAX_REQUEST_TAGS)
+            .map(|i| format!("t{i}"))
+            .collect();
+
+        let error = compose_filing_tags(&full, Some("Smurf Village"), true).unwrap_err();
+        assert!(!error.contains("--no-auto-tag"), "{error}");
+        assert!(error.contains("Tag by title"), "{error}");
+
+        // Setting the title on an already-full form is refused…
+        let mut params = fresh_params();
+        params.auto_tag_title = true;
+        params.tags = full.clone();
+        assert!(commit_filing_input(ParamField::Title, "Smurf Village", &params).is_err());
+        // …and so is filling the tag list on an already-titled form.
+        let mut params = fresh_params();
+        params.auto_tag_title = true;
+        params.title = Some("Smurf Village".into());
+        assert!(commit_filing_input(ParamField::Tags, &full.join(","), &params).is_err());
+
+        // With the preference off the same list is fine both ways.
+        let mut params = fresh_params();
+        params.auto_tag_title = false;
+        params.tags = full.clone();
+        assert!(commit_filing_input(ParamField::Title, "Smurf Village", &params).is_ok());
+        params.tags.clear();
+        params.title = Some("Smurf Village".into());
+        assert!(commit_filing_input(ParamField::Tags, &full.join(","), &params).is_ok());
+    }
+
+    /// The stored list is the explicit one: the auto tag stays derived, so
+    /// clearing the title (or the preference) takes it away again rather
+    /// than leaving behind a tag the user never typed.
+    #[test]
+    fn committing_tags_stores_only_the_explicit_list() {
+        let mut params = fresh_params();
+        params.auto_tag_title = true;
+        params.title = Some("Smurf Village".into());
+        assert_eq!(
+            commit_filing_input(ParamField::Tags, "village", &params),
+            Ok(FilingEdit::Tags(vec!["village".to_string()])),
+            "the title's slug must not be frozen into the typed list"
+        );
+    }
+
+    #[test]
+    fn commit_filing_input_rejects_a_field_that_is_not_a_filing_row() {
+        let params = fresh_params();
+        assert!(commit_filing_input(ParamField::Seed, "1", &params).is_err());
     }
 
     #[test]

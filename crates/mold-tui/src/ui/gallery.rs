@@ -322,6 +322,8 @@ pub(crate) mod tests {
 
     pub(crate) fn test_metadata(width: u32, height: u32) -> mold_core::OutputMetadata {
         mold_core::OutputMetadata {
+            collection: None,
+            tags: None,
             title: None,
             source_fit: None,
             guidance_overrides: None,
@@ -863,6 +865,15 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
         lines.push(Line::from(vec![
             Span::styled(format!("{:<10}", "Pipeline"), theme.param_label()),
             Span::styled(pipeline.to_string(), theme.param_value()),
+        ]));
+    }
+
+    // Identity provenance: name, short digest, effective strength and start
+    // step, present only when the print actually carried a face reference.
+    if let Some(identity) = crate::identity::metadata_summary(meta) {
+        lines.push(Line::from(vec![
+            Span::styled(format!("{:<10}", "Identity"), theme.param_label()),
+            Span::styled(identity, theme.param_value()),
         ]));
     }
 

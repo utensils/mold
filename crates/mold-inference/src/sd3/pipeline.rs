@@ -1118,6 +1118,7 @@ impl SD3Engine {
         );
 
         Ok(GenerateResponse {
+            request_warnings: Vec::new(),
             audio: None,
             images: vec![ImageData {
                 data: image_bytes,
@@ -1489,6 +1490,7 @@ impl SD3Engine {
             tracing::info!(generation_time_ms, seed, "SD3 generation complete");
 
             Ok(GenerateResponse {
+                request_warnings: Vec::new(),
                 audio: None,
                 images: vec![ImageData {
                     data: image_bytes,
@@ -1828,6 +1830,8 @@ mod tests {
         let key = cfg_prompt_cache_key("a cat", "", 1.0);
         store_cached_tensor_pair(&engine.prompt_cache, key, &context, &y).unwrap();
         let req = GenerateRequest {
+            collection: None,
+            tags: None,
             title: None,
             source_fit: None,
             hdr_exr_dir: None,

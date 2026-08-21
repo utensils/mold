@@ -35,7 +35,6 @@ import {
   planOrganizationFanout,
   sortTags,
   tagKey,
-  titleSlug,
   type CollectionSlugResolver,
   type MergedCollection,
   type OrganizationMutation,
@@ -49,6 +48,7 @@ import {
 } from "../components/machines/hostClient";
 import { ORIGIN_HOST_ID, type HostEntry } from "./hostRegistry";
 import type { HostGalleryImage } from "./multiHostGallery";
+import { downloadFileName, fileUnderAvailable } from "@studio/lib/fileUnder";
 import type { Collection, GalleryImage, TagCount } from "../types";
 
 // ── Per-host snapshot ───────────────────────────────────────────────────────
@@ -117,7 +117,9 @@ async function fetchHostSnapshot(
   const caps = await fetchers.capabilities(host, signal).catch(() => null);
   const gallery = caps?.gallery;
   // A failed probe is UNKNOWN (null), never "answered organize: false".
-  snapshot.organize = caps ? gallery?.organize === true : null;
+  // The positive test itself is the shared `fileUnderAvailable`, so the
+  // Library's organization gate and Create's "File under" gate cannot drift.
+  snapshot.organize = caps ? fileUnderAvailable(caps) : null;
   snapshot.trash = gallery?.trash
     ? {
         enabled: gallery.trash.enabled,
@@ -380,15 +382,24 @@ export function collectionCards(
 
 // ── Misc helpers ────────────────────────────────────────────────────────────
 
-/** Suggested download filename: the title's slug when one exists. */
-export function downloadFilename(
-  title: string | null | undefined,
-  filename: string,
-): string {
-  const slug = title ? titleSlug(title) : null;
-  if (!slug) return filename;
-  const dot = filename.lastIndexOf(".");
-  return dot > 0 ? `${slug}${filename.slice(dot)}` : slug;
+/**
+ * Suggested Save / Download name: `{title-slug}__{model}__s{seed}.{ext}`,
+ * composed by the shared `downloadFileName` so web, desktop, iPhone, and
+ * `mold-core` all agree. The gallery filename on disk never changes — this
+ * is only what the browser's save dialog is offered.
+ *
+ * The extension comes from the recorded output format, falling back to the
+ * gallery filename's own suffix for a row that predates the field.
+ */
+export function downloadFilename(item: GalleryImage): string {
+  const dot = item.filename.lastIndexOf(".");
+  const ext = item.format ?? (dot > 0 ? item.filename.slice(dot + 1) : "");
+  return downloadFileName({
+    title: item.title ?? null,
+    model: item.metadata.model,
+    seed: item.metadata.seed ?? null,
+    ext,
+  });
 }
 
 // ── Mutations (fan-out) ─────────────────────────────────────────────────────

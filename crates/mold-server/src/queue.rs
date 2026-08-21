@@ -229,15 +229,11 @@ fn save_image_to_dir_with_suffix(
             }
         };
         drop(reservation);
-        if let Some(db) = db {
-            if let Err(error) = db.upsert(&record) {
-                tracing::warn!(
-                    "metadata DB upsert failed for {}: {error:#}",
-                    record.filename
-                );
-            }
-        }
-        Some(Box::new(record.to_gallery_image()))
+        let seeded = db.and_then(|db| upsert_and_report_filing(db, &record));
+        Some(Box::new(gallery_image_with_filing(
+            &record,
+            seeded.as_ref(),
+        )))
     } else {
         drop(reservation);
         None
@@ -245,12 +241,85 @@ fn save_image_to_dir_with_suffix(
     // Emit even without a DB row — `image: None` tells clients to refetch
     // `/api/gallery` instead of inserting in place.
     if let Some(events) = events {
+        let seeded_filing = image_row
+            .as_ref()
+            .is_some_and(|image| !image.tags.is_empty() || !image.collections.is_empty());
+        let announced = image_row.clone();
         events.publish(mold_core::ServerEvent::GalleryAdded {
             filename: filename.clone(),
             image: image_row,
         });
+        if seeded_filing {
+            announce_seeded_filing(events, &filename, announced);
+        }
     }
     Some(filename)
+}
+
+/// Upsert a publication's gallery row and report the creation-time filing
+/// seeded onto it. Errors are logged and swallowed exactly as before — the
+/// file on disk is the source of truth, and a finished render is never lost
+/// over its filing.
+fn upsert_and_report_filing(
+    db: &MetadataDb,
+    record: &mold_db::GenerationRecord,
+) -> Option<mold_db::organization::SeededOrganization> {
+    match db.upsert_reporting_organization(record) {
+        Ok((_, seeded)) => Some(seeded),
+        Err(error) => {
+            tracing::warn!(
+                "metadata DB upsert failed for {}: {error:#}",
+                record.filename
+            );
+            None
+        }
+    }
+}
+
+/// Project a just-published record into its gallery row, folding in the
+/// filing that was seeded with it.
+///
+/// `GenerationRecord::to_gallery_image` leaves `tags` / `collections` empty
+/// because organization normally arrives through the server's post-overlay
+/// enrichment. A print that was filed at creation already knows both, so the
+/// `gallery_added` row carries them and a client can insert in place without
+/// a refetch.
+fn gallery_image_with_filing(
+    record: &mold_db::GenerationRecord,
+    seeded: Option<&mold_db::organization::SeededOrganization>,
+) -> mold_core::GalleryImage {
+    let mut image = record.to_gallery_image();
+    if let Some(seeded) = seeded {
+        image.tags = seeded.tags.clone();
+        image.collections = seeded.collection_id.clone().into_iter().collect();
+    }
+    image
+}
+
+/// Announce a print that arrived already filed.
+///
+/// `gallery_updated` carries the organized row so a client that already
+/// inserted the `gallery_added` row picks up its tags and membership.
+/// `gallery_collections_changed` follows whenever the print joined a
+/// collection — that event's contract is "created, renamed, re-covered,
+/// deleted, **or had its membership changed**", and the shelf's item counts
+/// move on a join whether or not the collection is new.
+fn announce_seeded_filing(
+    events: &crate::events::EventBroadcaster,
+    filename: &str,
+    image: Option<Box<mold_core::GalleryImage>>,
+) {
+    let joined_collection = image
+        .as_ref()
+        .map(|image| !image.collections.is_empty())
+        .unwrap_or(false);
+    events.publish(mold_core::ServerEvent::GalleryUpdated {
+        filename: filename.to_string(),
+        image,
+    });
+    if joined_collection {
+        events.publish(mold_core::ServerEvent::GalleryCollectionsChanged {});
+    }
 }
 
 /// Gallery filenames a generation's outputs were saved under, threaded into
@@ -338,7 +407,22 @@ pub(crate) fn save_video_to_dir(
     }
     let ts = mold_core::time::now_epoch_ms_u64();
     let ext = format.extension();
-    let desired = mold_core::default_output_filename(model, ts, ext, 1, 0);
+    // A titled video carries the same lossy `~slug` an image does — a
+    // sequence's stitched print reaches this path, and a title the user typed
+    // must reach the filename on both media kinds or the two disagree.
+    let desired = titled_output_filename(
+        model,
+        ts,
+        ext,
+        1,
+        0,
+        None,
+        metadata
+            .title
+            .as_deref()
+            .and_then(mold_core::title_slug)
+            .as_deref(),
+    );
     let (filename, path, reservation) = match write_gallery_bytes_no_replace(dir, &desired, bytes) {
         Ok(saved) => saved,
         Err(e) => {
@@ -378,20 +462,21 @@ pub(crate) fn save_video_to_dir(
     if !gif_preview.is_empty() {
         save_video_preview_gif(&filename, gif_preview);
     }
-    if let Some(db) = db {
-        if let Err(error) = db.upsert(&record) {
-            tracing::warn!(
-                "metadata DB upsert failed for {}: {error:#}",
-                record.filename
-            );
-        }
-    }
-    let image_row = Some(Box::new(record.to_gallery_image()));
+    let seeded = db.and_then(|db| upsert_and_report_filing(db, &record));
+    let image_row = Some(Box::new(gallery_image_with_filing(
+        &record,
+        seeded.as_ref(),
+    )));
     if let Some(events) = events {
+        let seeded_filing = seeded.map(|seeded| !seeded.is_empty()).unwrap_or(false);
+        let announced = image_row.clone();
         events.publish(mold_core::ServerEvent::GalleryAdded {
             filename: filename.clone(),
             image: image_row,
         });
+        if seeded_filing {
+            announce_seeded_filing(events, &filename, announced);
+        }
     }
     Some(filename)
 }
@@ -553,15 +638,31 @@ pub(crate) fn save_video_to_dir_named(
         }
     };
     drop(authority);
-    if let Some(db) = db {
-        db.upsert(&record)
-            .context("recording durable chain gallery metadata")?;
-    }
+    // Unlike the ordinary paths, a durable chain's DB failure is fatal: the
+    // caller settles the job on this returning, so a silently missing row
+    // would let a replay re-publish the same take.
+    let seeded = match db {
+        Some(db) => Some(
+            db.upsert_reporting_organization(&record)
+                .context("recording durable chain gallery metadata")?
+                .1,
+        ),
+        None => None,
+    };
     if let Some(events) = events {
+        let seeded_filing = seeded.as_ref().map(|s| !s.is_empty()).unwrap_or(false);
+        let image_row = Some(Box::new(gallery_image_with_filing(
+            &record,
+            seeded.as_ref(),
+        )));
+        let announced = image_row.clone();
         events.publish(mold_core::ServerEvent::GalleryAdded {
             filename: filename.to_string(),
-            image: Some(Box::new(record.to_gallery_image())),
+            image: image_row,
         });
+        if seeded_filing {
+            announce_seeded_filing(events, filename, announced);
+        }
     }
     Ok(filename.to_string())
 }
@@ -1054,6 +1155,7 @@ async fn upscale_generated_image_on_single_worker(
         .map_err(|e| format!("upscale failed: {e}"))?;
 
     let mut response = mold_core::GenerateResponse {
+        request_warnings: Vec::new(),
         audio: None,
         images: vec![],
         video: None,
@@ -3222,6 +3324,8 @@ mod tests {
     /// hand to `OutputMetadata::from_generate_request` in tests.
     fn fake_request(model: &str) -> GenerateRequest {
         GenerateRequest {
+            collection: None,
+            tags: None,
             title: None,
             source_fit: None,
             hdr_exr_dir: None,
@@ -3898,6 +4002,7 @@ mod tests {
             journal: None,
         };
         let response = mold_core::GenerateResponse {
+            request_warnings: Vec::new(),
             audio: None,
             images: Vec::new(),
             video: None,
@@ -4417,6 +4522,109 @@ mod tests {
         assert!(rec.file_size_bytes.unwrap_or(0) > 0);
     }
 
+    /// A print that arrived filed lands tagged and in its collection, and
+    /// the `gallery_added` row carries both so a client can insert in place
+    /// without refetching.
+    #[test]
+    fn publication_applies_creation_time_filing_and_announces_it() {
+        let tmp = TempDir::new().unwrap();
+        let db = MetadataDb::open_in_memory().unwrap();
+        let events = crate::events::EventBroadcaster::new();
+        let mut rx = events.subscribe();
+
+        let mut req = fake_request("flux-dev:q4");
+        req.title = Some("Smurf Village".into());
+        req.tags = Some(vec!["smurfs".into(), "village".into()]);
+        req.collection = Some(mold_core::CollectionRef::by_name("Sequences"));
+        let meta = OutputMetadata::from_generate_request(&req, 42, None, "test-version");
+
+        save_image_to_dir(
+            tmp.path(),
+            &fake_image(),
+            "flux-dev:q4",
+            1,
+            Some(&meta),
+            Some(1234),
+            Some(&db),
+            Some(&events),
+        );
+
+        let rows = db.list(Some(tmp.path())).unwrap();
+        assert_eq!(rows.len(), 1);
+        let filename = rows[0].filename.clone();
+        // The title still folds into the filename, unchanged by filing.
+        assert!(filename.contains("~smurf-village"), "{filename}");
+
+        let org = db
+            .print_organization(tmp.path(), &filename)
+            .unwrap()
+            .unwrap();
+        assert_eq!(org.tags, vec!["smurfs".to_string(), "village".to_string()]);
+        let collections = db.list_collections().unwrap();
+        assert_eq!(collections.len(), 1);
+        assert_eq!(collections[0].name, "Sequences");
+
+        // gallery_added carries the filing, then gallery_updated repeats the
+        // organized row and gallery_collections_changed follows the join.
+        let added = rx.try_recv().expect("gallery_added");
+        match added {
+            mold_core::ServerEvent::GalleryAdded {
+                image: Some(image), ..
+            } => {
+                assert_eq!(
+                    image.tags,
+                    vec!["smurfs".to_string(), "village".to_string()]
+                );
+                assert_eq!(image.collections, vec![collections[0].id.clone()]);
+                assert_eq!(image.title.as_deref(), Some("Smurf Village"));
+            }
+            other => panic!("expected gallery_added with a row, got {other:?}"),
+        }
+        assert!(matches!(
+            rx.try_recv().expect("gallery_updated"),
+            mold_core::ServerEvent::GalleryUpdated { image: Some(_), .. }
+        ));
+        assert!(matches!(
+            rx.try_recv().expect("gallery_collections_changed"),
+            mold_core::ServerEvent::GalleryCollectionsChanged {}
+        ));
+    }
+
+    /// An unfiled print — the overwhelmingly common case — emits exactly the
+    /// one event it always did. The organization events must not become
+    /// per-print noise.
+    #[test]
+    fn an_unfiled_publication_emits_only_gallery_added() {
+        let tmp = TempDir::new().unwrap();
+        let db = MetadataDb::open_in_memory().unwrap();
+        let events = crate::events::EventBroadcaster::new();
+        let mut rx = events.subscribe();
+
+        let req = fake_request("flux-dev:q4");
+        let meta = OutputMetadata::from_generate_request(&req, 42, None, "test-version");
+        save_image_to_dir(
+            tmp.path(),
+            &fake_image(),
+            "flux-dev:q4",
+            1,
+            Some(&meta),
+            None,
+            Some(&db),
+            Some(&events),
+        );
+
+        assert!(matches!(
+            rx.try_recv().expect("gallery_added"),
+            mold_core::ServerEvent::GalleryAdded { .. }
+        ));
+        assert!(
+            rx.try_recv().is_err(),
+            "an unfiled print must emit no organization events"
+        );
+        assert!(db.list_tags().unwrap().is_empty());
+        assert!(db.list_collections().unwrap().is_empty());
+    }
+
     #[test]
     fn save_generated_image_outputs_persists_original_and_upscaled_dimensions() {
         let tmp = TempDir::new().unwrap();
@@ -4718,6 +4926,7 @@ mod tests {
             audio_channels: Some(mold_core::minimax_h3::AUDIO_CHANNELS),
         };
         let response = mold_core::GenerateResponse {
+            request_warnings: Vec::new(),
             images: Vec::new(),
             video: Some(video.clone()),
             audio: None,
@@ -4871,6 +5080,7 @@ mod tests {
             audio_channels: Some(mold_core::minimax_h3::AUDIO_CHANNELS),
         };
         let response = mold_core::GenerateResponse {
+            request_warnings: Vec::new(),
             images: Vec::new(),
             video: Some(video.clone()),
             audio: None,
@@ -5130,6 +5340,7 @@ mod tests {
     fn build_sse_complete_event_audio_carries_wav_payload_and_no_video_fields() {
         let audio = fake_audio(48_000);
         let resp = mold_core::GenerateResponse {
+            request_warnings: Vec::new(),
             audio: Some(audio.clone()),
             images: vec![],
             video: None,
@@ -5175,6 +5386,7 @@ mod tests {
     #[test]
     fn build_sse_complete_event_audio_omits_media_for_metadata_only_payloads() {
         let resp = mold_core::GenerateResponse {
+            request_warnings: Vec::new(),
             audio: Some(fake_audio(24_000)),
             images: vec![],
             video: None,
@@ -5254,6 +5466,7 @@ mod tests {
             audio_channels: Some(2),
         };
         let resp = mold_core::GenerateResponse {
+            request_warnings: Vec::new(),
             audio: None,
             images: vec![],
             video: Some(video.clone()),
@@ -5359,6 +5572,7 @@ mod tests {
             audio_channels: None,
         };
         let resp = mold_core::GenerateResponse {
+            request_warnings: Vec::new(),
             audio: None,
             images: vec![],
             video: Some(video),
@@ -5382,6 +5596,7 @@ mod tests {
     #[test]
     fn build_sse_complete_event_image_clears_all_video_fields() {
         let resp = mold_core::GenerateResponse {
+            request_warnings: Vec::new(),
             audio: None,
             images: vec![fake_image()],
             video: None,
@@ -5414,6 +5629,7 @@ mod tests {
         req.batch_index = Some(2);
         req.batch_count = Some(3);
         let resp = mold_core::GenerateResponse {
+            request_warnings: Vec::new(),
             audio: None,
             images: vec![fake_image()],
             video: None,
@@ -5471,6 +5687,7 @@ mod tests {
     #[test]
     fn metadata_only_completion_fails_when_the_output_was_not_saved() {
         let response = mold_core::GenerateResponse {
+            request_warnings: Vec::new(),
             audio: None,
             images: vec![fake_image()],
             video: None,
@@ -5498,6 +5715,7 @@ mod tests {
         let mut req = fake_request("flux-dev:q4");
         req.upscale_model = Some("real-esrgan-x4plus:fp16".to_string());
         let mut response = mold_core::GenerateResponse {
+            request_warnings: Vec::new(),
             audio: None,
             images: vec![],
             video: None,
@@ -5588,6 +5806,7 @@ mod tests {
             audio_channels: None,
         };
         let mut response = mold_core::GenerateResponse {
+            request_warnings: Vec::new(),
             audio: None,
             images: vec![],
             video: Some(video),

@@ -8,6 +8,8 @@ pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 pub(crate) fn minimal_generate_request(model: &str) -> crate::types::GenerateRequest {
     crate::types::GenerateRequest {
         title: None,
+        tags: None,
+        collection: None,
         source_fit: None,
         hdr_exr_dir: None,
         hdr_exr_full_float: false,

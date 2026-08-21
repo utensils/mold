@@ -103,6 +103,39 @@ publishes a `queue_plan_changed`). The single-shot stream's `Queued
 registry position changes (queue drained, reorder, cancellation ahead of it);
 older servers sent it exactly once at submit.
 
+### Creation-time filing and request advisories
+
+`GenerateRequest` and the `POST /api/chain-jobs` body carry three additive
+optional fields — `title`, `tags` (`Vec<String>`), and `collection`
+(`mold_core::CollectionRef`, either `{ "id": … }` or `{ "name": … }`) — so a
+print arrives already organized. Rules live in `mold_core::organization` and
+are enforced at admission: at most 20 distinct tags after normalization, each
+1..=64 Unicode scalars, whitespace controls collapsed to a single space and
+any other control character a `422`; a leading `#` is a literal character on
+the wire, never a sigil the server strips. A `{ "name": … }` collection
+resolves by slug on the serving host and is created when absent, so one name
+means one collection across a fleet; a `{ "id": … }` reference resolves at
+admission. Filing is applied ONCE, when the print is published, and only on
+the row's INSERT — a reconcile or re-publication never resurrects a tag the
+user removed. A sequence files the stitched print only; intermediate clips
+never reach the gallery. Batch and prepared siblings inherit their parent's
+filing.
+
+Filing can never fail a render. A host with `MOLD_DB_DISABLE=1`, a collection
+deleted between listing and Generate, or an otherwise unusable value drops the
+filing, publishes the print anyway, and reports it as an advisory.
+
+Advisories about an ACCEPTED request ride the `x-mold-request-warning`
+response header (the same header that already carries e.g. a lip-dub retime)
+and are mirrored into additive `request_warnings: Vec<String>` on
+`GenerateResponse` and `ChainResponse` for JSON consumers. **Never split that
+header's value on `;` or `; `** — the server joins several advisories with
+`"; "`, but its own advisory prose contains that sequence ("…were not applied;
+the print was generated and saved normally"), so a splitting parser shreds one
+advisory into dangling half-sentences. Take each value whole. Read it with
+`get_all` (as `mold_core`'s client does) so a server that one day emits one
+header per advisory is handled without a client change.
+
 ## Durable queue and the retention contract
 
 A queued generation survives a server restart on hosts that report

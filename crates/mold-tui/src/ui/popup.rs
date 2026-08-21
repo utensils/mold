@@ -2,6 +2,7 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
 use crate::app::{App, Popup};
+use crate::ui::widgets::truncate_with_ellipsis;
 
 /// Render the active popup overlay.
 pub fn render(frame: &mut Frame, app: &mut App) {
@@ -15,6 +16,8 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         Some(Popup::SizeInput { .. }) => render_size_input(frame, app),
         Some(Popup::StgBlocksInput { .. }) => render_stg_blocks_input(frame, app),
         Some(Popup::ReferencesInput { .. }) => render_references_input(frame, app),
+        Some(Popup::IdentityImageInput { .. }) => render_identity_image_input(frame, app),
+        Some(Popup::FilingInput { .. }) => render_filing_input(frame, app),
         Some(Popup::HistorySearch { .. }) => render_history_search(frame, app),
         Some(Popup::CommandPalette { .. }) => render_command_palette(frame, app),
         Some(Popup::Confirm { message, .. }) => render_confirm(frame, app, message.clone()),
@@ -43,6 +46,23 @@ fn centered_rect(area: Rect, width_pct: u16, height_pct: u16) -> Rect {
             Constraint::Percentage((100 - width_pct) / 2),
         ])
         .split(vertical[1])[1]
+}
+
+/// A centered box `width_pct` wide and at most `rows` tall.
+///
+/// [`centered_rect`]'s percentage height collapses to nothing on a short
+/// terminal, which is fine for a popup that is mostly a list and wrong for
+/// one the user is typing into: the File-under editors need a floor, so
+/// they take their height in rows and shrink rather than vanish.
+fn centered_rect_rows(area: Rect, width_pct: u16, rows: u16) -> Rect {
+    let height = rows.min(area.height);
+    let width = ((u32::from(area.width) * u32::from(width_pct)) / 100) as u16;
+    Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    }
 }
 
 fn render_help(frame: &mut Frame, app: &App) {
@@ -684,6 +704,169 @@ fn render_references_input(frame: &mut Frame, app: &mut App) {
     );
 }
 
+fn render_identity_image_input(frame: &mut Frame, app: &mut App) {
+    let theme = &app.theme;
+    let area = centered_rect(frame.area(), 72, 24);
+    frame.render_widget(Clear, area);
+
+    let Some(Popup::IdentityImageInput { input, error }) = &app.popup else {
+        return;
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme.popup_border())
+        .title(" Identity photo ")
+        .title_style(theme.title_focused())
+        .style(theme.popup_bg());
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.height < 5 {
+        return;
+    }
+    frame.render_widget(
+        Paragraph::new(
+            "Path to a PNG or JPEG portrait (leave empty to clear). \
+             Checked before it is accepted.",
+        )
+        .style(theme.dim())
+        .wrap(Wrap { trim: true }),
+        Rect { height: 2, ..inner },
+    );
+    frame.render_widget(
+        Paragraph::new(format!("{input}\u{2588}"))
+            .style(Style::default().fg(theme.text))
+            .wrap(Wrap { trim: false }),
+        Rect {
+            y: inner.y + 3,
+            height: inner.height.saturating_sub(5),
+            ..inner
+        },
+    );
+    if let Some(error) = error {
+        frame.render_widget(
+            Paragraph::new(error.as_str())
+                .style(theme.error())
+                .wrap(Wrap { trim: true }),
+            Rect {
+                y: inner.y + inner.height.saturating_sub(3),
+                height: 2,
+                ..inner
+            },
+        );
+    }
+    frame.render_widget(
+        action_hints(theme, &[("Enter", "Confirm"), ("Esc", "Cancel")]),
+        Rect {
+            y: inner.y + inner.height.saturating_sub(1),
+            height: 1,
+            ..inner
+        },
+    );
+}
+
+/// One File-under editor (Title, Tags, or Collection). The hint names the
+/// shape the field expects, and a validation failure stays on screen rather
+/// than closing the popup with the entry discarded.
+///
+/// The rows are laid out from both ends so the editor degrades instead of
+/// disappearing on a short terminal: the entry and the key hints are the
+/// last two things dropped.
+fn render_filing_input(frame: &mut Frame, app: &mut App) {
+    let theme = &app.theme;
+    // Two borders, the hint, a blank line, the entry, a reason line, and
+    // the key hints.
+    let area = centered_rect_rows(frame.area(), 64, 7);
+    frame.render_widget(Clear, area);
+
+    let Some(Popup::FilingInput {
+        field,
+        input,
+        error,
+    }) = &app.popup
+    else {
+        return;
+    };
+    let (title, hint) = match field {
+        crate::app::ParamField::Title => (
+            " Title ",
+            "Names the print; blank clears it. Also files it under its own slug.",
+        ),
+        crate::app::ParamField::Tags => (
+            " Tags ",
+            "Comma-separated (for example: smurfs, village). Blank clears them.",
+        ),
+        crate::app::ParamField::Collection => (
+            " Collection ",
+            "One collection by name; created when it does not exist. Blank clears it.",
+        ),
+        _ => (" File under ", ""),
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme.popup_border())
+        .title(title)
+        .title_style(theme.title_focused())
+        .style(theme.popup_bg());
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.height == 0 || inner.width == 0 {
+        return;
+    }
+
+    let bottom = inner.y + inner.height;
+    let line = |y: u16| Rect {
+        y,
+        height: 1,
+        ..inner
+    };
+
+    // Claim the bottom rows first — the key hints, then the reason a commit
+    // was refused directly above them — so the entry keeps whatever is left.
+    let mut reserved_bottom = 0u16;
+    if inner.height > 1 {
+        frame.render_widget(
+            action_hints(theme, &[("Enter", "Confirm"), ("Esc", "Cancel")]),
+            line(bottom - 1),
+        );
+        reserved_bottom = 1;
+    }
+    if let Some(error) = error {
+        if inner.height >= 3 {
+            frame.render_widget(
+                Paragraph::new(truncate_with_ellipsis(error, inner.width as usize))
+                    .style(theme.error()),
+                line(bottom - 2),
+            );
+            reserved_bottom = 2;
+        }
+    }
+
+    // What is left goes to the hint and the entry. The hint is the first
+    // thing dropped (it explains the field; the entry is what the user is
+    // looking at) and the blank line between them is dropped before that.
+    let available = inner.height - reserved_bottom;
+    let mut top = inner.y;
+    if available >= 2 && !hint.is_empty() {
+        frame.render_widget(
+            Paragraph::new(truncate_with_ellipsis(hint, inner.width as usize)).style(theme.dim()),
+            line(top),
+        );
+        top += if available >= 3 { 2 } else { 1 };
+    }
+    if top < bottom - reserved_bottom {
+        frame.render_widget(
+            Paragraph::new(format!("{input}\u{2588}"))
+                .style(Style::default().fg(theme.text))
+                .wrap(Wrap { trim: false }),
+            Rect {
+                y: top,
+                height: bottom - reserved_bottom - top,
+                ..inner
+            },
+        );
+    }
+}
+
 /// Render the stepped connect-a-machine flow (Machines workspace).
 fn render_machine_connect(frame: &mut Frame, app: &mut App) {
     use crate::hosts::ConnectStep;
@@ -1166,15 +1349,86 @@ mod tests {
         );
     }
 
+    /// The File-under editors are the only Create-form popups whose body is
+    /// free text, so a render smoke test is what proves the label, the hint,
+    /// the entry, and a validation failure all land on screen at once.
+    #[test]
+    fn filing_popup_renders_its_label_hint_entry_and_error() {
+        use crate::app::{ParamField, Popup};
+
+        for (field, label, hint_fragment) in [
+            (ParamField::Title, "Title", "Names the print"),
+            (ParamField::Tags, "Tags", "Comma-separated"),
+            (ParamField::Collection, "Collection", "One collection"),
+        ] {
+            let rendered = render_popup_to_string(Popup::FilingInput {
+                field,
+                input: "Smurf Village".to_string(),
+                error: None,
+            });
+            assert!(rendered.contains(label), "{label} title: {rendered}");
+            assert!(rendered.contains(hint_fragment), "{label} hint: {rendered}");
+            assert!(rendered.contains("Smurf Village"), "{label}: {rendered}");
+            assert!(rendered.contains("Enter"), "{label}: {rendered}");
+            assert!(rendered.contains("Esc"), "{label}: {rendered}");
+        }
+
+        // A refusal stays on screen beside the entry that caused it.
+        let rendered = render_popup_to_string(Popup::FilingInput {
+            field: ParamField::Tags,
+            input: "nope".to_string(),
+            error: Some("tag names must not contain control characters".to_string()),
+        });
+        assert!(rendered.contains("nope"), "{rendered}");
+        assert!(rendered.contains("control characters"), "{rendered}");
+    }
+
+    /// A short terminal must still show what the user is typing. The hint
+    /// and the blank line above the entry are dropped first; the entry and
+    /// the key hints are what survive.
+    #[test]
+    fn filing_popup_degrades_to_the_entry_on_a_short_terminal() {
+        use crate::app::{ParamField, Popup};
+        for height in 3..=20u16 {
+            let rendered = render_popup_to_string_sized(
+                Popup::FilingInput {
+                    field: ParamField::Title,
+                    input: "Smurf Village".to_string(),
+                    error: None,
+                },
+                80,
+                height,
+            );
+            assert!(
+                rendered.contains("Smurf Village"),
+                "the entry must survive a {height}-row terminal: {rendered}"
+            );
+        }
+    }
+
     /// Drive `render_confirm` against a `TestBackend` and collapse the
     /// buffer into a single string so assertions can use substring
     /// matches against the visible UI.
     fn render_confirm_to_string(message: &str) -> String {
-        use crate::app::{App, ConfirmAction, Popup};
+        use crate::app::{ConfirmAction, Popup};
+        render_popup_to_string(Popup::Confirm {
+            message: message.to_string(),
+            on_confirm: ConfirmAction::DeleteGalleryImage,
+        })
+    }
+
+    /// Render one popup over a stand-in `App` and collapse the buffer into
+    /// a single string, one row per line.
+    fn render_popup_to_string(popup: crate::app::Popup) -> String {
+        render_popup_to_string_sized(popup, 80, 20)
+    }
+
+    fn render_popup_to_string_sized(popup: crate::app::Popup, width: u16, height: u16) -> String {
+        use crate::app::App;
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
 
-        let backend = TestBackend::new(80, 20);
+        let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
         // Build a stand-in App just for rendering — we don't need the
         // tokio handle because render_confirm is pure.
@@ -1209,6 +1463,7 @@ mod tests {
                 last_seed: None,
                 last_generation_time_ms: None,
                 error_message: None,
+                identity_error: None,
                 warning_message: None,
                 model_description: String::new(),
                 last_output_path: None,
@@ -1230,10 +1485,7 @@ mod tests {
             server_url: None,
             picker,
             theme: crate::ui::theme::Theme::default(),
-            popup: Some(Popup::Confirm {
-                message: message.to_string(),
-                on_confirm: ConfirmAction::DeleteGalleryImage,
-            }),
+            popup: Some(popup),
             should_quit: false,
             bg_tx: tx,
             bg_rx: rx,

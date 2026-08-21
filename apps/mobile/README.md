@@ -77,6 +77,21 @@ pushed screen opened from the header.
   prepared Batch N inherit it), an over-long or control-character title is
   refused inline before anything queues, and **Use as prompt** restores the
   print's saved title (a later Library rename wins over the metadata stamp).
+  Title is a field of the whole Create stack, One shot and Sequence alike —
+  a sequence's stitched print carries it on the chain wire.
+  Below it, a capability-gated **File under** group
+  (`desktop/src/mobile/MobileFileUnder.vue`) files the print as it is made:
+  a **Tags** row with a dashed, removable `{slug} · from title` ghost chip and
+  the tags you added, and a **Collection** row that pre-selects — never
+  creates — the collection whose slug matches the title. Both open a bottom
+  sheet; a mono line under them previews the filename the print lands as. The
+  reducers are `@studio/lib/fileUnder`, shared verbatim with desktop and web,
+  and `desktop/src/mobile/fileUnder.ts` owns only the phone's capability
+  question: a pinned machine answers for itself, an automatic policy is
+  satisfied by any reachable machine advertising
+  `capabilities.gallery.organize`, and an unread snapshot hides the group and
+  files nothing. Typed tag text loses a leading `#`; a suggestion a machine
+  actually reported is added verbatim, so a real `#grain` files as `#grain`.
   A **↺ Reset** beside the Advanced trigger restores every generation setting
   to the selected model's defaults while preserving the prompt, model choice,
   and any prepared batch size; the Advanced sheet keeps its narrower
@@ -200,7 +215,7 @@ pushed screen opened from the header.
   (the first mobile `/api/config` client, `desktop/src/mobile/hostConfig.ts`;
   an env-pinned key renders read-only and names the variable) plus a
   "Prints in trash: N" row with a two-step **Empty trash**. Retention is a
-  server setting — `mold.mobile.settings.v1` stays three local fields.
+  server setting — `mold.mobile.settings.v1` stays four local fields.
   Host detail's RAM card colors off the server's additive `host_memory`
   admission telemetry (headroom vs safety floor, mirroring the shared
   `studio/lib/hostMemory` levels; older servers keep the uncolored card), and
@@ -221,7 +236,12 @@ pushed screen opened from the header.
   System; valid saved choices remain authoritative. Its default-on Photos
   preference automatically fetches each completed still from its authenticated
   host gallery and saves it through UIKit; post-generation upscales save both
-  images, while videos and audio-only prints remain in Mold Library. Settings also links to host
+  images, while videos and audio-only prints remain in Mold Library. A
+  **Library** section carries **Tag new prints with their title**
+  (`autoTagTitle`, on by default), the mirror Create reads into
+  `GenerateForm.fileUnderAutoTag`; it only decides whether the removable ghost
+  chip is offered, so turning it off never touches prints already made.
+  Settings also links to host
   management and shows the app version, remote-only processing policy, and
   TestFlight update channel. About opens the public privacy policy at
   `https://utensils.io/mold/privacy` through the native external-browser opener.
@@ -374,7 +394,9 @@ WebView local storage contains non-secret mobile state:
 - `mold.mobile.sequence-job.v1` — non-secret exact-host identity and active
   durable sequence job ID for relaunch recovery; a saved instance UUID must
   exactly match the current host identity before Mold reattaches
-- `mold.mobile.settings.v1` — appearance, color family, and Photos auto-save preference
+- `mold.mobile.settings.v1` — appearance, color family, Photos auto-save, and
+  the "tag new prints with their title" preference (absent on installs saved
+  before File under; it migrates to the on default)
 - `mold.mobile.generation.templates.v1` — mobile-local generation templates
 - `mold.mobile.library-seen-at.v1` / `mold.mobile.library-visited.v1` — bounded
   per-host latest-print timestamps and the first-visit marker for New badges

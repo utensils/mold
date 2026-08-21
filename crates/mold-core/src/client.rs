@@ -359,6 +359,9 @@ impl MoldClient {
         let audio_meta = parse_audio_headers(resp.headers());
         // Detect video response via x-mold-video-frames header
         let video_meta = parse_video_headers(resp.headers());
+        // Advisories about the accepted request (retimings, a filing the host
+        // could not apply). Read here so every branch below carries them.
+        let request_warnings = parse_request_warnings(resp.headers());
 
         let data = resp.bytes().await?.to_vec();
         let generation_time_ms = start.elapsed().as_millis() as u64;
@@ -390,6 +393,7 @@ impl MoldClient {
                 model,
                 seed_used,
                 gpu,
+                request_warnings,
             });
         }
 
@@ -432,6 +436,7 @@ impl MoldClient {
             seed_used,
             video,
             gpu,
+            request_warnings,
         })
     }
 
@@ -589,6 +594,11 @@ impl MoldClient {
             anyhow::bail!("server error {status}: {body}");
         }
 
+        // Advisories ride the response headers, which arrive before the first
+        // SSE frame — captured now because `resp` is consumed chunk by chunk
+        // below and the headers are not reachable from a completion event.
+        let request_warnings = parse_request_warnings(resp.headers());
+
         // Parse SSE events from chunked response body
         let mut buffer = String::new();
         // The server-assigned job id, latched from the first `queued` event,
@@ -660,6 +670,7 @@ impl MoldClient {
                                 model,
                                 seed_used: complete.seed_used,
                                 gpu: complete.gpu,
+                                request_warnings,
                             }));
                         }
 
@@ -719,6 +730,7 @@ impl MoldClient {
                             seed_used: complete.seed_used,
                             video,
                             gpu: complete.gpu,
+                            request_warnings,
                         }));
                     }
                     "error" => {
@@ -830,7 +842,15 @@ impl MoldClient {
             anyhow::bail!("server error {status}: {body}");
         }
 
-        let chain: ChainResponse = resp.json().await?;
+        // Read before `resp` is consumed by `json()`. The body has its own
+        // `request_warnings` slot, but the server puts advisories on the
+        // header, so the header is the authority and the body's value (empty
+        // today) must not win over it.
+        let request_warnings = parse_request_warnings(resp.headers());
+        let mut chain: ChainResponse = resp.json().await?;
+        if !request_warnings.is_empty() {
+            chain.request_warnings = request_warnings;
+        }
         Ok(chain)
     }
 
@@ -870,6 +890,10 @@ impl MoldClient {
             let body = resp.text().await.unwrap_or_default();
             anyhow::bail!("server error {status}: {body}");
         }
+
+        // Captured before the body is drained chunk by chunk; the chain SSE
+        // headers arrive ahead of the first frame exactly as the one-shot's do.
+        let request_warnings = parse_request_warnings(resp.headers());
 
         let b64 = base64::engine::general_purpose::STANDARD;
         let mut buffer = String::new();
@@ -926,6 +950,7 @@ impl MoldClient {
                             gpu: complete.gpu,
                             script: complete.script,
                             vram_estimate: complete.vram_estimate,
+                            request_warnings,
                         }));
                     }
                     "error" => {
@@ -1890,6 +1915,37 @@ struct VideoMeta {
     duration_ms: Option<u64>,
     audio_sample_rate: Option<u32>,
     audio_channels: Option<u32>,
+}
+
+/// Read the `x-mold-request-warning` advisories off a response.
+///
+/// The server accepted the request and rendered the print; these say what it
+/// had to adjust or drop along the way — a lip-dub retiming, a filing a host
+/// with no metadata database could not apply, a collection deleted between
+/// listing and Generate. A terminal client that never reads this header turns
+/// "never a silent drop" into exactly that, which is why this is parsed on
+/// every response path rather than only where a warning is expected.
+///
+/// **Header values are never split.** The server joins several advisories
+/// with `"; "`, but its own advisory prose contains that sequence — "…were
+/// not applied; the print was generated and saved normally" — so splitting on
+/// the separator would shred one advisory into two half-sentences, each
+/// rendered as its own warning line. A joined line reads correctly as prose
+/// because the semicolons are punctuation; two fragments do not. Values are
+/// therefore taken whole.
+///
+/// `get_all` rather than `get` so that a server which one day emits one
+/// header per advisory — the lossless HTTP idiom, and the fix if this ever
+/// needs real structure — is read correctly without a client change.
+fn parse_request_warnings(headers: &reqwest::header::HeaderMap) -> Vec<String> {
+    headers
+        .get_all("x-mold-request-warning")
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 /// Parse video metadata from HTTP response headers.
@@ -3553,5 +3609,148 @@ mod tests {
         assert_eq!(tags[0].count, 4);
         client.rename_tag("sci fi", "scifi").await.unwrap();
         client.delete_tag("sci fi").await.unwrap();
+    }
+
+    // ── request advisories (`x-mold-request-warning`) ───────────────────
+
+    fn warning_headers(value: &str) -> reqwest::header::HeaderMap {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("x-mold-request-warning", value.parse().unwrap());
+        headers
+    }
+
+    /// The load-bearing one. Both filing advisories the server actually
+    /// emits contain `"; "` in their prose, so a client that split on the
+    /// server's join separator would render each of them as two dangling
+    /// half-sentences. The value is taken whole.
+    #[test]
+    fn an_advisory_containing_the_join_separator_is_never_split() {
+        for advisory in [
+            // `resolve_request_filing`, DB-disabled host.
+            "this host has no metadata database, so the requested collection and 2 tags \
+             were not applied; the print was generated and saved normally",
+            // `resolve_collection_reference`, unresolvable id.
+            "collection 'col-1' no longer exists on this host, so the print was not filed \
+             into it; its tags and everything else were applied normally",
+        ] {
+            assert_eq!(
+                super::parse_request_warnings(&warning_headers(advisory)),
+                vec![advisory.to_string()],
+                "one advisory must stay one line"
+            );
+        }
+    }
+
+    /// Several advisories arrive joined on one line and stay one line — they
+    /// read as prose, which two fragments would not. A server that one day
+    /// emits one header per advisory is read as a real list without a client
+    /// change.
+    #[test]
+    fn repeated_headers_are_read_as_separate_advisories() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.append("x-mold-request-warning", "first advisory".parse().unwrap());
+        headers.append("x-mold-request-warning", "second advisory".parse().unwrap());
+        assert_eq!(
+            super::parse_request_warnings(&headers),
+            vec!["first advisory".to_string(), "second advisory".to_string()]
+        );
+
+        // Today's joined form is one entry, verbatim.
+        assert_eq!(
+            super::parse_request_warnings(&warning_headers("first; second")),
+            vec!["first; second".to_string()]
+        );
+    }
+
+    #[test]
+    fn absent_or_empty_request_warnings_yield_nothing() {
+        assert!(super::parse_request_warnings(&reqwest::header::HeaderMap::new()).is_empty());
+        for value in ["", "   "] {
+            assert!(
+                super::parse_request_warnings(&warning_headers(value)).is_empty(),
+                "{value:?} must not render as a blank advisory"
+            );
+        }
+    }
+
+    /// The header is the whole point: a terminal client that does not read it
+    /// turns "never a silent drop" into exactly that. This drives the real
+    /// client against a real response.
+    #[tokio::test]
+    async fn generate_surfaces_the_request_warning_header() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/generate"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "image/png")
+                    .insert_header("x-mold-seed-used", "42")
+                    .insert_header(
+                        "x-mold-request-warning",
+                        "collection 'col-1' no longer exists on this host, so the print was \
+                         not filed into it; its tags and everything else were applied normally",
+                    )
+                    .set_body_bytes(b"fake-png".to_vec()),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let request: GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"a cat","model":"flux-dev:q4","width":64,"height":64,"steps":1,"guidance":1.0}"#,
+        )
+        .unwrap();
+        let response = MoldClient::new(&server.uri())
+            .generate(request)
+            .await
+            .unwrap();
+
+        assert_eq!(response.seed_used, 42);
+        assert_eq!(
+            response.request_warnings,
+            vec![
+                "collection 'col-1' no longer exists on this host, so the print was not filed \
+                 into it; its tags and everything else were applied normally"
+                    .to_string()
+            ],
+            "the advisory reaches the caller whole"
+        );
+    }
+
+    /// An ordinary generation carries no advisory, so the field stays empty
+    /// and nothing is printed. Guards against the reporting path becoming
+    /// per-print noise.
+    #[tokio::test]
+    async fn an_unwarned_generate_carries_no_advisories() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/generate"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "image/png")
+                    .insert_header("x-mold-seed-used", "7")
+                    .set_body_bytes(b"fake-png".to_vec()),
+            )
+            .mount(&server)
+            .await;
+
+        let request: GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"a cat","model":"flux-dev:q4","width":64,"height":64,"steps":1,"guidance":1.0}"#,
+        )
+        .unwrap();
+        let response = MoldClient::new(&server.uri())
+            .generate(request)
+            .await
+            .unwrap();
+        assert!(response.request_warnings.is_empty());
+        // …and it stays off the wire when the response is re-serialized.
+        let wire = serde_json::to_value(&response).unwrap();
+        assert!(wire.get("request_warnings").is_none(), "{wire}");
     }
 }

@@ -26,8 +26,14 @@ import type {
  * 3. Collapse runs of `-`; trim leading and trailing `-`.
  * 4. Cut to `maxLen` chars, then trim any trailing `-` the cut exposed.
  * 5. Empty ⇒ `""` (callers map that to `null` / `None`).
+ *
+ * Exported so a caller with its OWN cap can reuse the algorithm instead of
+ * restating it — the download name's model component is capped by a
+ * filesystem budget, not by a collection rule, so it must not inherit
+ * `COLLECTION_SLUG_MAX_LEN`. Prefer the named policies (`titleSlug`,
+ * `collectionSlug`) everywhere else.
  */
-function slugify(input: string, maxLen: number): string {
+export function slugify(input: string, maxLen: number): string {
   const lowered = input.replace(/[A-Z]/g, (char) => char.toLowerCase());
   let slug = lowered.replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
   if (slug.length > maxLen) {

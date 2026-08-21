@@ -204,10 +204,14 @@ fn adjustable(field: ParamField) -> bool {
             | ParamField::Lora
             | ParamField::StgBlocks
             | ParamField::SourceImage
+            | ParamField::IdentityImage
             | ParamField::References
             | ParamField::MaskImage
             | ParamField::ControlImage
             | ParamField::ControlModel
+            | ParamField::Title
+            | ParamField::Tags
+            | ParamField::Collection
     )
 }
 
@@ -245,12 +249,24 @@ fn row_lines(
                 ""
             };
             let label = format!("{indent}{:<w$}", field.label(), w = LABEL_W - indent.len());
-            let value = field_value(state, *field);
-            let (label_style, value_style) = if selected {
+            let mut value = field_value(state, *field);
+            let (label_style, mut value_style) = if selected {
                 (theme.param_selected(), theme.param_selected())
             } else {
                 (theme.param_label(), theme.param_value())
             };
+            // The identity refusal rides in the Photo row's own value cell:
+            // it is the row the user has to act on, and putting it there
+            // keeps every row exactly one line tall (`row_height`).
+            if *field == ParamField::IdentityImage {
+                if let Some(reason) = state.identity_error.as_deref() {
+                    value = truncate_with_ellipsis(
+                        &format!("{value} \u{2014} {reason}"),
+                        width.saturating_sub(LABEL_W + 2),
+                    );
+                    value_style = theme.error();
+                }
+            }
             let suffix = match field {
                 ParamField::Model => " \u{25be}".to_string(),
                 ParamField::Guidance if !state.guidance_adjustable() => String::new(),

@@ -12,13 +12,14 @@ import SwitchToggle from "@ui/components/SwitchToggle.vue";
 import BadgePill from "@ui/components/BadgePill.vue";
 import PanelResizeHandle from "../shell/PanelResizeHandle.vue";
 import { aspectIdFor } from "../../lib/resolutions";
-import { newGenerateForm, type GenerateForm } from "../../lib/generateForm";
+import { buildRequest, newGenerateForm, type GenerateForm } from "../../lib/generateForm";
 import { useGenerateFormStore } from "../../stores/generateForm";
 import { useModelStore } from "../../stores/models";
 import { useConnectionStore } from "../../stores/connection";
 import { useHostModelsStore } from "../../stores/hostModels";
 import { useHostsStore } from "../../stores/hosts";
 import { useAppPrefsStore } from "../../stores/appPrefs";
+import { useLibraryPrefsStore } from "../../stores/libraryPrefs";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import type { ModelEntry } from "../../lib/api/types";
 
@@ -30,8 +31,23 @@ vi.mock("../../lib/api/client", () => ({
   apiFetchTo: vi.fn(),
 }));
 vi.mock("../../lib/ipc", () => ({ ipc: {}, inTauri: () => false }));
+// The File under group reads the Library's merged tags and collections, so the
+// gallery store now fetches from Create. Serve those two listings from memory.
+const libraryListings = vi.hoisted(() => ({
+  collections: [] as { id: string; name: string; slug: string }[],
+  tags: [] as { name: string; count: number }[],
+}));
+vi.mock("@studio/api/galleryOrganization", async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  listCollections: vi.fn(() => Promise.resolve(libraryListings.collections)),
+  listTags: vi.fn(() => Promise.resolve(libraryListings.tags)),
+}));
 
-beforeEach(() => setActivePinia(createPinia()));
+beforeEach(() => {
+  setActivePinia(createPinia());
+  libraryListings.collections = [];
+  libraryListings.tags = [];
+});
 afterEach(() => (document.body.innerHTML = ""));
 
 function formFor(family: string): GenerateForm {
@@ -916,6 +932,66 @@ describe("InspectorPanel — source media in the primary form", () => {
     });
   });
 
+  it("renders the identity photo well right after source media when qualified", () => {
+    const form = formFor("flux");
+    form.model = "flux-dev:q8";
+    form.identitySupported = true;
+    const wrapper = mount(InspectorPanel, { props: { form } });
+    const field = wrapper.get("[data-test='inspector-identity']");
+    expect(field.find("[data-test='identity-photo-well']").exists()).toBe(true);
+    // Primary form, immediately below the source wells — never behind Advanced.
+    const order = wrapper
+      .findAll("[data-test='inspector-source-media'], [data-test='inspector-identity']")
+      .map((node) => node.attributes("data-test"));
+    expect(order).toEqual(["inspector-source-media", "inspector-identity"]);
+  });
+
+  it("hides identity entirely when the checkpoint has not said yes", async () => {
+    const form = formFor("flux");
+    form.model = "flux-dev:bf16";
+    const wrapper = mount(InspectorPanel, { props: { form } });
+    // Unread capability: absence is never evidence of support.
+    expect(wrapper.find("[data-test='inspector-identity']").exists()).toBe(false);
+    form.identitySupported = false;
+    await flushPromises();
+    expect(wrapper.find("[data-test='inspector-identity']").exists()).toBe(false);
+  });
+
+  it("parks a staged photo when the capability is lost, and restores it", async () => {
+    const form = formFor("flux");
+    form.model = "flux-dev:q8";
+    form.identitySupported = true;
+    form.identityImage = { filename: "ada.png", base64: "AAAA" };
+    const wrapper = mount(InspectorPanel, { props: { form } });
+    expect(wrapper.find("[data-test='inspector-identity']").exists()).toBe(true);
+
+    // Switching to an unqualified checkpoint hides the well and retains the
+    // photo — nothing is erased, nothing is refused, and `buildRequest` keeps
+    // the partition off the wire.
+    form.identitySupported = false;
+    await flushPromises();
+    expect(wrapper.find("[data-test='inspector-identity']").exists()).toBe(false);
+    expect(form.identityImage).toEqual({ filename: "ada.png", base64: "AAAA" });
+    expect(buildRequest(form).id_image).toBeUndefined();
+
+    // Selecting a qualified checkpoint again brings the well back with the
+    // photo still in it.
+    form.identitySupported = true;
+    await flushPromises();
+    expect(wrapper.find("[data-test='inspector-identity']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='identity-remove']").exists()).toBe(true);
+    expect(form.identityImage).toEqual({ filename: "ada.png", base64: "AAAA" });
+  });
+
+  it("keeps identity out of sequence mode", () => {
+    useSequenceDraftStore().output = "sequence";
+    const form = formFor("flux");
+    form.model = "flux-dev:q8";
+    form.identitySupported = true;
+    const wrapper = mount(InspectorPanel, { props: { form } });
+    expect(wrapper.find("[data-test='inspector-identity']").exists()).toBe(false);
+  });
+
   it("keeps H3 Ref2VA references out of the primary form", () => {
     const form = formFor("minimax-h3");
     form.model = "minimax-h3-ref2va:comfy-pruned-int8";
@@ -1070,5 +1146,129 @@ describe("InspectorPanel — a restored model no machine has", () => {
     const wrapper = mount(InspectorPanel, { props: { form: formFor("flux") } });
     expect(wrapper.get('[data-test="selected-model-name"]').text()).toBe("Choose a model");
     expect(wrapper.find('[data-test="selected-model-missing"]').exists()).toBe(false);
+  });
+});
+
+describe("InspectorPanel — File under", () => {
+  function connectHost(id: string, organize: boolean) {
+    const hosts = useHostsStore();
+    hosts.extras.push({
+      id,
+      label: id,
+      url: `http://${id}:7680`,
+      apiKey: null,
+      status: "ready",
+      error: null,
+      instanceId: null,
+    });
+    hosts.capabilities[id] = { gallery: { can_delete: true, organize } } as never;
+  }
+
+  it("stays hidden while no machine reports gallery.organize", () => {
+    connectHost("legacy-7680", false);
+    const wrapper = mount(InspectorPanel, { props: { form: formFor("flux") } });
+    expect(wrapper.find('[data-test="file-under-group"]').exists()).toBe(false);
+  });
+
+  it("stays hidden when the capability snapshot has not been read", () => {
+    const hosts = useHostsStore();
+    hosts.extras.push({
+      id: "unknown-7680",
+      label: "unknown",
+      url: "http://unknown:7680",
+      apiKey: null,
+      status: "ready",
+      error: null,
+      instanceId: null,
+    });
+    const wrapper = mount(InspectorPanel, { props: { form: formFor("flux") } });
+    expect(wrapper.find('[data-test="file-under-group"]').exists()).toBe(false);
+  });
+
+  it("renders between the essentials and Advanced once a machine can file", () => {
+    connectHost("halcyon-7680", true);
+    const wrapper = mount(InspectorPanel, { props: { form: formFor("flux") } });
+    const group = wrapper.get('[data-test="file-under-group"]');
+    expect(group.text()).toContain("File under");
+    const html = wrapper.html();
+    const at = (hook: string) => html.indexOf(`data-test="${hook}"`);
+    expect(at("seed-mode-random")).toBeLessThan(at("file-under-group"));
+    expect(at("file-under-group")).toBeLessThan(at("open-advanced"));
+  });
+
+  it("drops the ghost chip when Settings ▸ Library turns auto-tagging off", async () => {
+    connectHost("halcyon-7680", true);
+    useLibraryPrefsStore().autoTagTitle = false;
+    const form = formFor("flux");
+    form.title = "Smurf Village";
+    const wrapper = mount(InspectorPanel, { props: { form } });
+    await flushPromises();
+    expect(wrapper.find('[data-test="file-under-group"]').exists()).toBe(true);
+    expect(wrapper.find('[data-test="file-under-ghost-tag"]').exists()).toBe(false);
+  });
+
+  it("hides when the PINNED machine cannot file, even if another can", async () => {
+    connectHost("halcyon-7680", true);
+    connectHost("legacy-7680", false);
+    useAppPrefsStore().settings = { generateTargetHost: "legacy-7680" } as never;
+    const wrapper = mount(InspectorPanel, { props: { form: formFor("flux") } });
+    await flushPromises();
+    expect(wrapper.find('[data-test="file-under-group"]').exists()).toBe(false);
+  });
+
+  it("derives the ghost chip from the Create header title", async () => {
+    connectHost("halcyon-7680", true);
+    const form = formFor("flux");
+    const wrapper = mount(InspectorPanel, { props: { form } });
+    expect(wrapper.find('[data-test="file-under-ghost-tag"]').exists()).toBe(false);
+    form.title = "Smurf Village";
+    await flushPromises();
+    expect(wrapper.get('[data-test="file-under-ghost-tag"]').text()).toContain("smurf-village");
+  });
+
+  it("keeps the form's collection match in step with the live title", async () => {
+    connectHost("halcyon-7680", true);
+    libraryListings.collections = [{ id: "c1", name: "Smurf Village", slug: "smurf-village" }];
+    const form = formFor("flux");
+    const wrapper = mount(InspectorPanel, { props: { form } });
+    await flushPromises();
+    expect(form.fileUnderMatch).toBeNull();
+    form.title = "Smurf Village";
+    await flushPromises();
+    expect(form.fileUnderMatch).toMatchObject({ name: "Smurf Village", slug: "smurf-village" });
+    expect(wrapper.get('[data-test="file-under-collection-match"]').text()).toContain(
+      "matched to title",
+    );
+  });
+
+  it("offers the fleet's own tags as suggestions", async () => {
+    connectHost("halcyon-7680", true);
+    libraryListings.tags = [{ name: "blue", count: 9 }];
+    const wrapper = mount(InspectorPanel, { props: { form: formFor("flux") } });
+    await flushPromises();
+    await wrapper.get('[data-test="file-under-tag-input"]').setValue("bl");
+    expect(wrapper.get('[data-test="file-under-tag-suggestion"]').text()).toContain("blue");
+  });
+
+  it("writes tag edits back onto the form", async () => {
+    connectHost("halcyon-7680", true);
+    const form = formFor("flux");
+    const wrapper = mount(InspectorPanel, { props: { form } });
+    const input = wrapper.get('[data-test="file-under-tag-input"]');
+    await input.setValue("#kodak");
+    await input.trigger("keydown.enter");
+    expect(form.fileUnder.manualTags).toEqual(["kodak"]);
+  });
+
+  it("previews the filename the print will land as", async () => {
+    connectHost("halcyon-7680", true);
+    const form = formFor("flux");
+    form.model = "flux-dev:q8";
+    form.title = "Smurf Village";
+    const wrapper = mount(InspectorPanel, { props: { form } });
+    await flushPromises();
+    expect(wrapper.get('[data-test="file-under-filename"]').text()).toMatch(
+      /mold-flux-dev-q8-\d+~smurf-village\.png/,
+    );
   });
 });

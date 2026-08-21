@@ -40,6 +40,7 @@ vi.mock("../lib/sourceFitPreprocess", () => ({
 
 import GenerateView from "./GenerateView.vue";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
+import { addTag } from "@studio/lib/fileUnder";
 import { useGenerateFormStore } from "../stores/generateForm";
 import { useChainJobsStore } from "../stores/chainJobs";
 import { useComposerStore } from "../stores/composer";
@@ -629,6 +630,62 @@ describe("GenerateView — sequence output", () => {
       strength: 0.55,
       stages: [{ source_image: "FITTED" }, expect.any(Object)],
     });
+  });
+
+  it("files the STITCHED print: title, tags, and collection ride the create body", async () => {
+    readyLocal();
+    installedPayload = [videoModel];
+    useModelStore().all = [videoModel];
+    const formStore = useGenerateFormStore();
+    formStore.form.model = "ltx-video";
+    formStore.form.title = "Smurf Village";
+    formStore.form.fileUnderAutoTag = true;
+    formStore.form.fileUnder = addTag(formStore.form.fileUnder, "blue");
+    formStore.form.fileUnderMatch = { name: "River studies", slug: "river-studies" };
+    const draft = useSequenceDraftStore();
+    draft.hydrate();
+    draft.output = "sequence";
+    draft.ensureClips(25);
+    draft.clips[0]!.prompt = "opening";
+    draft.clips[1]!.prompt = "landing";
+    const create = vi.spyOn(useChainJobsStore(), "create").mockResolvedValue("job-1");
+
+    const wrapper = mountView();
+    await flushPromises();
+    wrapper.findComponent({ name: "SequenceComposer" }).vm.$emit("submit");
+    await flushPromises();
+
+    expect(create.mock.calls[0]?.[1]).toMatchObject({
+      title: "Smurf Village",
+      tags: ["smurf-village", "blue"],
+    });
+    // The title match only wins when the title's own slug names it; here the
+    // user's typed title slugs to `smurf-village`, so nothing is filed.
+    expect(create.mock.calls[0]?.[1].collection).toBeUndefined();
+  });
+
+  it("leaves the create body unfiled for an untitled, untagged sequence", async () => {
+    readyLocal();
+    installedPayload = [videoModel];
+    useModelStore().all = [videoModel];
+    useGenerateFormStore().form.model = "ltx-video";
+    const draft = useSequenceDraftStore();
+    draft.hydrate();
+    draft.output = "sequence";
+    draft.ensureClips(25);
+    draft.clips[0]!.prompt = "opening";
+    draft.clips[1]!.prompt = "landing";
+    const create = vi.spyOn(useChainJobsStore(), "create").mockResolvedValue("job-1");
+
+    const wrapper = mountView();
+    await flushPromises();
+    wrapper.findComponent({ name: "SequenceComposer" }).vm.$emit("submit");
+    await flushPromises();
+
+    const body = create.mock.calls[0]?.[1];
+    expect(body?.title).toBeUndefined();
+    expect(body?.tags).toBeUndefined();
+    expect(body?.collection).toBeUndefined();
   });
 
   it("parks Sequence images instead of sending them to an unsupported checkpoint", async () => {

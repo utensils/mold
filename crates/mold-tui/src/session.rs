@@ -697,6 +697,9 @@ mod tests {
             upscale_model: None,
             source_image_path: None,
             reference_paths: Vec::new(),
+            identity_image_path: None,
+            id_weight: mold_core::identity::ID_WEIGHT_DEFAULT,
+            id_start_step: mold_core::identity::ID_START_STEP_DEFAULT,
             strength: 0.6,
             mask_image_path: None,
             frames: 25,
@@ -709,6 +712,12 @@ mod tests {
             control_image_path: None,
             control_model: None,
             control_scale: 0.8,
+            // Creation-time filing is per-print intent, deliberately not
+            // session state — `TuiSession` has no slot for it.
+            title: None,
+            tags: Vec::new(),
+            collection: None,
+            auto_tag_title: true,
         };
 
         let session = TuiSession::from_params("a sunset", "blurry", &params);

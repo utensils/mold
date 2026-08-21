@@ -121,7 +121,9 @@ import {
 import {
   applyPrefillToForm,
   buildRequest,
+  chainFilingFields,
   cloneGenerateForm,
+  keepingPrintIdentity,
   normalizeLegacyNegativeSnapshot,
 } from "../lib/generateForm";
 import { composeStyle, mergeStyleNegative, styleHint } from "../lib/stylePresets";
@@ -131,6 +133,7 @@ import {
   audioOutputValidationError,
   cameraControlValidationError,
   fpsValidationError,
+  identityConditioningValidationError,
   profileGuidanceValidationError,
   profileStepsValidationError,
   resolutionValidationError,
@@ -172,7 +175,12 @@ import {
   recordPromptHistoryCache,
 } from "@studio/lib/promptHistoryCache";
 import { randomSeed } from "../stores/generation";
-import type { CompleteEvent, GenerateRequest, OutputMetadata } from "../lib/api/types";
+import type {
+  ChainCreateRequest,
+  CompleteEvent,
+  GenerateRequest,
+  OutputMetadata,
+} from "../lib/api/types";
 import {
   DEFAULT_VIDEO_EXPORT_CAPABILITIES,
   videoExportFilename,
@@ -192,6 +200,7 @@ import {
   persistGenerationSourceMedia,
   restoreGenerationSourceMedia,
 } from "@studio/lib/generationSourceMedia";
+import { persistIdentityPhoto, restoreIdentityPhoto } from "@studio/lib/identityConditioning";
 import { isMissingModelError } from "../lib/generateErrors";
 import { copyableError, describeTransportError } from "../lib/api/errors";
 import { startCatalogDownload } from "../lib/api/catalog";
@@ -793,6 +802,7 @@ const formValidationError = computed(
     sourceConditioningValidationError(form, {
       ignoreUnsupportedStagedSource: true,
     }) ??
+    identityConditioningValidationError(form) ??
     advancedVideoValidationError(form) ??
     wanRecipeValidationError(form),
 );
@@ -1742,11 +1752,16 @@ async function generateSequence() {
     const openingImage = openingSnapshot
       ? { ...openingSnapshot, base64: requestForm.sourceImage }
       : null;
-    const request = buildChainRequest(sequenceParams(requestForm, entry), clips, {
-      motionTailFrames,
-      enableAudio,
-      openingImage,
-    });
+    // The stitched print is the only artifact a sequence puts in the gallery,
+    // so it is what carries the header title and the File under choice.
+    const request: ChainCreateRequest = {
+      ...buildChainRequest(sequenceParams(requestForm, entry), clips, {
+        motionTailFrames,
+        enableAudio,
+        openingImage,
+      }),
+      ...chainFilingFields(requestForm),
+    };
     const currentRoute = hosts.resolveRoute(hostRoute.hostId, entry.name);
     if (
       !currentRoute ||
@@ -2030,7 +2045,14 @@ async function loadTemplate(template: GenerationTemplate) {
   // different) family can't use after the source snapshot is restored. A
   // pre-#787 template lacking `negativePromptDefault` is normalized first so
   // its empty negative reads as "untouched", not the explicit "" opt-out.
-  Object.assign(form, normalizeLegacyNegativeSnapshot(hydrated.form, installedModels.value));
+  //
+  // A template is a set of PARAMETERS. Its snapshot carries whatever title and
+  // filing the print it was saved from happened to have (`stripTemplateForm`
+  // only strips media), so applying it wholesale would rename and re-file the
+  // print in progress and flip the Settings ▸ Library auto-tag mirror.
+  keepingPrintIdentity(form, () =>
+    Object.assign(form, normalizeLegacyNegativeSnapshot(hydrated.form, installedModels.value)),
+  );
   if (form.model && !findInstalledModel(installedModels.value, form.model)) {
     toasts.push(`Model "${form.model}" isn't installed — settings applied anyway.`);
   }
@@ -3325,6 +3347,18 @@ async function generate() {
     if (request.source_image && originalSource) {
       void persistGenerationSourceMedia(request.source_image, originalSource);
     }
+    if (request.id_image) {
+      // Saved metadata records `id_image_sha256`, never the face bytes, so the
+      // photo has to be kept locally under the digest of exactly what shipped
+      // or Reuse settings has nothing to look up. Best-effort: a failed write
+      // costs a reattach later, never this print.
+      const decoded = imageDimensionsFromBase64(request.id_image);
+      void persistIdentityPhoto(request.id_image, {
+        filename: request.id_image_name ?? "identity photo",
+        width: decoded?.width ?? null,
+        height: decoded?.height ?? null,
+      });
+    }
     const chainRouting = decideGenerateRequestRouting(request, draft.family);
     if (chainRouting.kind === "reject") {
       toasts.push(chainRouting.reason, "error");
@@ -3590,10 +3624,35 @@ function applyPrefill() {
     );
     if (endFrameNotice) toasts.push(endFrameNotice, "error");
     void restorePrefillSource(prefill.metadata, restoreEpoch);
+    // Independent of the source restore above: identity is its own partition,
+    // and a print may carry a face photo on a checkpoint that takes no source
+    // image at all — the source restore's own early-outs must not skip it.
+    void restorePrefillIdentityPhoto(prefill.metadata, restoreEpoch);
   } else if ("request" in prefill && prefill.request) {
     void restoreRequestSource(prefill.request, restoreEpoch);
   }
   void nextTick(() => composerRef.value?.focus?.());
+}
+
+/**
+ * Fill in the bytes behind a reused print's identity photo.
+ *
+ * `applyMetadataToForm` restores the recorded knobs and a bytes-less reattach
+ * descriptor; the photo itself lives only in the local content-addressed
+ * stash, keyed by the digest of exactly what shipped. A miss is deliberately
+ * silent here — the well already renders `IDENTITY_PHOTO_UNAVAILABLE` for a
+ * descriptor with no bytes, and rendering a different face would be worse
+ * than saying the original is gone.
+ */
+async function restorePrefillIdentityPhoto(metadata: OutputMetadata, epoch: number) {
+  const wanted = form.identityImage;
+  if (!wanted || wanted.base64) return;
+  const restored = await restoreIdentityPhoto(metadata.id_image_sha256).catch(() => null);
+  if (!restored || epoch !== restoreEpoch) return;
+  const slot = form.identityImage;
+  // Cleared, reattached, or replaced while the lookup ran — the user wins.
+  if (!slot || slot.base64 || slot.filename !== wanted.filename) return;
+  form.identityImage = { filename: restored.filename || slot.filename, base64: restored.base64 };
 }
 
 async function restoreRequestSource(request: GenerateRequest, epoch: number) {

@@ -6,6 +6,7 @@ import {
   applyPrefillToForm,
   applyRequestToForm,
   buildRequest,
+  chainFilingFields,
   cloneGenerateForm,
   newGenerateForm,
   normalizeLegacyNegativeSnapshot,
@@ -18,6 +19,7 @@ import {
 import { MAX_LORA_STACK } from "./capabilities";
 import { WAN_FAMILY_DEFAULT_NEGATIVE_PROMPT } from "@studio/lib/negativePrompt";
 import { DEFAULT_EXTEND_OVERLAP_FRAMES } from "@studio/lib/extend";
+import { addTag, emptyFileUnderState, pickCollection } from "@studio/lib/fileUnder";
 import type { ModelEntry, OutputMetadata } from "./api/types";
 import type { GenerationProfileSet, GenerationRecipeProfile } from "@studio/lib/generationProfile";
 
@@ -2509,6 +2511,101 @@ describe("resetAdvancedToModelDefaults", () => {
   });
 });
 
+/**
+ * The typed title and its "File under" filing are the PRINT's identity, not
+ * model-owned generation controls. Only ⌘N (`clearComposer`) clears them, so a
+ * Reset — wholesale or the narrower Advanced one — restores parameters without
+ * renaming or re-filing the print in progress. `fileUnderAutoTag` rides along
+ * for the same reason: it mirrors Settings ▸ Library, and a form rewrite is
+ * not a preference change.
+ */
+describe("a reset never clears the print's identity", () => {
+  const sdxl: ModelEntry = {
+    name: "sdxl:base",
+    family: "sdxl",
+    size_gb: 7,
+    is_loaded: false,
+    hf_repo: "r",
+    default_steps: 30,
+    default_guidance: 7,
+    default_width: 1024,
+    default_height: 768,
+    description: "",
+    downloaded: true,
+  };
+
+  function filedForm(): GenerateForm {
+    const form = newGenerateForm();
+    form.model = sdxl.name;
+    form.family = sdxl.family;
+    form.prompt = "a smurf village";
+    form.title = "Smurf Village";
+    form.fileUnderAutoTag = true;
+    form.fileUnder = pickCollection(addTag(emptyFileUnderState(), "blue"), {
+      name: "River studies",
+    });
+    form.fileUnderMatch = { id: "c1", name: "Smurf Village", slug: "smurf-village" };
+    // Advanced dirt a Reset genuinely is supposed to clear.
+    form.scheduler = "ddim";
+    form.upscaleModel = "esrgan";
+    return form;
+  }
+
+  function expectFiledAsBefore(form: GenerateForm): void {
+    expect(form.title).toBe("Smurf Village");
+    expect(form.fileUnderAutoTag).toBe(true);
+    expect(form.fileUnder.manualTags).toEqual(["blue"]);
+    expect(form.fileUnder.picked).toEqual({ name: "River studies" });
+    expect(form.fileUnder.pickedExplicitly).toBe(true);
+    expect(form.fileUnderMatch).toEqual({
+      id: "c1",
+      name: "Smurf Village",
+      slug: "smurf-village",
+    });
+    // …and the next request still carries all of it.
+    const request = buildRequest(form);
+    expect(request.title).toBe("Smurf Village");
+    expect(request.tags).toEqual(["smurf-village", "blue"]);
+    expect(request.collection).toEqual({ name: "River studies" });
+  }
+
+  it("survives the inspector's wholesale Reset", () => {
+    const form = filedForm();
+    resetFormToModelDefaults(form, sdxl);
+    expect(form.scheduler).toBe("default");
+    expect(form.upscaleModel).toBe("");
+    expectFiledAsBefore(form);
+  });
+
+  it("survives the narrower Advanced Reset, which must never take MORE", () => {
+    const form = filedForm();
+    resetAdvancedToModelDefaults(form, sdxl);
+    expect(form.scheduler).toBe("default");
+    expect(form.upscaleModel).toBe("");
+    expectFiledAsBefore(form);
+  });
+
+  it("survives either Reset with no model entry to reset to", () => {
+    const wholesale = filedForm();
+    resetFormToModelDefaults(wholesale, null);
+    expectFiledAsBefore(wholesale);
+    const advanced = filedForm();
+    resetAdvancedToModelDefaults(advanced, null);
+    expectFiledAsBefore(advanced);
+  });
+
+  it("leaves an untitled, unfiled print untitled and unfiled", () => {
+    const form = newGenerateForm();
+    form.model = sdxl.name;
+    form.family = sdxl.family;
+    resetFormToModelDefaults(form, sdxl);
+    expect(form.title).toBe("");
+    expect(form.fileUnder).toEqual(emptyFileUnderState());
+    expect(form.fileUnderMatch).toBeNull();
+    expect(form.fileUnderAutoTag).toBe(false);
+  });
+});
+
 describe("source label clearing invariants (review findings)", () => {
   it("applyMetadataToForm clears the label with the image", () => {
     const form = newGenerateForm();
@@ -2583,5 +2680,417 @@ describe("print title", () => {
       [],
     );
     expect(form.title).toBe("Smurf village");
+  });
+});
+
+// ── Face-identity conditioning (PuLID, #1224) ────────────────────────────────
+// The capability is snapshotted onto the form because `buildRequest` takes only
+// the form; every rule about what may ride the wire lives in the shared
+// `@studio/lib/identityConditioning` policy, so these cover the desktop wiring.
+
+describe("identity conditioning", () => {
+  /** `"absent"` models a server that predates identity conditioning. */
+  function identityModel(supported: boolean | "absent" = true): ModelEntry {
+    const entry: ModelEntry = {
+      ...ltx2Model(),
+      name: "flux-dev:q8",
+      family: "flux",
+      default_steps: 20,
+      default_guidance: 3.5,
+      default_width: 1024,
+      default_height: 1024,
+    };
+    if (supported !== "absent") entry.supports_identity = supported;
+    return entry;
+  }
+
+  function identityForm(supported: boolean | null = true): GenerateForm {
+    const form = newGenerateForm();
+    form.prompt = "a portrait";
+    form.model = "flux-dev:q8";
+    form.family = "flux";
+    form.steps = 20;
+    form.identitySupported = supported;
+    form.identityImage = { filename: "face.png", base64: "aWRlbnRpdHk=" };
+    return form;
+  }
+
+  it("starts absent on a fresh form", () => {
+    const form = newGenerateForm();
+    expect(form.identityImage).toBeNull();
+    expect(form.identityWeight).toBeNull();
+    expect(form.identityStartStep).toBeNull();
+    expect(form.identitySupported).toBeNull();
+  });
+
+  it("ships the photo and only the knobs the user touched", () => {
+    const form = identityForm();
+    const bare = buildRequest(form);
+    expect(bare.id_image).toBe("aWRlbnRpdHk=");
+    expect(bare.id_image_name).toBe("face.png");
+    // Untouched knobs stay absent so the server's own defaults stay authoritative.
+    expect(bare.id_weight).toBeUndefined();
+    expect(bare.id_start_step).toBeUndefined();
+
+    form.identityWeight = 0.6;
+    form.identityStartStep = 3;
+    const tuned = buildRequest(form);
+    expect(tuned.id_weight).toBe(0.6);
+    expect(tuned.id_start_step).toBe(3);
+  });
+
+  it("ships nothing when the checkpoint is not qualified or has not been read", () => {
+    for (const supported of [false, null] as const) {
+      const form = identityForm(supported);
+      form.identityWeight = 2;
+      form.identityStartStep = 1;
+      const req = buildRequest(form);
+      expect(req.id_image).toBeUndefined();
+      expect(req.id_image_name).toBeUndefined();
+      expect(req.id_weight).toBeUndefined();
+      expect(req.id_start_step).toBeUndefined();
+    }
+  });
+
+  it("ships nothing without a photo, even with the knobs set", () => {
+    const form = identityForm();
+    form.identityImage = null;
+    form.identityWeight = 2;
+    form.identityStartStep = 1;
+    const req = buildRequest(form);
+    expect(req.id_image).toBeUndefined();
+    expect(req.id_weight).toBeUndefined();
+    expect(req.id_start_step).toBeUndefined();
+  });
+
+  it("never fits the photo against the canvas — it rides untouched", () => {
+    const form = identityForm();
+    const req = buildRequest(form);
+    // `source_fit` is crop provenance for composition inputs; a face reference
+    // is not one, so an identity-only request carries no fit policy at all.
+    expect(req.source_fit).toBeUndefined();
+    expect(req.id_image).toBe(form.identityImage!.base64);
+  });
+
+  it("survives cloneGenerateForm without sharing the picked object", () => {
+    const form = identityForm();
+    form.identityWeight = 1.5;
+    form.identityStartStep = 2;
+    const snapshot = cloneGenerateForm(form);
+    expect(snapshot.identityWeight).toBe(1.5);
+    expect(snapshot.identityStartStep).toBe(2);
+    expect(snapshot.identityImage).toEqual(form.identityImage);
+    expect(snapshot.identityImage).not.toBe(form.identityImage);
+    expect(snapshot.identitySupported).toBe(true);
+  });
+
+  it("snapshots the capability from the model row on selection", () => {
+    const form = newGenerateForm();
+    applyModelDefaults(form, identityModel());
+    expect(form.identitySupported).toBe(true);
+
+    applyModelDefaults(form, identityModel(false));
+    expect(form.identitySupported).toBe(false);
+
+    // Absent on a server that predates identity conditioning ⇒ "no".
+    applyModelDefaults(form, identityModel("absent"));
+    expect(form.identitySupported).toBe(false);
+  });
+
+  it("prefers the server-authored recipe over the model row", () => {
+    const form = newGenerateForm();
+    // The row says yes; the authoritative recipe says no and wins.
+    reconcileModelCapabilities(form, {
+      ...profiledLtx2Model(),
+      supports_identity: true,
+    });
+    expect(form.identitySupported).toBe(false);
+  });
+
+  it("keeps the staged photo across a capability-losing model switch", () => {
+    const form = identityForm();
+    reconcileModelCapabilities(form, identityModel(false));
+    // Staged media survives — only the wire is gated, and the inline reason
+    // plus the blocked submit is what tells the user.
+    expect(form.identityImage).not.toBeNull();
+    expect(form.identitySupported).toBe(false);
+    expect(buildRequest(form).id_image).toBeUndefined();
+  });
+
+  it("Advanced reset keeps the photo and clears the two knobs", () => {
+    const form = identityForm();
+    form.identityWeight = 2.5;
+    form.identityStartStep = 4;
+    resetAdvancedToModelDefaults(form, identityModel());
+    expect(form.identityImage).toEqual({ filename: "face.png", base64: "aWRlbnRpdHk=" });
+    expect(form.identityWeight).toBeNull();
+    expect(form.identityStartStep).toBeNull();
+  });
+
+  it("the wholesale reset clears the photo too", () => {
+    const form = identityForm();
+    form.identityWeight = 2.5;
+    form.identityStartStep = 4;
+    resetFormToModelDefaults(form, identityModel());
+    expect(form.identityImage).toBeNull();
+    expect(form.identityWeight).toBeNull();
+    expect(form.identityStartStep).toBeNull();
+  });
+
+  it("reuse settings restores the knobs and a bytes-less reattach descriptor", () => {
+    const form = newGenerateForm();
+    applyMetadataToForm(
+      form,
+      {
+        prompt: "a portrait",
+        model: "flux-dev:q8",
+        seed: 1,
+        steps: 20,
+        guidance: 3.5,
+        width: 1024,
+        height: 1024,
+        id_image_name: "face.png",
+        id_image_sha256: "b".repeat(64),
+        id_weight: 0.8,
+        id_start_step: 2,
+      },
+      [identityModel()],
+    );
+    expect(form.identityWeight).toBe(0.8);
+    expect(form.identityStartStep).toBe(2);
+    expect(form.identityImage).toEqual({ filename: "face.png", base64: "" });
+    // A reattach descriptor carries no bytes, so it can never smuggle an empty
+    // `id_image` onto the wire.
+    expect(buildRequest(form).id_image).toBeUndefined();
+  });
+
+  it("reuse settings clears identity for a print that carried none", () => {
+    const form = identityForm();
+    form.identityWeight = 2;
+    form.identityStartStep = 1;
+    applyMetadataToForm(
+      form,
+      {
+        prompt: "a portrait",
+        model: "flux-dev:q8",
+        seed: 1,
+        steps: 20,
+        guidance: 3.5,
+        width: 1024,
+        height: 1024,
+      },
+      [identityModel()],
+    );
+    expect(form.identityImage).toBeNull();
+    expect(form.identityWeight).toBeNull();
+    expect(form.identityStartStep).toBeNull();
+  });
+
+  it("an exact queued request restores its identity partition", () => {
+    const form = newGenerateForm();
+    applyRequestToForm(
+      form,
+      {
+        prompt: "a portrait",
+        model: "flux-dev:q8",
+        width: 1024,
+        height: 1024,
+        steps: 20,
+        id_image: "aWRlbnRpdHk=",
+        id_image_name: "face.png",
+        id_weight: 1.4,
+        id_start_step: 1,
+      },
+      [identityModel()],
+    );
+    expect(form.identityImage).toEqual({ filename: "face.png", base64: "aWRlbnRpdHk=" });
+    expect(form.identityWeight).toBe(1.4);
+    expect(form.identityStartStep).toBe(1);
+    expect(form.identitySupported).toBe(true);
+  });
+
+  it("prepared and batch siblings inherit the partition (they share buildRequest)", () => {
+    const form = identityForm();
+    form.identityWeight = 1.2;
+    form.batchSize = 3;
+    const req = buildRequest(cloneGenerateForm(form));
+    expect(req.batch_size).toBe(3);
+    expect(req.id_image).toBe("aWRlbnRpdHk=");
+    expect(req.id_weight).toBe(1.2);
+  });
+});
+
+// ── File under (Create-time Library organization) ──────────────────────────
+
+describe("file under", () => {
+  function baseMetadata(): OutputMetadata {
+    return {
+      prompt: "a smurf village",
+      model: "flux-dev:q8",
+      seed: 7,
+      steps: 4,
+      guidance: 3.5,
+      width: 1024,
+      height: 1024,
+    } as OutputMetadata;
+  }
+
+  it("starts as an empty draft that files nothing", () => {
+    const form = newGenerateForm();
+    expect(form.fileUnder).toEqual(emptyFileUnderState());
+    expect(form.fileUnderMatch).toBeNull();
+    const req = buildRequest(form);
+    expect(req.tags).toBeUndefined();
+    expect(req.collection).toBeUndefined();
+  });
+
+  it("never auto-tags a surface that has not opted in", () => {
+    // The mirror defaults off: a shell with no File under UI must not file a
+    // ghost tag the user was never shown.
+    const form = newGenerateForm();
+    expect(form.fileUnderAutoTag).toBe(false);
+    form.title = "Smurf Village";
+    expect(buildRequest(form).tags).toBeUndefined();
+  });
+
+  it("ships the title ghost tag plus manual tags on the wire", () => {
+    const form = newGenerateForm();
+    form.fileUnderAutoTag = true;
+    form.title = "Smurf Village";
+    form.fileUnder = addTag(form.fileUnder, "blue");
+    expect(buildRequest(form).tags).toEqual(["smurf-village", "blue"]);
+  });
+
+  it("drops the ghost tag when auto-tagging is off", () => {
+    const form = newGenerateForm();
+    form.title = "Smurf Village";
+    form.fileUnderAutoTag = false;
+    form.fileUnder = addTag(form.fileUnder, "blue");
+    expect(buildRequest(form).tags).toEqual(["blue"]);
+  });
+
+  it("files into the collection the title matched, by name only", () => {
+    const form = newGenerateForm();
+    form.title = "Smurf Village";
+    form.fileUnderMatch = { id: "host-local-uuid", name: "Smurf Village", slug: "smurf-village" };
+    expect(buildRequest(form).collection).toEqual({ name: "Smurf Village" });
+  });
+
+  it("an explicit pick outranks the title match", () => {
+    const form = newGenerateForm();
+    form.title = "Smurf Village";
+    form.fileUnderMatch = { id: "x", name: "Smurf Village", slug: "smurf-village" };
+    form.fileUnder = pickCollection(form.fileUnder, { name: "River studies" });
+    expect(buildRequest(form).collection).toEqual({ name: "River studies" });
+  });
+
+  it("survives cloneGenerateForm without sharing arrays (batch siblings)", () => {
+    const form = newGenerateForm();
+    form.fileUnderAutoTag = true;
+    form.title = "Smurf Village";
+    form.fileUnder = addTag(form.fileUnder, "blue");
+    form.fileUnderMatch = { name: "Smurf Village", slug: "smurf-village" };
+    const snapshot = cloneGenerateForm(form);
+    expect(buildRequest(snapshot).tags).toEqual(["smurf-village", "blue"]);
+    expect(buildRequest(snapshot).collection).toEqual({ name: "Smurf Village" });
+    snapshot.fileUnder.manualTags.push("mutated");
+    expect(form.fileUnder.manualTags).toEqual(["blue"]);
+    expect(snapshot.fileUnderMatch).not.toBe(form.fileUnderMatch);
+  });
+
+  it("reuse settings restores recorded tags and the collection", () => {
+    const form = newGenerateForm();
+    form.fileUnderAutoTag = true;
+    applyMetadataToForm(
+      form,
+      {
+        ...baseMetadata(),
+        title: "Smurf Village",
+        tags: ["smurf-village", "blue"],
+        collection: "River studies",
+      },
+      [],
+    );
+    // The ghost still derives from the title; the recorded copy of it must
+    // not come back as a second, manual chip.
+    expect(form.fileUnder.manualTags).toEqual(["blue"]);
+    expect(form.fileUnder.ghostRemoved).toBe(false);
+    expect(buildRequest(form).tags).toEqual(["smurf-village", "blue"]);
+    expect(buildRequest(form).collection).toEqual({ name: "River studies" });
+  });
+
+  it("restores a print that was filed WITHOUT its title tag as ghost-removed", () => {
+    const form = newGenerateForm();
+    form.fileUnderAutoTag = true;
+    applyMetadataToForm(form, { ...baseMetadata(), title: "Smurf Village", tags: ["blue"] }, []);
+    expect(form.fileUnder.ghostRemoved).toBe(true);
+    expect(buildRequest(form).tags).toEqual(["blue"]);
+  });
+
+  it("a legacy print with no recorded filing restores an empty draft", () => {
+    const form = newGenerateForm();
+    form.fileUnder = addTag(form.fileUnder, "stale");
+    applyMetadataToForm(form, { ...baseMetadata(), title: "Smurf Village" }, []);
+    expect(form.fileUnder).toEqual(emptyFileUnderState());
+  });
+
+  it("an exact queued request restores its filing too", () => {
+    const form = newGenerateForm();
+    form.fileUnderAutoTag = true;
+    applyRequestToForm(
+      form,
+      {
+        prompt: "a smurf village",
+        model: "flux-dev:q8",
+        width: 1024,
+        height: 1024,
+        steps: 4,
+        title: "Smurf Village",
+        tags: ["smurf-village", "blue"],
+        collection: { name: "River studies" },
+      },
+      [],
+    );
+    expect(form.fileUnder.manualTags).toEqual(["blue"]);
+    expect(buildRequest(form).collection).toEqual({ name: "River studies" });
+  });
+
+  it("keeps the mirrored auto-tag setting and the filing across a wholesale reset", () => {
+    const form = newGenerateForm();
+    form.fileUnderAutoTag = true;
+    form.fileUnder = addTag(form.fileUnder, "blue");
+    resetFormToModelDefaults(form, null);
+    expect(form.fileUnderAutoTag).toBe(true);
+    // The filing belongs to the print, not to the model's parameters — only
+    // ⌘N clears it. See "a reset never clears the print's identity" above.
+    expect(form.fileUnder.manualTags).toEqual(["blue"]);
+  });
+
+  it("carries the title and the filing on the chain-create body", () => {
+    const form = newGenerateForm();
+    form.fileUnderAutoTag = true;
+    form.title = "  Smurf Village  ";
+    form.fileUnder = addTag(form.fileUnder, "blue");
+    form.fileUnderMatch = { name: "Smurf Village", slug: "smurf-village" };
+    expect(chainFilingFields(form)).toEqual({
+      title: "Smurf Village",
+      tags: ["smurf-village", "blue"],
+      collection: { name: "Smurf Village" },
+    });
+  });
+
+  it("leaves every chain filing field absent for an unfiled sequence", () => {
+    expect(chainFilingFields(newGenerateForm())).toEqual({});
+  });
+
+  it("keeps the mirrored auto-tag setting across an exact-request restore", () => {
+    const form = newGenerateForm();
+    form.fileUnderAutoTag = true;
+    applyRequestToForm(
+      form,
+      { prompt: "p", model: "flux-dev:q8", width: 1024, height: 1024, steps: 4 },
+      [],
+    );
+    expect(form.fileUnderAutoTag).toBe(true);
   });
 });

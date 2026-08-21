@@ -59,8 +59,22 @@ import {
   audioOutputValidationError,
   cameraControlValidationError,
   fpsValidationError,
+  identityConditioningValidationError,
   wanRecipeValidationError,
 } from "../../lib/generateValidation";
+import {
+  ID_START_STEP_DEFAULT,
+  ID_WEIGHT_DEFAULT,
+  ID_WEIGHT_MAX,
+  ID_WEIGHT_MIN,
+  ID_WEIGHT_STEP,
+  IDENTITY_SECTION_LABEL,
+  IDENTITY_START_STEP_HINT,
+  IDENTITY_START_STEP_LABEL,
+  IDENTITY_WEIGHT_HINT,
+  IDENTITY_WEIGHT_LABEL,
+  identityActiveCount,
+} from "@studio/lib/identityConditioning";
 import { advancedActiveCount } from "../../lib/advancedCount";
 import {
   cameraMotionLoraPath,
@@ -457,6 +471,22 @@ function snapFramesField() {
 // ── Reset — restore the model's defaults, preserve prompt + prepared state.
 // Source media lives in the primary inspector stack, so it survives too; the
 // inspector's top-level Reset keeps the deliberate wholesale clear. ─────────
+// ── Identity (PuLID, #1224) ─────────────────────────────────────────────────
+// Both knobs stay `null` until touched so the server's own defaults remain
+// authoritative — the same rule the LTX-2 guidance overrides and the wan
+// recipe follow. The photo well is primary form (InspectorPanel), not here.
+const identitySupported = computed(() => props.form.identitySupported === true);
+const identityMaxStartStep = computed(() => Math.max(0, props.form.steps - 1));
+const identityWeightPlaceholder = ID_WEIGHT_DEFAULT.toFixed(1);
+const identityMessage = computed(() => identityConditioningValidationError(props.form));
+const identitySummary = computed(() => {
+  const count = identityActiveCount({
+    weight: props.form.identityWeight,
+    startStep: props.form.identityStartStep,
+  });
+  return count > 0 ? `${count} set` : "Face reference strength";
+});
+
 function reset() {
   resetAdvancedToModelDefaults(props.form, props.selectedModel);
   // The canvas comes back to the model's default, so its authority does too.
@@ -653,6 +683,63 @@ function reset() {
             >+ {{ word }}</Chip
           >
         </div>
+      </AccordionSection>
+
+      <!-- 3 · Identity (PuLID). The photo well itself is primary form; only
+           these two knobs are Advanced, and only when the checkpoint says it
+           accepts a face. -->
+      <AccordionSection
+        v-if="identitySupported"
+        icon="sliders"
+        :title="IDENTITY_SECTION_LABEL"
+        :summary="identitySummary"
+        :open="true"
+        :header-interactive="false"
+        data-test="section-identity"
+      >
+        <label class="ms-guidance__label">
+          {{ IDENTITY_WEIGHT_LABEL }}
+          <input
+            type="number"
+            inputmode="decimal"
+            :step="ID_WEIGHT_STEP"
+            :min="ID_WEIGHT_MIN"
+            :max="ID_WEIGHT_MAX"
+            :placeholder="identityWeightPlaceholder"
+            class="ms-input data-mono"
+            data-test="identity-weight"
+            :value="form.identityWeight ?? ''"
+            @input="form.identityWeight = numberOrNull(($event.target as HTMLInputElement).value)"
+          />
+        </label>
+        <p class="ms-hint">{{ IDENTITY_WEIGHT_HINT }}</p>
+        <label class="ms-guidance__label ms-label--mt">
+          {{ IDENTITY_START_STEP_LABEL }}
+          <input
+            type="number"
+            inputmode="numeric"
+            step="1"
+            min="0"
+            :max="identityMaxStartStep"
+            :placeholder="String(ID_START_STEP_DEFAULT)"
+            class="ms-input data-mono"
+            data-test="identity-start-step"
+            :aria-invalid="identityMessage ? 'true' : undefined"
+            :value="form.identityStartStep ?? ''"
+            @input="
+              form.identityStartStep = numberOrNull(($event.target as HTMLInputElement).value)
+            "
+          />
+        </label>
+        <p class="ms-hint">{{ IDENTITY_START_STEP_HINT }}</p>
+        <p
+          v-if="identityMessage"
+          class="ms-error ms-error--mt"
+          role="alert"
+          data-test="identity-error"
+        >
+          {{ identityMessage }}
+        </p>
       </AccordionSection>
 
       <!-- H3 Ref2VA ordered references. FL2VA boundaries and every other

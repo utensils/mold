@@ -322,6 +322,11 @@ async fn shim_start_job(state: &AppState, req: ChainRequest) -> Result<ShimJob, 
         .normalise_with_family(Some(&family))
         .map_err(|e| ApiError::validation(e.to_string()))?;
     validate_and_normalize_chain_family(&authority.config, &mut req)?;
+    // Resolve the stitched print's filing against this host before the job is
+    // frozen: publication only ever files by name, and the manifest keeps
+    // this request verbatim, so an unresolved id would still be unresolved
+    // on a resume days later.
+    let filing_warnings = crate::routes::resolve_collection_reference(db, &mut req.collection);
     crate::routes::materialize_chain_camera_controls(state, &authority.config, &req).await?;
 
     let original_format = req.output_format;
@@ -349,6 +354,7 @@ async fn shim_start_job(state: &AppState, req: ChainRequest) -> Result<ShimJob, 
         job_id,
         original_format,
         output_mode,
+        filing_warnings,
         guard,
     })
 }
@@ -365,6 +371,10 @@ struct ShimJob {
     job_id: String,
     original_format: OutputFormat,
     output_mode: mold_core::GenerationOutputMode,
+    /// Advisories from resolving the stitched print's filing, carried out to
+    /// the response as `x-mold-request-warning` so a dropped collection is
+    /// never a silent drop.
+    filing_warnings: Vec<String>,
     guard: EphemeralClaimGuard,
 }
 
@@ -618,6 +628,7 @@ fn shim_build_response_and_cleanup(
             .flatten(),
     };
     let response = ChainResponse {
+        request_warnings: Vec::new(),
         video,
         stage_count: manifest.stage_status.len() as u32,
         gpu: None,
@@ -1228,12 +1239,17 @@ pub async fn generate_chain(
         .into_response();
     }
     let state_for_build = state.clone();
+    let filing_warnings = shim.filing_warnings.clone();
     match tokio::task::spawn_blocking(move || {
         shim_build_response_and_cleanup(&state_for_build, shim)
     })
     .await
     {
-        Ok(Ok(result)) => Json(result.response).into_response(),
+        Ok(Ok(result)) => (
+            crate::routes::request_warning_headers(&filing_warnings),
+            Json(result.response),
+        )
+            .into_response(),
         Ok(Err(api_err)) => api_err.into_response(),
         Err(err) => ApiError::internal(format!("legacy chain shim response task failed: {err}"))
             .into_response(),
@@ -1265,7 +1281,13 @@ pub async fn generate_chain_stream(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(req): Json<ChainRequest>,
-) -> Result<Sse<impl futures_core::Stream<Item = Result<SseEvent, Infallible>>>, ApiError> {
+) -> Result<
+    (
+        HeaderMap,
+        Sse<impl futures_core::Stream<Item = Result<SseEvent, Infallible>>>,
+    ),
+    ApiError,
+> {
     if let Some(reason) = state.generation_unavailable() {
         return Err(ApiError::generation_unavailable(reason));
     }
@@ -1280,6 +1302,7 @@ pub async fn generate_chain_stream(
         ));
     }
     let shim = shim_start_job(&state, req).await?;
+    let filing_warnings = shim.filing_warnings.clone();
     tracing::info!(job_id = %shim.job_id, "generate/chain/stream legacy shim request");
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<ChainSseMessage>();
     let state_clone = state.clone();
@@ -1455,10 +1478,16 @@ pub async fn generate_chain_stream(
     let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(rx)
         .map(|msg| Ok::<_, Infallible>(chain_sse_event(msg)));
 
-    Ok(Sse::new(stream).keep_alive(
-        KeepAlive::new()
-            .interval(std::time::Duration::from_secs(15))
-            .text("ping"),
+    // The filing advisory rides the response headers, which are sent before
+    // the first SSE frame — the same `x-mold-request-warning` the one-shot
+    // path uses, so a dropped collection is never a silent drop here either.
+    Ok((
+        crate::routes::request_warning_headers(&filing_warnings),
+        Sse::new(stream).keep_alive(
+            KeepAlive::new()
+                .interval(std::time::Duration::from_secs(15))
+                .text("ping"),
+        ),
     ))
 }
 
@@ -1478,6 +1507,9 @@ mod tests {
 
     fn req(format: OutputFormat) -> ChainRequest {
         ChainRequest {
+            collection: None,
+            tags: None,
+            title: None,
             model: "ltx-2-19b-distilled:mock".into(),
             stages: vec![
                 ChainStage {
@@ -2227,6 +2259,7 @@ mod tests {
         let result = shim_build_response_and_cleanup(
             &state,
             ShimJob {
+                filing_warnings: Vec::new(),
                 job_id: row.id.clone(),
                 original_format: OutputFormat::Mp4,
                 output_mode: mold_core::GenerationOutputMode::Sequence,
@@ -2300,6 +2333,7 @@ mod tests {
         let result = shim_build_response_and_cleanup(
             &state,
             ShimJob {
+                filing_warnings: Vec::new(),
                 job_id: row.id.clone(),
                 original_format: OutputFormat::Apng,
                 output_mode: mold_core::GenerationOutputMode::Sequence,

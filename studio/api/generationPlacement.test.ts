@@ -158,6 +158,19 @@ describe("generation placement preview", () => {
     });
   });
 
+  test("drops creation-time filing, which is user text with no bearing on placement", () => {
+    const result = redactGenerationForPlacement({
+      prompt: "secret prompt",
+      model: "cv:123",
+      width: 1024,
+      tags: ["client-x", "unannounced"],
+      collection: { name: "Client X — unannounced campaign" },
+    });
+    expect(result).toEqual({ prompt: "", model: "cv:123", width: 1024 });
+    expect("tags" in result).toBe(false);
+    expect("collection" in result).toBe(false);
+  });
+
   test("ranks normalized completion then setup then stable host id", () => {
     const rows = [
       { hostId: "z", roundTripMs: 20, preview: planned(80, 1) },

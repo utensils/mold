@@ -170,6 +170,9 @@ fn build_sequence_request(params: SequenceParams<'_>) -> Result<ChainRequest, St
         mold_core::validation::DEFAULT_EXTEND_OVERLAP_FRAMES,
     );
     Ok(ChainRequest {
+        collection: None,
+        tags: None,
+        title: None,
         model: params.model,
         stages,
         motion_tail_frames,

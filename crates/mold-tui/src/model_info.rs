@@ -21,6 +21,11 @@ pub struct ModelCapabilities {
     pub supports_controlnet: bool,
     /// Whether the model supports LoRA adapters.
     pub supports_lora: bool,
+    /// Whether this exact checkpoint accepts a PuLID face-identity reference.
+    /// Derived only from the server's additive `/api/models[].supports_identity`
+    /// — absent means false, because a build that cannot execute identity
+    /// conditioning refuses the request rather than rendering a faceless print.
+    pub supports_identity: bool,
     /// Whether the model is a video model (supports frames/fps params).
     pub supports_video: bool,
     /// Whether the model can emit synchronized audio with video.
@@ -51,6 +56,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_mask: false,
             supports_controlnet: false,
             supports_lora: false,
+            supports_identity: false,
             supports_video: true,
             supports_audio: true,
             audio_required: true,
@@ -70,6 +76,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_mask: true,
             supports_controlnet: true,
             supports_lora: true,
+            supports_identity: false,
             supports_video: false,
             supports_audio: false,
             audio_required: false,
@@ -87,6 +94,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_mask: true,
             supports_controlnet: false,
             supports_lora: true,
+            supports_identity: false,
             supports_video: false,
             supports_audio: false,
             audio_required: false,
@@ -104,6 +112,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_mask: false,
             supports_controlnet: false,
             supports_lora: true,
+            supports_identity: false,
             supports_video: false,
             supports_audio: false,
             audio_required: false,
@@ -121,6 +130,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_mask: false,
             supports_controlnet: false,
             supports_lora: false,
+            supports_identity: false,
             supports_video: false,
             supports_audio: false,
             audio_required: false,
@@ -138,6 +148,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_mask: true,
             supports_controlnet: false, // ControlNet only supported on SD1.5
             supports_lora: true,
+            supports_identity: false,
             supports_video: false,
             supports_audio: false,
             audio_required: false,
@@ -155,6 +166,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_mask: false,
             supports_controlnet: false,
             supports_lora: true,
+            supports_identity: false,
             supports_video: false,
             supports_audio: false,
             audio_required: false,
@@ -172,6 +184,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_mask: false,
             supports_controlnet: false,
             supports_lora: true,
+            supports_identity: false,
             supports_video: false,
             supports_audio: false,
             audio_required: false,
@@ -189,6 +202,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_mask: false,
             supports_controlnet: false,
             supports_lora: true,
+            supports_identity: false,
             supports_video: false,
             supports_audio: false,
             audio_required: false,
@@ -206,6 +220,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_mask: false,
             supports_controlnet: false,
             supports_lora: true,
+            supports_identity: false,
             supports_video: false,
             supports_audio: false,
             audio_required: false,
@@ -223,6 +238,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_mask: false,
             supports_controlnet: false,
             supports_lora: false,
+            supports_identity: false,
             supports_video: true,
             supports_audio: false,
             audio_required: false,
@@ -240,6 +256,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_mask: false,
             supports_controlnet: false,
             supports_lora: true,
+            supports_identity: false,
             supports_video: true,
             supports_audio: true,
             audio_required: false,
@@ -265,6 +282,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_mask: false,
             supports_controlnet: false,
             supports_lora: true,
+            supports_identity: false,
             supports_video: true,
             supports_audio: false,
             audio_required: false,
@@ -282,6 +300,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_mask: false,
             supports_controlnet: false,
             supports_lora: false,
+            supports_identity: false,
             supports_video: false,
             supports_audio: false,
             audio_required: false,
@@ -293,7 +312,8 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
 }
 
 /// Refine family capabilities with the selected checkpoint's additive
-/// `/api/models[].supports_audio` and `[].source_image` facts. Older servers
+/// `/api/models[].supports_audio`, `[].source_image`, and
+/// `[].supports_identity` facts. Older servers
 /// omit the fields, so `None` preserves the family-level LTX-2 capability and
 /// the Wan name heuristic; a current server's explicit value hides a control
 /// the checkpoint cannot honor, or keeps one it cannot run without.
@@ -303,8 +323,15 @@ pub fn capabilities_for_model(
     advertised_audio_support: Option<bool>,
     advertised_guidance: Option<mold_core::GuidanceCapabilities>,
     advertised_source_image: Option<mold_core::SourceImageCapability>,
+    advertised_identity: Option<bool>,
 ) -> ModelCapabilities {
     let mut caps = capabilities_for_family(family);
+    // Identity is advertised-only. There is no family default and no name
+    // heuristic: `supports_identity` is true exactly when this server both
+    // links the PuLID contract and can execute it, so an absent field is
+    // "no" rather than "unknown" — offering the control against a server
+    // that would refuse it is worse than withholding it.
+    caps.supports_identity = advertised_identity == Some(true);
     caps.supports_references = mold_core::minimax_h3::is_family(family)
         && mold_core::minimax_h3::task_for_model(model)
             == Some(mold_core::minimax_h3::Task::Ref2va);
@@ -432,10 +459,12 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         let fl2va = capabilities_for_model(
             mold_core::minimax_h3::FAMILY,
             mold_core::minimax_h3::FL2VA_COMFY,
+            None,
             None,
             None,
             None,
@@ -521,7 +550,7 @@ mod tests {
         // The per-model refinement must not resurrect audio for wan the way
         // an advertised `supports_audio` can for LTX-2.
         assert!(
-            !capabilities_for_model("wan", "wan22-t2v-a14b:q5", Some(true), None, None)
+            !capabilities_for_model("wan", "wan22-t2v-a14b:q5", Some(true), None, None, None)
                 .supports_audio
         );
     }
@@ -540,7 +569,7 @@ mod tests {
             "wan22-ti2v-5b:fp16",
         ] {
             assert!(
-                capabilities_for_model("wan", model, None, None, None).supports_source_image,
+                capabilities_for_model("wan", model, None, None, None, None).supports_source_image,
                 "{model} takes a source image"
             );
         }
@@ -552,14 +581,15 @@ mod tests {
             "cv:12345",
         ] {
             assert!(
-                !capabilities_for_model("wan", model, None, None, None).supports_source_image,
+                !capabilities_for_model("wan", model, None, None, None, None).supports_source_image,
                 "{model} is text-to-video; the engine rejects an image"
             );
         }
 
         // Other families are untouched by the wan-specific narrowing.
         assert!(
-            capabilities_for_model("sdxl", "sdxl:fp16", None, None, None).supports_source_image
+            capabilities_for_model("sdxl", "sdxl:fp16", None, None, None, None)
+                .supports_source_image
         );
     }
 
@@ -573,7 +603,7 @@ mod tests {
 
         for capability in [Optional, Required] {
             assert!(
-                capabilities_for_model("wan", "cv:12345", None, None, Some(capability))
+                capabilities_for_model("wan", "cv:12345", None, None, Some(capability), None)
                     .supports_source_image,
                 "{capability:?} keeps the Source row on a name the heuristic reads as T2V"
             );
@@ -584,7 +614,8 @@ mod tests {
                 "some-i2v-flavored-t2v",
                 None,
                 None,
-                Some(Unsupported)
+                Some(Unsupported),
+                None,
             )
             .supports_source_image
         );
@@ -598,6 +629,7 @@ mod tests {
                 None,
                 None,
                 Some(Required),
+                None,
             )
             .supports_source_image
         );
@@ -657,19 +689,24 @@ mod tests {
 
     #[test]
     fn checkpoint_audio_fact_narrows_optional_audio_but_not_mandatory_h3_audio() {
-        assert!(capabilities_for_model("ltx2", "ltx-2-dev", None, None, None).supports_audio);
-        assert!(capabilities_for_model("ltx2", "ltx-2-dev", Some(true), None, None).supports_audio);
+        assert!(capabilities_for_model("ltx2", "ltx-2-dev", None, None, None, None).supports_audio);
         assert!(
-            !capabilities_for_model("ltx2", "ltx-2-dev", Some(false), None, None).supports_audio
+            capabilities_for_model("ltx2", "ltx-2-dev", Some(true), None, None, None)
+                .supports_audio
         );
         assert!(
-            !capabilities_for_model("ltx-video", "ltx-video-dev", Some(true), None, None)
+            !capabilities_for_model("ltx2", "ltx-2-dev", Some(false), None, None, None)
+                .supports_audio
+        );
+        assert!(
+            !capabilities_for_model("ltx-video", "ltx-video-dev", Some(true), None, None, None)
                 .supports_audio
         );
         let mandatory_h3 = capabilities_for_model(
             mold_core::minimax_h3::FAMILY,
             mold_core::minimax_h3::FL2VA_COMFY,
             Some(false),
+            None,
             None,
             None,
         );
@@ -680,11 +717,11 @@ mod tests {
     #[test]
     fn ltx_negative_prompt_support_tracks_the_checkpoint_recipe() {
         assert!(
-            capabilities_for_model("ltx2", "ltx-2.3-22b-dev:fp8", None, None, None)
+            capabilities_for_model("ltx2", "ltx-2.3-22b-dev:fp8", None, None, None, None)
                 .supports_negative_prompt
         );
         assert!(
-            !capabilities_for_model("ltx2", "ltx-2.3-22b-distilled:fp8", None, None, None)
+            !capabilities_for_model("ltx2", "ltx-2.3-22b-distilled:fp8", None, None, None, None)
                 .supports_negative_prompt
         );
         assert!(
@@ -693,7 +730,8 @@ mod tests {
                 "ltx-video-0.9.8-13b-dev:bf16",
                 None,
                 None,
-                None
+                None,
+                None,
             )
             .supports_negative_prompt
         );
@@ -703,6 +741,7 @@ mod tests {
                 "hf:opaque/checkpoint",
                 None,
                 Some(mold_core::GuidanceCapabilities::FIXED_ONE),
+                None,
                 None,
             )
             .supports_negative_prompt
@@ -780,6 +819,7 @@ mod tests {
             mold_core::minimax_h3::FL2VA_COMFY,
             Some(false),
             Some(mold_core::GuidanceCapabilities::ADJUSTABLE_CFG),
+            None,
             None,
         );
         assert!(contradictory.audio_required);

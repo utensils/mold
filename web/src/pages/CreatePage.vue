@@ -15,6 +15,8 @@ import ControlsAside from "../components/create/ControlsAside.vue";
 import CreateModelPicker from "../components/create/CreateModelPicker.vue";
 import AdvancedDrawer from "../components/create/AdvancedDrawer.vue";
 import SourceMediaPanel from "../components/create/SourceMediaPanel.vue";
+import IdentityPanel from "../components/create/IdentityPanel.vue";
+import FileUnderGroup from "../components/create/FileUnderGroup.vue";
 import SequenceOpeningImagePanel from "../components/create/SequenceOpeningImagePanel.vue";
 import ActivityStrip from "../components/create/ActivityStrip.vue";
 import EstimateBadge from "../components/create/EstimateBadge.vue";
@@ -199,6 +201,15 @@ import {
   restoreGenerationSourceMedia,
   sha256HexOfBase64,
 } from "@studio/lib/generationSourceMedia";
+import {
+  IDENTITY_PHOTO_UNAVAILABLE,
+  identityActiveCount,
+  identityProvenance,
+  identityValidationError,
+  persistIdentityPhoto,
+  restoreIdentityPhoto,
+  supportsIdentity,
+} from "@studio/lib/identityConditioning";
 import { useStatusPoll } from "../composables/useStatusPoll";
 import {
   useHostRouting,
@@ -206,6 +217,8 @@ import {
   type InfeasibleHost,
 } from "../composables/useHostRouting";
 import { usePullResume } from "../composables/usePullResume";
+import { useFileUnder } from "../composables/useFileUnder";
+import { autoTagTitle } from "../lib/fileUnder";
 import ModelInstallTargetDialog from "../components/models/ModelInstallTargetDialog.vue";
 import { profileConflictMessage } from "@studio/lib/profileFleet";
 import { generationCapabilitiesForFamily } from "../lib/generateCapabilities";
@@ -323,6 +336,30 @@ function onTitleInput(value: string) {
   const result = validatePrintTitle(value);
   titleError.value = result.ok ? "" : result.reason;
 }
+
+// ── File under (Create-time Library organization) ─────────────────────
+// The group is capability-gated per machine: `useFileUnder` reads the same
+// per-host organization snapshot the Library builds, so a fleet whose
+// machines cannot file (older server, MOLD_DB_DISABLE) renders no dead
+// controls. Under Auto / Most capable there is no pinned machine, so the
+// gate asks whether ANY machine in the fleet can file.
+const fileUnder = useFileUnder({
+  title: () => form.state.value.title,
+  targetHostId: () => {
+    const selection = routing.targetId.value;
+    return selection === AUTO_TARGET_ID || selection === CAPABLE_TARGET_ID
+      ? null
+      : selection;
+  },
+});
+/** Frozen so the "files as …" preview does not tick while it is on screen. */
+const fileUnderStamp = Date.now();
+// Re-probe when the fleet changes: a machine that just connected may be the
+// one that can file, and its collections join the picker.
+watch(
+  () => routing.hosts.value.map((host) => host.id).join(","),
+  () => void fileUnder.refresh().catch(() => {}),
+);
 
 // ── Expansion routing (issue #1162 §5) ────────────────────────────────
 // The generation router is model-aware about the CHECKPOINT and knows nothing
@@ -1512,6 +1549,49 @@ const capabilities = computed(() =>
     effectiveGenerationRecipe(currentModel.value, form.state.value.pipeline),
   ),
 );
+// ── Face identity (PuLID, #1224) ──────────────────────────────────────
+// The gate mirrors `toRequest`: the resolved catalog row's server-authored
+// recipe first, its additive `supports_identity` next, and the snapshot taken
+// on model change when no row has landed yet.
+const identitySupported = computed(() =>
+  currentModel.value
+    ? supportsIdentity(
+        effectiveGenerationRecipe(
+          currentModel.value,
+          form.state.value.pipeline,
+        ),
+        currentModel.value,
+      )
+    : (form.state.value.identitySupported ?? false),
+);
+/** Set when a reused print's identity photo is no longer on this device. */
+const identityRestoreNotice = ref<string | null>(null);
+// Declared with the ref rather than beside its only reader: a Library
+// handover fires an `immediate` watcher during setup, which reaches
+// `restoreReusedIdentityPhoto` before a later `let` would be initialized.
+let identityRestoreEpoch = 0;
+/** Why the identity partition would be refused, in the server's own order. */
+const identityError = computed(() =>
+  sequenceMode.value
+    ? // The chain wire has no identity slot, so nothing here can be refused
+      // for it — and a hidden control must never block Generate.
+      null
+    : identityValidationError({
+        supported: identitySupported.value,
+        image: form.state.value.identityImage?.base64
+          ? {
+              base64: form.state.value.identityImage.base64,
+              filename: form.state.value.identityImage.filename,
+            }
+          : null,
+        weight: form.state.value.identityWeight ?? null,
+        startStep: form.state.value.identityStartStep ?? null,
+        steps: form.state.value.steps,
+        hasLora: form.state.value.loras.length > 0,
+        hasSourceImage: form.state.value.imageAttachments.length > 0,
+      }),
+);
+
 /** The sequence opening frame is source media, so it obeys the selected
  * checkpoint's own source-image contract (#772) exactly as the one-shot well
  * does: an `unsupported` checkpoint renders no well at all, while an absent
@@ -1881,6 +1961,14 @@ async function onSubmitSequenceInner(
       "Choose an installed sequence-capable video model on the selected machine.";
     return;
   }
+  // The stitched print carries a title and its filing, so an invalid title
+  // blocks a sequence exactly as it blocks a one-shot.
+  const sequenceTitle = validatePrintTitle(form.state.value.title ?? "");
+  if (!sequenceTitle.ok) {
+    titleError.value = sequenceTitle.reason;
+    composerError.value = sequenceTitle.reason;
+    return;
+  }
   // Freeze every request-affecting value at the click boundary. Source
   // preprocessing may take minutes; edits during that await belong to the
   // next submission and must not create a hybrid request.
@@ -2055,6 +2143,8 @@ async function onSubmitSequenceInner(
       );
     }
     route = feasibility.route;
+    // Title and filing describe the STITCHED print — a sequence renders one
+    // print, and the clips it stitches are never filed individually.
     const operationId = createUuid();
     sequenceCancellationRequest = () =>
       chainJobs.cancelMutation(
@@ -2065,7 +2155,11 @@ async function onSubmitSequenceInner(
       );
     const jobId = await chainJobs.create(
       route.hostId,
-      req,
+      {
+        ...req,
+        ...(sequenceTitle.value ? { title: sequenceTitle.value } : {}),
+        ...fileUnder.requestFields(),
+      },
       route.target,
       operationId,
     );
@@ -2231,8 +2325,11 @@ function applySequenceReuse(metadata: OutputMetadata) {
   form.state.value = applyMetadataToForm(form.state.value, metadata, {
     models: models.value,
   });
+  void restoreReusedIdentityPhoto(metadata);
   // Reusing a sequence must not overwrite the parked one-shot prompt.
   form.state.value.prompt = oneShotPrompt;
+  // Restore what the stitched print was actually filed under.
+  fileUnder.restoreFromMetadata(metadata);
 
   // The live tail belongs to the model selected NOW, not the recorded one.
   const { clips, raised } = clampClipsToMotionTail(
@@ -2306,6 +2403,53 @@ watch(modelsLoaded, (loaded) => {
   pendingEndFrameNotice.value = null;
   noticeFirstLastFrameRestore(pending);
 });
+
+/**
+ * Reuse settings on an identity print: `applyMetadataToForm` has already
+ * installed the bytes-less reattach descriptor, so all that is left is
+ * looking the face itself back up in the local content-addressed stash by
+ * the recorded `id_image_sha256`.
+ *
+ * A miss is disclosed INLINE, beside the well — never as a toast that claims
+ * the reuse succeeded. Without the photo the request carries no identity at
+ * all (`identityRequestFields` refuses an empty payload), which would render
+ * a completely different face under the same prompt and seed.
+ */
+async function restoreReusedIdentityPhoto(metadata: OutputMetadata) {
+  const epoch = ++identityRestoreEpoch;
+  identityRestoreNotice.value = null;
+  const provenance = identityProvenance(metadata);
+  if (!provenance) return;
+  const restored = await restoreIdentityPhoto(provenance.sha256);
+  // The lookup can take a moment; never clobber a slot the user has since
+  // reattached, and stand down entirely if another reuse has landed.
+  if (epoch !== identityRestoreEpoch) return;
+  const descriptor = form.state.value.identityImage;
+  if (!descriptor || descriptor.base64) return;
+  if (!restored) {
+    identityRestoreNotice.value = IDENTITY_PHOTO_UNAVAILABLE;
+    return;
+  }
+  form.state.value = {
+    ...form.state.value,
+    identityImage: {
+      kind: "upload",
+      filename: restored.filename || descriptor.filename,
+      base64: restored.base64,
+      width: restored.width ?? null,
+      height: restored.height ?? null,
+      mime: restored.mime ?? null,
+    },
+  };
+}
+// The disclosure is about THIS descriptor; a photo the user attaches
+// afterwards retires it.
+watch(
+  () => Boolean(form.state.value.identityImage?.base64),
+  (attached) => {
+    if (attached) identityRestoreNotice.value = null;
+  },
+);
 
 /**
  * FL2VA reuse restores its first/last frames as bytes-less reattach
@@ -2399,6 +2543,8 @@ function applyGenerationHandoff() {
   form.state.value = applyMetadataToForm(form.state.value, metadata, {
     models: models.value,
   });
+  void restoreReusedIdentityPhoto(metadata);
+  fileUnder.restoreFromMetadata(metadata);
   noticeFirstLastFrameRestore(metadata);
 }
 watch(pendingGenerationHandoff(), applyGenerationHandoff, { immediate: true });
@@ -2430,6 +2576,9 @@ function onAppendPromptPhrase(phrase: string) {
 function onNewPrint() {
   const model = currentModel.value;
   if (model) form.applyModelDefaults(model);
+  // A new print files itself from scratch — the ghost chip and the title
+  // match re-derive from whatever this one is called.
+  fileUnder.reset();
   form.state.value.prompt = "";
   form.state.value.originalPrompt = null;
   form.state.value.stylePreset = null;
@@ -2540,6 +2689,14 @@ const advCount = computed(() =>
             guidanceOverrideCount(form.state.value.guidanceOverrides) > 0),
         wanRecipe: capabilities.value.wanRecipe.supported
           ? wanRecipeCount(form.state.value.wanRecipe)
+          : 0,
+        // Capability gating is the caller's job (advancedCount.ts): a knob
+        // whose group does not render must not inflate the badge.
+        identity: identitySupported.value
+          ? identityActiveCount({
+              weight: form.state.value.identityWeight ?? null,
+              startStep: form.state.value.identityStartStep ?? null,
+            })
           : 0,
       }),
 );
@@ -2874,15 +3031,14 @@ function validateSubmit(): boolean {
   }
   // An invalid print title blocks the submit like every other inline
   // validation — `toRequest` would silently drop it otherwise, generating
-  // an untitled print despite a populated field (codex review). Sequences
-  // carry no title slot on the wire, so a stale one never blocks them.
-  if (!sequenceMode.value) {
-    const titleCheck = validatePrintTitle(form.state.value.title ?? "");
-    if (!titleCheck.ok) {
-      titleError.value = titleCheck.reason;
-      composerError.value = titleCheck.reason;
-      return false;
-    }
+  // an untitled print despite a populated field (codex review). A sequence
+  // now carries a title too (it renders one stitched print), so the check
+  // applies to both outputs.
+  const titleCheck = validatePrintTitle(form.state.value.title ?? "");
+  if (!titleCheck.ok) {
+    titleError.value = titleCheck.reason;
+    composerError.value = titleCheck.reason;
+    return false;
   }
   const h3Error = h3FrameError.value;
   if (h3Error) {
@@ -2991,6 +3147,14 @@ function validateSubmit(): boolean {
   if (conditioningError) {
     composerError.value = conditioningError;
     showAdvanced.value = true;
+    return false;
+  }
+  // Identity is refused as a COMBINATION (a LoRA, a source image, a knob with
+  // no photo, an unqualified checkpoint), so the block has to happen here as
+  // well as inline: `toRequest` silently drops the whole partition, which
+  // would otherwise render a stranger's face without a word.
+  if (identityError.value) {
+    composerError.value = identityError.value;
     return false;
   }
   if (form.state.value.icLoraControl) {
@@ -3331,10 +3495,16 @@ function requestCopyCount(request: GenerateRequestWire): number {
 }
 
 function submitRequestCopies(
-  request: GenerateRequestWire,
+  base: GenerateRequestWire,
   decision: ReturnType<typeof decideGenerateRequestRouting>,
   route: HostRoute | null,
 ): void {
+  // Batch N shares ONE File under choice, exactly like it shares the prompt
+  // and the title: every sibling lands with the same tags and collection.
+  const request: GenerateRequestWire = {
+    ...base,
+    ...fileUnder.requestFields(),
+  };
   const copies = requestCopyCount(request);
   if (copies === 1) {
     stream.submit(request, decision, normalizeSubmitRoute(route, request));
@@ -3579,6 +3749,18 @@ async function onSubmitInner(
   }
   if (req.source_image && originalSource) {
     void persistGenerationSourceMedia(req.source_image, originalSource);
+  }
+  // The identity photo never reaches the server's metadata as bytes, only as
+  // `id_image_sha256`, so keep the payload in the same content-addressed
+  // local stash a source image uses or Reuse settings has nothing to find.
+  if (req.id_image) {
+    const staged = form.state.value.identityImage;
+    void persistIdentityPhoto(req.id_image, {
+      filename: req.id_image_name || staged?.filename || "identity photo",
+      width: staged?.width ?? null,
+      height: staged?.height ?? null,
+      mime: staged?.mime ?? null,
+    });
   }
   const finalizedResult = route
     ? decision.kind === "chain"
@@ -4016,6 +4198,9 @@ async function queueVariations() {
       // per-job image count.
       const request: GenerateRequestWire = {
         ...prepared.baseRequest,
+        // Prepared siblings share one filing decision, read at queue time —
+        // the reviewed prompts are what was frozen, not where they file.
+        ...fileUnder.requestFields(),
         prompt,
         batch_size: 1,
         original_prompt: prepared.rootPrompt ?? prepared.sourcePrompt,
@@ -4184,6 +4369,8 @@ function recreateFromGallery(item: GalleryImage) {
     format: item.format,
     models: models.value,
   });
+  void restoreReusedIdentityPhoto(item.metadata);
+  fileUnder.restoreFromMetadata(item.metadata);
   noticeFirstLastFrameRestore(item.metadata);
 }
 
@@ -4298,6 +4485,16 @@ function openJob(job: Job) {
         };
       });
   }
+  // Unlike saved metadata, a queued request still holds the face payload, so
+  // selecting a running job restores the exact photo rather than a reattach
+  // descriptor. Any stale disclosure from an earlier reuse retires with it.
+  identityRestoreEpoch += 1;
+  identityRestoreNotice.value = null;
+  form.state.value.identityImage = request.id_image
+    ? image(request.id_image, request.id_image_name || "Identity photo")
+    : null;
+  form.state.value.identityWeight = request.id_weight ?? null;
+  form.state.value.identityStartStep = request.id_start_step ?? null;
   form.state.value.maskImage = request.mask_image
     ? image(request.mask_image, "Mask")
     : null;
@@ -4453,6 +4650,8 @@ onMounted(async () => {
   // Models arrive from the host-routing poll (every machine, not just this
   // one); the watcher above homes the form onto one that's actually installed.
   void routing.refresh();
+  // Filing capability, the fleet's tag vocabulary, and its collections.
+  void fileUnder.refresh().catch(() => {});
   try {
     galleryEntries.value = await listGallery();
   } catch (e) {
@@ -4523,10 +4722,10 @@ onBeforeUnmount(() => {
         <div class="flex items-center gap-2">
           <!-- Print title (D5): a real field bound to the form, not a
                constant. Rides every one-shot request as `title`; empty is
-               untitled (placeholder, never a literal). Sequences carry no
-               title slot on the wire yet, so the field steps aside there. -->
+               untitled (placeholder, never a literal). A sequence renders
+               ONE stitched print, and the chain wire now carries a title —
+               so the field applies to both outputs. -->
           <label
-            v-if="!sequenceMode"
             class="flex min-w-0 flex-1 items-center gap-2"
             data-test="print-title-field"
           >
@@ -4535,7 +4734,9 @@ onBeforeUnmount(() => {
               :value="form.state.value.title ?? ''"
               type="text"
               maxlength="160"
-              placeholder="Untitled print"
+              :placeholder="
+                sequenceMode ? 'Untitled sequence' : 'Untitled print'
+              "
               aria-label="Print title"
               class="w-full min-w-0 max-w-[28rem] rounded-control border border-transparent bg-transparent px-2 py-1 font-display text-[15px] font-semibold text-ink outline-none transition placeholder:font-medium placeholder:text-ink-3 hover:border-ce focus:border-safelight"
               data-test="print-title"
@@ -4549,7 +4750,6 @@ onBeforeUnmount(() => {
               >{{ titleError }}</span
             >
           </label>
-          <div v-else class="flex-1" />
           <div ref="templatesHost" class="relative">
             <button
               type="button"
@@ -4860,7 +5060,20 @@ onBeforeUnmount(() => {
                   @open-advanced="openAdvanced"
                   @reset-settings="onResetSettings"
                   @canvas-intent="setCanvasIntent"
-                />
+                >
+                  <template v-if="fileUnder.available.value" #file-under>
+                    <FileUnderGroup
+                      v-model:state="fileUnder.state.value"
+                      :title="form.state.value.title"
+                      :auto-tag="autoTagTitle"
+                      :suggestions="fileUnder.suggestions.value"
+                      :collections="fileUnder.collections.value"
+                      :model="form.state.value.model"
+                      :ext="form.state.value.outputFormat"
+                      :timestamp="fileUnderStamp"
+                    />
+                  </template>
+                </ControlsAside>
                 <SourceMediaPanel
                   v-if="!sequenceMode"
                   v-model="form.state.value"
@@ -4878,6 +5091,12 @@ onBeforeUnmount(() => {
                   @open-h3-last-frame-picker="
                     h3BoundaryPickerTarget = 'lastFrame'
                   "
+                />
+                <IdentityPanel
+                  v-if="!sequenceMode"
+                  v-model="form.state.value"
+                  :models="models"
+                  :notice="identityRestoreNotice"
                 />
                 <SequenceOpeningImagePanel
                   v-else-if="showSequenceOpeningImage"
@@ -5083,7 +5302,20 @@ onBeforeUnmount(() => {
           @open-advanced="openAdvanced"
           @reset-settings="onResetSettings"
           @canvas-intent="setCanvasIntent"
-        />
+        >
+          <template v-if="fileUnder.available.value" #file-under>
+            <FileUnderGroup
+              v-model:state="fileUnder.state.value"
+              :title="form.state.value.title"
+              :auto-tag="autoTagTitle"
+              :suggestions="fileUnder.suggestions.value"
+              :collections="fileUnder.collections.value"
+              :model="form.state.value.model"
+              :ext="form.state.value.outputFormat"
+              :timestamp="fileUnderStamp"
+            />
+          </template>
+        </ControlsAside>
         <!-- Source media in the primary form: the model dictates whether
              (and how) it renders, exactly like resolutions. -->
         <SourceMediaPanel
@@ -5099,6 +5331,14 @@ onBeforeUnmount(() => {
           @open-mask="showMask = true"
           @open-h3-first-frame-picker="h3BoundaryPickerTarget = 'firstFrame'"
           @open-h3-last-frame-picker="h3BoundaryPickerTarget = 'lastFrame'"
+        />
+        <!-- The identity photo is media the user attaches, not a setting, so
+             it sits with the source wells; only its two knobs are Advanced. -->
+        <IdentityPanel
+          v-if="!sequenceMode"
+          v-model="form.state.value"
+          :models="models"
+          :notice="identityRestoreNotice"
         />
         <!-- Sequence's own source media: the opening frame sits exactly where
              the one-shot well does, never behind the Advanced toggle. -->

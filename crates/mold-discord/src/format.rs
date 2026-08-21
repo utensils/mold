@@ -124,9 +124,37 @@ fn progress_bar(current: usize, total: usize) -> String {
     )
 }
 
+/// One-line identity note for the result embed, built from the request the
+/// bot actually sent — `GenerateResponse` carries no metadata, and the bot is
+/// the only place that knows which photo went out.
+///
+/// `None` for every ordinary render, so nothing changes for a request that
+/// carried no face reference. The defaults are `mold_core::identity`'s, which
+/// is what the server applied for an omitted knob.
+pub fn identity_note(req: &mold_core::GenerateRequest) -> Option<String> {
+    req.id_image.as_ref()?;
+    let name = req
+        .id_image_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or("attached photo");
+    Some(format!(
+        "{name} \u{00b7} strength {:.2} \u{00b7} from step {}",
+        mold_core::identity::effective_id_weight(req),
+        mold_core::identity::effective_id_start_step(req)
+    ))
+}
+
 /// Format a completed generation result into embed data. Video responses get
 /// a distinct title and include frame/fps metadata alongside the usual fields.
-pub fn format_generation_result(resp: &GenerateResponse, prompt: &str) -> EmbedData {
+/// `identity` is the [`identity_note`] line for a print that carried a face
+/// reference, and `None` for every ordinary render.
+pub fn format_generation_result(
+    resp: &GenerateResponse,
+    prompt: &str,
+    identity: Option<&str>,
+) -> EmbedData {
     let time_secs = resp.generation_time_ms as f64 / 1000.0;
 
     let truncated_prompt = if prompt.chars().count() > 256 {
@@ -175,6 +203,11 @@ pub fn format_generation_result(resp: &GenerateResponse, prompt: &str) -> EmbedD
 
     // Preserve insertion order so tests/UI stay stable.
     fields.retain(|(_, v, _)| !v.is_empty());
+    // Identity provenance rides on its own full-width row: the photo name is
+    // long, and the conditioning is the point of the print.
+    if let Some(identity) = identity.map(str::trim).filter(|note| !note.is_empty()) {
+        fields.push(("Identity".to_string(), identity.to_string(), false));
+    }
     if let Some(gpu) = resp.gpu {
         fields.push(("Device".to_string(), format!("GPU {gpu}"), true));
     }
@@ -829,9 +862,91 @@ mod tests {
         assert_eq!(format_progress(&event), "Model flux-schnell:q8 downloaded");
     }
 
+    /// The identity note names the photo, the strength, and the start step —
+    /// resolving both knobs through `mold_core::identity`, so an omitted one
+    /// reports what the server actually applied rather than nothing.
+    #[test]
+    fn identity_note_reports_the_photo_and_both_knobs() {
+        let mut req = mold_core::GenerateRequest {
+            prompt: "a portrait".into(),
+            model: "flux-dev:q8".into(),
+            ..crate::commands::generate::build_generate_request(
+                crate::commands::generate::BuildParams {
+                    prompt: "a portrait",
+                    model: "flux-dev:q8",
+                    family: Some("flux"),
+                    ..Default::default()
+                },
+            )
+        };
+        assert_eq!(identity_note(&req), None, "an ordinary print has no note");
+
+        req.id_image = Some(vec![0x89, 0x50, 0x4E, 0x47]);
+        req.id_image_name = Some("ada.png".into());
+        assert_eq!(
+            identity_note(&req).as_deref(),
+            Some("ada.png \u{00b7} strength 1.00 \u{00b7} from step 0"),
+            "absent knobs report mold-core's defaults, which is what rendered"
+        );
+
+        req.id_weight = Some(1.4);
+        req.id_start_step = Some(3);
+        assert_eq!(
+            identity_note(&req).as_deref(),
+            Some("ada.png \u{00b7} strength 1.40 \u{00b7} from step 3")
+        );
+
+        // A photo with no label still gets a note — the conditioning happened.
+        req.id_image_name = None;
+        assert!(identity_note(&req).unwrap().starts_with("attached photo"));
+    }
+
+    #[test]
+    fn identity_note_becomes_a_full_width_embed_row() {
+        let resp = GenerateResponse {
+            audio: None,
+            images: vec![ImageData {
+                data: vec![],
+                format: OutputFormat::Png,
+                width: 1024,
+                height: 1024,
+                index: 0,
+            }],
+            generation_time_ms: 5500,
+            model: "flux-dev:q8".to_string(),
+            seed_used: 42,
+            video: None,
+            gpu: None,
+            request_warnings: Vec::new(),
+        };
+        let plain = format_generation_result(&resp, "a portrait", None);
+        assert!(
+            !plain.fields.iter().any(|(name, ..)| name == "Identity"),
+            "an ordinary print gains no Identity row"
+        );
+
+        let embed = format_generation_result(
+            &resp,
+            "a portrait",
+            Some("ada.png \u{00b7} strength 1.40 \u{00b7} from step 3"),
+        );
+        assert_eq!(
+            embed.fields.last().unwrap(),
+            &(
+                "Identity".to_string(),
+                "ada.png \u{00b7} strength 1.40 \u{00b7} from step 3".to_string(),
+                false
+            )
+        );
+        // Blank notes never manufacture an empty row.
+        let blank = format_generation_result(&resp, "a portrait", Some("   "));
+        assert!(!blank.fields.iter().any(|(name, ..)| name == "Identity"));
+    }
+
     #[test]
     fn generation_result_basic() {
         let resp = GenerateResponse {
+            request_warnings: Vec::new(),
             audio: None,
             images: vec![ImageData {
                 data: vec![],
@@ -846,7 +961,7 @@ mod tests {
             video: None,
             gpu: None,
         };
-        let embed = format_generation_result(&resp, "a cat on mars");
+        let embed = format_generation_result(&resp, "a cat on mars", None);
         assert_eq!(embed.title, "Image Generated");
         assert_eq!(embed.description, "a cat on mars");
         assert_eq!(embed.color, COLOR_SUCCESS);
@@ -873,6 +988,7 @@ mod tests {
     fn generation_result_truncates_long_prompt() {
         let long_prompt = "a".repeat(300);
         let resp = GenerateResponse {
+            request_warnings: Vec::new(),
             audio: None,
             images: vec![ImageData {
                 data: vec![],
@@ -887,7 +1003,7 @@ mod tests {
             video: None,
             gpu: None,
         };
-        let embed = format_generation_result(&resp, &long_prompt);
+        let embed = format_generation_result(&resp, &long_prompt, None);
         assert!(embed.description.chars().count() <= 260);
         assert!(embed.description.ends_with("..."));
     }
@@ -895,6 +1011,7 @@ mod tests {
     #[test]
     fn generation_result_video_has_frame_and_format_fields() {
         let resp = GenerateResponse {
+            request_warnings: Vec::new(),
             audio: None,
             images: vec![],
             video: Some(mold_core::VideoData {
@@ -919,7 +1036,7 @@ mod tests {
             seed_used: 7,
             gpu: None,
         };
-        let embed = format_generation_result(&resp, "a drone shot");
+        let embed = format_generation_result(&resp, "a drone shot", None);
         assert_eq!(embed.title, "Video Generated");
         assert!(embed
             .fields
@@ -942,6 +1059,7 @@ mod tests {
     #[test]
     fn generation_result_video_gif_shows_gif_label() {
         let resp = GenerateResponse {
+            request_warnings: Vec::new(),
             audio: None,
             images: vec![],
             video: Some(mold_core::VideoData {
@@ -966,7 +1084,7 @@ mod tests {
             seed_used: 3,
             gpu: None,
         };
-        let embed = format_generation_result(&resp, "loop");
+        let embed = format_generation_result(&resp, "loop", None);
         assert_eq!(embed.title, "Video Generated");
         assert!(embed
             .fields
@@ -980,6 +1098,7 @@ mod tests {
         // Multi-byte characters: each is 4 bytes in UTF-8
         let long_prompt = "\u{1F600}".repeat(300); // 300 emoji characters
         let resp = GenerateResponse {
+            request_warnings: Vec::new(),
             audio: None,
             images: vec![ImageData {
                 data: vec![],
@@ -994,7 +1113,7 @@ mod tests {
             video: None,
             gpu: None,
         };
-        let embed = format_generation_result(&resp, &long_prompt);
+        let embed = format_generation_result(&resp, &long_prompt, None);
         assert!(embed.description.chars().count() <= 260);
         assert!(embed.description.ends_with("..."));
     }

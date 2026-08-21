@@ -170,6 +170,63 @@ detail, prompt strength, seed, and the Advanced groups — while keeping your
 prompt, model choice, and batch. On the web it is undoable from the toast it
 raises.
 
+## Identity Photos (PuLID)
+
+An identity photo conditions the render on a person's face: the print keeps
+that likeness while the prompt decides everything else. The photo itself is
+never composited into the output, and it is never cropped or resized to the
+canvas — it is a reference, not a composition input.
+
+Identity conditioning is deliberately narrow today. It is offered only for the
+**identity-qualified checkpoints** — `flux-dev:q4` and `flux-dev:q8` — on a
+server built with the off-by-default `pulid` feature, and it cannot be combined
+with a LoRA or with an img2img source image. Every other model, and every
+server that was not built with the feature, refuses the request with a named
+reason rather than rendering a print with no face in it.
+
+The identity assets (the PuLID-FLUX adapter, its vision tower, and the
+InsightFace face detector/recognizer) install as one hidden bundle. The
+InsightFace weights are licensed for non-commercial research only, so Mold will
+not download them until you accept that licence once per `MOLD_HOME`:
+
+```bash
+mold pull pulid-flux --accept-license insightface-antelopev2
+```
+
+See [Third-party model licenses](/guide/configuration#third-party-model-licenses)
+for the full rule.
+
+In Mold Studio on web and desktop, Create shows an **Identity** well directly
+below the source-image wells whenever the selected model and the machine you
+are generating on both support it — when they do not, the control is not there
+at all, rather than present and disabled. Drop or pick a PNG or JPEG (at most
+16 MiB, 8192 px per side, 32 MP) and the print takes that likeness.
+
+Switching to a model that cannot use an identity photo does not throw yours
+away and does not stop you generating: the photo is parked, the request goes
+out without it, and the well comes back with the photo still in it when you
+select a qualified model again.
+
+Two knobs live in Advanced and stay absent from the request until you touch
+them, so the server's own defaults keep applying:
+
+- **Identity strength** — how strongly the face is held, `0.0`–`3.0`
+  (default `1.0`). Higher preserves the likeness; lower lets the prompt reshape
+  it. `0.0` is completely inert: no identity assets are loaded at all.
+- **Identity start step** — the first denoise step the face is applied at
+  (default `0`, and always fewer than the print's step count). Delaying it lets
+  the composition settle before the likeness is pinned.
+
+If the combination cannot be submitted — a photo alongside a LoRA or a source
+image, a knob set with no photo, an oversized or unsupported file — Create says
+so inline beside the control and Generate stays blocked.
+
+Saved metadata records the reference's filename, its SHA-256, and the effective
+strength and start step; it never contains the face bytes. The Library shows
+those facts in the print's info aside, and **Reuse settings** restores the two
+values and re-attaches the photo when this device still has it, telling you
+plainly when it does not.
+
 ## Video Generation
 
 mold supports text-to-video generation with the LTX Video, LTX-2 (next
@@ -424,7 +481,49 @@ keep the legacy `mold-{model}-{timestamp}.{ext}` name). The filename is never
 rewritten afterwards — renaming a print in the Library edits the row title
 only, and an explicit `--output` path is always used verbatim. `--title`
 applies to single-clip runs; chain scripts and multi-prompt sequences do not
-carry a title yet.
+carry a title on the CLI, though the HTTP chain body does title the stitched
+print.
+
+### File under
+
+A print can arrive already organized rather than being filed afterwards:
+
+```bash
+mold run flux-dev:q4 "a village of blue houses" \
+  --title "Smurf village" \
+  --tag blue --tag studies \
+  --collection "Village studies"
+```
+
+- `--tag <TAG>` is repeatable, up to 20 tags of 1–64 characters each. Tags
+  are trimmed, their interior whitespace is collapsed, and they are matched
+  case-insensitively, so `Blue` and `blue` are one tag.
+- `--collection <NAME>` files the print into a collection, **creating it if
+  it does not exist**. Collections merge across machines by their slug, so
+  "Village studies" means the same collection on every host in a fleet.
+
+Both are seeded onto the gallery row **once, when the row is created**.
+Organization is yours after that: renaming, re-tagging, or removing a print
+from a collection sticks, and a later reconcile or re-publication never
+resurrects a tag you removed.
+
+When a run is titled, mold also tags the print with its title slug and says
+so:
+
+```console
+$ mold run "a village" --title "Smurf village"
+filing under tag "smurf-village"
+```
+
+Turn that off for one run with `--no-auto-tag`, or permanently with
+`mold config set generate.auto_tag_title false`. This is a _client_ default:
+the server never auto-tags, because it cannot tell a title you typed from one
+a script generated.
+
+Filing never costs you a render. If the serving host has no metadata database
+(`MOLD_DB_DISABLE=1`), or a collection was deleted between the moment you
+listed it and the moment you pressed Generate, the print is still generated
+and saved — the filing is dropped and reported, never silently discarded.
 
 The Library organizes prints per host with titles, favorites, tags, and
 manual collections (`PATCH /api/gallery/image/:filename`,
@@ -501,7 +600,21 @@ such as `/generate` and `/catalog` render Page Not Found:
   chip editor with autocomplete, and an **In collections** checklist with
   **New…**. Select mode's bar gains **Add to collection**, **Tag**,
   **♥ Favorite**, and **Trash**. Titles typed in Create's title field travel
-  with the request and name the download (`title-slug.png`).
+  with the request and lead the suggested download name
+  (`{title-slug}__{model}__s{seed}.{ext}`; the file in the gallery is never
+  renamed).
+- **File under** in Create (on hosts that advertise `gallery.organize`) files
+  a print as you make it, between the essentials and Advanced — inside the
+  controls sheet on phones. A titled print offers its own title slug as a
+  dashed, removable tag chip; **Add tag…** suggests the tags your machines
+  already use with counts; and the collection row pre-selects — never creates
+  — the collection whose name matches the title, offering None, every merged
+  collection, and an inline **New collection…**. A line beneath previews the
+  filename the print will land as. The choice rides one shots, every batch
+  sibling, every prepared variation, and the single print a sequence stitches,
+  and **Reuse settings** restores what a print was actually filed under.
+  **Settings ▸ Library ▸ Tag new prints with their title** (stored in this
+  browser) turns the title chip off.
 - Shortcuts: **F** favorite · **T** tag · **⌘⇧N** new collection · **⌫** trash
   (undo for 6 s) · **⌘⌫** delete forever (confirm).
 - Destructive copy stays plain: **Empty trash**, **Delete forever**, and

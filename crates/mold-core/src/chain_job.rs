@@ -830,6 +830,9 @@ mod tests {
 
     fn sample_request() -> ChainRequest {
         ChainRequest {
+            collection: None,
+            tags: None,
+            title: None,
             model: "ltx-2-19b-distilled:fp8".into(),
             stages: vec![
                 sample_stage("stage zero", None),
@@ -1345,6 +1348,9 @@ request_json = "{}"
 
     fn event_detail_fixture() -> ChainJobDetail {
         let request = crate::chain::ChainRequest {
+            collection: None,
+            tags: None,
+            title: None,
             model: "ltx-2-19b-distilled:fp8".into(),
             stages: vec![sample_stage("stage zero", None)],
             motion_tail_frames: 0,
