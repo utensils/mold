@@ -33,6 +33,14 @@ domain or CC0.
 | `.arcface112.png` | `cv2.warpAffine` 112×112 ArcFace crop |
 | `.eva512.png` | facexlib's 512×512 crop |
 
+One fixture has a fifth file. `raja-chari-official-portrait.exif6.jpg` is the
+same portrait stored **1000×800 with EXIF orientation 6** — the tag a phone
+held sideways writes. It has no golden of its own (the capture script skips
+`.exif6.`); it exists so the orientation regression test can prove the decoder
+rights it before the detector ever sees it, against the upright twin's golden.
+Regenerate it from the upright fixture by storing the pixels rotated 90° CCW
+with `Orientation: 6` in the EXIF `0th` IFD.
+
 `../onnx-inventory.json` holds the op/attribute inventory of both ONNX graphs
 with their SHA-256 digests, so the Step-0 op gate runs without the weights.
 
@@ -76,6 +84,8 @@ change shows up as a regression rather than a flake.
 | bbox corner (weight-gated) | 2.0 px | inside |
 | detection score (weight-gated) | 0.02 | inside |
 | ArcFace cosine (weight-gated) | ≥ 0.99 | 0.999384 |
+| EXIF-6 landmark drift vs the upright twin (weight-gated) | 2.0 px | 0.111 px |
+| EXIF-6 ArcFace cosine (weight-gated) | ≥ 0.99 | 0.999245 |
 
 Per-face ArcFace cosine: Frank Rubio 0.999384, Kayla Barron 0.999773, Mae
 Jemison 0.999871, Raja Chari 0.999774.

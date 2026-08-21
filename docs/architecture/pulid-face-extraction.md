@@ -128,7 +128,15 @@ costs what the thousandth does and there is nothing to amortize.
 
 Measured with `cargo build --release -p mold-ai-inference --features
 dev-bins,pulid --bin pulid_face_probe`, then `pulid_face_probe bench <dir>`.
-"per image" is one SCRFD detection at 640×640 plus one ArcFace embedding.
+"per image" is one SCRFD detection at 640×640 plus one ArcFace embedding. The
+probe **exits non-zero on a failed gate**, like its `inventory` subcommand, so
+CI, a bisect, or a `&&` chain can act on the verdict.
+
+Use the full 5-warmup / 20-run protocol. A short run is not a measurement: at
+`--runs 2` the p95 is simply the larger of two samples, and one scheduler stall
+on a busy machine reports a blown budget. The same host that measured 588.4 ms
+p95 under a load average of 83 with the real protocol reported 2533.7 ms from
+two.
 
 **halcyon** — Apple M4 Max, 16 cores, 48 GiB, macOS (aarch64-darwin):
 
@@ -193,7 +201,7 @@ with the feature.
 
 ```
 image bytes
-  → decode (RGB8)
+  → EXIF-oriented, ICC-corrected decode              img_utils.rs
   → letterbox to 640x640, top-left, zero fill      scrfd.py:459-470
   → blob: (x - 127.5) / 128.0, planar RGB          scrfd.py:164
   → candle-onnx simple_eval  ->  9 tensors
@@ -206,6 +214,41 @@ image bytes
   └─ Umeyama fit -> facexlib FFHQ 512, warp        face_restoration_helper.py:73-74, 242-259
        → 512x512 crop for #1229
 ```
+
+### The photograph is righted before the detector sees it
+
+`extract` decodes through `img_utils::decode_oriented_srgb`, the same path
+LTX-2 still conditioning uses (it lived in `ltx2/preprocess.rs` until #1222
+needed it and was lifted into `img_utils`, which now re-exports to LTX-2 under
+its original name). A phone photograph carries its rotation in an EXIF tag
+rather than in the pixels; handing SCRFD the raw buffer gives it a sideways
+face, which it either misses outright or locates in a frame every crop then
+inherits. Upstream orients too — `cv2.imread` applies EXIF orientation unless
+`IMREAD_IGNORE_ORIENTATION` is set.
+
+One thing that decode does and `cv2.imread` does not: convert an embedded ICC
+profile to sRGB. Deliberate. An untagged sRGB image — every parity fixture —
+takes the identical path, so parity is unaffected, and a tagged one would
+otherwise have its colors misread into the embedding.
+`raja-chari-official-portrait.exif6.jpg` is the regression fixture: the same
+portrait stored 1000x800 with orientation 6. It detects landmarks within
+0.111 px of the upright original's, at ArcFace cosine 0.999245.
+
+### Both graphs are authenticated on every load
+
+`load_onnx_model` takes the expected SHA-256 and refuses a mismatch *before*
+decoding, against the digest of the same retained descriptor the bytes are read
+from. The pin comes from `mold_core::pulid_assets::pulid_manifest()` via
+`onnx_graph::pinned_sha256`, never a second copy in this crate.
+
+The downloader's `.sha256-verified` marker is not a substitute: it records that
+the bytes were correct *when they landed*, and says nothing about the bytes
+now. A marker sitting beside a since-modified model is exactly the state
+someone with write access to the models directory would leave behind — and
+these two graphs are executed code in every sense that matters.
+`IdentityExtractor::from_paths` always supplies the manifest's pins and has no
+unverified variant; tools that inspect arbitrary graphs pass `None` and get no
+extractor out of it.
 
 ### The embedding is RAW, not L2-normalized
 
@@ -354,13 +397,14 @@ Also not done here: the CLI's `--id-image` path handling
 
 | path | what |
 | --- | --- |
-| `identity/mod.rs` | `IdentityExtractor`, `IdentityFeatures`, face selection, typed errors |
+| `identity/mod.rs` | `IdentityExtractor`, `IdentityFeatures`, oriented decode, face selection, typed errors |
 | `identity/onnx_inventory.rs` | Step 0's op/attribute gate |
-| `identity/onnx_graph.rs` | descriptor-fenced load, `Resize` normalization |
+| `identity/onnx_graph.rs` | descriptor-fenced load, pin verification, `Resize` normalization |
 | `identity/scrfd.rs` | letterbox blob, anchor decode, NMS, detection |
 | `identity/align.rs` | both templates, Umeyama fit, residuals |
 | `identity/arcface.rs` | `norm_crop`, blob, 512-d embedding |
 | `identity/warp.rs` | OpenCV-convention resize and affine warp |
+| `img_utils::decode_oriented_srgb` | the crate's one EXIF/ICC decode, shared with LTX-2 |
 | `bin/pulid_face_probe.rs` | the inventory and benchmark tool this record cites |
 | `tests/pulid_face_parity.rs` | hermetic + weight-gated parity |
 | `crates/mold-inference/testdata/pulid/` | inventory fixture, faces, goldens, capture scripts |
