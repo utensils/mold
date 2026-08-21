@@ -74,6 +74,13 @@ export interface OutputMetadata {
   /** User-authored print title as it was at creation (D5). Embedded so
    * mirrors carry it; the gallery row's editable title wins for display. */
   title?: string | null;
+  /** Tags the print was filed under at creation ("File under"), exactly as
+   * the host applied them. The gallery row's links are the editable
+   * authority once the print exists. Additive. */
+  tags?: string[] | null;
+  /** Display name of the collection the print was filed into at creation —
+   * never the requested id, and never a name the host did not resolve. */
+  collection?: string | null;
   prompt: string;
   negative_prompt?: string | null;
   original_prompt?: string | null;
@@ -310,6 +317,13 @@ export interface GenerateRequestWire {
   prompt: string;
   /** User-authored print title (D5). Additive; absent = untitled. */
   title?: string | null;
+  /** Creation-time filing ("File under"). Tags the host applies to the
+   * print's gallery row as it lands. Additive; absent = file nothing. */
+  tags?: string[];
+  /** Creation-time collection. Clients send `{ name }` and let the host
+   * get-or-create by slug, so one request files correctly on any machine
+   * in the fleet. Additive. */
+  collection?: { id?: string; name?: string };
   prompt_transform?: PromptTransformProvenanceWire | null;
   negative_prompt?: string | null;
   model: string;
@@ -648,6 +662,14 @@ export interface ChainStageWire {
 
 export interface ChainRequestWire {
   model: string;
+  /** Title for the STITCHED print — a sequence renders one print, so this
+   * titles that print and never an intermediate clip. Additive. */
+  title?: string | null;
+  /** Creation-time filing for the stitched print, same normalization and
+   * limits as `GenerateRequestWire.tags`. Additive. */
+  tags?: string[];
+  /** Creation-time collection for the stitched print. Additive. */
+  collection?: { id?: string; name?: string };
   stages?: ChainStageWire[];
   motion_tail_frames?: number;
   width: number;
