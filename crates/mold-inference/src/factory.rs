@@ -392,7 +392,22 @@ pub fn create_engine_with_pool(
     offload: bool,
     shared_pool: Option<Arc<Mutex<SharedPool>>>,
 ) -> Result<Box<dyn InferenceEngine>> {
-    let frozen = FrozenEngineConfig::resolve(&model_name, config);
+    let mut frozen = FrozenEngineConfig::resolve(&model_name, config);
+    // The forced-local path has no scheduler admission to materialize the
+    // PuLID bundle, so resolve it here. `FrozenEngineConfig::resolve` itself
+    // deliberately stays `None`: the server compares a live `resolve()` against
+    // a frozen plan (`execution_plan::current_engine_config`), and populating
+    // it there would make every admitted job's frozen config disagree with the
+    // live one the moment the bundle is installed.
+    //
+    // `pulid_paths` returns `Some` only for a complete, on-disk bundle, so the
+    // "every populated frozen path must already be local" check in
+    // `create_engine_with_frozen_config` holds by construction. It is inert for
+    // a request that does not condition on a face — the engine loads nothing
+    // until one does.
+    if frozen.identity_assets.is_none() {
+        frozen.identity_assets = mold_core::pulid_assets::pulid_paths(config);
+    }
     create_engine_with_frozen_config(
         model_name,
         paths,
@@ -533,6 +548,7 @@ where
                 gpu_ordinal,
                 offload,
                 shared_pool,
+                frozen.identity_assets.clone(),
             )))
         }
         "sd15" | "sd1.5" | "stable-diffusion-1.5" => {
