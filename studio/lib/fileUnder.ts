@@ -460,21 +460,42 @@ export interface DownloadFileNameInput {
   title?: string | null;
   /** Resolved model id — `flux-dev`, `flux-dev:q4`, `cv:12345`. */
   model: string;
-  /** u64 seeds exceed `Number.MAX_SAFE_INTEGER`, so a string is accepted. */
-  seed?: number | bigint | string | null;
+  /**
+   * The print's seed. A `number` is only used when it is exactly
+   * representable — `metadata.seed` is a JSON double, so a u64 above
+   * `Number.MAX_SAFE_INTEGER` has already been rounded by the time it gets
+   * here and is dropped rather than written down (see `seedSegment`). A
+   * digits-only `string` is passed through verbatim, which is how an
+   * exact-seed wire would supply one.
+   */
+  seed?: number | string | null;
   /** Extension, with or without its leading dot. */
   ext?: string | null;
 }
 
+/**
+ * `s{seed}`, or `null` when this side cannot state the seed EXACTLY.
+ *
+ * Rust never faces this: `OutputMetadata.seed` is a `u64`. The browser reads
+ * that same value out of JSON as a double, so any seed above
+ * `Number.MAX_SAFE_INTEGER` — which is most randomly generated ones — has
+ * ALREADY been rounded before it reaches this function. Writing it into the
+ * name would produce a plausible, wrong identifier: a file claiming a seed
+ * that never rendered it. Omitting the segment is the honest answer and
+ * yields exactly the shape an absent seed does.
+ *
+ * A digits-only string is trusted verbatim, so an exact-seed wire (or a
+ * caller that kept the raw JSON text) can still name the file precisely.
+ */
 function seedSegment(seed: DownloadFileNameInput["seed"]): string | null {
   if (seed === null || seed === undefined) return null;
-  if (typeof seed === "bigint") return `s${seed.toString()}`;
   if (typeof seed === "number") {
-    if (!Number.isFinite(seed)) return null;
-    return `s${Math.trunc(seed).toString()}`;
+    if (!Number.isSafeInteger(seed) || seed < 0) return null;
+    return `s${seed.toString()}`;
   }
   const trimmed = seed.trim();
-  return /^-?\d+$/.test(trimmed) ? `s${trimmed}` : null;
+  // Digits only: u64 seeds are never negative and never exponential.
+  return /^\d+$/.test(trimmed) ? `s${trimmed}` : null;
 }
 
 /**
@@ -484,11 +505,18 @@ function seedSegment(seed: DownloadFileNameInput["seed"]): string | null {
  * nothing sluggable in it. Mirrors `mold-core`'s `print_title`
  * `download_file_name` — the parity table lives in `fileUnder.test.ts`.
  *
- * The model runs through the same slug algorithm at the 80-character
- * collection cap (compact ids run past 40), so `flux-dev:q4` and `cv:12345`
- * cannot smuggle a `:` into a filename. A segment that slugs to nothing is
+ * The model runs through the same slug algorithm at
+ * `DOWNLOAD_MODEL_SLUG_MAX_LEN`, so `flux-dev:q4` and `cv:12345` cannot
+ * smuggle a `:` into a filename. A segment that contributes nothing is
  * dropped rather than written as `undefined`; if nothing survives at all the
- * stem is `print`. The gallery filename itself never changes.
+ * stem is `DOWNLOAD_FALLBACK_STEM`. The gallery filename itself never
+ * changes.
+ *
+ * One component can legally differ from Rust, and only in what each side is
+ * able to know: Rust always holds the exact `u64` seed, while a browser
+ * holding `metadata.seed` as a JSON double may hold a rounded one. This
+ * function omits the seed segment whenever it cannot be exact rather than
+ * naming a print after a seed that never rendered it.
  */
 export function downloadFileName(input: DownloadFileNameInput): string {
   const segments: string[] = [];

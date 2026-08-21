@@ -532,6 +532,14 @@ describe("validateNewTag", () => {
  * `{model}__s{seed}.{ext}` when the title is absent or unsluggable. The model
  * runs through the same slug algorithm (80-char cap) so ids carrying `:` —
  * `flux-dev:q4`, `cv:12345` — stay filesystem-safe.
+ *
+ * The SEED is the one component where the two sides legally differ, and it is
+ * a difference in what each can know rather than in the rule: Rust always
+ * holds the exact `u64`, while a browser reading `metadata.seed` off JSON
+ * holds a double that has ALREADY rounded any value past
+ * `Number.MAX_SAFE_INTEGER`. TS therefore omits the segment whenever it
+ * cannot be exact — see the `seed` describe below — because a rounded seed is
+ * a false identifier, and most randomly-seeded prints have one.
  */
 const DOWNLOAD_FILE_NAME_FIXTURES: ReadonlyArray<
   [
@@ -777,6 +785,80 @@ describe("suggestTags", () => {
 });
 
 // ── Storage keys ────────────────────────────────────────────────────────────
+
+describe("downloadFileName seeds", () => {
+  const exact = (seed: number | string | null) =>
+    downloadFileName({ title: "Owl", model: "flux-dev", seed, ext: "png" });
+
+  it("includes an ordinary safe-integer seed", () => {
+    expect(exact(42)).toBe("owl__flux-dev__s42.png");
+    expect(exact(0)).toBe("owl__flux-dev__s0.png");
+  });
+
+  it("includes the largest seed a JS number can hold exactly", () => {
+    expect(exact(Number.MAX_SAFE_INTEGER)).toBe(
+      `owl__flux-dev__s${Number.MAX_SAFE_INTEGER}.png`,
+    );
+  });
+
+  it("OMITS a seed past MAX_SAFE_INTEGER — the value arrived rounded", () => {
+    // `metadata.seed` is a JSON number, so a u64 above 2^53-1 was already
+    // rounded before it reached this function. Emitting it would name the
+    // file after a seed that never rendered anything.
+    expect(exact(Number.MAX_SAFE_INTEGER + 1)).toBe("owl__flux-dev.png");
+    expect(exact(1.8446744073709552e19)).toBe("owl__flux-dev.png");
+  });
+
+  it("takes an exact string seed verbatim, past 2^53 included", () => {
+    expect(exact("9007199254740993")).toBe(
+      "owl__flux-dev__s9007199254740993.png",
+    );
+    expect(exact("18446744073709551615")).toBe(
+      "owl__flux-dev__s18446744073709551615.png",
+    );
+  });
+
+  it.each([
+    [-1],
+    [Number.NaN],
+    [Number.POSITIVE_INFINITY],
+    [Number.NEGATIVE_INFINITY],
+    [1.5],
+    ["-1"],
+    ["12.5"],
+    ["1e9"],
+    ["abc"],
+    [""],
+    ["   "],
+    [null],
+  ])("omits the segment for an unusable seed (%j)", (seed) => {
+    expect(exact(seed)).toBe("owl__flux-dev.png");
+  });
+
+  it("omits the segment when the caller has no seed field at all", () => {
+    expect(
+      downloadFileName({ title: "Owl", model: "flux-dev", ext: "png" }),
+    ).toBe("owl__flux-dev.png");
+  });
+
+  it("degrades to the same shape an absent seed produces", () => {
+    expect(exact(Number.MAX_SAFE_INTEGER + 1)).toBe(exact(null));
+  });
+
+  it("still names the file when the seed is all that survives", () => {
+    expect(downloadFileName({ model: "???", seed: 42, ext: "png" })).toBe(
+      "s42.png",
+    );
+    // ...and falls back to the stem word when even that is unusable.
+    expect(
+      downloadFileName({
+        model: "???",
+        seed: Number.MAX_SAFE_INTEGER + 1,
+        ext: "png",
+      }),
+    ).toBe("print.png");
+  });
+});
 
 describe("download-name constants", () => {
   it("pins the fallback stem word Rust also pins", () => {
