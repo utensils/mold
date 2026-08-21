@@ -131,8 +131,12 @@ async fn upscale_local(
             theme::icon_info(),
             model_name
         );
-        crate::commands::pull::run(model_name, &mold_core::download::PullOptions::default())
-            .await?;
+        crate::commands::pull::run(
+            model_name,
+            &mold_core::download::PullOptions::default(),
+            &[],
+        )
+        .await?;
         // Reload config after pull
         return Box::pin(upscale_local(
             req,
