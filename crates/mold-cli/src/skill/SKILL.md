@@ -841,6 +841,28 @@ digest, strength, and start step, and Reuse settings restores them plus the
 photo itself when the device still holds it. iPhone, TUI, and Discord do not
 expose identity conditioning yet.
 
+**Surfaces.** The TUI's Create form carries an **Identity photo** section in
+the Advanced accordion — a local path row plus Strength and Start step — shown
+only while the selected checkpoint's `/api/models[]` entry advertises
+`supports_identity`. The path is opened no-follow and bounds-checked at entry,
+so a rejected file never leaves the picker; a model switch to an unqualified
+checkpoint keeps the photo, shows `mold_core::identity`'s own refusal on the
+row, and blocks Generate (`↺ Reset to model defaults` clears it). Library
+Details and the full print view render the saved provenance.
+
+The Discord bot exposes identity as its own `/identity` command — `identity`
+(PNG/JPEG attachment), `identity_strength`, `identity_start_step`, plus
+prompt/model/size/steps/guidance/seed — rather than as options on `/generate`,
+which already sits at Discord's hard 25-option ceiling. The bot refuses an
+oversized or wrong-container attachment before downloading it, checks both
+knobs and the model gate against the server's advertised `supports_identity`,
+and names the reference in the result embed. Both surfaces derive every label,
+range, limit, and refusal from `mold_core::identity`; neither restates one, and
+neither reads a local build feature to decide whether the renderer can execute
+identity conditioning.
+
+The iPhone app ships the same four fields: an Identity well in the primary Create stack (gated on positive `supportsIdentity` knowledge, parked on a capability-losing model switch), strength and start step in the Advanced sheet, provenance in the Library Info sheet, and Use-as-prompt reattachment from the shared stash.
+
 ### ControlNet (SD1.5 only)
 
 ```bash
