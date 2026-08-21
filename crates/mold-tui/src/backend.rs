@@ -847,6 +847,23 @@ fn build_request(
         })
     });
 
+    // Identity conditioning ships as a group or not at all: the two knobs
+    // without a photo are exactly the incomplete form
+    // `mold_core::identity::validate_identity_conditioning` refuses. The
+    // photo is re-read here (it was validated at entry) so the request
+    // carries the file as it is right now, and the label is the basename —
+    // never the local path.
+    let identity_image = params
+        .identity_image_path
+        .as_deref()
+        .and_then(|path| crate::identity::load_identity_image(path).ok());
+    let identity_image_name = identity_image.as_ref().and_then(|_| {
+        params
+            .identity_image_path
+            .as_deref()
+            .and_then(crate::identity::identity_image_name)
+    });
+
     GenerateRequest {
         title: None,
         source_fit: None,
@@ -905,10 +922,10 @@ fn build_request(
         spatial_upscale: params.spatial_upscale,
         temporal_upscale: params.temporal_upscale,
         placement: None,
-        id_image: None,
-        id_image_name: None,
-        id_weight: None,
-        id_start_step: None,
+        id_weight: identity_image.as_ref().map(|_| params.id_weight),
+        id_start_step: identity_image.as_ref().map(|_| params.id_start_step),
+        id_image_name: identity_image_name,
+        id_image: identity_image,
     }
 }
 
@@ -1214,6 +1231,66 @@ mod tests {
             Some("real-esrgan-x4plus:fp16")
         );
     }
+
+    /// The four identity fields ship as one group. A request carrying a knob
+    /// but no photo is exactly the incomplete form
+    /// `mold_core::identity::validate_identity_conditioning` refuses, so the
+    /// builder must never produce it — not even from a form whose knobs were
+    /// moved before a photo was picked.
+    #[test]
+    fn build_request_ships_identity_as_a_group_or_not_at_all() {
+        let config = mold_core::Config::load_or_default();
+        let mut params = GenerateParams::from_config(&config);
+
+        let req = build_request(&params, "p", &None);
+        assert!(req.id_image.is_none());
+        assert!(req.id_image_name.is_none());
+        assert!(req.id_weight.is_none());
+        assert!(req.id_start_step.is_none());
+        assert!(!mold_core::identity::request_mentions_identity(&req));
+
+        // Knobs alone never reach the wire.
+        params.id_weight = 2.0;
+        params.id_start_step = 2;
+        let req = build_request(&params, "p", &None);
+        assert!(
+            !mold_core::identity::request_mentions_identity(&req),
+            "a knob without a photo must stay absent"
+        );
+
+        // A path that no longer resolves is dropped whole, knobs included —
+        // rendering without the face while claiming a strength would be the
+        // worst of both.
+        params.identity_image_path = Some("/nonexistent/face.png".into());
+        let req = build_request(&params, "p", &None);
+        assert!(!mold_core::identity::request_mentions_identity(&req));
+
+        let dir = tempfile::tempdir().unwrap();
+        let photo = dir.path().join("ada.png");
+        std::fs::write(&photo, PNG_1X1).unwrap();
+        params.identity_image_path = Some(photo.to_string_lossy().to_string());
+        let req = build_request(&params, "p", &None);
+        assert_eq!(req.id_image.as_deref(), Some(&PNG_1X1[..]));
+        assert_eq!(
+            req.id_image_name.as_deref(),
+            Some("ada.png"),
+            "the label is the basename, never the local path"
+        );
+        assert_eq!(req.id_weight, Some(2.0));
+        assert_eq!(req.id_start_step, Some(2));
+        assert_eq!(mold_core::identity::effective_id_weight(&req), 2.0);
+        assert_eq!(mold_core::identity::effective_id_start_step(&req), 2);
+    }
+
+    /// A genuine 1x1 RGBA PNG — the smallest payload
+    /// `identity::validate_id_image_bytes` accepts.
+    const PNG_1X1: [u8; 67] = [
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
+        0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00,
+        0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49,
+        0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
 
     #[test]
     fn build_request_preserves_explicit_audio_choice() {
