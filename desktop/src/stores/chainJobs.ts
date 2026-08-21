@@ -12,13 +12,12 @@ import type {
   ChainJobEvent,
   ChainJobListing,
   ChainJobSummary,
-  ChainRequestWire,
   CreateChainJobResponse,
 } from "@studio/lib/api/chainTypes";
 import { apiFetchTo, apiJsonTo, type ApiTarget } from "../lib/api/client";
 import { sseStream } from "../lib/api/sse";
 import { notifyChainFinished } from "../lib/notify";
-import type { GcOutcome, RetakeRequest } from "../lib/api/types";
+import type { ChainCreateRequest, GcOutcome, RetakeRequest } from "../lib/api/types";
 import { useHostsStore } from "./hosts";
 import { useToastStore } from "./toasts";
 
@@ -115,7 +114,11 @@ export const useChainJobsStore = defineStore("chainJobs", {
         this.pollTimer = null;
       }
     },
-    async create(hostId: string, req: ChainRequestWire, frozenTarget?: ApiTarget): Promise<string> {
+    async create(
+      hostId: string,
+      req: ChainCreateRequest,
+      frozenTarget?: ApiTarget,
+    ): Promise<string> {
       const target = frozenTarget ?? this.targetFor(hostId);
       const res = await apiJsonTo<CreateChainJobResponse>(target, "/api/chain-jobs", jsonInit(req));
       await this.fetchHost(hostId);
