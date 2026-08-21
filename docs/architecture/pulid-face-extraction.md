@@ -250,9 +250,11 @@ these two graphs are executed code in every sense that matters.
 unverified variant; tools that inspect arbitrary graphs pass `None` and get no
 extractor out of it.
 
-This is complementary to `mold_core::download::verify_pinned_file`, not a
-duplicate of it, and must not be folded into it: that function proves a file at
-placement time and accepts a matching marker without rehashing — right for
+This is complementary to placement-time verification — the download path's pin
+check, and the per-file dependency verification landing in
+[#1242](https://github.com/utensils/mold/pull/1242) — and must not be folded
+into it. Placement-time checking proves a file as it is materialized and
+accepts an existing `.sha256-verified` marker without rehashing: right for
 materialization, and exactly the assumption the load-time check exists to stop
 relying on. One proves what landed; the other proves what runs.
 
