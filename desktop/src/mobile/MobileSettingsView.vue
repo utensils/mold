@@ -22,6 +22,7 @@ const props = defineProps<{
   hostCount: number;
   appVersion: string;
   host?: MobileHost | null;
+  updateChannel?: string;
 }>();
 
 const emit = defineEmits<{
@@ -431,7 +432,7 @@ onBeforeUnmount(() => {
         </div>
         <div>
           <dt>Updates</dt>
-          <dd>TestFlight</dd>
+          <dd data-test="mobile-update-channel">{{ updateChannel ?? "TestFlight" }}</dd>
         </div>
         <div>
           <dt>Privacy</dt>

@@ -7695,6 +7695,16 @@ describe("MobileApp host and catalog coordination", () => {
     expect(wrapper.text()).toContain("API key");
   });
 
+  it("names Google Play instead of TestFlight in Android settings", async () => {
+    isNativeAndroidRuntime.mockReturnValue(true);
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    await wrapper.get("[data-test='mobile-open-settings']").trigger("click");
+
+    expect(wrapper.get("[data-test='mobile-update-channel']").text()).toBe("Google Play");
+  });
+
   it("claims Android pairing codes with an Android client identity", async () => {
     isNativeAndroidRuntime.mockReturnValue(true);
     scanPairingQr.mockResolvedValue({ content: pairingPayload() });

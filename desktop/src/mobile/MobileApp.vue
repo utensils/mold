@@ -8081,6 +8081,7 @@ onBeforeUnmount(() => {
         :host-count="hosts.length"
         :app-version="appVersion"
         :host="selectedHost ?? null"
+        :update-channel="androidNativeRuntime ? 'Google Play' : 'TestFlight'"
         @update="updateSettings"
         @manage-hosts="manageHostsFromSettings"
       />

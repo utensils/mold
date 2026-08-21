@@ -296,7 +296,7 @@ pushed screen opened from the header.
   chip is offered, so turning it off never touches prints already made.
   Settings also links to host
   management and shows the app version, remote-only processing policy, and
-  TestFlight update channel. About opens the public privacy policy at
+  platform update channel (TestFlight on iPhone, Google Play on Android). About opens the public privacy policy at
   `https://utensils.io/mold/privacy` through the native external-browser opener.
 
 The app shell suppresses WebKit focus/double-tap page zoom and rubber-band
