@@ -35,6 +35,88 @@ use anyhow::{Context, Result};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
+/// Why a directory is unsafe to stage private work in.
+///
+/// Separated from its prose so the policy can be tested without matching on
+/// error strings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UnprotectedParent {
+    /// The path is absent, or is not a directory.
+    NotADirectory,
+    /// Someone else owns it, so `chmod` and `chown` are theirs to use.
+    NotOwned { uid: u32, euid: u32 },
+    /// Group- or world-writable without the sticky bit: any of those users can
+    /// rename our entries out from under us.
+    RenamableByOthers { mode: u32 },
+}
+
+impl std::fmt::Display for UnprotectedParent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotADirectory => write!(f, "not a directory"),
+            Self::NotOwned { uid, euid } => write!(f, "owned by uid {uid} rather than {euid}"),
+            Self::RenamableByOthers { mode } => write!(
+                f,
+                "mode {mode:o} is writable by group or other without the sticky bit, so \
+                 another user could rename a staging directory away"
+            ),
+        }
+    }
+}
+
+/// Can a user other than us rename an entry inside `path`?
+///
+/// This is the exact property that makes a staging directory trustworthy, and
+/// it is NOT the same as that directory's own mode. Renaming an entry requires
+/// write permission on the CONTAINING directory, so a `0o700` staging directory
+/// sitting inside a group-writable parent can still be renamed away and
+/// replaced wholesale — which is precisely the hole that put the pickle parser
+/// in front of attacker bytes.
+///
+/// Two shapes are safe:
+///
+/// - We own it and nobody else can write it. `0o700` and `0o755` both qualify;
+///   `$XDG_RUNTIME_DIR` and macOS's per-user `$TMPDIR` are `0o700`.
+/// - The sticky bit is set, which restricts rename and unlink to each entry's
+///   own owner regardless of the directory's write bits. This is what makes
+///   Linux's `1777` `/tmp` usable.
+#[cfg(unix)]
+pub(crate) fn parent_protects_entries(path: &Path) -> std::result::Result<(), UnprotectedParent> {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return Err(UnprotectedParent::NotADirectory);
+    };
+    if !metadata.is_dir() {
+        return Err(UnprotectedParent::NotADirectory);
+    }
+    // SAFETY: `geteuid` takes no arguments and cannot fail.
+    let euid = unsafe { libc::geteuid() };
+    if metadata.uid() != euid {
+        return Err(UnprotectedParent::NotOwned {
+            uid: metadata.uid(),
+            euid,
+        });
+    }
+    const STICKY: u32 = 0o1000;
+    const OTHERS_WRITE: u32 = 0o022;
+    let mode = metadata.mode();
+    if mode & STICKY == 0 && mode & OTHERS_WRITE != 0 {
+        return Err(UnprotectedParent::RenamableByOthers {
+            mode: mode & 0o7777,
+        });
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub(crate) fn parent_protects_entries(path: &Path) -> std::result::Result<(), UnprotectedParent> {
+    if path.is_dir() {
+        Ok(())
+    } else {
+        Err(UnprotectedParent::NotADirectory)
+    }
+}
+
 /// An open directory, plus the path it was opened at **for error messages
 /// only**.
 ///
@@ -351,6 +433,50 @@ pub(crate) use imp::identity;
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    #[cfg(unix)]
+    fn the_parent_policy_accepts_only_unrenamable_directories() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let make = |name: &str, mode: u32| {
+            let path = root.path().join(name);
+            std::fs::create_dir(&path).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+            path
+        };
+
+        // Owned by us and not writable by anyone else.
+        assert_eq!(parent_protects_entries(&make("private", 0o700)), Ok(()));
+        assert_eq!(parent_protects_entries(&make("readable", 0o755)), Ok(()));
+        // Sticky: others may write, but only an entry's owner may rename it.
+        assert_eq!(parent_protects_entries(&make("sticky", 0o1777)), Ok(()));
+        assert_eq!(
+            parent_protects_entries(&make("sticky_group", 0o1770)),
+            Ok(())
+        );
+
+        // Group- or world-writable without the sticky bit is the shape that
+        // lets another member rename our staging directory away.
+        for (name, mode) in [("group", 0o770_u32), ("world", 0o777), ("other", 0o707)] {
+            let error = parent_protects_entries(&make(name, mode)).unwrap_err();
+            assert!(
+                matches!(error, UnprotectedParent::RenamableByOthers { .. }),
+                "{name} ({mode:o}) was accepted: {error:?}"
+            );
+        }
+
+        assert_eq!(
+            parent_protects_entries(&root.path().join("absent")),
+            Err(UnprotectedParent::NotADirectory)
+        );
+        let file = root.path().join("file");
+        std::fs::write(&file, b"x").unwrap();
+        assert_eq!(
+            parent_protects_entries(&file),
+            Err(UnprotectedParent::NotADirectory)
+        );
+    }
 
     #[test]
     fn a_subdirectory_is_created_exclusively_and_owned() {

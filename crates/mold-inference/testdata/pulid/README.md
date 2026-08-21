@@ -218,7 +218,9 @@ cargo test -p mold-ai-inference --lib -- pulid eva_clip
 
 Weight-gated tests need the two pinned checkpoints. Point
 `MOLD_TEST_PULID_ASSETS` at a directory holding them (searched one level deep,
-so `hf download --local-dir` layouts work):
+so `hf download --local-dir` layouts work). The conversion stages a transient
+856 MB copy of the source pickle under `$XDG_RUNTIME_DIR` or `$TMPDIR`, so that
+volume needs roughly 1 GB free; set `TMPDIR` if it does not.
 
 ```bash
 MOLD_TEST_PULID_ASSETS=/path/to/pulid-assets \

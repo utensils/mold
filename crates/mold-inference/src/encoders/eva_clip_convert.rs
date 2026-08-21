@@ -16,12 +16,15 @@
 //!
 //! ## The three things that authenticate a load
 //!
-//! 1. **The source is read through a private copy.** candle's `PthTensors`
-//!    re-opens its file by pathname for every tensor, so hashing a descriptor
-//!    and then handing candle a pathname authenticates nothing. The bytes are
-//!    copied out of the retained descriptor into an exclusively created 0o700
-//!    directory and hashed on that same stream, so the digest and the parse
-//!    observe identical bytes by construction. See [`stage_private_copy`].
+//! 1. **The source is read through a private copy, in a private place.**
+//!    candle's `PthTensors` re-opens its file by pathname for every tensor, so
+//!    hashing a descriptor and then handing candle a pathname authenticates
+//!    nothing. The bytes are copied out of the retained descriptor into an
+//!    exclusively created 0o700 directory and hashed on that same stream, so
+//!    the digest and the parse observe identical bytes by construction. That
+//!    directory lives under a root no other user can rename entries in — NOT
+//!    the model root, which `CLAUDE.md` allows to be group-writable. See
+//!    [`stage_private_copy`] and [`private_staging_root`].
 //! 2. **Every publish is a `renameat` between two retained directory
 //!    descriptors.** `rename` replaces a symlink instead of following it, and
 //!    binding both endpoints to descriptors means a group-writable model root
@@ -37,7 +40,7 @@
 // otherwise force either a premature `pub` surface or a stub caller.
 #![allow(dead_code)]
 
-use super::secure_dir::{identity, Dir};
+use super::secure_dir::{identity, parent_protects_entries, Dir};
 use anyhow::{bail, ensure, Context, Result};
 use candle_core::pickle::PthTensors;
 use mold_core::pulid_assets::PulidPaths;
@@ -147,8 +150,11 @@ impl PrivateStagingDir {
             .context("the conversion destination has no parent directory")?;
         std::fs::create_dir_all(parent_path)
             .with_context(|| format!("failed to create {}", parent_path.display()))?;
-        let parent = Dir::open(parent_path)?;
+        Self::create_under(Dir::open(parent_path)?)
+    }
 
+    /// Create an exclusively named 0o700 subdirectory of `parent`.
+    fn create_under(parent: Dir) -> Result<Self> {
         let mut last_error = None;
         for attempt in 0..16_u32 {
             let name = format!(
@@ -170,6 +176,25 @@ impl PrivateStagingDir {
         }
         Err(last_error.unwrap_or_else(|| anyhow::anyhow!("no attempt was made")))
             .context("failed to create a private staging directory")
+    }
+
+    /// Create the directory under a root **outside** the model tree.
+    ///
+    /// Used for the source copy, which exists to be handed to candle's pickle
+    /// reader by pathname. `create_beside` is wrong for that: a model root may
+    /// legitimately be group-writable, and then another member can rename our
+    /// 0o700 directory away after we verified its contents and leave an
+    /// unpinned `source.pt` at the pathname `PthTensors` keeps re-opening. The
+    /// derived-output pin would still catch the resulting weights, but only
+    /// after the pickle parser had already consumed attacker-chosen bytes.
+    ///
+    /// The output staging directory stays beside the destination, because a
+    /// publish must `renameat` within one filesystem — and it is safe there,
+    /// since nothing hands its pathname to anyone.
+    fn create_in_private_root(needed_bytes: u64) -> Result<Self> {
+        let root = select_private_staging_root(&private_staging_root_candidates())?;
+        ensure_room_for_copy(&root, needed_bytes)?;
+        Self::create_under(Dir::open(&root)?)
     }
 
     fn dir(&self) -> &Dir {
@@ -207,6 +232,74 @@ impl Drop for PrivateStagingDir {
         }
         let _ = self.parent.remove_subdir(&self.name);
     }
+}
+
+/// Roots to consider for the private source copy, best first.
+///
+/// `$XDG_RUNTIME_DIR` is a per-user `0o700` tmpfs on systemd Linux and is the
+/// right answer when it exists. `std::env::temp_dir()` is next: it honours
+/// `$TMPDIR`, which is a per-user `0o700` directory on macOS and `/tmp` (mode
+/// `1777`, sticky) on most Linux systems. Both shapes satisfy
+/// [`parent_protects_entries`].
+///
+/// Deliberately no `MOLD_*` variable of its own: `TMPDIR` is the standard knob
+/// and adding a private one would mean registering it in
+/// `ENGINE_SHAPING_VARIABLES` for something that is not engine shaping.
+fn private_staging_root_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(runtime_dir) = std::env::var_os("XDG_RUNTIME_DIR") {
+        if !runtime_dir.is_empty() {
+            candidates.push(PathBuf::from(runtime_dir));
+        }
+    }
+    candidates.push(std::env::temp_dir());
+    candidates
+}
+
+/// The first candidate no other user can rename entries in.
+///
+/// Fails closed, naming every candidate and why it was rejected, because the
+/// alternative — falling back to the model root — is the vulnerability this
+/// exists to close.
+fn select_private_staging_root(candidates: &[PathBuf]) -> Result<PathBuf> {
+    let mut rejected = Vec::new();
+    for candidate in candidates {
+        match parent_protects_entries(candidate) {
+            Ok(()) => return Ok(candidate.clone()),
+            Err(reason) => rejected.push(format!("{} ({reason})", candidate.display())),
+        }
+    }
+    bail!(
+        "no private directory is available to stage the EVA02-CLIP conversion: {}. \
+         Set TMPDIR to a directory you own that other users cannot write, or that \
+         has the sticky bit set.",
+        if rejected.is_empty() {
+            "no candidates were offered".to_string()
+        } else {
+            rejected.join("; ")
+        }
+    )
+}
+
+/// Refuse before copying rather than after 856 MB of writes.
+///
+/// The private root is frequently a tmpfs sized as a fraction of RAM, and the
+/// source pickle is large enough that a default `/tmp` can genuinely be too
+/// small. The remedy is `TMPDIR`, which is why the message names it.
+fn ensure_room_for_copy(root: &Path, needed_bytes: u64) -> Result<()> {
+    // A margin so we do not fill the volume to the last block; the conversion
+    // is not the only thing using it.
+    const MARGIN_BYTES: u64 = 64 * 1024 * 1024;
+    let available = fs2::available_space(root)
+        .with_context(|| format!("failed to read free space on {}", root.display()))?;
+    let required = needed_bytes.saturating_add(MARGIN_BYTES);
+    ensure!(
+        available >= required,
+        "staging the EVA02-CLIP source needs {required} bytes on {} but only {available} \
+         are free. Set TMPDIR to a larger volume.",
+        root.display()
+    );
+    Ok(())
 }
 
 /// A disambiguator for the staging directory's name. Not a security property —
@@ -467,7 +560,16 @@ pub(crate) fn convert_eva_clip_vision(source: &Path, destination: &Path) -> Resu
     // 2. Copy those bytes somewhere only we can reach, hashing the same stream,
     //    and require the manifest pin. From here on the pathname the caller
     //    gave us is irrelevant.
-    let staging = PrivateStagingDir::create_beside(destination)?;
+    //
+    //    The copy goes under a private tmp root rather than beside the
+    //    destination: the model root may legitimately be group-writable, and
+    //    this is the one staged file whose PATHNAME is handed out (to candle's
+    //    pickle reader, which re-opens it per tensor).
+    let source_bytes = retained
+        .metadata()
+        .context("failed to stat the source")?
+        .len();
+    let staging = PrivateStagingDir::create_in_private_root(source_bytes)?;
     let private_source = stage_private_copy(&retained, &staging, "source.pt", SOURCE_SHA256)
         .with_context(|| format!("{} failed its pin", source.display()))?;
     drop(retained);
@@ -746,6 +848,90 @@ mod tests {
             "expected a digest refusal, got: {message}"
         );
         assert_eq!(entries(dir.path()), vec!["impostor.pt".to_string()]);
+    }
+
+    /// The source copy must not be staged in the model root, so a conversion
+    /// leaves nothing there even when it fails partway.
+    #[test]
+    fn no_staging_lands_beside_the_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("impostor.pt");
+        std::fs::write(&source, b"definitely not EVA02-CLIP").unwrap();
+        // Fails on the pin, i.e. AFTER the private copy has been made.
+        assert!(convert_eva_clip_vision(&source, &dir.path().join("out.safetensors")).is_err());
+        assert_eq!(
+            entries(dir.path()),
+            vec!["impostor.pt".to_string()],
+            "the source copy was staged inside the model root"
+        );
+    }
+
+    /// The private root is chosen by the policy, not by convention: the first
+    /// candidate other users cannot rename entries in wins, and if none
+    /// qualifies the conversion fails closed rather than falling back to the
+    /// model root.
+    #[test]
+    #[cfg(unix)]
+    fn the_private_root_is_the_first_unrenamable_candidate() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let make = |name: &str, mode: u32| {
+            let path = root.path().join(name);
+            std::fs::create_dir(&path).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+            path
+        };
+        let shared = make("shared", 0o777);
+        let private = make("private", 0o700);
+        let sticky = make("sticky", 0o1777);
+
+        // An unusable earlier candidate is skipped, not fatal.
+        assert_eq!(
+            select_private_staging_root(&[shared.clone(), private.clone()]).unwrap(),
+            private
+        );
+        // Order is preference order.
+        assert_eq!(
+            select_private_staging_root(&[sticky.clone(), private.clone()]).unwrap(),
+            sticky
+        );
+
+        // Nothing usable: fail closed, and say what to do about it.
+        let error = select_private_staging_root(std::slice::from_ref(&shared)).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("TMPDIR"), "unhelpful message: {message}");
+        assert!(
+            message.contains("shared"),
+            "did not name the candidate: {message}"
+        );
+        assert!(select_private_staging_root(&[]).is_err());
+    }
+
+    /// The real candidate list must actually work on this machine, or every
+    /// conversion fails. `temp_dir()` is always present, so this is a check on
+    /// the environment as much as on the code.
+    #[test]
+    fn the_default_candidates_resolve() {
+        let candidates = private_staging_root_candidates();
+        assert!(!candidates.is_empty());
+        assert_eq!(candidates.last().unwrap(), &std::env::temp_dir());
+        select_private_staging_root(&candidates)
+            .expect("this machine offers no usable private staging root");
+    }
+
+    /// An 856 MB pickle onto a small tmpfs must fail before the copy, with a
+    /// message naming the remedy rather than ENOSPC halfway through.
+    #[test]
+    fn a_too_small_private_root_is_refused_before_copying() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(ensure_room_for_copy(root.path(), 1024).is_ok());
+        let error = ensure_room_for_copy(root.path(), u64::MAX / 2).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("TMPDIR"), "unhelpful message: {message}");
+        assert!(
+            message.contains("are free"),
+            "did not report what was available: {message}"
+        );
     }
 
     /// The private copy is what gets parsed, and it holds exactly the bytes

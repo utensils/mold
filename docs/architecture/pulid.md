@@ -95,12 +95,44 @@ and hashed on that same stream. The digest and the parse observe identical
 bytes by construction. The cost is one transient 856 MB copy, on an
 install-time path that is about to write 609 MB anyway.
 
-The staging directory is created with `create_dir` — which fails rather than
+The staging directory is created with `mkdirat` — which fails rather than
 reusing an existing entry — at mode `0o700`, and is removed on every exit path.
 That exclusivity is what makes it safe for `serialize_to_file` and the pickle
-reader to open paths inside it by name. It also cannot be the model directory
-itself: `CLAUDE.md`'s model-storage rule makes shared, group-writable model
-roots legitimate, so staging has to happen somewhere mold owns outright.
+reader to open paths inside it by name.
+
+### Why the source copy is not staged in the model root
+
+A `0o700` directory is only as private as its parent. Renaming an entry needs
+write permission on the **containing** directory, so in a group-writable model
+root another member can rename our staging directory away *after* we verified
+its contents and drop an unpinned `source.pt` at the pathname `PthTensors`
+keeps re-opening. The derived-output pin would still catch the resulting
+weights — but only after the pickle parser had already consumed
+attacker-chosen bytes, which is the wrong place to find out.
+
+So the source copy is staged under a root chosen by policy, not by convention.
+`private_staging_root_candidates` offers `$XDG_RUNTIME_DIR` (a per-user
+`0o700` tmpfs on systemd Linux) and then `std::env::temp_dir()` (which honours
+`$TMPDIR`: a per-user `0o700` directory on macOS, `/tmp` at sticky `1777` on
+most Linux systems). `secure_dir::parent_protects_entries` accepts a candidate
+only when we own it and either nobody else can write it or the sticky bit is
+set — those are exactly the two shapes in which no other user can rename our
+entries. If none qualifies the conversion fails closed, naming every candidate
+and its reason, rather than silently falling back to the model root.
+
+There is deliberately no `MOLD_*` variable for this: `TMPDIR` is the standard
+knob, and a private one would have to be registered in
+`ENGINE_SHAPING_VARIABLES` for something that is not engine shaping.
+
+The private root is often a tmpfs sized as a fraction of RAM, and 856 MB is
+enough that a default `/tmp` can genuinely be too small, so free space is
+checked before the copy starts and the error names `TMPDIR` as the remedy —
+rather than surfacing ENOSPC most of the way through.
+
+The **output** staging directory still sits beside the destination, because a
+publish must `renameat` within one filesystem. That is safe there: nothing ever
+hands its pathname to anyone, and both endpoints of the rename are retained
+descriptors.
 
 ### Why every publish is a `renameat` between descriptors
 
