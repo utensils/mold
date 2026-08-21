@@ -56,13 +56,29 @@ describe("model access policy", () => {
     expect(isModelAccessRestricted(capabilities, identity)).toBe(false);
   });
 
-  it("keeps older-server rows and removes restricted current-server rows", () => {
+  it("fails opaque H3 rows closed even when a server advertises no family restriction", () => {
     const models = [
       { name: "flux-dev:q8", family: "flux" },
       { name: "hf:opaque", family: "minimax-h3" },
     ];
-    expect(filterRestrictedModels(models, undefined)).toEqual(models);
+    expect(filterRestrictedModels(models, undefined)).toEqual([models[0]]);
     expect(filterRestrictedModels(models, capabilities)).toEqual([models[0]]);
+  });
+
+  it("keeps the reviewed H3 task partitions explicit", () => {
+    const models = [
+      { name: "minimax-h3-fl2va:comfy-pruned-int8", family: "minimax-h3" },
+      { name: "minimax-h3-ref2va:comfy-pruned-int8", family: "minimax-h3" },
+      {
+        name: "minimax-h3-fl2va:comfy-pruned-int8-turbo-8step",
+        family: "minimax-h3",
+      },
+      {
+        name: "minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p",
+        family: "minimax-h3",
+      },
+    ];
+    expect(filterRestrictedModels(models, undefined)).toEqual(models);
   });
 
   it("hides models whose runtime contract is explicitly unavailable", () => {
