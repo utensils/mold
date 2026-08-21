@@ -331,6 +331,38 @@ onBeforeUnmount(() => {
       </fieldset>
     </section>
 
+    <section
+      class="mobile-settings-section"
+      aria-labelledby="mobile-settings-library-title"
+      data-test="mobile-settings-library"
+    >
+      <div class="mobile-settings-section-copy">
+        <h2 id="mobile-settings-library-title">Library</h2>
+        <p>How a new print is filed the moment it is developed.</p>
+      </div>
+      <fieldset class="mobile-settings-fieldset">
+        <legend>File under</legend>
+        <label class="mobile-photo-setting">
+          <span>
+            <!-- Never a silent write: the tag this files is always shown on
+                 Create as the removable ghost chip, before Generate. -->
+            <strong>Tag new prints with their title</strong>
+            <small>Shown on Create as a removable chip — remove it to opt one print out.</small>
+          </span>
+          <input
+            name="mobile-auto-tag-title"
+            type="checkbox"
+            :checked="settings.autoTagTitle"
+            @change="
+              emit('update', {
+                autoTagTitle: ($event.target as HTMLInputElement).checked,
+              })
+            "
+          />
+        </label>
+      </fieldset>
+    </section>
+
     <section class="mobile-settings-section" aria-labelledby="mobile-settings-hosts-title">
       <div class="mobile-settings-section-copy">
         <h2 id="mobile-settings-hosts-title">Remote hosts</h2>

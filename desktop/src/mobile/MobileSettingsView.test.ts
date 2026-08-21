@@ -53,13 +53,18 @@ describe("MobileSettingsView", () => {
   it("offers accessible theme choices and emits immediate updates", async () => {
     const wrapper = mount(MobileSettingsView, {
       props: {
-        settings: { theme: "system", themeFamily: "mold", autoSavePhotos: true },
+        settings: {
+          theme: "system",
+          themeFamily: "mold",
+          autoSavePhotos: true,
+          autoTagTitle: true,
+        },
         hostCount: 2,
         appVersion: "0.18.0",
       },
     });
 
-    expect(wrapper.findAll("fieldset")).toHaveLength(3);
+    expect(wrapper.findAll("fieldset")).toHaveLength(4);
     expect(wrapper.text()).toContain("Change the chrome without changing the color of your prints");
     expect(wrapper.text()).toContain("2 hosts saved");
     expect(wrapper.text()).toContain("0.18.0");
@@ -70,18 +75,44 @@ describe("MobileSettingsView", () => {
     await wrapper.get('input[name="mobile-theme-family"][value="safelight"]').setValue(true);
     await wrapper.get('input[name="mobile-theme-appearance"][value="light"]').setValue(true);
     await wrapper.get('input[name="mobile-auto-save-photos"]').setValue(false);
+    await wrapper.get('input[name="mobile-auto-tag-title"]').setValue(false);
 
     expect(wrapper.emitted("update")).toEqual([
       [{ themeFamily: "safelight" }],
       [{ theme: "light" }],
       [{ autoSavePhotos: false }],
+      [{ autoTagTitle: false }],
     ]);
+  });
+
+  it("names the auto-tag preference as the removable default it files", async () => {
+    const wrapper = mount(MobileSettingsView, {
+      props: {
+        settings: {
+          theme: "system",
+          themeFamily: "mold",
+          autoSavePhotos: true,
+          autoTagTitle: false,
+        },
+        hostCount: 1,
+        appVersion: "0.23.0",
+      },
+    });
+
+    const toggle = wrapper.get('input[name="mobile-auto-tag-title"]');
+    expect((toggle.element as HTMLInputElement).checked).toBe(false);
+    expect(wrapper.get("[data-test='mobile-settings-library']").text()).toContain(
+      "Tag new prints with their title",
+    );
+
+    await toggle.setValue(true);
+    expect(wrapper.emitted("update")).toEqual([[{ autoTagTitle: true }]]);
   });
 
   it("routes host management through an explicit action", async () => {
     const wrapper = mount(MobileSettingsView, {
       props: {
-        settings: { theme: "dark", themeFamily: "mold", autoSavePhotos: true },
+        settings: { theme: "dark", themeFamily: "mold", autoSavePhotos: true, autoTagTitle: true },
         hostCount: 0,
         appVersion: "Development build",
       },
@@ -143,6 +174,7 @@ describe("MobileSettingsView", () => {
           theme: "system",
           themeFamily: "mold",
           autoSavePhotos: true,
+          autoTagTitle: true,
         },
         hostCount: 1,
         appVersion: "0.20.2",
@@ -200,7 +232,12 @@ describe("MobileSettingsView", () => {
 
     const wrapper = mount(MobileSettingsView, {
       props: {
-        settings: { theme: "system", themeFamily: "mold", autoSavePhotos: true },
+        settings: {
+          theme: "system",
+          themeFamily: "mold",
+          autoSavePhotos: true,
+          autoTagTitle: true,
+        },
         hostCount: 1,
         appVersion: "0.20.2",
         host,
@@ -216,7 +253,12 @@ describe("MobileSettingsView", () => {
   it("opens the public privacy policy from About", async () => {
     const wrapper = mount(MobileSettingsView, {
       props: {
-        settings: { theme: "system", themeFamily: "safelight", autoSavePhotos: true },
+        settings: {
+          theme: "system",
+          themeFamily: "safelight",
+          autoSavePhotos: true,
+          autoTagTitle: true,
+        },
         hostCount: 1,
         appVersion: "0.20.2",
       },
@@ -298,7 +340,12 @@ describe("MobileSettingsView", () => {
     });
     const wrapper = mount(MobileSettingsView, {
       props: {
-        settings: { theme: "system", themeFamily: "mold", autoSavePhotos: true },
+        settings: {
+          theme: "system",
+          themeFamily: "mold",
+          autoSavePhotos: true,
+          autoTagTitle: true,
+        },
         hostCount: 1,
         appVersion: "0.20.2",
         host,
@@ -368,7 +415,12 @@ describe("MobileSettingsView", () => {
     });
     const wrapper = mount(MobileSettingsView, {
       props: {
-        settings: { theme: "system", themeFamily: "mold", autoSavePhotos: true },
+        settings: {
+          theme: "system",
+          themeFamily: "mold",
+          autoSavePhotos: true,
+          autoTagTitle: true,
+        },
         hostCount: 1,
         appVersion: "0.20.2",
         host,
@@ -650,7 +702,7 @@ function mobileHost(id: string) {
 function mountSettings(host: ReturnType<typeof mobileHost>) {
   return mount(MobileSettingsView, {
     props: {
-      settings: { theme: "system", themeFamily: "mold", autoSavePhotos: true },
+      settings: { theme: "system", themeFamily: "mold", autoSavePhotos: true, autoTagTitle: true },
       hostCount: 1,
       appVersion: "0.20.2",
       host,

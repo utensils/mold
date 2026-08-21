@@ -5439,6 +5439,7 @@ describe("MobileApp settings", () => {
       theme: "light",
       themeFamily: "safelight",
       autoSavePhotos: true,
+      autoTagTitle: true,
     });
 
     await wrapper.get('input[name="mobile-theme-appearance"][value="system"]').setValue(true);
@@ -8923,7 +8924,7 @@ describe("MobileApp Create title", () => {
     expect(openStreams[1]?.options.body.title).toBeUndefined();
   });
 
-  it("hides the Title field for Sequence output behind a note instead of dropping a typed title", async () => {
+  it("keeps the Title field for Sequence output and stamps the stitched print", async () => {
     const sequenceModel: ModelEntry = {
       ...model,
       name: "ltx-video-0.9.8-2b-dev:bf16",
@@ -8973,12 +8974,12 @@ describe("MobileApp Create title", () => {
     await sequenceSegment!.trigger("click");
     await flushPromises();
 
-    // The chain wire (`ChainRequestWire`) has no title slot: the field is
-    // hidden with a one-line note rather than silently ignored.
+    // The chain wire carries `title` for the STITCHED print, so the field
+    // stays visible and the old "sequences have no title" note is retired.
     expect(
       wrapper.findAll("label.field").some((field) => field.find("span").text() === "Title"),
-    ).toBe(false);
-    expect(wrapper.get("[data-test='mobile-sequence-title-note']").text()).toMatch(/title/i);
+    ).toBe(true);
+    expect(wrapper.find("[data-test='mobile-sequence-title-note']").exists()).toBe(false);
 
     const prompts = wrapper.findAll("[data-test='mobile-sequence-clip'] textarea");
     await prompts[0]!.setValue("a paper boat");
@@ -8991,7 +8992,7 @@ describe("MobileApp Create title", () => {
         path === "/api/chain-jobs" && (init as RequestInit | undefined)?.method === "POST",
     );
     expect(post).toBeTruthy();
-    expect(JSON.parse(String((post![2] as RequestInit).body))).not.toHaveProperty("title");
+    expect(JSON.parse(String((post![2] as RequestInit).body)).title).toBe("Storm study");
   });
 
   it("refuses an over-long title with an inline error instead of dropping it", async () => {
@@ -9006,5 +9007,236 @@ describe("MobileApp Create title", () => {
     await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
     await flushPromises();
     expect(openStreams).toHaveLength(0);
+  });
+});
+
+describe("MobileApp Create File under", () => {
+  const filingCapabilities = {
+    gallery: {
+      can_delete: true,
+      organize: true,
+      trash: { enabled: true, retention_days: 30 },
+    },
+  };
+  const sequenceModel: ModelEntry = {
+    ...model,
+    name: "ltx-video-0.9.8-2b-dev:bf16",
+    family: "ltx-video",
+    default_steps: 7,
+    default_guidance: 1,
+    default_width: 704,
+    default_height: 480,
+    default_frames: 25,
+    default_fps: 30,
+  };
+
+  function installFilingApi(organize = true): void {
+    apiJsonTo.mockImplementation((_target: unknown, path: string, init?: RequestInit) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([model, sequenceModel]);
+      if (path === "/api/capabilities") {
+        return Promise.resolve(
+          organize ? filingCapabilities : { gallery: { can_delete: true, organize: false } },
+        );
+      }
+      if (path === "/api/gallery") return Promise.resolve([]);
+      if (path === "/api/gallery/collections") {
+        return Promise.resolve([
+          {
+            id: "c1",
+            name: "Smurfs",
+            slug: "smurfs",
+            description: null,
+            cover_filename: null,
+            count: 12,
+            created_at: 1,
+            updated_at: 1,
+          },
+        ]);
+      }
+      if (path === "/api/gallery/tags") return Promise.resolve([{ name: "#kodak", count: 4 }]);
+      if (path.startsWith("/api/capabilities/chain-limits")) {
+        return Promise.resolve({
+          model: sequenceModel.name,
+          frames_per_clip_cap: 97,
+          frames_per_clip_recommended: 97,
+          max_stages: 8,
+          max_total_frames: 777,
+          fade_frames_max: 32,
+          transition_modes: ["smooth", "cut", "fade"],
+          quantization_family: "bf16",
+          supports_audio: false,
+          supports_sequence: true,
+        });
+      }
+      if (path === "/api/chain-jobs" && init?.method === "POST") {
+        return Promise.resolve({ job_id: "sequence-job-1" });
+      }
+      if (path.startsWith("/api/chain-jobs/")) return new Promise(() => {});
+      if (path === "/api/activity")
+        return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+  }
+
+  async function openCreateWithFiling(organize = true): Promise<void> {
+    installFilingApi(organize);
+    wrapper = mountMobileApp();
+    await flushPromises();
+    if (organize) {
+      await vi.waitFor(() =>
+        expect(wrapper?.find("[data-test='mobile-file-under']").exists()).toBe(true),
+      );
+    }
+  }
+
+  async function chooseSequenceOutput(): Promise<void> {
+    const sequenceSegment = wrapper!
+      .get("[data-test='mobile-output-mode']")
+      .findAll("button")
+      .find((candidate) => candidate.text() === "Sequence");
+    await sequenceSegment!.trigger("click");
+    await flushPromises();
+  }
+
+  function chainBody(): Record<string, unknown> {
+    const post = apiJsonTo.mock.calls.find(
+      ([, path, init]) =>
+        path === "/api/chain-jobs" && (init as RequestInit | undefined)?.method === "POST",
+    );
+    expect(post).toBeTruthy();
+    return JSON.parse(String((post![2] as RequestInit).body)) as Record<string, unknown>;
+  }
+
+  it("hides File under and files nothing while no reachable machine can organize", async () => {
+    await openCreateWithFiling(false);
+
+    expect(wrapper!.find("[data-test='mobile-file-under']").exists()).toBe(false);
+
+    await fieldControl("Title").setValue("Smurfs");
+    await fieldControl("Prompt").setValue("a lighthouse");
+    await wrapper!.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+
+    // The title still rides; only the filing is withheld from a machine that
+    // would reject it.
+    expect(openStreams[0]?.options.body.title).toBe("Smurfs");
+    expect(openStreams[0]?.options.body.tags).toBeUndefined();
+    expect(openStreams[0]?.options.body.collection).toBeUndefined();
+  });
+
+  it("files a one-shot print under the ghost tag and the title-matched collection", async () => {
+    await openCreateWithFiling();
+
+    await fieldControl("Title").setValue("Smurfs");
+    expect(wrapper!.get("[data-test='mobile-file-under-ghost']").text()).toContain("smurfs");
+    expect(wrapper!.find("[data-test='mobile-file-under-collection-match']").exists()).toBe(true);
+
+    await fieldControl("Prompt").setValue("a village of small blue characters");
+    await wrapper!.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+
+    expect(openStreams[0]?.options.body.tags).toEqual(["smurfs"]);
+    // Always by name: the routed machine resolves or creates it by slug.
+    expect(openStreams[0]?.options.body.collection).toEqual({ name: "Smurfs" });
+  });
+
+  it("carries a tag typed in the sheet and honours a removed ghost chip", async () => {
+    await openCreateWithFiling();
+    await fieldControl("Title").setValue("Smurfs");
+
+    await wrapper!.get("[data-test='mobile-file-under-add-tag']").trigger("click");
+    await wrapper!.get("[data-test='mobile-file-under-tag-input']").setValue("#kodak");
+    await wrapper!.get("[data-test='mobile-file-under-tag-add']").trigger("click");
+    await wrapper!.get("[data-test='mobile-file-under-tag-sheet-done']").trigger("click");
+    await wrapper!.get("[data-test='mobile-file-under-ghost-remove']").trigger("click");
+    await wrapper!.get("[data-test='mobile-file-under-collection-clear']").trigger("click");
+
+    await fieldControl("Prompt").setValue("a lighthouse");
+    await wrapper!.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+
+    expect(openStreams[0]?.options.body.tags).toEqual(["kodak"]);
+    expect(openStreams[0]?.options.body.collection).toBeUndefined();
+  });
+
+  it("drops the ghost tag when the Settings auto-tag preference is off", async () => {
+    localStorage.setItem(
+      "mold.mobile.settings.v1",
+      JSON.stringify({ theme: "system", themeFamily: "safelight", autoTagTitle: false }),
+    );
+    await openCreateWithFiling();
+
+    await fieldControl("Title").setValue("Smurfs");
+    expect(wrapper!.find("[data-test='mobile-file-under-ghost']").exists()).toBe(false);
+
+    await fieldControl("Prompt").setValue("a lighthouse");
+    await wrapper!.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+
+    expect(openStreams[0]?.options.body.tags).toBeUndefined();
+    // The collection match is a separate decision and still applies.
+    expect(openStreams[0]?.options.body.collection).toEqual({ name: "Smurfs" });
+  });
+
+  it("gives every prepared Batch N sibling the same filing", async () => {
+    await openCreateWithFiling();
+
+    await fieldControl("Title").setValue("Smurfs");
+    await wrapper!.get("[data-test='mobile-batch-increment']").trigger("click");
+    await wrapper!.get("[data-test='mobile-batch-increment']").trigger("click");
+    await fieldControl("Prompt").setValue("three variations of a storm");
+    await wrapper!.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+    await wrapper!.get("[data-test='mobile-develop-prepared']").trigger("click");
+    await flushPromises();
+
+    expect(openStreams).toHaveLength(3);
+    for (const stream of openStreams) {
+      expect(stream.options.body.title).toBe("Smurfs");
+      expect(stream.options.body.tags).toEqual(["smurfs"]);
+      expect(stream.options.body.collection).toEqual({ name: "Smurfs" });
+    }
+  });
+
+  it("files a sequence's stitched print from the same draft, title included", async () => {
+    await openCreateWithFiling();
+
+    await fieldControl("Title").setValue("Smurfs");
+    await chooseSequenceOutput();
+
+    // The chain wire carries `title`/`tags`/`collection` now, so the Title
+    // field stays visible and the old "sequences have no title" note is gone.
+    expect(
+      wrapper!.findAll("label.field").some((field) => field.find("span").text() === "Title"),
+    ).toBe(true);
+    expect(wrapper!.find("[data-test='mobile-sequence-title-note']").exists()).toBe(false);
+    expect(wrapper!.find("[data-test='mobile-file-under']").exists()).toBe(true);
+
+    const prompts = wrapper!.findAll("[data-test='mobile-sequence-clip'] textarea");
+    await prompts[0]!.setValue("a paper boat");
+    await prompts[1]!.setValue("fireflies gather");
+    await wrapper!.get("[data-test='mobile-generate-sequence']").trigger("click");
+    await flushPromises();
+
+    const body = chainBody();
+    expect(body.title).toBe("Smurfs");
+    expect(body.tags).toEqual(["smurfs"]);
+    expect(body.collection).toEqual({ name: "Smurfs" });
+    // Filing describes the stitched print, never an intermediate clip.
+    for (const stage of body.stages as Array<Record<string, unknown>>) {
+      expect(stage).not.toHaveProperty("tags");
+      expect(stage).not.toHaveProperty("collection");
+    }
+  });
+
+  it("previews the creation-time filename with the title slug", async () => {
+    await openCreateWithFiling();
+
+    await fieldControl("Title").setValue("Smurfs");
+
+    expect(wrapper!.get("[data-test='mobile-file-under-filename']").text()).toMatch(
+      /files as mold-ltx2-q8-\d+~smurfs\./,
+    );
   });
 });

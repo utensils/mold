@@ -197,8 +197,10 @@ import {
   applyMetadataToForm,
   applyRequestToForm,
   buildRequest,
+  chainFilingFields,
   cloneGenerateForm,
   newGenerateForm,
+  restoredFileUnderState,
   normalizeLegacyNegativeSnapshot,
   reconcileModelCapabilities,
   resetAdvancedToModelDefaults,
@@ -331,6 +333,7 @@ import MobileExpansionPullStatus from "./MobileExpansionPullStatus.vue";
 import MobileGalleryViewer from "./MobileGalleryViewer.vue";
 import MobileGenerateParameters from "./MobileGenerateParameters.vue";
 import MobileHostDetail from "./MobileHostDetail.vue";
+import MobileFileUnder from "./MobileFileUnder.vue";
 import MobileLibrarySheet from "./MobileLibrarySheet.vue";
 import MobileLoraControls from "./MobileLoraControls.vue";
 import MobilePromptTools from "./MobilePromptTools.vue";
@@ -342,6 +345,12 @@ import MobileSharedParams from "./MobileSharedParams.vue";
 import MobileSourceControls from "./MobileSourceControls.vue";
 import MobileStyleChips from "./MobileStyleChips.vue";
 import MobileTemplates from "./MobileTemplates.vue";
+import { mobileFileUnderAvailable, mobileFileUnderCollections } from "./fileUnder";
+import {
+  emptyFileUnderState,
+  matchCollection,
+  type FileUnderCollectionLike,
+} from "@studio/lib/fileUnder";
 import {
   loadMobileSettings,
   updateMobileSettings as persistMobileSettings,
@@ -587,6 +596,17 @@ let sequenceWatch: SequenceWatchHandle | null = null;
 const expandCapabilities = reactive<Record<string, ExpandCapabilities | null | undefined>>({});
 const serverCapabilities = reactive<Record<string, ServerCapabilities | null | undefined>>({});
 const form = reactive<GenerateForm>(newGenerateForm());
+// The shared builder defaults `fileUnderAutoTag` to FALSE so a surface with no
+// File under UI can never auto-tag invisibly. The phone HAS the removable
+// ghost chip, so it opts in from its own preference — and keeps opting in
+// through every wholesale form reset, which deliberately preserves the mirror.
+watch(
+  () => mobileSettings.autoTagTitle,
+  (enabled) => {
+    form.fileUnderAutoTag = enabled;
+  },
+  { immediate: true },
+);
 const seedValid = ref(true);
 const parameterValid = ref(true);
 const sourceValid = ref(true);
@@ -639,7 +659,16 @@ function closeAdvancedSheet(): void {
  * prompt, the model, and any prepared batch size. Same contract as the desktop
  * inspector's Reset — the sheet's scoped reset below is deliberately narrower. */
 function resetCreateSettings(): void {
+  // Reset restores the MODEL's generation knobs. The print's name and the
+  // Library filing it carries are neither, and the phone has always kept the
+  // title across a reset — so they survive it whole.
+  const title = form.title;
+  const fileUnder = form.fileUnder;
+  const fileUnderMatchSnapshot = form.fileUnderMatch;
   resetFormToModelDefaults(form, selectedGenerationModel.value);
+  form.title = title;
+  form.fileUnder = fileUnder;
+  form.fileUnderMatch = fileUnderMatchSnapshot;
   // The canvas is part of what Reset restores, so its authority resets with
   // it — otherwise the next model change would re-snap the reset canvas back
   // onto the attached source (#1166).
@@ -752,8 +781,20 @@ const librarySheet = ref<LibrarySheet | null>(null);
 const librarySheetInput = ref("");
 const librarySheetError = ref("");
 const librarySheetBusy = ref(false);
-/** Create ▸ Title — rides every mobile-built `GenerateRequest` as `title`. */
-const printTitle = ref("");
+/**
+ * Create ▸ Title — rides every mobile-built `GenerateRequest` as `title`.
+ *
+ * A proxy over `form.title` rather than a ref of its own: "File under" derives
+ * its ghost tag and its collection match from the SAME title the shared
+ * `buildRequest` / `chainFilingFields` read, so a second copy would let the
+ * chip on screen and the tag on the wire disagree.
+ */
+const printTitle = computed({
+  get: () => form.title,
+  set: (value: string) => {
+    form.title = value;
+  },
+});
 const generatedViewerOpen = ref(false);
 const reusingPrint = ref(false);
 const usingPrintAsSource = ref(false);
@@ -2999,6 +3040,13 @@ async function submitMobileSequence(): Promise<void> {
   }
   const entry = selectedGenerationModel.value;
   if (!initialHost || !entry || sequenceStarting.value) return;
+  // Same contract as the one-shot path: a title the server would reject is an
+  // inline refusal, never a silently dropped name.
+  const titleCheck = requestTitle(printTitle.value);
+  if (!titleCheck.ok) {
+    sequenceError.value = titleCheck.reason;
+    return;
+  }
   let host: MobileHost = initialHost;
   let target = { ...mobileHostTarget(host) };
   let frozenRoute: HostRoute = {
@@ -3011,7 +3059,7 @@ async function submitMobileSequence(): Promise<void> {
   // Freeze all request-affecting values at the tap boundary. Source fitting
   // and placement preview are asynchronous; edits during either await belong
   // to the next submission.
-  const requestForm = cloneGenerateForm(form);
+  const requestForm = applyFileUnderPolicy(cloneGenerateForm(form));
   const clips = JSON.parse(JSON.stringify(draft.clips)) as typeof draft.clips;
   const openingSnapshot = draft.openingImage ? { ...draft.openingImage } : null;
   const enableAudio = draft.enableAudio;
@@ -3043,11 +3091,17 @@ async function submitMobileSequence(): Promise<void> {
     const openingImage = openingSnapshot
       ? { ...openingSnapshot, base64: requestForm.sourceImage }
       : null;
-    const request = buildChainRequest(sequenceParams(requestForm, entry), clips, {
-      motionTailFrames,
-      enableAudio,
-      openingImage,
-    });
+    // The stitched print is the only artifact a sequence puts in the gallery,
+    // so it is what carries the Create title and the File under choice; an
+    // intermediate clip never reaches the Library and is never filed.
+    const request = {
+      ...buildChainRequest(sequenceParams(requestForm, entry), clips, {
+        motionTailFrames,
+        enableAudio,
+        openingImage,
+      }),
+      ...chainFilingFields(requestForm),
+    };
     let preview: GenerationPlacementPreview | null = null;
     let legacyUnsupported = false;
     if (automatic) {
@@ -4530,7 +4584,7 @@ async function generate(): Promise<void> {
   // Replaced by the fan-out winner under Auto / Most capable; frozen from here
   // on for every other path.
   let route: HostRoute = initialRoute;
-  const draft = cloneGenerateForm(form);
+  const draft = applyFileUnderPolicy(cloneGenerateForm(form));
   const originalSource = draft.sourceImage
     ? {
         base64: draft.sourceImage,
@@ -5326,6 +5380,15 @@ async function reusePrint(print: GalleryPrint): Promise<void> {
     // The print's own saved title comes back with its settings; the Library
     // title (a later rename) wins over the metadata stamp when it exists.
     printTitle.value = organizationOf(print)?.title ?? reuse.title;
+    // `applyMetadataToForm` restored the filing against the METADATA title; a
+    // Library rename wins here, so re-derive the ghost opt-out against the
+    // title this reuse actually carries.
+    form.fileUnder = restoredFileUnderState(
+      form.title,
+      form.fileUnderAutoTag,
+      print.metadata.tags,
+      print.metadata.collection,
+    );
     const sourceRestoreNotice = !reuse.sequence
       ? await restoreOrdinaryReusedSource(
           print,
@@ -5790,6 +5853,60 @@ const mergedTags = computed(() =>
   ),
 );
 const libraryTagChips = computed(() => tagChipPlan(mergedTags.value, libraryFilters.tag));
+
+// ── Create ▸ File under ─────────────────────────────────────────────────────
+// The Create-time half of Library organization. Positive knowledge only: a
+// pinned machine answers for itself, an automatic policy is satisfied by any
+// reachable machine that can file, and an unread capability snapshot hides the
+// group and sends nothing.
+const fileUnderEnabled = computed(() =>
+  mobileFileUnderAvailable(generateTarget.value, connectedHosts.value, serverCapabilities),
+);
+const fileUnderCollections = computed(() =>
+  mobileFileUnderCollections(libraryCollectionCards.value),
+);
+/** The fleet collection whose slug equals the live title's — held on the form
+ * so the shared request builder can offer the match without knowing about
+ * stores, exactly as the desktop inspector keeps it in sync. */
+const fileUnderMatch = computed<FileUnderCollectionLike | null>(() =>
+  fileUnderEnabled.value ? matchCollection(form.title, fileUnderCollections.value) : null,
+);
+watch(
+  fileUnderMatch,
+  (match) => {
+    form.fileUnderMatch = match ? { ...match } : null;
+  },
+  { immediate: true },
+);
+/**
+ * The Library's own tag and collection listings are read as part of a gallery
+ * refresh, which only runs on the Library tab. Create needs them too — for the
+ * suggestions and for the title match — so read them whenever the set of
+ * filing-capable machines changes.
+ */
+watch(
+  () => [...librarySupport.value.organizeHostIds].sort().join("|"),
+  (key) => {
+    if (key) void refreshHostOrganization(key.split("|"));
+  },
+  { immediate: true },
+);
+
+/**
+ * Strip the Create-time filing from a request draft the routed machine cannot
+ * file. The group is hidden there, but the ghost tag is DERIVED from the live
+ * title rather than stored, so an untouched draft would still carry one.
+ */
+function applyFileUnderPolicy(draft: GenerateForm): GenerateForm {
+  if (fileUnderEnabled.value) {
+    draft.fileUnderMatch = form.fileUnderMatch ? { ...form.fileUnderMatch } : null;
+    return draft;
+  }
+  draft.fileUnder = emptyFileUnderState();
+  draft.fileUnderAutoTag = false;
+  draft.fileUnderMatch = null;
+  return draft;
+}
 const libraryHostChips = computed(() =>
   connectedHosts.value.length > 1
     ? connectedHosts.value.map((host) => ({
@@ -7591,12 +7708,43 @@ onBeforeUnmount(() => {
             </button>
           </div>
 
+          <!-- Title and File under sit ABOVE the One shot / Sequence branch:
+               both outputs land exactly one gallery print, and a sequence's
+               stitched print carries the same name and the same filing. -->
+          <label class="field">
+            <span>Title</span>
+            <input
+              id="mobile-print-title"
+              v-model="printTitle"
+              class="control"
+              autocomplete="off"
+              enterkeyhint="next"
+              placeholder="Untitled print"
+              data-test="mobile-create-title"
+            />
+          </label>
+          <p
+            v-if="printTitleError"
+            class="status-line error-text"
+            role="alert"
+            data-test="mobile-create-title-error"
+          >
+            {{ printTitleError }}
+          </p>
+          <MobileFileUnder
+            v-if="fileUnderEnabled"
+            v-model:state="form.fileUnder"
+            :title="printTitle"
+            :auto-tag-title="mobileSettings.autoTagTitle"
+            :tags="mergedTags"
+            :collections="fileUnderCollections"
+            :model="form.model"
+            :extension="form.outputFormat"
+            :batch-size="effectiveBatchSize"
+            :output-kind="isSequence ? 'sequence' : 'print'"
+          />
+
           <template v-if="isSequence">
-            <!-- The chain wire has no title slot (`ChainRequestWire`): the
-                 Title field is hidden here instead of silently dropped. -->
-            <p class="mobile-empty-note" data-test="mobile-sequence-title-note">
-              Sequences don't carry a title — rename the stitched print in the Library.
-            </p>
             <div
               v-if="sequenceModels.length === 0"
               class="mobile-sequence-empty"
@@ -7651,26 +7799,6 @@ onBeforeUnmount(() => {
             </MobileSequenceComposer>
           </template>
           <template v-else>
-            <label class="field">
-              <span>Title</span>
-              <input
-                id="mobile-print-title"
-                v-model="printTitle"
-                class="control"
-                autocomplete="off"
-                enterkeyhint="next"
-                placeholder="Untitled print"
-                data-test="mobile-create-title"
-              />
-            </label>
-            <p
-              v-if="printTitleError"
-              class="status-line error-text"
-              role="alert"
-              data-test="mobile-create-title-error"
-            >
-              {{ printTitleError }}
-            </p>
             <label class="field">
               <span>Prompt</span>
               <textarea

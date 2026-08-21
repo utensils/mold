@@ -7,6 +7,9 @@ import MobileFileUnder from "./MobileFileUnder.vue";
 const component = readFileSync("src/mobile/MobileFileUnder.vue", "utf8");
 
 let wrapper: VueWrapper | null = null;
+/** The owner's copy of the draft: every reducer emits a NEW state, so this is
+ * what `MobileApp` would be holding in `form.fileUnder`. */
+let current: FileUnderState = emptyFileUnderState();
 
 afterEach(() => {
   wrapper?.unmount();
@@ -41,25 +44,29 @@ function mountGroup(
     outputKind: "print" | "sequence";
   }> = {},
 ): VueWrapper {
+  current = props.state ?? emptyFileUnderState();
   wrapper = mount(MobileFileUnder, {
     attachTo: document.body,
     props: {
       title: "Smurfs",
-      state: emptyFileUnderState(),
       autoTagTitle: true,
       tags,
       collections,
       model: "z-image-turbo:bf16",
       extension: "png",
       ...props,
-      "onUpdate:state": (next: FileUnderState) => wrapper?.setProps({ state: next }),
+      state: current,
+      "onUpdate:state": (next: FileUnderState) => {
+        current = next;
+        void wrapper?.setProps({ state: next });
+      },
     },
   });
   return wrapper;
 }
 
 function state(): FileUnderState {
-  return wrapper!.props("state") as FileUnderState;
+  return current;
 }
 
 async function openTagSheet(): Promise<void> {
