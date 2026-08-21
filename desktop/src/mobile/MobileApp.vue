@@ -200,11 +200,11 @@ import {
   chainFilingFields,
   cloneGenerateForm,
   newGenerateForm,
-  restoredFileUnderState,
   normalizeLegacyNegativeSnapshot,
   reconcileModelCapabilities,
   resetAdvancedToModelDefaults,
   resetFormToModelDefaults,
+  restoredFileUnderState,
   type GenerateForm,
 } from "../lib/generateForm";
 import {
@@ -330,10 +330,10 @@ import {
 import MobileAdvancedSheet from "./MobileAdvancedSheet.vue";
 import MobileCatalogView from "./MobileCatalogView.vue";
 import MobileExpansionPullStatus from "./MobileExpansionPullStatus.vue";
+import MobileFileUnder from "./MobileFileUnder.vue";
 import MobileGalleryViewer from "./MobileGalleryViewer.vue";
 import MobileGenerateParameters from "./MobileGenerateParameters.vue";
 import MobileHostDetail from "./MobileHostDetail.vue";
-import MobileFileUnder from "./MobileFileUnder.vue";
 import MobileLibrarySheet from "./MobileLibrarySheet.vue";
 import MobileLoraControls from "./MobileLoraControls.vue";
 import MobilePromptTools from "./MobilePromptTools.vue";
@@ -5854,6 +5854,15 @@ const mergedTags = computed(() =>
 );
 const libraryTagChips = computed(() => tagChipPlan(mergedTags.value, libraryFilters.tag));
 
+const libraryHostChips = computed(() =>
+  connectedHosts.value.length > 1
+    ? connectedHosts.value.map((host) => ({
+        id: host.id,
+        name: host.name,
+        count: libraryHostCounts.value[host.id] ?? 0,
+      }))
+    : [],
+);
 // ── Create ▸ File under ─────────────────────────────────────────────────────
 // The Create-time half of Library organization. Positive knowledge only: a
 // pinned machine answers for itself, an automatic policy is satisfied by any
@@ -5911,15 +5920,7 @@ function applyFileUnderPolicy(draft: GenerateForm): GenerateForm {
   draft.fileUnderMatch = null;
   return draft;
 }
-const libraryHostChips = computed(() =>
-  connectedHosts.value.length > 1
-    ? connectedHosts.value.map((host) => ({
-        id: host.id,
-        name: host.name,
-        count: libraryHostCounts.value[host.id] ?? 0,
-      }))
-    : [],
-);
+
 const libraryChipRowVisible = computed(
   () =>
     libraryScope.value === "prints" &&

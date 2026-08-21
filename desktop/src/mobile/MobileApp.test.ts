@@ -9230,6 +9230,94 @@ describe("MobileApp Create File under", () => {
     }
   });
 
+  it("restores the filing a print actually landed with on Use as prompt", async () => {
+    const filed: GalleryImage = {
+      filename: "filed.png",
+      timestamp: Math.floor(Date.now() / 1000) + 6,
+      format: "png",
+      tags: ["Blue"],
+      metadata: {
+        prompt: "a village of small blue characters",
+        model: model.name,
+        seed: 7,
+        steps: 4,
+        guidance: 3.5,
+        width: 512,
+        height: 512,
+        title: "Smurfs",
+        // The print landed WITHOUT its own title tag: that is an opt-out, and
+        // re-offering the ghost chip would quietly re-file the reuse.
+        tags: ["Blue"],
+        collection: "River studies",
+      },
+    } as GalleryImage;
+    installFilingApi();
+    const withPrint = apiJsonTo.getMockImplementation()!;
+    apiJsonTo.mockImplementation((target: unknown, path: string, init?: RequestInit) =>
+      path === "/api/gallery" ? Promise.resolve([filed]) : withPrint(target, path, init),
+    );
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await vi.waitFor(() => expect(wrapper?.find("[data-test='gallery-item']").exists()).toBe(true));
+    await wrapper.get("[data-test='gallery-item']").trigger("click");
+    await flushPromises();
+    await wrapper.get("[data-test='gallery-viewer-reuse']").trigger("click");
+    await flushPromises();
+
+    expect((fieldControl("Title").element as HTMLInputElement).value).toBe("Smurfs");
+    expect(wrapper.find("[data-test='mobile-file-under-ghost']").exists()).toBe(false);
+    expect(wrapper.get("[data-test='mobile-file-under-tag']").text()).toContain("Blue");
+    expect(wrapper.get("[data-test='mobile-file-under-collection']").text()).toContain(
+      "River studies",
+    );
+    // An explicit pick outranks the title match, so nothing claims a match.
+    expect(wrapper.find("[data-test='mobile-file-under-collection-match']").exists()).toBe(false);
+  });
+
+  it("re-derives the ghost chip against a Library rename rather than the stamp", async () => {
+    const renamed: GalleryImage = {
+      filename: "renamed.png",
+      timestamp: Math.floor(Date.now() / 1000) + 6,
+      format: "png",
+      // The Library rename wins over the metadata stamp for the title, so the
+      // ghost opt-out has to be judged against the name this reuse carries.
+      title: "Harbour lights",
+      metadata: {
+        prompt: "a village of small blue characters",
+        model: model.name,
+        seed: 7,
+        steps: 4,
+        guidance: 3.5,
+        width: 512,
+        height: 512,
+        title: "Smurfs",
+        tags: ["smurfs", "Blue"],
+      },
+    } as GalleryImage;
+    installFilingApi();
+    const withPrint = apiJsonTo.getMockImplementation()!;
+    apiJsonTo.mockImplementation((target: unknown, path: string, init?: RequestInit) =>
+      path === "/api/gallery" ? Promise.resolve([renamed]) : withPrint(target, path, init),
+    );
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await vi.waitFor(() => expect(wrapper?.find("[data-test='gallery-item']").exists()).toBe(true));
+    await wrapper.get("[data-test='gallery-item']").trigger("click");
+    await flushPromises();
+    await wrapper.get("[data-test='gallery-viewer-reuse']").trigger("click");
+    await flushPromises();
+
+    expect((fieldControl("Title").element as HTMLInputElement).value).toBe("Harbour lights");
+    // Never invent `harbour-lights`: the print was not filed under it.
+    expect(wrapper.find("[data-test='mobile-file-under-ghost']").exists()).toBe(false);
+    // And never drop `smurfs`, which the print really does carry.
+    expect(
+      wrapper.findAll("[data-test='mobile-file-under-tag']").map((chip) => chip.text()),
+    ).toEqual([expect.stringContaining("smurfs"), expect.stringContaining("Blue")]);
+  });
+
   it("previews the creation-time filename with the title slug", async () => {
     await openCreateWithFiling();
 
