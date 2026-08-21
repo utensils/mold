@@ -6,6 +6,7 @@ ci="$repo_root/.github/workflows/ci.yml"
 desktop="$repo_root/.github/workflows/desktop.yml"
 ios="$repo_root/.github/workflows/ios.yml"
 android="$repo_root/.github/workflows/android.yml"
+android_gradle="$repo_root/apps/mobile/src-tauri/gen/android/build.gradle.kts"
 release_workflow="$repo_root/.github/workflows/release.yml"
 
 fail() {
@@ -512,5 +513,7 @@ require_text "$android" 'api-level: 35' \
 require_text "$android" \
   './gradlew --no-daemon :tauri-plugin-mold-mobile-native:connectedDebugAndroidTest' \
   "Android workflow does not run native instrumentation tests"
+require_text "$android_gradle" 'com.google.mlkit:barcode-scanning:17.3.0' \
+  "Android pairing does not bundle its barcode decoder for first-run and offline use"
 
 echo "PASS: CI routing contract"

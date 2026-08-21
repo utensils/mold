@@ -508,7 +508,9 @@ android-build              # ARM64/ARMv7 Google Play AAB
 `/Volumes/ExternalStorage/Android/Android Studio.app`. Open the generated
 project with `./scripts/android.sh studio`. The helper defaults to NDK
 `27.0.12077973`, which is pinned by the generated Tauri project; change it only
-with a deliberate template/toolchain upgrade.
+with a deliberate template/toolchain upgrade. The generated Gradle root replaces
+the scanner plugin's direct thin dependency with ML Kit's bundled barcode model,
+so first-run and offline QR pairing never waits for a Google Play module download.
 
 ### iOS
 
