@@ -13,7 +13,7 @@ mod theme;
 mod ui;
 
 use clap::{builder::ValueHint, CommandFactory, Parser, Subcommand};
-use clap_complete::engine::ArgValueCandidates;
+use clap_complete::engine::{ArgValueCandidates, CompletionCandidate};
 use mold_core::{OutputFormat, Scheduler};
 
 /// Value parser for OutputFormat with tab-completion candidates.
@@ -185,11 +185,13 @@ enum GpuAction {
     /// Stop assigning new work to a device; active work drains first.
     Disable {
         /// Opaque stable ID (preferred) or current display ordinal.
+        #[arg(add = ArgValueCandidates::new(commands::gpu::complete_device_id))]
         device: String,
     },
     /// Return a disabled or draining device to service.
     Enable {
         /// Opaque stable ID (preferred) or current display ordinal.
+        #[arg(add = ArgValueCandidates::new(commands::gpu::complete_device_id))]
         device: String,
     },
 }
@@ -1642,8 +1644,16 @@ Examples:
 
     Completions {
         /// Shell to generate completions for (bash, zsh, fish, elvish, powershell)
+        #[arg(add = ArgValueCandidates::new(complete_shell))]
         shell: String,
     },
+}
+
+fn complete_shell() -> Vec<CompletionCandidate> {
+    ["bash", "zsh", "fish", "elvish", "powershell"]
+        .into_iter()
+        .map(CompletionCandidate::new)
+        .collect()
 }
 
 /// Republish `--spatial-tile` as `MOLD_LTX2_SPATIAL_TILE`.

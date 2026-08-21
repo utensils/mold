@@ -15,8 +15,13 @@ pub async fn run() -> Result<()> {
         }
         Err(e) => match classify_server_error(&e) {
             ServerAvailability::FallbackLocal => {
-                print_server_unavailable(ctx.client().host(), &e);
-                Err(crate::AlreadyReported.into())
+                if crate::control::is_loopback_host(ctx.client().host()) {
+                    println!("No mold server is running; no server-loaded model to unload.");
+                    Ok(())
+                } else {
+                    print_server_unavailable(ctx.client().host(), &e);
+                    Err(crate::AlreadyReported.into())
+                }
             }
             ServerAvailability::SurfaceError => Err(e),
         },
