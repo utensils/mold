@@ -35,6 +35,7 @@ pub(crate) use crate::memory_preflight::{
     preflight_memory_guard_after_drop_for_request, preflight_memory_guard_for_request,
     request_requires_fresh_engine_for_offload_policy, select_server_load_strategy_for_budget,
     select_server_load_strategy_for_device, server_offload_enabled_for_paths,
+    GenerationOffloadPolicy,
 };
 
 pub(crate) fn request_has_effective_lora(req: &GenerateRequest) -> bool {
@@ -1051,6 +1052,7 @@ pub(crate) async fn estimate_generation_memory(
                                 gpu.vram_total.saturating_sub(gpu.vram_used),
                                 gpu.vram_total,
                                 gpu.ordinal,
+                                gpu.backend,
                             )
                         })
                 })
@@ -1059,17 +1061,17 @@ pub(crate) async fn estimate_generation_memory(
         .unwrap_or_default();
     let roomiest = candidates
         .iter()
-        .map(|(available, _, ordinal)| (*available, *ordinal))
-        .max_by_key(|(available, ordinal)| (*available, std::cmp::Reverse(*ordinal)));
+        .map(|(available, _, ordinal, backend)| (*available, *ordinal, *backend))
+        .max_by_key(|(available, ordinal, _)| (*available, std::cmp::Reverse(*ordinal)));
     // The Create badge answers a different question from current admission:
     // whether this request fits the host's hardware once earlier work releases
     // its allocations. Resolve that estimate against physical capacity so an
     // active denoise/load cannot make the answer oscillate on every sample.
     let roomiest_capacity = candidates
         .iter()
-        .map(|(_, capacity, ordinal)| (*capacity, *ordinal))
-        .max_by_key(|(capacity, ordinal)| (*capacity, std::cmp::Reverse(*ordinal)));
-    let available = roomiest.map(|(available, _)| available);
+        .map(|(_, capacity, ordinal, backend)| (*capacity, *ordinal, *backend))
+        .max_by_key(|(capacity, ordinal, _)| (*capacity, std::cmp::Reverse(*ordinal)));
+    let available = roomiest.map(|(available, _, _)| available);
     let forced_offload = matches!(
         mold_inference::runtime_env::value("MOLD_OFFLOAD").as_deref(),
         Some("1") | Some("true") | Some("yes")
@@ -1078,20 +1080,39 @@ pub(crate) async fn estimate_generation_memory(
         &effective_req,
         &paths,
         hint,
+        GenerationOffloadPolicy::new(
+            forced_offload,
+            roomiest.map_or(
+                mold_inference::wan::block_offload::AdmissionPolicy::Disabled,
+                |(_, _, backend)| {
+                    mold_inference::wan::block_offload::AdmissionPolicy::from_values(
+                        backend,
+                        mold_inference::runtime_env::value("MOLD_WAN_OFFLOAD_BLOCKS").as_deref(),
+                        mold_inference::runtime_env::value("MOLD_OFFLOAD").as_deref(),
+                    )
+                },
+            ),
+        ),
         available,
-        forced_offload,
         request_has_effective_lora(&effective_req),
-        roomiest.is_some_and(|(_, ordinal)| {
+        roomiest.is_some_and(|(_, ordinal, _)| {
             crate::memory_preflight::ltx2_encoder_phase_competes_with_transformer_gpu(ordinal)
         }),
     );
-    let capacity_estimate = roomiest_capacity.map(|(capacity, ordinal)| {
+    let capacity_estimate = roomiest_capacity.map(|(capacity, ordinal, backend)| {
         estimate_generation_memory_for_request(
             &effective_req,
             &paths,
             hint,
+            GenerationOffloadPolicy::new(
+                forced_offload,
+                mold_inference::wan::block_offload::AdmissionPolicy::from_values(
+                    backend,
+                    mold_inference::runtime_env::value("MOLD_WAN_OFFLOAD_BLOCKS").as_deref(),
+                    mold_inference::runtime_env::value("MOLD_OFFLOAD").as_deref(),
+                ),
+            ),
             Some(capacity),
-            forced_offload,
             request_has_effective_lora(&effective_req),
             crate::memory_preflight::ltx2_encoder_phase_competes_with_transformer_gpu(ordinal),
         )
@@ -1107,7 +1128,7 @@ pub(crate) async fn estimate_generation_memory(
         capacity_peak_memory_bytes: capacity_estimate
             .as_ref()
             .map(|estimate| estimate.peak_memory_bytes),
-        device_capacity_bytes: roomiest_capacity.map(|(capacity, _)| capacity),
+        device_capacity_bytes: roomiest_capacity.map(|(capacity, _, _)| capacity),
         fits_device_capacity: capacity_estimate.and_then(|estimate| estimate.fits_available_memory),
     })
 }

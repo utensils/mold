@@ -1210,6 +1210,21 @@ pub(crate) struct GenerationMemoryBudget {
     pub(crate) fits_available_memory: Option<bool>,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct GenerationOffloadPolicy {
+    forced: bool,
+    wan: mold_inference::wan::block_offload::AdmissionPolicy,
+}
+
+impl GenerationOffloadPolicy {
+    pub(crate) const fn new(
+        forced: bool,
+        wan: mold_inference::wan::block_offload::AdmissionPolicy,
+    ) -> Self {
+        Self { forced, wan }
+    }
+}
+
 /// Resolve one generation's memory/load policy against an explicit sampled
 /// free-memory budget.
 ///
@@ -1221,8 +1236,8 @@ pub(crate) fn estimate_generation_memory_for_request(
     req: &GenerateRequest,
     paths: &ModelPaths,
     hint: Option<ActivationHint>,
+    offload_policy: GenerationOffloadPolicy,
     available_memory_bytes: Option<u64>,
-    forced_offload: bool,
     request_has_lora: bool,
     gemma_competes: bool,
 ) -> GenerationMemoryBudget {
@@ -1248,10 +1263,10 @@ pub(crate) fn estimate_generation_memory_for_request(
         paths,
         hint,
         request_has_lora,
-        forced_offload,
+        offload_policy.forced,
     );
     let block_offload = if conservative_block_offload
-        && !forced_offload
+        && !offload_policy.forced
         && !request_has_lora
         && large_flux2_bf16_should_auto_offload(paths, hint, None, 0)
     {
@@ -1303,7 +1318,11 @@ pub(crate) fn estimate_generation_memory_for_request(
                 // blocks in host RAM, so a shape that does not fit resident
                 // may still be feasible. Charging the full weight term would
                 // refuse it before the engine ever got the chance.
-                wan_offload_relief = wan_block_offload_relief(paths);
+                wan_offload_relief = wan_block_offload_relief_for_policy(
+                    paths,
+                    offload_policy.wan,
+                    wan_geometry.map(|geometry| geometry.num_layers as usize),
+                );
                 base_peak = base_peak.saturating_sub(wan_offload_relief);
             }
             // Carry the wan checkpoint geometry in here too. Wan is never
@@ -1380,10 +1399,9 @@ pub(crate) fn estimate_generation_memory_for_request(
     let wan_block_offload = wan_family
         && wan_transformer_can_park(paths)
         && available_memory_bytes.is_some_and(|available| {
-            mold_inference::wan::block_offload::will_park(
-                peak.saturating_add(wan_offload_relief),
-                available,
-            )
+            offload_policy
+                .wan
+                .will_park(peak.saturating_add(wan_offload_relief), available)
         });
     // `MOLD_OFFLOAD=1` sets the generic streaming flag for every family, but
     // no wan arm streams a transformer from host RAM — the factory does not
@@ -1447,6 +1465,18 @@ fn wan_block_offload_relief(paths: &ModelPaths) -> u64 {
         .map(|m| m.len())
         .unwrap_or(0);
     mold_inference::wan::block_offload::max_block_offload_relief_bytes(bytes)
+}
+
+fn wan_block_offload_relief_for_policy(
+    paths: &ModelPaths,
+    policy: mold_inference::wan::block_offload::AdmissionPolicy,
+    total_blocks: Option<usize>,
+) -> u64 {
+    if policy.supports_max_relief(total_blocks) {
+        wan_block_offload_relief(paths)
+    } else {
+        0
+    }
 }
 
 /// Whether this checkpoint's weights can park at all.
@@ -1573,8 +1603,13 @@ fn request_sensitive_activation_memory_with_wan_geometry(
 mod fail_closed_tests {
     use super::*;
     use image::{DynamicImage, ImageBuffer, ImageFormat, Rgb};
+    use mold_inference::wan::block_offload::AdmissionPolicy;
     use std::io::Cursor;
     use std::path::{Path, PathBuf};
+
+    fn offload(wan: AdmissionPolicy) -> GenerationOffloadPolicy {
+        GenerationOffloadPolicy::new(false, wan)
+    }
 
     fn png(width: u32, height: u32) -> Vec<u8> {
         let image = ImageBuffer::from_pixel(width, height, Rgb([1u8, 2, 3]));
@@ -1813,8 +1848,8 @@ mod fail_closed_tests {
             &request,
             &model_paths,
             activation,
+            offload(AdmissionPolicy::Disabled),
             Some(64_000_000_000),
-            false,
             false,
             false,
         );
@@ -1825,8 +1860,8 @@ mod fail_closed_tests {
             &request,
             &model_paths,
             activation,
+            offload(AdmissionPolicy::Disabled),
             Some(64_000_000_000),
-            false,
             false,
             false,
         );
@@ -1871,8 +1906,8 @@ mod fail_closed_tests {
                 req,
                 paths,
                 activation,
+                offload(AdmissionPolicy::Automatic),
                 Some(24_000_000_000),
-                false,
                 false,
                 false,
             )
@@ -1894,6 +1929,79 @@ mod fail_closed_tests {
             !parks.block_offload,
             "wan parks a subset of one expert; it must not be charged as a \
              streamed transformer"
+        );
+
+        // Metal has no automatic parking plan because the runtime cannot take
+        // the CUDA-ordinal free-VRAM reading it needs. Admission must retain
+        // the resident weight term there instead of crediting CUDA-only
+        // relief (#1060).
+        let metal = estimate_generation_memory_for_request(
+            &request(81),
+            &model_paths,
+            activation,
+            offload(AdmissionPolicy::Disabled),
+            Some(24_000_000_000),
+            false,
+            false,
+        );
+        assert_eq!(
+            metal.peak_memory_bytes,
+            parks
+                .peak_memory_bytes
+                .saturating_add(wan_block_offload_relief(&model_paths))
+        );
+        assert_eq!(metal.fits_available_memory, Some(false));
+        assert!(!metal.wan_block_offload);
+
+        let finite_override = estimate_generation_memory_for_request(
+            &request(81),
+            &model_paths,
+            activation,
+            offload(AdmissionPolicy::ForcedFinite(1)),
+            Some(24_000_000_000),
+            false,
+            false,
+        );
+        assert_eq!(finite_override.peak_memory_bytes, metal.peak_memory_bytes);
+        assert_eq!(finite_override.fits_available_memory, Some(false));
+        assert!(finite_override.wan_block_offload);
+
+        let full_override = estimate_generation_memory_for_request(
+            &request(81),
+            &model_paths,
+            activation,
+            offload(AdmissionPolicy::ForcedFinite(40)),
+            Some(24_000_000_000),
+            false,
+            false,
+        );
+        assert_eq!(full_override.peak_memory_bytes, metal.peak_memory_bytes);
+        assert_eq!(full_override.fits_available_memory, Some(false));
+        assert!(full_override.wan_block_offload);
+        let exact_relief = wan_block_offload_relief(&model_paths);
+        assert_eq!(
+            wan_block_offload_relief_for_policy(
+                &model_paths,
+                AdmissionPolicy::ForcedFinite(40),
+                Some(40),
+            ),
+            exact_relief
+        );
+        assert_eq!(
+            wan_block_offload_relief_for_policy(
+                &model_paths,
+                AdmissionPolicy::ForcedFinite(999),
+                Some(40),
+            ),
+            exact_relief
+        );
+        assert_eq!(
+            wan_block_offload_relief_for_policy(
+                &model_paths,
+                AdmissionPolicy::ForcedFinite(40),
+                None,
+            ),
+            0
         );
 
         // A short clip fits with the weights resident and must keep exactly the
@@ -1960,8 +2068,8 @@ mod fail_closed_tests {
             &request,
             &model_paths,
             activation,
+            offload(AdmissionPolicy::Disabled),
             Some(24_000_000_000),
-            false,
             false,
             false,
         );
@@ -1976,8 +2084,8 @@ mod fail_closed_tests {
             &request,
             &model_paths,
             activation,
+            offload(AdmissionPolicy::Disabled),
             Some(96_000_000_000),
-            false,
             false,
             false,
         );
@@ -1991,8 +2099,8 @@ mod fail_closed_tests {
             &request,
             &model_paths,
             activation,
+            offload(AdmissionPolicy::Disabled),
             Some(24_000_000_000),
-            false,
             false,
             false,
         );
@@ -2004,8 +2112,8 @@ mod fail_closed_tests {
             &request,
             &model_paths,
             activation,
+            offload(AdmissionPolicy::Disabled),
             Some(24_000_000_000),
-            false,
             false,
             false,
         );
@@ -2102,8 +2210,8 @@ mod fail_closed_tests {
             &request,
             &ltx2_paths(dir.path()),
             Some(hint),
+            offload(AdmissionPolicy::Disabled),
             Some(RTX_4090_AVAILABLE),
-            false,
             false,
             false,
         );
@@ -2132,8 +2240,8 @@ mod fail_closed_tests {
             &request,
             &ltx2_paths(dir.path()),
             Some(hint),
+            offload(AdmissionPolicy::Disabled),
             Some(RTX_4090_AVAILABLE),
-            false,
             false,
             false,
         );
@@ -2165,8 +2273,8 @@ mod fail_closed_tests {
             &request,
             &ltx2_paths(dir.path()),
             Some(hint),
+            offload(AdmissionPolicy::Disabled),
             Some(RTX_4090_AVAILABLE),
-            false,
             false,
             false,
         );

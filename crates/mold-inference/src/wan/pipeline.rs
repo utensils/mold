@@ -167,6 +167,7 @@ fn denoise_activation_bytes(
             dim: config.dim as u64,
             ffn_dim: config.ffn_dim as u64,
             num_heads: config.num_heads as u64,
+            num_layers: config.num_layers as u64,
             vae,
             patch_spatial: config.patch_size.1.max(1) as u64,
             per_token_timesteps: false,
@@ -228,6 +229,7 @@ pub fn activation_geometry_across(
         dim: config.dim as u64,
         ffn_dim: config.ffn_dim as u64,
         num_heads: config.num_heads as u64,
+        num_layers: config.num_layers as u64,
         vae,
         patch_spatial: config.patch_size.1.max(1) as u64,
         // Per-token timesteps are a property of the *request* — only the

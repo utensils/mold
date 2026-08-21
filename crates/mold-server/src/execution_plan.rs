@@ -2325,6 +2325,17 @@ fn build_plan(
         context.family,
     ));
     let request_has_lora = !context.effective_loras.is_empty();
+    let wan_block_offload_policy = mold_inference::wan::block_offload::AdmissionPolicy::from_values(
+        device.backend,
+        context
+            .engine_config
+            .runtime_environment
+            .value("MOLD_WAN_OFFLOAD_BLOCKS"),
+        context
+            .engine_config
+            .runtime_environment
+            .value("MOLD_OFFLOAD"),
+    );
     let gemma_placement = mold_inference::device::resolve_ltx2_gemma_device_override_from_values(
         context
             .engine_config
@@ -2357,8 +2368,11 @@ fn build_plan(
         context.request,
         context.paths,
         hint,
+        crate::memory_preflight::GenerationOffloadPolicy::new(
+            context.offload_requested,
+            wan_block_offload_policy,
+        ),
         Some(device_budget),
-        context.offload_requested,
         request_has_lora,
         gemma_competes,
     );
@@ -2415,8 +2429,11 @@ fn build_plan(
         context.request,
         &gpu_paths,
         hint,
+        crate::memory_preflight::GenerationOffloadPolicy::new(
+            initial_memory.block_offload && !transformer_on_cpu,
+            wan_block_offload_policy,
+        ),
         Some(device_budget),
-        initial_memory.block_offload && !transformer_on_cpu,
         request_has_lora,
         gemma_competes,
     );
@@ -2435,8 +2452,11 @@ fn build_plan(
             context.request,
             &gpu_paths,
             hint,
+            crate::memory_preflight::GenerationOffloadPolicy::new(
+                initial_memory.block_offload && !transformer_on_cpu,
+                wan_block_offload_policy,
+            ),
             Some(device_budget),
-            initial_memory.block_offload && !transformer_on_cpu,
             request_has_lora,
             gemma_competes,
         );
