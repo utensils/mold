@@ -23,6 +23,7 @@ mold run flux-dev:q4 "a sunset over mountains"      # Specific model
 mold run "a portrait" -o portrait.png               # Custom output path
 mold run "a dog" --seed 42 --steps 20               # Reproducible generation
 mold run "a village" --title "Smurf village"        # Titled print (metadata + gallery row + ~slug in filename)
+mold run "a village" --title "Smurfs" --tag blue --collection "Village studies"  # …filed at creation
 mold run "watercolor" --image photo.png --strength 0.7  # img2img
 # NOTE --strength is family-specific: SD img2img higher = more change;
 # LTX-2 I2V higher = MORE source preservation (1.0 pins the opening frame)
@@ -547,7 +548,42 @@ parse time) rides `GenerateRequest.title` → `OutputMetadata.title` → the
 gallery row and folds into the default filename as
 `mold-{model}-{ts}[-{idx}]~{slug}.{ext}`; an explicit `-o` path is used
 verbatim and the file is never renamed later. `--title` applies to
-single-clip runs only (chain scripts / multi-`--prompt` sequences refuse it).
+single-clip runs only (chain scripts / multi-`--prompt` sequences refuse it),
+though the HTTP chain body does carry `title` for the stitched print.
+
+**File under (creation-time organization).** A print can arrive already
+organized: `--tag <TAG>` (repeatable, ≤20 tags of 1–64 chars, matched
+case-insensitively) and `--collection <NAME>` ride `GenerateRequest.tags` /
+`.collection` → `OutputMetadata` → the gallery row. Collections resolve by
+slug and are created when absent, which is how one name means one collection
+across a fleet. Seeding is **once, at row insert**: organization is
+user-owned afterwards, so a reconcile or a re-publication never resurrects a
+tag the user removed.
+
+`generate.auto_tag_title` (DB key, default `true`) makes a titled CLI/TUI run
+also tag the print with its title slug, disclosed before it is applied — on
+stderr for the CLI (`filing under tag "smurf-village"`), on the Tags row and
+section summary for the TUI. `--no-auto-tag` turns it off for one CLI
+invocation; the TUI's toggle is Settings ▸ Library ▸ **Tag by title**. It is
+deliberately a **client** default — the server never auto-tags, because it
+cannot tell a typed title from a scripted one.
+
+In the TUI, filing lives in Create ▸ Advanced ▸ **File under** (Title, Tags,
+Collection). Each is absent until touched and validated before its editor can
+close, so an untouched form's request is unchanged and nothing admission would
+refuse reaches the wire.
+
+Nothing about filing can fail a render. On `MOLD_DB_DISABLE=1`, or when a
+`{id}` collection was deleted between listing and Generate, the filing is
+dropped and reported on the `x-mold-request-warning` header — never silently,
+never as a refusal. `MoldClient` reads that header on all four response paths
+into additive `GenerateResponse.request_warnings` / `ChainResponse
+.request_warnings`; `mold run` prints each one through `status!` (stderr when
+piped), and the TUI shows them on the Create view — the `!` advisory row, never
+the error slot, since the host accepted and rendered the request — and records
+each one in the Timeline. Starting the next generation clears the row. Never
+split the header on `; ` — the advisory prose contains that sequence, so a
+split renders one advisory as two half-sentences.
 
 ## Reference implementations
 
@@ -711,9 +747,10 @@ mold run "a golden retriever" --image park.png --mask mask.png
 ### Face-identity conditioning (PuLID-FLUX)
 
 Additive `GenerateRequest` fields. **Not executable yet on any build**: the
-`pulid` feature compiles the wire contract, but the FLUX engine gains the
-adapter in a later change, and until then `mold_core::identity::IDENTITY_RUNTIME_READY`
-stays `false`, no build advertises the capability, and every identity request is
+`pulid` feature compiles the wire contract and the FLUX engine now carries the
+cross-attention adapter, but nothing yet turns `id_image` into the embedding
+that adapter consumes, so `mold_core::identity::IDENTITY_RUNTIME_READY` stays
+`false`, no build advertises the capability, and every identity request is
 refused. Read `supports_identity` — never the feature — to decide whether to
 offer the control.
 
@@ -886,6 +923,7 @@ mold info flux-dev:q4        # Show model details and file sizes
 mold rm flux-dev:q4          # Remove a downloaded model
 mold rm flux-dev:q4 --force  # Remove without confirmation
 mold licenses                # Third-party model licenses and acceptance state
+mold licenses --local        # ...this machine's own, without asking the server
 ```
 
 ### Third-party model licenses
@@ -895,7 +933,8 @@ the InsightFace antelopev2 face models PuLID needs, non-commercial research
 only). Mold refuses to download them until acceptance is on record.
 
 ```bash
-mold licenses                                              # what needs accepting, and where
+mold licenses                # what needs accepting, and on which machine
+mold licenses --local        # this machine's own acceptances, never the server's
 mold pull pulid-flux --accept-license insightface-antelopev2
 ```
 
@@ -912,11 +951,19 @@ newer upstream revision invalidates existing acceptances and asks again.
 Accepting is offline — Mold never fetches the license text, so it works
 air-gapped. There is no environment-variable bypass.
 
-Over HTTP: `GET /api/licenses` lists ids, terms links, `accepted`, and
-`required_by`; `POST /api/downloads` and `POST /api/models/pull` take an
-additive `accept_licenses: []`; a gated download without it is `403` with code
-`LICENSE_NOT_ACCEPTED` and a structured `license` object. Servers advertise
-`capabilities.licenses: true`.
+Consent is bound to the terms that were displayed. When a server will record
+the acceptance, `mold pull` reads `GET /api/licenses` from THAT server, shows
+its terms, and sends back exactly those — a bare id would let a server on a
+different release resolve its own revision and record agreement to text the
+user never read.
+
+Over HTTP: `GET /api/licenses` lists ids, terms links, `sha256`, `accepted`,
+and `required_by`. `POST /api/downloads` and `POST /api/models/pull` take an
+additive `accept_licenses: [{ id, url, sha256 }]`. A gated download without one
+is `403` / `LICENSE_NOT_ACCEPTED`; terms the server does not pin are `409` /
+`LICENSE_TERMS_MISMATCH` carrying the server's own `url`/`sha256`/`canonical`
+so a client can re-display and retry. Both refusals write nothing. Servers
+advertise `capabilities.licenses: true`.
 
 ## Model discovery catalog
 
@@ -1016,6 +1063,8 @@ Keys use dot-notation matching the TOML / DB layout. Boolean values accept `true
 Scheduler timing preferences are profile-scoped and loaded when the server's V2 coordinator starts: `scheduler.replan_debounce_ms` defaults to 2000, `scheduler.replan_max_delay_ms` to 5000, and `scheduler.warm_wait_max_ms` to 2000. Each accepts 0–30000, and max delay must be at least the debounce. Restart the server after changing them.
 
 `gallery.trash_retention_days` (section Gallery, `gallery.` ⇒ DB surface, env `MOLD_GALLERY_TRASH_RETENTION_DAYS`) is the per-host Library trash retention: days a trashed print waits in `<output_dir>/.trash/` before the hourly/startup sweep purges it; default 30, `0` keeps trashed prints forever, max 3650. It is read fresh on every sweep (no restart) and advertised as `capabilities.gallery.trash.retention_days`; desktop/web/iPhone edit a remote host's value through that host's `/api/config`.
+
+`generate.auto_tag_title` (profile-scoped DB key, default `true`) is the client-side **File under** preference: a titled `mold run` or TUI print also picks up its own title slug as a tag, disclosed before it is applied. `mold run --no-auto-tag` overrides it for one invocation; see **File under** above.
 
 On first launch after upgrading from a pre-#265 release, mold imports the `[expand]`/generation-defaults slices of `config.toml` into the DB (gated by `config.migrated_from_toml`), renames the original `config.toml` to `config.toml.migrated` as a one-release downgrade safety net, and rewrites `config.toml` as a stripped **bootstrap-only** file (paths, ports, credentials, per-model file paths — nothing the DB now owns). Multi-profile scoping landed in schema v6: set `MOLD_PROFILE=dev` or pass `--profile dev` to any `mold config` subcommand. Device enablement preferences are machine-wide in `device_preferences`, not profile-scoped; a missing row means enabled by default and discovery never writes one. SQLite corruption detected at open or during a gallery listing quarantines `mold.db` plus its WAL/SHM sidecars as `mold.db.corrupt-<timestamp>*`, rebuilds the schema, and reconciles gallery rows from disk; preferences and prompt history reset unless manually salvaged from that retained copy.
 

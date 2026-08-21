@@ -1633,6 +1633,8 @@ pub async fn run_run(opts: RunOptions) -> Result<()> {
         .clone()
         .or_else(|| config.default_negative_prompt.clone());
     let req = mold_core::GenerateRequest {
+        collection: None,
+        tags: None,
         title: None,
         source_fit: None,
         hdr_exr_dir: None,

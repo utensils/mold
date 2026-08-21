@@ -469,6 +469,14 @@ pub enum ParamField {
     /// Wan flow shift (#782). Absent-until-touched, like the LTX-2 override
     /// rows above.
     SampleShift,
+    // Advanced — File under (creation-time library organization)
+    /// The print's name. Rides every request as `GenerateRequest.title` and
+    /// is the source of the optional auto tag.
+    Title,
+    /// Comma-separated creation-time tags.
+    Tags,
+    /// Collection to file the print under, by display name.
+    Collection,
 }
 
 impl ParamField {
@@ -505,6 +513,9 @@ impl ParamField {
             Self::ModalityScale => "Modality",
             Self::GuidanceSkip => "Guide skip",
             Self::SampleShift => "Flow shift",
+            Self::Title => "Title",
+            Self::Tags => "Tags",
+            Self::Collection => "Collection",
             Self::ControlScale => "Scale",
             // These three live inside the "Identity photo" section, so they
             // are named for their role there — `LABEL_W` is 16 columns and a
@@ -680,6 +691,22 @@ pub struct GenerateParams {
     pub control_image_path: Option<String>,
     pub control_model: Option<String>,
     pub control_scale: f64,
+    // File under — creation-time library organization. All three are
+    // absent-until-touched: an untouched form sends no `title`, no `tags`,
+    // and no `collection`, so the request is byte-identical to before.
+    pub title: Option<String>,
+    /// Tags the user typed, already normalized by
+    /// `mold_core::normalize_request_tags`. The tag derived from the title
+    /// stays *derived* and is composed at submit time.
+    pub tags: Vec<String>,
+    /// Collection display name, already normalized by
+    /// `mold_core::validate_collection_name`.
+    pub collection: Option<String>,
+    /// Snapshot of the effective `generate.auto_tag_title` preference. Held
+    /// on the form rather than re-read per call so the summary the user sees
+    /// and the request that is submitted can never disagree; Settings
+    /// refreshes it when the preference is toggled.
+    pub auto_tag_title: bool,
 }
 
 /// Immutable, lightweight provenance captured for one submitted generation.
@@ -801,6 +828,10 @@ impl GenerateParams {
             control_image_path: None,
             control_model: None,
             control_scale: 1.0,
+            title: None,
+            tags: Vec::new(),
+            collection: None,
+            auto_tag_title: config.generate.auto_tag_title,
         }
     }
 
@@ -953,6 +984,28 @@ impl GenerateParams {
                 .map(|value| format!("{value:.1}"))
                 .unwrap_or_else(|| "default".to_string()),
             ParamField::ControlScale => format!("{:.1}", self.control_scale),
+            ParamField::Title => self
+                .title
+                .clone()
+                .unwrap_or_else(|| "\u{27e8}untitled\u{27e9}".to_string()),
+            // The auto tag is disclosed on the row it would join, so a tag
+            // the user did not type is visible before Generate.
+            ParamField::Tags => {
+                let auto = crate::ui::create_form::auto_tag_disclosure(self);
+                match (self.tags.is_empty(), auto) {
+                    (true, None) => "\u{27e8}none\u{27e9}".to_string(),
+                    (true, Some(slug)) => format!("auto: {slug}"),
+                    (false, None) => crate::ui::create_form::format_tag_input(&self.tags),
+                    (false, Some(slug)) => format!(
+                        "{} \u{00b7} auto: {slug}",
+                        crate::ui::create_form::format_tag_input(&self.tags)
+                    ),
+                }
+            }
+            ParamField::Collection => self
+                .collection
+                .clone()
+                .unwrap_or_else(|| "\u{27e8}none\u{27e9}".to_string()),
         }
     }
 }
@@ -1574,8 +1627,9 @@ pub enum SettingsKey {
     T5Variant,
     Qwen3Variant,
     DefaultNegativePrompt,
-    // Library (DB-surface `gallery.*` keys)
+    // Library (DB-surface `gallery.*` / `generate.*` keys)
     GalleryTrashRetentionDays,
+    GenerateAutoTagTitle,
     // Expand
     ExpandEnabled,
     ExpandBackend,
@@ -1735,6 +1789,13 @@ pub enum Popup {
     /// rejected photo never leaves the picker; the refusal stays visible here
     /// and on the row rather than arriving as a late server error.
     IdentityImageInput {
+        input: String,
+        error: Option<String>,
+    },
+    /// One File-under editor (Title, Tags, or Collection). Invalid input
+    /// stays visible and never reaches a generation request.
+    FilingInput {
+        field: ParamField,
         input: String,
         error: Option<String>,
     },
@@ -3705,6 +3766,37 @@ impl App {
                     }
                     _ => {}
                 },
+                Some(Popup::FilingInput {
+                    field,
+                    input,
+                    error,
+                }) => match key.code {
+                    KeyCode::Esc => self.close_popup(),
+                    KeyCode::Enter => {
+                        let field = *field;
+                        let text = input.clone();
+                        match crate::ui::create_form::commit_filing_input(
+                            field,
+                            &text,
+                            &self.generate.params,
+                        ) {
+                            Ok(edit) => {
+                                self.apply_filing_edit(edit);
+                                self.close_popup();
+                            }
+                            Err(message) => *error = Some(message),
+                        }
+                    }
+                    KeyCode::Char(c) => {
+                        input.push(c);
+                        *error = None;
+                    }
+                    KeyCode::Backspace => {
+                        input.pop();
+                        *error = None;
+                    }
+                    _ => {}
+                },
                 Some(Popup::MachineConnect { form }) => {
                     use crate::hosts::{connect_advance, ConnectEffect, ConnectInput};
                     let input = match key.code {
@@ -4739,6 +4831,8 @@ impl App {
                 let req = self.script.build_chain_request();
                 self.generate.generating = true;
                 self.generate.error_message = None;
+                // An advisory describes the print that produced it.
+                self.generate.warning_message = None;
                 self.generate.progress.clear();
                 self.generate.progress.mark_generation_start();
                 self.generate.preview_image = None;
@@ -5153,7 +5247,12 @@ impl App {
             | ParamField::References
             | ParamField::MaskImage
             | ParamField::ControlImage
-            | ParamField::ControlModel => {}
+            | ParamField::ControlModel
+            // File under is edited in its own popup; the adjust affordance
+            // has nothing to cycle through.
+            | ParamField::Title
+            | ParamField::Tags
+            | ParamField::Collection => {}
         }
         if field == ParamField::Pipeline {
             self.sync_pipeline_guidance();
@@ -5810,6 +5909,59 @@ impl App {
         }
     }
 
+    /// Surface the advisories a completed request carried
+    /// (`x-mold-request-warning`, via `request_warnings`).
+    ///
+    /// These ride a request the host ACCEPTED and rendered — a filing it
+    /// could not apply, a lip-dub clip it retimed — so they take the
+    /// advisory slot (`!`, warning styling) and never `error_message`, whose
+    /// `✗` would read as a failed render.
+    ///
+    /// Each advisory is taken WHOLE. The prose carries "; " as ordinary
+    /// punctuation ("…were not applied; the print was generated and saved
+    /// normally"), so splitting on it yields two dangling half-sentences.
+    /// Several are joined with the separator the TUI already uses between
+    /// independent facts, which the prose cannot contain. They also land in
+    /// the Timeline, the per-generation record, which holds what the
+    /// one-line slot clips.
+    ///
+    /// One-shot and chain completions share this so the two can never drift.
+    fn surface_request_advisories(&mut self, advisories: &[String]) {
+        if advisories.is_empty() {
+            return;
+        }
+        for advisory in advisories {
+            self.generate.progress.push_log(ProgressLogEntry {
+                message: advisory.clone(),
+                style: ProgressStyle::Warning,
+            });
+        }
+        self.generate.warning_message = Some(advisories.join(" \u{00b7} "));
+    }
+
+    /// Prefill text for one File-under editor: the stored value in the
+    /// shape the editor speaks.
+    fn filing_editor_text(&self, field: ParamField) -> String {
+        match field {
+            ParamField::Title => self.generate.params.title.clone().unwrap_or_default(),
+            ParamField::Tags => {
+                crate::ui::create_form::format_tag_input(&self.generate.params.tags)
+            }
+            ParamField::Collection => self.generate.params.collection.clone().unwrap_or_default(),
+            _ => String::new(),
+        }
+    }
+
+    /// Store one validated File-under edit.
+    fn apply_filing_edit(&mut self, edit: crate::ui::create_form::FilingEdit) {
+        use crate::ui::create_form::FilingEdit;
+        match edit {
+            FilingEdit::Title(title) => self.generate.params.title = title,
+            FilingEdit::Tags(tags) => self.generate.params.tags = tags,
+            FilingEdit::Collection(collection) => self.generate.params.collection = collection,
+        }
+    }
+
     /// Handle Enter on one parameter field.
     fn activate_field(&mut self, field: ParamField) {
         match field {
@@ -5863,6 +6015,15 @@ impl App {
                 self.popup = Some(Popup::IdentityImageInput {
                     input,
                     error: self.generate.identity_error.clone(),
+                });
+            }
+            // File under — three validated one-line editors.
+            ParamField::Title | ParamField::Tags | ParamField::Collection => {
+                let input = self.filing_editor_text(field);
+                self.popup = Some(Popup::FilingInput {
+                    field,
+                    input,
+                    error: None,
                 });
             }
             // Cycle format
@@ -5972,6 +6133,12 @@ impl App {
         self.generate.params.control_image_path = None;
         self.generate.params.control_model = None;
         self.generate.params.control_scale = 1.0;
+        // Reset Defaults is the form's explicit "start over" (it already
+        // drops the source image, which is no more a model default than a
+        // title is), so the creation-time filing goes with it.
+        self.generate.params.title = None;
+        self.generate.params.tags.clear();
+        self.generate.params.collection = None;
         self.sync_generate_capabilities();
         // #787 round 2: Reset Defaults is an explicit "give me the model's
         // defaults", not a model switch — the sync above deliberately
@@ -6112,6 +6279,15 @@ impl App {
                 max: f64::from(mold_core::config::GALLERY_TRASH_RETENTION_MAX_DAYS),
                 step: 1.0,
             },
+        });
+        // Whether a titled print picks up its own slug as a tag. Mirrors web
+        // Settings > Library "Tag new prints with their title"; this is a
+        // client decision, so the Create form's File under section reads it
+        // and discloses the tag before Generate.
+        rows.push(SettingsRow::Field {
+            key: SettingsKey::GenerateAutoTagTitle,
+            label: "Tag by title",
+            field_type: SettingsFieldType::Bool,
         });
 
         // ── Expand ──────────────────────────────────────────────
@@ -6363,6 +6539,12 @@ impl App {
             SettingsKey::GalleryTrashRetentionDays => {
                 trash_retention_display(cfg.gallery.trash_retention_days)
             }
+            SettingsKey::GenerateAutoTagTitle => if cfg.generate.auto_tag_title {
+                "on"
+            } else {
+                "off"
+            }
+            .into(),
             // Expand
             SettingsKey::ExpandEnabled => if cfg.expand.enabled { "on" } else { "off" }.into(),
             SettingsKey::ExpandBackend => cfg.expand.backend.clone(),
@@ -6756,6 +6938,16 @@ impl App {
                 self.config.expand.thinking = !self.config.expand.thinking;
             }
             SettingsKey::LogFile => self.config.logging.file = !self.config.logging.file,
+            SettingsKey::GenerateAutoTagTitle => {
+                self.config.generate.auto_tag_title = !self.config.generate.auto_tag_title;
+                // `generate.*` is a DB-surface key: persist it through the
+                // shared config_sync writer so `mold run`, the server, and
+                // every other surface read the same preference.
+                self.persist_db_surface_key(mold_core::config_keys::GENERATE_AUTO_TAG_TITLE_KEY);
+                // The Create form holds a snapshot so its summary and its
+                // request can never disagree; refresh it now.
+                self.generate.params.auto_tag_title = self.config.generate.auto_tag_title;
+            }
             _ => return,
         }
         self.save_config();
@@ -6950,6 +7142,19 @@ impl App {
             return;
         }
 
+        // Both File-under editors already refuse anything admission would,
+        // so this only catches the state they cannot see: turning
+        // `generate.auto_tag_title` back on behind a form already at the
+        // tag cap. Refusing here beats a 422 after the queue accepts it.
+        if let Err(message) = crate::ui::create_form::compose_filing_tags(
+            &self.generate.params.tags,
+            self.generate.params.title.as_deref(),
+            self.generate.params.auto_tag_title,
+        ) {
+            self.generate.error_message = Some(message);
+            return;
+        }
+
         let generation_target = if self.generate.params.prepared_prompts.is_empty() {
             if let Some(snapshot) = self.generate.params.quick_transform_snapshot.as_ref() {
                 if let Some(reason) = self.quick_transform_staleness(snapshot) {
@@ -7061,6 +7266,8 @@ impl App {
         self.generate.generating = true;
         self.generate.batch_remaining = self.generate.params.batch;
         self.generate.error_message = None;
+        // An advisory describes the print that produced it.
+        self.generate.warning_message = None;
         self.generate.progress.clear();
         self.generate.progress.mark_generation_start();
         self.generate.clear_live_preview();
@@ -7526,6 +7733,8 @@ impl App {
                     self.generate.last_seed = Some(response.seed_used);
                     self.generate.last_generation_time_ms = Some(response.generation_time_ms);
 
+                    self.surface_request_advisories(&response.request_warnings);
+
                     // Use the model name from the response (server is source of
                     // truth). The UI params may have changed if the user switched
                     // models while generation was running.
@@ -7561,14 +7770,23 @@ impl App {
 
                     let neg_text = negative_prompt.clone().unwrap_or_default();
 
+                    // A titled print's file carries `~<slug>`, the same shape
+                    // the server's gallery writes, so a local copy of a
+                    // remote render is recognizable by the same name.
+                    let title_slug = submitted_params
+                        .title
+                        .as_deref()
+                        .and_then(mold_core::title_slug);
+
                     for (i, img_data) in response.images.iter().enumerate() {
                         let ext = img_data.format.extension();
-                        let filename = mold_core::default_output_filename(
+                        let filename = mold_core::default_output_filename_titled(
                             &actual_model,
                             ts_secs,
                             ext,
                             response.images.len() as u32,
                             i as u32,
+                            title_slug.as_deref(),
                         );
                         // Save to disk when output is enabled
                         if let Some(ref dir) = output_dir {
@@ -7592,8 +7810,14 @@ impl App {
                     // Handle video output: save primary file + cache GIF preview
                     if let Some(ref video) = response.video {
                         let ext = video.format.extension();
-                        let filename =
-                            mold_core::default_output_filename(&actual_model, ts_secs, ext, 1, 0);
+                        let filename = mold_core::default_output_filename_titled(
+                            &actual_model,
+                            ts_secs,
+                            ext,
+                            1,
+                            0,
+                            title_slug.as_deref(),
+                        );
                         if let Some(ref dir) = output_dir {
                             let path = dir.join(&filename);
                             if std::fs::write(&path, &video.data).is_ok() {
@@ -7737,8 +7961,21 @@ impl App {
                     if (!response.images.is_empty() || response.video.is_some())
                         && !saved_path.as_os_str().is_empty()
                     {
+                        // The filing this print was submitted under. The
+                        // local DB seeds tags and collection membership from
+                        // these embedded fields on insert, so a forced-local
+                        // render files itself exactly as a served one does.
+                        let submitted_filing = crate::ui::create_form::compose_filing_tags(
+                            &submitted_params.tags,
+                            submitted_params.title.as_deref(),
+                            submitted_params.auto_tag_title,
+                        )
+                        .map(|composed| composed.tags)
+                        .unwrap_or_else(|_| submitted_params.tags.clone());
                         let meta = mold_core::OutputMetadata {
-                            title: None,
+                            collection: submitted_params.collection.clone(),
+                            tags: (!submitted_filing.is_empty()).then_some(submitted_filing),
+                            title: submitted_params.title.clone(),
                             source_fit: None,
                             guidance_overrides: submitted_params
                                 .guidance_overrides
@@ -8166,7 +8403,12 @@ impl App {
                         .map(|e| e.metadata.clone());
 
                     let meta = mold_core::OutputMetadata {
-                        title: None,
+                        // An upscale of a filed print stays filed: the copy
+                        // is the same picture, and losing its title and tags
+                        // would strand it in the Library.
+                        collection: source_meta.as_ref().and_then(|m| m.collection.clone()),
+                        tags: source_meta.as_ref().and_then(|m| m.tags.clone()),
+                        title: source_meta.as_ref().and_then(|m| m.title.clone()),
                         source_fit: None,
                         guidance_overrides: None,
                         sample_shift: None,
@@ -8439,6 +8681,10 @@ impl App {
                         ),
                         style: ProgressStyle::Done,
                     });
+                    // A sequence's filing is stamped on the stitched print, so
+                    // a host that could not apply it reports it here exactly
+                    // as it does for a one-shot.
+                    self.surface_request_advisories(&response.request_warnings);
                 }
                 BackgroundEvent::ChainError(msg) => {
                     self.generate.generating = false;
@@ -9383,6 +9629,8 @@ mod tests {
         let entry = GalleryEntry {
             path: std::path::PathBuf::from("/home/user/.mold/output/mold-flux-1234.png"),
             metadata: mold_core::OutputMetadata {
+                collection: None,
+                tags: None,
                 title: None,
                 source_fit: None,
                 guidance_overrides: None,
@@ -9461,6 +9709,8 @@ mod tests {
         let entry = GalleryEntry {
             path: std::path::PathBuf::new(),
             metadata: mold_core::OutputMetadata {
+                collection: None,
+                tags: None,
                 title: None,
                 source_fit: None,
                 guidance_overrides: None,
@@ -9600,6 +9850,8 @@ mod tests {
 
     fn make_test_metadata() -> mold_core::OutputMetadata {
         mold_core::OutputMetadata {
+            collection: None,
+            tags: None,
             title: None,
             source_fit: None,
             guidance_overrides: None,
@@ -9908,6 +10160,25 @@ mod tests {
         rows.iter()
             .position(|r| matches!(r, SettingsRow::Field { key: k, .. } if *k == key))
             .unwrap_or_else(|| panic!("SettingsKey {key:?} not found in rows"))
+    }
+
+    /// `{:<LABEL_WIDTH}` pads the label column, so a label that is exactly
+    /// `LABEL_WIDTH` wide renders flush against its value ("Tag by titleon").
+    /// Every label must leave at least one space.
+    #[tokio::test]
+    async fn every_settings_label_fits_its_column_with_a_gap() {
+        let app = make_settings_test_app();
+        for row in app.build_settings_rows() {
+            if let SettingsRow::Field { label, .. } = row {
+                assert!(
+                    label.chars().count() < crate::ui::settings::LABEL_WIDTH,
+                    "settings label {label:?} is {} chars; the column is {} wide and needs \
+                     room for a separating space",
+                    label.chars().count(),
+                    crate::ui::settings::LABEL_WIDTH
+                );
+            }
+        }
     }
 
     #[test]
@@ -12081,6 +12352,7 @@ mod tests {
 
         // Inject a GenerationComplete with model A (the model that actually ran)
         let response = GenerateResponse {
+            request_warnings: Vec::new(),
             audio: None,
             images: vec![mold_core::ImageData {
                 data: vec![0u8; 4],
@@ -12147,6 +12419,7 @@ mod tests {
             app.generate.params.guidance_overrides = submitted_guidance.clone();
 
             let response = GenerateResponse {
+                request_warnings: Vec::new(),
                 audio: None,
                 images: vec![mold_core::ImageData {
                     data: vec![0u8; 4],
@@ -12200,6 +12473,7 @@ mod tests {
             app.generate.params.guidance = 4.0;
 
             let response = GenerateResponse {
+                request_warnings: Vec::new(),
                 audio: None,
                 images: Vec::new(),
                 generation_time_ms: 100,
@@ -12291,6 +12565,7 @@ mod tests {
             app.generate.prompt = TextArea::from(["a timeline test"]);
 
             let response = GenerateResponse {
+                request_warnings: Vec::new(),
                 audio: None,
                 images: vec![mold_core::ImageData {
                     data: vec![0u8; 4],
@@ -13278,6 +13553,518 @@ mod tests {
             app.generate.params.guidance_overrides.stg_blocks,
             Some(vec![28, 29])
         );
+    }
+
+    // ── request advisories (x-mold-request-warning) ────────────
+
+    /// Build a completed response carrying `request_warnings`.
+    fn response_with_advisories(warnings: Vec<String>) -> GenerateResponse {
+        GenerateResponse {
+            request_warnings: warnings,
+            audio: None,
+            images: vec![mold_core::ImageData {
+                data: vec![0u8; 4],
+                format: OutputFormat::Png,
+                width: 64,
+                height: 64,
+                index: 0,
+            }],
+            generation_time_ms: 100,
+            model: "flux-dev:q4".to_string(),
+            seed_used: 42,
+            video: None,
+            gpu: None,
+        }
+    }
+
+    fn deliver_completion(app: &mut App, response: GenerateResponse) {
+        let metadata_snapshot = generation_metadata_snapshot(app);
+        app.bg_tx
+            .send(BackgroundEvent::GenerationComplete {
+                response: Box::new(response),
+                from_local: false,
+                metadata_snapshot,
+            })
+            .unwrap();
+        app.process_background_events();
+    }
+
+    /// The host accepted the request and produced a print; something was
+    /// dropped or adjusted along the way. That is an advisory, not a failure,
+    /// so it takes the advisory slot and leaves the error slot alone.
+    #[tokio::test]
+    async fn a_completed_generation_surfaces_its_advisories_without_claiming_failure() {
+        let mut app = make_settings_test_app();
+        app.generate.prompt = TextArea::from(["a test prompt"]);
+        deliver_completion(
+            &mut app,
+            response_with_advisories(vec![
+                "tags and collection were not applied; the print was generated and saved normally"
+                    .to_string(),
+            ]),
+        );
+
+        let warning = app
+            .generate
+            .warning_message
+            .as_deref()
+            .expect("a dropped filing must be reported");
+        assert!(
+            warning.contains("tags and collection were not applied"),
+            "{warning}"
+        );
+        assert_eq!(
+            app.generate.error_message, None,
+            "nothing failed \u{2014} the error slot renders a \u{2717} and would read as a failed render"
+        );
+    }
+
+    /// The advisory prose contains "; " as punctuation, so it must be taken
+    /// whole. Splitting on it renders two dangling half-sentences.
+    #[tokio::test]
+    async fn an_advisory_is_taken_whole_never_split_on_its_punctuation() {
+        let advisory =
+            "tags and collection were not applied; the print was generated and saved normally";
+        let mut app = make_settings_test_app();
+        app.generate.prompt = TextArea::from(["a test prompt"]);
+        deliver_completion(
+            &mut app,
+            response_with_advisories(vec![advisory.to_string()]),
+        );
+
+        assert_eq!(
+            app.generate.warning_message.as_deref(),
+            Some(advisory),
+            "one advisory must survive as exactly one sentence"
+        );
+    }
+
+    /// Two advisories are joined with the TUI's own separator, which the
+    /// prose cannot contain, rather than concatenated into one run-on.
+    #[tokio::test]
+    async fn several_advisories_are_joined_readably() {
+        let mut app = make_settings_test_app();
+        app.generate.prompt = TextArea::from(["a test prompt"]);
+        deliver_completion(
+            &mut app,
+            response_with_advisories(vec!["first advisory".to_string(), "second".to_string()]),
+        );
+
+        assert_eq!(
+            app.generate.warning_message.as_deref(),
+            Some("first advisory \u{00b7} second")
+        );
+    }
+
+    /// An ordinary generation reports nothing: the slot only ever appears
+    /// when something really was dropped or adjusted.
+    #[tokio::test]
+    async fn an_unwarned_generation_leaves_the_advisory_slot_empty() {
+        let mut app = make_settings_test_app();
+        app.generate.prompt = TextArea::from(["a test prompt"]);
+        deliver_completion(&mut app, response_with_advisories(Vec::new()));
+
+        assert_eq!(app.generate.warning_message, None);
+        assert_eq!(app.generate.error_message, None);
+    }
+
+    /// An advisory describes one print. Starting the next generation clears
+    /// it, exactly as the error slot is cleared.
+    #[tokio::test]
+    async fn starting_a_generation_clears_a_previous_advisory() {
+        let mut app = make_settings_test_app();
+        app.generate.prompt = TextArea::from(["a cat"]);
+        app.generate.warning_message = Some("a stale advisory".to_string());
+
+        app.start_generation();
+
+        assert_eq!(
+            app.generate.warning_message, None,
+            "a previous print's advisory must not describe this one"
+        );
+    }
+
+    /// The advisories also land in the Timeline, which is the TUI's durable
+    /// per-generation record and can hold text the one-line slot clips.
+    #[tokio::test]
+    async fn advisories_are_recorded_in_the_timeline() {
+        let mut app = make_settings_test_app();
+        app.generate.prompt = TextArea::from(["a test prompt"]);
+        deliver_completion(
+            &mut app,
+            response_with_advisories(vec!["tags were not applied".to_string()]),
+        );
+
+        assert!(
+            app.generate
+                .progress
+                .log
+                .iter()
+                .any(|entry| entry.message.contains("tags were not applied")
+                    && matches!(entry.style, ProgressStyle::Warning)),
+            "the advisory belongs in the per-generation record too"
+        );
+    }
+
+    /// A sequence carries a filing too — stamped on the stitched print —
+    /// so a host that could not apply it must say so on the same slot as a
+    /// one-shot. `ChainResponse` carries the identical `request_warnings`.
+    #[tokio::test]
+    async fn a_completed_chain_surfaces_its_advisories_too() {
+        let mut app = make_settings_test_app();
+        let advisory =
+            "tags and collection were not applied; the print was generated and saved normally";
+        app.bg_tx
+            .send(BackgroundEvent::ChainComplete {
+                response: Box::new(chain_response_with_advisories(vec![advisory.to_string()])),
+            })
+            .unwrap();
+        app.process_background_events();
+
+        assert_eq!(
+            app.generate.warning_message.as_deref(),
+            Some(advisory),
+            "a stitched print's dropped filing must not be silent"
+        );
+        assert_eq!(app.generate.error_message, None, "the chain succeeded");
+        assert!(app
+            .generate
+            .progress
+            .log
+            .iter()
+            .any(|entry| entry.message.contains("were not applied")
+                && matches!(entry.style, ProgressStyle::Warning)));
+    }
+
+    #[tokio::test]
+    async fn an_unwarned_chain_leaves_the_advisory_slot_empty() {
+        let mut app = make_settings_test_app();
+        app.bg_tx
+            .send(BackgroundEvent::ChainComplete {
+                response: Box::new(chain_response_with_advisories(Vec::new())),
+            })
+            .unwrap();
+        app.process_background_events();
+
+        assert_eq!(app.generate.warning_message, None);
+    }
+
+    /// Submitting a sequence clears a previous print's advisory, exactly as
+    /// starting a one-shot does.
+    #[tokio::test]
+    async fn submitting_a_chain_clears_a_previous_advisory() {
+        let mut app = make_settings_test_app();
+        app.generate.warning_message = Some("a stale advisory".to_string());
+
+        app.dispatch_action(Action::ScriptSubmit);
+
+        assert_eq!(app.generate.warning_message, None);
+    }
+
+    fn chain_response_with_advisories(warnings: Vec<String>) -> mold_core::ChainResponse {
+        mold_core::ChainResponse {
+            request_warnings: warnings,
+            video: mold_core::VideoData {
+                data: vec![0u8; 4],
+                format: OutputFormat::Mp4,
+                width: 64,
+                height: 64,
+                frames: 8,
+                fps: 8,
+                gif_preview: Vec::new(),
+                thumbnail: Vec::new(),
+                pipeline: None,
+                source_preprocessing: None,
+                pipeline_provenance_sha256: None,
+                has_audio: false,
+                duration_ms: None,
+                audio_sample_rate: None,
+                audio_channels: None,
+            },
+            stage_count: 2,
+            gpu: None,
+            script: Default::default(),
+            vram_estimate: None,
+        }
+    }
+
+    // ── File under (creation-time filing) ──────────────────────
+
+    #[test]
+    fn filing_rows_read_absent_until_touched() {
+        let config = Config::load_or_default();
+        let mut params = GenerateParams::from_config(&config);
+        params.auto_tag_title = false;
+        assert_eq!(
+            params.display_value(&ParamField::Title),
+            "\u{27e8}untitled\u{27e9}"
+        );
+        assert_eq!(
+            params.display_value(&ParamField::Tags),
+            "\u{27e8}none\u{27e9}"
+        );
+        assert_eq!(
+            params.display_value(&ParamField::Collection),
+            "\u{27e8}none\u{27e9}"
+        );
+
+        params.title = Some("Smurf Village".into());
+        params.tags = vec!["village".into(), "blue".into()];
+        params.collection = Some("Blue Period".into());
+        assert_eq!(params.display_value(&ParamField::Title), "Smurf Village");
+        assert_eq!(params.display_value(&ParamField::Tags), "village, blue");
+        assert_eq!(params.display_value(&ParamField::Collection), "Blue Period");
+    }
+
+    /// A tag the user did not type must be visible on the row it will join,
+    /// before Generate \u{2014} never discovered later in the Library.
+    #[test]
+    fn tags_row_discloses_the_tag_derived_from_the_title() {
+        let config = Config::load_or_default();
+        let mut params = GenerateParams::from_config(&config);
+        params.auto_tag_title = true;
+        params.title = Some("Smurf Village".into());
+        assert_eq!(
+            params.display_value(&ParamField::Tags),
+            "auto: smurf-village"
+        );
+
+        params.tags = vec!["village".into()];
+        assert_eq!(
+            params.display_value(&ParamField::Tags),
+            "village \u{00b7} auto: smurf-village"
+        );
+
+        params.auto_tag_title = false;
+        assert_eq!(params.display_value(&ParamField::Tags), "village");
+    }
+
+    /// `GenerateParams::from_config` snapshots the effective preference so
+    /// the row the user reads and the request that is sent cannot disagree.
+    #[test]
+    fn form_snapshots_the_auto_tag_preference_from_config() {
+        let mut config = Config::default();
+        assert!(config.generate.auto_tag_title, "the preference defaults on");
+        assert!(GenerateParams::from_config(&config).auto_tag_title);
+        config.generate.auto_tag_title = false;
+        assert!(!GenerateParams::from_config(&config).auto_tag_title);
+    }
+
+    #[tokio::test]
+    async fn filing_editors_open_prefilled_and_write_back_on_confirm() {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        let mut app = make_settings_test_app();
+        app.generate.params.auto_tag_title = false;
+        app.generate.params.title = Some("Smurf Village".into());
+        app.generate.params.tags = vec!["village".into()];
+        app.generate.params.collection = Some("Blue Period".into());
+
+        for (field, expected) in [
+            (ParamField::Title, "Smurf Village"),
+            (ParamField::Tags, "village"),
+            (ParamField::Collection, "Blue Period"),
+        ] {
+            app.activate_field(field);
+            let Some(Popup::FilingInput {
+                field: opened,
+                input,
+                error,
+            }) = &app.popup
+            else {
+                panic!("{field:?} must open its File under editor");
+            };
+            assert_eq!(*opened, field);
+            assert_eq!(input, expected, "{field:?} opens prefilled");
+            assert!(error.is_none());
+            app.close_popup();
+        }
+
+        // Editing the collection writes the normalized name back.
+        app.activate_field(ParamField::Collection);
+        let Some(Popup::FilingInput { input, .. }) = &mut app.popup else {
+            panic!("expected the collection editor");
+        };
+        input.clear();
+        input.push_str("  Red   Period  ");
+        app.handle_crossterm_event(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+        assert!(app.popup.is_none());
+        assert_eq!(
+            app.generate.params.collection.as_deref(),
+            Some("Red Period")
+        );
+    }
+
+    /// Invalid entry stays on screen with its reason. Nothing invalid ever
+    /// reaches a generation request.
+    #[tokio::test]
+    async fn filing_editor_keeps_invalid_input_visible_with_its_reason() {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        let mut app = make_settings_test_app();
+        app.popup = Some(Popup::FilingInput {
+            field: ParamField::Tags,
+            // 21 distinct tags: one past the request cap.
+            input: (0..=mold_core::MAX_REQUEST_TAGS)
+                .map(|i| format!("t{i}"))
+                .collect::<Vec<_>>()
+                .join(","),
+            error: None,
+        });
+        app.handle_crossterm_event(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+        let Some(Popup::FilingInput { input, error, .. }) = &mut app.popup else {
+            panic!("an over-cap tag list must keep the editor open");
+        };
+        assert!(error.is_some(), "the reason stays on screen");
+        assert!(app.generate.params.tags.is_empty(), "nothing was stored");
+
+        // Typing clears the stale reason, and a valid list commits.
+        input.clear();
+        input.push_str("smurfs, village");
+        app.handle_crossterm_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('!'),
+            KeyModifiers::NONE,
+        )));
+        let Some(Popup::FilingInput { input, error, .. }) = &mut app.popup else {
+            panic!("still editing");
+        };
+        assert!(error.is_none(), "typing dismisses the stale reason");
+        input.pop();
+        app.handle_crossterm_event(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+        assert!(app.popup.is_none());
+        assert_eq!(
+            app.generate.params.tags,
+            vec!["smurfs".to_string(), "village".to_string()]
+        );
+    }
+
+    /// Escape abandons the edit: the stored value is untouched.
+    #[tokio::test]
+    async fn filing_editor_escape_discards_the_entry() {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        let mut app = make_settings_test_app();
+        app.generate.params.title = Some("Smurf Village".into());
+        app.activate_field(ParamField::Title);
+        let Some(Popup::FilingInput { input, .. }) = &mut app.popup else {
+            panic!("expected the title editor");
+        };
+        input.push_str(" II");
+        app.handle_crossterm_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        assert!(app.popup.is_none());
+        assert_eq!(app.generate.params.title.as_deref(), Some("Smurf Village"));
+    }
+
+    /// Reset Defaults is the form's explicit "start over" \u{2014} it already
+    /// drops the source image, which is no more a model default than a
+    /// title is, so the filing goes with it.
+    #[tokio::test]
+    async fn reset_to_model_defaults_clears_the_filing() {
+        let mut app = make_settings_test_app();
+        app.generate.params.title = Some("Smurf Village".into());
+        app.generate.params.tags = vec!["village".into()];
+        app.generate.params.collection = Some("Blue Period".into());
+
+        app.reset_params_to_model_defaults();
+
+        assert_eq!(app.generate.params.title, None);
+        assert!(app.generate.params.tags.is_empty());
+        assert_eq!(app.generate.params.collection, None);
+    }
+
+    /// Leaving the section \u{2014} or the accordion entirely \u{2014} keeps what
+    /// was entered; only an explicit clear empties a field.
+    #[tokio::test]
+    async fn collapsing_the_accordion_keeps_the_filing() {
+        use crate::ui::create_form::AdvSection;
+        let mut app = make_settings_test_app();
+        app.generate.advanced.open = true;
+        app.generate.advanced.expanded = Some(AdvSection::Filing);
+        app.generate.params.title = Some("Smurf Village".into());
+        app.generate.params.tags = vec!["village".into()];
+
+        app.set_advanced_expanded(Some(AdvSection::Output));
+        app.dispatch_action(Action::ToggleAdvanced);
+
+        assert_eq!(app.generate.params.title.as_deref(), Some("Smurf Village"));
+        assert_eq!(app.generate.params.tags, vec!["village".to_string()]);
+    }
+
+    /// Turning the preference back on behind an already-full tag list is
+    /// the one state the editors cannot see, so dispatch is the gate \u{2014}
+    /// and it refuses in words that name a control the TUI has.
+    #[tokio::test]
+    async fn generate_refuses_a_filing_the_host_would_reject() {
+        let mut app = make_settings_test_app();
+        app.generate.prompt = TextArea::from(vec!["a cat".to_string()]);
+        app.generate.params.tags = (0..mold_core::MAX_REQUEST_TAGS)
+            .map(|i| format!("t{i}"))
+            .collect();
+        app.generate.params.title = Some("Smurf Village".into());
+        app.generate.params.auto_tag_title = true;
+
+        app.start_generation();
+
+        assert!(!app.generate.generating, "nothing was queued");
+        let error = app
+            .generate
+            .error_message
+            .as_deref()
+            .expect("the refusal is reported");
+        assert!(error.contains("Tag by title"), "{error}");
+        assert!(!error.contains("--no-auto-tag"), "{error}");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(mold_env)]
+    async fn settings_tag_with_title_row_round_trips_through_the_db_surface() {
+        // `generate.auto_tag_title` is a DB-surface key: toggling the row
+        // must land in the settings table `mold run` and the other surfaces
+        // read, and refresh the Create form's snapshot so its disclosure
+        // and its request agree.
+        crate::test_env::with_isolated_env(|_home| {
+            let mut app = make_settings_test_app();
+            let row = find_settings_row(&app, SettingsKey::GenerateAutoTagTitle);
+            match &app.build_settings_rows()[row] {
+                SettingsRow::Field {
+                    label, field_type, ..
+                } => {
+                    assert_eq!(*label, "Tag by title");
+                    assert!(matches!(field_type, SettingsFieldType::Bool));
+                }
+                other => panic!("expected a field row, got {other:?}"),
+            }
+            assert_eq!(
+                app.settings_display_value(&SettingsKey::GenerateAutoTagTitle),
+                "on",
+                "the preference defaults on"
+            );
+
+            app.generate.params.auto_tag_title = true;
+            app.settings_toggle_bool(SettingsKey::GenerateAutoTagTitle);
+            assert!(!app.config.generate.auto_tag_title);
+            assert_eq!(
+                app.settings_display_value(&SettingsKey::GenerateAutoTagTitle),
+                "off"
+            );
+            assert!(
+                !app.generate.params.auto_tag_title,
+                "the Create form's snapshot follows the preference"
+            );
+
+            let db = mold_db::open_default().unwrap().expect("isolated DB");
+            let mut stored = mold_core::config::GenerateSettings::default();
+            let applied =
+                mold_db::config_sync::hydrate_generate_settings_from_db(&db, &mut stored).unwrap();
+            assert!(applied, "the DB surface holds the generate row");
+            assert!(!stored.auto_tag_title);
+        });
     }
 
     #[tokio::test]

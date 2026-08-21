@@ -300,11 +300,20 @@ were adjusted to fit model constraints (e.g. multiples of 16, pixel cap). It
 carries dimension adjustments only.
 
 The `x-mold-request-warning` header carries **every** advisory about a request
-that was still accepted, `;`-separated — dimension adjustments plus anything
-else, such as a lip-dub render taking its frame count and frame rate from the
-reference clip instead of the values you sent. Prefer it over the dimension
-header if you want to surface all of them; the streaming endpoints deliver the
-same list as `info` progress events.
+that was still accepted — dimension adjustments plus anything else, such as a
+lip-dub render taking its frame count and frame rate from the reference clip
+instead of the values you sent, or a filing the host could not apply. Prefer it
+over the dimension header if you want to surface all of them; the streaming
+endpoints deliver the same list as `info` progress events, and the header is
+sent before the first SSE frame.
+
+::: warning Do not split this header on `; `
+Several advisories are joined with `; `, but the advisory text itself contains
+that sequence — "…were not applied; the print was generated and saved
+normally". Splitting on it turns one advisory into two dangling half-sentences.
+Show the value whole: the semicolons read as ordinary punctuation. `mold`'s own
+client does exactly that.
+:::
 
 ### Video and audio responses
 
@@ -381,7 +390,10 @@ frames, so a video-shaped probe falls through and mislabels the response.
   "embed_metadata": true,
   "upscale_model": "real-esrgan-x4plus:fp16",
   "expand": false,
-  "output_format": "png"
+  "output_format": "png",
+  "title": "Smurf Village at Dusk",
+  "tags": ["smurfs", "blue hour"],
+  "collection": { "name": "Blue Period" }
 }
 ```
 
@@ -447,6 +459,7 @@ Important fields:
 | `embed_metadata`                                             | override config/env metadata embedding for this request                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `batch_id`, `batch_index`, `batch_count`                     | optional native prepared-batch identity plus one-based sibling position/total; copied unchanged into complete-event and Gallery metadata                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | `source_fit`                                                 | additive, engine-ignored provenance recording the client-side source-image resize/crop policy; echoed verbatim into gallery `OutputMetadata.source_fit` so Reuse settings and running-job selection can restore the crop choice                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `title`, `tags`, `collection`                                | creation-time filing: the print's name plus the tags and collection it lands in. `title` is ≤ 120 characters, embedded in metadata, seeded into the gallery row, and folded into the default filename as `~slug`. `tags` holds at most 20 distinct names of 1–64 characters each. `collection` is `{ "id": "…" }` or `{ "name": "…" }`; a name resolves by slug and is created when absent. See [Creation-time filing](#creation-time-filing).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `upscale_model`                                              | post-generation Real-ESRGAN model applied before returning images                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 
 `guidance_overrides` is optional and every field inside it is optional. An
@@ -467,6 +480,44 @@ upscaled image in `image` and includes additive `original_image`,
 the pair. Gallery metadata exposes the saved file size in `width` / `height`
 and the reusable pre-upscale canvas in `generation_width` /
 `generation_height`.
+
+### Creation-time filing
+
+`title`, `tags`, and `collection` let a print arrive already organized instead
+of being filed afterwards. They are additive and optional — a request that
+omits them behaves exactly as before — and the same three fields are accepted
+on the chain body, where they describe the **stitched** print a sequence
+produces; intermediate clips never reach the gallery and are never filed.
+Batch and prepared siblings inherit their parent's filing.
+
+Validation happens at admission, before any queue work:
+
+- at most **20** distinct tags after normalization, each **1–64** Unicode
+  scalars. Runs of whitespace and whitespace-like controls collapse to a
+  single space; any other control character is a `422`. A leading `#` is an
+  ordinary character — the server never strips it, so `#smurfs` and `smurfs`
+  are different tags.
+- tags match case-insensitively, so `Smurfs` and `smurfs` are one tag.
+- `collection` is either `{ "id": "…" }` (resolved at admission) or
+  `{ "name": "…" }` (resolved by slug on the serving host, created when
+  absent). Creating by name is what makes one name mean one collection across
+  a fleet.
+
+Filing is applied **once**, when the print is published, and only as the
+gallery row is inserted. Organization is user-owned from that moment: a
+reconcile, an import, or a re-publication never resurrects a tag someone
+removed.
+
+The server never auto-tags. mold's own clients optionally add the title's slug
+as a tag before sending (`generate.auto_tag_title` on the CLI and TUI, **Tag
+new prints with their title** in the web, desktop, and iPhone apps), which is
+why the tag is always visible in the request rather than invented downstream.
+
+Nothing about filing can fail a render. A host running with
+`MOLD_DB_DISABLE=1`, or a `{ "id": … }` collection deleted between listing and
+generation, drops the filing, publishes the print anyway, and says so through the
+`x-mold-request-warning` response header documented above and the additive
+`request_warnings` list on `GenerateResponse` / `ChainResponse`.
 
 The exhaustive schema for enums and nested objects is served by the running
 server at `/api/docs` and `/api/openapi.json`.
@@ -764,18 +815,18 @@ data: {"type":"chain_job_ended","id":"550e8400-…","state":"completed"}
 
 Event semantics:
 
-| `type`                 | Meaning                                                                                                                                                                                           |
-| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `job_queued`           | A generation was accepted into the queue (`id`, `model`).                                                                                                                                         |
-| `job_started`          | A worker began the job. `gpu` is the ordinal on multi-GPU servers, omitted on single-GPU.                                                                                                         |
-| `job_ended`            | The job left the queue for **any** reason — completed, errored, or cancelled. Use the per-job stream for outcomes; `gallery_added` is the durable success signal.                                 |
-| `gallery_added`        | A new output landed on disk. `image` carries the full gallery row when the metadata DB recorded it (insert it directly); when the DB is disabled `image` is omitted — refetch `GET /api/gallery`. |
-| `gallery_removed`      | An output was deleted via `DELETE /api/gallery/image/:name`.                                                                                                                                      |
-| `queue_plan_changed`   | The scheduler published a newer versioned queue plan. Replace tentative lanes only when `plan_version` advances.                                                                                  |
-| `device_state_changed` | Device administration, worker health, or activity changed. Treat the payload as a hint and refetch `GET /api/devices`; telemetry-only samples do not emit this event.                             |
-| `chain_job_queued`     | A durable chain job entered the queue — created, resumed, retaken, or amended. Carries `id`, `model`, and `stage_count`.                                                                          |
-| `chain_job_started`    | The chain runner claimed the job and began rendering stages (`id`, `model`).                                                                                                                      |
-| `chain_job_ended`      | The job settled. `state` is `completed`, `failed`, or `cancelled`. Terminal chain jobs stay listed on `/api/chain-jobs` — this only says the runner is done with it.                              |
+| `type`                 | Meaning                                                                                                                                                                                                                                                                                            |
+| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `job_queued`           | A generation was accepted into the queue (`id`, `model`).                                                                                                                                                                                                                                          |
+| `job_started`          | A worker began the job. `gpu` is the ordinal on multi-GPU servers, omitted on single-GPU.                                                                                                                                                                                                          |
+| `job_ended`            | The job left the queue for **any** reason — completed, errored, or cancelled. Use the per-job stream for outcomes; `gallery_added` is the durable success signal.                                                                                                                                  |
+| `gallery_added`        | A new output landed on disk. `image` carries the full gallery row when the metadata DB recorded it — including any tags and collection the request filed it under, so a client can insert it in place without refetching. When the DB is disabled `image` is omitted — refetch `GET /api/gallery`. |
+| `gallery_removed`      | An output was deleted via `DELETE /api/gallery/image/:name`.                                                                                                                                                                                                                                       |
+| `queue_plan_changed`   | The scheduler published a newer versioned queue plan. Replace tentative lanes only when `plan_version` advances.                                                                                                                                                                                   |
+| `device_state_changed` | Device administration, worker health, or activity changed. Treat the payload as a hint and refetch `GET /api/devices`; telemetry-only samples do not emit this event.                                                                                                                              |
+| `chain_job_queued`     | A durable chain job entered the queue — created, resumed, retaken, or amended. Carries `id`, `model`, and `stage_count`.                                                                                                                                                                           |
+| `chain_job_started`    | The chain runner claimed the job and began rendering stages (`id`, `model`).                                                                                                                                                                                                                       |
+| `chain_job_ended`      | The job settled. `state` is `completed`, `failed`, or `cancelled`. Terminal chain jobs stay listed on `/api/chain-jobs` — this only says the runner is done with it.                                                                                                                               |
 
 The three `chain_job_*` events are additive and deliberately distinct from
 `job_queued` / `job_started` / `job_ended`: chain jobs do not support the
@@ -830,6 +881,12 @@ Both forms also accept optional `original_prompt`, `batch_id`, `batch_index`,
 and `batch_count` provenance. These fields survive normalization and durable
 resume and are copied into the stitched output's completion and Gallery
 metadata.
+
+Both forms also accept the same optional `title`, `tags`, and `collection`
+fields as `/api/generate` — see
+[Creation-time filing](#creation-time-filing). They apply to the **stitched**
+print the chain produces: intermediate clips are working artifacts inside the
+job directory, never reach the gallery, and are never filed.
 
 **Auto-expand body** (what `mold run --frames N` emits):
 
@@ -1413,20 +1470,44 @@ server that answered — a multi-host client must ask each one.
 ### Accepting a license
 
 `POST /api/downloads` and `POST /api/models/pull` take an additive
-`accept_licenses` array of ids. The server records them in **its own**
-`$MOLD_HOME/license-acceptances.json` (owner-only, `0600`) before the pull
-starts:
+`accept_licenses` array. Each entry carries the **exact terms the user was
+shown**, not just an id:
 
 ```bash
 curl -X POST http://localhost:7680/api/downloads \
   -H "Content-Type: application/json" \
-  -d '{"model":"pulid-flux","accept_licenses":["insightface-antelopev2"]}'
+  -d '{
+    "model": "pulid-flux",
+    "accept_licenses": [{
+      "id": "insightface-antelopev2",
+      "url": "https://raw.githubusercontent.com/deepinsight/insightface/7fadd420c2351d0ffa8cac403421c1a3ed733365/README.md",
+      "sha256": "84606d9ab37a38606b12c10d96172c6343768d2ef72c802a16482e476f8baf22"
+    }]
+  }'
 ```
 
-Omitting the field means "accept nothing", which is what every existing client
-sends. An id this server does not know is a `400` with code `UNKNOWN_LICENSE`,
-and nothing is written — resolution happens for the whole list before the first
-write, so one bad id cannot leave the request half-applied.
+An id alone would not be safe. The client and the server may be on different
+Mold releases pinning different revisions of the same license, and a bare id
+would let the server resolve terms of its own choosing and record consent for
+text the user never read. So the server compares the submitted `(url, sha256)`
+against its own pin and only records a match. Read `GET /api/licenses` first,
+display what it returned, and send back exactly that.
+
+The server records into **its own** `$MOLD_HOME/license-acceptances.json`
+(owner-only, `0600`) before the pull starts. Omitting the field means "accept
+nothing", which is what every existing client sends.
+
+Nothing is written unless every entry passes, so a rejected request leaves the
+root untouched:
+
+| Condition                                | Status | Code                     |
+| ---------------------------------------- | ------ | ------------------------ |
+| Id this server does not know             | `400`  | `UNKNOWN_LICENSE`        |
+| Known id, terms this server does not pin | `409`  | `LICENSE_TERMS_MISMATCH` |
+
+A `409` carries the server's own `url`, `sha256`, and `canonical` in the
+`license` object, so a client can display the server's terms and retry without
+a second round trip.
 
 ### Refusals
 
@@ -1442,6 +1523,7 @@ and code `LICENSE_NOT_ACCEPTED`, before any bytes move:
     "name": "InsightFace pretrained models (antelopev2)",
     "url": "https://raw.githubusercontent.com/deepinsight/insightface/7fadd420c2351d0ffa8cac403421c1a3ed733365/README.md",
     "canonical": "https://github.com/deepinsight/insightface#license",
+    "sha256": "84606d9ab37a38606b12c10d96172c6343768d2ef72c802a16482e476f8baf22",
     "summary": "InsightFace pretrained models (antelopev2: scrfd_10g_bnkps, glintr100) are licensed for non-commercial research purposes only."
   }
 }

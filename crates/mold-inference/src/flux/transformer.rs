@@ -1,9 +1,10 @@
 use anyhow::Result;
 use candle_core::Tensor;
-use candle_transformers::models::flux::{self, WithForward};
+use candle_transformers::models::flux::{self, BlockHook, WithForward};
 use std::time::Instant;
 
 use crate::flux::offload::OffloadedFluxTransformer;
+use crate::flux::pulid::PulidRuntime;
 use crate::flux::quantized_transformer::QuantizedFluxTransformer;
 use crate::img_utils::InpaintContext;
 use crate::progress::{ProgressEvent, ProgressReporter};
@@ -42,6 +43,7 @@ impl FluxTransformer {
         progress: &ProgressReporter,
         inpaint_ctx: Option<&InpaintContext>,
         preview: Option<&crate::latent_preview::LatentPreviewer>,
+        pulid: Option<PulidRuntime<'_>>,
     ) -> Result<Tensor> {
         let b_sz = img.dim(0)?;
         let dev = img.device();
@@ -57,8 +59,17 @@ impl FluxTransformer {
                 _ => continue,
             };
             let t_vec = Tensor::full(*t_curr as f32, b_sz, dev)?;
-            let pred = match self {
-                Self::BF16(m) => m.forward(
+            // The identity gate. A step before `id_start_step`, or an
+            // effective `id_weight` of 0, yields no hook — and every arm below
+            // answers `None` by calling the variant's ordinary `forward`, the
+            // exact call a render with no identity request makes. Bit-identity
+            // is therefore structural, not a numerical coincidence, and it
+            // holds on the *same* transformer route rather than requiring a
+            // separate no-PuLID load.
+            let hook = pulid.and_then(|runtime| runtime.hook_for_step(step));
+            let hook = hook.as_ref().map(|hook| hook as &dyn BlockHook);
+            let pred = match (self, hook) {
+                (Self::BF16(m), None) => m.forward(
                     &img,
                     img_ids,
                     txt,
@@ -67,7 +78,17 @@ impl FluxTransformer {
                     vec_,
                     Some(&guidance_tensor),
                 )?,
-                Self::Quantized(m) => m.forward(
+                (Self::BF16(m), Some(hook)) => m.forward_with_hook(
+                    &img,
+                    img_ids,
+                    txt,
+                    txt_ids,
+                    &t_vec,
+                    vec_,
+                    Some(&guidance_tensor),
+                    hook,
+                )?,
+                (Self::Quantized(m), None) => m.forward(
                     &img,
                     img_ids,
                     txt,
@@ -76,7 +97,7 @@ impl FluxTransformer {
                     vec_,
                     Some(&guidance_tensor),
                 )?,
-                Self::QuantizedBypass(m) => m.forward(
+                (Self::Quantized(m), Some(hook)) => m.forward_with_hook(
                     &img,
                     img_ids,
                     txt,
@@ -84,8 +105,9 @@ impl FluxTransformer {
                     &t_vec,
                     vec_,
                     Some(&guidance_tensor),
+                    hook,
                 )?,
-                Self::Offloaded(m) => m.forward(
+                (Self::QuantizedBypass(m), hook) => m.forward_with_hook(
                     &img,
                     img_ids,
                     txt,
@@ -93,6 +115,17 @@ impl FluxTransformer {
                     &t_vec,
                     vec_,
                     Some(&guidance_tensor),
+                    hook,
+                )?,
+                (Self::Offloaded(m), hook) => m.forward_with_hook(
+                    &img,
+                    img_ids,
+                    txt,
+                    txt_ids,
+                    &t_vec,
+                    vec_,
+                    Some(&guidance_tensor),
+                    hook,
                 )?,
             };
             img = (img + &pred * (t_prev - t_curr))?;

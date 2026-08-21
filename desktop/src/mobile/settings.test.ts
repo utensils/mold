@@ -28,16 +28,19 @@ describe("mobile settings persistence", () => {
       theme: "system",
       themeFamily: "safelight",
       autoSavePhotos: true,
+      autoTagTitle: true,
     });
     expect(loadMobileSettings(memoryStorage())).toEqual({
       theme: "system",
       themeFamily: "safelight",
       autoSavePhotos: true,
+      autoTagTitle: true,
     });
     expect(loadMobileSettings(memoryStorage("not json"))).toEqual({
       theme: "system",
       themeFamily: "safelight",
       autoSavePhotos: true,
+      autoTagTitle: true,
     });
   });
 
@@ -46,7 +49,12 @@ describe("mobile settings persistence", () => {
       loadMobileSettings(
         memoryStorage(JSON.stringify({ theme: "light", themeFamily: "unknown", future: true })),
       ),
-    ).toEqual({ theme: "light", themeFamily: "safelight", autoSavePhotos: true });
+    ).toEqual({
+      theme: "light",
+      themeFamily: "safelight",
+      autoSavePhotos: true,
+      autoTagTitle: true,
+    });
     expect(
       loadMobileSettings(
         memoryStorage(
@@ -57,26 +65,41 @@ describe("mobile settings persistence", () => {
           }),
         ),
       ),
-    ).toEqual({ theme: "system", themeFamily: "safelight", autoSavePhotos: false });
+    ).toEqual({
+      theme: "system",
+      themeFamily: "safelight",
+      autoSavePhotos: false,
+      autoTagTitle: true,
+    });
   });
 
   it("preserves an existing user's saved Mold preference", () => {
     expect(
       loadMobileSettings(memoryStorage(JSON.stringify({ theme: "dark", themeFamily: "mold" }))),
-    ).toEqual({ theme: "dark", themeFamily: "mold", autoSavePhotos: true });
+    ).toEqual({
+      theme: "dark",
+      themeFamily: "mold",
+      autoSavePhotos: true,
+      autoTagTitle: true,
+    });
   });
 
   it("persists and applies a change immediately, including native iOS appearance", () => {
     const storage = memoryStorage();
     const nativeInvoke = vi.fn().mockResolvedValue(undefined);
     const next = updateMobileSettings(
-      { theme: "system", themeFamily: "mold", autoSavePhotos: true },
+      { theme: "system", themeFamily: "mold", autoSavePhotos: true, autoTagTitle: true },
       { theme: "dark", themeFamily: "safelight" },
       storage,
       nativeInvoke,
     );
 
-    expect(next).toEqual({ theme: "dark", themeFamily: "safelight", autoSavePhotos: true });
+    expect(next).toEqual({
+      theme: "dark",
+      themeFamily: "safelight",
+      autoSavePhotos: true,
+      autoTagTitle: true,
+    });
     expect(JSON.parse(storage.value() ?? "{}")).toEqual(next);
     expect(document.documentElement.dataset.theme).toBe("dark");
     expect(document.documentElement.dataset.themeFamily).toBe("safelight");
@@ -89,7 +112,7 @@ describe("mobile settings persistence", () => {
     const nativeInvoke = vi.fn().mockResolvedValue(undefined);
 
     updateMobileSettings(
-      { theme: "dark", themeFamily: "mold", autoSavePhotos: true },
+      { theme: "dark", themeFamily: "mold", autoSavePhotos: true, autoTagTitle: true },
       { theme: "system" },
       memoryStorage(),
       nativeInvoke,
@@ -103,12 +126,50 @@ describe("mobile settings persistence", () => {
   it("persists an explicit Photos auto-save preference", () => {
     const storage = memoryStorage();
     const next = updateMobileSettings(
-      { theme: "system", themeFamily: "safelight", autoSavePhotos: true },
+      { theme: "system", themeFamily: "safelight", autoSavePhotos: true, autoTagTitle: true },
       { autoSavePhotos: false },
       storage,
     );
 
     expect(next.autoSavePhotos).toBe(false);
+    expect(JSON.parse(storage.value() ?? "{}")).toEqual(next);
+  });
+
+  it("keeps a saved auto-tag opt-out across a reload", () => {
+    // The preference is a mirror of the visible ghost chip: an existing user
+    // who turned it off must not have it silently restored by an upgrade.
+    expect(
+      loadMobileSettings(memoryStorage(JSON.stringify({ autoTagTitle: false }))).autoTagTitle,
+    ).toBe(false);
+    expect(
+      loadMobileSettings(memoryStorage(JSON.stringify({ autoTagTitle: "no" }))).autoTagTitle,
+    ).toBe(true);
+  });
+
+  it("migrates an install saved before File under to tagging prints with their title", () => {
+    // A pre-File-under blob has no `autoTagTitle` key at all; the product
+    // default is on, and every other saved choice survives the migration.
+    const saved = loadMobileSettings(
+      memoryStorage(JSON.stringify({ theme: "light", themeFamily: "mold", autoSavePhotos: false })),
+    );
+
+    expect(saved).toEqual({
+      theme: "light",
+      themeFamily: "mold",
+      autoSavePhotos: false,
+      autoTagTitle: true,
+    });
+  });
+
+  it("persists an explicit auto-tag opt-out", () => {
+    const storage = memoryStorage();
+    const next = updateMobileSettings(
+      { theme: "system", themeFamily: "safelight", autoSavePhotos: true, autoTagTitle: true },
+      { autoTagTitle: false },
+      storage,
+    );
+
+    expect(next.autoTagTitle).toBe(false);
     expect(JSON.parse(storage.value() ?? "{}")).toEqual(next);
   });
 

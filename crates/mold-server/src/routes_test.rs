@@ -286,6 +286,7 @@ mod tests {
                 }]
             };
             Ok(GenerateResponse {
+                request_warnings: Vec::new(),
                 audio: None,
                 images,
                 generation_time_ms: 1,
@@ -563,6 +564,9 @@ mod tests {
 
     fn route_chain_request() -> ChainRequest {
         ChainRequest {
+            collection: None,
+            tags: None,
+            title: None,
             model: "ltx-2-19b-distilled:fp8".into(),
             stages: vec![route_chain_stage("first shot", TransitionMode::Smooth)],
             motion_tail_frames: 1,
@@ -963,6 +967,8 @@ mod tests {
 
     fn output_metadata(prompt: &str) -> mold_core::OutputMetadata {
         mold_core::OutputMetadata {
+            collection: None,
+            tags: None,
             title: None,
             source_fit: None,
             guidance_overrides: None,
@@ -9588,6 +9594,8 @@ mod tests {
         let db_path = dir.path().join("mold.db");
         let db = MetadataDb::open(&db_path).unwrap();
         let metadata = mold_core::OutputMetadata {
+            collection: None,
+            tags: None,
             title: None,
             source_fit: None,
             guidance_overrides: None,
@@ -10513,6 +10521,8 @@ mod tests {
 
         let db = MetadataDb::open(&dir.path().join("mold.db")).unwrap();
         let metadata = mold_core::OutputMetadata {
+            collection: None,
+            tags: None,
             title: None,
             source_fit: None,
             guidance_overrides: None,
@@ -11188,6 +11198,86 @@ mod tests {
             .unwrap()
     }
 
+    /// The exact terms this build pins — what an honest client would have
+    /// read from `GET /api/licenses` and displayed before accepting.
+    fn accepted_terms() -> serde_json::Value {
+        let license = &mold_core::license_acceptance::INSIGHTFACE_ANTELOPEV2;
+        serde_json::json!({
+            "id": license.id,
+            "url": license.url,
+            "sha256": license.sha256,
+        })
+    }
+
+    /// A client on a different Mold release resolves the same id to a
+    /// different pinned revision. Recording ITS consent against OUR text would
+    /// store agreement to a document the user never read, so the server
+    /// refuses and shows its own terms instead.
+    #[tokio::test]
+    async fn post_api_downloads_rejects_terms_the_server_does_not_pin() {
+        let (home, _guard) = license_home();
+        let state = licensed_state();
+        let app = app_with_state(state.clone());
+
+        let stale = serde_json::json!({
+            "id": "insightface-antelopev2",
+            "url": "https://raw.githubusercontent.com/deepinsight/insightface/0000000000000000000000000000000000000000/README.md",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        });
+        let res = app
+            .oneshot(download_request(serde_json::json!({
+                "model": "pulid-flux",
+                "accept_licenses": [stale],
+            })))
+            .await
+            .unwrap();
+
+        assert_eq!(res.status(), StatusCode::CONFLICT);
+        let body = json_body(res).await;
+        assert_eq!(body["code"], mold_core::LICENSE_TERMS_MISMATCH);
+        // The server's OWN terms ride the refusal so the client can display
+        // them and retry without a second round trip.
+        let ours = &mold_core::license_acceptance::INSIGHTFACE_ANTELOPEV2;
+        assert_eq!(body["license"]["url"], ours.url);
+        assert_eq!(body["license"]["sha256"], ours.sha256);
+        assert_eq!(body["license"]["canonical"], ours.canonical);
+
+        assert!(!mold_core::license_acceptance::is_accepted(
+            home.path(),
+            ours
+        ));
+        assert!(state.downloads.listing().await.queued.is_empty());
+    }
+
+    /// A right id with a wrong digest is still a mismatch — the URL alone is
+    /// not the identity.
+    #[tokio::test]
+    async fn post_api_downloads_rejects_a_matching_url_with_a_different_digest() {
+        let (home, _guard) = license_home();
+        let state = licensed_state();
+        let app = app_with_state(state.clone());
+
+        let ours = &mold_core::license_acceptance::INSIGHTFACE_ANTELOPEV2;
+        let res = app
+            .oneshot(download_request(serde_json::json!({
+                "model": "pulid-flux",
+                "accept_licenses": [{
+                    "id": ours.id,
+                    "url": ours.url,
+                    "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+                }],
+            })))
+            .await
+            .unwrap();
+
+        assert_eq!(res.status(), StatusCode::CONFLICT);
+        assert!(!mold_core::license_acceptance::is_accepted(
+            home.path(),
+            ours
+        ));
+        assert!(state.downloads.listing().await.queued.is_empty());
+    }
+
     #[tokio::test]
     async fn get_api_licenses_reflects_this_servers_acceptance_state() {
         let (home, _guard) = license_home();
@@ -11292,7 +11382,7 @@ mod tests {
         let res = app
             .oneshot(download_request(serde_json::json!({
                 "model": "pulid-flux",
-                "accept_licenses": ["insightface-antelopev2"],
+                "accept_licenses": [accepted_terms()],
             })))
             .await
             .unwrap();
@@ -11317,7 +11407,10 @@ mod tests {
         let res = app
             .oneshot(download_request(serde_json::json!({
                 "model": "pulid-flux",
-                "accept_licenses": ["insightface-antelopev2", "not-a-license"],
+                "accept_licenses": [
+                    accepted_terms(),
+                    { "id": "not-a-license", "url": "https://example.invalid/x", "sha256": "0" },
+                ],
             })))
             .await
             .unwrap();
@@ -11979,6 +12072,7 @@ mod tests {
         let waveform = vec![0x89, 0x50, 0x4E, 0x47];
         let wav = b"RIFF....WAVEfmt ".to_vec();
         let response = GenerateResponse {
+            request_warnings: Vec::new(),
             audio: Some(mold_core::AudioData {
                 data: wav.clone(),
                 format: OutputFormat::Wav,
@@ -12039,6 +12133,7 @@ mod tests {
             index: 0,
         };
         let still = GenerateResponse {
+            request_warnings: Vec::new(),
             audio: None,
             images: vec![img()],
             video: None,
@@ -12057,6 +12152,7 @@ mod tests {
         assert_eq!(headers[axum::http::header::CONTENT_TYPE], "image/png");
 
         let clip = GenerateResponse {
+            request_warnings: Vec::new(),
             audio: None,
             images: Vec::new(),
             video: Some(mold_core::VideoData {

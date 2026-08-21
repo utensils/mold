@@ -125,11 +125,11 @@ impl IdentityExtractor {
     pub fn from_paths(detector: &Path, recognizer: &Path) -> Result<Self> {
         let det = onnx_graph::load_onnx_model(
             detector,
-            onnx_graph::pinned_sha256(ModelComponent::FaceDetector),
+            onnx_graph::pinned_artifact(ModelComponent::FaceDetector),
         )?;
         let rec = onnx_graph::load_onnx_model(
             recognizer,
-            onnx_graph::pinned_sha256(ModelComponent::FaceRecognizer),
+            onnx_graph::pinned_artifact(ModelComponent::FaceRecognizer),
         )?;
         Ok(Self {
             detector: ScrfdDetector::new(det.model).context("loading the SCRFD detector")?,

@@ -424,7 +424,49 @@ keep the legacy `mold-{model}-{timestamp}.{ext}` name). The filename is never
 rewritten afterwards — renaming a print in the Library edits the row title
 only, and an explicit `--output` path is always used verbatim. `--title`
 applies to single-clip runs; chain scripts and multi-prompt sequences do not
-carry a title yet.
+carry a title on the CLI, though the HTTP chain body does title the stitched
+print.
+
+### File under
+
+A print can arrive already organized rather than being filed afterwards:
+
+```bash
+mold run flux-dev:q4 "a village of blue houses" \
+  --title "Smurf village" \
+  --tag blue --tag studies \
+  --collection "Village studies"
+```
+
+- `--tag <TAG>` is repeatable, up to 20 tags of 1–64 characters each. Tags
+  are trimmed, their interior whitespace is collapsed, and they are matched
+  case-insensitively, so `Blue` and `blue` are one tag.
+- `--collection <NAME>` files the print into a collection, **creating it if
+  it does not exist**. Collections merge across machines by their slug, so
+  "Village studies" means the same collection on every host in a fleet.
+
+Both are seeded onto the gallery row **once, when the row is created**.
+Organization is yours after that: renaming, re-tagging, or removing a print
+from a collection sticks, and a later reconcile or re-publication never
+resurrects a tag you removed.
+
+When a run is titled, mold also tags the print with its title slug and says
+so:
+
+```console
+$ mold run "a village" --title "Smurf village"
+filing under tag "smurf-village"
+```
+
+Turn that off for one run with `--no-auto-tag`, or permanently with
+`mold config set generate.auto_tag_title false`. This is a _client_ default:
+the server never auto-tags, because it cannot tell a title you typed from one
+a script generated.
+
+Filing never costs you a render. If the serving host has no metadata database
+(`MOLD_DB_DISABLE=1`), or a collection was deleted between the moment you
+listed it and the moment you pressed Generate, the print is still generated
+and saved — the filing is dropped and reported, never silently discarded.
 
 The Library organizes prints per host with titles, favorites, tags, and
 manual collections (`PATCH /api/gallery/image/:filename`,
@@ -501,7 +543,21 @@ such as `/generate` and `/catalog` render Page Not Found:
   chip editor with autocomplete, and an **In collections** checklist with
   **New…**. Select mode's bar gains **Add to collection**, **Tag**,
   **♥ Favorite**, and **Trash**. Titles typed in Create's title field travel
-  with the request and name the download (`title-slug.png`).
+  with the request and lead the suggested download name
+  (`{title-slug}__{model}__s{seed}.{ext}`; the file in the gallery is never
+  renamed).
+- **File under** in Create (on hosts that advertise `gallery.organize`) files
+  a print as you make it, between the essentials and Advanced — inside the
+  controls sheet on phones. A titled print offers its own title slug as a
+  dashed, removable tag chip; **Add tag…** suggests the tags your machines
+  already use with counts; and the collection row pre-selects — never creates
+  — the collection whose name matches the title, offering None, every merged
+  collection, and an inline **New collection…**. A line beneath previews the
+  filename the print will land as. The choice rides one shots, every batch
+  sibling, every prepared variation, and the single print a sequence stitches,
+  and **Reuse settings** restores what a print was actually filed under.
+  **Settings ▸ Library ▸ Tag new prints with their title** (stored in this
+  browser) turns the title chip off.
 - Shortcuts: **F** favorite · **T** tag · **⌘⇧N** new collection · **⌫** trash
   (undo for 6 s) · **⌘⌫** delete forever (confirm).
 - Destructive copy stays plain: **Empty trash**, **Delete forever**, and

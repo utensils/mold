@@ -437,7 +437,7 @@ describe("Lightbox organization (V3 Shelf)", () => {
     wrapper.unmount();
   });
 
-  it("saves under the title slug when the print has a title", async () => {
+  it("saves under the download label — title, model, and seed", async () => {
     const wrapper = mountLightbox(item, false, {
       canOrganize: true,
       organization,
@@ -448,7 +448,7 @@ describe("Lightbox organization (V3 Shelf)", () => {
     expect(saveGalleryMedia).toHaveBeenCalledWith(
       { baseUrl: "http://hal", apiKey: "secret" },
       "print-0001.png",
-      "smurf-04.png",
+      "smurf-04__flux-dev-q8__s42.png",
       null,
       false,
     );

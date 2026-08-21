@@ -31,6 +31,7 @@ import { useContextMenuStore } from "./stores/contextMenu";
 import { useEventsStore } from "./stores/events";
 import { useHostsStore } from "./stores/hosts";
 import { useGenerationStore } from "./stores/generation";
+import { useLibraryPrefsStore } from "./stores/libraryPrefs";
 import { useToastStore } from "./stores/toasts";
 import { useUiStore } from "./stores/ui";
 import { useUpdaterStore } from "./stores/updater";
@@ -41,6 +42,7 @@ const connection = useConnectionStore();
 const contextMenu = useContextMenuStore();
 const events = useEventsStore();
 const hostsStore = useHostsStore();
+const libraryPrefs = useLibraryPrefsStore();
 
 // App-wide server-event subscription (live gallery). Re-probe whenever the
 // engine target changes — a different host may not support /api/events.
@@ -275,6 +277,9 @@ function suppressChromeSelection(e: Event) {
 }
 
 onMounted(async () => {
+  // Synchronous and first: the Create form's auto-tag mirror has to be right
+  // before any request can be built from it, whichever workspace opens.
+  libraryPrefs.init();
   window.addEventListener("keydown", onKeydown);
   window.addEventListener("contextmenu", suppressNativeContextMenu);
   window.addEventListener("selectstart", suppressChromeSelection);

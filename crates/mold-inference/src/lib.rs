@@ -84,6 +84,8 @@ pub use minimax_h3::private_server::{
 pub mod model_registry;
 pub(crate) mod nvfp4;
 pub mod progress;
+#[cfg(test)]
+pub(crate) mod pulid_fixtures;
 pub(crate) mod quantized_dmmv;
 pub mod qwen_image;
 pub(crate) mod reference_media;

@@ -250,7 +250,22 @@ a digest of the buffer it produced, and no way to obtain a digest and a buffer
 that did not come from the same call. `mold_core::secure_file::sha256_open_file`
 is deliberately unused here for exactly that reason: it takes a `&File`, which
 necessarily leaves the bytes to a second read. A structural test pins the
-module to one read. The pin comes from `mold_core::pulid_assets::pulid_manifest()` via
+module to one read.
+
+That single read is also **bounded**, which is what makes it safe to perform at
+all. A digest can only be computed from bytes already in memory, so an
+unbounded `read_to_end` on an oversized or sparse replacement file exhausts
+memory before the mismatch it was about to find can be reported — the process
+dies instead of refusing the file. The manifest pins each artifact's exact
+`size_bytes` alongside its digest, so `PinnedArtifact` carries both from one
+lookup (a caller cannot pair one component's digest with another's length), the
+retained descriptor is `fstat`ed first, and an unexpected length is refused as
+`ArtifactSizeError` before a byte is read. The read is then capped at the
+expected length **+ 1**, so a file that grows between the stat and the read
+overshoots and is refused rather than silently truncated to a prefix that
+happens to parse. Loads without a pin — the inventory and benchmark tools,
+which take arbitrary paths by design — get the same treatment at
+`UNPINNED_MAX_BYTES` (1 GiB, four times the largest graph mold loads). The pin comes from `mold_core::pulid_assets::pulid_manifest()` via
 `onnx_graph::pinned_sha256`, never a second copy in this crate.
 
 The downloader's `.sha256-verified` marker is not a substitute: it records that

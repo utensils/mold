@@ -63,7 +63,24 @@ more connected machines are reachable it also offers:
 An optional **Title** above the prompt names the print: it is embedded in the
 saved metadata, folded into the output filename as a slug, and shown across
 every Library. Batch siblings and prepared variations inherit it, and **Use as
-prompt** restores it from a print.
+prompt** restores it from a print. A sequence keeps the field too — it names
+the single stitched print the sequence lands in the Library.
+
+Directly beneath it, **File under** files the print as you make it, as two
+rows:
+
+- **Tags** — a dashed chip offers the title's own slug (tap it away and it
+  stays away), and the sheet takes typed names and suggests the tags your
+  machines already use, with counts.
+- **Collection** — the collection whose name matches the title is
+  pre-selected, never created; the sheet offers None, every collection merged
+  across your machines, and an inline **New collection…** that only records
+  the name until the print develops.
+
+A line under the rows previews the filename the print will land as. Both rows
+disappear when the machine the print is routed to cannot organize its library,
+and **Settings ▸ Library ▸ Tag new prints with their title** turns the title
+chip off without touching prints you already made.
 
 Under either policy the model list is the union of every reachable machine's
 installed models, and a model that is not on all of them is tagged with the
@@ -326,6 +343,8 @@ cover:
 - **Appearance:** System, Dark, or Light
 - **Photos:** automatically save newly generated stills to the iPhone photo
   library (on by default)
+- **Library:** **Tag new prints with their title** — offer a titled print its
+  own title slug as a tag in Create (on by default)
 - **Remote hosts:** saved-host count and a shortcut to manage them
 - **GPUs:** enable or disable each GPU on the selected host; a busy GPU
   finishes its current stage before disabling
@@ -334,9 +353,9 @@ cover:
   plus an external link to the [Mold privacy policy](/privacy)
 
 Fresh installs start with the Safelight color family, System appearance, and
-Photos auto-save enabled. Existing users keep any valid saved choices, with
-auto-save enabled when upgrading from a settings record that predates the
-option.
+Photos auto-save and title tagging enabled. Existing users keep any valid saved
+choices, with auto-save and title tagging enabled when upgrading from a
+settings record that predates either option.
 
 The appearance choice updates both the WebView and native iOS system chrome so
 status-bar content remains readable. Themes change the app chrome but never

@@ -374,18 +374,34 @@ The acceptance has to live on the machine that does the downloading, and
 - **No server, or `--local`**: the pull runs here, so the acceptance is
   recorded here.
 
-Either way the terms are printed before the request goes out. Run
-`mold licenses` to see what needs accepting and which root was read:
+Either way the terms are printed before the request goes out — and they are the
+terms of the machine that will record them. When a server will do the
+recording, `mold pull` reads that server's `GET /api/licenses`, displays what
+it returned, and sends back exactly that; the server refuses anything else.
+This matters because the two sides can be on different Mold releases pinning
+different revisions of the same license, and consent has to mean the document
+that was actually shown.
+
+Run `mold licenses` to see what needs accepting and which root was read:
 
 ```bash
-mold licenses
+mold licenses           # asks the server at MOLD_HOST when one answers
+mold licenses --local   # this machine's own acceptances, without asking
 ```
+
+`mold licenses` reads this machine only when nothing is listening at
+`MOLD_HOST`, or when you pass `--local`. If a server is there but the request
+fails — authentication, a 5xx, an unreadable body — the command reports that
+against the host rather than quietly showing you a different machine's
+acceptances.
 
 Over HTTP, `GET /api/licenses` returns each license with `accepted` and
 `required_by`, and `POST /api/downloads` / `POST /api/models/pull` accept an
-additive `accept_licenses` array. A gated download without one is refused with
-`403` and code `LICENSE_NOT_ACCEPTED`, carrying a structured `license` object a
-UI can build its own prompt from. Servers that support this advertise
+additive `accept_licenses` array of `{ id, url, sha256 }` entries. A gated
+download without one is refused with `403` and code `LICENSE_NOT_ACCEPTED`;
+terms the server does not pin are refused with `409` and code
+`LICENSE_TERMS_MISMATCH`. Both carry a structured `license` object — including
+the server's own `url` and `sha256` — that a UI can build its own prompt from. Servers that support this advertise
 `capabilities.licenses: true`; older ones do not, and can only be accepted by
 running `mold pull --accept-license` in a shell on that host.
 
@@ -467,6 +483,28 @@ the desktop, web, and iPhone apps edit a remote machine's value through that
 host's `/api/config`. `GET /api/capabilities` advertises the effective value
 as `gallery.trash.retention_days`; with `MOLD_DB_DISABLE=1` there is no trash
 and `capabilities.gallery.trash` is absent, so delete is permanent as before.
+
+### Auto-tagging titled prints
+
+| Key                       | Env var | Default | Description                                                              |
+| ------------------------- | ------- | ------- | ------------------------------------------------------------------------ |
+| `generate.auto_tag_title` | —       | `true`  | Whether a titled CLI or TUI run also tags the print with its title slug. |
+
+```bash
+mold config set generate.auto_tag_title false   # stop tagging titled prints
+mold config where generate.auto_tag_title       # → db
+```
+
+With it on, `mold run "a village" --title "Smurf village"` also files the
+print under the tag `smurf-village` and discloses it on stderr
+(`filing under tag "smurf-village"`). `mold run --no-auto-tag` overrides the
+setting for one invocation.
+
+This is deliberately a **client** setting with no env override: it shapes what
+the CLI puts in a request, not how a server behaves. The server never
+auto-tags — it cannot tell a title a person typed from one a script
+generated, and a host quietly adding tags to every print that crossed it
+would be surprising from every other machine on the fleet.
 
 ## Advanced
 

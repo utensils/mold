@@ -54,7 +54,7 @@ impl CliContext {
     pub(crate) async fn stream_server_pull_accepting(
         &self,
         model: &str,
-        accept_licenses: &[String],
+        accept_licenses: &[mold_core::LicenseAcceptance],
     ) -> Result<()> {
         stream_server_pull(&self.client, model, accept_licenses).await
     }
@@ -98,7 +98,7 @@ pub(crate) fn is_loopback_host(host: &str) -> bool {
 pub(crate) async fn stream_server_pull(
     client: &MoldClient,
     model: &str,
-    accept_licenses: &[String],
+    accept_licenses: &[mold_core::LicenseAcceptance],
 ) -> Result<()> {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let render = tokio::spawn(render_progress(rx));

@@ -3414,6 +3414,7 @@ impl QwenImageEngine {
         );
 
         Ok(GenerateResponse {
+            request_warnings: Vec::new(),
             audio: None,
             images: vec![ImageData {
                 data: image_bytes,
@@ -3807,6 +3808,7 @@ impl QwenImageEngine {
         )?;
 
         Ok(GenerateResponse {
+            request_warnings: Vec::new(),
             audio: None,
             images: vec![ImageData {
                 data: image_bytes,
@@ -4327,6 +4329,7 @@ impl QwenImageEngine {
         tracing::info!(generation_time_ms, seed, "Qwen-Image generation complete");
 
         Ok(GenerateResponse {
+            request_warnings: Vec::new(),
             audio: None,
             images: vec![ImageData {
                 data: image_bytes,
