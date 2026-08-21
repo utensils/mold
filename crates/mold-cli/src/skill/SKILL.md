@@ -762,6 +762,16 @@ license text it was shown; changed terms require accepting again. A refusal
 names the license, its URL, and that exact command. `mold rm pulid-flux`
 removes the bundle; `mold pull pulid-flux` repairs a partial one.
 
+You do not have to pull it by hand. A request that actually conditions on a
+face plans the bundle through the same dependency preparation the encoder
+ladders use: `POST /api/generate/placement-preview` reports whatever is missing
+under `pending_downloads` (kinds `identity_adapter`, `identity_vision_encoder`,
+`face_detector`, `face_recognizer`) without fetching anything, and admission
+materializes it into `shared/pulid/` — after the license gate, so an unaccepted
+antelopev2 fails the job with that same `--accept-license` message instead of
+downloading. An `id_weight` of `0` applies no identity at all and is completely
+inert: it plans no assets, downloads nothing, and adds no memory demand.
+
 ### ControlNet (SD1.5 only)
 
 ```bash

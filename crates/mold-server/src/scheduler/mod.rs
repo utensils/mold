@@ -12430,7 +12430,8 @@ mod tests {
                 repo: "owner/qwen3".to_string(),
                 filename: "qwen3-q8.gguf".to_string(),
                 bytes: 1_000_000_000,
-                quantization: crate::execution_plan::QuantizationVariant::Q8,
+                container: crate::execution_plan::PendingArtifactContainer::Gguf,
+                quantization: Some(crate::execution_plan::QuantizationVariant::Q8),
             },
         );
 

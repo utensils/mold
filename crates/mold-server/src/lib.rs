@@ -31,6 +31,7 @@ mod gallery_trash;
 pub mod generation_cancel;
 pub mod gpu_pool;
 pub mod gpu_worker;
+mod identity_dependencies;
 pub mod instance;
 pub mod job_registry;
 pub mod job_supervisor;
