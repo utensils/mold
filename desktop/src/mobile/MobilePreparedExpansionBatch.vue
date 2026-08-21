@@ -17,6 +17,7 @@ const emit = defineEmits<{
   refresh: [];
   discard: [];
   generate: [];
+  cancel: [];
 }>();
 
 const root = ref<HTMLElement | null>(null);
@@ -64,6 +65,11 @@ function requestReplacement(kind: "refresh" | "regenerate"): void {
   if (confirming.value) return;
   if (kind === "refresh") emit("refresh");
   else emit("regenerate");
+}
+
+function submitOrCancel(): void {
+  if (props.submitting) emit("cancel");
+  else emit("generate");
 }
 
 async function keep(): Promise<void> {
@@ -270,10 +276,14 @@ watch(
         type="button"
         class="primary-button mobile-touch-action"
         data-test="mobile-develop-prepared"
-        :disabled="preparing || submitting || stale || !valid || !!confirming"
-        @click="emit('generate')"
+        :disabled="preparing || stale || !valid || !!confirming"
+        @click="submitOrCancel"
       >
-        {{ submitting ? "Queueing variations…" : `Develop ${batch.prompts.length} variations` }}
+        {{
+          submitting
+            ? "Cancel · Planning variations…"
+            : `Develop ${batch.prompts.length} variations`
+        }}
       </button>
     </footer>
   </section>

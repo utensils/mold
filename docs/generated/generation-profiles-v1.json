@@ -15574,7 +15574,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "minimax-h3.minimax-h3-fl2va",
-        "profile_hash": "d54884bf99b2db486d9f673e2d106c7f43047d42054ad61f9b23c7281ebcf973",
+        "profile_hash": "9cb07be96af69e8ab9067a0956e9797ec3845c9862ff7dc2089c3d4b0f69ebee",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -15590,26 +15590,15 @@
               "fps": 24
             },
             "resolution": {
-              "domain": "dynamic",
+              "domain": "buckets",
               "alignment": 32,
               "min_width": 64,
               "min_height": 64,
               "max_pixels": 1069056,
               "min_aspect_ratio": 0.25,
               "max_aspect_ratio": 4.0,
+              "off_bucket": "reject",
               "aspect_groups": [
-                {
-                  "id": "16:7",
-                  "label": "16:7",
-                  "presets": [
-                    {
-                      "id": "1536x672",
-                      "width": 1536,
-                      "height": 672,
-                      "tier": "recommended"
-                    }
-                  ]
-                },
                 {
                   "id": "7:4",
                   "label": "7:4",
@@ -15621,66 +15610,18 @@
                       "tier": "recommended"
                     }
                   ]
-                },
-                {
-                  "id": "4:3",
-                  "label": "4:3",
-                  "presets": [
-                    {
-                      "id": "1024x768",
-                      "width": 1024,
-                      "height": 768,
-                      "tier": "recommended"
-                    }
-                  ]
-                },
-                {
-                  "id": "1:1",
-                  "label": "1:1",
-                  "presets": [
-                    {
-                      "id": "768x768",
-                      "width": 768,
-                      "height": 768,
-                      "tier": "recommended"
-                    }
-                  ]
-                },
-                {
-                  "id": "3:4",
-                  "label": "3:4",
-                  "presets": [
-                    {
-                      "id": "768x1024",
-                      "width": 768,
-                      "height": 1024,
-                      "tier": "recommended"
-                    }
-                  ]
-                },
-                {
-                  "id": "4:7",
-                  "label": "4:7",
-                  "presets": [
-                    {
-                      "id": "768x1344",
-                      "width": 768,
-                      "height": 1344,
-                      "tier": "recommended"
-                    }
-                  ]
                 }
               ]
             },
             "steps": {
               "default": 21,
-              "min": 2,
-              "max": 100,
+              "min": 21,
+              "max": 21,
               "step": 1,
               "recommended": [
                 21
               ],
-              "mode": "adjustable"
+              "mode": "fixed"
             },
             "guidance": {
               "default": 0.0,
@@ -15693,12 +15634,12 @@
               "frames": {
                 "default": 124,
                 "min": 124,
-                "max": 345,
+                "max": 124,
                 "step": 17,
                 "recommended": [
                   124
                 ],
-                "mode": "adjustable"
+                "mode": "fixed"
               },
               "frame_offset": 5,
               "fps": {
@@ -15793,7 +15734,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "minimax-h3.minimax-h3-fl2va",
-        "profile_hash": "81720789730fbea7e110f97ac0e076e622e0845e06d851a28dddb08fcc74a8bc",
+        "profile_hash": "cd87034f31ea1675f73e03d1018735143524089ecab30b19a45ff18a80300ffc",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -15809,26 +15750,15 @@
               "fps": 24
             },
             "resolution": {
-              "domain": "dynamic",
+              "domain": "buckets",
               "alignment": 32,
               "min_width": 64,
               "min_height": 64,
               "max_pixels": 1069056,
               "min_aspect_ratio": 0.25,
               "max_aspect_ratio": 4.0,
+              "off_bucket": "reject",
               "aspect_groups": [
-                {
-                  "id": "16:7",
-                  "label": "16:7",
-                  "presets": [
-                    {
-                      "id": "1536x672",
-                      "width": 1536,
-                      "height": 672,
-                      "tier": "recommended"
-                    }
-                  ]
-                },
                 {
                   "id": "7:4",
                   "label": "7:4",
@@ -15840,66 +15770,18 @@
                       "tier": "recommended"
                     }
                   ]
-                },
-                {
-                  "id": "4:3",
-                  "label": "4:3",
-                  "presets": [
-                    {
-                      "id": "1024x768",
-                      "width": 1024,
-                      "height": 768,
-                      "tier": "recommended"
-                    }
-                  ]
-                },
-                {
-                  "id": "1:1",
-                  "label": "1:1",
-                  "presets": [
-                    {
-                      "id": "768x768",
-                      "width": 768,
-                      "height": 768,
-                      "tier": "recommended"
-                    }
-                  ]
-                },
-                {
-                  "id": "3:4",
-                  "label": "3:4",
-                  "presets": [
-                    {
-                      "id": "768x1024",
-                      "width": 768,
-                      "height": 1024,
-                      "tier": "recommended"
-                    }
-                  ]
-                },
-                {
-                  "id": "4:7",
-                  "label": "4:7",
-                  "presets": [
-                    {
-                      "id": "768x1344",
-                      "width": 768,
-                      "height": 1344,
-                      "tier": "recommended"
-                    }
-                  ]
                 }
               ]
             },
             "steps": {
               "default": 5,
-              "min": 2,
-              "max": 100,
+              "min": 5,
+              "max": 5,
               "step": 1,
               "recommended": [
                 5
               ],
-              "mode": "adjustable"
+              "mode": "fixed"
             },
             "guidance": {
               "default": 0.0,
@@ -15912,12 +15794,12 @@
               "frames": {
                 "default": 124,
                 "min": 124,
-                "max": 345,
+                "max": 124,
                 "step": 17,
                 "recommended": [
                   124
                 ],
-                "mode": "adjustable"
+                "mode": "fixed"
               },
               "frame_offset": 5,
               "fps": {
@@ -16012,7 +15894,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "minimax-h3.minimax-h3-fl2va",
-        "profile_hash": "11af5c4364e771e68bafb478956b9344e714ce94e916fd3940116f21bedfa474",
+        "profile_hash": "bbc7b9707d4828bdac78969501bfd7e60e66842572802cbb6f26b1f7ea0b1841",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -16028,26 +15910,15 @@
               "fps": 24
             },
             "resolution": {
-              "domain": "dynamic",
+              "domain": "buckets",
               "alignment": 32,
               "min_width": 64,
               "min_height": 64,
               "max_pixels": 1069056,
               "min_aspect_ratio": 0.25,
               "max_aspect_ratio": 4.0,
+              "off_bucket": "reject",
               "aspect_groups": [
-                {
-                  "id": "16:7",
-                  "label": "16:7",
-                  "presets": [
-                    {
-                      "id": "1536x672",
-                      "width": 1536,
-                      "height": 672,
-                      "tier": "recommended"
-                    }
-                  ]
-                },
                 {
                   "id": "7:4",
                   "label": "7:4",
@@ -16059,66 +15930,18 @@
                       "tier": "recommended"
                     }
                   ]
-                },
-                {
-                  "id": "4:3",
-                  "label": "4:3",
-                  "presets": [
-                    {
-                      "id": "1024x768",
-                      "width": 1024,
-                      "height": 768,
-                      "tier": "recommended"
-                    }
-                  ]
-                },
-                {
-                  "id": "1:1",
-                  "label": "1:1",
-                  "presets": [
-                    {
-                      "id": "768x768",
-                      "width": 768,
-                      "height": 768,
-                      "tier": "recommended"
-                    }
-                  ]
-                },
-                {
-                  "id": "3:4",
-                  "label": "3:4",
-                  "presets": [
-                    {
-                      "id": "768x1024",
-                      "width": 768,
-                      "height": 1024,
-                      "tier": "recommended"
-                    }
-                  ]
-                },
-                {
-                  "id": "4:7",
-                  "label": "4:7",
-                  "presets": [
-                    {
-                      "id": "768x1344",
-                      "width": 768,
-                      "height": 1344,
-                      "tier": "recommended"
-                    }
-                  ]
                 }
               ]
             },
             "steps": {
               "default": 9,
-              "min": 2,
-              "max": 100,
+              "min": 9,
+              "max": 9,
               "step": 1,
               "recommended": [
                 9
               ],
-              "mode": "adjustable"
+              "mode": "fixed"
             },
             "guidance": {
               "default": 0.0,
@@ -16131,12 +15954,12 @@
               "frames": {
                 "default": 124,
                 "min": 124,
-                "max": 345,
+                "max": 124,
                 "step": 17,
                 "recommended": [
                   124
                 ],
-                "mode": "adjustable"
+                "mode": "fixed"
               },
               "frame_offset": 5,
               "fps": {
@@ -16450,7 +16273,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "minimax-h3.minimax-h3-ref2va",
-        "profile_hash": "00a357559591517fee7e7e5809bdb4596a6cffa111a3eff46c3bf1f6d1cdfb58",
+        "profile_hash": "ac9308b6315187cbb42f8cc480e177ed4150816e8764b825bc2a0edfdb7304f5",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -16466,26 +16289,15 @@
               "fps": 24
             },
             "resolution": {
-              "domain": "dynamic",
+              "domain": "buckets",
               "alignment": 32,
               "min_width": 64,
               "min_height": 64,
               "max_pixels": 1069056,
               "min_aspect_ratio": 0.25,
               "max_aspect_ratio": 4.0,
+              "off_bucket": "reject",
               "aspect_groups": [
-                {
-                  "id": "16:7",
-                  "label": "16:7",
-                  "presets": [
-                    {
-                      "id": "1536x672",
-                      "width": 1536,
-                      "height": 672,
-                      "tier": "recommended"
-                    }
-                  ]
-                },
                 {
                   "id": "7:4",
                   "label": "7:4",
@@ -16497,66 +16309,18 @@
                       "tier": "recommended"
                     }
                   ]
-                },
-                {
-                  "id": "4:3",
-                  "label": "4:3",
-                  "presets": [
-                    {
-                      "id": "1024x768",
-                      "width": 1024,
-                      "height": 768,
-                      "tier": "recommended"
-                    }
-                  ]
-                },
-                {
-                  "id": "1:1",
-                  "label": "1:1",
-                  "presets": [
-                    {
-                      "id": "768x768",
-                      "width": 768,
-                      "height": 768,
-                      "tier": "recommended"
-                    }
-                  ]
-                },
-                {
-                  "id": "3:4",
-                  "label": "3:4",
-                  "presets": [
-                    {
-                      "id": "768x1024",
-                      "width": 768,
-                      "height": 1024,
-                      "tier": "recommended"
-                    }
-                  ]
-                },
-                {
-                  "id": "4:7",
-                  "label": "4:7",
-                  "presets": [
-                    {
-                      "id": "768x1344",
-                      "width": 768,
-                      "height": 1344,
-                      "tier": "recommended"
-                    }
-                  ]
                 }
               ]
             },
             "steps": {
               "default": 21,
-              "min": 2,
-              "max": 100,
+              "min": 21,
+              "max": 21,
               "step": 1,
               "recommended": [
                 21
               ],
-              "mode": "adjustable"
+              "mode": "fixed"
             },
             "guidance": {
               "default": 0.0,
@@ -16569,12 +16333,12 @@
               "frames": {
                 "default": 124,
                 "min": 124,
-                "max": 345,
+                "max": 124,
                 "step": 17,
                 "recommended": [
                   124
                 ],
-                "mode": "adjustable"
+                "mode": "fixed"
               },
               "frame_offset": 5,
               "fps": {

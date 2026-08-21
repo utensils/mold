@@ -16,6 +16,8 @@ agents, and custom API clients.
 
 ## One-Line Install (recommended)
 
+Stable release:
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/utensils/mold/main/install.sh | sh
 ```
@@ -36,6 +38,18 @@ which was the historical name for that same target. Timeouts, authentication
 failures, server failures, duplicate checksums, and checksum mismatches stop
 installation.
 
+### Nightly CLI
+
+Install the latest successfully published CLI build from `main`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/utensils/mold/main/install.sh | MOLD_CHANNEL=nightly sh
+```
+
+Nightly uses the rolling `latest` prerelease and the same platform detection
+and SHA-256 verification as stable. It may be less tested than a tagged
+release. Re-run that command or use `mold update --nightly` to refresh it.
+
 ### Options
 
 All options are passed as environment variables:
@@ -46,6 +60,9 @@ curl -fsSL ... | MOLD_INSTALL_DIR=/usr/local/bin sh
 
 # Pin to a specific release tag (default: latest)
 curl -fsSL ... | MOLD_VERSION=v0.10.0 sh
+
+# Install the latest rolling build from main
+curl -fsSL ... | MOLD_CHANNEL=nightly sh
 
 # Force a GPU architecture (default: auto-detect on Linux)
 curl -fsSL ... | MOLD_CUDA_ARCH=sm86  sh   # Ampere (RTX 3090 / A40)
@@ -83,6 +100,7 @@ points at.
 
 ```bash
 mold update                       # Update to latest release
+mold update --nightly             # Install latest rolling build from main
 mold update --check               # Check for updates without installing
 mold update --version v0.7.0      # Install a specific version
 ```
@@ -209,9 +227,9 @@ See [Docker & RunPod](/deployment/docker) for full deployment instructions.
 
 ## Pre-Built Binaries
 
-The one-line installer always targets the latest tag from the
-[releases page](https://github.com/utensils/mold/releases). Each release ships
-the following assets:
+The one-line installer targets the latest stable tag by default; with
+`MOLD_CHANNEL=nightly`, it targets the rolling `latest` prerelease. Both use
+assets from the [releases page](https://github.com/utensils/mold/releases):
 
 | Platform                                         | File                                              |
 | ------------------------------------------------ | ------------------------------------------------- |

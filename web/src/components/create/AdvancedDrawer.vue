@@ -16,7 +16,6 @@ import SheetPanel from "@ui/components/SheetPanel.vue";
 import AccordionSection from "@ui/components/AccordionSection.vue";
 import BadgePill from "@ui/components/BadgePill.vue";
 import Icon from "@ui/components/Icon.vue";
-import SliderRow from "@ui/components/SliderRow.vue";
 import SegmentedControl from "@ui/components/SegmentedControl.vue";
 import SwitchToggle from "@ui/components/SwitchToggle.vue";
 import Chip from "@ui/components/Chip.vue";
@@ -25,8 +24,6 @@ import PlacementPanel from "../PlacementPanel.vue";
 import ExtendVideoControls from "./advanced/ExtendVideoControls.vue";
 import Ltx2VideoControls from "./advanced/Ltx2VideoControls.vue";
 import MinimaxH3AuthoringPanel from "@studio/components/MinimaxH3AuthoringPanel.vue";
-import ImageDropWell from "@studio/components/ImageDropWell.vue";
-import { imageDimensionsFromBase64 } from "@studio/lib/imageDimensions";
 import { DEFAULT_EXTEND_OVERLAP_FRAMES } from "@studio/lib/extend";
 import type { CanvasIntent } from "@studio/lib/outputShape";
 import UpscaleSection from "./advanced/UpscaleSection.vue";
@@ -63,12 +60,6 @@ import {
   videoFrameStep,
 } from "@studio/lib/videoDuration";
 import {
-  SOURCE_FIT_OPTIONS,
-  coerceSourceFitForMaskless,
-  sourceFitPolicyForMode,
-  type SourceFitMode,
-} from "@studio/lib/sourceFit";
-import {
   cameraMotionLoraPath,
   cameraMotionMode,
   parseCameraControlAvailability,
@@ -86,7 +77,6 @@ import {
   effectiveGenerationRecipe,
   resolutionProfileFinding,
 } from "@studio/lib/generationProfile";
-import { blobToBase64 } from "../../lib/base64";
 
 const props = withDefaults(
   defineProps<{
@@ -218,44 +208,6 @@ const NEG_CHIPS = [
 // Desktop/tablet web (spec §06 v0.12): render inline as an always-visible
 // column. Phone: render inside the Advanced sheet.
 const inline = computed(() => !props.mobile);
-const sequenceOpeningImageError = ref<string | null>(null);
-const sequenceOpeningImageMime = computed(() =>
-  /\.jpe?g$/i.test(draft.openingImage?.filename ?? "")
-    ? "image/jpeg"
-    : "image/png",
-);
-
-async function onSequenceOpeningImageFile(file: File) {
-  const base64 = await blobToBase64(file);
-  const dimensions = imageDimensionsFromBase64(base64);
-  if (!dimensions) {
-    sequenceOpeningImageError.value =
-      "Only PNG or JPEG images can be used here.";
-    return;
-  }
-  sequenceOpeningImageError.value = null;
-  draft.openingImage = {
-    filename: file.name,
-    base64,
-    width: dimensions.width,
-    height: dimensions.height,
-  };
-  patch({
-    sourceFitPolicy: coerceSourceFitForMaskless(
-      props.modelValue.sourceFitPolicy ?? { mode: "crop-fill" },
-    ),
-  });
-}
-
-function clearSequenceOpeningImage() {
-  sequenceOpeningImageError.value = null;
-  draft.openingImage = null;
-}
-
-function openSequenceOpeningImagePicker() {
-  sequenceOpeningImageError.value = null;
-  emit("open-picker");
-}
 
 // The fifth argument is the selected checkpoint's own advertised
 // source-image contract (#772): wan's checkpoints split T2V / I2V-optional /
@@ -362,23 +314,6 @@ function addNegative(word: string) {
   patch({ negativePrompt: cur ? `${cur}, ${word}` : word });
 }
 
-const sequenceFitOptions = SOURCE_FIT_OPTIONS.filter(
-  (option) => option.value !== "pad-repaint",
-);
-const sequenceFitMode = computed(
-  () =>
-    coerceSourceFitForMaskless(
-      props.modelValue.sourceFitPolicy ?? { mode: "crop-fill" },
-    ).mode,
-);
-function setSequenceFit(mode: SourceFitMode) {
-  patch({
-    sourceFitPolicy: sourceFitPolicyForMode(mode, {
-      supportsMask: false,
-      upscalerModel: props.modelValue.upscaleModel || "real-esrgan-x4plus:fp16",
-    }),
-  });
-}
 // LTX-2 / LTX-2.3 own the full advanced video suite (pipeline, conditioning,
 // keyframes, retake, spatial/temporal). `supportsAudio` is true for
 // exactly those families, so it doubles as the suite gate; plain
@@ -559,78 +494,9 @@ function setSequenceCameraMode(mode: string) {
 
     <div class="adv__sections">
       <template v-if="sequenceMode">
-        <AccordionSection
-          icon="image"
-          title="Opening sequence image"
-          :summary="
-            draft.openingImage?.filename ?? 'Optional original starting frame'
-          "
-          :open="true"
-          :header-interactive="false"
-          data-test="sequence-section-opening-image"
-        >
-          <ImageDropWell
-            :image="draft.openingImage?.base64 ?? null"
-            :mime-type="sequenceOpeningImageMime"
-            :filename="draft.openingImage?.filename ?? null"
-            placeholder="Drop an image or click to pick the original starting frame"
-            accept="image/png,image/jpeg"
-            gallery
-            alt="Opening sequence image"
-            test-id="sequence-opening-image"
-            @file="onSequenceOpeningImageFile"
-            @gallery="openSequenceOpeningImagePicker"
-            @clear="clearSequenceOpeningImage"
-          />
-          <p
-            v-if="sequenceOpeningImageError"
-            class="adv__error"
-            role="alert"
-            data-test="sequence-opening-image-error"
-          >
-            {{ sequenceOpeningImageError }}
-          </p>
-          <template v-if="draft.openingImage">
-            <SliderRow
-              label="Source strength"
-              :model-value="modelValue.strength"
-              :min="0"
-              :max="1"
-              :step="0.01"
-              :value-label="modelValue.strength.toFixed(2)"
-              data-test="sequence-source-strength"
-              @update:model-value="patch({ strength: $event })"
-            />
-            <div class="adv__field">
-              <label class="adv__label" for="sequence-source-fit"
-                >Fit to video frame</label
-              >
-              <select
-                id="sequence-source-fit"
-                class="adv__input"
-                data-test="sequence-source-fit"
-                :value="sequenceFitMode"
-                @change="
-                  setSequenceFit(
-                    ($event.target as HTMLSelectElement).value as SourceFitMode,
-                  )
-                "
-              >
-                <option
-                  v-for="option in sequenceFitOptions"
-                  :key="option.value"
-                  :value="option.value"
-                >
-                  {{ option.label }}
-                </option>
-              </select>
-              <p class="adv__hint">
-                Applied to the opening image before the first clip renders.
-              </p>
-            </div>
-          </template>
-        </AccordionSection>
-
+        <!-- The opening frame is source media, so it renders in the primary
+             form (`SequenceOpeningImagePanel`) beside the one-shot well — not
+             here, and never in the Advanced count. -->
         <AccordionSection
           v-if="activeSequenceClip && family === 'ltx2'"
           icon="video"

@@ -591,6 +591,32 @@ fn base_peak_memory_for_paths(
 /// activations with the generic estimate, and still needs the headroom.
 const WAN_REQUEST_AWARE_HEADROOM_BYTES: u64 = 2_000_000_000;
 
+/// Device memory a face-identity render needs beside the checkpoint it
+/// conditions.
+///
+/// Three terms, all resident on the generation device for the whole denoise:
+/// PuLID's identity adapter (a 1.14 GB safetensors release, BF16 at runtime),
+/// the EVA02-CLIP-L-14-336 vision tower (~0.6 GB BF16 once #1229 converts the
+/// 856 MB `.pt` source), and ~0.5 GB of activation headroom for the IDFormer
+/// cross-attention the adapter injects at every step. The two InsightFace ONNX
+/// models are deliberately absent: they run on the CPU in milestone 1 and are
+/// charged as host bytes by their component roles instead.
+///
+/// This is a declared budget, not a measurement. #1227 calibrates it against a
+/// real render; until then it is deliberately a single named constant so the
+/// recalibration is one edit rather than an archaeology exercise.
+pub(crate) const IDENTITY_VRAM_OVERHEAD_BYTES: u64 = 2_300_000_000;
+
+/// Whether this request will actually condition on a face.
+///
+/// Weight zero is completely inert — no assets are planned, nothing is
+/// downloaded, and no memory is charged — so the predicate is the effective
+/// weight, never the mere presence of the fields.
+pub(crate) fn request_charges_identity_overhead(req: &GenerateRequest) -> bool {
+    mold_core::identity::request_mentions_identity(req)
+        && mold_core::identity::effective_id_weight(req) > 0.0
+}
+
 fn activation_memory_for_estimate(hint: Option<ActivationHint>, qwen_quantized: bool) -> u64 {
     if qwen_quantized {
         0
@@ -1319,6 +1345,14 @@ pub(crate) fn estimate_generation_memory_for_request(
             (base_peak.saturating_add(activation), activation)
         }
     };
+    // Identity conditioning adds resident weights and activations to whichever
+    // arm produced the peak. Charged from the request rather than from a path,
+    // because the assets are not part of the checkpoint's `ModelPaths`.
+    let peak = if request_charges_identity_overhead(req) {
+        peak.saturating_add(IDENTITY_VRAM_OVERHEAD_BYTES)
+    } else {
+        peak
+    };
     let load_strategy = request_aware_load_strategy(
         select_server_load_strategy_for_budget(paths, available_memory_bytes, hint),
         paths,
@@ -1834,6 +1868,68 @@ mod fail_closed_tests {
             source.load_strategy,
             mold_inference::LoadStrategy::Sequential
         );
+    }
+
+    /// A face-identity render carries resident adapter and vision-tower
+    /// weights the checkpoint's `ModelPaths` cannot describe, so the estimate
+    /// has to charge them from the request. Weight zero applies no identity at
+    /// all and must cost exactly nothing — an inert knob that still reserved
+    /// 2.3 GB would refuse renders that fit.
+    #[test]
+    fn identity_conditioning_charges_exactly_its_named_overhead_and_weight_zero_charges_nothing() {
+        let mut request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "portrait",
+            "model": "flux-dev:q8",
+            "width": 1024,
+            "height": 1024,
+            "steps": 20,
+            "guidance": 3.5,
+            "batch_size": 1
+        }))
+        .unwrap();
+        let model_paths = paths("/models/flux-dev/flux1-dev-Q8_0.gguf");
+        let activation = Some(hint(ActivationFamily::FluxDit));
+        let estimate = |request: &GenerateRequest| {
+            estimate_generation_memory_for_request(
+                request,
+                &model_paths,
+                activation,
+                Some(24_000_000_000),
+                false,
+                false,
+                false,
+            )
+            .peak_memory_bytes
+        };
+
+        let plain = estimate(&request);
+
+        request.id_image = Some(vec![0x89, 0x50, 0x4e, 0x47]);
+        assert!(!request_charges_identity_overhead(&{
+            let mut zero = request.clone();
+            zero.id_weight = Some(0.0);
+            zero
+        }));
+        assert_eq!(
+            estimate(&{
+                let mut zero = request.clone();
+                zero.id_weight = Some(0.0);
+                zero
+            }),
+            plain,
+            "id_weight 0 applies no identity, so it must add no memory demand"
+        );
+
+        assert!(request_charges_identity_overhead(&request));
+        assert_eq!(
+            estimate(&request),
+            plain + IDENTITY_VRAM_OVERHEAD_BYTES,
+            "an identity render must be charged exactly the named overhead"
+        );
+
+        let mut weighted = request.clone();
+        weighted.id_weight = Some(0.85);
+        assert_eq!(estimate(&weighted), plain + IDENTITY_VRAM_OVERHEAD_BYTES);
     }
 
     /// Wan never reaches `OffloadMode::Block` through the request-controlled

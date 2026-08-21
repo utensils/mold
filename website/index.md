@@ -131,6 +131,9 @@ mold run flux-dev:q4 "a sunset over mountains"
 mold run "neon cityscape" | viu -
 ```
 
+For the latest rolling CLI build from `main`, install with
+`curl -fsSL https://raw.githubusercontent.com/utensils/mold/main/install.sh | MOLD_CHANNEL=nightly sh`.
+
 ## Gallery
 
 All images generated locally with mold — click any to see the model and prompt.

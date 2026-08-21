@@ -936,7 +936,31 @@ fn require_manifest_licenses_accepted_in(
     manifest: &ModelManifest,
     mold_home: Option<&std::path::Path>,
 ) -> Result<(), DownloadError> {
-    let Some(license) = crate::license_acceptance::manifest_requires_license(manifest) else {
+    for file in &manifest.files {
+        require_license_accepted(&manifest.name, &file.hf_filename, mold_home)?;
+    }
+    Ok(())
+}
+
+/// Refuse one manifest file whose license the user has not accepted.
+///
+/// This is the single gate implementation. `require_manifest_licenses_accepted`
+/// asks it once per file before a `mold pull`, and per-file dependency
+/// materialization (identity assets, which never route through `pull_model`)
+/// asks it directly for exactly the files it is about to fetch. Two gates would
+/// be two policies; a dependency path with no gate at all would acquire
+/// restricted weights on the user's behalf.
+///
+/// `mold_home` is `None` when the Mold data root cannot be resolved, which
+/// fails closed — unverifiable is not accepted.
+pub fn require_license_accepted(
+    manifest_name: &str,
+    hf_filename: &str,
+    mold_home: Option<&std::path::Path>,
+) -> Result<(), DownloadError> {
+    let Some(license) =
+        crate::license_acceptance::license_for_manifest_file(manifest_name, hf_filename)
+    else {
         return Ok(());
     };
     if mold_home.is_some_and(|home| crate::license_acceptance::is_accepted(home, license)) {
@@ -944,7 +968,7 @@ fn require_manifest_licenses_accepted_in(
     }
     Err(DownloadError::LicenseNotAccepted {
         license_id: license.id.to_string(),
-        message: crate::license_acceptance::acceptance_required_message(&manifest.name, license),
+        message: crate::license_acceptance::acceptance_required_message(manifest_name, license),
     })
 }
 

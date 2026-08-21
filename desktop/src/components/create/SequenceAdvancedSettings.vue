@@ -1,23 +1,12 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed } from "vue";
 import AccordionSection from "@ui/components/AccordionSection.vue";
 import Chip from "@ui/components/Chip.vue";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import { cameraMotionMode } from "@studio/lib/cameraMotion";
-import type { GenerateForm, PickedImage } from "../../lib/generateForm";
-import type { Ltx2CameraControlInfo, ModelEntry } from "../../lib/api/types";
-import {
-  SOURCE_FIT_OPTIONS,
-  coerceSourceFitForMaskless,
-  sourceFitPolicyForMode,
-  type SourceFitMode,
-} from "@studio/lib/sourceFit";
-import ImagePickerModal from "../generate/ImagePickerModal.vue";
+import type { GenerateForm } from "../../lib/generateForm";
+import type { Ltx2CameraControlInfo } from "../../lib/api/types";
 import { generationCapabilitiesForFamily } from "../../lib/capabilities";
-import ImageDropWell from "@studio/components/ImageDropWell.vue";
-import { imageDimensionsFromBase64 } from "@studio/lib/imageDimensions";
-import { fileToBase64 } from "../../lib/image";
-import { useToastStore } from "../../stores/toasts";
 
 const props = withDefaults(
   defineProps<{
@@ -25,24 +14,17 @@ const props = withDefaults(
     cameraControlsEnabled?: boolean;
     cameraControls?: Ltx2CameraControlInfo[];
     cameraControlsLoaded?: boolean;
-    upscalers?: ModelEntry[];
     cameraUnsupportedReason?: string | null;
   }>(),
   {
     cameraControlsEnabled: false,
     cameraControls: () => [],
     cameraControlsLoaded: false,
-    upscalers: () => [],
     cameraUnsupportedReason: null,
   },
 );
 
 const draft = useSequenceDraftStore();
-const toasts = useToastStore();
-const pickerOpen = ref(false);
-const openingImageMime = computed(() =>
-  /\.jpe?g$/i.test(draft.openingImage?.filename ?? "") ? "image/jpeg" : "image/png",
-);
 const activeClip = computed(
   () => draft.clips.find((clip) => clip.id === draft.activeClipId) ?? draft.clips[0] ?? null,
 );
@@ -57,29 +39,14 @@ const guidanceCaps = computed(() =>
     props.form.guidanceCapabilities,
   ),
 );
-// Keep old/unknown servers compatible; only an explicit per-checkpoint
-// rejection parks the opening image and its controls.
-const supportsOpeningImage = computed(() => props.form.sourceImageCapability !== "unsupported");
+// The opening image is primary-form source media (`SequenceOpeningImageWell`),
+// so it is deliberately absent from this pane and from its active count.
 const activeCount = computed(
   () =>
-    Number(supportsOpeningImage.value && Boolean(draft.openingImage)) +
     Number(
       guidanceCaps.value.supportsNegativePrompt && Boolean(activeClip.value?.negativePrompt.trim()),
-    ) +
-    Number(props.cameraControlsEnabled && Boolean(activeClip.value?.cameraControl)),
+    ) + Number(props.cameraControlsEnabled && Boolean(activeClip.value?.cameraControl)),
 );
-const fitOptions = SOURCE_FIT_OPTIONS.filter((option) => option.value !== "pad-repaint");
-const fitMode = computed(() => coerceSourceFitForMaskless(props.form.sourceFit).mode);
-const upscalerAvailable = computed(() =>
-  Boolean(props.form.upscaleModel || props.upscalers[0]?.name),
-);
-
-function setSourceFit(mode: SourceFitMode) {
-  props.form.sourceFit = sourceFitPolicyForMode(mode, {
-    supportsMask: false,
-    upscalerModel: props.form.upscaleModel || props.upscalers[0]?.name || "",
-  });
-}
 
 const NEGATIVE_QUICK_ADDS = [
   "blurry",
@@ -106,36 +73,9 @@ function setCameraMode(mode: string) {
   }
 }
 
-function onPickImage(images: PickedImage[]) {
-  const image = images[0];
-  pickerOpen.value = false;
-  if (!image) return;
-  draft.openingImage = { filename: image.filename, base64: image.base64 };
-  props.form.sourceFit = coerceSourceFitForMaskless(props.form.sourceFit);
-}
-
-async function onOpeningImageFile(file: File) {
-  try {
-    const base64 = await fileToBase64(file);
-    const dimensions = imageDimensionsFromBase64(base64);
-    if (!dimensions) {
-      toasts.push("Only PNG or JPEG images can be used here.", "error");
-      return;
-    }
-    draft.openingImage = {
-      filename: file.name,
-      base64,
-      width: dimensions.width,
-      height: dimensions.height,
-    };
-    props.form.sourceFit = coerceSourceFitForMaskless(props.form.sourceFit);
-  } catch {
-    toasts.push("Couldn't read the image.", "error");
-  }
-}
-
 // Reset clears sequence-advanced knobs only; the opening image and its
-// strength/fit are staged source media and survive (web parity).
+// strength/fit are staged source media owned by the primary form, so they
+// survive this Reset (the inspector header's ↺ Reset is what clears them).
 function reset() {
   for (const clip of draft.clips) {
     clip.negativePrompt = "";
@@ -161,68 +101,6 @@ function reset() {
     </div>
 
     <div class="ms-adv__list">
-      <AccordionSection
-        v-if="supportsOpeningImage"
-        icon="image"
-        title="Opening sequence image"
-        :summary="draft.openingImage?.filename ?? 'Optional original starting frame'"
-        :open="true"
-        :header-interactive="false"
-        data-test="sequence-section-opening-image"
-      >
-        <ImageDropWell
-          :image="draft.openingImage?.base64 ?? null"
-          :mime-type="openingImageMime"
-          :filename="draft.openingImage?.filename ?? null"
-          placeholder="Drop an image or click to pick the original starting frame"
-          accept="image/png,image/jpeg"
-          gallery
-          alt="Opening sequence image"
-          test-id="sequence-opening-image"
-          @file="onOpeningImageFile"
-          @gallery="pickerOpen = true"
-          @clear="draft.openingImage = null"
-        />
-        <div v-if="draft.openingImage" class="ms-source-controls">
-          <label class="ms-range">
-            <span>
-              Source strength
-              <output class="data-mono">{{ form.strength.toFixed(2) }}</output>
-            </span>
-            <input
-              v-model.number="form.strength"
-              type="range"
-              min="0"
-              max="1"
-              step="0.01"
-              data-test="sequence-source-strength"
-            />
-          </label>
-          <label class="ms-field">
-            <span>Fit to video frame</span>
-            <select
-              class="ms-input"
-              :value="fitMode"
-              data-test="sequence-source-fit"
-              @change="setSourceFit(($event.target as HTMLSelectElement).value as SourceFitMode)"
-            >
-              <option
-                v-for="option in fitOptions"
-                :key="option.value"
-                :value="option.value"
-                :disabled="option.value === 'upscale-then-fit' && !upscalerAvailable"
-              >
-                {{ option.label }}
-              </option>
-            </select>
-          </label>
-          <p v-if="!upscalerAvailable" class="ms-hint">
-            Install an upscaler to enable Upscale + crop.
-          </p>
-          <p class="ms-hint">Applied to the opening image before clip 1 renders.</p>
-        </div>
-      </AccordionSection>
-
       <AccordionSection
         v-if="activeClip"
         icon="negative"
@@ -297,15 +175,6 @@ function reset() {
         </p>
       </AccordionSection>
     </div>
-
-    <ImagePickerModal
-      v-if="supportsOpeningImage"
-      :open="pickerOpen"
-      title="Opening sequence image"
-      :multiple="false"
-      @pick="onPickImage"
-      @close="pickerOpen = false"
-    />
   </section>
 </template>
 
@@ -338,29 +207,6 @@ function reset() {
 .ms-adv__reset {
   padding: 5px 9px;
   font-size: 11px;
-}
-.ms-source-controls {
-  display: grid;
-  gap: 10px;
-  margin-top: 12px;
-  padding-top: 12px;
-  border-top: 1px solid var(--ce);
-}
-.ms-range,
-.ms-field {
-  display: grid;
-  gap: 6px;
-  color: var(--ink-2);
-  font-size: 11px;
-}
-.ms-range > span {
-  display: flex;
-  justify-content: space-between;
-  gap: 10px;
-}
-.ms-range input {
-  width: 100%;
-  accent-color: var(--safelight);
 }
 .ms-adv__list {
   display: flex;

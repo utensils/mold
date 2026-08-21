@@ -40,6 +40,33 @@ EOF
 
 chmod +x "$stub_bin/uname" "$stub_bin/nvidia-smi" "$stub_bin/curl"
 
+nightly_output="$(
+  PATH="$stub_bin:$PATH" \
+  TEST_INVENTORY="0, GPU-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa, 8.9" \
+  TEST_MIG_LISTING="" \
+  MOLD_CHANNEL=nightly \
+  MOLD_INSTALL_DIR="$test_root/install" \
+  sh "$repo_root/install.sh" 2>&1 || true
+)"
+grep -Fq "/releases/download/latest/mold-x86_64-unknown-linux-gnu-cuda-sm89.tar.gz" \
+  <<<"$nightly_output" \
+  || {
+    echo "installer nightly channel did not select the rolling latest release" >&2
+    echo "$nightly_output" >&2
+    exit 1
+  }
+
+if PATH="$stub_bin:$PATH" \
+  TEST_INVENTORY="0, GPU-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa, 8.9" \
+  TEST_MIG_LISTING="" \
+  MOLD_CHANNEL=nightly \
+  MOLD_VERSION=v0.23.3 \
+  MOLD_INSTALL_DIR="$test_root/install" \
+  sh "$repo_root/install.sh" >/dev/null 2>&1; then
+  echo "installer accepted both MOLD_CHANNEL=nightly and MOLD_VERSION" >&2
+  exit 1
+fi
+
 assert_inventory() {
   local inventory="$1"
   local expected_arch="$2"

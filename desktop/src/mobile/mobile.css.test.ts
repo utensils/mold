@@ -468,6 +468,19 @@ describe("mobile Library organization", () => {
     expect(chips?.[1]).toMatch(/overflow-x:\s*auto\s*;/);
   });
 
+  it("keeps Select-mode scrolling native and selection labels inside their buttons", () => {
+    const selectingTile = css.match(/\.gallery-grid\.is-selecting \.gallery-item\s*\{([^}]*)\}/s);
+    const actions = css.match(/\.mobile-gallery-actions\s*\{([^}]*)\}/s);
+    const actionButton = css.match(/\.mobile-gallery-actions button\s*\{([^}]*)\}/s);
+
+    expect(selectingTile?.[1]).toMatch(/touch-action:\s*pan-y\s*;/);
+    expect(actions?.[1]).toMatch(/flex-shrink:\s*0\s*;/);
+    expect(actions?.[1]).toMatch(/grid-template-columns:\s*repeat\(6,\s*minmax\(0,\s*1fr\)\)/);
+    expect(actionButton?.[1]).toMatch(/box-sizing:\s*border-box\s*;/);
+    expect(actionButton?.[1]).toMatch(/overflow-wrap:\s*anywhere\s*;/);
+    expect(actionButton?.[1]).toMatch(/white-space:\s*normal\s*;/);
+  });
+
   it("gives the Library sheet the pinned fixed-overlay and body invariants", () => {
     const sheet = css.match(/\.mobile-library-sheet\s*\{([^}]*)\}/s);
     const open = css.match(/\.mobile-library-sheet\.is-open\s*\{([^}]*)\}/s);

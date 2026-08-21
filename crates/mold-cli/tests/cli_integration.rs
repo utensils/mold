@@ -12,6 +12,31 @@ mod common;
 use common::TestEnv;
 use predicates::prelude::*;
 
+#[tokio::test(flavor = "multi_thread")]
+async fn loopback_admin_commands_do_not_hide_live_server_http_errors() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    for status in [401, 500] {
+        let env = TestEnv::new();
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/status"))
+            .respond_with(ResponseTemplate::new(status))
+            .mount(&server)
+            .await;
+
+        for command in ["ps", "info"] {
+            env.cmd()
+                .env("MOLD_HOST", server.uri())
+                .arg(command)
+                .assert()
+                .failure()
+                .stderr(predicate::str::contains("server status"));
+        }
+    }
+}
+
 // ── mold version ──────────────────────────────────────────────────────────
 
 #[test]
@@ -346,6 +371,39 @@ fn info_known_model_shows_details() {
         .stdout(predicate::str::contains("flux2-klein:q4"));
 }
 
+// ── standalone server administration ────────────────────────────────────
+
+#[test]
+fn gpu_list_json_falls_back_to_local_inventory_when_loopback_server_is_stopped() {
+    let env = TestEnv::new();
+    let output = env
+        .cmd()
+        .env("MOLD_HOST", "http://127.0.0.1:9")
+        .args(["gpu", "list", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let body: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(body["devices"].is_array());
+    assert_eq!(body["plan_version"], 0);
+    assert!(String::from_utf8_lossy(&output.stderr).contains("local runtime inventory"));
+}
+
+#[test]
+fn unload_is_idempotent_when_loopback_server_is_stopped() {
+    let env = TestEnv::new();
+    env.cmd()
+        .env("MOLD_HOST", "http://127.0.0.1:9")
+        .arg("unload")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("no server-loaded model to unload"));
+}
+
 // ── mold rm ───────────────────────────────────────────────────────────────
 
 #[test]
@@ -663,8 +721,19 @@ fn update_help_text() {
         .stdout(
             predicate::str::contains("--check")
                 .and(predicate::str::contains("--force"))
+                .and(predicate::str::contains("--nightly"))
                 .and(predicate::str::contains("--version")),
         );
+}
+
+#[test]
+fn update_nightly_conflicts_with_exact_version() {
+    let env = TestEnv::new();
+    env.cmd()
+        .args(["update", "--nightly", "--version", "v0.23.3"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot be used with"));
 }
 
 #[test]

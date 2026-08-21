@@ -25,24 +25,23 @@ beforeEach(() => {
 });
 
 describe("SequenceAdvancedSettings camera motion", () => {
-  it("parks unsupported opening-image controls and restores them on switch back", async () => {
+  it("leaves the opening image to the primary form and out of its active count", async () => {
     const draft = useSequenceDraftStore();
     draft.openingImage = { filename: "opening.png", base64: "PARKED" };
     const form = reactive(newGenerateForm());
-    form.sourceImageCapability = "unsupported";
     const wrapper = mount(SequenceAdvancedSettings, { props: { form } });
 
     expect(wrapper.find("[data-test='sequence-section-opening-image']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='sequence-opening-image-well']").exists()).toBe(false);
     expect(wrapper.find("[data-test='sequence-source-strength']").exists()).toBe(false);
     expect(wrapper.find("[data-test='sequence-source-fit']").exists()).toBe(false);
     expect(wrapper.findComponent({ name: "ImagePickerModal" }).exists()).toBe(false);
+    // An attached opening image alone is not a sequence-Advanced control.
     expect(wrapper.get(".ms-adv__summary").text()).toBe("Sequence controls");
     expect(draft.openingImage?.base64).toBe("PARKED");
 
-    form.sourceImageCapability = "optional";
+    draft.clips[0]!.negativePrompt = "blurry";
     await flushPromises();
-    expect(wrapper.find("[data-test='sequence-section-opening-image']").exists()).toBe(true);
-    expect(wrapper.findComponent({ name: "ImagePickerModal" }).exists()).toBe(true);
     expect(wrapper.get(".ms-adv__summary").text()).toBe("1 active");
     expect(draft.openingImage?.base64).toBe("PARKED");
   });
@@ -78,35 +77,6 @@ describe("SequenceAdvancedSettings camera motion", () => {
     expect(draft.clips[0]?.cameraControl).toBe("dolly-in");
   });
 
-  it("disables upscale fit when no upscaler is available", () => {
-    const draft = useSequenceDraftStore();
-    draft.openingImage = { filename: "opening.png", base64: "QUJD" };
-    const wrapper = mount(SequenceAdvancedSettings, {
-      props: { form: newGenerateForm() },
-    });
-    const upscale = wrapper
-      .get("[data-test='sequence-source-fit']")
-      .findAll("option")
-      .find((option) => option.attributes("value") === "upscale-then-fit");
-    expect(upscale?.attributes("disabled")).toBeDefined();
-    expect(wrapper.text()).toContain("Install an upscaler");
-  });
-
-  it("renders the shared one-shot thumbnail for the sequence opening image", () => {
-    const draft = useSequenceDraftStore();
-    draft.openingImage = { filename: "opening.jpg", base64: "QUJD" };
-    const wrapper = mount(SequenceAdvancedSettings, {
-      props: { form: newGenerateForm() },
-    });
-
-    const image = wrapper.get(
-      "[data-test='sequence-section-opening-image'] .image-well__preview img",
-    );
-    expect(image.attributes("src")).toBe("data:image/jpeg;base64,QUJD");
-    expect(image.attributes("alt")).toBe("Opening sequence image");
-    expect(wrapper.find("[data-test='sequence-opening-image-remove']").exists()).toBe(true);
-  });
-
   it("resets camera motion across the sequence", async () => {
     const draft = useSequenceDraftStore();
     draft.enableAudio = true;
@@ -140,29 +110,5 @@ describe("SequenceAdvancedSettings camera motion", () => {
       props: { form: newGenerateForm(), cameraControls, cameraControlsEnabled: false },
     });
     expect(wrapper.find("[data-test='sequence-section-camera']").exists()).toBe(false);
-  });
-
-  it("edits opening-image strength and fit with the same live form as one shot", async () => {
-    const draft = useSequenceDraftStore();
-    draft.openingImage = { filename: "opening.png", base64: "QUJD" };
-    const form = newGenerateForm();
-    const wrapper = mount(SequenceAdvancedSettings, {
-      props: {
-        form,
-        upscalers: [{ name: "real-esrgan-x4plus:fp16" } as never],
-      },
-    });
-
-    expect(
-      (wrapper.get("[data-test='sequence-source-fit']").element as HTMLSelectElement).value,
-    ).toBe("crop-fill");
-    await wrapper.get("[data-test='sequence-source-strength']").setValue("0.55");
-    expect(form.strength).toBe(0.55);
-    await wrapper.get("[data-test='sequence-source-fit']").setValue("upscale-then-fit");
-    expect(form.sourceFit).toEqual({
-      mode: "upscale-then-fit",
-      upscalerModel: "real-esrgan-x4plus:fp16",
-      fit: { mode: "crop-fill", alignX: "center", alignY: "center" },
-    });
   });
 });

@@ -134,6 +134,11 @@ of the source's aspect ratio — the engine fits the frame internally. The
 aspect-derived short-edge canvas applies only to the hidden official BF16
 reference.
 
+Every reviewed compact and Turbo tag advertises exactly this envelope, so
+Create on web, desktop, and iPhone offers the single `1344x768` canvas with the
+tier's step count and 124 frames already fixed, and an off-envelope request is
+refused at submission instead of after the model loads.
+
 Mold rejects rather than silently resizing, rerouting, changing steps, dropping
 the source image, or falling back to another backend. A downloaded checkpoint
 can remain stored on an unsupported host; Create and request routing become

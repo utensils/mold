@@ -11536,10 +11536,14 @@ mod tests {
             .await
             .unwrap();
         let limits: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(limits["frames_per_clip_cap"], 481);
+        // The advertised cap is the model's routing clip size — what ONE
+        // generation renders — not the family's 481-frame single-request
+        // ceiling at 24 fps, which stays derivable from the duration budget.
+        assert_eq!(limits["frames_per_clip_cap"], 97);
         assert_eq!(limits["fps"], 24);
         assert_eq!(limits["frames_per_clip_runtime_seconds"], 20);
         assert_eq!(limits["max_stages"], 16);
+        assert_eq!(limits["max_total_frames"], 97 * 16);
         assert!(limits["transition_modes"]
             .as_array()
             .unwrap()
@@ -11723,7 +11727,9 @@ mod tests {
             .unwrap();
         let limits: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(limits["model"], "cv:3143864");
-        assert_eq!(limits["frames_per_clip_cap"], 481);
+        // An opaque catalog LTX-2 checkpoint takes the family's routing clip
+        // size, not the 481-frame duration budget at 24 fps.
+        assert_eq!(limits["frames_per_clip_cap"], 97);
         assert_eq!(
             limits["supports_audio"], false,
             "chain limits must preserve the checkpoint-specific audio capability",
