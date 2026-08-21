@@ -866,6 +866,98 @@ pub(crate) mod tests {
         );
     }
 
+    /// A fixed ramp, so a round trip through a container is checkable
+    /// element-by-element rather than only by shape.
+    fn embedding_ramp(device: &Device) -> (Vec<f32>, Tensor) {
+        let values: Vec<f32> = (0..ID_TOKENS * ID_TOKEN_DIM)
+            .map(|i| (i % 251) as f32 / 251.0 - 0.5)
+            .collect();
+        let tensor = Tensor::from_vec(values.clone(), (ID_TOKENS, ID_TOKEN_DIM), device).unwrap();
+        (values, tensor)
+    }
+
+    #[test]
+    fn an_embedding_round_trips_through_safetensors() {
+        let device = Device::Cpu;
+        let (values, tensor) = embedding_ramp(&device);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("identity.safetensors");
+        candle_core::safetensors::save(
+            &std::collections::HashMap::from([("pulid_id".to_string(), tensor)]),
+            &path,
+        )
+        .unwrap();
+
+        let loaded = IdentityEmbedding::from_safetensors(&path, None).unwrap();
+        assert_eq!(loaded.tensor().dims(), [1, ID_TOKENS, ID_TOKEN_DIM]);
+        assert_eq!(
+            loaded
+                .tensor()
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap(),
+            values
+        );
+
+        let missing = IdentityEmbedding::from_safetensors(&path, Some("not_there"))
+            .expect_err("a wrong tensor name is an error, not an empty identity");
+        assert!(missing.to_string().contains("not_there"), "{missing}");
+    }
+
+    /// stable-diffusion.cpp's `.pulidembd` container: one `pulid_id` tensor in
+    /// a gguf, written by `scripts/pulid_extract_id.py` through
+    /// `gguf.GGUFWriter(arch="pulid")`. Reading it is what lets the identical
+    /// identity be pushed through both implementations for a seed-matched
+    /// comparison, so both axis orders a writer might produce are covered.
+    #[test]
+    fn an_embedding_round_trips_through_the_sdcpp_gguf_container() {
+        let device = Device::Cpu;
+        let (values, tensor) = embedding_ramp(&device);
+        let dir = tempfile::tempdir().unwrap();
+
+        for (label, stored) in [
+            ("token-major", tensor.clone()),
+            ("ggml-order", tensor.t().unwrap().contiguous().unwrap()),
+        ] {
+            let path = dir.path().join(format!("{label}.pulidembd"));
+            let quantized = mold_candle::quantized::quantize_onto(
+                &stored,
+                candle_core::quantized::GgmlDType::F32,
+                &device,
+            )
+            .unwrap();
+            let mut file = std::fs::File::create(&path).unwrap();
+            candle_core::quantized::gguf_file::write(
+                &mut file,
+                &[(
+                    "general.architecture",
+                    &candle_core::quantized::gguf_file::Value::String("pulid".to_string()),
+                )],
+                &[("pulid_id", &quantized)],
+            )
+            .unwrap();
+            drop(file);
+
+            let loaded = IdentityEmbedding::from_gguf(&path).unwrap();
+            assert_eq!(
+                loaded.tensor().dims(),
+                [1, ID_TOKENS, ID_TOKEN_DIM],
+                "{label}"
+            );
+            assert_eq!(
+                loaded
+                    .tensor()
+                    .flatten_all()
+                    .unwrap()
+                    .to_vec1::<f32>()
+                    .unwrap(),
+                values,
+                "{label}: a transposed store must come back token-major"
+            );
+        }
+    }
+
     #[test]
     fn a_var_map_backed_adapter_reports_its_geometry() {
         let device = Device::Cpu;
