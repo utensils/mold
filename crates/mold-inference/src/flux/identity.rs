@@ -6,13 +6,21 @@
 //! [`ResolvedIdentity`] or `None`.
 //!
 //! Residency follows the same drop-and-reload discipline the text encoders
-//! use, for the same reason: the adapter is ~1.14 GB of fp16 that is useless
-//! to a render nobody asked to condition. It is loaded on the first
-//! identity-conditioned request, kept across subsequent ones that agree on
-//! device, dtype, and transformer shape, and dropped the moment a request does
-//! not condition on a face. Unlike the transformer's blocks it is never
-//! streamed — see `flux::offload::OffloadedFluxTransformer::forward_with_hook`
-//! for why.
+//! use, for the same reason: the adapter is ~1.7 GB on the device at FLUX.1's
+//! geometry in f32 (~840 MB in bf16), and it is useless to a render nobody
+//! asked to condition. It is loaded on the first identity-conditioned request,
+//! kept across subsequent ones that agree on device, dtype, and transformer
+//! shape, and released whenever the engine stops holding a transformer — an
+//! unconditioned request, a render the transformer did not survive, or an
+//! `unload()`. That last one is not optional: `ModelCache` parks by calling
+//! `unload()`, zeroing the entry's `vram_bytes` while keeping the engine
+//! cached, so an adapter that survived it is device memory nothing accounts
+//! for and the next model switch sizes its preflight against a number that is
+//! wrong by the whole adapter. [`EngineIdentityState::resident_bytes`] is the
+//! accounting-visible form of that guarantee.
+//!
+//! Unlike the transformer's blocks it is never streamed — see
+//! `flux::offload::OffloadedFluxTransformer::forward_with_hook` for why.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -119,22 +127,52 @@ impl EngineIdentityState {
         self.assets.as_ref().map(|assets| &assets.adapter)
     }
 
-    /// Release the adapter's memory.
+    /// Release the adapter's device memory.
+    ///
+    /// Every path that stops classifying the engine as GPU-resident must call
+    /// this. `Drop` needs no help — the `Arc` dies with the engine — but
+    /// parking does: `ModelCache` calls `unload()`, sets the entry's
+    /// `vram_bytes` to 0, and keeps the engine alive in the cache, so an
+    /// adapter that survived would be device memory nothing accounts for.
     pub(crate) fn drop_adapter(&mut self) {
         self.resident = None;
     }
 
-    /// Whether an adapter is currently resident.
+    /// Device bytes the resident adapter occupies, or 0 when none is.
+    ///
+    /// This is the accounting-visible form of [`Self::drop_adapter`]: a caller
+    /// that wants to know whether the engine is really holding nothing asks
+    /// this rather than trusting that a drop happened.
+    pub(crate) fn resident_bytes(&self) -> u64 {
+        self.resident
+            .as_ref()
+            .map_or(0, |resident| resident.adapter.resident_bytes())
+    }
+
+    /// Install a resident adapter without loading 1.7 GB of real weights.
     #[cfg(test)]
-    pub(crate) fn is_resident(&self) -> bool {
-        self.resident.is_some()
+    pub(crate) fn install_resident_for_test(
+        &mut self,
+        adapter: Arc<PulidAdapter>,
+        device: Device,
+        dtype: DType,
+        depth: usize,
+        depth_single_blocks: usize,
+    ) {
+        self.resident = Some(ResidentAdapter {
+            adapter,
+            device,
+            dtype,
+            depth,
+            depth_single_blocks,
+        });
     }
 
     /// Resolve identity conditioning for one request.
     ///
     /// Returns `None` for every request that does not condition on a face, and
     /// drops the adapter on the way out so an unconditioned render does not
-    /// keep 1.14 GB alive. A conditioned request loads the adapter if the
+    /// keep ~1.7 GB alive. A conditioned request loads the adapter if the
     /// resident one does not match this device, dtype, and transformer shape.
     pub(crate) fn resolve(
         &mut self,
@@ -199,7 +237,7 @@ impl EngineIdentityState {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use candle_core::Tensor;
     use mold_core::identity::{ID_START_STEP_DEFAULT, ID_WEIGHT_DEFAULT};
@@ -258,34 +296,56 @@ mod tests {
         assert_eq!(asked.start_step, 4);
     }
 
-    #[test]
-    fn an_unconditioned_request_drops_a_resident_adapter() {
+    /// Stands in for a resident adapter without loading 1.7 GB of weights.
+    pub(crate) fn state_holding_an_adapter() -> EngineIdentityState {
         let mut state = EngineIdentityState::new(None);
-        // Stand in for a resident adapter without loading 1.14 GB of weights.
-        state.resident = Some(ResidentAdapter {
-            adapter: Arc::new(crate::flux::pulid::tests::synthetic_adapter(
+        state.install_resident_for_test(
+            Arc::new(crate::flux::pulid::tests::synthetic_adapter(
                 crate::flux::pulid::tests::tiny_config(),
                 4,
                 8,
                 DType::F32,
                 &Device::Cpu,
             )),
-            device: Device::Cpu,
-            dtype: DType::F32,
-            depth: 4,
-            depth_single_blocks: 8,
-        });
-        assert!(state.is_resident());
+            Device::Cpu,
+            DType::F32,
+            4,
+            8,
+        );
+        state
+    }
+
+    #[test]
+    fn an_unconditioned_request_drops_a_resident_adapter() {
+        let mut state = state_holding_an_adapter();
+        assert!(state.resident_bytes() > 0);
 
         let cfg = flux::model::Config::dev();
         let resolved = state
             .resolve(&request(), &Device::Cpu, DType::F32, &cfg)
             .expect("an unconditioned request never fails");
         assert!(resolved.is_none());
-        assert!(
-            !state.is_resident(),
+        assert_eq!(
+            state.resident_bytes(),
+            0,
             "the adapter must not survive a request that does not condition on a face"
         );
+    }
+
+    /// The parking path: `ModelCache` calls `unload()`, zeroes the entry's
+    /// `vram_bytes`, and keeps the engine cached. An adapter that survived
+    /// that would be device memory nothing accounts for.
+    #[test]
+    fn dropping_the_adapter_zeroes_the_accounted_bytes() {
+        let mut state = state_holding_an_adapter();
+        let before = state.resident_bytes();
+        assert!(before > 0, "the fixture must actually hold something");
+        state.drop_adapter();
+        assert_eq!(state.resident_bytes(), 0);
+        // Idempotent: a second release on an already-empty state is a no-op,
+        // because several paths may classify the engine as gone.
+        state.drop_adapter();
+        assert_eq!(state.resident_bytes(), 0);
     }
 
     #[test]

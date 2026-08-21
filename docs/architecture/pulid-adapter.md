@@ -104,12 +104,30 @@ step: streaming it would pay twenty host→device copies per step to reclaim
 memory the block schedule has already accounted for.
 
 `flux/identity.rs` owns the lifecycle, following the same drop-and-reload
-discipline as the text encoders:
+discipline as the text encoders. The rule is that **the adapter is resident
+only while the transformer is**:
 
 - Loaded lazily on the first request that conditions on a face.
 - Kept across subsequent conditioned requests that agree on device, dtype, and
   transformer shape.
 - Dropped the moment a request does not condition on a face.
+- Dropped at the end of any render the transformer did not survive — the
+  sequential path always, the eager path unless `MOLD_FLUX_KEEP_TRANSFORMER`
+  or the quantized stay-hot path kept it. `FluxEngine::generate` applies this
+  once, at the end, so neither in-render drop site carries its own copy of the
+  rule and neither can forget it.
+- **Released by `unload()`.** This one is not an optimisation. `ModelCache`
+  parks an engine by calling `unload()`, setting the entry's `vram_bytes` to
+  0, and keeping the engine alive in the cache. An adapter that survived that
+  would be ~1.7 GB of device memory nothing accounts for, and the next model
+  switch would size its preflight against a number wrong by the whole adapter —
+  failing admission or OOMing. `Drop` needs no help: the `Arc` dies with the
+  engine.
+
+`FluxEngine::identity_resident_bytes()` is the accounting-visible form of all
+of the above. The `InferenceEngine` trait has no resident-bytes method to fold
+it into, so it is exposed on the engine directly and pinned by hermetic tests
+that assert an `unload()` leaves it at zero.
 
 The dtype is the transformer's *working* dtype, not its weight dtype: the
 quantized paths run their state tensors in f32, so the adapter is loaded in f32

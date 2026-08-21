@@ -1094,6 +1094,37 @@ impl FluxEngine {
         self.identity.adapter_path()
     }
 
+    /// Device bytes the PuLID adapter is currently holding, or 0.
+    ///
+    /// The `InferenceEngine` trait has no resident-bytes method to fold this
+    /// into, so it is exposed here: it is the only way a caller can confirm
+    /// that a park or an unload actually released the adapter rather than
+    /// leaving device memory nothing accounts for.
+    pub fn identity_resident_bytes(&self) -> u64 {
+        self.identity.resident_bytes()
+    }
+
+    /// The adapter's residency follows the transformer's.
+    ///
+    /// Called once at the end of every `generate`, so the two drop sites
+    /// inside the render — the sequential path's unconditional
+    /// `drop(flux_model)` and the eager path's VAE-decode drop, which
+    /// `MOLD_FLUX_KEEP_TRANSFORMER` and the quantized stay-hot path can skip —
+    /// do not each need their own copy of this rule, and neither can forget
+    /// it. Whenever the transformer did not survive the render, the ~1.7 GB
+    /// adapter must not either: nothing is going to use it before the next
+    /// conditioned request, which reloads it anyway.
+    fn release_identity_adapter_unless_transformer_resident(&mut self) {
+        let transformer_resident = self
+            .base
+            .loaded
+            .as_ref()
+            .is_some_and(|loaded| loaded.flux_model.is_some());
+        if !transformer_resident {
+            self.identity.drop_adapter();
+        }
+    }
+
     /// Return the LoRA delta cache handle, or `None` when disabled via
     /// `MOLD_FLUX_DELTA_CACHE=0`. The cache stores CPU-resident F32 delta
     /// tensors for every LoRA-touched layer; on a typical FLUX LoRA that's
@@ -2708,6 +2739,7 @@ impl InferenceEngine for FluxEngine {
         self.pending_placement = req.placement.clone();
         let result = self.generate_inner(req);
         self.pending_placement = None;
+        self.release_identity_adapter_unless_transformer_resident();
         result
     }
 
@@ -2740,6 +2772,12 @@ impl InferenceEngine for FluxEngine {
         // transformer. After unload there is no transformer, so clear the
         // marker — the next reload re-applies whatever is in the request.
         self.active_lora = Vec::new();
+        // The PuLID adapter is device-resident and ~1.7 GB. `ModelCache`
+        // parks by calling this, zeroing the entry's `vram_bytes` and keeping
+        // the engine alive in the cache — so an adapter that survived here
+        // would be device memory nothing accounts for, and a later model
+        // switch would fail its preflight or OOM against it.
+        self.identity.drop_adapter();
         // lora_delta_cache lives on CPU and survives park so the next reload
         // can skip the B @ A · scale recompute. It dies with the engine on Drop.
     }
@@ -3071,7 +3109,7 @@ mod tests {
         flux_transformer_var_builder, park_cond_to_cpu, should_use_offload_bypass_registry,
         LoraBypassMode,
     };
-    use crate::LoadStrategy;
+    use crate::{InferenceEngine, LoadStrategy};
     use candle_core::{DType, Device, Result, Tensor};
     use candle_nn::VarBuilder;
     use mold_core::{GenerateRequest, LoraWeight, ModelPaths, OutputFormat};
@@ -3191,6 +3229,96 @@ mod tests {
             text_tokenizer: None,
             decoder: None,
         }
+    }
+
+    /// An engine holding a resident PuLID adapter, with no transformer —
+    /// exactly the state a parked engine is in.
+    fn engine_holding_an_identity_adapter() -> super::FluxEngine {
+        let mut engine = super::FluxEngine::new(
+            "flux-dev:q8".to_string(),
+            dummy_paths("flux1-dev-Q8_0.gguf"),
+            Some(false),
+            None,
+            LoadStrategy::Eager,
+            0,
+            false,
+            None,
+            None,
+        );
+        engine.identity = super::super::identity::tests::state_holding_an_adapter();
+        assert!(
+            engine.identity_resident_bytes() > 0,
+            "the fixture must actually hold something"
+        );
+        engine
+    }
+
+    /// `ModelCache` parks an engine by calling `unload()`, zeroing the entry's
+    /// `vram_bytes`, and keeping the engine in the cache. An adapter that
+    /// survived that would be device memory nothing accounts for, and the next
+    /// model switch would size its preflight against a number that is wrong by
+    /// the whole adapter.
+    #[test]
+    fn unloading_releases_the_identity_adapter() {
+        let mut engine = engine_holding_an_identity_adapter();
+        InferenceEngine::unload(&mut engine);
+        assert_eq!(
+            engine.identity_resident_bytes(),
+            0,
+            "parking must leave no adapter behind"
+        );
+    }
+
+    /// The render-time rule, checked without running a render: the adapter's
+    /// residency follows the transformer's, so a render the transformer did
+    /// not survive — the sequential path always, the eager path unless it kept
+    /// the transformer hot — releases the adapter too.
+    #[test]
+    fn a_render_the_transformer_does_not_survive_releases_the_adapter() {
+        let mut engine = engine_holding_an_identity_adapter();
+        assert!(
+            engine.base.loaded.is_none(),
+            "the sequential path never populates `loaded`, which is the case under test"
+        );
+        engine.release_identity_adapter_unless_transformer_resident();
+        assert_eq!(engine.identity_resident_bytes(), 0);
+    }
+
+    #[test]
+    fn adapter_bytes_are_the_stack_geometry_times_the_dtype() {
+        use crate::flux::pulid::{tests::tiny_config, PulidAdapterConfig};
+        // FLUX.1: 20 modules of 3072-wide image tokens against 2048-wide
+        // identity tokens, 16 heads x 128 => inner 2048.
+        let full = PulidAdapterConfig::default();
+        let inner = full.dim_head * full.heads;
+        let per_module = 2 * full.kv_dim
+            + 2 * full.dim
+            + inner * full.dim
+            + 2 * inner * full.kv_dim
+            + full.dim * inner;
+        let expected_f32 = (per_module * 20) as u64 * 4;
+        assert_eq!(
+            expected_f32, 1_678_540_800,
+            "the FLUX.1 stack is ~1.68 GB in f32 — the number the residency rule exists for"
+        );
+
+        // The tiny geometry the hermetic fixtures use, through the real accessor.
+        let adapter = crate::flux::pulid::tests::synthetic_adapter(
+            tiny_config(),
+            4,
+            8,
+            DType::F32,
+            &Device::Cpu,
+        );
+        let tiny = tiny_config();
+        let tiny_inner = tiny.dim_head * tiny.heads;
+        let tiny_per_module = 2 * tiny.kv_dim
+            + 2 * tiny.dim
+            + tiny_inner * tiny.dim
+            + 2 * tiny_inner * tiny.kv_dim
+            + tiny.dim * tiny_inner;
+        assert_eq!(adapter.len(), 4);
+        assert_eq!(adapter.resident_bytes(), (tiny_per_module * 4) as u64 * 4);
     }
 
     #[test]

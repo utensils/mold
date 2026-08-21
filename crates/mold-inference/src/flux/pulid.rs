@@ -318,6 +318,28 @@ impl PulidAdapter {
         self.ca.get(index)
     }
 
+    /// Bytes this stack occupies on its device.
+    ///
+    /// Not a nicety: the adapter is device-resident and nothing else in the
+    /// engine accounts for it, so whatever classifies the engine's residency
+    /// has to be able to see it. ~1.7 GB at FLUX.1's geometry in f32, ~840 MB
+    /// in bf16 — enough that a parked engine still holding it can push a later
+    /// model switch past its preflight.
+    ///
+    /// Computed from the geometry rather than by walking the tensors because
+    /// candle's `LayerNorm` exposes no accessor; a test pins the arithmetic.
+    pub fn resident_bytes(&self) -> u64 {
+        let config = self.config;
+        let inner = config.inner_dim();
+        // norm1 + norm2 are affine, so weight and bias each.
+        let elements_per_module = 2 * config.kv_dim
+            + 2 * config.dim
+            + inner * config.dim
+            + 2 * inner * config.kv_dim
+            + config.dim * inner;
+        (elements_per_module * self.ca.len()) as u64 * self.dtype.size_in_bytes() as u64
+    }
+
     /// `img + id_weight * ca[index](id_embeds, img)`.
     fn inject(
         &self,
