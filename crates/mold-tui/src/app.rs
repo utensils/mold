@@ -6079,7 +6079,7 @@ impl App {
         // and discloses the tag before Generate.
         rows.push(SettingsRow::Field {
             key: SettingsKey::GenerateAutoTagTitle,
-            label: "Tag with title",
+            label: "Tag by title",
             field_type: SettingsFieldType::Bool,
         });
 
@@ -9913,6 +9913,25 @@ mod tests {
             .unwrap_or_else(|| panic!("SettingsKey {key:?} not found in rows"))
     }
 
+    /// `{:<LABEL_WIDTH}` pads the label column, so a label that is exactly
+    /// `LABEL_WIDTH` wide renders flush against its value ("Tag by titleon").
+    /// Every label must leave at least one space.
+    #[tokio::test]
+    async fn every_settings_label_fits_its_column_with_a_gap() {
+        let app = make_settings_test_app();
+        for row in app.build_settings_rows() {
+            if let SettingsRow::Field { label, .. } = row {
+                assert!(
+                    label.chars().count() < crate::ui::settings::LABEL_WIDTH,
+                    "settings label {label:?} is {} chars; the column is {} wide and needs \
+                     room for a separating space",
+                    label.chars().count(),
+                    crate::ui::settings::LABEL_WIDTH
+                );
+            }
+        }
+    }
+
     #[test]
     fn settings_state_default_values() {
         let state = SettingsState::default();
@@ -13348,7 +13367,7 @@ mod tests {
             .error_message
             .as_deref()
             .expect("the refusal is reported");
-        assert!(error.contains("Tag with title"), "{error}");
+        assert!(error.contains("Tag by title"), "{error}");
         assert!(!error.contains("--no-auto-tag"), "{error}");
     }
 
@@ -13366,7 +13385,7 @@ mod tests {
                 SettingsRow::Field {
                     label, field_type, ..
                 } => {
-                    assert_eq!(*label, "Tag with title");
+                    assert_eq!(*label, "Tag by title");
                     assert!(matches!(field_type, SettingsFieldType::Bool));
                 }
                 other => panic!("expected a field row, got {other:?}"),

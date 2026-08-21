@@ -497,7 +497,7 @@ pub fn compose_filing_tags(
     mold_core::compose_client_tags(tags, title, auto_tag_title).map_err(|_| {
         format!(
             "the title's tag would exceed the {}-tag limit \u{2014} drop a tag, clear the title, \
-             or turn off Settings \u{25b8} Library \u{25b8} Tag with title",
+             or turn off Settings \u{25b8} Library \u{25b8} Tag by title",
             mold_core::MAX_REQUEST_TAGS
         )
     })
@@ -1544,7 +1544,7 @@ mod tests {
 
         let error = compose_filing_tags(&full, Some("Smurf Village"), true).unwrap_err();
         assert!(!error.contains("--no-auto-tag"), "{error}");
-        assert!(error.contains("Tag with title"), "{error}");
+        assert!(error.contains("Tag by title"), "{error}");
 
         // Setting the title on an already-full form is refused…
         let mut params = fresh_params();
