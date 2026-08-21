@@ -4486,7 +4486,8 @@ describe("MobileApp generation queue", () => {
     ).toBe(true);
   });
 
-  it("remounts generated video when forced renewal returns the same URL", async () => {
+  it("backs off transient generated-video failures before remounting the media element", async () => {
+    vi.useFakeTimers();
     const unchangedUrl =
       "https://studio/media/missing-video?media_token=unchanged&expires=4102444800";
     streamableMediaUrl.mockResolvedValueOnce(unchangedUrl).mockResolvedValueOnce(unchangedUrl);
@@ -4511,20 +4512,105 @@ describe("MobileApp generation queue", () => {
     await flushPromises();
 
     const originalVideo = wrapper.get("video.result-media").element;
+    expect(wrapper.get("video.result-media").attributes("preload")).toBe("metadata");
     await wrapper.get("video.result-media").trigger("error");
     await flushPromises();
 
+    expect(streamableMediaUrl).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(249);
+    expect(streamableMediaUrl).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await flushPromises();
     expect(streamableMediaUrl).toHaveBeenCalledTimes(2);
     expect(wrapper.get("video.result-media").attributes("src")).toBe(unchangedUrl);
     expect(wrapper.get("video.result-media").element).not.toBe(originalVideo);
+  });
+
+  it("bounds delayed generated-video recovery and exposes a manual retry", async () => {
+    vi.useFakeTimers();
+    const unchangedUrl =
+      "https://studio/media/missing-video?media_token=unchanged&expires=4102444800";
+    streamableMediaUrl.mockResolvedValue(unchangedUrl);
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    await submitPrompt("persistently missing generated video");
+    openStreams[0]!.options.onEvent(
+      "complete",
+      JSON.stringify({
+        image: "",
+        format: "mp4",
+        filename: "missing-video.mp4",
+        width: 768,
+        height: 512,
+        seed_used: 7,
+        generation_time_ms: 500,
+        model: model.name,
+      }),
+    );
+    openStreams[0]!.resolve();
+    await flushPromises();
+
+    for (const delay of [250, 750, 1_500]) {
+      await wrapper.get("video.result-media").trigger("error");
+      await vi.advanceTimersByTimeAsync(delay);
+      await flushPromises();
+    }
+    expect(streamableMediaUrl).toHaveBeenCalledTimes(4);
 
     await wrapper.get("video.result-media").trigger("error");
     await flushPromises();
-    expect(streamableMediaUrl).toHaveBeenCalledTimes(2);
     expect(wrapper.find("video.result-media").exists()).toBe(false);
     expect(wrapper.get(".result-preview-error").text()).toContain(
       "Couldn’t load this generated print",
     );
+    expect(
+      wrapper
+        .findAll(".result-preview-error button")
+        .some((button) => button.text() === "Try preview again"),
+    ).toBe(true);
+  });
+
+  it("replaces a stale video retry when a newer generated result fails", async () => {
+    vi.useFakeTimers();
+    streamableMediaUrl.mockResolvedValue(
+      "https://studio/media/video?media_token=renewed&expires=4102444800",
+    );
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    const completeVideo = async (streamIndex: number, filename: string, seed: number) => {
+      openStreams[streamIndex]!.options.onEvent(
+        "complete",
+        JSON.stringify({
+          image: "",
+          format: "mp4",
+          filename,
+          width: 768,
+          height: 512,
+          seed_used: seed,
+          generation_time_ms: 500,
+          model: model.name,
+        }),
+      );
+      openStreams[streamIndex]!.resolve();
+      await flushPromises();
+    };
+
+    await submitPrompt("first video");
+    await completeVideo(0, "first-video.mp4", 1);
+    await wrapper.get("video.result-media").trigger("error");
+
+    await submitPrompt("second video");
+    await completeVideo(1, "second-video.mp4", 2);
+    const secondVideo = wrapper.get("video.result-media").element;
+    await wrapper.get("video.result-media").trigger("error");
+
+    expect(streamableMediaUrl).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(250);
+    await flushPromises();
+    expect(streamableMediaUrl).toHaveBeenCalledTimes(3);
+    expect(wrapper.get("video.result-media").element).not.toBe(secondVideo);
   });
 
   it("shows a completion that wins the cancellation race", async () => {
@@ -6983,6 +7069,66 @@ describe("MobileApp gallery", () => {
     expect(fieldControl("Format").element).toHaveProperty("value", "mp4");
     expect(fieldControl("Frames").element).toHaveProperty("value", "121");
     expect(fieldControl("FPS").element).toHaveProperty("value", "30");
+  });
+
+  it("keeps generation notches after reusing an ordinary nightly LTX output", async () => {
+    const nightlyPrint: GalleryImage = {
+      ...print,
+      filename: "nightly-ltx.mp4",
+      metadata: {
+        prompt: "a live nightly print",
+        model: "ltx-2.3-22b-distilled:fp8",
+        seed: 44,
+        steps: 8,
+        guidance: 1,
+        width: 768,
+        height: 768,
+        frames: 217,
+        fps: 24,
+        pipeline: "distilled",
+        output_mode: "one-shot",
+        version: "0.23.3 (b3e803c 2026-08-21)",
+      },
+    };
+    const nightlyModel = {
+      ...model,
+      name: "ltx-2.3-22b-distilled:fp8",
+      default_steps: 8,
+      default_guidance: 1,
+      max_frames: 481,
+      frame_step: 8,
+      frame_offset: 1,
+      default_fps: 24,
+    };
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([nightlyModel]);
+      if (path === "/api/gallery") return Promise.resolve([nightlyPrint]);
+      if (path === "/api/activity") {
+        return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
+      }
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await vi.waitFor(() => expect(wrapper?.find("[data-test='gallery-item']").exists()).toBe(true));
+    await wrapper.get("[data-test='gallery-item']").trigger("click");
+    await flushPromises();
+    await wrapper.get("[data-test='gallery-viewer-reuse']").trigger("click");
+    await flushPromises();
+
+    const duration = wrapper.findAll(".video-duration")[0]!;
+    expect(duration.get("[data-test='video-duration-detail']").text()).toContain("3 generations");
+    expect(duration.findAll(".ms-slider__mark b").map((mark) => mark.text())).toEqual([
+      "1×",
+      "2×",
+      "3×",
+      "4×",
+      "5×",
+      "6×",
+    ]);
   });
 
   it("restores the original source image attributes and crop when reusing a print", async () => {

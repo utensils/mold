@@ -13,6 +13,7 @@ pub(crate) mod h3;
 pub mod info;
 pub mod jobs;
 pub mod lambda;
+pub mod licenses;
 pub mod list;
 pub(crate) mod local_engine;
 pub mod mcp;

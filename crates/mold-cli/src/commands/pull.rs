@@ -175,12 +175,19 @@ fn print_unknown_model_error(model: &str) {
     eprintln!("Usage: mold pull <model>");
 }
 
-/// Record the user's acceptance of a third-party model license.
+/// Resolve a `--accept-license` id and SHOW the user what they are accepting.
 ///
-/// Prints the restriction and the canonical terms URL before writing the
-/// record, so `--accept-license` is never a silent flag: the user sees what
-/// they are agreeing to in the same invocation that agrees to it.
-pub fn accept_license(id: &str) -> Result<()> {
+/// Always called before the pull is dispatched, on both the local and the
+/// server route, so the terms appear in the same invocation that agrees to
+/// them — a flag that silently consents is not consent.
+///
+/// Deliberately offline: the terms are pinned to an exact upstream commit
+/// whose digest was verified when the pin landed, so there is nothing a
+/// network round-trip could add, and accepting must work on an air-gapped
+/// host.
+pub fn resolve_and_show_license(
+    id: &str,
+) -> Result<&'static mold_core::license_acceptance::ThirdPartyLicense> {
     use mold_core::license_acceptance;
 
     let Some(license) = license_acceptance::license_by_id(id) else {
@@ -197,6 +204,24 @@ pub fn accept_license(id: &str) -> Result<()> {
         return Err(AlreadyReported.into());
     };
 
+    status!("{} {}", theme::icon_info(), license.name.bold());
+    status!("  {}", license.summary);
+    status!("  Terms (pinned): {}", license.url);
+    status!("  Project terms:  {}", license.canonical);
+    status!("");
+    Ok(license)
+}
+
+/// Write the acceptance into THIS machine's Mold data root.
+///
+/// Only correct when the pull itself runs locally. A pull dispatched to a
+/// server must instead send the id in `accept_licenses` so the SERVER records
+/// it in its own root — recording here and pulling there is exactly the bug
+/// that made the documented `--accept-license` command fail against a remote
+/// `MOLD_HOST`.
+pub fn record_license_locally(
+    license: &mold_core::license_acceptance::ThirdPartyLicense,
+) -> Result<()> {
     let Some(mold_home) = Config::mold_dir() else {
         eprintln!(
             "{} could not resolve the Mold data directory to record acceptance",
@@ -205,12 +230,7 @@ pub fn accept_license(id: &str) -> Result<()> {
         return Err(AlreadyReported.into());
     };
 
-    status!("{} {}", theme::icon_info(), license.name.bold());
-    status!("  {}", license.summary);
-    status!("  Terms: {}", license.url);
-    status!("");
-
-    license_acceptance::record_acceptance(&mold_home, license).map_err(|error| {
+    mold_core::license_acceptance::record_acceptance(&mold_home, license).map_err(|error| {
         eprintln!(
             "{} failed to record license acceptance: {error}",
             theme::prefix_error()
@@ -219,7 +239,7 @@ pub fn accept_license(id: &str) -> Result<()> {
     })?;
 
     status!(
-        "{} recorded acceptance of {}",
+        "{} recorded acceptance of {} on this machine",
         theme::icon_done(),
         license.id.bold()
     );
@@ -227,7 +247,11 @@ pub fn accept_license(id: &str) -> Result<()> {
     Ok(())
 }
 
-pub async fn run(model: &str, opts: &mold_core::download::PullOptions) -> Result<()> {
+pub async fn run(
+    model: &str,
+    opts: &mold_core::download::PullOptions,
+    accept_licenses: &[String],
+) -> Result<()> {
     let canonical = resolve_model_name(model);
     let manifest = match find_manifest(&canonical) {
         Some(m) => m,
@@ -237,12 +261,25 @@ pub async fn run(model: &str, opts: &mold_core::download::PullOptions) -> Result
         }
     };
 
+    // Resolve and display before anything is dispatched: an unknown id must
+    // fail here rather than after a download has been enqueued somewhere.
+    let mut licenses = Vec::with_capacity(accept_licenses.len());
+    for id in accept_licenses {
+        licenses.push(resolve_and_show_license(id)?);
+    }
+
     let ctx = CliContext::new(None);
-    match pull_via_server(&ctx, manifest).await {
+    // The server path carries the ids on the wire so the SERVER records them
+    // in its own root; the local path records them here. Which machine runs
+    // the pull decides which machine's acceptance counts.
+    match pull_via_server(&ctx, manifest, accept_licenses).await {
         Ok(()) => {}
         Err(e) => match classify_server_error(&e) {
             ServerAvailability::FallbackLocal => {
                 print_server_fallback(ctx.client().host(), "pulling locally");
+                for license in &licenses {
+                    record_license_locally(license)?;
+                }
                 pull_and_configure(model, opts).await?;
             }
             ServerAvailability::SurfaceError => return Err(e),
@@ -415,7 +452,11 @@ pub async fn run_recipe(
     Ok(())
 }
 
-async fn pull_via_server(ctx: &CliContext, manifest: &ModelManifest) -> Result<()> {
+async fn pull_via_server(
+    ctx: &CliContext,
+    manifest: &ModelManifest,
+    accept_licenses: &[String],
+) -> Result<()> {
     status!(
         "{} Pulling {} on {}",
         theme::icon_info(),
@@ -428,7 +469,8 @@ async fn pull_via_server(ctx: &CliContext, manifest: &ModelManifest) -> Result<(
     );
     status!("");
 
-    ctx.stream_server_pull(&manifest.name).await?;
+    ctx.stream_server_pull_accepting(&manifest.name, accept_licenses)
+        .await?;
 
     status!("");
     status!(

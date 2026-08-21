@@ -1145,11 +1145,13 @@ fn recipe(
         && !flux2_dev
         && input.source_image != Some(SourceImageCapability::Unsupported);
     let controlnet_supported = family == "sd15";
-    // Identity conditioning is advertised only when this binary actually
-    // links the adapter AND the checkpoint is one of the qualified ones —
-    // `crate::identity` is the single authority for the second half.
-    let identity_supported =
-        cfg!(feature = "pulid") && crate::identity::identity_qualified_model(input.model);
+    // Identity conditioning is advertised only when this binary can actually
+    // execute it AND the checkpoint is one of the qualified ones. Both halves
+    // belong to `crate::identity`: `identity_runtime_available` is the feature
+    // AND the landed runtime adapter, never a bare `cfg!(feature = "pulid")`,
+    // which would advertise a control the worker cannot honour.
+    let identity_supported = crate::identity::identity_runtime_available()
+        && crate::identity::identity_qualified_model(input.model);
     let output = if audio_only {
         OutputCapabilitiesProfile {
             default_format: OutputFormat::Wav,
@@ -1561,17 +1563,50 @@ mod tests {
     }
 
     #[test]
-    fn identity_capability_is_off_in_a_build_without_the_adapter() {
-        // A binary that does not link the identity adapter must never
-        // advertise the control, however qualified the checkpoint is.
+    fn identity_capability_is_off_in_a_build_that_cannot_execute_it() {
+        // A binary that cannot execute identity conditioning must never
+        // advertise the control, however qualified the checkpoint is. That
+        // is the feature AND the landed runtime adapter, not the feature
+        // alone.
         let profile = resolve_generation_profile(input("flux-dev:q8", "flux"));
         let advertised = profile
             .default_recipe()
             .unwrap()
             .capabilities
             .supports_identity;
-        assert_eq!(advertised, cfg!(feature = "pulid"));
-        assert_eq!(profile.supports_identity(), cfg!(feature = "pulid"));
+        assert_eq!(advertised, crate::identity::identity_runtime_available());
+        assert_eq!(
+            profile.supports_identity(),
+            crate::identity::identity_runtime_available()
+        );
+    }
+
+    /// The capability arm must not ship a promise the worker cannot execute
+    /// (the failure `CLAUDE.md` records for wan's `supports_sequence`). While
+    /// the runtime adapter is pending, NO build advertises identity — the
+    /// `pulid` feature included.
+    #[test]
+    fn identity_capability_is_unadvertised_while_the_runtime_adapter_is_pending() {
+        if crate::identity::IDENTITY_RUNTIME_READY {
+            return;
+        }
+        for model in ["flux-dev", "flux-dev:q4", "flux-dev:q8", "flux-dev-q4"] {
+            let profile = resolve_generation_profile(input(model, "flux"));
+            assert!(
+                !profile.supports_identity(),
+                "{model} must not advertise identity while the adapter is pending \
+                 (feature pulid = {})",
+                cfg!(feature = "pulid")
+            );
+            assert!(
+                !profile
+                    .default_recipe()
+                    .unwrap()
+                    .capabilities
+                    .supports_identity,
+                "{model}: the default recipe must not advertise it either"
+            );
+        }
     }
 
     #[test]
@@ -1593,7 +1628,12 @@ mod tests {
 
     #[cfg(feature = "pulid")]
     #[test]
-    fn identity_capability_is_advertised_for_qualified_checkpoints_with_the_feature() {
+    fn identity_capability_is_advertised_for_qualified_checkpoints_once_the_adapter_lands() {
+        if !crate::identity::IDENTITY_RUNTIME_READY {
+            // Pinned by `identity_capability_is_unadvertised_while_the_runtime_adapter_is_pending`
+            // until #1221 flips the constant.
+            return;
+        }
         for model in ["flux-dev", "flux-dev:q4", "flux-dev:q8", "flux-dev-q4"] {
             let profile = resolve_generation_profile(input(model, "flux"));
             assert!(

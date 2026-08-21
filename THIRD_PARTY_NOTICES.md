@@ -158,11 +158,21 @@ InsightFace model license:
 
     mold pull pulid-flux --accept-license insightface-antelopev2
 
-The acceptance is written to `$MOLD_HOME/license-acceptances.json` and is bound
-to the exact license text Mold pinned; if the upstream terms change, the
-recorded acceptance no longer counts and the user is asked again. Without an
-acceptance, every download path — the CLI, the server's auto-pull, and every
-automatic client-driven pull — refuses before any byte is fetched.
+The acceptance is written to `$MOLD_HOME/license-acceptances.json`. Without
+one, every download path — the CLI, the server's auto-pull, and every automatic
+client-driven pull — refuses before any byte is fetched.
+
+The terms Mold shows are pinned to an exact upstream revision:
+`deepinsight/insightface` commit `7fadd420c2351d0ffa8cac403421c1a3ed733365`,
+whose `README.md` was fetched on 2026-08-21 and verified to hash to
+`84606d9ab37a38606b12c10d96172c6343768d2ef72c802a16482e476f8baf22`. A
+commit-addressed URL is immutable, so that digest cannot go stale against its
+own source — which a `master` branch link could, leaving Mold recording consent
+for text that had since been rewritten. Each stored acceptance is bound to that
+`(url, sha256)` pair, so a Mold release that re-pins the license to a newer
+upstream revision invalidates every existing acceptance and asks again.
+Recording an acceptance is entirely offline; Mold never fetches the license
+text.
 
 [InsightFace](https://github.com/deepinsight/insightface) splits its terms. The
 InsightFace **code** is licensed under the MIT License with no usage
@@ -173,6 +183,14 @@ automatically by their tooling (InsightFace `README.md`, "License").
 
     Copyright (c) 2018-2024 InsightFace (DeepInsight)
 
+Mold's Rust face-extraction path (`crates/mold-inference/src/identity/`) is an
+independent reimplementation whose behaviour is derived from the MIT-licensed
+InsightFace **code** — `model_zoo/scrfd.py` (letterbox, anchor decode, NMS
+thresholds), `utils/face_align.py` (the `arcface_dst` template and the
+similarity fit), and `model_zoo/arcface_onnx.py` (input order and
+normalization). No InsightFace source file is vendored; each ported function
+cites the upstream file and line range it follows.
+
 Provenance of the files Mold pulls: InsightFace publishes the antelopev2 pack
 as an archive on GitHub releases and Google Drive, which Mold's Hugging
 Face-based downloader cannot address. PuLID itself resolves the pack from the
@@ -180,3 +198,20 @@ Hugging Face mirror `DIAMONIK7777/antelopev2`
 (`pulid/pipeline_flux.py`, `snapshot_download('DIAMONIK7777/antelopev2', ...)`),
 and Mold pulls the same two files from the same mirror, pinned by SHA-256 and
 verified on download.
+
+## facexlib (identity crop geometry)
+
+PuLID produces the 512x512 crop its vision tower conditions on with
+[facexlib](https://github.com/xinntao/facexlib)'s `FaceRestoreHelper`
+(`PuLID/pulid/pipeline_flux.py:47-53`, `:145-147`). Mold reimplements that
+crop's geometry in Rust — facexlib's standard FFHQ five-point template and its
+constant grey warp border (`facexlib/utils/face_restoration_helper.py:73-74`,
+`:242-259`) — in `crates/mold-inference/src/identity/align.rs`. No facexlib
+source file is vendored, and Mold downloads no facexlib model: facexlib's
+RetinaFace detector and BiSeNet parser are not used (see
+`docs/architecture/pulid-face-extraction.md`).
+
+facexlib is licensed under the MIT License
+(<https://github.com/xinntao/facexlib/blob/master/LICENSE>).
+
+    Copyright (c) 2020 Xintao Wang

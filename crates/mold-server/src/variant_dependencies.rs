@@ -46,7 +46,26 @@ pub(crate) struct DependencySpec<'a> {
     /// mislabels the identity bundle's safetensors, `.pt`, and `.onnx` files.
     pub(crate) container: crate::execution_plan::PendingArtifactContainer,
     pub(crate) quantization: Option<crate::execution_plan::QuantizationVariant>,
+    /// Manifest-pinned content digest the landed bytes must hash to.
+    ///
+    /// `None` keeps the historical bytes-and-size contract. `Some` is what
+    /// makes a mutable Hugging Face `main` revision safe: this downloader
+    /// resolves `main`, not a commit, so without the pin a file replaced
+    /// upstream — or served by a compromised mirror — would be frozen into the
+    /// plan and executed, since everything downstream only ever proves that
+    /// the path is local.
+    pub(crate) expected_sha256: Option<PinnedDigest<'a>>,
     pub(crate) subdir: &'a str,
+}
+
+/// A content pin plus the repair its violation should tell the user to run.
+#[derive(Clone, Copy)]
+pub(crate) struct PinnedDigest<'a> {
+    pub(crate) sha256: &'a str,
+    /// Model named by the `mold pull <model>` remedy in a mismatch error. The
+    /// repo is the wrong answer here — a user repairs a bundle, not a
+    /// Hugging Face repository.
+    pub(crate) repair_model: &'a str,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -196,6 +215,57 @@ fn send_dependency_wait(
     }
 }
 
+/// What an already-present copy of a pinned dependency is worth.
+enum CachedDependencyVerdict {
+    /// Unpinned, or proven to be the pinned bytes.
+    Usable,
+    /// Pinned, present, and NOT the pinned bytes. Under `Admission` the file
+    /// has already been removed, so a retry re-downloads.
+    Rejected(String),
+    /// Pinned and present, but this policy may not prove it. Only a read-only
+    /// preview reaches this.
+    Unproven,
+}
+
+/// Prove an already-placed dependency against its manifest pin.
+///
+/// Admission is the enforcing policy: it hashes the file's current bytes,
+/// deletes a file that does not match, and attests one that does. A read-only
+/// placement preview must not delete, must not attest, and must not refuse —
+/// it only decides whether the copy on disk counts as evidence that nothing
+/// needs downloading.
+///
+/// Neither policy reads the `.sha256-verified` marker as proof. Content
+/// authentication cannot come from a sidecar anyone who can write the artifact
+/// can also write.
+fn verify_cached_dependency(
+    path: &Path,
+    filename: &str,
+    expected_sha256: Option<PinnedDigest<'_>>,
+    policy: DependencyMaterializationPolicy,
+) -> CachedDependencyVerdict {
+    let Some(pin) = expected_sha256 else {
+        return CachedDependencyVerdict::Usable;
+    };
+    if policy == DependencyMaterializationPolicy::ExistingOnly {
+        // Read-only: hash the current bytes through a retained descriptor and
+        // answer. Never the `.sha256-verified` marker — it is a writable
+        // sidecar in a models root the model-storage invariant lets a group
+        // write, so it attests nothing about content. The hash is memoized per
+        // file identity, so a preview of an unchanged installed bundle costs
+        // one `fstat` per asset after the first.
+        return if mold_core::download::pinned_file_matches(path, pin.sha256) {
+            CachedDependencyVerdict::Usable
+        } else {
+            CachedDependencyVerdict::Unproven
+        };
+    }
+    match mold_core::download::verify_pinned_file(path, pin.sha256, filename, pin.repair_model) {
+        Ok(()) => CachedDependencyVerdict::Usable,
+        Err(error) => CachedDependencyVerdict::Rejected(error.to_string()),
+    }
+}
+
 pub(crate) async fn ensure_downloaded(
     state: Option<&AppState>,
     work_id: &str,
@@ -211,6 +281,7 @@ pub(crate) async fn ensure_downloaded(
         kind,
         container,
         quantization,
+        expected_sha256,
         subdir,
     } = dependency;
     let cached = if policy == DependencyMaterializationPolicy::ExistingOnly {
@@ -224,7 +295,15 @@ pub(crate) async fn ensure_downloaded(
         mold_core::download::cached_file_path_in(models_root, repo, filename, Some(subdir))
     };
     if let Some(path) = cached {
-        return Ok(ResolvedDependency::Available(path));
+        match verify_cached_dependency(&path, filename, expected_sha256, policy) {
+            CachedDependencyVerdict::Usable => return Ok(ResolvedDependency::Available(path)),
+            CachedDependencyVerdict::Rejected(error) => return Err(error),
+            // A read-only preview neither deletes the file nor writes an
+            // attestation for it, so an unproven copy is simply not usable
+            // evidence — it falls through and is reported as a pending
+            // download that admission will verify for real.
+            CachedDependencyVerdict::Unproven => {}
+        }
     }
     if policy == DependencyMaterializationPolicy::ExistingOnly {
         let bytes = expected_bytes.ok_or_else(|| {
@@ -309,6 +388,11 @@ pub(crate) async fn ensure_downloaded(
         let shared = shared.clone();
         let key_for_task = key.clone();
         let models_root = models_root.to_path_buf();
+        // Verification runs once, inside the shared task, so joiners share the
+        // one hash of a multi-gigabyte artifact and every one of them sees the
+        // same verdict — a joiner that skipped the check would freeze bytes
+        // the creator rejected.
+        let pin = expected_sha256.map(|pin| (pin.sha256.to_string(), pin.repair_model.to_string()));
         tokio::spawn(async move {
             let repo = key_for_task.repo.clone();
             let filename = key_for_task.filename.clone();
@@ -383,7 +467,24 @@ pub(crate) async fn ensure_downloaded(
             })
             .await
             .map_err(|error| format!("encoder dependency task failed: {error}"))
-            .and_then(|result| result);
+            .and_then(|result| result)
+            .and_then(|path| {
+                // Hugging Face `main` is mutable and this downloader resolves
+                // the branch, not a commit, so "the download succeeded" is not
+                // "the manifest's bytes landed". A mismatch removes the file
+                // here, before any caller can freeze the path into a plan.
+                let Some((sha256, repair_model)) = pin.as_ref() else {
+                    return Ok(path);
+                };
+                mold_core::download::verify_pinned_file(
+                    &path,
+                    sha256,
+                    &key_for_task.filename,
+                    repair_model,
+                )
+                .map(|()| path)
+                .map_err(|error| error.to_string())
+            });
             *shared
                 .result
                 .lock()
@@ -721,6 +822,11 @@ async fn materialize_t5(
                 kind: "text_encoder",
                 container: crate::execution_plan::PendingArtifactContainer::Gguf,
                 quantization: registry_quantization(variant.tag),
+                // The quantized encoder registries publish repo, filename, and
+                // size but no digest, so there is nothing to pin here yet.
+                // Pinning them is its own change: it needs 20+ digests sourced
+                // and reviewed, not a field flipped.
+                expected_sha256: None,
                 subdir: "shared/t5-gguf",
             },
             context.progress,
@@ -796,6 +902,7 @@ async fn materialize_umt5(
             kind: "text_encoder",
             container: crate::execution_plan::PendingArtifactContainer::Gguf,
             quantization: registry_quantization(variant.tag),
+            expected_sha256: None,
             subdir: "shared/wan/umt5-gguf",
         },
         context.progress,
@@ -883,6 +990,7 @@ async fn materialize_qwen3(
                 kind: "text_encoder",
                 container: crate::execution_plan::PendingArtifactContainer::Gguf,
                 quantization: registry_quantization(variant.tag),
+                expected_sha256: None,
                 subdir,
             },
             context.progress,
@@ -936,6 +1044,7 @@ async fn materialize_qwen2(
             kind: "text_encoder",
             container: crate::execution_plan::PendingArtifactContainer::Gguf,
             quantization: registry_quantization(variant.tag),
+            expected_sha256: None,
             subdir: "shared/qwen2-vl-gguf",
         },
         context.progress,
@@ -1978,6 +2087,61 @@ mod tests {
         }
     }
 
+    const PINNED_CONTENT: &[u8] = b"the exact pinned bytes";
+    /// SHA-256 of [`PINNED_CONTENT`], asserted against the real digest by
+    /// `the_pin_fixture_digests_are_the_digests_of_the_fixtures`.
+    const PINNED_CONTENT_SHA256: &str =
+        "53d2d7847273102e2b9997c3651ae60a1a5653c9eb17b09a956f88d829333b0e";
+    const TAMPERED_CONTENT: &[u8] = b"tampered";
+    const TAMPERED_CONTENT_SHA256: &str =
+        "d121be3103007b41edf96f8262925f8c7d61894afe9a041843b631f69445bc57";
+
+    /// A pin fixture that does not actually hash to its constant would make
+    /// every test below pass for the wrong reason.
+    #[test]
+    fn the_pin_fixture_digests_are_the_digests_of_the_fixtures() {
+        let dir = TempDir::new().unwrap();
+        let write = |name: &str, bytes: &[u8]| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, bytes).unwrap();
+            mold_core::download::compute_sha256(&path).unwrap()
+        };
+        assert_eq!(write("pinned", PINNED_CONTENT), PINNED_CONTENT_SHA256);
+        assert_eq!(write("tampered", TAMPERED_CONTENT), TAMPERED_CONTENT_SHA256);
+    }
+
+    fn unique_test_repo(prefix: &str) -> String {
+        format!(
+            "{prefix}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        )
+    }
+
+    fn pinned_spec<'a>(
+        models_root: &'a Path,
+        repo: &'a str,
+        sha256: &'a str,
+    ) -> DependencySpec<'a> {
+        DependencySpec {
+            models_root,
+            repo,
+            filename: "pinned.safetensors",
+            expected_bytes: Some(PINNED_CONTENT.len() as u64),
+            kind: "identity_adapter",
+            container: crate::execution_plan::PendingArtifactContainer::Safetensors,
+            quantization: None,
+            expected_sha256: Some(PinnedDigest {
+                sha256,
+                repair_model: "pinned-bundle",
+            }),
+            subdir: "shared/pin-test",
+        }
+    }
+
     fn install_test_download_adapter(
         repo: &str,
         adapter: TestDownloadAdapter,
@@ -2030,6 +2194,236 @@ mod tests {
         );
     }
 
+    /// Hugging Face `main` is a mutable branch and this downloader resolves the
+    /// branch, not a commit. A dependency that arrives with the right byte
+    /// count but the wrong content must therefore be rejected on its manifest
+    /// pin and REMOVED — freezing it would put unverified bytes into an
+    /// execution plan, and everything downstream only ever proves that the
+    /// path is local.
+    #[tokio::test]
+    async fn a_pinned_download_whose_bytes_do_not_match_is_rejected_and_removed() {
+        let cache = TempDir::new().unwrap();
+        let repo = unique_test_repo("mold-pin-corrupt");
+        let _adapter = install_test_download_adapter(
+            &repo,
+            Arc::new(|models_root, _repo, filename, subdir| {
+                let path =
+                    mold_core::download::planned_single_file_path_in(models_root, filename, subdir);
+                std::fs::create_dir_all(path.parent().unwrap())
+                    .map_err(|error| error.to_string())?;
+                // Right size, wrong bytes: exactly what a mutated upstream
+                // revision or a compromised mirror looks like to a
+                // size-and-bytes contract.
+                std::fs::write(&path, TAMPERED_CONTENT).map_err(|error| error.to_string())?;
+                Ok(path)
+            }),
+        );
+
+        let error = ensure_downloaded(
+            None,
+            "admission",
+            pinned_spec(cache.path(), &repo, PINNED_CONTENT_SHA256),
+            None,
+            DependencyMaterializationPolicy::Admission,
+        )
+        .await
+        .err()
+        .expect("a pinned dependency whose bytes do not match must be refused");
+
+        assert!(error.contains("pinned.safetensors"), "{error}");
+        assert!(error.contains(PINNED_CONTENT_SHA256), "{error}");
+        assert!(
+            error.contains(TAMPERED_CONTENT_SHA256),
+            "the error must name the digest that actually landed: {error}"
+        );
+        assert!(error.contains("mold pull pinned-bundle"), "{error}");
+
+        let landed = mold_core::download::planned_single_file_path_in(
+            cache.path(),
+            "pinned.safetensors",
+            "shared/pin-test",
+        );
+        assert!(
+            !landed.exists(),
+            "the rejected bytes must be removed so a retry re-downloads"
+        );
+        assert!(!mold_core::download::has_sha256_marker(&landed));
+    }
+
+    /// The matching case: the file is kept and attested with the shared
+    /// `.sha256-verified` marker, so the next admission short-circuits instead
+    /// of rehashing a multi-gigabyte artifact.
+    #[tokio::test]
+    async fn a_pinned_download_that_matches_is_accepted_and_attested() {
+        let cache = TempDir::new().unwrap();
+        let repo = unique_test_repo("mold-pin-good");
+        let _adapter = install_test_download_adapter(
+            &repo,
+            Arc::new(|models_root, _repo, filename, subdir| {
+                let path =
+                    mold_core::download::planned_single_file_path_in(models_root, filename, subdir);
+                std::fs::create_dir_all(path.parent().unwrap())
+                    .map_err(|error| error.to_string())?;
+                std::fs::write(&path, PINNED_CONTENT).map_err(|error| error.to_string())?;
+                Ok(path)
+            }),
+        );
+
+        let resolved = ensure_downloaded(
+            None,
+            "admission",
+            pinned_spec(cache.path(), &repo, PINNED_CONTENT_SHA256),
+            None,
+            DependencyMaterializationPolicy::Admission,
+        )
+        .await
+        .expect("bytes that match the pin are accepted");
+        let ResolvedDependency::Available(path) = resolved else {
+            panic!("admission never returns pending");
+        };
+
+        assert!(path.is_file());
+        assert_eq!(
+            mold_core::download::recorded_sha256_marker(&path).as_deref(),
+            Some(PINNED_CONTENT_SHA256),
+            "a proven download must be attested with the digest it hashed to"
+        );
+    }
+
+    /// The `.sha256-verified` sidecar is writable by anyone who can write the
+    /// artifact — the model-storage invariant supports group-writable model
+    /// roots on purpose — so it can never be the thing that authenticates
+    /// content. Neither policy may accept it, and a stale one left behind by a
+    /// replaced file must not resurrect the replacement either.
+    #[tokio::test]
+    async fn a_forged_attestation_beside_wrong_bytes_is_refused_by_both_policies() {
+        let cache = TempDir::new().unwrap();
+        let repo = unique_test_repo("mold-pin-forged");
+        let path = mold_core::download::planned_single_file_path_in(
+            cache.path(),
+            "pinned.safetensors",
+            "shared/pin-test",
+        );
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let forge = || {
+            std::fs::write(&path, TAMPERED_CONTENT).unwrap();
+            mold_core::download::write_sha256_marker(&path, PINNED_CONTENT_SHA256).unwrap();
+        };
+        forge();
+
+        // Read-only: the forged attestation buys nothing, and the preview
+        // still neither deletes nor refuses.
+        let resolved = ensure_downloaded(
+            None,
+            "placement-preview",
+            pinned_spec(cache.path(), &repo, PINNED_CONTENT_SHA256),
+            None,
+            DependencyMaterializationPolicy::ExistingOnly,
+        )
+        .await
+        .expect("a preview never refuses");
+        assert!(
+            matches!(resolved, ResolvedDependency::Pending(_)),
+            "a self-served attestation is not evidence the file is installed"
+        );
+        assert!(path.exists());
+
+        // Admission: refused on the bytes, and the lying sidecar goes with the
+        // file it lied about. No download adapter is installed, so reaching
+        // the downloader would be real network I/O — the cached branch must
+        // refuse first.
+        forge();
+        let error = ensure_downloaded(
+            None,
+            "admission",
+            pinned_spec(cache.path(), &repo, PINNED_CONTENT_SHA256),
+            None,
+            DependencyMaterializationPolicy::Admission,
+        )
+        .await
+        .err()
+        .expect("a forged attestation must not authenticate the bytes beside it");
+        assert!(error.contains(PINNED_CONTENT_SHA256), "{error}");
+        assert!(error.contains(TAMPERED_CONTENT_SHA256), "{error}");
+        assert!(!path.exists());
+        assert!(!mold_core::download::has_sha256_marker(&path));
+    }
+
+    /// A copy already on disk is not evidence of anything until it is proven:
+    /// the cache lookup happens before the downloader, so an attacker who can
+    /// write into the models root would otherwise bypass the pin entirely by
+    /// pre-placing the file.
+    #[tokio::test]
+    async fn a_pre_existing_unattested_copy_is_verified_before_it_is_reused() {
+        let cache = TempDir::new().unwrap();
+        let repo = unique_test_repo("mold-pin-preplaced");
+        let path = mold_core::download::planned_single_file_path_in(
+            cache.path(),
+            "pinned.safetensors",
+            "shared/pin-test",
+        );
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"pre-placed").unwrap();
+
+        // No download adapter is installed, so reaching the downloader at all
+        // would attempt real network I/O. The cached branch must refuse first.
+        let error = ensure_downloaded(
+            None,
+            "admission",
+            pinned_spec(cache.path(), &repo, PINNED_CONTENT_SHA256),
+            None,
+            DependencyMaterializationPolicy::Admission,
+        )
+        .await
+        .err()
+        .expect("a pre-placed file that is not the pinned bytes must be refused");
+        assert!(error.contains(PINNED_CONTENT_SHA256), "{error}");
+        assert!(!path.exists(), "the rejected copy must be removed");
+
+        // A read-only preview must neither delete nor refuse — it reports the
+        // unproven copy as work admission still has to do.
+        std::fs::write(&path, b"pre-placed").unwrap();
+        let resolved = ensure_downloaded(
+            None,
+            "placement-preview",
+            pinned_spec(cache.path(), &repo, PINNED_CONTENT_SHA256),
+            None,
+            DependencyMaterializationPolicy::ExistingOnly,
+        )
+        .await
+        .expect("a preview never refuses");
+        assert!(
+            matches!(resolved, ResolvedDependency::Pending(_)),
+            "an unproven copy is not evidence that nothing needs downloading"
+        );
+        assert!(
+            path.exists(),
+            "a read-only preview must not delete the file it could not prove"
+        );
+        assert!(
+            !mold_core::download::has_sha256_marker(&path),
+            "a read-only preview must not write an attestation either"
+        );
+
+        // Proven bytes are reused by both policies without a download.
+        std::fs::write(&path, PINNED_CONTENT).unwrap();
+        for policy in [
+            DependencyMaterializationPolicy::ExistingOnly,
+            DependencyMaterializationPolicy::Admission,
+        ] {
+            let resolved = ensure_downloaded(
+                None,
+                "reuse",
+                pinned_spec(cache.path(), &repo, PINNED_CONTENT_SHA256),
+                None,
+                policy,
+            )
+            .await
+            .expect("pinned bytes already on disk are reused");
+            assert!(matches!(resolved, ResolvedDependency::Available(_)));
+        }
+    }
+
     #[tokio::test]
     async fn existing_only_dependency_check_never_starts_a_download() {
         let cache = TempDir::new().unwrap();
@@ -2052,6 +2446,7 @@ mod tests {
                 kind: "text_encoder",
                 container: crate::execution_plan::PendingArtifactContainer::Gguf,
                 quantization: Some(crate::execution_plan::QuantizationVariant::Q4),
+                expected_sha256: None,
                 subdir: "preview-test",
             },
             None,
@@ -2101,6 +2496,7 @@ mod tests {
                 kind: "text_encoder",
                 container: crate::execution_plan::PendingArtifactContainer::Gguf,
                 quantization: Some(crate::execution_plan::QuantizationVariant::Q4),
+                expected_sha256: None,
                 subdir: "shared/test",
             },
             None,
@@ -2148,6 +2544,7 @@ mod tests {
             kind: "text_encoder",
             container: crate::execution_plan::PendingArtifactContainer::Gguf,
             quantization: Some(crate::execution_plan::QuantizationVariant::Q4),
+            expected_sha256: None,
             subdir,
         };
 
@@ -2214,6 +2611,7 @@ mod tests {
             kind: "text_encoder",
             container: crate::execution_plan::PendingArtifactContainer::Gguf,
             quantization: Some(crate::execution_plan::QuantizationVariant::Q4),
+            expected_sha256: None,
             subdir: "shared/dedupe",
         };
 

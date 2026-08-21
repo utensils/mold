@@ -21,7 +21,7 @@ use mold_core::GenerateRequest;
 use crate::execution_plan::PendingArtifactContainer;
 use crate::variant_dependencies::{
     ensure_downloaded, DependencyContext, DependencyMaterializationPolicy, DependencySpec,
-    MissingDependency,
+    MissingDependency, PinnedDigest,
 };
 
 /// The one family that can condition on an identity.
@@ -159,6 +159,13 @@ pub(crate) async fn materialize_identity_assets(
                 file.hf_filename
             )
         })?;
+        let pin = file.sha256.ok_or_else(|| {
+            format!(
+                "identity asset '{}' has no pinned SHA-256; refusing to acquire an unpinned \
+                 identity artifact",
+                file.hf_filename
+            )
+        })?;
         let subdir = identity_storage_subdir(manifest, file);
         let path = ensure_downloaded(
             context.state,
@@ -174,6 +181,17 @@ pub(crate) async fn materialize_identity_assets(
                 // tower ship at their trained precision and the ONNX models
                 // carry no GGUF-style variant at all.
                 quantization: None,
+                // Every PuLID file is SHA-256 pinned in the manifest, and this
+                // is the only place that pin is enforced for them: the
+                // single-file downloader resolves the repo's mutable `main`
+                // revision, so without it a replaced upstream file — or a
+                // compromised mirror — would be frozen into the plan and
+                // executed. The pin is required, never optional: an entry
+                // without one is refused below rather than fetched unpinned.
+                expected_sha256: Some(PinnedDigest {
+                    sha256: pin,
+                    repair_model: &manifest.name,
+                }),
                 subdir: &subdir,
             },
             context.progress,
@@ -323,6 +341,26 @@ mod tests {
             vision_encoder_source: resolve(ModelComponent::IdentityVisionEncoder),
             face_detector: resolve(ModelComponent::FaceDetector),
             face_recognizer: resolve(ModelComponent::FaceRecognizer),
+        }
+    }
+
+    /// Place a stand-in for every bundle file, each carrying a
+    /// `.sha256-verified` marker that names the manifest's pinned digest while
+    /// the bytes beside it are something else entirely.
+    ///
+    /// This is not a fixture for "correctly installed" — no test can produce
+    /// a 1.14 GB preimage of a fixed digest. It is the ATTACK: a group-writable
+    /// models root, which the model-storage invariant explicitly supports, lets
+    /// anyone who can drop weights also drop the sidecar that vouches for them.
+    /// Every use below asserts that mold refuses it.
+    fn install_forged_bundle(config: &Config) {
+        let manifest = mold_core::pulid_assets::pulid_manifest();
+        let models_dir = config.resolved_models_dir();
+        for file in &manifest.files {
+            let path = models_dir.join(mold_core::manifest::storage_path(manifest, file));
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, b"identity asset").unwrap();
+            mold_core::download::write_sha256_marker(&path, file.sha256.unwrap()).unwrap();
         }
     }
 
@@ -490,23 +528,26 @@ mod tests {
         ));
     }
 
-    /// An installed bundle plans no download at all and freezes the concrete
-    /// paths the worker will construct the engine from.
+    /// A bundle that is merely PRESENT is not installed. Presence plus a
+    /// self-served attestation is what an attacker with write access to a
+    /// shared models root can manufacture; only bytes that hash to the
+    /// manifest pin count.
+    ///
+    /// The read-only preview says so by planning the download anyway, and
+    /// admission says so by refusing. Neither is allowed to read the sidecar
+    /// and call it installed.
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
-    async fn an_installed_bundle_is_frozen_and_plans_nothing() {
+    async fn a_forged_attestation_never_makes_a_bundle_count_as_installed() {
         let models = TempDir::new().unwrap();
         let home = TempDir::new().unwrap();
         let _env = EnvGuard::new(home.path(), models.path());
         let (_root, config) = flux_case(models.path());
-        for path in mold_core::pulid_assets::pulid_storage_paths(&config) {
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(&path, b"identity asset").unwrap();
-        }
+        install_forged_bundle(&config);
 
         let prepared = prepare_inputs_for_devices(
             None,
-            "installed",
+            "placement-preview",
             &request(None, true),
             &config,
             vec![device()],
@@ -517,11 +558,20 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(prepared.pending_downloads_for_device("cuda:0").is_empty());
-        let device_inputs = &prepared.by_device["cuda:0"];
-        assert!(device_inputs.pending_artifacts.is_empty());
         assert_eq!(
-            device_inputs.engine_config.identity_assets,
+            prepared.pending_downloads_for_device("cuda:0").len(),
+            4,
+            "unproven bytes are not evidence that nothing needs downloading"
+        );
+        // The preview stays read-only about them: nothing deleted, nothing
+        // attested, nothing refused.
+        for path in mold_core::pulid_assets::pulid_storage_paths(&config) {
+            assert!(path.exists(), "{}", path.display());
+        }
+        // The planned paths are still frozen — they are where admission will
+        // land the real bytes.
+        assert_eq!(
+            prepared.by_device["cuda:0"].engine_config.identity_assets,
             Some(expected_paths(models.path()))
         );
     }
@@ -606,19 +656,64 @@ mod tests {
             "a refused acquisition must not have started a download"
         );
 
-        // Recording the acceptance is what unblocks it. The bundle is present
-        // here so the test stays offline; what it proves is that the gate
-        // itself no longer refuses.
+        // Recording the acceptance is what clears the gate. This half is a
+        // direct call rather than another admission: with the gate open and
+        // no files on disk, admission's next move is a real download, and a
+        // forged bundle can no longer stand in for one (which is the point of
+        // the pinned check).
+        let manifest = mold_core::pulid_assets::pulid_manifest();
+        assert!(require_identity_licenses(manifest, models.path(), Some(home.path())).is_err());
         mold_core::license_acceptance::record_acceptance(
             home.path(),
             &mold_core::license_acceptance::INSIGHTFACE_ANTELOPEV2,
         )
         .unwrap();
-        for path in mold_core::pulid_assets::pulid_storage_paths(&config) {
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(&path, b"identity asset").unwrap();
-        }
-        let prepared = prepare_inputs_for_devices(
+        require_identity_licenses(manifest, models.path(), Some(home.path()))
+            .expect("a recorded acceptance clears the gate");
+        // An unresolvable Mold data root stays closed: unverifiable is not
+        // accepted.
+        assert!(require_identity_licenses(manifest, models.path(), None).is_err());
+    }
+
+    /// Every identity asset is SHA-256 pinned in the manifest, and this is the
+    /// only place that pin is enforced for them — the single-file downloader
+    /// resolves the repo's mutable `main` revision, and the frozen plan proves
+    /// only that the path is local. A file on disk that is not the pinned
+    /// bytes must therefore fail admission by name, be removed, and never be
+    /// frozen into an execution plan.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_tampered_identity_asset_fails_admission_and_is_removed() {
+        let models = TempDir::new().unwrap();
+        let home = TempDir::new().unwrap();
+        let _env = EnvGuard::new(home.path(), models.path());
+        let (_root, config) = flux_case(models.path());
+        mold_core::license_acceptance::record_acceptance(
+            home.path(),
+            &mold_core::license_acceptance::INSIGHTFACE_ANTELOPEV2,
+        )
+        .unwrap();
+        install_forged_bundle(&config);
+
+        // The adapter's bytes are not its pin, and its forged marker is left
+        // deliberately IN PLACE — the whole point is that the sidecar buys the
+        // attacker nothing.
+        let manifest = mold_core::pulid_assets::pulid_manifest();
+        let adapter_file = manifest
+            .files
+            .iter()
+            .find(|file| file.component == ModelComponent::IdentityAdapter)
+            .unwrap();
+        let adapter = models
+            .path()
+            .join(mold_core::manifest::storage_path(manifest, adapter_file));
+        assert_eq!(
+            mold_core::download::recorded_sha256_marker(&adapter).as_deref(),
+            adapter_file.sha256,
+            "the fixture must present a marker that vouches for the pin"
+        );
+
+        let error = prepare_inputs_for_devices(
             None,
             "admission",
             &request(None, true),
@@ -629,11 +724,27 @@ mod tests {
             DependencyPreparationContext::default(),
         )
         .await
-        .expect("an accepted license admits the request");
-        assert_eq!(
-            prepared.by_device["cuda:0"].engine_config.identity_assets,
-            Some(expected_paths(models.path()))
+        .expect_err("a tampered identity asset must fail admission");
+
+        assert!(error.contains("pulid_flux_v0.9.1.safetensors"), "{error}");
+        assert!(error.contains(adapter_file.sha256.unwrap()), "{error}");
+        assert!(error.contains("mold pull pulid-flux"), "{error}");
+        assert!(
+            !adapter.exists(),
+            "the rejected asset must be removed so a repair re-downloads it"
         );
+
+        // The other three assets are untouched: only the file that failed its
+        // own pin is rejected.
+        for file in &manifest.files {
+            if file.component == ModelComponent::IdentityAdapter {
+                continue;
+            }
+            let path = models
+                .path()
+                .join(mold_core::manifest::storage_path(manifest, file));
+            assert!(path.exists(), "{}", file.hf_filename);
+        }
     }
 
     /// A read-only preview is not the refusal point: it must report the gated

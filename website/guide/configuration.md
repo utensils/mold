@@ -345,12 +345,49 @@ until you record acceptance once per `MOLD_HOME`:
 mold pull pulid-flux --accept-license insightface-antelopev2
 ```
 
-The command prints the restriction and the pinned terms URL before it writes
-the record. Acceptances live in owner-only `$MOLD_HOME/license-acceptances.json`
-and are bound to the SHA-256 of the license text you were shown, so if the
-upstream terms change you are asked again. A refused download names the license
-and the exact command to run; there is no environment-variable bypass. See
-`THIRD_PARTY_NOTICES.md` for the full notice.
+The command prints the restriction and both terms URLs before it writes the
+record. Acceptances live in owner-only `$MOLD_HOME/license-acceptances.json`.
+
+The terms are pinned to an **exact upstream commit**, not to a branch: Mold
+stores the commit-addressed URL of the license text alongside its SHA-256, and
+verified that pair when the pin landed. A commit URL serves the same bytes
+forever, so the digest can never drift away from the document it describes —
+which a `master` link would, quietly leaving you consented to text that had
+since been rewritten. Each acceptance is bound to that `(url, sha256)` pair, so
+a Mold release that re-pins a license to a newer upstream revision invalidates
+your existing acceptance and asks again with the new text.
+
+Recording an acceptance is entirely offline — Mold never fetches the license
+text, so `--accept-license` works on an air-gapped host. A refused download
+names the license and the exact command to run; there is no
+environment-variable bypass. See `THIRD_PARTY_NOTICES.md` for the full notice,
+including the pinned commit and digest.
+
+#### Which machine records the acceptance
+
+The acceptance has to live on the machine that does the downloading, and
+`mold pull` follows the pull:
+
+- **A server answers at `MOLD_HOST`** (including the local `mold serve`): the
+  id is sent with the request and the **server** writes it into its own
+  `$MOLD_HOME`. Nothing is recorded on the calling machine.
+- **No server, or `--local`**: the pull runs here, so the acceptance is
+  recorded here.
+
+Either way the terms are printed before the request goes out. Run
+`mold licenses` to see what needs accepting and which root was read:
+
+```bash
+mold licenses
+```
+
+Over HTTP, `GET /api/licenses` returns each license with `accepted` and
+`required_by`, and `POST /api/downloads` / `POST /api/models/pull` accept an
+additive `accept_licenses` array. A gated download without one is refused with
+`403` and code `LICENSE_NOT_ACCEPTED`, carrying a structured `license` object a
+UI can build its own prompt from. Servers that support this advertise
+`capabilities.licenses: true`; older ones do not, and can only be accepted by
+running `mold pull --accept-license` in a shell on that host.
 
 ### Gallery Metadata Database
 

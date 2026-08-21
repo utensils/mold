@@ -16,15 +16,30 @@ describe("pipelineForSettingsReuse", () => {
         chain: { stages: [{ frames: 97 }, { frames: 97 }] },
       }),
     ).toBeNull();
+    expect(
+      pipelineForSettingsReuse({
+        pipeline: "distilled",
+        output_mode: "one-shot",
+      }),
+    ).toBeNull();
+    expect(pipelineForSettingsReuse({ pipeline: "distilled" })).toBeNull();
   });
 
-  it("preserves explicit pipeline provenance for ordinary and authored sequence outputs", () => {
+  it("preserves a pipeline only when request provenance says it was authored", () => {
     expect(
       pipelineForSettingsReuse({
         pipeline: "two-stage",
         output_mode: "one-shot",
+        pipeline_requested: true,
       }),
     ).toBe("two-stage");
+    expect(
+      pipelineForSettingsReuse({
+        pipeline: "distilled",
+        output_mode: "one-shot",
+        pipeline_requested: false,
+      }),
+    ).toBeNull();
     expect(
       pipelineForSettingsReuse({
         pipeline: "distilled",

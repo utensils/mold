@@ -135,6 +135,7 @@ export interface OutputMetadata {
   extend_video_path?: string | null;
   extend_overlap_frames?: number | null;
   pipeline?: Ltx2PipelineMode | null;
+  pipeline_requested?: boolean | null;
   /** LTX-2 source-image preprocessing actually applied (newer servers). */
   source_preprocessing?: Ltx2SourcePreprocessing | null;
   ic_lora_control?: string | null;

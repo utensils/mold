@@ -831,6 +831,7 @@ const usingPrintAsSource = ref(false);
 const reusePrintError = ref("");
 const latestResultClientId = ref<number | null>(null);
 const resultMediaLoadKey = ref(0);
+const GENERATED_VIDEO_RECOVERY_DELAYS_MS = [250, 750, 1_500] as const;
 const objectUrls = new Set<string>();
 const handledGenerationClientIds = new Set<number>();
 let pendingGallery: PendingGalleryPrint[] = [];
@@ -841,6 +842,7 @@ let reusePrintEpoch = 0;
 let reusePrintController: AbortController | null = null;
 let sourceUseEpoch = 0;
 let sourceUseController: AbortController | null = null;
+let resultMediaRecoveryTimer: ReturnType<typeof setTimeout> | null = null;
 let galleryRefreshRequested = false;
 let galleryRefreshDeferred = false;
 let galleryRefreshTask: Promise<void> | null = null;
@@ -5247,6 +5249,10 @@ function renewGeneratedResult(force: boolean): void {
 }
 
 function generatedMediaReady(): void {
+  if (resultMediaRecoveryTimer !== null) {
+    clearTimeout(resultMediaRecoveryTimer);
+    resultMediaRecoveryTimer = null;
+  }
   resultMediaRecoveryClientId = latestResultClientId.value;
   resultMediaRecoveryAttempts = 0;
 }
@@ -5255,12 +5261,28 @@ function recoverGeneratedMedia(): void {
   const job = latestResultJob.value;
   if (!job || job.resultUrlLoading) return;
   if (resultMediaRecoveryClientId !== job.clientId) {
+    if (resultMediaRecoveryTimer !== null) {
+      clearTimeout(resultMediaRecoveryTimer);
+      resultMediaRecoveryTimer = null;
+    }
     resultMediaRecoveryClientId = job.clientId;
     resultMediaRecoveryAttempts = 0;
   }
-  if (resultMediaRecoveryAttempts === 0) {
-    resultMediaRecoveryAttempts = 1;
-    renewGeneratedResult(true);
+  if (resultMediaRecoveryTimer !== null) return;
+
+  const retryDelays = job.result?.format === "mp4" ? GENERATED_VIDEO_RECOVERY_DELAYS_MS : [0];
+  const delay = retryDelays[resultMediaRecoveryAttempts];
+  if (delay !== undefined) {
+    resultMediaRecoveryAttempts += 1;
+    if (delay === 0) {
+      renewGeneratedResult(true);
+      return;
+    }
+    const clientId = job.clientId;
+    resultMediaRecoveryTimer = setTimeout(() => {
+      resultMediaRecoveryTimer = null;
+      if (latestResultClientId.value === clientId) renewGeneratedResult(true);
+    }, delay);
     return;
   }
 
@@ -5272,6 +5294,10 @@ function recoverGeneratedMedia(): void {
 }
 
 function retryGeneratedPreview(): void {
+  if (resultMediaRecoveryTimer !== null) {
+    clearTimeout(resultMediaRecoveryTimer);
+    resultMediaRecoveryTimer = null;
+  }
   resultMediaRecoveryClientId = latestResultClientId.value;
   resultMediaRecoveryAttempts = 0;
   renewGeneratedResult(true);
@@ -7767,6 +7793,10 @@ onBeforeUnmount(() => {
   document.documentElement.style.removeProperty("--mobile-visual-viewport-page-top");
   window.removeEventListener("pageshow", handleForegroundResume);
   cancelKeyboardViewportRestore();
+  if (resultMediaRecoveryTimer !== null) {
+    clearTimeout(resultMediaRecoveryTimer);
+    resultMediaRecoveryTimer = null;
+  }
   stopPairingDeepLinks?.();
   stopPairingDeepLinks = null;
   if (hostProbeTimer) clearInterval(hostProbeTimer);
@@ -8505,6 +8535,7 @@ onBeforeUnmount(() => {
               :src="resultUrl"
               controls
               playsinline
+              preload="metadata"
               @play="renewGeneratedResult(false)"
               @loadedmetadata="generatedMediaReady"
               @error="recoverGeneratedMedia"
