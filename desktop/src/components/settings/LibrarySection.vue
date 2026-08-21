@@ -1,16 +1,35 @@
 <script setup lang="ts">
 import ConfigSettingRow from "./ConfigSettingRow.vue";
+import SettingRow from "./SettingRow.vue";
+import ToggleControl from "./ToggleControl.vue";
+import { useLibraryPrefsStore } from "../../stores/libraryPrefs";
 
 /**
- * Settings ▸ Library: the engine's trash retention for THIS device
- * (`gallery.trash_retention_days` on the primary's `/api/config`). Remote
- * machines keep their own retention — Machines ▸ machine ▸ Storage edits it
- * per host — so this section never pretends to be fleet-wide.
+ * Settings ▸ Library.
+ *
+ * Two different kinds of setting live here and the split is deliberate. Trash
+ * retention is the ENGINE's (`gallery.trash_retention_days` on the primary's
+ * `/api/config`), and remote machines keep their own — Machines ▸ machine ▸
+ * Storage edits those. "Tag new prints with their title" is a property of this
+ * install's Create form, so it stays on this side of the wire and reaches no
+ * host at all.
  */
+const libraryPrefs = useLibraryPrefsStore();
 </script>
 
 <template>
   <div data-test="library-section">
+    <SettingRow
+      label="Tag new prints with their title"
+      help="A titled print picks up its own slug as a tag — shown as a removable chip in Create before you generate. Never changes prints you already made."
+    >
+      <ToggleControl
+        :model-value="libraryPrefs.autoTagTitle"
+        aria-label="Tag new prints with their title"
+        data-test="library-auto-tag-title"
+        @commit="libraryPrefs.setAutoTagTitle($event)"
+      />
+    </SettingRow>
     <ConfigSettingRow schema-key="gallery.trash_retention_days" />
     <p class="mt-2 text-caption text-ink-3" data-test="library-remote-note">
       Remote machines keep their own retention — change it in Machines ▸ machine ▸ Storage.
