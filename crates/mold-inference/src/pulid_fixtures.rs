@@ -2,7 +2,7 @@
 //!
 //! The parity goldens under `crates/mold-inference/testdata/pulid/` were
 //! captured from upstream `ToTheBeginning/PuLID` on CPU in float32 (see that
-//! directory's `README.md` and `capture_goldens.py`). Their *inputs* are never
+//! directory's `README.md` and `capture_eva_goldens.py`). Their *inputs* are never
 //! committed as bytes — both the capture script and this module generate them
 //! from the same deterministic value stream, so a fixture tensor of any size
 //! costs nothing in the repository.
@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 
 /// `xorshift64*`, chosen because it is four lines in both Python and Rust and
 /// leaves no room for a library version to change the numbers underneath a
-/// golden. Mirrors `capture_goldens.py::DeterministicStream`.
+/// golden. Mirrors `capture_eva_goldens.py::DeterministicStream`.
 pub(crate) struct DeterministicStream {
     state: u64,
 }
@@ -121,7 +121,7 @@ pub(crate) fn max_errors(actual: &[f32], expected: &[f32]) -> (f32, f32) {
 
 /// A golden's recorded whole-tensor statistics: mean, standard deviation,
 /// minimum, maximum, and peak magnitude, in that order. Written by
-/// `capture_goldens.py::stats_tensor`.
+/// `capture_eva_goldens.py::stats_tensor`.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct GoldenStats {
     pub(crate) mean: f32,
@@ -251,7 +251,7 @@ mod tests {
     fn the_value_stream_is_pinned() {
         let mut stream = DeterministicStream::new(SEED_TOWER_INPUT);
         let values = stream.values(4);
-        // Captured from `capture_goldens.py::DeterministicStream` under the
+        // Captured from `capture_eva_goldens.py::DeterministicStream` under the
         // same seed; see `testdata/pulid/README.md`.
         let expected = [0.803_524_6_f32, -0.701_746_34, -0.431_918_62, 0.244_076_33];
         let (absolute, _) = max_errors(&values, &expected);

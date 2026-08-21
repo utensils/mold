@@ -1,4 +1,4 @@
-# PuLID parity goldens
+# PuLID encoder parity goldens
 
 Fixtures for `crates/mold-inference`'s EVA02-CLIP-L-14-336 vision tower
 (`src/encoders/eva_clip_vision.rs`), its preprocessing
@@ -6,17 +6,24 @@ Fixtures for `crates/mold-inference`'s EVA02-CLIP-L-14-336 vision tower
 (`src/flux/pulid_encoder.rs`). Issue
 [#1229](https://github.com/utensils/mold/issues/1229).
 
+> This directory holds two independent golden sets. The **face extraction**
+> fixtures — detection, alignment, and the ArcFace embedding
+> ([#1222](https://github.com/utensils/mold/issues/1222)) — live in `faces/`
+> with their own `faces/README.md` and their own `capture_goldens.py`. This
+> file covers only the encoder set below, whose capture script is
+> `capture_eva_goldens.py`.
+
 ## Provenance
 
 | | |
 | --- | --- |
 | Upstream | <https://github.com/ToTheBeginning/PuLID> |
 | Commit | `1aa2fc7df4bf51080df39f355f9abdc1cbfefbaa` |
-| Capture script | `capture_goldens.py` (in this directory) |
+| Capture script | `capture_eva_goldens.py` (in this directory) |
 | Captured | 2026-08-21, aarch64-darwin, CPU, float32 |
 | torch | 2.x CPU wheel in a scratch venv |
 
-`capture_goldens.py` is committed **as documentation of provenance only**.
+`capture_eva_goldens.py` is committed **as documentation of provenance only**.
 Nothing in mold's build, test, or runtime path executes it, and mold ships no
 Python. Re-run it by hand to refresh these files:
 
@@ -24,7 +31,7 @@ Python. Re-run it by hand to refresh these files:
 python3 -m venv /tmp/pulid-venv
 /tmp/pulid-venv/bin/pip install torch torchvision numpy pillow einops timm ftfy regex safetensors
 git clone https://github.com/ToTheBeginning/PuLID /tmp/PuLID
-/tmp/pulid-venv/bin/python capture_goldens.py \
+/tmp/pulid-venv/bin/python capture_eva_goldens.py \
   --pulid-repo /tmp/PuLID \
   --eva   /path/to/EVA02_CLIP_L_336_psz14_s6B.pt \
   --adapter /path/to/pulid_flux_v0.9.1.safetensors \
@@ -63,12 +70,16 @@ with the weights could forge it to match.
 | `goldens.safetensors` | Every numeric fixture (290 KB) |
 | `goldens.json` | Human-readable statistics and capture parameters |
 | `input_pattern.png` | The 512x512 preprocessing input (force-added past the repo-wide `*.png` ignore) |
-| `capture_goldens.py` | Provenance, above |
+| `capture_eva_goldens.py` | Provenance, above |
+
+`faces/`, `fetch_faces.py`, `onnx-inventory.json` and `capture_goldens.py`
+belong to the face-extraction goldens and are documented in
+`faces/README.md`.
 
 ### Inputs are generated, not committed
 
 Every fixture input except the PNG comes from one deterministic value stream —
-`xorshift64*`, four lines, implemented identically in `capture_goldens.py` and
+`xorshift64*`, four lines, implemented identically in `capture_eva_goldens.py` and
 in `crates/mold-inference/src/pulid_fixtures.rs`. A `[1, 577, 1024]` fixture
 therefore costs zero bytes in the repository, and
 `pulid_fixtures::tests::the_value_stream_is_pinned` guards the stream itself so

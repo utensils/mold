@@ -604,6 +604,35 @@ describe("useGenerateForm", () => {
 
       expect(restored.frames).toBe(177);
       expect(restored.pipeline).toBeNull();
+
+      const nightly = applyMetadataToForm(
+        base,
+        {
+          prompt: "the live nightly metadata shape",
+          model: "ltx-2.3-22b-distilled:fp8",
+          seed: 8,
+          steps: 8,
+          guidance: 1,
+          width: 768,
+          height: 768,
+          frames: 217,
+          fps: 24,
+          pipeline: "distilled",
+          output_mode: "one-shot",
+        } as OutputMetadata,
+        {
+          models: [
+            makeModel({
+              name: "ltx-2.3-22b-distilled:fp8",
+              family: "ltx2",
+              default_frames: 97,
+              default_fps: 24,
+              frame_step: 8,
+            }),
+          ],
+        },
+      );
+      expect(nightly.pipeline).toBeNull();
     });
 
     it("an explicit clear restored before rows load survives the wan row arriving", () => {

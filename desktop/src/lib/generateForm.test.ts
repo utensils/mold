@@ -1734,6 +1734,46 @@ describe("applyMetadataToForm", () => {
     applyMetadataToForm(
       form,
       {
+        prompt: "the live nightly metadata shape",
+        model: "ltx-2.3-22b-distilled:fp8",
+        seed: 44,
+        steps: 8,
+        guidance: 1,
+        width: 768,
+        height: 768,
+        frames: 217,
+        fps: 24,
+        pipeline: "distilled",
+        output_mode: "one-shot",
+      } as OutputMetadata,
+      [{ ...ltx2Model(), name: "ltx-2.3-22b-distilled:fp8" }],
+    );
+    expect(form.pipeline).toBeNull();
+    expect(buildRequest(form).pipeline).toBeUndefined();
+
+    applyMetadataToForm(
+      form,
+      {
+        prompt: "an explicitly selected pipeline",
+        model: "ltx-2.3-22b-distilled:fp8",
+        seed: 45,
+        steps: 8,
+        guidance: 1,
+        width: 768,
+        height: 768,
+        frames: 97,
+        fps: 24,
+        pipeline: "two-stage",
+        pipeline_requested: true,
+        output_mode: "one-shot",
+      } as OutputMetadata,
+      [{ ...ltx2Model(), name: "ltx-2.3-22b-distilled:fp8" }],
+    );
+    expect(form.pipeline).toBe("two-stage");
+
+    applyMetadataToForm(
+      form,
+      {
         prompt: "a legacy long tracking shot",
         model: "ltx-2-19b-distilled:fp8",
         seed: 43,
@@ -1866,6 +1906,7 @@ describe("applyMetadataToForm", () => {
         fps: 30,
         enable_audio: true,
         pipeline: "two-stage",
+        pipeline_requested: true,
         spatial_upscale: "x2",
         guidance_overrides: {
           stg_scale: 1.25,
