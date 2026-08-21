@@ -56,6 +56,11 @@ web/*.tsbuildinfo
 !apps/mobile/src-tauri/gen/apple/Assets.xcassets/**/*.png
 !crates/mold-inference/src/ltx2/testdata/preprocess/*.jpg
 !crates/mold-inference/src/ltx2/testdata/preprocess/*.png
+# PuLID face-extraction parity fixtures (#1222): public-domain portraits and
+# the warp goldens captured from them. Un-ignored rather than force-added,
+# because release-plz refuses to run while a tracked file is also gitignored.
+!testdata/pulid/faces/*.jpg
+!testdata/pulid/faces/*.png
 apps/mobile/src-tauri/gen/schemas/
 result
 result-*

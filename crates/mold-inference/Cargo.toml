@@ -57,7 +57,7 @@ h3-cuda = ["h3", "cuda", "h3-attention-rc"]
 h3-private-uat = ["mold-candle/h3-private-uat"]
 # PuLID-FLUX face-identity conditioning. Off by default; the runtime adapter
 # lands separately, so today this only forwards the core contract edge.
-pulid = ["mold-core/pulid"]
+pulid = ["mold-core/pulid", "dep:candle-onnx", "dep:prost"]
 
 [[bin]]
 name = "ltx2_checkpoint_probe"
@@ -78,6 +78,13 @@ required-features = ["dev-bins", "mp4"]
 name = "sd_singlefile_inspect"
 path = "src/bin/sd_singlefile_inspect.rs"
 required-features = ["dev-bins"]
+
+# Step-0 decision probe for #1222: ONNX op inventory and the warm-latency
+# measurement that qualified (or would have disqualified) `candle-onnx`.
+[[bin]]
+name = "pulid_face_probe"
+path = "src/bin/pulid_face_probe.rs"
+required-features = ["dev-bins", "pulid"]
 
 # Needs `flash-attn` on top of `dev-bins` to measure anything: without it the
 # flash column silently benchmarks the math fallback.
@@ -143,6 +150,17 @@ cudarc = { version = "0.19.8", default-features = false, features = ["driver"], 
 # This now resolves through the same workspace-root `candle-core` patch as
 # Mold, so its `Tensor` type is identical to ours.
 candle-flash-attn = { version = "0.11", optional = true }
+# ONNX evaluation for the InsightFace antelopev2 face models (PuLID only).
+# Resolves through the same workspace-root `candle-core` patch as every other
+# candle crate, so its `Tensor` type is identical to ours. CPU-only by
+# construction: `candle-onnx`'s `get_tensor` materializes every initializer on
+# `Device::Cpu` (candle-onnx/src/eval.rs:191-232).
+candle-onnx = { version = "0.11", optional = true }
+# `candle-onnx` does not re-export `prost`, and mold decodes the `ModelProto`
+# from a retained descriptor rather than through that crate's path-based
+# `read_file`. Same 0.14 release candle-onnx builds against, so cargo unifies
+# the two and the generated types keep implementing this crate's `Message`.
+prost = { version = "0.14", optional = true }
 gif = "0.13"
 webp-animation = { version = "0.10", features = ["static"], optional = true }
 image = "0.25"

@@ -1,0 +1,469 @@
+{
+  "glintr100.onnx": {
+    "bytes": 260665334,
+    "inventory": {
+      "inputs": [
+        {
+          "dims": [
+            -1,
+            3,
+            112,
+            112
+          ],
+          "name": "input.1"
+        }
+      ],
+      "opset": {
+        "": 11
+      },
+      "outputs": [
+        {
+          "dims": [
+            1,
+            512
+          ],
+          "name": "1333"
+        }
+      ],
+      "signatures": [
+        {
+          "attributes": [],
+          "count": 49,
+          "op_type": "Add"
+        },
+        {
+          "attributes": [
+            {
+              "name": "epsilon",
+              "value": "0.00001"
+            },
+            {
+              "name": "momentum",
+              "value": "0.9"
+            }
+          ],
+          "count": 51,
+          "op_type": "BatchNormalization"
+        },
+        {
+          "attributes": [
+            {
+              "name": "dilations",
+              "value": "1,1"
+            },
+            {
+              "name": "group",
+              "value": "1"
+            },
+            {
+              "name": "kernel_shape",
+              "value": "1,1"
+            },
+            {
+              "name": "pads",
+              "value": "0,0,0,0"
+            },
+            {
+              "name": "strides",
+              "value": "2,2"
+            }
+          ],
+          "count": 4,
+          "op_type": "Conv"
+        },
+        {
+          "attributes": [
+            {
+              "name": "dilations",
+              "value": "1,1"
+            },
+            {
+              "name": "group",
+              "value": "1"
+            },
+            {
+              "name": "kernel_shape",
+              "value": "3,3"
+            },
+            {
+              "name": "pads",
+              "value": "1,1,1,1"
+            },
+            {
+              "name": "strides",
+              "value": "1,1"
+            }
+          ],
+          "count": 95,
+          "op_type": "Conv"
+        },
+        {
+          "attributes": [
+            {
+              "name": "dilations",
+              "value": "1,1"
+            },
+            {
+              "name": "group",
+              "value": "1"
+            },
+            {
+              "name": "kernel_shape",
+              "value": "3,3"
+            },
+            {
+              "name": "pads",
+              "value": "1,1,1,1"
+            },
+            {
+              "name": "strides",
+              "value": "2,2"
+            }
+          ],
+          "count": 4,
+          "op_type": "Conv"
+        },
+        {
+          "attributes": [
+            {
+              "name": "axis",
+              "value": "1"
+            }
+          ],
+          "count": 1,
+          "op_type": "Flatten"
+        },
+        {
+          "attributes": [
+            {
+              "name": "alpha",
+              "value": "1"
+            },
+            {
+              "name": "beta",
+              "value": "1"
+            },
+            {
+              "name": "transB",
+              "value": "1"
+            }
+          ],
+          "count": 1,
+          "op_type": "Gemm"
+        },
+        {
+          "attributes": [],
+          "count": 50,
+          "op_type": "PRelu"
+        }
+      ]
+    },
+    "sha256": "4ab1d6435d639628a6f3e5008dd4f929edf4c4124b1a7169e1048f9fef534cdf"
+  },
+  "scrfd_10g_bnkps.onnx": {
+    "bytes": 16923827,
+    "inventory": {
+      "inputs": [
+        {
+          "dims": [
+            1,
+            3,
+            -1,
+            -1
+          ],
+          "name": "input.1"
+        }
+      ],
+      "opset": {
+        "": 11
+      },
+      "outputs": [
+        {
+          "dims": [
+            12800,
+            1
+          ],
+          "name": "448"
+        },
+        {
+          "dims": [
+            3200,
+            1
+          ],
+          "name": "471"
+        },
+        {
+          "dims": [
+            800,
+            1
+          ],
+          "name": "494"
+        },
+        {
+          "dims": [
+            12800,
+            4
+          ],
+          "name": "451"
+        },
+        {
+          "dims": [
+            3200,
+            4
+          ],
+          "name": "474"
+        },
+        {
+          "dims": [
+            800,
+            4
+          ],
+          "name": "497"
+        },
+        {
+          "dims": [
+            12800,
+            10
+          ],
+          "name": "454"
+        },
+        {
+          "dims": [
+            3200,
+            10
+          ],
+          "name": "477"
+        },
+        {
+          "dims": [
+            800,
+            10
+          ],
+          "name": "500"
+        }
+      ],
+      "signatures": [
+        {
+          "attributes": [],
+          "count": 16,
+          "op_type": "Add"
+        },
+        {
+          "attributes": [
+            {
+              "name": "ceil_mode",
+              "value": "1"
+            },
+            {
+              "name": "kernel_shape",
+              "value": "2,2"
+            },
+            {
+              "name": "pads",
+              "value": "0,0,0,0"
+            },
+            {
+              "name": "strides",
+              "value": "2,2"
+            }
+          ],
+          "count": 3,
+          "op_type": "AveragePool"
+        },
+        {
+          "attributes": [
+            {
+              "name": "axis",
+              "value": "0"
+            }
+          ],
+          "count": 2,
+          "op_type": "Concat"
+        },
+        {
+          "attributes": [
+            {
+              "name": "dilations",
+              "value": "1,1"
+            },
+            {
+              "name": "group",
+              "value": "1"
+            },
+            {
+              "name": "kernel_shape",
+              "value": "1,1"
+            },
+            {
+              "name": "pads",
+              "value": "0,0,0,0"
+            },
+            {
+              "name": "strides",
+              "value": "1,1"
+            }
+          ],
+          "count": 6,
+          "op_type": "Conv"
+        },
+        {
+          "attributes": [
+            {
+              "name": "dilations",
+              "value": "1,1"
+            },
+            {
+              "name": "group",
+              "value": "1"
+            },
+            {
+              "name": "kernel_shape",
+              "value": "3,3"
+            },
+            {
+              "name": "pads",
+              "value": "1,1,1,1"
+            },
+            {
+              "name": "strides",
+              "value": "1,1"
+            }
+          ],
+          "count": 46,
+          "op_type": "Conv"
+        },
+        {
+          "attributes": [
+            {
+              "name": "dilations",
+              "value": "1,1"
+            },
+            {
+              "name": "group",
+              "value": "1"
+            },
+            {
+              "name": "kernel_shape",
+              "value": "3,3"
+            },
+            {
+              "name": "pads",
+              "value": "1,1,1,1"
+            },
+            {
+              "name": "strides",
+              "value": "2,2"
+            }
+          ],
+          "count": 6,
+          "op_type": "Conv"
+        },
+        {
+          "attributes": [
+            {
+              "name": "axis",
+              "value": "0"
+            }
+          ],
+          "count": 4,
+          "op_type": "Gather"
+        },
+        {
+          "attributes": [
+            {
+              "name": "ceil_mode",
+              "value": "0"
+            },
+            {
+              "name": "kernel_shape",
+              "value": "2,2"
+            },
+            {
+              "name": "pads",
+              "value": "0,0,0,0"
+            },
+            {
+              "name": "strides",
+              "value": "2,2"
+            }
+          ],
+          "count": 1,
+          "op_type": "MaxPool"
+        },
+        {
+          "attributes": [],
+          "count": 3,
+          "op_type": "Mul"
+        },
+        {
+          "attributes": [],
+          "count": 36,
+          "op_type": "Relu"
+        },
+        {
+          "attributes": [],
+          "count": 9,
+          "op_type": "Reshape"
+        },
+        {
+          "attributes": [
+            {
+              "name": "coordinate_transformation_mode",
+              "value": "asymmetric"
+            },
+            {
+              "name": "cubic_coeff_a",
+              "value": "-0.75"
+            },
+            {
+              "name": "mode",
+              "value": "nearest"
+            },
+            {
+              "name": "nearest_mode",
+              "value": "floor"
+            }
+          ],
+          "count": 2,
+          "op_type": "Resize"
+        },
+        {
+          "attributes": [],
+          "count": 6,
+          "op_type": "Shape"
+        },
+        {
+          "attributes": [],
+          "count": 3,
+          "op_type": "Sigmoid"
+        },
+        {
+          "attributes": [],
+          "count": 2,
+          "op_type": "Slice"
+        },
+        {
+          "attributes": [
+            {
+              "name": "perm",
+              "value": "2,3,0,1"
+            }
+          ],
+          "count": 9,
+          "op_type": "Transpose"
+        },
+        {
+          "attributes": [
+            {
+              "name": "axes",
+              "value": "0"
+            }
+          ],
+          "count": 4,
+          "op_type": "Unsqueeze"
+        }
+      ]
+    },
+    "sha256": "5838f7fe053675b1c7a08b633df49e7af5495cee0493c7dcf6697200b85b5b91"
+  }
+}
