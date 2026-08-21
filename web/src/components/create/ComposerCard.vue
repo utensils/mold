@@ -36,6 +36,8 @@ const props = withDefaults(
     expanded?: boolean;
     /** Disable submit/expand (e.g. a job is mid-flight). */
     busy?: boolean;
+    cancellable?: boolean;
+    busyLabel?: string;
     /** Actionable request prerequisite shown beside Generate. */
     disabledReason?: string | null;
     /** The visual conditioning lets this render go out undescribed. */
@@ -48,6 +50,8 @@ const props = withDefaults(
   {
     expanded: false,
     busy: false,
+    cancellable: false,
+    busyLabel: "Planning generation…",
     disabledReason: null,
     promptOptional: false,
     requiredPlaceholder: "Describe the image you want to create…",
@@ -59,6 +63,7 @@ const emit = defineEmits<{
   "update:prompt": [value: string];
   "update:stylePreset": [value: string | null];
   submit: [];
+  cancel: [];
   expand: [];
   remix: [];
   "undo-expand": [];
@@ -85,7 +90,7 @@ const expandLabel = computed(() =>
   props.batchSize > 1 ? `Expand to ${props.batchSize}` : "Expand prompt",
 );
 const generateDisabled = computed(
-  () => props.busy || Boolean(props.disabledReason),
+  () => !props.cancellable && (props.busy || Boolean(props.disabledReason)),
 );
 
 // Shell-style ↑/↓ prompt-history recall. The cycler is fed the latest history
@@ -106,7 +111,7 @@ function onInput(event: Event) {
 function onKeydown(event: KeyboardEvent) {
   if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
     event.preventDefault();
-    if (!generateDisabled.value) emit("submit");
+    if (!generateDisabled.value) submitOrCancel();
     return;
   }
   const el = event.target as HTMLTextAreaElement;
@@ -127,6 +132,11 @@ function onKeydown(event: KeyboardEvent) {
       emit("update:prompt", recalled);
     }
   }
+}
+
+function submitOrCancel() {
+  if (props.cancellable) emit("cancel");
+  else emit("submit");
 }
 
 function pickStyle(id: string) {
@@ -244,12 +254,22 @@ watch(
         class="composer__generate"
         data-test="composer-submit"
         :disabled="generateDisabled"
-        @click="emit('submit')"
+        @click="submitOrCancel"
       >
-        <Icon name="sparkle" :size="16" :stroke-width="2" />
-        Generate
+        <Icon
+          :name="cancellable ? 'close' : 'sparkle'"
+          :size="16"
+          :stroke-width="2"
+        />
+        {{ cancellable ? "Cancel" : "Generate" }}
         <Keycap on-accent>⌘<span class="composer__return">↵</span></Keycap>
       </button>
+      <span
+        v-if="cancellable"
+        class="composer__summary"
+        data-test="composer-busy-status"
+        >{{ busyLabel }}</span
+      >
     </div>
     <ActionBlocker
       v-if="disabledReason"

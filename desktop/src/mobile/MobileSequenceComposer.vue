@@ -87,7 +87,12 @@ const props = withDefaults(
   },
 );
 
-const emit = defineEmits<{ submit: [] }>();
+const emit = defineEmits<{ submit: []; cancel: [] }>();
+
+function submitOrCancel(): void {
+  if (props.submitting) emit("cancel");
+  else emit("submit");
+}
 
 const draft = useSequenceDraftStore();
 const guidanceCaps = computed(() =>
@@ -298,11 +303,6 @@ function removeClip(id: string): void {
   draft.removeClip(id);
 }
 
-function submit(): void {
-  if (locked.value || blockingReason.value) return;
-  emit("submit");
-}
-
 function setOpeningImage(image: MobilePickedImage): void {
   draft.openingImage = { filename: image.filename, base64: image.base64 };
   props.form.sourceFit = coerceSourceFitForMaskless(props.form.sourceFit);
@@ -496,10 +496,10 @@ function sourceImageMime(filename: string): string {
       class="primary-button mobile-sequence-generate"
       type="button"
       data-test="mobile-generate-sequence"
-      :disabled="locked || !!blockingReason"
-      @click="submit"
+      :disabled="(locked || !!blockingReason) && !submitting"
+      @click="submitOrCancel"
     >
-      {{ submitting ? "Starting…" : "Generate sequence" }}
+      {{ submitting ? "Cancel · Preparing sequence…" : "Generate sequence" }}
     </button>
 
     <MobileSeamSheet

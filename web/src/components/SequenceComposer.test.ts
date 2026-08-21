@@ -88,6 +88,21 @@ describe("SequenceComposer", () => {
     expect(wrapper.text()).toContain("Describe clip 1");
   });
 
+  it("keeps the preparing action responsive and emits cancel", async () => {
+    const store = useSequenceDraftStore();
+    store.ensureClips(97);
+    store.clips[0]!.prompt = "opening";
+    store.clips[1]!.prompt = "ending";
+    const wrapper = mountComposer({ submitting: true });
+    await flushPromises();
+    const button = wrapper.get("[data-test='sequence-generate']");
+    expect(button.attributes("disabled")).toBeUndefined();
+    expect(button.text()).toContain("Cancel · Preparing sequence");
+    await button.trigger("click");
+    expect(wrapper.emitted("cancel")).toHaveLength(1);
+    expect(wrapper.emitted("submit")).toBeUndefined();
+  });
+
   it("resets model-owned clip lengths and fetches limits at the active fps", async () => {
     const wrapper = mountComposer();
     await flushPromises();
