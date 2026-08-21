@@ -5,6 +5,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 ci="$repo_root/.github/workflows/ci.yml"
 desktop="$repo_root/.github/workflows/desktop.yml"
 ios="$repo_root/.github/workflows/ios.yml"
+android="$repo_root/.github/workflows/android.yml"
 release_workflow="$repo_root/.github/workflows/release.yml"
 
 fail() {
@@ -454,7 +455,7 @@ grep -Fq 'desktop/src/components/**' <<< "$desktop_classifier" \
 grep -Fq 'desktop/src-tauri/**' <<< "$desktop_classifier" \
   || fail "desktop native classifier does not track the Tauri crate"
 if grep -Fq 'desktop/src/mobile/**' "$desktop"; then
-  fail "mobile-only changes are not owned exclusively by the iOS workflow"
+  fail "mobile-only changes leak into the desktop workflow instead of the mobile workflows"
 fi
 [[ "$(grep -Fc 'crates/mold-scheduler/**' "$desktop")" -eq 2 ]] \
   || fail "desktop main trigger/classifier does not track its scheduler dependency"
@@ -489,5 +490,27 @@ grep -Fq 'run: cargo clippy --target aarch64-apple-ios-sim -- -D warnings' <<< "
 if grep -Fq 'run: cargo check --target aarch64-apple-ios-sim' "$ios"; then
   fail "iOS simulator still runs cargo check immediately before Clippy"
 fi
+
+require_text "$android" \
+  "cancel-in-progress: \${{ github.event_name == 'pull_request' }}" \
+  "Android workflow does not cancel superseded PR runs"
+require_text "$android" 'desktop/src/mobile/**' \
+  "Android workflow does not run for shared mobile source changes"
+require_text "$android" 'apps/mobile/**' \
+  "Android workflow does not run for native mobile changes"
+require_text "$android" 'runs-on: ubuntu-latest' \
+  "Android builds do not run on the supported Linux host"
+require_text "$android" 'targets: aarch64-linux-android' \
+  "Android workflow does not install its Rust target"
+require_text "$android" '"ndk;27.0.12077973"' \
+  "Android workflow does not pin the repository NDK"
+require_text "$android" \
+  'run: cargo tauri android build --debug --apk --target aarch64 --ci' \
+  "Android workflow does not build the ARM64 APK"
+require_text "$android" 'api-level: 35' \
+  "Android workflow does not exercise a modern emulator"
+require_text "$android" \
+  './gradlew --no-daemon :tauri-plugin-mold-mobile-native:connectedDebugAndroidTest' \
+  "Android workflow does not run native instrumentation tests"
 
 echo "PASS: CI routing contract"

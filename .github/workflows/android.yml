@@ -1,0 +1,110 @@
+name: Android
+
+on:
+  push:
+    branches: [main]
+    paths:
+      [
+        "apps/mobile/**",
+        "studio/**",
+        "ui/**",
+        "package.json",
+        "bun.lock",
+        "bun.nix",
+        "desktop/src/mobile/**",
+        "desktop/src/components/**",
+        "desktop/src/lib/**",
+        "desktop/src/stores/**",
+        "desktop/src/styles/**",
+        "desktop/src/assets/**",
+        "desktop/package.json",
+        "desktop/vite.mobile.config.ts",
+        "desktop/index.mobile.html",
+        "scripts/android.sh",
+        "flake.nix",
+        ".github/workflows/android.yml",
+      ]
+  pull_request:
+    paths:
+      [
+        "apps/mobile/**",
+        "studio/**",
+        "ui/**",
+        "package.json",
+        "bun.lock",
+        "bun.nix",
+        "desktop/src/mobile/**",
+        "desktop/src/components/**",
+        "desktop/src/lib/**",
+        "desktop/src/stores/**",
+        "desktop/src/styles/**",
+        "desktop/src/assets/**",
+        "desktop/package.json",
+        "desktop/vite.mobile.config.ts",
+        "desktop/index.mobile.html",
+        "scripts/android.sh",
+        "flake.nix",
+        ".github/workflows/android.yml",
+      ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build-and-test:
+    name: Android build and native tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: android-actions/setup-android@v3
+      - name: Install Android toolchain
+        run: |
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-36" \
+            "build-tools;36.0.0" \
+            "ndk;27.0.12077973"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> "$GITHUB_ENV"
+      - uses: gradle/actions/setup-gradle@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/mobile/src-tauri
+          key: mold-android
+      - name: Cache Tauri CLI
+        id: tauri-cli-cache
+        uses: actions/cache@v5
+        with:
+          path: ~/.cargo/bin/cargo-tauri
+          key: tauri-cli-${{ runner.os }}-${{ runner.arch }}-2.11.4
+      - name: Install Tauri CLI
+        if: steps.tauri-cli-cache.outputs.cache-hit != 'true'
+        run: cargo install tauri-cli --version 2.11.4 --locked
+      - name: Verify Tauri CLI
+        run: cargo tauri --version | grep -F '2.11.4'
+      - name: Install frontend dependencies
+        run: bun install --frozen-lockfile
+      - name: Build Android APK
+        working-directory: apps/mobile/src-tauri
+        run: cargo tauri android build --debug --apk --target aarch64 --ci
+      - name: Run Android instrumentation tests
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          arch: x86_64
+          profile: pixel_6
+          disable-animations: true
+          script: cd apps/mobile/src-tauri/gen/android && ./gradlew --no-daemon :tauri-plugin-mold-mobile-native:connectedDebugAndroidTest
