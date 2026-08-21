@@ -5435,10 +5435,11 @@ describe("MobileApp foreground resume", () => {
     }
   });
 
-  it("counters visual-viewport keyboard panning so the header stays below iOS chrome", async () => {
+  it("tracks the visual viewport so sheets clear the keyboard and the header stays put", async () => {
     const originalViewport = Object.getOwnPropertyDescriptor(window, "visualViewport");
-    const visualViewport = new EventTarget() as EventTarget & { pageTop: number };
+    const visualViewport = new EventTarget() as EventTarget & { pageTop: number; height: number };
     visualViewport.pageTop = 58;
+    visualViewport.height = 510;
     Object.defineProperty(window, "visualViewport", {
       value: visualViewport,
       configurable: true,
@@ -5449,12 +5450,19 @@ describe("MobileApp foreground resume", () => {
       expect(
         document.documentElement.style.getPropertyValue("--mobile-visual-viewport-page-top"),
       ).toBe("58px");
+      expect(
+        document.documentElement.style.getPropertyValue("--mobile-visual-viewport-height"),
+      ).toBe("510px");
 
       visualViewport.pageTop = 0;
-      visualViewport.dispatchEvent(new Event("scroll"));
+      visualViewport.height = 844;
+      visualViewport.dispatchEvent(new Event("resize"));
       expect(
         document.documentElement.style.getPropertyValue("--mobile-visual-viewport-page-top"),
       ).toBe("0px");
+      expect(
+        document.documentElement.style.getPropertyValue("--mobile-visual-viewport-height"),
+      ).toBe("844px");
     } finally {
       wrapper?.unmount();
       wrapper = null;

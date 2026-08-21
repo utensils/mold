@@ -172,12 +172,16 @@ describe("mobile seam sheet", () => {
     const open = css.match(/\.mobile-seam-sheet\.is-open\s*\{([^}]*)\}/s);
     expect(sheet?.[1]).toMatch(/position:\s*fixed\s*;/);
     expect(sheet?.[1]).toMatch(/display:\s*none\s*;/);
-    expect(sheet?.[1]).toMatch(/inset:\s*0\s*;/);
+    expect(sheet?.[1]).toMatch(/inset:\s*0 0 auto\s*;/);
     expect(open?.[1]).toMatch(/display:\s*flex\s*;/);
   });
 
   it("scrolls its own body with the pinned mobile containment invariants", () => {
+    const panel = css.match(/\.mobile-seam-sheet-panel\s*\{([^}]*)\}/s);
     const body = css.match(/\.mobile-seam-sheet-body\s*\{([^}]*)\}/s);
+    expect(panel?.[1]).toMatch(
+      /max-height:\s*min\(86dvh,\s*var\(--mobile-visual-viewport-height,\s*100dvh\)\)\s*;/,
+    );
     expect(body?.[1]).toMatch(/overflow-y:\s*auto\s*;/);
     expect(body?.[1]).toMatch(/overscroll-behavior:\s*none\s*;/);
     expect(body?.[1]).toMatch(/touch-action:\s*manipulation\s*;/);
@@ -439,6 +443,35 @@ describe("mobile develop bed", () => {
   });
 });
 
+describe("mobile gallery viewer", () => {
+  it("contains wide intrinsic media inside the iPhone viewport", () => {
+    const viewer = css.match(/\.gallery-viewer\s*\{([^}]*)\}/s);
+    const stage = css.match(/\.gallery-viewer-stage\s*\{([^}]*)\}/s);
+    const media = css.match(
+      /\.gallery-viewer-media,\s*\.gallery-viewer-placeholder\s*\{([^}]*)\}/s,
+    );
+    expect(viewer?.[1]).toMatch(/overflow:\s*hidden\s*;/);
+    expect(stage?.[1]).toMatch(/width:\s*100%\s*;/);
+    expect(stage?.[1]).toMatch(/min-width:\s*0\s*;/);
+    expect(media?.[1]).toMatch(/min-width:\s*0\s*;/);
+    expect(media?.[1]).toMatch(/max-width:\s*100%\s*;/);
+  });
+
+  it("keeps the header and actions within the same viewport column", () => {
+    const header = css.match(/\.gallery-viewer-header\s*\{([^}]*)\}/s);
+    const origin = css.match(/\.gallery-viewer-origin\s*\{([^}]*)\}/s);
+    const details = css.match(/\.gallery-viewer-details\s*\{([^}]*)\}/s);
+    expect(header?.[1]).toMatch(/width:\s*100%\s*;/);
+    expect(header?.[1]).toMatch(/min-width:\s*0\s*;/);
+    expect(header?.[1]).toMatch(/box-sizing:\s*border-box\s*;/);
+    expect(origin?.[1]).toMatch(/flex:\s*1 1 0\s*;/);
+    expect(origin?.[1]).toMatch(/min-width:\s*0\s*;/);
+    expect(details?.[1]).toMatch(/width:\s*100%\s*;/);
+    expect(details?.[1]).toMatch(/min-width:\s*0\s*;/);
+    expect(details?.[1]).toMatch(/box-sizing:\s*border-box\s*;/);
+  });
+});
+
 describe("mobile Library organization", () => {
   it("keeps the scope row, chips, and tag targets at the 44pt floor", () => {
     for (const selector of [
@@ -488,7 +521,8 @@ describe("mobile Library organization", () => {
     const done = css.match(/\.mobile-library-sheet-done\s*\{([^}]*)\}/s);
     expect(sheet?.[1]).toMatch(/position:\s*fixed\s*;/);
     expect(sheet?.[1]).toMatch(/display:\s*none\s*;/);
-    expect(sheet?.[1]).toMatch(/inset:\s*0\s*;/);
+    expect(sheet?.[1]).toMatch(/inset:\s*0 0 auto\s*;/);
+    expect(sheet?.[1]).toMatch(/height:\s*var\(--mobile-visual-viewport-height,\s*100dvh\)\s*;/);
     expect(open?.[1]).toMatch(/display:\s*flex\s*;/);
     expect(body?.[1]).toMatch(/overflow-y:\s*auto\s*;/);
     expect(body?.[1]).toMatch(/overscroll-behavior:\s*none\s*;/);
@@ -497,6 +531,23 @@ describe("mobile Library organization", () => {
     expect(body?.[1]).toContain("env(safe-area-inset-right)");
     expect(body?.[1]).toContain("env(safe-area-inset-bottom)");
     expect(Number(done?.[1]?.match(/min-height:\s*(\d+)px/)?.[1])).toBeGreaterThanOrEqual(44);
+  });
+
+  it("keeps every keyboard-capable sheet inside the visual viewport", () => {
+    for (const className of ["mobile-advanced-sheet", "mobile-seam-sheet"]) {
+      const sheet = css.match(new RegExp(`\\.${className}\\s*\\{([^}]*)\\}`, "s"));
+      expect(sheet?.[1]).toMatch(/inset:\s*0 0 auto\s*;/);
+      expect(sheet?.[1]).toMatch(/height:\s*var\(--mobile-visual-viewport-height,\s*100dvh\)\s*;/);
+    }
+  });
+
+  it("aligns Library sheet actions with their controls instead of the labeled field margin", () => {
+    const panel = css.match(/\.mobile-library-sheet-panel\s*\{([^}]*)\}/s);
+    const field = css.match(/\.mobile-library-sheet-form \.field\s*\{([^}]*)\}/s);
+    expect(panel?.[1]).toMatch(
+      /max-height:\s*min\(86dvh,\s*var\(--mobile-visual-viewport-height,\s*100dvh\)\)\s*;/,
+    );
+    expect(field?.[1]).toMatch(/margin:\s*0\s*;/);
   });
 
   it("uses the iPhone radii scale for chips, covers, and collection cards", () => {
