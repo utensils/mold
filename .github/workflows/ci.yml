@@ -458,7 +458,9 @@ jobs:
           components: rustfmt,clippy
       - name: Install Rust build deps
         if: env.RUN_RUST_SUITE == 'true'
-        run: sudo apt-get update && sudo apt-get install -y clang lld nasm libwebp-dev
+        # `protobuf-compiler` is for the `pulid` feature: `candle-onnx`'s build
+        # script drives `prost-build`, which shells out to `protoc`.
+        run: sudo apt-get update && sudo apt-get install -y clang lld nasm libwebp-dev protobuf-compiler
       - uses: mozilla-actions/sccache-action@v0.0.7
         if: env.RUN_RUST_SUITE == 'true'
       - name: Enable sccache
@@ -497,7 +499,7 @@ jobs:
           rustup toolchain install "$msrv_toolchain" --profile minimal
           cargo "+$msrv_toolchain" check --workspace --all-targets --locked
           cargo "+$msrv_toolchain" check -p mold-ai --locked \
-            --features preview,discord,expand,tui,metrics,webp,mp4,mdns
+            --features preview,discord,expand,tui,metrics,webp,mp4,mdns,pulid
       - name: Format
         if: env.RUN_RUST_FORMAT == 'true'
         run: cargo fmt --all -- --check
@@ -557,7 +559,22 @@ jobs:
         run: cargo test -p mold-ai-inference --lib --features h3-private-uat minimax_h3
       - name: Check with all optional features
         if: env.RUN_RUST_SUITE == 'true'
-        run: cargo check -p mold-ai --features preview,discord,expand,tui,webp,mp4,mdns
+        run: cargo check -p mold-ai --features preview,discord,expand,tui,webp,mp4,mdns,pulid
+      # `pulid` is the only feature whose lints are otherwise never compiled:
+      # the workspace clippy gate runs featureless, and the PuLID extractor,
+      # the identity extraction seam, and their tests all live behind it.
+      - name: Clippy the PuLID identity stack
+        if: env.RUN_RUST_SUITE == 'true'
+        run: |
+          cargo clippy -p mold-ai-core --features pulid --all-targets -- -D warnings
+          cargo clippy -p mold-ai-inference --features pulid --all-targets -- -D warnings
+          cargo clippy -p mold-ai-server --features pulid --all-targets -- -D warnings
+      - name: Test the PuLID identity stack
+        if: env.RUN_RUST_SUITE == 'true'
+        run: |
+          cargo test -p mold-ai-core --features pulid --lib identity
+          cargo test -p mold-ai-inference --features pulid --lib identity
+          cargo test -p mold-ai-server --features pulid --lib identity
       - name: Record protected gate success
         run: echo "Required Rust and release routes completed successfully."
 
@@ -658,8 +675,12 @@ jobs:
         with:
           shared-key: workspace-metal
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install protoc
+        # The `pulid` feature pulls in `candle-onnx`, whose build script shells
+        # out to `protoc`.
+        run: brew install protobuf
       - name: Clippy Metal forced-local and server paths
-        run: cargo clippy -p mold-ai --features metal,preview,expand,tui,webp,mp4,mdns --all-targets -- -D warnings
+        run: cargo clippy -p mold-ai --features metal,preview,expand,tui,webp,mp4,mdns,pulid --all-targets -- -D warnings
 
   # Codecov remains a main-branch reporting signal. It is intentionally not a
   # required PR check: the protected Rust job already runs the same tests, and

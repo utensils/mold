@@ -44,7 +44,10 @@ pub struct IdentityOptions {
 
 impl IdentityArgs {
     /// Whether the user asked for identity conditioning in any way, including
-    /// the incomplete forms.
+    /// the incomplete forms. Mirrors
+    /// `mold_core::identity::request_mentions_identity` on the pre-request
+    /// side, where the fields are still a path rather than bytes.
+    #[cfg(test)]
     pub fn mentions_identity(&self) -> bool {
         self.id_image.is_some() || self.id_weight.is_some() || self.id_start_step.is_some()
     }

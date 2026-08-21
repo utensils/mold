@@ -65,8 +65,13 @@ jobs:
       - name: Build embedded web SPA
         run: ./scripts/ensure-web-dist.sh
 
+      - name: Install protoc
+        # The `pulid` feature pulls in `candle-onnx`, whose build script shells
+        # out to `protoc`.
+        run: brew install protobuf
+
       - name: Build (Metal)
-        run: cargo build --release -p mold-ai --features metal,preview,discord,expand,tui,webp,mp4,metrics,mdns
+        run: cargo build --release -p mold-ai --features metal,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid
 
       - name: Ad-hoc code sign
         run: codesign -s - target/release/mold
@@ -107,7 +112,9 @@ jobs:
           df -h
 
       - name: Install build deps
-        run: sudo apt-get update && sudo apt-get install -y clang lld nasm
+        # `protobuf-compiler` is for the `pulid` feature: `candle-onnx`'s
+        # build script drives `prost-build`, which shells out to `protoc`.
+        run: sudo apt-get update && sudo apt-get install -y clang lld nasm protobuf-compiler
 
       - uses: Jimver/cuda-toolkit@v0.2.35
         with:
@@ -150,7 +157,7 @@ jobs:
         env:
           CUDA_COMPUTE_CAP: "86"
           LIBRARY_PATH: /usr/local/cuda/lib64/stubs
-        run: cargo build --release -p mold-ai --features cuda,preview,discord,expand,tui,webp,mp4,metrics,mdns
+        run: cargo build --release -p mold-ai --features cuda,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid
 
       - name: Seal generated CUDA PTX manifest
         run: scripts/seal-cuda-ptx-manifest.py target/release/mold 86 target/release/build
@@ -194,7 +201,9 @@ jobs:
           df -h
 
       - name: Install build deps
-        run: sudo apt-get update && sudo apt-get install -y clang lld nasm
+        # `protobuf-compiler` is for the `pulid` feature: `candle-onnx`'s
+        # build script drives `prost-build`, which shells out to `protoc`.
+        run: sudo apt-get update && sudo apt-get install -y clang lld nasm protobuf-compiler
 
       - uses: Jimver/cuda-toolkit@v0.2.35
         with:
@@ -240,7 +249,7 @@ jobs:
         env:
           CUDA_COMPUTE_CAP: "89"
           LIBRARY_PATH: /usr/local/cuda/lib64/stubs
-        run: cargo build --release -p mold-ai --features h3-cuda,preview,discord,expand,tui,webp,mp4,metrics,mdns
+        run: cargo build --release -p mold-ai --features h3-cuda,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid,pulid
 
       - name: Seal generated CUDA PTX manifest
         run: scripts/seal-cuda-ptx-manifest.py target/release/mold 89 target/release/build
@@ -285,7 +294,9 @@ jobs:
           df -h
 
       - name: Install build deps
-        run: sudo apt-get update && sudo apt-get install -y clang lld nasm
+        # `protobuf-compiler` is for the `pulid` feature: `candle-onnx`'s
+        # build script drives `prost-build`, which shells out to `protoc`.
+        run: sudo apt-get update && sudo apt-get install -y clang lld nasm protobuf-compiler
 
       - uses: Jimver/cuda-toolkit@v0.2.35
         with:
@@ -328,7 +339,7 @@ jobs:
         env:
           CUDA_COMPUTE_CAP: "100"
           LIBRARY_PATH: /usr/local/cuda/lib64/stubs
-        run: cargo build --release -p mold-ai --features cuda,preview,discord,expand,tui,webp,mp4,metrics,mdns
+        run: cargo build --release -p mold-ai --features cuda,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid
 
       - name: Seal generated CUDA PTX manifest
         run: scripts/seal-cuda-ptx-manifest.py target/release/mold 100 target/release/build
@@ -372,7 +383,9 @@ jobs:
           df -h
 
       - name: Install build deps
-        run: sudo apt-get update && sudo apt-get install -y clang lld nasm
+        # `protobuf-compiler` is for the `pulid` feature: `candle-onnx`'s
+        # build script drives `prost-build`, which shells out to `protoc`.
+        run: sudo apt-get update && sudo apt-get install -y clang lld nasm protobuf-compiler
 
       - uses: Jimver/cuda-toolkit@v0.2.35
         with:
@@ -418,7 +431,7 @@ jobs:
         env:
           CUDA_COMPUTE_CAP: "120"
           LIBRARY_PATH: /usr/local/cuda/lib64/stubs
-        run: cargo build --release -p mold-ai --features cuda,preview,discord,expand,tui,webp,mp4,metrics,mdns
+        run: cargo build --release -p mold-ai --features cuda,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid
 
       - name: Seal generated CUDA PTX manifest
         run: scripts/seal-cuda-ptx-manifest.py target/release/mold 120 target/release/build
@@ -831,8 +844,8 @@ jobs:
             cargo install mold-ai
 
             # From source with GPU support
-            cargo install --git https://github.com/utensils/mold --tag ${{ github.ref_name }} --features metal,preview,discord,expand,tui,webp,mp4,metrics,mdns  # macOS
-            cargo install --git https://github.com/utensils/mold --tag ${{ github.ref_name }} --features cuda,preview,discord,expand,tui,webp,mp4,metrics,mdns   # Linux; use the SM89 artifact for H3
+            cargo install --git https://github.com/utensils/mold --tag ${{ github.ref_name }} --features metal,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid  # macOS
+            cargo install --git https://github.com/utensils/mold --tag ${{ github.ref_name }} --features cuda,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid   # Linux; use the SM89 artifact for H3
 
             # Nix
             nix run github:utensils/mold/${{ github.ref_name }}

@@ -141,6 +141,11 @@
               pkgs.nasm
               pkgs.clang
               pkgs.llvmPackages.libclang.lib
+              # `candle-onnx`'s build script drives `prost-build`, which shells
+              # out to `protoc`. The `pulid` feature pulls that crate in and is
+              # now in every release recipe, so this is a build requirement
+              # rather than a devshell convenience.
+              pkgs.protobuf
             ]
             ++ lib.optionals isLinux [
               pkgs.gitMinimal
@@ -227,21 +232,30 @@
           devProfile = "dev-fast";
 
           # Full shipping feature set used for release builds and feature coverage.
+          #
+          # `pulid` ships ON. The feature only decides whether the binary LINKS
+          # the PuLID stack; the capability stays unadvertised unless a
+          # qualified checkpoint is installed AND the four-file bundle has been
+          # pulled with the InsightFace licence explicitly accepted, so a user
+          # who never asks for a face never sees it. Shipping it off would make
+          # building from source the only route to identity conditioning, which
+          # is not a licence decision — the licence gate is the acceptance
+          # record, and it is enforced at download time.
           releaseFeaturesFor =
             computeCap:
             if isLinux then
               "${
                 if computeCap == "89" then "h3-cuda" else "cuda"
-              },preview,discord,expand,tui,webp,mp4,metrics,mdns"
+              },preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid"
             else if gpuFeature != "" then
-              "${gpuFeature},preview,discord,expand,tui,webp,mp4,metrics,mdns"
+              "${gpuFeature},preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid"
             else
-              "preview,discord,expand,tui,webp,mp4,metrics,mdns";
+              "preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid";
 
           # Shell completion generation only needs CLI shape, not GPU linkage.
           # Keep this CUDA-free so Linux sandbox builds can generate completion
           # scripts without loading the host-only NVIDIA driver library.
-          completionFeatures = "preview,discord,expand,tui,webp,mp4,metrics,mdns";
+          completionFeatures = "preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid";
 
           # Devshell defaults compile the full shipping feature set so that
           # `mold tui`, `mold discord`, WebP/MP4 output, Prometheus metrics,
@@ -911,10 +925,9 @@
               pkgs.openssl
               pkgs.nasm
               # `candle-onnx`'s build script drives `prost-build`, which shells
-              # out to `protoc` to parse `onnx.proto3`. Only the `pulid`
-              # feature pulls that crate in, so this is devshell-only until a
-              # release recipe enables it — at which point the crane
-              # `nativeBuildInputs` need it too.
+              # out to `protoc` to parse `onnx.proto3`. The `pulid` feature
+              # pulls that crate in; it is in the shipping feature set, so the
+              # crane `nativeBuildInputs` carry it too.
               pkgs.protobuf
               pkgs.sccache
               pkgs.git

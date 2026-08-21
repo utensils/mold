@@ -29,6 +29,9 @@ makedepends=(
   'clang'
   'lld'
   'nasm'
+  # The `pulid` feature pulls in candle-onnx, whose build script drives
+  # prost-build, which shells out to protoc.
+  'protobuf'
 )
 
 provides=("${_pkgname}=${pkgver%.r*}")
@@ -81,7 +84,7 @@ build() {
   [[ "${CUDA_COMPUTE_CAP}" == "89" ]] && gpu_feature="h3-cuda"
   cargo build --release --frozen --offline \
     -p mold-ai \
-    --features "${gpu_feature},preview,expand,tui,webp,mp4,metrics,mdns"
+    --features "${gpu_feature},preview,expand,tui,webp,mp4,metrics,mdns,pulid"
 }
 
 check() {

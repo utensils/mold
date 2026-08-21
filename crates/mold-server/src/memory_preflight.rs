@@ -626,7 +626,10 @@ pub(crate) const IDENTITY_VRAM_OVERHEAD_BYTES: u64 = 1_250_000_000;
 
 /// The adapter half of [`IDENTITY_VRAM_OVERHEAD_BYTES`], pinned against the
 /// engine's own arithmetic by
-/// `identity_overhead_matches_the_adapters_own_resident_arithmetic`.
+/// `identity_overhead_matches_the_adapters_own_resident_arithmetic`. It is the
+/// documented decomposition of the budget rather than a second input to it,
+/// so only that test reads it.
+#[cfg(test)]
 pub(crate) const IDENTITY_ADAPTER_BF16_BYTES: u64 = 839_270_400;
 
 /// Whether this request will actually condition on a face.
