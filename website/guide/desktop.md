@@ -177,11 +177,16 @@ surface powers it, so anything the app does maps to a documented endpoint.
   switch the inspector's **Output** control to **Sequence** (File → New
   Sequence and the ⌘K palette land there too) and the composer becomes a clip
   rail. Clip pills carry per-clip prompts and frame counts (validated on the
-  family's own grid — `8n+1`, or `4n+1` for Wan — and defaulted from the
-  selected model), and the seam pills between them name
+  family's own grid — `8n+1`, or `4n+1` for Wan — defaulted from the
+  selected model, and capped at that model's own clip size, so a sequence
+  clip is never longer than the clips a one-shot Duration would be split
+  into), and the seam pills between them name
   each transition in words — **Smooth**, **Cut**, or **Fade 8f** (zero-tail
   joins say **Join**) — with a click opening the seam editor's teaching
-  rows and fade-length stepper. A live fits/duration forecast runs against
+  rows and fade-length stepper. Right-click a clip pill for Play (when a
+  cached render exists), Duplicate, Insert before/after, Move, and Remove, or
+  the rail background for Add clip, Validate plan, the TOML file tools, and
+  Clear sequence. A live fits/duration forecast runs against
   `/api/capabilities/chain-limits`, TOML import/export lives under File tools,
   and running sequence jobs appear in the same activity strip as prints with
   watch and cancel. A finished sequence leaves the strip: its video lands on
@@ -198,7 +203,11 @@ surface powers it, so anything the app does maps to a documented endpoint.
   host (choosing Sequence auto-picks one and remembers your single-mode model;
   with none installed the bench deep-links to Discover with Video + Models
   filters), and limits, creation, events, previews, and job actions stay
-  routed to the model's host. Job and action failures stay visible inline.
+  routed to the model's host. An optional **Opening image** well — with its
+  source strength and fit-to-frame controls — sits in the inspector's primary
+  form exactly where one-shot source media lives (the header ↺ Reset clears it;
+  the Advanced reset does not), and Advanced keeps the per-clip negative
+  prompt and camera motion. Job and action failures stay visible inline.
 - **History** (the Runs + Prompts + Sequences drawer inside Library) — a fast,
   searchable list of past prompts from every ready host; ↩ refills the
   composer, while Up/Down recalls the same merged history inline. The

@@ -450,6 +450,8 @@ require_text "install.sh" 'nvidia-smi -L'
 require_text "install.sh" 'CUDA_VISIBLE_DEVICES'
 require_text "install.sh" 'SHA256SUMS'
 require_text "install.sh" 'return 44'
+require_text ".github/workflows/release.yml" 'MOLD_BUILD_CHANNEL:'
+require_text ".github/workflows/release.yml" "'stable' || 'nightly'"
 require_text "crates/mold-cli/src/commands/lambda.rs" \
   'resolve_distribution_image_reference'
 require_text "crates/mold-cli/src/commands/runpod.rs" \

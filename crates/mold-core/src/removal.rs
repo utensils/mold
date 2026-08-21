@@ -55,12 +55,45 @@ pub fn build_ref_counts(config: &Config) -> HashMap<String, Vec<String>> {
             continue; // already counted above
         }
         if config.manifest_model_is_downloaded(&manifest.name) {
-            for path in config.model_config(&manifest.name).all_file_paths() {
+            for path in model_owned_paths(config, &manifest.name) {
                 refs.entry(path).or_default().push(manifest.name.clone());
             }
         }
     }
     refs
+}
+
+/// Every path a model owns on disk.
+///
+/// Normally that is its `[models]` config entry's file list. A files-only
+/// bundle (PuLID's identity assets, the hidden LTX-2 adapters) never gets a
+/// config entry and never resolves to a `ModelPaths`, so its config list is
+/// empty and removal would delete nothing — enumerate its manifest storage
+/// paths instead. The two are unioned rather than switched between: a utility
+/// model has both a resolved config list and manifest files, and each can name
+/// a path the other does not.
+pub fn model_owned_paths(config: &Config, canonical: &str) -> Vec<String> {
+    let model_config = match config.models.get(canonical) {
+        Some(cfg) => cfg.clone(),
+        None => config.resolved_model_config(canonical),
+    };
+    let mut paths = model_config.all_file_paths();
+
+    if let Some(manifest) = crate::manifest::find_manifest(canonical) {
+        if manifest.is_files_only_bundle() {
+            let models_dir = config.resolved_models_dir();
+            for file in &manifest.files {
+                let path = models_dir
+                    .join(crate::manifest::storage_path(manifest, file))
+                    .to_string_lossy()
+                    .to_string();
+                if !paths.contains(&path) {
+                    paths.push(path);
+                }
+            }
+        }
+    }
+    paths
 }
 
 /// True when `canonical` is removable: it has an explicit config entry or
@@ -107,7 +140,7 @@ pub fn plan_removal(config: &Config, canonical: &str) -> RemovalPlan {
     let mut unique_files: Vec<(String, u64)> = Vec::new();
     let mut shared_files: Vec<(String, Vec<String>)> = Vec::new();
 
-    for path in &model_config.all_file_paths() {
+    for path in &model_owned_paths(config, canonical) {
         let refs = ref_counts.get(path).cloned().unwrap_or_default();
         let other_refs: Vec<String> = refs.into_iter().filter(|name| name != canonical).collect();
 
@@ -418,6 +451,58 @@ mod tests {
         );
         assert_eq!(outcome.freed_bytes, 13, "freed = unique file size");
         assert!(outcome.warnings.is_empty(), "got: {:?}", outcome.warnings);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A files-only bundle has no `[models]` config entry and never resolves
+    /// to a `ModelPaths`, so removal has to read its manifest storage paths
+    /// or it deletes nothing at all.
+    #[test]
+    fn files_only_bundle_removal_deletes_its_manifest_files() {
+        // `resolved_models_dir()` reads MOLD_MODELS_DIR / MOLD_HOME, which
+        // sibling tests mutate.
+        let _lock = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tmp_dir("pulid");
+        let manifest =
+            crate::manifest::find_manifest(crate::manifest::PULID_FLUX_MANIFEST).unwrap();
+        let config = Config {
+            models_dir: tmp.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+
+        let expected: Vec<PathBuf> = manifest
+            .files
+            .iter()
+            .map(|file| tmp.join(crate::manifest::storage_path(manifest, file)))
+            .collect();
+        for path in &expected {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"asset").unwrap();
+        }
+
+        let plan = plan_removal(&config, crate::manifest::PULID_FLUX_MANIFEST);
+        let planned: Vec<String> = plan
+            .unique_files
+            .iter()
+            .map(|(path, _)| path.clone())
+            .collect();
+        for path in &expected {
+            let path = path.to_string_lossy().into_owned();
+            assert!(
+                planned.contains(&path),
+                "{path} was not planned for removal"
+            );
+        }
+        assert!(plan.shared_files.is_empty());
+
+        let outcome = execute_removal(&config, &plan);
+        assert_eq!(outcome.removed.len(), expected.len());
+        for path in &expected {
+            assert!(!path.exists(), "{} survived removal", path.display());
+        }
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

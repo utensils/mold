@@ -67,6 +67,7 @@ import { dragWidth } from "../../lib/panelResize";
 import ModelPicker from "./ModelPicker.vue";
 import AdvancedSettings from "./AdvancedSettings.vue";
 import SequenceAdvancedSettings from "./SequenceAdvancedSettings.vue";
+import SequenceOpeningImageWell from "./SequenceOpeningImageWell.vue";
 import { formatGB } from "../../lib/format";
 import PanelResizeHandle from "../shell/PanelResizeHandle.vue";
 
@@ -232,13 +233,13 @@ const showSourceMedia = computed(
 const activeRecipe = computed(() =>
   effectiveGenerationRecipe(selectedModel.value, props.form.pipeline),
 );
+// The sequence opening image is primary-form source media, so — exactly like
+// the one-shot source well — it never contributes to the Advanced badge.
 const advancedCount = computed(() =>
   isSequence.value
-    ? Number(sequenceSourceImagesSupported.value && Boolean(draft.openingImage)) +
-      Number(
+    ? Number(
         caps.value.supportsNegativePrompt && draft.clips.some((clip) => clip.negativePrompt.trim()),
-      ) +
-      Number(Boolean(draft.clips.some((clip) => clip.cameraControl)))
+      ) + Number(Boolean(draft.clips.some((clip) => clip.cameraControl)))
     : advancedActiveCount(props.form),
 );
 const showGenerateAudio = computed(() =>
@@ -564,7 +565,13 @@ function resetSettings() {
   // it — otherwise the next model change would re-snap the reset canvas back
   // onto the attached source (#1166).
   emit("canvas-intent", "model-default");
-  if (isSequence.value) draft.enableAudio = false;
+  if (isSequence.value) {
+    draft.enableAudio = false;
+    // `resetFormToModelDefaults` discards one-shot source media wholesale; the
+    // sequence's opening image is the same primary-form media, so it goes with
+    // it. (`form.strength` / `form.sourceFit` are already reset above.)
+    draft.clearOpeningImage();
+  }
 }
 </script>
 
@@ -635,6 +642,16 @@ function resetSettings() {
            whether (and how) it renders, exactly like resolutions. -->
       <div v-if="showSourceMedia" class="ms-field" data-test="inspector-source-media">
         <SourceImageWell :form="form" :selected-model="selectedModel" />
+      </div>
+
+      <!-- The sequence's opening image sits in the same primary slot: staged
+           source media is an authoring decision, never an Advanced knob. -->
+      <div
+        v-if="isSequence && sequenceSourceImagesSupported"
+        class="ms-field"
+        data-test="inspector-sequence-opening-image"
+      >
+        <SequenceOpeningImageWell :form="form" :upscalers="models.upscalers" />
       </div>
 
       <!-- Shape -->
@@ -896,7 +913,6 @@ function resetSettings() {
         v-if="advancedExpanded && isSequence"
         id="desktop-inline-advanced"
         :form="form"
-        :upscalers="models.upscalers"
         :camera-controls-enabled="form.family === 'ltx2'"
         :camera-controls="cameraControls"
         :camera-controls-loaded="cameraControlsLoaded"

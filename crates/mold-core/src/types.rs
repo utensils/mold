@@ -1239,6 +1239,31 @@ pub struct GenerateRequest {
     /// controls when reusing settings or selecting a running generation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_fit: Option<serde_json::Value>,
+    /// Face-identity reference image for identity conditioning (raw PNG/JPEG
+    /// bytes, base64-encoded in JSON). Milestone 1 accepts this only on the
+    /// identity-qualified checkpoints named by
+    /// `mold_core::identity::IDENTITY_QUALIFIED_MODELS`, and never alongside
+    /// a LoRA or an img2img `source_image`. The payload is bounds-checked
+    /// from its header alone before any decode
+    /// (`identity::validate_id_image_bytes`).
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "base64_opt")]
+    pub id_image: Option<Vec<u8>>,
+    /// Client-supplied provenance label for `id_image` — the gallery filename
+    /// or upload name it was picked from. Recorded into
+    /// `OutputMetadata::id_image_name` so clients can attempt to restore the
+    /// identity reference when reusing settings; the engine never reads it.
+    /// Requires `id_image`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id_image_name: Option<String>,
+    /// Strength of the identity conditioning, in `0.0..=identity::ID_WEIGHT_MAX`.
+    /// Absent means `identity::ID_WEIGHT_DEFAULT`. Requires `id_image`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id_weight: Option<f64>,
+    /// First denoise step at which identity conditioning is applied, so the
+    /// composition can settle before the face is pinned. Must be `< steps`.
+    /// Absent means `identity::ID_START_STEP_DEFAULT`. Requires `id_image`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id_start_step: Option<u32>,
     /// Source images for Qwen-Image-Edit generation (raw PNG/JPEG bytes, base64-encoded in JSON).
     /// The first image is the primary edit target; additional images are reference images.
     #[serde(
@@ -2139,6 +2164,22 @@ pub struct OutputMetadata {
     /// names and hashes only, never image payloads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_image_sha256: Option<String>,
+    /// Provenance label of the identity reference (client-supplied filename)
+    /// — present only when the request carried an `id_image` and a name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id_image_name: Option<String>,
+    /// SHA-256 (hex) of the exact `id_image` bytes used. Names and hashes
+    /// only, never the face payload itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id_image_sha256: Option<String>,
+    /// Effective identity-conditioning strength, recorded only when the print
+    /// actually carried an identity reference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id_weight: Option<f64>,
+    /// Effective first identity-conditioned denoise step, recorded only when
+    /// the print actually carried an identity reference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id_start_step: Option<u32>,
     /// Opaque client-shaped source-fit (crop/pad) policy provenance. The
     /// engine never reads it — fitting happens client-side before the bytes
     /// ship — but recording it verbatim lets Reuse settings and running-job
@@ -2340,6 +2381,27 @@ impl OutputMetadata {
                 hasher.update(bytes);
                 format!("{:x}", hasher.finalize())
             }),
+            // Identity provenance is recorded only when the print actually
+            // carried a face reference; a bare knob on an ordinary render
+            // would read as conditioning that never happened.
+            id_image_name: req
+                .id_image
+                .as_ref()
+                .and_then(|_| req.id_image_name.clone()),
+            id_image_sha256: req.id_image.as_ref().map(|bytes| {
+                use sha2::{Digest, Sha256};
+                let mut hasher = Sha256::new();
+                hasher.update(bytes);
+                format!("{:x}", hasher.finalize())
+            }),
+            id_weight: req
+                .id_image
+                .as_ref()
+                .map(|_| crate::identity::effective_id_weight(req)),
+            id_start_step: req
+                .id_image
+                .as_ref()
+                .map(|_| crate::identity::effective_id_start_step(req)),
             source_fit: req.source_fit.clone(),
             edit_image_sha256s: req.edit_images.as_ref().and_then(|images| {
                 (!images.is_empty()).then(|| {
@@ -2649,6 +2711,14 @@ pub struct ModelInfoExtended {
     /// compatibility with older servers that only advertised family support.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_audio: Option<bool>,
+    /// Whether this concrete model can accept a face-identity reference
+    /// (`GenerateRequest.id_image`). Derived from the same generation-profile
+    /// authority as `capabilities.supports_identity`, never a second
+    /// predicate: it is true only for an identity-qualified checkpoint on a
+    /// binary that actually links the identity adapter. `None` on servers
+    /// that predate identity conditioning, which clients read as "no".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_identity: Option<bool>,
     /// Whether this model can continue an existing video in one request
     /// (`GenerateRequest.extend_video`). `None` on servers that predate
     /// continuation support, which clients must read as "no" — offering the
@@ -2912,6 +2982,7 @@ mod model_display_name_tests {
             modality: None,
             nsfw: None,
             supports_audio: None,
+            supports_identity: None,
             supports_extend: None,
             supports_sequence: None,
             extend_default_overlap_frames: None,
@@ -4635,6 +4706,10 @@ mod tests {
             spatial_upscale: None,
             temporal_upscale: None,
             placement: None,
+            id_image: None,
+            id_image_name: None,
+            id_weight: None,
+            id_start_step: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         let back: GenerateRequest = serde_json::from_str(&json).unwrap();
@@ -4838,6 +4913,10 @@ mod tests {
             spatial_upscale: None,
             temporal_upscale: None,
             placement: None,
+            id_image: None,
+            id_image_name: None,
+            id_weight: None,
+            id_start_step: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("negative_prompt"));
@@ -4908,6 +4987,10 @@ mod tests {
             spatial_upscale: None,
             temporal_upscale: None,
             placement: None,
+            id_image: None,
+            id_image_name: None,
+            id_weight: None,
+            id_start_step: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(!json.contains("negative_prompt"));
@@ -5030,6 +5113,10 @@ mod tests {
             spatial_upscale: None,
             temporal_upscale: None,
             placement: None,
+            id_image: None,
+            id_image_name: None,
+            id_weight: None,
+            id_start_step: None,
         };
 
         let metadata = OutputMetadata::from_generate_request(&req, 7, None, "0.1.0");
@@ -5045,6 +5132,102 @@ mod tests {
         let json = serde_json::to_string(&metadata).unwrap();
         assert!(!json.contains("source_image_name"));
         assert!(!json.contains("source_image_sha256"));
+    }
+
+    /// Identity conditioning rides the wire additively: present fields
+    /// survive a round trip, and an ordinary request never grows the keys.
+    #[test]
+    fn identity_fields_round_trip_and_stay_absent_when_unset() {
+        let mut req = crate::test_support::minimal_generate_request("flux-dev:q8");
+        let json = serde_json::to_string(&req).unwrap();
+        for key in ["id_image", "id_image_name", "id_weight", "id_start_step"] {
+            assert!(!json.contains(key), "{key} must be absent: {json}");
+        }
+        let back: GenerateRequest = serde_json::from_str(&json).unwrap();
+        assert!(back.id_image.is_none());
+        assert!(back.id_weight.is_none());
+
+        // An older client that never heard of identity still deserializes.
+        let legacy: GenerateRequest =
+            serde_json::from_str(
+                r#"{"prompt":"a cat","model":"flux-dev:q8","width":1024,"height":1024,"steps":4,"guidance":3.5}"#,
+            )
+            .unwrap();
+        assert!(legacy.id_image.is_none());
+        assert!(legacy.id_image_name.is_none());
+        assert!(legacy.id_weight.is_none());
+        assert!(legacy.id_start_step.is_none());
+
+        req.id_image = Some(vec![0x89, 0x50, 0x4E, 0x47]);
+        req.id_image_name = Some("face.png".to_string());
+        req.id_weight = Some(0.8);
+        req.id_start_step = Some(2);
+        let json = serde_json::to_string(&req).unwrap();
+        let back: GenerateRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            back.id_image.as_deref(),
+            Some(&[0x89, 0x50, 0x4E, 0x47][..])
+        );
+        assert_eq!(back.id_image_name.as_deref(), Some("face.png"));
+        assert_eq!(back.id_weight, Some(0.8));
+        assert_eq!(back.id_start_step, Some(2));
+    }
+
+    /// Identity provenance is recorded from the effective values, and only
+    /// when the print actually carried a face reference.
+    #[test]
+    fn identity_metadata_records_effective_values_only_with_an_image() {
+        let mut req = crate::test_support::minimal_generate_request("flux-dev:q8");
+        req.id_weight = Some(2.5);
+        req.id_start_step = Some(3);
+        req.id_image_name = Some("face.png".to_string());
+
+        let metadata = OutputMetadata::from_generate_request(&req, 7, None, "0.1.0");
+        assert_eq!(metadata.id_image_name, None);
+        assert_eq!(metadata.id_image_sha256, None);
+        assert_eq!(metadata.id_weight, None);
+        assert_eq!(metadata.id_start_step, None);
+        let json = serde_json::to_string(&metadata).unwrap();
+        for key in [
+            "id_image_name",
+            "id_image_sha256",
+            "id_weight",
+            "id_start_step",
+        ] {
+            assert!(!json.contains(key), "{key} must be absent: {json}");
+        }
+
+        req.id_image = Some(b"\x89PNG\r\n\x1a\n".to_vec());
+        let metadata = OutputMetadata::from_generate_request(&req, 7, None, "0.1.0");
+        assert_eq!(metadata.id_image_name.as_deref(), Some("face.png"));
+        assert_eq!(
+            metadata.id_image_sha256.as_deref().map(str::len),
+            Some(64),
+            "the reference is recorded as a digest, never as bytes"
+        );
+        assert_eq!(metadata.id_weight, Some(2.5));
+        assert_eq!(metadata.id_start_step, Some(3));
+
+        // Defaults are materialized so saved provenance records what ran.
+        req.id_weight = None;
+        req.id_start_step = None;
+        let metadata = OutputMetadata::from_generate_request(&req, 7, None, "0.1.0");
+        assert_eq!(metadata.id_weight, Some(crate::identity::ID_WEIGHT_DEFAULT));
+        assert_eq!(
+            metadata.id_start_step,
+            Some(crate::identity::ID_START_STEP_DEFAULT)
+        );
+
+        // Round trip, plus tolerance for metadata written before identity.
+        let json = serde_json::to_string(&metadata).unwrap();
+        let back: OutputMetadata = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.id_weight, metadata.id_weight);
+        let legacy: OutputMetadata = serde_json::from_str(
+            r#"{"prompt":"a cat","model":"flux-dev:q8","seed":1,"steps":4,"guidance":3.5,"width":8,"height":8,"version":"0.1.0"}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.id_image_sha256, None);
+        assert_eq!(legacy.id_start_step, None);
     }
 
     /// Reuse-settings source restore: the metadata records the client's
@@ -5112,6 +5295,10 @@ mod tests {
             spatial_upscale: None,
             temporal_upscale: None,
             placement: None,
+            id_image: None,
+            id_image_name: None,
+            id_weight: None,
+            id_start_step: None,
         };
 
         let metadata = OutputMetadata::from_generate_request(&req, 7, None, "0.1.0");
@@ -5348,6 +5535,10 @@ mod tests {
             spatial_upscale: None,
             temporal_upscale: None,
             placement: None,
+            id_image: None,
+            id_image_name: None,
+            id_weight: None,
+            id_start_step: None,
         };
         let metadata = OutputMetadata::from_generate_request(&req, 1, None, "0.1.0");
         assert_eq!(metadata.negative_prompt.as_deref(), Some("blurry, ugly"));
@@ -5415,6 +5606,10 @@ mod tests {
             spatial_upscale: None,
             temporal_upscale: None,
             placement: None,
+            id_image: None,
+            id_image_name: None,
+            id_weight: None,
+            id_start_step: None,
         };
 
         let metadata =
@@ -5492,6 +5687,10 @@ mod tests {
             spatial_upscale: Some(Ltx2SpatialUpscale::X1_5),
             temporal_upscale: Some(Ltx2TemporalUpscale::X2),
             placement: None,
+            id_image: None,
+            id_image_name: None,
+            id_weight: None,
+            id_start_step: None,
         };
 
         let metadata = OutputMetadata::from_generate_request(&req, 9, None, "0.1.0");
@@ -6126,6 +6325,10 @@ mod tests {
             spatial_upscale: None,
             temporal_upscale: None,
             placement: None,
+            id_image: None,
+            id_image_name: None,
+            id_weight: None,
+            id_start_step: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         // Verify base64 encoding is in the JSON
@@ -6199,6 +6402,10 @@ mod tests {
             spatial_upscale: None,
             temporal_upscale: None,
             placement: None,
+            id_image: None,
+            id_image_name: None,
+            id_weight: None,
+            id_start_step: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("edit_images"));
@@ -6285,6 +6492,10 @@ mod tests {
             spatial_upscale: None,
             temporal_upscale: None,
             placement: None,
+            id_image: None,
+            id_image_name: None,
+            id_weight: None,
+            id_start_step: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(!json.contains("source_image"));
@@ -6356,6 +6567,10 @@ mod tests {
             spatial_upscale: None,
             temporal_upscale: None,
             placement: None,
+            id_image: None,
+            id_image_name: None,
+            id_weight: None,
+            id_start_step: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("control_image"));
@@ -6490,6 +6705,10 @@ mod tests {
             spatial_upscale: None,
             temporal_upscale: None,
             placement: None,
+            id_image: None,
+            id_image_name: None,
+            id_weight: None,
+            id_start_step: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("mask_image"));

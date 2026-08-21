@@ -121,7 +121,7 @@ beforeEach(() => {
 afterEach(() => (document.body.innerHTML = ""));
 
 describe("GenerateView — sequence output", () => {
-  it("offers Save image and Copy file path on a completed still", async () => {
+  it("offers Save image, Use as source, and Copy file path on a completed still", async () => {
     readyLocal();
     installedPayload = [imageModel];
     useModelStore().all = [imageModel];
@@ -156,7 +156,17 @@ describe("GenerateView — sequence output", () => {
       "separator" in entry ? [] : [entry.label],
     );
     expect(labels).toContain("Save image");
+    expect(labels).toContain("Use as source");
     expect(labels).toContain("Copy file path");
+
+    const useAsSource = useContextMenuStore().entries.find(
+      (entry) => !("separator" in entry) && entry.label === "Use as source",
+    );
+    expect(useAsSource).toMatchObject({ disabled: false });
+    useContextMenuStore().activate(useAsSource!);
+    expect(useGenerateFormStore().form.sourceImage).toBe("aW1hZ2U=");
+    expect(useGenerateFormStore().form.sourceImageName).toBe("remote-print.png");
+    expect(useGenerateFormStore().form.sourceFit).toEqual({ mode: "lanczos-resize" });
   });
 
   it.each([
@@ -515,6 +525,70 @@ describe("GenerateView — sequence output", () => {
     expect(body.strength).toBe(0.75);
     expect(body.stages[0].source_image).toBe("QUJD");
     expect(body.stages[1].source_image).toBeUndefined();
+  });
+
+  it("compensates a cancelled in-flight amendment on its frozen target", async () => {
+    readyLocal();
+    installedPayload = [videoModel];
+    useModelStore().all = [videoModel];
+    const formStore = useGenerateFormStore();
+    formStore.form.model = "ltx-video";
+    const draft = useSequenceDraftStore();
+    draft.hydrate();
+    draft.output = "sequence";
+    draft.ensureClips(25);
+    draft.clips[0]!.prompt = "opening";
+    draft.clips[1]!.prompt = "landing";
+    draft.loadFromJob(
+      {
+        jobId: "job-1",
+        hostId: "local",
+        baseline: draft.clips.map((clip) => ({ ...clip })),
+        completedStages: 2,
+      },
+      draft.clips.map((clip) => ({ ...clip })),
+      false,
+    );
+    let finishAmend!: (value: Record<string, unknown>) => void;
+    apiJsonTo.mockImplementation((_target: unknown, path: unknown) => {
+      if (typeof path === "string" && path.endsWith("/amend")) {
+        return new Promise((resolve) => (finishAmend = resolve));
+      }
+      if (path === "/api/chain-jobs") return Promise.resolve({ jobs: [] });
+      if (path === "/api/models") return Promise.resolve(installedPayload);
+      return Promise.resolve({});
+    });
+    apiFetchTo.mockResolvedValue({});
+    const wrapper = mountView();
+    await flushPromises();
+    const composer = wrapper.findComponent({ name: "SequenceComposer" });
+
+    composer.vm.$emit("submit");
+    await vi.waitFor(() => expect(finishAmend).toBeTypeOf("function"));
+    const amendCall = apiJsonTo.mock.calls.find(
+      (call) => typeof call[1] === "string" && call[1].endsWith("/amend"),
+    );
+    const operationId = new Headers((amendCall?.[2] as RequestInit).headers).get(
+      "x-mold-operation-id",
+    );
+    expect(operationId).toMatch(/^[0-9a-f-]{36}$/);
+    composer.vm.$emit("cancel");
+    await vi.waitFor(() =>
+      expect(apiFetchTo).toHaveBeenCalledWith(
+        { baseUrl: "http://127.0.0.1:7680", apiKey: "k" },
+        `/api/chain-jobs/job-1/operations/${operationId}/cancel`,
+        { method: "POST", keepalive: true },
+      ),
+    );
+    finishAmend({ preserved_stages: 0 });
+    await flushPromises();
+
+    expect(apiFetchTo).toHaveBeenCalledWith(
+      { baseUrl: "http://127.0.0.1:7680", apiKey: "k" },
+      "/api/chain-jobs/job-1/cancel",
+      { method: "POST" },
+    );
+    expect(draft.editing).toMatchObject({ jobId: "job-1" });
   });
 
   it("fits the opening image before a sequence request is submitted", async () => {

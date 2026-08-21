@@ -67,6 +67,7 @@ function profileModel(): GenerationProfileModel {
       negative_prompt: { mode: "hidden" as const, required: false },
       supports_lora: false,
       supports_controlnet: false,
+      supports_identity: false,
       supports_sequence: false,
       supports_extend: false,
       supports_audio: false,
@@ -189,9 +190,94 @@ describe("generation profile contract", () => {
     // a stale form value on a fixed control is never user authority (the
     // control is disabled), so it snaps instead of stranding Generate
     // behind an error the user cannot correct. Desktop and web share this.
+    // Its single reject-policy bucket is fixed authority too, exactly like
+    // H3's reviewed compact envelope.
     const recipe = effectiveGenerationRecipe(profileModel(), "one-stage");
-    expect(fixedRecipeControlOverrides(recipe)).toEqual({ guidance: 0 });
+    expect(fixedRecipeControlOverrides(recipe)).toEqual({
+      guidance: 0,
+      width: 1024,
+      height: 576,
+    });
     expect(fixedRecipeControlOverrides(null)).toEqual({});
+  });
+
+  it("treats a single reject-policy bucket as fixed resolution authority", () => {
+    const base = effectiveGenerationRecipe(profileModel(), "one-stage")!;
+    const single = (
+      overrides: Partial<GenerationRecipeProfile["resolution"]>,
+    ): GenerationRecipeProfile => ({
+      ...base,
+      resolution: { ...base.resolution, ...overrides },
+    });
+
+    // An absent policy means Reject — the fail-closed reading every other
+    // client path already takes — so it snaps just like an explicit one.
+    expect(
+      fixedRecipeControlOverrides(single({ off_bucket: "reject" })),
+    ).toMatchObject({
+      width: 1024,
+      height: 576,
+    });
+    expect(fixedRecipeControlOverrides(single({}))).toMatchObject({
+      width: 1024,
+      height: 576,
+    });
+
+    // Wan admits an off-bucket size with an advisory, so its buckets are
+    // recommendations rather than the only runnable canvas.
+    const warn = fixedRecipeControlOverrides(single({ off_bucket: "warn" }));
+    expect(warn.width).toBeUndefined();
+    expect(warn.height).toBeUndefined();
+
+    // More than one advertised bucket is a choice, not an envelope.
+    const multiple = fixedRecipeControlOverrides(
+      single({
+        aspect_groups: [
+          ...base.resolution.aspect_groups,
+          {
+            id: "1:1",
+            label: "1:1",
+            presets: [
+              { id: "768x768", width: 768, height: 768, tier: "recommended" },
+            ],
+          },
+        ],
+      }),
+    );
+    expect(multiple.width).toBeUndefined();
+
+    // Wuerstchen advertises one preset on a dynamic canvas — a preset is a
+    // suggestion there, and any aligned size is admitted.
+    const dynamic = fixedRecipeControlOverrides(single({ domain: "dynamic" }));
+    expect(dynamic.width).toBeUndefined();
+  });
+
+  it("snaps a fixed temporal frame count", () => {
+    const base = effectiveGenerationRecipe(profileModel(), "one-stage")!;
+    const adjustable: GenerationRecipeProfile = {
+      ...base,
+      temporal: {
+        frames: {
+          default: 124,
+          min: 124,
+          max: 345,
+          step: 17,
+          mode: "adjustable",
+        },
+        frame_offset: 5,
+        fps: { mode: "fixed", value: 24 },
+      },
+    };
+    expect(fixedRecipeControlOverrides(adjustable).frames).toBeUndefined();
+
+    const fixed: GenerationRecipeProfile = {
+      ...adjustable,
+      temporal: {
+        ...adjustable.temporal!,
+        frames: { ...adjustable.temporal!.frames, max: 124, mode: "fixed" },
+      },
+    };
+    expect(fixedRecipeControlOverrides(fixed).frames).toBe(124);
   });
 });
 

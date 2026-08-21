@@ -403,6 +403,7 @@ mod tests {
             guidance_capabilities: None,
             source_image: None,
             generation_profile: None,
+            supports_identity: None,
         }
     }
 

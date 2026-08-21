@@ -423,6 +423,10 @@ mod tests {
             version: "0.1.0".to_string(),
             frames: None,
             fps: None,
+            id_image_name: None,
+            id_image_sha256: None,
+            id_weight: None,
+            id_start_step: None,
         };
 
         let bytes = encode_image(&tensor, OutputFormat::Png, 4, 4, Some(&metadata)).unwrap();
@@ -523,6 +527,10 @@ mod tests {
             spatial_upscale: None,
             temporal_upscale: None,
             placement: None,
+            id_image: None,
+            id_image_name: None,
+            id_weight: None,
+            id_start_step: None,
         };
 
         assert!(build_output_metadata(&req, 42, None).is_none());
@@ -591,6 +599,10 @@ mod tests {
             version: "0.1.0".to_string(),
             frames: None,
             fps: None,
+            id_image_name: None,
+            id_image_sha256: None,
+            id_weight: None,
+            id_start_step: None,
         });
 
         update_output_metadata_size(&mut metadata, 1008, 1008);
@@ -664,6 +676,10 @@ mod tests {
             version: "0.1.0".to_string(),
             frames: None,
             fps: None,
+            id_image_name: None,
+            id_image_sha256: None,
+            id_weight: None,
+            id_start_step: None,
         }
     }
 
@@ -830,6 +846,10 @@ mod tests {
             version: "0.2.0".to_string(),
             frames: None,
             fps: None,
+            id_image_name: None,
+            id_image_sha256: None,
+            id_weight: None,
+            id_start_step: None,
         };
         let bytes = encode_image(&tensor, OutputFormat::Jpeg, 8, 8, Some(&metadata)).unwrap();
 

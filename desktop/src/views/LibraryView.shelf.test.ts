@@ -449,6 +449,200 @@ describe("tile context menu", () => {
 });
 
 describe("bulk bar", () => {
+  it("enters selection naturally with Command-click and Shift-click", async () => {
+    const { wrapper } = await mountView();
+    await tileFor(wrapper, smurf04.filename).trigger("click");
+    await tileFor(wrapper, river.filename).trigger("click", { metaKey: true });
+
+    expect(wrapper.get("[data-test='bulk-action-bar']").text()).toContain("2 / 4 selected");
+    expect(tileFor(wrapper, smurf04.filename).get("button").attributes("aria-pressed")).toBe(
+      "true",
+    );
+    expect(tileFor(wrapper, river.filename).get("button").attributes("aria-pressed")).toBe("true");
+
+    await tileFor(wrapper, plain.filename).trigger("pointerdown", {
+      pointerId: 40,
+      pointerType: "mouse",
+      button: 0,
+      isPrimary: true,
+      shiftKey: true,
+    });
+    window.dispatchEvent(
+      new PointerEvent("pointerup", {
+        pointerId: 40,
+        pointerType: "mouse",
+        isPrimary: true,
+        shiftKey: true,
+      }),
+    );
+    await tileFor(wrapper, plain.filename).trigger("click", { shiftKey: true });
+    expect(wrapper.get("[data-test='bulk-action-bar']").text()).toContain("3 / 4 selected");
+    wrapper.unmount();
+  });
+
+  it("Command-A selects only the prints in the active filter", async () => {
+    const { wrapper } = await mountView();
+    await wrapper.get("[data-test='tag-chip'][data-tag='smurf']").trigger("click");
+    await flushPromises();
+
+    key("a", { metaKey: true });
+    await wrapper.vm.$nextTick();
+
+    expect(wrapper.get("[data-test='bulk-action-bar']").text()).toContain("2 / 2 selected");
+    expect(wrapper.findAll("[data-test='select-indicator']").map((node) => node.text())).toEqual([
+      "✓",
+      "✓",
+    ]);
+    wrapper.unmount();
+  });
+
+  it("drag-selects and drag-deselects every visible tile crossed", async () => {
+    const { wrapper } = await mountView();
+    await wrapper.get('[aria-label="Toggle select mode"]').trigger("click");
+    const tiles = [smurf04, smurf03, river].map((print) => tileFor(wrapper, print.filename));
+    const previous = Object.getOwnPropertyDescriptor(document, "elementsFromPoint");
+    Object.defineProperty(document, "elementsFromPoint", {
+      configurable: true,
+      value: vi.fn((x: number) => [
+        x < 100 ? tiles[0]!.element : x < 200 ? tiles[1]!.element : tiles[2]!.element,
+      ]),
+    });
+    try {
+      await tiles[0]!.trigger("pointerdown", {
+        pointerId: 41,
+        pointerType: "mouse",
+        button: 0,
+        isPrimary: true,
+        clientX: 20,
+        clientY: 200,
+      });
+      window.dispatchEvent(
+        new PointerEvent("pointermove", {
+          pointerId: 41,
+          pointerType: "mouse",
+          isPrimary: true,
+          clientX: 260,
+          clientY: 200,
+        }),
+      );
+      window.dispatchEvent(
+        new PointerEvent("pointerup", { pointerId: 41, pointerType: "mouse", isPrimary: true }),
+      );
+      await wrapper.vm.$nextTick();
+      expect(wrapper.get("[data-test='bulk-action-bar']").text()).toContain("3 / 4 selected");
+
+      await tiles[0]!.trigger("pointerdown", {
+        pointerId: 42,
+        pointerType: "mouse",
+        button: 0,
+        isPrimary: true,
+        clientX: 20,
+        clientY: 200,
+      });
+      window.dispatchEvent(
+        new PointerEvent("pointermove", {
+          pointerId: 42,
+          pointerType: "mouse",
+          isPrimary: true,
+          clientX: 150,
+          clientY: 200,
+        }),
+      );
+      window.dispatchEvent(
+        new PointerEvent("pointerup", { pointerId: 42, pointerType: "mouse", isPrimary: true }),
+      );
+      await wrapper.vm.$nextTick();
+      expect(wrapper.get("[data-test='bulk-action-bar']").text()).toContain("1 / 4 selected");
+      expect(tileFor(wrapper, river.filename).get("button").attributes("aria-pressed")).toBe(
+        "true",
+      );
+    } finally {
+      if (previous) Object.defineProperty(document, "elementsFromPoint", previous);
+      else Reflect.deleteProperty(document, "elementsFromPoint");
+      wrapper.unmount();
+    }
+  });
+
+  it("right-click targets the selected group and resets to an unselected print", async () => {
+    const { wrapper } = await mountView();
+    await wrapper.get('[aria-label="Toggle select mode"]').trigger("click");
+    await tileFor(wrapper, smurf04.filename).trigger("click");
+    await tileFor(wrapper, plain.filename).trigger("click", { metaKey: true });
+
+    await tileFor(wrapper, smurf04.filename).trigger("contextmenu");
+    expect(menuEntry("Favorite 2 selected")).toBeDefined();
+    expect(menuEntry("Move 2 selected to trash")).toBeDefined();
+    expect(menuEntry("Rename…")).toBeUndefined();
+
+    await tileFor(wrapper, river.filename).trigger("contextmenu");
+    expect(wrapper.get("[data-test='bulk-action-bar']").text()).toContain("1 / 4 selected");
+    expect(menuEntry("Move to trash")).toBeDefined();
+    wrapper.unmount();
+  });
+
+  it("preserves the selected group when macOS Control-click opens its context menu", async () => {
+    const { wrapper } = await mountView();
+    await wrapper.get('[aria-label="Toggle select mode"]').trigger("click");
+    await tileFor(wrapper, smurf04.filename).trigger("click");
+    await tileFor(wrapper, plain.filename).trigger("click", { metaKey: true });
+
+    await tileFor(wrapper, smurf04.filename).trigger("pointerdown", {
+      pointerId: 43,
+      pointerType: "mouse",
+      button: 0,
+      isPrimary: true,
+      ctrlKey: true,
+    });
+    await tileFor(wrapper, smurf04.filename).trigger("contextmenu", { ctrlKey: true });
+
+    expect(wrapper.get("[data-test='bulk-action-bar']").text()).toContain("2 / 4 selected");
+    expect(menuEntry("Favorite 2 selected")).toBeDefined();
+    expect(menuEntry("Move 2 selected to trash")).toBeDefined();
+    wrapper.unmount();
+  });
+
+  it("labels mixed trash-capability selections as permanent delete", async () => {
+    const { wrapper, gallery, hosts } = await mountView();
+    const legacy = base("legacy-host-print.png", 8, 8);
+    apiJsonTo.mockImplementation(async (target: { baseUrl?: string }, path: string) => {
+      if (path === "/api/gallery") {
+        return target?.baseUrl === "http://legacy:7680"
+          ? [structuredClone(legacy)]
+          : live.map((print) => structuredClone(print));
+      }
+      if (path.startsWith("/api/gallery/collections/")) return { filenames: [] };
+      return undefined;
+    });
+    hosts.extras.push({
+      id: "legacy-7680",
+      label: "legacy",
+      url: "http://legacy:7680",
+      apiKey: null,
+      status: "ready",
+      error: null,
+      instanceId: null,
+    });
+    hosts.capabilities["legacy-7680"] = {
+      gallery: { can_delete: true, organize: false, trash: null },
+    };
+    gallery.buckets["legacy-7680"] = {
+      items: [legacy],
+      loading: false,
+      error: null,
+      loaded: true,
+    };
+    await flushPromises();
+
+    await wrapper.get('[aria-label="Toggle select mode"]').trigger("click");
+    await tileFor(wrapper, smurf04.filename).trigger("click");
+    await tileFor(wrapper, legacy.filename).trigger("click", { metaKey: true });
+    await tileFor(wrapper, smurf04.filename).trigger("contextmenu");
+
+    expect(menuEntry("Delete 2 selected")).toBeDefined();
+    expect(menuEntry("Move 2 selected to trash")).toBeUndefined();
+    wrapper.unmount();
+  });
+
   it("moves the selection to the trash behind one undo toast; undo restores every print", async () => {
     const { wrapper, gallery } = await mountView();
     vi.useFakeTimers();

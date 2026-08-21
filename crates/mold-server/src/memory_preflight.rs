@@ -591,6 +591,32 @@ fn base_peak_memory_for_paths(
 /// activations with the generic estimate, and still needs the headroom.
 const WAN_REQUEST_AWARE_HEADROOM_BYTES: u64 = 2_000_000_000;
 
+/// Device memory a face-identity render needs beside the checkpoint it
+/// conditions.
+///
+/// Three terms, all resident on the generation device for the whole denoise:
+/// PuLID's identity adapter (a 1.14 GB safetensors release, BF16 at runtime),
+/// the EVA02-CLIP-L-14-336 vision tower (~0.6 GB BF16 once #1229 converts the
+/// 856 MB `.pt` source), and ~0.5 GB of activation headroom for the IDFormer
+/// cross-attention the adapter injects at every step. The two InsightFace ONNX
+/// models are deliberately absent: they run on the CPU in milestone 1 and are
+/// charged as host bytes by their component roles instead.
+///
+/// This is a declared budget, not a measurement. #1227 calibrates it against a
+/// real render; until then it is deliberately a single named constant so the
+/// recalibration is one edit rather than an archaeology exercise.
+pub(crate) const IDENTITY_VRAM_OVERHEAD_BYTES: u64 = 2_300_000_000;
+
+/// Whether this request will actually condition on a face.
+///
+/// Weight zero is completely inert — no assets are planned, nothing is
+/// downloaded, and no memory is charged — so the predicate is the effective
+/// weight, never the mere presence of the fields.
+pub(crate) fn request_charges_identity_overhead(req: &GenerateRequest) -> bool {
+    mold_core::identity::request_mentions_identity(req)
+        && mold_core::identity::effective_id_weight(req) > 0.0
+}
+
 fn activation_memory_for_estimate(hint: Option<ActivationHint>, qwen_quantized: bool) -> u64 {
     if qwen_quantized {
         0
@@ -1210,6 +1236,21 @@ pub(crate) struct GenerationMemoryBudget {
     pub(crate) fits_available_memory: Option<bool>,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct GenerationOffloadPolicy {
+    forced: bool,
+    wan: mold_inference::wan::block_offload::AdmissionPolicy,
+}
+
+impl GenerationOffloadPolicy {
+    pub(crate) const fn new(
+        forced: bool,
+        wan: mold_inference::wan::block_offload::AdmissionPolicy,
+    ) -> Self {
+        Self { forced, wan }
+    }
+}
+
 /// Resolve one generation's memory/load policy against an explicit sampled
 /// free-memory budget.
 ///
@@ -1221,8 +1262,8 @@ pub(crate) fn estimate_generation_memory_for_request(
     req: &GenerateRequest,
     paths: &ModelPaths,
     hint: Option<ActivationHint>,
+    offload_policy: GenerationOffloadPolicy,
     available_memory_bytes: Option<u64>,
-    forced_offload: bool,
     request_has_lora: bool,
     gemma_competes: bool,
 ) -> GenerationMemoryBudget {
@@ -1248,10 +1289,10 @@ pub(crate) fn estimate_generation_memory_for_request(
         paths,
         hint,
         request_has_lora,
-        forced_offload,
+        offload_policy.forced,
     );
     let block_offload = if conservative_block_offload
-        && !forced_offload
+        && !offload_policy.forced
         && !request_has_lora
         && large_flux2_bf16_should_auto_offload(paths, hint, None, 0)
     {
@@ -1303,7 +1344,11 @@ pub(crate) fn estimate_generation_memory_for_request(
                 // blocks in host RAM, so a shape that does not fit resident
                 // may still be feasible. Charging the full weight term would
                 // refuse it before the engine ever got the chance.
-                wan_offload_relief = wan_block_offload_relief(paths);
+                wan_offload_relief = wan_block_offload_relief_for_policy(
+                    paths,
+                    offload_policy.wan,
+                    wan_geometry.map(|geometry| geometry.num_layers as usize),
+                );
                 base_peak = base_peak.saturating_sub(wan_offload_relief);
             }
             // Carry the wan checkpoint geometry in here too. Wan is never
@@ -1318,6 +1363,14 @@ pub(crate) fn estimate_generation_memory_for_request(
             );
             (base_peak.saturating_add(activation), activation)
         }
+    };
+    // Identity conditioning adds resident weights and activations to whichever
+    // arm produced the peak. Charged from the request rather than from a path,
+    // because the assets are not part of the checkpoint's `ModelPaths`.
+    let peak = if request_charges_identity_overhead(req) {
+        peak.saturating_add(IDENTITY_VRAM_OVERHEAD_BYTES)
+    } else {
+        peak
     };
     let load_strategy = request_aware_load_strategy(
         select_server_load_strategy_for_budget(paths, available_memory_bytes, hint),
@@ -1380,10 +1433,9 @@ pub(crate) fn estimate_generation_memory_for_request(
     let wan_block_offload = wan_family
         && wan_transformer_can_park(paths)
         && available_memory_bytes.is_some_and(|available| {
-            mold_inference::wan::block_offload::will_park(
-                peak.saturating_add(wan_offload_relief),
-                available,
-            )
+            offload_policy
+                .wan
+                .will_park(peak.saturating_add(wan_offload_relief), available)
         });
     // `MOLD_OFFLOAD=1` sets the generic streaming flag for every family, but
     // no wan arm streams a transformer from host RAM — the factory does not
@@ -1447,6 +1499,18 @@ fn wan_block_offload_relief(paths: &ModelPaths) -> u64 {
         .map(|m| m.len())
         .unwrap_or(0);
     mold_inference::wan::block_offload::max_block_offload_relief_bytes(bytes)
+}
+
+fn wan_block_offload_relief_for_policy(
+    paths: &ModelPaths,
+    policy: mold_inference::wan::block_offload::AdmissionPolicy,
+    total_blocks: Option<usize>,
+) -> u64 {
+    if policy.supports_max_relief(total_blocks) {
+        wan_block_offload_relief(paths)
+    } else {
+        0
+    }
 }
 
 /// Whether this checkpoint's weights can park at all.
@@ -1573,8 +1637,13 @@ fn request_sensitive_activation_memory_with_wan_geometry(
 mod fail_closed_tests {
     use super::*;
     use image::{DynamicImage, ImageBuffer, ImageFormat, Rgb};
+    use mold_inference::wan::block_offload::AdmissionPolicy;
     use std::io::Cursor;
     use std::path::{Path, PathBuf};
+
+    fn offload(wan: AdmissionPolicy) -> GenerationOffloadPolicy {
+        GenerationOffloadPolicy::new(false, wan)
+    }
 
     fn png(width: u32, height: u32) -> Vec<u8> {
         let image = ImageBuffer::from_pixel(width, height, Rgb([1u8, 2, 3]));
@@ -1813,8 +1882,8 @@ mod fail_closed_tests {
             &request,
             &model_paths,
             activation,
+            offload(AdmissionPolicy::Disabled),
             Some(64_000_000_000),
-            false,
             false,
             false,
         );
@@ -1825,8 +1894,8 @@ mod fail_closed_tests {
             &request,
             &model_paths,
             activation,
+            offload(AdmissionPolicy::Disabled),
             Some(64_000_000_000),
-            false,
             false,
             false,
         );
@@ -1834,6 +1903,68 @@ mod fail_closed_tests {
             source.load_strategy,
             mold_inference::LoadStrategy::Sequential
         );
+    }
+
+    /// A face-identity render carries resident adapter and vision-tower
+    /// weights the checkpoint's `ModelPaths` cannot describe, so the estimate
+    /// has to charge them from the request. Weight zero applies no identity at
+    /// all and must cost exactly nothing — an inert knob that still reserved
+    /// 2.3 GB would refuse renders that fit.
+    #[test]
+    fn identity_conditioning_charges_exactly_its_named_overhead_and_weight_zero_charges_nothing() {
+        let mut request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "portrait",
+            "model": "flux-dev:q8",
+            "width": 1024,
+            "height": 1024,
+            "steps": 20,
+            "guidance": 3.5,
+            "batch_size": 1
+        }))
+        .unwrap();
+        let model_paths = paths("/models/flux-dev/flux1-dev-Q8_0.gguf");
+        let activation = Some(hint(ActivationFamily::FluxDit));
+        let estimate = |request: &GenerateRequest| {
+            estimate_generation_memory_for_request(
+                request,
+                &model_paths,
+                activation,
+                Some(24_000_000_000),
+                false,
+                false,
+                false,
+            )
+            .peak_memory_bytes
+        };
+
+        let plain = estimate(&request);
+
+        request.id_image = Some(vec![0x89, 0x50, 0x4e, 0x47]);
+        assert!(!request_charges_identity_overhead(&{
+            let mut zero = request.clone();
+            zero.id_weight = Some(0.0);
+            zero
+        }));
+        assert_eq!(
+            estimate(&{
+                let mut zero = request.clone();
+                zero.id_weight = Some(0.0);
+                zero
+            }),
+            plain,
+            "id_weight 0 applies no identity, so it must add no memory demand"
+        );
+
+        assert!(request_charges_identity_overhead(&request));
+        assert_eq!(
+            estimate(&request),
+            plain + IDENTITY_VRAM_OVERHEAD_BYTES,
+            "an identity render must be charged exactly the named overhead"
+        );
+
+        let mut weighted = request.clone();
+        weighted.id_weight = Some(0.85);
+        assert_eq!(estimate(&weighted), plain + IDENTITY_VRAM_OVERHEAD_BYTES);
     }
 
     /// Wan never reaches `OffloadMode::Block` through the request-controlled
@@ -1871,8 +2002,8 @@ mod fail_closed_tests {
                 req,
                 paths,
                 activation,
+                offload(AdmissionPolicy::Automatic),
                 Some(24_000_000_000),
-                false,
                 false,
                 false,
             )
@@ -1894,6 +2025,79 @@ mod fail_closed_tests {
             !parks.block_offload,
             "wan parks a subset of one expert; it must not be charged as a \
              streamed transformer"
+        );
+
+        // Metal has no automatic parking plan because the runtime cannot take
+        // the CUDA-ordinal free-VRAM reading it needs. Admission must retain
+        // the resident weight term there instead of crediting CUDA-only
+        // relief (#1060).
+        let metal = estimate_generation_memory_for_request(
+            &request(81),
+            &model_paths,
+            activation,
+            offload(AdmissionPolicy::Disabled),
+            Some(24_000_000_000),
+            false,
+            false,
+        );
+        assert_eq!(
+            metal.peak_memory_bytes,
+            parks
+                .peak_memory_bytes
+                .saturating_add(wan_block_offload_relief(&model_paths))
+        );
+        assert_eq!(metal.fits_available_memory, Some(false));
+        assert!(!metal.wan_block_offload);
+
+        let finite_override = estimate_generation_memory_for_request(
+            &request(81),
+            &model_paths,
+            activation,
+            offload(AdmissionPolicy::ForcedFinite(1)),
+            Some(24_000_000_000),
+            false,
+            false,
+        );
+        assert_eq!(finite_override.peak_memory_bytes, metal.peak_memory_bytes);
+        assert_eq!(finite_override.fits_available_memory, Some(false));
+        assert!(finite_override.wan_block_offload);
+
+        let full_override = estimate_generation_memory_for_request(
+            &request(81),
+            &model_paths,
+            activation,
+            offload(AdmissionPolicy::ForcedFinite(40)),
+            Some(24_000_000_000),
+            false,
+            false,
+        );
+        assert_eq!(full_override.peak_memory_bytes, metal.peak_memory_bytes);
+        assert_eq!(full_override.fits_available_memory, Some(false));
+        assert!(full_override.wan_block_offload);
+        let exact_relief = wan_block_offload_relief(&model_paths);
+        assert_eq!(
+            wan_block_offload_relief_for_policy(
+                &model_paths,
+                AdmissionPolicy::ForcedFinite(40),
+                Some(40),
+            ),
+            exact_relief
+        );
+        assert_eq!(
+            wan_block_offload_relief_for_policy(
+                &model_paths,
+                AdmissionPolicy::ForcedFinite(999),
+                Some(40),
+            ),
+            exact_relief
+        );
+        assert_eq!(
+            wan_block_offload_relief_for_policy(
+                &model_paths,
+                AdmissionPolicy::ForcedFinite(40),
+                None,
+            ),
+            0
         );
 
         // A short clip fits with the weights resident and must keep exactly the
@@ -1960,8 +2164,8 @@ mod fail_closed_tests {
             &request,
             &model_paths,
             activation,
+            offload(AdmissionPolicy::Disabled),
             Some(24_000_000_000),
-            false,
             false,
             false,
         );
@@ -1976,8 +2180,8 @@ mod fail_closed_tests {
             &request,
             &model_paths,
             activation,
+            offload(AdmissionPolicy::Disabled),
             Some(96_000_000_000),
-            false,
             false,
             false,
         );
@@ -1991,8 +2195,8 @@ mod fail_closed_tests {
             &request,
             &model_paths,
             activation,
+            offload(AdmissionPolicy::Disabled),
             Some(24_000_000_000),
-            false,
             false,
             false,
         );
@@ -2004,8 +2208,8 @@ mod fail_closed_tests {
             &request,
             &model_paths,
             activation,
+            offload(AdmissionPolicy::Disabled),
             Some(24_000_000_000),
-            false,
             false,
             false,
         );
@@ -2102,8 +2306,8 @@ mod fail_closed_tests {
             &request,
             &ltx2_paths(dir.path()),
             Some(hint),
+            offload(AdmissionPolicy::Disabled),
             Some(RTX_4090_AVAILABLE),
-            false,
             false,
             false,
         );
@@ -2132,8 +2336,8 @@ mod fail_closed_tests {
             &request,
             &ltx2_paths(dir.path()),
             Some(hint),
+            offload(AdmissionPolicy::Disabled),
             Some(RTX_4090_AVAILABLE),
-            false,
             false,
             false,
         );
@@ -2165,8 +2369,8 @@ mod fail_closed_tests {
             &request,
             &ltx2_paths(dir.path()),
             Some(hint),
+            offload(AdmissionPolicy::Disabled),
             Some(RTX_4090_AVAILABLE),
-            false,
             false,
             false,
         );

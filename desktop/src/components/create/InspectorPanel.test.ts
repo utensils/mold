@@ -230,6 +230,7 @@ describe("InspectorPanel — shape + resolution projection", () => {
               negative_prompt: { mode: "hidden", required: false },
               supports_lora: false,
               supports_controlnet: false,
+              supports_identity: false,
               supports_sequence: false,
               supports_extend: false,
               supports_audio: false,
@@ -477,19 +478,19 @@ describe("InspectorPanel — seed mode", () => {
 });
 
 describe("InspectorPanel — advanced", () => {
-  it("does not count a parked Sequence image for an unsupported checkpoint", async () => {
+  it("never counts the Sequence opening image — it is primary-form media, not Advanced", async () => {
     const draft = useSequenceDraftStore();
     draft.output = "sequence";
+    draft.ensureClips(97);
     draft.openingImage = { filename: "opening.png", base64: "PARKED" };
-    const form = formFor("wan");
-    form.model = "wan22-t2v-a14b";
-    form.sourceImageCapability = "unsupported";
+    const form = formFor("ltx2");
+    form.model = "ltx-2-19b-distilled:fp8";
     const wrapper = mount(InspectorPanel, { props: { form } });
 
     expect(wrapper.find("[data-test='advanced-count']").exists()).toBe(false);
     expect(draft.openingImage?.base64).toBe("PARKED");
 
-    form.sourceImageCapability = "optional";
+    draft.clips[0]!.cameraControl = "dolly-in";
     await flushPromises();
     expect(wrapper.get("[data-test='advanced-count']").text()).toContain("1 on");
     expect(draft.openingImage?.base64).toBe("PARKED");
@@ -542,10 +543,70 @@ describe("InspectorPanel — advanced", () => {
     await wrapper.get('[data-test="open-advanced"]').trigger("click");
 
     expect(wrapper.find('[data-test="generate-audio-control"]').exists()).toBe(true);
-    expect(wrapper.find('[data-test="sequence-section-opening-image"]').exists()).toBe(true);
+    expect(wrapper.find('[data-test="sequence-section-opening-image"]').exists()).toBe(false);
     expect(wrapper.find('[data-test="sequence-section-negative"]').exists()).toBe(true);
     expect(wrapper.find('[data-test="sequence-section-audio"]').exists()).toBe(false);
     expect(wrapper.find('[data-test="inline-advanced"]').exists()).toBe(false);
+  });
+});
+
+describe("InspectorPanel — sequence opening image in the primary form", () => {
+  function sequenceForm() {
+    const draft = useSequenceDraftStore();
+    draft.output = "sequence";
+    draft.ensureClips(97);
+    const form = formFor("ltx2");
+    form.model = "ltx-2-19b-distilled:fp8";
+    return form;
+  }
+
+  it("renders the opening image beside the other primary controls, never inside Advanced", async () => {
+    const wrapper = mount(InspectorPanel, { props: { form: sequenceForm() } });
+
+    const field = wrapper.get("[data-test='inspector-sequence-opening-image']");
+    expect(field.find("[data-test='sequence-opening-image-well']").exists()).toBe(true);
+
+    await wrapper.get('[data-test="open-advanced"]').trigger("click");
+    const advanced = wrapper.get("[data-test='sequence-inline-advanced']");
+    expect(advanced.find("[data-test='sequence-opening-image-well']").exists()).toBe(false);
+    expect(advanced.find("[data-test='sequence-source-strength']").exists()).toBe(false);
+    // Still exactly one well on the panel — it did not move, it was moved out.
+    expect(wrapper.findAll("[data-test='sequence-opening-image-well']")).toHaveLength(1);
+  });
+
+  it("stands down for a checkpoint whose contract rejects a source image", async () => {
+    const draft = useSequenceDraftStore();
+    draft.output = "sequence";
+    draft.ensureClips(97);
+    draft.openingImage = { filename: "opening.png", base64: "PARKED" };
+    const form = formFor("wan");
+    form.model = "wan22-t2v-a14b";
+    form.sourceImageCapability = "unsupported";
+    const wrapper = mount(InspectorPanel, { props: { form } });
+
+    expect(wrapper.find("[data-test='inspector-sequence-opening-image']").exists()).toBe(false);
+    expect(draft.openingImage?.base64).toBe("PARKED");
+
+    form.sourceImageCapability = "optional";
+    await flushPromises();
+    expect(wrapper.find("[data-test='inspector-sequence-opening-image']").exists()).toBe(true);
+    expect(draft.openingImage?.base64).toBe("PARKED");
+  });
+
+  it("keeps the one-shot source well out of sequence mode", () => {
+    const wrapper = mount(InspectorPanel, { props: { form: sequenceForm() } });
+    expect(wrapper.find("[data-test='inspector-source-media']").exists()).toBe(false);
+  });
+
+  it("clears the opening image with the header Reset, like one-shot source media", async () => {
+    const draft = useSequenceDraftStore();
+    const form = sequenceForm();
+    draft.openingImage = { filename: "opening.png", base64: "QUJD" };
+    const wrapper = mount(InspectorPanel, { props: { form } });
+
+    await wrapper.get('[data-test="settings-reset"]').trigger("click");
+
+    expect(draft.openingImage).toBeNull();
   });
 });
 

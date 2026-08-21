@@ -237,6 +237,8 @@ pub fn build_model_catalog(
             modality: None,
             nsfw: None,
             supports_audio: None,
+            // One authority: the profile this entry already advertises.
+            supports_identity: Some(generation_profile.supports_identity()),
             // Wan continues a clip the way its chain seam does — the source's
             // final frame becomes image conditioning — so only an
             // image-conditioned checkpoint can extend. `source_image` is that
@@ -395,6 +397,8 @@ pub fn build_model_catalog(
             modality: None,
             nsfw: None,
             supports_audio: None,
+            // One authority: the profile this entry already advertises.
+            supports_identity: Some(generation_profile.supports_identity()),
             supports_extend: Some(extend_capable_model(&family, source_image_contract)),
             supports_sequence: Some(sequence_capable),
             extend_default_overlap_frames: Some(
@@ -960,6 +964,7 @@ mod tests {
                 modality: None,
                 nsfw: None,
                 supports_audio: None,
+                supports_identity: None,
                 supports_extend: None,
                 supports_sequence: None,
                 extend_default_overlap_frames: None,

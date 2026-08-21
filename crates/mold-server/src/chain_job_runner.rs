@@ -4,7 +4,7 @@ use std::ops::ControlFlow;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context};
 use image::codecs::jpeg::JpegEncoder;
@@ -45,6 +45,7 @@ pub struct ChainJobRunnerHandle {
     events: Arc<JobEventBus>,
     job_locks: Arc<JobMutationLocks>,
     claims: Arc<EphemeralClaims>,
+    mutation_cancels: Arc<Mutex<HashMap<String, Instant>>>,
 }
 
 struct ActiveChainAttemptGuard {
@@ -427,6 +428,7 @@ impl ChainJobRunnerHandle {
             events: Arc::new(JobEventBus::new()),
             job_locks: Arc::new(JobMutationLocks::new()),
             claims: Arc::new(EphemeralClaims::default()),
+            mutation_cancels: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -459,6 +461,30 @@ impl ChainJobRunnerHandle {
 
     pub fn unregister_cancel(&self, job_id: &str) {
         self.cancel.unregister(job_id);
+    }
+
+    /// Remember a client-known mutation cancellation even when its create or
+    /// amend request has not reached the mutation boundary yet. Entries are
+    /// short-lived because operation ids are single-use and a response may be
+    /// lost after the mutation has already completed.
+    pub fn request_mutation_cancel(&self, operation_id: &str) {
+        const RETENTION: Duration = Duration::from_secs(10 * 60);
+        let now = Instant::now();
+        let mut cancelled = self
+            .mutation_cancels
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        cancelled.retain(|_, requested_at| now.duration_since(*requested_at) < RETENTION);
+        cancelled.insert(operation_id.to_string(), now);
+    }
+
+    /// Atomically consume a pre-mutation cancellation fence.
+    pub fn take_mutation_cancel(&self, operation_id: &str) -> bool {
+        self.mutation_cancels
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(operation_id)
+            .is_some()
     }
 
     pub async fn lock_job(&self, job_id: &str) -> tokio::sync::OwnedMutexGuard<()> {
@@ -531,6 +557,7 @@ pub fn spawn_runner(deps: RunnerDeps) -> ChainJobRunnerHandle {
         events,
         job_locks,
         claims,
+        mutation_cancels: Arc::new(Mutex::new(HashMap::new())),
     }
 }
 
@@ -3468,6 +3495,10 @@ pub(crate) fn build_stage_generate_request(
         spatial_upscale: None,
         temporal_upscale: None,
         placement: chain.placement.clone(),
+        id_image: None,
+        id_image_name: None,
+        id_weight: None,
+        id_start_step: None,
     }
 }
 
@@ -4909,6 +4940,7 @@ mod tests {
             events: Arc::new(JobEventBus::new()),
             job_locks: Arc::new(JobMutationLocks::new()),
             claims: Arc::new(EphemeralClaims::default()),
+            mutation_cancels: Arc::new(Mutex::new(HashMap::new())),
         };
 
         let mut rx = handle

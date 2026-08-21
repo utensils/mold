@@ -1027,6 +1027,10 @@ mod tests {
             frames: None,
             fps: None,
             version: "test".into(),
+            id_image_name: None,
+            id_image_sha256: None,
+            id_weight: None,
+            id_start_step: None,
         }
     }
 
@@ -9649,6 +9653,10 @@ mod tests {
             chain_job_id: None,
             chain: None,
             version: "test".into(),
+            id_image_name: None,
+            id_image_sha256: None,
+            id_weight: None,
+            id_start_step: None,
         };
         let mut rec = GenerationRecord::from_save(
             dir.path(),
@@ -10571,6 +10579,10 @@ mod tests {
             chain_job_id: None,
             chain: None,
             version: "t".into(),
+            id_image_name: None,
+            id_image_sha256: None,
+            id_weight: None,
+            id_start_step: None,
         };
         let rec = GenerationRecord::from_save(
             dir.path(),
@@ -11534,10 +11546,14 @@ mod tests {
             .await
             .unwrap();
         let limits: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(limits["frames_per_clip_cap"], 481);
+        // The advertised cap is the model's routing clip size — what ONE
+        // generation renders — not the family's 481-frame single-request
+        // ceiling at 24 fps, which stays derivable from the duration budget.
+        assert_eq!(limits["frames_per_clip_cap"], 97);
         assert_eq!(limits["fps"], 24);
         assert_eq!(limits["frames_per_clip_runtime_seconds"], 20);
         assert_eq!(limits["max_stages"], 16);
+        assert_eq!(limits["max_total_frames"], 97 * 16);
         assert!(limits["transition_modes"]
             .as_array()
             .unwrap()
@@ -11721,7 +11737,9 @@ mod tests {
             .unwrap();
         let limits: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(limits["model"], "cv:3143864");
-        assert_eq!(limits["frames_per_clip_cap"], 481);
+        // An opaque catalog LTX-2 checkpoint takes the family's routing clip
+        // size, not the 481-frame duration budget at 24 fps.
+        assert_eq!(limits["frames_per_clip_cap"], 97);
         assert_eq!(
             limits["supports_audio"], false,
             "chain limits must preserve the checkpoint-specific audio capability",

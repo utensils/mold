@@ -506,7 +506,7 @@ mold run ltx-2-19b-distilled:fp8 \
 - Validation endpoint: `POST /api/generate/chain/validate` accepts the same body and returns a normalized, no-queue plan (per-stage input/output frames, transitions, source/negative presence, warnings, and optional `vram_estimate`). It never creates a job, starts a download, or touches inference. Web, desktop, and iPhone expose it as **Validate plan** on the exact selected host and discard stale responses after live draft changes.
 - Capabilities: `GET /api/capabilities/chain-limits?model=<name>&fps=<n>` — also carries `frames_per_clip_recommended` (the model's own default), the echoed `fps`, `frames_per_clip_runtime_seconds` for duration-budgeted families, `supports_audio`, and model-specific `supports_sequence` + `sequence_unsupported_reason`
 - Per-model frame semantics ride on each `GET /api/models` row (flattened, video models only): `default_frames`, `default_fps`, `max_frames` (ceiling at `default_fps`), `max_runtime_seconds` + `max_frames_absolute` when the ceiling is a duration, `frame_step` (valid counts are `k·step+1`). Absent on image models — never substitute a constant
-- Max stages: 16. Default clip size 97 frames; the per-clip cap is the family's single-request ceiling at the chain's fps (484 for LTX-2 at 24 fps, a flat 97 for LTX-Video), and the server rejects any stage above it.
+- Max stages: 16. `frames_per_clip_cap` is the model's own clip size — the clip one generation renders when auto-chaining (97 for LTX-2, a flat 97 for LTX-Video, and for Wan the checkpoint's own manifest default frame count over a 53-frame A14B / 121-frame floor — 81 for A14B Q5, 121 for TI2V-5B) — and every Studio sequence picker locks to it. Chain admission rejects a stage above the family's single-request ceiling at the chain's fps (481 on-grid for LTX-2 at 24 fps), which is the most an explicit `--clip-frames` can reach.
 
 ### mold jobs CLI
 
@@ -744,6 +744,70 @@ mold run "a golden retriever" --image park.png --mask mask.png
 # mask: white = repaint, black = preserve
 ```
 
+### Face-identity conditioning (PuLID-FLUX)
+
+Additive `GenerateRequest` fields, off by default (the `pulid` build feature):
+
+| Field           | Purpose                                                                                                                                                                                    |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `id_image`      | Face-identity reference as base64 PNG/JPEG bytes. Bounds-checked from its header alone (≤ 16 MiB encoded, ≤ 8192 px per axis, ≤ 32 MP) before anything decodes it.                         |
+| `id_image_name` | Client-supplied provenance label for `id_image`; recorded into `OutputMetadata.id_image_name` so Reuse settings can restore the reference. The engine never reads it. Requires `id_image`. |
+| `id_weight`     | Identity strength in `0.0..=3.0`. Absent means `1.0`. Requires `id_image`.                                                                                                                 |
+| `id_start_step` | First denoise step at which identity is applied, so composition settles before the face is pinned. Must be `< steps`. Absent means `0`. Requires `id_image`.                               |
+
+Milestone-1 gate — every rule below is a 422 at admission, never a silent drop:
+
+- Only the identity-qualified checkpoints `flux-dev:q4` and `flux-dev:q8` are
+  accepted (bare `flux-dev` resolves to `:q8`, and the legacy dash form
+  `flux-dev-q4` resolves too). `flux-dev:bf16` and every other model are refused.
+- Identity may not be combined with a LoRA or with an img2img `source_image` —
+  neither combination is qualified yet.
+- Any of `id_weight` / `id_start_step` / `id_image_name` without `id_image` is
+  an error, not an ignored field.
+- A server built **without** the `pulid` feature refuses any request carrying an
+  identity field with "this server was built without PuLID face-identity
+  support" — it never accepts-and-ignores, because that would render a print
+  with no face in it and say nothing. `mold_core::identity::IDENTITY_BUILD_UNSUPPORTED`
+  is the exact message. A request with no identity fields is untouched on
+  every build.
+
+`mold_core::identity` is the single authority for all of this. `/api/models[]`
+advertises additive `supports_identity` per model — true only on a build that
+links the adapter AND for a qualified checkpoint; absent on servers that
+predate identity conditioning, which clients read as "no". The same fact rides
+`generation_profile.capabilities.supports_identity`; never derive a second
+predicate. Saved metadata records `id_image_name`, `id_image_sha256`,
+`id_weight`, and `id_start_step` only when the print actually carried an
+identity reference — hashes and names, never the face payload.
+
+Assets: identity conditioning needs the hidden auxiliary bundle `pulid-flux`
+(PuLID-FLUX v0.9.1 adapter, the EVA02-CLIP-L-14-336 vision tower, and the
+InsightFace antelopev2 face detector + recognizer, every file SHA-256 pinned,
+stored under `shared/pulid/`). The two antelopev2 files are licensed for
+non-commercial research only, so every pull path — `mold pull`, the server's
+auto-pull, client-triggered downloads — refuses them until acceptance is
+recorded once per `MOLD_HOME`:
+
+```bash
+mold pull pulid-flux --accept-license insightface-antelopev2
+```
+
+The flag prints the restriction and the pinned terms URL, then writes an
+owner-only `$MOLD_HOME/license-acceptances.json` bound to the SHA-256 of the
+license text it was shown; changed terms require accepting again. A refusal
+names the license, its URL, and that exact command. `mold rm pulid-flux`
+removes the bundle; `mold pull pulid-flux` repairs a partial one.
+
+You do not have to pull it by hand. A request that actually conditions on a
+face plans the bundle through the same dependency preparation the encoder
+ladders use: `POST /api/generate/placement-preview` reports whatever is missing
+under `pending_downloads` (kinds `identity_adapter`, `identity_vision_encoder`,
+`face_detector`, `face_recognizer`) without fetching anything, and admission
+materializes it into `shared/pulid/` — after the license gate, so an unaccepted
+antelopev2 fails the job with that same `--accept-license` message instead of
+downloading. An `id_weight` of `0` applies no identity at all and is completely
+inert: it plans no assets, downloads nothing, and adds no memory demand.
+
 ### ControlNet (SD1.5 only)
 
 ```bash
@@ -927,6 +991,7 @@ On first launch after upgrading from a pre-#265 release, mold imports the `[expa
 
 ```bash
 mold update                       # Update to latest GitHub release
+mold update --nightly             # Install latest rolling build from main
 mold update --check               # Check for updates without installing
 mold update --version v0.6.0      # Install a specific version
 mold update --force               # Reinstall even if already up-to-date

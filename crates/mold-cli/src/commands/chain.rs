@@ -28,14 +28,14 @@ use crate::theme;
 /// Default per-clip frame count when auto-chaining an over-long LTX-2
 /// request.
 ///
-/// This is a *routing* default, not the model's ceiling — see
-/// `mold_core::validation::ltx2_max_frames_at_fps` for that. A 97-frame clip
-/// is what fits comfortably on a single consumer GPU; the model's real
-/// single-request budget is 20 s of runtime, which at 24 fps is 484 frames and
-/// would need far more VRAM than most cards have. Users who want one long clip
-/// instead of a stitched sequence raise `--clip-frames`, which is clamped to
-/// the model's real budget rather than to this default.
-pub const LTX2_DEFAULT_CLIP_FRAMES: u32 = 97;
+/// The per-model clip size lives in `mold_core::chain` because the CLI router
+/// is no longer its only reader: `/api/capabilities/chain-limits` advertises
+/// the same value, so a Studio composer cannot offer a clip the one-shot path
+/// would have split. Re-exported here so the CLI's own call sites and tests
+/// keep one import surface.
+pub use mold_core::chain::{
+    routing_clip_frames, wan_default_clip_frames, LTX2_DEFAULT_CLIP_FRAMES,
+};
 
 #[cfg(any(feature = "cuda", feature = "metal", test))]
 fn local_chain_planning_frames(request: &ChainRequest) -> u32 {
@@ -75,36 +75,6 @@ fn wan_carries_context(source_image: Option<mold_core::SourceImageCapability>) -
         Some(mold_core::SourceImageCapability::Required)
             | Some(mold_core::SourceImageCapability::Optional)
     )
-}
-
-/// Auto-chaining clip length for a wan render, in pixel frames.
-///
-/// The two-expert A14B pair measures near the 24 GB envelope well before wan's
-/// 257-frame request cap; the single-expert 5B has room for its own shipped
-/// 121. Both values sit on wan's `4k+1` grid, so a clip started at the default
-/// is submittable.
-///
-/// Those two numbers are a **floor**, not the answer. A tier whose manifest
-/// default was raised past its family floor on a measurement has to be able to
-/// render that default as one clip — otherwise running the model with no
-/// `--frames` at all silently produces a stitched sequence instead of the clip
-/// the default advertises. That is exactly what shipped: #776 item 4 raised the
-/// Q5/Q4 A14B tiers to the checkpoint's trained 81 frames once block offload
-/// made them fit, while this routing default stayed at the pre-offload 53, so
-/// `mold run wan22-t2v-a14b:q5` rendered 2 clips and 106 frames in 351.6 s
-/// rather than one 81-frame clip. Reading the tier's own recorded default
-/// keeps the two from drifting again; the floor still covers models whose
-/// manifest records a smaller default (Q8 and fp8 A14B stay at 33) and opaque
-/// catalog IDs with no manifest at all.
-fn wan_default_clip_frames(model: &str) -> u32 {
-    let floor = if model.to_ascii_lowercase().contains("a14b") {
-        53
-    } else {
-        121
-    };
-    mold_core::manifest::find_manifest(&mold_core::manifest::resolve_model_name(model))
-        .and_then(|manifest| manifest.defaults.frames)
-        .map_or(floor, |tier_default| tier_default.max(floor))
 }
 
 /// Pixel frames a wan continuation duplicates from the clip before it.
@@ -195,11 +165,9 @@ pub fn decide_chain_routing(
     // A14B measures near the 24 GB limit well before its 257-frame request
     // cap, while the single-expert 5B has room for its own shipped 121. Both
     // sit on wan's `4k+1` grid.
-    let routing_default = if is_wan {
-        wan_default_clip_frames(model)
-    } else {
-        LTX2_DEFAULT_CLIP_FRAMES
-    };
+    let routing_default = family
+        .and_then(|family| routing_clip_frames(family, model))
+        .unwrap_or(LTX2_DEFAULT_CLIP_FRAMES);
     let effective_clip_frames = clip_frames_flag
         .unwrap_or(routing_default)
         .min(single_clip_cap);

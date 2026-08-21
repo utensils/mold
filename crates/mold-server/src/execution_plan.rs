@@ -55,6 +55,16 @@ pub enum ComponentRole {
     /// expert of a pair is distilled separately, so the two adapters are
     /// distinct artifacts, not one applied twice.
     LowNoiseDistilledLora,
+    /// PuLID's identity adapter (IDFormer + cross-attention weights). Loads on
+    /// the generation device beside the transformer it conditions.
+    IdentityAdapter,
+    /// The EVA02-CLIP-L-14-336 vision tower PuLID encodes the reference face
+    /// with. Also a generation-device artifact.
+    IdentityVisionEncoder,
+    /// InsightFace SCRFD face detector. ONNX, and CPU-only in milestone 1.
+    FaceDetector,
+    /// InsightFace ArcFace recognizer. ONNX, and CPU-only in milestone 1.
+    FaceRecognizer,
 }
 
 impl ComponentRole {
@@ -78,6 +88,14 @@ impl ComponentRole {
                 | Self::ClipGTokenizer
                 | Self::TextTokenizer
                 | Self::Lora(_)
+                // Milestone 1 runs both InsightFace models through an ONNX
+                // runtime on the CPU: they crop and embed the reference face
+                // once, before the denoise, and never touch the generation
+                // device. Their bytes are therefore host demand, never VRAM.
+                // The identity adapter and the EVA-CLIP vision tower are NOT
+                // host-only — those two load on the generation device.
+                | Self::FaceDetector
+                | Self::FaceRecognizer
         )
     }
 }
@@ -389,7 +407,10 @@ pub enum ComponentStorageFormat {
     PendingPreview {
         container: PendingArtifactContainer,
         artifact_identity: EquivalenceContentIdentity,
-        quantization: QuantizationVariant,
+        /// `None` for an unquantized pending artifact. Serde renders `Some(q)`
+        /// exactly as the pre-`Option` field did, so every previously emitted
+        /// GGUF descriptor keeps its bytes.
+        quantization: Option<QuantizationVariant>,
     },
     Unknown {
         reason: ArtifactFormatUnknown,
@@ -400,6 +421,11 @@ pub enum ComponentStorageFormat {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub enum PendingArtifactContainer {
     Gguf,
+    Safetensors,
+    /// A PyTorch pickle archive carried as a conversion input (the EVA-CLIP
+    /// vision tower release), never handed to a tensor loader as-is.
+    TorchArchive,
+    Onnx,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -520,6 +546,10 @@ impl ExecutionSemanticConfig {
             selected_qwen2_path: _,
             selected_gemma_paths: _,
             selected_umt5_path: _,
+            // Identity assets are represented by their own component
+            // content/format facts in the enclosing descriptor, exactly like
+            // the selected encoder artifacts above.
+            identity_assets: _,
             h3_factory_authority,
             runtime_environment,
             attention_backend,
@@ -1004,7 +1034,12 @@ pub struct PendingArtifactIdentity {
     pub repo: String,
     pub filename: String,
     pub bytes: u64,
-    pub quantization: QuantizationVariant,
+    /// Registry-declared container of the artifact admission will land here.
+    /// The preview must not claim GGUF for a `.safetensors`, `.pt`, or `.onnx`
+    /// dependency it has never read.
+    pub container: PendingArtifactContainer,
+    /// `None` for an artifact the registry declares unquantized.
+    pub quantization: Option<QuantizationVariant>,
 }
 
 impl PendingArtifactIdentity {
@@ -2100,6 +2135,22 @@ fn concrete_artifacts_for_family(
     for (index, lora) in effective_loras.iter().enumerate() {
         artifacts.insert(ComponentRole::Lora(index), lora.path.clone());
     }
+    // Identity conditioning is frozen, not requested: `identity_assets` is
+    // populated by dependency preparation only for a request that asks for a
+    // face with a non-zero effective weight, so a plain render and an
+    // `id_weight` 0 render carry no identity components at all.
+    if let Some(identity) = &engine_config.identity_assets {
+        artifacts.insert(ComponentRole::IdentityAdapter, identity.adapter.clone());
+        artifacts.insert(
+            ComponentRole::IdentityVisionEncoder,
+            identity.vision_encoder_source.clone(),
+        );
+        artifacts.insert(ComponentRole::FaceDetector, identity.face_detector.clone());
+        artifacts.insert(
+            ComponentRole::FaceRecognizer,
+            identity.face_recognizer.clone(),
+        );
+    }
     artifacts
 }
 
@@ -2325,6 +2376,17 @@ fn build_plan(
         context.family,
     ));
     let request_has_lora = !context.effective_loras.is_empty();
+    let wan_block_offload_policy = mold_inference::wan::block_offload::AdmissionPolicy::from_values(
+        device.backend,
+        context
+            .engine_config
+            .runtime_environment
+            .value("MOLD_WAN_OFFLOAD_BLOCKS"),
+        context
+            .engine_config
+            .runtime_environment
+            .value("MOLD_OFFLOAD"),
+    );
     let gemma_placement = mold_inference::device::resolve_ltx2_gemma_device_override_from_values(
         context
             .engine_config
@@ -2357,8 +2419,11 @@ fn build_plan(
         context.request,
         context.paths,
         hint,
+        crate::memory_preflight::GenerationOffloadPolicy::new(
+            context.offload_requested,
+            wan_block_offload_policy,
+        ),
         Some(device_budget),
-        context.offload_requested,
         request_has_lora,
         gemma_competes,
     );
@@ -2415,8 +2480,11 @@ fn build_plan(
         context.request,
         &gpu_paths,
         hint,
+        crate::memory_preflight::GenerationOffloadPolicy::new(
+            initial_memory.block_offload && !transformer_on_cpu,
+            wan_block_offload_policy,
+        ),
         Some(device_budget),
-        initial_memory.block_offload && !transformer_on_cpu,
         request_has_lora,
         gemma_competes,
     );
@@ -2435,8 +2503,11 @@ fn build_plan(
             context.request,
             &gpu_paths,
             hint,
+            crate::memory_preflight::GenerationOffloadPolicy::new(
+                initial_memory.block_offload && !transformer_on_cpu,
+                wan_block_offload_policy,
+            ),
             Some(device_budget),
-            initial_memory.block_offload && !transformer_on_cpu,
             request_has_lora,
             gemma_competes,
         );
@@ -2708,7 +2779,7 @@ pub(crate) fn execution_environment_descriptor(
             let storage = pending.map_or_else(
                 || component_storage_format(&facts),
                 |pending| ComponentStorageFormat::PendingPreview {
-                    container: PendingArtifactContainer::Gguf,
+                    container: pending.container,
                     artifact_identity: pending.equivalence_identity(),
                     quantization: pending.quantization,
                 },
@@ -3039,7 +3110,7 @@ fn quantization_from_storage(storage: &ComponentStorageFormat) -> Option<Quantiz
                 None
             }
         }
-        ComponentStorageFormat::PendingPreview { quantization, .. } => Some(*quantization),
+        ComponentStorageFormat::PendingPreview { quantization, .. } => *quantization,
         _ => None,
     }
 }
@@ -4158,6 +4229,7 @@ impl std::fmt::Debug for ExecutionFingerprintEngineConfig<'_> {
             selected_qwen2_path,
             selected_gemma_paths,
             selected_umt5_path,
+            identity_assets,
             h3_factory_authority,
             runtime_environment,
             attention_backend,
@@ -4188,6 +4260,11 @@ impl std::fmt::Debug for ExecutionFingerprintEngineConfig<'_> {
         }
         if let Some(path) = selected_umt5_path {
             debug.field("selected_umt5_path", path);
+        }
+        // Emitted only when present, so every fingerprint that predates
+        // identity conditioning keeps its exact bytes.
+        if let Some(identity) = identity_assets {
+            debug.field("identity_assets", identity);
         }
         if let Some(authority) = h3_factory_authority {
             debug.field("h3_factory_authority", &authority.identity_sha256());
@@ -6841,6 +6918,7 @@ mod tests {
             selected_qwen2_path: None,
             selected_gemma_paths: Vec::new(),
             selected_umt5_path: None,
+            identity_assets: None,
             h3_factory_authority: None,
             runtime_environment: mold_inference::runtime_env::FrozenRuntimeEnvironment::default(),
             attention_backend: mold_inference::attention::AttentionBackend::Math,

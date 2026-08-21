@@ -50,7 +50,14 @@ pub fn collect_referenced_paths(config: &Config) -> HashSet<String> {
         }
 
         if config.manifest_model_is_downloaded(&manifest.name) {
-            referenced.extend(config.model_config(&manifest.name).all_file_paths());
+            // `model_owned_paths` (not the config entry) — a files-only bundle
+            // such as PuLID's identity assets has no `[models]` entry, so its
+            // files would look orphaned and `mold clean` would delete an
+            // installed bundle.
+            referenced.extend(mold_core::removal::model_owned_paths(
+                config,
+                &manifest.name,
+            ));
         }
     }
 

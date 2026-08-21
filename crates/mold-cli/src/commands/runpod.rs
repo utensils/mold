@@ -1692,6 +1692,10 @@ pub async fn run_run(opts: RunOptions) -> Result<()> {
         spatial_upscale: None,
         temporal_upscale: None,
         placement: None,
+        id_image: None,
+        id_image_name: None,
+        id_weight: None,
+        id_start_step: None,
     };
     let http = mold_core::MoldClient::new(&mold_host);
 

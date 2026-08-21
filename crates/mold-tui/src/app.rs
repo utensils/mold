@@ -7877,6 +7877,10 @@ impl App {
                             version: mold_core::build_info::VERSION.to_string(),
                             frames: response.video.as_ref().map(|v| v.frames),
                             fps: response.video.as_ref().map(|v| v.fps),
+                            id_image_name: None,
+                            id_image_sha256: None,
+                            id_weight: None,
+                            id_start_step: None,
                         };
 
                         if let (Ok(Some(db)), Some(output_dir)) =
@@ -8311,6 +8315,10 @@ impl App {
                         chain_job_id: None,
                         chain: None,
                         version: mold_core::build_info::VERSION.to_string(),
+                        id_image_name: None,
+                        id_image_sha256: None,
+                        id_weight: None,
+                        id_start_step: None,
                     };
 
                     self.gallery.entries.insert(
@@ -9496,6 +9504,10 @@ mod tests {
                 version: "0.3.1".to_string(),
                 frames: None,
                 fps: None,
+                id_image_name: None,
+                id_image_sha256: None,
+                id_weight: None,
+                id_start_step: None,
             },
             generation_time_ms: Some(5000),
             timestamp: 1234,
@@ -9571,6 +9583,10 @@ mod tests {
                 version: "0.0.0".to_string(),
                 frames: None,
                 fps: None,
+                id_image_name: None,
+                id_image_sha256: None,
+                id_weight: None,
+                id_start_step: None,
             },
             generation_time_ms: None,
             timestamp: 0,
@@ -9712,6 +9728,10 @@ mod tests {
             version: "0.3.1".to_string(),
             frames: None,
             fps: None,
+            id_image_name: None,
+            id_image_sha256: None,
+            id_weight: None,
+            id_start_step: None,
         }
     }
 
@@ -14486,6 +14506,7 @@ mod tests {
             guidance_capabilities: None,
             source_image: None,
             generation_profile: None,
+            supports_identity: None,
         }
     }
 
@@ -16360,6 +16381,7 @@ mod tests {
             guidance_capabilities: None,
             source_image: None,
             generation_profile: None,
+            supports_identity: None,
         }
     }
 

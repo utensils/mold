@@ -184,6 +184,10 @@ fn generate_request_placement_round_trips() {
                 ..Default::default()
             }),
         }),
+        id_image: None,
+        id_image_name: None,
+        id_weight: None,
+        id_start_step: None,
     };
     let json = serde_json::to_string(&req).unwrap();
     let back: GenerateRequest = serde_json::from_str(&json).unwrap();

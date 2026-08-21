@@ -1,10 +1,12 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use colored::Colorize;
 use mold_core::manifest::{find_manifest, resolve_model_name, ModelComponent};
-use mold_core::{build_model_catalog, Config, ModelPaths, MoldClient};
+use mold_core::{
+    build_model_catalog, classify_server_error, Config, ModelPaths, MoldClient, ServerAvailability,
+};
 use sha2::{Digest, Sha256};
 
 use crate::fs_util::dir_stats;
@@ -54,7 +56,14 @@ fn resolve_file_path(
         | ModelComponent::VideoScheduler
         | ModelComponent::AudioScheduler
         | ModelComponent::ModelConfig
-        | ModelComponent::TaskConfig => None,
+        | ModelComponent::TaskConfig
+        // PuLID's identity bundle has no ModelConfig slot — it is not part of
+        // a diffusion pipeline. Its files resolve from the manifest's storage
+        // path instead.
+        | ModelComponent::IdentityAdapter
+        | ModelComponent::IdentityVisionEncoder
+        | ModelComponent::FaceDetector
+        | ModelComponent::FaceRecognizer => None,
         ModelComponent::Upscaler => mcfg.transformer.clone(),
     }
 }
@@ -92,6 +101,10 @@ fn resolve_verify_path(
             | ModelComponent::AudioScheduler
             | ModelComponent::ModelConfig
             | ModelComponent::TaskConfig
+            | ModelComponent::IdentityAdapter
+            | ModelComponent::IdentityVisionEncoder
+            | ModelComponent::FaceDetector
+            | ModelComponent::FaceRecognizer
             | ModelComponent::Upscaler => None,
         };
         if let Some(p) = path {
@@ -128,6 +141,10 @@ fn component_label(component: &ModelComponent) -> &'static str {
         ModelComponent::TextTokenizer => "Text Tokenizer",
         ModelComponent::Decoder => "Decoder",
         ModelComponent::Upscaler => "Upscaler",
+        ModelComponent::IdentityAdapter => "Identity Adapter",
+        ModelComponent::IdentityVisionEncoder => "Identity Vision Encoder",
+        ModelComponent::FaceDetector => "Face Detector",
+        ModelComponent::FaceRecognizer => "Face Recognizer",
     }
 }
 
@@ -383,9 +400,20 @@ pub async fn run_overview() -> Result<()> {
                 loaded,
             );
         }
-        _ => {
+        Ok(Err(error))
+            if crate::control::is_loopback_host(client.host())
+                && classify_server_error(&error) == ServerAvailability::FallbackLocal =>
+        {
             println!("  {:<18} {}", "Status:".dimmed(), "Not running".dimmed(),);
+            let local = crate::commands::gpu::local_device_state()?;
+            println!(
+                "  {:<18} {} runtime-visible",
+                "Local compute:".dimmed(),
+                local.devices.len()
+            );
         }
+        Ok(Err(error)) => return Err(error).context("failed to read mold server status"),
+        Err(error) => return Err(error).context("timed out reading mold server status"),
     }
 
     Ok(())
@@ -643,8 +671,18 @@ pub fn run(name: &str, verify: bool) -> Result<()> {
                 let resolved_paths = ModelPaths::resolve(&canonical, &config);
                 let mut all_ok = true;
                 for file in &m.files {
+                    // Components with no ModelPaths or config slot — shards,
+                    // H3's contract files, PuLID's identity bundle — still
+                    // land at their canonical manifest storage path. Verify
+                    // them there instead of reporting them as unresolvable.
                     let local_path =
-                        resolve_verify_path(resolved_paths.as_ref(), Some(mcfg), &file.component);
+                        resolve_verify_path(resolved_paths.as_ref(), Some(mcfg), &file.component)
+                            .or_else(|| {
+                                let path = config
+                                    .resolved_models_dir()
+                                    .join(mold_core::manifest::storage_path(m, file));
+                                path.is_file().then(|| path.to_string_lossy().to_string())
+                            });
                     match (local_path, file.sha256) {
                         (Some(path), Some(expected)) => match compute_sha256(&path) {
                             Ok(actual) if actual == expected => {

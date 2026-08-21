@@ -55,6 +55,9 @@ h3-cuda = ["h3", "cuda", "h3-attention-rc"]
 # qualifier. This feature is intentionally not forwarded by mold-ai or any
 # shipping surface; release verification rejects its embedded claim marker.
 h3-private-uat = ["mold-candle/h3-private-uat"]
+# PuLID-FLUX face-identity conditioning. Off by default; the runtime adapter
+# lands separately, so today this only forwards the core contract edge.
+pulid = ["mold-core/pulid"]
 
 [[bin]]
 name = "ltx2_checkpoint_probe"

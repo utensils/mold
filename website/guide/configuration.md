@@ -333,6 +333,25 @@ it waiting.
 | `HF_TOKEN`      | —       | Default Hugging Face token for gated models; web Settings can override it until cleared |
 | `CIVITAI_TOKEN` | —       | Default Civitai token for gated models; web Settings can override it until cleared      |
 
+### Third-party model licenses
+
+Some auxiliary weights carry terms that Mold's MIT license does not cover. The
+InsightFace antelopev2 face models that PuLID identity conditioning needs are
+licensed for non-commercial research only, so Mold refuses to download them —
+from `mold pull`, the server's auto-pull, or any client-triggered download —
+until you record acceptance once per `MOLD_HOME`:
+
+```bash
+mold pull pulid-flux --accept-license insightface-antelopev2
+```
+
+The command prints the restriction and the pinned terms URL before it writes
+the record. Acceptances live in owner-only `$MOLD_HOME/license-acceptances.json`
+and are bound to the SHA-256 of the license text you were shown, so if the
+upstream terms change you are asked again. A refused download names the license
+and the exact command to run; there is no environment-variable bypass. See
+`THIRD_PARTY_NOTICES.md` for the full notice.
+
 ### Gallery Metadata Database
 
 mold persists generation metadata in a SQLite database at `MOLD_HOME/mold.db`
@@ -508,7 +527,10 @@ learned estimates; metadata schema v15 persists runtime independently so a
 candidate receives exactly its cold or warm setup charge. Multi-host Create
 uses `POST /api/generate/placement-preview` as a read-only final feasibility
 check for ordinary generation. A planned response can name known encoder
-dependencies in `pending_downloads`; those downloads and the low-confidence
+dependencies in `pending_downloads` — and, for a request that conditions on a
+face, the four PuLID identity assets under the `identity_adapter`,
+`identity_vision_encoder`, `face_detector`, and `face_recognizer` kinds; those
+downloads and the low-confidence
 estimate include only devices selected by that candidate plan. The preview does not
 fetch them, uses a separate registry-identity fingerprint, and admission
 recomputes the plan after the files land. Cold installed Civitai and Hugging

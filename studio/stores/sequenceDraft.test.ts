@@ -166,6 +166,32 @@ describe("sequence draft store", () => {
     expect(store.clips[1]?.prompt).toBe("waves crash closer");
   });
 
+  it("clearOpeningImage drops only the opening image and its stored media", async () => {
+    const store = freshStore();
+    store.hydrate();
+    store.ensureClips(97);
+    store.clips[0]!.prompt = "a river";
+    store.enableAudio = true;
+    store.openingImage = { filename: "open.png", base64: "QUJD" };
+    vi.advanceTimersByTime(1000);
+    expect(store.openingImage?.draftId).toBeTruthy();
+
+    store.clearOpeningImage();
+    vi.advanceTimersByTime(1000);
+
+    expect(store.openingImage).toBeNull();
+    expect(store.clips).toHaveLength(2);
+    expect(store.clips[0]?.prompt).toBe("a river");
+    expect(store.enableAudio).toBe(true);
+    const saved = JSON.parse(localStorage.getItem(SEQUENCE_DRAFT_KEY)!);
+    expect(saved.openingImage).toBeNull();
+    // The blob is gone too: a reload must not resurrect it.
+    const reloaded = freshStore();
+    reloaded.hydrate();
+    await vi.advanceTimersByTimeAsync(50);
+    expect(reloaded.openingImage).toBeNull();
+  });
+
   it("keeps a two-clip floor and reorders with stable ids", () => {
     const store = freshStore();
     store.hydrate();
@@ -391,6 +417,70 @@ describe("sequence draft store", () => {
     expect(store.clips[0]!.frames).toBe(481);
     expect(store.adoptSequenceModel("ltx-2.3-22b-dev:fp8", 97)).toBe(false);
     expect(store.clips[0]!.frames).toBe(481);
+  });
+
+  it("duplicates a clip after its source with its own id and media", async () => {
+    const store = freshStore();
+    store.hydrate();
+    store.ensureClips(97);
+    const source = store.clips[0]!;
+    source.prompt = "a kingfisher waits";
+    source.negativePrompt = "blurry";
+    source.cameraControl = "dolly-in";
+    source.frames = 49;
+    source.transition = "fade";
+    source.fadeFrames = 12;
+    source.sourceImage = { filename: "open.png", base64: "QUJD" };
+    vi.advanceTimersByTime(1000);
+    expect(source.sourceImage?.draftId).toBeTruthy();
+
+    const copy = store.duplicateClip(source.id);
+
+    expect(copy).not.toBeNull();
+    expect(store.clips).toHaveLength(3);
+    expect(store.clips[1]!.id).toBe(copy!.id);
+    expect(copy!.id).not.toBe(source.id);
+    expect(store.activeClipId).toBe(copy!.id);
+    expect(copy!.prompt).toBe("a kingfisher waits");
+    expect(copy!.negativePrompt).toBe("blurry");
+    expect(copy!.cameraControl).toBe("dolly-in");
+    expect(copy!.frames).toBe(49);
+    expect(copy!.transition).toBe("fade");
+    expect(copy!.fadeFrames).toBe(12);
+    expect(copy!.sourceImage?.base64).toBe("QUJD");
+
+    // The copy owns its own persisted blob: removing the original must not
+    // delete the duplicate's media.
+    vi.advanceTimersByTime(1000);
+    expect(copy!.sourceImage?.draftId).toBeTruthy();
+    expect(copy!.sourceImage?.draftId).not.toBe(source.sourceImage?.draftId);
+    store.removeClip(source.id);
+    await vi.advanceTimersByTimeAsync(50);
+    expect(store.clips[0]!.sourceImage?.base64).toBe("QUJD");
+
+    expect(store.duplicateClip("nope")).toBeNull();
+  });
+
+  it("inserts a fresh clip at a clamped index and activates it", () => {
+    const store = freshStore();
+    store.hydrate();
+    store.ensureClips(97);
+    const [a, b] = store.clips;
+
+    const inserted = store.insertClip(1, 49);
+    expect(store.clips.map((clip) => clip.id)).toEqual([
+      a!.id,
+      inserted.id,
+      b!.id,
+    ]);
+    expect(inserted.frames).toBe(49);
+    expect(inserted.prompt).toBe("");
+    expect(store.activeClipId).toBe(inserted.id);
+
+    const head = store.insertClip(-5, 97);
+    expect(store.clips[0]!.id).toBe(head.id);
+    const tail = store.insertClip(99, 97);
+    expect(store.clips[store.clips.length - 1]!.id).toBe(tail.id);
   });
 
   it("tracks an edit session without persisting it", () => {

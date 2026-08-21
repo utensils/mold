@@ -865,6 +865,7 @@ fn h3_model_row(
         modality: Some("video".into()),
         nsfw: None,
         supports_audio: Some(true),
+        supports_identity: Some(false),
         supports_extend: Some(false),
         extend_default_overlap_frames: None,
         supports_sequence: Some(false),

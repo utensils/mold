@@ -2664,6 +2664,10 @@ mod tests {
             distill_strength_high: None,
             distill_strength_low: None,
             placement: None,
+            id_image: None,
+            id_image_name: None,
+            id_weight: None,
+            id_start_step: None,
         }
     }
 

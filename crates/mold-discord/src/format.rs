@@ -1044,6 +1044,7 @@ mod tests {
             guidance_capabilities: None,
             source_image: None,
             generation_profile: None,
+            supports_identity: None,
         }];
         let embed = format_model_list(&models);
         assert!(embed.description.contains("**FLUX**"));
@@ -1086,6 +1087,7 @@ mod tests {
                 guidance_capabilities: None,
                 source_image: None,
                 generation_profile: None,
+                supports_identity: None,
             },
             ModelInfoExtended {
                 info: mold_core::ModelInfo {
@@ -1118,6 +1120,7 @@ mod tests {
                 guidance_capabilities: None,
                 source_image: None,
                 generation_profile: None,
+                supports_identity: None,
             },
             ModelInfoExtended {
                 info: mold_core::ModelInfo {
@@ -1150,6 +1153,7 @@ mod tests {
                 guidance_capabilities: None,
                 source_image: None,
                 generation_profile: None,
+                supports_identity: None,
             },
         ];
         let embed = format_model_list(&models);

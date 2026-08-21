@@ -242,6 +242,14 @@ mold gpu disable <stable-id-or-ordinal>
 mold gpu enable <stable-id-or-ordinal>
 ```
 
+When the target is loopback and no server is running, `gpu list` discovers the
+devices visible to the current Mold runtime directly. The JSON schema stays the
+same; operational telemetry that only the server samples remains `null` rather
+than being fabricated. `gpu enable` and `gpu disable` persist the stable
+device's startup preference in the local metadata database and report that it
+takes effect on the next `mold serve`. They never fall back to local hardware
+when `MOLD_HOST` names another machine.
+
 Disable removes the device from future scheduling immediately. Active work
 finishes before Mold drops its device-backed caches on the owner thread and
 joins it. Re-enable starts a fresh owner thread; it never resets and reuses a
@@ -411,19 +419,39 @@ Common subcommands are `doctor`, `availability`, `deploy`, `status`, `logs`,
 
 ## Other Commands
 
-| Command                                           | Purpose                                                         |
-| ------------------------------------------------- | --------------------------------------------------------------- |
-| `mold default [MODEL]`                            | Get or set the default model                                    |
-| `mold stats [--json]`                             | Show disk usage for models, output, logs, and shared components |
-| `mold clean [--force] [--older-than DURATION]`    | Remove stale downloads, orphaned files, and old outputs         |
-| `mold server start/status/stop`                   | Manage a background server daemon                               |
-| `mold server discover`                            | Find mold servers advertised on the local network (mDNS)        |
-| `mold rm <MODELS...> [--force]`                   | Remove downloaded models                                        |
-| `mold ps`                                         | Show server status or local mold processes                      |
-| `mold unload`                                     | Unload the current server model                                 |
-| `mold update [--check] [--force] [--version TAG]` | Update a release binary                                         |
-| `mold skill <COMMAND>`                            | Manage Mold's embedded Agent Skill                              |
-| `mold version`                                    | Show version, build date, and git SHA                           |
+| Command                                                       | Purpose                                                         |
+| ------------------------------------------------------------- | --------------------------------------------------------------- |
+| `mold default [MODEL]`                                        | Get or set the default model                                    |
+| `mold stats [--json]`                                         | Show disk usage for models, output, logs, and shared components |
+| `mold clean [--force] [--older-than DURATION]`                | Remove stale downloads, orphaned files, and old outputs         |
+| `mold server start/status/stop`                               | Manage a background server daemon                               |
+| `mold server discover`                                        | Find mold servers advertised on the local network (mDNS)        |
+| `mold rm <MODELS...> [--force]`                               | Remove downloaded models                                        |
+| `mold ps`                                                     | Show server status or local mold processes                      |
+| `mold unload`                                                 | Unload the current server model                                 |
+| `mold update [--check] [--force] [--nightly] [--version TAG]` | Update a stable, nightly, or exact release binary               |
+| `mold skill <COMMAND>`                                        | Manage Mold's embedded Agent Skill                              |
+| `mold version`                                                | Show version, build date, and git SHA                           |
+
+## Running commands without `mold serve`
+
+The CLI does not need a daemon for work whose authority already exists on disk,
+in the local runtime, or in a named cloud API. Server-first commands fall back
+only when doing so preserves the target the user asked about.
+
+| Behavior without a local server    | Commands                                                                      | Result                                                                                                               |
+| ---------------------------------- | ----------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| Fully standalone, local files      | `list`, `info`, `default`, `config`, `stats`, `clean`, `rm`, `chain validate` | Reads or changes `MOLD_HOME` directly                                                                                |
+| Fully standalone, local runtime    | `gpu list`, `gpu enable`, `gpu disable`, `ps`, `unload`                       | Lists local devices, persists next-start device preferences, reports processes, or completes an already-empty unload |
+| Server-first with local execution  | `run`, `pull`, `upscale`                                                      | Uses the server when reachable, otherwise executes or downloads locally                                              |
+| Standalone prompt tooling          | `expand`, `remix`                                                             | Uses the configured local expansion model or external API backend                                                    |
+| Standalone lifecycle/discovery     | `serve`, `server start`, `server status`, `server stop`, `server discover`    | Starts or inspects processes, or browses mDNS directly                                                               |
+| Standalone utility/network clients | `version`, `update`, `completions`, `skill`, `runpod`, `lambda`               | Uses embedded data, GitHub, agent paths, or the explicitly named cloud API                                           |
+| Requires a live Mold server        | `jobs`, `trash`, `mcp`, `discord`; `tui` unless `--local` is used             | These operate on server-owned queue, gallery, tool, or UI state and do not substitute a different local authority    |
+
+An unreachable non-loopback `MOLD_HOST` remains an error for host-administration
+commands. In particular, `gpu`, `ps`, and `unload` do not answer with this
+machine's state when the user selected a remote machine.
 
 ## `mold skill`
 
@@ -458,6 +486,10 @@ mold completions fish
 mold completions elvish
 mold completions powershell
 ```
+
+Dynamic completion includes command and flag names, known and installed model
+IDs where appropriate, upscaler IDs, config keys, RunPod resources, completion
+shell names, and locally visible stable GPU IDs for `gpu enable|disable`.
 
 Common setup:
 

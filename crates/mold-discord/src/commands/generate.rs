@@ -658,6 +658,10 @@ pub fn build_generate_request(params: BuildParams<'_>) -> GenerateRequest {
         spatial_upscale: None,
         temporal_upscale: None,
         placement: None,
+        id_image: None,
+        id_image_name: None,
+        id_weight: None,
+        id_start_step: None,
     }
 }
 
@@ -2358,6 +2362,7 @@ mod tests {
             guidance_capabilities: None,
             source_image: None,
             generation_profile: None,
+            supports_identity: None,
         }
     }
 
@@ -2527,6 +2532,7 @@ mod tests {
             guidance_capabilities: None,
             source_image: None,
             generation_profile: None,
+            supports_identity: None,
         }];
         assert_eq!(
             family_for_model(&models, "ltx-2-19b-distilled:fp8"),
@@ -2564,6 +2570,7 @@ mod tests {
                 guidance_capabilities: None,
                 source_image: None,
                 generation_profile: None,
+                supports_identity: None,
             },
             ModelInfoExtended {
                 info: mold_core::ModelInfo {
@@ -2589,6 +2596,7 @@ mod tests {
                 guidance_capabilities: None,
                 source_image: None,
                 generation_profile: None,
+                supports_identity: None,
             },
         ];
         assert_eq!(resolve_default_model(&models), "flux2-klein:q8");
@@ -2620,6 +2628,7 @@ mod tests {
             guidance_capabilities: None,
             source_image: None,
             generation_profile: None,
+            supports_identity: None,
         }];
         assert_eq!(resolve_default_model(&models), "flux-dev:q4");
     }
@@ -2656,6 +2665,7 @@ mod tests {
                 guidance_capabilities: None,
                 source_image: None,
                 generation_profile: None,
+                supports_identity: None,
             },
             ModelInfoExtended {
                 info: mold_core::ModelInfo {
@@ -2681,6 +2691,7 @@ mod tests {
                 guidance_capabilities: None,
                 source_image: None,
                 generation_profile: None,
+                supports_identity: None,
             },
         ];
         assert_eq!(resolve_default_model(&models), "flux2-klein:q8");
@@ -2713,6 +2724,7 @@ mod tests {
                 guidance_capabilities: None,
                 source_image: None,
                 generation_profile: None,
+                supports_identity: None,
             },
             ModelInfoExtended {
                 info: mold_core::ModelInfo {
@@ -2738,6 +2750,7 @@ mod tests {
                 guidance_capabilities: None,
                 source_image: None,
                 generation_profile: None,
+                supports_identity: None,
             },
         ];
         assert_eq!(resolve_default_model(&models), "flux2-klein:q8");

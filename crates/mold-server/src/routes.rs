@@ -272,6 +272,7 @@ use crate::queue::clean_error_message;
         crate::routes_chain_jobs::retake_chain_job,
         crate::routes_chain_jobs::amend_chain_job,
         crate::routes_chain_jobs::cancel_chain_job,
+        crate::routes_chain_jobs::cancel_chain_job_mutation,
         crate::routes_chain_jobs::delete_chain_job,
         crate::routes_chain_jobs::gc_chain_jobs,
         crate::routes_chain_jobs::chain_job_stage_preview,
@@ -495,6 +496,10 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/chain-jobs/:id/cancel",
             post(crate::routes_chain_jobs::cancel_chain_job),
+        )
+        .route(
+            "/api/chain-jobs/:id/operations/:operation_id/cancel",
+            post(crate::routes_chain_jobs::cancel_chain_job_mutation),
         )
         .route(
             "/api/chain-jobs/gc",

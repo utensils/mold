@@ -22,6 +22,12 @@ pub const SHORT_SHA_LENGTH: usize = 7;
 /// Date of the git commit (YYYY-MM-DD), or `"unknown"`.
 pub const BUILD_DATE: &str = env!("MOLD_BUILD_DATE");
 
+/// Distribution channel embedded by official release workflows.
+///
+/// Local and third-party builds use `"development"`, so commit equality alone
+/// can never make them impersonate an installed official nightly.
+pub const BUILD_CHANNEL: &str = env!("MOLD_BUILD_CHANNEL");
+
 /// Compile-time version string: `"0.2.0 (abc1234 2026-03-25)"`.
 ///
 /// Equivalent to [`version_string()`] but as a `&'static str` for use in
@@ -82,6 +88,14 @@ mod tests {
         assert!(parts[0].parse::<u32>().is_ok(), "year should be numeric");
         assert!(parts[1].parse::<u32>().is_ok(), "month should be numeric");
         assert!(parts[2].parse::<u32>().is_ok(), "day should be numeric");
+    }
+
+    #[test]
+    fn build_channel_is_known() {
+        assert!(matches!(
+            BUILD_CHANNEL,
+            "stable" | "nightly" | "development"
+        ));
     }
 
     #[test]

@@ -1880,6 +1880,9 @@ fn validate_generate_request_after_activation(
     if req.steps > 100 {
         return Err(format!("steps ({}) must be <= 100", req.steps));
     }
+    // Face-identity conditioning is its own contract; `crate::identity` owns
+    // every rule so this validator does not grow a second authority.
+    crate::identity::validate_identity_conditioning(req)?;
     if req.batch_size == 0 {
         return Err("batch_size must be >= 1".to_string());
     }
@@ -3533,6 +3536,10 @@ mod tests {
             spatial_upscale: None,
             temporal_upscale: None,
             placement: None,
+            id_image: None,
+            id_image_name: None,
+            id_weight: None,
+            id_start_step: None,
         }
     }
 
@@ -6294,6 +6301,70 @@ mod tests {
             model: "flux-dev".to_string(),
             ..valid_req()
         }
+    }
+
+    const IDENTITY_PNG_1X1: &[u8] = &[
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
+        0x15, 0xC4, 0x89,
+    ];
+
+    /// True on every build: identity validation is delegated to
+    /// `crate::identity` and an ordinary request is untouched by it.
+    #[test]
+    fn generate_request_validation_leaves_ordinary_requests_alone() {
+        let mut plain = valid_req();
+        plain.model = "flux-dev:q8".to_string();
+        validate_generate_request_with_family(&plain, None).expect("no identity fields");
+        plain.steps = 0;
+        assert!(validate_generate_request_with_family(&plain, None)
+            .unwrap_err()
+            .contains("steps must be >= 1"));
+    }
+
+    /// The shared validator delegates to `crate::identity` — proving the
+    /// wiring here, not restating the rules, which are table-driven there.
+    #[cfg(feature = "pulid")]
+    #[test]
+    fn generate_request_validation_enforces_identity_conditioning() {
+        let mut req = valid_req();
+        req.model = "flux-dev".to_string();
+        req.id_image = Some(IDENTITY_PNG_1X1.to_vec());
+        validate_generate_request_with_family(&req, None)
+            .expect("flux-dev resolves to the qualified flux-dev:q8");
+
+        req.model = "flux-dev:bf16".to_string();
+        let error = validate_generate_request_with_family(&req, None).unwrap_err();
+        assert!(error.contains("flux-dev:q4"), "{error}");
+        assert!(error.contains("flux-dev:q8"), "{error}");
+
+        // A knob without the reference is refused, never silently ignored.
+        let mut bare = valid_req();
+        bare.model = "flux-dev:q8".to_string();
+        bare.id_weight = Some(1.5);
+        let error = validate_generate_request_with_family(&bare, None).unwrap_err();
+        assert!(error.contains("id_image is required"), "{error}");
+    }
+
+    /// Without the adapter the shared validator refuses the request and names
+    /// the missing build support, so no print renders silently face-less.
+    #[cfg(not(feature = "pulid"))]
+    #[test]
+    fn generate_request_validation_refuses_identity_without_the_adapter() {
+        let mut req = valid_req();
+        req.model = "flux-dev:q8".to_string();
+        req.id_image = Some(IDENTITY_PNG_1X1.to_vec());
+        let error = validate_generate_request_with_family(&req, None).unwrap_err();
+        assert_eq!(error, crate::identity::IDENTITY_BUILD_UNSUPPORTED);
+
+        // Same refusal for a bare knob — the build, not the field, is why.
+        let mut bare = valid_req();
+        bare.model = "flux-dev:q8".to_string();
+        bare.id_start_step = Some(2);
+        assert_eq!(
+            validate_generate_request_with_family(&bare, None).unwrap_err(),
+            crate::identity::IDENTITY_BUILD_UNSUPPORTED
+        );
     }
 
     #[test]

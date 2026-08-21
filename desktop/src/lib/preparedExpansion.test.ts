@@ -207,12 +207,18 @@ describe("prepared expansion lifecycle", () => {
   it("lets only the newest request apply and invalidates a discarded request", () => {
     const guard = new PreparationRequestGuard();
     const first = guard.begin();
+    const firstSignal = guard.signalFor(first);
     const second = guard.begin();
+    const secondSignal = guard.signalFor(second);
     expect(guard.isCurrent(first)).toBe(false);
+    expect(firstSignal.aborted).toBe(true);
     expect(guard.isCurrent(second)).toBe(true);
+    expect(secondSignal.aborted).toBe(false);
 
     guard.invalidate();
     expect(guard.isCurrent(second)).toBe(false);
+    expect(secondSignal.aborted).toBe(true);
+    expect(() => guard.signalFor(second)).toThrow("no longer current");
   });
 
   it("applies prepared-style stale checks to a frozen quick expansion route", () => {

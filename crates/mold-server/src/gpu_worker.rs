@@ -3175,17 +3175,37 @@ fn run_claimed_h3_generation(
     // driver fault or panic. The adapter consumes its one-shot inference value
     // internally; normal and ordinary-error paths explicitly release it.
     let mut prepared = std::mem::ManuallyDrop::new(prepared);
+    let rss_before = crate::resources::ram_snapshot().used_by_mold;
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         prepared.run_once(scope, &mut progress, allocation_commit)
     }));
     progress.clear_callback();
 
-    let release_prepared = |prepared: &mut std::mem::ManuallyDrop<
+    // Every ordinary completion — success and non-fatal failure alike —
+    // releases the runtime owner and then hands its freed pages back to the
+    // OS, exactly as `process_job` and the chain-stage watchdog do. Without it
+    // an H3 render leaves ~8 GiB of idle glibc arena behind, `MemAvailable`
+    // stays low, and the next identical request is refused by host admission
+    // (#1214). The fatal-CUDA and panic arms deliberately call neither: that
+    // context is quarantined and the process is about to stop, so its
+    // allocator state must not be touched.
+    let release_prepared_and_trim = |prepared: &mut std::mem::ManuallyDrop<
         crate::h3_private_bridge::BoxedH3PreparedAttempt,
     >| {
         // SAFETY: this helper is called at most once and only on paths where
         // the CUDA context remains safe for normal destruction.
         unsafe { std::mem::ManuallyDrop::drop(prepared) }
+        let rss_pre_trim = trim_malloc_arenas();
+        let rss_after = crate::resources::ram_snapshot().used_by_mold;
+        tracing::info!(
+            gpu = ordinal,
+            model = %model_name,
+            rss_before_mb = rss_before / 1_000_000,
+            rss_after_mb = rss_after / 1_000_000,
+            rss_delta_mb = (rss_after as i64 - rss_before as i64) / 1_000_000,
+            rss_pre_trim_mb = rss_pre_trim.map(|value| value / 1_000_000).unwrap_or(0),
+            "claimed H3 generation memory delta"
+        );
     };
 
     match result {
@@ -3207,11 +3227,11 @@ fn run_claimed_h3_generation(
         }
         Ok(Err(error)) => {
             if let Some(violation) = allocation_violation.lock().unwrap().take() {
-                release_prepared(&mut prepared);
+                release_prepared_and_trim(&mut prepared);
                 return reject_claimed_h3_generation_message(job, violation);
             }
             if mold_inference::is_inference_cancelled(&error) {
-                release_prepared(&mut prepared);
+                release_prepared_and_trim(&mut prepared);
                 return reject_claimed_h3_generation_message(
                     job,
                     "MiniMax H3 generation cancelled".to_string(),
@@ -3220,7 +3240,7 @@ fn run_claimed_h3_generation(
             if is_cuda_oom(&error) {
                 let synchronized = synchronize_after_oom(worker);
                 let message = if synchronized {
-                    release_prepared(&mut prepared);
+                    release_prepared_and_trim(&mut prepared);
                     cuda_oom_user_message_with_plan(
                         worker,
                         &model_name,
@@ -3235,7 +3255,7 @@ fn run_claimed_h3_generation(
                 };
                 return reject_claimed_h3_generation_message(job, message);
             }
-            release_prepared(&mut prepared);
+            release_prepared_and_trim(&mut prepared);
             record_failure(worker);
             reject_claimed_h3_generation_message(
                 job,
@@ -3243,7 +3263,7 @@ fn run_claimed_h3_generation(
             )
         }
         Ok(Ok(output)) => {
-            release_prepared(&mut prepared);
+            release_prepared_and_trim(&mut prepared);
             if let Some(violation) = allocation_violation.lock().unwrap().take() {
                 return reject_claimed_h3_generation_message(job, violation);
             }
@@ -11896,10 +11916,12 @@ mod tests {
         );
     }
 
-    /// A chain stage leaves the same glibc arenas behind as an ordinary
-    /// generation, and had no trim to return them.
+    /// A chain stage and a claimed-H3 owner leave the same glibc arenas behind
+    /// as an ordinary generation, and neither had a trim to return them. The
+    /// claimed-H3 residue is what made an identical H3 rerun fail host
+    /// admission (#1214).
     #[test]
-    fn both_generation_paths_reclaim_glibc_arenas_through_one_gate() {
+    fn every_generation_path_reclaims_glibc_arenas_through_one_gate() {
         let whole = include_str!("gpu_worker.rs");
         let source = &whole[..whole.find("\nmod tests {").unwrap_or(whole.len())];
         assert_eq!(
@@ -11917,6 +11939,51 @@ mod tests {
         assert!(
             source[start..end].contains("trim_malloc_arenas()"),
             "the chain-stage path must reclaim arenas the way process_job does"
+        );
+
+        let start = source
+            .find("fn run_claimed_h3_generation(")
+            .expect("claimed H3 generation");
+        let end = source[start..]
+            .find("\nfn validate_h3_prepared_attempt_facts(")
+            .map(|offset| start + offset)
+            .expect("claimed H3 generation boundary");
+        let claimed_h3 = &source[start..end];
+        assert_eq!(
+            claimed_h3.matches("trim_malloc_arenas()").count(),
+            1,
+            "the claimed-H3 path reclaims arenas through exactly one call site"
+        );
+        let release_start = claimed_h3
+            .find("let release_prepared_and_trim =")
+            .expect("claimed H3 ordinary-completion release helper");
+        let release_end = claimed_h3[release_start..]
+            .find("\n    match result {")
+            .map(|offset| release_start + offset)
+            .expect("claimed H3 completion match");
+        assert!(
+            claimed_h3[release_start..release_end].contains("trim_malloc_arenas()"),
+            "the claimed-H3 success and ordinary-error arms must reclaim arenas the way process_job does"
+        );
+
+        let fatal_start = claimed_h3
+            .find("Err(payload) => {")
+            .expect("claimed H3 panic arm");
+        let fatal_end = claimed_h3[fatal_start..]
+            .find("Ok(Err(error)) => {")
+            .map(|offset| fatal_start + offset)
+            .expect("claimed H3 ordinary error arm");
+        let quarantine_arms = &claimed_h3[fatal_start..fatal_end];
+        assert_eq!(
+            quarantine_arms
+                .matches("quarantine_poisoned_worker(worker)")
+                .count(),
+            2,
+            "the panic and fatal-CUDA arms quarantine the owner"
+        );
+        assert!(
+            !quarantine_arms.contains("release_prepared_and_trim("),
+            "a quarantined CUDA context must never have its allocator state touched"
         );
     }
 

@@ -3,6 +3,7 @@ import {
   amendChainJob,
   ApiHttpError,
   cancelChainJob,
+  cancelChainJobMutation,
   chainJobEventsUrl,
   chainJobStagePreviewUrl,
   createChainJob,
@@ -533,10 +534,13 @@ describe("chain job api helpers", () => {
       script: { schema: "mold.chain.v1", chain: {}, stage: [] },
     };
     const fetchMock = installFetch({ job_id: "job/1" });
-    await createChainJob(chainRequest());
+    await createChainJob(chainRequest(), undefined, "create-op");
     expect(fetchMock).toHaveBeenLastCalledWith("/api/chain-jobs", {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: {
+        "content-type": "application/json",
+        "x-mold-operation-id": "create-op",
+      },
       body: JSON.stringify(chainRequest()),
     });
 
@@ -579,12 +583,15 @@ describe("chain job api helpers", () => {
     fetchMock.mockResolvedValueOnce(
       new Response(JSON.stringify({ ...summary, preserved_stages: 1 })),
     );
-    await amendChainJob("job/1", amendRequest);
+    await amendChainJob("job/1", amendRequest, undefined, "amend-op");
     expect(fetchMock).toHaveBeenLastCalledWith(
       "/api/chain-jobs/job%2F1/amend",
       {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: {
+          "content-type": "application/json",
+          "x-mold-operation-id": "amend-op",
+        },
         body: JSON.stringify(amendRequest),
       },
     );
@@ -597,6 +604,13 @@ describe("chain job api helpers", () => {
         method: "POST",
         headers: {},
       },
+    );
+
+    fetchMock.mockResolvedValueOnce(new Response("", { status: 202 }));
+    await cancelChainJobMutation("job/1", "amend-op");
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      "/api/chain-jobs/job%2F1/operations/amend-op/cancel",
+      { method: "POST", headers: {}, keepalive: true },
     );
 
     fetchMock.mockResolvedValueOnce(new Response("", { status: 204 }));

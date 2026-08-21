@@ -15,6 +15,7 @@ use mold_core::cuda_distribution::{
 
 const GITHUB_REPO: &str = "utensils/mold";
 const GITHUB_API_BASE: &str = "https://api.github.com";
+const NIGHTLY_TAG: &str = "latest";
 
 // ── GitHub API types ────────────────────────────────────────────────────────
 
@@ -29,6 +30,16 @@ struct GitHubAsset {
     name: String,
     browser_download_url: String,
     size: u64,
+}
+
+#[derive(serde::Deserialize)]
+struct GitHubRef {
+    object: GitHubRefObject,
+}
+
+#[derive(serde::Deserialize)]
+struct GitHubRefObject {
+    sha: String,
 }
 
 // ── Version comparison ──────────────────────────────────────────────────────
@@ -53,6 +64,41 @@ fn is_newer(current: &str, remote: &str) -> bool {
         (Some(c), Some(r)) => r > c,
         _ => false,
     }
+}
+
+fn is_same_commit(current: &str, remote: &str) -> bool {
+    if current == "unknown"
+        || current.len() < mold_core::build_info::SHORT_SHA_LENGTH
+        || remote.len() < mold_core::build_info::SHORT_SHA_LENGTH
+        || !current
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
+        || !remote
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
+    {
+        return false;
+    }
+    current.starts_with(remote) || remote.starts_with(current)
+}
+
+fn is_current_nightly(build_channel: &str, current_commit: &str, remote_commit: &str) -> bool {
+    build_channel == "nightly" && is_same_commit(current_commit, remote_commit)
+}
+
+fn binary_contains_commit(binary: &[u8], commit: &str) -> bool {
+    commit.len() == 40
+        && commit
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
+        && binary
+            .windows(commit.len())
+            .any(|candidate| candidate == commit.as_bytes())
+}
+
+fn short_commit(sha: &str) -> &str {
+    sha.get(..mold_core::build_info::SHORT_SHA_LENGTH)
+        .unwrap_or(sha)
 }
 
 // ── Platform detection ──────────────────────────────────────────────────────
@@ -395,6 +441,61 @@ async fn fetch_release_by_tag(client: &reqwest::Client, tag: &str) -> Result<Git
         .context("failed to parse GitHub release response")
 }
 
+/// Fetch the mutable rolling prerelease used by CLI nightly builds.
+async fn fetch_nightly_release(client: &reqwest::Client) -> Result<GitHubRelease> {
+    let url = format!("{GITHUB_API_BASE}/repos/{GITHUB_REPO}/releases/tags/{NIGHTLY_TAG}");
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .context("failed to connect to GitHub API")?;
+
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        bail!("nightly release not found on GitHub");
+    }
+    if resp.status() == reqwest::StatusCode::FORBIDDEN {
+        bail!(
+            "GitHub API rate limit exceeded. Set GITHUB_TOKEN to authenticate:\n  \
+             export GITHUB_TOKEN=$(gh auth token)"
+        );
+    }
+    if !resp.status().is_success() {
+        bail!("GitHub API returned {}", resp.status());
+    }
+
+    resp.json()
+        .await
+        .context("failed to parse GitHub nightly release response")
+}
+
+async fn fetch_nightly_commit(client: &reqwest::Client) -> Result<String> {
+    let url = format!("{GITHUB_API_BASE}/repos/{GITHUB_REPO}/git/ref/tags/{NIGHTLY_TAG}");
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .context("failed to resolve the GitHub nightly tag")?;
+
+    if resp.status() == reqwest::StatusCode::FORBIDDEN {
+        bail!(
+            "GitHub API rate limit exceeded. Set GITHUB_TOKEN to authenticate:\n  \
+             export GITHUB_TOKEN=$(gh auth token)"
+        );
+    }
+    if !resp.status().is_success() {
+        bail!(
+            "GitHub API returned {} while resolving nightly",
+            resp.status()
+        );
+    }
+
+    let git_ref: GitHubRef = resp
+        .json()
+        .await
+        .context("failed to parse the GitHub nightly tag response")?;
+    Ok(git_ref.object.sha)
+}
+
 /// Download a release asset with a progress bar.
 async fn download_asset(client: &reqwest::Client, url: &str, size: u64) -> Result<Vec<u8>> {
     let resp = client
@@ -458,16 +559,30 @@ fn select_release_asset<'a>(
 
 // ── Main command ────────────────────────────────────────────────────────────
 
-pub async fn run(check: bool, force: bool, version: Option<String>) -> Result<()> {
+pub async fn run(check: bool, force: bool, nightly: bool, version: Option<String>) -> Result<()> {
     let current = mold_core::build_info::VERSION;
-    eprintln!("{} Current version: {current}", theme::icon_info());
-    eprintln!("{} Checking for updates...", theme::icon_info());
+    let current_display = mold_core::build_info::version_string();
+    eprintln!("{} Current version: {current_display}", theme::icon_info());
+    if nightly {
+        eprintln!("{} Checking for nightly updates...", theme::icon_info());
+    } else {
+        eprintln!("{} Checking for updates...", theme::icon_info());
+    }
 
     let client = build_client()?;
 
-    let release = match &version {
-        Some(tag) => fetch_release_by_tag(&client, tag).await?,
-        None => fetch_latest_release(&client).await?,
+    let release = if nightly {
+        fetch_nightly_release(&client).await?
+    } else {
+        match &version {
+            Some(tag) => fetch_release_by_tag(&client, tag).await?,
+            None => fetch_latest_release(&client).await?,
+        }
+    };
+    let nightly_commit = if nightly {
+        Some(fetch_nightly_commit(&client).await?)
+    } else {
+        None
     };
 
     let remote_version = release
@@ -475,14 +590,28 @@ pub async fn run(check: bool, force: bool, version: Option<String>) -> Result<()
         .strip_prefix('v')
         .unwrap_or(&release.tag_name);
 
-    // Version comparison
+    // Nightlies are identified by source commit because their rolling release
+    // tag is always `latest` and their Cargo version may match stable.
     if !force {
-        if remote_version == current {
+        if let Some(commit) = nightly_commit.as_deref() {
+            if is_current_nightly(
+                mold_core::build_info::BUILD_CHANNEL,
+                mold_core::build_info::GIT_SHA,
+                commit,
+            ) {
+                eprintln!(
+                    "{} Already up to date (nightly {})",
+                    theme::icon_done(),
+                    short_commit(commit)
+                );
+                return Ok(());
+            }
+        } else if remote_version == current {
             eprintln!("{} Already up to date ({current})", theme::icon_done());
             return Ok(());
         }
 
-        if version.is_none() && !is_newer(current, remote_version) {
+        if !nightly && version.is_none() && !is_newer(current, remote_version) {
             eprintln!(
                 "{} Current version ({current}) is newer than latest release ({remote_version})",
                 theme::icon_done()
@@ -491,7 +620,9 @@ pub async fn run(check: bool, force: bool, version: Option<String>) -> Result<()
         }
     }
 
-    let action = if is_newer(current, remote_version) {
+    let action = if nightly {
+        "Installing nightly"
+    } else if is_newer(current, remote_version) {
         "Updating"
     } else if remote_version == current {
         "Reinstalling"
@@ -501,7 +632,13 @@ pub async fn run(check: bool, force: bool, version: Option<String>) -> Result<()
 
     // --check: report availability and exit (no write access needed)
     if check {
-        if is_newer(current, remote_version) {
+        if let Some(commit) = nightly_commit.as_deref() {
+            eprintln!(
+                "{} Nightly available: {} (current: {current_display})",
+                theme::icon_info(),
+                short_commit(commit)
+            );
+        } else if is_newer(current, remote_version) {
             eprintln!(
                 "{} New version available: {remote_version} (current: {current})",
                 theme::icon_info()
@@ -546,8 +683,12 @@ pub async fn run(check: bool, force: bool, version: Option<String>) -> Result<()
         }
     }
 
+    let remote_display = nightly_commit
+        .as_deref()
+        .map(|commit| format!("nightly {}", short_commit(commit)))
+        .unwrap_or_else(|| remote_version.to_string());
     eprintln!(
-        "{} {action}: {current} -> {remote_version}",
+        "{} {action}: {current_display} -> {remote_display}",
         theme::icon_info()
     );
 
@@ -607,11 +748,26 @@ pub async fn run(check: bool, force: bool, version: Option<String>) -> Result<()
     // Extract binary
     let binary = extract_binary_from_tarball(&archive_data)?;
 
+    if let Some(expected_commit) = nightly_commit.as_deref() {
+        anyhow::ensure!(
+            binary_contains_commit(&binary, expected_commit),
+            "nightly publication changed while downloading; the archive does not match commit {}. Retry `mold update --nightly`.",
+            short_commit(expected_commit)
+        );
+        let final_commit = fetch_nightly_commit(&client).await?;
+        anyhow::ensure!(
+            final_commit == expected_commit,
+            "nightly publication advanced from {} to {} while downloading. Retry `mold update --nightly`.",
+            short_commit(expected_commit),
+            short_commit(&final_commit)
+        );
+    }
+
     // Replace binary
     replace_binary(&binary, &exe_path)?;
 
     eprintln!(
-        "{} {action} complete: mold {remote_version} ({})",
+        "{} {action} complete: mold {remote_display} ({})",
         theme::icon_done(),
         exe_path.display()
     );
@@ -665,6 +821,37 @@ mod tests {
         assert!(is_newer("0.9.9", "1.0.0"));
         assert!(is_newer("0.99.99", "1.0.0"));
         assert!(!is_newer("1.0.0", "0.99.99"));
+    }
+
+    #[test]
+    fn nightly_commit_comparison_accepts_full_and_abbreviated_shas() {
+        let full = "9ea1353730812787f9214545c0f54201f1ced188";
+        assert!(is_same_commit(full, full));
+        assert!(is_same_commit("9ea1353", full));
+        assert!(is_same_commit(full, "9ea1353"));
+        assert!(!is_same_commit("bc6b99b", full));
+        assert!(!is_same_commit("unknown", full));
+    }
+
+    #[test]
+    fn only_an_official_nightly_at_the_same_commit_is_current() {
+        let full = "9ea1353730812787f9214545c0f54201f1ced188";
+        assert!(is_current_nightly("nightly", full, full));
+        assert!(!is_current_nightly("stable", full, full));
+        assert!(!is_current_nightly("development", full, full));
+        assert!(!is_current_nightly("nightly", "bc6b99b", full));
+    }
+
+    #[test]
+    fn nightly_archive_must_embed_the_exact_rolling_commit() {
+        let commit = "9ea1353730812787f9214545c0f54201f1ced188";
+        let binary = format!("binary-prefix\0{commit}\0binary-suffix");
+        assert!(binary_contains_commit(binary.as_bytes(), commit));
+        assert!(!binary_contains_commit(binary.as_bytes(), "bc6b99b"));
+        assert!(!binary_contains_commit(
+            binary.as_bytes(),
+            "bc6b99b423f0e85909ffceca9f4ae2b7fa900744"
+        ));
     }
 
     // ── Platform detection ──────────────────────────────────────────────

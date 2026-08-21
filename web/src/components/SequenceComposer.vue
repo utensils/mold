@@ -11,7 +11,13 @@ import ClipRail from "@ui/components/ClipRail.vue";
 import Popover from "@ui/components/Popover.vue";
 import SeamEditor from "@ui/components/SeamEditor.vue";
 import Icon from "@ui/components/Icon.vue";
+import SequenceContextMenu from "./create/SequenceContextMenu.vue";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
+import {
+  clipContextEntries,
+  railContextEntries,
+  type SequenceMenuEntry,
+} from "@studio/lib/sequenceContextMenu";
 import {
   buildChainRequest,
   chainScriptToClips,
@@ -24,6 +30,7 @@ import {
   defaultClipFrames,
   formatFrameDuration,
   sequenceDuration,
+  sequenceClipFrameCap,
   sequenceFrameOptions,
   sequenceFrameStep,
   sequenceMotionTailFrames,
@@ -67,6 +74,7 @@ const props = withDefaults(
       Record<string, ClipRailMedia | undefined>
     > | null;
     playingClipId?: string | null;
+    submitting?: boolean;
   }>(),
   {
     sourceImage: null,
@@ -74,11 +82,13 @@ const props = withDefaults(
     chainLevelDirty: false,
     stageMediaByClipId: null,
     playingClipId: null,
+    submitting: false,
   },
 );
 
 const emit = defineEmits<{
   submit: [];
+  cancel: [];
   "duplicate-as-new": [];
   "discard-edit": [];
   "expand-clip": [clipId: string, prompt: string];
@@ -123,7 +133,11 @@ const motionTail = computed(() =>
 );
 const defaultFrames = computed(() =>
   defaultClipFrames(
-    { default_frames: props.modelDefaultFrames, family: props.family },
+    {
+      name: props.model,
+      default_frames: props.modelDefaultFrames,
+      family: props.family,
+    },
     limits.value,
     motionTail.value,
   ),
@@ -145,7 +159,11 @@ async function loadLimits() {
   if (!limits.value?.supports_audio) draft.enableAudio = false;
   if (!draft.editing && limits.value) {
     const frames = defaultClipFrames(
-      { default_frames: props.modelDefaultFrames, family: props.family },
+      {
+        name: props.model,
+        default_frames: props.modelDefaultFrames,
+        family: props.family,
+      },
       limits.value,
       motionTail.value,
     );
@@ -242,9 +260,7 @@ const validationErrors = computed(() =>
   sequenceValidation(stages.value, {
     maxStages: maxStages.value,
     maxTotalFrames: limits.value?.max_total_frames ?? 1552,
-    ...(limits.value
-      ? { maxFramesPerClip: limits.value.frames_per_clip_cap }
-      : {}),
+    maxFramesPerClip: clipFrameCap.value,
     frameStep: sequenceFrameStep(props.family),
     frameOffset: 1,
     motionTailFrames: motionTail.value,
@@ -262,9 +278,18 @@ const fitNote = computed(() => {
   return `${n} ${n === 1 ? "clip" : "clips"} · ${formatFrameDuration(duration.value.frames, props.shared.fps)} @ ${props.shared.fps}fps`;
 });
 
+/** The model's own clip size bounds the picker and the validator alike —
+ *  even against an older host that still advertises the family's
+ *  single-request budget (481 LTX-2 frames at 24 fps). */
+const clipFrameCap = computed(() =>
+  sequenceClipFrameCap(
+    { name: props.model, family: props.family },
+    limits.value,
+  ),
+);
 const frameOptions = computed(() => {
   const options = sequenceFrameOptions(
-    limits.value?.frames_per_clip_cap ?? 97,
+    clipFrameCap.value,
     motionTail.value,
     // Wan's VAE compresses time by 4, so its clips sit on `4k+1`; offering
     // the LTX grid hid its own 53-frame routing default (#783).
@@ -370,6 +395,10 @@ function formatBytes(bytes: number): string {
 }
 
 function trySubmit() {
+  if (props.submitting) {
+    emit("cancel");
+    return;
+  }
   if (!canGenerate.value) return;
   emit("submit");
 }
@@ -423,6 +452,90 @@ function importTomlText(text: string) {
   fileToolsOpen.value = false;
 }
 
+// ── Context menus ─────────────────────────────────────────────────────
+// One right-click handler for the whole bench, discriminated by target:
+// text fields keep the browser's own menu, a seam pill keeps its transition
+// editor (SeamPill turns `contextmenu` into a `click`), a clip pill gets the
+// clip menu, and everything else gets the bench menu. Desktop runs the same
+// discrimination over the same shared entry builder.
+const CONTEXT_MENU_TEXT_TARGETS =
+  "textarea, input, select, [contenteditable], [data-selectable]";
+
+const contextMenu = ref<{
+  entries: SequenceMenuEntry[];
+  x: number;
+  y: number;
+} | null>(null);
+
+function clipMenuEntries(clipId: string, index: number): SequenceMenuEntry[] {
+  return clipContextEntries(
+    {
+      index,
+      count: draft.clips.length,
+      maxStages: maxStages.value,
+      canPlay: Boolean(props.stageMediaByClipId?.[clipId]),
+      // Web's rail is never submit-locked: the page owns no in-flight POST
+      // state for the bench, so nothing freezes the clips.
+      locked: false,
+    },
+    {
+      play: () => onPlayClip(clipId),
+      duplicate: () => void draft.duplicateClip(clipId),
+      insertBefore: () => void draft.insertClip(index, defaultFrames.value),
+      insertAfter: () => void draft.insertClip(index + 1, defaultFrames.value),
+      moveTo: (to) => draft.moveClip(clipId, to),
+      remove: () => draft.removeClip(clipId),
+    },
+  );
+}
+
+function railMenuEntries(): SequenceMenuEntry[] {
+  return railContextEntries(
+    {
+      count: draft.clips.length,
+      maxStages: maxStages.value,
+      locked: false,
+      canValidate: canGenerate.value && !validating.value,
+    },
+    {
+      addClip: () => draft.addClip(defaultFrames.value),
+      validate: () => void validatePlan(),
+      importToml: () => importFileInput.value?.click(),
+      exportToml: () => downloadToml(),
+      copyToml: () => copyToml(),
+      clear: () => void clearSequence(),
+    },
+  );
+}
+
+function onBenchContextMenu(event: MouseEvent) {
+  const node = event.target as HTMLElement | null;
+  if (!node || typeof node.closest !== "function") return;
+  if (node.closest(CONTEXT_MENU_TEXT_TARGETS)) return;
+  if (node.closest(".ms-seam")) return;
+  const clipId =
+    node.closest("[data-clip-id]")?.getAttribute("data-clip-id") ?? null;
+  event.preventDefault();
+  // The bench root carries the same handler; one open per right-click.
+  event.stopPropagation();
+  if (clipId) {
+    const index = draft.clips.findIndex((clip) => clip.id === clipId);
+    if (index < 0) return;
+    draft.activeClipId = clipId;
+    contextMenu.value = {
+      entries: clipMenuEntries(clipId, index),
+      x: event.clientX,
+      y: event.clientY,
+    };
+    return;
+  }
+  contextMenu.value = {
+    entries: railMenuEntries(),
+    x: event.clientX,
+    y: event.clientY,
+  };
+}
+
 function handleImportChange(event: Event) {
   const input = event.target as HTMLInputElement;
   const file = input.files?.[0];
@@ -439,6 +552,7 @@ defineExpose({ importTomlText });
   <section
     class="flex flex-col gap-3 rounded-card-lg border border-edge bg-bench p-4 shadow-[inset_0_1px_0_var(--card-hi)]"
     data-test="sequence-composer"
+    @contextmenu="onBenchContextMenu"
   >
     <div class="flex items-center gap-2">
       <div>
@@ -543,7 +657,7 @@ defineExpose({ importTomlText });
       </button>
     </div>
 
-    <div class="sq-filmstrip-wrap">
+    <div class="sq-filmstrip-wrap" @contextmenu="onBenchContextMenu">
       <Popover
         :open="openSeamId !== null"
         placement="bottom-start"
@@ -772,13 +886,27 @@ defineExpose({ importTomlText });
             ? 'bg-safelight text-on-accent hover:brightness-110'
             : 'cursor-not-allowed border border-edge bg-bath text-ink-3'
         "
-        :disabled="!canGenerate"
+        :disabled="!canGenerate && !submitting"
         data-test="sequence-generate"
         @click="trySubmit"
       >
-        {{ draft.editing ? "Update sequence" : "Generate sequence" }}
+        {{
+          submitting
+            ? "Cancel · Preparing sequence…"
+            : draft.editing
+              ? "Update sequence"
+              : "Generate sequence"
+        }}
       </button>
     </div>
+
+    <SequenceContextMenu
+      v-if="contextMenu"
+      :entries="contextMenu.entries"
+      :x="contextMenu.x"
+      :y="contextMenu.y"
+      @close="contextMenu = null"
+    />
   </section>
 </template>
 

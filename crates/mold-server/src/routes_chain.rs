@@ -898,9 +898,14 @@ pub(crate) fn validate_and_normalize_chain_family(
             })));
         }
     }
-    // Each stage is denoised as one generation, so it is bound by the same
-    // ceiling `/api/capabilities/chain-limits` advertises. This used to be
-    // advertised but never enforced, so an over-budget clip only failed once
+    // Each stage is denoised as one generation, so it is bound by the family's
+    // SINGLE-REQUEST ceiling — LTX-2's 20 s runtime budget, 481 frames at
+    // 24 fps. That is deliberately looser than the `frames_per_clip_cap`
+    // `/api/capabilities/chain-limits` advertises, which is the model's
+    // routing clip size: `mold run --clip-frames` is documented to go all the
+    // way to the model's real budget and submits chains here, so admission
+    // must not refuse what the CLI is allowed to ask for. This used to be
+    // neither advertised nor enforced, so an over-budget clip only failed once
     // the stage reached the engine.
     if let Some(cap) = crate::chain_limits::family_cap_at_fps(&family, req.fps) {
         if let Some((idx, stage)) = req
@@ -910,7 +915,8 @@ pub(crate) fn validate_and_normalize_chain_family(
             .find(|(_, stage)| stage.frames > cap)
         {
             return Err(ApiError::validation(format!(
-                "stage {idx} asks for {} frames; the per-clip cap for '{}' at {} fps is {cap} frames",
+                "stage {idx} asks for {} frames; the single-request ceiling for '{}' at {} fps is \
+                 {cap} frames",
                 stage.frames, family, req.fps,
             )));
         }

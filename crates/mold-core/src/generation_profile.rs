@@ -267,6 +267,11 @@ pub struct GenerationCapabilitiesProfile {
     pub source_image: Option<SourceImageCapability>,
     pub supports_lora: bool,
     pub supports_controlnet: bool,
+    /// Face-identity conditioning (`GenerateRequest.id_image`). True only for
+    /// an identity-qualified checkpoint on a binary that links the identity
+    /// adapter, so a client never offers a control this server would refuse.
+    #[serde(default)]
+    pub supports_identity: bool,
     pub supports_sequence: bool,
     pub supports_extend: bool,
     pub supports_audio: bool,
@@ -312,6 +317,15 @@ impl GenerationProfileSet {
         self.recipes
             .iter()
             .find(|recipe| recipe.id == self.default_recipe_id)
+    }
+
+    /// Whether any selectable recipe of this model advertises face-identity
+    /// conditioning. `/api/models[].supports_identity` reads this rather than
+    /// re-deriving the predicate.
+    pub fn supports_identity(&self) -> bool {
+        self.recipes
+            .iter()
+            .any(|recipe| recipe.capabilities.supports_identity)
     }
 
     pub fn recipe_for_pipeline(
@@ -827,6 +841,14 @@ const H3: &[(u32, u32)] = &[
     (768, 1024),
     (768, 1344),
 ];
+/// The reviewed compact stack renders exactly one canvas: `private_server.rs`
+/// admits `DEFAULT_WIDTH`x`DEFAULT_HEIGHT` and nothing else, and the engine
+/// fits any source into it. Advertising the official ladder here is what let
+/// users pick a size the engine refuses after the load was paid for.
+const H3_COMPACT: &[(u32, u32)] = &[(
+    crate::minimax_h3::DEFAULT_WIDTH,
+    crate::minimax_h3::DEFAULT_HEIGHT,
+)];
 
 const Z_IMAGE_QUALIFICATION: ResolutionQualificationRecord =
     ResolutionQualificationRecord {
@@ -891,6 +913,16 @@ pub fn presets_for_identity<'a>(
     sub_family: Option<&str>,
 ) -> &'a [(u32, u32)] {
     let family = canonical_family(family);
+    if family == "minimax-h3" {
+        // Only the hidden official BF16 references keep the flexible ladder.
+        // Every compact identity — and any identity the layout resolver does
+        // not recognize — takes the fixed reviewed envelope, the same
+        // fail-toward-the-stricter-contract rule as `source_fit_dimensions`.
+        return match crate::minimax_h3::layout_for_model(model) {
+            Some(crate::minimax_h3::Layout::OfficialBf16) => H3,
+            _ => H3_COMPACT,
+        };
+    }
     if family != "wan" {
         return family_presets(family);
     }
@@ -960,6 +992,16 @@ fn recipe(
     pipeline: Option<Ltx2PipelineMode>,
 ) -> GenerationRecipeProfile {
     let family = canonical_family(input.family);
+    // The reviewed compact H3 stack has one canvas, one step count, and one
+    // frame count. All three are derived from the identity, never from
+    // `input.default_*` — those are laundered through user `model_prefs` in
+    // `build_model_catalog` and can carry a stale off-envelope value.
+    let h3_compact = family == "minimax-h3"
+        && crate::minimax_h3::layout_for_model(input.model)
+            != Some(crate::minimax_h3::Layout::OfficialBf16);
+    let h3_compact_steps = crate::minimax_h3::turbo_tier_for_model(input.model)
+        .map(|tier| tier.steps)
+        .unwrap_or(crate::minimax_h3::COMFY_DEFAULT_STEPS);
     let audio_only = pipeline == Some(Ltx2PipelineMode::T2a);
     let source_driven = family == "qwen-image-edit"
         || matches!(
@@ -1024,7 +1066,7 @@ fn recipe(
         ResolutionProfile {
             domain: if source_driven {
                 ResolutionDomain::SourceDriven
-            } else if family == "wan" {
+            } else if family == "wan" || h3_compact {
                 ResolutionDomain::Buckets
             } else {
                 ResolutionDomain::Dynamic
@@ -1045,8 +1087,13 @@ fn recipe(
                 .then_some(crate::minimax_h3::MAX_ASPECT_RATIO),
             // Wan's buckets are the trained sizes, not the only runnable
             // ones — a deliberate off-bucket request is admitted and the
-            // advisory warning channel says results may vary.
-            off_bucket: (family == "wan").then_some(OffBucketPolicy::Warn),
+            // advisory warning channel says results may vary. H3's compact
+            // bucket is the only size its admission accepts, so it refuses.
+            off_bucket: if h3_compact {
+                Some(OffBucketPolicy::Reject)
+            } else {
+                (family == "wan").then_some(OffBucketPolicy::Warn)
+            },
             aspect_groups: aspect_groups(family, &dimensions),
         }
     };
@@ -1061,7 +1108,17 @@ fn recipe(
         GuidanceCapabilities::for_recipe(family, input.model, pipeline)
     };
     let effective_guidance = guidance_caps.fixed_scale.unwrap_or(input.default_guidance);
-    let temporal = temporal_profile(input, family);
+    let mut temporal = temporal_profile(input, family);
+    if let Some(temporal) = temporal.as_mut().filter(|_| h3_compact) {
+        temporal.frames = IntegerControl {
+            default: crate::minimax_h3::MIN_FRAMES,
+            min: crate::minimax_h3::MIN_FRAMES,
+            max: crate::minimax_h3::MIN_FRAMES,
+            step: crate::minimax_h3::FRAME_STEP,
+            recommended: vec![crate::minimax_h3::MIN_FRAMES],
+            mode: ControlMode::Fixed,
+        };
+    }
     let flux2_dev = family == "flux2"
         && crate::manifest::resolve_model_name(input.model)
             .to_ascii_lowercase()
@@ -1088,6 +1145,11 @@ fn recipe(
         && !flux2_dev
         && input.source_image != Some(SourceImageCapability::Unsupported);
     let controlnet_supported = family == "sd15";
+    // Identity conditioning is advertised only when this binary actually
+    // links the adapter AND the checkpoint is one of the qualified ones —
+    // `crate::identity` is the single authority for the second half.
+    let identity_supported =
+        cfg!(feature = "pulid") && crate::identity::identity_qualified_model(input.model);
     let output = if audio_only {
         OutputCapabilitiesProfile {
             default_format: OutputFormat::Wav,
@@ -1123,10 +1185,25 @@ fn recipe(
             delivery_reason: None,
         }
     };
+    let default_width = if h3_compact {
+        crate::minimax_h3::DEFAULT_WIDTH
+    } else {
+        input.default_width
+    };
+    let default_height = if h3_compact {
+        crate::minimax_h3::DEFAULT_HEIGHT
+    } else {
+        input.default_height
+    };
+    let default_steps = if h3_compact {
+        h3_compact_steps
+    } else {
+        input.default_steps
+    };
     let defaults = GenerationDefaultsProfile {
-        width: if audio_only { 0 } else { input.default_width },
-        height: if audio_only { 0 } else { input.default_height },
-        steps: input.default_steps,
+        width: if audio_only { 0 } else { default_width },
+        height: if audio_only { 0 } else { default_height },
+        steps: default_steps,
         guidance: effective_guidance,
         frames: temporal.as_ref().map(|profile| profile.frames.default),
         fps: temporal.as_ref().map(|profile| match profile.fps {
@@ -1142,12 +1219,22 @@ fn recipe(
         defaults,
         resolution,
         steps: IntegerControl {
-            default: input.default_steps,
-            min: if family == "minimax-h3" { 2 } else { 1 },
-            max: 100,
+            default: default_steps,
+            min: if h3_compact {
+                h3_compact_steps
+            } else if family == "minimax-h3" {
+                2
+            } else {
+                1
+            },
+            max: if h3_compact { h3_compact_steps } else { 100 },
             step: 1,
-            recommended: vec![input.default_steps],
-            mode: ControlMode::Adjustable,
+            recommended: vec![default_steps],
+            mode: if h3_compact {
+                ControlMode::Fixed
+            } else {
+                ControlMode::Adjustable
+            },
         },
         guidance: FloatControl {
             default: effective_guidance,
@@ -1179,6 +1266,7 @@ fn recipe(
             source_image: input.source_image,
             supports_lora: lora_supported,
             supports_controlnet: controlnet_supported,
+            supports_identity: identity_supported,
             supports_sequence: input.supports_sequence && !audio_only,
             supports_extend: input.supports_extend && !audio_only,
             supports_audio: input.supports_audio || audio_only,
@@ -1469,6 +1557,49 @@ mod tests {
             supports_sequence: false,
             supports_extend: false,
             supports_audio: false,
+        }
+    }
+
+    #[test]
+    fn identity_capability_is_off_in_a_build_without_the_adapter() {
+        // A binary that does not link the identity adapter must never
+        // advertise the control, however qualified the checkpoint is.
+        let profile = resolve_generation_profile(input("flux-dev:q8", "flux"));
+        let advertised = profile
+            .default_recipe()
+            .unwrap()
+            .capabilities
+            .supports_identity;
+        assert_eq!(advertised, cfg!(feature = "pulid"));
+        assert_eq!(profile.supports_identity(), cfg!(feature = "pulid"));
+    }
+
+    #[test]
+    fn identity_capability_is_never_advertised_for_an_unqualified_checkpoint() {
+        for (model, family) in [
+            ("flux-dev:bf16", "flux"),
+            ("flux-schnell:q8", "flux"),
+            ("flux2-klein", "flux2"),
+            ("sdxl-base:fp16", "sdxl"),
+            ("z-image-turbo:q4", "z-image"),
+        ] {
+            let profile = resolve_generation_profile(input(model, family));
+            assert!(
+                !profile.supports_identity(),
+                "{model} must not advertise identity conditioning"
+            );
+        }
+    }
+
+    #[cfg(feature = "pulid")]
+    #[test]
+    fn identity_capability_is_advertised_for_qualified_checkpoints_with_the_feature() {
+        for model in ["flux-dev", "flux-dev:q4", "flux-dev:q8", "flux-dev-q4"] {
+            let profile = resolve_generation_profile(input(model, "flux"));
+            assert!(
+                profile.supports_identity(),
+                "{model} must advertise identity conditioning"
+            );
         }
     }
 
@@ -1986,6 +2117,163 @@ mod tests {
         assert!(generation_profile_default_output_format(&h3, None)
             .unwrap_err()
             .contains("no default recipe"));
+    }
+
+    #[test]
+    fn h3_compact_profiles_pin_the_reviewed_envelope() {
+        // The reviewed compact stack admits exactly one canvas, one step
+        // count, and one frame count. The laundered manifest defaults below
+        // are deliberately wrong (a stale user `model_pref` reaches this
+        // input through `build_model_catalog`), so the profile must derive
+        // the envelope from the identity rather than from what it was told.
+        for (model, steps) in [
+            (crate::minimax_h3::FL2VA_COMFY, 21),
+            (crate::minimax_h3::REF2VA_COMFY, 21),
+            (crate::minimax_h3::FL2VA_COMFY_TURBO_8STEP, 9),
+            (crate::minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P, 5),
+        ] {
+            let mut h3_input = input(model, "minimax-h3");
+            h3_input.default_width = 768;
+            h3_input.default_height = 768;
+            h3_input.default_steps = 30;
+            h3_input.default_frames = Some(crate::minimax_h3::MAX_FRAMES);
+            h3_input.default_fps = Some(crate::minimax_h3::FIXED_FPS);
+            let profile = resolve_generation_profile(h3_input);
+            let recipe = profile.default_recipe().unwrap();
+
+            assert_eq!(
+                recipe.resolution.domain,
+                ResolutionDomain::Buckets,
+                "{model}"
+            );
+            assert_eq!(
+                recipe.resolution.off_bucket,
+                Some(OffBucketPolicy::Reject),
+                "{model}"
+            );
+            let presets = recipe
+                .resolution
+                .aspect_groups
+                .iter()
+                .flat_map(|group| &group.presets)
+                .map(|preset| (preset.width, preset.height))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                presets,
+                vec![(
+                    crate::minimax_h3::DEFAULT_WIDTH,
+                    crate::minimax_h3::DEFAULT_HEIGHT
+                )],
+                "{model}"
+            );
+
+            assert_eq!(recipe.defaults.width, crate::minimax_h3::DEFAULT_WIDTH);
+            assert_eq!(recipe.defaults.height, crate::minimax_h3::DEFAULT_HEIGHT);
+            assert_eq!(recipe.defaults.steps, steps, "{model}");
+            assert_eq!(
+                recipe.defaults.frames,
+                Some(crate::minimax_h3::MIN_FRAMES),
+                "{model}"
+            );
+
+            assert_eq!(recipe.steps.mode, ControlMode::Fixed, "{model}");
+            assert_eq!(recipe.steps.min, steps, "{model}");
+            assert_eq!(recipe.steps.max, steps, "{model}");
+            assert_eq!(recipe.steps.default, steps, "{model}");
+            assert_eq!(recipe.steps.recommended, vec![steps], "{model}");
+
+            let temporal = recipe.temporal.as_ref().unwrap();
+            assert_eq!(temporal.frames.mode, ControlMode::Fixed, "{model}");
+            assert_eq!(
+                temporal.frames.min,
+                crate::minimax_h3::MIN_FRAMES,
+                "{model}"
+            );
+            assert_eq!(
+                temporal.frames.max,
+                crate::minimax_h3::MIN_FRAMES,
+                "{model}"
+            );
+            assert_eq!(
+                temporal.frames.default,
+                crate::minimax_h3::MIN_FRAMES,
+                "{model}"
+            );
+
+            let mut request = request_for(
+                &profile,
+                crate::minimax_h3::DEFAULT_WIDTH,
+                crate::minimax_h3::DEFAULT_HEIGHT,
+            );
+            request.output_format = Some(OutputFormat::Mp4);
+            validate_request_against_generation_profile(&profile, &request).unwrap();
+
+            let off_bucket = request_for(&profile, 768, 768);
+            assert!(
+                validate_request_against_generation_profile(&profile, &off_bucket)
+                    .unwrap_err()
+                    .contains("not an available bucket"),
+                "{model}"
+            );
+
+            let mut wrong_steps = request.clone();
+            wrong_steps.steps = 30;
+            assert!(
+                validate_request_against_generation_profile(&profile, &wrong_steps)
+                    .unwrap_err()
+                    .contains("steps is fixed at"),
+                "{model}"
+            );
+
+            let mut wrong_frames = request.clone();
+            wrong_frames.frames =
+                Some(crate::minimax_h3::MIN_FRAMES + crate::minimax_h3::FRAME_STEP);
+            assert!(
+                validate_request_against_generation_profile(&profile, &wrong_frames)
+                    .unwrap_err()
+                    .contains("frames is fixed at 124"),
+                "{model}"
+            );
+        }
+    }
+
+    #[test]
+    fn h3_official_profiles_keep_the_flexible_ladder() {
+        for model in [
+            crate::minimax_h3::FL2VA_OFFICIAL,
+            crate::minimax_h3::REF2VA_OFFICIAL,
+        ] {
+            let mut h3_input = input(model, "minimax-h3");
+            h3_input.default_width = crate::minimax_h3::DEFAULT_WIDTH;
+            h3_input.default_height = crate::minimax_h3::DEFAULT_HEIGHT;
+            h3_input.default_steps = crate::minimax_h3::DEFAULT_STEPS;
+            h3_input.default_frames = Some(crate::minimax_h3::MIN_FRAMES);
+            h3_input.default_fps = Some(crate::minimax_h3::FIXED_FPS);
+            let profile = resolve_generation_profile(h3_input);
+            let recipe = profile.default_recipe().unwrap();
+
+            assert_eq!(
+                recipe.resolution.domain,
+                ResolutionDomain::Dynamic,
+                "{model}"
+            );
+            assert_eq!(recipe.resolution.off_bucket, None, "{model}");
+            assert!(
+                recipe.resolution.aspect_groups.len() >= 2,
+                "{model}: the official ladder keeps every reviewed aspect"
+            );
+            assert_eq!(recipe.steps.mode, ControlMode::Adjustable, "{model}");
+            assert_eq!(recipe.steps.min, 2, "{model}");
+            assert_eq!(recipe.steps.max, 100, "{model}");
+
+            let temporal = recipe.temporal.as_ref().unwrap();
+            assert_eq!(temporal.frames.mode, ControlMode::Adjustable, "{model}");
+            assert_eq!(
+                temporal.frames.max,
+                crate::minimax_h3::MAX_FRAMES,
+                "{model}"
+            );
+        }
     }
 
     #[test]

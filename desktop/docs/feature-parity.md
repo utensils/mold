@@ -264,7 +264,11 @@ Desktop parity: Create's Sequence path starts with two required, directly
 editable clips and filters the model menu through the shared chain-capability
 contract. Plain-language transitions sit between clips; per-clip frame,
 negative-prompt, and source controls plus sequence-wide size, FPS, seed, audio,
-opening image, and TOML file tools stay available under progressive disclosure.
+and TOML file tools stay available under progressive disclosure. The opening
+image is not one of them: on every surface it is a primary-form well (source
+strength and fit beside it), sitting in the same slot the one-shot source well
+occupies and cleared by the same header ↺ Reset, while Advanced keeps only the
+clip negative prompt and camera motion.
 The opening image is projected onto `stages[0].source_image` at request/script
 build time (canonical `stages` form ignores top-level `source_image`); a clip's
 own image wins. TOML **Export** emits inline `source_image_b64` per clip and

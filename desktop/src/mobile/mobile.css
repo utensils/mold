@@ -2549,7 +2549,9 @@ button:disabled {
 }
 
 .gallery-grid.is-selecting .gallery-item {
-  touch-action: none;
+  /* WebKit keeps vertical pans native until the pointer handler sees
+     horizontal/diagonal drag-selection intent. */
+  touch-action: pan-y;
   user-select: none;
   -webkit-user-select: none;
   -webkit-touch-callout: none;
@@ -2669,7 +2671,9 @@ button:disabled {
   position: sticky;
   bottom: 8px;
   z-index: 8;
-  display: flex;
+  display: grid;
+  flex-shrink: 0;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   align-items: center;
   gap: 6px;
   min-height: 56px;
@@ -2684,15 +2688,19 @@ button:disabled {
 
 .mobile-gallery-actions > span {
   min-width: 0;
-  flex: 1;
+  grid-column: span 2;
   padding-left: 8px;
   color: var(--ink-2);
   font-family: var(--font-utility);
   font-size: var(--text-data);
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .mobile-gallery-actions button {
+  box-sizing: border-box;
+  grid-column: span 2;
+  width: 100%;
   min-width: 44px;
   min-height: 44px;
   border: 1px solid var(--control-edge);
@@ -2702,6 +2710,15 @@ button:disabled {
   color: var(--ink);
   font-family: var(--font-utility);
   font-weight: 650;
+  line-height: 1.15;
+  overflow-wrap: anywhere;
+  text-align: center;
+  white-space: normal;
+}
+
+.mobile-gallery-actions [data-test="mobile-gallery-favorite"],
+.mobile-gallery-actions [data-test="mobile-gallery-tag"] {
+  grid-column: span 1;
 }
 
 .mobile-gallery-actions button.danger {

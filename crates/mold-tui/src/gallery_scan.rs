@@ -603,6 +603,10 @@ mod tests {
             version: "test".to_string(),
             frames: None,
             fps: None,
+            id_image_name: None,
+            id_image_sha256: None,
+            id_weight: None,
+            id_start_step: None,
         }
     }
 

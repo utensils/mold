@@ -431,7 +431,7 @@ async function requireJson<T>(res: Response, label: string): Promise<T> {
 async function chainJobJson<T>(
   suffix: string,
   target?: StreamTarget,
-  request: { method?: "POST"; body?: unknown } = {},
+  request: { method?: "POST"; body?: unknown; operationId?: string } = {},
 ): Promise<T> {
   const path = `/api/chain-jobs${suffix}`;
   const hasBody = request.body !== undefined;
@@ -439,6 +439,9 @@ async function chainJobJson<T>(
     ...(request.method ? { method: request.method } : {}),
     headers: {
       ...(hasBody ? { "content-type": "application/json" } : {}),
+      ...(request.operationId
+        ? { "x-mold-operation-id": request.operationId }
+        : {}),
       ...targetHeaders(target),
     },
     ...(hasBody ? { body: JSON.stringify(request.body) } : {}),
@@ -452,10 +455,12 @@ async function chainJobJson<T>(
 export async function createChainJob(
   req: ChainRequestWire,
   target?: StreamTarget,
+  operationId?: string,
 ): Promise<CreateChainJobResponse> {
   return chainJobJson("", target, {
     method: "POST",
     body: req,
+    operationId,
   });
 }
 
@@ -525,11 +530,32 @@ export async function amendChainJob(
   id: string,
   req: AmendRequestWire,
   target?: StreamTarget,
+  operationId?: string,
 ): Promise<AmendResponseWire> {
   return chainJobJson(`/${encodeURIComponent(id)}/amend`, target, {
     method: "POST",
     body: req,
+    operationId,
   });
+}
+
+/** Cancel a create/amend by its client-known id, including before the
+ * mutation response exposes a durable job id. */
+export async function cancelChainJobMutation(
+  jobId: string,
+  operationId: string,
+  target?: StreamTarget,
+): Promise<void> {
+  const path = `/api/chain-jobs/${encodeURIComponent(jobId)}/operations/${encodeURIComponent(operationId)}/cancel`;
+  const res = await fetch(`${targetBase(target)}${path}`, {
+    method: "POST",
+    headers: targetHeaders(target),
+    keepalive: true,
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new ApiHttpError(`POST ${path}`, res.status, body);
+  }
 }
 
 export async function gcChainJobs(target?: StreamTarget): Promise<{

@@ -59,6 +59,7 @@ import {
   type GenerationPlacementPreview,
   type MissingModelPlacement,
   type PlacementMissingComponent,
+  type PlacementPreviewOptions,
 } from "@studio/api/generationPlacement";
 import {
   AUTO_TARGET_ID,
@@ -136,22 +137,26 @@ export interface HostRouting {
   resolveFeasible: (
     request: GenerateRequestWire,
     copies?: number,
+    options?: PlacementPreviewOptions,
   ) => Promise<FeasibilityResult>;
   /** Revalidate only a previously selected host; never globally rerank. */
   revalidateFeasible: (
     route: HostRoute,
     request: GenerateRequestWire,
     copies?: number,
+    options?: PlacementPreviewOptions,
   ) => Promise<FeasibilityResult>;
   /** Resolve a complete durable sequence through the same scheduler preview. */
   resolveFeasibleChain: (
     request: ChainRequestWire,
     copies?: number,
+    options?: PlacementPreviewOptions,
   ) => Promise<FeasibilityResult>;
   revalidateFeasibleChain: (
     route: HostRoute,
     request: ChainRequestWire,
     copies?: number,
+    options?: PlacementPreviewOptions,
   ) => Promise<FeasibilityResult>;
   /** Re-read the registry and poll every host once. */
   refresh: () => Promise<void>;
@@ -634,8 +639,12 @@ function resolve(model: string | null): HostRoute | null {
 
 async function resolveFeasibleWithPreview(
   model: string,
-  previewFor: (target: ApiTarget) => Promise<GenerationPlacementPreview>,
+  previewFor: (
+    target: ApiTarget,
+    options: PlacementPreviewOptions,
+  ) => Promise<GenerationPlacementPreview>,
   requireAuthoritative = false,
+  options: PlacementPreviewOptions = {},
   authorityRetry = 0,
 ): Promise<FeasibilityResult> {
   readRegistry();
@@ -713,7 +722,7 @@ async function resolveFeasibleWithPreview(
           baseUrl: entry.url,
           apiKey: entry.apiKey ?? null,
         };
-        const preview = await previewFor(target);
+        const preview = await previewFor(target, options);
         return {
           candidate,
           preview,
@@ -749,6 +758,7 @@ async function resolveFeasibleWithPreview(
         model,
         previewFor,
         requireAuthoritative,
+        options,
         1,
       );
     }
@@ -913,10 +923,11 @@ async function resolveFeasibleWithPreview(
 async function resolveFeasible(
   request: GenerateRequestWire,
   copies = 1,
+  options: PlacementPreviewOptions = {},
 ): Promise<FeasibilityResult> {
   return resolveFeasibleWithPreview(
     request.model,
-    (target) =>
+    (target, previewOptions) =>
       previewGenerationPlacement(
         target,
         previewRequestForSiblingFanout(
@@ -924,34 +935,46 @@ async function resolveFeasible(
           copies,
         ),
         copies,
+        previewOptions,
       ),
     requiresAuthoritativePlacement(
       request as unknown as Record<string, unknown>,
     ),
+    options,
   );
 }
 
 async function resolveFeasibleChain(
   request: ChainRequestWire,
   copies = 1,
+  options: PlacementPreviewOptions = {},
 ): Promise<FeasibilityResult> {
-  return resolveFeasibleWithPreview(request.model, (target) =>
-    previewChainPlacement(
-      target,
-      previewRequestForSiblingFanout(
-        request as unknown as Record<string, unknown>,
+  return resolveFeasibleWithPreview(
+    request.model,
+    (target, previewOptions) =>
+      previewChainPlacement(
+        target,
+        previewRequestForSiblingFanout(
+          request as unknown as Record<string, unknown>,
+          copies,
+        ),
         copies,
+        previewOptions,
       ),
-      copies,
-    ),
+    false,
+    options,
   );
 }
 
 async function revalidateFeasibleWithPreview(
   route: HostRoute,
   model: string,
-  previewFor: (target: ApiTarget) => Promise<GenerationPlacementPreview>,
+  previewFor: (
+    target: ApiTarget,
+    options: PlacementPreviewOptions,
+  ) => Promise<GenerationPlacementPreview>,
   requireAuthoritative = false,
+  options: PlacementPreviewOptions = {},
   authorityRetry = 0,
 ): Promise<FeasibilityResult> {
   readRegistry();
@@ -987,10 +1010,13 @@ async function revalidateFeasibleWithPreview(
   let preview: GenerationPlacementPreview | null = null;
   let legacyUnsupported = false;
   try {
-    preview = await previewFor({
-      baseUrl: route.target.baseUrl,
-      apiKey: route.target.apiKey ?? null,
-    });
+    preview = await previewFor(
+      {
+        baseUrl: route.target.baseUrl,
+        apiKey: route.target.apiKey ?? null,
+      },
+      options,
+    );
   } catch (error) {
     if (
       error instanceof ApiError &&
@@ -1027,6 +1053,7 @@ async function revalidateFeasibleWithPreview(
         model,
         previewFor,
         requireAuthoritative,
+        options,
         1,
       );
     }
@@ -1113,11 +1140,12 @@ async function revalidateFeasible(
   route: HostRoute,
   request: GenerateRequestWire,
   copies = 1,
+  options: PlacementPreviewOptions = {},
 ): Promise<FeasibilityResult> {
   return revalidateFeasibleWithPreview(
     route,
     request.model,
-    (target) =>
+    (target, previewOptions) =>
       previewGenerationPlacement(
         target,
         previewRequestForSiblingFanout(
@@ -1125,10 +1153,12 @@ async function revalidateFeasible(
           copies,
         ),
         copies,
+        previewOptions,
       ),
     requiresAuthoritativePlacement(
       request as unknown as Record<string, unknown>,
     ),
+    options,
   );
 }
 
@@ -1136,16 +1166,23 @@ async function revalidateFeasibleChain(
   route: HostRoute,
   request: ChainRequestWire,
   copies = 1,
+  options: PlacementPreviewOptions = {},
 ): Promise<FeasibilityResult> {
-  return revalidateFeasibleWithPreview(route, request.model, (target) =>
-    previewChainPlacement(
-      target,
-      previewRequestForSiblingFanout(
-        request as unknown as Record<string, unknown>,
+  return revalidateFeasibleWithPreview(
+    route,
+    request.model,
+    (target, previewOptions) =>
+      previewChainPlacement(
+        target,
+        previewRequestForSiblingFanout(
+          request as unknown as Record<string, unknown>,
+          copies,
+        ),
         copies,
+        previewOptions,
       ),
-      copies,
-    ),
+    false,
+    options,
   );
 }
 
