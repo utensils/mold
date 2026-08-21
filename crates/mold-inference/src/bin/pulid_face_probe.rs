@@ -52,13 +52,51 @@ fn peak_rss_bytes() -> u64 {
     }
 }
 
+/// Nearest-rank percentile of an ascending slice.
+///
+/// Panics on an empty slice, deliberately. The old `0.0` fallback meant an
+/// empty sample set reported a p95 of zero and PASSED the gate — a decision
+/// procedure answering "well within budget" from no measurement at all.
+/// [`validate_bench_args`] makes the slice non-empty before this is reachable,
+/// and this panic is the backstop if that ever stops being true.
 fn percentile(sorted_ms: &[f64], p: f64) -> f64 {
-    if sorted_ms.is_empty() {
-        return 0.0;
-    }
+    assert!(
+        !sorted_ms.is_empty(),
+        "percentile of an empty sample set must never decide the gate"
+    );
     // Nearest-rank, which for 20 samples at p95 is the 19th.
     let rank = ((p / 100.0) * sorted_ms.len() as f64).ceil() as usize;
     sorted_ms[rank.clamp(1, sorted_ms.len()) - 1]
+}
+
+/// Sample counts #1222's gate is stated over.
+const GATE_WARMUPS: usize = 5;
+const GATE_RUNS: usize = 20;
+/// Anything past this is a typo, not an intention — at ~0.4 s per run it is
+/// already more than a day of benchmarking.
+const MAX_RUNS: usize = 10_000;
+
+/// Reject sample counts that cannot produce a verdict, and say so when the
+/// counts are legal but not the gate's.
+fn validate_bench_args(warmups: usize, runs: usize) -> Result<Option<String>> {
+    if runs == 0 {
+        bail!("--runs must be at least 1; a gate cannot be decided from no samples");
+    }
+    if runs > MAX_RUNS {
+        bail!("--runs {runs} exceeds the {MAX_RUNS} sanity cap");
+    }
+    if warmups > MAX_RUNS {
+        bail!("--warmups {warmups} exceeds the {MAX_RUNS} sanity cap");
+    }
+    if runs < GATE_RUNS || warmups < GATE_WARMUPS {
+        return Ok(Some(format!(
+            "NOTE: {warmups} warmups / {runs} runs is not the #1222 protocol \
+             ({GATE_WARMUPS} / {GATE_RUNS}). At this sample count the p95 is \
+             dominated by any single scheduler stall, so the verdict below is \
+             advisory and must not be recorded as the gate."
+        )));
+    }
+    Ok(None)
 }
 
 fn report(label: &str, mut samples: Vec<f64>) {
@@ -146,6 +184,10 @@ fn run_inventory(dir: &Path, write: Option<&Path>) -> Result<()> {
 }
 
 fn run_bench(dir: &Path, warmups: usize, runs: usize) -> Result<()> {
+    let advisory = validate_bench_args(warmups, runs)?;
+    if let Some(note) = &advisory {
+        println!("{note}\n");
+    }
     println!(
         "host: {} {} | warmups={warmups} runs={runs} | build={}",
         std::env::consts::OS,
@@ -206,7 +248,12 @@ fn run_bench(dir: &Path, warmups: usize, runs: usize) -> Result<()> {
     let p95 = percentile(&sorted, 95.0);
     let passed = p95 <= LATENCY_BUDGET_MS;
     println!(
-        "\nGATE: p95 per image = {p95:.1} ms, budget = {LATENCY_BUDGET_MS:.0} ms -> {}",
+        "\n{}: p95 per image = {p95:.1} ms, budget = {LATENCY_BUDGET_MS:.0} ms -> {}",
+        if advisory.is_some() {
+            "ADVISORY (not the gate protocol)"
+        } else {
+            "GATE"
+        },
         if passed { "PASS" } else { "FAIL" }
     );
     // Exit non-zero on a failed gate, exactly as `inventory` does for the op
@@ -257,5 +304,67 @@ fn main() -> Result<()> {
         "inventory" => run_inventory(&dir, write.as_deref()),
         "bench" => run_bench(&dir, warmups, runs),
         other => bail!("unknown subcommand `{other}`\n{usage}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zero_runs_is_refused_rather_than_measured() {
+        let err = validate_bench_args(GATE_WARMUPS, 0).unwrap_err();
+        assert!(
+            format!("{err}").contains("--runs must be at least 1"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn absurd_counts_are_refused() {
+        assert!(validate_bench_args(GATE_WARMUPS, MAX_RUNS + 1).is_err());
+        assert!(validate_bench_args(MAX_RUNS + 1, GATE_RUNS).is_err());
+        assert!(validate_bench_args(MAX_RUNS, MAX_RUNS).unwrap().is_none());
+    }
+
+    #[test]
+    fn the_gate_protocol_carries_no_advisory() {
+        assert!(validate_bench_args(GATE_WARMUPS, GATE_RUNS)
+            .unwrap()
+            .is_none());
+        assert!(validate_bench_args(GATE_WARMUPS + 3, GATE_RUNS + 80)
+            .unwrap()
+            .is_none());
+    }
+
+    /// A legal but too-small sample set still runs — it is useful while
+    /// iterating — but must never be mistaken for the recorded gate.
+    #[test]
+    fn a_short_run_is_advisory_and_says_so() {
+        let note = validate_bench_args(0, 2).unwrap().expect("an advisory");
+        assert!(note.contains("not the #1222 protocol"), "{note}");
+        assert!(note.contains("advisory"), "{note}");
+        assert!(validate_bench_args(GATE_WARMUPS, GATE_RUNS - 1)
+            .unwrap()
+            .is_some());
+        assert!(validate_bench_args(GATE_WARMUPS - 1, GATE_RUNS)
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn nearest_rank_percentiles_pick_the_documented_sample() {
+        let samples: Vec<f64> = (1..=20).map(|i| i as f64).collect();
+        // 20 samples at p95 is the 19th.
+        assert_eq!(percentile(&samples, 95.0), 19.0);
+        assert_eq!(percentile(&samples, 50.0), 10.0);
+        assert_eq!(percentile(&samples, 100.0), 20.0);
+        assert_eq!(percentile(&[7.0], 95.0), 7.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "empty sample set")]
+    fn an_empty_sample_set_can_never_report_a_percentile() {
+        percentile(&[], 95.0);
     }
 }
