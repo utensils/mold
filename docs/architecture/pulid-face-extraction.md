@@ -250,6 +250,12 @@ these two graphs are executed code in every sense that matters.
 unverified variant; tools that inspect arbitrary graphs pass `None` and get no
 extractor out of it.
 
+This is complementary to `mold_core::download::verify_pinned_file`, not a
+duplicate of it, and must not be folded into it: that function proves a file at
+placement time and accepts a matching marker without rehashing — right for
+materialization, and exactly the assumption the load-time check exists to stop
+relying on. One proves what landed; the other proves what runs.
+
 ### The embedding is RAW, not L2-normalized
 
 #1222's summary line says "512-d, L2-normalized". Upstream says otherwise, and
