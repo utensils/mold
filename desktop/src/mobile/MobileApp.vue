@@ -779,7 +779,10 @@ let gallerySentinelObserver: IntersectionObserver | null = null;
 let galleryChainedFetches = 0;
 const MAX_GALLERY_CHAINED_FETCHES = 3;
 let galleryDragPointerId: number | null = null;
+let galleryDragActive = false;
 let galleryDragSelect = true;
+let galleryDragStartX = 0;
+let galleryDragStartY = 0;
 let galleryDragClientX = 0;
 let galleryDragClientY = 0;
 let galleryDragFrame: number | null = null;
@@ -787,6 +790,7 @@ let galleryDragPendingClicks = 0;
 let galleryPinchPendingClicks = 0;
 let galleryDragSelectionBaseline: Set<string> | null = null;
 const galleryDragVisited = new Set<string>();
+const GALLERY_DRAG_INTENT_THRESHOLD = 8;
 const GALLERY_DRAG_SCROLL_EDGE = 72;
 const GALLERY_DRAG_SCROLL_MAX = 18;
 let resultMediaRecoveryClientId: number | null = null;
@@ -6751,7 +6755,7 @@ function applyGalleryDragSegment(fromX: number, fromY: number, toX: number, toY:
 
 function runGalleryDragFrame(): void {
   galleryDragFrame = null;
-  if (galleryDragPointerId === null || !gallerySelectMode.value) return;
+  if (galleryDragPointerId === null || !galleryDragActive || !gallerySelectMode.value) return;
   const scroller = mobileContent.value;
   if (scroller) {
     const bounds = scroller.getBoundingClientRect();
@@ -6782,26 +6786,46 @@ function beginGallerySelectionDrag(event: PointerEvent, print: GalleryPrint): vo
   ) {
     return;
   }
-  event.preventDefault();
   galleryDragPointerId = event.pointerId;
-  // The first tile is painted before any movement proves this is a drag. Keep
-  // the pre-drag selection so a second finger — which makes this a pinch, not a
-  // drag — can put it back exactly as the user left it.
+  galleryDragActive = event.pointerType === "mouse";
   galleryDragSelectionBaseline = new Set(gallerySelection.value);
   galleryDragSelect = !gallerySelection.value.has(galleryPrintKey(print));
+  galleryDragStartX = event.clientX;
+  galleryDragStartY = event.clientY;
   galleryDragClientX = event.clientX;
   galleryDragClientY = event.clientY;
   galleryDragVisited.clear();
-  applyGalleryDragSelection(print);
-  (event.currentTarget as HTMLElement | null)?.setPointerCapture?.(event.pointerId);
-  if (galleryDragFrame === null) galleryDragFrame = requestAnimationFrame(runGalleryDragFrame);
+  // Mouse has no native vertical-pan gesture to preserve, so it can paint on
+  // pointerdown. Touch waits for movement intent: vertical remains native
+  // scrolling, while horizontal/diagonal movement claims drag-selection.
+  if (galleryDragActive) {
+    event.preventDefault();
+    applyGalleryDragSelection(print);
+    (event.currentTarget as HTMLElement | null)?.setPointerCapture?.(event.pointerId);
+    if (galleryDragFrame === null) galleryDragFrame = requestAnimationFrame(runGalleryDragFrame);
+  }
 }
 
 function moveGallerySelectionDrag(event: PointerEvent): void {
   if (event.pointerId !== galleryDragPointerId) return;
-  event.preventDefault();
   const points = [...(event.getCoalescedEvents?.() ?? []), event];
   for (const point of points) {
+    if (!galleryDragActive) {
+      const deltaX = point.clientX - galleryDragStartX;
+      const deltaY = point.clientY - galleryDragStartY;
+      if (Math.hypot(deltaX, deltaY) < GALLERY_DRAG_INTENT_THRESHOLD) continue;
+      if (Math.abs(deltaY) > Math.abs(deltaX)) {
+        // Do not prevent this event: WebKit keeps ownership and scrolls the
+        // Library with native momentum. No tile was painted speculatively.
+        finishGallerySelectionDrag();
+        return;
+      }
+      galleryDragActive = true;
+      const startingPrint = galleryPrintAtPoint(galleryDragStartX, galleryDragStartY);
+      if (startingPrint) applyGalleryDragSelection(startingPrint);
+      if (galleryDragFrame === null) galleryDragFrame = requestAnimationFrame(runGalleryDragFrame);
+    }
+    event.preventDefault();
     applyGalleryDragSegment(galleryDragClientX, galleryDragClientY, point.clientX, point.clientY);
     galleryDragClientX = point.clientX;
     galleryDragClientY = point.clientY;
@@ -6810,8 +6834,9 @@ function moveGallerySelectionDrag(event: PointerEvent): void {
 
 function finishGallerySelectionDrag(event?: PointerEvent): void {
   if (event && event.pointerId !== galleryDragPointerId) return;
-  if (event?.type === "pointerup") galleryDragPendingClicks += 1;
+  if (event?.type === "pointerup" && galleryDragActive) galleryDragPendingClicks += 1;
   galleryDragPointerId = null;
+  galleryDragActive = false;
   galleryDragSelectionBaseline = null;
   galleryDragVisited.clear();
   if (galleryDragFrame !== null) cancelAnimationFrame(galleryDragFrame);

@@ -6441,6 +6441,38 @@ describe("MobileApp gallery", () => {
     ]);
   });
 
+  it("leaves a vertical Select-mode swipe to native Library scrolling", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await vi.waitFor(() => expect(wrapper?.find("[data-test='gallery-item']").exists()).toBe(true));
+    await wrapper.get("[data-test='mobile-gallery-select']").trigger("click");
+    const tile = wrapper.get("[data-test='gallery-item']");
+
+    await tile.trigger("pointerdown", {
+      pointerId: 43,
+      pointerType: "touch",
+      isPrimary: true,
+      clientX: 40,
+      clientY: 300,
+    });
+    const verticalMove = new PointerEvent("pointermove", {
+      pointerId: 43,
+      pointerType: "touch",
+      isPrimary: true,
+      clientX: 43,
+      clientY: 360,
+      cancelable: true,
+    });
+    window.dispatchEvent(verticalMove);
+    window.dispatchEvent(new PointerEvent("pointercancel", { pointerId: 43 }));
+    await wrapper.vm.$nextTick();
+
+    expect(verticalMove.defaultPrevented).toBe(false);
+    expect(tile.attributes("aria-pressed")).toBe("false");
+    expect(wrapper.get("[data-test='mobile-gallery-actions']").text()).toContain("0 selected");
+  });
+
   it("deletes one selected print from every host that contains a copy", async () => {
     const renderTarget = { baseUrl: "http://render.tailnet.ts.net:7680", apiKey: "secret" };
     localStorage.setItem(
@@ -7790,7 +7822,7 @@ describe("mobile Library pinch-to-resize", () => {
     const app = await openLibrary();
     await app.get("[data-test='mobile-gallery-select']").trigger("click");
 
-    // The first finger paints its tile before any movement proves intent.
+    // The first finger remains pending until movement proves drag intent.
     await app.get("[data-test='gallery-item']").trigger("pointerdown", {
       pointerId: 91,
       pointerType: "touch",
@@ -7798,9 +7830,9 @@ describe("mobile Library pinch-to-resize", () => {
       clientX: 0,
       clientY: 0,
     });
-    expect(app.get("[data-test='mobile-gallery-actions']").text()).toContain("1 selected");
+    expect(app.get("[data-test='mobile-gallery-actions']").text()).toContain("0 selected");
 
-    // The second finger makes it a pinch, so that paint was never intended.
+    // The second finger makes it a pinch without changing the selection.
     touchDown(app.get("[data-test='mobile-gallery-grid']").element, 92, 200);
     touchMove(91, 0, 900);
     touchMove(92, 340);
