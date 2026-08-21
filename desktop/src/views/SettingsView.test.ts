@@ -27,6 +27,12 @@ vi.mock("@studio/components/PairingAccessPanel.vue", () => stub("stub-paired-acc
 
 import SettingsView from "./SettingsView.vue";
 
+const scrollIntoView = vi.fn();
+Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+  configurable: true,
+  value: scrollIntoView,
+});
+
 async function mountView() {
   const pinia = createPinia();
   setActivePinia(pinia);
@@ -128,6 +134,20 @@ describe("SettingsView shell", () => {
     await flushPromises();
     expect(wrapper.find("[data-test='stub-library']").exists()).toBe(true);
     expect(wrapper.find("[data-test='stub-performance']").exists()).toBe(false);
+  });
+
+  it("scrolls the Updates card into view for the native update-check deep link", async () => {
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: "/settings", component: { template: "<div />" } }],
+    });
+    await router.push({ path: "/settings", query: { section: "updates" } });
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    mount(SettingsView, { global: { plugins: [pinia, router] } });
+    await flushPromises();
+
+    expect(scrollIntoView).toHaveBeenCalledWith({ behavior: "smooth", block: "start" });
   });
 
   it("search opens the owning accordion and hides the rest", async () => {
