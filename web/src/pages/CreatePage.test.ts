@@ -33,6 +33,7 @@ import {
 import { ApiHttpError } from "../api";
 import { ApiError } from "@studio/api/client";
 import { addHost, ORIGIN_HOST_ID } from "../lib/hostRegistry";
+import { autoTagTitle, reloadAutoTagTitle } from "../lib/fileUnder";
 import { AUTO_TARGET_ID, CAPABLE_TARGET_ID } from "../lib/hostRouting";
 import type { GalleryImage, ModelInfoExtended, OutputMetadata } from "../types";
 import type { Job } from "../composables/useGenerateStream";
@@ -129,6 +130,17 @@ const promptHistoryApiMock = vi.hoisted(() =>
 vi.mock("@studio/api/client", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@studio/api/client")>()),
   apiJsonTo: promptHistoryApiMock,
+}));
+
+const listCollectionsMock = vi.hoisted(() =>
+  vi.fn(async () => [] as unknown[]),
+);
+const listTagsMock = vi.hoisted(() => vi.fn(async () => [] as unknown[]));
+
+vi.mock("@studio/api/galleryOrganization", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@studio/api/galleryOrganization")>()),
+  listCollections: listCollectionsMock,
+  listTags: listTagsMock,
 }));
 
 vi.mock("@studio/api/generationPlacement", async (importOriginal) => ({
@@ -255,6 +267,13 @@ vi.mock("../components/machines/hostClient", () => ({
   hostModels: hostModelsMock,
   hostModelDownload: hostModelDownloadMock,
   hostCapabilities: hostCapabilitiesMock,
+  // The File under group reads each host's organization snapshot through
+  // the same helpers the Library uses.
+  hostApiTarget: (host: { url: string; apiKey?: string | null }) => ({
+    baseUrl: host.url,
+    apiKey: host.apiKey ?? null,
+  }),
+  hostGallery: vi.fn(async () => []),
   hostQueue: () => Promise.resolve({ entries: [], plan: null }),
   hostDevices: () => Promise.reject(new Error("legacy server in tests")),
   hostModelComponents: (_host: unknown, model: string) =>
@@ -372,6 +391,11 @@ describe("CreatePage layout and behavior", () => {
     hostCapabilitiesMock.mockClear();
     hostCapabilitiesMock.mockResolvedValue({});
     hostModelDownloadMock.mockClear();
+    listCollectionsMock.mockClear();
+    listCollectionsMock.mockResolvedValue([]);
+    listTagsMock.mockClear();
+    listTagsMock.mockResolvedValue([]);
+    reloadAutoTagTitle();
     vi.stubGlobal("prompt", vi.fn());
   });
 
@@ -3267,6 +3291,204 @@ describe("CreatePage layout and behavior", () => {
     vi.unstubAllGlobals();
     vi.stubGlobal("prompt", vi.fn());
   });
+
+  // ── File under (Create-time Library organization) ─────────────────────
+  const filingCapabilities = { gallery: { organize: true } };
+
+  function filingFleet() {
+    hostCapabilitiesMock.mockResolvedValue(filingCapabilities);
+    listTagsMock.mockResolvedValue([
+      { name: "blue", count: 9 },
+      { name: "dusk", count: 2 },
+    ]);
+    listCollectionsMock.mockResolvedValue([
+      {
+        id: "c1",
+        name: "Smurfs",
+        slug: "smurfs",
+        description: null,
+        cover_filename: null,
+        count: 12,
+        created_at: 1,
+        updated_at: 1,
+      },
+    ]);
+  }
+
+  async function mountFiling(title = "Smurfs") {
+    filingFleet();
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = "flux-dev:q4";
+    form.state.value.modelFamily = "flux";
+    form.state.value.prompt = "a cat";
+    form.state.value.title = title;
+    await flushPromises();
+    return wrapper;
+  }
+
+  it("hides File under entirely on a fleet that cannot organize", async () => {
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    expect(wrapper.find("[data-test='file-under-group']").exists()).toBe(false);
+  });
+
+  it("renders File under inside the controls region once a host can file", async () => {
+    const wrapper = await mountFiling();
+    // Its home is the controls rail's slot — after the essentials, above the
+    // inline Advanced column (spec §06 web note).
+    expect(
+      wrapper
+        .get("[data-test='controls-stub']")
+        .find("[data-test='file-under-group']")
+        .exists(),
+    ).toBe(true);
+    expect(wrapper.get("[data-test='file-under-ghost']").text()).toContain(
+      "smurfs",
+    );
+  });
+
+  it("files a one-shot print under the ghost tag and the matched collection", async () => {
+    const wrapper = await mountFiling();
+    await wrapper.get("[data-test='composer-submit']").trigger("click");
+    await flushPromises();
+    expect(submitMock.mock.calls[0]?.[0]).toMatchObject({
+      title: "Smurfs",
+      tags: ["smurfs"],
+      collection: { name: "Smurfs" },
+    });
+  });
+
+  it("carries a typed tag added in the group", async () => {
+    const wrapper = await mountFiling();
+    const input = wrapper.get("[data-test='file-under-tag-input']");
+    await input.setValue("#blue");
+    await input.trigger("keydown", { key: "Enter" });
+    await wrapper.get("[data-test='composer-submit']").trigger("click");
+    await flushPromises();
+    expect(submitMock.mock.calls[0]?.[0].tags).toEqual(["smurfs", "blue"]);
+  });
+
+  it("files nothing once the ghost chip and the collection are cleared", async () => {
+    const wrapper = await mountFiling();
+    await wrapper.get("[data-test='file-under-ghost-remove']").trigger("click");
+    await wrapper
+      .get("[data-test='file-under-collection-clear']")
+      .trigger("click");
+    await wrapper.get("[data-test='composer-submit']").trigger("click");
+    await flushPromises();
+    const request = submitMock.mock.calls[0]?.[0];
+    expect(request.tags).toBeUndefined();
+    expect(request.collection).toBeUndefined();
+  });
+
+  it("gives every batch sibling the same filing", async () => {
+    const wrapper = await mountFiling();
+    useGenerateForm().state.value.batchSize = 3;
+    await nextTick();
+    await wrapper.get("[data-test='composer-submit']").trigger("click");
+    await flushPromises();
+    expect(submitMock).toHaveBeenCalledTimes(3);
+    for (const call of submitMock.mock.calls) {
+      expect(call[0]).toMatchObject({
+        tags: ["smurfs"],
+        collection: { name: "Smurfs" },
+      });
+    }
+  });
+
+  it("files every prepared variation the same way", async () => {
+    const wrapper = await mountFiling();
+    useGenerateForm().state.value.batchSize = 3;
+    useGenerateForm().state.value.prompt = "a lighthouse";
+    await nextTick();
+    await wrapper.get("[data-test='composer-expand']").trigger("click");
+    await flushPromises();
+    await wrapper.get("[data-test='queue-variations']").trigger("click");
+    await flushPromises();
+    expect(submitMock).toHaveBeenCalledTimes(3);
+    for (const call of submitMock.mock.calls) {
+      expect(call[0]).toMatchObject({
+        tags: ["smurfs"],
+        collection: { name: "Smurfs" },
+      });
+    }
+  });
+
+  it("files the stitched print of a sequence, never its clips", async () => {
+    filingFleet();
+    hostModelsMock.mockResolvedValue([installedSequenceModel()]);
+    useGenerateForm().state.value.modelFamily = "ltx2";
+    useGenerateForm().state.value.model = "ltx-2-19b-distilled:fp8";
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const draft = enterSequenceMode();
+    draft.clips[0]!.prompt = "the opening";
+    draft.clips[1]!.prompt = "the landing";
+    useGenerateForm().state.value.title = "Smurfs";
+    await flushPromises();
+
+    await wrapper.get("[data-test='sequence-generate']").trigger("click");
+    await flushPromises();
+
+    expect(createChainJobMock).toHaveBeenCalledTimes(1);
+    const calls = createChainJobMock.mock.calls as unknown as Record<
+      string,
+      unknown
+    >[][];
+    const body = calls[0]![0]!;
+    expect(body).toMatchObject({
+      title: "Smurfs",
+      tags: ["smurfs"],
+      collection: { name: "Smurfs" },
+    });
+    for (const stage of body.stages as Record<string, unknown>[]) {
+      expect(stage.tags).toBeUndefined();
+      expect(stage.collection).toBeUndefined();
+    }
+  });
+
+  it("drops the ghost tag when the title auto-tag preference is off", async () => {
+    const wrapper = await mountFiling();
+    autoTagTitle.value = false;
+    await nextTick();
+    expect(wrapper.find("[data-test='file-under-ghost']").exists()).toBe(false);
+    await wrapper.get("[data-test='composer-submit']").trigger("click");
+    await flushPromises();
+    const request = submitMock.mock.calls[0]?.[0];
+    expect(request.tags).toBeUndefined();
+    expect(request.collection).toEqual({ name: "Smurfs" });
+  });
+
+  it("restores a print's filing with Reuse settings", async () => {
+    filingFleet();
+    setGenerationHandoff({
+      seedPinned: true,
+      metadata: {
+        version: "1",
+        model: "flux-dev",
+        prompt: "recovered lighthouse",
+        title: "Smurfs",
+        tags: ["smurfs", "blue"],
+        collection: "River studies",
+        seed: 42,
+        steps: 20,
+        guidance: 3.5,
+        width: 1024,
+        height: 1024,
+      } as OutputMetadata,
+    });
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const chips = wrapper
+      .findAll("[data-test='file-under-tag'], [data-test='file-under-ghost']")
+      .map((chip) => chip.text());
+    expect(chips.join(" ")).toContain("blue");
+    expect(wrapper.get("[data-test='file-under-collection']").text()).toContain(
+      "River studies",
+    );
+  });
 });
 
 // ── Multi-host generation routing (spec §08) ────────────────────────────────
@@ -4135,7 +4357,10 @@ function pageStubs() {
     ControlsAside: {
       name: "ControlsAside",
       props: ["output", "clipCount"],
-      template: "<aside data-test='controls-stub' />",
+      // The File under group rides the rail's `file-under` slot, so the stub
+      // has to render it for placement to be observable.
+      template:
+        "<aside data-test='controls-stub'><slot name='file-under'/></aside>",
     },
     AdvancedDrawer: { name: "AdvancedDrawer", template: "<div />" },
     ActivityStrip: {
