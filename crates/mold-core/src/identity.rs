@@ -136,6 +136,20 @@ pub fn identity_model_gate_message(model: &str) -> String {
     )
 }
 
+/// Refusal for an identity request that also carries a LoRA.
+///
+/// A const rather than a formatted message because clients show it before a
+/// request exists — the TUI refuses the pairing inline instead of spending a
+/// round trip to be told the same thing.
+pub const IDENTITY_LORA_CONFLICT: &str =
+    "face-identity conditioning combined with a LoRA is not yet qualified; \
+     remove the LoRA or the id_image";
+
+/// Refusal for an identity request that also carries an img2img source image.
+pub const IDENTITY_IMG2IMG_CONFLICT: &str =
+    "face-identity conditioning combined with img2img is not yet qualified; \
+     remove the source_image or the id_image";
+
 /// Validate an `id_weight` against the one advertised range. Surfaces that
 /// collect the value before a request exists call this directly; the shared
 /// request validator below delegates to it so the two cannot drift.
@@ -329,18 +343,10 @@ pub fn validate_identity_conditioning(req: &GenerateRequest) -> Result<(), Strin
 
     let has_lora = req.lora.is_some() || req.loras.as_ref().is_some_and(|items| !items.is_empty());
     if has_lora {
-        return Err(
-            "face-identity conditioning combined with a LoRA is not yet qualified; \
-             remove the LoRA or the id_image"
-                .to_string(),
-        );
+        return Err(IDENTITY_LORA_CONFLICT.to_string());
     }
     if req.source_image.is_some() {
-        return Err(
-            "face-identity conditioning combined with img2img is not yet qualified; \
-             remove the source_image or the id_image"
-                .to_string(),
-        );
+        return Err(IDENTITY_IMG2IMG_CONFLICT.to_string());
     }
 
     validate_id_weight(effective_id_weight(req))?;
@@ -457,6 +463,11 @@ mod tests {
             validate_id_weight(4.0).unwrap_err(),
             "id_weight (4) must be a finite value in range [0.0, 3]"
         );
+
+        // The two conflict refusals are consts for the same reason: a client
+        // refuses the pairing inline, before a request exists.
+        assert!(IDENTITY_LORA_CONFLICT.contains("remove the LoRA or the id_image"));
+        assert!(IDENTITY_IMG2IMG_CONFLICT.contains("remove the source_image or the id_image"));
 
         assert!(validate_id_start_step(ID_START_STEP_DEFAULT, 1).is_ok());
         assert!(validate_id_start_step(19, 20).is_ok());

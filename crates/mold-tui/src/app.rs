@@ -2471,11 +2471,17 @@ impl App {
     /// Why an attached identity photo cannot be submitted against the current
     /// form, or `None` when it can.
     ///
-    /// Only the model gate lives here — the file itself was already opened,
-    /// bounds-checked, and accepted at entry time, and the range checks are
-    /// unreachable because the rows cannot express an out-of-range value.
-    /// They are still asked, through `mold_core::identity`, because a restored
-    /// session or a gallery reuse can carry a value no row produced.
+    /// Every rule `mold_core::identity::validate_identity_conditioning` would
+    /// apply to the *shape* of the request, asked here so the refusal is
+    /// inline on the Photo row instead of a round trip away: the model gate,
+    /// the LoRA and img2img pairings the milestone does not qualify, and both
+    /// knob ranges. The range checks are unreachable from the rows, which
+    /// cannot express an out-of-range value, but a restored session or a
+    /// gallery reuse can carry one no row produced.
+    ///
+    /// Deliberately does NO file I/O — it runs on every model switch, and
+    /// re-reading a 16 MiB photo there would be felt. The file is re-checked
+    /// once at dispatch by [`Self::identity_dispatch_error`].
     fn identity_gate_error(&self) -> Option<String> {
         let params = &self.generate.params;
         params.identity_image_path.as_ref()?;
@@ -2483,6 +2489,15 @@ impl App {
             return Some(mold_core::identity::identity_model_gate_message(
                 &params.model,
             ));
+        }
+        // Neither pairing is qualified in milestone 1. The Create form can
+        // hold both at once — LoRA and Source are their own sections — so
+        // this is a reachable state, not a defensive check.
+        if params.lora_path.is_some() {
+            return Some(mold_core::identity::IDENTITY_LORA_CONFLICT.to_string());
+        }
+        if params.source_image_path.is_some() {
+            return Some(mold_core::identity::IDENTITY_IMG2IMG_CONFLICT.to_string());
         }
         if let Err(message) = mold_core::identity::validate_id_weight(params.id_weight) {
             return Some(message);
@@ -2493,6 +2508,24 @@ impl App {
             return Some(message);
         }
         None
+    }
+
+    /// The dispatch-time identity check: everything [`Self::identity_gate_error`]
+    /// asks, plus one re-read of the photo itself.
+    ///
+    /// A file accepted at entry can be deleted, truncated, or swapped for a
+    /// symlink before Generate is pressed. Every other conditioning input
+    /// degrades to "absent" in that case; an identity reference must not,
+    /// because the run would then render an ordinary print with a plausible
+    /// wrong face and say nothing. `build_request` refuses the same way as a
+    /// last line of defence — the file can still vanish between here and the
+    /// read — but checking here is what puts the reason on the Photo row.
+    fn identity_dispatch_error(&self) -> Option<String> {
+        if let Some(message) = self.identity_gate_error() {
+            return Some(message);
+        }
+        let path = self.generate.params.identity_image_path.as_deref()?;
+        crate::identity::load_identity_image(path).err()
     }
 
     /// Recompute Create rows from the selected model's family and the current
@@ -2573,18 +2606,23 @@ impl App {
         if !self.generate.capabilities.supports_references {
             self.generate.params.reference_paths.clear();
         }
+        // `id_start_step` is bounded by the step count, which every model
+        // switch can move; a restored 20 against a 4-step model would be
+        // refused at admission for a value the form never let the user set.
+        // The clamp runs BEFORE the gate below, so a value this repair fixes
+        // never leaves a refusal on screen for a state that no longer exists.
+        let step_ceiling = self.generate.params.steps.saturating_sub(1);
+        self.generate.params.id_start_step = self.generate.params.id_start_step.min(step_ceiling);
         // Identity is the one conditioning reference a model switch does NOT
         // discard. Dropping a face silently would be worse than the stale
         // source-image path above: the print would render, look fine, and
         // simply not be that person. The photo is kept, the refusal is
         // raised, and dispatch is blocked until the user picks a qualified
         // checkpoint or clears the photo. The wording is `mold_core`'s.
+        //
+        // Assigned unconditionally, so a gate that now passes clears the
+        // previous refusal rather than leaving it stale on the row.
         self.generate.identity_error = self.identity_gate_error();
-        // `id_start_step` is bounded by the step count, which every model
-        // switch can move; a restored 20 against a 4-step model would be
-        // refused at admission for a value the form never let the user set.
-        let step_ceiling = self.generate.params.steps.saturating_sub(1);
-        self.generate.params.id_start_step = self.generate.params.id_start_step.min(step_ceiling);
         if !self.generate.capabilities.supports_video_upscale {
             self.generate.params.pipeline = None;
             self.generate.params.spatial_upscale = None;
@@ -7134,9 +7172,10 @@ impl App {
             return;
         }
 
-        // An identity photo the current model cannot take blocks dispatch
-        // rather than rendering a print that silently has no face in it.
-        if let Some(message) = self.identity_gate_error() {
+        // An identity photo the current model cannot take — or one whose file
+        // has gone away since it was picked — blocks dispatch rather than
+        // rendering a print that silently has the wrong face in it.
+        if let Some(message) = self.identity_dispatch_error() {
             self.generate.identity_error = Some(message.clone());
             self.generate.error_message = Some(message);
             return;
@@ -13378,6 +13417,139 @@ mod tests {
         )
         .is_ok());
     }
+
+    /// Milestone 1 qualifies neither pairing, and the Create form can hold
+    /// both at once — LoRA and Source are their own Advanced sections — so
+    /// the refusal has to be inline rather than a round trip away. The
+    /// wording is `mold_core::identity`'s const, not a restatement.
+    #[tokio::test]
+    async fn identity_refuses_the_lora_and_img2img_pairings_inline() {
+        let mut app = make_settings_test_app();
+        let model = "flux-dev:q8";
+        let mut entry = make_test_catalog_entry(model, 20, 3.5, 1024, 1024, "FLUX dev");
+        entry.supports_identity = Some(true);
+        app.models.catalog.push(entry);
+        app.generate.params.model = model.into();
+        app.generate.params.identity_image_path = Some("/photos/ada.png".into());
+        app.sync_generate_capabilities();
+        assert_eq!(app.generate.identity_error, None);
+
+        app.generate.params.lora_path = Some("/loras/pixel.safetensors".into());
+        app.sync_generate_capabilities();
+        assert_eq!(
+            app.generate.identity_error.as_deref(),
+            Some(mold_core::identity::IDENTITY_LORA_CONFLICT)
+        );
+
+        app.generate.params.lora_path = None;
+        app.generate.params.source_image_path = Some("/photos/scene.png".into());
+        app.sync_generate_capabilities();
+        assert_eq!(
+            app.generate.identity_error.as_deref(),
+            Some(mold_core::identity::IDENTITY_IMG2IMG_CONFLICT)
+        );
+
+        // Removing the conflict clears the refusal rather than leaving it
+        // stale on the row.
+        app.generate.params.source_image_path = None;
+        app.sync_generate_capabilities();
+        assert_eq!(app.generate.identity_error, None);
+
+        // Neither pairing is a problem without a photo.
+        app.generate.params.identity_image_path = None;
+        app.generate.params.lora_path = Some("/loras/pixel.safetensors".into());
+        app.sync_generate_capabilities();
+        assert_eq!(app.generate.identity_error, None);
+    }
+
+    /// A restored print whose start step is at or past the new step count is
+    /// repaired first and validated second, so the user is never left staring
+    /// at a refusal for a state the repair already fixed.
+    #[tokio::test]
+    async fn a_restored_out_of_range_start_step_is_clamped_before_it_is_judged() {
+        let mut app = make_settings_test_app();
+        let model = "flux-dev:q8";
+        let mut entry = make_test_catalog_entry(model, 20, 3.5, 1024, 1024, "FLUX dev");
+        entry.supports_identity = Some(true);
+        app.models.catalog.push(entry);
+        app.generate.params.model = model.into();
+        app.generate.params.identity_image_path = Some("/photos/ada.png".into());
+
+        // Restored state: start step at the step count, which admission
+        // refuses (the rule is strictly less than).
+        app.generate.params.steps = 4;
+        app.generate.params.id_start_step = 20;
+        app.sync_generate_capabilities();
+        assert_eq!(app.generate.params.id_start_step, 3);
+        assert_eq!(
+            app.generate.identity_error, None,
+            "the clamp runs first, so no refusal survives for a repaired value"
+        );
+        assert!(mold_core::identity::validate_id_start_step(
+            app.generate.params.id_start_step,
+            app.generate.params.steps
+        )
+        .is_ok());
+
+        // Exactly at the boundary is the same repair.
+        app.generate.params.id_start_step = 4;
+        app.sync_generate_capabilities();
+        assert_eq!(app.generate.params.id_start_step, 3);
+        assert_eq!(app.generate.identity_error, None);
+    }
+
+    /// A photo accepted at entry can be deleted or replaced before Generate
+    /// is pressed. Dispatch re-reads it so the refusal lands on the Photo row
+    /// instead of the run silently becoming an ordinary render.
+    #[tokio::test]
+    async fn dispatch_rechecks_the_photo_file_the_gate_does_not_touch() {
+        let mut app = make_settings_test_app();
+        let model = "flux-dev:q8";
+        let mut entry = make_test_catalog_entry(model, 20, 3.5, 1024, 1024, "FLUX dev");
+        entry.supports_identity = Some(true);
+        app.models.catalog.push(entry);
+        app.generate.params.model = model.into();
+        app.generate.params.steps = 20;
+
+        let dir = tempfile::tempdir().unwrap();
+        let photo = dir.path().join("ada.png");
+        std::fs::write(&photo, IDENTITY_TEST_PNG).unwrap();
+        app.generate.params.identity_image_path = Some(photo.to_string_lossy().to_string());
+        app.sync_generate_capabilities();
+        assert_eq!(app.identity_dispatch_error(), None);
+
+        // The cheap gate deliberately does no file I/O — it runs on every
+        // model switch — so only the dispatch check notices the file is gone.
+        std::fs::remove_file(&photo).unwrap();
+        assert_eq!(app.identity_gate_error(), None);
+        let error = app
+            .identity_dispatch_error()
+            .expect("a vanished photo must refuse dispatch");
+        assert!(
+            error.starts_with("Identity photo could not be opened"),
+            "{error}"
+        );
+
+        // The model gate still outranks the file check: a request that could
+        // not run anyway names the reason it could not run.
+        std::fs::write(&photo, IDENTITY_TEST_PNG).unwrap();
+        app.models.catalog[0].supports_identity = None;
+        app.sync_generate_capabilities();
+        assert_eq!(
+            app.identity_dispatch_error(),
+            Some(mold_core::identity::identity_model_gate_message(model))
+        );
+    }
+
+    /// A genuine 1x1 RGBA PNG — the smallest payload
+    /// `identity::validate_id_image_bytes` accepts.
+    const IDENTITY_TEST_PNG: [u8; 67] = [
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
+        0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00,
+        0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49,
+        0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
 
     /// With no photo attached there is nothing to gate: the knobs alone are
     /// never a reason to refuse a perfectly ordinary render.
