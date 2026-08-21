@@ -143,20 +143,32 @@ fn test_stub() -> Option<Stub> {
     *TEST_STUB.lock().unwrap_or_else(|error| error.into_inner())
 }
 
-/// Substitute a stub extractor for the duration of a test, and reset the
-/// counter. The real stack needs ~2 GB of pinned weights; the lifetime
-/// contract does not.
+/// Serializes every test that observes [`EXTRACTIONS`].
+///
+/// The counter is process-global on purpose — it is the only way to state
+/// "exactly one extraction for this whole request" — which means two tests
+/// counting at once would each see the other's work. This is the lock that
+/// makes the delta meaningful.
+#[cfg(test)]
+static STUB_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Substitute a stub extractor for the duration of a test and measure the
+/// extractions it causes. The real stack needs ~2 GB of pinned weights; the
+/// lifetime contract does not.
 #[cfg(test)]
 pub(crate) struct StubbedExtractor {
     baseline: u64,
+    _guard: std::sync::MutexGuard<'static, ()>,
 }
 
 #[cfg(test)]
 impl StubbedExtractor {
     pub(crate) fn install(stub: Stub) -> Self {
+        let guard = STUB_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         *TEST_STUB.lock().unwrap_or_else(|error| error.into_inner()) = Some(stub);
         Self {
             baseline: extraction_count(),
+            _guard: guard,
         }
     }
 

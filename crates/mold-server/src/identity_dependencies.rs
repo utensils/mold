@@ -888,6 +888,81 @@ mod tests {
         );
     }
 
+    /// #1223's headline requirement, in the shape it actually occurs: ONE
+    /// parent request, `batch_size = 4`, two devices — exactly ONE extraction,
+    /// and all four children conditioned on the identical value.
+    ///
+    /// This walks the real sequence rather than asserting that a clone equals
+    /// itself. `freeze_batch_plan` prepares the parent once, and the scheduler
+    /// then re-prepares EVERY child; the child preparations are the ones that
+    /// would re-extract, so each is driven here with the frozen identity the
+    /// parent produced, exactly as `start_needed_preparations` supplies it.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn one_parent_request_extracts_once_for_four_children_on_two_devices() {
+        let models = TempDir::new().unwrap();
+        let home = TempDir::new().unwrap();
+        let _env = EnvGuard::new(home.path(), models.path());
+        let (_root, config) = flux_case(models.path());
+
+        let stubbed = crate::identity_extraction::StubbedExtractor::install(|_, image| {
+            Ok(Some(crate::identity_extraction::stub_embedding(image)))
+        });
+
+        // The parent. `freeze_batch_plan` validates a `batch_size = 1` clone,
+        // which is what reaches preparation, so the request here matches.
+        let parent = crate::identity_extraction::resolve_identity_embedding(
+            &request(None, true),
+            Some(&expected_paths(models.path())),
+        )
+        .await
+        .expect("the stub extractor answers")
+        .expect("a conditioned parent resolves an identity");
+        assert_eq!(stubbed.extractions(), 1);
+
+        // The four children, each re-prepared by the scheduler across both
+        // devices.
+        let mut fingerprints = std::collections::BTreeSet::new();
+        for index in 1..=4u32 {
+            let mut child = request(None, true);
+            child.batch_id = Some("parent".to_string());
+            child.batch_index = Some(index);
+            child.batch_count = Some(4);
+            let prepared = prepare_inputs_for_devices(
+                None,
+                &format!("child-{index}"),
+                &child,
+                &config,
+                vec![device(), second_device()],
+                None,
+                DependencyMaterializationPolicy::ExistingOnly,
+                DependencyPreparationContext {
+                    frozen_identity: Some(parent.clone()),
+                },
+            )
+            .await
+            .unwrap();
+            fingerprints.insert(
+                prepared
+                    .identity_embedding
+                    .expect("every child carries the parent's identity")
+                    .fingerprint()
+                    .to_string(),
+            );
+        }
+
+        assert_eq!(
+            stubbed.extractions(),
+            1,
+            "four children across two devices must not add a single extraction"
+        );
+        assert_eq!(
+            fingerprints,
+            std::collections::BTreeSet::from([parent.fingerprint().to_string()]),
+            "every sibling must condition on the parent's exact identity"
+        );
+    }
+
     /// The zero-weight rule, end to end through preparation: no assets, no
     /// embedding, and byte-identical prepared inputs to a request that never
     /// mentioned identity.
