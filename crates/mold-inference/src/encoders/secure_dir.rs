@@ -43,10 +43,15 @@ use std::path::{Path, PathBuf};
 pub(crate) enum UnprotectedParent {
     /// The path is absent, or is not a directory.
     NotADirectory,
-    /// Someone else owns it, so `chmod` and `chown` are theirs to use.
+    /// Not sticky, and owned by someone else — so `chmod` and `chown` are
+    /// theirs to use and no mode we observe is stable.
     NotOwned { uid: u32, euid: u32 },
-    /// Group- or world-writable without the sticky bit: any of those users can
-    /// rename our entries out from under us.
+    /// Sticky, but owned by an untrusted third party. Sticky lets the
+    /// DIRECTORY's owner rename entries too, so this one is only safe when
+    /// that owner is us or root.
+    StickyButForeignOwned { uid: u32, euid: u32 },
+    /// Owned by us, but group- or world-writable without the sticky bit: any
+    /// of those users can rename our entries out from under us.
     RenamableByOthers { mode: u32 },
 }
 
@@ -54,7 +59,14 @@ impl std::fmt::Display for UnprotectedParent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NotADirectory => write!(f, "not a directory"),
-            Self::NotOwned { uid, euid } => write!(f, "owned by uid {uid} rather than {euid}"),
+            Self::NotOwned { uid, euid } => {
+                write!(f, "not sticky and owned by uid {uid} rather than {euid}")
+            }
+            Self::StickyButForeignOwned { uid, euid } => write!(
+                f,
+                "sticky but owned by uid {uid} rather than {euid} or root, and a sticky \
+                 directory's owner may rename entries inside it"
+            ),
             Self::RenamableByOthers { mode } => write!(
                 f,
                 "mode {mode:o} is writable by group or other without the sticky bit, so \
@@ -64,22 +76,73 @@ impl std::fmt::Display for UnprotectedParent {
     }
 }
 
-/// Can a user other than us rename an entry inside `path`?
+/// Root, which is trusted by definition: it can already replace anything we
+/// own, so requiring protection from it is meaningless.
+const ROOT_UID: u32 = 0;
+
+/// Could a user we do not trust rename an entry inside a directory with this
+/// owner and mode?
 ///
-/// This is the exact property that makes a staging directory trustworthy, and
-/// it is NOT the same as that directory's own mode. Renaming an entry requires
-/// write permission on the CONTAINING directory, so a `0o700` staging directory
-/// sitting inside a group-writable parent can still be renamed away and
-/// replaced wholesale — which is precisely the hole that put the pickle parser
-/// in front of attacker bytes.
+/// Pure so the root-owned case is testable — a test cannot `chown` a fixture
+/// to root, and Linux's `/tmp` is exactly that case.
 ///
-/// Two shapes are safe:
+/// Renaming or unlinking an entry needs write permission on the CONTAINING
+/// directory, not on the entry, so a `0o700` staging directory inside a
+/// group-writable parent can still be renamed away and replaced wholesale.
+/// That is the hole that put the pickle parser in front of attacker bytes.
 ///
-/// - We own it and nobody else can write it. `0o700` and `0o755` both qualify;
-///   `$XDG_RUNTIME_DIR` and macOS's per-user `$TMPDIR` are `0o700`.
-/// - The sticky bit is set, which restricts rename and unlink to each entry's
-///   own owner regardless of the directory's write bits. This is what makes
-///   Linux's `1777` `/tmp` usable.
+/// Two shapes are safe, and the STICKY test has to come first:
+///
+/// - **Sticky**, owned by us or by root. The sticky bit restricts rename and
+///   unlink to each entry's own owner, the directory's owner, or root — so
+///   other unprivileged users cannot touch our entries no matter how open the
+///   write bits are. This is what makes Linux's root-owned `1777` `/tmp`
+///   usable, and checking ownership before stickiness (as this did originally)
+///   rejects it and breaks first-use conversion on any headless Linux box with
+///   neither `XDG_RUNTIME_DIR` nor `TMPDIR` set.
+///
+///   The owner still matters, just less: sticky lets the DIRECTORY's owner
+///   rename entries too, so a sticky directory belonging to some other
+///   unprivileged user is not safe. Us or root, and nobody else.
+///
+/// - **Not sticky**, owned by us, and not writable by group or other. `0o700`
+///   and `0o755` both qualify; `$XDG_RUNTIME_DIR` and macOS's per-user
+///   `$TMPDIR` are `0o700`.
+fn parent_policy(
+    dir_uid: u32,
+    mode: u32,
+    current_uid: u32,
+) -> std::result::Result<(), UnprotectedParent> {
+    const STICKY: u32 = 0o1000;
+    const OTHERS_WRITE: u32 = 0o022;
+
+    if mode & STICKY != 0 {
+        return if dir_uid == current_uid || dir_uid == ROOT_UID {
+            Ok(())
+        } else {
+            Err(UnprotectedParent::StickyButForeignOwned {
+                uid: dir_uid,
+                euid: current_uid,
+            })
+        };
+    }
+    if dir_uid != current_uid {
+        return Err(UnprotectedParent::NotOwned {
+            uid: dir_uid,
+            euid: current_uid,
+        });
+    }
+    if mode & OTHERS_WRITE != 0 {
+        return Err(UnprotectedParent::RenamableByOthers {
+            mode: mode & 0o7777,
+        });
+    }
+    Ok(())
+}
+
+/// Can a user we do not trust rename an entry inside `path`?
+///
+/// See [`parent_policy`] for the rule; this only supplies the owner and mode.
 #[cfg(unix)]
 pub(crate) fn parent_protects_entries(path: &Path) -> std::result::Result<(), UnprotectedParent> {
     use std::os::unix::fs::MetadataExt;
@@ -91,21 +154,7 @@ pub(crate) fn parent_protects_entries(path: &Path) -> std::result::Result<(), Un
     }
     // SAFETY: `geteuid` takes no arguments and cannot fail.
     let euid = unsafe { libc::geteuid() };
-    if metadata.uid() != euid {
-        return Err(UnprotectedParent::NotOwned {
-            uid: metadata.uid(),
-            euid,
-        });
-    }
-    const STICKY: u32 = 0o1000;
-    const OTHERS_WRITE: u32 = 0o022;
-    let mode = metadata.mode();
-    if mode & STICKY == 0 && mode & OTHERS_WRITE != 0 {
-        return Err(UnprotectedParent::RenamableByOthers {
-            mode: mode & 0o7777,
-        });
-    }
-    Ok(())
+    parent_policy(metadata.uid(), metadata.mode(), euid)
 }
 
 #[cfg(not(unix))]
@@ -434,6 +483,138 @@ mod tests {
     use super::*;
     use std::io::Write;
 
+    const US: u32 = 501;
+    const ROOT: u32 = 0;
+    const MALLORY: u32 = 1234;
+
+    /// Linux's `/tmp` is root-owned `1777`, and on a headless box with neither
+    /// `XDG_RUNTIME_DIR` nor `TMPDIR` set it is the ONLY candidate. Checking
+    /// ownership before stickiness rejected it and broke first-use conversion
+    /// outright, so this case is pinned on its own.
+    #[test]
+    fn root_owned_sticky_tmp_is_accepted() {
+        assert_eq!(parent_policy(ROOT, 0o1777, US), Ok(()));
+        assert_eq!(parent_policy(ROOT, 0o1755, US), Ok(()));
+    }
+
+    /// The real thing, not a fixture: a sticky system `/tmp` must be accepted.
+    ///
+    /// macOS's `/private/tmp` and Linux's `/tmp` are both root-owned `1777`,
+    /// so this is the reported failure exactly — and it is what
+    /// `std::env::temp_dir()` returns when `TMPDIR` is unset, which is the
+    /// normal state of a headless server.
+    #[test]
+    #[cfg(unix)]
+    fn a_sticky_system_tmp_is_accepted() {
+        use std::os::unix::fs::MetadataExt;
+        let Ok(metadata) = std::fs::metadata("/tmp") else {
+            return; // No /tmp at all; nothing to assert.
+        };
+        if metadata.mode() & 0o1000 == 0 {
+            return; // Not sticky on this box, so not the case under test.
+        }
+        assert_eq!(
+            parent_protects_entries(Path::new("/tmp")),
+            Ok(()),
+            "/tmp is sticky (mode {:o}, uid {}) and must be usable",
+            metadata.mode() & 0o7777,
+            metadata.uid()
+        );
+    }
+
+    /// The whole matrix, as a pure function — a test cannot `chown` a fixture
+    /// to root or to a stranger, so the filesystem test below cannot reach
+    /// these rows.
+    #[test]
+    fn the_parent_policy_matrix_is_pinned() {
+        // Sticky, owned by us or root: safe however open the write bits are,
+        // because sticky restricts rename to each entry's own owner.
+        for mode in [0o1777_u32, 0o1770, 0o1700, 0o1755] {
+            assert_eq!(parent_policy(US, mode, US), Ok(()), "{mode:o} owned by us");
+            assert_eq!(
+                parent_policy(ROOT, mode, US),
+                Ok(()),
+                "{mode:o} owned by root"
+            );
+        }
+
+        // Sticky but owned by another unprivileged user: NOT safe. Sticky lets
+        // the directory's owner rename entries too, so Mallory could still
+        // swap ours.
+        assert_eq!(
+            parent_policy(MALLORY, 0o1777, US),
+            Err(UnprotectedParent::StickyButForeignOwned {
+                uid: MALLORY,
+                euid: US
+            })
+        );
+
+        // Not sticky, owned by us, nobody else can write: safe.
+        for mode in [0o700_u32, 0o755, 0o750, 0o500] {
+            assert_eq!(parent_policy(US, mode, US), Ok(()), "{mode:o}");
+        }
+
+        // Not sticky, owned by us, group- or world-writable: the original
+        // hole.
+        for mode in [0o770_u32, 0o777, 0o707, 0o702] {
+            assert_eq!(
+                parent_policy(US, mode, US),
+                Err(UnprotectedParent::RenamableByOthers { mode }),
+                "{mode:o}"
+            );
+        }
+
+        // Not sticky and not ours: refused whatever the mode says, because the
+        // owner can change it at will.
+        for mode in [0o700_u32, 0o755, 0o777] {
+            assert_eq!(
+                parent_policy(ROOT, mode, US),
+                Err(UnprotectedParent::NotOwned {
+                    uid: ROOT,
+                    euid: US
+                }),
+                "{mode:o}"
+            );
+            assert_eq!(
+                parent_policy(MALLORY, mode, US),
+                Err(UnprotectedParent::NotOwned {
+                    uid: MALLORY,
+                    euid: US
+                }),
+                "{mode:o}"
+            );
+        }
+
+        // Running as root ourselves: root-owned is our own.
+        assert_eq!(parent_policy(ROOT, 0o700, ROOT), Ok(()));
+    }
+
+    /// Every rejection has to say which candidate failed and why, because the
+    /// failure users hit is "conversion refuses and I do not know where to
+    /// point TMPDIR".
+    #[test]
+    fn every_rejection_explains_itself() {
+        for reason in [
+            UnprotectedParent::NotADirectory,
+            UnprotectedParent::NotOwned { uid: 0, euid: 501 },
+            UnprotectedParent::StickyButForeignOwned {
+                uid: 1234,
+                euid: 501,
+            },
+            UnprotectedParent::RenamableByOthers { mode: 0o777 },
+        ] {
+            let rendered = reason.to_string();
+            assert!(!rendered.is_empty(), "{reason:?} renders nothing");
+            assert!(
+                !rendered.contains("  "),
+                "{reason:?} has a line-continuation artefact: {rendered}"
+            );
+        }
+    }
+
+    /// The same policy over real fixtures. Limited to directories we own —
+    /// `the_parent_policy_matrix_is_pinned` covers root-owned and
+    /// foreign-owned, which a test cannot create.
     #[test]
     #[cfg(unix)]
     fn the_parent_policy_accepts_only_unrenamable_directories() {

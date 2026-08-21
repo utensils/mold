@@ -904,6 +904,12 @@ mod tests {
             message.contains("shared"),
             "did not name the candidate: {message}"
         );
+        // ...and the reason, not just the path, or the user cannot tell a
+        // permissions problem from a missing directory.
+        assert!(
+            message.contains("sticky"),
+            "did not explain the rejection: {message}"
+        );
         assert!(select_private_staging_root(&[]).is_err());
     }
 

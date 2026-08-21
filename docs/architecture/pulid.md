@@ -114,11 +114,22 @@ So the source copy is staged under a root chosen by policy, not by convention.
 `private_staging_root_candidates` offers `$XDG_RUNTIME_DIR` (a per-user
 `0o700` tmpfs on systemd Linux) and then `std::env::temp_dir()` (which honours
 `$TMPDIR`: a per-user `0o700` directory on macOS, `/tmp` at sticky `1777` on
-most Linux systems). `secure_dir::parent_protects_entries` accepts a candidate
-only when we own it and either nobody else can write it or the sticky bit is
-set — those are exactly the two shapes in which no other user can rename our
-entries. If none qualifies the conversion fails closed, naming every candidate
-and its reason, rather than silently falling back to the model root.
+most Linux systems). `secure_dir::parent_policy` accepts exactly two shapes,
+and **the sticky test has to come first**:
+
+- **Sticky**, owned by us or by root. Sticky restricts rename and unlink to
+  each entry's own owner, the directory's owner, or root, so no other
+  unprivileged user can touch our entries however open the write bits are.
+  Checking ownership first instead rejects root-owned `1777` `/tmp` — which is
+  the *only* candidate on a headless box with neither `XDG_RUNTIME_DIR` nor
+  `TMPDIR` set — and breaks first-use conversion outright. The owner still
+  matters, just less: sticky lets the directory's owner rename entries too, so
+  a sticky directory belonging to some other unprivileged user is refused.
+- **Not sticky**, owned by us, and not writable by group or other. `0o700` and
+  `0o755` both qualify.
+
+If none qualifies the conversion fails closed, naming every candidate and its
+reason, rather than silently falling back to the model root.
 
 There is deliberately no `MOLD_*` variable for this: `TMPDIR` is the standard
 knob, and a private one would have to be registered in
