@@ -454,6 +454,11 @@ pub async fn run(
     batch_prompts: Option<Vec<String>>,
     lora: Option<LoraWeight>,
     expand: Option<bool>,
+    // PuLID face identity, already read and validated by
+    // `commands::identity`. The SAME value serves the remote and the
+    // forced-local path, which is what makes the two requests identical by
+    // construction rather than by review.
+    identity: crate::commands::identity::IdentityOptions,
 ) -> Result<()> {
     let Ltx2Options {
         frames,
@@ -936,10 +941,10 @@ pub async fn run(
         spatial_upscale,
         temporal_upscale,
         placement,
-        id_image: None,
-        id_image_name: None,
-        id_weight: None,
-        id_start_step: None,
+        id_image: identity.id_image,
+        id_image_name: identity.id_image_name,
+        id_weight: identity.id_weight,
+        id_start_step: identity.id_start_step,
     };
     // A continuation that named no overlap renders with its family's own
     // carryover, and the metadata `record_local_save` builds resolves the
@@ -4084,6 +4089,7 @@ mod tests {
             None,
             None,
             None,
+            crate::commands::identity::IdentityOptions::default(),
         )
         .await
         .unwrap_err();
