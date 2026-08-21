@@ -344,11 +344,36 @@ describe("filtering", () => {
     expect(entryMatchesSearch(frog, "nope")).toBe(false);
   });
 
-  it("names the download after the title's slug when one exists", () => {
-    expect(downloadFilename("Smurf 04!", "mold-flux-1.png")).toBe(
-      "smurf-04.png",
+  it("names the download with the {title}__{model}__s{seed} grammar", () => {
+    const print = entry("origin", "mold-z-image-turbo-bf16-1787.png", {
+      title: "Smurf 04!",
+      format: "png",
+      metadata: {
+        prompt: "a print",
+        model: "z-image-turbo:bf16",
+        seed: 4471,
+      } as never,
+    });
+    expect(downloadFilename(print)).toBe(
+      "smurf-04__z-image-turbo-bf16__s4471.png",
     );
-    expect(downloadFilename(null, "mold-flux-1.png")).toBe("mold-flux-1.png");
+  });
+
+  it("drops the title segment for an untitled print", () => {
+    const print = entry("origin", "mold-flux-dev-1787.png", {
+      format: "png",
+      metadata: { prompt: "a print", model: "flux-dev", seed: 7 } as never,
+    });
+    expect(downloadFilename(print)).toBe("flux-dev__s7.png");
+  });
+
+  it("takes the extension from the filename when no format was recorded", () => {
+    const print = entry("origin", "mold-ltx2-1787.mp4", {
+      title: "Riverbank at dusk",
+      format: null,
+      metadata: { prompt: "a print", model: "ltx2", seed: 3 } as never,
+    });
+    expect(downloadFilename(print)).toBe("riverbank-at-dusk__ltx2__s3.mp4");
   });
 });
 

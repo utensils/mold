@@ -305,13 +305,13 @@ describe("Lightbox organization (title · ♥ · tags · collections · trash)",
     );
   });
 
-  it("names the download after the title slug", () => {
+  it("names the download with the title, model, and seed grammar", () => {
     const wrapper = mountWide({
       item: { ...item, title: "Harbor Light!", hostId: "origin" },
       canOrganize: true,
     });
     expect(wrapper.get("a[download]").attributes("download")).toBe(
-      "harbor-light.png",
+      "harbor-light__flux-dev-fp16__s4242.png",
     );
   });
 
