@@ -78,6 +78,8 @@ describe("generateForm store", () => {
     const captured = store.form;
     store.form.prompt = "a cat";
     store.form.model = "flux-dev:q8";
+    store.form.title = "Smurf village";
+    store.form.fileUnder.manualTags = ["blue"];
 
     store.resetAll();
 
@@ -85,6 +87,8 @@ describe("generateForm store", () => {
     expect(store.form).toBe(captured);
     expect(captured.prompt).toBe("");
     expect(captured.model).toBe("");
+    expect(captured.title).toBe("Smurf village");
+    expect(captured.fileUnder.manualTags).toEqual(["blue"]);
   });
 });
 

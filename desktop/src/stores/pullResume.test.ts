@@ -57,6 +57,35 @@ describe("pullResume store", () => {
     expect(store.pending).toBeNull();
   });
 
+  it("surfaces request advisories from the resumed generation", async () => {
+    const store = armOnPrimary();
+    vi.spyOn(useGenerationStore(), "submitBatch").mockReturnValue({
+      jobs: [],
+      settled: Promise.resolve([
+        {
+          status: "complete",
+          error: null,
+          requestWarnings: [
+            "Reference timing was used; the requested frame count was adjusted",
+          ],
+        },
+      ]),
+    } as never);
+
+    useDownloadsStore().history = [job("d1", "jibmix-flux:fp8", "completed")];
+    store.check();
+    await Promise.resolve();
+
+    expect(useToastStore().items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "warning",
+          message: "Reference timing was used; the requested frame count was adjusted",
+        }),
+      ]),
+    );
+  });
+
   it("ignores terminal jobs that predate the arm (a stale history entry must not resume)", () => {
     const downloads = useDownloadsStore();
     downloads.history = [job("old", "jibmix-flux:fp8", "completed")];

@@ -103,6 +103,9 @@ export const usePullResumeStore = defineStore("pullResume", {
               pending.chainRouting ?? null,
             );
         void submission.settled.then((jobs) => {
+          for (const warning of new Set(jobs.flatMap((job) => job.requestWarnings))) {
+            useToastStore().push(warning, "warning");
+          }
           const failed = jobs.find((job) => job.status === "error");
           if (failed?.error && failed.error !== "Cancelled") {
             useToastStore().push(

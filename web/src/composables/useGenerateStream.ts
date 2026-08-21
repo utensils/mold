@@ -25,6 +25,11 @@ import {
 } from "@studio/api/referenceUploads";
 import { redactGenerationReference } from "@studio/lib/generationReferences";
 import { getHost, ORIGIN_HOST_ID } from "../lib/hostRegistry";
+import { toast } from "../lib/toasts";
+
+function surfaceRequestWarnings(warnings: string[]): void {
+  for (const warning of warnings) toast("warning", warning);
+}
 
 export interface JobProgress {
   stage: string;
@@ -1071,6 +1076,7 @@ function submitJob(
             scheduleAutoRemoveOnDone(id);
           },
           onError: onErrorCommon,
+          onRequestWarnings: surfaceRequestWarnings,
         },
         controller.signal,
         route?.target,
@@ -1128,6 +1134,7 @@ function submitJob(
               scheduleAutoRemoveOnDone(id);
             },
             onError: onErrorCommon,
+            onRequestWarnings: surfaceRequestWarnings,
           },
           controller.signal,
           route?.target,

@@ -92,10 +92,10 @@ describe("collectionSlug", () => {
 });
 
 describe("normalizeTagName / tagKey", () => {
-  it("trims, collapses whitespace, and drops a leading hash", () => {
-    expect(normalizeTagName("  #Portrait   Study  ")).toBe("Portrait Study");
-    expect(normalizeTagName("\t#\n")).toBe("");
-    expect(normalizeTagName("#")).toBe("");
+  it("trims and collapses whitespace while keeping a leading hash literal", () => {
+    expect(normalizeTagName("  #Portrait   Study  ")).toBe("#Portrait Study");
+    expect(normalizeTagName("\t#\n")).toBe("#");
+    expect(normalizeTagName("#")).toBe("#");
     expect(normalizeTagName("plain")).toBe("plain");
   });
 
@@ -105,7 +105,8 @@ describe("normalizeTagName / tagKey", () => {
 
   it("tagKey is the case-insensitive merge key", () => {
     expect(tagKey("Portrait")).toBe("portrait");
-    expect(tagKey("  #PORTRAIT ")).toBe("portrait");
+    expect(tagKey("  #PORTRAIT ")).toBe("#portrait");
+    expect(tagKey("#blue")).not.toBe(tagKey("blue"));
   });
 });
 

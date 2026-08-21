@@ -264,6 +264,7 @@ import type { HostRoute } from "../stores/hosts";
 import { domCanvasOps } from "../lib/sourceFitCanvas";
 import { applyH3BoundaryFit, applySourceFitPreprocess } from "../lib/sourceFitPreprocess";
 import { coerceSourceFitForMaskless, parseSourceFitPolicy } from "@studio/lib/sourceFit";
+import { requestWarningsFromHeaders } from "@studio/lib/requestWarnings";
 import {
   persistGenerationSourceMedia,
   restoreGenerationSourceMedia,
@@ -817,6 +818,8 @@ const libraryHostCounts = ref<Record<string, number>>({});
 const libraryPrintCount = ref(0);
 /** Inline (never a toast) organization failure banner. */
 const organizationError = ref("");
+/** Accepted-request advisories stay visible until dismissed or superseded. */
+const requestAdvisories = ref<string[]>([]);
 const organizationBusy = ref(false);
 /** Trash listing, fetched lazily the first time the Trash scope opens. */
 let trashCopies: PendingGalleryPrint[] = [];
@@ -3359,7 +3362,8 @@ async function submitMobileSequence(): Promise<void> {
         `/api/chain-jobs/${encodeURIComponent(operationId)}/operations/${encodeURIComponent(operationId)}/cancel`,
         { method: "POST", keepalive: true },
       );
-    const response = await apiJsonTo<CreateChainJobResponse>(target, "/api/chain-jobs", {
+    requestAdvisories.value = [];
+    const chainResponse = await apiFetchTo(target, "/api/chain-jobs", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -3367,6 +3371,8 @@ async function submitMobileSequence(): Promise<void> {
       },
       body: JSON.stringify(request),
     });
+    requestAdvisories.value = requestWarningsFromHeaders(chainResponse.headers);
+    const response = (await chainResponse.json()) as CreateChainJobResponse;
     if (!isCurrent()) {
       await apiFetchTo(target, `/api/chain-jobs/${encodeURIComponent(response.job_id)}/cancel`, {
         method: "POST",
@@ -5173,6 +5179,7 @@ async function generate(): Promise<void> {
   // prepared/quick submission's frozen route, or the pinned machine. Every
   // Batch sibling spreads this one request, so they share the outcome.
   request = fileUnderForFrozenRoute(request, route);
+  requestAdvisories.value = [];
   const { settled } = generation.submitBatch(
     request,
     batchSize,
@@ -5227,6 +5234,7 @@ async function generate(): Promise<void> {
       isActive: () => !unmounted,
     });
     if (unmounted) return;
+    requestAdvisories.value = [...new Set(jobs.flatMap((candidate) => candidate.requestWarnings))];
     for (const candidate of jobs) handledGenerationClientIds.add(candidate.clientId);
     const completed = jobs.filter(
       (candidate) => candidate.status === "complete" && candidate.result,
@@ -8260,6 +8268,21 @@ onBeforeUnmount(() => {
               type="button"
               data-test="mobile-file-under-dropped-dismiss"
               @click="fileUnderDropNotice = ''"
+            >
+              Dismiss
+            </button>
+          </div>
+          <div
+            v-if="requestAdvisories.length > 0"
+            class="mobile-file-under-dropped"
+            role="status"
+            data-test="mobile-request-advisories"
+          >
+            <p v-for="warning in requestAdvisories" :key="warning">{{ warning }}</p>
+            <button
+              type="button"
+              data-test="mobile-request-advisories-dismiss"
+              @click="requestAdvisories = []"
             >
               Dismiss
             </button>

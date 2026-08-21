@@ -43,9 +43,9 @@ describe("TagEditor", () => {
     const wrapper = mountEditor(["blue"]);
     await input(wrapper).setValue("  #Portrait ");
     await key(wrapper, "Enter");
-    // Canonical casing from the suggestion list wins over what was typed.
-    expect(wrapper.emitted("update:modelValue")).toEqual([[["blue", "portrait"]]]);
-    expect(wrapper.emitted("add")).toEqual([["portrait"]]);
+    // A literal leading hash addresses a distinct tag, matching the server.
+    expect(wrapper.emitted("update:modelValue")).toEqual([[["blue", "#Portrait"]]]);
+    expect(wrapper.emitted("add")).toEqual([["#Portrait"]]);
     expect(input(wrapper).element.value).toBe("");
     wrapper.unmount();
   });

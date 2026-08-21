@@ -19,6 +19,8 @@ export interface StreamSseOptions<TBody> {
   /** Extra request headers — how a cross-host stream carries its `x-api-key`. */
   headers?: Record<string, string>;
   onEvent: (evt: SseEvent) => void;
+  /** Called once with an accepted response before its event body is read. */
+  onOpen?: (res: Response) => void;
   /** Called once with the Response if the server returned a non-2xx. */
   onHttpError?: (res: Response) => void;
 }
@@ -44,6 +46,7 @@ export async function streamSse<TBody>(
   if (!res.body) {
     throw new Error("SSE response has no body");
   }
+  opts.onOpen?.(res);
 
   const reader = res.body.getReader();
   const decoder = new TextDecoder();

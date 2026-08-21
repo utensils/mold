@@ -49,6 +49,25 @@ describe("streamSse", () => {
     ]);
   });
 
+  it("exposes accepted response headers before reading the stream", async () => {
+    globalThis.fetch = vi.fn(
+      async () =>
+        new Response("event: complete\ndata: {}\n\n", {
+          headers: {
+            "x-mold-request-warning": "kept whole; still one advisory",
+          },
+        }),
+    ) as typeof fetch;
+    const onOpen = vi.fn();
+
+    await streamSse({ url: "/x", body: {}, onEvent: vi.fn(), onOpen });
+
+    expect(onOpen).toHaveBeenCalledOnce();
+    expect(
+      onOpen.mock.calls[0]?.[0].headers.get("x-mold-request-warning"),
+    ).toBe("kept whole; still one advisory");
+  });
+
   it("concatenates multi-line data fields with '\\n'", async () => {
     const body =
       "event: info\n" +

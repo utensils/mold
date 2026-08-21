@@ -955,7 +955,7 @@ describe("MobileGalleryViewer info sheet", () => {
     const input = view.get("[data-test='gallery-viewer-tag-input']");
     await input.setValue("  #Grain ");
     await view.get("[data-test='gallery-viewer-tag-add']").trigger("submit");
-    expect(view.emitted("tags")?.at(-1)).toEqual([{ add: ["Grain"] }]);
+    expect(view.emitted("tags")?.at(-1)).toEqual([{ add: ["#Grain"] }]);
   });
 
   it("suggests merged tags the print does not already carry", async () => {

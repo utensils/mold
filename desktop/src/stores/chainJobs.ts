@@ -20,6 +20,7 @@ import { notifyChainFinished } from "../lib/notify";
 import type { ChainCreateRequest, GcOutcome, RetakeRequest } from "../lib/api/types";
 import { useHostsStore } from "./hosts";
 import { useToastStore } from "./toasts";
+import { requestWarningsFromHeaders } from "@studio/lib/requestWarnings";
 
 /** One host's durable chain-job listing. */
 export interface HostChainJobs {
@@ -124,11 +125,11 @@ export const useChainJobsStore = defineStore("chainJobs", {
       operationId?: string,
     ): Promise<string> {
       const target = frozenTarget ?? this.targetFor(hostId);
-      const res = await apiJsonTo<CreateChainJobResponse>(
-        target,
-        "/api/chain-jobs",
-        jsonInit(req, operationId),
-      );
+      const response = await apiFetchTo(target, "/api/chain-jobs", jsonInit(req, operationId));
+      for (const warning of requestWarningsFromHeaders(response.headers)) {
+        useToastStore().push(warning, "warning");
+      }
+      const res = (await response.json()) as CreateChainJobResponse;
       await this.fetchHost(hostId);
       this.watch(hostId, res.job_id);
       return res.job_id;

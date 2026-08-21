@@ -312,7 +312,9 @@ Several advisories are joined with `; `, but the advisory text itself contains
 that sequence — "…were not applied; the print was generated and saved
 normally". Splitting on it turns one advisory into two dangling half-sentences.
 Show the value whole: the semicolons read as ordinary punctuation. `mold`'s own
-client does exactly that.
+client does exactly that. Browser Fetch also combines repeated response fields
+and cannot recover their original boundaries, so servers must continue sending
+this as one joined field until a future structured warning encoding replaces it.
 :::
 
 ### Video and audio responses

@@ -3715,7 +3715,8 @@ impl App {
                                 .and_then(|recipe| mold_core::resolution_advisory(&recipe, w, h));
                             self.generate.params.width = w;
                             self.generate.params.height = h;
-                            self.generate.error_message = advisory;
+                            self.generate.error_message = None;
+                            self.generate.warning_message = advisory;
                         }
                     }
                     KeyCode::Char(c)
@@ -14360,6 +14361,7 @@ mod tests {
             .position(|r| *r == CreateRow::Field(ParamField::Size))
             .unwrap();
         app.generate.param_index = size_idx;
+        app.generate.error_message = Some("a stale size error".to_string());
         app.dispatch_action(Action::Confirm);
         assert!(matches!(app.popup, Some(Popup::SizeInput { .. })));
         // Clear the prefilled WxH and type a new one.
@@ -14381,6 +14383,7 @@ mod tests {
         )));
         assert_eq!(app.generate.params.width, 1152);
         assert_eq!(app.generate.params.height, 832);
+        assert_eq!(app.generate.error_message, None);
     }
 
     #[tokio::test]
@@ -14400,6 +14403,7 @@ mod tests {
             .position(|r| *r == CreateRow::Field(ParamField::Size))
             .unwrap();
         app.generate.param_index = size_idx;
+        app.generate.error_message = Some("a stale size error".to_string());
         app.dispatch_action(Action::Confirm);
         assert!(matches!(app.popup, Some(Popup::SizeInput { .. })));
         for _ in 0..12 {
@@ -14423,8 +14427,9 @@ mod tests {
         )));
         assert_eq!(app.generate.params.width, 1001);
         assert_eq!(app.generate.params.height, 601);
+        assert_eq!(app.generate.error_message, None);
         if app.active_generation_recipe().is_some() {
-            let advisory = app.generate.error_message.as_deref().unwrap_or_default();
+            let advisory = app.generate.warning_message.as_deref().unwrap_or_default();
             assert!(advisory.contains("server may reject"), "got: {advisory}");
         }
     }

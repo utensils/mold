@@ -55,6 +55,8 @@ function singleHandlers() {
     onProgress: vi.fn<GenerateStreamHandlers["onProgress"]>(),
     onComplete: vi.fn<GenerateStreamHandlers["onComplete"]>(),
     onError: vi.fn<GenerateStreamHandlers["onError"]>(),
+    onRequestWarnings:
+      vi.fn<NonNullable<GenerateStreamHandlers["onRequestWarnings"]>>(),
   };
 }
 
@@ -63,6 +65,8 @@ function chainHandlers() {
     onProgress: vi.fn<ChainStreamHandlers["onProgress"]>(),
     onComplete: vi.fn<ChainStreamHandlers["onComplete"]>(),
     onError: vi.fn<ChainStreamHandlers["onError"]>(),
+    onRequestWarnings:
+      vi.fn<NonNullable<ChainStreamHandlers["onRequestWarnings"]>>(),
   };
 }
 
@@ -287,6 +291,29 @@ describe("chain validation api", () => {
 });
 
 describe("generateStream", () => {
+  it("surfaces an accepted request warning without splitting semicolons", async () => {
+    vi.mocked(streamSse).mockImplementationOnce(async (opts) => {
+      opts.onOpen?.(
+        new Response("", {
+          headers: {
+            "x-mold-request-warning": "retimed clip; output still rendered",
+          },
+        }),
+      );
+      opts.onEvent({
+        event: "complete",
+        data: JSON.stringify({ image: "AAAA" }),
+      });
+      return new Response("");
+    });
+    const h = singleHandlers();
+
+    await generateStream(singleRequest(), h);
+
+    expect(h.onRequestWarnings).toHaveBeenCalledWith([
+      "retimed clip; output still rendered",
+    ]);
+  });
   it("flips a job to network error when the stream resolves without complete/error", async () => {
     // Server-side scenario: the worker crashed mid-job, or a proxy /
     // network blip closed the SSE pipe after a few progress events.
@@ -543,6 +570,24 @@ describe("chain job api helpers", () => {
       },
       body: JSON.stringify(chainRequest()),
     });
+
+    const onRequestWarnings = vi.fn();
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ job_id: "job/2" }), {
+        headers: {
+          "x-mold-request-warning": "retimed clip; output was still created",
+        },
+      }),
+    );
+    await createChainJob(
+      chainRequest(),
+      undefined,
+      undefined,
+      onRequestWarnings,
+    );
+    expect(onRequestWarnings).toHaveBeenCalledWith([
+      "retimed clip; output was still created",
+    ]);
 
     fetchMock.mockResolvedValueOnce(
       new Response(JSON.stringify({ jobs: [summary] })),
