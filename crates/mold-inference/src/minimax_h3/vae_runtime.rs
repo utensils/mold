@@ -3190,8 +3190,15 @@ mod tests {
         assert!(std::sync::Arc::ptr_eq(&first, &second));
         assert_eq!(stage_events(&second_observer), 0);
 
-        // Any source drift — here a rewrite bumping mtime/ctime with identical
-        // bytes — evicts the cached stage and re-stages.
+        // Any source drift — here a replacement carrying identical bytes —
+        // evicts the cached stage and re-stages. The replacement recreates the
+        // file rather than rewriting it in place, because an in-place rewrite
+        // drifts only the timestamps and the kernel's coarse file clock can
+        // hand both writes the same one: that made this assertion depend on
+        // how the test binary happened to be scheduled, and it failed at
+        // `--test-threads=4` on unmodified `main`. A new inode is drift under
+        // exactly the same `FileIdentity` rule, with no timing in it.
+        std::fs::remove_file(&paths.visual_weights).unwrap();
         std::fs::write(&paths.visual_weights, b"\x08visual").unwrap();
         let mut third_observer = RecordingObserver::default();
         let mut redrifted = reopen(&plan, &mut third_observer);
