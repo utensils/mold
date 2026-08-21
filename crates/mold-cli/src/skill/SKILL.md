@@ -711,9 +711,10 @@ mold run "a golden retriever" --image park.png --mask mask.png
 ### Face-identity conditioning (PuLID-FLUX)
 
 Additive `GenerateRequest` fields. **Not executable yet on any build**: the
-`pulid` feature compiles the wire contract, but the FLUX engine gains the
-adapter in a later change, and until then `mold_core::identity::IDENTITY_RUNTIME_READY`
-stays `false`, no build advertises the capability, and every identity request is
+`pulid` feature compiles the wire contract and the FLUX engine now carries the
+cross-attention adapter, but nothing yet turns `id_image` into the embedding
+that adapter consumes, so `mold_core::identity::IDENTITY_RUNTIME_READY` stays
+`false`, no build advertises the capability, and every identity request is
 refused. Read `supports_identity` — never the feature — to decide whether to
 offer the control.
 

@@ -36,10 +36,15 @@ pub const ID_START_STEP_DEFAULT: u32 = 0;
 /// Whether this binary can actually execute identity conditioning.
 ///
 /// The `pulid` feature compiles the wire contract — the qualified-model list,
-/// the bounds, the validator, the request fields. It does not yet compile an
-/// engine that consumes them: the FLUX engine gains that in the adapter PR
-/// (#1221), which flips this constant to `true` in the same change that makes
-/// `FrozenEngineConfig.identity_assets` reach the denoise loop.
+/// the bounds, the validator, the request fields.
+///
+/// #1221 landed the cross-attention adapter, so `FrozenEngineConfig's`
+/// identity assets now reach the denoise loop on every FLUX transformer
+/// variant. That is not yet enough to flip this: nothing turns a request's
+/// `id_image` into the `[1, 32, 2048]` embedding the adapter consumes, so a
+/// conditioned request would download the bundle and then fail at render time.
+/// #1223 wires the extractor to the engine seam and flips this constant in the
+/// same change.
 ///
 /// Until then the capability stays unadvertised on every build and every
 /// identity request is refused. Advertising a control the worker cannot honour
