@@ -446,6 +446,10 @@ pub enum ParamField {
     ControlImage,
     ControlModel,
     ControlScale,
+    // Advanced — Identity (PuLID-FLUX)
+    IdentityImage,
+    IdentityWeight,
+    IdentityStartStep,
     // Advanced — LoRA / Upscale / Output
     Lora,
     Upscale,
@@ -513,6 +517,12 @@ impl ParamField {
             Self::Tags => "Tags",
             Self::Collection => "Collection",
             Self::ControlScale => "Scale",
+            // These three live inside the "Identity photo" section, so they
+            // are named for their role there — `LABEL_W` is 16 columns and a
+            // repeated "Identity " prefix would not fit any of them.
+            Self::IdentityImage => "Photo",
+            Self::IdentityWeight => "Strength",
+            Self::IdentityStartStep => "Start step",
         }
     }
 }
@@ -646,6 +656,17 @@ pub struct GenerateParams {
     pub reference_paths: Vec<crate::h3_references::ReferencePath>,
     pub strength: f64,
     pub mask_image_path: Option<String>,
+    // Identity (PuLID-FLUX). The path is transient TUI state: only the
+    // basename and the bytes cross the wire, exactly as the source image
+    // does. Validated once at entry (`crate::identity::load_identity_image`)
+    // so an unreadable or out-of-bounds photo never reaches a queue slot.
+    pub identity_image_path: Option<String>,
+    /// Identity strength in `0.0..=mold_core::identity::ID_WEIGHT_MAX`.
+    /// Shipped explicitly whenever a photo is attached, so the saved
+    /// provenance records the value the user actually saw.
+    pub id_weight: f64,
+    /// First identity-conditioned denoise step; always `< steps`.
+    pub id_start_step: u32,
     // Video
     pub frames: u32,
     pub fps: u32,
@@ -793,6 +814,9 @@ impl GenerateParams {
             reference_paths: Vec::new(),
             strength: 0.75,
             mask_image_path: None,
+            identity_image_path: None,
+            id_weight: mold_core::identity::ID_WEIGHT_DEFAULT,
+            id_start_step: mold_core::identity::ID_START_STEP_DEFAULT,
             frames: 25,
             fps: 24,
             pipeline: None,
@@ -868,6 +892,18 @@ impl GenerateParams {
                         .unwrap_or_else(|| p.to_string())
                 })
                 .unwrap_or_else(|| "\u{27e8}none\u{27e9}".to_string()),
+            ParamField::IdentityImage => self
+                .identity_image_path
+                .as_deref()
+                .map(|p| {
+                    std::path::Path::new(p)
+                        .file_name()
+                        .map(|f| f.to_string_lossy().to_string())
+                        .unwrap_or_else(|| p.to_string())
+                })
+                .unwrap_or_else(|| "\u{27e8}none\u{27e9}".to_string()),
+            ParamField::IdentityWeight => format!("{:.2}", self.id_weight),
+            ParamField::IdentityStartStep => self.id_start_step.to_string(),
             ParamField::References => match self.reference_paths.len() {
                 0 => "\u{27e8}none\u{27e9}".to_string(),
                 1 => "1 ordered file".to_string(),
@@ -1207,6 +1243,13 @@ pub struct GenerateState {
     pub last_seed: Option<u64>,
     pub last_generation_time_ms: Option<u64>,
     pub error_message: Option<String>,
+    /// Why the attached identity photo cannot be used right now — a rejected
+    /// file at entry time, or the model gate after a switch to a checkpoint
+    /// that does not advertise `supports_identity`. Rendered inline on the
+    /// Photo row (and in the picker) and re-checked at dispatch, so the
+    /// refusal is never only a late server error. The photo itself is kept:
+    /// the user chose it, and switching back must not have lost it.
+    pub identity_error: Option<String>,
     /// Non-blocking advisory (e.g. an admitted off-bucket size); rendered in
     /// the error row's slot with warning styling, never as an error.
     pub warning_message: Option<String>,
@@ -1741,6 +1784,14 @@ pub enum Popup {
         input: String,
         error: Option<String>,
     },
+    /// Local path to the PuLID face-identity photo. Committing opens the file
+    /// no-follow and bounds-checks it through `mold_core::identity`, so a
+    /// rejected photo never leaves the picker; the refusal stays visible here
+    /// and on the row rather than arriving as a late server error.
+    IdentityImageInput {
+        input: String,
+        error: Option<String>,
+    },
     /// One File-under editor (Title, Tags, or Collection). Invalid input
     /// stays visible and never reaches a generation request.
     FilingInput {
@@ -1793,6 +1844,11 @@ pub enum UpscalePickerPurpose {
 
 /// Label of the synthetic "clear" entry offered by the Create-side picker.
 pub(crate) const UPSCALE_OFF_ENTRY: &str = "(off)";
+
+/// Ceiling on the identity-photo path the picker will accept. Well above any
+/// real filesystem path; it exists so a pasted blob cannot grow the popup
+/// buffer without bound.
+pub(crate) const IDENTITY_PATH_MAX_BYTES: usize = 4096;
 
 #[derive(Debug, Clone)]
 pub enum ConfirmAction {
@@ -2073,6 +2129,10 @@ impl App {
                 .iter()
                 .find(|model| model.name == params.model)
                 .and_then(|model| model.source_image),
+            catalog
+                .iter()
+                .find(|model| model.name == params.model)
+                .and_then(|model| model.supports_identity),
         );
 
         let model_description = mold_core::manifest::find_manifest(&params.model)
@@ -2164,6 +2224,7 @@ impl App {
                 last_seed: None,
                 last_generation_time_ms: None,
                 error_message: None,
+                identity_error: None,
                 warning_message: None,
                 model_description,
                 last_output_path: None,
@@ -2407,6 +2468,66 @@ impl App {
             })
     }
 
+    /// Why an attached identity photo cannot be submitted against the current
+    /// form, or `None` when it can.
+    ///
+    /// Every rule `mold_core::identity::validate_identity_conditioning` would
+    /// apply to the *shape* of the request, asked here so the refusal is
+    /// inline on the Photo row instead of a round trip away: the model gate,
+    /// the LoRA and img2img pairings the milestone does not qualify, and both
+    /// knob ranges. The range checks are unreachable from the rows, which
+    /// cannot express an out-of-range value, but a restored session or a
+    /// gallery reuse can carry one no row produced.
+    ///
+    /// Deliberately does NO file I/O — it runs on every model switch, and
+    /// re-reading a 16 MiB photo there would be felt. The file is re-checked
+    /// once at dispatch by [`Self::identity_dispatch_error`].
+    fn identity_gate_error(&self) -> Option<String> {
+        let params = &self.generate.params;
+        params.identity_image_path.as_ref()?;
+        if !self.generate.capabilities.supports_identity {
+            return Some(mold_core::identity::identity_model_gate_message(
+                &params.model,
+            ));
+        }
+        // Neither pairing is qualified in milestone 1. The Create form can
+        // hold both at once — LoRA and Source are their own sections — so
+        // this is a reachable state, not a defensive check.
+        if params.lora_path.is_some() {
+            return Some(mold_core::identity::IDENTITY_LORA_CONFLICT.to_string());
+        }
+        if params.source_image_path.is_some() {
+            return Some(mold_core::identity::IDENTITY_IMG2IMG_CONFLICT.to_string());
+        }
+        if let Err(message) = mold_core::identity::validate_id_weight(params.id_weight) {
+            return Some(message);
+        }
+        if let Err(message) =
+            mold_core::identity::validate_id_start_step(params.id_start_step, params.steps)
+        {
+            return Some(message);
+        }
+        None
+    }
+
+    /// The dispatch-time identity check: everything [`Self::identity_gate_error`]
+    /// asks, plus one re-read of the photo itself.
+    ///
+    /// A file accepted at entry can be deleted, truncated, or swapped for a
+    /// symlink before Generate is pressed. Every other conditioning input
+    /// degrades to "absent" in that case; an identity reference must not,
+    /// because the run would then render an ordinary print with a plausible
+    /// wrong face and say nothing. `build_request` refuses the same way as a
+    /// last line of defence — the file can still vanish between here and the
+    /// read — but checking here is what puts the reason on the Photo row.
+    fn identity_dispatch_error(&self) -> Option<String> {
+        if let Some(message) = self.identity_gate_error() {
+            return Some(message);
+        }
+        let path = self.generate.params.identity_image_path.as_deref()?;
+        crate::identity::load_identity_image(path).err()
+    }
+
     /// Recompute Create rows from the selected model's family and the current
     /// catalog's checkpoint-specific audio, guidance, and source-image facts.
     /// An incompatible model clears stale audio, source image, plus LTX-2
@@ -2441,6 +2562,11 @@ impl App {
             advertised_audio_support,
             effective_guidance,
             self.source_image_contract(&model),
+            self.models
+                .catalog
+                .iter()
+                .find(|entry| entry.name == model)
+                .and_then(|entry| entry.supports_identity),
         );
         // #787: keep the Negative editor and its advertised default in step
         // with the selected model. The server's per-model advertisement wins;
@@ -2480,6 +2606,23 @@ impl App {
         if !self.generate.capabilities.supports_references {
             self.generate.params.reference_paths.clear();
         }
+        // `id_start_step` is bounded by the step count, which every model
+        // switch can move; a restored 20 against a 4-step model would be
+        // refused at admission for a value the form never let the user set.
+        // The clamp runs BEFORE the gate below, so a value this repair fixes
+        // never leaves a refusal on screen for a state that no longer exists.
+        let step_ceiling = self.generate.params.steps.saturating_sub(1);
+        self.generate.params.id_start_step = self.generate.params.id_start_step.min(step_ceiling);
+        // Identity is the one conditioning reference a model switch does NOT
+        // discard. Dropping a face silently would be worse than the stale
+        // source-image path above: the print would render, look fine, and
+        // simply not be that person. The photo is kept, the refusal is
+        // raised, and dispatch is blocked until the user picks a qualified
+        // checkpoint or clears the photo. The wording is `mold_core`'s.
+        //
+        // Assigned unconditionally, so a gate that now passes clears the
+        // previous refusal rather than leaving it stale on the row.
+        self.generate.identity_error = self.identity_gate_error();
         if !self.generate.capabilities.supports_video_upscale {
             self.generate.params.pipeline = None;
             self.generate.params.spatial_upscale = None;
@@ -3617,6 +3760,41 @@ impl App {
                         if input.len() + c.len_utf8()
                             <= crate::h3_references::MAX_REFERENCE_INPUT_BYTES =>
                     {
+                        input.push(c);
+                        *error = None;
+                    }
+                    KeyCode::Backspace => {
+                        input.pop();
+                        *error = None;
+                    }
+                    _ => {}
+                },
+                Some(Popup::IdentityImageInput { input, error }) => match key.code {
+                    KeyCode::Esc => self.close_popup(),
+                    KeyCode::Enter => {
+                        // An emptied field clears the photo — that is the only
+                        // way back out of an attached reference, and it must
+                        // not have to pass a file check to get there.
+                        if input.trim().is_empty() {
+                            self.generate.params.identity_image_path = None;
+                            self.generate.identity_error = None;
+                            self.close_popup();
+                        } else {
+                            match crate::identity::load_identity_image(input) {
+                                Ok(_) => {
+                                    self.generate.params.identity_image_path =
+                                        Some(input.trim().to_string());
+                                    self.generate.identity_error = None;
+                                    self.close_popup();
+                                }
+                                Err(message) => {
+                                    self.generate.identity_error = Some(message.clone());
+                                    *error = Some(message);
+                                }
+                            }
+                        }
+                    }
+                    KeyCode::Char(c) if input.len() + c.len_utf8() <= IDENTITY_PATH_MAX_BYTES => {
                         input.push(c);
                         *error = None;
                     }
@@ -4934,6 +5112,21 @@ impl App {
             ParamField::Strength => {
                 p.strength = (p.strength + delta as f64 * 0.05).clamp(0.0, 1.0);
             }
+            ParamField::IdentityWeight => {
+                // The range is `mold_core::identity`'s, never a local copy.
+                // Rounding to one decimal keeps repeated ◀▶ presses from
+                // accumulating binary drift into the recorded provenance.
+                let next = ((p.id_weight + delta as f64 * 0.1) * 10.0).round() / 10.0;
+                p.id_weight = next.clamp(0.0, mold_core::identity::ID_WEIGHT_MAX);
+            }
+            ParamField::IdentityStartStep => {
+                // `id_start_step` must stay strictly below `steps`; a form
+                // that cannot express an invalid value never has to explain
+                // one. `steps` is at least 1 everywhere it is adjustable.
+                let ceiling = p.steps.saturating_sub(1);
+                p.id_start_step = (i64::from(p.id_start_step) + i64::from(delta))
+                    .clamp(0, i64::from(ceiling)) as u32;
+            }
             ParamField::Frames => {
                 let grid = video_grid.expect("frames has video grid");
                 let current = grid
@@ -5088,6 +5281,7 @@ impl App {
             | ParamField::Lora
             | ParamField::StgBlocks
             | ParamField::SourceImage
+            | ParamField::IdentityImage
             | ParamField::References
             | ParamField::MaskImage
             | ParamField::ControlImage
@@ -5849,6 +6043,18 @@ impl App {
                 );
                 self.popup = Some(Popup::ReferencesInput { input, error: None });
             }
+            ParamField::IdentityImage => {
+                let input = self
+                    .generate
+                    .params
+                    .identity_image_path
+                    .clone()
+                    .unwrap_or_default();
+                self.popup = Some(Popup::IdentityImageInput {
+                    input,
+                    error: self.generate.identity_error.clone(),
+                });
+            }
             // File under — three validated one-line editors.
             ParamField::Title | ParamField::Tags | ParamField::Collection => {
                 let input = self.filing_editor_text(field);
@@ -5954,6 +6160,13 @@ impl App {
         self.generate.params.strength = 0.75;
         self.generate.params.source_image_path = None;
         self.generate.params.reference_paths.clear();
+        // Reset is the one control that always clears the identity photo —
+        // including on a model that cannot take it, where it is the way back
+        // out of the gate refusal.
+        self.generate.params.identity_image_path = None;
+        self.generate.params.id_weight = mold_core::identity::ID_WEIGHT_DEFAULT;
+        self.generate.params.id_start_step = mold_core::identity::ID_START_STEP_DEFAULT;
+        self.generate.identity_error = None;
         self.generate.params.mask_image_path = None;
         self.generate.params.control_image_path = None;
         self.generate.params.control_model = None;
@@ -6956,6 +7169,15 @@ impl App {
             self.generate.params.source_image_path.is_some(),
         ) {
             self.generate.error_message = Some(message.to_string());
+            return;
+        }
+
+        // An identity photo the current model cannot take — or one whose file
+        // has gone away since it was picked — blocks dispatch rather than
+        // rendering a print that silently has the wrong face in it.
+        if let Some(message) = self.identity_dispatch_error() {
+            self.generate.identity_error = Some(message.clone());
+            self.generate.error_message = Some(message);
             return;
         }
 
@@ -9922,6 +10144,7 @@ mod tests {
                 last_seed: None,
                 last_generation_time_ms: None,
                 error_message: None,
+                identity_error: None,
                 warning_message: None,
                 model_description: String::new(),
                 last_output_path: None,
@@ -12997,6 +13220,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         app.generate.params.pipeline = Some(Ltx2PipelineMode::Distilled);
         app.generate.params.guidance = 7.0;
@@ -13042,6 +13266,300 @@ mod tests {
             !app.generate.capabilities.supports_negative_prompt,
             "Auto must restore the server-advertised fixed guidance contract"
         );
+    }
+
+    // ── identity conditioning (PuLID-FLUX, #1231) ───────────────
+
+    /// The Identity rows follow the server's advertisement and nothing else.
+    #[tokio::test]
+    async fn identity_rows_follow_the_advertised_capability() {
+        use crate::ui::create_form::{AdvSection, CreateRow};
+
+        let mut app = make_settings_test_app();
+        let model = "flux-dev:q8";
+        app.generate.params.model = model.into();
+        let mut entry = make_test_catalog_entry(model, 20, 3.5, 1024, 1024, "FLUX dev");
+        entry.supports_identity = Some(true);
+        app.models.catalog.push(entry);
+        app.generate.advanced = crate::ui::create_form::AdvancedState {
+            open: true,
+            expanded: Some(AdvSection::Identity),
+        };
+
+        app.sync_generate_capabilities();
+        assert!(app.generate.capabilities.supports_identity);
+        assert!(app
+            .generate
+            .rows
+            .contains(&CreateRow::Section(AdvSection::Identity)));
+        assert!(app.generate.rows.contains(&CreateRow::SectionField(
+            AdvSection::Identity,
+            ParamField::IdentityImage
+        )));
+
+        // The same model against a server that does not advertise the field.
+        app.models.catalog[0].supports_identity = None;
+        app.sync_generate_capabilities();
+        assert!(!app.generate.capabilities.supports_identity);
+        assert!(!app
+            .generate
+            .rows
+            .contains(&CreateRow::Section(AdvSection::Identity)));
+    }
+
+    /// Switching to a checkpoint that cannot take the photo keeps the photo
+    /// (the user picked it, and switching back must not have lost it), raises
+    /// `mold_core`'s own refusal, and blocks dispatch.
+    #[tokio::test]
+    async fn an_unqualified_model_keeps_the_photo_and_refuses_it() {
+        let mut app = make_settings_test_app();
+        let qualified = "flux-dev:q8";
+        let mut entry = make_test_catalog_entry(qualified, 20, 3.5, 1024, 1024, "FLUX dev");
+        entry.supports_identity = Some(true);
+        app.models.catalog.push(entry);
+        app.models.catalog.push(make_test_catalog_entry(
+            "flux2-klein:q8",
+            4,
+            0.0,
+            1024,
+            1024,
+            "Klein",
+        ));
+
+        app.generate.params.model = qualified.into();
+        app.generate.params.identity_image_path = Some("/photos/ada.png".into());
+        app.sync_generate_capabilities();
+        assert_eq!(app.generate.identity_error, None);
+
+        app.generate.params.model = "flux2-klein:q8".into();
+        app.sync_generate_capabilities();
+        assert_eq!(
+            app.generate.params.identity_image_path.as_deref(),
+            Some("/photos/ada.png"),
+            "a model switch must never silently drop the face"
+        );
+        assert_eq!(
+            app.generate.identity_error.as_deref(),
+            Some(mold_core::identity::identity_model_gate_message("flux2-klein:q8").as_str()),
+            "the refusal is mold-core's sentence, not a restatement"
+        );
+
+        // Reset is the way back out; it clears the photo and both knobs.
+        app.generate.params.id_weight = 2.0;
+        app.generate.params.id_start_step = 1;
+        app.reset_params_to_model_defaults();
+        assert_eq!(app.generate.params.identity_image_path, None);
+        assert_eq!(app.generate.identity_error, None);
+        assert_eq!(
+            app.generate.params.id_weight,
+            mold_core::identity::ID_WEIGHT_DEFAULT
+        );
+        assert_eq!(
+            app.generate.params.id_start_step,
+            mold_core::identity::ID_START_STEP_DEFAULT
+        );
+    }
+
+    /// Both knobs are bounded by `mold_core::identity`, so the form can never
+    /// express a value admission would refuse.
+    #[tokio::test]
+    async fn identity_knobs_clamp_to_the_core_bounds() {
+        let mut app = make_settings_test_app();
+        app.generate.params.steps = 20;
+
+        app.adjust_field(ParamField::IdentityWeight, 1);
+        assert_eq!(app.generate.params.id_weight, 1.1);
+        for _ in 0..64 {
+            app.adjust_field(ParamField::IdentityWeight, 1);
+        }
+        assert_eq!(
+            app.generate.params.id_weight,
+            mold_core::identity::ID_WEIGHT_MAX
+        );
+        for _ in 0..128 {
+            app.adjust_field(ParamField::IdentityWeight, -1);
+        }
+        assert_eq!(app.generate.params.id_weight, 0.0);
+        assert!(mold_core::identity::validate_id_weight(app.generate.params.id_weight).is_ok());
+
+        app.adjust_field(ParamField::IdentityStartStep, -1);
+        assert_eq!(app.generate.params.id_start_step, 0);
+        for _ in 0..64 {
+            app.adjust_field(ParamField::IdentityStartStep, 1);
+        }
+        assert_eq!(
+            app.generate.params.id_start_step, 19,
+            "the ceiling is steps - 1, so `id_start_step < steps` always holds"
+        );
+        assert!(mold_core::identity::validate_id_start_step(
+            app.generate.params.id_start_step,
+            app.generate.params.steps
+        )
+        .is_ok());
+    }
+
+    /// A restored start step that a lower-step model cannot honour is pulled
+    /// back onto the grid rather than left to fail at admission.
+    #[tokio::test]
+    async fn a_model_switch_pulls_the_start_step_below_the_new_step_count() {
+        let mut app = make_settings_test_app();
+        app.generate.params.steps = 20;
+        app.generate.params.id_start_step = 15;
+        app.sync_generate_capabilities();
+        assert_eq!(app.generate.params.id_start_step, 15);
+
+        app.generate.params.steps = 4;
+        app.sync_generate_capabilities();
+        assert_eq!(app.generate.params.id_start_step, 3);
+        assert!(mold_core::identity::validate_id_start_step(
+            app.generate.params.id_start_step,
+            app.generate.params.steps
+        )
+        .is_ok());
+    }
+
+    /// Milestone 1 qualifies neither pairing, and the Create form can hold
+    /// both at once — LoRA and Source are their own Advanced sections — so
+    /// the refusal has to be inline rather than a round trip away. The
+    /// wording is `mold_core::identity`'s const, not a restatement.
+    #[tokio::test]
+    async fn identity_refuses_the_lora_and_img2img_pairings_inline() {
+        let mut app = make_settings_test_app();
+        let model = "flux-dev:q8";
+        let mut entry = make_test_catalog_entry(model, 20, 3.5, 1024, 1024, "FLUX dev");
+        entry.supports_identity = Some(true);
+        app.models.catalog.push(entry);
+        app.generate.params.model = model.into();
+        app.generate.params.identity_image_path = Some("/photos/ada.png".into());
+        app.sync_generate_capabilities();
+        assert_eq!(app.generate.identity_error, None);
+
+        app.generate.params.lora_path = Some("/loras/pixel.safetensors".into());
+        app.sync_generate_capabilities();
+        assert_eq!(
+            app.generate.identity_error.as_deref(),
+            Some(mold_core::identity::IDENTITY_LORA_CONFLICT)
+        );
+
+        app.generate.params.lora_path = None;
+        app.generate.params.source_image_path = Some("/photos/scene.png".into());
+        app.sync_generate_capabilities();
+        assert_eq!(
+            app.generate.identity_error.as_deref(),
+            Some(mold_core::identity::IDENTITY_IMG2IMG_CONFLICT)
+        );
+
+        // Removing the conflict clears the refusal rather than leaving it
+        // stale on the row.
+        app.generate.params.source_image_path = None;
+        app.sync_generate_capabilities();
+        assert_eq!(app.generate.identity_error, None);
+
+        // Neither pairing is a problem without a photo.
+        app.generate.params.identity_image_path = None;
+        app.generate.params.lora_path = Some("/loras/pixel.safetensors".into());
+        app.sync_generate_capabilities();
+        assert_eq!(app.generate.identity_error, None);
+    }
+
+    /// A restored print whose start step is at or past the new step count is
+    /// repaired first and validated second, so the user is never left staring
+    /// at a refusal for a state the repair already fixed.
+    #[tokio::test]
+    async fn a_restored_out_of_range_start_step_is_clamped_before_it_is_judged() {
+        let mut app = make_settings_test_app();
+        let model = "flux-dev:q8";
+        let mut entry = make_test_catalog_entry(model, 20, 3.5, 1024, 1024, "FLUX dev");
+        entry.supports_identity = Some(true);
+        app.models.catalog.push(entry);
+        app.generate.params.model = model.into();
+        app.generate.params.identity_image_path = Some("/photos/ada.png".into());
+
+        // Restored state: start step at the step count, which admission
+        // refuses (the rule is strictly less than).
+        app.generate.params.steps = 4;
+        app.generate.params.id_start_step = 20;
+        app.sync_generate_capabilities();
+        assert_eq!(app.generate.params.id_start_step, 3);
+        assert_eq!(
+            app.generate.identity_error, None,
+            "the clamp runs first, so no refusal survives for a repaired value"
+        );
+        assert!(mold_core::identity::validate_id_start_step(
+            app.generate.params.id_start_step,
+            app.generate.params.steps
+        )
+        .is_ok());
+
+        // Exactly at the boundary is the same repair.
+        app.generate.params.id_start_step = 4;
+        app.sync_generate_capabilities();
+        assert_eq!(app.generate.params.id_start_step, 3);
+        assert_eq!(app.generate.identity_error, None);
+    }
+
+    /// A photo accepted at entry can be deleted or replaced before Generate
+    /// is pressed. Dispatch re-reads it so the refusal lands on the Photo row
+    /// instead of the run silently becoming an ordinary render.
+    #[tokio::test]
+    async fn dispatch_rechecks_the_photo_file_the_gate_does_not_touch() {
+        let mut app = make_settings_test_app();
+        let model = "flux-dev:q8";
+        let mut entry = make_test_catalog_entry(model, 20, 3.5, 1024, 1024, "FLUX dev");
+        entry.supports_identity = Some(true);
+        app.models.catalog.push(entry);
+        app.generate.params.model = model.into();
+        app.generate.params.steps = 20;
+
+        let dir = tempfile::tempdir().unwrap();
+        let photo = dir.path().join("ada.png");
+        std::fs::write(&photo, IDENTITY_TEST_PNG).unwrap();
+        app.generate.params.identity_image_path = Some(photo.to_string_lossy().to_string());
+        app.sync_generate_capabilities();
+        assert_eq!(app.identity_dispatch_error(), None);
+
+        // The cheap gate deliberately does no file I/O — it runs on every
+        // model switch — so only the dispatch check notices the file is gone.
+        std::fs::remove_file(&photo).unwrap();
+        assert_eq!(app.identity_gate_error(), None);
+        let error = app
+            .identity_dispatch_error()
+            .expect("a vanished photo must refuse dispatch");
+        assert!(
+            error.starts_with("Identity photo could not be opened"),
+            "{error}"
+        );
+
+        // The model gate still outranks the file check: a request that could
+        // not run anyway names the reason it could not run.
+        std::fs::write(&photo, IDENTITY_TEST_PNG).unwrap();
+        app.models.catalog[0].supports_identity = None;
+        app.sync_generate_capabilities();
+        assert_eq!(
+            app.identity_dispatch_error(),
+            Some(mold_core::identity::identity_model_gate_message(model))
+        );
+    }
+
+    /// A genuine 1x1 RGBA PNG — the smallest payload
+    /// `identity::validate_id_image_bytes` accepts.
+    const IDENTITY_TEST_PNG: [u8; 67] = [
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
+        0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00,
+        0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49,
+        0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
+
+    /// With no photo attached there is nothing to gate: the knobs alone are
+    /// never a reason to refuse a perfectly ordinary render.
+    #[tokio::test]
+    async fn knobs_without_a_photo_never_gate_a_render() {
+        let mut app = make_settings_test_app();
+        app.generate.params.id_weight = 2.5;
+        app.generate.params.id_start_step = 2;
+        app.sync_generate_capabilities();
+        assert_eq!(app.generate.identity_error, None);
     }
 
     #[tokio::test]
@@ -13141,6 +13659,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         app.generate.params.guidance = 7.0;
         app.sync_generate_capabilities();
@@ -13154,6 +13673,7 @@ mod tests {
         app.generate.capabilities = crate::model_info::capabilities_for_model(
             "ltx2",
             &app.generate.params.model,
+            None,
             None,
             None,
             None,
@@ -13938,6 +14458,7 @@ mod tests {
             last_seed: None,
             last_generation_time_ms: None,
             error_message: None,
+            identity_error: None,
             warning_message: None,
             model_description: String::new(),
             last_output_path: None,
@@ -14003,6 +14524,7 @@ mod tests {
             last_seed: None,
             last_generation_time_ms: None,
             error_message: None,
+            identity_error: None,
             warning_message: None,
             model_description: String::new(),
             last_output_path: None,
@@ -14049,6 +14571,7 @@ mod tests {
             last_seed: None,
             last_generation_time_ms: None,
             error_message: None,
+            identity_error: None,
             warning_message: None,
             model_description: String::new(),
             last_output_path: None,

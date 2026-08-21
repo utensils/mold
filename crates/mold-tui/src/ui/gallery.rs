@@ -868,6 +868,15 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
         ]));
     }
 
+    // Identity provenance: name, short digest, effective strength and start
+    // step, present only when the print actually carried a face reference.
+    if let Some(identity) = crate::identity::metadata_summary(meta) {
+        lines.push(Line::from(vec![
+            Span::styled(format!("{:<10}", "Identity"), theme.param_label()),
+            Span::styled(identity, theme.param_value()),
+        ]));
+    }
+
     // Optional parameters
     if let Some(strength) = meta.strength {
         lines.push(Line::from(vec![

@@ -11,6 +11,7 @@ mod gallery_trash;
 mod h3_references;
 mod history;
 mod hosts;
+mod identity;
 mod model_info;
 mod motion;
 mod palette;

@@ -122,6 +122,56 @@ pub fn identity_qualified_model(resolved_model: &str) -> bool {
     IDENTITY_QUALIFIED_MODELS.contains(&resolved.as_str())
 }
 
+/// The refusal a surface shows for a checkpoint that cannot take an identity
+/// reference.
+///
+/// Extracted so admission, the TUI, and the Discord bot all speak one
+/// sentence. Clients gate on the server's advertised
+/// `/api/models[].supports_identity` — never on this list, which is the
+/// built-in fallback and the wording authority, not a second capability.
+pub fn identity_model_gate_message(model: &str) -> String {
+    format!(
+        "{model} does not support face-identity conditioning; identity is qualified only for {}",
+        IDENTITY_QUALIFIED_MODELS.join(" and ")
+    )
+}
+
+/// Refusal for an identity request that also carries a LoRA.
+///
+/// A const rather than a formatted message because clients show it before a
+/// request exists — the TUI refuses the pairing inline instead of spending a
+/// round trip to be told the same thing.
+pub const IDENTITY_LORA_CONFLICT: &str =
+    "face-identity conditioning combined with a LoRA is not yet qualified; \
+     remove the LoRA or the id_image";
+
+/// Refusal for an identity request that also carries an img2img source image.
+pub const IDENTITY_IMG2IMG_CONFLICT: &str =
+    "face-identity conditioning combined with img2img is not yet qualified; \
+     remove the source_image or the id_image";
+
+/// Validate an `id_weight` against the one advertised range. Surfaces that
+/// collect the value before a request exists call this directly; the shared
+/// request validator below delegates to it so the two cannot drift.
+pub fn validate_id_weight(weight: f64) -> Result<(), String> {
+    if !weight.is_finite() || !(0.0..=ID_WEIGHT_MAX).contains(&weight) {
+        return Err(format!(
+            "id_weight ({weight}) must be a finite value in range [0.0, {ID_WEIGHT_MAX}]"
+        ));
+    }
+    Ok(())
+}
+
+/// Validate an `id_start_step` against the run's own step count.
+pub fn validate_id_start_step(start_step: u32, steps: u32) -> Result<(), String> {
+    if start_step >= steps {
+        return Err(format!(
+            "id_start_step ({start_step}) must be less than steps ({steps})"
+        ));
+    }
+    Ok(())
+}
+
 /// Whether the request asks for identity conditioning in any way — including
 /// the incomplete forms (a knob without an image) validation must refuse.
 pub fn request_mentions_identity(req: &GenerateRequest) -> bool {
@@ -288,43 +338,19 @@ pub fn validate_identity_conditioning(req: &GenerateRequest) -> Result<(), Strin
     };
 
     if !identity_qualified_model(&req.model) {
-        return Err(format!(
-            "{} does not support face-identity conditioning; identity is qualified only for {}",
-            req.model,
-            IDENTITY_QUALIFIED_MODELS.join(" and ")
-        ));
+        return Err(identity_model_gate_message(&req.model));
     }
 
     let has_lora = req.lora.is_some() || req.loras.as_ref().is_some_and(|items| !items.is_empty());
     if has_lora {
-        return Err(
-            "face-identity conditioning combined with a LoRA is not yet qualified; \
-             remove the LoRA or the id_image"
-                .to_string(),
-        );
+        return Err(IDENTITY_LORA_CONFLICT.to_string());
     }
     if req.source_image.is_some() {
-        return Err(
-            "face-identity conditioning combined with img2img is not yet qualified; \
-             remove the source_image or the id_image"
-                .to_string(),
-        );
+        return Err(IDENTITY_IMG2IMG_CONFLICT.to_string());
     }
 
-    let weight = effective_id_weight(req);
-    if !weight.is_finite() || !(0.0..=ID_WEIGHT_MAX).contains(&weight) {
-        return Err(format!(
-            "id_weight ({weight}) must be a finite value in range [0.0, {ID_WEIGHT_MAX}]"
-        ));
-    }
-
-    let start_step = effective_id_start_step(req);
-    if start_step >= req.steps {
-        return Err(format!(
-            "id_start_step ({start_step}) must be less than steps ({})",
-            req.steps
-        ));
-    }
+    validate_id_weight(effective_id_weight(req))?;
+    validate_id_start_step(effective_id_start_step(req), req.steps)?;
 
     validate_id_image_bytes(bytes)
 }
@@ -412,6 +438,46 @@ mod tests {
                 "{name} must not be identity-qualified"
             );
         }
+    }
+
+    /// The three extracted helpers are what the TUI and the Discord bot call
+    /// — neither can reach [`validate_identity_conditioning`], whose build
+    /// gate is about the *server's* binary, not the client's. They must stay
+    /// byte-identical to the sentences admission produces.
+    #[test]
+    fn extracted_helpers_match_the_request_validator_wording() {
+        assert_eq!(
+            identity_model_gate_message("sdxl"),
+            "sdxl does not support face-identity conditioning; identity is qualified only for \
+             flux-dev:q4 and flux-dev:q8"
+        );
+
+        assert!(validate_id_weight(0.0).is_ok());
+        assert!(validate_id_weight(ID_WEIGHT_DEFAULT).is_ok());
+        assert!(validate_id_weight(ID_WEIGHT_MAX).is_ok());
+        assert!(validate_id_weight(-0.1).is_err());
+        assert!(validate_id_weight(ID_WEIGHT_MAX + 0.1).is_err());
+        assert!(validate_id_weight(f64::NAN).is_err());
+        assert!(validate_id_weight(f64::INFINITY).is_err());
+        assert_eq!(
+            validate_id_weight(4.0).unwrap_err(),
+            "id_weight (4) must be a finite value in range [0.0, 3]"
+        );
+
+        // The two conflict refusals are consts for the same reason: a client
+        // refuses the pairing inline, before a request exists.
+        assert!(IDENTITY_LORA_CONFLICT.contains("remove the LoRA or the id_image"));
+        assert!(IDENTITY_IMG2IMG_CONFLICT.contains("remove the source_image or the id_image"));
+
+        assert!(validate_id_start_step(ID_START_STEP_DEFAULT, 1).is_ok());
+        assert!(validate_id_start_step(19, 20).is_ok());
+        assert!(validate_id_start_step(20, 20).is_err());
+        assert_eq!(
+            validate_id_start_step(20, 20).unwrap_err(),
+            "id_start_step (20) must be less than steps (20)"
+        );
+        // Zero steps can never admit an identity start step.
+        assert!(validate_id_start_step(0, 0).is_err());
     }
 
     #[test]

@@ -14,10 +14,10 @@ mod pipeline;
 /// `#[cfg]` at every transformer call site, and would keep the module out of
 /// the workspace clippy gate, which runs without `pulid`.
 pub mod pulid;
+pub(crate) mod pulid_encoder;
 /// Per-variant PuLID injection coverage on a synthetic FLUX transformer.
 #[cfg(test)]
 pub(crate) mod pulid_variants;
-pub(crate) mod pulid_encoder;
 pub(crate) mod quantized_transformer;
 pub(crate) mod transformer;
 
