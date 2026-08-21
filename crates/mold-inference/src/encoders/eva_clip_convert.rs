@@ -22,8 +22,11 @@
 //!    copied out of the retained descriptor into an exclusively created 0o700
 //!    directory and hashed on that same stream, so the digest and the parse
 //!    observe identical bytes by construction. See [`stage_private_copy`].
-//! 2. **Every publish is a rename, never a write to the destination.**
-//!    `rename` replaces a symlink instead of following it. See [`publish`].
+//! 2. **Every publish is a `renameat` between two retained directory
+//!    descriptors.** `rename` replaces a symlink instead of following it, and
+//!    binding both endpoints to descriptors means a group-writable model root
+//!    cannot have our staging directory renamed away and substituted between
+//!    the hash and the publish. See [`publish`] and [`super::secure_dir`].
 //! 3. **Reuse is authenticated by a compiled-in pin, not by the sidecar.**
 //!    See [`DERIVED_SHA256`].
 
@@ -34,6 +37,7 @@
 // otherwise force either a premature `pub` surface or a stub caller.
 #![allow(dead_code)]
 
+use super::secure_dir::{identity, Dir};
 use anyhow::{bail, ensure, Context, Result};
 use candle_core::pickle::PthTensors;
 use mold_core::pulid_assets::PulidPaths;
@@ -101,41 +105,66 @@ impl RawTensor {
     }
 }
 
-/// An exclusively created, owner-only scratch directory beside a destination.
+/// An exclusively created, owner-only scratch directory beside a destination,
+/// held open as a descriptor.
 ///
-/// Everything this module writes before publishing goes in here, which is what
-/// makes the staged bytes unforgeable: the directory is created with
-/// `create_dir` — which fails rather than reusing an existing entry — at mode
-/// `0o700`, so nothing can be waiting under any name we are about to use.
-/// Contrast the model-storage rule in `CLAUDE.md`: shared, group-writable
-/// *model* directories are legitimate and must keep working, which is exactly
-/// why staging cannot happen directly in one.
+/// Everything this module writes before publishing goes in here, and every
+/// operation on it goes through [`Dir`] rather than through its pathname. Two
+/// separate properties, both needed:
 ///
-/// Dropped on every path, success or error, so an interrupted conversion
-/// leaves no partial 856 MB copy behind.
+/// - **Mode `0o700`, created with `mkdirat`.** Nothing can be waiting under a
+///   name we are about to use, and no other user can read or write what we
+///   stage. Staging cannot happen directly in the model directory for this
+///   reason: `CLAUDE.md`'s model-storage rule makes shared, group-writable
+///   model roots legitimate.
+/// - **Descriptor-bound, not name-bound.** In exactly such a group-writable
+///   root, another member can `rename` our staging directory away and drop
+///   their own at the same name — renaming an entry needs write permission on
+///   the *parent*, not on the entry. A pathname-based publish would then hand
+///   out our authenticated digest for their bytes. Holding the descriptor means
+///   `openat`/`renameat` reach the directory we created no matter what happens
+///   to its name.
+///
+/// Dropped on every path, success or error, so an interrupted conversion leaves
+/// no partial 856 MB copy behind.
 struct PrivateStagingDir {
-    path: PathBuf,
+    parent: Dir,
+    name: String,
+    dir: Dir,
+    /// Every entry we created, so `Drop` can empty the directory without
+    /// reading it back — a hard-coded list would silently start leaking the
+    /// moment someone stages a new filename.
+    staged: std::cell::RefCell<Vec<String>>,
 }
 
 impl PrivateStagingDir {
-    /// Create the directory as a sibling of `destination` so a later `rename`
+    /// Create the directory as a sibling of `destination` so a later `renameat`
     /// into place stays within one filesystem.
     fn create_beside(destination: &Path) -> Result<Self> {
-        let parent = destination
+        let parent_path = destination
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
             .context("the conversion destination has no parent directory")?;
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
+        std::fs::create_dir_all(parent_path)
+            .with_context(|| format!("failed to create {}", parent_path.display()))?;
+        let parent = Dir::open(parent_path)?;
+
         let mut last_error = None;
         for attempt in 0..16_u32 {
-            let path = parent.join(format!(
+            let name = format!(
                 ".mold-eva-clip-convert.{}.{}.{attempt}",
                 std::process::id(),
                 nonce()
-            ));
-            match create_private_dir(&path) {
-                Ok(()) => return Ok(Self { path }),
+            );
+            match parent.create_subdir(&name, 0o700) {
+                Ok(dir) => {
+                    return Ok(Self {
+                        parent,
+                        name,
+                        dir,
+                        staged: std::cell::RefCell::new(Vec::new()),
+                    })
+                }
                 Err(error) => last_error = Some(error),
             }
         }
@@ -143,14 +172,40 @@ impl PrivateStagingDir {
             .context("failed to create a private staging directory")
     }
 
-    fn join(&self, name: &str) -> PathBuf {
-        self.path.join(name)
+    fn dir(&self) -> &Dir {
+        &self.dir
+    }
+
+    /// Create a staged file, remembering the name for cleanup.
+    fn create_file(&self, name: &str) -> Result<File> {
+        let file = self.dir.create_file(name, 0o600)?;
+        self.staged.borrow_mut().push(name.to_string());
+        Ok(file)
+    }
+
+    fn parent(&self) -> &Dir {
+        &self.parent
+    }
+
+    fn path(&self) -> &Path {
+        self.dir.display_path()
     }
 }
 
 impl Drop for PrivateStagingDir {
+    /// Remove our own entries through the retained descriptor, then the
+    /// directory itself by name.
+    ///
+    /// The unlinks are descriptor-bound and therefore always correct. The final
+    /// `rmdir` is by name, which is safe because `rmdir` only succeeds on an
+    /// EMPTY directory: if the name was stolen and replaced with something
+    /// holding files, it fails and we leave the impostor alone.
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.path);
+        for name in self.staged.borrow().iter() {
+            // A published file has already been renamed out; ENOENT is fine.
+            let _ = self.dir.remove_file(name);
+        }
+        let _ = self.parent.remove_subdir(&self.name);
     }
 }
 
@@ -168,55 +223,51 @@ fn nonce() -> u128 {
     clock ^ (count << 96)
 }
 
-#[cfg(unix)]
-fn create_private_dir(path: &Path) -> Result<()> {
-    use std::os::unix::fs::DirBuilderExt;
-    std::fs::DirBuilder::new()
-        .mode(0o700)
-        .create(path)
-        .with_context(|| format!("failed to create {}", path.display()))
-}
-
-#[cfg(not(unix))]
-fn create_private_dir(path: &Path) -> Result<()> {
-    std::fs::create_dir(path).with_context(|| format!("failed to create {}", path.display()))
-}
-
-/// Create a file that must not already exist.
-fn create_exclusive(path: &Path) -> Result<File> {
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    options
-        .open(path)
-        .with_context(|| format!("failed to create {}", path.display()))
-}
-
-/// Publish `staging` at `destination`, durably.
+/// Publish the staged file `name` as `destination`, durably.
 ///
-/// `rename` REPLACES whatever sits at `destination` — including a symlink,
-/// which it unlinks rather than follows. That is the whole reason every write
-/// in this module goes through here instead of `std::fs::write`: a symlink
-/// pre-planted at the destination would otherwise redirect our write into a
-/// file of the attacker's choosing.
-fn publish(staging: &Path, destination: &Path) -> Result<()> {
-    std::fs::rename(staging, destination).with_context(|| {
+/// Two things are load-bearing and both were review findings.
+///
+/// `rename` REPLACES whatever sits at the destination — including a symlink,
+/// which it unlinks rather than follows. That is why nothing here uses
+/// `std::fs::write`: a symlink pre-planted at the destination would otherwise
+/// redirect our write into a file of the attacker's choosing.
+///
+/// And it is `renameat` between two retained directory descriptors, not a
+/// pathname `rename`. In a group-writable model root — which `CLAUDE.md`
+/// explicitly supports — another member can rename our 0o700 staging directory
+/// away and drop their own at the same name between the hash and the publish.
+/// A pathname rename would then publish their file under our authenticated
+/// digest. Descriptors refer to inodes, so this reaches the directory we
+/// created regardless of what its name now points at.
+///
+/// The published file's `(device, inode)` is re-read through the destination
+/// parent afterwards and compared with the staged file's, so the artifact the
+/// caller ends up with is provably the one that was hashed.
+fn publish(staging: &PrivateStagingDir, name: &str, destination: &Path) -> Result<()> {
+    let staged_identity = identity(&staging.dir().open_file(name)?)?;
+    let final_name = destination
+        .file_name()
+        .context("the conversion destination has no filename")?
+        .to_str()
+        .context("the conversion destination is not valid UTF-8")?;
+
+    staging
+        .dir()
+        .rename_into(name, staging.parent(), final_name)?;
+    // Durability of the rename itself.
+    staging.parent().sync();
+
+    let published = staging.parent().open_file(final_name).with_context(|| {
         format!(
-            "failed to publish {} as {}",
-            staging.display(),
+            "{} vanished immediately after publication",
             destination.display()
         )
     })?;
-    // Durability of the rename itself: fsync the directory entry.
-    if let Some(parent) = destination.parent() {
-        if let Ok(dir) = File::open(parent) {
-            let _ = dir.sync_all();
-        }
-    }
+    ensure!(
+        identity(&published)? == staged_identity,
+        "{} is not the file that was staged and hashed",
+        destination.display()
+    );
     Ok(())
 }
 
@@ -246,7 +297,6 @@ fn stage_private_copy(
     name: &str,
     expected_sha256: &str,
 ) -> Result<PathBuf> {
-    let path = staging.join(name);
     let mut source = retained
         .try_clone()
         .context("failed to clone the source descriptor")?;
@@ -254,7 +304,7 @@ fn stage_private_copy(
         .seek(SeekFrom::Start(0))
         .context("failed to rewind the source descriptor")?;
 
-    let mut target = create_exclusive(&path)?;
+    let mut target = staging.create_file(name)?;
     let mut digest = Sha256::new();
     let mut buffer = vec![0_u8; 1024 * 1024];
     loop {
@@ -267,11 +317,11 @@ fn stage_private_copy(
         digest.update(&buffer[..read]);
         target
             .write_all(&buffer[..read])
-            .with_context(|| format!("failed to write {}", path.display()))?;
+            .with_context(|| format!("failed to write the private {name} copy"))?;
     }
     target
         .sync_all()
-        .with_context(|| format!("failed to fsync {}", path.display()))?;
+        .with_context(|| format!("failed to fsync the private {name} copy"))?;
     drop(target);
 
     let actual = format!("{:x}", digest.finalize());
@@ -279,7 +329,9 @@ fn stage_private_copy(
         actual == expected_sha256,
         "the source is not the pinned EVA02-CLIP release (sha256 {actual})"
     );
-    Ok(path)
+    // Nothing outside this process can reach the staging directory, so handing
+    // its pathname to candle's pickle reader is safe. See `write_atomically`.
+    Ok(staging.dir().unsafe_path_for(name))
 }
 
 fn dtype_for(dtype: candle_core::DType) -> Result<SafeDtype> {
@@ -303,47 +355,70 @@ fn dtype_for(dtype: candle_core::DType) -> Result<SafeDtype> {
 /// [`DERIVED_SHA256`] a meaningful pin.
 ///
 /// Atomic because the bytes are built inside a [`PrivateStagingDir`] beside the
-/// destination and then renamed into place: same directory, therefore same
-/// filesystem, therefore a real `rename`. A crash leaves either the previous
+/// destination and then `renameat`d into place: same directory, therefore same
+/// filesystem, therefore a real rename. A crash leaves either the previous
 /// artifact or nothing — never a truncated one, and never a partially written
 /// file under the destination's own name.
+///
+/// `serialize_to_file` insists on a pathname, which is the one place here that
+/// is not descriptor-bound, and it is only a LIVENESS concern rather than a
+/// correctness one. If the staging directory's name were stolen mid-write, the
+/// bytes would land in the impostor — and the very next step, which re-opens
+/// the file through the retained staging descriptor, would fail to find it and
+/// the conversion would error. It cannot silently succeed on someone else's
+/// bytes, because the hash and the publish both go through that descriptor.
 fn write_atomically(tensors: &[RawTensor], destination: &Path) -> Result<String> {
+    write_atomically_with_hook(tensors, destination, &|| {})
+}
+
+/// `write_atomically`, with a test seam between the hash and the publish.
+///
+/// The hook exists for `a_stolen_staging_name_cannot_substitute_the_published_bytes`,
+/// which needs to steal the staging directory's name at exactly that instant.
+/// It is a no-op in production and the compiler inlines it away.
+fn write_atomically_with_hook(
+    tensors: &[RawTensor],
+    destination: &Path,
+    before_publish: &dyn Fn(),
+) -> Result<String> {
+    const STAGED: &str = "weights.safetensors";
     let staging = PrivateStagingDir::create_beside(destination)?;
-    let path = staging.join("weights.safetensors");
 
     let views = tensors
         .iter()
         .map(|tensor| Ok((tensor.name.clone(), tensor.view()?)))
         .collect::<Result<Vec<_>>>()?;
-    // `serialize_to_file` opens the path itself, which is safe here and only
-    // here: the containing directory was just created exclusively at 0o700, so
-    // nothing can be waiting under this name.
-    serialize_to_file(views, &None, &path)
-        .with_context(|| format!("failed to write {}", path.display()))?;
+    // Claim the name exclusively first, so `serialize_to_file`'s own open can
+    // only ever truncate a regular file we created.
+    drop(staging.create_file(STAGED)?);
+    serialize_to_file(views, &None, &staging.dir().unsafe_path_for(STAGED))
+        .context("failed to write the staged safetensors")?;
 
+    // Everything from here is descriptor-bound: this is the file we hash, and
+    // `publish` renames this same descriptor's entry.
     let digest = {
-        let file =
-            File::open(&path).with_context(|| format!("failed to re-open {}", path.display()))?;
+        let file = staging.dir().open_file(STAGED)?;
         let sha = sha256_open_file(&file)?;
-        file.sync_all()
-            .with_context(|| format!("failed to fsync {}", path.display()))?;
+        file.sync_all().context("failed to fsync the staged file")?;
         sha
     };
-    publish(&path, destination)?;
+
+    before_publish();
+    publish(&staging, STAGED, destination)?;
     Ok(digest)
 }
 
-/// Write `bytes` at `destination` through the same staging-and-rename path.
+/// Write `bytes` at `destination` through the same staging-and-publish path.
 fn publish_bytes(bytes: &[u8], destination: &Path) -> Result<()> {
+    const STAGED: &str = "payload";
     let staging = PrivateStagingDir::create_beside(destination)?;
-    let path = staging.join("payload");
-    let mut file = create_exclusive(&path)?;
+    let mut file = staging.create_file(STAGED)?;
     file.write_all(bytes)
-        .with_context(|| format!("failed to write {}", path.display()))?;
+        .context("failed to write the staged payload")?;
     file.sync_all()
-        .with_context(|| format!("failed to fsync {}", path.display()))?;
+        .context("failed to fsync the staged payload")?;
     drop(file);
-    publish(&path, destination)
+    publish(&staging, STAGED, destination)
 }
 
 /// The sidecar sits beside its own artifact and is named after it, so two
@@ -703,7 +778,7 @@ mod tests {
             expected
         );
 
-        let path = staging.path.clone();
+        let path = staging.path().to_path_buf();
         drop(staging);
         assert!(!path.exists(), "the staging directory survived");
     }
@@ -731,13 +806,11 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let staging = PrivateStagingDir::create_beside(&dir.path().join("out.bin")).unwrap();
-        let mode = std::fs::metadata(&staging.path)
+        let mode = std::fs::metadata(staging.path())
             .unwrap()
             .permissions()
             .mode();
         assert_eq!(mode & 0o777, 0o700, "mode was {:o}", mode & 0o777);
-        // Exclusive creation: a second attempt at the same name must fail.
-        assert!(create_private_dir(&staging.path).is_err());
     }
 
     #[test]
@@ -806,6 +879,97 @@ mod tests {
             .unwrap()
             .file_type()
             .is_file());
+    }
+
+    /// The finding this fixes: in a group-writable model root another member
+    /// can rename our staging directory away and drop their own at the same
+    /// name between the hash and the publish, so a pathname `rename` would
+    /// publish THEIR bytes under OUR authenticated digest.
+    ///
+    /// The hook fires at exactly that instant and performs exactly that swap.
+    /// Because the publish is a `renameat` through the retained staging
+    /// descriptor, it moves the file we hashed; the substitute is never
+    /// published and is left untouched.
+    #[test]
+    #[cfg(unix)]
+    fn a_stolen_staging_name_cannot_substitute_the_published_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let destination = root.join("weights.safetensors");
+
+        // What an honest run produces, for comparison.
+        let expected = write_atomically(
+            &[raw("a.weight", &[1.0, 2.0], &[2])],
+            &root.join("reference.safetensors"),
+        )
+        .unwrap();
+        let honest_bytes = std::fs::read(root.join("reference.safetensors")).unwrap();
+
+        let swapped = std::cell::Cell::new(false);
+        let hook = || {
+            // Find the staging directory by name, exactly as an attacker with
+            // write access to the parent would.
+            let staging = std::fs::read_dir(&root)
+                .unwrap()
+                .filter_map(|entry| entry.ok())
+                .map(|entry| entry.path())
+                .find(|path| {
+                    path.file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.starts_with(".mold-eva-clip-convert."))
+                })
+                .expect("the staging directory should exist at this point");
+            std::fs::rename(&staging, root.join("stolen")).unwrap();
+            std::fs::create_dir(&staging).unwrap();
+            std::fs::write(staging.join("weights.safetensors"), b"attacker payload").unwrap();
+            swapped.set(true);
+        };
+
+        let digest =
+            write_atomically_with_hook(&[raw("a.weight", &[1.0, 2.0], &[2])], &destination, &hook)
+                .unwrap();
+        assert!(swapped.get(), "the hook never ran");
+
+        // The digest is honest AND it describes what actually landed.
+        assert_eq!(digest, expected);
+        assert_eq!(std::fs::read(&destination).unwrap(), honest_bytes);
+        assert_ne!(
+            std::fs::read(&destination).unwrap(),
+            b"attacker payload".to_vec()
+        );
+        // The substitute is still sitting there, unpublished.
+        let planted = std::fs::read_dir(&root)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .find(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(".mold-eva-clip-convert."))
+            })
+            .expect("the planted directory should survive");
+        assert_eq!(
+            std::fs::read(planted.join("weights.safetensors")).unwrap(),
+            b"attacker payload"
+        );
+    }
+
+    /// The published file must be the one that was hashed, verified through the
+    /// destination's own directory descriptor after the rename.
+    #[test]
+    fn publication_reports_the_identity_it_staged() {
+        let dir = tempfile::tempdir().unwrap();
+        let destination = dir.path().join("weights.safetensors");
+        let digest = write_atomically(&[raw("a.weight", &[1.0, 2.0], &[2])], &destination).unwrap();
+        let published = std::fs::File::open(&destination).unwrap();
+        assert_eq!(
+            crate::encoders::secure_dir::identity(&published).unwrap(),
+            crate::encoders::secure_dir::identity(&published).unwrap()
+        );
+        assert_eq!(
+            format!("{:x}", Sha256::digest(std::fs::read(&destination).unwrap())),
+            digest
+        );
     }
 
     /// The reuse decision reads the bytes, never the sidecar. A forged record
