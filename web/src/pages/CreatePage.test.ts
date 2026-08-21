@@ -36,7 +36,12 @@ import { addHost, ORIGIN_HOST_ID } from "../lib/hostRegistry";
 import { AUTO_TARGET_ID, CAPABLE_TARGET_ID } from "../lib/hostRouting";
 import type { GalleryImage, ModelInfoExtended, OutputMetadata } from "../types";
 import type { Job } from "../composables/useGenerateStream";
-import type { ChainJobDetail } from "@studio/lib/api/chainTypes";
+import type {
+  ChainJobDetail,
+  ChainRequestWire,
+  CreateChainJobResponse,
+} from "@studio/lib/api/chainTypes";
+import type { StreamTarget } from "../api";
 
 const routeQuery = vi.hoisted(() => ({ value: {} as Record<string, unknown> }));
 const routerReplaceMock = vi.hoisted(() =>
@@ -85,7 +90,13 @@ const upscaleStreamMock = vi.hoisted(() =>
   >(async () => undefined),
 );
 const createChainJobMock = vi.hoisted(() =>
-  vi.fn(async () => ({ job_id: "job-1" })),
+  vi.fn<
+    (
+      request: ChainRequestWire,
+      target?: StreamTarget,
+      operationId?: string,
+    ) => Promise<CreateChainJobResponse>
+  >(async () => ({ job_id: "job-1" })),
 );
 const expandPromptMock = vi.hoisted(() =>
   vi.fn(async (request: { variations: number }) => ({
