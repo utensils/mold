@@ -561,10 +561,17 @@ user-owned afterwards, so a reconcile or a re-publication never resurrects a
 tag the user removed.
 
 `generate.auto_tag_title` (DB key, default `true`) makes a titled CLI/TUI run
-also tag the print with its title slug, disclosed on stderr
-(`filing under tag "smurf-village"`). `--no-auto-tag` turns it off for one
-invocation. It is deliberately a **client** default — the server never
-auto-tags, because it cannot tell a typed title from a scripted one.
+also tag the print with its title slug, disclosed before it is applied — on
+stderr for the CLI (`filing under tag "smurf-village"`), on the Tags row and
+section summary for the TUI. `--no-auto-tag` turns it off for one CLI
+invocation; the TUI's toggle is Settings ▸ Library ▸ **Tag by title**. It is
+deliberately a **client** default — the server never auto-tags, because it
+cannot tell a typed title from a scripted one.
+
+In the TUI, filing lives in Create ▸ Advanced ▸ **File under** (Title, Tags,
+Collection). Each is absent until touched and validated before its editor can
+close, so an untouched form's request is unchanged and nothing admission would
+refuse reaches the wire.
 
 Nothing about filing can fail a render. On `MOLD_DB_DISABLE=1`, or when a
 `{id}` collection was deleted between listing and Generate, the filing is
