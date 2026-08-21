@@ -45,6 +45,18 @@ pub struct ApiError {
     pub reference: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub field: Option<String>,
+    /// Machine-readable detail for a `LICENSE_NOT_ACCEPTED` refusal.
+    ///
+    /// Additive and absent on every other error, so a UI can render its own
+    /// acceptance prompt from structured data instead of parsing `error`.
+    ///
+    /// Boxed because `ApiError` is the `Err` half of most handler signatures:
+    /// inlining five `String`s here grows EVERY `Result` in the crate and
+    /// trips clippy's `result_large_err`. The box costs one pointer on the
+    /// overwhelmingly common `None` path, and `Box<T>` serializes
+    /// transparently so the wire shape is unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub license: Option<Box<mold_core::LicenseRefusal>>,
     #[serde(skip)]
     status: StatusCode,
 }
@@ -68,6 +80,7 @@ impl ApiError {
             code: error.code.to_string(),
             reference: error.reference,
             field: error.field.map(str::to_string),
+            license: None,
             status: StatusCode::UNPROCESSABLE_ENTITY,
         }
     }
@@ -84,7 +97,53 @@ impl ApiError {
             code: code.into(),
             reference,
             field,
+            license: None,
             status,
+        }
+    }
+
+    /// A download refused because a third-party license has not been accepted
+    /// on THIS server.
+    ///
+    /// `403` rather than `422`: the request is well-formed and the model
+    /// exists — the server is declining to act until consent is on record.
+    /// The structured `license` payload lets a client offer acceptance and
+    /// retry with `accept_licenses`, which a prose-only error could not.
+    /// The caller accepted a different revision of a license this server
+    /// knows.
+    ///
+    /// `409` rather than `400`: the request is well-formed and the license is
+    /// real — the two sides disagree about the current terms, which a client
+    /// resolves by re-reading `GET /api/licenses` and accepting again. The
+    /// structured payload carries THIS server's `url`/`sha256`/`canonical` so
+    /// it can display them without a second round trip.
+    pub fn license_terms_mismatch(
+        license: &mold_core::license_acceptance::ThirdPartyLicense,
+    ) -> Self {
+        Self {
+            error: format!(
+                "the accepted terms for '{}' are not the ones this server pins.\n\n  {}\n  Terms (pinned): {}\n  sha256: {}\n  Project terms: {}\n\nReview those terms and accept again.",
+                license.id, license.summary, license.url, license.sha256, license.canonical
+            ),
+            code: mold_core::LICENSE_TERMS_MISMATCH.to_string(),
+            reference: None,
+            field: None,
+            license: Some(Box::new(mold_core::license_acceptance::refusal(license))),
+            status: StatusCode::CONFLICT,
+        }
+    }
+
+    pub fn license_not_accepted(
+        model: &str,
+        license: &mold_core::license_acceptance::ThirdPartyLicense,
+    ) -> Self {
+        Self {
+            error: mold_core::license_acceptance::acceptance_required_message(model, license),
+            code: mold_core::LICENSE_NOT_ACCEPTED.to_string(),
+            reference: None,
+            field: None,
+            license: Some(Box::new(mold_core::license_acceptance::refusal(license))),
+            status: StatusCode::FORBIDDEN,
         }
     }
 
@@ -114,6 +173,7 @@ impl ApiError {
             code: code.into(),
             reference: None,
             field: None,
+            license: None,
             status,
         }
     }
@@ -259,6 +319,7 @@ use crate::queue::clean_error_message;
         capabilities_chain_limits,
         capabilities_ltx2_control_adapters,
         capabilities_ltx2_camera_controls,
+        list_licenses_endpoint,
         stream_events,
         crate::routes_chain::generate_chain,
         crate::routes_chain::generate_chain_stream,
@@ -649,6 +710,7 @@ pub fn create_router(state: AppState) -> Router {
         )
         .route("/api/history", get(list_history).delete(delete_history))
         .route("/api/capabilities", get(server_capabilities))
+        .route("/api/licenses", get(list_licenses_endpoint))
         .route("/api/discovery/peers", get(discovery_peers))
         .route(
             "/api/capabilities/chain-limits",
@@ -865,6 +927,62 @@ async fn require_server_model_acquisition(
             .map_err(ApiError::model_activation)?;
     }
     Ok(family)
+}
+
+/// Apply a download request's `accept_licenses`, then refuse if the model
+/// still needs one.
+///
+/// Ordering is the whole point: acceptance is recorded in THIS server's Mold
+/// data root before the pull is enqueued, because a client that recorded it
+/// locally told the wrong machine — that was the remote-`MOLD_HOST` bug.
+///
+/// Unknown ids are a `400` and nothing is written; see
+/// [`mold_core::license_acceptance::record_acceptances`] for why they are
+/// rejected rather than ignored.
+fn apply_download_license_acceptances(
+    model: &str,
+    accept_licenses: &[mold_core::LicenseAcceptance],
+) -> Result<(), ApiError> {
+    use mold_core::license_acceptance;
+
+    // This server's own root — the same one `catalog_credentials` writes to.
+    let mold_home = mold_core::Config::mold_dir()
+        .ok_or_else(|| ApiError::internal("could not resolve the Mold data directory"))?;
+
+    if !accept_licenses.is_empty() {
+        license_acceptance::record_acceptances(&mold_home, accept_licenses).map_err(|error| {
+            match error {
+                license_acceptance::RecordAcceptancesError::Unknown(unknown) => {
+                    ApiError::with_code(
+                        unknown.to_string(),
+                        "UNKNOWN_LICENSE",
+                        StatusCode::BAD_REQUEST,
+                    )
+                }
+                license_acceptance::RecordAcceptancesError::TermsMismatch(ours) => {
+                    ApiError::license_terms_mismatch(ours)
+                }
+                license_acceptance::RecordAcceptancesError::Io(io) => {
+                    ApiError::internal(format!("failed to record license acceptance: {io}"))
+                }
+            }
+        })?;
+    }
+
+    // Re-derive from the manifest rather than trusting the accepted list: a
+    // request may name one license while the model needs another.
+    let resolved = mold_core::manifest::resolve_model_name(model);
+    let Some(manifest) = mold_core::manifest::find_manifest(&resolved) else {
+        // Unknown models are the enqueue path's 400 to report, not ours.
+        return Ok(());
+    };
+    let Some(license) = license_acceptance::manifest_requires_license(manifest) else {
+        return Ok(());
+    };
+    if license_acceptance::is_accepted(&mold_home, license) {
+        return Ok(());
+    }
+    Err(ApiError::license_not_accepted(&manifest.name, license))
 }
 
 pub(crate) async fn require_server_generation_request_activation(
@@ -3652,6 +3770,12 @@ pub struct LoadModelBody {
     /// default placement strategy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpu: Option<usize>,
+    /// Third-party licenses the user has accepted, each carrying the exact
+    /// terms they were shown. Honoured by `POST /api/models/pull`; ignored by
+    /// `/api/models/load`, which moves no bytes over the network. Additive and
+    /// empty by default.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub accept_licenses: Vec<mold_core::LicenseAcceptance>,
 }
 
 #[utoipa::path(
@@ -3756,6 +3880,9 @@ async fn pull_model_endpoint(
     Json(body): Json<LoadModelBody>,
 ) -> Result<impl IntoResponse, ApiError> {
     require_server_model_acquisition(&state, &body.model).await?;
+    // Before ANY branch below — the catalog repair path enqueues downloads
+    // too, and a refusal must happen before bytes move on either route.
+    apply_download_license_acceptances(&body.model, &body.accept_licenses)?;
     let wants_sse = headers
         .get(header::ACCEPT)
         .and_then(|v| v.to_str().ok())
@@ -5246,6 +5373,7 @@ async fn server_capabilities(
     };
     Json(mold_core::ServerCapabilities {
         generation_profile_v1: true,
+        licenses: true,
         gallery,
         catalog: mold_core::CatalogCapabilities {
             available: catalog_available,
@@ -7720,11 +7848,44 @@ async fn scalar_docs() -> impl IntoResponse {
     )
 }
 
+// ─── Third-party model licenses ──────────────────────────────────────────────
+
+#[utoipa::path(
+    get,
+    path = "/api/licenses",
+    tag = "models",
+    responses((
+        status = 200,
+        description = "Known third-party model licenses and this server's acceptance state",
+        body = mold_core::LicenseListing,
+    )),
+)]
+/// List every third-party model license and whether THIS server has accepted it.
+///
+/// Acceptance is per Mold data root, so the answer belongs to the host that
+/// served it — a multi-host client must ask each one rather than caching a
+/// fleet-wide verdict.
+async fn list_licenses_endpoint() -> Result<Json<mold_core::LicenseListing>, ApiError> {
+    let mold_home = mold_core::Config::mold_dir()
+        .ok_or_else(|| ApiError::internal("could not resolve the Mold data directory"))?;
+    Ok(Json(mold_core::LicenseListing {
+        licenses: mold_core::license_acceptance::license_statuses(&mold_home),
+    }))
+}
+
 // ─── Downloads UI (Agent A) ──────────────────────────────────────────────────
 
 #[derive(serde::Deserialize, utoipa::ToSchema)]
 pub struct CreateDownloadBody {
     pub model: String,
+    /// Third-party licenses the user has accepted, each carrying the exact
+    /// terms they were shown, recorded in this server's Mold data root before
+    /// the pull starts.
+    ///
+    /// Additive: absent means "accept nothing", which is what every existing
+    /// client sends and leaves their behaviour unchanged.
+    #[serde(default)]
+    pub accept_licenses: Vec<mold_core::LicenseAcceptance>,
 }
 
 #[derive(serde::Serialize, utoipa::ToSchema)]
@@ -7750,6 +7911,9 @@ pub async fn create_download(
 ) -> axum::response::Response {
     use crate::downloads::{EnqueueError, EnqueueOutcome};
     if let Err(error) = require_server_model_acquisition(&state, &body.model).await {
+        return error.into_response();
+    }
+    if let Err(error) = apply_download_license_acceptances(&body.model, &body.accept_licenses) {
         return error.into_response();
     }
     match state.downloads.enqueue(body.model.clone()).await {

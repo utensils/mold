@@ -35,13 +35,43 @@ pub struct ThirdPartyLicense {
     pub id: &'static str,
     /// Human-readable name for prompts and error messages.
     pub name: &'static str,
-    /// Canonical URL of the license text mold pinned.
+    /// **Immutable** URL of the exact license text mold pinned — a
+    /// content-addressed upstream revision, never a moving branch ref.
+    ///
+    /// This is load-bearing, not cosmetic. A `.../master/README.md` URL is
+    /// mutable: upstream can rewrite the terms, and mold would go on
+    /// recording a hard-coded digest of text nobody can fetch any more while
+    /// showing the user a link whose contents no longer match. Old
+    /// acceptances would keep passing and the "changed terms require
+    /// re-acceptance" promise would be hollow. Pinning the revision makes
+    /// `(url, sha256)` a closed pair: the bytes at this URL cannot change, so
+    /// the digest cannot go stale, and adopting new terms is necessarily a
+    /// visible edit to this constant.
     pub url: &'static str,
-    /// SHA-256 of the exact license text fetched from `url`. An acceptance
-    /// recorded against a different digest does not count.
+    /// SHA-256 of the exact license text served at [`Self::url`]. Verified at
+    /// pin time; an acceptance recorded against a different digest does not
+    /// count.
     pub sha256: &'static str,
+    /// Human-readable landing page for the project's current terms.
+    ///
+    /// Shown alongside [`Self::url`] so a user can read today's terms in
+    /// context, but deliberately NOT part of the accepted identity — its
+    /// contents move, which is exactly what `url` must not do.
+    pub canonical: &'static str,
     /// One-sentence statement of the restriction the user is accepting.
     pub summary: &'static str,
+}
+
+impl ThirdPartyLicense {
+    /// The identity an acceptance is bound to: the immutable text location
+    /// and its digest.
+    ///
+    /// Re-pinning either half — a new upstream revision, or a corrected
+    /// digest — invalidates every stored acceptance, which is the whole point
+    /// of binding both.
+    pub fn accepted_identity(&self) -> (&'static str, &'static str) {
+        (self.url, self.sha256)
+    }
 }
 
 /// InsightFace pretrained models (the antelopev2 pack PuLID conditions on).
@@ -52,14 +82,19 @@ pub struct ThirdPartyLicense {
 /// and that applies to both manually downloaded and auto-downloaded models
 /// (InsightFace README, "License" section).
 ///
-/// `sha256` is the digest of the README as fetched on 2026-08-21 from the
-/// pinned raw URL. A change upstream invalidates existing acceptances so the
-/// user is re-shown the terms.
+/// The terms are pinned to upstream commit
+/// `7fadd420c2351d0ffa8cac403421c1a3ed733365`, whose `README.md` was fetched
+/// and verified on 2026-08-21 to hash to `sha256` below. GitHub serves a
+/// commit-addressed raw URL immutably, so that digest can never go stale
+/// against its own URL — re-pinning to a later revision is a deliberate edit
+/// here, and it invalidates every recorded acceptance so users are re-shown
+/// whatever the new text says.
 pub const INSIGHTFACE_ANTELOPEV2: ThirdPartyLicense = ThirdPartyLicense {
     id: "insightface-antelopev2",
     name: "InsightFace pretrained models (antelopev2)",
-    url: "https://raw.githubusercontent.com/deepinsight/insightface/master/README.md",
+    url: "https://raw.githubusercontent.com/deepinsight/insightface/7fadd420c2351d0ffa8cac403421c1a3ed733365/README.md",
     sha256: "84606d9ab37a38606b12c10d96172c6343768d2ef72c802a16482e476f8baf22",
+    canonical: "https://github.com/deepinsight/insightface#license",
     summary: "InsightFace pretrained models (antelopev2: scrfd_10g_bnkps, glintr100) are licensed for non-commercial research purposes only.",
 };
 
@@ -101,6 +136,150 @@ pub fn manifest_requires_license(
         .find_map(|file| license_for_manifest_file(&manifest.name, &file.hf_filename))
 }
 
+/// Manifest names that cannot be downloaded until `license` is accepted.
+///
+/// Derived from the manifest registry rather than hard-coded, so adding a
+/// gated file to a manifest cannot leave `GET /api/licenses` telling users the
+/// wrong thing about what they are unblocking.
+pub fn manifests_requiring(license: &ThirdPartyLicense) -> Vec<String> {
+    crate::manifest::known_manifests()
+        .iter()
+        .filter(|manifest| {
+            manifest.files.iter().any(|file| {
+                license_for_manifest_file(&manifest.name, &file.hf_filename)
+                    .is_some_and(|found| found.id == license.id)
+            })
+        })
+        .map(|manifest| manifest.name.clone())
+        .collect()
+}
+
+/// Every known license plus this root's acceptance state, for `GET /api/licenses`.
+pub fn license_statuses(mold_home: &Path) -> Vec<crate::types::ThirdPartyLicenseStatus> {
+    THIRD_PARTY_LICENSES
+        .iter()
+        .map(|license| crate::types::ThirdPartyLicenseStatus {
+            id: license.id.to_string(),
+            name: license.name.to_string(),
+            url: license.url.to_string(),
+            canonical: license.canonical.to_string(),
+            sha256: license.sha256.to_string(),
+            summary: license.summary.to_string(),
+            accepted: is_accepted(mold_home, license),
+            required_by: manifests_requiring(license),
+        })
+        .collect()
+}
+
+/// The machine-readable refusal payload for `license`.
+pub fn refusal(license: &ThirdPartyLicense) -> crate::types::LicenseRefusal {
+    crate::types::LicenseRefusal {
+        id: license.id.to_string(),
+        name: license.name.to_string(),
+        url: license.url.to_string(),
+        canonical: license.canonical.to_string(),
+        sha256: license.sha256.to_string(),
+        summary: license.summary.to_string(),
+    }
+}
+
+/// An `accept_licenses` entry naming a license this build does not know.
+///
+/// Rejected rather than ignored: silently dropping an unrecognised id would
+/// let a client believe it had accepted something, then fail the download with
+/// a refusal that looks like a server bug.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownLicenseId(pub String);
+
+impl std::fmt::Display for UnknownLicenseId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let known = THIRD_PARTY_LICENSES
+            .iter()
+            .map(|license| license.id)
+            .collect::<Vec<_>>()
+            .join(", ");
+        write!(
+            f,
+            "unknown license id '{}'. Known licenses: {known}",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for UnknownLicenseId {}
+
+/// Resolve and VERIFY every acceptance, then record them all.
+///
+/// Two things are checked before anything is written, for the whole list:
+/// that the id is known, and that the `(url, sha256)` the caller displayed is
+/// the document this build pins. The second check is the point of the whole
+/// struct — the caller may be a client on a different Mold release, and
+/// recording its consent against terms of OUR choosing would store agreement
+/// to text the user never read.
+///
+/// Nothing is written until every entry passes, so a rejected request leaves a
+/// root the caller can describe as untouched.
+pub fn record_acceptances(
+    mold_home: &Path,
+    acceptances: &[crate::types::LicenseAcceptance],
+) -> Result<Vec<&'static ThirdPartyLicense>, RecordAcceptancesError> {
+    let mut resolved = Vec::with_capacity(acceptances.len());
+    for acceptance in acceptances {
+        let license = license_by_id(&acceptance.id).ok_or_else(|| {
+            RecordAcceptancesError::Unknown(UnknownLicenseId(acceptance.id.clone()))
+        })?;
+        if !acceptance.matches(license.url, license.sha256) {
+            return Err(RecordAcceptancesError::TermsMismatch(license));
+        }
+        resolved.push(license);
+    }
+    for license in &resolved {
+        record_acceptance(mold_home, license).map_err(RecordAcceptancesError::Io)?;
+    }
+    Ok(resolved)
+}
+
+/// Failure modes of [`record_acceptances`].
+#[derive(Debug)]
+pub enum RecordAcceptancesError {
+    /// The request named a license this build does not know — a client error.
+    Unknown(UnknownLicenseId),
+    /// The caller accepted a DIFFERENT revision of a license this build knows.
+    /// Carries our pinned license so the refusal can show the caller what it
+    /// would have to accept instead.
+    TermsMismatch(&'static ThirdPartyLicense),
+    /// The record could not be written — a server error.
+    Io(io::Error),
+}
+
+impl std::fmt::Display for RecordAcceptancesError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unknown(error) => write!(f, "{error}"),
+            Self::TermsMismatch(license) => write!(
+                f,
+                "the accepted terms for '{}' are not the ones this server pins. \
+                 This server pins {} (sha256 {}). Review those terms and accept again.",
+                license.id, license.url, license.sha256
+            ),
+            Self::Io(error) => write!(f, "failed to record license acceptance: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for RecordAcceptancesError {}
+
+/// The acceptance payload for `license` as this build pins it.
+///
+/// Used by the CLI's older-server fallback, and by tests.
+pub fn acceptance_for(license: &ThirdPartyLicense) -> crate::types::LicenseAcceptance {
+    crate::types::LicenseAcceptance {
+        id: license.id.to_string(),
+        url: license.url.to_string(),
+        sha256: license.sha256.to_string(),
+    }
+}
+
 /// Path of the acceptance record inside a Mold data root.
 pub fn acceptance_path(mold_home: &Path) -> PathBuf {
     mold_home.join(ACCEPTANCE_FILE)
@@ -129,13 +308,20 @@ fn load(mold_home: &Path) -> AcceptanceRecord {
 
 /// True when `license` has been accepted against its CURRENT pinned text.
 ///
-/// A record whose `sha256` differs from the const does not count: the terms
-/// mold would show today are not the terms the user agreed to.
+/// The record must match the license's whole [`ThirdPartyLicense::accepted_identity`]
+/// — BOTH the immutable text URL and the digest — not just the id. Either
+/// half moving means the terms mold would show today are not the terms the
+/// user agreed to, so a Mold release that re-pins the license to a newer
+/// upstream revision asks every user again rather than silently inheriting
+/// consent given for different text. Checking only the digest would let a
+/// re-pin whose text happens to be byte-identical slip through, and checking
+/// only the URL would miss a corrected digest.
 pub fn is_accepted(mold_home: &Path, license: &ThirdPartyLicense) -> bool {
+    let (url, sha256) = license.accepted_identity();
     load(mold_home).acceptances.iter().any(|accepted| {
         accepted.id == license.id
-            && accepted.sha256.eq_ignore_ascii_case(license.sha256)
-            && accepted.url == license.url
+            && accepted.sha256.eq_ignore_ascii_case(sha256)
+            && accepted.url == url
     })
 }
 
@@ -150,12 +336,13 @@ pub fn is_accepted_by_id(mold_home: &Path, id: &str) -> bool {
 /// Written owner-only through a temp file and an atomic rename so a partially
 /// written record can never be read as an acceptance.
 pub fn record_acceptance(mold_home: &Path, license: &ThirdPartyLicense) -> io::Result<()> {
+    let (url, sha256) = license.accepted_identity();
     let mut record = load(mold_home);
     record.acceptances.retain(|entry| entry.id != license.id);
     record.acceptances.push(Acceptance {
         id: license.id.to_string(),
-        url: license.url.to_string(),
-        sha256: license.sha256.to_string(),
+        url: url.to_string(),
+        sha256: sha256.to_string(),
         accepted_at_unix_ms: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|elapsed| elapsed.as_millis() as u64)
@@ -206,8 +393,8 @@ fn write_owner_only(path: &Path, record: &AcceptanceRecord) -> io::Result<()> {
 /// proceed is a dead end.
 pub fn acceptance_required_message(model: &str, license: &ThirdPartyLicense) -> String {
     format!(
-        "{model} includes files under a license that must be accepted before download.\n\n  {}\n  {}\n  Terms: {}\n\nReview the terms, then accept explicitly:\n\n  mold pull {model} --accept-license {}\n",
-        license.name, license.summary, license.url, license.id
+        "{model} includes files under a license that must be accepted before download.\n\n  {}\n  {}\n  Terms (pinned): {}\n  Project terms: {}\n\nReview the terms, then accept explicitly:\n\n  mold pull {model} --accept-license {}\n",
+        license.name, license.summary, license.url, license.canonical, license.id
     )
 }
 
@@ -257,6 +444,71 @@ mod tests {
         assert!(!is_accepted(home.path(), &revised));
     }
 
+    /// The other half of the binding: a Mold release that re-pins the license
+    /// to a NEWER upstream revision must ask again, even in the degenerate
+    /// case where the new revision's text hashes the same. Consent was given
+    /// for one exact document, identified by where it lives as well as what
+    /// it says.
+    #[test]
+    fn re_pinning_to_a_new_revision_invalidates_the_acceptance() {
+        let home = tempfile::tempdir().unwrap();
+        record_acceptance(home.path(), &INSIGHTFACE_ANTELOPEV2).unwrap();
+        assert!(is_accepted(home.path(), &INSIGHTFACE_ANTELOPEV2));
+
+        let repinned = ThirdPartyLicense {
+            url: "https://raw.githubusercontent.com/deepinsight/insightface/0000000000000000000000000000000000000000/README.md",
+            ..INSIGHTFACE_ANTELOPEV2
+        };
+        assert!(
+            !is_accepted(home.path(), &repinned),
+            "a new pinned revision must require a fresh acceptance"
+        );
+
+        // And accepting the re-pin replaces rather than accumulates, so the
+        // superseded revision does not linger as a second standing consent.
+        record_acceptance(home.path(), &repinned).unwrap();
+        assert!(is_accepted(home.path(), &repinned));
+        assert!(!is_accepted(home.path(), &INSIGHTFACE_ANTELOPEV2));
+        assert_eq!(load(home.path()).acceptances.len(), 1);
+    }
+
+    /// The guarantee this whole design rests on: the accepted URL must be
+    /// content-addressed. A branch ref such as `.../master/README.md` can be
+    /// rewritten upstream, which would leave the pinned digest describing
+    /// text nobody can fetch while old acceptances kept passing.
+    #[test]
+    fn every_pinned_license_url_is_immutable() {
+        for license in THIRD_PARTY_LICENSES {
+            let url = license.url;
+            assert!(
+                !url.contains("/master/") && !url.contains("/main/") && !url.contains("/HEAD/"),
+                "{} pins a mutable branch ref: {url}",
+                license.id
+            );
+            // GitHub raw URLs are immutable only when the ref is a full
+            // 40-hex commit SHA.
+            let looks_commit_pinned = url.split('/').any(|segment| {
+                segment.len() == 40 && segment.chars().all(|c| c.is_ascii_hexdigit())
+            });
+            assert!(
+                looks_commit_pinned,
+                "{} must pin an exact upstream commit: {url}",
+                license.id
+            );
+            assert_eq!(
+                license.sha256.len(),
+                64,
+                "{} must pin a full sha256",
+                license.id
+            );
+            assert_ne!(
+                license.url, license.canonical,
+                "{} must keep the browsable page separate from the accepted identity",
+                license.id
+            );
+        }
+    }
+
     #[test]
     fn re_accepting_replaces_rather_than_appends() {
         let home = tempfile::tempdir().unwrap();
@@ -264,6 +516,78 @@ mod tests {
         record_acceptance(home.path(), &INSIGHTFACE_ANTELOPEV2).unwrap();
         let record = load(home.path());
         assert_eq!(record.acceptances.len(), 1);
+    }
+
+    /// The consent-integrity rule: a caller may only have its acceptance
+    /// recorded against the document it actually displayed.
+    #[test]
+    fn recording_requires_the_terms_the_caller_displayed() {
+        let home = tempfile::tempdir().unwrap();
+        let ours = &INSIGHTFACE_ANTELOPEV2;
+
+        let honest = [acceptance_for(ours)];
+        record_acceptances(home.path(), &honest).unwrap();
+        assert!(is_accepted(home.path(), ours));
+
+        // A caller on a different release, resolving the same id to its own
+        // pinned revision.
+        let fresh = tempfile::tempdir().unwrap();
+        let other_revision = crate::types::LicenseAcceptance {
+            id: ours.id.to_string(),
+            url: "https://raw.githubusercontent.com/deepinsight/insightface/0000000000000000000000000000000000000000/README.md".to_string(),
+            sha256: ours.sha256.to_string(),
+        };
+        let error = record_acceptances(fresh.path(), &[other_revision]).unwrap_err();
+        assert!(matches!(
+            error,
+            RecordAcceptancesError::TermsMismatch(license) if license.id == ours.id
+        ));
+        assert!(
+            !is_accepted(fresh.path(), ours),
+            "a mismatched acceptance must record nothing"
+        );
+
+        // Same URL, different digest, is equally a mismatch — the URL alone
+        // is not the identity.
+        let wrong_digest = crate::types::LicenseAcceptance {
+            id: ours.id.to_string(),
+            url: ours.url.to_string(),
+            sha256: "0".repeat(64),
+        };
+        assert!(matches!(
+            record_acceptances(fresh.path(), &[wrong_digest]).unwrap_err(),
+            RecordAcceptancesError::TermsMismatch(_)
+        ));
+        assert!(!is_accepted(fresh.path(), ours));
+    }
+
+    #[test]
+    fn digest_casing_is_not_part_of_the_identity() {
+        let home = tempfile::tempdir().unwrap();
+        let ours = &INSIGHTFACE_ANTELOPEV2;
+        let upper = crate::types::LicenseAcceptance {
+            id: ours.id.to_string(),
+            url: ours.url.to_string(),
+            sha256: ours.sha256.to_ascii_uppercase(),
+        };
+        record_acceptances(home.path(), &[upper]).unwrap();
+        assert!(is_accepted(home.path(), ours));
+    }
+
+    /// A rejected entry must not leave earlier entries in the same request
+    /// applied — the refusal describes a root that was not touched.
+    #[test]
+    fn a_mismatch_late_in_the_list_writes_nothing_at_all() {
+        let home = tempfile::tempdir().unwrap();
+        let ours = &INSIGHTFACE_ANTELOPEV2;
+        let bad = crate::types::LicenseAcceptance {
+            id: ours.id.to_string(),
+            url: ours.url.to_string(),
+            sha256: "0".repeat(64),
+        };
+        let error = record_acceptances(home.path(), &[acceptance_for(ours), bad]).unwrap_err();
+        assert!(matches!(error, RecordAcceptancesError::TermsMismatch(_)));
+        assert!(!is_accepted(home.path(), ours));
     }
 
     #[test]
@@ -292,6 +616,7 @@ mod tests {
         let message = acceptance_required_message("pulid-flux", &INSIGHTFACE_ANTELOPEV2);
         assert!(message.contains("non-commercial research"));
         assert!(message.contains(INSIGHTFACE_ANTELOPEV2.url));
+        assert!(message.contains(INSIGHTFACE_ANTELOPEV2.canonical));
         assert!(message.contains("mold pull pulid-flux --accept-license insightface-antelopev2"));
     }
 

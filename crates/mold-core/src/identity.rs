@@ -6,11 +6,12 @@
 //! decode limits an `id_image` payload must respect before anything in the
 //! process attempts a full decode.
 //!
-//! The runtime adapter lands separately. Everything here is contract only, so
-//! it is deliberately feature-independent: a build without `pulid` still
-//! validates the request shape identically and simply advertises
-//! `supports_identity = false`, which is what stops a client from queueing
-//! work the binary cannot execute.
+//! The runtime adapter lands separately, and until it does no build can
+//! execute identity conditioning — not even one compiled with `pulid`, which
+//! today links the contract and nothing that consumes it. So the capability
+//! stays unadvertised and a request carrying an identity field is refused
+//! rather than rendered without the face. [`IDENTITY_RUNTIME_READY`] is the
+//! one switch the adapter PR flips.
 
 use crate::types::GenerateRequest;
 
@@ -32,8 +33,37 @@ pub const ID_WEIGHT_MAX: f64 = 3.0;
 /// denoise step unless the request delays it.
 pub const ID_START_STEP_DEFAULT: u32 = 0;
 
-/// Refusal a build without the identity adapter gives a request that asks
-/// for identity conditioning.
+/// Whether this binary can actually execute identity conditioning.
+///
+/// The `pulid` feature compiles the wire contract — the qualified-model list,
+/// the bounds, the validator, the request fields.
+///
+/// #1221 landed the cross-attention adapter, so `FrozenEngineConfig's`
+/// identity assets now reach the denoise loop on every FLUX transformer
+/// variant. That is not yet enough to flip this: nothing turns a request's
+/// `id_image` into the `[1, 32, 2048]` embedding the adapter consumes, so a
+/// conditioned request would download the bundle and then fail at render time.
+/// #1223 wires the extractor to the engine seam and flips this constant in the
+/// same change.
+///
+/// Until then the capability stays unadvertised on every build and every
+/// identity request is refused. Advertising a control the worker cannot honour
+/// is the failure `CLAUDE.md` records for wan's `supports_sequence`; here it
+/// would be worse than a hard error, because the print would render, look
+/// fine, and simply not be the person in the reference photo.
+pub const IDENTITY_RUNTIME_READY: bool = false;
+
+/// Whether identity conditioning can be both accepted and executed here.
+///
+/// The single predicate for every advertisement and every admission decision:
+/// the feature must be linked *and* the runtime adapter must have landed.
+/// Callers must never re-spell it as a bare `cfg!(feature = "pulid")`.
+pub fn identity_runtime_available() -> bool {
+    cfg!(feature = "pulid") && IDENTITY_RUNTIME_READY
+}
+
+/// Refusal a build compiled without the `pulid` feature gives a request that
+/// asks for identity conditioning.
 ///
 /// Accept-and-ignore is not an option: the print would render without the
 /// face and nothing would say so. The request is refused instead, and the
@@ -42,6 +72,19 @@ pub const IDENTITY_BUILD_UNSUPPORTED: &str =
     "this server was built without PuLID face-identity support; remove id_image \
      (and any id_weight, id_start_step, or id_image_name) or use a server built \
      with the `pulid` feature";
+
+/// Refusal a build that links `pulid` but predates the runtime adapter gives
+/// a request that asks for identity conditioning.
+///
+/// Deliberately distinct from [`IDENTITY_BUILD_UNSUPPORTED`]: the operator of
+/// this server does not need a differently compiled binary, they need a newer
+/// one, and a client that cannot tell the two apart would send them to the
+/// wrong fix.
+pub const IDENTITY_RUNTIME_PENDING: &str =
+    "identity conditioning is not available in this build yet — the runtime \
+     adapter has not landed; remove id_image (and any id_weight, id_start_step, \
+     or id_image_name), or upgrade to a server that advertises \
+     supports_identity";
 
 /// Bounded-decode limits for an `id_image` payload.
 ///
@@ -227,9 +270,14 @@ pub fn validate_identity_conditioning(req: &GenerateRequest) -> Result<(), Strin
     }
 
     // A binary that cannot execute identity conditioning refuses the request
-    // rather than rendering a print that silently has no face in it.
+    // rather than rendering a print that silently has no face in it. The two
+    // reasons stay distinct: one needs a differently compiled binary, the
+    // other simply a newer one.
     if !cfg!(feature = "pulid") {
         return Err(IDENTITY_BUILD_UNSUPPORTED.to_string());
+    }
+    if !IDENTITY_RUNTIME_READY {
+        return Err(IDENTITY_RUNTIME_PENDING.to_string());
     }
 
     let Some(bytes) = req.id_image.as_deref() else {
@@ -503,8 +551,26 @@ mod tests {
         assert_eq!(effective_id_start_step(&req), 3);
     }
 
+    /// Every `pulid` test below is written for BOTH values of
+    /// [`IDENTITY_RUNTIME_READY`]: while the adapter is pending, the shape
+    /// rules are unreachable and the one observable behaviour is this
+    /// refusal, so asserting it is what keeps these tests honest rather than
+    /// merely compiled.
+    #[cfg(feature = "pulid")]
+    fn assert_runtime_pending(result: Result<(), String>, context: &str) {
+        let error = result.expect_err(&format!(
+            "{context}: a pending adapter must refuse the request"
+        ));
+        assert_eq!(error, IDENTITY_RUNTIME_PENDING, "{context}");
+        assert!(
+            !error.contains("built without PuLID"),
+            "{context}: a linked-but-pending build must not read as the wrong binary: {error}"
+        );
+    }
+
     /// The rules below only apply to a build that can execute identity
-    /// conditioning; without the adapter the request never reaches them.
+    /// conditioning; while the adapter is pending the request is refused
+    /// before it reaches any of them.
     #[cfg(feature = "pulid")]
     #[test]
     fn identity_conditioning_accepts_a_qualified_request() {
@@ -513,8 +579,59 @@ mod tests {
             req.id_weight = Some(ID_WEIGHT_MAX);
             req.id_start_step = Some(req.steps - 1);
             req.id_image_name = Some("face.png".to_string());
-            validate_identity_conditioning(&req)
-                .unwrap_or_else(|error| panic!("{model} must be accepted: {error}"));
+            let result = validate_identity_conditioning(&req);
+            if IDENTITY_RUNTIME_READY {
+                result.unwrap_or_else(|error| panic!("{model} must be accepted: {error}"));
+            } else {
+                assert_runtime_pending(result, model);
+            }
+        }
+    }
+
+    /// The feature alone never makes the capability real: a build that links
+    /// `pulid` while the adapter is pending refuses exactly like one that
+    /// does not link it, but with its own reason.
+    #[cfg(feature = "pulid")]
+    #[test]
+    fn identity_is_refused_while_the_runtime_adapter_is_pending() {
+        if IDENTITY_RUNTIME_READY {
+            return;
+        }
+        let req = identity_request("flux-dev:q8");
+        let error = validate_identity_conditioning(&req).unwrap_err();
+        assert_eq!(error, IDENTITY_RUNTIME_PENDING);
+        assert!(
+            !error.contains("flux-dev:q4"),
+            "the refusal is about the build, not the model: {error}"
+        );
+        // A request that mentions no identity field is still not this
+        // contract's business, even while the adapter is pending.
+        let mut plain = identity_request("flux-dev:q8");
+        plain.id_image = None;
+        validate_identity_conditioning(&plain).expect("no identity mentioned, nothing to refuse");
+    }
+
+    /// The two refusals must stay distinguishable — a client routes the
+    /// operator to a different fix for each.
+    #[test]
+    fn the_two_unavailable_refusals_are_distinct() {
+        assert_ne!(IDENTITY_BUILD_UNSUPPORTED, IDENTITY_RUNTIME_PENDING);
+        assert!(IDENTITY_BUILD_UNSUPPORTED.contains("built without PuLID"));
+        assert!(IDENTITY_RUNTIME_PENDING.contains("not available in this build yet"));
+    }
+
+    /// The predicate is the conjunction, never either half alone.
+    #[test]
+    fn runtime_availability_requires_both_the_feature_and_the_adapter() {
+        assert_eq!(
+            identity_runtime_available(),
+            cfg!(feature = "pulid") && IDENTITY_RUNTIME_READY
+        );
+        if !IDENTITY_RUNTIME_READY {
+            assert!(
+                !identity_runtime_available(),
+                "no build may claim identity while the adapter is pending"
+            );
         }
     }
 
@@ -576,7 +693,8 @@ mod tests {
     }
 
     /// The rules below only apply to a build that can execute identity
-    /// conditioning; without the adapter the request never reaches them.
+    /// conditioning; while the adapter is pending every case collapses to
+    /// the one pending refusal, which is asserted instead.
     #[cfg(feature = "pulid")]
     #[test]
     fn identity_rules_are_table_driven() {
@@ -693,8 +811,16 @@ mod tests {
         for case in cases {
             let mut req = identity_request("flux-dev:q8");
             (case.mutate)(&mut req);
-            let error = validate_identity_conditioning(&req)
-                .expect_err(&format!("{} must be refused", case.name));
+            let result = validate_identity_conditioning(&req);
+            if !IDENTITY_RUNTIME_READY {
+                // Every one of these requests still mentions identity, so the
+                // pending build refuses them all for the same reason before a
+                // single shape rule runs.
+                assert!(request_mentions_identity(&req), "{}", case.name);
+                assert_runtime_pending(result, case.name);
+                continue;
+            }
+            let error = result.expect_err(&format!("{} must be refused", case.name));
             assert!(
                 error.contains(case.expect),
                 "{}: expected {:?} in {error:?}",
@@ -705,21 +831,34 @@ mod tests {
     }
 
     /// The rules below only apply to a build that can execute identity
-    /// conditioning; without the adapter the request never reaches them.
+    /// conditioning; while the adapter is pending the request is refused
+    /// before it reaches any of them.
     #[cfg(feature = "pulid")]
     #[test]
     fn empty_lora_list_is_not_a_lora_combination() {
         let mut req = identity_request("flux-dev:q8");
         req.loras = Some(Vec::new());
-        validate_identity_conditioning(&req).expect("an empty list is not a merged adapter");
+        let result = validate_identity_conditioning(&req);
+        if IDENTITY_RUNTIME_READY {
+            result.expect("an empty list is not a merged adapter");
+        } else {
+            assert_runtime_pending(result, "empty lora list");
+        }
     }
 
     /// The rules below only apply to a build that can execute identity
-    /// conditioning; without the adapter the request never reaches them.
+    /// conditioning; while the adapter is pending the request is refused
+    /// before it reaches any of them.
     #[cfg(feature = "pulid")]
     #[test]
     fn the_model_refusal_names_every_supported_model() {
         let mut req = identity_request("sdxl");
+        if !IDENTITY_RUNTIME_READY {
+            assert_runtime_pending(validate_identity_conditioning(&req), "unqualified model");
+            req.model = "flux-dev:q4".to_string();
+            assert_runtime_pending(validate_identity_conditioning(&req), "qualified model");
+            return;
+        }
         let error = validate_identity_conditioning(&req).unwrap_err();
         for model in IDENTITY_QUALIFIED_MODELS {
             assert!(error.contains(model), "{model} must be named: {error}");

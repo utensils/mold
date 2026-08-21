@@ -20,6 +20,22 @@ use std::io::{Seek, SeekFrom};
 use std::path::Path;
 use tokio_util::io::ReaderStream;
 
+/// Body for `POST /api/models/pull`.
+///
+/// `accept_licenses` is omitted when empty so requests to older servers —
+/// which reject unknown fields on some builds and would otherwise see a field
+/// they never asked for — stay byte-identical to what they got before.
+fn pull_body(
+    model: &str,
+    accept_licenses: &[crate::types::LicenseAcceptance],
+) -> serde_json::Value {
+    let mut body = serde_json::json!({ "model": model });
+    if !accept_licenses.is_empty() {
+        body["accept_licenses"] = serde_json::json!(accept_licenses);
+    }
+    body
+}
+
 const REFERENCE_UPLOAD_HANDLE_HEADER: &str = "x-mold-reference-upload";
 const REFERENCE_UPLOAD_SESSION_HEADER: &str = "x-mold-reference-upload-session";
 
@@ -1049,16 +1065,43 @@ impl MoldClient {
     /// completes on the server side. The server updates its in-memory config
     /// so subsequent generate/load requests can find the model.
     pub async fn pull_model(&self, model: &str) -> Result<String> {
+        self.pull_model_accepting(model, &[]).await
+    }
+
+    /// Pull a model, recording third-party license acceptances ON THE SERVER
+    /// first.
+    ///
+    /// Acceptance is per Mold data root, so a client that recorded it locally
+    /// has told the wrong machine. The ids ride the request instead, and the
+    /// server writes them into its own root before the pull starts.
+    pub async fn pull_model_accepting(
+        &self,
+        model: &str,
+        accept_licenses: &[crate::types::LicenseAcceptance],
+    ) -> Result<String> {
         let resp = self
             .client
             .post(format!("{}/api/models/pull", self.base_url))
-            .json(&serde_json::json!({ "model": model }))
+            .json(&pull_body(model, accept_licenses))
             .send()
             .await?
             .error_for_status()?
             .text()
             .await?;
         Ok(resp)
+    }
+
+    /// List this server's third-party licenses and their acceptance state.
+    pub async fn list_licenses(&self) -> Result<Vec<crate::types::ThirdPartyLicenseStatus>> {
+        let listing: crate::types::LicenseListing = self
+            .client
+            .get(format!("{}/api/licenses", self.base_url))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        Ok(listing.licenses)
     }
 
     /// Request graceful server shutdown.
@@ -1080,11 +1123,23 @@ impl MoldClient {
         model: &str,
         progress_tx: tokio::sync::mpsc::UnboundedSender<SseProgressEvent>,
     ) -> Result<()> {
+        self.pull_model_stream_accepting(model, &[], progress_tx)
+            .await
+    }
+
+    /// [`Self::pull_model_stream`], recording license acceptances on the
+    /// server before the pull starts. See [`Self::pull_model_accepting`].
+    pub async fn pull_model_stream_accepting(
+        &self,
+        model: &str,
+        accept_licenses: &[crate::types::LicenseAcceptance],
+        progress_tx: tokio::sync::mpsc::UnboundedSender<SseProgressEvent>,
+    ) -> Result<()> {
         let mut resp = self
             .client
             .post(format!("{}/api/models/pull", self.base_url))
             .header("Accept", "text/event-stream")
-            .json(&serde_json::json!({ "model": model }))
+            .json(&pull_body(model, accept_licenses))
             .send()
             .await?;
 

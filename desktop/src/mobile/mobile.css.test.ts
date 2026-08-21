@@ -21,6 +21,19 @@ describe("mobile viewport scaling", () => {
   });
 });
 
+describe("mobile gallery viewer", () => {
+  it("lets fixed edges size the top-layer dialog without iOS inline offset", () => {
+    const viewer = css.match(/\.gallery-viewer\s*\{([^}]*)\}/s);
+
+    expect(viewer?.[1]).toMatch(/position:\s*fixed\s*;/);
+    expect(viewer?.[1]).toMatch(/inset:\s*0\s*;/);
+    expect(viewer?.[1]).toMatch(/width:\s*auto\s*;/);
+    expect(viewer?.[1]).toMatch(/height:\s*auto\s*;/);
+    expect(viewer?.[1]).toMatch(/margin:\s*0\s*;/);
+    expect(viewer?.[1]).not.toMatch(/(?:width|height):\s*100(?:%|dvh)\s*;/);
+  });
+});
+
 describe("mobile Library thumbnail sizing", () => {
   it("drives every gallery column count from the pinch variable", () => {
     // Match every `.gallery-grid` selector, nested or at top level, so a

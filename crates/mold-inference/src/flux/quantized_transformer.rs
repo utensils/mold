@@ -30,6 +30,7 @@ use anyhow::Result;
 use candle_core::{quantized::QTensor, DType, IndexOp, Module, Tensor, D};
 use candle_nn::{LayerNorm, RmsNorm};
 use candle_transformers::models::flux::model::{Config, EmbedNd};
+use candle_transformers::models::flux::BlockHook;
 use mold_candle::quantized::VarBuilder;
 use mold_candle::quantized_nn::Linear as QuantizedLinear;
 use std::sync::Arc;
@@ -700,9 +701,14 @@ impl QuantizedFluxTransformer {
             .unwrap_or(false)
     }
 
-    /// Run the full FLUX forward pass.
+    /// Run the full FLUX forward pass, with an optional per-block hook.
+    ///
+    /// Mirrors the candle fork's `Flux::forward_with_hook` for the two upstream
+    /// variants, but takes an `Option` rather than a no-op implementation: a
+    /// `None` hook has to execute the untouched loop, because a gated PuLID
+    /// step must be bit-identical to a render that never asked for identity.
     #[allow(clippy::too_many_arguments)]
-    pub fn forward(
+    pub fn forward_with_hook(
         &self,
         img: &Tensor,
         img_ids: &Tensor,
@@ -711,6 +717,7 @@ impl QuantizedFluxTransformer {
         timesteps: &Tensor,
         y: &Tensor,
         guidance: Option<&Tensor>,
+        hook: Option<&dyn BlockHook>,
     ) -> Result<Tensor> {
         if txt.rank() != 3 {
             anyhow::bail!("unexpected shape for txt {:?}", txt.shape());
@@ -737,14 +744,24 @@ impl QuantizedFluxTransformer {
         };
         let vec_ = (vec_ + y.apply(&self.vector_in))?;
 
-        for block in self.double_blocks.iter() {
+        for (index, block) in self.double_blocks.iter().enumerate() {
             (img, txt) = block.forward(&img, &txt, &vec_, &pe)?;
+            if let Some(hook) = hook {
+                if let Some(replacement) = hook.after_double_block(index, &img, &txt)? {
+                    img = replacement;
+                }
+            }
         }
 
         let mut img = Tensor::cat(&[&txt, &img], 1)?;
         let txt_len = txt.dim(1)?;
-        for block in self.single_blocks.iter() {
+        for (index, block) in self.single_blocks.iter().enumerate() {
             img = block.forward(&img, &vec_, &pe)?;
+            if let Some(hook) = hook {
+                if let Some(replacement) = hook.after_single_block(index, txt_len, &img)? {
+                    img = replacement;
+                }
+            }
         }
 
         let img = img.i((.., txt_len..))?;

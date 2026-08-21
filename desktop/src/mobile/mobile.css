@@ -2722,9 +2722,11 @@ button:disabled {
   position: fixed;
   inset: 0;
   z-index: 100;
-  width: 100%;
-  height: 100%;
-  height: 100dvh;
+  /* Let the fixed edges size the top-layer dialog. iOS WebKit can retain the
+     dialog's UA inline placement when an explicit 100% width is combined
+     with `inset: 0`, shifting a viewport-wide stage to the right. */
+  width: auto;
+  height: auto;
   max-width: none;
   max-height: none;
   grid-template-rows: auto minmax(0, 1fr) auto;

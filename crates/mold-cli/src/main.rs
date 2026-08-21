@@ -1274,6 +1274,19 @@ Run 'mold list' to see all available models.")]
         accept_license: Option<String>,
     },
 
+    /// Show third-party model licenses and whether they have been accepted
+    #[command(after_long_help = "\
+Acceptance is recorded per Mold data root, so this reports the machine that
+runs the pull: the server at MOLD_HOST when one answers, otherwise this
+machine. Accept a license as part of the pull it unblocks:
+
+  mold pull pulid-flux --accept-license insightface-antelopev2")]
+    Licenses {
+        /// Read this machine's own acceptances instead of asking the server
+        #[arg(long)]
+        local: bool,
+    },
+
     /// Remove downloaded model(s) and their unique files
     #[command(
         alias = "remove",
@@ -2267,22 +2280,27 @@ async fn run() -> anyhow::Result<()> {
             skip_verify,
             accept_license,
         } => {
-            if let Some(id) = accept_license.as_deref() {
-                commands::pull::accept_license(id)?;
-            }
+            // Passed through rather than recorded here: `pull::run` decides
+            // whether the pull lands locally or on `MOLD_HOST`, and the
+            // acceptance has to be written on whichever machine does the
+            // downloading.
+            let accept_licenses: Vec<String> = accept_license.into_iter().collect();
             let opts = mold_core::download::PullOptions { skip_verify };
             if model.starts_with("hf:") || model.starts_with("cv:") {
                 match resolve_catalog_id(&model).await? {
                     CatalogIdResolution::Manifest(name) => {
-                        commands::pull::run(&name, &opts).await?
+                        commands::pull::run(&name, &opts, &accept_licenses).await?
                     }
                     CatalogIdResolution::Recipe(entry) => {
                         commands::pull::run_recipe(*entry, &opts).await?
                     }
                 }
             } else {
-                commands::pull::run(&model, &opts).await?;
+                commands::pull::run(&model, &opts, &accept_licenses).await?;
             }
+        }
+        Commands::Licenses { local } => {
+            commands::licenses::run(local).await?;
         }
         Commands::Rm { models, force } => {
             commands::rm::run(&models, force).await?;

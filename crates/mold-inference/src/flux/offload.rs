@@ -26,6 +26,7 @@ use std::sync::Arc;
 
 // Re-export Config and EmbedNd — these are public types with public constructors.
 use candle_transformers::models::flux::model::{Config, EmbedNd};
+use candle_transformers::models::flux::BlockHook;
 
 #[cfg(feature = "cuda")]
 type PrefetchStream = Arc<candle_core::cuda_backend::cudarc::driver::CudaStream>;
@@ -1176,9 +1177,20 @@ impl OffloadedFluxTransformer {
             .unwrap_or(false)
     }
 
-    /// Run the full FLUX forward pass with block-level streaming.
+    /// Run the full FLUX forward pass with block-level streaming, with an
+    /// optional per-block hook.
+    ///
+    /// The hook's modules are **not** streamed with the blocks. PuLID's
+    /// adapter is ~1.14 GB against a transformer this path exists to fit into
+    /// 2–4 GB, but it is touched twenty times per step: streaming it would pay
+    /// twenty host→device copies per step to reclaim memory the block schedule
+    /// has already accounted for. It stays resident on `gpu_device`, and the
+    /// caller charges it once.
+    ///
+    /// A `None` hook runs the untouched loop so a gated PuLID step is
+    /// bit-identical to a render that never asked for identity.
     #[allow(clippy::too_many_arguments)]
-    pub fn forward(
+    pub fn forward_with_hook(
         &self,
         img: &Tensor,
         img_ids: &Tensor,
@@ -1187,6 +1199,7 @@ impl OffloadedFluxTransformer {
         timesteps: &Tensor,
         y: &Tensor,
         guidance: Option<&Tensor>,
+        hook: Option<&dyn BlockHook>,
     ) -> Result<Tensor> {
         let dtype = img.dtype();
         let registry = self.lora_registry.as_ref();
@@ -1225,6 +1238,11 @@ impl OffloadedFluxTransformer {
                     drop(gpu_block);
                 }
             }
+            if let Some(hook) = hook {
+                if let Some(replacement) = hook.after_double_block(i, &img, &txt)? {
+                    img = replacement;
+                }
+            }
             tracing::trace!("double block {i} done");
         }
 
@@ -1241,6 +1259,11 @@ impl OffloadedFluxTransformer {
                     img = gpu_block.forward(&img, &vec_, &pe)?;
                     self.gpu_device.synchronize()?;
                     drop(gpu_block);
+                }
+            }
+            if let Some(hook) = hook {
+                if let Some(replacement) = hook.after_single_block(i, txt_len, &img)? {
+                    img = replacement;
                 }
             }
             tracing::trace!("single block {i} done");

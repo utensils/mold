@@ -7811,7 +7811,117 @@ pub struct ServerCapabilities {
     /// absence here means unknown so newer clients may still try expansion.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expand: Option<ExpandCapabilities>,
+    /// This server exposes `GET /api/licenses` and honours `accept_licenses`
+    /// on its download routes.
+    ///
+    /// Absent (false) on older servers, where a restricted model can only be
+    /// accepted by running `mold pull --accept-license` in a shell ON that
+    /// host — so a UI must not offer an in-app acceptance flow it cannot
+    /// deliver.
+    #[serde(default)]
+    pub licenses: bool,
 }
+
+/// One third-party model license and this server's acceptance state for it.
+///
+/// The response element of `GET /api/licenses`. Acceptance is per Mold data
+/// root, so this is always the answer for the host that served it — a client
+/// holding several hosts must ask each one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ThirdPartyLicenseStatus {
+    /// Stable id used by `accept_licenses` and `mold pull --accept-license`.
+    pub id: String,
+    /// Human-readable license name.
+    pub name: String,
+    /// Immutable, commit-pinned URL of the exact license text. Together with
+    /// `sha256` this is the identity an acceptance is bound to.
+    pub url: String,
+    /// Browsable page for the project's current terms. Presentation only —
+    /// deliberately not part of the accepted identity, because its contents
+    /// move.
+    pub canonical: String,
+    /// SHA-256 of the text served at `url`, verified when the pin landed.
+    pub sha256: String,
+    /// One-sentence statement of the restriction being accepted.
+    pub summary: String,
+    /// Whether THIS server has a current acceptance on record. A record bound
+    /// to a superseded `(url, sha256)` pair reads as `false`.
+    pub accepted: bool,
+    /// Manifest names that cannot be downloaded until this is accepted.
+    #[serde(default)]
+    pub required_by: Vec<String>,
+}
+
+/// Response body of `GET /api/licenses`.
+///
+/// An object rather than a bare array so later fields (paging, a server-wide
+/// policy note) stay additive.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct LicenseListing {
+    pub licenses: Vec<ThirdPartyLicenseStatus>,
+}
+
+/// One license the user accepted, carrying the EXACT terms they were shown.
+///
+/// Deliberately not a bare id string. Acceptance is recorded on whichever
+/// machine runs the download, and that machine may be on a different Mold
+/// release with a different pinned revision of the same license. An id alone
+/// would let it resolve terms of its own choosing and record consent for text
+/// the user never read — the server must be able to prove it is storing
+/// agreement to the document that was actually displayed, so the identity
+/// travels with the id and a mismatch is refused rather than reconciled.
+///
+/// There is no bare-string compatibility shape on purpose: accepting one would
+/// reintroduce exactly the hole this struct closes, and no client has shipped
+/// against the id-only form.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct LicenseAcceptance {
+    /// Stable license id.
+    pub id: String,
+    /// Immutable, commit-pinned URL of the terms the user was shown.
+    pub url: String,
+    /// SHA-256 of the text at `url`, as displayed.
+    pub sha256: String,
+}
+
+impl LicenseAcceptance {
+    /// True when `self` names the same document as `(url, sha256)`.
+    ///
+    /// Digest comparison is case-insensitive because hex casing is not part of
+    /// the identity; the URL must match exactly.
+    pub fn matches(&self, url: &str, sha256: &str) -> bool {
+        self.url == url && self.sha256.eq_ignore_ascii_case(sha256)
+    }
+}
+
+/// Error code for an acceptance whose terms are not the ones this server pins.
+///
+/// Distinct from [`LICENSE_NOT_ACCEPTED`]: nothing is missing, the two sides
+/// simply disagree about what the license says. The refusal carries the
+/// server's own terms so a client can display those and retry.
+pub const LICENSE_TERMS_MISMATCH: &str = "LICENSE_TERMS_MISMATCH";
+
+/// The machine-readable half of a `LICENSE_NOT_ACCEPTED` refusal.
+///
+/// Rides the error body beside the human message so a UI can render its own
+/// acceptance prompt — name, terms links, and the id to send back in
+/// `accept_licenses` — instead of scraping prose.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct LicenseRefusal {
+    pub id: String,
+    pub name: String,
+    pub url: String,
+    pub canonical: String,
+    /// SHA-256 of the text at `url`. Lets a client that was refused for a
+    /// terms mismatch re-display and re-send exactly what this server pins.
+    pub sha256: String,
+    pub summary: String,
+}
+
+/// Error code carried by a download refused for a missing license acceptance.
+///
+/// Clients match on this rather than on the message text.
+pub const LICENSE_NOT_ACCEPTED: &str = "LICENSE_NOT_ACCEPTED";
 
 #[cfg(test)]
 mod device_types_tests {

@@ -43,8 +43,20 @@ impl CliContext {
         }
     }
 
-    pub(crate) async fn stream_server_pull(&self, model: &str) -> Result<()> {
-        stream_server_pull(&self.client, model).await
+    /// Pull on the server, recording third-party license acceptances in the
+    /// SERVER's Mold data root first.
+    ///
+    /// There is deliberately no zero-argument variant: which machine records
+    /// the acceptance is a decision every caller has to make, and a
+    /// convenience wrapper that silently passed `&[]` is how the remote-pull
+    /// bug got written in the first place. Callers with nothing to accept
+    /// pass `&[]` explicitly. See `MoldClient::pull_model_accepting`.
+    pub(crate) async fn stream_server_pull_accepting(
+        &self,
+        model: &str,
+        accept_licenses: &[mold_core::LicenseAcceptance],
+    ) -> Result<()> {
+        stream_server_pull(&self.client, model, accept_licenses).await
     }
 }
 
@@ -83,10 +95,16 @@ pub(crate) fn is_loopback_host(host: &str) -> bool {
         })
 }
 
-pub(crate) async fn stream_server_pull(client: &MoldClient, model: &str) -> Result<()> {
+pub(crate) async fn stream_server_pull(
+    client: &MoldClient,
+    model: &str,
+    accept_licenses: &[mold_core::LicenseAcceptance],
+) -> Result<()> {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let render = tokio::spawn(render_progress(rx));
-    let result = client.pull_model_stream(model, tx).await;
+    let result = client
+        .pull_model_stream_accepting(model, accept_licenses, tx)
+        .await;
     let _ = render.await;
     result
 }

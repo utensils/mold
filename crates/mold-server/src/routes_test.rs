@@ -11158,6 +11158,302 @@ mod tests {
         assert_eq!(listing.queued[0].model, "flux-schnell:q4");
     }
 
+    /// Point `MOLD_HOME` at a throwaway root through the SHARED env guard.
+    ///
+    /// License acceptance is per Mold data root, so these tests write to it —
+    /// and `MOLD_HOME` is process-global, so holding anything other than
+    /// `env_lock()` lets them race the gallery tests that derive output dirs
+    /// from the same variable.
+    fn license_home() -> (tempfile::TempDir, MoldHomeGuard) {
+        let home = tempfile::tempdir().unwrap();
+        let guard = MoldHomeGuard::set(home.path());
+        (home, guard)
+    }
+
+    fn licensed_state() -> AppState {
+        AppState::empty(
+            mold_core::Config::default(),
+            crate::state::QueueHandle::new(tokio::sync::mpsc::channel(1).0),
+            AppState::empty_gpu_pool_for_test(),
+            200,
+        )
+    }
+
+    fn download_request(body: serde_json::Value) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri("/api/downloads")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    /// The exact terms this build pins — what an honest client would have
+    /// read from `GET /api/licenses` and displayed before accepting.
+    fn accepted_terms() -> serde_json::Value {
+        let license = &mold_core::license_acceptance::INSIGHTFACE_ANTELOPEV2;
+        serde_json::json!({
+            "id": license.id,
+            "url": license.url,
+            "sha256": license.sha256,
+        })
+    }
+
+    /// A client on a different Mold release resolves the same id to a
+    /// different pinned revision. Recording ITS consent against OUR text would
+    /// store agreement to a document the user never read, so the server
+    /// refuses and shows its own terms instead.
+    #[tokio::test]
+    async fn post_api_downloads_rejects_terms_the_server_does_not_pin() {
+        let (home, _guard) = license_home();
+        let state = licensed_state();
+        let app = app_with_state(state.clone());
+
+        let stale = serde_json::json!({
+            "id": "insightface-antelopev2",
+            "url": "https://raw.githubusercontent.com/deepinsight/insightface/0000000000000000000000000000000000000000/README.md",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        });
+        let res = app
+            .oneshot(download_request(serde_json::json!({
+                "model": "pulid-flux",
+                "accept_licenses": [stale],
+            })))
+            .await
+            .unwrap();
+
+        assert_eq!(res.status(), StatusCode::CONFLICT);
+        let body = json_body(res).await;
+        assert_eq!(body["code"], mold_core::LICENSE_TERMS_MISMATCH);
+        // The server's OWN terms ride the refusal so the client can display
+        // them and retry without a second round trip.
+        let ours = &mold_core::license_acceptance::INSIGHTFACE_ANTELOPEV2;
+        assert_eq!(body["license"]["url"], ours.url);
+        assert_eq!(body["license"]["sha256"], ours.sha256);
+        assert_eq!(body["license"]["canonical"], ours.canonical);
+
+        assert!(!mold_core::license_acceptance::is_accepted(
+            home.path(),
+            ours
+        ));
+        assert!(state.downloads.listing().await.queued.is_empty());
+    }
+
+    /// A right id with a wrong digest is still a mismatch — the URL alone is
+    /// not the identity.
+    #[tokio::test]
+    async fn post_api_downloads_rejects_a_matching_url_with_a_different_digest() {
+        let (home, _guard) = license_home();
+        let state = licensed_state();
+        let app = app_with_state(state.clone());
+
+        let ours = &mold_core::license_acceptance::INSIGHTFACE_ANTELOPEV2;
+        let res = app
+            .oneshot(download_request(serde_json::json!({
+                "model": "pulid-flux",
+                "accept_licenses": [{
+                    "id": ours.id,
+                    "url": ours.url,
+                    "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+                }],
+            })))
+            .await
+            .unwrap();
+
+        assert_eq!(res.status(), StatusCode::CONFLICT);
+        assert!(!mold_core::license_acceptance::is_accepted(
+            home.path(),
+            ours
+        ));
+        assert!(state.downloads.listing().await.queued.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_api_licenses_reflects_this_servers_acceptance_state() {
+        let (home, _guard) = license_home();
+        let app = app_with_state(licensed_state());
+
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/licenses")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let listing = json_body(res).await;
+        let entry = listing["licenses"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["id"] == "insightface-antelopev2")
+            .expect("the antelopev2 license is listed");
+        assert_eq!(entry["accepted"], serde_json::Value::Bool(false));
+        assert_eq!(
+            entry["url"],
+            mold_core::license_acceptance::INSIGHTFACE_ANTELOPEV2.url
+        );
+        assert_eq!(
+            entry["canonical"],
+            mold_core::license_acceptance::INSIGHTFACE_ANTELOPEV2.canonical
+        );
+        assert!(entry["required_by"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|name| name == "pulid-flux"));
+
+        mold_core::license_acceptance::record_acceptance(
+            home.path(),
+            &mold_core::license_acceptance::INSIGHTFACE_ANTELOPEV2,
+        )
+        .unwrap();
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/licenses")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let listing = json_body(res).await;
+        let entry = listing["licenses"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["id"] == "insightface-antelopev2")
+            .unwrap();
+        assert_eq!(entry["accepted"], serde_json::Value::Bool(true));
+    }
+
+    /// The bug this endpoint exists to fix: a client that recorded acceptance
+    /// in ITS OWN root told the wrong machine, so the server must refuse —
+    /// and refuse in a shape a UI can act on rather than prose alone.
+    #[tokio::test]
+    async fn post_api_downloads_refuses_a_license_gated_model_structurally() {
+        let (_home, _guard) = license_home();
+        let app = app_with_state(licensed_state());
+
+        let res = app
+            .oneshot(download_request(
+                serde_json::json!({ "model": "pulid-flux" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+        let body = json_body(res).await;
+        assert_eq!(body["code"], mold_core::LICENSE_NOT_ACCEPTED);
+        assert_eq!(body["license"]["id"], "insightface-antelopev2");
+        assert!(body["license"]["summary"]
+            .as_str()
+            .unwrap()
+            .contains("non-commercial research"));
+        assert_eq!(
+            body["license"]["url"],
+            mold_core::license_acceptance::INSIGHTFACE_ANTELOPEV2.url
+        );
+        assert!(body["error"]
+            .as_str()
+            .unwrap()
+            .contains("--accept-license insightface-antelopev2"));
+    }
+
+    #[tokio::test]
+    async fn post_api_downloads_accept_licenses_records_on_the_server_and_proceeds() {
+        let (home, _guard) = license_home();
+        let state = licensed_state();
+        let app = app_with_state(state.clone());
+
+        let res = app
+            .oneshot(download_request(serde_json::json!({
+                "model": "pulid-flux",
+                "accept_licenses": [accepted_terms()],
+            })))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        // Recorded in the SERVER's root, not the caller's.
+        assert!(mold_core::license_acceptance::is_accepted(
+            home.path(),
+            &mold_core::license_acceptance::INSIGHTFACE_ANTELOPEV2
+        ));
+        let listing = state.downloads.listing().await;
+        assert_eq!(listing.queued.len(), 1);
+        assert_eq!(listing.queued[0].model, "pulid-flux");
+    }
+
+    #[tokio::test]
+    async fn post_api_downloads_unknown_license_id_400_and_writes_nothing() {
+        let (home, _guard) = license_home();
+        let state = licensed_state();
+        let app = app_with_state(state.clone());
+
+        let res = app
+            .oneshot(download_request(serde_json::json!({
+                "model": "pulid-flux",
+                "accept_licenses": [
+                    accepted_terms(),
+                    { "id": "not-a-license", "url": "https://example.invalid/x", "sha256": "0" },
+                ],
+            })))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let body = json_body(res).await;
+        assert_eq!(body["code"], "UNKNOWN_LICENSE");
+
+        // Resolution happens for the whole list before the first write, so
+        // the valid id in the same request must NOT have been recorded.
+        assert!(!mold_core::license_acceptance::is_accepted(
+            home.path(),
+            &mold_core::license_acceptance::INSIGHTFACE_ANTELOPEV2
+        ));
+        assert!(state.downloads.listing().await.queued.is_empty());
+    }
+
+    /// An unrestricted model must be completely unaffected by the gate.
+    #[tokio::test]
+    async fn post_api_downloads_unlicensed_model_is_never_gated() {
+        let (_home, _guard) = license_home();
+        let state = licensed_state();
+        let app = app_with_state(state.clone());
+
+        let res = app
+            .oneshot(download_request(
+                serde_json::json!({ "model": "flux-schnell:q4" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(state.downloads.listing().await.queued.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn capabilities_advertise_license_support() {
+        let (_home, _guard) = license_home();
+        let app = app_with_state(licensed_state());
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/capabilities")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(
+            json_body(res).await["licenses"],
+            serde_json::Value::Bool(true)
+        );
+    }
+
     #[tokio::test]
     async fn post_api_downloads_unknown_model_400() {
         let state = AppState::empty(

@@ -33,3 +33,31 @@
   are frozen into the execution plan the worker dispatches. An `id_weight` of 0
   is completely inert — no assets planned, nothing downloaded, no memory
   charged ([#1220](https://github.com/utensils/mold/issues/1220)).
+- **Identity assets are verified against their manifest pins before use.**
+  Hugging Face `main` is a mutable branch, so every PuLID file Mold
+  materializes is hashed against the SHA-256 the manifest pinned — after the
+  download, and again for any copy already sitting in the models directory. The
+  bytes are read through a retained no-follow descriptor, so a symlink or path
+  swap cannot substitute different content, and the `.sha256-verified` sidecar
+  is never accepted as proof: model roots are allowed to be group-writable, so
+  anyone who can drop weights there could drop an attestation for them too. A
+  mismatch names the file and both digests, removes the rejected bytes, and
+  fails the job instead of freezing unverified weights into an execution plan.
+  Each file is read once per process, so repeat admissions cost a stat rather
+  than a re-hash ([#1220](https://github.com/utensils/mold/issues/1220)).
+- **License acceptance works against a remote server.**
+  `mold pull <model> --accept-license <id>` now records the acceptance on
+  whichever machine runs the pull: the id travels to `MOLD_HOST` and the server writes it
+  into its own `$MOLD_HOME`, instead of the client accepting on its own behalf
+  and the server refusing anyway. New `GET /api/licenses` lists each license
+  with its pinned terms, `accepted`, and `required_by`; `POST /api/downloads`
+  and `POST /api/models/pull` take an additive `accept_licenses` array of
+  `{ id, url, sha256 }` entries carrying the exact terms the user was shown, so
+  a server on a different release cannot resolve a bare id to its own revision
+  and record consent for text nobody read. A gated download without one is a
+  `403` (`LICENSE_NOT_ACCEPTED`); terms the server does not pin are a `409`
+  (`LICENSE_TERMS_MISMATCH`) carrying the server's own terms to re-display.
+  Both write nothing, and both are structured so web, desktop, and iPhone can
+  offer acceptance in-app. Servers advertise `capabilities.licenses`, and `mold licenses` shows
+  the state along with which machine it read
+  ([#1220](https://github.com/utensils/mold/issues/1220)).
