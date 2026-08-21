@@ -4484,7 +4484,8 @@ describe("MobileApp generation queue", () => {
     ).toBe(true);
   });
 
-  it("remounts generated video when forced renewal returns the same URL", async () => {
+  it("backs off transient generated-video failures before remounting the media element", async () => {
+    vi.useFakeTimers();
     const unchangedUrl =
       "https://studio/media/missing-video?media_token=unchanged&expires=4102444800";
     streamableMediaUrl.mockResolvedValueOnce(unchangedUrl).mockResolvedValueOnce(unchangedUrl);
@@ -4509,20 +4510,105 @@ describe("MobileApp generation queue", () => {
     await flushPromises();
 
     const originalVideo = wrapper.get("video.result-media").element;
+    expect(wrapper.get("video.result-media").attributes("preload")).toBe("metadata");
     await wrapper.get("video.result-media").trigger("error");
     await flushPromises();
 
+    expect(streamableMediaUrl).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(249);
+    expect(streamableMediaUrl).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await flushPromises();
     expect(streamableMediaUrl).toHaveBeenCalledTimes(2);
     expect(wrapper.get("video.result-media").attributes("src")).toBe(unchangedUrl);
     expect(wrapper.get("video.result-media").element).not.toBe(originalVideo);
+  });
+
+  it("bounds delayed generated-video recovery and exposes a manual retry", async () => {
+    vi.useFakeTimers();
+    const unchangedUrl =
+      "https://studio/media/missing-video?media_token=unchanged&expires=4102444800";
+    streamableMediaUrl.mockResolvedValue(unchangedUrl);
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    await submitPrompt("persistently missing generated video");
+    openStreams[0]!.options.onEvent(
+      "complete",
+      JSON.stringify({
+        image: "",
+        format: "mp4",
+        filename: "missing-video.mp4",
+        width: 768,
+        height: 512,
+        seed_used: 7,
+        generation_time_ms: 500,
+        model: model.name,
+      }),
+    );
+    openStreams[0]!.resolve();
+    await flushPromises();
+
+    for (const delay of [250, 750, 1_500]) {
+      await wrapper.get("video.result-media").trigger("error");
+      await vi.advanceTimersByTimeAsync(delay);
+      await flushPromises();
+    }
+    expect(streamableMediaUrl).toHaveBeenCalledTimes(4);
 
     await wrapper.get("video.result-media").trigger("error");
     await flushPromises();
-    expect(streamableMediaUrl).toHaveBeenCalledTimes(2);
     expect(wrapper.find("video.result-media").exists()).toBe(false);
     expect(wrapper.get(".result-preview-error").text()).toContain(
       "Couldn’t load this generated print",
     );
+    expect(
+      wrapper
+        .findAll(".result-preview-error button")
+        .some((button) => button.text() === "Try preview again"),
+    ).toBe(true);
+  });
+
+  it("replaces a stale video retry when a newer generated result fails", async () => {
+    vi.useFakeTimers();
+    streamableMediaUrl.mockResolvedValue(
+      "https://studio/media/video?media_token=renewed&expires=4102444800",
+    );
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    const completeVideo = async (streamIndex: number, filename: string, seed: number) => {
+      openStreams[streamIndex]!.options.onEvent(
+        "complete",
+        JSON.stringify({
+          image: "",
+          format: "mp4",
+          filename,
+          width: 768,
+          height: 512,
+          seed_used: seed,
+          generation_time_ms: 500,
+          model: model.name,
+        }),
+      );
+      openStreams[streamIndex]!.resolve();
+      await flushPromises();
+    };
+
+    await submitPrompt("first video");
+    await completeVideo(0, "first-video.mp4", 1);
+    await wrapper.get("video.result-media").trigger("error");
+
+    await submitPrompt("second video");
+    await completeVideo(1, "second-video.mp4", 2);
+    const secondVideo = wrapper.get("video.result-media").element;
+    await wrapper.get("video.result-media").trigger("error");
+
+    expect(streamableMediaUrl).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(250);
+    await flushPromises();
+    expect(streamableMediaUrl).toHaveBeenCalledTimes(3);
+    expect(wrapper.get("video.result-media").element).not.toBe(secondVideo);
   });
 
   it("shows a completion that wins the cancellation race", async () => {
