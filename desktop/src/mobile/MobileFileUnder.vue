@@ -385,7 +385,9 @@ const previewStem = computed(() =>
           aria-label="Collection"
           data-test="mobile-file-under-collection-list"
         >
-          <li>
+          <!-- `role="presentation"` on the items so the radios stay direct
+               children of the radiogroup for assistive technology. -->
+          <li role="presentation">
             <button
               type="button"
               role="radio"
@@ -397,7 +399,7 @@ const previewStem = computed(() =>
               <span class="mobile-collection-copy"><strong>None</strong></span>
             </button>
           </li>
-          <li v-for="entry in collections" :key="slugOf(entry)">
+          <li v-for="entry in collections" :key="slugOf(entry)" role="presentation">
             <button
               type="button"
               role="radio"
