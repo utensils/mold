@@ -170,6 +170,63 @@ detail, prompt strength, seed, and the Advanced groups — while keeping your
 prompt, model choice, and batch. On the web it is undoable from the toast it
 raises.
 
+## Identity Photos (PuLID)
+
+An identity photo conditions the render on a person's face: the print keeps
+that likeness while the prompt decides everything else. The photo itself is
+never composited into the output, and it is never cropped or resized to the
+canvas — it is a reference, not a composition input.
+
+Identity conditioning is deliberately narrow today. It is offered only for the
+**identity-qualified checkpoints** — `flux-dev:q4` and `flux-dev:q8` — on a
+server built with the off-by-default `pulid` feature, and it cannot be combined
+with a LoRA or with an img2img source image. Every other model, and every
+server that was not built with the feature, refuses the request with a named
+reason rather than rendering a print with no face in it.
+
+The identity assets (the PuLID-FLUX adapter, its vision tower, and the
+InsightFace face detector/recognizer) install as one hidden bundle. The
+InsightFace weights are licensed for non-commercial research only, so Mold will
+not download them until you accept that licence once per `MOLD_HOME`:
+
+```bash
+mold pull pulid-flux --accept-license insightface-antelopev2
+```
+
+See [Third-party model licenses](/guide/configuration#third-party-model-licenses)
+for the full rule.
+
+In Mold Studio on web and desktop, Create shows an **Identity** well directly
+below the source-image wells whenever the selected model and the machine you
+are generating on both support it — when they do not, the control is not there
+at all, rather than present and disabled. Drop or pick a PNG or JPEG (at most
+16 MiB, 8192 px per side, 32 MP) and the print takes that likeness.
+
+Switching to a model that cannot use an identity photo does not throw yours
+away and does not stop you generating: the photo is parked, the request goes
+out without it, and the well comes back with the photo still in it when you
+select a qualified model again.
+
+Two knobs live in Advanced and stay absent from the request until you touch
+them, so the server's own defaults keep applying:
+
+- **Identity strength** — how strongly the face is held, `0.0`–`3.0`
+  (default `1.0`). Higher preserves the likeness; lower lets the prompt reshape
+  it. `0.0` is completely inert: no identity assets are loaded at all.
+- **Identity start step** — the first denoise step the face is applied at
+  (default `0`, and always fewer than the print's step count). Delaying it lets
+  the composition settle before the likeness is pinned.
+
+If the combination cannot be submitted — a photo alongside a LoRA or a source
+image, a knob set with no photo, an oversized or unsupported file — Create says
+so inline beside the control and Generate stays blocked.
+
+Saved metadata records the reference's filename, its SHA-256, and the effective
+strength and start step; it never contains the face bytes. The Library shows
+those facts in the print's info aside, and **Reuse settings** restores the two
+values and re-attaches the photo when this device still has it, telling you
+plainly when it does not.
+
 ## Video Generation
 
 mold supports text-to-video generation with the LTX Video, LTX-2 (next

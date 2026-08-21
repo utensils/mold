@@ -868,6 +868,60 @@ describe("AdvancedSettings — per-model source-image contract (#772)", () => {
   });
 });
 
+describe("AdvancedSettings — identity conditioning", () => {
+  function identityForm(supported: boolean | null = true): GenerateForm {
+    return reactive({
+      ...newGenerateForm(),
+      family: "flux",
+      model: "flux-dev:q8",
+      steps: 20,
+      identitySupported: supported,
+    });
+  }
+
+  it("renders the Identity section only for a qualified checkpoint", () => {
+    expect(accordionTitles(mountSettings(identityForm()))).toContain("Identity");
+    for (const supported of [false, null] as const) {
+      const wrapper = mountSettings(identityForm(supported));
+      expect(accordionTitles(wrapper)).not.toContain("Identity");
+      expect(wrapper.find("[data-test='section-identity']").exists()).toBe(false);
+    }
+  });
+
+  it("leaves both knobs absent until touched so the server default is authoritative", async () => {
+    const form = identityForm();
+    const wrapper = mountSettings(form);
+    const weight = wrapper.get("[data-test='identity-weight']");
+    const startStep = wrapper.get("[data-test='identity-start-step']");
+    expect((weight.element as HTMLInputElement).value).toBe("");
+    expect(weight.attributes("placeholder")).toBe("1.0");
+    expect((startStep.element as HTMLInputElement).value).toBe("");
+    expect(startStep.attributes("placeholder")).toBe("0");
+    // The start step can never reach the step count this print renders.
+    expect(startStep.attributes("max")).toBe("19");
+
+    await weight.setValue("0.6");
+    await startStep.setValue("3");
+    expect(form.identityWeight).toBe(0.6);
+    expect(form.identityStartStep).toBe(3);
+
+    await weight.setValue("");
+    await startStep.setValue("");
+    expect(form.identityWeight).toBeNull();
+    expect(form.identityStartStep).toBeNull();
+  });
+
+  it("names the refusal inline in the section, never as a toast", async () => {
+    const form = identityForm();
+    form.identityWeight = 2;
+    const wrapper = mountSettings(form);
+    // A knob with no photo is exactly what admission refuses.
+    expect(wrapper.get("[data-test='identity-error']").text()).toContain(
+      "Attach an identity photo",
+    );
+  });
+});
+
 describe("AdvancedSettings — exact size", () => {
   it("records a typed exact size as a manual canvas intent (#1166)", async () => {
     const form = formFor("flux");

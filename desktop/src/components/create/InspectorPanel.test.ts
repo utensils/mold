@@ -12,7 +12,7 @@ import SwitchToggle from "@ui/components/SwitchToggle.vue";
 import BadgePill from "@ui/components/BadgePill.vue";
 import PanelResizeHandle from "../shell/PanelResizeHandle.vue";
 import { aspectIdFor } from "../../lib/resolutions";
-import { newGenerateForm, type GenerateForm } from "../../lib/generateForm";
+import { buildRequest, newGenerateForm, type GenerateForm } from "../../lib/generateForm";
 import { useGenerateFormStore } from "../../stores/generateForm";
 import { useModelStore } from "../../stores/models";
 import { useConnectionStore } from "../../stores/connection";
@@ -930,6 +930,66 @@ describe("InspectorPanel — source media in the primary form", () => {
       width: 7,
       height: 4,
     });
+  });
+
+  it("renders the identity photo well right after source media when qualified", () => {
+    const form = formFor("flux");
+    form.model = "flux-dev:q8";
+    form.identitySupported = true;
+    const wrapper = mount(InspectorPanel, { props: { form } });
+    const field = wrapper.get("[data-test='inspector-identity']");
+    expect(field.find("[data-test='identity-photo-well']").exists()).toBe(true);
+    // Primary form, immediately below the source wells — never behind Advanced.
+    const order = wrapper
+      .findAll("[data-test='inspector-source-media'], [data-test='inspector-identity']")
+      .map((node) => node.attributes("data-test"));
+    expect(order).toEqual(["inspector-source-media", "inspector-identity"]);
+  });
+
+  it("hides identity entirely when the checkpoint has not said yes", async () => {
+    const form = formFor("flux");
+    form.model = "flux-dev:bf16";
+    const wrapper = mount(InspectorPanel, { props: { form } });
+    // Unread capability: absence is never evidence of support.
+    expect(wrapper.find("[data-test='inspector-identity']").exists()).toBe(false);
+    form.identitySupported = false;
+    await flushPromises();
+    expect(wrapper.find("[data-test='inspector-identity']").exists()).toBe(false);
+  });
+
+  it("parks a staged photo when the capability is lost, and restores it", async () => {
+    const form = formFor("flux");
+    form.model = "flux-dev:q8";
+    form.identitySupported = true;
+    form.identityImage = { filename: "ada.png", base64: "AAAA" };
+    const wrapper = mount(InspectorPanel, { props: { form } });
+    expect(wrapper.find("[data-test='inspector-identity']").exists()).toBe(true);
+
+    // Switching to an unqualified checkpoint hides the well and retains the
+    // photo — nothing is erased, nothing is refused, and `buildRequest` keeps
+    // the partition off the wire.
+    form.identitySupported = false;
+    await flushPromises();
+    expect(wrapper.find("[data-test='inspector-identity']").exists()).toBe(false);
+    expect(form.identityImage).toEqual({ filename: "ada.png", base64: "AAAA" });
+    expect(buildRequest(form).id_image).toBeUndefined();
+
+    // Selecting a qualified checkpoint again brings the well back with the
+    // photo still in it.
+    form.identitySupported = true;
+    await flushPromises();
+    expect(wrapper.find("[data-test='inspector-identity']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='identity-remove']").exists()).toBe(true);
+    expect(form.identityImage).toEqual({ filename: "ada.png", base64: "AAAA" });
+  });
+
+  it("keeps identity out of sequence mode", () => {
+    useSequenceDraftStore().output = "sequence";
+    const form = formFor("flux");
+    form.model = "flux-dev:q8";
+    form.identitySupported = true;
+    const wrapper = mount(InspectorPanel, { props: { form } });
+    expect(wrapper.find("[data-test='inspector-identity']").exists()).toBe(false);
   });
 
   it("keeps H3 Ref2VA references out of the primary form", () => {

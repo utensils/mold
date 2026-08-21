@@ -15,6 +15,7 @@ import ControlsAside from "../components/create/ControlsAside.vue";
 import CreateModelPicker from "../components/create/CreateModelPicker.vue";
 import AdvancedDrawer from "../components/create/AdvancedDrawer.vue";
 import SourceMediaPanel from "../components/create/SourceMediaPanel.vue";
+import IdentityPanel from "../components/create/IdentityPanel.vue";
 import FileUnderGroup from "../components/create/FileUnderGroup.vue";
 import SequenceOpeningImagePanel from "../components/create/SequenceOpeningImagePanel.vue";
 import ActivityStrip from "../components/create/ActivityStrip.vue";
@@ -200,6 +201,15 @@ import {
   restoreGenerationSourceMedia,
   sha256HexOfBase64,
 } from "@studio/lib/generationSourceMedia";
+import {
+  IDENTITY_PHOTO_UNAVAILABLE,
+  identityActiveCount,
+  identityProvenance,
+  identityValidationError,
+  persistIdentityPhoto,
+  restoreIdentityPhoto,
+  supportsIdentity,
+} from "@studio/lib/identityConditioning";
 import { useStatusPoll } from "../composables/useStatusPoll";
 import {
   useHostRouting,
@@ -1539,6 +1549,49 @@ const capabilities = computed(() =>
     effectiveGenerationRecipe(currentModel.value, form.state.value.pipeline),
   ),
 );
+// ── Face identity (PuLID, #1224) ──────────────────────────────────────
+// The gate mirrors `toRequest`: the resolved catalog row's server-authored
+// recipe first, its additive `supports_identity` next, and the snapshot taken
+// on model change when no row has landed yet.
+const identitySupported = computed(() =>
+  currentModel.value
+    ? supportsIdentity(
+        effectiveGenerationRecipe(
+          currentModel.value,
+          form.state.value.pipeline,
+        ),
+        currentModel.value,
+      )
+    : (form.state.value.identitySupported ?? false),
+);
+/** Set when a reused print's identity photo is no longer on this device. */
+const identityRestoreNotice = ref<string | null>(null);
+// Declared with the ref rather than beside its only reader: a Library
+// handover fires an `immediate` watcher during setup, which reaches
+// `restoreReusedIdentityPhoto` before a later `let` would be initialized.
+let identityRestoreEpoch = 0;
+/** Why the identity partition would be refused, in the server's own order. */
+const identityError = computed(() =>
+  sequenceMode.value
+    ? // The chain wire has no identity slot, so nothing here can be refused
+      // for it — and a hidden control must never block Generate.
+      null
+    : identityValidationError({
+        supported: identitySupported.value,
+        image: form.state.value.identityImage?.base64
+          ? {
+              base64: form.state.value.identityImage.base64,
+              filename: form.state.value.identityImage.filename,
+            }
+          : null,
+        weight: form.state.value.identityWeight ?? null,
+        startStep: form.state.value.identityStartStep ?? null,
+        steps: form.state.value.steps,
+        hasLora: form.state.value.loras.length > 0,
+        hasSourceImage: form.state.value.imageAttachments.length > 0,
+      }),
+);
+
 /** The sequence opening frame is source media, so it obeys the selected
  * checkpoint's own source-image contract (#772) exactly as the one-shot well
  * does: an `unsupported` checkpoint renders no well at all, while an absent
@@ -2272,6 +2325,7 @@ function applySequenceReuse(metadata: OutputMetadata) {
   form.state.value = applyMetadataToForm(form.state.value, metadata, {
     models: models.value,
   });
+  void restoreReusedIdentityPhoto(metadata);
   // Reusing a sequence must not overwrite the parked one-shot prompt.
   form.state.value.prompt = oneShotPrompt;
   // Restore what the stitched print was actually filed under.
@@ -2349,6 +2403,53 @@ watch(modelsLoaded, (loaded) => {
   pendingEndFrameNotice.value = null;
   noticeFirstLastFrameRestore(pending);
 });
+
+/**
+ * Reuse settings on an identity print: `applyMetadataToForm` has already
+ * installed the bytes-less reattach descriptor, so all that is left is
+ * looking the face itself back up in the local content-addressed stash by
+ * the recorded `id_image_sha256`.
+ *
+ * A miss is disclosed INLINE, beside the well — never as a toast that claims
+ * the reuse succeeded. Without the photo the request carries no identity at
+ * all (`identityRequestFields` refuses an empty payload), which would render
+ * a completely different face under the same prompt and seed.
+ */
+async function restoreReusedIdentityPhoto(metadata: OutputMetadata) {
+  const epoch = ++identityRestoreEpoch;
+  identityRestoreNotice.value = null;
+  const provenance = identityProvenance(metadata);
+  if (!provenance) return;
+  const restored = await restoreIdentityPhoto(provenance.sha256);
+  // The lookup can take a moment; never clobber a slot the user has since
+  // reattached, and stand down entirely if another reuse has landed.
+  if (epoch !== identityRestoreEpoch) return;
+  const descriptor = form.state.value.identityImage;
+  if (!descriptor || descriptor.base64) return;
+  if (!restored) {
+    identityRestoreNotice.value = IDENTITY_PHOTO_UNAVAILABLE;
+    return;
+  }
+  form.state.value = {
+    ...form.state.value,
+    identityImage: {
+      kind: "upload",
+      filename: restored.filename || descriptor.filename,
+      base64: restored.base64,
+      width: restored.width ?? null,
+      height: restored.height ?? null,
+      mime: restored.mime ?? null,
+    },
+  };
+}
+// The disclosure is about THIS descriptor; a photo the user attaches
+// afterwards retires it.
+watch(
+  () => Boolean(form.state.value.identityImage?.base64),
+  (attached) => {
+    if (attached) identityRestoreNotice.value = null;
+  },
+);
 
 /**
  * FL2VA reuse restores its first/last frames as bytes-less reattach
@@ -2442,6 +2543,7 @@ function applyGenerationHandoff() {
   form.state.value = applyMetadataToForm(form.state.value, metadata, {
     models: models.value,
   });
+  void restoreReusedIdentityPhoto(metadata);
   fileUnder.restoreFromMetadata(metadata);
   noticeFirstLastFrameRestore(metadata);
 }
@@ -2587,6 +2689,14 @@ const advCount = computed(() =>
             guidanceOverrideCount(form.state.value.guidanceOverrides) > 0),
         wanRecipe: capabilities.value.wanRecipe.supported
           ? wanRecipeCount(form.state.value.wanRecipe)
+          : 0,
+        // Capability gating is the caller's job (advancedCount.ts): a knob
+        // whose group does not render must not inflate the badge.
+        identity: identitySupported.value
+          ? identityActiveCount({
+              weight: form.state.value.identityWeight ?? null,
+              startStep: form.state.value.identityStartStep ?? null,
+            })
           : 0,
       }),
 );
@@ -3037,6 +3147,14 @@ function validateSubmit(): boolean {
   if (conditioningError) {
     composerError.value = conditioningError;
     showAdvanced.value = true;
+    return false;
+  }
+  // Identity is refused as a COMBINATION (a LoRA, a source image, a knob with
+  // no photo, an unqualified checkpoint), so the block has to happen here as
+  // well as inline: `toRequest` silently drops the whole partition, which
+  // would otherwise render a stranger's face without a word.
+  if (identityError.value) {
+    composerError.value = identityError.value;
     return false;
   }
   if (form.state.value.icLoraControl) {
@@ -3631,6 +3749,18 @@ async function onSubmitInner(
   }
   if (req.source_image && originalSource) {
     void persistGenerationSourceMedia(req.source_image, originalSource);
+  }
+  // The identity photo never reaches the server's metadata as bytes, only as
+  // `id_image_sha256`, so keep the payload in the same content-addressed
+  // local stash a source image uses or Reuse settings has nothing to find.
+  if (req.id_image) {
+    const staged = form.state.value.identityImage;
+    void persistIdentityPhoto(req.id_image, {
+      filename: req.id_image_name || staged?.filename || "identity photo",
+      width: staged?.width ?? null,
+      height: staged?.height ?? null,
+      mime: staged?.mime ?? null,
+    });
   }
   const finalizedResult = route
     ? decision.kind === "chain"
@@ -4239,6 +4369,7 @@ function recreateFromGallery(item: GalleryImage) {
     format: item.format,
     models: models.value,
   });
+  void restoreReusedIdentityPhoto(item.metadata);
   fileUnder.restoreFromMetadata(item.metadata);
   noticeFirstLastFrameRestore(item.metadata);
 }
@@ -4354,6 +4485,16 @@ function openJob(job: Job) {
         };
       });
   }
+  // Unlike saved metadata, a queued request still holds the face payload, so
+  // selecting a running job restores the exact photo rather than a reattach
+  // descriptor. Any stale disclosure from an earlier reuse retires with it.
+  identityRestoreEpoch += 1;
+  identityRestoreNotice.value = null;
+  form.state.value.identityImage = request.id_image
+    ? image(request.id_image, request.id_image_name || "Identity photo")
+    : null;
+  form.state.value.identityWeight = request.id_weight ?? null;
+  form.state.value.identityStartStep = request.id_start_step ?? null;
   form.state.value.maskImage = request.mask_image
     ? image(request.mask_image, "Mask")
     : null;
@@ -4951,6 +5092,12 @@ onBeforeUnmount(() => {
                     h3BoundaryPickerTarget = 'lastFrame'
                   "
                 />
+                <IdentityPanel
+                  v-if="!sequenceMode"
+                  v-model="form.state.value"
+                  :models="models"
+                  :notice="identityRestoreNotice"
+                />
                 <SequenceOpeningImagePanel
                   v-else-if="showSequenceOpeningImage"
                   v-model="form.state.value"
@@ -5184,6 +5331,14 @@ onBeforeUnmount(() => {
           @open-mask="showMask = true"
           @open-h3-first-frame-picker="h3BoundaryPickerTarget = 'firstFrame'"
           @open-h3-last-frame-picker="h3BoundaryPickerTarget = 'lastFrame'"
+        />
+        <!-- The identity photo is media the user attaches, not a setting, so
+             it sits with the source wells; only its two knobs are Advanced. -->
+        <IdentityPanel
+          v-if="!sequenceMode"
+          v-model="form.state.value"
+          :models="models"
+          :notice="identityRestoreNotice"
         />
         <!-- Sequence's own source media: the opening frame sits exactly where
              the one-shot well does, never behind the Advanced toggle. -->

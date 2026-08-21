@@ -828,6 +828,19 @@ model root lets whoever writes the weights write the sidecar too. An
 `id_weight` of `0` applies no identity at all and is completely
 inert: it plans no assets, downloads nothing, and adds no memory demand.
 
+Studio surfaces: web and desktop Create render an **Identity** photo well
+beside the source-image wells with **Identity strength** and **Identity start
+step** in Advanced, gated on the advertised `supports_identity` — an
+unqualified checkpoint or an older host shows nothing at all and a staged
+photo parks (retained, off the wire, Generate unaffected) until a qualified
+model is selected again. `id_weight` and
+`id_start_step` stay off the wire until the user touches them, the photo is
+never fitted or cropped to the canvas, and an unqualified combination is
+reported inline with Generate blocked. The Library shows the recorded name,
+digest, strength, and start step, and Reuse settings restores them plus the
+photo itself when the device still holds it. iPhone, TUI, and Discord do not
+expose identity conditioning yet.
+
 ### ControlNet (SD1.5 only)
 
 ```bash

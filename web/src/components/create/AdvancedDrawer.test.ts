@@ -8,6 +8,7 @@ import {
 import type { GenerateFormState, ModelInfoExtended } from "../../types";
 import { createPinia, setActivePinia } from "pinia";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
+import { identityActiveCount } from "@studio/lib/identityConditioning";
 
 // The upscale section reads the host's model list. Only upscalers matter here.
 const UPSCALERS: ModelInfoExtended[] = [
@@ -934,5 +935,187 @@ describe("AdvancedDrawer — continue a video", () => {
       .findAll("option")
       .map((option) => option.attributes("value"));
     expect(options).toEqual(["1"]);
+  });
+});
+
+// ── Face-identity knobs (PuLID, #1224) ──────────────────────────────────
+//
+// The photo well is primary form; only the two knobs are Advanced, and both
+// must stay absent from the request until the user touches them so the
+// server's own defaults keep applying.
+describe("AdvancedDrawer identity group", () => {
+  function identityModel(supportsIdentity: boolean): ModelInfoExtended {
+    return {
+      name: "flux-dev-pulid:bf16",
+      family: "flux",
+      downloaded: true,
+      default_width: 1024,
+      default_height: 1024,
+      default_steps: 20,
+      default_guidance: 3.5,
+      generation_profile: {
+        schema_version: 1,
+        profile_id: "flux.v1",
+        profile_hash: "hash",
+        default_recipe_id: "default",
+        recipes: [
+          {
+            id: "default",
+            label: "Default",
+            request_selector: {},
+            defaults: { width: 1024, height: 1024, steps: 20, guidance: 3.5 },
+            resolution: {
+              domain: "dynamic",
+              alignment: 64,
+              min_width: 64,
+              min_height: 64,
+              max_pixels: 1_048_576,
+              aspect_groups: [],
+            },
+            steps: {
+              default: 20,
+              min: 1,
+              max: 100,
+              step: 1,
+              mode: "adjustable",
+            },
+            guidance: {
+              default: 3.5,
+              min: 0,
+              max: 20,
+              step: 0.1,
+              mode: "adjustable",
+            },
+            capabilities: {
+              guidance: { adjustable: true, supports_negative_prompt: false },
+              negative_prompt: { mode: "hidden", required: false },
+              supports_lora: true,
+              supports_controlnet: false,
+              supports_identity: supportsIdentity,
+              supports_sequence: false,
+              supports_extend: false,
+              supports_audio: false,
+              source_video: { mode: "hidden", required: false },
+              mask: { mode: "hidden", required: false },
+              keyframes: { mode: "hidden", required: false },
+              audio: { mode: "hidden", required: false },
+              lora: { mode: "adjustable", max_count: 4 },
+              controlnet: { mode: "hidden", max_count: 0 },
+              output: {
+                default_format: "png",
+                formats: ["png"],
+                audio_requires_mp4: false,
+              },
+              wan_recipe: {
+                mode: "hidden",
+                supports_distill_strength: false,
+                supports_first_last_frame: false,
+              },
+              schedulers: [],
+            },
+            provenance: [],
+          },
+        ],
+      },
+    } as unknown as ModelInfoExtended;
+  }
+
+  function identityDrawer(
+    supportsIdentity: boolean,
+    overrides: Partial<GenerateFormState> = {},
+  ) {
+    const model = identityModel(supportsIdentity);
+    return factory(
+      "flux",
+      { model: model.name, modelFamily: "flux", steps: 20, ...overrides },
+      { models: [model] },
+    );
+  }
+
+  it("is hidden on a checkpoint that is not identity-qualified", () => {
+    const wrapper = identityDrawer(false);
+    expect(wrapper.find("[data-test='section-identity']").exists()).toBe(false);
+  });
+
+  it("renders both knobs on an identity-qualified checkpoint", () => {
+    const wrapper = identityDrawer(true);
+    expect(wrapper.find("[data-test='section-identity']").exists()).toBe(true);
+    expect(wrapper.text()).toContain("Identity strength");
+    expect(wrapper.text()).toContain("Identity start step");
+  });
+
+  it("shows the defaults while untouched without writing them to the form", () => {
+    const wrapper = identityDrawer(true);
+    // 1.0 / 0 are what the SERVER would apply; showing them must not turn
+    // them into request fields, or a later default change stops reaching us.
+    expect(
+      (
+        wrapper.get("[data-test='identity-weight'] input")
+          .element as HTMLInputElement
+      ).value,
+    ).toBe("1");
+    expect(
+      (
+        wrapper.get("[data-test='identity-start-step']")
+          .element as HTMLInputElement
+      ).value,
+    ).toBe("");
+    expect(wrapper.emitted("update:modelValue")).toBeUndefined();
+    expect(wrapper.get("[data-test='section-identity']").text()).toContain(
+      "Model defaults",
+    );
+  });
+
+  it("writes the strength only once the slider moves", async () => {
+    const wrapper = identityDrawer(true);
+    const slider = wrapper.get("[data-test='identity-weight'] input");
+    (slider.element as HTMLInputElement).value = "1.45";
+    await slider.trigger("input");
+    const [next] = wrapper.emitted("update:modelValue")!.at(-1) as [
+      GenerateFormState,
+    ];
+    expect(next.identityWeight).toBe(1.45);
+  });
+
+  it("writes the start step, and clears back to null on an empty field", async () => {
+    const wrapper = identityDrawer(true, { identityStartStep: 4 });
+    const input = wrapper.get("[data-test='identity-start-step']");
+    (input.element as HTMLInputElement).value = "6";
+    await input.trigger("input");
+    let [next] = wrapper.emitted("update:modelValue")!.at(-1) as [
+      GenerateFormState,
+    ];
+    expect(next.identityStartStep).toBe(6);
+
+    (input.element as HTMLInputElement).value = "";
+    await input.trigger("input");
+    [next] = wrapper.emitted("update:modelValue")!.at(-1) as [
+      GenerateFormState,
+    ];
+    expect(next.identityStartStep).toBeNull();
+  });
+
+  it("summarizes the set knobs and counts them for the Advanced badge", () => {
+    const wrapper = identityDrawer(true, {
+      identityWeight: 1.4,
+      identityStartStep: 2,
+    });
+    const summary = wrapper.get("[data-test='section-identity']").text();
+    expect(summary).toContain("2 set");
+    expect(identityActiveCount({ weight: 1.4, startStep: 2 })).toBe(2);
+    expect(identityActiveCount({ weight: null, startStep: null })).toBe(0);
+  });
+
+  it("returns both knobs to the server defaults in one action", async () => {
+    const wrapper = identityDrawer(true, {
+      identityWeight: 1.4,
+      identityStartStep: 2,
+    });
+    await wrapper.get("[data-test='identity-reset']").trigger("click");
+    const [next] = wrapper.emitted("update:modelValue")!.at(-1) as [
+      GenerateFormState,
+    ];
+    expect(next.identityWeight).toBeNull();
+    expect(next.identityStartStep).toBeNull();
   });
 });

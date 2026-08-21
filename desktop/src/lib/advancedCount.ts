@@ -8,6 +8,7 @@
 import { generationCapabilitiesForFamily } from "./capabilities";
 import type { GenerateForm } from "./generateForm";
 import { guidanceOverridesAreEmpty } from "@studio/lib/guidanceOverrides";
+import { identityActiveCount } from "@studio/lib/identityConditioning";
 import { negativePromptWireValue } from "@studio/lib/negativePrompt";
 import { wanRecipeCount } from "@studio/lib/wanRecipe";
 
@@ -30,6 +31,14 @@ export function advancedActiveCount(form: GenerateForm): number {
   if (caps.supportsCfgPlus && form.cfgPlus) count += 1;
   if (caps.wanRecipe.supported) count += wanRecipeCount(form.wanRecipe);
   // Source images and attachments live in the primary form now, not Advanced.
+  // The identity photo well is primary form for the same reason; only its two
+  // knobs are Advanced, and only on a checkpoint that accepts them.
+  if (form.identitySupported === true) {
+    count += identityActiveCount({
+      weight: form.identityWeight,
+      startStep: form.identityStartStep,
+    });
+  }
   if (caps.supportsLora && form.loras.length > 0) count += 1;
   if (!caps.supportsVideo && form.upscaleModel) count += 1;
   if (caps.supportsVideo && form.cameraControl) count += 1;

@@ -133,6 +133,7 @@ import {
   audioOutputValidationError,
   cameraControlValidationError,
   fpsValidationError,
+  identityConditioningValidationError,
   profileGuidanceValidationError,
   profileStepsValidationError,
   resolutionValidationError,
@@ -199,6 +200,7 @@ import {
   persistGenerationSourceMedia,
   restoreGenerationSourceMedia,
 } from "@studio/lib/generationSourceMedia";
+import { persistIdentityPhoto, restoreIdentityPhoto } from "@studio/lib/identityConditioning";
 import { isMissingModelError } from "../lib/generateErrors";
 import { copyableError, describeTransportError } from "../lib/api/errors";
 import { startCatalogDownload } from "../lib/api/catalog";
@@ -800,6 +802,7 @@ const formValidationError = computed(
     sourceConditioningValidationError(form, {
       ignoreUnsupportedStagedSource: true,
     }) ??
+    identityConditioningValidationError(form) ??
     advancedVideoValidationError(form) ??
     wanRecipeValidationError(form),
 );
@@ -3344,6 +3347,18 @@ async function generate() {
     if (request.source_image && originalSource) {
       void persistGenerationSourceMedia(request.source_image, originalSource);
     }
+    if (request.id_image) {
+      // Saved metadata records `id_image_sha256`, never the face bytes, so the
+      // photo has to be kept locally under the digest of exactly what shipped
+      // or Reuse settings has nothing to look up. Best-effort: a failed write
+      // costs a reattach later, never this print.
+      const decoded = imageDimensionsFromBase64(request.id_image);
+      void persistIdentityPhoto(request.id_image, {
+        filename: request.id_image_name ?? "identity photo",
+        width: decoded?.width ?? null,
+        height: decoded?.height ?? null,
+      });
+    }
     const chainRouting = decideGenerateRequestRouting(request, draft.family);
     if (chainRouting.kind === "reject") {
       toasts.push(chainRouting.reason, "error");
@@ -3609,10 +3624,35 @@ function applyPrefill() {
     );
     if (endFrameNotice) toasts.push(endFrameNotice, "error");
     void restorePrefillSource(prefill.metadata, restoreEpoch);
+    // Independent of the source restore above: identity is its own partition,
+    // and a print may carry a face photo on a checkpoint that takes no source
+    // image at all — the source restore's own early-outs must not skip it.
+    void restorePrefillIdentityPhoto(prefill.metadata, restoreEpoch);
   } else if ("request" in prefill && prefill.request) {
     void restoreRequestSource(prefill.request, restoreEpoch);
   }
   void nextTick(() => composerRef.value?.focus?.());
+}
+
+/**
+ * Fill in the bytes behind a reused print's identity photo.
+ *
+ * `applyMetadataToForm` restores the recorded knobs and a bytes-less reattach
+ * descriptor; the photo itself lives only in the local content-addressed
+ * stash, keyed by the digest of exactly what shipped. A miss is deliberately
+ * silent here — the well already renders `IDENTITY_PHOTO_UNAVAILABLE` for a
+ * descriptor with no bytes, and rendering a different face would be worse
+ * than saying the original is gone.
+ */
+async function restorePrefillIdentityPhoto(metadata: OutputMetadata, epoch: number) {
+  const wanted = form.identityImage;
+  if (!wanted || wanted.base64) return;
+  const restored = await restoreIdentityPhoto(metadata.id_image_sha256).catch(() => null);
+  if (!restored || epoch !== restoreEpoch) return;
+  const slot = form.identityImage;
+  // Cleared, reattached, or replaced while the lookup ran — the user wins.
+  if (!slot || slot.base64 || slot.filename !== wanted.filename) return;
+  form.identityImage = { filename: restored.filename || slot.filename, base64: restored.base64 };
 }
 
 async function restoreRequestSource(request: GenerateRequest, epoch: number) {
