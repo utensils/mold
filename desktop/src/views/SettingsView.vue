@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, nextTick, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 import AccordionSection from "@ui/components/AccordionSection.vue";
 import CardSurface from "@ui/components/CardSurface.vue";
@@ -38,16 +38,22 @@ const pairingBaseUrl = computed(() => conn.baseUrl ?? "http://127.0.0.1:7680");
 const query = ref("");
 /** Which "All settings" accordion is open (one at a time) when not searching. */
 const openSection = ref<SectionId | null>(null);
+const updatesCard = ref<HTMLElement | null>(null);
 
-// Deep link: /settings?section=<id> opens that accordion (the Library trash
-// banner's "Change retention" lands on Settings ▸ Library this way). The view
-// also mounts router-less in tests, so the route is optional.
+// Deep links open accordions or reveal an always-open top card. The native
+// Check for Updates menu action uses `section=updates`; the Library trash
+// banner uses `section=library`. The view also mounts router-less in tests, so
+// the route is optional.
 const route = useRoute();
 watch(
   () => route?.query.section,
-  (section) => {
+  async (section) => {
     if (typeof section !== "string") return;
     if (ACCORDION_SECTIONS.some((s) => s.id === section)) openSection.value = section as SectionId;
+    if (section === "updates") {
+      await nextTick();
+      updatesCard.value?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
   },
   { immediate: true },
 );
@@ -144,7 +150,7 @@ function toggle(id: SectionId): void {
             />
           </section>
 
-          <section data-test="updates-card">
+          <section ref="updatesCard" data-test="updates-card">
             <div class="edge-code mb-2.5 uppercase">Updates</div>
             <UpdatesSection />
           </section>
