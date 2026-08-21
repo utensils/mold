@@ -321,7 +321,7 @@ html.mobile-surface:has(.mobile-shell.is-pair-scanning) #app,
 .mobile-output-mode {
   display: grid;
   gap: 7px;
-  margin-top: 14px;
+  margin: 14px 0;
 }
 
 .mobile-output-mode .ms-seg {
@@ -1491,12 +1491,16 @@ textarea.control {
 .mobile-range-field {
   display: grid;
   gap: 2px;
-  margin-top: 14px;
+  margin: 14px 0;
   color: var(--ink-3);
   font-family: var(--font-utility);
   font-size: var(--text-edge-code);
   letter-spacing: 0.04em;
   text-transform: uppercase;
+}
+
+.mobile-duration-field {
+  margin-bottom: 14px;
 }
 
 .mobile-range-field > span {
