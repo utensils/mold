@@ -5,7 +5,10 @@
   through candle, with no ONNX runtime, no Python, and no new native
   dependency. Several faces in one photo picks the largest and says so; a
   photo with no face is refused with a clear error instead of a meaningless
-  embedding. Measured against the upstream Python pipeline on four
-  public-domain portraits: landmarks within 0.24 px and ArcFace cosine at or
-  above 0.9993
+  embedding, and a photo taken with the phone held sideways is righted from its
+  EXIF tag before the detector sees it. The two InsightFace models are
+  re-verified against their pinned checksums on every load, so a model file
+  modified after download is refused rather than run. Measured against the
+  upstream Python pipeline on four public-domain portraits: landmarks within
+  0.24 px and ArcFace cosine at or above 0.9993
   ([#1222](https://github.com/utensils/mold/issues/1222)).
