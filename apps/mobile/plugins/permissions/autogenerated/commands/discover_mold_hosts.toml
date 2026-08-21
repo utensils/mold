@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-discover-mold-hosts"
+description = "Enables the discover_mold_hosts command without any pre-configured scope."
+commands.allow = ["discover_mold_hosts"]
+
+[[permission]]
+identifier = "deny-discover-mold-hosts"
+description = "Denies the discover_mold_hosts command without any pre-configured scope."
+commands.deny = ["discover_mold_hosts"]

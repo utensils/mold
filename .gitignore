@@ -54,6 +54,7 @@ web/*.tsbuildinfo
 !docs/design/**/*.png
 !apps/mobile/src-tauri/app-icon.png
 !apps/mobile/src-tauri/gen/apple/Assets.xcassets/**/*.png
+!apps/mobile/src-tauri/gen/android/app/src/main/res/mipmap-*/**/*.png
 !crates/mold-inference/src/ltx2/testdata/preprocess/*.jpg
 !crates/mold-inference/src/ltx2/testdata/preprocess/*.png
 # PuLID face-extraction parity fixtures (#1222): public-domain portraits and

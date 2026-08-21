@@ -1,7 +1,7 @@
-# mold Desktop and iPhone — Tauri 2 Architecture
+# mold Desktop and mobile — Tauri 2 Architecture
 
 Mold ships native macOS (Apple Silicon / Metal) and x86_64 Linux (CUDA)
-desktop apps plus a remote-only iPhone companion. The backend and shared
+desktop apps plus a remote-only iPhone companion and an Android foundation. The backend and shared
 frontend logic stay platform-neutral; Tauri platform configs and thin native
 bridges own window chrome, device capabilities, and bundle details. The Mold
 Studio Mold and Safelight theme families are shared without changing
@@ -11,6 +11,21 @@ Design system: [`../../docs/design/mold-studio-spec.html`](../../docs/design/mol
 — the Mold Studio interface spec these surfaces implement. Its information
 architecture is five workspaces on every surface: Create, Library, Models,
 Machines, and Settings.
+
+## Android foundation
+
+Android reuses the same standalone `apps/mobile/src-tauri` crate, the generated
+project at `apps/mobile/src-tauri/gen/android`, and the complete
+`desktop/src/mobile` Vue surface. It is remote-only for the same reason as iOS:
+no server or inference crates enter the phone build. The first scaffold targets
+SDK 36 with minimum SDK 24 and builds through `scripts/android.sh`; Android
+Studio, SDK/NDK, AVD, Gradle, Cargo, and Bun caches default to external storage.
+
+The Android-native boundary lives in `apps/mobile/plugins`. It encrypts per-host
+keys with a non-exportable Android Keystore AES-GCM key, retains only ciphertext
+in private preferences, and uses Tauri's Android barcode scanner for the shared
+one-time pairing flow. Android NSD for `_mold._tcp`, MediaStore/share intents,
+and system-bar/viewport behavior remain behind the existing command contracts.
 
 ## iOS companion
 

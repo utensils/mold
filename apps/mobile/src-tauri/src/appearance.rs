@@ -35,6 +35,34 @@ pub fn set_mobile_appearance(
     window: tauri::WebviewWindow,
     appearance: MobileAppearance,
 ) -> Result<(), String> {
+    platform_set_mobile_appearance(window, appearance)
+}
+
+#[cfg(target_os = "android")]
+fn platform_set_mobile_appearance(
+    window: tauri::WebviewWindow,
+    appearance: MobileAppearance,
+) -> Result<(), String> {
+    use tauri::Manager;
+    use tauri_plugin_mold_mobile_native::MoldMobileNativeExt;
+
+    let appearance = match appearance {
+        MobileAppearance::System => "system",
+        MobileAppearance::Light => "light",
+        MobileAppearance::Dark => "dark",
+    };
+    window
+        .app_handle()
+        .mold_mobile_native()
+        .set_mobile_appearance(appearance.to_string())
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(not(target_os = "android"))]
+fn platform_set_mobile_appearance(
+    window: tauri::WebviewWindow,
+    appearance: MobileAppearance,
+) -> Result<(), String> {
     window
         .with_webview(move |webview| {
             #[cfg(target_os = "ios")]

@@ -41,7 +41,11 @@ import {
   validateRemixVariants,
   DEFAULT_REMIX_VARIATIONS,
 } from "@studio/lib/promptTransform";
-import { claimPairingSession, parseMobilePairingPayload } from "@studio/api/pairing";
+import {
+  claimPairingSession,
+  parseMobilePairingPayload,
+  type PairingClientIdentity,
+} from "@studio/api/pairing";
 import { imageDimensionsFromBase64 } from "@studio/lib/imageDimensions";
 import {
   resolveDefaultSourceResolution,
@@ -381,7 +385,7 @@ import {
   type MobileSettings,
 } from "./settings";
 import { useMobileDownloadsStore } from "./mobileDownloads";
-import { isNativeIOSRuntime } from "./platform";
+import { isNativeAndroidRuntime, isNativeIOSRuntime } from "./platform";
 import {
   createMobileExpansionRecovery,
   mobileExpansionRecoveryStaleReason,
@@ -540,6 +544,7 @@ const OUTPUT_OPTIONS = [
   { value: "single" as const, label: "One shot" },
   { value: "sequence" as const, label: "Sequence" },
 ];
+const androidNativeRuntime = isNativeAndroidRuntime();
 const tab = ref<Tab>("generate");
 // Output is a setting of Create, not a place. The store hydrates here (before
 // first paint) so the legacy `mold.mobile.create-mode.v1` key migrates into
@@ -2219,8 +2224,12 @@ function persistHosts(): void {
 async function hydrateApiKeys(): Promise<void> {
   await Promise.all(
     hosts.value.map(async (host) => {
-      host.apiKey =
-        (await invoke<string | null>("keychain_get_api_key", { hostId: host.id })) ?? "";
+      try {
+        host.apiKey =
+          (await invoke<string | null>("keychain_get_api_key", { hostId: host.id })) ?? "";
+      } catch {
+        host.apiKey = "";
+      }
     }),
   );
 }
@@ -2300,10 +2309,10 @@ async function pairFromCode(code: () => Promise<string>): Promise<void> {
     const iPad =
       /iPad/i.test(navigator.userAgent) ||
       (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
-    const claim = await claimPairingSession(baseUrl, payload.token, {
-      name: iPad ? "Mold on iPad" : "Mold on iPhone",
-      kind: iPad ? "ipad" : "iphone",
-    });
+    const client: PairingClientIdentity = androidNativeRuntime
+      ? { name: "Mold on Android", kind: "android" }
+      : { name: iPad ? "Mold on iPad" : "Mold on iPhone", kind: iPad ? "ipad" : "iphone" };
+    const claim = await claimPairingSession(baseUrl, payload.token, client);
     if (claim.instance_id !== payload.instance_id) {
       throw new Error("The pairing code was redeemed by a different Mold host.");
     }
@@ -8076,6 +8085,7 @@ onBeforeUnmount(() => {
         :host-count="hosts.length"
         :app-version="appVersion"
         :host="selectedHost ?? null"
+        :update-channel="androidNativeRuntime ? 'Google Play' : 'TestFlight'"
         @update="updateSettings"
         @manage-hosts="manageHostsFromSettings"
       />
@@ -9606,11 +9616,17 @@ onBeforeUnmount(() => {
             class="secondary-button"
             type="button"
             :disabled="discovering"
+            data-test="mobile-discover-hosts"
             @click="discoverHosts"
           >
             {{ discovering ? "Scanning…" : "Discover nearby" }}
           </button>
-          <div v-for="host in discovered" :key="`${host.host}:${host.port}`" class="host-row">
+          <div
+            v-for="host in discovered"
+            :key="`${host.host}:${host.port}`"
+            class="host-row"
+            data-test="mobile-discovered-host"
+          >
             <div class="host-row-head">
               <div>
                 <div class="host-name">{{ host.name }}</div>

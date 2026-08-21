@@ -22,6 +22,7 @@ const props = defineProps<{
   hostCount: number;
   appVersion: string;
   host?: MobileHost | null;
+  updateChannel?: string;
 }>();
 
 const emit = defineEmits<{
@@ -39,7 +40,7 @@ const families: Array<{
 ];
 
 const appearances: Array<{ value: Theme; label: string; description: string }> = [
-  { value: "system", label: "System", description: "Match iPhone" },
+  { value: "system", label: "System", description: "Match phone" },
   { value: "dark", label: "Dark", description: "Lights off" },
   { value: "light", label: "Light", description: "Lights on" },
 ];
@@ -308,7 +309,7 @@ onBeforeUnmount(() => {
     <section class="mobile-settings-section" aria-labelledby="mobile-settings-photos-title">
       <div class="mobile-settings-section-copy">
         <h2 id="mobile-settings-photos-title">Photos</h2>
-        <p>Keep newly generated images in your iPhone photo library as well as Mold Library.</p>
+        <p>Keep newly generated images in your phone’s photo library as well as Mold Library.</p>
       </div>
       <fieldset class="mobile-settings-fieldset">
         <legend>Generated images</legend>
@@ -370,7 +371,7 @@ onBeforeUnmount(() => {
           {{
             hostCount === 0
               ? "No hosts saved."
-              : `${hostCount} host${hostCount === 1 ? "" : "s"} saved. API keys stay in your iPhone Keychain.`
+              : `${hostCount} host${hostCount === 1 ? "" : "s"} saved. API keys stay in secure device storage.`
           }}
         </p>
         <!-- Create only offers these while two or more machines are
@@ -431,7 +432,7 @@ onBeforeUnmount(() => {
         </div>
         <div>
           <dt>Updates</dt>
-          <dd>TestFlight</dd>
+          <dd data-test="mobile-update-channel">{{ updateChannel ?? "TestFlight" }}</dd>
         </div>
         <div>
           <dt>Privacy</dt>

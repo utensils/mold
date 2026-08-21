@@ -24,11 +24,11 @@ import {
 
 export const MAX_INLINE_GENERATION_MEDIA_BYTES = 64 * 1024 * 1024;
 // JSON base64 expands bytes by roughly 4/3 and the server body limit is 64
-// MiB. Keep the whole iPhone conditioning payload below 45 MiB so the request
+// MiB. Keep the whole phone conditioning payload below 45 MiB so the request
 // has room for JSON/scalars without a late extractor rejection.
 export const MAX_MOBILE_GENERATION_REQUEST_MEDIA_BYTES = 45 * 1024 * 1024;
 export const MOBILE_MEDIA_BUDGET_ERROR =
-  "Combined generation media must be 45 MiB or smaller on iPhone.";
+  "Combined generation media must be 45 MiB or smaller on this phone.";
 
 export type InlineGenerationMediaField =
   | "sourceImage"

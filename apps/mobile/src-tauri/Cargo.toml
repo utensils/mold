@@ -3,7 +3,7 @@ name = "mold-mobile"
 version = "0.23.3"
 edition = "2024"
 license = "MIT"
-description = "Mold iOS companion for remote generation and gallery access"
+description = "Mold mobile companion for remote generation and gallery access"
 authors = [
     "James Brink <brink.james@gmail.com>",
     "Jeffrey Dilley <jeff.dilley@gmail.com>",
@@ -38,7 +38,12 @@ objc2-photos = { version = "0.3.2", default-features = false, features = ["PHAss
 objc2-ui-kit = { version = "0.3.2", default-features = false, features = ["UIActivity", "UIActivityViewController", "UIInterface", "UIImage", "UIPasteboard", "UIPopoverPresentationController", "UIPresentationController", "UIResponder", "UIScrollView", "UIView", "UIViewController", "objc2-core-foundation"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+
+[target.'cfg(any(target_os = "ios", target_os = "android"))'.dependencies]
 tauri-plugin-barcode-scanner = "2.4.5"
+
+[target.'cfg(target_os = "android")'.dependencies]
+tauri-plugin-mold-mobile-native = { path = "../plugins" }
 
 [features]
 default = []

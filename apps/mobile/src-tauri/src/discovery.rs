@@ -14,14 +14,48 @@ pub struct DiscoveredHost {
 }
 
 #[tauri::command]
-pub async fn discover_mold_hosts(timeout_ms: Option<u32>) -> Result<Vec<DiscoveredHost>, String> {
+pub async fn discover_mold_hosts(
+    app: tauri::AppHandle,
+    timeout_ms: Option<u32>,
+) -> Result<Vec<DiscoveredHost>, String> {
     let timeout = Duration::from_millis(u64::from(timeout_ms.unwrap_or(2500).clamp(500, 10_000)));
+    platform_discover(app, timeout).await
+}
+
+#[cfg(target_os = "android")]
+async fn platform_discover(
+    app: tauri::AppHandle,
+    timeout: Duration,
+) -> Result<Vec<DiscoveredHost>, String> {
+    use tauri_plugin_mold_mobile_native::MoldMobileNativeExt;
+
+    app.mold_mobile_native()
+        .discover_mold_hosts(timeout.as_millis() as u32)
+        .await
+        .map(|hosts| {
+            hosts
+                .into_iter()
+                .map(|host| DiscoveredHost {
+                    name: host.name,
+                    host: host.host,
+                    port: host.port,
+                })
+                .collect()
+        })
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(not(target_os = "android"))]
+async fn platform_discover(
+    _app: tauri::AppHandle,
+    timeout: Duration,
+) -> Result<Vec<DiscoveredHost>, String> {
     tauri::async_runtime::spawn_blocking(move || scan(timeout))
         .await
         .map_err(|error| format!("discovery task failed: {error}"))?
 }
 
-#[cfg(not(target_vendor = "apple"))]
+#[cfg(all(not(target_vendor = "apple"), not(target_os = "android")))]
 fn scan(_timeout: Duration) -> Result<Vec<DiscoveredHost>, String> {
     Err("Bonjour discovery is available in the Apple build".into())
 }

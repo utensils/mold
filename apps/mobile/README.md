@@ -1,11 +1,16 @@
-# Mold for iPhone
+# Mold mobile
 
 Mold is equally owned and maintained by core contributors James Brink and
 Jeffrey Dilley.
 
-Mold for iPhone is a remote-only Tauri 2 client. It never links or embeds the
-GPU inference stack; a saved Mold server owns the models, queue, downloads,
-generation work, and gallery media.
+Mold mobile is a remote-only Tauri 2 client for iPhone and Android. It never
+links or embeds the GPU inference stack; a saved Mold server owns the models,
+queue, downloads, generation work, and gallery media. Both native shells reuse
+this crate and the same Vue product frontend. The iPhone app is shipped through
+TestFlight. The Android app has native secure credentials, QR pairing, NSD
+discovery, media actions, inset-aware system chrome, and an emulator-backed CI
+gate. Relevant `main` changes also produce a downloadable nightly APK. Play
+signing and store publication remain release work.
 
 The app is designed for iPhone first and supports iOS 17 or later. iPad is a
 responsive secondary target.
@@ -24,16 +29,23 @@ path.
   host targets, SSE handling, generation capabilities, the form/request
   builder, source fitting, gallery media, catalog helpers, and themes
 - Generated Apple project: `apps/mobile/src-tauri/gen/apple`
+- Generated Android project: `apps/mobile/src-tauri/gen/android`
 - Bundle identifier: `com.utensils.mold`
 - Minimum iOS version: 17.0
+- Android compile/target SDK: 36; minimum SDK: 24
 
-The thin mobile crate is excluded from the root Cargo workspace so an iOS build
-never cross-compiles the desktop server or inference dependency tree. Native
-commands are intentionally limited to platform responsibilities:
+The thin mobile crate is excluded from the root Cargo workspace so a phone
+build never cross-compiles the desktop server or inference dependency tree.
+Native commands are intentionally limited to platform responsibilities:
 
-- Keychain storage for per-host API keys
-- Bonjour/DNS-SD discovery of `_mold._tcp`
-- UIKit appearance synchronization for readable system chrome
+- Keychain or Android Keystore storage for per-host API keys
+- Bonjour or Android NSD discovery of `_mold._tcp`
+- UIKit or Android system-bar appearance synchronization
+- Native clipboard, Photos/MediaStore, and share-sheet actions
+
+Android implements those contracts through the local `apps/mobile/plugins`
+Kotlin bridge plus Tauri's barcode-scanner plugin. Keep platform work behind
+the same commands; do not fork the product UI or remote HTTP/SSE logic.
 
 Everything a remote Mold server can answer uses the same authenticated HTTP
 and SSE contract as desktop. Do not import desktop stores that assume a local
@@ -285,7 +297,7 @@ pushed screen opened from the header.
   chip is offered, so turning it off never touches prints already made.
   Settings also links to host
   management and shows the app version, remote-only processing policy, and
-  TestFlight update channel. About opens the public privacy policy at
+  platform update channel (TestFlight on iPhone, Google Play on Android). About opens the public privacy policy at
   `https://utensils.io/mold/privacy` through the native external-browser opener.
 
 The app shell suppresses WebKit focus/double-tap page zoom and rubber-band
@@ -444,15 +456,18 @@ WebView local storage contains non-secret mobile state:
   per-host latest-print timestamps and the first-visit marker for New badges
 
 Per-host API keys live in the iOS Keychain under
-`com.utensils.mold.remote-api-key`. Never move them into local storage, query
-parameters, logs, or generated project files.
+`com.utensils.mold.remote-api-key`. Android encrypts them with a non-exportable
+AES-GCM key under `com.utensils.mold.remote-api-key.v1` in Android Keystore; only
+ciphertext is stored in private preferences. Never move keys into local storage,
+query parameters, logs, generated project files, or plain Android
+SharedPreferences.
 
 Mobile pairing uses authenticated `POST /api/pairing/sessions` and the
 one-time-token `POST /api/pairing/claim`. The claim route is intentionally the
 only unauthenticated credential handoff: tokens are 256-bit random values,
 stored server-side only as an HMAC, capped, single-use, and expire after two
 minutes. Both responses are `no-store`; the QR must never contain the durable
-API key. Pairing QR codes use the registered `mold://pair` scheme so the iOS
+API key. Pairing QR codes use the registered `mold://pair` scheme so the mobile
 Camera app offers to open them directly in Mold; cold-launch and already-open
 links share the same claim, instance-verification, and Keychain path as Mold's
 in-app scanner.
@@ -471,6 +486,34 @@ seeking without exposing the long-lived API key. Keep the image-only fallback
 for older hosts, but never buffer a whole video as that fallback.
 
 ## Local development
+
+### Android
+
+The default setup keeps Android Studio and the large SDK, NDK, emulator, AVD,
+Gradle, Cargo, and Bun caches under `/Volumes/ExternalStorage/Android`. Override
+the root with `MOLD_ANDROID_ROOT` when the volume is mounted elsewhere.
+
+```bash
+nix develop
+./scripts/android.sh setup # first machine setup only
+android-doctor             # print and verify every resolved path
+android-emulator           # boot Mold_API_37 (Pixel 9 Pro / Android 17)
+android-dev                # Tauri hot reload
+android-check              # debug ARM64 APK build
+android-test               # Keystore, MediaStore, content-URI, and share tests
+android-run                # production-mode run
+android-build              # ARM64/ARMv7 Google Play AAB
+```
+
+`android-studio` is installed as
+`/Volumes/ExternalStorage/Android/Android Studio.app`. Open the generated
+project with `./scripts/android.sh studio`. The helper defaults to NDK
+`27.0.12077973`, which is pinned by the generated Tauri project; change it only
+with a deliberate template/toolchain upgrade. The generated Gradle root replaces
+the scanner plugin's direct thin dependency with ML Kit's bundled barcode model,
+so first-run and offline QR pairing never waits for a Google Play module download.
+
+### iOS
 
 Enter the Nix development shell on macOS. Xcode and CocoaPods are required.
 
@@ -521,6 +564,8 @@ bun run test
 bun run build:mobile
 
 cd ..
+android-doctor
+android-check
 ./scripts/tests/ios-release-assets.sh
 ./scripts/ios.sh check
 ./scripts/ios.sh simulator
@@ -539,7 +584,18 @@ Keep `apps/mobile/src-tauri/Info.ios.plist`, the generated Apple plist, and
 `gen/apple/project.yml` aligned when native capabilities change. Simulator
 builds must retain Xcode's ad-hoc signature so Keychain access works.
 
-## CI and TestFlight
+## CI and distribution
+
+`.github/workflows/android.yml` runs for Android and shared-mobile changes. It
+classifies the changed paths before spending Android build time. Relevant pull
+requests build the ARM64 debug APK with the pinned NDK; the Android 15 emulator
+and native credential, discovery, MediaStore, clipboard, content-URI, and
+authenticated-share instrumentation tests run only when the Kotlin/generated
+Android surface changed. Relevant `main` pushes build an unsigned ARM64/ARMv7
+release APK and retain it for 14 days as the `mold-android-nightly-apk` workflow
+artifact. `./scripts/android.sh build` separately proves the local Play artifact
+path by producing the unsigned ARM64/ARMv7 release AAB. Repository keystore
+secrets and Play Console publishing are intentionally not configured yet.
 
 `.github/workflows/ios.yml` runs for mobile-relevant pull requests and `main`
 changes, including shared component changes imported by the mobile entry. It
