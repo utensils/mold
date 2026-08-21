@@ -3350,7 +3350,20 @@ async function loadTemplate(template: GenerationTemplate): Promise<void> {
   if (epoch !== templateLoadEpoch) return;
   // A pre-#787 template lacking `negativePromptDefault` is normalized first
   // so its empty negative reads as "untouched", not the explicit "" opt-out.
+  //
+  // A template snapshots the WHOLE form, so it also carries whatever title and
+  // File under draft were live when it was saved — neither of which is a
+  // generation setting. Loading one must not rename the print in progress or
+  // re-file it, and the auto-tag mirror is a Settings preference that a
+  // snapshot may not override.
+  const title = form.title;
+  const fileUnder = form.fileUnder;
+  const fileUnderMatchSnapshot = form.fileUnderMatch;
   Object.assign(form, normalizeLegacyNegativeSnapshot(hydrated.form, generationModels.value));
+  form.title = title;
+  form.fileUnder = fileUnder;
+  form.fileUnderMatch = fileUnderMatchSnapshot;
+  form.fileUnderAutoTag = mobileSettings.autoTagTitle;
   const sameHost = !!template.scopeId && template.scopeId === selectedHostId.value;
   if (!sameHost) clearHostScopedGenerationSelections();
   const selectedEntry = generationModels.value.find((model) => model.name === form.model);

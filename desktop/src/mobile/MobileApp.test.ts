@@ -4,7 +4,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { IDBFactory } from "fake-indexeddb";
 import { installMemoryLocalStorage } from "../lib/testSupport/memoryLocalStorage";
 import type { GalleryImage, ModelEntry, ServerStatus } from "../lib/api/types";
-import { applyModelDefaults, type GenerateForm } from "../lib/generateForm";
+import { applyModelDefaults, newGenerateForm, type GenerateForm } from "../lib/generateForm";
+import { saveGenerationTemplate } from "../lib/generationTemplates";
+import { MOBILE_GENERATION_TEMPLATES_STORAGE_KEY } from "./mobileTemplateStorage";
 import {
   loadCachedGallery,
   storeCachedGallery,
@@ -9316,6 +9318,32 @@ describe("MobileApp Create File under", () => {
     expect(
       wrapper.findAll("[data-test='mobile-file-under-tag']").map((chip) => chip.text()),
     ).toEqual([expect.stringContaining("smurfs"), expect.stringContaining("Blue")]);
+  });
+
+  it("leaves the print's name and filing alone when a template is loaded", async () => {
+    // A template snapshots the whole form, so it also carries whatever title,
+    // filing, and auto-tag mirror were live when it was saved. None of those
+    // are generation settings: loading a template must not rename the print
+    // in progress, re-file it, or silently switch the ghost chip off.
+    const stale = newGenerateForm();
+    stale.model = model.name;
+    stale.family = model.family;
+    stale.prompt = "a template prompt";
+    stale.title = "Someone else's name";
+    stale.fileUnderAutoTag = false;
+    stale.fileUnder = { ...stale.fileUnder, manualTags: ["stale"] };
+    saveGenerationTemplate("Storm", stale, MOBILE_GENERATION_TEMPLATES_STORAGE_KEY, "studio-id");
+    await openCreateWithFiling();
+
+    await fieldControl("Title").setValue("Smurfs");
+    await wrapper!.get("[data-test='mobile-template-disclosure']").trigger("click");
+    await wrapper!.get("[data-test='mobile-template-load']").trigger("click");
+    await flushPromises();
+
+    expect(fieldControl("Prompt").element).toHaveProperty("value", "a template prompt");
+    expect((fieldControl("Title").element as HTMLInputElement).value).toBe("Smurfs");
+    expect(wrapper!.get("[data-test='mobile-file-under-ghost']").text()).toContain("smurfs");
+    expect(wrapper!.findAll("[data-test='mobile-file-under-tag']")).toHaveLength(0);
   });
 
   it("previews the creation-time filename with the title slug", async () => {
