@@ -543,7 +543,21 @@ such as `/generate` and `/catalog` render Page Not Found:
   chip editor with autocomplete, and an **In collections** checklist with
   **New…**. Select mode's bar gains **Add to collection**, **Tag**,
   **♥ Favorite**, and **Trash**. Titles typed in Create's title field travel
-  with the request and name the download (`title-slug.png`).
+  with the request and lead the suggested download name
+  (`{title-slug}__{model}__s{seed}.{ext}`; the file in the gallery is never
+  renamed).
+- **File under** in Create (on hosts that advertise `gallery.organize`) files
+  a print as you make it, between the essentials and Advanced — inside the
+  controls sheet on phones. A titled print offers its own title slug as a
+  dashed, removable tag chip; **Add tag…** suggests the tags your machines
+  already use with counts; and the collection row pre-selects — never creates
+  — the collection whose name matches the title, offering None, every merged
+  collection, and an inline **New collection…**. A line beneath previews the
+  filename the print will land as. The choice rides one shots, every batch
+  sibling, every prepared variation, and the single print a sequence stitches,
+  and **Reuse settings** restores what a print was actually filed under.
+  **Settings ▸ Library ▸ Tag new prints with their title** (stored in this
+  browser) turns the title chip off.
 - Shortcuts: **F** favorite · **T** tag · **⌘⇧N** new collection · **⌫** trash
   (undo for 6 s) · **⌘⌫** delete forever (confirm).
 - Destructive copy stays plain: **Empty trash**, **Delete forever**, and

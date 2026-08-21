@@ -128,9 +128,21 @@ surface powers it, so anything the app does maps to a documented endpoint.
   trash: N" and an **Empty trash** action. Naming a print starts in Create: the
   header's "Untitled print" is editable (click, Enter/blur commits, Escape
   reverts); the name travels with every sibling of that print, is restored by
-  **Reuse settings**, and becomes the suggested filename when you save or
-  export. Older servers without organization simply hide these controls and
-  keep the previous delete wording.
+  **Reuse settings**, and leads the name suggested when you save or export
+  (`{title-slug}__{model}__s{seed}.{ext}` — the file in the Library is never
+  renamed). Filing starts in Create too: a **File under** group sits in the
+  inspector between the essentials and **Advanced**, offering the print's own
+  title as a removable tag chip, typed tags with suggestions drawn from every
+  connected machine, and a collection row that pre-selects — never creates —
+  the collection whose name matches the title, with a picker for the fleet's
+  collections and an inline **New collection…**. A line beneath previews the
+  filename the print will land as. The choice rides the one shot, every
+  sibling of a batch, every prepared variation, and the single print a
+  sequence stitches; **Reuse settings** restores it, and
+  **Settings ▸ Library ▸ Tag new prints with their title** turns the title
+  chip off without touching prints you already made. Older servers without
+  organization simply hide these controls and keep the previous delete
+  wording.
 - **Models** — one searchable model workspace split into **Installed** and
   **Discover** segments: installed models in the Installed segment, above
   the live Hugging Face/Civitai catalog in Discover, filtered by

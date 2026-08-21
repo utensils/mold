@@ -384,7 +384,10 @@ frames, so a video-shaped probe falls through and mislabels the response.
   "embed_metadata": true,
   "upscale_model": "real-esrgan-x4plus:fp16",
   "expand": false,
-  "output_format": "png"
+  "output_format": "png",
+  "title": "Smurf Village at Dusk",
+  "tags": ["smurfs", "blue hour"],
+  "collection": { "name": "Blue Period" }
 }
 ```
 
@@ -449,6 +452,7 @@ Important fields:
 | `embed_metadata`                                             | override config/env metadata embedding for this request                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `batch_id`, `batch_index`, `batch_count`                     | optional native prepared-batch identity plus one-based sibling position/total; copied unchanged into complete-event and Gallery metadata                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `source_fit`                                                 | additive, engine-ignored provenance recording the client-side source-image resize/crop policy; echoed verbatim into gallery `OutputMetadata.source_fit` so Reuse settings and running-job selection can restore the crop choice                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `title`, `tags`, `collection`                                | creation-time filing: the print's name plus the tags and collection it lands in. `title` is ≤ 120 characters, embedded in metadata, seeded into the gallery row, and folded into the default filename as `~slug`. `tags` holds at most 20 distinct names of 1–64 characters each. `collection` is `{ "id": "…" }` or `{ "name": "…" }`; a name resolves by slug and is created when absent. See [Creation-time filing](#creation-time-filing).                                                                                                                                                                                                                       |
 | `upscale_model`                                              | post-generation Real-ESRGAN model applied before returning images                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 
 `guidance_overrides` is optional and every field inside it is optional. An
@@ -469,6 +473,44 @@ upscaled image in `image` and includes additive `original_image`,
 the pair. Gallery metadata exposes the saved file size in `width` / `height`
 and the reusable pre-upscale canvas in `generation_width` /
 `generation_height`.
+
+### Creation-time filing
+
+`title`, `tags`, and `collection` let a print arrive already organized instead
+of being filed afterwards. They are additive and optional — a request that
+omits them behaves exactly as before — and the same three fields are accepted
+on the chain body, where they describe the **stitched** print a sequence
+produces; intermediate clips never reach the gallery and are never filed.
+Batch and prepared siblings inherit their parent's filing.
+
+Validation happens at admission, before any queue work:
+
+- at most **20** distinct tags after normalization, each **1–64** Unicode
+  scalars. Runs of whitespace and whitespace-like controls collapse to a
+  single space; any other control character is a `422`. A leading `#` is an
+  ordinary character — the server never strips it, so `#smurfs` and `smurfs`
+  are different tags.
+- tags match case-insensitively, so `Smurfs` and `smurfs` are one tag.
+- `collection` is either `{ "id": "…" }` (resolved at admission) or
+  `{ "name": "…" }` (resolved by slug on the serving host, created when
+  absent). Creating by name is what makes one name mean one collection across
+  a fleet.
+
+Filing is applied **once**, when the print is published, and only as the
+gallery row is inserted. Organization is user-owned from that moment: a
+reconcile, an import, or a re-publication never resurrects a tag someone
+removed.
+
+The server never auto-tags. mold's own clients optionally add the title's slug
+as a tag before sending (`generate.auto_tag_title` on the CLI and TUI, **Tag
+new prints with their title** in the web, desktop, and iPhone apps), which is
+why the tag is always visible in the request rather than invented downstream.
+
+Nothing about filing can fail a render. A host running with
+`MOLD_DB_DISABLE=1`, or a `{ "id": … }` collection deleted between listing and
+generation, drops the filing, publishes the print anyway, and says so through the
+`x-mold-request-warning` response header documented above and the additive
+`request_warnings` list on `GenerateResponse` / `ChainResponse`.
 
 The exhaustive schema for enums and nested objects is served by the running
 server at `/api/docs` and `/api/openapi.json`.
@@ -832,6 +874,12 @@ Both forms also accept optional `original_prompt`, `batch_id`, `batch_index`,
 and `batch_count` provenance. These fields survive normalization and durable
 resume and are copied into the stitched output's completion and Gallery
 metadata.
+
+Both forms also accept the same optional `title`, `tags`, and `collection`
+fields as `/api/generate` — see
+[Creation-time filing](#creation-time-filing). They apply to the **stitched**
+print the chain produces: intermediate clips are working artifacts inside the
+job directory, never reach the gallery, and are never filed.
 
 **Auto-expand body** (what `mold run --frames N` emits):
 
