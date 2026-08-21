@@ -28,7 +28,10 @@ import { SourceFitPreprocessCache } from "@ui/lib/sourceFitPreprocessCache";
 import { createUuid } from "@studio/lib/id";
 import { filterRestrictedModels, modelAccessRestrictionFor } from "@studio/lib/modelAccess";
 import { expansionTaskForRequest } from "@studio/lib/expandTask";
-import { effectiveGenerationRecipe } from "@studio/lib/generationProfile";
+import {
+  effectiveGenerationRecipe,
+  fixedRecipeControlOverrides,
+} from "@studio/lib/generationProfile";
 import {
   conditioningFingerprint,
   defaultRemixDimensions,
@@ -4307,6 +4310,17 @@ async function prepareGenerationRequest(
   draft: GenerateForm,
   isCurrent: () => boolean = () => true,
 ) {
+  // Fixed recipe controls are not user choices: a stale draft value (restored
+  // before the recipe landed, model swapped under it) snaps to what the
+  // disabled control displays instead of queueing a shape the host refuses.
+  // It runs before the source fits below so their target is the canvas that
+  // actually renders. Shared with desktop and web.
+  Object.assign(
+    draft,
+    fixedRecipeControlOverrides(
+      effectiveGenerationRecipe(selectedGenerationModel.value, draft.pipeline),
+    ),
+  );
   const draftCaps = generationCapabilitiesForFamily(
     draft.family,
     draft.model,
