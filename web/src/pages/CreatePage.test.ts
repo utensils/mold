@@ -1508,15 +1508,13 @@ describe("CreatePage layout and behavior", () => {
     await flushPromises();
 
     expect(createChainJobMock).toHaveBeenCalledTimes(1);
-    expect(createChainJobMock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        stages: [
-          expect.not.objectContaining({ source_image: expect.anything() }),
-          expect.not.objectContaining({ source_image: expect.anything() }),
-        ],
-      }),
-      expect.anything(),
-    );
+    const request = createChainJobMock.mock.calls[0]?.[0] as unknown as {
+      stages: Array<Record<string, unknown>>;
+    };
+    expect(request.stages).toHaveLength(2);
+    for (const stage of request.stages) {
+      expect(stage).not.toHaveProperty("source_image");
+    }
     // The draft keeps the image for a checkpoint that can use it later.
     expect(draft.openingImage).toMatchObject({ filename: "opening.png" });
   });
