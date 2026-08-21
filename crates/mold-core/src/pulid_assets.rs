@@ -82,6 +82,43 @@ pub fn missing_pulid_files(config: &Config) -> Vec<&'static ModelFile> {
         .collect()
 }
 
+/// The EVA02-CLIP vision tower mold DERIVES from the `.pt` source on first use.
+///
+/// The name lives here rather than beside the converter in `mold-inference`
+/// because removal has to delete it and `mold-core` cannot see that crate. It
+/// is the converter's authority all the same — `encoders::eva_clip_convert`
+/// reads it from here — so the two can never name different files.
+pub const DERIVED_VISION_FILENAME: &str = "eva02_clip_l_336_vision.safetensors";
+
+/// Provenance sidecar written beside [`DERIVED_VISION_FILENAME`]. Never read
+/// back to decide anything; deleted with the artifact it describes.
+pub const DERIVED_VISION_SIDECAR_FILENAME: &str = "eva02_clip_l_336_vision.json";
+
+/// The artifacts mold derived rather than downloaded, present or not.
+///
+/// These are NOT manifest files, so nothing that enumerates the manifest can
+/// find them — which is exactly how a `mold rm pulid-flux` would leave 609 MB
+/// of converted weights and their sidecar behind. They live beside the `.pt`
+/// they were converted from.
+pub fn derived_pulid_paths(config: &Config) -> Vec<PathBuf> {
+    let manifest = pulid_manifest();
+    let models_dir = config.resolved_models_dir();
+    let Some(source) = file_for(ModelComponent::IdentityVisionEncoder) else {
+        return Vec::new();
+    };
+    let root = models_dir
+        .join(crate::manifest::storage_path(manifest, source))
+        .parent()
+        .map(std::path::Path::to_path_buf);
+    root.map(|root| {
+        vec![
+            root.join(DERIVED_VISION_FILENAME),
+            root.join(DERIVED_VISION_SIDECAR_FILENAME),
+        ]
+    })
+    .unwrap_or_default()
+}
+
 /// Canonical on-disk destinations for every PuLID asset, present or not.
 ///
 /// Used by removal, which must delete the files it planned to write rather
@@ -93,6 +130,7 @@ pub fn pulid_storage_paths(config: &Config) -> Vec<PathBuf> {
         .files
         .iter()
         .map(|file| models_dir.join(crate::manifest::storage_path(manifest, file)))
+        .chain(derived_pulid_paths(config))
         .collect()
 }
 

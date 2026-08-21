@@ -59,7 +59,8 @@ pub enum ComponentRole {
     /// the generation device beside the transformer it conditions.
     IdentityAdapter,
     /// The EVA02-CLIP-L-14-336 vision tower PuLID encodes the reference face
-    /// with. Also a generation-device artifact.
+    /// with. CPU-only: the tower runs once at admission, on the host, and the
+    /// generation device never sees it.
     IdentityVisionEncoder,
     /// InsightFace SCRFD face detector. ONNX, and CPU-only in milestone 1.
     FaceDetector,
@@ -80,6 +81,12 @@ impl ComponentRole {
         )
     }
 
+    /// [`Self::is_host_only`] for a sibling module's test.
+    #[cfg(test)]
+    pub(crate) fn is_host_only_for_test(&self) -> bool {
+        self.is_host_only()
+    }
+
     fn is_host_only(&self) -> bool {
         matches!(
             self,
@@ -88,14 +95,22 @@ impl ComponentRole {
                 | Self::ClipGTokenizer
                 | Self::TextTokenizer
                 | Self::Lora(_)
-                // Milestone 1 runs both InsightFace models through an ONNX
-                // runtime on the CPU: they crop and embed the reference face
-                // once, before the denoise, and never touch the generation
-                // device. Their bytes are therefore host demand, never VRAM.
-                // The identity adapter and the EVA-CLIP vision tower are NOT
-                // host-only — those two load on the generation device.
+                // The whole identity EXTRACTION runs on the host, at
+                // admission, before the scheduler has leased a device (#1223):
+                // both InsightFace ONNX graphs, and the EVA02-CLIP tower that
+                // turns the aligned crop into the IDFormer's five hidden
+                // states. None of the three ever touches the generation
+                // device, so their bytes are host demand and never VRAM.
+                //
+                // `IdentityAdapter` is deliberately NOT in this list: its
+                // twenty cross-attention modules are the one identity artifact
+                // that IS resident on the generation device, for the whole
+                // denoise. It is also the file the IDFormer weights live in,
+                // which is why the extraction reads it on the host too — but
+                // the residency that matters for placement is the device one.
                 | Self::FaceDetector
                 | Self::FaceRecognizer
+                | Self::IdentityVisionEncoder
         )
     }
 }

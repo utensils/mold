@@ -594,18 +594,40 @@ const WAN_REQUEST_AWARE_HEADROOM_BYTES: u64 = 2_000_000_000;
 /// Device memory a face-identity render needs beside the checkpoint it
 /// conditions.
 ///
-/// Three terms, all resident on the generation device for the whole denoise:
-/// PuLID's identity adapter (a 1.14 GB safetensors release, BF16 at runtime),
-/// the EVA02-CLIP-L-14-336 vision tower (~0.6 GB BF16 once #1229 converts the
-/// 856 MB `.pt` source), and ~0.5 GB of activation headroom for the IDFormer
-/// cross-attention the adapter injects at every step. The two InsightFace ONNX
-/// models are deliberately absent: they run on the CPU in milestone 1 and are
-/// charged as host bytes by their component roles instead.
+/// **Two** terms, not the five the whole PuLID stack weighs, because #1223
+/// moved the extraction to the host at admission. What is actually resident on
+/// the generation device for the duration of a denoise is:
 ///
-/// This is a declared budget, not a measurement. #1227 calibrates it against a
-/// real render; until then it is deliberately a single named constant so the
-/// recalibration is one edit rather than an archaeology exercise.
-pub(crate) const IDENTITY_VRAM_OVERHEAD_BYTES: u64 = 2_300_000_000;
+/// | Term | Bytes | Where it comes from |
+/// | --- | --- | --- |
+/// | PuLID cross-attention adapter, 20 modules at FLUX.1's geometry, f16/bf16 | 839,270,400 | `flux::pulid::PulidAdapter::resident_bytes`, pinned below |
+/// | Cross-attention activation headroom | 410,729,600 | `[1, 4096, 3072]` + `[1, 4096, 2048]` working tensors at 1024x1024, with margin |
+/// | **Total** | **1,250,000,000** | |
+///
+/// Everything else in the stack is CPU work that has finished before the job
+/// is dispatched: the SCRFD detector (17 MB) and the ArcFace recognizer
+/// (261 MB) evaluate through `candle-onnx`, which materializes on
+/// `Device::Cpu` and refuses anything else, and the EVA02-CLIP-L-14-336 tower
+/// (609 MB derived, from the 856 MB `.pt`) plus the IDFormer run beside them.
+/// All four are charged as HOST bytes by their component roles in
+/// `execution_plan::ComponentRole::is_host_only`, and the measured host peak of
+/// that phase is `mold_inference::identity::extraction::EXTRACTION_HOST_PEAK_BYTES`.
+///
+/// This replaces #1220's declared 2.3 GB placeholder, which charged the vision
+/// tower and the IDFormer to VRAM on the assumption that the extractor would
+/// run on the generation device. It does not, and over-charging VRAM by ~1 GB
+/// parks renders a card could actually run.
+///
+/// The adapter term is the f16/bf16 figure, which is what every GPU render
+/// loads: `PulidAdapter::load` takes the transformer's working dtype and FLUX's
+/// is BF16 on CUDA and on Metal. An f32 adapter is 1,678,540,800 bytes, but the
+/// only path that builds one is CPU inference, which this gate does not govern.
+pub(crate) const IDENTITY_VRAM_OVERHEAD_BYTES: u64 = 1_250_000_000;
+
+/// The adapter half of [`IDENTITY_VRAM_OVERHEAD_BYTES`], pinned against the
+/// engine's own arithmetic by
+/// `identity_overhead_matches_the_adapters_own_resident_arithmetic`.
+pub(crate) const IDENTITY_ADAPTER_BF16_BYTES: u64 = 839_270_400;
 
 /// Whether this request will actually condition on a face.
 ///
@@ -1905,11 +1927,11 @@ mod fail_closed_tests {
         );
     }
 
-    /// A face-identity render carries resident adapter and vision-tower
-    /// weights the checkpoint's `ModelPaths` cannot describe, so the estimate
-    /// has to charge them from the request. Weight zero applies no identity at
-    /// all and must cost exactly nothing — an inert knob that still reserved
-    /// 2.3 GB would refuse renders that fit.
+    /// A face-identity render carries a resident cross-attention adapter the
+    /// checkpoint's `ModelPaths` cannot describe, so the estimate has to charge
+    /// it from the request. Weight zero applies no identity at all and must
+    /// cost exactly nothing — an inert knob that still reserved 1.25 GB would
+    /// refuse renders that fit.
     #[test]
     fn identity_conditioning_charges_exactly_its_named_overhead_and_weight_zero_charges_nothing() {
         let mut request: GenerateRequest = serde_json::from_value(serde_json::json!({
@@ -2408,5 +2430,78 @@ mod fail_closed_tests {
 
         assert_eq!(error.code, "INTERNAL_ERROR");
         assert!(error.error.contains("fatal CUDA error"));
+    }
+
+    /// The charged overhead is a MEASUREMENT, and this is what keeps it one.
+    ///
+    /// The adapter half is recomputed from `flux::pulid`'s own geometry — the
+    /// same arithmetic `PulidAdapter::resident_bytes` performs — so a change to
+    /// the adapter's shape breaks this rather than silently making the budget
+    /// wrong. The remainder is the cross-attention activation headroom, which
+    /// is bounded rather than pinned: it must be enough for 1024x1024 and small
+    /// enough not to become a second adapter.
+    #[test]
+    fn identity_overhead_matches_the_adapters_own_resident_arithmetic() {
+        // `PulidAdapterConfig::default()`: dim 3072, dim_head 128, heads 16,
+        // kv_dim 2048; twenty modules for FLUX.1's 19 double + 38 single
+        // blocks.
+        const DIM: u64 = 3072;
+        const INNER: u64 = 128 * 16;
+        const KV: u64 = 2048;
+        const MODULES: u64 = 20;
+        const F16: u64 = 2;
+        let per_module = 2 * KV + 2 * DIM + INNER * DIM + 2 * INNER * KV + DIM * INNER;
+        let adapter = per_module * MODULES * F16;
+
+        assert_eq!(
+            adapter, IDENTITY_ADAPTER_BF16_BYTES,
+            "the adapter term must be the adapter's own resident arithmetic"
+        );
+        assert!(
+            IDENTITY_VRAM_OVERHEAD_BYTES > adapter,
+            "the budget must leave room for the injections themselves"
+        );
+
+        // 1024x1024 is 4096 image tokens. One injection's working set is the
+        // normalized image stream plus the query/output projections.
+        const TOKENS: u64 = 4096;
+        let one_injection = (TOKENS * DIM + TOKENS * INNER) * F16;
+        let activations = IDENTITY_VRAM_OVERHEAD_BYTES - adapter;
+        assert!(
+            activations >= 4 * one_injection,
+            "activation headroom {activations} must cover a 1024x1024 injection's working set"
+        );
+        assert!(
+            activations < adapter,
+            "activation headroom {activations} must not exceed the weights it serves"
+        );
+
+        // The old declared placeholder charged the CPU-side extraction to the
+        // device. It must not creep back.
+        assert!(
+            IDENTITY_VRAM_OVERHEAD_BYTES < 2_300_000_000,
+            "the extraction runs on the host and must not be charged as VRAM"
+        );
+    }
+
+    /// Every artifact the extraction touches is host demand, and the adapter —
+    /// the only device-resident one — is not.
+    #[test]
+    fn the_extraction_artifacts_are_host_only_and_the_adapter_is_not() {
+        use crate::execution_plan::ComponentRole;
+        for role in [
+            ComponentRole::FaceDetector,
+            ComponentRole::FaceRecognizer,
+            ComponentRole::IdentityVisionEncoder,
+        ] {
+            assert!(
+                role.is_host_only_for_test(),
+                "{role:?} runs on the host at admission"
+            );
+        }
+        assert!(
+            !ComponentRole::IdentityAdapter.is_host_only_for_test(),
+            "the cross-attention adapter is resident on the generation device"
+        );
     }
 }
