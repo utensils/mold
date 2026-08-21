@@ -60,10 +60,17 @@ export function authedMediaUrl(path: string, opts: AuthedMediaOptions = {}): Pro
       } catch {
         return null;
       }
-      const media = await ipc.fetchGalleryThumbnail(target, filename);
-      if (!media) return null;
-      const bytes = Uint8Array.from(atob(media.base64), (character) => character.charCodeAt(0));
-      return new Blob([bytes], { type: media.contentType });
+      try {
+        const media = await ipc.fetchGalleryThumbnail(target, filename);
+        if (!media) return null;
+        const bytes = Uint8Array.from(atob(media.base64), (character) => character.charCodeAt(0));
+        return new Blob([bytes], { type: media.contentType });
+      } catch {
+        // Native commands differ between the desktop and iPhone shells. A
+        // missing/refused desktop-only bridge must preserve the authenticated
+        // web fallback instead of making every mobile thumbnail unreadable.
+        return null;
+      }
     };
     url = nativeThumbnail()
       .then(

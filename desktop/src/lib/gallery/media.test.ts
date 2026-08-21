@@ -374,6 +374,22 @@ describe("authedMediaUrl host-keyed cache", () => {
     expect(apiFetchTo).not.toHaveBeenCalled();
   });
 
+  it("falls back to authenticated HTTP when the Tauri shell has no native thumbnail command", async () => {
+    vi.mocked(inTauri).mockReturnValue(true);
+    vi.mocked(ipc.fetchGalleryThumbnail).mockRejectedValue(
+      new Error("Command fetch_gallery_thumbnail not found"),
+    );
+    const target = { baseUrl: "http://hal9000:7680", apiKey: "hk" };
+    const path = "/api/gallery/thumbnail/ios-source.png";
+
+    await expect(authedMediaUrl(path, { target, cacheKey: "ios-source-picker" })).resolves.toMatch(
+      /^blob:mock-/,
+    );
+
+    expect(ipc.fetchGalleryThumbnail).toHaveBeenCalledWith(target, "ios-source.png");
+    expect(apiFetchTo).toHaveBeenCalledWith(target, path);
+  });
+
   it("caches the same path separately per cacheKey", async () => {
     const path = "/api/gallery/thumbnail/same.png";
     const target = { baseUrl: "http://hal9000:7680", apiKey: "hk" };
