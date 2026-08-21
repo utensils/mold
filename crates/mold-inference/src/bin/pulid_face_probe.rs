@@ -30,6 +30,9 @@ use mold_inference::identity::onnx_inventory::{
 };
 use mold_inference::identity::{arcface::ArcFaceRecognizer, scrfd::ScrfdDetector};
 
+/// #1222's Step-0 latency gate, in milliseconds of warm p95 per image.
+const LATENCY_BUDGET_MS: f64 = 2000.0;
+
 const DETECTOR: &str = "scrfd_10g_bnkps.onnx";
 const RECOGNIZER: &str = "glintr100.onnx";
 
@@ -85,7 +88,7 @@ fn synthetic_face(width: u32, height: u32) -> RgbImage {
 }
 
 fn inventory_for(dir: &Path, file: &str) -> Result<(GraphInventory, String, usize)> {
-    let loaded = load_onnx_model(&dir.join(file))?;
+    let loaded = load_onnx_model(&dir.join(file), None)?;
     let inventory = graph_inventory(&loaded.model)?;
     Ok((inventory, loaded.sha256, loaded.bytes))
 }
@@ -156,8 +159,8 @@ fn run_bench(dir: &Path, warmups: usize, runs: usize) -> Result<()> {
     let rss_start = peak_rss_bytes();
 
     let load = Instant::now();
-    let detector_model = load_onnx_model(&dir.join(DETECTOR))?;
-    let recognizer_model = load_onnx_model(&dir.join(RECOGNIZER))?;
+    let detector_model = load_onnx_model(&dir.join(DETECTOR), None)?;
+    let recognizer_model = load_onnx_model(&dir.join(RECOGNIZER), None)?;
     let detector = ScrfdDetector::new(detector_model.model)?;
     let recognizer = ArcFaceRecognizer::new(recognizer_model.model)?;
     println!(
@@ -201,10 +204,18 @@ fn run_bench(dir: &Path, warmups: usize, runs: usize) -> Result<()> {
     let mut sorted = total;
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let p95 = percentile(&sorted, 95.0);
+    let passed = p95 <= LATENCY_BUDGET_MS;
     println!(
-        "\nGATE: p95 per image = {p95:.1} ms, budget = 2000 ms -> {}",
-        if p95 <= 2000.0 { "PASS" } else { "FAIL" }
+        "\nGATE: p95 per image = {p95:.1} ms, budget = {LATENCY_BUDGET_MS:.0} ms -> {}",
+        if passed { "PASS" } else { "FAIL" }
     );
+    // Exit non-zero on a failed gate, exactly as `inventory` does for the op
+    // gate. A decision procedure that always exits 0 is a decision nothing can
+    // act on: CI, a bisect, or a `&&` chain would all read a blown budget as
+    // success.
+    if !passed {
+        bail!("latency gate failed: p95 {p95:.1} ms exceeds the {LATENCY_BUDGET_MS:.0} ms budget");
+    }
     Ok(())
 }
 

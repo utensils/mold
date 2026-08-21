@@ -62,6 +62,19 @@ const AFFINE_TOLERANCE: f64 = 1e-4;
 /// 0.23/255 with a 99.9th percentile of 2 LSB, on both crops.
 const WARP_MEAN_ABS_TOLERANCE: f64 = 0.6;
 const WARP_P999_ABS_TOLERANCE: u8 = 4;
+/// The EXIF-orientation twin is a JPEG re-encode of an already-lossy fixture,
+/// so its landmarks move by more than a bit-identical rotation would. The
+/// budget is the measured worst case plus headroom; an unapplied orientation
+/// would miss by hundreds of pixels, not by this.
+const ORIENTED_LANDMARK_TOLERANCE_PX: f64 = 2.0;
+
+/// The orientation-6 twin and the upright fixture it was made from.
+///
+/// Orientation 6 means "the stored pixels are 90 deg CCW from upright" — the
+/// tag a phone held sideways writes. The stored buffer is 1000x800 and every
+/// EXIF-aware decoder must present it as 800x1000.
+const EXIF6_TWIN: &str = "raja-chari-official-portrait.exif6.jpg";
+const EXIF6_UPRIGHT: &str = "raja-chari-official-portrait.jpg";
 
 #[derive(Debug, Deserialize)]
 struct Golden {
@@ -165,6 +178,21 @@ fn inventory_fixture() -> BTreeMap<String, InventoryFixture> {
 
 #[test]
 fn the_inventory_fixture_was_captured_from_the_manifest_pinned_models() {
+    // The literals above are a second copy of the pins on purpose — but only
+    // as a cross-check. This is what keeps them from drifting: the manifest is
+    // the authority, and a pin changed there without regenerating the fixture
+    // fails here rather than at someone's first render.
+    use mold_core::manifest::ModelComponent;
+    use mold_inference::identity::onnx_graph::pinned_sha256;
+    assert_eq!(
+        pinned_sha256(ModelComponent::FaceDetector),
+        Some(DETECTOR_SHA256)
+    );
+    assert_eq!(
+        pinned_sha256(ModelComponent::FaceRecognizer),
+        Some(RECOGNIZER_SHA256)
+    );
+
     let fixture = inventory_fixture();
     assert_eq!(fixture["scrfd_10g_bnkps.onnx"].sha256, DETECTOR_SHA256);
     assert_eq!(fixture["glintr100.onnx"].sha256, RECOGNIZER_SHA256);
@@ -350,6 +378,44 @@ fn the_committed_goldens_were_fitted_to_the_templates_mold_ships() {
     }
 }
 
+/// A sideways photograph must reach the detector upright.
+///
+/// Hermetic half: the shared oriented decode presents the twin at the upright
+/// fixture's dimensions and pixels. An unapplied orientation shows up here as
+/// a transposed shape, long before any model is involved.
+#[test]
+fn the_exif_orientation_twin_decodes_upright() {
+    let dir = testdata().join("faces");
+    let twin = std::fs::read(dir.join(EXIF6_TWIN)).expect("the orientation fixture is committed");
+    let upright = std::fs::read(dir.join(EXIF6_UPRIGHT)).expect("the upright fixture");
+
+    // The bytes really do store the rotated buffer -- otherwise this fixture
+    // would prove nothing.
+    let unoriented = image::load_from_memory(&twin)
+        .expect("the twin decodes")
+        .to_rgb8();
+    assert_eq!(
+        unoriented.dimensions(),
+        (1000, 800),
+        "the fixture must store the sideways buffer"
+    );
+
+    let oriented = mold_inference::img_utils::decode_oriented_srgb(&twin).expect("oriented decode");
+    let reference =
+        mold_inference::img_utils::decode_oriented_srgb(&upright).expect("oriented decode");
+    assert_eq!(
+        oriented.dimensions(),
+        (800, 1000),
+        "orientation not applied"
+    );
+    assert_eq!(oriented.dimensions(), reference.dimensions());
+
+    // Same picture, one JPEG generation apart.
+    let (mean, p999) = image_delta(&oriented, &reference);
+    println!("exif6 vs upright: mean {mean:.4}, p99.9 {p999}");
+    assert!(mean < 6.0, "oriented decode differs by mean {mean}");
+}
+
 // ---------------------------------------------------------------------------
 // Weight-gated: the graphs themselves.
 // ---------------------------------------------------------------------------
@@ -469,7 +535,7 @@ fn the_committed_inventory_still_describes_the_real_models() {
     );
     let fixture = inventory_fixture();
     for name in ["scrfd_10g_bnkps.onnx", "glintr100.onnx"] {
-        let loaded = mold_inference::identity::onnx_graph::load_onnx_model(&dir.join(name))
+        let loaded = mold_inference::identity::onnx_graph::load_onnx_model(&dir.join(name), None)
             .expect("the model loads");
         assert_eq!(loaded.sha256, fixture[name].sha256, "{name} digest drifted");
         let live = graph_inventory(&loaded.model).expect("the graph parses");
@@ -481,4 +547,52 @@ fn the_committed_inventory_still_describes_the_real_models() {
             "{name}'s op inventory drifted from the committed fixture"
         );
     }
+}
+
+/// Weight-gated half of the orientation fix: the sideways photograph yields
+/// the same face, in the same place, as the upright one.
+///
+/// Before the review fix this failed outright — SCRFD saw a 1000x800 image
+/// with a rotated head, and either missed it or reported landmarks in a frame
+/// every downstream crop then inherited.
+#[test]
+#[ignore = "requires the antelopev2 ONNX models via MOLD_TEST_PULID_ASSETS"]
+fn an_exif_rotated_photograph_detects_the_same_face() {
+    let extractor = extractor().expect("set MOLD_TEST_PULID_ASSETS to the antelopev2 directory");
+    let dir = testdata().join("faces");
+    let twin = std::fs::read(dir.join(EXIF6_TWIN)).expect("the orientation fixture is committed");
+
+    let golden_path = dir.join(format!(
+        "{}.golden.json",
+        EXIF6_UPRIGHT.trim_end_matches(".jpg")
+    ));
+    let golden: Golden = serde_json::from_slice(&std::fs::read(golden_path).expect("the golden"))
+        .expect("the golden parses");
+
+    let features = extractor.extract(&twin).expect("the rotated face is found");
+    let mut worst = 0.0f64;
+    for (i, (mine, theirs)) in features
+        .landmarks
+        .iter()
+        .zip(golden.landmarks.iter())
+        .enumerate()
+    {
+        let d = ((mine[0] - theirs[0]).powi(2) + (mine[1] - theirs[1]).powi(2)).sqrt();
+        worst = worst.max(d);
+        assert!(
+            d < ORIENTED_LANDMARK_TOLERANCE_PX,
+            "landmark {i} moved {d:.4} px when the source carried an orientation tag"
+        );
+    }
+    // Still the same person, not merely still a face.
+    let reference = ArcFaceEmbedding {
+        raw: golden.embedding.iter().map(|v| *v as f32).collect(),
+    };
+    let cosine = features.arcface.cosine_similarity(&reference);
+    println!("exif6: worst landmark {worst:.4} px, cosine {cosine:.6}");
+    assert!(
+        cosine >= ARCFACE_COSINE_FLOOR,
+        "ArcFace cosine {cosine:.6} < {ARCFACE_COSINE_FLOOR} after orientation"
+    );
+    assert_eq!(features.eva_crop_512.dimensions(), (512, 512));
 }

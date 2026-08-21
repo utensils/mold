@@ -18,6 +18,8 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use candle_onnx::onnx::ModelProto;
+use mold_core::manifest::ModelComponent;
+use mold_core::pulid_assets::pulid_manifest;
 use mold_core::secure_file::{open_regular_file_no_follow, sha256_open_file};
 use prost::Message;
 
@@ -88,16 +90,69 @@ pub fn normalize_empty_optional_resize_inputs(model: &mut ModelProto) -> usize {
     rewritten
 }
 
-/// Open, hash, and decode an ONNX model without ever re-opening its path.
+/// The bytes on disk are not the bytes the manifest pinned.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "{path} does not match the pinned SHA-256 for this PuLID asset\n  expected {expected}\n  found    {found}\nre-pull the bundle: mold pull pulid-flux"
+)]
+pub struct DigestMismatch {
+    /// The file that failed.
+    pub path: String,
+    /// The manifest's pin.
+    pub expected: String,
+    /// What the retained descriptor actually hashed to.
+    pub found: String,
+}
+
+/// The manifest's SHA-256 pin for one PuLID component.
+///
+/// Read from [`mold_core::pulid_assets::pulid_manifest`] rather than copied,
+/// so there is exactly one place a pin lives. `None` for a component the
+/// manifest does not pin, which for this bundle cannot happen — a completeness
+/// test in `manifest.rs` requires all four — but is not worth a panic.
+pub fn pinned_sha256(component: ModelComponent) -> Option<&'static str> {
+    pulid_manifest()
+        .files
+        .iter()
+        .find(|file| file.component == component)
+        .and_then(|file| file.sha256)
+}
+
+/// Open, hash, verify, and decode an ONNX model without ever re-opening its
+/// path.
+///
+/// `expected_sha256` is checked **before** the proto is decoded, against the
+/// digest of the same retained descriptor the bytes are read from — so a file
+/// swapped between the check and the read cannot be the file that runs.
+///
+/// Verifying here rather than trusting the download is the point. The
+/// downloader's `.sha256-verified` marker records that the bytes were correct
+/// *when they landed*; it says nothing about the bytes now, and a marker file
+/// sitting beside a since-modified model is exactly the state an attacker with
+/// write access to the models directory would leave behind. These two graphs
+/// are executed code in every sense that matters, so they are authenticated on
+/// every load. Passing `None` skips the check and exists for tests and for the
+/// probe binary, which inspect arbitrary graphs by design;
+/// [`super::IdentityExtractor::load`] always supplies the manifest's pin.
 ///
 /// The decoded graph is normalized by
 /// [`normalize_empty_optional_resize_inputs`] before it is returned, so every
 /// caller evaluates the same shape.
-pub fn load_onnx_model(path: &Path) -> Result<LoadedOnnxModel> {
+pub fn load_onnx_model(path: &Path, expected_sha256: Option<&str>) -> Result<LoadedOnnxModel> {
     let mut file = open_regular_file_no_follow(path)
         .with_context(|| format!("failed to open the ONNX model at {}", path.display()))?;
     let sha256 = sha256_open_file(&file)
         .with_context(|| format!("failed to hash the ONNX model at {}", path.display()))?;
+    if let Some(expected) = expected_sha256 {
+        if !sha256.eq_ignore_ascii_case(expected) {
+            return Err(DigestMismatch {
+                path: path.display().to_string(),
+                expected: expected.to_string(),
+                found: sha256,
+            }
+            .into());
+        }
+    }
     let mut buf = Vec::new();
     file.read_to_end(&mut buf)
         .with_context(|| format!("failed to read the ONNX model at {}", path.display()))?;
@@ -204,12 +259,100 @@ mod tests {
         assert_eq!(normalize_empty_optional_resize_inputs(&mut model), 1);
     }
 
+    /// A synthetic proto, written twice: once intact, once with one byte
+    /// flipped. Only the intact one may be decoded.
+    fn write_proto(
+        dir: &std::path::Path,
+        name: &str,
+        flip_byte: bool,
+    ) -> (std::path::PathBuf, String) {
+        let model = model_with(
+            vec![resize(&["data", "", "", "sizes"])],
+            vec![tensor("sizes", vec![4])],
+        );
+        let mut bytes = model.encode_to_vec();
+        if flip_byte {
+            let last = bytes.len() - 1;
+            bytes[last] ^= 0x01;
+        }
+        let path = dir.join(name);
+        std::fs::write(&path, &bytes).unwrap();
+        let digest = <sha2::Sha256 as sha2::Digest>::digest(&bytes);
+        (path, format!("{digest:x}"))
+    }
+
+    #[test]
+    fn a_matching_digest_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, digest) = write_proto(dir.path(), "model.onnx", false);
+        let loaded = load_onnx_model(&path, Some(&digest)).expect("the pinned model loads");
+        assert_eq!(loaded.sha256, digest);
+    }
+
+    /// The whole point of #1222's P1 fix: a modified model is refused even
+    /// though the downloader's marker beside it still claims it was verified.
+    #[test]
+    fn a_byte_flipped_model_is_refused_before_it_is_decoded() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, pinned) = write_proto(dir.path(), "pristine.onnx", false);
+        let (tampered, actual) = write_proto(dir.path(), "tampered.onnx", true);
+        assert_ne!(pinned, actual, "the flip must change the digest");
+
+        let err = load_onnx_model(&tampered, Some(&pinned)).unwrap_err();
+        let message = format!("{err:#}");
+        assert!(message.contains("tampered.onnx"), "{message}");
+        assert!(
+            message.contains(&pinned),
+            "expected digest missing: {message}"
+        );
+        assert!(message.contains(&actual), "found digest missing: {message}");
+        assert!(
+            err.downcast_ref::<DigestMismatch>().is_some(),
+            "must be the typed error, got {message}"
+        );
+        // And it is still refused when the file happens to be a valid proto —
+        // the check runs before the decode, so decodability is no defence.
+        assert!(load_onnx_model(&tampered, None).is_ok());
+    }
+
+    /// A caller that passes the wrong component's pin must be refused too,
+    /// which is what stops the two models being swapped for each other.
+    #[test]
+    fn the_recognizers_pin_does_not_admit_the_detector() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, _) = write_proto(dir.path(), "model.onnx", false);
+        assert!(load_onnx_model(&path, pinned_sha256(ModelComponent::FaceDetector)).is_err());
+        assert!(load_onnx_model(&path, pinned_sha256(ModelComponent::FaceRecognizer)).is_err());
+    }
+
+    /// The pins come from the manifest, never from a second copy in this
+    /// crate. If `manifest.rs` drops one, this fails rather than silently
+    /// loading unverified.
+    #[test]
+    fn both_face_components_are_pinned_by_the_manifest() {
+        let detector = pinned_sha256(ModelComponent::FaceDetector).expect("detector is pinned");
+        let recognizer =
+            pinned_sha256(ModelComponent::FaceRecognizer).expect("recognizer is pinned");
+        assert_eq!(detector.len(), 64, "{detector}");
+        assert_eq!(recognizer.len(), 64, "{recognizer}");
+        assert_ne!(detector, recognizer);
+        assert!(detector.chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(recognizer.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn digest_comparison_is_case_insensitive() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, digest) = write_proto(dir.path(), "model.onnx", false);
+        assert!(load_onnx_model(&path, Some(&digest.to_uppercase())).is_ok());
+    }
+
     #[test]
     fn a_non_onnx_file_is_a_decode_error_not_a_panic() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("not-a-model.onnx");
         std::fs::write(&path, b"this is not a protobuf at all, not even close").unwrap();
-        let err = load_onnx_model(&path).unwrap_err();
+        let err = load_onnx_model(&path, None).unwrap_err();
         assert!(
             format!("{err:#}").contains("failed to decode"),
             "unexpected error: {err:#}"
@@ -220,7 +363,7 @@ mod tests {
     fn a_missing_model_names_its_path() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("absent.onnx");
-        let err = load_onnx_model(&path).unwrap_err();
+        let err = load_onnx_model(&path, None).unwrap_err();
         assert!(format!("{err:#}").contains("absent.onnx"), "{err:#}");
     }
 
@@ -233,7 +376,7 @@ mod tests {
         let link = dir.path().join("link.onnx");
         std::os::unix::fs::symlink(&real, &link).unwrap();
         assert!(
-            load_onnx_model(&link).is_err(),
+            load_onnx_model(&link, None).is_err(),
             "a symlinked model must not be opened"
         );
     }
