@@ -15,10 +15,18 @@
 //! offers no way to obtain a digest and a buffer that did not come from the
 //! same call.
 //!
+//! That read is also bounded. A digest cannot be computed from bytes that were
+//! never read, so an unbounded read of a replacement file the size of the disk
+//! exhausts memory before the mismatch it was about to find can be reported.
+//! The manifest pins each artifact's exact length, so the descriptor is
+//! `fstat`ed first and the read is capped regardless — see
+//! [`ArtifactSizeError`] and [`UNPINNED_MAX_BYTES`].
+//!
 //! Permissions are deliberately NOT checked: a model artifact on shared
 //! storage with a collaborative umask is valid (see CLAUDE.md, "Model storage
 //! permissions invariant"). Authenticity comes from the content digest.
 
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::Read;
@@ -113,12 +121,85 @@ pub struct DigestMismatch {
     pub found: String,
 }
 
-/// The manifest's SHA-256 pin for one PuLID component.
+/// The file on disk is not the size the manifest pinned, or is implausibly
+/// large for a graph nobody pinned.
+///
+/// Separate from [`DigestMismatch`] because it is raised at a different
+/// moment and for a different reason: the digest can only be computed from
+/// bytes already in memory, so size is what decides whether they may be read
+/// at all.
+#[derive(Debug, thiserror::Error)]
+pub enum ArtifactSizeError {
+    /// The manifest pins an exact byte count and the file is not it.
+    #[error(
+        "{path} is {found} bytes but the manifest pins {expected} for this PuLID asset\nre-pull the bundle: mold pull pulid-flux"
+    )]
+    Mismatch {
+        /// The file that failed.
+        path: String,
+        /// The manifest's pinned length.
+        expected: u64,
+        /// What the retained descriptor reports.
+        found: u64,
+    },
+    /// No pin was supplied and the file is past the unpinned ceiling.
+    #[error(
+        "{path} is {found} bytes, past the {cap}-byte ceiling for an ONNX graph loaded without a manifest pin"
+    )]
+    OverCap {
+        /// The file that failed.
+        path: String,
+        /// What the retained descriptor reports.
+        found: u64,
+        /// The ceiling that was applied.
+        cap: u64,
+    },
+}
+
+/// Ceiling for a graph loaded without a manifest pin — the inventory tool and
+/// the benchmark, which take arbitrary paths by design.
+///
+/// Generous on purpose: the largest graph mold itself loads is `glintr100` at
+/// ~249 MiB, so this leaves four times that. It is not a correctness bound, it
+/// is a refusal to allocate unbounded memory on behalf of a file nobody
+/// vouched for.
+pub const UNPINNED_MAX_BYTES: u64 = 1 << 30;
+
+/// Everything the manifest pins about one artifact.
+///
+/// Digest and length travel together, from one manifest lookup, so a caller
+/// cannot pair one component's digest with another's length. Both are needed
+/// and they are only correct as a pair.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PinnedArtifact {
+    /// Lowercase hex SHA-256 the file must hash to.
+    ///
+    /// `Cow` so the manifest's `&'static str` is borrowed with no allocation
+    /// on the real path, while a test can pin a digest it computed at runtime.
+    pub sha256: Cow<'static, str>,
+    /// Exact byte count the file must have.
+    pub size_bytes: u64,
+}
+
+/// The manifest's pin for one PuLID component.
 ///
 /// Read from [`mold_core::pulid_assets::pulid_manifest`] rather than copied,
 /// so there is exactly one place a pin lives. `None` for a component the
 /// manifest does not pin, which for this bundle cannot happen — a completeness
 /// test in `manifest.rs` requires all four — but is not worth a panic.
+pub fn pinned_artifact(component: ModelComponent) -> Option<PinnedArtifact> {
+    let file = pulid_manifest()
+        .files
+        .iter()
+        .find(|file| file.component == component)?;
+    Some(PinnedArtifact {
+        sha256: Cow::Borrowed(file.sha256?),
+        size_bytes: file.size_bytes,
+    })
+}
+
+/// Just the digest half of [`pinned_artifact`], for callers cross-checking a
+/// pin they already hold.
 pub fn pinned_sha256(component: ModelComponent) -> Option<&'static str> {
     pulid_manifest()
         .files
@@ -130,9 +211,19 @@ pub fn pinned_sha256(component: ModelComponent) -> Option<&'static str> {
 /// Open, hash, verify, and decode an ONNX model without ever re-opening its
 /// path.
 ///
-/// `expected_sha256` is checked **before** the proto is decoded, against the
-/// digest of the same retained descriptor the bytes are read from — so a file
-/// swapped between the check and the read cannot be the file that runs.
+/// `pin` is checked **before** the proto is decoded, against the digest of the
+/// same retained descriptor the bytes are read from — so a file swapped
+/// between the check and the read cannot be the file that runs.
+///
+/// The pin's **length** is checked earlier still, and is what makes the read
+/// safe to perform at all. A digest can only be computed from bytes already in
+/// memory, so an unbounded `read_to_end` on a replacement file the size of the
+/// disk would exhaust memory long before it could be reported as a mismatch.
+/// The retained descriptor is `fstat`ed first, an unexpected length is refused
+/// as [`ArtifactSizeError`], and the read is then bounded regardless — so a
+/// file that grows between the stat and the read is refused too rather than
+/// silently truncated. Without a pin the same bound applies at
+/// [`UNPINNED_MAX_BYTES`].
 ///
 /// Verifying here rather than trusting the download is the point. The
 /// downloader's `.sha256-verified` marker records that the bytes were correct
@@ -155,11 +246,12 @@ pub fn pinned_sha256(component: ModelComponent) -> Option<&'static str> {
 /// The decoded graph is normalized by
 /// [`normalize_empty_optional_resize_inputs`] before it is returned, so every
 /// caller evaluates the same shape.
-pub fn load_onnx_model(path: &Path, expected_sha256: Option<&str>) -> Result<LoadedOnnxModel> {
+pub fn load_onnx_model(path: &Path, pin: Option<PinnedArtifact>) -> Result<LoadedOnnxModel> {
     let mut file = open_regular_file_no_follow(path)
         .with_context(|| format!("failed to open the ONNX model at {}", path.display()))?;
-    let authenticated = AuthenticatedBytes::read_once(&mut file, path)?;
-    authenticated.verify(expected_sha256, path)?;
+    let authenticated =
+        AuthenticatedBytes::read_once(&mut file, path, pin.as_ref().map(|p| p.size_bytes))?;
+    authenticated.verify(pin.as_ref().map(|p| p.sha256.as_ref()), path)?;
     let mut model = ModelProto::decode(authenticated.bytes())
         .with_context(|| format!("failed to decode the ONNX model at {}", path.display()))?;
     normalize_empty_optional_resize_inputs(&mut model);
@@ -186,21 +278,84 @@ pub fn load_onnx_model(path: &Path, expected_sha256: Option<&str>) -> Result<Loa
 /// separately. `mold_core::secure_file::sha256_open_file` is deliberately
 /// unused here for the same reason — it takes a `&File` and hashes it, which
 /// necessarily leaves the bytes to be fetched by a second read.
+#[derive(Debug)]
 struct AuthenticatedBytes {
     bytes: Vec<u8>,
     sha256: String,
 }
 
 impl AuthenticatedBytes {
-    /// Read the whole descriptor exactly once and hash what was read.
+    /// Read the whole descriptor exactly once, within a bound, and hash what
+    /// was read.
     ///
     /// The descriptor comes from `open_regular_file_no_follow`, so it is
     /// positioned at zero and no seek is needed — nor performed, which is what
     /// keeps this to a single pass over the bytes.
-    fn read_once(file: &mut File, path: &Path) -> Result<Self> {
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)
+    ///
+    /// `expected_len` is the manifest's pinned byte count when there is one.
+    /// The bound is not an optimization: an unbounded `read_to_end` on a
+    /// replacement file the size of the disk exhausts memory before any digest
+    /// can be computed, so the process dies instead of reporting the mismatch
+    /// it was about to find.
+    fn read_once(file: &mut File, path: &Path, expected_len: Option<u64>) -> Result<Self> {
+        Self::read_bounded(file, path, expected_len, UNPINNED_MAX_BYTES)
+    }
+
+    /// [`read_once`](Self::read_once) with the unpinned ceiling supplied, so a
+    /// test can exercise the ceiling without writing a gigabyte.
+    fn read_bounded(
+        file: &mut File,
+        path: &Path,
+        expected_len: Option<u64>,
+        unpinned_cap: u64,
+    ) -> Result<Self> {
+        // `fstat` on the retained descriptor, never a `stat` on the path —
+        // the point of holding the descriptor is that this describes the same
+        // file the bytes come from.
+        let reported = file
+            .metadata()
+            .with_context(|| format!("failed to stat the ONNX model at {}", path.display()))?
+            .len();
+        let limit = match expected_len {
+            Some(expected) if reported != expected => {
+                return Err(ArtifactSizeError::Mismatch {
+                    path: path.display().to_string(),
+                    expected,
+                    found: reported,
+                }
+                .into())
+            }
+            Some(expected) => expected,
+            None if reported > unpinned_cap => {
+                return Err(ArtifactSizeError::OverCap {
+                    path: path.display().to_string(),
+                    found: reported,
+                    cap: unpinned_cap,
+                }
+                .into())
+            }
+            None => reported,
+        };
+        let capacity = usize::try_from(limit)
+            .with_context(|| format!("{} does not fit in memory on this target", path.display()))?;
+
+        // `limit + 1` so a file that GREW between the stat and the read
+        // overshoots the bound and is refused below, rather than being
+        // silently truncated to a prefix that happens to parse.
+        let mut bytes = Vec::with_capacity(capacity);
+        file.by_ref()
+            .take(limit.saturating_add(1))
+            .read_to_end(&mut bytes)
             .with_context(|| format!("failed to read the ONNX model at {}", path.display()))?;
+        if bytes.len() as u64 != limit {
+            return Err(ArtifactSizeError::Mismatch {
+                path: path.display().to_string(),
+                expected: limit,
+                found: bytes.len() as u64,
+            }
+            .into());
+        }
+
         let digest = Sha256::digest(&bytes);
         Ok(Self {
             bytes,
@@ -327,6 +482,19 @@ mod tests {
 
     /// A synthetic proto, written twice: once intact, once with one byte
     /// flipped. Only the intact one may be decoded.
+    /// Build a pin for a digest computed at runtime.
+    fn pin(sha256: &str, size_bytes: u64) -> PinnedArtifact {
+        PinnedArtifact {
+            sha256: Cow::Owned(sha256.to_string()),
+            size_bytes,
+        }
+    }
+
+    /// The on-disk length of a fixture, which every pin needs.
+    fn len_of(path: &std::path::Path) -> u64 {
+        std::fs::metadata(path).unwrap().len()
+    }
+
     fn write_proto(
         dir: &std::path::Path,
         name: &str,
@@ -358,7 +526,7 @@ mod tests {
         std::fs::write(&path, &content).unwrap();
 
         let mut file = open_regular_file_no_follow(&path).unwrap();
-        let authenticated = AuthenticatedBytes::read_once(&mut file, &path).unwrap();
+        let authenticated = AuthenticatedBytes::read_once(&mut file, &path, None).unwrap();
         assert_eq!(authenticated.bytes(), content.as_slice());
         assert_eq!(
             authenticated.sha256,
@@ -378,7 +546,7 @@ mod tests {
         let path = dir.path().join("empty.bin");
         std::fs::write(&path, b"").unwrap();
         let mut file = open_regular_file_no_follow(&path).unwrap();
-        let authenticated = AuthenticatedBytes::read_once(&mut file, &path).unwrap();
+        let authenticated = AuthenticatedBytes::read_once(&mut file, &path, None).unwrap();
         assert!(authenticated.bytes().is_empty());
         assert_eq!(
             authenticated.sha256,
@@ -421,11 +589,112 @@ mod tests {
         );
     }
 
+    /// The size check runs BEFORE the bytes are read, so a replacement file is
+    /// refused without ever being pulled into memory. Proved by pinning the
+    /// file's own true digest against a wrong length: were size checked after
+    /// hashing, the digest would match and the load would succeed.
+    #[test]
+    fn a_right_digest_with_a_wrong_size_is_refused_before_hashing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, digest) = write_proto(dir.path(), "model.onnx", false);
+        let real = len_of(&path);
+
+        let err = load_onnx_model(&path, Some(pin(&digest, real + 1))).unwrap_err();
+        match err.downcast_ref::<ArtifactSizeError>() {
+            Some(ArtifactSizeError::Mismatch {
+                path: named,
+                expected,
+                found,
+            }) => {
+                assert!(named.contains("model.onnx"), "{named}");
+                assert_eq!(*expected, real + 1);
+                assert_eq!(*found, real);
+            }
+            _ => panic!("expected a size mismatch, got {err:#}"),
+        }
+
+        // The same digest with the true length is accepted, so the refusal
+        // above was the length and nothing else.
+        assert!(load_onnx_model(&path, Some(pin(&digest, real))).is_ok());
+    }
+
+    /// A pinned file whose real length is enormous is refused on length alone
+    /// — the case the bound exists for, where an unbounded read would exhaust
+    /// memory before the digest could report the mismatch.
+    #[test]
+    fn an_oversized_pinned_file_never_reaches_the_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, _) = write_proto(dir.path(), "model.onnx", false);
+        // The manifest's real 16 MB detector pin against a tiny file.
+        let err =
+            load_onnx_model(&path, pinned_artifact(ModelComponent::FaceDetector)).unwrap_err();
+        assert!(
+            err.downcast_ref::<ArtifactSizeError>().is_some(),
+            "must fail on size, not digest: {err:#}"
+        );
+    }
+
+    /// Without a pin the ceiling still applies. Exercised through
+    /// `read_bounded` with a tiny ceiling, so proving a gigabyte is refused
+    /// does not require writing one.
+    #[test]
+    fn an_unpinned_read_past_the_ceiling_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("big.bin");
+        std::fs::write(&path, vec![0u8; 4096]).unwrap();
+
+        let mut file = open_regular_file_no_follow(&path).unwrap();
+        let err = AuthenticatedBytes::read_bounded(&mut file, &path, None, 1024).unwrap_err();
+        match err.downcast_ref::<ArtifactSizeError>() {
+            Some(ArtifactSizeError::OverCap { found, cap, .. }) => {
+                assert_eq!(*found, 4096);
+                assert_eq!(*cap, 1024);
+            }
+            _ => panic!("expected an over-cap refusal, got {err:#}"),
+        }
+
+        // At the ceiling the same file reads normally.
+        let mut file = open_regular_file_no_follow(&path).unwrap();
+        let ok = AuthenticatedBytes::read_bounded(&mut file, &path, None, 4096).unwrap();
+        assert_eq!(ok.bytes().len(), 4096);
+    }
+
+    /// The production ceiling is stated once and clears the largest graph mold
+    /// loads, so a legitimate pull is never refused by it.
+    #[test]
+    fn the_unpinned_ceiling_clears_every_pinned_artifact() {
+        assert_eq!(UNPINNED_MAX_BYTES, 1_073_741_824);
+        for component in [ModelComponent::FaceDetector, ModelComponent::FaceRecognizer] {
+            let pinned = pinned_artifact(component).expect("pinned");
+            assert!(
+                pinned.size_bytes < UNPINNED_MAX_BYTES,
+                "{component:?} is {} bytes",
+                pinned.size_bytes
+            );
+        }
+    }
+
+    /// Both halves of a pin come from one manifest lookup, so a caller cannot
+    /// pair one component's digest with another's length.
+    #[test]
+    fn a_pin_carries_the_matching_digest_and_length() {
+        let detector = pinned_artifact(ModelComponent::FaceDetector).expect("pinned");
+        let recognizer = pinned_artifact(ModelComponent::FaceRecognizer).expect("pinned");
+        assert_eq!(detector.size_bytes, 16_923_827);
+        assert_eq!(recognizer.size_bytes, 260_665_334);
+        assert_ne!(detector.sha256, recognizer.sha256);
+        assert_eq!(
+            pinned_sha256(ModelComponent::FaceDetector),
+            Some(detector.sha256.as_ref())
+        );
+    }
+
     #[test]
     fn a_matching_digest_loads() {
         let dir = tempfile::tempdir().unwrap();
         let (path, digest) = write_proto(dir.path(), "model.onnx", false);
-        let loaded = load_onnx_model(&path, Some(&digest)).expect("the pinned model loads");
+        let loaded = load_onnx_model(&path, Some(pin(&digest, len_of(&path))))
+            .expect("the pinned model loads");
         assert_eq!(loaded.sha256, digest);
     }
 
@@ -438,7 +707,7 @@ mod tests {
         let (tampered, actual) = write_proto(dir.path(), "tampered.onnx", true);
         assert_ne!(pinned, actual, "the flip must change the digest");
 
-        let err = load_onnx_model(&tampered, Some(&pinned)).unwrap_err();
+        let err = load_onnx_model(&tampered, Some(pin(&pinned, len_of(&tampered)))).unwrap_err();
         let message = format!("{err:#}");
         assert!(message.contains("tampered.onnx"), "{message}");
         assert!(
@@ -461,8 +730,8 @@ mod tests {
     fn the_recognizers_pin_does_not_admit_the_detector() {
         let dir = tempfile::tempdir().unwrap();
         let (path, _) = write_proto(dir.path(), "model.onnx", false);
-        assert!(load_onnx_model(&path, pinned_sha256(ModelComponent::FaceDetector)).is_err());
-        assert!(load_onnx_model(&path, pinned_sha256(ModelComponent::FaceRecognizer)).is_err());
+        assert!(load_onnx_model(&path, pinned_artifact(ModelComponent::FaceDetector)).is_err());
+        assert!(load_onnx_model(&path, pinned_artifact(ModelComponent::FaceRecognizer)).is_err());
     }
 
     /// The pins come from the manifest, never from a second copy in this
@@ -484,7 +753,7 @@ mod tests {
     fn digest_comparison_is_case_insensitive() {
         let dir = tempfile::tempdir().unwrap();
         let (path, digest) = write_proto(dir.path(), "model.onnx", false);
-        assert!(load_onnx_model(&path, Some(&digest.to_uppercase())).is_ok());
+        assert!(load_onnx_model(&path, Some(pin(&digest.to_uppercase(), len_of(&path)))).is_ok());
     }
 
     #[test]
