@@ -31,18 +31,32 @@ pub const TITLE_SLUG_SEPARATOR: char = '~';
 /// result is capped at [`TITLE_SLUG_MAX_LEN`] bytes (re-trimmed so the cut
 /// never leaves a dangling `-`). Returns `None` when nothing survives.
 pub fn title_slug(title: &str) -> Option<String> {
-    let mut slug = String::with_capacity(title.len().min(TITLE_SLUG_MAX_LEN));
+    slug_with_cap(title, TITLE_SLUG_MAX_LEN)
+}
+
+/// The slug algorithm behind [`title_slug`] and the download name's model
+/// component, parameterized by cap.
+///
+/// One algorithm, two caps — deliberately, because the browser mirror
+/// (`studio/lib/libraryOrganization.ts`'s `slugify`) is a single function
+/// called at both caps, and its parity fixtures pin it to *this* code. A
+/// second, separately-written sanitizer for the model component would sit
+/// outside those fixtures and could drift at the cap boundary, which is
+/// exactly the kind of divergence nobody notices until two machines name the
+/// same download differently.
+fn slug_with_cap(input: &str, max_len: usize) -> Option<String> {
+    let mut slug = String::with_capacity(input.len().min(max_len));
     let mut pending_dash = false;
-    for ch in title.chars() {
+    for ch in input.chars() {
         if ch.is_ascii_alphanumeric() {
             if pending_dash && !slug.is_empty() {
-                if slug.len() + 1 >= TITLE_SLUG_MAX_LEN {
+                if slug.len() + 1 >= max_len {
                     break;
                 }
                 slug.push('-');
             }
             pending_dash = false;
-            if slug.len() >= TITLE_SLUG_MAX_LEN {
+            if slug.len() >= max_len {
                 break;
             }
             slug.push(ch.to_ascii_lowercase());
@@ -149,10 +163,7 @@ pub const DOWNLOAD_FALLBACK_STEM: &str = "print";
 pub fn download_file_name(title: Option<&str>, model: &str, seed: u64, ext: &str) -> String {
     let mut segments: Vec<String> = Vec::with_capacity(3);
     segments.extend(title.and_then(title_slug));
-    let model = sanitize_download_component(model, DOWNLOAD_MODEL_SLUG_MAX_LEN);
-    if !model.is_empty() {
-        segments.push(model);
-    }
+    segments.extend(slug_with_cap(model, DOWNLOAD_MODEL_SLUG_MAX_LEN));
     segments.push(format!("s{seed}"));
 
     let stem = if segments.is_empty() {
@@ -173,34 +184,6 @@ pub fn download_file_name(title: Option<&str>, model: &str, seed: u64, ext: &str
 fn normalize_download_extension(ext: &str) -> Option<String> {
     let trimmed = ext.trim().trim_start_matches('.').trim();
     (!trimmed.is_empty()).then(|| trimmed.to_ascii_lowercase())
-}
-
-/// Reduce one download-name component to filesystem-portable characters:
-/// ASCII alphanumerics survive as lowercase, everything else collapses to a
-/// single `-`, the edges are trimmed, and the result is capped at `max_len`
-/// bytes (re-trimmed so the cut never leaves a dangling `-`). Deliberately
-/// never emits `_`, so the `__` separator stays unambiguous.
-fn sanitize_download_component(raw: &str, max_len: usize) -> String {
-    let mut out = String::with_capacity(raw.len().min(max_len));
-    let mut pending_dash = false;
-    for ch in raw.chars() {
-        if ch.is_ascii_alphanumeric() {
-            if pending_dash && !out.is_empty() {
-                if out.len() + 1 >= max_len {
-                    break;
-                }
-                out.push('-');
-            }
-            pending_dash = false;
-            if out.len() >= max_len {
-                break;
-            }
-            out.push(ch.to_ascii_lowercase());
-        } else {
-            pending_dash = true;
-        }
-    }
-    out.trim_matches('-').to_string()
 }
 
 /// Strip a trailing `~<slug>` from a filename stem (no extension), returning
@@ -443,6 +426,47 @@ mod tests {
     #[test]
     fn download_name_falls_back_to_a_shared_stem_word() {
         assert_eq!(DOWNLOAD_FALLBACK_STEM, "print");
+    }
+
+    /// The title slug and the download name's model component are ONE
+    /// algorithm at two caps, matching the browser's single `slugify(input,
+    /// maxLen)`. A separately-written sanitizer would sit outside the shared
+    /// parity fixtures and could drift right at the cap boundary — where a
+    /// dash lands on the cut is exactly the fiddly part.
+    #[test]
+    fn both_slug_caps_run_the_same_algorithm() {
+        for input in [
+            "Smurf Village",
+            "flux-dev:q4",
+            "cv:12345",
+            "  ...Hello,   World!!!  ",
+            "Café au lait",
+            "日本語 cat 🐈",
+            "a -- b",
+            "!!!",
+        ] {
+            // Below both caps, the two agree exactly.
+            assert_eq!(
+                slug_with_cap(input, TITLE_SLUG_MAX_LEN),
+                slug_with_cap(input, DOWNLOAD_MODEL_SLUG_MAX_LEN),
+                "{input:?} is short enough that the cap cannot matter"
+            );
+            assert_eq!(title_slug(input), slug_with_cap(input, TITLE_SLUG_MAX_LEN));
+        }
+
+        // Walk the boundary: every length either side of both caps must cut
+        // cleanly, with no dangling dash and never over the cap.
+        for cap in [TITLE_SLUG_MAX_LEN, DOWNLOAD_MODEL_SLUG_MAX_LEN] {
+            for words in 1..40usize {
+                let input = "ab ".repeat(words);
+                let slug = slug_with_cap(&input, cap).unwrap();
+                assert!(slug.len() <= cap, "cap {cap}, words {words}: {slug}");
+                assert!(!slug.ends_with('-'), "cap {cap}, words {words}: {slug}");
+                assert!(!slug.starts_with('-'), "cap {cap}, words {words}: {slug}");
+            }
+            let solid = "x".repeat(cap * 2);
+            assert_eq!(slug_with_cap(&solid, cap).unwrap().len(), cap);
+        }
     }
 
     #[test]
