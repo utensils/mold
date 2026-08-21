@@ -120,6 +120,7 @@ import {
   buildRequest,
   chainFilingFields,
   cloneGenerateForm,
+  keepingPrintIdentity,
   normalizeLegacyNegativeSnapshot,
 } from "../lib/generateForm";
 import { composeStyle, mergeStyleNegative, styleHint } from "../lib/stylePresets";
@@ -1951,7 +1952,14 @@ async function loadTemplate(template: GenerationTemplate) {
   // different) family can't use after the source snapshot is restored. A
   // pre-#787 template lacking `negativePromptDefault` is normalized first so
   // its empty negative reads as "untouched", not the explicit "" opt-out.
-  Object.assign(form, normalizeLegacyNegativeSnapshot(hydrated.form, installedModels.value));
+  //
+  // A template is a set of PARAMETERS. Its snapshot carries whatever title and
+  // filing the print it was saved from happened to have (`stripTemplateForm`
+  // only strips media), so applying it wholesale would rename and re-file the
+  // print in progress and flip the Settings ▸ Library auto-tag mirror.
+  keepingPrintIdentity(form, () =>
+    Object.assign(form, normalizeLegacyNegativeSnapshot(hydrated.form, installedModels.value)),
+  );
   if (form.model && !findInstalledModel(installedModels.value, form.model)) {
     toasts.push(`Model "${form.model}" isn't installed — settings applied anyway.`);
   }
