@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import type { Collection } from "./api/galleryOrganization";
 import {
   AUTO_TAG_SETTING_WEB,
+  DOWNLOAD_FALLBACK_STEM,
+  DOWNLOAD_MODEL_SLUG_MAX_LEN,
   MAX_REQUEST_TAGS,
   REQUEST_TAG_MAX_LEN,
   addTag,
@@ -14,9 +16,12 @@ import {
   emptyFileUnderState,
   fileUnderAvailable,
   matchCollection,
+  normalizeRequestTag,
   pickCollection,
   removeTag,
+  requestTagKey,
   restoreGhostTag,
+  stripTagHash,
   suggestTags,
   validateNewTag,
   validateRequestTag,
@@ -24,8 +29,13 @@ import {
   type FileUnderState,
 } from "./fileUnder";
 
-/** A C0 control character; never legal in a tag (mirrors the Rust guard). */
+/** A NON-whitespace control character — the only kind Rust rejects
+ * (`is_control() && !is_whitespace()`). */
 const BELL = String.fromCharCode(7);
+
+/** A WHITESPACE control character: Rust collapses it into the tag's inner
+ * spacing rather than failing the tag. */
+const TAB = String.fromCharCode(9);
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -137,22 +147,61 @@ describe("effectiveTags", () => {
     expect(effectiveTags(s, "Sunsets", true)).toEqual(["sunsets", "kodak"]);
   });
 
-  it("normalizes every tag through normalizeTagName", () => {
-    const s = state({ manualTags: ["  #golden   hour ", "kodak"] });
+  it("collapses whitespace and trims, mirroring Rust's normalize_tag_name", () => {
+    const s = state({ manualTags: [`  golden ${TAB}  hour `, "kodak"] });
     expect(effectiveTags(s, "", true)).toEqual(["golden hour", "kodak"]);
   });
 
+  it("keeps a leading # — Rust files `#blue` as the literal tag", () => {
+    const s = state({ manualTags: ["#blue"] });
+    expect(effectiveTags(s, "", true)).toEqual(["#blue"]);
+  });
+
   it("drops tags that normalize to nothing", () => {
-    const s = state({ manualTags: ["   ", "#", "kodak"] });
+    const s = state({ manualTags: ["   ", `${TAB}`, "kodak"] });
     expect(effectiveTags(s, "", true)).toEqual(["kodak"]);
+  });
+});
+
+describe("normalizeRequestTag / requestTagKey", () => {
+  it("collapses whitespace runs, including tabs and newlines", () => {
+    expect(normalizeRequestTag(`  a ${TAB}\n b  `)).toBe("a b");
+  });
+
+  it("preserves case and a leading #, exactly like Rust", () => {
+    expect(normalizeRequestTag("  #Kodak Gold  ")).toBe("#Kodak Gold");
+  });
+
+  it("requestTagKey folds case for the merge key", () => {
+    expect(requestTagKey("  #Kodak  GOLD ")).toBe("#kodak gold");
+  });
+});
+
+describe("stripTagHash", () => {
+  it("removes a typed leading # (the input-side affordance)", () => {
+    expect(stripTagHash("#kodak")).toBe("kodak");
+    expect(stripTagHash("  ##  kodak ")).toBe("kodak ");
+  });
+
+  it("leaves an inner # alone", () => {
+    expect(stripTagHash("shot #2")).toBe("shot #2");
   });
 });
 
 describe("addTag", () => {
   it("normalizes and appends", () => {
+    expect(addTag(emptyFileUnderState(), "  Golden  Hour ").manualTags).toEqual(
+      ["Golden Hour"],
+    );
+  });
+
+  it("files a typed # literally unless the surface stripped it first", () => {
+    expect(addTag(emptyFileUnderState(), "#kodak").manualTags).toEqual([
+      "#kodak",
+    ]);
     expect(
-      addTag(emptyFileUnderState(), "  #Golden  Hour ").manualTags,
-    ).toEqual(["Golden Hour"]);
+      addTag(emptyFileUnderState(), stripTagHash("#kodak")).manualTags,
+    ).toEqual(["kodak"]);
   });
 
   it("ignores a blank tag", () => {
@@ -417,15 +466,41 @@ describe("validateRequestTag", () => {
     ).not.toBeNull();
   });
 
-  it.each([[""], ["   "], ["#"], ["  #  "]])(
-    "rejects the empty tag %j",
-    (raw) => {
-      expect(validateRequestTag(raw)).not.toBeNull();
-    },
-  );
+  it.each([[""], ["   "]])("rejects the empty tag %j", (raw) => {
+    expect(validateRequestTag(raw)).not.toBeNull();
+  });
 
-  it("rejects control characters instead of silently stripping them", () => {
+  it("accepts a bare # — Rust does not treat it as decoration", () => {
+    expect(validateRequestTag("#")).toBeNull();
+    expect(validateRequestTag("#blue")).toBeNull();
+  });
+
+  it("rejects NON-whitespace control characters", () => {
     expect(validateRequestTag(`kodak${BELL}gold`)).toMatch(/control character/);
+  });
+
+  it("accepts U+0085 NEL, the one control character Rust admits", () => {
+    // Rust: is_control() && !is_whitespace() is FALSE for NEL, so it
+    // collapses into the tag's spacing. Its neighbours are rejected.
+    const nel = String.fromCharCode(0x85);
+    expect(validateRequestTag(`a${nel}b`)).toBeNull();
+    expect(normalizeRequestTag(`a${nel}b`)).toBe("a b");
+    expect(validateRequestTag(`a${String.fromCharCode(0x84)}b`)).toMatch(
+      /control character/,
+    );
+    expect(validateRequestTag(`a${String.fromCharCode(0x86)}b`)).toMatch(
+      /control character/,
+    );
+  });
+
+  it("accepts whitespace control characters, which Rust collapses", () => {
+    expect(validateRequestTag(`kodak${TAB}gold`)).toBeNull();
+    expect(normalizeRequestTag(`kodak${TAB}gold`)).toBe("kodak gold");
+  });
+
+  it("measures the length after collapsing, like Rust", () => {
+    const spaced = `${"x".repeat(REQUEST_TAG_MAX_LEN)}${TAB}${TAB}`;
+    expect(validateRequestTag(spaced)).toBeNull();
   });
 });
 
@@ -531,6 +606,52 @@ const DOWNLOAD_FILE_NAME_FIXTURES: ReadonlyArray<
     },
     "minimax-h3-fl2va-comfy-pruned-int8-turbo-4step-768p__s5.mp4",
   ],
+  // Rust's own fixtures, copied verbatim from print_title.rs's tests.
+  [
+    {
+      title: "Smurf Village at Dusk",
+      model: "flux-dev:q4",
+      seed: 42,
+      ext: "png",
+    },
+    "smurf-village-at-dusk__flux-dev-q4__s42.png",
+  ],
+  [{ title: "!!!", model: "sdxl", seed: 7, ext: "jpeg" }, "sdxl__s7.jpeg"],
+  [
+    { title: "Owl", model: "ltx-2-19b-distilled:fp8", seed: 1, ext: "mp4" },
+    "owl__ltx-2-19b-distilled-fp8__s1.mp4",
+  ],
+  [{ title: null, model: "cv:12345", seed: 9, ext: "png" }, "cv-12345__s9.png"],
+  [
+    { title: null, model: "flux-dev:q4", seed: 42, ext: "png" },
+    "flux-dev-q4__s42.png",
+  ],
+  // A model exactly at the cap is kept whole.
+  [
+    {
+      title: null,
+      model: "z".repeat(DOWNLOAD_MODEL_SLUG_MAX_LEN),
+      seed: 1,
+      ext: "png",
+    },
+    `${"z".repeat(DOWNLOAD_MODEL_SLUG_MAX_LEN)}__s1.png`,
+  ],
+  // Rust's own fixtures for a model that sanitizes to nothing: the segment
+  // is dropped, never replaced by a placeholder word that reads like a model.
+  [{ title: "Owl", model: "???", seed: 42, ext: "png" }, "owl__s42.png"],
+  [{ title: null, model: "???", seed: 42, ext: "png" }, "s42.png"],
+  // The model cap is a filesystem budget, so a long `hf:` path IS cut — at
+  // DOWNLOAD_MODEL_SLUG_MAX_LEN (80), and the cut never leaves a dangling
+  // `-`: `hf-` + 7 x `abcdefghij-` is exactly 80, so the 7th separator goes.
+  [
+    {
+      title: null,
+      model: `hf:${"abcdefghij/".repeat(9)}end`,
+      seed: 1,
+      ext: "png",
+    },
+    `hf-${"abcdefghij-".repeat(6)}abcdefghij__s1.png`,
+  ],
   // Nothing sluggable at all still yields a usable name.
   [{ title: null, model: "日本語", seed: null, ext: "png" }, "print.png"],
   [
@@ -542,6 +663,35 @@ const DOWNLOAD_FILE_NAME_FIXTURES: ReadonlyArray<
 describe("downloadFileName", () => {
   it.each(DOWNLOAD_FILE_NAME_FIXTURES)("%j → %s", (input, expected) => {
     expect(downloadFileName(input)).toBe(expected);
+  });
+
+  // Rust: `download_name_normalizes_the_extension`.
+  it.each([["png"], [".png"], ["PNG"], [".PNG"], ["  .Png "]])(
+    "normalizes the extension %j",
+    (ext) => {
+      expect(
+        downloadFileName({ title: "Owl", model: "flux-dev", seed: 1, ext }),
+      ).toBe("owl__flux-dev__s1.png");
+    },
+  );
+
+  it.each([[""], ["   "], ["."], [null]])(
+    "leaves no bare trailing dot for %j",
+    (ext) => {
+      expect(
+        downloadFileName({ title: "Owl", model: "flux-dev", seed: 1, ext }),
+      ).toBe("owl__flux-dev__s1");
+    },
+  );
+
+  it("keeps exactly two separators when every component survives", () => {
+    const name = downloadFileName({
+      title: "Owl",
+      model: "ltx-2-19b-distilled:fp8",
+      seed: 1,
+      ext: "mp4",
+    });
+    expect(name.match(/__/g)).toHaveLength(2);
   });
 });
 
@@ -592,14 +742,42 @@ describe("suggestTags", () => {
     expect(suggestTags(EXISTING_TAGS, "zzz", [])).toEqual([]);
   });
 
-  it("matches the typed tag through normalization (a leading #)", () => {
-    expect(suggestTags(EXISTING_TAGS, "#grain", []).map((t) => t.name)).toEqual(
-      ["grain"],
-    );
+  it("matches on the collapsed, case-folded key", () => {
+    expect(
+      suggestTags(EXISTING_TAGS, `  GRA${TAB}`, []).map((t) => t.name),
+    ).toEqual(["grain"]);
+  });
+
+  it("takes a typed # literally, so a host's #-tag is findable", () => {
+    const tags = [...EXISTING_TAGS, { name: "#grain", count: 1 }];
+    expect(suggestTags(tags, "#grain", []).map((t) => t.name)).toEqual([
+      "#grain",
+    ]);
+    // The surface applies the affordance when it wants the plain tag.
+    expect(
+      suggestTags(tags, stripTagHash("#grain"), []).map((t) => t.name),
+    ).toEqual(["grain", "#grain"]);
   });
 });
 
 // ── Storage keys ────────────────────────────────────────────────────────────
+
+describe("download-name constants", () => {
+  it("pins the fallback stem word Rust also pins", () => {
+    expect(DOWNLOAD_FALLBACK_STEM).toBe("print");
+    expect(downloadFileName({ model: "???", ext: "png" })).toBe(
+      `${DOWNLOAD_FALLBACK_STEM}.png`,
+    );
+  });
+
+  it("caps the model component independently of the collection slug", () => {
+    expect(DOWNLOAD_MODEL_SLUG_MAX_LEN).toBe(80);
+    const model = "m".repeat(DOWNLOAD_MODEL_SLUG_MAX_LEN + 20);
+    expect(downloadFileName({ model, seed: 1, ext: "png" })).toBe(
+      `${"m".repeat(DOWNLOAD_MODEL_SLUG_MAX_LEN)}__s1.png`,
+    );
+  });
+});
 
 describe("storage keys", () => {
   it("pins the web auto-tag setting key", () => {

@@ -18,10 +18,20 @@
  * against every host in a fleet without the browser learning host-local
  * collection ids.
  *
- * Slug and tag normalization are NOT restated here: `titleSlug`,
- * `collectionSlug`, `normalizeTagName`, `tagKey`, and `sortTags` come from
- * `libraryOrganization`, which is already pinned to `mold_core` by its own
- * parity fixtures. Rust remains the authority for every limit mirrored below.
+ * Slug logic is NOT restated here: `titleSlug`, `collectionSlug`, `slugify`,
+ * and `sortTags` come from `libraryOrganization`, which is already pinned to
+ * `mold_core` by its own parity fixtures. Rust remains the authority for
+ * every limit and rule mirrored below.
+ *
+ * Tag normalization is the one deliberate exception. The Library's
+ * `normalizeTagName` also strips a leading `#` — a display affordance the V3
+ * tag editors chose — but `mold_core::organization::normalize_tag_name` does
+ * NOT: `#blue` is the literal tag `#blue` there. A request tag is storage,
+ * not display, so `normalizeRequestTag` below mirrors Rust exactly and the
+ * `#` affordance is offered separately as `stripTagHash`, for a surface to
+ * apply to TYPED input before calling `addTag` (never to a suggestion the
+ * host reported, or picking `#blue` would file a different tag called
+ * `blue`).
  *
  * Framework-free and browser-safe: no Vue, no Pinia, no DOM, no shell
  * imports. Every state helper returns a NEW state object so a surface can
@@ -31,9 +41,8 @@
 import type { TagCount } from "./api/galleryOrganization";
 import {
   collectionSlug,
-  normalizeTagName,
+  slugify,
   sortTags,
-  tagKey,
   titleSlug,
 } from "./libraryOrganization";
 
@@ -52,9 +61,31 @@ export const REQUEST_TAG_MAX_LEN = 64;
  * `mold.mobile.settings.v1`, so neither needs a key of its own. */
 export const AUTO_TAG_SETTING_WEB = "mold.create.autoTagTitle.v1";
 
-// Control characters (C0 + DEL). Rejected rather than stripped so a pasted
-// tag is reported instead of silently altered.
-const CONTROL_CHARS = /[\u0000-\u001f\u007f]/;
+/**
+ * Cap for the model component of a download name. Mirrors Rust's
+ * `DOWNLOAD_MODEL_SLUG_MAX_LEN` - deliberately its OWN constant rather than
+ * the collection-slug cap it happens to equal, because the reason is a
+ * filesystem budget (`title(40) + model + s{20 digits} + ext` must stay under
+ * 255 bytes), not a collection rule. A long `hf:` path really is cut here.
+ */
+export const DOWNLOAD_MODEL_SLUG_MAX_LEN = 80;
+
+/** Stem when nothing about a print slugs to anything usable. Mirrors Rust's
+ * `DOWNLOAD_FALLBACK_STEM` - unreachable there, where the seed is a `u64`;
+ * reachable here, where a gallery entry can be seedless. */
+export const DOWNLOAD_FALLBACK_STEM = "print";
+
+// Exactly what Rust refuses: `is_control() && !is_whitespace()`. Tab, LF, VT,
+// FF, CR, and U+0085 NEL are whitespace, so they collapse into the tag's
+// inner spacing instead of failing it - refusing a pasted tab would reject a
+// tag the server accepts. NEL is the reason this range is split rather than
+// a flat U+007F-U+009F: it is a control character Rust admits.
+const REJECTED_CONTROL_CHARS =
+  /[\u0000-\u0008\u000e-\u001f\u007f-\u0084\u0086-\u009f]/;
+
+// Whitespace runs, mirroring Rust's `split_whitespace` (the White_Space
+// property). JS's `\s` covers all of it except U+0085 NEL.
+const WHITESPACE_RUN = /[\s\u0085]+/g;
 
 // ── State ───────────────────────────────────────────────────────────────────
 
@@ -152,10 +183,37 @@ export function matchCollection<T extends FileUnderCollectionLike>(
 // ── Tag helpers ─────────────────────────────────────────────────────────────
 
 /**
+ * Display form of a request tag, mirroring
+ * `mold_core::organization::normalize_tag_name`: whitespace runs (tabs and
+ * newlines included) collapse to single spaces and the edges are trimmed.
+ * Case is preserved — the server stores tags `COLLATE NOCASE`, so compare
+ * with `requestTagKey`. A leading `#` is NOT stripped: see `stripTagHash`.
+ */
+export function normalizeRequestTag(raw: string): string {
+  return raw.replace(WHITESPACE_RUN, " ").trim();
+}
+
+/** Case-insensitive merge key for a request tag; mirrors the `to_lowercase`
+ * fold in Rust's `normalize_request_tags`. */
+export function requestTagKey(raw: string): string {
+  return normalizeRequestTag(raw).toLowerCase();
+}
+
+/**
+ * The `#` affordance, offered as its own step: people type `#kodak` out of
+ * habit, and Rust would file that as the literal tag `#kodak`. A surface
+ * applies this to what the user TYPED, before `addTag` — never to a tag the
+ * host reported, where stripping it would file a different tag.
+ */
+export function stripTagHash(raw: string): string {
+  return raw.replace(/^\s*#+\s*/, "");
+}
+
+/**
  * The tags this print would be filed under: the ghost tag first unless it was
  * removed, then the manual tags in typing order — every name through
- * `normalizeTagName`, deduped case-insensitively (first casing wins), empties
- * dropped.
+ * `normalizeRequestTag`, deduped case-insensitively (first casing wins),
+ * empties dropped.
  */
 export function effectiveTags(
   state: FileUnderState,
@@ -165,7 +223,7 @@ export function effectiveTags(
   const out: string[] = [];
   const seen = new Set<string>();
   const push = (raw: string) => {
-    const name = normalizeTagName(raw);
+    const name = normalizeRequestTag(raw);
     if (!name) return;
     const key = name.toLowerCase();
     if (seen.has(key)) return;
@@ -183,10 +241,10 @@ export function effectiveTags(
 /** Add a typed tag. Blank and case-insensitively duplicate names are
  * ignored, so the caller can wire this straight to Enter. */
 export function addTag(state: FileUnderState, raw: string): FileUnderState {
-  const name = normalizeTagName(raw);
+  const name = normalizeRequestTag(raw);
   if (!name) return { ...state, manualTags: [...state.manualTags] };
-  const key = tagKey(name);
-  const exists = state.manualTags.some((tag) => tagKey(tag) === key);
+  const key = requestTagKey(name);
+  const exists = state.manualTags.some((tag) => requestTagKey(tag) === key);
   return {
     ...state,
     manualTags: exists ? [...state.manualTags] : [...state.manualTags, name],
@@ -204,13 +262,13 @@ export function removeTag(
   title: string | null | undefined,
   autoTagEnabled: boolean,
 ): FileUnderState {
-  const key = tagKey(name);
+  const key = requestTagKey(name);
   const ghost = deriveGhostTag(title, autoTagEnabled);
-  const isGhost = ghost !== null && tagKey(ghost) === key;
+  const isGhost = ghost !== null && requestTagKey(ghost) === key;
   return {
     ...state,
     ghostRemoved: state.ghostRemoved || isGhost,
-    manualTags: state.manualTags.filter((tag) => tagKey(tag) !== key),
+    manualTags: state.manualTags.filter((tag) => requestTagKey(tag) !== key),
   };
 }
 
@@ -360,10 +418,10 @@ export function fileUnderAvailable(capabilities: unknown): boolean {
  * submit, where the user has already lost the context.
  */
 export function validateRequestTag(name: string): string | null {
-  if (CONTROL_CHARS.test(name)) {
+  if (REJECTED_CONTROL_CHARS.test(name)) {
     return "Tags cannot contain control characters.";
   }
-  const normalized = normalizeTagName(name);
+  const normalized = normalizeRequestTag(name);
   if (normalized.length === 0) return "Enter a tag name.";
   // Count Unicode scalar values like Rust's `.chars().count()`.
   if (Array.from(normalized).length > REQUEST_TAG_MAX_LEN) {
@@ -383,8 +441,8 @@ export function validateNewTag(
 ): string | null {
   const perTag = validateRequestTag(raw);
   if (perTag) return perTag;
-  const key = tagKey(raw);
-  if (active.some((tag) => tagKey(tag) === key)) {
+  const key = requestTagKey(raw);
+  if (active.some((tag) => requestTagKey(tag) === key)) {
     return "That tag is already on this print.";
   }
   if (active.length >= MAX_REQUEST_TAGS) {
@@ -435,12 +493,15 @@ export function downloadFileName(input: DownloadFileNameInput): string {
   const title = input.title?.trim();
   const slug = title ? titleSlug(title) : null;
   if (slug) segments.push(slug);
-  const model = collectionSlug(input.model ?? "");
+  const model = slugify(input.model ?? "", DOWNLOAD_MODEL_SLUG_MAX_LEN);
   if (model) segments.push(model);
   const seed = seedSegment(input.seed);
   if (seed) segments.push(seed);
-  const stem = segments.length > 0 ? segments.join("__") : "print";
-  const ext = (input.ext ?? "").trim().replace(/^\.+/, "").toLowerCase();
+  const stem =
+    segments.length > 0 ? segments.join("__") : DOWNLOAD_FALLBACK_STEM;
+  // Rust: `ext.trim().trim_start_matches('.').trim()`, then lowercased — the
+  // second trim is what makes `". Png "` agree with `"png"`.
+  const ext = (input.ext ?? "").trim().replace(/^\.+/, "").trim().toLowerCase();
   return ext ? `${stem}.${ext}` : stem;
 }
 
@@ -459,14 +520,16 @@ export function suggestTags<T extends TagCount>(
   query: string,
   active: readonly string[],
 ): T[] {
-  const taken = new Set(active.map((tag) => tagKey(tag)));
-  const candidates = existing.filter((tag) => !taken.has(tagKey(tag.name)));
-  const needle = tagKey(query);
+  const taken = new Set(active.map((tag) => requestTagKey(tag)));
+  const candidates = existing.filter(
+    (tag) => !taken.has(requestTagKey(tag.name)),
+  );
+  const needle = requestTagKey(query);
   if (!needle) return sortTags(candidates);
   const prefix: T[] = [];
   const substring: T[] = [];
   for (const tag of candidates) {
-    const key = tagKey(tag.name);
+    const key = requestTagKey(tag.name);
     if (key.startsWith(needle)) prefix.push(tag);
     else if (key.includes(needle)) substring.push(tag);
   }
