@@ -7051,6 +7051,8 @@ impl App {
         self.generate.generating = true;
         self.generate.batch_remaining = self.generate.params.batch;
         self.generate.error_message = None;
+        // An advisory describes the print that produced it.
+        self.generate.warning_message = None;
         self.generate.progress.clear();
         self.generate.progress.mark_generation_start();
         self.generate.clear_live_preview();
@@ -7515,6 +7517,29 @@ impl App {
                     }
                     self.generate.last_seed = Some(response.seed_used);
                     self.generate.last_generation_time_ms = Some(response.generation_time_ms);
+
+                    // `x-mold-request-warning` rides a request the host
+                    // ACCEPTED and rendered: a filing it could not apply, a
+                    // lip-dub clip it retimed. Nothing failed, so it takes the
+                    // advisory slot (`!`, warning styling) and never the error
+                    // slot, whose `✗` would read as a failed render.
+                    //
+                    // Each advisory is taken WHOLE. The prose contains "; " as
+                    // ordinary punctuation ("…were not applied; the print was
+                    // generated and saved normally"), so splitting on it yields
+                    // two dangling half-sentences; several advisories are
+                    // joined with the separator the TUI already uses between
+                    // independent facts, which the prose cannot contain.
+                    if !response.request_warnings.is_empty() {
+                        for advisory in &response.request_warnings {
+                            self.generate.progress.push_log(ProgressLogEntry {
+                                message: advisory.clone(),
+                                style: ProgressStyle::Warning,
+                            });
+                        }
+                        self.generate.warning_message =
+                            Some(response.request_warnings.join(" \u{00b7} "));
+                    }
 
                     // Use the model name from the response (server is source of
                     // truth). The UI params may have changed if the user switched
@@ -13139,6 +13164,157 @@ mod tests {
         assert_eq!(
             app.generate.params.guidance_overrides.stg_blocks,
             Some(vec![28, 29])
+        );
+    }
+
+    // ── request advisories (x-mold-request-warning) ────────────
+
+    /// Build a completed response carrying `request_warnings`.
+    fn response_with_advisories(warnings: Vec<String>) -> GenerateResponse {
+        GenerateResponse {
+            request_warnings: warnings,
+            audio: None,
+            images: vec![mold_core::ImageData {
+                data: vec![0u8; 4],
+                format: OutputFormat::Png,
+                width: 64,
+                height: 64,
+                index: 0,
+            }],
+            generation_time_ms: 100,
+            model: "flux-dev:q4".to_string(),
+            seed_used: 42,
+            video: None,
+            gpu: None,
+        }
+    }
+
+    fn deliver_completion(app: &mut App, response: GenerateResponse) {
+        let metadata_snapshot = generation_metadata_snapshot(app);
+        app.bg_tx
+            .send(BackgroundEvent::GenerationComplete {
+                response: Box::new(response),
+                from_local: false,
+                metadata_snapshot,
+            })
+            .unwrap();
+        app.process_background_events();
+    }
+
+    /// The host accepted the request and produced a print; something was
+    /// dropped or adjusted along the way. That is an advisory, not a failure,
+    /// so it takes the advisory slot and leaves the error slot alone.
+    #[tokio::test]
+    async fn a_completed_generation_surfaces_its_advisories_without_claiming_failure() {
+        let mut app = make_settings_test_app();
+        app.generate.prompt = TextArea::from(["a test prompt"]);
+        deliver_completion(
+            &mut app,
+            response_with_advisories(vec![
+                "tags and collection were not applied; the print was generated and saved normally"
+                    .to_string(),
+            ]),
+        );
+
+        let warning = app
+            .generate
+            .warning_message
+            .as_deref()
+            .expect("a dropped filing must be reported");
+        assert!(
+            warning.contains("tags and collection were not applied"),
+            "{warning}"
+        );
+        assert_eq!(
+            app.generate.error_message, None,
+            "nothing failed \u{2014} the error slot renders a \u{2717} and would read as a failed render"
+        );
+    }
+
+    /// The advisory prose contains "; " as punctuation, so it must be taken
+    /// whole. Splitting on it renders two dangling half-sentences.
+    #[tokio::test]
+    async fn an_advisory_is_taken_whole_never_split_on_its_punctuation() {
+        let advisory =
+            "tags and collection were not applied; the print was generated and saved normally";
+        let mut app = make_settings_test_app();
+        app.generate.prompt = TextArea::from(["a test prompt"]);
+        deliver_completion(
+            &mut app,
+            response_with_advisories(vec![advisory.to_string()]),
+        );
+
+        assert_eq!(
+            app.generate.warning_message.as_deref(),
+            Some(advisory),
+            "one advisory must survive as exactly one sentence"
+        );
+    }
+
+    /// Two advisories are joined with the TUI's own separator, which the
+    /// prose cannot contain, rather than concatenated into one run-on.
+    #[tokio::test]
+    async fn several_advisories_are_joined_readably() {
+        let mut app = make_settings_test_app();
+        app.generate.prompt = TextArea::from(["a test prompt"]);
+        deliver_completion(
+            &mut app,
+            response_with_advisories(vec!["first advisory".to_string(), "second".to_string()]),
+        );
+
+        assert_eq!(
+            app.generate.warning_message.as_deref(),
+            Some("first advisory \u{00b7} second")
+        );
+    }
+
+    /// An ordinary generation reports nothing: the slot only ever appears
+    /// when something really was dropped or adjusted.
+    #[tokio::test]
+    async fn an_unwarned_generation_leaves_the_advisory_slot_empty() {
+        let mut app = make_settings_test_app();
+        app.generate.prompt = TextArea::from(["a test prompt"]);
+        deliver_completion(&mut app, response_with_advisories(Vec::new()));
+
+        assert_eq!(app.generate.warning_message, None);
+        assert_eq!(app.generate.error_message, None);
+    }
+
+    /// An advisory describes one print. Starting the next generation clears
+    /// it, exactly as the error slot is cleared.
+    #[tokio::test]
+    async fn starting_a_generation_clears_a_previous_advisory() {
+        let mut app = make_settings_test_app();
+        app.generate.prompt = TextArea::from(["a cat"]);
+        app.generate.warning_message = Some("a stale advisory".to_string());
+
+        app.start_generation();
+
+        assert_eq!(
+            app.generate.warning_message, None,
+            "a previous print's advisory must not describe this one"
+        );
+    }
+
+    /// The advisories also land in the Timeline, which is the TUI's durable
+    /// per-generation record and can hold text the one-line slot clips.
+    #[tokio::test]
+    async fn advisories_are_recorded_in_the_timeline() {
+        let mut app = make_settings_test_app();
+        app.generate.prompt = TextArea::from(["a test prompt"]);
+        deliver_completion(
+            &mut app,
+            response_with_advisories(vec!["tags were not applied".to_string()]),
+        );
+
+        assert!(
+            app.generate
+                .progress
+                .log
+                .iter()
+                .any(|entry| entry.message.contains("tags were not applied")
+                    && matches!(entry.style, ProgressStyle::Warning)),
+            "the advisory belongs in the per-generation record too"
         );
     }
 
