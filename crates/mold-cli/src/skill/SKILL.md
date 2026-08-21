@@ -710,7 +710,12 @@ mold run "a golden retriever" --image park.png --mask mask.png
 
 ### Face-identity conditioning (PuLID-FLUX)
 
-Additive `GenerateRequest` fields, off by default (the `pulid` build feature):
+Additive `GenerateRequest` fields. **Not executable yet on any build**: the
+`pulid` feature compiles the wire contract, but the FLUX engine gains the
+adapter in a later change, and until then `mold_core::identity::IDENTITY_RUNTIME_READY`
+stays `false`, no build advertises the capability, and every identity request is
+refused. Read `supports_identity` — never the feature — to decide whether to
+offer the control.
 
 | Field           | Purpose                                                                                                                                                                                    |
 | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -728,18 +733,25 @@ Milestone-1 gate — every rule below is a 422 at admission, never a silent drop
   neither combination is qualified yet.
 - Any of `id_weight` / `id_start_step` / `id_image_name` without `id_image` is
   an error, not an ignored field.
-- A server built **without** the `pulid` feature refuses any request carrying an
-  identity field with "this server was built without PuLID face-identity
-  support" — it never accepts-and-ignores, because that would render a print
-  with no face in it and say nothing. `mold_core::identity::IDENTITY_BUILD_UNSUPPORTED`
-  is the exact message. A request with no identity fields is untouched on
-  every build.
+- A server that cannot execute identity conditioning refuses any request
+  carrying an identity field. It never accepts-and-ignores, because that would
+  render a print with no face in it and say nothing. Two distinct messages, so
+  a client sends the operator to the right fix: a build **without** the `pulid`
+  feature answers `mold_core::identity::IDENTITY_BUILD_UNSUPPORTED` ("this
+  server was built without PuLID face-identity support" — needs a differently
+  compiled binary), and a build that links `pulid` while the runtime adapter is
+  still pending answers `IDENTITY_RUNTIME_PENDING` ("identity conditioning is
+  not available in this build yet" — needs a newer one). A request with no
+  identity fields is untouched on every build.
 
-`mold_core::identity` is the single authority for all of this. `/api/models[]`
-advertises additive `supports_identity` per model — true only on a build that
-links the adapter AND for a qualified checkpoint; absent on servers that
-predate identity conditioning, which clients read as "no". The same fact rides
-`generation_profile.capabilities.supports_identity`; never derive a second
+`mold_core::identity` is the single authority for all of this.
+`identity_runtime_available()` — the `pulid` feature AND `IDENTITY_RUNTIME_READY`
+— is the one predicate; never re-spell it as a bare feature check.
+`/api/models[]` advertises additive `supports_identity` per model, true only
+when that predicate holds AND the checkpoint is qualified, so the capability is
+advertised only once the runtime adapter is present; it is absent on servers
+that predate identity conditioning, which clients read as "no". The same fact
+rides `generation_profile.capabilities.supports_identity`; never derive a second
 predicate. Saved metadata records `id_image_name`, `id_image_sha256`,
 `id_weight`, and `id_start_step` only when the print actually carried an
 identity reference — hashes and names, never the face payload.
@@ -769,7 +781,11 @@ under `pending_downloads` (kinds `identity_adapter`, `identity_vision_encoder`,
 `face_detector`, `face_recognizer`) without fetching anything, and admission
 materializes it into `shared/pulid/` — after the license gate, so an unaccepted
 antelopev2 fails the job with that same `--accept-license` message instead of
-downloading. An `id_weight` of `0` applies no identity at all and is completely
+downloading. Every file is verified against its manifest SHA-256 pin before it
+can be used — Hugging Face `main` is a mutable branch — so a changed or tampered
+artifact is named, deleted, and refused rather than frozen into a plan; a copy
+already attested by a `.sha256-verified` marker recording that pin is not
+rehashed. An `id_weight` of `0` applies no identity at all and is completely
 inert: it plans no assets, downloads nothing, and adds no memory demand.
 
 ### ControlNet (SD1.5 only)

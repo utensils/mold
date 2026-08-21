@@ -177,9 +177,16 @@ fn print_unknown_model_error(model: &str) {
 
 /// Record the user's acceptance of a third-party model license.
 ///
-/// Prints the restriction and the canonical terms URL before writing the
-/// record, so `--accept-license` is never a silent flag: the user sees what
-/// they are agreeing to in the same invocation that agrees to it.
+/// Prints the restriction and both terms URLs before writing the record, so
+/// `--accept-license` is never a silent flag: the user sees what they are
+/// agreeing to in the same invocation that agrees to it.
+///
+/// Deliberately OFFLINE — it never fetches the license text. The terms are
+/// pinned to an exact upstream commit whose digest was verified when the pin
+/// landed, so there is nothing a network round-trip could tell us that the
+/// constant does not already say, and accepting must work on an air-gapped
+/// host. Adopting newer upstream terms is a Mold release re-pinning the
+/// revision, which invalidates stored acceptances and asks again.
 pub fn accept_license(id: &str) -> Result<()> {
     use mold_core::license_acceptance;
 
@@ -207,7 +214,8 @@ pub fn accept_license(id: &str) -> Result<()> {
 
     status!("{} {}", theme::icon_info(), license.name.bold());
     status!("  {}", license.summary);
-    status!("  Terms: {}", license.url);
+    status!("  Terms (pinned): {}", license.url);
+    status!("  Project terms:  {}", license.canonical);
     status!("");
 
     license_acceptance::record_acceptance(&mold_home, license).map_err(|error| {
