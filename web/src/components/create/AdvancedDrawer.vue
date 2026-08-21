@@ -17,6 +17,7 @@ import AccordionSection from "@ui/components/AccordionSection.vue";
 import BadgePill from "@ui/components/BadgePill.vue";
 import Icon from "@ui/components/Icon.vue";
 import SegmentedControl from "@ui/components/SegmentedControl.vue";
+import SliderRow from "@ui/components/SliderRow.vue";
 import SwitchToggle from "@ui/components/SwitchToggle.vue";
 import Chip from "@ui/components/Chip.vue";
 import LoraPicker from "../LoraPicker.vue";
@@ -46,6 +47,20 @@ import {
   type WanRecipeState,
 } from "@studio/lib/wanRecipe";
 import { emptyGuidanceOverrides } from "@studio/lib/guidanceOverrides";
+import {
+  ID_START_STEP_DEFAULT,
+  ID_WEIGHT_DEFAULT,
+  ID_WEIGHT_MAX,
+  ID_WEIGHT_MIN,
+  ID_WEIGHT_STEP,
+  IDENTITY_SECTION_LABEL,
+  IDENTITY_START_STEP_HINT,
+  IDENTITY_START_STEP_LABEL,
+  IDENTITY_WEIGHT_HINT,
+  IDENTITY_WEIGHT_LABEL,
+  identityActiveCount,
+  supportsIdentity,
+} from "@studio/lib/identityConditioning";
 import { useOverlayFocus } from "../../composables/useOverlayFocus";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import type { OutputMode } from "@studio/lib/sequence";
@@ -306,6 +321,48 @@ function numberOrNull(raw: string): number | null {
   if (trimmed === "") return null;
   const value = Number(trimmed);
   return Number.isFinite(value) ? value : null;
+}
+
+// ── Face identity (PuLID, #1224) ──────────────────────────────────────
+// Only the two knobs live here; the photo well is primary form, beside the
+// source-media card. Both write null when untouched or cleared for the same
+// reason the wan recipe does: the value the server applies is its own until
+// the request actually carries a field.
+const identitySupported = computed(() =>
+  selectedModel.value
+    ? supportsIdentity(
+        effectiveGenerationRecipe(
+          selectedModel.value,
+          props.modelValue.pipeline,
+        ),
+        selectedModel.value,
+      )
+    : (props.modelValue.identitySupported ?? false),
+);
+/** Sequence clips carry no identity slot on the chain wire. */
+const showIdentity = computed(
+  () => !sequenceMode.value && identitySupported.value,
+);
+const identityWeight = computed(
+  () => props.modelValue.identityWeight ?? ID_WEIGHT_DEFAULT,
+);
+const identityActive = computed(() =>
+  identityActiveCount({
+    weight: props.modelValue.identityWeight ?? null,
+    startStep: props.modelValue.identityStartStep ?? null,
+  }),
+);
+const identitySummary = computed(() =>
+  identityActive.value
+    ? `${identityActive.value} set · strength ${identityWeight.value.toFixed(2)}`
+    : "Model defaults",
+);
+/** The start step must land strictly below the steps this print renders. */
+const identityStartStepMax = computed(() =>
+  Math.max(0, (props.modelValue.steps || 1) - 1),
+);
+function resetIdentity() {
+  patch({ identityWeight: null, identityStartStep: null });
 }
 
 // ── Negative prompt ───────────────────────────────────────────────────
@@ -815,6 +872,66 @@ function setSequenceCameraMode(mode: string) {
             @update:model-value="setLoras"
             @append-prompt="emit('append-prompt', $event)"
           />
+        </AccordionSection>
+
+        <!-- Identity sits beside the LoRA stack because admission refuses the
+             two together; the photo itself is primary form. -->
+        <AccordionSection
+          v-if="showIdentity"
+          icon="image"
+          :title="IDENTITY_SECTION_LABEL"
+          :summary="identitySummary"
+          :open="true"
+          :header-interactive="false"
+          data-test="section-identity"
+        >
+          <div class="adv__field" data-test="identity-weight">
+            <SliderRow
+              :label="IDENTITY_WEIGHT_LABEL"
+              :model-value="identityWeight"
+              :min="ID_WEIGHT_MIN"
+              :max="ID_WEIGHT_MAX"
+              :step="ID_WEIGHT_STEP"
+              :value-label="
+                modelValue.identityWeight == null
+                  ? `${identityWeight.toFixed(2)} · default`
+                  : identityWeight.toFixed(2)
+              "
+              @update:model-value="patch({ identityWeight: $event })"
+            />
+            <p class="adv__hint">{{ IDENTITY_WEIGHT_HINT }}</p>
+          </div>
+          <div class="adv__field">
+            <label class="adv__label">{{ IDENTITY_START_STEP_LABEL }}</label>
+            <input
+              class="adv__input"
+              type="number"
+              inputmode="numeric"
+              step="1"
+              min="0"
+              :max="identityStartStepMax"
+              :placeholder="`Model default (${ID_START_STEP_DEFAULT})`"
+              data-test="identity-start-step"
+              :value="modelValue.identityStartStep ?? ''"
+              @input="
+                patch({
+                  identityStartStep: numberOrNull(
+                    ($event.target as HTMLInputElement).value,
+                  ),
+                })
+              "
+            />
+            <p class="adv__hint">{{ IDENTITY_START_STEP_HINT }}</p>
+          </div>
+          <button
+            v-if="identityActive"
+            type="button"
+            class="adv__reset"
+            data-test="identity-reset"
+            @click="resetIdentity"
+          >
+            Use model defaults
+          </button>
         </AccordionSection>
 
         <UpscaleSection

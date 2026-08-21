@@ -33,6 +33,10 @@ export interface AdvancedCountParams {
   /** How many wan recipe controls (flow shift, distill strengths) are set.
    * Each counts, matching how LoRA rows do. Optional for the same reason. */
   wanRecipe?: number;
+  /** `identityActiveCount` — the two identity knobs that are actually set.
+   * The identity photo itself is primary-form media and never counts, the
+   * same way source images stopped counting when they moved there. */
+  identity?: number;
 }
 
 /** Count of active advanced fields for the "N on" / "N active" badge. */
@@ -50,6 +54,7 @@ export function advancedActiveCount(p: AdvancedCountParams): number {
     (p.customSize ? 1 : 0) +
     (p.videoNonDefault ? 1 : 0) +
     (p.videoSuite ? 1 : 0) +
-    Math.max(0, p.wanRecipe ?? 0)
+    Math.max(0, p.wanRecipe ?? 0) +
+    Math.max(0, p.identity ?? 0)
   );
 }

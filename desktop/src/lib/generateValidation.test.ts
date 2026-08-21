@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { newGenerateForm } from "./generateForm";
 import {
+  identityConditioningValidationError,
   inlineGenerationMediaBytes,
   sourceConditioningValidationError,
   resolutionValidationWarning,
   resolutionValidationError,
 } from "./generateValidation";
+import type { GenerateForm } from "./generateForm";
 
 function formWithEveryH3MediaField() {
   const form = newGenerateForm();
@@ -298,5 +300,120 @@ describe("resolution checks never block a custom size (server is the authority)"
     // A well-formed on-grid size stays silent on both channels.
     expect(resolutionValidationError(1024, 576, legacy)).toBeNull();
     expect(resolutionValidationWarning(1024, 576, legacy)).toBeNull();
+  });
+});
+
+// A PNG whose header declares `width × height`. Only the 24-byte header is
+// read by every identity pre-check, so the payload never has to be real.
+function pngBase64(width: number, height: number): string {
+  const bytes = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+  const u32 = (value: number) => [
+    (value >>> 24) & 0xff,
+    (value >>> 16) & 0xff,
+    (value >>> 8) & 0xff,
+    value & 0xff,
+  ];
+  bytes.push(...u32(13), 0x49, 0x48, 0x44, 0x52, ...u32(width), ...u32(height), 8, 6, 0, 0, 0);
+  return btoa(String.fromCharCode(...bytes));
+}
+
+describe("identityConditioningValidationError", () => {
+  function identityForm(): GenerateForm {
+    const form = newGenerateForm();
+    form.model = "flux-dev:q8";
+    form.family = "flux";
+    form.steps = 20;
+    form.identitySupported = true;
+    form.identityImage = { filename: "face.png", base64: pngBase64(768, 768) };
+    return form;
+  }
+
+  it("is silent for a form that does not mention identity at all", () => {
+    expect(identityConditioningValidationError(newGenerateForm())).toBeNull();
+  });
+
+  it("accepts a qualified checkpoint carrying only a photo", () => {
+    expect(identityConditioningValidationError(identityForm())).toBeNull();
+  });
+
+  it("refuses a knob with no photo", () => {
+    const form = identityForm();
+    form.identityImage = null;
+    form.identityWeight = 1.5;
+    expect(identityConditioningValidationError(form)).toContain("Attach an identity photo");
+  });
+
+  it("parks — never refuses — on a checkpoint that is not identity-qualified", () => {
+    // The partition never reaches the wire on such a checkpoint, so there is
+    // nothing for Generate to block on: the photo stays staged and the well
+    // is simply not rendered, exactly as staged LTX-2 media behaves.
+    const form = identityForm();
+    form.identitySupported = false;
+    expect(identityConditioningValidationError(form)).toBeNull();
+    // An unread capability is the same parked state, never a refusal.
+    form.identitySupported = null;
+    expect(identityConditioningValidationError(form)).toBeNull();
+    // Not even a combination the qualified path refuses outright.
+    form.loras = [{ path: "style.safetensors", name: "style", scale: 1, trainedWords: [] }];
+    form.identityWeight = 99;
+    expect(identityConditioningValidationError(form)).toBeNull();
+  });
+
+  it("refuses the combination with a LoRA", () => {
+    const form = identityForm();
+    form.loras = [{ path: "style.safetensors", name: "style", scale: 1, trainedWords: [] }];
+    expect(identityConditioningValidationError(form)).toContain("LoRA");
+  });
+
+  it("refuses the combination with an img2img source image", () => {
+    const form = identityForm();
+    form.family = "sd15";
+    form.model = "sd15:fp16";
+    form.sourceImage = "c291cmNl";
+    expect(identityConditioningValidationError(form)).toContain("source image");
+  });
+
+  it("ignores a parked source image the selected checkpoint would drop", () => {
+    // Source media is parked across model switches so switching back restores
+    // the draft. A checkpoint that advertises no source image drops it in
+    // `buildRequest`, so it must not refuse the identity partition either.
+    const form = identityForm();
+    form.sourceImageCapability = "unsupported";
+    form.sourceImage = "c291cmNl";
+    expect(identityConditioningValidationError(form)).toBeNull();
+  });
+
+  it("refuses an out-of-range strength", () => {
+    const form = identityForm();
+    form.identityWeight = 3.5;
+    expect(identityConditioningValidationError(form)).toContain("0 to 3");
+    form.identityWeight = -0.1;
+    expect(identityConditioningValidationError(form)).toContain("0 to 3");
+    form.identityWeight = 3;
+    expect(identityConditioningValidationError(form)).toBeNull();
+  });
+
+  it("refuses a start step at or beyond the steps this print renders", () => {
+    const form = identityForm();
+    form.steps = 8;
+    form.identityStartStep = 8;
+    expect(identityConditioningValidationError(form)).toContain("0 to 7");
+    form.identityStartStep = 7;
+    expect(identityConditioningValidationError(form)).toBeNull();
+  });
+
+  it("refuses bytes that are not a PNG or JPEG, and an oversized photo", () => {
+    const form = identityForm();
+    form.identityImage = { filename: "face.gif", base64: "R0lGODlhAQABAAAAACw=" };
+    expect(identityConditioningValidationError(form)).toContain("PNG or JPEG");
+    form.identityImage = { filename: "huge.png", base64: pngBase64(9000, 4000) };
+    expect(identityConditioningValidationError(form)).toContain("8192");
+  });
+
+  it("counts the identity photo against the inline media budget", () => {
+    const form = identityForm();
+    const bytes = inlineGenerationMediaBytes(form);
+    expect(bytes).toBeGreaterThan(0);
+    expect(inlineGenerationMediaBytes(form, "identityImage")).toBe(0);
   });
 });

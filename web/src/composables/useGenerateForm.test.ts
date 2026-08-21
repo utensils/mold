@@ -2863,3 +2863,278 @@ describe("generate form serialization helpers", () => {
     expect(next.cameraControl).toBeNull();
   });
 });
+
+// ── Face-identity conditioning (PuLID, #1224) ────────────────────────────
+//
+// The gate, the wire projection and the reuse shape all live in
+// `@studio/lib/identityConditioning`; what these cover is that the web form
+// asks it the right questions — the resolved catalog row at submit time, the
+// snapshot when the inventory has not landed, and nothing at all on a
+// checkpoint the host would refuse.
+describe("useGenerateForm — identity photo", () => {
+  const PHOTO = "aWRlbnRpdHktcGhvdG8=";
+
+  beforeEach(() => {
+    localStorage.clear();
+    __testing__.resetForTest();
+  });
+
+  /** A server-authored v1 recipe whose only interesting bit is the gate. */
+  function identityRecipeModel(supportsIdentity: boolean): ModelInfoExtended {
+    return makeModel({
+      name: "flux-dev-pulid:bf16",
+      family: "flux",
+      generation_profile: {
+        schema_version: 1,
+        profile_id: "flux.v1",
+        profile_hash: "hash",
+        default_recipe_id: "default",
+        recipes: [
+          {
+            id: "default",
+            label: "Default",
+            request_selector: {},
+            defaults: { width: 1024, height: 1024, steps: 20, guidance: 3.5 },
+            resolution: {
+              domain: "dynamic",
+              alignment: 64,
+              min_width: 64,
+              min_height: 64,
+              max_pixels: 1_048_576,
+              aspect_groups: [],
+            },
+            steps: {
+              default: 20,
+              min: 1,
+              max: 100,
+              step: 1,
+              mode: "adjustable",
+            },
+            guidance: {
+              default: 3.5,
+              min: 0,
+              max: 20,
+              step: 0.1,
+              mode: "adjustable",
+            },
+            capabilities: {
+              guidance: { adjustable: true, supports_negative_prompt: false },
+              negative_prompt: { mode: "hidden", required: false },
+              supports_lora: true,
+              supports_controlnet: false,
+              supports_identity: supportsIdentity,
+              supports_sequence: false,
+              supports_extend: false,
+              supports_audio: false,
+              source_video: { mode: "hidden", required: false },
+              mask: { mode: "hidden", required: false },
+              keyframes: { mode: "hidden", required: false },
+              audio: { mode: "hidden", required: false },
+              lora: { mode: "adjustable", max_count: 4 },
+              controlnet: { mode: "hidden", max_count: 0 },
+              output: {
+                default_format: "png",
+                formats: ["png", "jpeg"],
+                audio_requires_mp4: false,
+              },
+              wan_recipe: {
+                mode: "hidden",
+                supports_distill_strength: false,
+                supports_first_last_frame: false,
+              },
+              schedulers: [],
+            },
+            provenance: [],
+          },
+        ],
+      },
+    } as unknown as Partial<ModelInfoExtended>);
+  }
+
+  function attach(form: ReturnType<typeof useGenerateForm>) {
+    form.state.value.identityImage = {
+      kind: "upload",
+      filename: "ada.png",
+      base64: PHOTO,
+    };
+  }
+
+  it("ships the four fields when the resolved row is identity-qualified", () => {
+    const form = useGenerateForm();
+    const model = identityRecipeModel(true);
+    form.applyModelDefaults(model);
+    attach(form);
+    form.state.value.identityWeight = 1.4;
+    form.state.value.identityStartStep = 3;
+
+    const request = form.toRequest(model);
+    expect(request.id_image).toBe(PHOTO);
+    expect(request.id_image_name).toBe("ada.png");
+    expect(request.id_weight).toBe(1.4);
+    expect(request.id_start_step).toBe(3);
+  });
+
+  it("keeps untouched knobs off the wire so the server's defaults stand", () => {
+    const form = useGenerateForm();
+    const model = identityRecipeModel(true);
+    form.applyModelDefaults(model);
+    attach(form);
+
+    const request = form.toRequest(model);
+    expect(request.id_image).toBe(PHOTO);
+    expect("id_weight" in request).toBe(false);
+    expect("id_start_step" in request).toBe(false);
+  });
+
+  it("sends nothing when the checkpoint is not identity-qualified", () => {
+    const form = useGenerateForm();
+    const model = identityRecipeModel(false);
+    form.applyModelDefaults(model);
+    attach(form);
+    form.state.value.identityWeight = 2;
+
+    const request = form.toRequest(model);
+    expect("id_image" in request).toBe(false);
+    expect("id_weight" in request).toBe(false);
+  });
+
+  it("reads absence on an older server as no, even with a photo staged", () => {
+    const form = useGenerateForm();
+    const model = makeModel();
+    form.applyModelDefaults(model);
+    attach(form);
+
+    expect("id_image" in form.toRequest(model)).toBe(false);
+  });
+
+  it("accepts a row-only advertisement when the host sends no recipe", () => {
+    const form = useGenerateForm();
+    const model = makeModel({ supports_identity: true });
+    form.applyModelDefaults(model);
+    attach(form);
+
+    expect(form.toRequest(model).id_image).toBe(PHOTO);
+  });
+
+  it("falls back to the snapshot when no row is resolved at submit time", () => {
+    const form = useGenerateForm();
+    form.applyModelDefaults(identityRecipeModel(true));
+    attach(form);
+    expect(form.state.value.identitySupported).toBe(true);
+
+    // The inventory has not landed — the snapshot taken on model change is
+    // the only authority left, exactly as it is for `sourceImageCapability`.
+    expect(form.toRequest(null).id_image).toBe(PHOTO);
+  });
+
+  it("sends no knobs without a photo", () => {
+    const form = useGenerateForm();
+    const model = identityRecipeModel(true);
+    form.applyModelDefaults(model);
+    form.state.value.identityWeight = 2.5;
+    form.state.value.identityStartStep = 1;
+
+    const request = form.toRequest(model);
+    expect("id_image" in request).toBe(false);
+    expect("id_weight" in request).toBe(false);
+    expect("id_start_step" in request).toBe(false);
+  });
+
+  it("rides every sibling of a batch — they all come from one toRequest", () => {
+    const form = useGenerateForm();
+    const model = identityRecipeModel(true);
+    form.applyModelDefaults(model);
+    attach(form);
+    form.state.value.identityWeight = 0.8;
+    form.state.value.batchSize = 3;
+
+    const request = form.toRequest(model);
+    expect(request.batch_size).toBe(3);
+    expect(request.id_image).toBe(PHOTO);
+    expect(request.id_weight).toBe(0.8);
+  });
+
+  it("keeps a staged photo across a capability-losing model switch", () => {
+    const form = useGenerateForm();
+    form.applyModelDefaults(identityRecipeModel(true));
+    attach(form);
+    form.state.value.identityWeight = 2;
+
+    const plain = makeModel({ name: "sdxl:fp16", family: "sdxl" });
+    form.applyModelDefaults(plain);
+    // The photo survives (the user may switch back); the SETTINGS knobs do
+    // not, exactly like the LTX-2 suite — a knob whose control no longer
+    // renders would otherwise strand Generate behind an invisible error.
+    expect(form.state.value.identityImage?.base64).toBe(PHOTO);
+    expect(form.state.value.identityWeight).toBeNull();
+    expect(form.state.value.identitySupported).toBe(false);
+    expect("id_image" in form.toRequest(plain)).toBe(false);
+  });
+
+  it("strips the face bytes from a persisted draft", () => {
+    const form = useGenerateForm();
+    attach(form);
+    const persisted = sanitizePersistedForm(form.state.value);
+    expect(persisted.identityImage?.filename).toBe("ada.png");
+    expect(persisted.identityImage?.base64).toBeUndefined();
+  });
+
+  it("restores the knobs and a reattach descriptor from a print's provenance", () => {
+    const form = useGenerateForm();
+    const next = applyMetadataToForm(form.state.value, {
+      prompt: "a portrait",
+      model: "flux-dev-pulid:bf16",
+      seed: 7,
+      steps: 20,
+      guidance: 3.5,
+      width: 1024,
+      height: 1024,
+      id_image_name: "ada.png",
+      id_image_sha256: "a".repeat(64),
+      id_weight: 1.25,
+      id_start_step: 2,
+    } as OutputMetadata);
+
+    expect(next.identityWeight).toBe(1.25);
+    expect(next.identityStartStep).toBe(2);
+    // Metadata never carries the face payload: the descriptor renders the
+    // well's reattach state, and `identityRequestFields` refuses an empty
+    // payload so it can never smuggle a blank `id_image` onto the wire.
+    expect(next.identityImage).toEqual({
+      kind: "upload",
+      filename: "ada.png",
+      base64: "",
+    });
+  });
+
+  it("restores nothing for a print that carried no identity photo", () => {
+    const form = useGenerateForm();
+    const next = applyMetadataToForm(form.state.value, {
+      prompt: "a portrait",
+      model: "flux-dev-pulid:bf16",
+      seed: 7,
+      steps: 20,
+      guidance: 3.5,
+      width: 1024,
+      height: 1024,
+    } as OutputMetadata);
+    expect(next.identityImage).toBeNull();
+    expect(next.identityWeight).toBeNull();
+    expect(next.identityStartStep).toBeNull();
+  });
+
+  it("clears the photo and both knobs on Reset settings", () => {
+    const form = useGenerateForm();
+    const model = identityRecipeModel(true);
+    form.applyModelDefaults(model);
+    attach(form);
+    form.state.value.identityWeight = 2;
+    form.state.value.identityStartStep = 4;
+
+    form.resetSettings(model);
+    expect(form.state.value.identityImage).toBeNull();
+    expect(form.state.value.identityWeight).toBeNull();
+    expect(form.state.value.identityStartStep).toBeNull();
+    expect(form.state.value.identitySupported).toBe(true);
+  });
+});
