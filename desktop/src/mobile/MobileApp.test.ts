@@ -5489,6 +5489,27 @@ describe("MobileApp create settings reset", () => {
     expect(draft.enableAudio).toBe(false);
   });
 
+  it("discards the sequence opening image on the primary Reset", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    // Read the live form while One shot still mounts the LoRA controls; the
+    // sequence bench renders a different subtree over the same form object.
+    const liveForm = wrapper.getComponent(MobileLoraControls).props("form") as GenerateForm;
+
+    const draft = useSequenceDraftStore();
+    draft.output = "sequence";
+    draft.openingImage = { filename: "opening.png", base64: "QUJD" };
+    liveForm.strength = 0.4;
+    await flushPromises();
+
+    await wrapper.get("[data-test='mobile-settings-reset']").trigger("click");
+    await flushPromises();
+
+    expect(draft.openingImage).toBeNull();
+    expect(liveForm.strength).not.toBe(0.4);
+  });
+
   it("badges and resets LTX-2 guidance overrides from the Advanced sheet", async () => {
     wrapper = mountMobileApp();
     await flushPromises();

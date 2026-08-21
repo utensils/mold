@@ -17,6 +17,7 @@ import {
   defaultClipFrames,
   formatFrameDuration,
   friendlySequenceError,
+  sequenceClipFrameCap,
   sequenceDuration,
   sequenceFrameOptions,
   sequenceFrameStep,
@@ -34,19 +35,13 @@ import {
 } from "@studio/lib/sequenceForm";
 import { promptOptional } from "@studio/lib/promptRequirement";
 import { cameraMotionMode } from "@studio/lib/cameraMotion";
-import {
-  SOURCE_FIT_OPTIONS,
-  coerceSourceFitForMaskless,
-  sourceFitPolicyForMode,
-  type SourceFitMode,
-} from "@studio/lib/sourceFit";
+import { parseSourceImageCapability } from "@studio/lib/sourceImageCapability";
 import type { ChainLimits } from "@studio/lib/api/chainTypes";
 import type { ApiTarget } from "../lib/api/client";
 import type { Ltx2CameraControlInfo, ModelEntry } from "../lib/api/types";
 import type { GenerateForm } from "../lib/generateForm";
 import { generationCapabilitiesForFamily } from "../lib/capabilities";
-import { base64ToDataUrl } from "../lib/image";
-import MobileImagePickerSheet, { type MobilePickedImage } from "./MobileImagePickerSheet.vue";
+import MobileSequenceOpeningImage from "./MobileSequenceOpeningImage.vue";
 import MobileAdvancedSheet from "./MobileAdvancedSheet.vue";
 import MobileSeamSheet from "./MobileSeamSheet.vue";
 import { validateChain } from "@studio/api/chains";
@@ -106,7 +101,6 @@ const newClipFrames = computed(() =>
   defaultClipFrames(props.selectedModel, props.chainLimits, motionTail.value),
 );
 const locked = computed(() => props.submitting || props.busy);
-const imagePickerOpen = ref(false);
 const advancedOpen = ref(false);
 const activeClip = computed(
   () => draft.clips.find((clip) => clip.id === draft.activeClipId) ?? draft.clips[0] ?? null,
@@ -114,26 +108,22 @@ const activeClip = computed(
 const activeIndex = computed(() =>
   activeClip.value ? draft.clips.findIndex((clip) => clip.id === activeClip.value?.id) : -1,
 );
+// The opening image left the Advanced sheet for the primary stack, so it is
+// no longer one of the sheet's badge terms.
 const advancedCount = computed(
   () =>
-    Number(Boolean(draft.openingImage)) +
     Number(
       guidanceCaps.value.supportsNegativePrompt && Boolean(activeClip.value?.negativePrompt.trim()),
-    ) +
-    Number(Boolean(activeClip.value?.cameraControl)),
+    ) + Number(Boolean(activeClip.value?.cameraControl)),
 );
-const fitOptions = SOURCE_FIT_OPTIONS.filter((option) => option.value !== "pad-repaint");
-const fitMode = computed(() => coerceSourceFitForMaskless(props.form.sourceFit).mode);
-const upscalerAvailable = computed(() =>
-  Boolean(props.form.upscaleModel || props.upscalers[0]?.name),
+/** A checkpoint that reads no source image gets no opening-image well. An
+ *  older server advertises nothing, which stays "unknown" and keeps it. */
+const showOpeningImage = computed(
+  () =>
+    parseSourceImageCapability(
+      props.selectedModel?.source_image ?? props.form.sourceImageCapability,
+    ) !== "unsupported",
 );
-
-function setSourceFit(mode: SourceFitMode): void {
-  props.form.sourceFit = sourceFitPolicyForMode(mode, {
-    supportsMask: false,
-    upscalerModel: props.form.upscaleModel || props.upscalers[0]?.name || "",
-  });
-}
 
 function setCameraMode(mode: string) {
   const clip = activeClip.value;
@@ -148,9 +138,20 @@ function setCameraMode(mode: string) {
 /** Durations are the family's own grid (`8n+1`, `4n+1` for wan — #783) up to
  *  the cap, strictly above the motion tail; an off-grid loaded value stays
  *  visible rather than silently re-snapping. */
+/** The model's own clip size bounds every picker — even against an older
+ *  host that still advertises the family's single-request budget. */
+const clipFrameCap = computed(() =>
+  sequenceClipFrameCap(
+    {
+      name: props.selectedModel?.name ?? props.form.model,
+      family: props.selectedModel?.family ?? props.form.family,
+    },
+    props.chainLimits,
+  ),
+);
 function frameOptionsFor(frames: number): number[] {
   const options = sequenceFrameOptions(
-    props.chainLimits?.frames_per_clip_cap ?? 97,
+    clipFrameCap.value,
     motionTail.value,
     props.selectedModel?.family ?? props.form.family,
   );
@@ -180,7 +181,7 @@ const validation = computed(() =>
   sequenceValidation(stages.value, {
     maxStages: maxStages.value,
     maxTotalFrames: props.chainLimits?.max_total_frames ?? Number.MAX_SAFE_INTEGER,
-    ...(props.chainLimits ? { maxFramesPerClip: props.chainLimits.frames_per_clip_cap } : {}),
+    maxFramesPerClip: clipFrameCap.value,
     frameStep: sequenceFrameStep(props.selectedModel?.family),
     frameOffset: 1,
     motionTailFrames: motionTail.value,
@@ -301,16 +302,6 @@ function removeClip(id: string): void {
 function submit(): void {
   if (locked.value || blockingReason.value) return;
   emit("submit");
-}
-
-function setOpeningImage(image: MobilePickedImage): void {
-  draft.openingImage = { filename: image.filename, base64: image.base64 };
-  props.form.sourceFit = coerceSourceFitForMaskless(props.form.sourceFit);
-  imagePickerOpen.value = false;
-}
-
-function sourceImageMime(filename: string): string {
-  return /\.jpe?g$/i.test(filename.trim()) ? "image/jpeg" : "image/png";
 }
 </script>
 
@@ -441,6 +432,27 @@ function sourceImageMime(filename: string): string {
       {{ validationError }}
     </p>
 
+    <!-- Source media rides in the primary stack for both outputs — one-shot
+         keeps `mobile-source-disclosure` in exactly this seat, immediately
+         above the shared parameters. -->
+    <details
+      v-if="showOpeningImage"
+      class="mobile-native-disclosure"
+      data-test="mobile-sequence-source-disclosure"
+      :open="!!draft.openingImage"
+    >
+      <summary>
+        <span>Opening sequence image</span>
+        <small>{{ draft.openingImage?.filename ?? "Original starting frame" }}</small>
+      </summary>
+      <MobileSequenceOpeningImage
+        :form="form"
+        :upscalers="upscalers"
+        :target="target"
+        :locked="locked"
+      />
+    </details>
+
     <!-- Shared generation params are OWNED by the host form (one source of
          truth for both outputs); the composer only lends them a place to sit
          so the clips stay at the top of the phone's scroll. -->
@@ -520,92 +532,12 @@ function sourceImageMime(filename: string): string {
       :count="advancedCount"
       @close="advancedOpen = false"
       @reset="
-        draft.openingImage = null;
-        form.strength = 0.75;
-        form.sourceFit = { mode: 'crop-fill', alignX: 'center', alignY: 'center' };
         draft.clips.forEach((clip) => {
           clip.negativePrompt = '';
           clip.cameraControl = null;
-        });
+        })
       "
     >
-      <details class="mobile-native-disclosure" open data-test="mobile-sequence-advanced-opening">
-        <summary>
-          <span>Opening sequence image</span>
-          <small>{{ draft.openingImage?.filename ?? "Original starting frame" }}</small>
-        </summary>
-        <img
-          v-if="draft.openingImage?.base64"
-          :src="
-            base64ToDataUrl(
-              draft.openingImage.base64 ?? '',
-              sourceImageMime(draft.openingImage.filename),
-            )
-          "
-          :alt="draft.openingImage.filename"
-          data-test="mobile-sequence-source-preview"
-        />
-        <button
-          type="button"
-          class="secondary-button"
-          data-test="mobile-sequence-source-pick"
-          :disabled="locked || !target"
-          @click="imagePickerOpen = true"
-        >
-          {{ draft.openingImage ? "Replace opening image" : "Attach opening image" }}
-        </button>
-        <button
-          v-if="draft.openingImage"
-          type="button"
-          class="secondary-button"
-          data-test="mobile-sequence-source-clear"
-          :disabled="locked"
-          @click="draft.openingImage = null"
-        >
-          Remove
-        </button>
-        <template v-if="draft.openingImage">
-          <label class="mobile-range-field">
-            <span>
-              Source strength
-              <output>{{ form.strength.toFixed(2) }}</output>
-            </span>
-            <input
-              v-model.number="form.strength"
-              type="range"
-              min="0"
-              max="1"
-              step="0.01"
-              aria-label="Sequence source strength"
-              data-test="mobile-sequence-source-strength"
-              :disabled="locked"
-            />
-          </label>
-          <label class="field">
-            <span>Fit to video frame</span>
-            <select
-              class="control"
-              :value="fitMode"
-              data-test="mobile-sequence-source-fit"
-              :disabled="locked"
-              @change="setSourceFit(($event.target as HTMLSelectElement).value as SourceFitMode)"
-            >
-              <option
-                v-for="option in fitOptions"
-                :key="option.value"
-                :value="option.value"
-                :disabled="option.value === 'upscale-then-fit' && !upscalerAvailable"
-              >
-                {{ option.label }}
-              </option>
-            </select>
-          </label>
-          <p v-if="!upscalerAvailable" class="mobile-source-note">
-            Install an upscaler to enable Upscale + crop.
-          </p>
-          <p class="mobile-source-note">Applied to the opening image before clip 1 renders.</p>
-        </template>
-      </details>
       <label v-if="activeClip" class="field" data-test="mobile-sequence-advanced-negative">
         <span>Clip {{ activeIndex + 1 }} negative prompt</span>
         <input
@@ -676,12 +608,6 @@ function sourceImageMime(filename: string): string {
         }}
       </p>
     </MobileAdvancedSheet>
-    <MobileImagePickerSheet
-      :open="imagePickerOpen"
-      :target="target"
-      @pick="setOpeningImage"
-      @close="imagePickerOpen = false"
-    />
   </section>
 </template>
 
@@ -738,21 +664,6 @@ function sourceImageMime(filename: string): string {
   min-height: 92px;
   resize: vertical;
   font-size: 16px;
-}
-
-.mobile-sequence-source {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-}
-
-.mobile-sequence-source img {
-  width: 56px;
-  height: 56px;
-  object-fit: cover;
-  border: 1px solid var(--edge);
-  border-radius: 10px;
 }
 
 /* The seam owns the vertical run between two cards: short connector lines

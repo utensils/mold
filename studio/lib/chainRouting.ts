@@ -184,7 +184,13 @@ export const WAN_SINGLE_EXPERT_CLIP_FRAMES = 121;
  */
 export const WAN_HANDOFF_DUPLICATED_FRAMES = 1;
 
-function wanDefaultClipFrames(model: string): number {
+/**
+ * Wan's per-checkpoint routing clip size — the clip size ONE generation
+ * renders. Exported because sequence authoring must bound its per-clip picker
+ * by the same value the router splits work into, even when the host advertises
+ * only the family's looser ceiling.
+ */
+export function wanDefaultClipFrames(model: string): number {
   return /a14b/i.test(model)
     ? WAN_DEFAULT_CLIP_FRAMES
     : WAN_SINGLE_EXPERT_CLIP_FRAMES;

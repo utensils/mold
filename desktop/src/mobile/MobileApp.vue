@@ -644,7 +644,14 @@ function resetCreateSettings(): void {
   // it — otherwise the next model change would re-snap the reset canvas back
   // onto the attached source (#1166).
   canvasIntent.value = "model-default";
-  if (isSequence.value) draft.enableAudio = false;
+  // Sequence output keeps its source media in the primary stack too, so the
+  // primary Reset owns the opening image exactly as it owns the one-shot
+  // wells `resetFormToModelDefaults` just discarded. `clearOpeningImage` is
+  // the narrow store write: clips stay, and the persisted blob is reclaimed.
+  if (isSequence.value) {
+    draft.enableAudio = false;
+    draft.clearOpeningImage();
+  }
 }
 
 /** Match the desktop Advanced reset: restore model-owned generation controls
