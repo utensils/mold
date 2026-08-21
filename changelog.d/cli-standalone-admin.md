@@ -1,8 +1,6 @@
-### Added
-
-- Let `mold gpu list` inspect local runtime-visible compute devices when the
-  loopback server is stopped, and let `mold gpu enable|disable` persist the
-  selected stable device preference for the next server start. GPU stable IDs
-  and completion-shell names now participate in dynamic shell completion.
-- Make `mold ps`, `mold info`, and the idempotent `mold unload` useful with no
-  local server running while keeping configured remote-host failures explicit.
+- **CLI administration now works without a running local server.** `mold gpu
+  list` inspects runtime-visible devices, `gpu enable|disable` persists stable
+  startup preferences, and `ps`, `info`, and idempotent `unload` provide useful
+  standalone behavior without masking configured remote-host failures. GPU
+  stable IDs and completion-shell names also participate in dynamic shell
+  completion.
