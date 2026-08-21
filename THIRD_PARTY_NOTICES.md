@@ -173,6 +173,14 @@ automatically by their tooling (InsightFace `README.md`, "License").
 
     Copyright (c) 2018-2024 InsightFace (DeepInsight)
 
+Mold's Rust face-extraction path (`crates/mold-inference/src/identity/`) is an
+independent reimplementation whose behaviour is derived from the MIT-licensed
+InsightFace **code** — `model_zoo/scrfd.py` (letterbox, anchor decode, NMS
+thresholds), `utils/face_align.py` (the `arcface_dst` template and the
+similarity fit), and `model_zoo/arcface_onnx.py` (input order and
+normalization). No InsightFace source file is vendored; each ported function
+cites the upstream file and line range it follows.
+
 Provenance of the files Mold pulls: InsightFace publishes the antelopev2 pack
 as an archive on GitHub releases and Google Drive, which Mold's Hugging
 Face-based downloader cannot address. PuLID itself resolves the pack from the
@@ -180,3 +188,20 @@ Hugging Face mirror `DIAMONIK7777/antelopev2`
 (`pulid/pipeline_flux.py`, `snapshot_download('DIAMONIK7777/antelopev2', ...)`),
 and Mold pulls the same two files from the same mirror, pinned by SHA-256 and
 verified on download.
+
+## facexlib (identity crop geometry)
+
+PuLID produces the 512x512 crop its vision tower conditions on with
+[facexlib](https://github.com/xinntao/facexlib)'s `FaceRestoreHelper`
+(`PuLID/pulid/pipeline_flux.py:47-53`, `:145-147`). Mold reimplements that
+crop's geometry in Rust — facexlib's standard FFHQ five-point template and its
+constant grey warp border (`facexlib/utils/face_restoration_helper.py:73-74`,
+`:242-259`) — in `crates/mold-inference/src/identity/align.rs`. No facexlib
+source file is vendored, and Mold downloads no facexlib model: facexlib's
+RetinaFace detector and BiSeNet parser are not used (see
+`docs/architecture/pulid-face-extraction.md`).
+
+facexlib is licensed under the MIT License
+(<https://github.com/xinntao/facexlib/blob/master/LICENSE>).
+
+    Copyright (c) 2020 Xintao Wang
