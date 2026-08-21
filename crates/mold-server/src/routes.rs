@@ -281,6 +281,7 @@ use crate::queue::clean_error_message;
     ),
     components(schemas(
         mold_core::GenerateRequest,
+        mold_core::CollectionRef,
         mold_core::Ltx2ControlAdapterInfo,
         mold_core::Ltx2CameraControlInfo,
         mold_core::Ltx2GuidanceOverrides,
@@ -8626,6 +8627,157 @@ mod tests {
             "a timing substitution must not be published as a dimension adjustment"
         );
         assert!(super::RequestWarnings::default().is_empty());
+    }
+
+    // ── creation-time filing at admission ───────────────────────────────
+
+    fn filed_request(
+        tags: &[&str],
+        collection: Option<mold_core::CollectionRef>,
+    ) -> mold_core::GenerateRequest {
+        let mut request: mold_core::GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "a cat",
+            "model": "flux-dev:q4",
+            "width": 512,
+            "height": 512,
+            "steps": 4,
+            "guidance": 3.5,
+        }))
+        .unwrap();
+        if !tags.is_empty() {
+            request.tags = Some(tags.iter().map(|t| t.to_string()).collect());
+        }
+        request.collection = collection;
+        request
+    }
+
+    /// An `{id}` reference becomes the `{id, name}` form publication files
+    /// by; a `{name}` reference is left exactly as it arrived, because
+    /// publication creates it when absent.
+    #[test]
+    fn admission_resolves_a_collection_id_to_its_name_and_leaves_a_name_alone() {
+        let db = mold_db::MetadataDb::open_in_memory().unwrap();
+        let created = db.create_collection("Smurf Village", None).unwrap();
+
+        let mut by_id = Some(mold_core::CollectionRef::by_id(created.id.clone()));
+        assert!(super::resolve_collection_reference(&db, &mut by_id).is_empty());
+        assert_eq!(
+            by_id,
+            Some(mold_core::CollectionRef {
+                id: Some(created.id.clone()),
+                name: Some("Smurf Village".to_string()),
+            })
+        );
+
+        let mut by_name = Some(mold_core::CollectionRef::by_name("Somewhere Else"));
+        assert!(super::resolve_collection_reference(&db, &mut by_name).is_empty());
+        assert_eq!(
+            by_name,
+            Some(mold_core::CollectionRef::by_name("Somewhere Else")),
+            "a name needs no lookup and must not be rewritten"
+        );
+
+        let mut none = None;
+        assert!(super::resolve_collection_reference(&db, &mut none).is_empty());
+        assert_eq!(none, None);
+    }
+
+    /// A collection deleted between the client reading the list and pressing
+    /// Generate drops the filing with an advisory — never a refusal, because
+    /// the print is the expensive artifact and its filing is not.
+    #[test]
+    fn admission_drops_an_unknown_collection_id_with_an_advisory() {
+        let db = mold_db::MetadataDb::open_in_memory().unwrap();
+        let mut gone = Some(mold_core::CollectionRef::by_id(
+            "11111111-2222-3333-4444-555555555555",
+        ));
+        let warnings = super::resolve_collection_reference(&db, &mut gone);
+        assert_eq!(gone, None, "the filing is dropped, not carried forward");
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("no longer exists"), "{}", warnings[0]);
+        assert!(
+            warnings[0].contains("11111111-2222-3333-4444-555555555555"),
+            "the advisory must name the collection: {}",
+            warnings[0]
+        );
+    }
+
+    /// A host with no metadata DB has nowhere to file. The print still
+    /// generates; the filing is dropped and said so.
+    #[tokio::test]
+    async fn a_host_without_a_metadata_db_drops_the_filing_with_a_warning() {
+        let mut state = AppState::for_tests();
+        state.metadata_db = std::sync::Arc::new(None);
+
+        let mut request = filed_request(
+            &["smurfs", "village"],
+            Some(mold_core::CollectionRef::by_name("Sequences")),
+        );
+        let warnings = super::resolve_request_filing(&state, &mut request).await;
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].contains("no metadata database"),
+            "{}",
+            warnings[0]
+        );
+        assert!(warnings[0].contains("2 tags"), "{}", warnings[0]);
+        assert!(warnings[0].contains("collection"), "{}", warnings[0]);
+        assert_eq!(request.tags, None, "the filing is dropped from the request");
+        assert_eq!(request.collection, None);
+
+        // An unfiled request on the same host is silent — the advisory must
+        // not become boilerplate on every print.
+        let mut plain = filed_request(&[], None);
+        assert!(super::resolve_request_filing(&state, &mut plain)
+            .await
+            .is_empty());
+    }
+
+    /// The advisory names what was dropped, in the singular or the plural,
+    /// so the user can tell which part of their filing did not land.
+    #[test]
+    fn the_filing_advisory_names_what_was_requested() {
+        assert_eq!(
+            super::describe_request_filing(&filed_request(&[], None)),
+            None
+        );
+        assert_eq!(
+            super::describe_request_filing(&filed_request(&["one"], None)).as_deref(),
+            Some("the requested tag")
+        );
+        assert_eq!(
+            super::describe_request_filing(&filed_request(&["one", "two"], None)).as_deref(),
+            Some("the requested 2 tags")
+        );
+        assert_eq!(
+            super::describe_request_filing(&filed_request(
+                &[],
+                Some(mold_core::CollectionRef::by_name("Sequences"))
+            ))
+            .as_deref(),
+            Some("the requested collection")
+        );
+        assert_eq!(
+            super::describe_request_filing(&filed_request(
+                &["one"],
+                Some(mold_core::CollectionRef::by_name("Sequences"))
+            ))
+            .as_deref(),
+            Some("the requested collection and tag")
+        );
+    }
+
+    /// Advisories ride the general `x-mold-request-warning` header, joined
+    /// with `; ` and stripped of newlines so the value stays a legal header.
+    #[test]
+    fn filing_advisories_become_a_single_request_warning_header() {
+        assert!(super::request_warning_headers(&[]).is_empty());
+        let headers =
+            super::request_warning_headers(&["first\nadvisory".to_string(), "second".to_string()]);
+        assert_eq!(
+            headers.get("x-mold-request-warning").unwrap(),
+            "first advisory; second"
+        );
     }
 
     #[tokio::test]

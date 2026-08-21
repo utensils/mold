@@ -81,8 +81,9 @@ pub use model_policy::{
     MINIMAX_H3_LICENSE_SHA256, MINIMAX_H3_LICENSE_URL,
 };
 pub use organization::{
-    collection_slug, normalize_request_tags, normalize_tag_name, validate_collection_name,
-    MAX_COLLECTION_NAME_CHARS, MAX_COLLECTION_SLUG_CHARS, MAX_REQUEST_TAGS, MAX_TAG_CHARS,
+    collection_slug, compose_client_tags, normalize_request_tags, normalize_tag_name,
+    validate_collection_name, ComposedClientTags, MAX_COLLECTION_NAME_CHARS,
+    MAX_COLLECTION_SLUG_CHARS, MAX_REQUEST_TAGS, MAX_TAG_CHARS,
 };
 pub use print_title::{
     default_output_filename_titled, download_file_name, strip_title_slug, title_slug,

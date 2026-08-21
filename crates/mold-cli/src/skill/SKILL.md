@@ -23,6 +23,7 @@ mold run flux-dev:q4 "a sunset over mountains"      # Specific model
 mold run "a portrait" -o portrait.png               # Custom output path
 mold run "a dog" --seed 42 --steps 20               # Reproducible generation
 mold run "a village" --title "Smurf village"        # Titled print (metadata + gallery row + ~slug in filename)
+mold run "a village" --title "Smurfs" --tag blue --collection "Village studies"  # …filed at creation
 mold run "watercolor" --image photo.png --strength 0.7  # img2img
 # NOTE --strength is family-specific: SD img2img higher = more change;
 # LTX-2 I2V higher = MORE source preservation (1.0 pins the opening frame)
@@ -547,7 +548,28 @@ parse time) rides `GenerateRequest.title` → `OutputMetadata.title` → the
 gallery row and folds into the default filename as
 `mold-{model}-{ts}[-{idx}]~{slug}.{ext}`; an explicit `-o` path is used
 verbatim and the file is never renamed later. `--title` applies to
-single-clip runs only (chain scripts / multi-`--prompt` sequences refuse it).
+single-clip runs only (chain scripts / multi-`--prompt` sequences refuse it),
+though the HTTP chain body does carry `title` for the stitched print.
+
+**File under (creation-time organization).** A print can arrive already
+organized: `--tag <TAG>` (repeatable, ≤20 tags of 1–64 chars, matched
+case-insensitively) and `--collection <NAME>` ride `GenerateRequest.tags` /
+`.collection` → `OutputMetadata` → the gallery row. Collections resolve by
+slug and are created when absent, which is how one name means one collection
+across a fleet. Seeding is **once, at row insert**: organization is
+user-owned afterwards, so a reconcile or a re-publication never resurrects a
+tag the user removed.
+
+`generate.auto_tag_title` (DB key, default `true`) makes a titled CLI/TUI run
+also tag the print with its title slug, disclosed on stderr
+(`filing under tag "smurf-village"`). `--no-auto-tag` turns it off for one
+invocation. It is deliberately a **client** default — the server never
+auto-tags, because it cannot tell a typed title from a scripted one.
+
+Nothing about filing can fail a render. On `MOLD_DB_DISABLE=1`, or when a
+`{id}` collection was deleted between listing and Generate, the filing is
+dropped and reported on the `x-mold-request-warning` header — never silently,
+never as a refusal.
 
 ## Reference implementations
 

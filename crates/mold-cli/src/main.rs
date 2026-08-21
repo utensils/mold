@@ -38,6 +38,26 @@ fn print_title_parser(raw: &str) -> Result<String, String> {
     }
 }
 
+/// Value parser for `--tag`: applies the shared tag contract (trim, collapse
+/// interior whitespace, no control characters, at most 64 characters) at
+/// parse time, so a bad tag is refused before any server or GPU work. An
+/// empty tag is a parse error rather than a silent no-op — a user typing
+/// `--tag ""` meant something.
+fn tag_parser(raw: &str) -> Result<String, String> {
+    match mold_core::normalize_tag_name(raw) {
+        Ok(Some(tag)) => Ok(tag),
+        Ok(None) => Err("tag must not be empty".to_string()),
+        Err(error) => Err(error),
+    }
+}
+
+/// Value parser for `--collection`: the shared collection-name contract.
+/// Returns the normalized display name; the slug it merges on is derived
+/// server-side (and locally) from exactly this value.
+fn collection_name_parser(raw: &str) -> Result<String, String> {
+    mold_core::validate_collection_name(raw).map(|(name, _slug)| name)
+}
+
 #[derive(Clone, clap::ValueEnum)]
 enum LogFormat {
     Text,
@@ -685,6 +705,21 @@ Examples:
         /// filename as a slug: mold-<model>-<timestamp>~<slug>.<ext>
         #[arg(long, help_heading = "Output", value_name = "TEXT", value_parser = print_title_parser)]
         title: Option<String>,
+
+        /// File the print under a tag. Repeatable, up to 20 tags
+        /// (1-64 characters each). Tags are matched case-insensitively.
+        #[arg(long = "tag", help_heading = "Output", value_name = "TAG", value_parser = tag_parser)]
+        tags: Vec<String>,
+
+        /// File the print into a collection, creating it if it does not
+        /// exist yet. Collections merge across machines by name.
+        #[arg(long, help_heading = "Output", value_name = "NAME", value_parser = collection_name_parser)]
+        collection: Option<String>,
+
+        /// Do not add the title as a tag, whatever
+        /// `generate.auto_tag_title` says.
+        #[arg(long, help_heading = "Output")]
+        no_auto_tag: bool,
 
         /// Display generated image(s) inline in the terminal after generation
         #[arg(long, env = "MOLD_PREVIEW", help_heading = "Output")]
@@ -1897,6 +1932,9 @@ async fn run() -> anyhow::Result<()> {
             format,
             no_metadata,
             title,
+            tags,
+            collection,
+            no_auto_tag,
             preview,
             local,
             prompt,
@@ -2082,6 +2120,11 @@ async fn run() -> anyhow::Result<()> {
                 format,
                 no_metadata,
                 title,
+                commands::generate::FilingOptions {
+                    tags,
+                    collection,
+                    no_auto_tag,
+                },
                 preview,
                 local,
                 gpus,

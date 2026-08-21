@@ -79,6 +79,55 @@ pub fn normalize_request_tags(raw: &[String]) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
+/// One client's decision about what tags to submit for a titled print.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ComposedClientTags {
+    /// The tags to send, normalized and deduplicated.
+    pub tags: Vec<String>,
+    /// The tag added from the title, when one was. Present only so the
+    /// client can disclose it — a tag the user did not type must be visible,
+    /// not a surprise discovered later in the Library.
+    pub auto_tagged: Option<String>,
+}
+
+/// Compose the tag list a CLI or TUI submits for a print, optionally adding
+/// the title's slug as a tag.
+///
+/// This is a **client** policy on purpose. The server never auto-tags: it
+/// cannot tell a title a person typed from one a script generated, and a
+/// host silently adding tags to every print that crosses it would be
+/// surprising from any other machine on the fleet. So the decision is made
+/// where the intent is known, and travels as an ordinary explicit tag.
+///
+/// The auto tag is the title's [`crate::title_slug`] — the same lossy ASCII
+/// form the filename carries — so "Smurf Village" files under
+/// `smurf-village` and matches the print's name in a file browser. It is
+/// skipped when the user already asked for that tag (case-insensitively),
+/// when the title has no usable slug, and whenever `auto_tag_title` is off.
+pub fn compose_client_tags(
+    explicit: &[String],
+    title: Option<&str>,
+    auto_tag_title: bool,
+) -> Result<ComposedClientTags, String> {
+    let mut tags = normalize_request_tags(explicit)?;
+    let auto_tagged = auto_tag_title
+        .then(|| title.and_then(crate::title_slug))
+        .flatten()
+        .filter(|slug| !tags.iter().any(|tag| tag.eq_ignore_ascii_case(slug)));
+    if let Some(slug) = auto_tagged.as_ref() {
+        tags.push(slug.clone());
+        // The explicit list was already at the cap; re-check rather than
+        // submitting a request admission would refuse.
+        if tags.len() > MAX_REQUEST_TAGS {
+            return Err(format!(
+                "adding the title tag '{slug}' would exceed the {MAX_REQUEST_TAGS}-tag limit; \
+                 drop a tag or pass --no-auto-tag"
+            ));
+        }
+    }
+    Ok(ComposedClientTags { tags, auto_tagged })
+}
+
 /// Slug for a collection name: lowercase ASCII, `[a-z0-9]` kept, every
 /// other character becomes `-`, runs collapsed, ends trimmed, at most
 /// [`MAX_COLLECTION_SLUG_CHARS`]. Same algorithm as
@@ -208,6 +257,77 @@ mod tests {
     fn request_tags_propagate_an_invalid_tag_as_an_error() {
         assert!(normalize_request_tags(&["fine".into(), "bad\0".into()]).is_err());
         assert!(normalize_request_tags(&["x".repeat(MAX_TAG_CHARS + 1)]).is_err());
+    }
+
+    // ── client-side auto-tagging ────────────────────────────────────────
+
+    #[test]
+    fn auto_tag_adds_the_title_slug_and_reports_it() {
+        let composed =
+            compose_client_tags(&["village".into()], Some("Smurf Village"), true).unwrap();
+        assert_eq!(
+            composed.tags,
+            vec!["village".to_string(), "smurf-village".to_string()]
+        );
+        assert_eq!(composed.auto_tagged.as_deref(), Some("smurf-village"));
+    }
+
+    #[test]
+    fn auto_tag_is_skipped_when_disabled_untitled_or_slugless() {
+        for (title, enabled) in [
+            (Some("Smurf Village"), false),
+            (None, true),
+            (Some(""), true),
+            (Some("日本語"), true),
+            (Some("!!!"), true),
+        ] {
+            let composed = compose_client_tags(&["village".into()], title, enabled).unwrap();
+            assert_eq!(
+                composed.tags,
+                vec!["village".to_string()],
+                "{title:?}/{enabled}"
+            );
+            assert_eq!(composed.auto_tagged, None, "{title:?}/{enabled}");
+        }
+    }
+
+    /// A tag the user already typed is not duplicated, and nothing is
+    /// reported as auto-added — they chose it.
+    #[test]
+    fn auto_tag_does_not_duplicate_a_tag_the_user_already_asked_for() {
+        let composed =
+            compose_client_tags(&["Smurf-Village".into()], Some("Smurf Village"), true).unwrap();
+        assert_eq!(composed.tags, vec!["Smurf-Village".to_string()]);
+        assert_eq!(composed.auto_tagged, None);
+    }
+
+    /// The auto tag must never push a request past the cap into a 422 the
+    /// user cannot explain; name the remedy instead.
+    #[test]
+    fn auto_tag_refuses_rather_than_overflowing_the_cap() {
+        let full: Vec<String> = (0..MAX_REQUEST_TAGS).map(|i| format!("t{i}")).collect();
+        let err = compose_client_tags(&full, Some("Smurf Village"), true).unwrap_err();
+        assert!(err.contains("--no-auto-tag"), "{err}");
+        // Without the auto tag the same list is fine.
+        assert_eq!(
+            compose_client_tags(&full, Some("Smurf Village"), false)
+                .unwrap()
+                .tags
+                .len(),
+            MAX_REQUEST_TAGS
+        );
+    }
+
+    #[test]
+    fn auto_tag_still_normalizes_the_explicit_list() {
+        let composed = compose_client_tags(
+            &["  Smurfs  ".into(), "smurfs".into(), "".into()],
+            None,
+            true,
+        )
+        .unwrap();
+        assert_eq!(composed.tags, vec!["Smurfs".to_string()]);
+        assert!(compose_client_tags(&["bad\0".into()], None, true).is_err());
     }
 
     #[test]

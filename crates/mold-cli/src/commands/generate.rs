@@ -397,6 +397,57 @@ fn require_local_hdr_exr_dir(hdr_exr_dir: Option<String>, local: bool) -> Result
     Ok(hdr_exr_dir)
 }
 
+/// Creation-time filing chosen on the command line: `--tag`, `--collection`,
+/// and `--no-auto-tag`.
+///
+/// Bundled rather than three more positional parameters on a signature that
+/// already carries fifty, and because the three are resolved together —
+/// whether the title becomes a tag depends on all of them plus config.
+#[derive(Debug, Clone, Default)]
+pub struct FilingOptions {
+    /// Tags from repeated `--tag`, already validated by the value parser.
+    pub tags: Vec<String>,
+    /// Collection display name from `--collection`, already validated.
+    pub collection: Option<String>,
+    /// `--no-auto-tag`: never add the title as a tag, whatever
+    /// `generate.auto_tag_title` says.
+    pub no_auto_tag: bool,
+}
+
+impl FilingOptions {
+    /// Resolve the filing into the wire fields a request carries, plus the
+    /// disclosure line for a tag the user did not type.
+    ///
+    /// `auto_tag_title` is the effective `generate.auto_tag_title` setting;
+    /// `--no-auto-tag` overrides it for this invocation only.
+    fn resolve(
+        &self,
+        title: Option<&str>,
+        auto_tag_title: bool,
+    ) -> Result<ResolvedFiling, anyhow::Error> {
+        let composed =
+            mold_core::compose_client_tags(&self.tags, title, auto_tag_title && !self.no_auto_tag)
+                .map_err(|error| anyhow::anyhow!(error))?;
+        Ok(ResolvedFiling {
+            tags: (!composed.tags.is_empty()).then_some(composed.tags),
+            collection: self
+                .collection
+                .as_deref()
+                .map(mold_core::CollectionRef::by_name),
+            auto_tagged: composed.auto_tagged,
+        })
+    }
+}
+
+/// [`FilingOptions`] resolved against the title and the effective config.
+struct ResolvedFiling {
+    tags: Option<Vec<String>>,
+    collection: Option<mold_core::CollectionRef>,
+    /// The tag added from the title, when one was — disclosed on stderr so a
+    /// tag the user did not type is never a surprise found later.
+    auto_tagged: Option<String>,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
     prompt: &str,
@@ -413,6 +464,7 @@ pub async fn run(
     format: OutputFormat,
     no_metadata: bool,
     title: Option<String>,
+    filing: FilingOptions,
     preview: bool,
     local: bool,
     gpus: Option<String>,
@@ -859,9 +911,19 @@ pub async fn run(
         )
     };
 
+    // Creation-time filing is a client decision (see
+    // `mold_core::compose_client_tags`), resolved here so both the remote and
+    // the forced-local path submit the identical tag list.
+    let resolved_filing = filing.resolve(title.as_deref(), config.generate.auto_tag_title)?;
+    if let Some(auto_tagged) = resolved_filing.auto_tagged.as_deref() {
+        // A tag the user did not type must be visible now, not discovered
+        // later in the Library.
+        status!("filing under tag \"{auto_tagged}\"");
+    }
+
     let mut req = GenerateRequest {
-        collection: None,
-        tags: None,
+        collection: resolved_filing.collection,
+        tags: resolved_filing.tags,
         title,
         source_fit: None,
         hdr_exr_dir,
@@ -4039,6 +4101,7 @@ mod tests {
             OutputFormat::Png,
             false,
             None,
+            FilingOptions::default(),
             false,
             false,
             None,
@@ -4168,6 +4231,71 @@ mod tests {
     fn filename_single_batch_no_index() {
         let name = default_filename("flux-dev:q4", 100, "png", 1, 0, None);
         assert!(!name.contains("-0."));
+    }
+
+    /// `--tag` / `--collection` become the request's filing, and a titled
+    /// print picks up its slug as a tag while `generate.auto_tag_title` is
+    /// on — reported back so the caller can disclose it.
+    #[test]
+    fn filing_options_resolve_into_the_request_fields() {
+        let filing = FilingOptions {
+            tags: vec!["village".into()],
+            collection: Some("Smurf Village".into()),
+            no_auto_tag: false,
+        };
+        let resolved = filing.resolve(Some("Smurf Village"), true).unwrap();
+        assert_eq!(
+            resolved.tags.as_deref(),
+            Some(["village".to_string(), "smurf-village".to_string()].as_slice())
+        );
+        assert_eq!(
+            resolved.collection,
+            Some(mold_core::CollectionRef::by_name("Smurf Village"))
+        );
+        assert_eq!(resolved.auto_tagged.as_deref(), Some("smurf-village"));
+    }
+
+    /// `--no-auto-tag` wins over the setting, and the setting being off is
+    /// enough on its own. Neither drops a tag the user typed.
+    #[test]
+    fn no_auto_tag_and_the_setting_each_suppress_the_title_tag() {
+        let filing = FilingOptions {
+            tags: vec!["village".into()],
+            collection: None,
+            no_auto_tag: true,
+        };
+        for auto_tag_title in [true, false] {
+            let resolved = filing
+                .resolve(Some("Smurf Village"), auto_tag_title)
+                .unwrap();
+            assert_eq!(
+                resolved.tags.as_deref(),
+                Some(["village".to_string()].as_slice())
+            );
+            assert_eq!(resolved.auto_tagged, None);
+        }
+
+        let opt_in = FilingOptions {
+            tags: vec!["village".into()],
+            collection: None,
+            no_auto_tag: false,
+        };
+        let resolved = opt_in.resolve(Some("Smurf Village"), false).unwrap();
+        assert_eq!(
+            resolved.tags.as_deref(),
+            Some(["village".to_string()].as_slice())
+        );
+        assert_eq!(resolved.auto_tagged, None);
+    }
+
+    /// An unfiled, untitled run sends neither field, so an older host sees
+    /// exactly the request body it saw before.
+    #[test]
+    fn an_unfiled_run_resolves_to_absent_wire_fields() {
+        let resolved = FilingOptions::default().resolve(None, true).unwrap();
+        assert_eq!(resolved.tags, None);
+        assert_eq!(resolved.collection, None);
+        assert_eq!(resolved.auto_tagged, None);
     }
 
     /// `--title` folds into the default filename as `~<slug>` (the same

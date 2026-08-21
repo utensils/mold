@@ -75,7 +75,8 @@ with prompt, model, seed, and generation metadata.
 - **Multi-machine**: connect LAN/Tailscale hosts and RunPod, route jobs by
   capability, and browse every machine's gallery in one place
 - **Library organization**: title (`--title`), favorite, tag, and collect
-  prints, with a per-host trash and configurable retention
+  prints — or file them at creation with `--tag` / `--collection` so they
+  arrive organized — with a per-host trash and configurable retention
   (`gallery.trash_retention_days`, `mold trash`) instead of permanent
   delete — merged across machines in the web and desktop Library
   (Prints | Collections | Trash)
