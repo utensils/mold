@@ -9,6 +9,7 @@ import {
   effectiveTags,
   pickCollection,
   removeTag,
+  requestTagKey,
   stripTagHash,
   suggestTags,
   validateNewTag,
@@ -60,6 +61,22 @@ const ghost = computed(() => deriveGhostTag(props.title, props.autoTagTitle));
 const ghostVisible = computed(() => ghost.value !== null && !props.state.ghostRemoved);
 /** Every chip currently filed, ghost first — the validation gate's context. */
 const activeTags = computed(() => effectiveTags(props.state, props.title, props.autoTagTitle));
+
+/**
+ * The chips drawn after the ghost.
+ *
+ * A manual tag becomes case-insensitively equal to the ghost when the title is
+ * typed AFTER the tag — `validateNewTag` only guards the other order — and the
+ * row would then draw the same name twice. `effectiveTags` already dedupes for
+ * the wire; the row has to as well, because `removeTag` retires the ghost AND
+ * drops the identical manual tag, so a ✕ on either twin would delete a tag the
+ * user only meant to de-duplicate. Absorbing it into the ghost leaves one chip
+ * whose ✕ means exactly one thing: opt this print out of the title tag.
+ */
+const rowTags = computed(() => {
+  const ghostKey = ghostVisible.value && ghost.value ? requestTagKey(ghost.value) : null;
+  return props.state.manualTags.filter((tag) => requestTagKey(tag) !== ghostKey);
+});
 
 const tagDraft = ref("");
 const tagError = ref<string | null>(null);
@@ -263,12 +280,7 @@ onBeforeUnmount(() => {
             ✕
           </button>
         </span>
-        <span
-          v-for="tag in state.manualTags"
-          :key="tag"
-          class="ms-fu__chip"
-          data-test="file-under-tag"
-        >
+        <span v-for="tag in rowTags" :key="tag" class="ms-fu__chip" data-test="file-under-tag">
           {{ tag }}
           <button
             type="button"
