@@ -328,6 +328,35 @@ describe("sequence authoring", () => {
         { frames_per_clip_cap: 257 },
       ),
     ).toBe(53);
+    // A14B tiers whose manifest default was raised past the 53-frame floor
+    // (Q5/Q4 at 81) render that default as one clip: the server advertises
+    // 81, and the browser must not clamp it back to the floor — whether the
+    // default arrives on the model row or as the chain-limits recommendation.
+    expect(
+      sequenceClipFrameCap(
+        { name: "wan22-t2v-a14b:q5", family: "wan", default_frames: 81 },
+        { frames_per_clip_cap: 81, frames_per_clip_recommended: 81 },
+      ),
+    ).toBe(81);
+    expect(
+      sequenceClipFrameCap(
+        { name: "wan22-t2v-a14b:q5", family: "wan" },
+        { frames_per_clip_cap: 257, frames_per_clip_recommended: 81 },
+      ),
+    ).toBe(81);
+    expect(
+      sequenceClipFrameCap(
+        { name: "wan22-t2v-a14b:q8", family: "wan", default_frames: 73 },
+        { frames_per_clip_cap: 257, frames_per_clip_recommended: 73 },
+      ),
+    ).toBe(73);
+    // A default BELOW the floor (fp8 A14B ships 33) keeps the floor.
+    expect(
+      sequenceClipFrameCap(
+        { name: "wan22-t2v-a14b:fp8", family: "wan", default_frames: 33 },
+        { frames_per_clip_cap: 257, frames_per_clip_recommended: 33 },
+      ),
+    ).toBe(53);
 
     // LTX-Video's flat 97 is unchanged.
     expect(
@@ -376,11 +405,21 @@ describe("sequence authoring", () => {
         17,
       ),
     ).toBe(97);
-    // An A14B clip is clamped to wan's 53-frame envelope, on its 4k+1 grid.
+    // An A14B clip defaults to its own tier default (81 for Q5) even when an
+    // older host advertises the family's 257-frame ceiling; an opaque A14B
+    // id with no recorded default lands on the 53-frame floor the server
+    // advertises for it.
     expect(
       defaultClipFrames(
-        { name: "wan22-t2v-a14b:q5", family: "wan", default_frames: 257 },
-        { frames_per_clip_cap: 257, frames_per_clip_recommended: 257 },
+        { name: "wan22-t2v-a14b:q5", family: "wan", default_frames: 81 },
+        { frames_per_clip_cap: 257, frames_per_clip_recommended: 81 },
+        1,
+      ),
+    ).toBe(81);
+    expect(
+      defaultClipFrames(
+        { name: "cv:wan-a14b", family: "wan" },
+        { frames_per_clip_cap: 53, frames_per_clip_recommended: 53 },
         1,
       ),
     ).toBe(53);

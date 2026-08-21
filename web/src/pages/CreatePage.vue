@@ -1820,7 +1820,14 @@ async function onSubmitSequence() {
       : undefined,
   } satisfies SequenceSharedParams;
   const clips = JSON.parse(JSON.stringify(draft.clips)) as typeof draft.clips;
-  const openingSnapshot = draft.openingImage ? { ...draft.openingImage } : null;
+  // A checkpoint that reads no source image has no opening-image well, so a
+  // retained image is parked out of the request exactly as the one-shot
+  // wells park theirs — never shipped as invisible conditioning the server
+  // would refuse.
+  const openingSnapshot =
+    showSequenceOpeningImage.value && draft.openingImage
+      ? { ...draft.openingImage }
+      : null;
   const enableAudio = draft.enableAudio;
   const motionTailFrames = sequenceMotionTail.value;
   const initialRoute = editing

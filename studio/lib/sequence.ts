@@ -10,7 +10,7 @@ import { FALLBACK_VIDEO_FPS } from "@ui/lib/duration";
 import {
   LTX2_DEFAULT_CLIP_FRAMES,
   WAN_HANDOFF_DUPLICATED_FRAMES,
-  wanDefaultClipFrames,
+  wanRoutingClipFrames,
 } from "./chainRouting";
 
 // The seam vocabulary is presentational and lives beside the SeamPill /
@@ -269,10 +269,20 @@ export function defaultVideoFps(
  * A family with no routing clip size adds no bound of its own.
  */
 export function sequenceClipFrameCap(
-  model: { name?: string | null; family?: string | null } | null | undefined,
-  limits: { frames_per_clip_cap: number } | null | undefined,
+  model:
+    | {
+        name?: string | null;
+        family?: string | null;
+        default_frames?: number | null;
+      }
+    | null
+    | undefined,
+  limits:
+    | { frames_per_clip_cap: number; frames_per_clip_recommended?: number }
+    | null
+    | undefined,
 ): number {
-  const routing = routingClipFrames(model);
+  const routing = routingClipFrames(model, limits);
   const advertised =
     limits?.frames_per_clip_cap ?? routing ?? LTX2_DEFAULT_CLIP_FRAMES;
   return routing === null ? advertised : Math.min(advertised, routing);
@@ -284,7 +294,15 @@ export function sequenceClipFrameCap(
  * so nothing bounds the server's advertised cap.
  */
 function routingClipFrames(
-  model: { name?: string | null; family?: string | null } | null | undefined,
+  model:
+    | {
+        name?: string | null;
+        family?: string | null;
+        default_frames?: number | null;
+      }
+    | null
+    | undefined,
+  limits: { frames_per_clip_recommended?: number } | null | undefined,
 ): number | null {
   switch (model?.family?.trim().toLowerCase()) {
     case "ltx2":
@@ -292,7 +310,15 @@ function routingClipFrames(
     case "ltx-video":
       return LTX2_DEFAULT_CLIP_FRAMES;
     case "wan":
-      return wanDefaultClipFrames(model?.name ?? "");
+      // Wan's routing size is the checkpoint's own recorded default over the
+      // family floor (`mold_core::chain::wan_default_clip_frames`). The
+      // browser has no manifest, but it has the same default on
+      // `/api/models.default_frames` and on chain-limits'
+      // `frames_per_clip_recommended`, which old and new servers both send.
+      return wanRoutingClipFrames(
+        model?.name ?? "",
+        model?.default_frames ?? limits?.frames_per_clip_recommended ?? null,
+      );
     default:
       return null;
   }

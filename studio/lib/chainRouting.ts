@@ -196,6 +196,23 @@ export function wanDefaultClipFrames(model: string): number {
     : WAN_SINGLE_EXPERT_CLIP_FRAMES;
 }
 
+/**
+ * Mirror of `mold_core::chain::wan_default_clip_frames`: the checkpoint's own
+ * recorded default frame count over the family floor. The floor alone is
+ * what `wanDefaultClipFrames` answers when no manifest is in hand; a tier
+ * whose default was raised past it (A14B Q5/Q4 at 81, Q8 at 73) renders that
+ * default as one clip, so the browser must not clamp it back to 53. Pass
+ * `/api/models.default_frames` or chain-limits' `frames_per_clip_recommended`
+ * (the same default, snapped to the grid) as `tierDefault`.
+ */
+export function wanRoutingClipFrames(
+  model: string,
+  tierDefault: number | null | undefined,
+): number {
+  const floor = wanDefaultClipFrames(model);
+  return tierDefault != null && tierDefault > floor ? tierDefault : floor;
+}
+
 function canonicalizeFamily(family: string | null | undefined): string {
   const normalized = (family ?? "").trim().toLowerCase();
   return normalized === "ltx-2" ? "ltx2" : normalized;

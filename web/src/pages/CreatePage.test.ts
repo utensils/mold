@@ -1470,6 +1470,36 @@ describe("CreatePage layout and behavior", () => {
     ).toBe(false);
   });
 
+  it("parks a retained opening image out of the request for an unsupported checkpoint", async () => {
+    // The well is gone, so the user can neither see nor remove the image; the
+    // request must not carry conditioning the server would refuse.
+    hostModelsMock.mockResolvedValue([
+      { ...installedSequenceModel(), source_image: "unsupported" },
+    ]);
+    useGenerateForm().state.value.modelFamily = "ltx2";
+    useGenerateForm().state.value.model = "ltx-2-19b-distilled:fp8";
+    const draft = enterSequenceMode();
+    draft.clips[0]!.prompt = "the opening";
+    draft.clips[1]!.prompt = "the landing";
+    draft.openingImage = { filename: "opening.png", base64: "U1RBTEU=" };
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    expect(
+      wrapper.find("[data-test='sequence-opening-image-panel']").exists(),
+    ).toBe(false);
+
+    await wrapper.get("[data-test='sequence-generate']").trigger("click");
+    await flushPromises();
+
+    expect(createChainJobMock).toHaveBeenCalledTimes(1);
+    const request = createChainJobMock.mock.calls[0]![0] as {
+      stages: Array<{ source_image?: string }>;
+    };
+    expect(request.stages[0]).not.toHaveProperty("source_image");
+    // The draft keeps the image for a checkpoint that can use it later.
+    expect(draft.openingImage).toMatchObject({ filename: "opening.png" });
+  });
+
   it("hides the opening image when the checkpoint advertises no source-image contract", async () => {
     hostModelsMock.mockResolvedValue([
       { ...installedSequenceModel(), source_image: "unsupported" },
