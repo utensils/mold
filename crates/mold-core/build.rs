@@ -50,6 +50,11 @@ fn main() {
     println!("cargo:rustc-env=MOLD_GIT_SHA={sha}");
     println!("cargo:rustc-env=MOLD_GIT_SHA_SHORT={short_sha}");
     println!("cargo:rustc-env=MOLD_BUILD_DATE={date}");
+    let build_channel = std::env::var("MOLD_BUILD_CHANNEL")
+        .ok()
+        .filter(|channel| matches!(channel.as_str(), "stable" | "nightly"))
+        .unwrap_or_else(|| "development".to_string());
+    println!("cargo:rustc-env=MOLD_BUILD_CHANNEL={build_channel}");
 
     // Build a full version string as a compile-time constant for clap's
     // #[command(version = ...)] which requires &'static str.
@@ -67,4 +72,5 @@ fn main() {
     println!("cargo:rerun-if-changed=../../.git/packed-refs");
     println!("cargo:rerun-if-env-changed=MOLD_GIT_SHA");
     println!("cargo:rerun-if-env-changed=MOLD_BUILD_DATE");
+    println!("cargo:rerun-if-env-changed=MOLD_BUILD_CHANNEL");
 }
