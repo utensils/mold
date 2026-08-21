@@ -43,6 +43,7 @@ const STRIPPED_GLOBAL_KEYS: &[&str] = &[
     "expand",
     "scheduler",
     "gallery",
+    "generate",
 ];
 
 const STRIPPED_MODEL_KEYS: &[&str] = &[
@@ -608,6 +609,13 @@ pub struct Config {
     #[serde(default)]
     pub gallery: GallerySettings,
 
+    /// Profile-scoped generation behavior that has no flat legacy key name
+    /// (currently just `generate.auto_tag_title`). Persisted in `mold.db`
+    /// like `gallery`; the serialized field exists only for one-shot import
+    /// of a hand-written `[generate]` TOML section.
+    #[serde(default)]
+    pub generate: GenerateSettings,
+
     /// Logging configuration.
     #[serde(default)]
     pub logging: LoggingConfig,
@@ -660,6 +668,39 @@ pub const SCHEDULER_TIMING_MAX_MS: u32 = 30_000;
 
 /// Upper bound for `gallery.trash_retention_days` (ten years).
 pub const GALLERY_TRASH_RETENTION_MAX_DAYS: u32 = 3650;
+
+/// Generation behaviour that is a user preference rather than bootstrap
+/// state, and that does not already have a flat legacy key name.
+///
+/// Deliberately separate from the older flat `default_width` /
+/// `embed_metadata` globals: those keep their historical CLI spelling for
+/// backwards compatibility even though they persist under `generate.*` in the
+/// DB. New generation preferences are named `generate.*` on both surfaces.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+pub struct GenerateSettings {
+    /// Whether a titled print is also tagged with its title slug, by the
+    /// client that submits it. Default on.
+    ///
+    /// This is a CLIENT-side default for the CLI and TUI — the server never
+    /// auto-tags, because it cannot tell a title the user typed from one a
+    /// script generated, and a host silently adding tags to every print that
+    /// crosses it would be surprising from any other machine. `mold run
+    /// --no-auto-tag` overrides it per invocation.
+    #[serde(default = "default_auto_tag_title")]
+    pub auto_tag_title: bool,
+}
+
+const fn default_auto_tag_title() -> bool {
+    true
+}
+
+impl Default for GenerateSettings {
+    fn default() -> Self {
+        Self {
+            auto_tag_title: default_auto_tag_title(),
+        }
+    }
+}
 
 /// Gallery behaviour that is a user preference rather than bootstrap state.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
@@ -856,6 +897,7 @@ impl Default for Config {
             expand: ExpandSettings::default(),
             scheduler: SchedulerSettings::default(),
             gallery: GallerySettings::default(),
+            generate: GenerateSettings::default(),
             logging: LoggingConfig::default(),
             runpod: crate::runpod::RunPodSettings::default(),
             lambda: crate::lambda::LambdaSettings::default(),

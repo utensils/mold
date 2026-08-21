@@ -29,6 +29,14 @@ pub enum ValueType {
 pub const GALLERY_TRASH_RETENTION_DAYS_KEY: &str = "gallery.trash_retention_days";
 pub const GALLERY_TRASH_RETENTION_DAYS_ENV: &str = "MOLD_GALLERY_TRASH_RETENTION_DAYS";
 
+/// Whether a titled print is also tagged with its title slug, by the CLIENT
+/// that submits it. Profile-scoped DB key, default true.
+///
+/// Deliberately has no env override: it shapes what the CLI puts in a
+/// request, not how the server behaves, so a host-level environment variable
+/// would be the wrong lever.
+pub const GENERATE_AUTO_TAG_TITLE_KEY: &str = "generate.auto_tag_title";
+
 pub struct ConfigKeyInfo {
     pub key: &'static str,
     pub value_type: ValueType,
@@ -184,6 +192,13 @@ pub const ALL_KEYS: &[ConfigKeyInfo] = &[
         value_type: ValueType::U32,
         env_var: Some(GALLERY_TRASH_RETENTION_DAYS_ENV),
         section: "Gallery",
+    },
+    // Generate
+    ConfigKeyInfo {
+        key: GENERATE_AUTO_TAG_TITLE_KEY,
+        value_type: ValueType::Bool,
+        env_var: None,
+        section: "Generate",
     },
     // Logging
     ConfigKeyInfo {
@@ -473,6 +488,8 @@ pub fn get_static_value(config: &Config, key: &str) -> Result<ConfigValue> {
         "scheduler.warm_wait_max_ms" => ConfigValue::U32(config.scheduler.warm_wait_max_ms),
         // Gallery
         GALLERY_TRASH_RETENTION_DAYS_KEY => ConfigValue::U32(config.gallery.trash_retention_days),
+        // Generate
+        GENERATE_AUTO_TAG_TITLE_KEY => ConfigValue::Bool(config.generate.auto_tag_title),
         // Logging
         "logging.level" => ConfigValue::String(config.logging.level.clone()),
         "logging.file" => ConfigValue::Bool(config.logging.file),
@@ -656,6 +673,10 @@ fn set_static_value(config: &mut Config, key: &str, raw: &str) -> Result<()> {
             config.gallery.trash_retention_days =
                 parse_u32(raw, 0, crate::config::GALLERY_TRASH_RETENTION_MAX_DAYS, key)
                     .map_err(|error| anyhow!("{error} Use 0 to keep trashed prints forever."))?;
+        }
+        // Generate
+        GENERATE_AUTO_TAG_TITLE_KEY => {
+            config.generate.auto_tag_title = parse_bool(raw, key)?;
         }
         // Logging
         "logging.level" => {
@@ -957,6 +978,34 @@ mod tests {
         // Unknown siblings under the prefix still route to the DB so a
         // future gallery.* key can never split-brain against the sweeper.
         assert_eq!(surface_for_key("gallery.something_else"), Surface::Db);
+    }
+
+    /// `generate.auto_tag_title` is a DB-surface bool that defaults on, is
+    /// reachable through the same registry as every other key, and has no
+    /// env override — it shapes what a CLIENT puts in a request, so a
+    /// host-level environment variable would be the wrong lever.
+    #[test]
+    fn generate_auto_tag_title_round_trips_on_the_db_surface() {
+        assert!(is_known_key(GENERATE_AUTO_TAG_TITLE_KEY));
+        assert_eq!(effective_surface(GENERATE_AUTO_TAG_TITLE_KEY), Surface::Db);
+        assert_eq!(env_override_for(GENERATE_AUTO_TAG_TITLE_KEY), None);
+
+        let mut config = Config::default();
+        assert!(matches!(
+            get_value(&config, GENERATE_AUTO_TAG_TITLE_KEY).unwrap(),
+            ConfigValue::Bool(true)
+        ));
+
+        set_value(&mut config, GENERATE_AUTO_TAG_TITLE_KEY, "false").unwrap();
+        assert!(!config.generate.auto_tag_title);
+        assert!(matches!(
+            get_value(&config, GENERATE_AUTO_TAG_TITLE_KEY).unwrap(),
+            ConfigValue::Bool(false)
+        ));
+
+        set_value(&mut config, GENERATE_AUTO_TAG_TITLE_KEY, "true").unwrap();
+        assert!(config.generate.auto_tag_title);
+        assert!(set_value(&mut config, GENERATE_AUTO_TAG_TITLE_KEY, "maybe").is_err());
     }
 
     #[test]

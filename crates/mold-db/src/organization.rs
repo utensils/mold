@@ -232,6 +232,9 @@ pub struct SeededOrganization {
     pub tags: Vec<String>,
     /// Display name of the collection the print was filed into.
     pub collection: Option<String>,
+    /// Id of that collection, so the `gallery_updated` row the server emits
+    /// carries real membership instead of an empty list.
+    pub collection_id: Option<String>,
     /// True when the collection did not exist and this seed created it.
     pub created_collection: bool,
 }
@@ -292,6 +295,7 @@ pub(crate) fn seed_creation_organization(
             };
             collection_add_ids(conn, &id, &[generation_id], now_ms)?;
             seeded.collection = Some(name);
+            seeded.collection_id = Some(id);
             seeded.created_collection = created;
         }
     }

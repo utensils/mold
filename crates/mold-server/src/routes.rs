@@ -1111,6 +1111,15 @@ async fn prepare_generation(
     }
     enforce_source_image_capability(state, request, resolved_family.as_deref()).await?;
 
+    // Resolve the creation-time filing against this host now that the
+    // request is otherwise admissible. Publication only ever files by name,
+    // so an `{id}` reference is turned into its name here — that is also the
+    // name the print's embedded provenance will record, and resolving it
+    // later would risk filing under one collection and recording another.
+    warnings
+        .other
+        .extend(resolve_request_filing(state, request).await);
+
     let resolved_references = if request.references.is_some() {
         let identity = reference_identity
             .as_deref()
@@ -1421,6 +1430,136 @@ pub(crate) fn materialize_default_negative_prompt(
 /// admitted for 97 frames that then rendered a 20-second reference would be
 /// five times the size it was measured at.
 ///
+/// Resolve the creation-time filing a request carries against this host,
+/// rewriting `request.collection` into the `{name}` form publication files
+/// by. Returns advisories for anything that was dropped.
+///
+/// Three things can go wrong, and none of them may refuse the render — a
+/// print is the expensive artifact and its filing is not:
+///
+/// * **No metadata DB** (`MOLD_DB_DISABLE=1`): there is nowhere to file. The
+///   filing is dropped and said so on `x-mold-request-warning`, never
+///   silently and never as a refusal.
+/// * **An `{id}` that no longer exists**: the collection was deleted between
+///   the client reading the list and pressing Generate. Dropped and reported.
+/// * **A DB read failure**: reported the same way rather than escalated.
+///
+/// A `{name}` reference needs no resolution at all: publication creates it
+/// when absent, which is the cross-host create-by-name rule.
+async fn resolve_request_filing(
+    state: &AppState,
+    request: &mut mold_core::GenerateRequest,
+) -> Vec<String> {
+    let filing = describe_request_filing(request);
+    if filing.is_none() {
+        return Vec::new();
+    }
+
+    let Some(db) = state.metadata_db.as_ref().as_ref() else {
+        let filing = filing.expect("checked above");
+        request.tags = None;
+        request.collection = None;
+        return vec![format!(
+            "this host has no metadata database, so {filing} was not applied; \
+             the print was generated and saved normally"
+        )];
+    };
+
+    resolve_collection_reference(db, &mut request.collection)
+}
+
+/// Rewrite an `{id}` collection reference into the `{id, name}` form
+/// publication files by, dropping it with an advisory when this host cannot
+/// resolve it. A `{name}` reference needs no lookup — publication creates it
+/// when absent — and is left exactly as it arrived.
+///
+/// Shared by the one-shot and chain admission paths so a sequence and a
+/// single print resolve their filing identically.
+pub(crate) fn resolve_collection_reference(
+    db: &mold_db::MetadataDb,
+    collection: &mut Option<mold_core::CollectionRef>,
+) -> Vec<String> {
+    let Some(id) = collection
+        .as_ref()
+        .filter(|reference| reference.name.is_none())
+        .and_then(|reference| reference.id.as_deref())
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
+    else {
+        return Vec::new();
+    };
+
+    match db.get_collection(&id) {
+        Ok(Some(row)) => {
+            *collection = Some(mold_core::CollectionRef {
+                id: Some(row.id),
+                name: Some(row.name),
+            });
+            Vec::new()
+        }
+        Ok(None) => {
+            *collection = None;
+            vec![format!(
+                "collection '{id}' no longer exists on this host, so the print was not filed \
+                 into it; its tags and everything else were applied normally"
+            )]
+        }
+        Err(error) => {
+            tracing::warn!("collection lookup failed for '{id}': {error:#}");
+            *collection = None;
+            vec![format!(
+                "collection '{id}' could not be read on this host, so the print was not filed \
+                 into it; its tags and everything else were applied normally"
+            )]
+        }
+    }
+}
+
+/// Build the `x-mold-request-warning` header for a set of advisories, or an
+/// empty map when there are none.
+///
+/// The generate path assembles this header from [`RequestWarnings`] on its
+/// own response; the chain endpoints have no such struct, so they share this
+/// so a dropped filing is never a silent drop there either.
+pub(crate) fn request_warning_headers(warnings: &[String]) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    if warnings.is_empty() {
+        return headers;
+    }
+    let joined = warnings.join("; ").replace('\n', " ");
+    match HeaderValue::from_str(&joined) {
+        Ok(value) => {
+            headers.insert("x-mold-request-warning", value);
+        }
+        Err(e) => tracing::warn!("request warning could not be encoded as a header: {e}"),
+    }
+    headers
+}
+
+/// Human-readable summary of what a request asked to be filed under, for the
+/// advisory text. `None` when it asked for nothing.
+fn describe_request_filing(request: &mold_core::GenerateRequest) -> Option<String> {
+    let tags = request.tags.as_deref().filter(|tags| !tags.is_empty());
+    let collection = request
+        .collection
+        .as_ref()
+        .filter(|reference| !reference.is_unset());
+    match (tags, collection) {
+        (None, None) => None,
+        (Some(tags), None) => Some(format!("the requested {}", tag_phrase(tags))),
+        (None, Some(_)) => Some("the requested collection".to_string()),
+        (Some(tags), Some(_)) => Some(format!("the requested collection and {}", tag_phrase(tags))),
+    }
+}
+
+fn tag_phrase(tags: &[String]) -> String {
+    match tags.len() {
+        1 => "tag".to_string(),
+        n => format!("{n} tags"),
+    }
+}
+
 /// Returns anything the caller asked for that the reference overrode, so the
 /// client is told rather than quietly retimed.
 async fn apply_lip_dub_reference_timing(

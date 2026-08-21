@@ -82,7 +82,14 @@ impl ChainPlacementPreviewBody {
 pub async fn create_chain_job(
     State(state): State<AppState>,
     Json(mut req): Json<ChainRequest>,
-) -> Result<(StatusCode, Json<CreateChainJobResponse>), ApiError> {
+) -> Result<
+    (
+        StatusCode,
+        axum::http::HeaderMap,
+        Json<CreateChainJobResponse>,
+    ),
+    ApiError,
+> {
     crate::routes::ensure_generation_available(&state)?;
     let handle = chain_jobs_handle(&state)?;
     let db = metadata_db(&state)?;
@@ -97,9 +104,13 @@ pub async fn create_chain_job(
     // checkpoint normalises on wan's `4k+1` grid rather than the LTX
     // fallback a manifest-only lookup leaves behind (#783).
     let family = crate::routes_chain::resolve_chain_family(&authority.config, &req.model);
-    let req = req
+    let mut req = req
         .normalise_with_family(Some(&family))
         .map_err(|e| ApiError::validation(e.to_string()))?;
+    // Resolve the stitched print's collection before the job is frozen: the
+    // manifest keeps this request verbatim, so an unresolved id would still
+    // be unresolved on a resume days later.
+    let filing_warnings = crate::routes::resolve_collection_reference(db, &mut req.collection);
     if req.output_format != mold_core::OutputFormat::Mp4 {
         return Err(ApiError::validation(
             "durable chain jobs currently require output_format = mp4; legacy /api/generate/chain may request gif/webp/apng via the shim",
@@ -134,6 +145,7 @@ pub async fn create_chain_job(
         });
     Ok((
         StatusCode::ACCEPTED,
+        crate::routes::request_warning_headers(&filing_warnings),
         Json(CreateChainJobResponse { job_id }),
     ))
 }
@@ -1391,7 +1403,7 @@ mod tests {
         request.model = "route-chain-test".into();
 
         let mut events_rx = state.events.subscribe();
-        let (_status, Json(body)) = with_mold_home(home.path(), || {
+        let (_status, _headers, Json(body)) = with_mold_home(home.path(), || {
             futures::executor::block_on(create_chain_job(State(state), Json(request)))
         })
         .unwrap();
@@ -1598,7 +1610,7 @@ mod tests {
             references: vec![],
         });
 
-        let (status, Json(created)) = with_mold_home(home.path(), || {
+        let (status, _headers, Json(created)) = with_mold_home(home.path(), || {
             futures::executor::block_on(create_chain_job(State(state.clone()), Json(request)))
         })
         .unwrap();
@@ -1852,7 +1864,7 @@ mod tests {
         );
         let request = freezable_amend_request(&state, home.path()).await;
 
-        let (_status, Json(created)) = with_mold_home(home.path(), || {
+        let (_status, _headers, Json(created)) = with_mold_home(home.path(), || {
             futures::executor::block_on(create_chain_job(
                 State(state.clone()),
                 Json(request.clone()),
@@ -1907,7 +1919,7 @@ mod tests {
             crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests(),
         );
         let request = freezable_amend_request(&state, home.path()).await;
-        let (_status, Json(created)) = with_mold_home(home.path(), || {
+        let (_status, _headers, Json(created)) = with_mold_home(home.path(), || {
             futures::executor::block_on(create_chain_job(
                 State(state.clone()),
                 Json(request.clone()),
@@ -1966,7 +1978,7 @@ mod tests {
             crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests(),
         );
         let request = freezable_amend_request(&state, home.path()).await;
-        let (_status, Json(created)) = with_mold_home(home.path(), || {
+        let (_status, _headers, Json(created)) = with_mold_home(home.path(), || {
             futures::executor::block_on(create_chain_job(
                 State(state.clone()),
                 Json(request.clone()),
@@ -2036,7 +2048,7 @@ mod tests {
             crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests(),
         );
         let request = freezable_amend_request(&state, home.path()).await;
-        let (_status, Json(created)) = with_mold_home(home.path(), || {
+        let (_status, _headers, Json(created)) = with_mold_home(home.path(), || {
             futures::executor::block_on(create_chain_job(
                 State(state.clone()),
                 Json(request.clone()),
