@@ -1467,6 +1467,111 @@ describe("CreatePage layout and behavior", () => {
     expect(controls.props("clipCount")).toBe(2);
   });
 
+  it("renders the sequence opening image in the primary form, never in Advanced", async () => {
+    hostModelsMock.mockResolvedValue([installedSequenceModel()]);
+    enterSequenceMode();
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+
+    expect(
+      wrapper.find("[data-test='sequence-opening-image-panel']").exists(),
+    ).toBe(true);
+    // The one-shot well steps aside in Sequence, and Advanced no longer owns
+    // an opening-image section at all.
+    expect(wrapper.find("[data-test='source-media-panel']").exists()).toBe(
+      false,
+    );
+    expect(
+      wrapper.find("[data-test='sequence-section-opening-image']").exists(),
+    ).toBe(false);
+  });
+
+  it("parks a retained opening image out of the request for an unsupported checkpoint", async () => {
+    // The well is gone, so the user can neither see nor remove the image; the
+    // request must not carry conditioning the server would refuse.
+    hostModelsMock.mockResolvedValue([
+      { ...installedSequenceModel(), source_image: "unsupported" },
+    ]);
+    useGenerateForm().state.value.modelFamily = "ltx2";
+    useGenerateForm().state.value.model = "ltx-2-19b-distilled:fp8";
+    const draft = enterSequenceMode();
+    draft.clips[0]!.prompt = "the opening";
+    draft.clips[1]!.prompt = "the landing";
+    draft.openingImage = { filename: "opening.png", base64: "U1RBTEU=" };
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    expect(
+      wrapper.find("[data-test='sequence-opening-image-panel']").exists(),
+    ).toBe(false);
+
+    await wrapper.get("[data-test='sequence-generate']").trigger("click");
+    await flushPromises();
+
+    expect(createChainJobMock).toHaveBeenCalledTimes(1);
+    const request = createChainJobMock.mock.calls[0]?.[0] as unknown as {
+      stages: Array<Record<string, unknown>>;
+    };
+    expect(request.stages).toHaveLength(2);
+    for (const stage of request.stages) {
+      expect(stage).not.toHaveProperty("source_image");
+    }
+    // The draft keeps the image for a checkpoint that can use it later.
+    expect(draft.openingImage).toMatchObject({ filename: "opening.png" });
+  });
+
+  it("hides the opening image when the checkpoint advertises no source-image contract", async () => {
+    hostModelsMock.mockResolvedValue([
+      { ...installedSequenceModel(), source_image: "unsupported" },
+    ]);
+    enterSequenceMode();
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+
+    expect(
+      wrapper.find("[data-test='sequence-opening-image-panel']").exists(),
+    ).toBe(false);
+  });
+
+  it("keeps the opening image out of the Advanced count and clears it on Reset", async () => {
+    hostModelsMock.mockResolvedValue([installedSequenceModel()]);
+    const stubs: Record<string, Component> = pageStubs();
+    stubs.ControlsAside = defineComponent({
+      name: "ControlsAside",
+      template:
+        "<aside data-test='controls-stub'><button data-test='controls-reset' @click=\"$emit('reset-settings')\">reset</button></aside>",
+    });
+    stubs.AdvancedDrawer = defineComponent({
+      name: "AdvancedDrawer",
+      props: { advCount: { type: Number, default: 0 } },
+      template: "<div data-test='advanced-stub' :data-count='advCount' />",
+    });
+    const draft = enterSequenceMode();
+    const wrapper = mount(CreatePage, { global: { stubs } });
+    await flushPromises();
+
+    draft.openingImage = {
+      filename: "opening.png",
+      base64: "QUJD",
+      width: 1216,
+      height: 704,
+    };
+    await flushPromises();
+    // Advanced badges Advanced content; primary-form source media is not it.
+    expect(
+      wrapper.get("[data-test='advanced-stub']").attributes("data-count"),
+    ).toBe("0");
+
+    await wrapper.get("[data-test='controls-reset']").trigger("click");
+    expect(draft.openingImage).toBeNull();
+
+    const notifications = useNotifications();
+    const toast = [...notifications.toasts]
+      .reverse()
+      .find((t) => /settings/i.test(t.text));
+    runToastAction(toast!.id);
+    expect(draft.openingImage).toMatchObject({ filename: "opening.png" });
+  });
+
   it("selects a chain-capable model from the pinned host when Sequence is restored", async () => {
     const studio = addHost({
       url: "http://studio:7680",

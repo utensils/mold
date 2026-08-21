@@ -935,6 +935,75 @@ describe("MobileApp sequence generation", () => {
     expect(wrapper.get("[data-test='mobile-sequence-job']").text()).toContain("queued");
   });
 
+  it("parks a retained opening image when the checkpoint reads no source image", async () => {
+    // The well is hidden for an advertised text-to-video checkpoint, so the
+    // request must not ship the image the user can no longer see or remove.
+    const sequenceModel = {
+      ...model,
+      name: "wan22-t2v-a14b:q5",
+      family: "wan",
+      default_steps: 20,
+      default_guidance: 5,
+      default_frames: 81,
+      default_fps: 16,
+      source_image: "unsupported",
+      supports_sequence: true,
+    };
+    localStorage.setItem("mold.mobile.create-mode.v1", "sequence");
+    apiJsonTo.mockImplementation((_target: unknown, path: string, init?: RequestInit) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([sequenceModel]);
+      if (path === "/api/capabilities") return Promise.resolve({});
+      if (path.startsWith("/api/capabilities/chain-limits")) {
+        return Promise.resolve({
+          model: sequenceModel.name,
+          frames_per_clip_cap: 81,
+          frames_per_clip_recommended: 81,
+          max_stages: 8,
+          max_total_frames: 648,
+          fade_frames_max: 32,
+          transition_modes: ["smooth", "cut", "fade"],
+          quantization_family: "q5",
+          supports_audio: false,
+          supports_sequence: true,
+        });
+      }
+      if (path === "/api/chain-jobs" && init?.method === "POST") {
+        return Promise.resolve({ job_id: "sequence-job-2" });
+      }
+      if (path === "/api/chain-jobs/sequence-job-2") {
+        return new Promise(() => {});
+      }
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    previewChainPlacement.mockResolvedValueOnce({
+      ...plannedPlacement(),
+      authoritative: false,
+      outcome: "unsupported",
+      candidate: null,
+    });
+    wrapper = mountMobileApp();
+    await flushPromises();
+    const draft = useSequenceDraftStore();
+    draft.openingImage = { filename: "opening.png", base64: btoa("stale opening") };
+    const prompts = wrapper.findAll("[data-test='mobile-sequence-clip'] textarea");
+    await prompts[0]!.setValue("A paper boat crosses a moonlit pond");
+    await prompts[1]!.setValue("Fireflies gather as the sky brightens");
+    await flushPromises();
+
+    expect(wrapper.find("[data-test='mobile-sequence-source-disclosure']").exists()).toBe(false);
+    await wrapper.get("[data-test='mobile-generate-sequence']").trigger("click");
+    await flushPromises();
+
+    const createCall = apiJsonTo.mock.calls.find(
+      (call) => call[1] === "/api/chain-jobs" && (call[2] as RequestInit)?.method === "POST",
+    );
+    expect(createCall).toBeDefined();
+    const request = JSON.parse(String((createCall?.[2] as RequestInit)?.body));
+    expect(request.stages[0]).not.toHaveProperty("source_image");
+    expect(String((createCall?.[2] as RequestInit)?.body)).not.toContain(btoa("stale opening"));
+  });
+
   it("cancels the exact sequence when cancellation arrives before its id", async () => {
     const sequenceModel = {
       ...model,
@@ -5680,6 +5749,27 @@ describe("MobileApp create settings reset", () => {
     await flushPromises();
     await wrapper.get("[data-test='mobile-settings-reset']").trigger("click");
     expect(draft.enableAudio).toBe(false);
+  });
+
+  it("discards the sequence opening image on the primary Reset", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    // Read the live form while One shot still mounts the LoRA controls; the
+    // sequence bench renders a different subtree over the same form object.
+    const liveForm = wrapper.getComponent(MobileLoraControls).props("form") as GenerateForm;
+
+    const draft = useSequenceDraftStore();
+    draft.output = "sequence";
+    draft.openingImage = { filename: "opening.png", base64: "QUJD" };
+    liveForm.strength = 0.4;
+    await flushPromises();
+
+    await wrapper.get("[data-test='mobile-settings-reset']").trigger("click");
+    await flushPromises();
+
+    expect(draft.openingImage).toBeNull();
+    expect(liveForm.strength).not.toBe(0.4);
   });
 
   it("badges and resets LTX-2 guidance overrides from the Advanced sheet", async () => {

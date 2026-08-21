@@ -603,6 +603,75 @@ fn default_output_format() -> OutputFormat {
 /// past the 400-frame target without risking runaway jobs.
 pub const MAX_CHAIN_STAGES: usize = 16;
 
+/// Per-clip frame count an LTX-2 render chain uses for one clip.
+///
+/// This is the model's *clip size*, not the family's ceiling — see
+/// [`crate::validation::ltx2_max_frames_at_fps`] for that. A 97-frame clip is
+/// what fits comfortably on a single consumer GPU; the family's real
+/// single-request budget is 20 s of runtime, which at 24 fps is 481 frames and
+/// would need far more VRAM than most cards have. Users who deliberately want
+/// one long clip instead of a stitched sequence raise `--clip-frames`, which
+/// is clamped to the family budget rather than to this value.
+pub const LTX2_DEFAULT_CLIP_FRAMES: u32 = 97;
+
+/// Per-clip frame count LTX-Video renders in one clip. Mirrors
+/// `mold_inference::chain::LTX_VIDEO_FRAMES_PER_CLIP_CAP`, which `mold-core`
+/// cannot depend on; the two are pinned together by a contract test in
+/// `mold-server`'s `chain_limits`.
+pub const LTX_VIDEO_DEFAULT_CLIP_FRAMES: u32 = 97;
+
+/// Per-clip frame count a wan render chain uses for one clip, in pixel frames.
+///
+/// The two-expert A14B pair measures near the 24 GB envelope well before
+/// wan's 257-frame request cap; the single-expert 5B has room for its own
+/// shipped 121. Both values sit on wan's `4k+1` grid, so a clip started at the
+/// routing default is submittable.
+///
+/// Those two numbers are a **floor**, not the answer. A tier whose manifest
+/// default was raised past its family floor on a measurement has to be able to
+/// render that default as one clip — otherwise running the model with no
+/// `--frames` at all silently produces a stitched sequence instead of the clip
+/// the default advertises. That is exactly what shipped: #776 item 4 raised
+/// the Q5/Q4 A14B tiers to the checkpoint's trained 81 frames once block
+/// offload made them fit, while the routing default stayed at the pre-offload
+/// 53, so `mold run wan22-t2v-a14b:q5` rendered 2 clips and 106 frames rather
+/// than one 81-frame clip. Reading the tier's own recorded default keeps the
+/// two from drifting again; the floor still covers models whose manifest
+/// records a smaller default (Q8 and fp8 A14B stay at 33) and opaque catalog
+/// IDs with no manifest at all.
+pub fn wan_default_clip_frames(model: &str) -> u32 {
+    let floor = if model.to_ascii_lowercase().contains("a14b") {
+        53
+    } else {
+        121
+    };
+    crate::manifest::find_manifest(&crate::manifest::resolve_model_name(model))
+        .and_then(|manifest| manifest.defaults.frames)
+        .map_or(floor, |tier_default| tier_default.max(floor))
+}
+
+/// The per-model clip size ONE generation renders when mold auto-chains.
+///
+/// This is deliberately **not** the family's single-request ceiling. The
+/// ceiling (`crate::validation::max_frames_for_family_at_fps`) is what a
+/// single denoise is *allowed* to ask for — LTX-2's is a 20 s runtime budget,
+/// 481 frames at 24 fps. The routing clip size is what mold actually renders
+/// per clip: a VRAM envelope for wan, and the model's shipped clip default for
+/// the LTX families. Conflating the two is what let a Studio sequence composer
+/// offer a single 481-frame LTX-2 clip that the one-shot auto-chain path would
+/// have split into five.
+///
+/// `None` means the family has no routing clip size — it is not chain-capable,
+/// so callers keep the family ceiling.
+pub fn routing_clip_frames(family: &str, model: &str) -> Option<u32> {
+    match family {
+        "ltx2" => Some(LTX2_DEFAULT_CLIP_FRAMES),
+        "ltx-video" => Some(LTX_VIDEO_DEFAULT_CLIP_FRAMES),
+        "wan" => Some(wan_default_clip_frames(model)),
+        _ => None,
+    }
+}
+
 impl ChainRequest {
     /// Build a synthetic single-clip `GenerateRequest` describing the
     /// stitched output, so gallery rows and embedded metadata can reuse
@@ -813,7 +882,17 @@ impl ChainRequest {
                     "chain total_frames must be > 0".into(),
                 ));
             }
-            let clip_frames = self.clip_frames.unwrap_or(97);
+            // A caller that named no clip size gets the model's own routing
+            // clip size — the size ONE generation renders — never the family's
+            // single-request ceiling. Wan's is a VRAM envelope on its own
+            // `4k+1` grid, so the old flat 97 auto-expanded wan into clips
+            // nearly twice the envelope its routing default measures at.
+            let clip_frames = self.clip_frames.unwrap_or_else(|| {
+                family
+                    .as_deref()
+                    .and_then(|family| routing_clip_frames(family, &self.model))
+                    .unwrap_or(LTX2_DEFAULT_CLIP_FRAMES)
+            });
             if clip_frames == 0 {
                 return Err(MoldError::Validation(
                     "chain clip_frames must be > 0".into(),
@@ -1107,6 +1186,75 @@ fn build_auto_expand_stages(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The per-model routing clip size is the size ONE generation renders when
+    /// mold auto-chains — deliberately smaller than the family's
+    /// single-request ceiling.
+    #[test]
+    fn routing_clip_frames_is_the_per_model_clip_size() {
+        assert_eq!(
+            routing_clip_frames("ltx2", "ltx-2-19b-distilled:fp8"),
+            Some(LTX2_DEFAULT_CLIP_FRAMES),
+        );
+        assert_eq!(LTX2_DEFAULT_CLIP_FRAMES, 97);
+        // Opaque catalog ids stay on the family answer.
+        assert_eq!(routing_clip_frames("ltx2", "cv:3143864"), Some(97));
+        // ltx-video's chain capability publishes a flat 97-frame clip cap.
+        assert_eq!(
+            routing_clip_frames("ltx-video", "ltx-video-0.9.6:bf16"),
+            Some(97),
+        );
+        // wan is per checkpoint: the two-expert A14B pair measures near the
+        // 24 GB envelope well before the single-expert 5B does.
+        assert_eq!(
+            routing_clip_frames("wan", "wan22-t2v-a14b:q5"),
+            Some(wan_default_clip_frames("wan22-t2v-a14b:q5")),
+        );
+        assert_eq!(routing_clip_frames("wan", "wan22-ti2v-5b:fp16"), Some(121));
+        // Non-chain-capable families have no routing clip size at all.
+        assert_eq!(routing_clip_frames("flux", "flux-dev:q4"), None);
+        assert_eq!(routing_clip_frames("", "whatever"), None);
+    }
+
+    /// wan's routing size is the tier's own recorded default over the family
+    /// floor, never a flat constant (#776 item 4).
+    #[test]
+    fn wan_default_clip_frames_takes_the_tier_default_over_the_floor() {
+        // A14B floor.
+        assert!(wan_default_clip_frames("wan22-t2v-a14b:q8") >= 53);
+        assert_eq!(wan_default_clip_frames("cv:unknown-a14b-thing"), 53);
+        // Single-expert floor for everything else.
+        assert_eq!(wan_default_clip_frames("cv:2041121"), 121);
+        assert!(wan_default_clip_frames("wan22-ti2v-5b:fp16") >= 121);
+        // Every answer sits on wan's own `4k+1` grid, so a clip started at the
+        // routing default is submittable.
+        for model in [
+            "wan22-t2v-a14b:q5",
+            "wan22-t2v-a14b:q8",
+            "wan22-ti2v-5b:fp16",
+            "wan21-t2v-1.3b:bf16",
+            "cv:2041121",
+        ] {
+            let frames = wan_default_clip_frames(model);
+            assert_eq!(
+                (frames - 1) % crate::validation::WAN_TEMPORAL_SCALE,
+                0,
+                "{model}: routing default {frames} is off wan's 4k+1 grid",
+            );
+        }
+    }
+
+    /// The routing clip size is NOT the family's single-request ceiling: the
+    /// whole point of the split is that one generation renders 97 LTX-2 frames
+    /// where the family budget admits 481 at 24 fps.
+    #[test]
+    fn routing_clip_frames_is_below_the_family_ceiling() {
+        let family_cap = crate::validation::max_frames_for_family_at_fps("ltx2", 24).unwrap();
+        assert!(
+            routing_clip_frames("ltx2", "ltx-2-19b-distilled:fp8").unwrap() < family_cap,
+            "the routing clip size must stay below the family's single-request ceiling",
+        );
+    }
 
     /// An installed catalog wan checkpoint normalises on wan's grid (#783).
     ///

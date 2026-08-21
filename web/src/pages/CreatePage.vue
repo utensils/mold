@@ -15,6 +15,7 @@ import ControlsAside from "../components/create/ControlsAside.vue";
 import CreateModelPicker from "../components/create/CreateModelPicker.vue";
 import AdvancedDrawer from "../components/create/AdvancedDrawer.vue";
 import SourceMediaPanel from "../components/create/SourceMediaPanel.vue";
+import SequenceOpeningImagePanel from "../components/create/SequenceOpeningImagePanel.vue";
 import ActivityStrip from "../components/create/ActivityStrip.vue";
 import EstimateBadge from "../components/create/EstimateBadge.vue";
 import { advancedActiveCount } from "../components/create/advancedCount";
@@ -1511,6 +1512,13 @@ const capabilities = computed(() =>
     effectiveGenerationRecipe(currentModel.value, form.state.value.pipeline),
   ),
 );
+/** The sequence opening frame is source media, so it obeys the selected
+ * checkpoint's own source-image contract (#772) exactly as the one-shot well
+ * does: an `unsupported` checkpoint renders no well at all, while an absent
+ * field keeps the family fallback (older servers stay as they were). */
+const showSequenceOpeningImage = computed(
+  () => capabilities.value.sourceImageCapability !== "unsupported",
+);
 const h3FrameError = computed(() =>
   minimaxH3AuthoringError(
     currentFamily.value,
@@ -1884,7 +1892,14 @@ async function onSubmitSequenceInner(
       : undefined,
   } satisfies SequenceSharedParams;
   const clips = JSON.parse(JSON.stringify(draft.clips)) as typeof draft.clips;
-  const openingSnapshot = draft.openingImage ? { ...draft.openingImage } : null;
+  // A checkpoint that reads no source image has no opening-image well, so a
+  // retained image is parked out of the request exactly as the one-shot
+  // wells park theirs — never shipped as invisible conditioning the server
+  // would refuse.
+  const openingSnapshot =
+    showSequenceOpeningImage.value && draft.openingImage
+      ? { ...draft.openingImage }
+      : null;
   const enableAudio = draft.enableAudio;
   const motionTailFrames = sequenceMotionTail.value;
   const initialRoute = editing
@@ -2444,20 +2459,31 @@ function onResetSettings() {
   // never mutated and can be handed straight back on undo.
   const previous = form.state.value;
   const previousSequenceAudio = sequenceMode.value ? draft.enableAudio : null;
+  // Parity with the one-shot reset, which discards staged source media
+  // (`settingsResetPatch`): the sequence's staged source media is the opening
+  // frame, and it lives on the shared draft rather than in the form.
+  const previousOpeningImage = draft.openingImage;
   // The canvas is part of what Reset restores, so its authority resets with
   // it — otherwise the next model change would re-snap the reset canvas back
   // onto the attached source (#1166).
   const previousIntent = canvasIntent.value;
   form.resetSettings(currentModel.value ?? null);
   canvasIntent.value = "model-default";
-  if (sequenceMode.value) draft.enableAudio = false;
+  if (sequenceMode.value) {
+    draft.enableAudio = false;
+    // Undo hands the retained in-memory object (bytes included) back, and the
+    // store's persist pass re-writes its media blob.
+    draft.clearOpeningImage();
+  }
   undoableAction({
     text: "Settings reset to model defaults",
     undo: () => {
       form.state.value = previous;
       canvasIntent.value = previousIntent;
-      if (previousSequenceAudio !== null)
+      if (previousSequenceAudio !== null) {
         draft.enableAudio = previousSequenceAudio;
+        draft.openingImage = previousOpeningImage;
+      }
     },
     commit: () => {},
   });
@@ -2474,12 +2500,12 @@ const aspectLabel = computed(
 
 const advCount = computed(() =>
   sequenceMode.value
-    ? Number(Boolean(draft.openingImage)) +
+    ? // The opening image is primary-form source media, so it never counts
+      // toward the Advanced badge (which promises Advanced content only).
       Number(
         capabilities.value.supportsNegativePrompt &&
           draft.clips.some((clip) => clip.negativePrompt.trim()),
-      ) +
-      Number(Boolean(draft.clips.some((clip) => clip.cameraControl)))
+      ) + Number(Boolean(draft.clips.some((clip) => clip.cameraControl)))
     : advancedActiveCount({
         negativePrompt: capabilities.value.supportsNegativePrompt
           ? form.state.value.negativePrompt
@@ -4853,6 +4879,11 @@ onBeforeUnmount(() => {
                     h3BoundaryPickerTarget = 'lastFrame'
                   "
                 />
+                <SequenceOpeningImagePanel
+                  v-else-if="showSequenceOpeningImage"
+                  v-model="form.state.value"
+                  @open-picker="showPicker = true"
+                />
               </div>
             </template>
           </ComposerCard>
@@ -5068,6 +5099,13 @@ onBeforeUnmount(() => {
           @open-mask="showMask = true"
           @open-h3-first-frame-picker="h3BoundaryPickerTarget = 'firstFrame'"
           @open-h3-last-frame-picker="h3BoundaryPickerTarget = 'lastFrame'"
+        />
+        <!-- Sequence's own source media: the opening frame sits exactly where
+             the one-shot well does, never behind the Advanced toggle. -->
+        <SequenceOpeningImagePanel
+          v-else-if="showSequenceOpeningImage"
+          v-model="form.state.value"
+          @open-picker="showPicker = true"
         />
         <!-- Tablet+ : inline, always-visible Advanced column. -->
         <AdvancedDrawer

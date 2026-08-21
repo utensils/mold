@@ -725,3 +725,168 @@ describe("SequenceComposer — wan", () => {
     expect(frames).toContain(97);
   });
 });
+
+/**
+ * Right-click on the bench. Web has no app-wide menu component, so the
+ * composer renders its own inline `role="menu"` panel — the entries and their
+ * disabled rules are the desktop ones, from the shared builder.
+ */
+describe("SequenceComposer — context menus", () => {
+  const rightClick = { clientX: 40, clientY: 60 };
+
+  beforeEach(() => {
+    localStorage.clear();
+    pinia = createPinia();
+    setActivePinia(pinia);
+    fetchChainLimitsMock.mockReset();
+    fetchChainLimitsMock.mockResolvedValue(ltx2Limits());
+    validateChainMock.mockReset();
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  function itemLabels(wrapper: ReturnType<typeof mountComposer>) {
+    return wrapper
+      .findAll("[data-test='sequence-context-item']")
+      .map((item) => item.text());
+  }
+
+  async function clickItem(
+    wrapper: ReturnType<typeof mountComposer>,
+    label: string,
+  ) {
+    const item = wrapper
+      .findAll("[data-test='sequence-context-item']")
+      .find((candidate) => candidate.text() === label);
+    if (!item) throw new Error(`no context-menu item labelled ${label}`);
+    await item.trigger("click");
+    await flushPromises();
+  }
+
+  it("opens the clip menu on a clip pill and makes that clip active", async () => {
+    const wrapper = mountComposer();
+    await flushPromises();
+    const store = useSequenceDraftStore();
+    store.activeClipId = store.clips[0]!.id;
+
+    await wrapper
+      .findAll("[data-clip-id]")[1]!
+      .trigger("contextmenu", rightClick);
+
+    expect(wrapper.find("[data-test='sequence-context-menu']").exists()).toBe(
+      true,
+    );
+    expect(store.activeClipId).toBe(store.clips[1]!.id);
+    expect(itemLabels(wrapper)).toEqual([
+      "Duplicate clip",
+      "Insert clip before",
+      "Insert clip after",
+      "Move to start",
+      "Move left",
+      "Move right",
+      "Move to end",
+      "Remove clip",
+    ]);
+  });
+
+  it("duplicates, inserts, moves, and removes through the clip menu", async () => {
+    const wrapper = mountComposer();
+    await flushPromises();
+    const store = useSequenceDraftStore();
+    store.clips[0]!.prompt = "one";
+
+    await wrapper
+      .findAll("[data-clip-id]")[0]!
+      .trigger("contextmenu", rightClick);
+    await clickItem(wrapper, "Duplicate clip");
+    expect(store.clips).toHaveLength(3);
+    expect(store.clips[1]!.prompt).toBe("one");
+    // Acting on an item closes the panel.
+    expect(wrapper.find("[data-test='sequence-context-menu']").exists()).toBe(
+      false,
+    );
+
+    await wrapper
+      .findAll("[data-clip-id]")[0]!
+      .trigger("contextmenu", rightClick);
+    await clickItem(wrapper, "Insert clip after");
+    expect(store.clips).toHaveLength(4);
+    expect(store.clips[1]!.prompt).toBe("");
+
+    const moved = store.clips[0]!.id;
+    await wrapper
+      .findAll("[data-clip-id]")[0]!
+      .trigger("contextmenu", rightClick);
+    await clickItem(wrapper, "Move to end");
+    expect(store.clips[store.clips.length - 1]!.id).toBe(moved);
+
+    const removed = store.clips[0]!.id;
+    await wrapper
+      .findAll("[data-clip-id]")[0]!
+      .trigger("contextmenu", rightClick);
+    await clickItem(wrapper, "Remove clip");
+    expect(store.clips.some((clip) => clip.id === removed)).toBe(false);
+  });
+
+  it("disables Remove clip at the two-clip floor", async () => {
+    const wrapper = mountComposer();
+    await flushPromises();
+    await wrapper
+      .findAll("[data-clip-id]")[0]!
+      .trigger("contextmenu", rightClick);
+    const remove = wrapper
+      .findAll("[data-test='sequence-context-item']")
+      .find((item) => item.text() === "Remove clip");
+    expect(remove?.attributes("disabled")).toBeDefined();
+    expect(remove?.classes()).toContain("sq-context__danger");
+  });
+
+  it("opens the rail menu on the bench background and adds a clip", async () => {
+    const wrapper = mountComposer();
+    await flushPromises();
+    const store = useSequenceDraftStore();
+
+    await wrapper.get(".ms-rail").trigger("contextmenu", rightClick);
+    expect(itemLabels(wrapper)).toEqual([
+      "Add clip",
+      "Validate plan",
+      "Import TOML…",
+      "Export TOML",
+      "Copy TOML",
+      "Clear sequence",
+    ]);
+
+    await clickItem(wrapper, "Add clip");
+    expect(store.clips).toHaveLength(3);
+  });
+
+  it("closes the menu on Escape", async () => {
+    const wrapper = mountComposer();
+    await flushPromises();
+    await wrapper.get(".ms-rail").trigger("contextmenu", rightClick);
+    expect(wrapper.find("[data-test='sequence-context-menu']").exists()).toBe(
+      true,
+    );
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    await flushPromises();
+    expect(wrapper.find("[data-test='sequence-context-menu']").exists()).toBe(
+      false,
+    );
+  });
+
+  it("leaves the prompt textarea and the seam pill alone", async () => {
+    const wrapper = mountComposer();
+    await flushPromises();
+
+    await wrapper
+      .get("[data-test='clip-prompt']")
+      .trigger("contextmenu", rightClick);
+    expect(wrapper.find("[data-test='sequence-context-menu']").exists()).toBe(
+      false,
+    );
+
+    await wrapper.get(".ms-seam").trigger("contextmenu", rightClick);
+    expect(wrapper.find("[data-test='sequence-context-menu']").exists()).toBe(
+      false,
+    );
+  });
+});

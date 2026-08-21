@@ -150,7 +150,10 @@ import { buildChainRequest } from "@studio/lib/sequenceForm";
 import { chainScriptToClips } from "@studio/lib/sequenceForm";
 import { normalizeServerChainScript } from "@studio/lib/chainScriptWire";
 import { sequenceReuseClampNote, sequenceReuseNote } from "@studio/lib/sequenceReuse";
-import { firstLastFrameRestoreNotice } from "@studio/lib/sourceImageCapability";
+import {
+  firstLastFrameRestoreNotice,
+  parseSourceImageCapability,
+} from "@studio/lib/sourceImageCapability";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import type { ChainJobDetail, ChainLimits } from "@studio/lib/api/chainTypes";
 import SegmentedControl from "@ui/components/SegmentedControl.vue";
@@ -649,7 +652,14 @@ function resetCreateSettings(): void {
   // it — otherwise the next model change would re-snap the reset canvas back
   // onto the attached source (#1166).
   canvasIntent.value = "model-default";
-  if (isSequence.value) draft.enableAudio = false;
+  // Sequence output keeps its source media in the primary stack too, so the
+  // primary Reset owns the opening image exactly as it owns the one-shot
+  // wells `resetFormToModelDefaults` just discarded. `clearOpeningImage` is
+  // the narrow store write: clips stay, and the persisted blob is reclaimed.
+  if (isSequence.value) {
+    draft.enableAudio = false;
+    draft.clearOpeningImage();
+  }
 }
 
 /** Match the desktop Advanced reset: restore model-owned generation controls
@@ -3075,7 +3085,13 @@ async function submitMobileSequence(): Promise<void> {
   // to the next submission.
   const requestForm = cloneGenerateForm(form);
   const clips = JSON.parse(JSON.stringify(draft.clips)) as typeof draft.clips;
-  const openingSnapshot = draft.openingImage ? { ...draft.openingImage } : null;
+  // The opening image obeys the checkpoint's own source-image contract: a
+  // checkpoint that reads none shows no well, so a retained image is parked
+  // out of the request rather than shipped as conditioning admission refuses.
+  const openingImageSupported =
+    parseSourceImageCapability(entry.source_image ?? form.sourceImageCapability) !== "unsupported";
+  const openingSnapshot =
+    openingImageSupported && draft.openingImage ? { ...draft.openingImage } : null;
   const enableAudio = draft.enableAudio;
   const motionTailFrames = sequenceMotionTail.value;
   sequenceStarting.value = true;
