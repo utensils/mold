@@ -316,6 +316,13 @@ export function redactGenerationForPlacement<T extends Record<string, unknown>>(
       return { ...keyframe, image: "" };
     });
   }
+  // Creation-time filing is user-authored text with no bearing on placement —
+  // a tag or a collection name ("Client X, unannounced") must not be fanned
+  // out to every candidate host just to price a render. Dropped rather than
+  // blanked, because both fields are additive and absent is their normal
+  // shape; a preview never files anything anyway.
+  delete redacted.tags;
+  delete redacted.collection;
   return redacted as T;
 }
 
