@@ -414,9 +414,9 @@ and `capabilities.gallery.trash` is absent, so delete is permanent as before.
 
 ### Auto-tagging titled prints
 
-| Key                        | Env var | Default | Description                                                             |
-| -------------------------- | ------- | ------- | ------------------------------------------------------------------------ |
-| `generate.auto_tag_title`  | —       | `true`  | Whether a titled CLI or TUI run also tags the print with its title slug. |
+| Key                       | Env var | Default | Description                                                              |
+| ------------------------- | ------- | ------- | ------------------------------------------------------------------------ |
+| `generate.auto_tag_title` | —       | `true`  | Whether a titled CLI or TUI run also tags the print with its title slug. |
 
 ```bash
 mold config set generate.auto_tag_title false   # stop tagging titled prints

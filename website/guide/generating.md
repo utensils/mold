@@ -459,7 +459,7 @@ filing under tag "smurf-village"
 ```
 
 Turn that off for one run with `--no-auto-tag`, or permanently with
-`mold config set generate.auto_tag_title false`. This is a *client* default:
+`mold config set generate.auto_tag_title false`. This is a _client_ default:
 the server never auto-tags, because it cannot tell a title you typed from one
 a script generated.
 
