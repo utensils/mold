@@ -122,7 +122,7 @@ memory telemetry live in the Machines workspace and the chrome host chip.
 
 ### Essentials
 
-| Row             | Shows                                   | ◀▶ / +/-             | Enter                |
+| Row             | Shows                                   | ◀▶ / +/-           | Enter                |
 | --------------- | --------------------------------------- | -------------------- | -------------------- |
 | Model           | human-readable model name + description | —                    | fuzzy model selector |
 | Size            | `1024 × 1024`                           | cycle aspect presets | type an exact `WxH`  |
@@ -151,6 +151,7 @@ open state and expanded section persist across sessions
 | Scheduler & sampling   | Scheduler (CFG models), Expand prompt, Offload                                                                                                                                       |
 | Negative prompt        | inline editor (CFG models; **Alt+N** jumps here). Wan models prefill their tuned default — leave it for the default, edit to replace it, clear it to send an explicit empty negative |
 | Source image           | Source, Strength, Mask, ControlNet (per model)                                                                                                                                       |
+| Identity photo         | Photo, Strength, Start step (only for a checkpoint the server advertises as identity-capable)                                                                                        |
 | LoRA                   | LoRA path + scale                                                                                                                                                                    |
 | Upscale after generate | post-generate upscaler (Enter picks, `(off)` clears)                                                                                                                                 |
 | Output format          | png / jpeg / gif / apng / webp / mp4                                                                                                                                                 |
@@ -170,6 +171,34 @@ primary quality/character knob, request field `sample_shift`); it is absent
 until touched and never appears for other families. LTX-2's optional STG
 scale/blocks, CFG rescale, modality scale, and guidance-skip rows keep their
 request fields absent until edited, so pipeline constants stay authoritative.
+
+#### Identity photo (PuLID-FLUX)
+
+The **Identity photo** section appears only while the selected checkpoint's
+`/api/models[]` entry advertises `supports_identity` — face-identity
+conditioning is qualified for the FLUX dev tiers, on a server built with PuLID
+support. It is never inferred from the family or from how your local `mold` was
+compiled, because the render happens on the server.
+
+**Enter** on the **Photo** row opens a path picker. The file is opened without
+following symlinks and bounds-checked (PNG or JPEG, at most 16 MiB encoded,
+8192 px per axis, 32 MP) before it is accepted, so a bad path is refused in the
+picker rather than after your job has taken a queue slot. Leaving the field
+empty clears the photo. **Strength** moves in 0.1 steps across `0.0`–`3.0`
+(default `1.0`) and **Start step** across `0`–`steps-1` (default `0`), so the
+form cannot express a value the server would reject; lowering the step count
+pulls Start step back with it.
+
+Switching to a model that cannot take the photo **keeps** it — the photo is
+your choice, and switching back must not have lost it — but shows the server's
+refusal on the Photo row and blocks Generate. That is deliberate: rendering
+silently without the face would produce a print that looks fine and is simply
+not the person you asked for. `↺ Reset to model defaults` clears the photo and
+both knobs.
+
+Prints that carried a face reference show `Identity` in Library **Details** and
+in the full print view: the photo's name, a short digest, the strength, and the
+start step. The face bytes themselves are never recorded.
 
 The Audio row is capability-driven: a checkpoint that advertises missing
 audio assets does not show it. `default` leaves the field absent so the
