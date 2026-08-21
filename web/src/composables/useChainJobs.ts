@@ -15,6 +15,7 @@ import { computed, reactive, ref, type ComputedRef, type Ref } from "vue";
 import {
   amendChainJob,
   cancelChainJob,
+  cancelChainJobMutation,
   chainJobEventsUrl,
   createChainJob,
   deleteChainJob,
@@ -289,19 +290,28 @@ function watch(hostId: string, jobId: string) {
   });
 }
 
-async function create(hostId: string, req: ChainRequestWire): Promise<string> {
+async function create(
+  hostId: string,
+  req: ChainRequestWire,
+  frozenTarget?: StreamTarget,
+  operationId?: string,
+): Promise<string> {
   ensureLoaded();
-  const target = targetFor(hostId);
+  const target = frozenTarget ?? targetFor(hostId);
   if (!target) throw new Error("That machine is no longer connected.");
-  const { job_id } = await createChainJob(req, target);
+  const { job_id } = await createChainJob(req, target, operationId);
   track(hostId, job_id);
   void fetchHost(hostId);
   watch(hostId, job_id);
   return job_id;
 }
 
-async function cancel(hostId: string, jobId: string): Promise<void> {
-  const target = targetFor(hostId) ?? undefined;
+async function cancel(
+  hostId: string,
+  jobId: string,
+  frozenTarget?: StreamTarget,
+): Promise<void> {
+  const target = frozenTarget ?? targetFor(hostId) ?? undefined;
   await cancelChainJob(jobId, target);
   await fetchHost(hostId);
 }
@@ -340,13 +350,24 @@ async function amend(
   jobId: string,
   req: AmendRequest,
   frozenTarget?: StreamTarget,
+  operationId?: string,
 ): Promise<AmendResponse> {
   const target = frozenTarget ?? targetFor(hostId) ?? undefined;
-  const response = await amendChainJob(jobId, req, target);
+  const response = await amendChainJob(jobId, req, target, operationId);
   track(hostId, jobId);
   void fetchHost(hostId);
   watch(hostId, jobId);
   return response;
+}
+
+async function cancelMutation(
+  hostId: string,
+  jobId: string,
+  operationId: string,
+  frozenTarget?: StreamTarget,
+): Promise<void> {
+  const target = frozenTarget ?? targetFor(hostId) ?? undefined;
+  await cancelChainJobMutation(jobId, operationId, target);
 }
 
 /** Delete every settled job (anything not running or queued) on every host. */
@@ -421,10 +442,25 @@ export interface UseChainJobs {
   start: () => Promise<void>;
   fetchHost: (hostId: string) => Promise<void>;
   fetchAll: () => Promise<void>;
-  create: (hostId: string, req: ChainRequestWire) => Promise<string>;
+  create: (
+    hostId: string,
+    req: ChainRequestWire,
+    frozenTarget?: StreamTarget,
+    operationId?: string,
+  ) => Promise<string>;
   watch: (hostId: string, jobId: string) => void;
   unwatch: () => void;
-  cancel: (hostId: string, jobId: string) => Promise<void>;
+  cancel: (
+    hostId: string,
+    jobId: string,
+    frozenTarget?: StreamTarget,
+  ) => Promise<void>;
+  cancelMutation: (
+    hostId: string,
+    jobId: string,
+    operationId: string,
+    frozenTarget?: StreamTarget,
+  ) => Promise<void>;
   resume: (hostId: string, jobId: string) => Promise<void>;
   remove: (hostId: string, jobId: string) => Promise<void>;
   retake: (hostId: string, jobId: string, req: RetakeRequest) => Promise<void>;
@@ -433,6 +469,7 @@ export interface UseChainJobs {
     jobId: string,
     req: AmendRequest,
     frozenTarget?: StreamTarget,
+    operationId?: string,
   ) => Promise<AmendResponse>;
   clearInactive: () => Promise<{ cleared: number; failed: number }>;
   gc: () => Promise<{
@@ -456,6 +493,7 @@ export function useChainJobs(): UseChainJobs {
     watch,
     unwatch,
     cancel,
+    cancelMutation,
     resume,
     remove,
     retake,

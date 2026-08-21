@@ -30,6 +30,20 @@ const CHAIN_JOB_RUNNING: &str = "CHAIN_JOB_RUNNING";
 const CHAIN_JOB_NOT_RESUMABLE: &str = "CHAIN_JOB_NOT_RESUMABLE";
 const RETAKE_SPLICE_REQUIRES_CUT_OR_FADE: &str = "RETAKE_SPLICE_REQUIRES_CUT_OR_FADE";
 pub const CHAIN_JOB_EPHEMERAL: &str = "CHAIN_JOB_EPHEMERAL";
+const CHAIN_MUTATION_CANCELLED: &str = "CHAIN_MUTATION_CANCELLED";
+const MUTATION_ID_HEADER: &str = "x-mold-operation-id";
+
+fn mutation_id(headers: &HeaderMap) -> Result<Option<String>, ApiError> {
+    let Some(value) = headers.get(MUTATION_ID_HEADER) else {
+        return Ok(None);
+    };
+    let value = value
+        .to_str()
+        .map_err(|_| ApiError::validation("x-mold-operation-id must be a UUID"))?;
+    let id = uuid::Uuid::parse_str(value)
+        .map_err(|_| ApiError::validation("x-mold-operation-id must be a UUID"))?;
+    Ok(Some(id.to_string()))
+}
 
 #[derive(Debug, Clone, serde::Deserialize, utoipa::ToSchema)]
 pub struct ChainPlacementPreviewRequest {
@@ -81,6 +95,7 @@ impl ChainPlacementPreviewBody {
 )]
 pub async fn create_chain_job(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(mut req): Json<ChainRequest>,
 ) -> Result<(StatusCode, Json<CreateChainJobResponse>), ApiError> {
     crate::routes::ensure_generation_available(&state)?;
@@ -106,7 +121,20 @@ pub async fn create_chain_job(
         ));
     }
     crate::routes::materialize_chain_camera_controls(&state, &authority.config, &req).await?;
-    let job_id = uuid::Uuid::new_v4().to_string();
+    let operation_id = mutation_id(&headers)?;
+    let job_id = operation_id
+        .clone()
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let _guard = handle.lock_job(&job_id).await;
+    if operation_id
+        .as_deref()
+        .is_some_and(|id| handle.take_mutation_cancel(id))
+    {
+        return Err(conflict(
+            CHAIN_MUTATION_CANCELLED,
+            "sequence creation was cancelled before it was queued",
+        ));
+    }
     let jobs_root = jobs_root()?;
     let model = req.model.clone();
     let stage_count = req.stages.len() as u32;
@@ -486,6 +514,7 @@ pub async fn retake_chain_job(
 pub async fn amend_chain_job(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     Json(req): Json<AmendRequest>,
 ) -> Result<(StatusCode, Json<AmendResponse>), ApiError> {
     let handle = chain_jobs_handle(&state)?;
@@ -550,6 +579,17 @@ pub async fn amend_chain_job(
         }
     }
 
+    let operation_id = mutation_id(&headers)?;
+    if operation_id
+        .as_deref()
+        .is_some_and(|operation_id| handle.take_mutation_cancel(operation_id))
+    {
+        return Err(conflict(
+            CHAIN_MUTATION_CANCELLED,
+            "sequence amendment was cancelled before it was queued",
+        ));
+    }
+
     let (updated, preserved_stages) = crate::chain_job_runner::apply_amend(db, &root, &id, &req)
         .map_err(|e| {
             let msg = e.to_string();
@@ -607,19 +647,65 @@ pub async fn cancel_chain_job(
     let db = metadata_db(&state)?;
     let root = jobs_root()?;
     let _guard = handle.lock_job(&id).await;
-    let mut row = chain_jobs::get_job(db, &id)
+    let summary = cancel_chain_job_locked(handle, db, &root, &id)?;
+    Ok((StatusCode::ACCEPTED, Json(summary)))
+}
+
+/// Cancel one client-known create/amend operation. The operation id is known
+/// before the mutation response, so a lost response cannot orphan work. The
+/// fence is recorded before waiting for the job mutation lock; a request that
+/// is still validating observes it before persistence, while an already
+/// persisted mutation is cancelled under the same job lock.
+#[utoipa::path(
+    post,
+    path = "/api/chain-jobs/{id}/operations/{operation_id}/cancel",
+    tag = "chain-jobs",
+    params(
+        ("id" = String, Path, description = "Chain job or proposed job id"),
+        ("operation_id" = String, Path, description = "Client mutation UUID")
+    ),
+    responses((status = 202, description = "Mutation cancellation accepted"))
+)]
+pub async fn cancel_chain_job_mutation(
+    State(state): State<AppState>,
+    Path((id, operation_id)): Path<(String, String)>,
+) -> Result<StatusCode, ApiError> {
+    let operation_id = uuid::Uuid::parse_str(&operation_id)
+        .map_err(|_| ApiError::validation("operation id must be a UUID"))?
+        .to_string();
+    let handle = chain_jobs_handle(&state)?;
+    let db = metadata_db(&state)?;
+    let root = jobs_root()?;
+    handle.request_mutation_cancel(&operation_id);
+    let _guard = handle.lock_job(&id).await;
+    if chain_jobs::get_job(db, &id)
         .map_err(|e| ApiError::internal(format!("failed to load chain job: {e:#}")))?
-        .ok_or_else(|| not_found(&id))?;
+        .is_some()
+    {
+        let _ = cancel_chain_job_locked(handle, db, &root, &id)?;
+    }
+    Ok(StatusCode::ACCEPTED)
+}
+
+fn cancel_chain_job_locked(
+    handle: &crate::chain_job_runner::ChainJobRunnerHandle,
+    db: &MetadataDb,
+    root: &FsPath,
+    id: &str,
+) -> Result<ChainJobSummary, ApiError> {
+    let mut row = chain_jobs::get_job(db, id)
+        .map_err(|e| ApiError::internal(format!("failed to load chain job: {e:#}")))?
+        .ok_or_else(|| not_found(id))?;
     let cancelling = if row.state == ChainJobState::Running {
-        let requested = handle.request_cancel(&id);
-        row = chain_jobs::get_job(db, &id)
+        let requested = handle.request_cancel(id);
+        row = chain_jobs::get_job(db, id)
             .map_err(|e| ApiError::internal(format!("failed to reload chain job: {e:#}")))?
-            .ok_or_else(|| not_found(&id))?;
+            .ok_or_else(|| not_found(id))?;
         requested && row.state == ChainJobState::Running
     } else if row.state == ChainJobState::Queued {
         let changed = chain_jobs::try_transition(
             db,
-            &id,
+            id,
             &[ChainJobState::Queued],
             ChainJobState::Cancelled,
             None,
@@ -627,9 +713,9 @@ pub async fn cancel_chain_job(
         )
         .map_err(|e| ApiError::internal(format!("failed to cancel queued chain job: {e:#}")))?;
         if changed {
-            handle.publish_settled_state(&id, ChainJobState::Cancelled, None);
+            handle.publish_settled_state(id, ChainJobState::Cancelled, None);
         } else {
-            cancel_after_cas_loss(handle, db, &id)?;
+            cancel_after_cas_loss(handle, db, id)?;
         }
         false
     } else if settled(row.state) {
@@ -639,18 +725,12 @@ pub async fn cancel_chain_job(
     } else {
         false
     };
-    let updated = chain_jobs::get_job(db, &id)
+    let updated = chain_jobs::get_job(db, id)
         .map_err(|e| ApiError::internal(format!("failed to reload chain job: {e:#}")))?
-        .ok_or_else(|| not_found(&id))?;
-    Ok((
-        StatusCode::ACCEPTED,
-        Json({
-            let mut summary =
-                summary_for_row(&updated, read_manifest_optional(&updated, &root).as_ref());
-            summary.cancelling = cancelling && updated.state == ChainJobState::Running;
-            summary
-        }),
-    ))
+        .ok_or_else(|| not_found(id))?;
+    let mut summary = summary_for_row(&updated, read_manifest_optional(&updated, root).as_ref());
+    summary.cancelling = cancelling && updated.state == ChainJobState::Running;
+    Ok(summary)
 }
 
 /// 204; 409 CHAIN_JOB_RUNNING while running; removes job dir + row.
@@ -1389,7 +1469,11 @@ mod tests {
 
         let mut events_rx = state.events.subscribe();
         let (_status, Json(body)) = with_mold_home(home.path(), || {
-            futures::executor::block_on(create_chain_job(State(state), Json(request)))
+            futures::executor::block_on(create_chain_job(
+                State(state),
+                HeaderMap::new(),
+                Json(request),
+            ))
         })
         .unwrap();
 
@@ -1426,7 +1510,11 @@ mod tests {
         request.model = "private-checkpoint".into();
 
         let error = with_mold_home(home.path(), || {
-            futures::executor::block_on(create_chain_job(State(state), Json(request)))
+            futures::executor::block_on(create_chain_job(
+                State(state),
+                HeaderMap::new(),
+                Json(request),
+            ))
         })
         .unwrap_err();
 
@@ -1457,7 +1545,11 @@ mod tests {
         request.enable_audio = Some(true);
 
         let error = with_mold_home(home.path(), || {
-            futures::executor::block_on(create_chain_job(State(state), Json(request)))
+            futures::executor::block_on(create_chain_job(
+                State(state),
+                HeaderMap::new(),
+                Json(request),
+            ))
         })
         .unwrap_err();
 
@@ -1540,7 +1632,11 @@ mod tests {
             }
 
             let error = with_mold_home(home.path(), || {
-                futures::executor::block_on(create_chain_job(State(state.clone()), Json(request)))
+                futures::executor::block_on(create_chain_job(
+                    State(state.clone()),
+                    HeaderMap::new(),
+                    Json(request),
+                ))
             })
             .unwrap_err();
 
@@ -1596,7 +1692,11 @@ mod tests {
         });
 
         let (status, Json(created)) = with_mold_home(home.path(), || {
-            futures::executor::block_on(create_chain_job(State(state.clone()), Json(request)))
+            futures::executor::block_on(create_chain_job(
+                State(state.clone()),
+                HeaderMap::new(),
+                Json(request),
+            ))
         })
         .unwrap();
 
@@ -1662,7 +1762,11 @@ mod tests {
         request.model = "unfreezable-chain".into();
 
         let error = with_mold_home(home.path(), || {
-            futures::executor::block_on(create_chain_job(State(state), Json(request)))
+            futures::executor::block_on(create_chain_job(
+                State(state),
+                HeaderMap::new(),
+                Json(request),
+            ))
         })
         .unwrap_err();
         assert!(error
@@ -1732,6 +1836,7 @@ mod tests {
         let err = with_mold_home(home.path(), || {
             futures::executor::block_on(create_chain_job(
                 State(state),
+                HeaderMap::new(),
                 Json(req(OutputFormat::Apng)),
             ))
         })
@@ -1840,6 +1945,106 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_honours_a_cancel_that_arrives_before_the_mutation_request() {
+        let home = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(MetadataDb::open_in_memory().unwrap()));
+        let state = state_with(
+            db.clone(),
+            crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests(),
+        );
+        let request = freezable_amend_request(&state, home.path()).await;
+        let operation_id = uuid::Uuid::new_v4().to_string();
+
+        let error = with_mold_home(home.path(), || {
+            futures::executor::block_on(async {
+                cancel_chain_job_mutation(
+                    State(state.clone()),
+                    Path((operation_id.clone(), operation_id.clone())),
+                )
+                .await
+                .unwrap();
+                let mut headers = HeaderMap::new();
+                headers.insert(
+                    MUTATION_ID_HEADER,
+                    HeaderValue::from_str(&operation_id).unwrap(),
+                );
+                create_chain_job(State(state.clone()), headers, Json(request)).await
+            })
+        })
+        .unwrap_err();
+
+        assert_eq!(error.code, CHAIN_MUTATION_CANCELLED);
+        assert!(
+            chain_jobs::get_job(db.as_ref().as_ref().unwrap(), &operation_id)
+                .unwrap()
+                .is_none(),
+            "a pre-cancelled create must never persist or queue a job"
+        );
+    }
+
+    #[tokio::test]
+    async fn amend_honours_a_cancel_that_arrives_before_the_mutation_request() {
+        let home = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(MetadataDb::open_in_memory().unwrap()));
+        let state = state_with(
+            db.clone(),
+            crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests(),
+        );
+        let request = freezable_amend_request(&state, home.path()).await;
+        let (_status, Json(created)) = with_mold_home(home.path(), || {
+            futures::executor::block_on(create_chain_job(
+                State(state.clone()),
+                HeaderMap::new(),
+                Json(request.clone()),
+            ))
+        })
+        .unwrap();
+        let db_ref = db.as_ref().as_ref().unwrap();
+        chain_jobs::update_job_state(
+            db_ref,
+            &created.job_id,
+            ChainJobState::Completed,
+            None,
+            now_ms(),
+        )
+        .unwrap();
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        let mut amended_stages = request.stages;
+        amended_stages[0].prompt = "must not be persisted".into();
+
+        let error = with_mold_home(home.path(), || {
+            futures::executor::block_on(async {
+                cancel_chain_job_mutation(
+                    State(state.clone()),
+                    Path((created.job_id.clone(), operation_id.clone())),
+                )
+                .await
+                .unwrap();
+                let mut headers = HeaderMap::new();
+                headers.insert(
+                    MUTATION_ID_HEADER,
+                    HeaderValue::from_str(&operation_id).unwrap(),
+                );
+                amend_chain_job(
+                    State(state.clone()),
+                    Path(created.job_id.clone()),
+                    headers,
+                    Json(amend_body(amended_stages)),
+                )
+                .await
+            })
+        })
+        .unwrap_err();
+
+        assert_eq!(error.code, CHAIN_MUTATION_CANCELLED);
+        let stored = chain_jobs::get_job(db_ref, &created.job_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.state, ChainJobState::Completed);
+        assert!(!stored.request_json.contains("must not be persisted"));
+    }
+
+    #[tokio::test]
     async fn amend_chain_job_returns_202_with_preserved_stages_and_requeues() {
         let home = tempfile::tempdir().unwrap();
         let db = Arc::new(Some(MetadataDb::open_in_memory().unwrap()));
@@ -1852,6 +2057,7 @@ mod tests {
         let (_status, Json(created)) = with_mold_home(home.path(), || {
             futures::executor::block_on(create_chain_job(
                 State(state.clone()),
+                HeaderMap::new(),
                 Json(request.clone()),
             ))
         })
@@ -1875,6 +2081,7 @@ mod tests {
             futures::executor::block_on(amend_chain_job(
                 State(state.clone()),
                 Path(created.job_id.clone()),
+                HeaderMap::new(),
                 Json(amend_body(stages)),
             ))
         })
@@ -1907,6 +2114,7 @@ mod tests {
         let (_status, Json(created)) = with_mold_home(home.path(), || {
             futures::executor::block_on(create_chain_job(
                 State(state.clone()),
+                HeaderMap::new(),
                 Json(request.clone()),
             ))
         })
@@ -1928,6 +2136,7 @@ mod tests {
             futures::executor::block_on(amend_chain_job(
                 State(state.clone()),
                 Path(created.job_id.clone()),
+                HeaderMap::new(),
                 Json(amend_body(stages)),
             ))
         })
@@ -1966,6 +2175,7 @@ mod tests {
         let (_status, Json(created)) = with_mold_home(home.path(), || {
             futures::executor::block_on(create_chain_job(
                 State(state.clone()),
+                HeaderMap::new(),
                 Json(request.clone()),
             ))
         })
@@ -1977,6 +2187,7 @@ mod tests {
             futures::executor::block_on(amend_chain_job(
                 State(state.clone()),
                 Path(created.job_id.clone()),
+                HeaderMap::new(),
                 Json(amend_body(request.stages)),
             ))
         })
@@ -2015,6 +2226,7 @@ mod tests {
             futures::executor::block_on(amend_chain_job(
                 State(state.clone()),
                 Path(job_id.to_string()),
+                HeaderMap::new(),
                 Json(amend_body(req(OutputFormat::Mp4).stages)),
             ))
         })
@@ -2036,6 +2248,7 @@ mod tests {
         let (_status, Json(created)) = with_mold_home(home.path(), || {
             futures::executor::block_on(create_chain_job(
                 State(state.clone()),
+                HeaderMap::new(),
                 Json(request.clone()),
             ))
         })
@@ -2047,6 +2260,7 @@ mod tests {
             futures::executor::block_on(amend_chain_job(
                 State(state.clone()),
                 Path(created.job_id.clone()),
+                HeaderMap::new(),
                 Json(amend_body(stages)),
             ))
         })

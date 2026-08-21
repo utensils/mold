@@ -105,7 +105,7 @@ describe("ComposerCard", () => {
     expect(missingPrompt.find("[data-test='action-blocker']").exists()).toBe(false);
   });
 
-  it("disables Generate and displays non-obvious corrective guidance", () => {
+  it("disables blocked Generate but keeps an in-flight submission cancellable", async () => {
     expect(
       mountComposer(baseForm(), {
         disabled: true,
@@ -114,11 +114,11 @@ describe("ComposerCard", () => {
         .get("[data-test='generate-button']")
         .attributes("disabled"),
     ).toBeDefined();
-    expect(
-      mountComposer(baseForm(), { submitting: true })
-        .get("[data-test='generate-button']")
-        .attributes("disabled"),
-    ).toBeDefined();
+    const submitting = mountComposer(baseForm(), { submitting: true });
+    const cancel = submitting.get("[data-test='generate-button']");
+    expect(cancel.attributes("disabled")).toBeUndefined();
+    await cancel.trigger("click");
+    expect(submitting.emitted("cancel")).toHaveLength(1);
   });
 
   it("shows a non-blocking size advisory while Generate stays enabled", () => {

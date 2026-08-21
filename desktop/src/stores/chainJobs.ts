@@ -32,9 +32,12 @@ const POLL_INTERVAL_MS = 10_000;
 
 const isActive = (job: ChainJobSummary) => job.state === "running" || job.state === "queued";
 
-const jsonInit = (body: unknown): RequestInit => ({
+const jsonInit = (body: unknown, operationId?: string): RequestInit => ({
   method: "POST",
-  headers: { "Content-Type": "application/json" },
+  headers: {
+    "Content-Type": "application/json",
+    ...(operationId ? { "x-mold-operation-id": operationId } : {}),
+  },
   body: JSON.stringify(body),
 });
 
@@ -115,9 +118,18 @@ export const useChainJobsStore = defineStore("chainJobs", {
         this.pollTimer = null;
       }
     },
-    async create(hostId: string, req: ChainRequestWire, frozenTarget?: ApiTarget): Promise<string> {
+    async create(
+      hostId: string,
+      req: ChainRequestWire,
+      frozenTarget?: ApiTarget,
+      operationId?: string,
+    ): Promise<string> {
       const target = frozenTarget ?? this.targetFor(hostId);
-      const res = await apiJsonTo<CreateChainJobResponse>(target, "/api/chain-jobs", jsonInit(req));
+      const res = await apiJsonTo<CreateChainJobResponse>(
+        target,
+        "/api/chain-jobs",
+        jsonInit(req, operationId),
+      );
       await this.fetchHost(hostId);
       this.watch(hostId, res.job_id);
       return res.job_id;
@@ -178,12 +190,25 @@ export const useChainJobsStore = defineStore("chainJobs", {
       await this.fetchHost(hostId);
       this.watch(hostId, jobId);
     },
-    async cancel(hostId: string, jobId: string) {
-      const target = this.targetFor(hostId);
+    async cancel(hostId: string, jobId: string, frozenTarget?: ApiTarget) {
+      const target = frozenTarget ?? this.targetFor(hostId);
       await apiFetchTo(target, `/api/chain-jobs/${encodeURIComponent(jobId)}/cancel`, {
         method: "POST",
       });
       await this.fetchHost(hostId);
+    },
+    async cancelMutation(
+      hostId: string,
+      jobId: string,
+      operationId: string,
+      frozenTarget?: ApiTarget,
+    ) {
+      const target = frozenTarget ?? this.targetFor(hostId);
+      await apiFetchTo(
+        target,
+        `/api/chain-jobs/${encodeURIComponent(jobId)}/operations/${encodeURIComponent(operationId)}/cancel`,
+        { method: "POST", keepalive: true },
+      );
     },
     async remove(hostId: string, jobId: string) {
       const target = this.targetFor(hostId);
@@ -210,12 +235,13 @@ export const useChainJobsStore = defineStore("chainJobs", {
       jobId: string,
       req: AmendRequest,
       frozenTarget?: ApiTarget,
+      operationId?: string,
     ): Promise<AmendResponse> {
       const target = frozenTarget ?? this.targetFor(hostId);
       const outcome = await apiJsonTo<AmendResponse>(
         target,
         `/api/chain-jobs/${encodeURIComponent(jobId)}/amend`,
-        jsonInit(req),
+        jsonInit(req, operationId),
       );
       await this.fetchHost(hostId);
       this.watch(hostId, jobId);

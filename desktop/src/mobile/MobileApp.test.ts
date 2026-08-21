@@ -456,7 +456,7 @@ describe("MobileApp sequence generation", () => {
     expect(wrapper.find("[data-test='mobile-quick-expansion-stale']").exists()).toBe(true);
   });
 
-  it("acknowledges a tap through placement preview and blocks duplicate submission", async () => {
+  it("lets the user cancel a placement preview before anything is queued", async () => {
     const preview = deferred<ReturnType<typeof plannedPlacement>>();
     previewGenerationPlacement.mockReturnValueOnce(preview.promise);
     wrapper = mountMobileApp();
@@ -467,15 +467,18 @@ describe("MobileApp sequence generation", () => {
     await vi.waitFor(() => expect(previewGenerationPlacement).toHaveBeenCalledTimes(1));
 
     const button = wrapper.get("[data-test='mobile-develop-button']");
-    expect(button.text()).toBe("Checking placement…");
-    expect(button.attributes("disabled")).toBe("");
+    expect(button.text()).toBe("Cancel · Checking placement…");
+    expect(button.attributes("disabled")).toBeUndefined();
     await button.trigger("click");
     expect(previewGenerationPlacement).toHaveBeenCalledTimes(1);
     expect(openStreams).toHaveLength(0);
 
+    const previewOptions = previewGenerationPlacement.mock.calls[0]?.[3];
+    expect(previewOptions?.signal?.aborted).toBe(true);
+
     preview.resolve(plannedPlacement());
     await flushPromises();
-    expect(openStreams).toHaveLength(1);
+    expect(openStreams).toHaveLength(0);
     expect(button.text()).toContain("Develop print");
   });
 
@@ -901,7 +904,12 @@ describe("MobileApp sequence generation", () => {
     });
     await flushPromises();
 
-    expect(previewChainPlacement).toHaveBeenCalledWith(target, expect.anything());
+    expect(previewChainPlacement).toHaveBeenCalledWith(
+      target,
+      expect.anything(),
+      1,
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
     expect(apiJsonTo).toHaveBeenCalledWith(
       target,
       "/api/chain-jobs",
@@ -925,6 +933,79 @@ describe("MobileApp sequence generation", () => {
     });
     expect(recovery).not.toContain(target.apiKey);
     expect(wrapper.get("[data-test='mobile-sequence-job']").text()).toContain("queued");
+  });
+
+  it("cancels the exact sequence when cancellation arrives before its id", async () => {
+    const sequenceModel = {
+      ...model,
+      name: "ltx-video-0.9.8-2b-distilled:bf16",
+      family: "ltx-video",
+      default_steps: 7,
+      default_guidance: 1,
+    };
+    localStorage.setItem("mold.mobile.create-mode.v1", "sequence");
+    let finishCreate!: (value: { job_id: string }) => void;
+    apiJsonTo.mockImplementation((_target: unknown, path: string, init?: RequestInit) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([sequenceModel]);
+      if (path === "/api/capabilities") return Promise.resolve({});
+      if (path.startsWith("/api/capabilities/chain-limits")) {
+        return Promise.resolve({
+          model: sequenceModel.name,
+          frames_per_clip_cap: 97,
+          frames_per_clip_recommended: 97,
+          max_stages: 8,
+          max_total_frames: 777,
+          fade_frames_max: 32,
+          transition_modes: ["smooth", "cut", "fade"],
+          quantization_family: "bf16",
+          supports_audio: false,
+        });
+      }
+      if (path === "/api/chain-jobs" && init?.method === "POST") {
+        return new Promise((resolve) => (finishCreate = resolve));
+      }
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    previewChainPlacement.mockResolvedValue({
+      ...plannedPlacement(),
+      authoritative: false,
+      outcome: "unsupported",
+      candidate: null,
+    });
+    wrapper = mountMobileApp();
+    await flushPromises();
+    const prompts = wrapper.findAll("[data-test='mobile-sequence-clip'] textarea");
+    await prompts[0]!.setValue("opening");
+    await prompts[1]!.setValue("ending");
+
+    await wrapper.get("[data-test='mobile-generate-sequence']").trigger("click");
+    await vi.waitFor(() => expect(finishCreate).toBeTypeOf("function"));
+    const create = apiJsonTo.mock.calls.find(
+      (call) => call[1] === "/api/chain-jobs" && (call[2] as RequestInit)?.method === "POST",
+    );
+    expect((create?.[2] as RequestInit).signal).toBeUndefined();
+    const operationId = new Headers((create?.[2] as RequestInit).headers).get(
+      "x-mold-operation-id",
+    );
+    expect(operationId).toMatch(/^[0-9a-f-]{36}$/);
+    const cancel = wrapper.get("[data-test='mobile-generate-sequence']");
+    expect(cancel.text()).toContain("Cancel");
+    await cancel.trigger("click");
+    await vi.waitFor(() =>
+      expect(apiFetchTo).toHaveBeenCalledWith(
+        target,
+        `/api/chain-jobs/${operationId}/operations/${operationId}/cancel`,
+        { method: "POST", keepalive: true },
+      ),
+    );
+    finishCreate({ job_id: "late-sequence" });
+    await flushPromises();
+
+    expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/chain-jobs/late-sequence/cancel", {
+      method: "POST",
+    });
+    expect(localStorage.getItem("mold.mobile.sequence-job.v1")).toBeNull();
   });
 
   it("refuses recovery when a saved server identity cannot be verified", async () => {
@@ -2443,6 +2524,7 @@ describe("MobileApp generation queue", () => {
       target,
       expect.objectContaining({ batch_size: 1 }),
       3,
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
     expect(wrapper.findAll("[data-test='mobile-generation-job']")).toHaveLength(3);
     expect(document.activeElement).toBe(fieldControl("Prompt").element);
@@ -2502,6 +2584,7 @@ describe("MobileApp generation queue", () => {
         target,
         expect.objectContaining({ batch_size: 1 }),
         count,
+        expect.objectContaining({ signal: expect.any(AbortSignal) }),
       );
 
       apiJsonTo.mockImplementation((_target: unknown, path: string) => {

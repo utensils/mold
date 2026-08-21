@@ -87,6 +87,8 @@ import {
   type ExpansionCandidate,
 } from "@studio/lib/expansionRouting";
 import { useAppPrefsStore } from "../stores/appPrefs";
+import { createUuid } from "@studio/lib/id";
+import { confirmCancellation } from "@studio/lib/cancellationRetry";
 import { useHostModelsStore } from "../stores/hostModels";
 import { strongestRoutableGpu, useHostsStore, type FeasibleRouteResult } from "../stores/hosts";
 import { useConnectionStore } from "../stores/connection";
@@ -655,6 +657,7 @@ const preparedSubmitting = ref(false);
 const submissionPlanning = ref(false);
 const preparationGuard = new PreparationRequestGuard();
 const submissionGuard = new PreparationRequestGuard();
+const sequenceSubmissionGuard = new PreparationRequestGuard();
 // Completion is detached from authoring once the store accepts a batch. Only
 // the newest accepted submission may publish mutable recovery authority:
 // older batches can finish later, but must not replace a newer pull/resume
@@ -1215,6 +1218,8 @@ const sequenceInventorySettled = computed(() => {
 });
 const chainLimits = ref<ChainLimits | null>(null);
 const sequenceSubmitting = ref(false);
+let sequenceAmendInFlight = false;
+let sequenceCancellationRequest: (() => Promise<void>) | null = null;
 /** Snapshot of the shared params at edit-load time — drives chainLevelDirty. */
 const editSharedBaseline = ref<string | null>(null);
 /** What a Library reuse could NOT restore, said once and quietly beneath the
@@ -1678,7 +1683,10 @@ function resumeSettledSequence() {
 }
 
 async function generateSequence() {
-  if (sequenceSubmitting.value) return;
+  if (sequenceSubmitting.value) {
+    cancelSequenceSubmission();
+    return;
+  }
   const entry = selectedSequenceEntry.value;
   if (!entry) {
     toasts.push("Choose an installed sequence-capable video model first.", "error");
@@ -1709,14 +1717,18 @@ async function generateSequence() {
     return;
   }
   sequenceSubmitting.value = true;
+  const token = sequenceSubmissionGuard.begin();
+  const signal = sequenceSubmissionGuard.signalFor(token);
+  const isCurrent = () => sequenceSubmissionGuard.isCurrent(token) && !signal.aborted;
   try {
     // Refetch stale limits so frames caps/audio gating match the routed host.
     if (!chainLimits.value || chainLimits.value.model !== entry.name) {
       await loadChainLimits();
+      if (!isCurrent()) return;
     }
     requestForm.sourceImage = openingSnapshot?.base64 ?? null;
     requestForm.maskImage = null;
-    if (!(await preprocessSourceFit(hostRoute, requestForm))) return;
+    if (!(await preprocessSourceFit(hostRoute, requestForm, signal)) || !isCurrent()) return;
     const openingImage = openingSnapshot
       ? { ...openingSnapshot, base64: requestForm.sourceImage }
       : null;
@@ -1740,6 +1752,7 @@ async function generateSequence() {
       return;
     }
     if (editing) {
+      const operationId = createUuid();
       const amend: AmendRequest = {
         stages: request.stages,
         motion_tail_frames: request.motion_tail_frames ?? null,
@@ -1757,7 +1770,20 @@ async function generateSequence() {
           `${editing.hostId}:${editing.jobId}`,
           clips.map((clip) => clip.id),
         );
-        const outcome = await chains.amend(editing.hostId, editing.jobId, amend, hostRoute.target);
+        sequenceAmendInFlight = true;
+        sequenceCancellationRequest = () =>
+          chains.cancelMutation(editing.hostId, editing.jobId, operationId, hostRoute.target);
+        const outcome = await chains.amend(
+          editing.hostId,
+          editing.jobId,
+          amend,
+          hostRoute.target,
+          operationId,
+        );
+        if (!isCurrent()) {
+          await chains.cancel(editing.hostId, editing.jobId, hostRoute.target).catch(() => {});
+          return;
+        }
         toasts.push(
           `Sequence updated · ${outcome.preserved_stages} clip${outcome.preserved_stages === 1 ? "" : "s"} kept from cache`,
         );
@@ -1774,7 +1800,14 @@ async function generateSequence() {
         throw err;
       }
     } else {
-      const jobId = await chains.create(hostRoute.hostId, request, hostRoute.target);
+      const operationId = createUuid();
+      sequenceCancellationRequest = () =>
+        chains.cancelMutation(hostRoute.hostId, operationId, operationId, hostRoute.target);
+      const jobId = await chains.create(hostRoute.hostId, request, hostRoute.target, operationId);
+      if (!isCurrent()) {
+        await chains.cancel(hostRoute.hostId, jobId, hostRoute.target).catch(() => {});
+        return;
+      }
       sequenceStageClipIdsByJob.set(
         `${hostRoute.hostId}:${jobId}`,
         clips.map((clip) => clip.id),
@@ -1784,10 +1817,44 @@ async function generateSequence() {
     // The caveat described the handoff, not the submitted job.
     sequenceReuseNotice.value = null;
   } catch (err) {
+    if (!isCurrent()) return;
     toasts.push(String(err), "error");
   } finally {
-    sequenceSubmitting.value = false;
+    if (sequenceSubmissionGuard.isCurrent(token)) {
+      sequenceSubmitting.value = false;
+      sequenceAmendInFlight = false;
+      sequenceCancellationRequest = null;
+    }
   }
+}
+
+function cancelSequenceSubmission() {
+  if (!sequenceSubmitting.value) return;
+  sequenceSubmissionGuard.invalidate();
+  const cancellation = sequenceCancellationRequest;
+  const cancellingAmendment = sequenceAmendInFlight;
+  sequenceCancellationRequest = null;
+  sequenceAmendInFlight = false;
+  sequenceSubmitting.value = false;
+  preprocessingStatus.value = null;
+  if (!cancellation) {
+    toasts.push("Sequence preparation cancelled — nothing was queued");
+    return;
+  }
+  toasts.push(
+    cancellingAmendment ? "Cancelling the sequence update…" : "Cancelling sequence creation…",
+  );
+  void confirmCancellation(cancellation)
+    .then(() =>
+      toasts.push(
+        cancellingAmendment
+          ? "Sequence update cancelled"
+          : "Sequence creation cancelled — nothing was queued",
+      ),
+    )
+    .catch(() =>
+      toasts.push("Cancellation could not be confirmed. Check Activity before retrying.", "error"),
+    );
 }
 
 /** Edit session: submit the current clips as a brand-new job instead. */
@@ -1884,11 +1951,24 @@ watch(
 );
 
 const buttonLabel = computed(() => {
-  if (submissionPlanning.value) return "Planning…";
+  if (submissionPlanning.value) return "Cancel";
   return generation.pending.length > 0
     ? `Generate (+${generation.pending.length} queued)`
     : "Generate";
 });
+const submissionStatus = computed(() =>
+  submissionPlanning.value
+    ? (preprocessingStatus.value ?? "Checking machine fit and generation route…")
+    : preprocessingStatus.value,
+);
+
+function cancelSubmissionPlanning() {
+  if (!submissionPlanning.value) return;
+  submissionGuard.invalidate();
+  sequenceSubmissionGuard.invalidate();
+  submissionPlanning.value = false;
+  preparedSubmitting.value = false;
+}
 
 const previewWidth = computed(() => job.value?.width ?? form.width);
 const previewHeight = computed(() => job.value?.height ?? form.height);
@@ -2113,6 +2193,7 @@ function expansionInputs(count: number): PreparedExpansionInputs {
 async function remixForCurrentPrompt(replacePrepared = false) {
   if (!form.prompt.trim() || !form.model || expansionRunning.value) return;
   submissionGuard.invalidate();
+  sequenceSubmissionGuard.invalidate();
   const route = currentExpansionRoute.value;
   // Frozen before the request: an Auto rerank mid-flight must not move the
   // print's machine out from under the reviewed set.
@@ -2745,6 +2826,7 @@ const sourceFitCache = new SourceFitPreprocessCache();
 async function preprocessSourceFit(
   route: HostRoute | null,
   draft: ReturnType<typeof cloneGenerateForm>,
+  signal?: AbortSignal,
 ): Promise<boolean> {
   const draftCaps = generationCapabilitiesForFamily(
     draft.family,
@@ -2770,6 +2852,7 @@ async function preprocessSourceFit(
                 model,
                 image,
                 ...(route ? { target: route.target } : {}),
+                ...(signal ? { signal } : {}),
                 onProgress: (message) => (preprocessingStatus.value = message),
               }),
             onStatus: (message) => (preprocessingStatus.value = message),
@@ -2777,6 +2860,7 @@ async function preprocessSourceFit(
         )) ?? emptyMinimaxH3AuthoringState();
       return true;
     } catch (error) {
+      if (signal?.aborted) return false;
       const message = error instanceof Error ? error.message : String(error);
       toasts.push(`Source preprocessing failed: ${message}`, "error");
       return false;
@@ -2806,6 +2890,7 @@ async function preprocessSourceFit(
               model,
               image,
               ...(route ? { target: route.target } : {}),
+              ...(signal ? { signal } : {}),
               onProgress: (message) => (preprocessingStatus.value = message),
             }),
           onStatus: (message) => (preprocessingStatus.value = message),
@@ -2814,6 +2899,7 @@ async function preprocessSourceFit(
       if (result.source) draft.imageAttachments[0] = result.source;
       return true;
     } catch (error) {
+      if (signal?.aborted) return false;
       const message = error instanceof Error ? error.message : String(error);
       toasts.push(`Source preprocessing failed: ${message}`, "error");
       return false;
@@ -2843,6 +2929,7 @@ async function preprocessSourceFit(
             model,
             image,
             ...(route ? { target: route.target } : {}),
+            ...(signal ? { signal } : {}),
             onProgress: (message) => (preprocessingStatus.value = message),
           }),
         onStatus: (message) => (preprocessingStatus.value = message),
@@ -2855,6 +2942,7 @@ async function preprocessSourceFit(
     draft.maskImage = result.mask;
     return true;
   } catch (error) {
+    if (signal?.aborted) return false;
     const message = error instanceof Error ? error.message : String(error);
     toasts.push(`Source preprocessing failed: ${message}`, "error");
     return false;
@@ -3004,6 +3092,7 @@ async function generate() {
       : null
     : null;
   const submitToken = submissionGuard.begin();
+  const submitSignal = submissionGuard.signalFor(submitToken);
   preparedSubmitting.value = preparedSubmission !== null;
   submissionPlanning.value = true;
   try {
@@ -3056,7 +3145,7 @@ async function generate() {
     let routeResolvedAgainstFinalRequest = false;
     let sourcePreprocessed = false;
     if (!route && !routeRequiredForPreprocessing) {
-      if (!(await preprocessSourceFit(null, draft))) return;
+      if (!(await preprocessSourceFit(null, draft, submitSignal))) return;
       if (!submissionGuard.isCurrent(submitToken)) return;
       sourcePreprocessed = true;
     }
@@ -3104,7 +3193,9 @@ async function generate() {
         appPrefs.settings?.generateTargetHost ?? null,
         planningRequest,
         batch,
+        { signal: submitSignal },
       );
+      if (!submissionGuard.isCurrent(submitToken)) return;
       if (feasibility.kind !== "route") {
         // Nothing can run this print. When the only thing in the way is the
         // model itself, offer the pull instead of a dead-end toast — but only
@@ -3127,7 +3218,7 @@ async function generate() {
       routeResolvedAgainstFinalRequest = sourcePreprocessed;
     }
     if (!sourcePreprocessed) {
-      if (!(await preprocessSourceFit(route, draft))) return;
+      if (!(await preprocessSourceFit(route, draft, submitSignal))) return;
       if (!submissionGuard.isCurrent(submitToken)) return;
     }
     if (preparedSubmission) {
@@ -3195,7 +3286,10 @@ async function generate() {
         }
       : {};
     if (route && !routeResolvedAgainstFinalRequest) {
-      const finalized = await hosts.resolveFeasible(route.hostId, finalizedPlanningRequest, batch);
+      const finalized = await hosts.resolveFeasible(route.hostId, finalizedPlanningRequest, batch, {
+        signal: submitSignal,
+      });
+      if (!submissionGuard.isCurrent(submitToken)) return;
       const finalizedRoute = finalized.kind === "route" ? finalized.route : null;
       if (
         !finalizedRoute ||
@@ -3314,8 +3408,10 @@ async function generate() {
       }
     });
   } finally {
-    preparedSubmitting.value = false;
-    submissionPlanning.value = false;
+    if (submissionGuard.isCurrent(submitToken)) {
+      preparedSubmitting.value = false;
+      submissionPlanning.value = false;
+    }
   }
 }
 
@@ -3718,6 +3814,13 @@ onBeforeUnmount(() => {
   if (!import.meta.env.TEST) liveActivity.stop();
   preparationGuard.invalidate();
   submissionGuard.invalidate();
+  sequenceSubmissionGuard.invalidate();
+  const sequenceCancellation = sequenceCancellationRequest;
+  sequenceCancellationRequest = null;
+  sequenceAmendInFlight = false;
+  if (sequenceCancellation) {
+    void confirmCancellation(sequenceCancellation).catch(() => {});
+  }
   clearSequenceStageMedia();
   nativeImageDropUnmounted = true;
   stopNativeImageDrop?.();
@@ -4209,6 +4312,7 @@ onBeforeUnmount(() => {
               :playing-clip-id="playingSequenceClipId"
               :target="sequenceTarget"
               @submit="generateSequence"
+              @cancel="cancelSequenceSubmission"
               @duplicate="duplicateSequenceAsNew"
               @play-clip="playSequenceClip"
             />
@@ -4231,11 +4335,12 @@ onBeforeUnmount(() => {
             :button-label="buttonLabel"
             :estimate-request="estimateRequest"
             :estimate-target="estimateTarget"
-            :preprocessing-status="preprocessingStatus"
+            :preprocessing-status="submissionStatus"
             :history="promptHistory"
             :remix-source="remixSource"
             @prompt-authored="onPromptAuthored"
             @generate="generate"
+            @cancel="cancelSubmissionPlanning"
             @expand="expandForCurrentBatch()"
             @remix="remixForCurrentPrompt()"
             @update:remix-source="remixSource = $event"

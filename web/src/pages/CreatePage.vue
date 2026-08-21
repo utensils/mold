@@ -48,6 +48,7 @@ import type { DevelopPhase } from "@ui/lib/grain";
 import type { ClipRailMedia } from "@ui/components/types";
 import { SourceFitPreprocessCache } from "@ui/lib/sourceFitPreprocessCache";
 import { createUuid } from "@studio/lib/id";
+import { confirmCancellation } from "@studio/lib/cancellationRetry";
 import { validatePrintTitle } from "@studio/lib/libraryOrganization";
 import { applyAuthoredPrompt } from "@studio/lib/promptProvenance";
 import { requestNeedsReferenceUpload } from "@studio/api/referenceUploads";
@@ -1791,7 +1792,78 @@ function applySharedToForm(shared: Partial<SequenceSharedParams>) {
   }
 }
 
+const sequenceSubmitInFlight = ref(false);
+let sequenceSubmitController: AbortController | null = null;
+let sequenceSubmitAttempt = 0;
+let sequenceAmendInFlight = false;
+let sequenceCancellationRequest: (() => Promise<void>) | null = null;
+
 async function onSubmitSequence() {
+  if (sequenceSubmitInFlight.value) {
+    cancelSequenceSubmit();
+    return;
+  }
+  const attempt = ++sequenceSubmitAttempt;
+  const controller = new AbortController();
+  sequenceSubmitController = controller;
+  sequenceSubmitInFlight.value = true;
+  try {
+    await onSubmitSequenceInner(
+      controller.signal,
+      () => attempt === sequenceSubmitAttempt && !controller.signal.aborted,
+    );
+  } finally {
+    if (attempt === sequenceSubmitAttempt) {
+      sequenceSubmitController = null;
+      sequenceSubmitInFlight.value = false;
+      sequenceAmendInFlight = false;
+      sequenceCancellationRequest = null;
+    }
+  }
+}
+
+function cancelSequenceSubmit() {
+  if (!sequenceSubmitInFlight.value) return;
+  sequenceSubmitAttempt += 1;
+  sequenceSubmitController?.abort(new Error("cancelled"));
+  sequenceSubmitController = null;
+  const cancellation = sequenceCancellationRequest;
+  const cancellingAmendment = sequenceAmendInFlight;
+  sequenceCancellationRequest = null;
+  sequenceAmendInFlight = false;
+  sequenceSubmitInFlight.value = false;
+  preprocessingStatus.value = null;
+  composerError.value = null;
+  if (!cancellation) {
+    toast("info", "Sequence preparation cancelled — nothing was queued.");
+    return;
+  }
+  toast(
+    "info",
+    cancellingAmendment
+      ? "Cancelling the sequence update…"
+      : "Cancelling sequence creation…",
+  );
+  void confirmCancellation(cancellation)
+    .then(() =>
+      toast(
+        "info",
+        cancellingAmendment
+          ? "Sequence update cancelled."
+          : "Sequence creation cancelled — nothing was queued.",
+      ),
+    )
+    .catch(() => {
+      composerError.value =
+        "Cancellation could not be confirmed. Check Activity before retrying.";
+      toast("error", composerError.value);
+    });
+}
+
+async function onSubmitSequenceInner(
+  signal: AbortSignal,
+  isCurrent: () => boolean,
+) {
   composerError.value = null;
   if (
     !sequenceMode.value ||
@@ -1827,6 +1899,7 @@ async function onSubmitSequence() {
   await fetchChainLimits(shared.model, initialRoute.target, shared.fps).catch(
     () => {},
   );
+  if (!isCurrent()) return;
   const preliminaryRequest = buildChainRequest(shared, clips, {
     motionTailFrames,
     enableAudio,
@@ -1834,7 +1907,14 @@ async function onSubmitSequence() {
   });
   let route = initialRoute;
   if (!editing) {
-    const feasibility = await routing.resolveFeasibleChain(preliminaryRequest);
+    const feasibility = await routing.resolveFeasibleChain(
+      preliminaryRequest,
+      1,
+      {
+        signal,
+      },
+    );
+    if (!isCurrent()) return;
     if (feasibility.kind !== "route") {
       composerError.value = feasibilityMessage(feasibility, "this sequence");
       return;
@@ -1843,29 +1923,33 @@ async function onSubmitSequence() {
   }
   let openingImage = openingSnapshot;
   if (openingImage?.base64) {
-    const prepared = await prepareStillSourceToRequest(route, {
-      source: {
-        kind: "upload",
-        filename: openingImage.filename,
-        base64: openingImage.base64,
-        width: openingImage.width,
-        height: openingImage.height,
-        mime: /\.jpe?g$/i.test(openingImage.filename)
-          ? "image/jpeg"
-          : "image/png",
+    const prepared = await prepareStillSourceToRequest(
+      route,
+      {
+        source: {
+          kind: "upload",
+          filename: openingImage.filename,
+          base64: openingImage.base64,
+          width: openingImage.width,
+          height: openingImage.height,
+          mime: /\.jpe?g$/i.test(openingImage.filename)
+            ? "image/jpeg"
+            : "image/png",
+        },
+        mask: null,
+        maskless: true,
+        settings: {
+          policy: shared.sourceFitPolicy,
+          upscalerModel: shared.upscalerModel,
+          family: shared.family,
+          frames: null,
+          width: shared.width,
+          height: shared.height,
+        },
       },
-      mask: null,
-      maskless: true,
-      settings: {
-        policy: shared.sourceFitPolicy,
-        upscalerModel: shared.upscalerModel,
-        family: shared.family,
-        frames: null,
-        width: shared.width,
-        height: shared.height,
-      },
-    });
-    if (prepared === false) return;
+      signal,
+    );
+    if (prepared === false || !isCurrent()) return;
     openingImage = prepared.source
       ? {
           ...openingImage,
@@ -1882,6 +1966,7 @@ async function onSubmitSequence() {
   });
 
   if (editing) {
+    const operationId = createUuid();
     const amendReq: AmendRequest = {
       stages: req.stages,
       motion_tail_frames: req.motion_tail_frames ?? null,
@@ -1902,12 +1987,27 @@ async function onSubmitSequence() {
         `${editing.hostId}:${editing.jobId}`,
         clips.map((clip) => clip.id),
       );
+      sequenceAmendInFlight = true;
+      sequenceCancellationRequest = () =>
+        chainJobs.cancelMutation(
+          editing.hostId,
+          editing.jobId,
+          operationId,
+          route.target,
+        );
       await chainJobs.amend(
         editing.hostId,
         editing.jobId,
         amendReq,
         route.target,
+        operationId,
       );
+      if (!isCurrent()) {
+        await chainJobs
+          .cancel(editing.hostId, editing.jobId, route.target)
+          .catch(() => {});
+        return;
+      }
       draft.stopEditing();
       editBaselineShared.value = null;
       toast("info", "Sequence updated — unchanged clips stay cached.");
@@ -1930,14 +2030,34 @@ async function onSubmitSequence() {
   }
 
   try {
-    const feasibility = await routing.revalidateFeasibleChain(route, req);
+    const feasibility = await routing.revalidateFeasibleChain(route, req, 1, {
+      signal,
+    });
+    if (!isCurrent()) return;
     if (feasibility.kind !== "route") {
       throw new Error(
         feasibilityMessage(feasibility, "this finalized sequence"),
       );
     }
     route = feasibility.route;
-    const jobId = await chainJobs.create(route.hostId, req);
+    const operationId = createUuid();
+    sequenceCancellationRequest = () =>
+      chainJobs.cancelMutation(
+        route.hostId,
+        operationId,
+        operationId,
+        route.target,
+      );
+    const jobId = await chainJobs.create(
+      route.hostId,
+      req,
+      route.target,
+      operationId,
+    );
+    if (!isCurrent()) {
+      await chainJobs.cancel(route.hostId, jobId, route.target).catch(() => {});
+      return;
+    }
     sequenceStageClipIdsByJob.set(
       `${route.hostId}:${jobId}`,
       clips.map((clip) => clip.id),
@@ -1950,6 +2070,7 @@ async function onSubmitSequence() {
     sequenceReuseNotice.value = null;
     toast("info", `Sequence queued on ${route.label}.`);
   } catch (error) {
+    if (!isCurrent()) return;
     composerError.value =
       error instanceof Error ? error.message : String(error);
   }
@@ -2548,6 +2669,7 @@ async function prepareStillSourceToRequest(
       height: number;
     };
   },
+  signal?: AbortSignal,
 ): Promise<PreparedStillSource | false> {
   let source = override
     ? override.source
@@ -2600,7 +2722,7 @@ async function prepareStillSourceToRequest(
                       : `Source preprocessing failed: ${err.message}`;
                 },
               },
-              undefined,
+              signal,
               route?.target,
             );
             if (output === null)
@@ -2909,15 +3031,17 @@ function resolveSubmitRoute(): HostRoute | null | false {
 
 async function resolveFeasibleSubmitRoute(
   request: GenerateRequestWire,
+  decision: ReturnType<typeof decideGenerateRequestRouting> | undefined,
+  quick: unknown,
+  signal: AbortSignal,
   copies = 1,
-  decision?: ReturnType<typeof decideGenerateRequestRouting>,
-  quick: unknown = null,
 ): Promise<HostRoute | false> {
-  const result = await routing.resolveFeasible(request, copies);
+  const result = await routing.resolveFeasible(request, copies, { signal });
+  if (signal?.aborted) return false;
   if (result.kind !== "route") {
     if (
       !decision ||
-      !(await offerMissingModelPull(result, request, decision, quick))
+      !(await offerMissingModelPull(result, request, decision, quick, signal))
     ) {
       toast("error", feasibilityMessage(result, "this print"));
     }
@@ -3001,7 +3125,8 @@ async function offerMissingModelPull(
   result: Exclude<FeasibilityResult, { kind: "route" }>,
   request: GenerateRequestWire,
   decision: ReturnType<typeof decideGenerateRequestRouting>,
-  quick: unknown = null,
+  quick: unknown,
+  signal: AbortSignal,
 ): Promise<boolean> {
   const failures = missingModelFailures(result);
   if (failures.length === 0) return false;
@@ -3018,6 +3143,7 @@ async function offerMissingModelPull(
     displayName: modelDisplayNameForId(model, models.value),
     restrictToHostIds: candidateIds,
   });
+  if (signal?.aborted) return true;
   // An explicit cancel is an answer: nothing was queued, and the dead-end
   // error toast would only restate what the user just dismissed.
   if (choice.kind === "cancelled") return true;
@@ -3028,6 +3154,7 @@ async function offerMissingModelPull(
   // inside that window would otherwise land in the baseline and be ignored
   // forever.
   const baseline = await pullResume.captureBaseline(hostId);
+  if (signal?.aborted) return true;
   let jobId: string | null = null;
   try {
     jobId = await installTargets.startDownloadOn(target, model);
@@ -3040,6 +3167,7 @@ async function offerMissingModelPull(
     );
     return true;
   }
+  if (signal.aborted) return true;
   if (!frozenRequestIsFinal(request, quick)) {
     toast(
       "info",
@@ -3048,19 +3176,24 @@ async function offerMissingModelPull(
     return true;
   }
   const resumeRoute = routing.multiHost.value ? routeForHostId(hostId) : null;
-  await pullResume.arm(
-    {
-      model,
-      // A catalog download reports its queue id on both routes; a plain
-      // manifest-name POST answers with no body, so that watch matches by
-      // model against the pre-POST terminal snapshot.
-      jobId,
-      hostId,
-      hostLabel,
-      resume: () => submitRequestCopies(request, decision, resumeRoute),
+  const pendingPull = {
+    model,
+    // A catalog download reports its queue id on both routes; a plain
+    // manifest-name POST answers with no body, so that watch matches by
+    // model against the pre-POST terminal snapshot.
+    jobId,
+    hostId,
+    hostLabel,
+    resume: () => {
+      if (!signal.aborted) submitRequestCopies(request, decision, resumeRoute);
     },
-    baseline,
-  );
+  };
+  if (signal.aborted) return true;
+  await pullResume.arm(pendingPull, baseline);
+  if (signal.aborted) {
+    pullResume.cancel(pendingPull);
+    return true;
+  }
   toast(
     "info",
     `Pulling ${model} on ${hostLabel} — generation starts when it's ready`,
@@ -3200,19 +3333,44 @@ function submitRequestCopies(
  * click could double-queue. */
 const submitInFlight = ref(false);
 const placementStatus = ref<string | null>(null);
+let submitController: AbortController | null = null;
+let submitAttempt = 0;
 async function onSubmit(allowStaleQuick = false) {
   if (submitInFlight.value) return;
+  const attempt = ++submitAttempt;
+  const controller = new AbortController();
+  submitController = controller;
   submitInFlight.value = true;
-  placementStatus.value = "Checking fit on the selected machine…";
+  placementStatus.value = "Checking machine fit and generation route…";
   try {
-    await onSubmitInner(allowStaleQuick);
+    await onSubmitInner(
+      controller.signal,
+      () => attempt === submitAttempt && !controller.signal.aborted,
+      allowStaleQuick,
+    );
   } finally {
-    submitInFlight.value = false;
-    placementStatus.value = null;
+    if (attempt === submitAttempt) {
+      submitController = null;
+      submitInFlight.value = false;
+      placementStatus.value = null;
+    }
   }
 }
 
-async function onSubmitInner(allowStaleQuick = false) {
+function cancelSubmitPlanning() {
+  if (!submitInFlight.value) return;
+  submitAttempt += 1;
+  submitController?.abort(new Error("cancelled"));
+  submitController = null;
+  submitInFlight.value = false;
+  placementStatus.value = null;
+}
+
+async function onSubmitInner(
+  signal: AbortSignal,
+  isCurrent: () => boolean,
+  allowStaleQuick = false,
+) {
   if (ordinarySubmitBlocked.value) return;
   // The route is settled first, and before source preprocessing, for two
   // reasons: an unreachable pinned machine is the real complaint (its model
@@ -3264,14 +3422,19 @@ async function onSubmitInner(allowStaleQuick = false) {
             route,
             resolveChainRequest(currentRequest, decision),
             copies,
+            { signal },
           )
-        : await routing.revalidateFeasible(route, currentRequest, copies)
+        : await routing.revalidateFeasible(route, currentRequest, copies, {
+            signal,
+          })
       : await resolveFeasibleSubmitRoute(
           currentRequest,
-          copies,
           decision,
           quick,
+          signal,
+          copies,
         );
+    if (!isCurrent()) return;
     if (result === false) return;
     if ("kind" in result && result.kind !== "route") {
       toast("error", feasibilityMessage(result, "this prepared print"));
@@ -3292,11 +3455,19 @@ async function onSubmitInner(allowStaleQuick = false) {
         ? await routing.resolveFeasibleChain(
             resolveChainRequest(currentRequest, decision),
             copies,
+            { signal },
           )
-        : await routing.resolveFeasible(currentRequest, copies);
+        : await routing.resolveFeasible(currentRequest, copies, { signal });
+    if (!isCurrent()) return;
     if (result.kind !== "route") {
       if (
-        !(await offerMissingModelPull(result, currentRequest, decision, quick))
+        !(await offerMissingModelPull(
+          result,
+          currentRequest,
+          decision,
+          quick,
+          signal,
+        ))
       ) {
         toast("error", feasibilityMessage(result, "this print"));
       }
@@ -3304,7 +3475,12 @@ async function onSubmitInner(allowStaleQuick = false) {
     }
     route = result.route;
   }
-  const preparedSource = await prepareStillSourceToRequest(route);
+  const preparedSource = await prepareStillSourceToRequest(
+    route,
+    undefined,
+    signal,
+  );
+  if (!isCurrent()) return;
   if (preparedSource === false) return;
   const req = form.toRequest(currentModel.value);
   const finalizedCopies = requestCopyCount(req);
@@ -3326,18 +3502,22 @@ async function onSubmitInner(allowStaleQuick = false) {
         mimeType: string;
       },
     ): Promise<string | false> => {
-      const fitted = await prepareStillSourceToRequest(boundaryRoute, {
-        source: {
-          kind: "upload",
-          filename: boundary.filename,
-          base64,
-          width: boundary.width,
-          height: boundary.height,
-          mime: boundary.mimeType,
+      const fitted = await prepareStillSourceToRequest(
+        boundaryRoute,
+        {
+          source: {
+            kind: "upload",
+            filename: boundary.filename,
+            base64,
+            width: boundary.width,
+            height: boundary.height,
+            mime: boundary.mimeType,
+          },
+          mask: null,
+          maskless: true,
         },
-        mask: null,
-        maskless: true,
-      });
+        signal,
+      );
       if (fitted === false) return false;
       return fitted.source?.base64 ?? base64;
     };
@@ -3371,14 +3551,19 @@ async function onSubmitInner(allowStaleQuick = false) {
           route,
           resolveChainRequest(req, decision),
           finalizedCopies,
+          { signal },
         )
-      : await routing.revalidateFeasible(route, req, finalizedCopies)
+      : await routing.revalidateFeasible(route, req, finalizedCopies, {
+          signal,
+        })
     : decision.kind === "chain"
       ? await routing.resolveFeasibleChain(
           resolveChainRequest(req, decision),
           finalizedCopies,
+          { signal },
         )
-      : await routing.resolveFeasible(req, finalizedCopies);
+      : await routing.resolveFeasible(req, finalizedCopies, { signal });
+  if (!isCurrent()) return;
   if (finalizedResult.kind !== "route") {
     toast("error", feasibilityMessage(finalizedResult, "this finalized print"));
     return;
@@ -4246,6 +4431,18 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
+  submitAttempt += 1;
+  submitController?.abort(new Error("unmounted"));
+  submitController = null;
+  sequenceSubmitAttempt += 1;
+  sequenceSubmitController?.abort(new Error("unmounted"));
+  sequenceSubmitController = null;
+  const sequenceCancellation = sequenceCancellationRequest;
+  sequenceCancellationRequest = null;
+  sequenceAmendInFlight = false;
+  if (sequenceCancellation) {
+    void confirmCancellation(sequenceCancellation).catch(() => {});
+  }
   promptHistoryCoordinator.invalidate();
   stopAutoRefresh();
   clearSequencePreviews();
@@ -4434,7 +4631,9 @@ onBeforeUnmount(() => {
             :chain-level-dirty="chainLevelDirty"
             :stage-media-by-clip-id="sequenceFilmstripMediaByClipId"
             :playing-clip-id="playingSequenceClipId"
+            :submitting="sequenceSubmitInFlight"
             @submit="onSubmitSequence"
+            @cancel="cancelSequenceSubmit"
             @duplicate-as-new="onDuplicateAsNew"
             @discard-edit="onDiscardEdit"
             @expand-clip="onExpandClip"
@@ -4583,6 +4782,8 @@ onBeforeUnmount(() => {
             :steps="form.state.value.steps"
             :batch-size="form.state.value.batchSize"
             :busy="ordinarySubmitBlocked || submitInFlight"
+            :cancellable="submitInFlight"
+            :busy-label="placementStatus ?? 'Planning generation…'"
             :disabled-reason="h3GenerationInputBlocker"
             :expanded="expanded"
             :prompt-optional="canSkipPrompt"
@@ -4590,6 +4791,7 @@ onBeforeUnmount(() => {
             :history="promptHistory"
             @update:prompt="onPromptAuthored"
             @submit="onSubmit"
+            @cancel="cancelSubmitPlanning"
             @expand="onExpand"
             @remix="onRemix"
             @undo-expand="undoExpand"
