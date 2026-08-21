@@ -663,8 +663,19 @@ fn update_help_text() {
         .stdout(
             predicate::str::contains("--check")
                 .and(predicate::str::contains("--force"))
+                .and(predicate::str::contains("--nightly"))
                 .and(predicate::str::contains("--version")),
         );
+}
+
+#[test]
+fn update_nightly_conflicts_with_exact_version() {
+    let env = TestEnv::new();
+    env.cmd()
+        .args(["update", "--nightly", "--version", "v0.23.3"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot be used with"));
 }
 
 #[test]
