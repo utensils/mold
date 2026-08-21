@@ -31,7 +31,9 @@ by the check that produced them.
 | 6 | Remote render over HTTP | plato | q4 | **PASS** — byte-identical to the forced-local render |
 | 7 | Refusals (unqualified model, invalid start step) | plato | mixed | **PASS** |
 | 8 | `supports_identity` advertised for exactly the qualified tiers | plato | — | **PASS** |
-| 9 | Metal path | halcyon | — | **NOT RUN** — no FLUX checkpoint obtainable |
+| 9 | `mold rm pulid-flux` removes the derived tower | plato | — | **PASS** |
+| 10 | Dependency auto-pull during a conditioned generate | plato | q4 | **PASS** — byte-identical render after a full wipe |
+| 11 | Metal path | halcyon | — | **NOT RUN** — no FLUX checkpoint obtainable |
 
 ## 1. Missing acceptance refuses the pull
 
@@ -207,6 +209,65 @@ Note `flux-dev:q8` advertises `true` while `downloaded: false`: the capability
 is a property of the checkpoint, not of whether it is installed, which is what
 lets a client offer the control before the pull.
 
+## 9 and 10. Removal, and auto-pull back
+
+The bundle was removed and then re-acquired by an ordinary conditioned
+generate, which is the same sequence a user hits the first time they render a
+face on a fresh machine that has already accepted the licence.
+
+```console
+$ mold rm pulid-flux --force
+pulid-flux
+  Delete:   pulid_flux_v0.9.1.safetensors (1.1 GB)
+  Delete:   EVA02_CLIP_L_336_psz14_s6B.pt (816.8 MB)
+  Delete:   scrfd_10g_bnkps.onnx (16.1 MB)
+  Delete:   glintr100.onnx (248.6 MB)
+  Delete:   eva02_clip_l_336_vision.safetensors (580.8 MB)
+  Delete:   eva02_clip_l_336_vision.json (348 B)
+
+Removed pulid-flux (freed 2.1 GB)
+```
+
+The last two lines are what #1223 added: they are mold's own conversion output,
+invisible to anything that walks the manifest, and before this change they
+survived removal as a 580 MB orphan. `shared/pulid/` is now empty and gone.
+
+Licence acceptance is deliberately NOT removed — it is a record of what the
+human agreed to, not an artifact:
+
+```console
+$ mold licenses --local
+  insightface-antelopev2   accepted   InsightFace pretrained models (antelopev2)
+                           needed by: pulid-flux
+```
+
+Which is what lets the next conditioned generate re-acquire everything with no
+flag:
+
+```console
+$ mold run --local flux-dev:q4 "<the portrait prompt>" --seed 7 \
+    --id-image frank-rubio-official-portrait.jpg --id-weight 1.0
+  ✓ Denoising (25 steps) [54.3s]
+✓ Done — flux-dev:q4 in 74.3s (seed: 7)
+
+real  2m55s
+```
+
+2m55s wall for a 2.1 GB download, an 856 MB pickle read converted to a 609 MB
+safetensors, and the render — of which the render itself was 74.3 s, the same
+as the pre-removal run.
+
+And the output:
+
+```
+accbd724bf81e2866db1cf6b94fcf7006bc52572f0109172c19fb633481727b5  flux-dev-q4-autopull-id-frank-rubio.png
+accbd724bf81e2866db1cf6b94fcf7006bc52572f0109172c19fb633481727b5  flux-dev-q4-portrait-id-frank-rubio-official-portrait.png
+```
+
+**Byte-identical to the render from before the wipe.** The derived conversion is
+deterministic in practice as well as by construction, and the whole identity
+pipeline reproduces exactly across a complete asset wipe and re-acquisition.
+
 ## Metal (halcyon)
 
 **Not run.** Two independent blockers, both environmental:
@@ -237,10 +298,6 @@ and repeating checks 3 and 4.
 - `flux-dev:q8` — the second qualified tier. Same code path, same adapter shape;
   it differs only in the transformer's quantization, which the adapter does not
   read.
-- Dependency auto-pull during a generate (as opposed to the explicit
-  `mold pull`). The two share `identity_dependencies::materialize_identity_assets`
-  and the licence gate above is enforced there; the server-side unit tests cover
-  the branch.
 - Krea, block offload, LoRA, and img2img alongside an identity. All are refused
   by the request contract in milestone 1 and belong to a milestone-2
   qualification pass.
