@@ -679,7 +679,11 @@ html.mobile-surface:has(.mobile-shell.is-pair-scanning) #app,
   color: var(--safelight);
 }
 
-.mobile-photo-setting {
+/* One switch row in Settings. Named for the Photos preference it shipped
+   with; the Library auto-tag switch is the same control, so both selectors
+   ride the one rule rather than duplicating it. */
+.mobile-photo-setting,
+.mobile-settings-switch {
   display: grid;
   min-height: 64px;
   box-sizing: border-box;
@@ -693,16 +697,20 @@ html.mobile-surface:has(.mobile-shell.is-pair-scanning) #app,
 }
 
 .mobile-photo-setting strong,
-.mobile-photo-setting small {
+.mobile-photo-setting small,
+.mobile-settings-switch strong,
+.mobile-settings-switch small {
   display: block;
 }
 
-.mobile-photo-setting strong {
+.mobile-photo-setting strong,
+.mobile-settings-switch strong {
   color: var(--rebate);
   font-size: var(--text-body);
 }
 
-.mobile-photo-setting small {
+.mobile-photo-setting small,
+.mobile-settings-switch small {
   margin-top: 3px;
   color: var(--ink-3);
   font-size: var(--text-caption);
