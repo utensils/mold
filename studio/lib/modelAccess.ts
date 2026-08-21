@@ -2,6 +2,10 @@ import {
   reviewedMiniMaxH3ModelAccess,
   type MiniMaxH3Capability,
 } from "./minimaxH3Inventory";
+import {
+  isMinimaxH3Identity,
+  minimaxH3TaskForModel,
+} from "./minimaxH3Identity";
 
 /**
  * Additive `/api/capabilities.model_access` contract shared by every Studio
@@ -98,7 +102,10 @@ export function isModelAccessRestricted(
   return modelAccessRestrictionFor(capabilities, identity) !== null;
 }
 
-/** Filter model rows using both their request identity and resolved family. */
+/** Filter model rows using both their request identity and resolved family.
+ * H3 additionally fails opaque catalog identities closed: family metadata can
+ * identify the editor, but only a released partition identifies a task the
+ * server can validate and execute. */
 export function filterRestrictedModels<
   T extends {
     name: string;
@@ -113,6 +120,8 @@ export function filterRestrictedModels<
   return models.filter(
     (model) =>
       model.runtime_available !== false &&
+      (!isMinimaxH3Identity(model.family, model.name) ||
+        minimaxH3TaskForModel(model.name) !== null) &&
       !isModelAccessRestricted(capabilities, {
         model: model.name,
         family: model.family,

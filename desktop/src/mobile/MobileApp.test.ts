@@ -4714,6 +4714,23 @@ describe("MobileApp wan source conditioning", () => {
     await flushPromises();
   }
 
+  it("keeps opaque H3 catalog rows out of the generation picker", async () => {
+    serveWan({
+      ...wanModel,
+      name: "hf:MiniMaxAI/MiniMax-H3",
+      family: "minimax-h3",
+      hf_repo: "MiniMaxAI/MiniMax-H3",
+      source_image: "required",
+    });
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    expect(wrapper.get("[data-test='mobile-model-empty']").text()).toContain(
+      "No downloaded generation model is available",
+    );
+    expect(wrapper.find("[data-test='mobile-h3-authoring-error']").exists()).toBe(false);
+  });
+
   it("shows the H3 first-frame blocker before prompt entry and clears it after picking", async () => {
     const h3Model: ModelEntry = {
       ...wanModel,

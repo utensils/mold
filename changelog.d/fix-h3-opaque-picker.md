@@ -1,0 +1,1 @@
+- Hide generic MiniMax H3 catalog repositories from Create so iPhone, desktop, and web offer only explicit runnable FL2VA or Ref2VA task partitions instead of presenting an impossible partition error.

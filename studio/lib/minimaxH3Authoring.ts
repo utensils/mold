@@ -8,6 +8,26 @@ import {
 } from "./modelAccess";
 import { imageDimensionsFromBase64 } from "./imageDimensions";
 import { readFileBase64 } from "./fileBase64";
+import {
+  canonicalMinimaxH3ModelName,
+  isMinimaxH3Identity,
+  minimaxH3TaskForModel,
+  type MinimaxH3Task,
+} from "./minimaxH3Identity";
+
+export {
+  canonicalMinimaxH3ModelName,
+  isMinimaxH3Family,
+  isMinimaxH3Identity,
+  minimaxH3TaskForModel,
+  MINIMAX_H3_FL2VA_COMFY,
+  MINIMAX_H3_FL2VA_COMFY_TURBO_4STEP_768P,
+  MINIMAX_H3_FL2VA_COMFY_TURBO_8STEP,
+  MINIMAX_H3_FL2VA_OFFICIAL,
+  MINIMAX_H3_REF2VA_COMFY,
+  MINIMAX_H3_REF2VA_OFFICIAL,
+  type MinimaxH3Task,
+} from "./minimaxH3Identity";
 
 export const MINIMAX_H3_FIXED_FPS = 24;
 export const MINIMAX_H3_MIN_FRAMES = 124;
@@ -33,17 +53,6 @@ export const MINIMAX_H3_RESYNTHESIS_GUIDANCE =
   "References guide identity, relationships, motion, timing, and sound in a newly synthesized shot. This is not pixel-aligned video editing, so there is no denoise-strength control.";
 export const MINIMAX_H3_PROMPT_PLACEHOLDER =
   "Describe the new synchronized shot…";
-
-export type MinimaxH3Task = "fl2va" | "ref2va";
-
-export const MINIMAX_H3_FL2VA_OFFICIAL = "minimax-h3-fl2va:official-bf16";
-export const MINIMAX_H3_REF2VA_OFFICIAL = "minimax-h3-ref2va:official-bf16";
-export const MINIMAX_H3_FL2VA_COMFY = "minimax-h3-fl2va:comfy-pruned-int8";
-export const MINIMAX_H3_REF2VA_COMFY = "minimax-h3-ref2va:comfy-pruned-int8";
-export const MINIMAX_H3_FL2VA_COMFY_TURBO_8STEP =
-  "minimax-h3-fl2va:comfy-pruned-int8-turbo-8step";
-export const MINIMAX_H3_FL2VA_COMFY_TURBO_4STEP_768P =
-  "minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p";
 
 /** Browser-owned first/last-frame authority. The raw bytes live in IndexedDB
  * when a draft/template is persisted; only the small descriptor is allowed in
@@ -92,79 +101,6 @@ export interface MinimaxH3ModelIdentity {
    * runnable-model boundary. */
   runtime_available?: boolean | null;
   generation_profile?: { profile_hash?: string | null } | null;
-}
-
-function normalize(value: string): string {
-  return value.trim().toLowerCase().replaceAll("_", "-");
-}
-
-/** Browser-side mirror of the server's released H3 alias resolver. Opaque
- * catalog IDs and unknown future variants stay unresolved instead of being
- * guessed into a task/layout partition. */
-export function canonicalMinimaxH3ModelName(
-  model: string | null | undefined,
-): string | null {
-  const value = normalize(model ?? "");
-  if (
-    value === "minimax-h3" ||
-    value === "minimaxh3" ||
-    value === "minimax-h3-fl2va"
-  ) {
-    return MINIMAX_H3_FL2VA_COMFY;
-  }
-  if (value === "minimax-h3-ref2va") {
-    return MINIMAX_H3_REF2VA_COMFY;
-  }
-  if (
-    value === MINIMAX_H3_FL2VA_OFFICIAL ||
-    value === MINIMAX_H3_REF2VA_OFFICIAL ||
-    value === MINIMAX_H3_FL2VA_COMFY ||
-    value === MINIMAX_H3_REF2VA_COMFY ||
-    value === MINIMAX_H3_FL2VA_COMFY_TURBO_8STEP ||
-    value === MINIMAX_H3_FL2VA_COMFY_TURBO_4STEP_768P
-  ) {
-    return value;
-  }
-  return null;
-}
-
-export function isMinimaxH3Family(family: string | null | undefined): boolean {
-  const value = normalize(family ?? "").replaceAll("-", "");
-  return value === "minimaxh3";
-}
-
-/** Resolve only the released, explicit task partitions. An opaque catalog ID
- * must carry a future advertised task instead of being guessed from family. */
-export function minimaxH3TaskForModel(
-  model: string | null | undefined,
-): MinimaxH3Task | null {
-  const value = canonicalMinimaxH3ModelName(model);
-  if (value?.startsWith("minimax-h3-ref2va:")) {
-    return "ref2va";
-  }
-  if (value?.startsWith("minimax-h3-fl2va:")) {
-    return "fl2va";
-  }
-  return null;
-}
-
-/** Family metadata can be absent in durable gallery/request snapshots. An
- * H3-shaped model name still identifies the family boundary, while task and
- * layout resolution remain restricted to the exact released identities. */
-export function isMinimaxH3Identity(
-  family: string | null | undefined,
-  model: string | null | undefined,
-): boolean {
-  if (isMinimaxH3Family(family)) return true;
-  const value = normalize(model ?? "");
-  return (
-    value === "minimax-h3" ||
-    value === "minimaxh3" ||
-    value === "minimax-h3-fl2va" ||
-    value === "minimax-h3-ref2va" ||
-    value.startsWith("minimax-h3-fl2va:") ||
-    value.startsWith("minimax-h3-ref2va:")
-  );
 }
 
 export function emptyMinimaxH3AuthoringState(): MinimaxH3AuthoringState {
