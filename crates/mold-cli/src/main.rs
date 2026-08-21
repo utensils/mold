@@ -1281,7 +1281,11 @@ runs the pull: the server at MOLD_HOST when one answers, otherwise this
 machine. Accept a license as part of the pull it unblocks:
 
   mold pull pulid-flux --accept-license insightface-antelopev2")]
-    Licenses,
+    Licenses {
+        /// Read this machine's own acceptances instead of asking the server
+        #[arg(long)]
+        local: bool,
+    },
 
     /// Remove downloaded model(s) and their unique files
     #[command(
@@ -2295,8 +2299,8 @@ async fn run() -> anyhow::Result<()> {
                 commands::pull::run(&model, &opts, &accept_licenses).await?;
             }
         }
-        Commands::Licenses => {
-            commands::licenses::run().await?;
+        Commands::Licenses { local } => {
+            commands::licenses::run(local).await?;
         }
         Commands::Rm { models, force } => {
             commands::rm::run(&models, force).await?;

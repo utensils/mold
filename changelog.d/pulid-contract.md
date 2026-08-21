@@ -51,9 +51,13 @@
   into its own `$MOLD_HOME`, instead of the client accepting on its own behalf
   and the server refusing anyway. New `GET /api/licenses` lists each license
   with its pinned terms, `accepted`, and `required_by`; `POST /api/downloads`
-  and `POST /api/models/pull` take an additive `accept_licenses` array; a gated
-  download without one is a `403` with code `LICENSE_NOT_ACCEPTED` and a
-  structured `license` object so web, desktop, and iPhone can offer acceptance
-  in-app. Servers advertise `capabilities.licenses`, and `mold licenses` shows
+  and `POST /api/models/pull` take an additive `accept_licenses` array of
+  `{ id, url, sha256 }` entries carrying the exact terms the user was shown, so
+  a server on a different release cannot resolve a bare id to its own revision
+  and record consent for text nobody read. A gated download without one is a
+  `403` (`LICENSE_NOT_ACCEPTED`); terms the server does not pin are a `409`
+  (`LICENSE_TERMS_MISMATCH`) carrying the server's own terms to re-display.
+  Both write nothing, and both are structured so web, desktop, and iPhone can
+  offer acceptance in-app. Servers advertise `capabilities.licenses`, and `mold licenses` shows
   the state along with which machine it read
   ([#1220](https://github.com/utensils/mold/issues/1220)).
