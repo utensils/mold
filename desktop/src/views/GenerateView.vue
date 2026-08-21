@@ -118,6 +118,7 @@ import {
 import {
   applyPrefillToForm,
   buildRequest,
+  chainFilingFields,
   cloneGenerateForm,
   normalizeLegacyNegativeSnapshot,
 } from "../lib/generateForm";
@@ -169,7 +170,12 @@ import {
   recordPromptHistoryCache,
 } from "@studio/lib/promptHistoryCache";
 import { randomSeed } from "../stores/generation";
-import type { CompleteEvent, GenerateRequest, OutputMetadata } from "../lib/api/types";
+import type {
+  ChainCreateRequest,
+  CompleteEvent,
+  GenerateRequest,
+  OutputMetadata,
+} from "../lib/api/types";
 import {
   DEFAULT_VIDEO_EXPORT_CAPABILITIES,
   videoExportFilename,
@@ -1720,11 +1726,16 @@ async function generateSequence() {
     const openingImage = openingSnapshot
       ? { ...openingSnapshot, base64: requestForm.sourceImage }
       : null;
-    const request = buildChainRequest(sequenceParams(requestForm, entry), clips, {
-      motionTailFrames,
-      enableAudio,
-      openingImage,
-    });
+    // The stitched print is the only artifact a sequence puts in the gallery,
+    // so it is what carries the header title and the File under choice.
+    const request: ChainCreateRequest = {
+      ...buildChainRequest(sequenceParams(requestForm, entry), clips, {
+        motionTailFrames,
+        enableAudio,
+        openingImage,
+      }),
+      ...chainFilingFields(requestForm),
+    };
     const currentRoute = hosts.resolveRoute(hostRoute.hostId, entry.name);
     if (
       !currentRoute ||

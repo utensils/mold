@@ -48,6 +48,12 @@ export function buildAutoChainRequest(
     ...(req.batch_id !== undefined ? { batch_id: req.batch_id } : {}),
     ...(req.batch_index !== undefined ? { batch_index: req.batch_index } : {}),
     ...(req.batch_count !== undefined ? { batch_count: req.batch_count } : {}),
+    // A stitched long video is still ONE print. Dropping these here would
+    // silently unfile (and untitle) every video long enough to auto-chain,
+    // which is exactly the request most worth naming.
+    ...(req.title !== undefined ? { title: req.title } : {}),
+    ...(req.tags !== undefined ? { tags: req.tags } : {}),
+    ...(req.collection !== undefined ? { collection: req.collection } : {}),
   };
 }
 

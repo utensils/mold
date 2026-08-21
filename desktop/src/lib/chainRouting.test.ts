@@ -326,6 +326,25 @@ describe("automatic chain request projection", () => {
     });
   });
 
+  it("carries the title and creation-time filing onto the stitched print", () => {
+    const decision = decideChainRouting(request.frames, "ltx2", request.model);
+    if (decision.kind !== "chain") throw new Error("expected chain routing");
+    const filed = buildAutoChainRequest(
+      {
+        ...request,
+        title: "Smurf Village",
+        tags: ["smurf-village", "blue"],
+        collection: { name: "River studies" },
+      },
+      decision,
+    );
+    expect(filed).toMatchObject({
+      title: "Smurf Village",
+      tags: ["smurf-village", "blue"],
+      collection: { name: "River studies" },
+    });
+  });
+
   it("reports every advanced field that auto-expand cannot preserve", () => {
     expect(
       unsupportedAutoChainFields({

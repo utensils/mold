@@ -6,6 +6,7 @@ import {
   applyPrefillToForm,
   applyRequestToForm,
   buildRequest,
+  chainFilingFields,
   cloneGenerateForm,
   newGenerateForm,
   normalizeLegacyNegativeSnapshot,
@@ -18,6 +19,7 @@ import {
 import { MAX_LORA_STACK } from "./capabilities";
 import { WAN_FAMILY_DEFAULT_NEGATIVE_PROMPT } from "@studio/lib/negativePrompt";
 import { DEFAULT_EXTEND_OVERLAP_FRAMES } from "@studio/lib/extend";
+import { addTag, emptyFileUnderState, pickCollection } from "@studio/lib/fileUnder";
 import type { ModelEntry, OutputMetadata } from "./api/types";
 import type { GenerationProfileSet, GenerationRecipeProfile } from "@studio/lib/generationProfile";
 
@@ -2541,5 +2543,178 @@ describe("print title", () => {
       [],
     );
     expect(form.title).toBe("Smurf village");
+  });
+});
+
+// ── File under (Create-time Library organization) ──────────────────────────
+
+describe("file under", () => {
+  function baseMetadata(): OutputMetadata {
+    return {
+      prompt: "a smurf village",
+      model: "flux-dev:q8",
+      seed: 7,
+      steps: 4,
+      guidance: 3.5,
+      width: 1024,
+      height: 1024,
+    } as OutputMetadata;
+  }
+
+  it("starts as an empty draft that files nothing", () => {
+    const form = newGenerateForm();
+    expect(form.fileUnder).toEqual(emptyFileUnderState());
+    expect(form.fileUnderMatch).toBeNull();
+    const req = buildRequest(form);
+    expect(req.tags).toBeUndefined();
+    expect(req.collection).toBeUndefined();
+  });
+
+  it("never auto-tags a surface that has not opted in", () => {
+    // The mirror defaults off: a shell with no File under UI must not file a
+    // ghost tag the user was never shown.
+    const form = newGenerateForm();
+    expect(form.fileUnderAutoTag).toBe(false);
+    form.title = "Smurf Village";
+    expect(buildRequest(form).tags).toBeUndefined();
+  });
+
+  it("ships the title ghost tag plus manual tags on the wire", () => {
+    const form = newGenerateForm();
+    form.fileUnderAutoTag = true;
+    form.title = "Smurf Village";
+    form.fileUnder = addTag(form.fileUnder, "blue");
+    expect(buildRequest(form).tags).toEqual(["smurf-village", "blue"]);
+  });
+
+  it("drops the ghost tag when auto-tagging is off", () => {
+    const form = newGenerateForm();
+    form.title = "Smurf Village";
+    form.fileUnderAutoTag = false;
+    form.fileUnder = addTag(form.fileUnder, "blue");
+    expect(buildRequest(form).tags).toEqual(["blue"]);
+  });
+
+  it("files into the collection the title matched, by name only", () => {
+    const form = newGenerateForm();
+    form.title = "Smurf Village";
+    form.fileUnderMatch = { id: "host-local-uuid", name: "Smurf Village", slug: "smurf-village" };
+    expect(buildRequest(form).collection).toEqual({ name: "Smurf Village" });
+  });
+
+  it("an explicit pick outranks the title match", () => {
+    const form = newGenerateForm();
+    form.title = "Smurf Village";
+    form.fileUnderMatch = { id: "x", name: "Smurf Village", slug: "smurf-village" };
+    form.fileUnder = pickCollection(form.fileUnder, { name: "River studies" });
+    expect(buildRequest(form).collection).toEqual({ name: "River studies" });
+  });
+
+  it("survives cloneGenerateForm without sharing arrays (batch siblings)", () => {
+    const form = newGenerateForm();
+    form.fileUnderAutoTag = true;
+    form.title = "Smurf Village";
+    form.fileUnder = addTag(form.fileUnder, "blue");
+    form.fileUnderMatch = { name: "Smurf Village", slug: "smurf-village" };
+    const snapshot = cloneGenerateForm(form);
+    expect(buildRequest(snapshot).tags).toEqual(["smurf-village", "blue"]);
+    expect(buildRequest(snapshot).collection).toEqual({ name: "Smurf Village" });
+    snapshot.fileUnder.manualTags.push("mutated");
+    expect(form.fileUnder.manualTags).toEqual(["blue"]);
+    expect(snapshot.fileUnderMatch).not.toBe(form.fileUnderMatch);
+  });
+
+  it("reuse settings restores recorded tags and the collection", () => {
+    const form = newGenerateForm();
+    form.fileUnderAutoTag = true;
+    applyMetadataToForm(
+      form,
+      {
+        ...baseMetadata(),
+        title: "Smurf Village",
+        tags: ["smurf-village", "blue"],
+        collection: "River studies",
+      },
+      [],
+    );
+    // The ghost still derives from the title; the recorded copy of it must
+    // not come back as a second, manual chip.
+    expect(form.fileUnder.manualTags).toEqual(["blue"]);
+    expect(form.fileUnder.ghostRemoved).toBe(false);
+    expect(buildRequest(form).tags).toEqual(["smurf-village", "blue"]);
+    expect(buildRequest(form).collection).toEqual({ name: "River studies" });
+  });
+
+  it("restores a print that was filed WITHOUT its title tag as ghost-removed", () => {
+    const form = newGenerateForm();
+    form.fileUnderAutoTag = true;
+    applyMetadataToForm(form, { ...baseMetadata(), title: "Smurf Village", tags: ["blue"] }, []);
+    expect(form.fileUnder.ghostRemoved).toBe(true);
+    expect(buildRequest(form).tags).toEqual(["blue"]);
+  });
+
+  it("a legacy print with no recorded filing restores an empty draft", () => {
+    const form = newGenerateForm();
+    form.fileUnder = addTag(form.fileUnder, "stale");
+    applyMetadataToForm(form, { ...baseMetadata(), title: "Smurf Village" }, []);
+    expect(form.fileUnder).toEqual(emptyFileUnderState());
+  });
+
+  it("an exact queued request restores its filing too", () => {
+    const form = newGenerateForm();
+    form.fileUnderAutoTag = true;
+    applyRequestToForm(
+      form,
+      {
+        prompt: "a smurf village",
+        model: "flux-dev:q8",
+        width: 1024,
+        height: 1024,
+        steps: 4,
+        title: "Smurf Village",
+        tags: ["smurf-village", "blue"],
+        collection: { name: "River studies" },
+      },
+      [],
+    );
+    expect(form.fileUnder.manualTags).toEqual(["blue"]);
+    expect(buildRequest(form).collection).toEqual({ name: "River studies" });
+  });
+
+  it("keeps the mirrored auto-tag setting across a wholesale reset", () => {
+    const form = newGenerateForm();
+    form.fileUnderAutoTag = true;
+    form.fileUnder = addTag(form.fileUnder, "blue");
+    resetFormToModelDefaults(form, null);
+    expect(form.fileUnderAutoTag).toBe(true);
+    expect(form.fileUnder).toEqual(emptyFileUnderState());
+  });
+
+  it("carries the title and the filing on the chain-create body", () => {
+    const form = newGenerateForm();
+    form.fileUnderAutoTag = true;
+    form.title = "  Smurf Village  ";
+    form.fileUnder = addTag(form.fileUnder, "blue");
+    form.fileUnderMatch = { name: "Smurf Village", slug: "smurf-village" };
+    expect(chainFilingFields(form)).toEqual({
+      title: "Smurf Village",
+      tags: ["smurf-village", "blue"],
+      collection: { name: "Smurf Village" },
+    });
+  });
+
+  it("leaves every chain filing field absent for an unfiled sequence", () => {
+    expect(chainFilingFields(newGenerateForm())).toEqual({});
+  });
+
+  it("keeps the mirrored auto-tag setting across an exact-request restore", () => {
+    const form = newGenerateForm();
+    form.fileUnderAutoTag = true;
+    applyRequestToForm(
+      form,
+      { prompt: "p", model: "flux-dev:q8", width: 1024, height: 1024, steps: 4 },
+      [],
+    );
+    expect(form.fileUnderAutoTag).toBe(true);
   });
 });
