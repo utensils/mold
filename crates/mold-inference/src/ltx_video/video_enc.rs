@@ -92,6 +92,8 @@ impl VideoMetadata {
     /// carries the same composite `mold:parameters` block still images do.
     fn to_output_metadata(&self) -> mold_core::OutputMetadata {
         mold_core::OutputMetadata {
+            collection: None,
+            tags: None,
             title: None,
             source_fit: None,
             guidance_overrides: None,

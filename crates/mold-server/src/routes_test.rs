@@ -286,6 +286,7 @@ mod tests {
                 }]
             };
             Ok(GenerateResponse {
+                request_warnings: Vec::new(),
                 audio: None,
                 images,
                 generation_time_ms: 1,
@@ -563,6 +564,9 @@ mod tests {
 
     fn route_chain_request() -> ChainRequest {
         ChainRequest {
+            collection: None,
+            tags: None,
+            title: None,
             model: "ltx-2-19b-distilled:fp8".into(),
             stages: vec![route_chain_stage("first shot", TransitionMode::Smooth)],
             motion_tail_frames: 1,
@@ -963,6 +967,8 @@ mod tests {
 
     fn output_metadata(prompt: &str) -> mold_core::OutputMetadata {
         mold_core::OutputMetadata {
+            collection: None,
+            tags: None,
             title: None,
             source_fit: None,
             guidance_overrides: None,
@@ -9588,6 +9594,8 @@ mod tests {
         let db_path = dir.path().join("mold.db");
         let db = MetadataDb::open(&db_path).unwrap();
         let metadata = mold_core::OutputMetadata {
+            collection: None,
+            tags: None,
             title: None,
             source_fit: None,
             guidance_overrides: None,
@@ -10513,6 +10521,8 @@ mod tests {
 
         let db = MetadataDb::open(&dir.path().join("mold.db")).unwrap();
         let metadata = mold_core::OutputMetadata {
+            collection: None,
+            tags: None,
             title: None,
             source_fit: None,
             guidance_overrides: None,
@@ -12062,6 +12072,7 @@ mod tests {
         let waveform = vec![0x89, 0x50, 0x4E, 0x47];
         let wav = b"RIFF....WAVEfmt ".to_vec();
         let response = GenerateResponse {
+            request_warnings: Vec::new(),
             audio: Some(mold_core::AudioData {
                 data: wav.clone(),
                 format: OutputFormat::Wav,
@@ -12122,6 +12133,7 @@ mod tests {
             index: 0,
         };
         let still = GenerateResponse {
+            request_warnings: Vec::new(),
             audio: None,
             images: vec![img()],
             video: None,
@@ -12140,6 +12152,7 @@ mod tests {
         assert_eq!(headers[axum::http::header::CONTENT_TYPE], "image/png");
 
         let clip = GenerateResponse {
+            request_warnings: Vec::new(),
             audio: None,
             images: Vec::new(),
             video: Some(mold_core::VideoData {

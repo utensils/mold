@@ -4,7 +4,7 @@
  * once the OpenAPI harness lands (see desktop/docs/architecture.md §5).
  */
 
-import type { ChainOutputMetadata } from "@studio/lib/api/chainTypes";
+import type { ChainOutputMetadata, ChainRequestWire } from "@studio/lib/api/chainTypes";
 import type { HostMemorySnapshot } from "@studio/lib/hostMemory";
 import type {
   GenerationReference,
@@ -505,6 +505,14 @@ export interface GenerateRequest {
    * server embeds it into `OutputMetadata.title`, seeds the gallery row, and
    * folds a lossy slug into the output filename. Absent = untitled. */
   title?: string;
+  /** Creation-time filing ("File under"): tags applied to the print the
+   * moment it lands. Additive and ABSENT when nothing is filed — never `[]`.
+   * Normalized and capped server-side; `mold_core::MAX_REQUEST_TAGS`. */
+  tags?: string[];
+  /** Creation-time collection. Clients send `{ name }` and let the routed
+   * host get-or-create it by slug, so one request files correctly on any
+   * machine in the fleet; `id` is only ever a host-local `Collection.id`. */
+  collection?: { id?: string; name?: string };
   /** Durable prepared-batch provenance. Index is one-based. */
   batch_id?: string;
   batch_index?: number;
@@ -661,6 +669,12 @@ export interface OutputMetadata {
   prompt: string;
   /** Creation-time print title; the gallery row is the editable authority. */
   title?: string | null;
+  /** Tags the print was filed under at creation, exactly as applied. The
+   * gallery row's tag links are the editable authority once it exists. */
+  tags?: string[] | null;
+  /** Display name of the collection the print was filed into at creation —
+   * never the requested id, and never a name the host did not resolve. */
+  collection?: string | null;
   negative_prompt?: string | null;
   original_prompt?: string | null;
   batch_id?: string | null;
@@ -1037,7 +1051,27 @@ export interface ChainRequest {
   batch_count?: number | null;
   output_mode?: "one-shot" | "sequence" | null;
   placement?: DevicePlacement | null;
+  /** Title for the STITCHED print (mold-core `ChainRequest.title`). An
+   * intermediate clip is a working artifact inside the job dir and never
+   * reaches the gallery, so filing applies to the finished timeline only. */
+  title?: string;
+  /** Creation-time tags for the stitched print. */
+  tags?: string[];
+  /** Creation-time collection for the stitched print, by name. */
+  collection?: { id?: string; name?: string };
 }
+
+/**
+ * The exact `POST /api/chain-jobs` body desktop submits: studio's canonical
+ * clip wire plus the additive creation-time filing the stitched print
+ * carries. Kept here rather than in `@studio` because the shared wire is
+ * every surface's contract and this is the desktop composer's body type.
+ */
+export type ChainCreateRequest = ChainRequestWire & {
+  title?: string;
+  tags?: string[];
+  collection?: { id?: string; name?: string };
+};
 
 /**
  * Auto-expand request accepted by `POST /api/generate/chain/stream`. The
@@ -1066,6 +1100,11 @@ export interface AutoChainRequest {
   batch_index?: number | null;
   batch_count?: number | null;
   output_mode?: "one-shot" | "sequence" | null;
+  /** A stitched long video is still ONE print, so it carries the same title
+   * and creation-time filing an unstitched one-shot would. */
+  title?: string;
+  tags?: string[];
+  collection?: { id?: string; name?: string };
 }
 
 /**

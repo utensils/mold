@@ -1,58 +1,94 @@
 import { describe, expect, it } from "vitest";
 import { suggestedSaveName } from "./saveName";
 
+const META = { model: "flux-dev:q8", seed: 7 };
+
 describe("suggestedSaveName", () => {
-  it("keeps the gallery filename for an untitled print", () => {
-    expect(suggestedSaveName({ filename: "mold-flux-dev-1700000000.png" })).toBe(
-      "mold-flux-dev-1700000000.png",
+  it("labels an untitled print with its model and seed", () => {
+    expect(suggestedSaveName({ filename: "mold-flux-dev-1700000000.png", metadata: META })).toBe(
+      "flux-dev-q8__s7.png",
     );
-    expect(suggestedSaveName({ filename: "mold-flux-dev-1700000000.png", title: "   " })).toBe(
-      "mold-flux-dev-1700000000.png",
-    );
-    expect(suggestedSaveName({ filename: "mold-flux-dev-1700000000.png", title: null })).toBe(
-      "mold-flux-dev-1700000000.png",
-    );
+    expect(
+      suggestedSaveName({
+        filename: "mold-flux-dev-1700000000.png",
+        title: "   ",
+        metadata: META,
+      }),
+    ).toBe("flux-dev-q8__s7.png");
   });
 
-  it("uses the title slug with the print's own extension", () => {
+  it("leads with the title slug", () => {
     expect(
       suggestedSaveName({
         filename: "mold-flux-dev-1700000000.png",
         title: "Smurf Village at Dusk",
+        metadata: META,
       }),
-    ).toBe("smurf-village-at-dusk.png");
-    expect(suggestedSaveName({ filename: "mold-ltx2-1700000000.mp4", title: "Opening shot" })).toBe(
-      "opening-shot.mp4",
-    );
+    ).toBe("smurf-village-at-dusk__flux-dev-q8__s7.png");
+    expect(
+      suggestedSaveName({
+        filename: "mold-ltx2-1700000000.mp4",
+        title: "Opening shot",
+        metadata: { model: "ltx-2-19b-distilled:fp8", seed: 42 },
+      }),
+    ).toBe("opening-shot__ltx-2-19b-distilled-fp8__s42.mp4");
   });
 
-  it("falls back to the gallery filename when nothing of the title survives slugging", () => {
-    expect(suggestedSaveName({ filename: "mold-flux-dev-1700000000.png", title: "日本語" })).toBe(
+  it("drops a title that slugs to nothing rather than writing it", () => {
+    expect(
+      suggestedSaveName({
+        filename: "mold-flux-dev-1700000000.png",
+        title: "日本語",
+        metadata: META,
+      }),
+    ).toBe("flux-dev-q8__s7.png");
+  });
+
+  it("keeps the gallery filename when the row carries no usable provenance", () => {
+    expect(suggestedSaveName({ filename: "mold-flux-dev-1700000000.png" })).toBe(
       "mold-flux-dev-1700000000.png",
     );
+    expect(
+      suggestedSaveName({ filename: "mold-flux-dev-1700000000.png", metadata: { seed: null } }),
+    ).toBe("mold-flux-dev-1700000000.png");
+  });
+
+  it("keeps a full-range u64 seed exactly", () => {
+    expect(
+      suggestedSaveName({
+        filename: "mold-flux-dev-1700000000.png",
+        metadata: { model: "flux-dev", seed: "18446744073709551615" },
+      }),
+    ).toBe("flux-dev__s18446744073709551615.png");
   });
 
   it("applies an optional suffix before the extension and an explicit extension override", () => {
     expect(
       suggestedSaveName(
-        { filename: "mold-flux-dev-1700000000.png", title: "Smurf village" },
+        { filename: "mold-flux-dev-1700000000.png", title: "Smurf village", metadata: META },
         { suffix: "-upscaled" },
       ),
-    ).toBe("smurf-village-upscaled.png");
+    ).toBe("smurf-village__flux-dev-q8__s7-upscaled.png");
     expect(
       suggestedSaveName(
-        { filename: "mold-ltx2-1700000000.mp4", title: "Opening shot" },
+        {
+          filename: "mold-ltx2-1700000000.mp4",
+          title: "Opening shot",
+          metadata: { model: "ltx2", seed: 1 },
+        },
         { extension: "webm" },
       ),
-    ).toBe("opening-shot.webm");
-    // Untitled + suffix keeps today's `${stem}${suffix}.${ext}` shape.
+    ).toBe("opening-shot__ltx2__s1.webm");
+    // A provenance-less row keeps today's `${stem}${suffix}.${ext}` shape.
     expect(
       suggestedSaveName({ filename: "mold-flux-dev-1700000000.png" }, { suffix: "-upscaled" }),
     ).toBe("mold-flux-dev-1700000000-upscaled.png");
   });
 
   it("handles filenames without an extension", () => {
-    expect(suggestedSaveName({ filename: "mystery", title: "Named" })).toBe("named");
+    expect(suggestedSaveName({ filename: "mystery", title: "Named", metadata: META })).toBe(
+      "named__flux-dev-q8__s7",
+    );
     expect(suggestedSaveName({ filename: "mystery" })).toBe("mystery");
   });
 
@@ -60,8 +96,8 @@ describe("suggestedSaveName", () => {
     expect(
       suggestedSaveName({
         filename: "mold-flux-dev-1700000000.png",
-        metadata: { title: "From metadata" },
+        metadata: { ...META, title: "From metadata" },
       }),
-    ).toBe("from-metadata.png");
+    ).toBe("from-metadata__flux-dev-q8__s7.png");
   });
 });

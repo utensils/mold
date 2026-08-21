@@ -103,7 +103,7 @@ const purgeLabel = computed(() =>
     : "",
 );
 const downloadName = computed(() =>
-  props.item ? downloadFilename(props.item.title, props.item.filename) : "",
+  props.item ? downloadFilename(props.item) : "",
 );
 function onRestore() {
   menuOpen.value = false;

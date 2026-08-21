@@ -1,4 +1,5 @@
 import { defineStore } from "pinia";
+import { emptyFileUnderState } from "@studio/lib/fileUnder";
 import { applyModelDefaults, newGenerateForm } from "../lib/generateForm";
 import type { ModelEntry } from "../lib/api/types";
 
@@ -25,6 +26,10 @@ export const useGenerateFormStore = defineStore("generateForm", {
       // A fresh print is untitled. This is the ONLY place the title is
       // cleared implicitly — generating keeps it so siblings share the name.
       this.form.title = "";
+      // …and unfiled: "File under" is a per-print choice, and the ghost chip
+      // it re-derives from the (now empty) title is nothing.
+      this.form.fileUnder = emptyFileUnderState();
+      this.form.fileUnderMatch = null;
       // A cleared composer starts from the model's advertised default
       // negative (wan), never the explicit empty opt-out.
       this.form.negativePrompt = this.form.negativePromptDefault;

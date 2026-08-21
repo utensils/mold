@@ -121,7 +121,9 @@ import {
 import {
   applyPrefillToForm,
   buildRequest,
+  chainFilingFields,
   cloneGenerateForm,
+  keepingPrintIdentity,
   normalizeLegacyNegativeSnapshot,
 } from "../lib/generateForm";
 import { composeStyle, mergeStyleNegative, styleHint } from "../lib/stylePresets";
@@ -173,7 +175,12 @@ import {
   recordPromptHistoryCache,
 } from "@studio/lib/promptHistoryCache";
 import { randomSeed } from "../stores/generation";
-import type { CompleteEvent, GenerateRequest, OutputMetadata } from "../lib/api/types";
+import type {
+  ChainCreateRequest,
+  CompleteEvent,
+  GenerateRequest,
+  OutputMetadata,
+} from "../lib/api/types";
 import {
   DEFAULT_VIDEO_EXPORT_CAPABILITIES,
   videoExportFilename,
@@ -1745,11 +1752,16 @@ async function generateSequence() {
     const openingImage = openingSnapshot
       ? { ...openingSnapshot, base64: requestForm.sourceImage }
       : null;
-    const request = buildChainRequest(sequenceParams(requestForm, entry), clips, {
-      motionTailFrames,
-      enableAudio,
-      openingImage,
-    });
+    // The stitched print is the only artifact a sequence puts in the gallery,
+    // so it is what carries the header title and the File under choice.
+    const request: ChainCreateRequest = {
+      ...buildChainRequest(sequenceParams(requestForm, entry), clips, {
+        motionTailFrames,
+        enableAudio,
+        openingImage,
+      }),
+      ...chainFilingFields(requestForm),
+    };
     const currentRoute = hosts.resolveRoute(hostRoute.hostId, entry.name);
     if (
       !currentRoute ||
@@ -2033,7 +2045,14 @@ async function loadTemplate(template: GenerationTemplate) {
   // different) family can't use after the source snapshot is restored. A
   // pre-#787 template lacking `negativePromptDefault` is normalized first so
   // its empty negative reads as "untouched", not the explicit "" opt-out.
-  Object.assign(form, normalizeLegacyNegativeSnapshot(hydrated.form, installedModels.value));
+  //
+  // A template is a set of PARAMETERS. Its snapshot carries whatever title and
+  // filing the print it was saved from happened to have (`stripTemplateForm`
+  // only strips media), so applying it wholesale would rename and re-file the
+  // print in progress and flip the Settings ▸ Library auto-tag mirror.
+  keepingPrintIdentity(form, () =>
+    Object.assign(form, normalizeLegacyNegativeSnapshot(hydrated.form, installedModels.value)),
+  );
   if (form.model && !findInstalledModel(installedModels.value, form.model)) {
     toasts.push(`Model "${form.model}" isn't installed — settings applied anyway.`);
   }

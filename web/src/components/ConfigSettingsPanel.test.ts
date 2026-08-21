@@ -1,6 +1,8 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import ConfigSettingsPanel from "./ConfigSettingsPanel.vue";
+import { AUTO_TAG_SETTING_WEB } from "@studio/lib/fileUnder";
+import { autoTagTitle, reloadAutoTagTitle } from "../lib/fileUnder";
 
 const rows = [
   { key: "models_dir", value: "/models", source: "file" },
@@ -90,7 +92,9 @@ describe("ConfigSettingsPanel", () => {
     await flushPromises();
 
     const groups = wrapper.findAll("[data-test='config-group']");
-    expect(groups).toHaveLength(4);
+    // Four server sections plus Library, which this host contributes no rows
+    // to but which still carries the browser-local auto-tag preference.
+    expect(groups).toHaveLength(5);
     for (const group of groups) {
       expect(group.find(".config-group__plate").exists()).toBe(true);
       expect(group.find(".config-group__summary").text()).not.toBe("");
@@ -211,5 +215,61 @@ describe("ConfigSettingsPanel", () => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ name: "drafts" }),
     });
+  });
+
+  it("offers the browser-local auto-tag preference in Settings ▸ Library", async () => {
+    localStorage.clear();
+    reloadAutoTagTitle();
+    const wrapper = mount(ConfigSettingsPanel);
+    await flushPromises();
+
+    const toggle = wrapper.get('[data-test="config-auto-tag-title"]');
+    expect(wrapper.text()).toContain("Tag new prints with their title");
+    expect(wrapper.text()).toContain("it never rewrites existing ones");
+    // On by default, and stored in this browser rather than on the host —
+    // so there is nothing to Save or Reset.
+    expect((toggle.element as HTMLInputElement).checked).toBe(true);
+    expect(wrapper.get('[data-test="source-auto-tag-title"]').text()).toBe(
+      "this browser",
+    );
+    expect(
+      wrapper.find('[data-test="save-mold.create.autoTagTitle.v1"]').exists(),
+    ).toBe(false);
+
+    await toggle.setValue(false);
+    expect(autoTagTitle.value).toBe(false);
+    expect(localStorage.getItem(AUTO_TAG_SETTING_WEB)).toBe("false");
+  });
+
+  it("keeps the Library heading for the local row when the host has no Library config", async () => {
+    globalThis.fetch = vi.fn(async (input, init) => {
+      const url = String(input);
+      if (url === "/api/config" && !init?.method)
+        return response({
+          profile: "default",
+          entries: [{ key: "models_dir", value: "/models", source: "file" }],
+        });
+      return response({ profiles: ["default"], active: "default" });
+    }) as typeof fetch;
+    const wrapper = mount(ConfigSettingsPanel);
+    await flushPromises();
+    expect(wrapper.find('[data-test="config-auto-tag-title"]').exists()).toBe(
+      true,
+    );
+  });
+
+  it("hides the local row when it does not match the settings search", async () => {
+    const wrapper = mount(ConfigSettingsPanel);
+    await flushPromises();
+    await wrapper
+      .get('[data-test="config-search"]')
+      .setValue("prompt expansion");
+    expect(wrapper.find('[data-test="config-auto-tag-title"]').exists()).toBe(
+      false,
+    );
+    await wrapper.get('[data-test="config-search"]').setValue("title");
+    expect(wrapper.find('[data-test="config-auto-tag-title"]').exists()).toBe(
+      true,
+    );
   });
 });

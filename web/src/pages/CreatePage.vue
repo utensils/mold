@@ -16,6 +16,7 @@ import CreateModelPicker from "../components/create/CreateModelPicker.vue";
 import AdvancedDrawer from "../components/create/AdvancedDrawer.vue";
 import SourceMediaPanel from "../components/create/SourceMediaPanel.vue";
 import IdentityPanel from "../components/create/IdentityPanel.vue";
+import FileUnderGroup from "../components/create/FileUnderGroup.vue";
 import SequenceOpeningImagePanel from "../components/create/SequenceOpeningImagePanel.vue";
 import ActivityStrip from "../components/create/ActivityStrip.vue";
 import EstimateBadge from "../components/create/EstimateBadge.vue";
@@ -216,6 +217,8 @@ import {
   type InfeasibleHost,
 } from "../composables/useHostRouting";
 import { usePullResume } from "../composables/usePullResume";
+import { useFileUnder } from "../composables/useFileUnder";
+import { autoTagTitle } from "../lib/fileUnder";
 import ModelInstallTargetDialog from "../components/models/ModelInstallTargetDialog.vue";
 import { profileConflictMessage } from "@studio/lib/profileFleet";
 import { generationCapabilitiesForFamily } from "../lib/generateCapabilities";
@@ -333,6 +336,30 @@ function onTitleInput(value: string) {
   const result = validatePrintTitle(value);
   titleError.value = result.ok ? "" : result.reason;
 }
+
+// ── File under (Create-time Library organization) ─────────────────────
+// The group is capability-gated per machine: `useFileUnder` reads the same
+// per-host organization snapshot the Library builds, so a fleet whose
+// machines cannot file (older server, MOLD_DB_DISABLE) renders no dead
+// controls. Under Auto / Most capable there is no pinned machine, so the
+// gate asks whether ANY machine in the fleet can file.
+const fileUnder = useFileUnder({
+  title: () => form.state.value.title,
+  targetHostId: () => {
+    const selection = routing.targetId.value;
+    return selection === AUTO_TARGET_ID || selection === CAPABLE_TARGET_ID
+      ? null
+      : selection;
+  },
+});
+/** Frozen so the "files as …" preview does not tick while it is on screen. */
+const fileUnderStamp = Date.now();
+// Re-probe when the fleet changes: a machine that just connected may be the
+// one that can file, and its collections join the picker.
+watch(
+  () => routing.hosts.value.map((host) => host.id).join(","),
+  () => void fileUnder.refresh().catch(() => {}),
+);
 
 // ── Expansion routing (issue #1162 §5) ────────────────────────────────
 // The generation router is model-aware about the CHECKPOINT and knows nothing
@@ -1934,6 +1961,14 @@ async function onSubmitSequenceInner(
       "Choose an installed sequence-capable video model on the selected machine.";
     return;
   }
+  // The stitched print carries a title and its filing, so an invalid title
+  // blocks a sequence exactly as it blocks a one-shot.
+  const sequenceTitle = validatePrintTitle(form.state.value.title ?? "");
+  if (!sequenceTitle.ok) {
+    titleError.value = sequenceTitle.reason;
+    composerError.value = sequenceTitle.reason;
+    return;
+  }
   // Freeze every request-affecting value at the click boundary. Source
   // preprocessing may take minutes; edits during that await belong to the
   // next submission and must not create a hybrid request.
@@ -2108,6 +2143,8 @@ async function onSubmitSequenceInner(
       );
     }
     route = feasibility.route;
+    // Title and filing describe the STITCHED print — a sequence renders one
+    // print, and the clips it stitches are never filed individually.
     const operationId = createUuid();
     sequenceCancellationRequest = () =>
       chainJobs.cancelMutation(
@@ -2118,7 +2155,11 @@ async function onSubmitSequenceInner(
       );
     const jobId = await chainJobs.create(
       route.hostId,
-      req,
+      {
+        ...req,
+        ...(sequenceTitle.value ? { title: sequenceTitle.value } : {}),
+        ...fileUnder.requestFields(),
+      },
       route.target,
       operationId,
     );
@@ -2287,6 +2328,8 @@ function applySequenceReuse(metadata: OutputMetadata) {
   void restoreReusedIdentityPhoto(metadata);
   // Reusing a sequence must not overwrite the parked one-shot prompt.
   form.state.value.prompt = oneShotPrompt;
+  // Restore what the stitched print was actually filed under.
+  fileUnder.restoreFromMetadata(metadata);
 
   // The live tail belongs to the model selected NOW, not the recorded one.
   const { clips, raised } = clampClipsToMotionTail(
@@ -2501,6 +2544,7 @@ function applyGenerationHandoff() {
     models: models.value,
   });
   void restoreReusedIdentityPhoto(metadata);
+  fileUnder.restoreFromMetadata(metadata);
   noticeFirstLastFrameRestore(metadata);
 }
 watch(pendingGenerationHandoff(), applyGenerationHandoff, { immediate: true });
@@ -2532,6 +2576,9 @@ function onAppendPromptPhrase(phrase: string) {
 function onNewPrint() {
   const model = currentModel.value;
   if (model) form.applyModelDefaults(model);
+  // A new print files itself from scratch — the ghost chip and the title
+  // match re-derive from whatever this one is called.
+  fileUnder.reset();
   form.state.value.prompt = "";
   form.state.value.originalPrompt = null;
   form.state.value.stylePreset = null;
@@ -2984,15 +3031,14 @@ function validateSubmit(): boolean {
   }
   // An invalid print title blocks the submit like every other inline
   // validation — `toRequest` would silently drop it otherwise, generating
-  // an untitled print despite a populated field (codex review). Sequences
-  // carry no title slot on the wire, so a stale one never blocks them.
-  if (!sequenceMode.value) {
-    const titleCheck = validatePrintTitle(form.state.value.title ?? "");
-    if (!titleCheck.ok) {
-      titleError.value = titleCheck.reason;
-      composerError.value = titleCheck.reason;
-      return false;
-    }
+  // an untitled print despite a populated field (codex review). A sequence
+  // now carries a title too (it renders one stitched print), so the check
+  // applies to both outputs.
+  const titleCheck = validatePrintTitle(form.state.value.title ?? "");
+  if (!titleCheck.ok) {
+    titleError.value = titleCheck.reason;
+    composerError.value = titleCheck.reason;
+    return false;
   }
   const h3Error = h3FrameError.value;
   if (h3Error) {
@@ -3449,10 +3495,16 @@ function requestCopyCount(request: GenerateRequestWire): number {
 }
 
 function submitRequestCopies(
-  request: GenerateRequestWire,
+  base: GenerateRequestWire,
   decision: ReturnType<typeof decideGenerateRequestRouting>,
   route: HostRoute | null,
 ): void {
+  // Batch N shares ONE File under choice, exactly like it shares the prompt
+  // and the title: every sibling lands with the same tags and collection.
+  const request: GenerateRequestWire = {
+    ...base,
+    ...fileUnder.requestFields(),
+  };
   const copies = requestCopyCount(request);
   if (copies === 1) {
     stream.submit(request, decision, normalizeSubmitRoute(route, request));
@@ -4146,6 +4198,9 @@ async function queueVariations() {
       // per-job image count.
       const request: GenerateRequestWire = {
         ...prepared.baseRequest,
+        // Prepared siblings share one filing decision, read at queue time —
+        // the reviewed prompts are what was frozen, not where they file.
+        ...fileUnder.requestFields(),
         prompt,
         batch_size: 1,
         original_prompt: prepared.rootPrompt ?? prepared.sourcePrompt,
@@ -4315,6 +4370,7 @@ function recreateFromGallery(item: GalleryImage) {
     models: models.value,
   });
   void restoreReusedIdentityPhoto(item.metadata);
+  fileUnder.restoreFromMetadata(item.metadata);
   noticeFirstLastFrameRestore(item.metadata);
 }
 
@@ -4594,6 +4650,8 @@ onMounted(async () => {
   // Models arrive from the host-routing poll (every machine, not just this
   // one); the watcher above homes the form onto one that's actually installed.
   void routing.refresh();
+  // Filing capability, the fleet's tag vocabulary, and its collections.
+  void fileUnder.refresh().catch(() => {});
   try {
     galleryEntries.value = await listGallery();
   } catch (e) {
@@ -4664,10 +4722,10 @@ onBeforeUnmount(() => {
         <div class="flex items-center gap-2">
           <!-- Print title (D5): a real field bound to the form, not a
                constant. Rides every one-shot request as `title`; empty is
-               untitled (placeholder, never a literal). Sequences carry no
-               title slot on the wire yet, so the field steps aside there. -->
+               untitled (placeholder, never a literal). A sequence renders
+               ONE stitched print, and the chain wire now carries a title —
+               so the field applies to both outputs. -->
           <label
-            v-if="!sequenceMode"
             class="flex min-w-0 flex-1 items-center gap-2"
             data-test="print-title-field"
           >
@@ -4676,7 +4734,9 @@ onBeforeUnmount(() => {
               :value="form.state.value.title ?? ''"
               type="text"
               maxlength="160"
-              placeholder="Untitled print"
+              :placeholder="
+                sequenceMode ? 'Untitled sequence' : 'Untitled print'
+              "
               aria-label="Print title"
               class="w-full min-w-0 max-w-[28rem] rounded-control border border-transparent bg-transparent px-2 py-1 font-display text-[15px] font-semibold text-ink outline-none transition placeholder:font-medium placeholder:text-ink-3 hover:border-ce focus:border-safelight"
               data-test="print-title"
@@ -4690,7 +4750,6 @@ onBeforeUnmount(() => {
               >{{ titleError }}</span
             >
           </label>
-          <div v-else class="flex-1" />
           <div ref="templatesHost" class="relative">
             <button
               type="button"
@@ -5001,7 +5060,20 @@ onBeforeUnmount(() => {
                   @open-advanced="openAdvanced"
                   @reset-settings="onResetSettings"
                   @canvas-intent="setCanvasIntent"
-                />
+                >
+                  <template v-if="fileUnder.available.value" #file-under>
+                    <FileUnderGroup
+                      v-model:state="fileUnder.state.value"
+                      :title="form.state.value.title"
+                      :auto-tag="autoTagTitle"
+                      :suggestions="fileUnder.suggestions.value"
+                      :collections="fileUnder.collections.value"
+                      :model="form.state.value.model"
+                      :ext="form.state.value.outputFormat"
+                      :timestamp="fileUnderStamp"
+                    />
+                  </template>
+                </ControlsAside>
                 <SourceMediaPanel
                   v-if="!sequenceMode"
                   v-model="form.state.value"
@@ -5230,7 +5302,20 @@ onBeforeUnmount(() => {
           @open-advanced="openAdvanced"
           @reset-settings="onResetSettings"
           @canvas-intent="setCanvasIntent"
-        />
+        >
+          <template v-if="fileUnder.available.value" #file-under>
+            <FileUnderGroup
+              v-model:state="fileUnder.state.value"
+              :title="form.state.value.title"
+              :auto-tag="autoTagTitle"
+              :suggestions="fileUnder.suggestions.value"
+              :collections="fileUnder.collections.value"
+              :model="form.state.value.model"
+              :ext="form.state.value.outputFormat"
+              :timestamp="fileUnderStamp"
+            />
+          </template>
+        </ControlsAside>
         <!-- Source media in the primary form: the model dictates whether
              (and how) it renders, exactly like resolutions. -->
         <SourceMediaPanel

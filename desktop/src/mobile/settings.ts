@@ -7,12 +7,18 @@ export interface MobileSettings {
   theme: Theme;
   themeFamily: ThemeFamily;
   autoSavePhotos: boolean;
+  /** Settings ▸ Library "Tag new prints with their title" — the mirror the
+   * Create form reads into `GenerateForm.fileUnderAutoTag`. On by default,
+   * because the tag it files is always visible as the removable ghost chip
+   * before Generate; a saved opt-out is preserved verbatim. */
+  autoTagTitle: boolean;
 }
 
 export const DEFAULT_MOBILE_SETTINGS: Readonly<MobileSettings> = {
   theme: "system",
   themeFamily: "safelight",
   autoSavePhotos: true,
+  autoTagTitle: true,
 };
 
 type SettingsStorage = Pick<Storage, "getItem" | "setItem">;
@@ -67,6 +73,12 @@ export function loadMobileSettings(
         typeof parsed.autoSavePhotos === "boolean"
           ? parsed.autoSavePhotos
           : DEFAULT_MOBILE_SETTINGS.autoSavePhotos,
+      // Absent on every install saved before File under shipped: that is the
+      // migration, and it lands on the product default rather than off.
+      autoTagTitle:
+        typeof parsed.autoTagTitle === "boolean"
+          ? parsed.autoTagTitle
+          : DEFAULT_MOBILE_SETTINGS.autoTagTitle,
     };
   } catch {
     return { ...DEFAULT_MOBILE_SETTINGS };
@@ -124,6 +136,8 @@ export function updateMobileSettings(
     themeFamily: isThemeFamily(patch.themeFamily) ? patch.themeFamily : current.themeFamily,
     autoSavePhotos:
       typeof patch.autoSavePhotos === "boolean" ? patch.autoSavePhotos : current.autoSavePhotos,
+    autoTagTitle:
+      typeof patch.autoTagTitle === "boolean" ? patch.autoTagTitle : current.autoTagTitle,
   };
   saveMobileSettings(next, storage);
   applyMobileSettings(next, nativeInvoke);

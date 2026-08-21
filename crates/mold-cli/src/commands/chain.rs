@@ -328,6 +328,9 @@ pub(crate) struct ChainHdrInputs {
 impl ChainInputs {
     pub(crate) fn to_chain_request(&self) -> ChainRequest {
         ChainRequest {
+            collection: None,
+            tags: None,
+            title: None,
             model: self.model.clone(),
             stages: Vec::new(),
             motion_tail_frames: self.motion_tail,
@@ -497,7 +500,12 @@ async fn run_chain_remote(client: &MoldClient, req: &ChainRequest) -> Result<Vid
     let _ = render.await;
 
     match stream_result {
-        Ok(Some(resp)) => Ok(resp.video),
+        Ok(Some(resp)) => {
+            // A sequence's filing rides the stitched print, so a host that
+            // could not apply it says so on the same header a one-shot uses.
+            crate::commands::generate::report_request_warnings(&resp.request_warnings);
+            Ok(resp.video)
+        }
         Ok(None) => {
             // Server predates chain endpoint; fall back to non-streaming.
             status!(
@@ -505,6 +513,7 @@ async fn run_chain_remote(client: &MoldClient, req: &ChainRequest) -> Result<Vid
                 theme::prefix_warning(),
             );
             let resp = client.generate_chain(req).await?;
+            crate::commands::generate::report_request_warnings(&resp.request_warnings);
             Ok(resp.video)
         }
         Err(e) => Err(e),
@@ -1276,6 +1285,9 @@ pub(crate) fn build_request_from_script(
     script: &mold_core::chain::ChainScript,
 ) -> anyhow::Result<ChainRequest> {
     Ok(ChainRequest {
+        collection: None,
+        tags: None,
+        title: None,
         model: script.chain.model.clone(),
         stages: script.stages.clone(),
         motion_tail_frames: script.chain.motion_tail_frames,
@@ -1389,6 +1401,9 @@ pub async fn run_from_sugar(
 
     // Geometry, timing, and the denoise recipe all come from the model.
     let req = ChainRequest {
+        collection: None,
+        tags: None,
+        title: None,
         model: model.clone(),
         stages,
         motion_tail_frames: motion_tail,
@@ -1646,6 +1661,9 @@ mod tests {
     /// are always spelled out at the call site.
     fn empty_chain_request() -> ChainRequest {
         ChainRequest {
+            collection: None,
+            tags: None,
+            title: None,
             model: String::new(),
             stages: vec![],
             motion_tail_frames: 0,
@@ -2230,6 +2248,9 @@ mod tests {
     #[test]
     fn exact_fit_shrinks_the_last_stage_to_the_requested_total() {
         let mut req = ChainRequest {
+            collection: None,
+            tags: None,
+            title: None,
             model: "ltx-2.3-22b-distilled:fp8".into(),
             stages: Vec::new(),
             motion_tail_frames: 17,
@@ -2282,6 +2303,9 @@ mod tests {
             for total in (105..=1537).step_by(8) {
                 let clip = 97u32;
                 let mut req = ChainRequest {
+                    collection: None,
+                    tags: None,
+                    title: None,
                     model: "ltx-2.3-22b-distilled:fp8".into(),
                     stages: Vec::new(),
                     motion_tail_frames: tail,
@@ -2336,6 +2360,9 @@ mod tests {
     #[test]
     fn exact_fit_refuses_a_layout_the_lattice_cannot_close() {
         let mut req = ChainRequest {
+            collection: None,
+            tags: None,
+            title: None,
             model: "ltx-2.3-22b-distilled:fp8".into(),
             stages: Vec::new(),
             motion_tail_frames: 0,

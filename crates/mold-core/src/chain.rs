@@ -226,6 +226,29 @@ pub struct ChainRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placement: Option<DevicePlacement>,
 
+    /// User-authored title for the **stitched** print. Validated by
+    /// [`crate::validate_print_title`] at submission, embedded into the
+    /// stitched output's `OutputMetadata.title`, seeded into its gallery row,
+    /// and folded into its filename as a lossy `~slug` exactly like a
+    /// one-shot. Additive; absent means untitled.
+    ///
+    /// A sequence has one print, so this titles that print — never an
+    /// intermediate clip, which is a working artifact inside the job dir and
+    /// never reaches the gallery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(example = "Smurf village at dusk")]
+    pub title: Option<String>,
+
+    /// Tags to file the **stitched** print under. Same contract, cap, and
+    /// normalization as `GenerateRequest.tags`. Additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<String>>,
+
+    /// Collection to file the **stitched** print into. Same contract as
+    /// `GenerateRequest.collection`. Additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collection: Option<crate::CollectionRef>,
+
     /// Original source prompt shared by a client-prepared sibling batch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub original_prompt: Option<String>,
@@ -459,6 +482,13 @@ pub struct ChainResponse {
     /// Reserved for sub-project D; `None` in this release.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vram_estimate: Option<VramEstimate>,
+
+    /// Advisories the server attached to this response — see
+    /// [`crate::GenerateResponse::request_warnings`]. For a chain the one that
+    /// matters is a stitched-print filing the host could not apply.
+    /// Populated by [`crate::MoldClient`] from `x-mold-request-warning`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub request_warnings: Vec<String>,
 }
 
 /// SSE completion event for a successful chain run. Streamed as the final
@@ -706,7 +736,14 @@ impl ChainRequest {
                 .join("\n")
         };
         GenerateRequest {
-            title: None,
+            // A sequence has exactly one gallery print — the stitched output.
+            // Its title and filing come from the chain request and ride the
+            // same `OutputMetadata` plumbing as a one-shot's, which is why
+            // they belong on the synthetic request rather than being stamped
+            // onto the metadata afterwards.
+            collection: self.collection.clone(),
+            tags: self.tags.clone(),
+            title: self.title.clone(),
             source_fit: None,
             hdr_exr_dir: None,
             hdr_exr_full_float: false,
@@ -871,6 +908,34 @@ impl ChainRequest {
             composition,
         )
         .map_err(MoldError::Validation)?;
+
+        // The stitched print's title and filing are validated here, on the
+        // same normalise pass every chain entry point runs, so a bad tag is
+        // refused before a durable job dir exists. The filing is also
+        // MATERIALIZED: the manifest stores this request verbatim and
+        // `stitched_output_metadata` embeds it, so leaving raw spellings here
+        // would put a different filing in the print's provenance than the one
+        // the row receives — and a chain's request outlives the submission,
+        // so the divergence survives every resume.
+        if let Some(title) = self.title.as_deref() {
+            crate::validate_print_title(title).map_err(MoldError::Validation)?;
+        }
+        let organization =
+            crate::validate_request_organization(self.tags.as_deref(), self.collection.as_ref())
+                .map_err(MoldError::Validation)?;
+        if self.tags.is_some() {
+            self.tags = (!organization.tags.is_empty()).then_some(organization.tags);
+        }
+        if let Some(Ok(name)) = organization.collection {
+            let id = self
+                .collection
+                .as_ref()
+                .and_then(|reference| reference.id.clone());
+            self.collection = Some(crate::CollectionRef {
+                id,
+                name: Some(name),
+            });
+        }
 
         if self.stages.is_empty() {
             let prompt = self.prompt.take().ok_or_else(|| {
@@ -1339,6 +1404,9 @@ mod tests {
         source_image: Option<Vec<u8>>,
     ) -> ChainRequest {
         ChainRequest {
+            collection: None,
+            tags: None,
+            title: None,
             model: "ltx-2-19b-distilled:fp8".into(),
             stages: Vec::new(),
             motion_tail_frames,
@@ -1367,6 +1435,9 @@ mod tests {
 
     fn canonical_request(stages: Vec<ChainStage>, motion_tail_frames: u32) -> ChainRequest {
         ChainRequest {
+            collection: None,
+            tags: None,
+            title: None,
             model: "ltx-2-19b-distilled:fp8".into(),
             stages,
             motion_tail_frames,
@@ -1843,6 +1914,9 @@ mod tests {
     #[test]
     fn chain_script_projects_from_request() {
         let req = ChainRequest {
+            collection: None,
+            tags: None,
+            title: None,
             model: "ltx-2-19b-distilled:fp8".into(),
             stages: vec![ChainStage {
                 prompt: "a".into(),
@@ -2028,6 +2102,9 @@ mod tests {
 
     fn stage_list_request(stages: Vec<(TransitionMode, u32, Option<u32>)>) -> ChainRequest {
         ChainRequest {
+            collection: None,
+            tags: None,
+            title: None,
             model: "ltx-2-19b-distilled:fp8".into(),
             stages: stages
                 .into_iter()
@@ -2206,6 +2283,128 @@ mod tests {
         assert_eq!(metadata.batch_id.as_deref(), Some("prepared-batch-1"));
         assert_eq!(metadata.batch_index, Some(2));
         assert_eq!(metadata.batch_count, Some(3));
+    }
+
+    /// A sequence has exactly one gallery print, so the chain request's
+    /// title and filing land on the stitched output's metadata exactly the
+    /// way a one-shot's do — never on an intermediate clip, which never
+    /// reaches the gallery at all.
+    #[test]
+    fn chain_title_and_filing_reach_the_stitched_output_metadata() {
+        let mut req = auto_expand_request("a cat", 190, 97, 17, None);
+        req.title = Some("Smurf Village".into());
+        req.tags = Some(vec!["smurfs".into(), "village".into()]);
+        req.collection = Some(crate::CollectionRef::by_name("Sequences"));
+        let req = req.normalise().unwrap();
+
+        let synth = req.synthetic_generate_request(OutputFormat::Mp4, 190, 24);
+        assert_eq!(synth.title.as_deref(), Some("Smurf Village"));
+        assert_eq!(
+            synth.tags.as_deref(),
+            Some(["smurfs".to_string(), "village".to_string()].as_slice())
+        );
+        assert_eq!(
+            synth.collection,
+            Some(crate::CollectionRef::by_name("Sequences"))
+        );
+
+        let metadata = req.stitched_output_metadata(OutputFormat::Mp4, 190, None);
+        assert_eq!(metadata.title.as_deref(), Some("Smurf Village"));
+        assert_eq!(
+            metadata.tags.as_deref(),
+            Some(["smurfs".to_string(), "village".to_string()].as_slice())
+        );
+        assert_eq!(metadata.collection.as_deref(), Some("Sequences"));
+    }
+
+    /// The three fields are additive: an older client's body omits them and
+    /// an untitled, unfiled sequence serializes exactly as before.
+    #[test]
+    fn chain_title_and_filing_are_additive_on_the_wire() {
+        let bare = auto_expand_request("a cat", 190, 97, 17, None);
+        assert_eq!(bare.title, None);
+        assert_eq!(bare.tags, None);
+        assert_eq!(bare.collection, None);
+        let wire = serde_json::to_value(&bare).unwrap();
+        for key in ["title", "tags", "collection"] {
+            assert!(wire.get(key).is_none(), "{key} should be omitted: {wire}");
+        }
+        let metadata =
+            bare.normalise()
+                .unwrap()
+                .stitched_output_metadata(OutputFormat::Mp4, 190, None);
+        assert_eq!(metadata.title, None);
+        assert_eq!(metadata.tags, None);
+        assert_eq!(metadata.collection, None);
+    }
+
+    /// `normalise` is the one gate every chain entry point runs, so a bad
+    /// title or tag is refused before a durable job dir is created.
+    #[test]
+    fn chain_normalise_refuses_an_invalid_title_or_filing() {
+        let with = |mutate: fn(&mut ChainRequest)| {
+            let mut req = auto_expand_request("a cat", 190, 97, 17, None);
+            mutate(&mut req);
+            req.normalise()
+        };
+
+        assert!(with(|req| req.title = Some("line\nbreak".into())).is_err());
+        assert!(
+            with(|req| req.title = Some("x".repeat(crate::PRINT_TITLE_MAX_CHARS + 1))).is_err()
+        );
+        assert!(with(|req| req.tags = Some(vec!["nul\0".into()])).is_err());
+        assert!(with(|req| req.collection = Some(crate::CollectionRef::default())).is_err());
+
+        // …and valid values pass through normalise untouched.
+        let ok = with(|req| {
+            req.title = Some("  Smurf Village  ".into());
+            req.tags = Some(vec!["smurfs".into()]);
+            req.collection = Some(crate::CollectionRef::by_name("Sequences"));
+        })
+        .unwrap();
+        assert_eq!(ok.title.as_deref(), Some("  Smurf Village  "));
+    }
+
+    /// `normalise` materializes the stitched print's filing, not just checks
+    /// it. The manifest keeps this request verbatim and
+    /// `stitched_output_metadata` embeds it, so a raw spelling left here
+    /// would record a different filing than the row receives — and it would
+    /// survive every resume of the job.
+    #[test]
+    fn chain_normalise_materializes_the_filing_into_the_request() {
+        let mut req = auto_expand_request("a cat", 190, 97, 17, None);
+        req.tags = Some(vec![
+            "  Smurfs ".into(),
+            "smurfs".into(),
+            "".into(),
+            " village  green ".into(),
+        ]);
+        req.collection = Some(crate::CollectionRef::by_name("  Smurf   Village  "));
+        let req = req.normalise().unwrap();
+
+        assert_eq!(
+            req.tags.as_deref(),
+            Some(["Smurfs".to_string(), "village green".to_string()].as_slice())
+        );
+        assert_eq!(
+            req.collection,
+            Some(crate::CollectionRef::by_name("Smurf Village"))
+        );
+
+        // The stitched print's provenance agrees with what will be applied.
+        let metadata = req.stitched_output_metadata(OutputFormat::Mp4, 190, None);
+        assert_eq!(
+            metadata.tags.as_deref(),
+            Some(["Smurfs".to_string(), "village green".to_string()].as_slice())
+        );
+        assert_eq!(metadata.collection.as_deref(), Some("Smurf Village"));
+
+        // An unfiled chain gains nothing.
+        let bare = auto_expand_request("a cat", 190, 97, 17, None)
+            .normalise()
+            .unwrap();
+        assert_eq!(bare.tags, None);
+        assert_eq!(bare.collection, None);
     }
 
     /// A sequence whose clips carry distinct prompts must not record the

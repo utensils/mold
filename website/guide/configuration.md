@@ -484,6 +484,28 @@ host's `/api/config`. `GET /api/capabilities` advertises the effective value
 as `gallery.trash.retention_days`; with `MOLD_DB_DISABLE=1` there is no trash
 and `capabilities.gallery.trash` is absent, so delete is permanent as before.
 
+### Auto-tagging titled prints
+
+| Key                       | Env var | Default | Description                                                              |
+| ------------------------- | ------- | ------- | ------------------------------------------------------------------------ |
+| `generate.auto_tag_title` | —       | `true`  | Whether a titled CLI or TUI run also tags the print with its title slug. |
+
+```bash
+mold config set generate.auto_tag_title false   # stop tagging titled prints
+mold config where generate.auto_tag_title       # → db
+```
+
+With it on, `mold run "a village" --title "Smurf village"` also files the
+print under the tag `smurf-village` and discloses it on stderr
+(`filing under tag "smurf-village"`). `mold run --no-auto-tag` overrides the
+setting for one invocation.
+
+This is deliberately a **client** setting with no env override: it shapes what
+the CLI puts in a request, not how a server behaves. The server never
+auto-tags — it cannot tell a title a person typed from one a script
+generated, and a host quietly adding tags to every print that crossed it
+would be surprising from every other machine on the fleet.
+
 ## Advanced
 
 ### Device and Path Overrides

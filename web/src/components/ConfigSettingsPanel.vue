@@ -15,8 +15,26 @@ import {
   switchProfile,
   writeConfig,
   type ConfigRow,
+  type ConfigSchema,
   type ConfigValue,
 } from "../lib/settingsConfig";
+import { AUTO_TAG_SETTING_WEB } from "@studio/lib/fileUnder";
+import { autoTagTitle } from "../lib/fileUnder";
+
+/**
+ * Create's "File under" auto-tag default. Unlike every other row here it is
+ * a BROWSER preference, not engine config — the ghost chip is offered by
+ * this client, so it is stored in `localStorage` and there is nothing to
+ * save or reset on the host. It sits beside trash retention because both
+ * answer "how does this machine's Library behave".
+ */
+const AUTO_TAG_SCHEMA: ConfigSchema = {
+  key: AUTO_TAG_SETTING_WEB,
+  section: "Library",
+  label: "Tag new prints with their title",
+  help: "Create offers each titled print its own tag as a removable chip. Off turns the ghost chip off for future prints — it never rewrites existing ones.",
+  editor: "toggle",
+};
 
 const rows = ref<ConfigRow[]>([]);
 const profiles = ref<string[]>([]);
@@ -74,6 +92,10 @@ async function load() {
   }
 }
 
+const showAutoTagRow = computed(() =>
+  matchesConfigSearch(search.value, AUTO_TAG_SCHEMA),
+);
+
 const grouped = computed(() =>
   CONFIG_SECTIONS.map((section) => ({
     section,
@@ -84,7 +106,13 @@ const grouped = computed(() =>
           schema.section === section &&
           matchesConfigSearch(search.value, schema),
       ),
-  })).filter((group) => group.rows.length > 0),
+  })).filter(
+    (group) =>
+      group.rows.length > 0 ||
+      // Library keeps its heading for the browser-local row alone: a host
+      // with no trash capability still offers the auto-tag default.
+      (group.section === "Library" && showAutoTagRow.value),
+  ),
 );
 
 function typedDraft(row: ConfigRow): ConfigValue {
@@ -316,6 +344,31 @@ onMounted(load);
               >
                 Reset
               </button>
+            </div>
+          </div>
+          <!-- Browser preference, stored in this browser. No Save / Reset:
+               the toggle IS the commit. -->
+          <div
+            v-if="group.section === 'Library' && showAutoTagRow"
+            class="config-row"
+            data-test="config-row-auto-tag-title"
+          >
+            <div class="config-copy">
+              <label :for="`config-${AUTO_TAG_SCHEMA.key}`">{{
+                AUTO_TAG_SCHEMA.label
+              }}</label>
+              <p>{{ AUTO_TAG_SCHEMA.help }}</p>
+              <span class="source" data-test="source-auto-tag-title"
+                >this browser</span
+              >
+            </div>
+            <div class="config-editor">
+              <input
+                :id="`config-${AUTO_TAG_SCHEMA.key}`"
+                v-model="autoTagTitle"
+                data-test="config-auto-tag-title"
+                type="checkbox"
+              />
             </div>
           </div>
         </CardSurface>
