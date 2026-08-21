@@ -106,6 +106,20 @@ describe("FileUnderGroup tags row", () => {
     );
   });
 
+  it("keeps the footer up for a brand-new name with no matches", async () => {
+    const wrapper = mountGroup();
+    const input = wrapper.get("[data-test='file-under-tag-input']");
+    await input.trigger("focus");
+    await input.setValue("nothing-like-this");
+    expect(
+      document.querySelector("[data-test='file-under-suggest-empty']")
+        ?.textContent,
+    ).toContain("No matching tag yet.");
+    expect(
+      document.querySelector("[data-test='file-under-suggest-foot']"),
+    ).toBeTruthy();
+  });
+
   it("refuses a duplicate of the ghost chip with an inline message", async () => {
     const wrapper = mountGroup();
     const input = wrapper.get("[data-test='file-under-tag-input']");

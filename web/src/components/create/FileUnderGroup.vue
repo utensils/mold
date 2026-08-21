@@ -170,10 +170,17 @@ const rows = computed(() =>
   })),
 );
 
-function closePicker() {
-  pickerOpen.value = false;
+/** Closing always discards a half-typed new-collection name, so reopening
+ * the picker starts from the list rather than a stale draft. */
+function setPickerOpen(open: boolean) {
+  pickerOpen.value = open;
+  if (open) return;
   creating.value = false;
   newName.value = "";
+}
+
+function closePicker() {
+  setPickerOpen(false);
 }
 
 function choose(name: string) {
@@ -257,8 +264,11 @@ const preview = computed(() =>
         </button>
       </span>
 
+      <!-- Open while the field has focus even with NO matches: the footer
+           is what explains that a brand-new name is created on develop,
+           which is exactly the case a match-gated popover would hide. -->
       <Popover
-        :open="suggestOpen && matches.length > 0"
+        :open="suggestOpen"
         label="Tag suggestions"
         class="fu__addwrap"
         @update:open="suggestOpen = $event"
@@ -289,6 +299,13 @@ const preview = computed(() =>
             <span class="fu__sug-name">{{ tag.name }}</span>
             <span class="fu__sug-n">{{ tag.count }}</span>
           </button>
+          <p
+            v-if="matches.length === 0"
+            class="fu__sug-empty"
+            data-test="file-under-suggest-empty"
+          >
+            {{ draft.trim() ? "No matching tag yet." : "No tags yet." }}
+          </p>
           <p class="fu__sug-foot" data-test="file-under-suggest-foot">
             ↵ adds · new names are created on develop
           </p>
@@ -326,7 +343,7 @@ const preview = computed(() =>
         :open="pickerOpen"
         label="Collection"
         class="fu__pickwrap"
-        @update:open="pickerOpen = $event ? true : (closePicker(), false)"
+        @update:open="setPickerOpen"
       >
         <template #trigger>
           <button
@@ -335,7 +352,7 @@ const preview = computed(() =>
             :aria-expanded="pickerOpen"
             aria-label="Collection"
             data-test="file-under-collection-open"
-            @click="pickerOpen ? closePicker() : (pickerOpen = true)"
+            @click="setPickerOpen(!pickerOpen)"
           >
             <Icon name="library" :size="12" />
             <span v-if="!collection" class="fu__field-none">None</span>
@@ -553,6 +570,13 @@ const preview = computed(() =>
 .fu__sug-n {
   font-family: var(--f-mono);
   font-size: 9.5px;
+  color: var(--ink-3);
+}
+.fu__sug-empty {
+  margin: 2px 0 0;
+  padding: 0 7px;
+  font-size: 12px;
+  font-style: italic;
   color: var(--ink-3);
 }
 .fu__sug-foot {
