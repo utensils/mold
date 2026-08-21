@@ -258,6 +258,14 @@ pub struct BuildParams<'a> {
     pub source_video: Option<Vec<u8>>,
     pub keyframes: Option<Vec<KeyframeCondition>>,
     pub retake_range: Option<TimeRange>,
+    /// PuLID face-identity reference bytes. The remaining three identity
+    /// fields ride only with this one — a knob without a photo is exactly the
+    /// incomplete form `mold_core::identity` refuses.
+    pub id_image: Option<Vec<u8>>,
+    /// Display-safe identity attachment basename; never a Discord URL.
+    pub id_image_name: Option<String>,
+    pub id_weight: Option<f64>,
+    pub id_start_step: Option<u32>,
 }
 
 /// Concrete video timing plus an optional user-facing disclosure. `notice`
@@ -658,10 +666,25 @@ pub fn build_generate_request(params: BuildParams<'_>) -> GenerateRequest {
         spatial_upscale: None,
         temporal_upscale: None,
         placement: None,
-        id_image: None,
-        id_image_name: None,
-        id_weight: None,
-        id_start_step: None,
+        // Identity ships as a group or not at all, and never on a video
+        // family — `mold_core::identity` qualifies only the two FLUX dev
+        // tiers, so a knob that survived onto a video request would be a
+        // guaranteed rejection rather than a control.
+        id_weight: params.id_image.as_ref().map(|_| {
+            params
+                .id_weight
+                .unwrap_or(mold_core::identity::ID_WEIGHT_DEFAULT)
+        }),
+        id_start_step: params.id_image.as_ref().map(|_| {
+            params
+                .id_start_step
+                .unwrap_or(mold_core::identity::ID_START_STEP_DEFAULT)
+        }),
+        id_image_name: params
+            .id_image
+            .as_ref()
+            .and_then(|_| params.id_image_name.clone()),
+        id_image: params.id_image,
     }
 }
 
@@ -1292,6 +1315,12 @@ pub async fn generate(
         source_video: video_bytes,
         keyframes,
         retake_range,
+        // /generate has no identity options — Discord caps a command at 25
+        // and this one is already there. Identity lives on /identity.
+        id_image: None,
+        id_image_name: None,
+        id_weight: None,
+        id_start_step: None,
     });
 
     let mut reference_session = if let Some(prepared) = prepared_references {

@@ -72,6 +72,7 @@ pub async fn run() -> Result<()> {
         .options(poise::FrameworkOptions {
             commands: vec![
                 commands::generate::generate(),
+                commands::identity::identity(),
                 commands::sequence::sequence(),
                 commands::expand::expand(),
                 commands::models::models(),

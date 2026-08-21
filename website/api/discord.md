@@ -28,6 +28,7 @@ MOLD_HOST=http://gpu-host:7680 MOLD_DISCORD_TOKEN="your-token" mold discord
 | Command              | Description                                                                                                                                                                                                                       |
 | -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `/generate`          | Generate an image or video, including attachment-driven LTX-2 audio-to-video, retake, and keyframe modes                                                                                                                          |
+| `/identity`          | Generate an image conditioned on a face reference photo (PuLID-FLUX), with `identity_strength` and `identity_start_step`                                                                                                          |
 | `/sequence`          | Submit 2–16 `\|`-separated prompts as a durable video sequence (LTX-2, LTX-Video — which joins independently rendered clips — or Wan, per the model's advertised sequence support), with per-clip progress and final MP4 delivery |
 | `/expand`            | Expand a short prompt into detailed generation prompts                                                                                                                                                                            |
 | `/models`            | List available models with download/loaded status                                                                                                                                                                                 |
@@ -36,6 +37,36 @@ MOLD_HOST=http://gpu-host:7680 MOLD_DISCORD_TOKEN="your-token" mold discord
 | `/admin reset-quota` | Reset a user's daily quota (requires Manage Server)                                                                                                                                                                               |
 | `/admin block`       | Temporarily block a user from generating (requires Manage Server)                                                                                                                                                                 |
 | `/admin unblock`     | Unblock a previously blocked user (requires Manage Server)                                                                                                                                                                        |
+
+### `/identity`
+
+Face-identity conditioning has its own command rather than options on
+`/generate`. Discord caps a chat-input command at **25 options** and
+`/generate` is already at exactly 25 — and identity is qualified only for the
+FLUX dev tiers, so none of `/generate`'s video and conditioning options apply
+to it anyway.
+
+| Option                | Purpose                                                                                        |
+| --------------------- | ---------------------------------------------------------------------------------------------- |
+| `prompt`              | Required. What to render.                                                                      |
+| `identity`            | Required. Face reference photo as a PNG or JPEG attachment.                                    |
+| `model`               | Identity-capable checkpoint. Autocompletes only models the server advertises; defaults to one. |
+| `identity_strength`   | `0.0`–`3.0`, default `1.0`.                                                                    |
+| `identity_start_step` | First identity-conditioned denoise step; must be under the resolved step count. Default `0`.   |
+| `width` / `height`    | Output size in pixels.                                                                         |
+| `steps`               | Inference steps.                                                                               |
+| `guidance`            | Guidance scale.                                                                                |
+| `seed`                | Seed for reproducibility.                                                                      |
+
+Preconditions are checked in cost order, so an impossible request never takes a
+quota slot or a download: the declared attachment size and container and the
+strength range first, then the model gate against the server's advertised
+`/api/models[].supports_identity` — an absent field is read as "no", which
+covers both a server too old for identity conditioning and one whose binary
+cannot execute it — then the start step against the resolved step count, and
+finally the downloaded bytes. A server advertising no identity-capable model at
+all says so instead of guessing a checkpoint. The result embed carries an
+**Identity** row naming the photo, the strength, and the start step.
 
 ## Configuration
 

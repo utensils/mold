@@ -16,6 +16,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         Some(Popup::SizeInput { .. }) => render_size_input(frame, app),
         Some(Popup::StgBlocksInput { .. }) => render_stg_blocks_input(frame, app),
         Some(Popup::ReferencesInput { .. }) => render_references_input(frame, app),
+        Some(Popup::IdentityImageInput { .. }) => render_identity_image_input(frame, app),
         Some(Popup::FilingInput { .. }) => render_filing_input(frame, app),
         Some(Popup::HistorySearch { .. }) => render_history_search(frame, app),
         Some(Popup::CommandPalette { .. }) => render_command_palette(frame, app),
@@ -689,6 +690,66 @@ fn render_references_input(frame: &mut Frame, app: &mut App) {
             Rect {
                 y: inner.y + inner.height.saturating_sub(2),
                 height: 1,
+                ..inner
+            },
+        );
+    }
+    frame.render_widget(
+        action_hints(theme, &[("Enter", "Confirm"), ("Esc", "Cancel")]),
+        Rect {
+            y: inner.y + inner.height.saturating_sub(1),
+            height: 1,
+            ..inner
+        },
+    );
+}
+
+fn render_identity_image_input(frame: &mut Frame, app: &mut App) {
+    let theme = &app.theme;
+    let area = centered_rect(frame.area(), 72, 24);
+    frame.render_widget(Clear, area);
+
+    let Some(Popup::IdentityImageInput { input, error }) = &app.popup else {
+        return;
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme.popup_border())
+        .title(" Identity photo ")
+        .title_style(theme.title_focused())
+        .style(theme.popup_bg());
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.height < 5 {
+        return;
+    }
+    frame.render_widget(
+        Paragraph::new(
+            "Path to a PNG or JPEG portrait (leave empty to clear). \
+             Checked before it is accepted.",
+        )
+        .style(theme.dim())
+        .wrap(Wrap { trim: true }),
+        Rect { height: 2, ..inner },
+    );
+    frame.render_widget(
+        Paragraph::new(format!("{input}\u{2588}"))
+            .style(Style::default().fg(theme.text))
+            .wrap(Wrap { trim: false }),
+        Rect {
+            y: inner.y + 3,
+            height: inner.height.saturating_sub(5),
+            ..inner
+        },
+    );
+    if let Some(error) = error {
+        frame.render_widget(
+            Paragraph::new(error.as_str())
+                .style(theme.error())
+                .wrap(Wrap { trim: true }),
+            Rect {
+                y: inner.y + inner.height.saturating_sub(3),
+                height: 2,
                 ..inner
             },
         );
@@ -1402,6 +1463,7 @@ mod tests {
                 last_seed: None,
                 last_generation_time_ms: None,
                 error_message: None,
+                identity_error: None,
                 warning_message: None,
                 model_description: String::new(),
                 last_output_path: None,

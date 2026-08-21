@@ -61,6 +61,7 @@ pub(crate) fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let seed = entry.metadata.seed.to_string();
     let dims = format!("{}×{}", entry.metadata.width, entry.metadata.height);
     let pipeline = entry.metadata.pipeline.map(|pipeline| pipeline.to_string());
+    let identity = crate::identity::metadata_summary(&entry.metadata);
     let machine = entry.machine_label();
     let thumb_path = crate::thumbnails::thumbnail_path(&entry.path);
 
@@ -100,8 +101,9 @@ pub(crate) fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     // ── Prompt (wrapped) + dim negative line ────────────────────
     let remaining = (inner.y + inner.height).saturating_sub(y);
     let neg_rows = u16::from(negative.is_some());
-    // Four required KV rows, optional pipeline, blank, two hints, and blank.
-    let kv_rows = 4 + u16::from(pipeline.is_some());
+    // Four required KV rows, optional pipeline and identity, blank, two
+    // hints, and blank.
+    let kv_rows = 4 + u16::from(pipeline.is_some()) + u16::from(identity.is_some());
     let prompt_rows = PROMPT_MAX_ROWS
         .min(remaining.saturating_sub(neg_rows + kv_rows + 4))
         .max(1)
@@ -144,6 +146,11 @@ pub(crate) fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     if let Some(ref pipeline) = pipeline {
         lines.push(crate::ui::widgets::kv_row_line(
             theme, "Pipeline", pipeline, 8, false,
+        ));
+    }
+    if let Some(ref identity) = identity {
+        lines.push(crate::ui::widgets::kv_row_line(
+            theme, "Identity", identity, 8, false,
         ));
     }
     lines.extend([

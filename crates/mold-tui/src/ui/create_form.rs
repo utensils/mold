@@ -21,14 +21,17 @@ const DETAIL_DOT_COUNT: u32 = 8;
 
 /// The Advanced accordion sections, in display order. `Video` is a
 /// capability-gated TUI addition beyond the spec's six image sections;
-/// `Filing` is the creation-time "File under" section, which is about where
-/// the print lands in the Library rather than how it renders, so it sits
-/// last.
+/// `Identity` is the PuLID-FLUX face-reference section — gated on the
+/// selected checkpoint's advertised `/api/models[].supports_identity`, never
+/// on the family or on a locally compiled feature; and `Filing` is the
+/// creation-time "File under" section, which is about where the print lands
+/// in the Library rather than how it renders, so it sits last.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdvSection {
     Sampling,
     Negative,
     Source,
+    Identity,
     Lora,
     Upscale,
     Output,
@@ -42,6 +45,7 @@ impl AdvSection {
             Self::Sampling => "Scheduler & sampling",
             Self::Negative => "Negative prompt",
             Self::Source => "Source image",
+            Self::Identity => "Identity photo",
             Self::Lora => "LoRA",
             Self::Upscale => "Upscale after generate",
             Self::Output => "Output format",
@@ -56,6 +60,7 @@ impl AdvSection {
             Self::Sampling => "sampling",
             Self::Negative => "negative",
             Self::Source => "source",
+            Self::Identity => "identity",
             Self::Lora => "lora",
             Self::Upscale => "upscale",
             Self::Output => "output",
@@ -69,6 +74,7 @@ impl AdvSection {
             "sampling" => Some(Self::Sampling),
             "negative" => Some(Self::Negative),
             "source" => Some(Self::Source),
+            "identity" => Some(Self::Identity),
             "lora" => Some(Self::Lora),
             "upscale" => Some(Self::Upscale),
             "output" => Some(Self::Output),
@@ -157,6 +163,12 @@ pub fn advanced_sections(caps: &ModelCapabilities) -> Vec<AdvSection> {
     {
         sections.push(AdvSection::Source);
     }
+    // Identity sits beside Source because it is the other conditioning
+    // reference, and above LoRA because `mold_core::identity` refuses the
+    // two together — the neighbouring rows say so without a warning.
+    if caps.supports_identity {
+        sections.push(AdvSection::Identity);
+    }
     if caps.supports_lora {
         sections.push(AdvSection::Lora);
     }
@@ -207,6 +219,11 @@ pub fn section_fields(sec: AdvSection, caps: &ModelCapabilities) -> Vec<ParamFie
             }
             fields
         }
+        AdvSection::Identity => vec![
+            ParamField::IdentityImage,
+            ParamField::IdentityWeight,
+            ParamField::IdentityStartStep,
+        ],
         AdvSection::Lora => vec![ParamField::Lora],
         AdvSection::Upscale => vec![ParamField::Upscale],
         AdvSection::Output => vec![ParamField::Format],
@@ -317,6 +334,18 @@ pub fn section_summary(sec: AdvSection, params: &GenerateParams, negative_empty:
             .or(params.control_image_path.as_deref())
             .map(file_name_of)
             .unwrap_or_else(|| "off".into()),
+        AdvSection::Identity => params
+            .identity_image_path
+            .as_deref()
+            .map(|path| {
+                format!(
+                    "{} \u{00b7} {:.2} \u{00b7} step {}",
+                    file_name_of(path),
+                    params.id_weight,
+                    params.id_start_step
+                )
+            })
+            .unwrap_or_else(|| "off".into()),
         AdvSection::Lora => params
             .lora_path
             .as_deref()
@@ -407,6 +436,18 @@ pub fn advanced_active_count(params: &GenerateParams, negative_empty: bool) -> u
         || params.mask_image_path.is_some()
         || params.control_image_path.is_some()
     {
+        count += 1;
+    }
+    // The identity photo counts once; each knob counts only when it differs
+    // from the value `mold_core::identity` would apply anyway, so an attached
+    // photo on stock settings reads as one active control, not three.
+    if params.identity_image_path.is_some() {
+        count += 1;
+    }
+    if params.id_weight != mold_core::identity::ID_WEIGHT_DEFAULT {
+        count += 1;
+    }
+    if params.id_start_step != mold_core::identity::ID_START_STEP_DEFAULT {
         count += 1;
     }
     if params.lora_path.is_some() {
@@ -902,6 +943,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         assert_eq!(
             section_fields(AdvSection::Source, &caps),
@@ -1075,6 +1117,116 @@ mod tests {
                 }
             }
         }
+    }
+
+    // ── identity (PuLID-FLUX) ───────────────────────────────────
+
+    /// The Identity section is advertised-only. `capabilities_for_model`
+    /// reads `/api/models[].supports_identity`; the family says nothing, an
+    /// absent field is "no", and an explicit `false` is also "no" — so the
+    /// row can never be offered against a server that would refuse it.
+    #[test]
+    fn identity_section_appears_only_for_an_advertising_checkpoint() {
+        for advertised in [None, Some(false)] {
+            let caps = crate::model_info::capabilities_for_model(
+                "flux",
+                "flux-dev:q8",
+                None,
+                None,
+                None,
+                advertised,
+            );
+            assert!(!caps.supports_identity, "advertised: {advertised:?}");
+            let rows = visible_rows(&caps, &open_state(None));
+            assert!(
+                !rows.contains(&CreateRow::Section(AdvSection::Identity)),
+                "an unadvertised checkpoint must not offer the Identity section"
+            );
+        }
+
+        let caps = crate::model_info::capabilities_for_model(
+            "flux",
+            "flux-dev:q8",
+            None,
+            None,
+            None,
+            Some(true),
+        );
+        assert!(caps.supports_identity);
+        let rows = visible_rows(&caps, &open_state(Some(AdvSection::Identity)));
+        assert!(rows.contains(&CreateRow::Section(AdvSection::Identity)));
+        assert_eq!(
+            section_fields(AdvSection::Identity, &caps),
+            vec![
+                ParamField::IdentityImage,
+                ParamField::IdentityWeight,
+                ParamField::IdentityStartStep,
+            ]
+        );
+        for field in section_fields(AdvSection::Identity, &caps) {
+            assert!(
+                rows.contains(&CreateRow::SectionField(AdvSection::Identity, field)),
+                "{field:?} must be visible while Identity is expanded"
+            );
+        }
+    }
+
+    /// Identity is a conditioning reference, so it sits next to Source and
+    /// above LoRA — the pairing `mold_core::identity` refuses.
+    #[test]
+    fn identity_section_sits_between_source_and_lora() {
+        let caps = crate::model_info::capabilities_for_model(
+            "flux",
+            "flux-dev:q8",
+            None,
+            None,
+            None,
+            Some(true),
+        );
+        let sections = advanced_sections(&caps);
+        let index = |sec| sections.iter().position(|entry| *entry == sec).unwrap();
+        assert!(index(AdvSection::Source) < index(AdvSection::Identity));
+        assert!(index(AdvSection::Identity) < index(AdvSection::Lora));
+    }
+
+    #[test]
+    fn identity_summary_and_active_count_track_the_photo_and_its_knobs() {
+        let mut params = fresh_params();
+        assert_eq!(section_summary(AdvSection::Identity, &params, true), "off");
+        assert_eq!(advanced_active_count(&params, true), 0);
+
+        params.identity_image_path = Some("/photos/ada.png".into());
+        assert_eq!(
+            section_summary(AdvSection::Identity, &params, true),
+            "ada.png \u{00b7} 1.00 \u{00b7} step 0"
+        );
+        assert_eq!(
+            advanced_active_count(&params, true),
+            1,
+            "a photo on stock knobs is one active control, not three"
+        );
+
+        params.id_weight = 1.5;
+        params.id_start_step = 3;
+        assert_eq!(
+            section_summary(AdvSection::Identity, &params, true),
+            "ada.png \u{00b7} 1.50 \u{00b7} step 3"
+        );
+        assert_eq!(advanced_active_count(&params, true), 3);
+    }
+
+    /// The defaults the fresh form starts on are `mold_core::identity`'s, not
+    /// a second copy — a drifted default would record provenance that does
+    /// not describe what rendered.
+    #[test]
+    fn identity_defaults_come_from_mold_core() {
+        let params = fresh_params();
+        assert_eq!(params.id_weight, mold_core::identity::ID_WEIGHT_DEFAULT);
+        assert_eq!(
+            params.id_start_step,
+            mold_core::identity::ID_START_STEP_DEFAULT
+        );
+        assert!(mold_core::identity::validate_id_weight(params.id_weight).is_ok());
     }
 
     // ── section summaries + active count ────────────────────────
@@ -1299,6 +1451,7 @@ mod tests {
             AdvSection::Sampling,
             AdvSection::Negative,
             AdvSection::Source,
+            AdvSection::Identity,
             AdvSection::Lora,
             AdvSection::Upscale,
             AdvSection::Output,
