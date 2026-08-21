@@ -784,4 +784,137 @@ mod tests {
             "a preview must never record an acceptance on the user's behalf"
         );
     }
+
+    /// A second device, so the fan-out cases below are genuinely multi-device.
+    fn second_device() -> DeviceFact {
+        DeviceFact {
+            id: "cuda:1".to_string(),
+            ordinal: 1,
+            backend: mold_core::GpuBackend::Cuda,
+            compute_capability: Some((8, 6)),
+            available_vram_bytes: 24_000_000_000,
+        }
+    }
+
+    /// The core of #1223's extraction lifetime, at the one place it could
+    /// break: the scheduler re-prepares dependencies for EVERY pending job,
+    /// batch children included, so a child arriving with its parent's frozen
+    /// identity must reuse it verbatim and extract nothing — on every device
+    /// it fans out to.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_batch_child_reuses_the_parents_identity_across_every_device() {
+        let models = TempDir::new().unwrap();
+        let home = TempDir::new().unwrap();
+        let _env = EnvGuard::new(home.path(), models.path());
+        let (_root, config) = flux_case(models.path());
+
+        let frozen = crate::identity_extraction::stub_embedding(b"parent-face");
+        let stubbed = crate::identity_extraction::StubbedExtractor::install(|_, image| {
+            Ok(Some(crate::identity_extraction::stub_embedding(image)))
+        });
+
+        let prepared = prepare_inputs_for_devices(
+            None,
+            "batch-child",
+            &request(None, true),
+            &config,
+            vec![device(), second_device()],
+            None,
+            DependencyMaterializationPolicy::ExistingOnly,
+            DependencyPreparationContext {
+                frozen_identity: Some(frozen.clone()),
+                ..DependencyPreparationContext::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            stubbed.extractions(),
+            0,
+            "a child must never re-extract the identity its parent already froze"
+        );
+        assert_eq!(
+            prepared.identity_embedding.as_ref().map(|e| e.fingerprint()),
+            Some(frozen.fingerprint()),
+            "the child must carry the parent's exact identity, not an equivalent one"
+        );
+        assert_eq!(
+            prepared.by_device.len(),
+            2,
+            "the fan-out under test must actually be multi-device"
+        );
+    }
+
+    /// Placement preview is a read-only probe. Running the extractor there
+    /// would cost seconds and ~1.4 GB of host RAM for an answer that does not
+    /// depend on the embedding — `memory_preflight` charges identity from the
+    /// request, never from the extracted value.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_placement_preview_extracts_nothing() {
+        let models = TempDir::new().unwrap();
+        let home = TempDir::new().unwrap();
+        let _env = EnvGuard::new(home.path(), models.path());
+        let (_root, config) = flux_case(models.path());
+
+        let stubbed = crate::identity_extraction::StubbedExtractor::install(|_, image| {
+            Ok(Some(crate::identity_extraction::stub_embedding(image)))
+        });
+
+        let prepared = prepare_inputs_for_devices(
+            None,
+            "placement-preview",
+            &request(None, true),
+            &config,
+            vec![device()],
+            None,
+            DependencyMaterializationPolicy::ExistingOnly,
+            DependencyPreparationContext::default(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(stubbed.extractions(), 0);
+        assert!(prepared.identity_embedding.is_none());
+        // The bundle is still PLANNED — the probe reports what admission will
+        // fetch; it simply does not run the extractor over it.
+        assert_eq!(
+            prepared.by_device["cuda:0"].engine_config.identity_assets,
+            Some(expected_paths(models.path()))
+        );
+    }
+
+    /// The zero-weight rule, end to end through preparation: no assets, no
+    /// embedding, and byte-identical prepared inputs to a request that never
+    /// mentioned identity.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn weight_zero_freezes_no_identity_embedding() {
+        let models = TempDir::new().unwrap();
+        let home = TempDir::new().unwrap();
+        let _env = EnvGuard::new(home.path(), models.path());
+        let (_root, config) = flux_case(models.path());
+
+        let stubbed = crate::identity_extraction::StubbedExtractor::install(|_, image| {
+            Ok(Some(crate::identity_extraction::stub_embedding(image)))
+        });
+
+        let prepared = prepare_inputs_for_devices(
+            None,
+            "inert",
+            &request(Some(0.0), true),
+            &config,
+            vec![device()],
+            None,
+            DependencyMaterializationPolicy::ExistingOnly,
+            DependencyPreparationContext::default(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(stubbed.extractions(), 0);
+        assert!(prepared.identity_embedding.is_none());
+    }
 }

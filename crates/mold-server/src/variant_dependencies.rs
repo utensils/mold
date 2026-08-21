@@ -1583,11 +1583,39 @@ pub(crate) async fn prepare_inputs_for_devices(
                 .join("; ")
         ));
     }
+    // The identity is resolved ONCE, here, after the per-device loop and
+    // before any fan-out, and the value is device-independent by construction.
+    // This is the whole of #1223's extraction lifetime: a batch parent clones
+    // this struct into every child, so every sibling and every denoise step
+    // reuses this exact embedding. See `crate::identity_extraction`.
+    let identity_embedding = match context.frozen_identity.clone() {
+        // A batch child, re-prepared by the scheduler: the parent already
+        // resolved this exact face. Reusing it is the contract, not an
+        // optimization.
+        Some(frozen) => Some(frozen),
+        // Placement preview is a read-only probe. It must never spend seconds
+        // and 1.4 GB running the extractor, and it does not need to: identity
+        // changes the memory demand, which `memory_preflight` charges from the
+        // request, not from the embedding.
+        None if policy == DependencyMaterializationPolicy::ExistingOnly => None,
+        None => {
+            let identity_paths = by_device
+                .values()
+                .find_map(|device| device.engine_config.identity_assets.clone());
+            crate::identity_extraction::resolve_identity_embedding(
+                request,
+                identity_paths.as_ref(),
+            )
+            .await?
+        }
+    };
+
     let prepared = PreparedExecutionInputs {
         authority_fingerprint,
         by_device,
         retryable_device_failures: failures,
         model_config_overlay,
+        identity_embedding,
         #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
         h3_private_ingress_grant: context.h3_private_ingress_grant,
         #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
@@ -1906,6 +1934,9 @@ async fn prepare_h3_private_inputs_for_devices(
         by_device,
         retryable_device_failures: failures,
         model_config_overlay: None,
+        // The private H3 ingress has no face-identity path; FLUX is the only
+        // family qualified for it.
+        identity_embedding: None,
         h3_private_ingress_grant: Some(rebound_grant),
         h3_private_admission_by_device: admissions,
     })
@@ -1925,6 +1956,15 @@ pub struct DependencyPreparationContext {
     #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     pub(crate) h3_resolved_references:
         Option<crate::reference_uploads::ResolvedReferenceAdmissionView>,
+    /// An identity the parent request already froze.
+    ///
+    /// The scheduler prepares dependencies for EVERY pending job, batch
+    /// children included, and the result replaces whatever the parent
+    /// composed. Without this the four children of a `batch_size = 4` parent
+    /// would each re-run the extractor — five extractions of one face, five
+    /// chances for the siblings to disagree. Populated, the extraction is
+    /// skipped entirely and the parent's exact value is carried forward.
+    pub(crate) frozen_identity: Option<mold_core::identity::FrozenIdentityEmbedding>,
 }
 
 pub async fn prepare_execution_inputs(

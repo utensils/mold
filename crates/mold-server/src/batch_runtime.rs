@@ -1948,6 +1948,7 @@ mod tests {
             cancellation,
             execution_equivalence_fingerprint: "same".to_string(),
             prepared_inputs: PreparedExecutionInputs {
+                identity_embedding: None,
                 authority_fingerprint: "prepared".to_string(),
                 by_device: BTreeMap::new(),
                 retryable_device_failures: BTreeMap::new(),

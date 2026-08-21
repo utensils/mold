@@ -1000,6 +1000,20 @@ pub struct PreparedExecutionInputs {
     /// admission, and pre-CUDA validation independent of endpoint call order
     /// and of `refresh_config()` erasing in-memory catalog entries.
     pub model_config_overlay: Option<Arc<mold_core::ModelConfig>>,
+    /// The face identity this parent request conditions on, extracted ONCE.
+    ///
+    /// It lives here rather than in `FrozenEngineConfig` for two reasons that
+    /// both matter. The engine is cached across requests while the identity is
+    /// per request, so putting it in the engine's construction config would
+    /// rebuild the engine for every new face; and this struct is exactly what
+    /// the batch parent clones into every child
+    /// (`batch_runtime::submit_child` → `BatchChildExecution::prepared_inputs`),
+    /// which is what makes "one extraction per parent, reused by every sibling
+    /// on every device" structural instead of a convention.
+    ///
+    /// `None` covers every request that does not condition on a face, an
+    /// explicit `id_weight` of 0, and a build without the `pulid` feature.
+    pub identity_embedding: Option<mold_core::identity::FrozenIdentityEmbedding>,
     /// Payload-free authenticated authority for the private H3 ingress. This
     /// is only a transport seam; per-device admission evidence is attached by
     /// dependency preparation before generic execution planning may consume it.
@@ -6052,6 +6066,7 @@ mod tests {
         selected_config.t5_variant = Some("fp16".to_string());
         selected_config.selected_t5_path = Some(selected_t5.clone());
         let prepared = PreparedExecutionInputs {
+            identity_embedding: None,
             authority_fingerprint: preparation_authority_fingerprint(
                 &config,
                 &request,
@@ -6138,6 +6153,7 @@ mod tests {
         let engine_config =
             mold_inference::FrozenEngineConfig::resolve(&request.model, &effective_config);
         let prepared = PreparedExecutionInputs {
+            identity_embedding: None,
             authority_fingerprint: preparation_authority_fingerprint(
                 &effective_config,
                 &request,
@@ -6196,6 +6212,7 @@ mod tests {
         let paths = ModelPaths::resolve(&request.model, &config).unwrap();
         let engine_config = mold_inference::FrozenEngineConfig::resolve(&request.model, &config);
         let prepared = PreparedExecutionInputs {
+            identity_embedding: None,
             authority_fingerprint: preparation_authority_fingerprint(
                 &config,
                 &request,
@@ -6662,6 +6679,7 @@ mod tests {
         let paths = ModelPaths::resolve(&request.model, &config).unwrap();
         let engine_config = mold_inference::FrozenEngineConfig::resolve(&request.model, &config);
         let prepared = PreparedExecutionInputs {
+            identity_embedding: None,
             authority_fingerprint: preparation_authority_fingerprint(
                 &config,
                 &request,

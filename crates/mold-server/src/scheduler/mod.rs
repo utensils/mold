@@ -722,7 +722,17 @@ fn compose_prepared_generation(pending: &mut PendingGeneration, prepared: Prepar
     {
         pending.job.h3_private_ingress_grant = Some(grant);
     }
+    // The identity a parent request froze outlives any re-preparation of one
+    // of its children: preparation is handed the frozen value and must return
+    // it unchanged, and this is the backstop for a preparer that did not.
+    let frozen_identity = pending
+        .prepared_inputs
+        .as_ref()
+        .and_then(|inputs| inputs.identity_embedding.clone());
     pending.prepared_inputs = prepared.execution_inputs;
+    if let (Some(inputs), Some(identity)) = (pending.prepared_inputs.as_mut(), frozen_identity) {
+        inputs.identity_embedding = Some(identity);
+    }
 }
 
 type PreparationFuture = Pin<Box<dyn Future<Output = Result<PreparedGeneration, String>> + Send>>;
@@ -1734,7 +1744,18 @@ impl Coordinator {
                     .map(crate::reference_uploads::ResolvedReferenceSet::admission_view),
             };
             #[cfg(not(any(feature = "h3", feature = "h3-private-uat")))]
-            let context = crate::variant_dependencies::DependencyPreparationContext::default();
+            let mut context = crate::variant_dependencies::DependencyPreparationContext::default();
+            #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+            let mut context = context;
+            // A batch child arrives already holding the parent's frozen
+            // identity. Handing it to preparation is what keeps ONE extraction
+            // per parent request: without it this re-preparation would run the
+            // extractor again for every sibling and then overwrite the
+            // parent's value with its own.
+            context.frozen_identity = pending
+                .prepared_inputs
+                .as_ref()
+                .and_then(|inputs| inputs.identity_embedding.clone());
             let preparer = self.preparer.clone();
             let tx = self.preparation_tx.clone();
             let slots = self.preparation_slots.clone();

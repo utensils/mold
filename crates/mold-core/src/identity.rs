@@ -6,12 +6,13 @@
 //! decode limits an `id_image` payload must respect before anything in the
 //! process attempts a full decode.
 //!
-//! The runtime adapter lands separately, and until it does no build can
-//! execute identity conditioning — not even one compiled with `pulid`, which
-//! today links the contract and nothing that consumes it. So the capability
-//! stays unadvertised and a request carrying an identity field is refused
-//! rather than rendered without the face. [`IDENTITY_RUNTIME_READY`] is the
-//! one switch the adapter PR flips.
+//! A build without the `pulid` feature links this contract and nothing that
+//! consumes it, so it refuses an identity request rather than rendering it
+//! without the face. [`IDENTITY_RUNTIME_READY`] is the second half of that
+//! gate: it records whether the runtime stack behind the feature is complete.
+//!
+//! It also owns [`FrozenIdentityEmbedding`], the extraction admission freezes
+//! once per parent request and every sibling reuses.
 
 use crate::types::GenerateRequest;
 
@@ -38,20 +39,20 @@ pub const ID_START_STEP_DEFAULT: u32 = 0;
 /// The `pulid` feature compiles the wire contract — the qualified-model list,
 /// the bounds, the validator, the request fields.
 ///
-/// #1221 landed the cross-attention adapter, so `FrozenEngineConfig's`
-/// identity assets now reach the denoise loop on every FLUX transformer
-/// variant. That is not yet enough to flip this: nothing turns a request's
-/// `id_image` into the `[1, 32, 2048]` embedding the adapter consumes, so a
-/// conditioned request would download the bundle and then fail at render time.
-/// #1223 wires the extractor to the engine seam and flips this constant in the
-/// same change.
+/// #1221 landed the cross-attention adapter and #1223 wired the extractor to
+/// it: a `pulid` build now turns `id_image` into the `[1, 32, 2048]` embedding
+/// at admission, freezes it into the prepared plan, and installs it on the
+/// engine before every dispatch. So a `pulid` build can execute identity
+/// conditioning end to end, and this is `true`.
 ///
-/// Until then the capability stays unadvertised on every build and every
-/// identity request is refused. Advertising a control the worker cannot honour
-/// is the failure `CLAUDE.md` records for wan's `supports_sequence`; here it
-/// would be worse than a hard error, because the print would render, look
-/// fine, and simply not be the person in the reference photo.
-pub const IDENTITY_RUNTIME_READY: bool = false;
+/// It stays a separate constant from the feature rather than collapsing into
+/// it, because the two answer different questions: the feature is whether this
+/// binary LINKED the stack, and this is whether the stack is complete enough to
+/// honour a request. Advertising a control the worker cannot honour is the
+/// failure `CLAUDE.md` records for wan's `supports_sequence`; here it would be
+/// worse than a hard error, because the print would render, look fine, and
+/// simply not be the person in the reference photo.
+pub const IDENTITY_RUNTIME_READY: bool = true;
 
 /// Whether identity conditioning can be both accepted and executed here.
 ///
@@ -327,6 +328,169 @@ pub fn validate_identity_conditioning(req: &GenerateRequest) -> Result<(), Strin
     }
 
     validate_id_image_bytes(bytes)
+}
+
+/// Token count of the identity embedding the IDFormer produces.
+///
+/// Mirrors `mold_inference::flux::pulid::ID_TOKENS`; it lives here as well
+/// because the frozen embedding crosses the crate boundary as plain data and
+/// the shape has to be checkable without linking the engine.
+pub const ID_EMBEDDING_TOKENS: usize = 32;
+
+/// Width of each identity token.
+pub const ID_EMBEDDING_DIM: usize = 2048;
+
+/// Number of `f32` values one frozen embedding carries.
+pub const ID_EMBEDDING_VALUES: usize = ID_EMBEDDING_TOKENS * ID_EMBEDDING_DIM;
+
+/// SHA-256 pins of every artifact one identity extraction consumed.
+///
+/// Recorded rather than assumed: the four PuLID files are pinned by the
+/// manifest, but the *derived* vision tower is mold's own conversion output,
+/// and an embedding is only reproducible from the exact bytes that produced
+/// it. A frozen plan carrying these can be checked against the bundle the
+/// worker actually holds instead of trusting that nothing was repaired
+/// underneath it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct IdentityAssetDigests {
+    /// `pulid_flux_v0.9.1.safetensors` — the IDFormer half.
+    pub adapter: String,
+    /// The derived `eva02_clip_l_336_vision.safetensors`, not the `.pt`
+    /// source: the tower that ran is the artifact that matters.
+    pub vision: String,
+    /// `scrfd_10g_bnkps.onnx`.
+    pub face_detector: String,
+    /// `glintr100.onnx`.
+    pub face_recognizer: String,
+}
+
+/// One identity, extracted once and frozen for every sibling of a batch.
+///
+/// This is the unit that makes "exactly one extraction per parent request"
+/// enforceable rather than aspirational. Admission produces it before batch
+/// fan-out; every singleton child, on every device, carries the same value and
+/// the engine turns it back into a tensor on its own device. It is deliberately
+/// **plain data** — little-endian `f32` bytes, not a `candle` tensor — so it is
+/// `Clone`, `Eq`, device-independent, and safe to hold in a plan that outlives
+/// any particular engine.
+///
+/// 32 x 2048 f32 is 256 KiB, which is why carrying it per child costs nothing
+/// worth optimizing and why nothing here is lazily recomputed.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct FrozenIdentityEmbedding {
+    /// `ID_EMBEDDING_VALUES` little-endian `f32`s, token-major.
+    values_le: std::sync::Arc<Vec<u8>>,
+    /// SHA-256 of the encoded `id_image` bytes the extraction consumed.
+    source_sha256: String,
+    assets: IdentityAssetDigests,
+    /// SHA-256 over source, assets, and values — the identity half of the
+    /// prepared plan's profile hash.
+    fingerprint: String,
+}
+
+impl FrozenIdentityEmbedding {
+    /// Freeze an extracted embedding.
+    ///
+    /// The shape is checked here, once, rather than at the twenty injection
+    /// sites that eventually consume it.
+    pub fn new(
+        values: &[f32],
+        source_sha256: impl Into<String>,
+        assets: IdentityAssetDigests,
+    ) -> Result<Self, String> {
+        if values.len() != ID_EMBEDDING_VALUES {
+            return Err(format!(
+                "a frozen identity embedding must carry {ID_EMBEDDING_VALUES} values \
+                 ({ID_EMBEDDING_TOKENS}x{ID_EMBEDDING_DIM}), got {}",
+                values.len()
+            ));
+        }
+        if let Some(bad) = values.iter().find(|value| !value.is_finite()) {
+            return Err(format!(
+                "the identity extractor produced a non-finite value ({bad}); \
+                 the embedding is not usable"
+            ));
+        }
+        let mut values_le = Vec::with_capacity(ID_EMBEDDING_VALUES * 4);
+        for value in values {
+            values_le.extend_from_slice(&value.to_le_bytes());
+        }
+        let source_sha256 = source_sha256.into();
+        let fingerprint = fingerprint_of(&values_le, &source_sha256, &assets);
+        Ok(Self {
+            values_le: std::sync::Arc::new(values_le),
+            source_sha256,
+            assets,
+            fingerprint,
+        })
+    }
+
+    /// The embedding, token-major, as `ID_EMBEDDING_VALUES` `f32`s.
+    pub fn values(&self) -> Vec<f32> {
+        self.values_le
+            .chunks_exact(4)
+            .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+            .collect()
+    }
+
+    /// SHA-256 of the `id_image` this identity came from.
+    pub fn source_sha256(&self) -> &str {
+        &self.source_sha256
+    }
+
+    /// The artifacts the extraction ran on.
+    pub fn assets(&self) -> &IdentityAssetDigests {
+        &self.assets
+    }
+
+    /// The identity profile hash a prepared plan freezes.
+    ///
+    /// Two children of the same parent request must agree on it exactly; a
+    /// disagreement means something re-extracted, which is the bug this whole
+    /// type exists to make impossible.
+    pub fn fingerprint(&self) -> &str {
+        &self.fingerprint
+    }
+}
+
+/// Redacted: the values are a biometric derivative and must never reach a log
+/// line, an error body, or a probe payload.
+impl std::fmt::Debug for FrozenIdentityEmbedding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FrozenIdentityEmbedding")
+            .field("fingerprint", &self.fingerprint)
+            .field("source_sha256", &self.source_sha256)
+            .field("values", &"<redacted>")
+            .finish()
+    }
+}
+
+fn fingerprint_of(values_le: &[u8], source_sha256: &str, assets: &IdentityAssetDigests) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(b"mold.identity.v1\0");
+    hasher.update(source_sha256.as_bytes());
+    hasher.update(b"\0");
+    for digest in [
+        &assets.adapter,
+        &assets.vision,
+        &assets.face_detector,
+        &assets.face_recognizer,
+    ] {
+        hasher.update(digest.as_bytes());
+        hasher.update(b"\0");
+    }
+    hasher.update(values_le);
+    format!("{:x}", hasher.finalize())
+}
+
+/// SHA-256 of an `id_image` payload — the provenance a frozen embedding
+/// records so a replayed or restored request can be told apart from a new one.
+pub fn id_image_sha256(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
 }
 
 #[cfg(test)]
@@ -865,5 +1029,96 @@ mod tests {
         }
         req.model = "flux-dev:q4".to_string();
         assert!(validate_identity_conditioning(&req).is_ok());
+    }
+
+    fn digests() -> IdentityAssetDigests {
+        IdentityAssetDigests {
+            adapter: "a".repeat(64),
+            vision: "b".repeat(64),
+            face_detector: "c".repeat(64),
+            face_recognizer: "d".repeat(64),
+        }
+    }
+
+    fn embedding_values(seed: f32) -> Vec<f32> {
+        (0..ID_EMBEDDING_VALUES)
+            .map(|index| seed + index as f32 * 1e-4)
+            .collect()
+    }
+
+    #[test]
+    fn a_frozen_embedding_round_trips_its_values_exactly() {
+        let values = embedding_values(0.5);
+        let frozen = FrozenIdentityEmbedding::new(&values, "source-sha", digests())
+            .expect("a correctly shaped embedding freezes");
+        assert_eq!(frozen.values(), values);
+        assert_eq!(frozen.source_sha256(), "source-sha");
+        assert_eq!(frozen.assets(), &digests());
+    }
+
+    #[test]
+    fn the_shape_is_checked_once_at_the_boundary() {
+        let error = FrozenIdentityEmbedding::new(&[0.0; 16], "s", digests()).unwrap_err();
+        assert!(error.contains(&ID_EMBEDDING_VALUES.to_string()), "{error}");
+        assert!(error.contains("32x2048"), "{error}");
+    }
+
+    #[test]
+    fn a_non_finite_extraction_is_refused_rather_than_rendered() {
+        let mut values = embedding_values(0.5);
+        values[7] = f32::NAN;
+        let error = FrozenIdentityEmbedding::new(&values, "s", digests()).unwrap_err();
+        assert!(error.contains("non-finite"), "{error}");
+    }
+
+    /// The whole point of the type: two children of one parent request agree
+    /// bit for bit, so "exactly one extraction" is checkable.
+    #[test]
+    fn the_fingerprint_is_stable_across_clones_and_rebuilds() {
+        let values = embedding_values(0.25);
+        let first = FrozenIdentityEmbedding::new(&values, "s", digests()).unwrap();
+        let second = FrozenIdentityEmbedding::new(&values, "s", digests()).unwrap();
+        assert_eq!(first.fingerprint(), second.fingerprint());
+        assert_eq!(first.clone().fingerprint(), first.fingerprint());
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn the_fingerprint_moves_with_the_values_the_source_and_the_assets() {
+        let base = FrozenIdentityEmbedding::new(&embedding_values(0.25), "s", digests()).unwrap();
+
+        let other_values =
+            FrozenIdentityEmbedding::new(&embedding_values(0.26), "s", digests()).unwrap();
+        assert_ne!(base.fingerprint(), other_values.fingerprint());
+
+        let other_source =
+            FrozenIdentityEmbedding::new(&embedding_values(0.25), "t", digests()).unwrap();
+        assert_ne!(base.fingerprint(), other_source.fingerprint());
+
+        let mut repaired = digests();
+        repaired.vision = "e".repeat(64);
+        let other_assets =
+            FrozenIdentityEmbedding::new(&embedding_values(0.25), "s", repaired).unwrap();
+        assert_ne!(base.fingerprint(), other_assets.fingerprint());
+    }
+
+    /// A biometric derivative must never reach a log line or an error body.
+    #[test]
+    fn the_debug_form_redacts_the_biometric_values() {
+        let frozen =
+            FrozenIdentityEmbedding::new(&embedding_values(0.25), "source-sha", digests()).unwrap();
+        let rendered = format!("{frozen:?}");
+        assert!(rendered.contains("<redacted>"), "{rendered}");
+        assert!(rendered.contains(frozen.fingerprint()), "{rendered}");
+        assert!(!rendered.contains("0.25"), "{rendered}");
+    }
+
+    #[test]
+    fn the_source_digest_is_a_plain_sha256_of_the_payload() {
+        // Well-known: sha256("abc").
+        assert_eq!(
+            id_image_sha256(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
     }
 }
