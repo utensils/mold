@@ -298,7 +298,7 @@ async function readImages(
       files.reduce((sum, file) => sum + file.size, 0) >
     MAX_MOBILE_GENERATION_REQUEST_MEDIA_BYTES
   ) {
-    error.value = "Combined generation media must be 45 MiB or smaller on iPhone.";
+    error.value = "Combined generation media must be 45 MiB or smaller on this phone.";
     return [];
   }
   if (files.some((file) => !isAcceptedImage(file))) {

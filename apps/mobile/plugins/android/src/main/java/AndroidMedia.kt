@@ -1,0 +1,268 @@
+package com.utensils.mold.mobile_native
+
+import android.Manifest
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.ContentValues
+import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.net.Uri
+import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
+import android.util.Base64
+import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
+import java.io.BufferedInputStream
+import java.io.File
+import java.io.FileOutputStream
+import java.net.HttpURLConnection
+import java.net.URL
+import java.util.concurrent.ConcurrentHashMap
+
+internal class AndroidMedia(context: Context) {
+    private val context = context.applicationContext
+
+    fun copyImage(dataB64: String): Uri {
+        val image = decodeImage(dataB64)
+        val directory = File(context.cacheDir, "shared").apply { mkdirs() }
+        prune(directory)
+        val file = File(directory, "mold-copy-${System.currentTimeMillis()}.${image.extension}")
+        file.writeBytes(image.bytes)
+        val uri = shareUri(file)
+        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        clipboard.setPrimaryClip(ClipData.newUri(context.contentResolver, "Mold image", uri))
+        return uri
+    }
+
+    fun saveImage(dataB64: String): Uri {
+        val image = decodeImage(dataB64)
+        val name = "Mold-${System.currentTimeMillis()}.${image.extension}"
+        return saveBytes(
+            image.bytes,
+            name,
+            image.mimeType,
+            MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+            Environment.DIRECTORY_PICTURES,
+        )
+    }
+
+    fun saveVideo(url: String): Uri {
+        requireModernStoragePermission()
+        val connection = openConnection(url, "GET")
+        try {
+            requireSuccessful(connection, "download the video")
+            val mimeType = connection.contentType?.substringBefore(';')
+                ?.takeIf { it.startsWith("video/") } ?: "video/mp4"
+            val extension = when (mimeType) {
+                "video/webm" -> "webm"
+                "video/quicktime" -> "mov"
+                else -> "mp4"
+            }
+            return writeMediaStream(
+                connection.inputStream,
+                "Mold-${System.currentTimeMillis()}.$extension",
+                mimeType,
+                MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+                Environment.DIRECTORY_MOVIES,
+            )
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    fun prepareAnimationShare(
+        url: String,
+        apiKey: String?,
+        requestJson: String,
+        filename: String,
+        reuseKey: String,
+    ): Intent {
+        val safeName = File(filename).name
+        require(safeName == filename && safeName.isNotBlank()) { "invalid animation filename" }
+        val cached = animationCache[reuseKey]?.takeIf { it.isFile }
+        val file = cached ?: downloadAnimation(url, apiKey, requestJson, safeName).also {
+            animationCache[reuseKey] = it
+        }
+        val mimeType = animationMimeType(file)
+        val uri = shareUri(file)
+        val send = Intent(Intent.ACTION_SEND).apply {
+            type = mimeType
+            putExtra(Intent.EXTRA_STREAM, uri)
+            clipData = ClipData.newRawUri("Mold animation", uri)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        return Intent.createChooser(send, "Share Mold animation")
+    }
+
+    private fun downloadAnimation(
+        url: String,
+        apiKey: String?,
+        requestJson: String,
+        filename: String,
+    ): File {
+        val directory = File(context.cacheDir, "shared").apply { mkdirs() }
+        prune(directory)
+        val file = File(directory, "mold-export-${System.currentTimeMillis()}-$filename")
+        val connection = openConnection(url, "POST").apply {
+            setRequestProperty("Content-Type", "application/json")
+            if (!apiKey.isNullOrBlank()) setRequestProperty("x-api-key", apiKey)
+            doOutput = true
+            outputStream.use { it.write(requestJson.toByteArray(Charsets.UTF_8)) }
+        }
+        try {
+            requireSuccessful(connection, "export the animation")
+            BufferedInputStream(connection.inputStream).use { input ->
+                FileOutputStream(file).use { output ->
+                    val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                    var total = 0L
+                    while (true) {
+                        val read = input.read(buffer)
+                        if (read < 0) break
+                        total += read
+                        require(total <= MAX_EXPORT_BYTES) { "the animation export exceeds the 2 GB Android limit" }
+                        output.write(buffer, 0, read)
+                    }
+                    output.fd.sync()
+                }
+            }
+            animationMimeType(file)
+            return file
+        } catch (error: Exception) {
+            file.delete()
+            throw error
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    private fun saveBytes(
+        bytes: ByteArray,
+        name: String,
+        mimeType: String,
+        collection: Uri,
+        directory: String,
+    ): Uri {
+        requireModernStoragePermission()
+        return writeMediaStream(bytes.inputStream(), name, mimeType, collection, directory)
+    }
+
+    private fun writeMediaStream(
+        source: java.io.InputStream,
+        name: String,
+        mimeType: String,
+        collection: Uri,
+        directory: String,
+    ): Uri {
+        val values = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+            put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                put(MediaStore.MediaColumns.RELATIVE_PATH, "$directory/Mold")
+                put(MediaStore.MediaColumns.IS_PENDING, 1)
+            }
+        }
+        val resolver = context.contentResolver
+        val uri = resolver.insert(collection, values)
+            ?: error("Android MediaStore could not create the media item")
+        try {
+            source.use { input ->
+                resolver.openOutputStream(uri, "w")?.use { output -> input.copyTo(output) }
+                    ?: error("Android MediaStore could not open the media item")
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                resolver.update(uri, ContentValues().apply {
+                    put(MediaStore.MediaColumns.IS_PENDING, 0)
+                }, null, null)
+            }
+            return uri
+        } catch (error: Exception) {
+            resolver.delete(uri, null, null)
+            throw error
+        }
+    }
+
+    private fun requireModernStoragePermission() {
+        if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P) {
+            check(
+                ContextCompat.checkSelfPermission(context, Manifest.permission.WRITE_EXTERNAL_STORAGE) ==
+                    PackageManager.PERMISSION_GRANTED,
+            ) { "Photos access is required on this Android version" }
+        }
+    }
+
+    private fun decodeImage(dataB64: String): ImageData {
+        val bytes = try {
+            Base64.decode(dataB64, Base64.DEFAULT)
+        } catch (_: IllegalArgumentException) {
+            throw IllegalArgumentException("the selected print contains invalid image data")
+        }
+        return when {
+            bytes.size >= PNG_SIGNATURE.size && bytes.copyOfRange(0, PNG_SIGNATURE.size).contentEquals(PNG_SIGNATURE) ->
+                ImageData(bytes, "image/png", "png")
+            bytes.size >= 3 && bytes[0] == 0xff.toByte() && bytes[1] == 0xd8.toByte() && bytes[2] == 0xff.toByte() ->
+                ImageData(bytes, "image/jpeg", "jpg")
+            else -> throw IllegalArgumentException("the selected print is not a PNG or JPEG image")
+        }
+    }
+
+    private fun animationMimeType(file: File): String {
+        val header = ByteArray(12)
+        val count = file.inputStream().use { it.read(header) }
+        val extension = file.extension.lowercase()
+        val valid = when (extension) {
+            "gif" -> count >= 6 && (header.copyOfRange(0, 6).contentEquals("GIF87a".toByteArray()) ||
+                header.copyOfRange(0, 6).contentEquals("GIF89a".toByteArray()))
+            "png" -> count >= PNG_SIGNATURE.size &&
+                header.copyOfRange(0, PNG_SIGNATURE.size).contentEquals(PNG_SIGNATURE)
+            "webp" -> count >= 12 && header.copyOfRange(0, 4).contentEquals("RIFF".toByteArray()) &&
+                header.copyOfRange(8, 12).contentEquals("WEBP".toByteArray())
+            else -> false
+        }
+        require(valid) { "the exported animation format does not match its filename" }
+        return when (extension) {
+            "gif" -> "image/gif"
+            "webp" -> "image/webp"
+            else -> "image/png"
+        }
+    }
+
+    private fun openConnection(url: String, method: String): HttpURLConnection =
+        (URL(url).openConnection() as HttpURLConnection).apply {
+            requestMethod = method
+            connectTimeout = 30_000
+            readTimeout = 600_000
+            instanceFollowRedirects = true
+        }
+
+    private fun requireSuccessful(connection: HttpURLConnection, action: String) {
+        val code = connection.responseCode
+        check(code in 200..299) { "could not $action: host returned HTTP $code" }
+    }
+
+    private fun shareUri(file: File): Uri = FileProvider.getUriForFile(
+        context,
+        "${context.packageName}.mold-mobile-native-fileprovider",
+        file,
+    )
+
+    private fun prune(directory: File) {
+        val cutoff = System.currentTimeMillis() - CACHE_MAX_AGE_MS
+        directory.listFiles()?.filter { it.isFile && it.lastModified() < cutoff }?.forEach { stale ->
+            animationCache.entries.removeIf { it.value == stale }
+            stale.delete()
+        }
+    }
+
+    private data class ImageData(val bytes: ByteArray, val mimeType: String, val extension: String)
+
+    companion object {
+        private val PNG_SIGNATURE = byteArrayOf(
+            0x89.toByte(), 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+        )
+        private const val MAX_EXPORT_BYTES = 2L * 1024 * 1024 * 1024
+        private const val CACHE_MAX_AGE_MS = 24L * 60 * 60 * 1000
+        private val animationCache = ConcurrentHashMap<String, File>()
+    }
+}

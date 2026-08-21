@@ -11,7 +11,8 @@ const { invoke, apiFetchTo, apiJsonTo } = vi.hoisted(() => ({
   apiFetchTo: vi.fn(),
   apiJsonTo: vi.fn(),
 }));
-const { isNativeIOSRuntime } = vi.hoisted(() => ({
+const { isNativeAndroidRuntime, isNativeIOSRuntime } = vi.hoisted(() => ({
+  isNativeAndroidRuntime: vi.fn(),
   isNativeIOSRuntime: vi.fn(),
 }));
 
@@ -26,7 +27,7 @@ vi.mock("../lib/api/client", async (importOriginal) => ({
   apiFetchTo,
   apiJsonTo,
 }));
-vi.mock("./platform", () => ({ isNativeIOSRuntime }));
+vi.mock("./platform", () => ({ isNativeAndroidRuntime, isNativeIOSRuntime }));
 
 import MobileGalleryViewer from "./MobileGalleryViewer.vue";
 
@@ -72,6 +73,7 @@ function mountViewer(
 }
 
 beforeEach(() => {
+  isNativeAndroidRuntime.mockReset().mockReturnValue(false);
   isNativeIOSRuntime.mockReset().mockReturnValue(true);
   streamableMediaUrl.mockReset().mockResolvedValue("https://studio/media/full");
   evictMedia.mockReset();
@@ -465,6 +467,28 @@ describe("MobileGalleryViewer", () => {
       reuseKey:
         'http://studio.tailnet.ts.net:7680\ndeveloped clip.mp4\n{"format":"gif","playback":"loop","repeat":"forever","max_dimension":720,"fps":12}',
     });
+    expect(apiFetchTo).not.toHaveBeenCalled();
+    expect(view.get("[data-test='gallery-viewer-action-status']").text()).toBe(
+      "Export ready to share",
+    );
+  });
+
+  it("opens the native Android share sheet after the remote export completes", async () => {
+    isNativeIOSRuntime.mockReturnValue(false);
+    isNativeAndroidRuntime.mockReturnValue(true);
+    invoke.mockResolvedValueOnce("shared");
+    const view = mountViewer({ ...image, filename: "developed clip.mp4", format: "mp4" });
+    await flushPromises();
+
+    await view.get("[data-test='gallery-viewer-export']").trigger("click");
+    await flushPromises();
+    await view.get("[data-test='video-export-dialog'] form").trigger("submit");
+    await flushPromises();
+
+    expect(invoke).toHaveBeenCalledWith(
+      "share_exported_animation",
+      expect.objectContaining({ filename: "developed clip.gif" }),
+    );
     expect(apiFetchTo).not.toHaveBeenCalled();
     expect(view.get("[data-test='gallery-viewer-action-status']").text()).toBe(
       "Export ready to share",

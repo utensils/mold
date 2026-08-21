@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-save-video-to-photos"
+description = "Enables the save_video_to_photos command without any pre-configured scope."
+commands.allow = ["save_video_to_photos"]
+
+[[permission]]
+identifier = "deny-save-video-to-photos"
+description = "Denies the save_video_to_photos command without any pre-configured scope."
+commands.deny = ["save_video_to_photos"]

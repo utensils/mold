@@ -9609,26 +9609,20 @@ onBeforeUnmount(() => {
           <p class="mobile-pair-note">
             On your host, open Settings → Mobile pairing.
           </p>
-          <p
-            v-if="androidNativeRuntime"
-            class="section-note"
-            data-test="mobile-android-foundation-note"
-          >
-            Android secure pairing is active. Nearby discovery and native media actions are next.
-          </p>
           <button
-            v-if="!androidNativeRuntime"
             class="secondary-button"
             type="button"
             :disabled="discovering"
+            data-test="mobile-discover-hosts"
             @click="discoverHosts"
           >
             {{ discovering ? "Scanning…" : "Discover nearby" }}
           </button>
           <div
-            v-for="host in androidNativeRuntime ? [] : discovered"
+            v-for="host in discovered"
             :key="`${host.host}:${host.port}`"
             class="host-row"
+            data-test="mobile-discovered-host"
           >
             <div class="host-row-head">
               <div>

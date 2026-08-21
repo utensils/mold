@@ -435,7 +435,7 @@ async function setSourceVideo(event: Event): Promise<void> {
     return;
   }
   if (exceedsMobileRequestBudget(file.size, "sourceVideo")) {
-    mediaReadError.value = "Combined generation media must be 45 MiB or smaller on iPhone.";
+    mediaReadError.value = "Combined generation media must be 45 MiB or smaller on this phone.";
     return;
   }
   try {
@@ -460,7 +460,7 @@ async function setExtendVideo(event: Event): Promise<void> {
     return;
   }
   if (exceedsMobileRequestBudget(file.size, "extendVideo")) {
-    mediaReadError.value = "Combined generation media must be 45 MiB or smaller on iPhone.";
+    mediaReadError.value = "Combined generation media must be 45 MiB or smaller on this phone.";
     return;
   }
   try {
@@ -520,7 +520,7 @@ async function setAudioFile(event: Event): Promise<void> {
     return;
   }
   if (exceedsMobileRequestBudget(file.size, "audioFile")) {
-    mediaReadError.value = "Combined generation media must be 45 MiB or smaller on iPhone.";
+    mediaReadError.value = "Combined generation media must be 45 MiB or smaller on this phone.";
     return;
   }
   try {
@@ -557,7 +557,7 @@ async function addKeyframes(event: Event): Promise<void> {
   }
   const incomingBytes = files.reduce((sum, file) => sum + file.size, 0);
   if (exceedsMobileRequestBudget(incomingBytes, null)) {
-    mediaReadError.value = "Combined generation media must be 45 MiB or smaller on iPhone.";
+    mediaReadError.value = "Combined generation media must be 45 MiB or smaller on this phone.";
     return;
   }
   try {

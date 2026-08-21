@@ -14,6 +14,32 @@ Default permissions for the plugin
 <tr>
 <td>
 
+`mold-mobile-native:allow-copy-image-to-clipboard`
+
+</td>
+<td>
+
+Enables the copy_image_to_clipboard command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`mold-mobile-native:deny-copy-image-to-clipboard`
+
+</td>
+<td>
+
+Denies the copy_image_to_clipboard command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
 `mold-mobile-native:allow-delete-api-key`
 
 </td>
@@ -33,6 +59,32 @@ Enables the delete_api_key command without any pre-configured scope.
 <td>
 
 Denies the delete_api_key command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`mold-mobile-native:allow-discover-mold-hosts`
+
+</td>
+<td>
+
+Enables the discover_mold_hosts command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`mold-mobile-native:deny-discover-mold-hosts`
+
+</td>
+<td>
+
+Denies the discover_mold_hosts command without any pre-configured scope.
 
 </td>
 </tr>
@@ -66,6 +118,58 @@ Denies the get_api_key command without any pre-configured scope.
 <tr>
 <td>
 
+`mold-mobile-native:allow-save-image-to-photos`
+
+</td>
+<td>
+
+Enables the save_image_to_photos command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`mold-mobile-native:deny-save-image-to-photos`
+
+</td>
+<td>
+
+Denies the save_image_to_photos command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`mold-mobile-native:allow-save-video-to-photos`
+
+</td>
+<td>
+
+Enables the save_video_to_photos command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`mold-mobile-native:deny-save-video-to-photos`
+
+</td>
+<td>
+
+Denies the save_video_to_photos command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
 `mold-mobile-native:allow-set-api-key`
 
 </td>
@@ -85,6 +189,58 @@ Enables the set_api_key command without any pre-configured scope.
 <td>
 
 Denies the set_api_key command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`mold-mobile-native:allow-set-mobile-appearance`
+
+</td>
+<td>
+
+Enables the set_mobile_appearance command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`mold-mobile-native:deny-set-mobile-appearance`
+
+</td>
+<td>
+
+Denies the set_mobile_appearance command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`mold-mobile-native:allow-share-exported-animation`
+
+</td>
+<td>
+
+Enables the share_exported_animation command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`mold-mobile-native:deny-share-exported-animation`
+
+</td>
+<td>
+
+Denies the share_exported_animation command without any pre-configured scope.
 
 </td>
 </tr>

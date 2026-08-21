@@ -3,13 +3,13 @@
 Mold is equally owned and maintained by core contributors James Brink and
 Jeffrey Dilley.
 
-Mold mobile is a remote-only Tauri 2 client. It never links or embeds the GPU
-inference stack; a saved Mold server owns the models, queue, downloads,
-generation work, and gallery media. The iPhone app is the shipped product. The
-Android project is buildable groundwork that deliberately reuses this crate and
-Vue frontend. Keystore-backed API-key storage and native QR pairing are active;
-Android NSD discovery, native media actions, system-chrome polish, CI, and Play
-distribution remain implementation work before an Android release.
+Mold mobile is a remote-only Tauri 2 client for iPhone and Android. It never
+links or embeds the GPU inference stack; a saved Mold server owns the models,
+queue, downloads, generation work, and gallery media. Both native shells reuse
+this crate and the same Vue product frontend. The iPhone app is shipped through
+TestFlight. The Android app has native secure credentials, QR pairing, NSD
+discovery, media actions, and system-chrome synchronization; Android CI,
+release signing, and Play distribution remain release work.
 
 The app is designed for iPhone first and supports iOS 17 or later. iPad is a
 responsive secondary target.
@@ -37,14 +37,14 @@ The thin mobile crate is excluded from the root Cargo workspace so a phone
 build never cross-compiles the desktop server or inference dependency tree.
 Native commands are intentionally limited to platform responsibilities:
 
-- Keychain storage for per-host API keys
-- Bonjour/DNS-SD discovery of `_mold._tcp`
-- UIKit appearance synchronization for readable system chrome
+- Keychain or Android Keystore storage for per-host API keys
+- Bonjour or Android NSD discovery of `_mold._tcp`
+- UIKit or Android system-bar appearance synchronization
+- Native clipboard, Photos/MediaStore, and share-sheet actions
 
-Android provides secure credentials and pairing through the local
-`apps/mobile/plugins` Kotlin bridge plus Tauri's barcode-scanner plugin. Keep
-implementing NSD, MediaStore/share intents, and system-bar appearance behind the
-same command contracts; do not fork the product UI or remote HTTP/SSE logic.
+Android implements those contracts through the local `apps/mobile/plugins`
+Kotlin bridge plus Tauri's barcode-scanner plugin. Keep platform work behind
+the same commands; do not fork the product UI or remote HTTP/SSE logic.
 
 Everything a remote Mold server can answer uses the same authenticated HTTP
 and SSE contract as desktop. Do not import desktop stores that assume a local
@@ -499,7 +499,7 @@ android-doctor             # print and verify every resolved path
 android-emulator           # boot Mold_API_37 (Pixel 9 Pro / Android 17)
 android-dev                # Tauri hot reload
 android-check              # debug ARM64 APK build
-android-test               # Keystore instrumentation test on the emulator
+android-test               # Keystore, MediaStore, content-URI, and share tests
 android-run                # production-mode run
 android-build              # ARM64/ARMv7 Google Play AAB
 ```

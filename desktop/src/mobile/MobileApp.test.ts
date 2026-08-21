@@ -2295,7 +2295,7 @@ describe("MobileApp generation queue", () => {
 
     expect(openStreams).toHaveLength(0);
     expect(wrapper.get("[data-test='mobile-generation-summary']").text()).toContain(
-      "Combined generation media must be 45 MiB or smaller on iPhone",
+      "Combined generation media must be 45 MiB or smaller on this phone",
     );
   });
 
@@ -7372,7 +7372,7 @@ describe("MobileApp gallery", () => {
 
     expect(readBlob).not.toHaveBeenCalled();
     expect(wrapper.get(".gallery-viewer-reuse-error").text()).toContain(
-      "Combined generation media must be 45 MiB or smaller on iPhone",
+      "Combined generation media must be 45 MiB or smaller on this phone",
     );
     expect(wrapper.find("[data-test='gallery-viewer']").exists()).toBe(true);
   });
@@ -7670,17 +7670,28 @@ describe("MobileApp host and catalog coordination", () => {
     await flushPromises();
   }
 
-  it("offers secure Android pairing while discovery remains explicitly unavailable", async () => {
+  it("offers secure Android pairing and nearby discovery", async () => {
     isNativeAndroidRuntime.mockReturnValue(true);
+    invoke.mockImplementation((command: string) => {
+      if (command === "keychain_get_api_key") return Promise.resolve(target.apiKey);
+      if (command === "discover_mold_hosts") {
+        return Promise.resolve([{ name: "Render Box", host: "192.168.1.50", port: 7680 }]);
+      }
+      return Promise.resolve(null);
+    });
     wrapper = mountMobileApp();
     await flushPromises();
     await wrapper.get("[data-test='mobile-tab-hosts']").trigger("click");
 
-    expect(wrapper.get("[data-test='mobile-android-foundation-note']").text()).toContain(
-      "Android secure pairing is active",
-    );
     expect(wrapper.find("[data-test='mobile-scan-pairing']").exists()).toBe(true);
-    expect(wrapper.text()).not.toContain("Discover nearby");
+    await wrapper.get("[data-test='mobile-discover-hosts']").trigger("click");
+    await flushPromises();
+
+    expect(invoke).toHaveBeenCalledWith("discover_mold_hosts", { timeoutMs: 2500 });
+    expect(wrapper.get("[data-test='mobile-discovered-host']").text()).toContain("Render Box");
+    expect(wrapper.get("[data-test='mobile-discovered-host']").text()).toContain(
+      "192.168.1.50:7680",
+    );
     expect(wrapper.text()).toContain("API key");
   });
 

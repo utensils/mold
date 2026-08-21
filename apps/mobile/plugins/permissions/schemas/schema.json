@@ -295,6 +295,18 @@
       "type": "string",
       "oneOf": [
         {
+          "description": "Enables the copy_image_to_clipboard command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-copy-image-to-clipboard",
+          "markdownDescription": "Enables the copy_image_to_clipboard command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the copy_image_to_clipboard command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-copy-image-to-clipboard",
+          "markdownDescription": "Denies the copy_image_to_clipboard command without any pre-configured scope."
+        },
+        {
           "description": "Enables the delete_api_key command without any pre-configured scope.",
           "type": "string",
           "const": "allow-delete-api-key",
@@ -305,6 +317,18 @@
           "type": "string",
           "const": "deny-delete-api-key",
           "markdownDescription": "Denies the delete_api_key command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the discover_mold_hosts command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-discover-mold-hosts",
+          "markdownDescription": "Enables the discover_mold_hosts command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the discover_mold_hosts command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-discover-mold-hosts",
+          "markdownDescription": "Denies the discover_mold_hosts command without any pre-configured scope."
         },
         {
           "description": "Enables the get_api_key command without any pre-configured scope.",
@@ -319,6 +343,30 @@
           "markdownDescription": "Denies the get_api_key command without any pre-configured scope."
         },
         {
+          "description": "Enables the save_image_to_photos command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-save-image-to-photos",
+          "markdownDescription": "Enables the save_image_to_photos command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the save_image_to_photos command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-save-image-to-photos",
+          "markdownDescription": "Denies the save_image_to_photos command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the save_video_to_photos command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-save-video-to-photos",
+          "markdownDescription": "Enables the save_video_to_photos command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the save_video_to_photos command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-save-video-to-photos",
+          "markdownDescription": "Denies the save_video_to_photos command without any pre-configured scope."
+        },
+        {
           "description": "Enables the set_api_key command without any pre-configured scope.",
           "type": "string",
           "const": "allow-set-api-key",
@@ -329,6 +377,30 @@
           "type": "string",
           "const": "deny-set-api-key",
           "markdownDescription": "Denies the set_api_key command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the set_mobile_appearance command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-set-mobile-appearance",
+          "markdownDescription": "Enables the set_mobile_appearance command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the set_mobile_appearance command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-set-mobile-appearance",
+          "markdownDescription": "Denies the set_mobile_appearance command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the share_exported_animation command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-share-exported-animation",
+          "markdownDescription": "Enables the share_exported_animation command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the share_exported_animation command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-share-exported-animation",
+          "markdownDescription": "Denies the share_exported_animation command without any pre-configured scope."
         },
         {
           "description": "Default permissions for the plugin",

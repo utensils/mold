@@ -37,4 +37,48 @@ impl<R: Runtime> MoldMobileNative<R> {
             .run_mobile_plugin("deleteApiKey", HostKeyRequest { host_id })
             .map_err(Into::into)
     }
+
+    pub fn discover_mold_hosts(&self, timeout_ms: u32) -> crate::Result<Vec<DiscoveredHost>> {
+        self.0
+            .run_mobile_plugin::<DiscoveryResponse>(
+                "discoverMoldHosts",
+                DiscoveryRequest { timeout_ms },
+            )
+            .map(|response| response.hosts)
+            .map_err(Into::into)
+    }
+
+    pub fn copy_image_to_clipboard(&self, data_b64: String) -> crate::Result<()> {
+        self.0
+            .run_mobile_plugin("copyImageToClipboard", ImageDataRequest { data_b64 })
+            .map_err(Into::into)
+    }
+
+    pub fn save_image_to_photos(&self, data_b64: String) -> crate::Result<()> {
+        self.0
+            .run_mobile_plugin("saveImageToPhotos", ImageDataRequest { data_b64 })
+            .map_err(Into::into)
+    }
+
+    pub fn save_video_to_photos(&self, url: String) -> crate::Result<()> {
+        self.0
+            .run_mobile_plugin("saveVideoToPhotos", VideoUrlRequest { url })
+            .map_err(Into::into)
+    }
+
+    pub fn share_exported_animation(
+        &self,
+        request: ShareAnimationRequest,
+    ) -> crate::Result<String> {
+        self.0
+            .run_mobile_plugin::<ShareAnimationResponse>("shareExportedAnimation", request)
+            .map(|response| response.outcome)
+            .map_err(Into::into)
+    }
+
+    pub fn set_mobile_appearance(&self, appearance: String) -> crate::Result<()> {
+        self.0
+            .run_mobile_plugin("setMobileAppearance", AppearanceRequest { appearance })
+            .map_err(Into::into)
+    }
 }
