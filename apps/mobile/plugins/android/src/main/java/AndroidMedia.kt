@@ -25,15 +25,23 @@ internal class AndroidMedia(context: Context) {
     private val context = context.applicationContext
 
     fun copyImage(dataB64: String): Uri {
+        val clip = prepareImageClip(dataB64)
+        copyPreparedImage(clip)
+        return clip.uri
+    }
+
+    fun prepareImageClip(dataB64: String): PreparedImageClip {
         val image = decodeImage(dataB64)
         val directory = File(context.cacheDir, "shared").apply { mkdirs() }
         prune(directory)
         val file = File(directory, "mold-copy-${System.currentTimeMillis()}.${image.extension}")
         file.writeBytes(image.bytes)
-        val uri = shareUri(file)
+        return PreparedImageClip(shareUri(file))
+    }
+
+    fun copyPreparedImage(clip: PreparedImageClip) {
         val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        clipboard.setPrimaryClip(ClipData.newUri(context.contentResolver, "Mold image", uri))
-        return uri
+        clipboard.setPrimaryClip(ClipData.newUri(context.contentResolver, "Mold image", clip.uri))
     }
 
     fun saveImage(dataB64: String): Uri {
@@ -254,6 +262,8 @@ internal class AndroidMedia(context: Context) {
             stale.delete()
         }
     }
+
+    internal data class PreparedImageClip(val uri: Uri)
 
     private data class ImageData(val bytes: ByteArray, val mimeType: String, val extension: String)
 

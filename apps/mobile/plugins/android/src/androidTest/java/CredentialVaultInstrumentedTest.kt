@@ -28,4 +28,12 @@ class CredentialVaultInstrumentedTest {
         vault.delete(hostId)
         assertNull(vault.get(hostId))
     }
+
+    @Test
+    fun discardsMalformedCiphertext() {
+        vault.storeCiphertextForTesting(hostId, "not-an-encrypted-payload")
+
+        assertNull(vault.get(hostId))
+        assertNull(vault.storedCiphertext(hostId))
+    }
 }

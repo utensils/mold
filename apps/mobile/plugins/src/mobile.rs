@@ -38,12 +38,13 @@ impl<R: Runtime> MoldMobileNative<R> {
             .map_err(Into::into)
     }
 
-    pub fn discover_mold_hosts(&self, timeout_ms: u32) -> crate::Result<Vec<DiscoveredHost>> {
+    pub async fn discover_mold_hosts(&self, timeout_ms: u32) -> crate::Result<Vec<DiscoveredHost>> {
         self.0
-            .run_mobile_plugin::<DiscoveryResponse>(
+            .run_mobile_plugin_async::<DiscoveryResponse>(
                 "discoverMoldHosts",
                 DiscoveryRequest { timeout_ms },
             )
+            .await
             .map(|response| response.hosts)
             .map_err(Into::into)
     }

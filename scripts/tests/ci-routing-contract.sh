@@ -501,13 +501,30 @@ require_text "$android" 'apps/mobile/**' \
   "Android workflow does not run for native mobile changes"
 require_text "$android" 'runs-on: ubuntu-latest' \
   "Android builds do not run on the supported Linux host"
+require_text "$android" 'name: Classify Android changes' \
+  "Android workflow has no path classifier"
+android_build_filter="$(extract_filter "$android" build)"
+grep -Fq "desktop/src/mobile/**" <<< "$android_build_filter" \
+  || fail "Android build classifier omits the shared mobile frontend"
+android_native_filter="$(extract_filter "$android" native_tests)"
+grep -Fq "apps/mobile/plugins/android/**" <<< "$android_native_filter" \
+  || fail "Android native-test classifier omits the Kotlin bridge"
 require_text "$android" 'targets: aarch64-linux-android' \
   "Android workflow does not install its Rust target"
 require_text "$android" '"ndk;27.0.12077973"' \
   "Android workflow does not pin the repository NDK"
 require_text "$android" \
-  'run: cargo tauri android build --debug --apk --target aarch64 --ci' \
+  'run: cargo tauri android build --debug --apk true --target aarch64 --ci' \
   "Android workflow does not build the ARM64 APK"
+require_text "$android" \
+  'run: cargo tauri android build --apk true --target aarch64 --target armv7 --ci' \
+  "Android workflow does not build the ARM64/ARMv7 nightly APK"
+require_text "$android" 'name: mold-android-nightly-apk' \
+  "Android workflow does not retain its nightly APK"
+require_text "$android" 'retention-days: 14' \
+  "Android nightly artifact retention is not bounded"
+require_text "$android" 'KERNEL=="kvm", GROUP="kvm", MODE="0666"' \
+  "Android emulator CI does not enable KVM"
 require_text "$android" 'api-level: 35' \
   "Android workflow does not exercise a modern emulator"
 require_text "$android" \

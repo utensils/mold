@@ -31,6 +31,7 @@ async fn platform_discover(
 
     app.mold_mobile_native()
         .discover_mold_hosts(timeout.as_millis() as u32)
+        .await
         .map(|hosts| {
             hosts
                 .into_iter()

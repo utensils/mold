@@ -113,10 +113,13 @@ class MoldMobileNativePlugin(private val hostActivity: Activity) : Plugin(hostAc
     @Command
     fun copyImageToClipboard(invoke: Invoke) {
         val args = invoke.parseArgs(ImageDataArgs::class.java)
-        hostActivity.runOnUiThread {
-            resolveOrReject(invoke, "copy image") {
-                media.copyImage(args.dataB64)
-                invoke.resolve()
+        runAsync(invoke, "copy image") {
+            val clip = media.prepareImageClip(args.dataB64)
+            hostActivity.runOnUiThread {
+                resolveOrReject(invoke, "copy image") {
+                    media.copyPreparedImage(clip)
+                    invoke.resolve()
+                }
             }
         }
     }

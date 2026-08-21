@@ -8,8 +8,9 @@ links or embeds the GPU inference stack; a saved Mold server owns the models,
 queue, downloads, generation work, and gallery media. Both native shells reuse
 this crate and the same Vue product frontend. The iPhone app is shipped through
 TestFlight. The Android app has native secure credentials, QR pairing, NSD
-discovery, media actions, system-chrome synchronization, and an emulator-backed
-CI gate. Play signing and distribution remain release work.
+discovery, media actions, inset-aware system chrome, and an emulator-backed CI
+gate. Relevant `main` changes also produce a downloadable nightly APK. Play
+signing and store publication remain release work.
 
 The app is designed for iPhone first and supports iOS 17 or later. iPad is a
 responsive secondary target.
@@ -586,12 +587,15 @@ builds must retain Xcode's ad-hoc signature so Keychain access works.
 ## CI and distribution
 
 `.github/workflows/android.yml` runs for Android and shared-mobile changes. It
-builds the ARM64 debug APK with the pinned NDK, then runs the native credential,
-MediaStore, clipboard, content-URI, and authenticated-share instrumentation
-tests on an Android 15 emulator. `./scripts/android.sh build` proves the local
-Play artifact path by producing the unsigned ARM64/ARMv7 release AAB; repository
-keystore secrets and Play Console publishing are intentionally not configured
-in the development workflow.
+classifies the changed paths before spending Android build time. Relevant pull
+requests build the ARM64 debug APK with the pinned NDK; the Android 15 emulator
+and native credential, discovery, MediaStore, clipboard, content-URI, and
+authenticated-share instrumentation tests run only when the Kotlin/generated
+Android surface changed. Relevant `main` pushes build an unsigned ARM64/ARMv7
+release APK and retain it for 14 days as the `mold-android-nightly-apk` workflow
+artifact. `./scripts/android.sh build` separately proves the local Play artifact
+path by producing the unsigned ARM64/ARMv7 release AAB. Repository keystore
+secrets and Play Console publishing are intentionally not configured yet.
 
 `.github/workflows/ios.yml` runs for mobile-relevant pull requests and `main`
 changes, including shared component changes imported by the mobile entry. It

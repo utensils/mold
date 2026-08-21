@@ -7,6 +7,7 @@ import android.util.Base64
 import java.nio.charset.StandardCharsets
 import java.security.KeyStore
 import java.security.MessageDigest
+import java.security.GeneralSecurityException
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
@@ -34,15 +35,26 @@ internal class CredentialVault(private val context: Context) {
     fun get(hostId: String): String? {
         require(hostId.isNotBlank()) { "host id is required" }
         val payload = preferences.getString(preferenceKey(hostId), null) ?: return null
-        val pieces = payload.split('.', limit = 2)
-        check(pieces.size == 2) { "encrypted credential is malformed" }
+        return try {
+            val pieces = payload.split('.', limit = 2)
+            check(pieces.size == 2) { "encrypted credential is malformed" }
 
-        val cipher = Cipher.getInstance(TRANSFORMATION)
-        val iv = Base64.decode(pieces[0], Base64.NO_WRAP)
-        val ciphertext = Base64.decode(pieces[1], Base64.NO_WRAP)
-        cipher.init(Cipher.DECRYPT_MODE, getOrCreateKey(), GCMParameterSpec(128, iv))
-        cipher.updateAAD(hostId.toByteArray(StandardCharsets.UTF_8))
-        return String(cipher.doFinal(ciphertext), StandardCharsets.UTF_8)
+            val cipher = Cipher.getInstance(TRANSFORMATION)
+            val iv = Base64.decode(pieces[0], Base64.NO_WRAP)
+            val ciphertext = Base64.decode(pieces[1], Base64.NO_WRAP)
+            cipher.init(Cipher.DECRYPT_MODE, getOrCreateKey(), GCMParameterSpec(128, iv))
+            cipher.updateAAD(hostId.toByteArray(StandardCharsets.UTF_8))
+            String(cipher.doFinal(ciphertext), StandardCharsets.UTF_8)
+        } catch (_: GeneralSecurityException) {
+            discardUnreadable(hostId)
+            null
+        } catch (_: IllegalArgumentException) {
+            discardUnreadable(hostId)
+            null
+        } catch (_: IllegalStateException) {
+            discardUnreadable(hostId)
+            null
+        }
     }
 
     fun delete(hostId: String) {
@@ -54,6 +66,14 @@ internal class CredentialVault(private val context: Context) {
 
     internal fun storedCiphertext(hostId: String): String? =
         preferences.getString(preferenceKey(hostId), null)
+
+    internal fun storeCiphertextForTesting(hostId: String, payload: String) {
+        check(preferences.edit().putString(preferenceKey(hostId), payload).commit())
+    }
+
+    private fun discardUnreadable(hostId: String) {
+        preferences.edit().remove(preferenceKey(hostId)).commit()
+    }
 
     private fun getOrCreateKey(): SecretKey {
         val store = KeyStore.getInstance(KEYSTORE).apply { load(null) }

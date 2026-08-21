@@ -2224,8 +2224,12 @@ function persistHosts(): void {
 async function hydrateApiKeys(): Promise<void> {
   await Promise.all(
     hosts.value.map(async (host) => {
-      host.apiKey =
-        (await invoke<string | null>("keychain_get_api_key", { hostId: host.id })) ?? "";
+      try {
+        host.apiKey =
+          (await invoke<string | null>("keychain_get_api_key", { hostId: host.id })) ?? "";
+      } catch {
+        host.apiKey = "";
+      }
     }),
   );
 }

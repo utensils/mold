@@ -4,11 +4,14 @@ import android.content.Context
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
 import android.net.wifi.WifiManager
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import app.tauri.plugin.Invoke
 import app.tauri.plugin.JSObject
 import org.json.JSONArray
+import java.net.Inet4Address
+import java.net.InetAddress
 import java.util.ArrayDeque
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -42,31 +45,39 @@ internal class AndroidDiscovery(
 
     private val listener = object : NsdManager.DiscoveryListener {
         override fun onDiscoveryStarted(serviceType: String) {
-            discoveryStarted = true
+            onHandler { discoveryStarted = true }
         }
 
         override fun onServiceFound(serviceInfo: NsdServiceInfo) {
-            if (serviceInfo.serviceType.startsWith("_mold._tcp")) {
-                services["${serviceInfo.serviceName}|${serviceInfo.serviceType}"] = serviceInfo
+            onHandler {
+                if (serviceInfo.serviceType.startsWith("_mold._tcp")) {
+                    services["${serviceInfo.serviceName}|${serviceInfo.serviceType}"] = serviceInfo
+                }
             }
         }
 
         override fun onServiceLost(serviceInfo: NsdServiceInfo) {
-            services.remove("${serviceInfo.serviceName}|${serviceInfo.serviceType}")
+            onHandler {
+                services.remove("${serviceInfo.serviceName}|${serviceInfo.serviceType}")
+            }
         }
 
         override fun onDiscoveryStopped(serviceType: String) {
-            discoveryStarted = false
-            beginResolving()
+            onHandler {
+                discoveryStarted = false
+                beginResolving()
+            }
         }
 
         override fun onStartDiscoveryFailed(serviceType: String, errorCode: Int) {
-            reject("nearby discovery could not start (Android NSD error $errorCode)")
+            onHandler { reject("nearby discovery could not start (Android NSD error $errorCode)") }
         }
 
         override fun onStopDiscoveryFailed(serviceType: String, errorCode: Int) {
-            discoveryStarted = false
-            beginResolving()
+            onHandler {
+                discoveryStarted = false
+                beginResolving()
+            }
         }
     }
 
@@ -76,6 +87,7 @@ internal class AndroidDiscovery(
         if (discoveryStarted) {
             try {
                 manager.stopServiceDiscovery(listener)
+                handler.postDelayed(::beginResolving, STOP_TIMEOUT_MS)
                 return
             } catch (_: Exception) {
                 discoveryStarted = false
@@ -88,6 +100,7 @@ internal class AndroidDiscovery(
         if (finished.get() || resolving) return
         resolving = true
         pending.addAll(services.values)
+        handler.postDelayed(::resolve, minOf(timeoutMs, RESOLVE_TIMEOUT_MS))
         resolveNext()
     }
 
@@ -102,21 +115,28 @@ internal class AndroidDiscovery(
         try {
             manager.resolveService(service, object : NsdManager.ResolveListener {
                 override fun onServiceResolved(resolved: NsdServiceInfo) {
-                    val address = resolved.host?.hostAddress.orEmpty()
-                    val port = resolved.port
-                    if (address.isNotBlank() && port in 1..65535) {
-                        val connectableAddress = if (address.contains(':')) "[$address]" else address
-                        hosts["$connectableAddress:$port"] = DiscoveredService(
-                            resolved.serviceName.ifBlank { connectableAddress },
-                            connectableAddress,
-                            port,
-                        )
+                    onHandler {
+                        if (finished.get()) return@onHandler
+                        val addresses = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                            resolved.hostAddresses
+                        } else {
+                            listOfNotNull(resolved.host)
+                        }
+                        val address = selectConnectableAddress(addresses)
+                        val port = resolved.port
+                        if (address != null && port in 1..65535) {
+                            hosts["$address:$port"] = DiscoveredService(
+                                resolved.serviceName.ifBlank { address },
+                                address,
+                                port,
+                            )
+                        }
+                        resolveNext()
                     }
-                    resolveNext()
                 }
 
                 override fun onResolveFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
-                    resolveNext()
+                    onHandler(::resolveNext)
                 }
             })
         } catch (_: Exception) {
@@ -142,6 +162,10 @@ internal class AndroidDiscovery(
         if (!finished.compareAndSet(false, true)) return
         cleanup()
         invoke.reject(message)
+    }
+
+    private fun onHandler(block: () -> Unit) {
+        if (Looper.myLooper() == handler.looper) block() else handler.post(block)
     }
 
     private fun acquireMulticastLock() {
@@ -170,5 +194,15 @@ internal class AndroidDiscovery(
 
     companion object {
         private const val SERVICE_TYPE = "_mold._tcp."
+        private const val STOP_TIMEOUT_MS = 500L
+        private const val RESOLVE_TIMEOUT_MS = 3_000L
     }
+}
+
+internal fun selectConnectableAddress(addresses: List<InetAddress>): String? {
+    val selected = addresses.firstOrNull { it is Inet4Address && !it.isAnyLocalAddress }
+        ?: addresses.firstOrNull { !it.isAnyLocalAddress && !it.isLinkLocalAddress }
+        ?: return null
+    val address = selected.hostAddress?.substringBefore('%')?.takeIf { it.isNotBlank() } ?: return null
+    return if (address.contains(':')) "[$address]" else address
 }
