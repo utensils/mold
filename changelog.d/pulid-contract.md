@@ -33,3 +33,11 @@
   are frozen into the execution plan the worker dispatches. An `id_weight` of 0
   is completely inert — no assets planned, nothing downloaded, no memory
   charged ([#1220](https://github.com/utensils/mold/issues/1220)).
+- **Identity assets are verified against their manifest pins before use.**
+  Hugging Face `main` is a mutable branch, so every PuLID file Mold
+  materializes is hashed against the SHA-256 the manifest pinned — after the
+  download, and again for any copy already on disk that is not already attested
+  by a `.sha256-verified` marker recording that pin. A mismatch names the file
+  and both digests, removes the rejected bytes, and fails the job instead of
+  freezing unverified weights into an execution plan
+  ([#1220](https://github.com/utensils/mold/issues/1220)).
