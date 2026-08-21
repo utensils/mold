@@ -4691,6 +4691,8 @@ impl App {
                 let req = self.script.build_chain_request();
                 self.generate.generating = true;
                 self.generate.error_message = None;
+                // An advisory describes the print that produced it.
+                self.generate.warning_message = None;
                 self.generate.progress.clear();
                 self.generate.progress.mark_generation_start();
                 self.generate.preview_image = None;
@@ -5749,6 +5751,36 @@ impl App {
             // Reset all params to model defaults (keep model and prompt)
             CreateRow::ResetDefaults => self.reset_params_to_model_defaults(),
         }
+    }
+
+    /// Surface the advisories a completed request carried
+    /// (`x-mold-request-warning`, via `request_warnings`).
+    ///
+    /// These ride a request the host ACCEPTED and rendered — a filing it
+    /// could not apply, a lip-dub clip it retimed — so they take the
+    /// advisory slot (`!`, warning styling) and never `error_message`, whose
+    /// `✗` would read as a failed render.
+    ///
+    /// Each advisory is taken WHOLE. The prose carries "; " as ordinary
+    /// punctuation ("…were not applied; the print was generated and saved
+    /// normally"), so splitting on it yields two dangling half-sentences.
+    /// Several are joined with the separator the TUI already uses between
+    /// independent facts, which the prose cannot contain. They also land in
+    /// the Timeline, the per-generation record, which holds what the
+    /// one-line slot clips.
+    ///
+    /// One-shot and chain completions share this so the two can never drift.
+    fn surface_request_advisories(&mut self, advisories: &[String]) {
+        if advisories.is_empty() {
+            return;
+        }
+        for advisory in advisories {
+            self.generate.progress.push_log(ProgressLogEntry {
+                message: advisory.clone(),
+                style: ProgressStyle::Warning,
+            });
+        }
+        self.generate.warning_message = Some(advisories.join(" \u{00b7} "));
     }
 
     /// Prefill text for one File-under editor: the stored value in the
@@ -7518,28 +7550,7 @@ impl App {
                     self.generate.last_seed = Some(response.seed_used);
                     self.generate.last_generation_time_ms = Some(response.generation_time_ms);
 
-                    // `x-mold-request-warning` rides a request the host
-                    // ACCEPTED and rendered: a filing it could not apply, a
-                    // lip-dub clip it retimed. Nothing failed, so it takes the
-                    // advisory slot (`!`, warning styling) and never the error
-                    // slot, whose `✗` would read as a failed render.
-                    //
-                    // Each advisory is taken WHOLE. The prose contains "; " as
-                    // ordinary punctuation ("…were not applied; the print was
-                    // generated and saved normally"), so splitting on it yields
-                    // two dangling half-sentences; several advisories are
-                    // joined with the separator the TUI already uses between
-                    // independent facts, which the prose cannot contain.
-                    if !response.request_warnings.is_empty() {
-                        for advisory in &response.request_warnings {
-                            self.generate.progress.push_log(ProgressLogEntry {
-                                message: advisory.clone(),
-                                style: ProgressStyle::Warning,
-                            });
-                        }
-                        self.generate.warning_message =
-                            Some(response.request_warnings.join(" \u{00b7} "));
-                    }
+                    self.surface_request_advisories(&response.request_warnings);
 
                     // Use the model name from the response (server is source of
                     // truth). The UI params may have changed if the user switched
@@ -8477,6 +8488,10 @@ impl App {
                         ),
                         style: ProgressStyle::Done,
                     });
+                    // A sequence's filing is stamped on the stitched print, so
+                    // a host that could not apply it reports it here exactly
+                    // as it does for a one-shot.
+                    self.surface_request_advisories(&response.request_warnings);
                 }
                 BackgroundEvent::ChainError(msg) => {
                     self.generate.generating = false;
@@ -13316,6 +13331,88 @@ mod tests {
                     && matches!(entry.style, ProgressStyle::Warning)),
             "the advisory belongs in the per-generation record too"
         );
+    }
+
+    /// A sequence carries a filing too — stamped on the stitched print —
+    /// so a host that could not apply it must say so on the same slot as a
+    /// one-shot. `ChainResponse` carries the identical `request_warnings`.
+    #[tokio::test]
+    async fn a_completed_chain_surfaces_its_advisories_too() {
+        let mut app = make_settings_test_app();
+        let advisory =
+            "tags and collection were not applied; the print was generated and saved normally";
+        app.bg_tx
+            .send(BackgroundEvent::ChainComplete {
+                response: Box::new(chain_response_with_advisories(vec![advisory.to_string()])),
+            })
+            .unwrap();
+        app.process_background_events();
+
+        assert_eq!(
+            app.generate.warning_message.as_deref(),
+            Some(advisory),
+            "a stitched print's dropped filing must not be silent"
+        );
+        assert_eq!(app.generate.error_message, None, "the chain succeeded");
+        assert!(app
+            .generate
+            .progress
+            .log
+            .iter()
+            .any(|entry| entry.message.contains("were not applied")
+                && matches!(entry.style, ProgressStyle::Warning)));
+    }
+
+    #[tokio::test]
+    async fn an_unwarned_chain_leaves_the_advisory_slot_empty() {
+        let mut app = make_settings_test_app();
+        app.bg_tx
+            .send(BackgroundEvent::ChainComplete {
+                response: Box::new(chain_response_with_advisories(Vec::new())),
+            })
+            .unwrap();
+        app.process_background_events();
+
+        assert_eq!(app.generate.warning_message, None);
+    }
+
+    /// Submitting a sequence clears a previous print's advisory, exactly as
+    /// starting a one-shot does.
+    #[tokio::test]
+    async fn submitting_a_chain_clears_a_previous_advisory() {
+        let mut app = make_settings_test_app();
+        app.generate.warning_message = Some("a stale advisory".to_string());
+
+        app.dispatch_action(Action::ScriptSubmit);
+
+        assert_eq!(app.generate.warning_message, None);
+    }
+
+    fn chain_response_with_advisories(warnings: Vec<String>) -> mold_core::ChainResponse {
+        mold_core::ChainResponse {
+            request_warnings: warnings,
+            video: mold_core::VideoData {
+                data: vec![0u8; 4],
+                format: OutputFormat::Mp4,
+                width: 64,
+                height: 64,
+                frames: 8,
+                fps: 8,
+                gif_preview: Vec::new(),
+                thumbnail: Vec::new(),
+                pipeline: None,
+                source_preprocessing: None,
+                pipeline_provenance_sha256: None,
+                has_audio: false,
+                duration_ms: None,
+                audio_sample_rate: None,
+                audio_channels: None,
+            },
+            stage_count: 2,
+            gpu: None,
+            script: Default::default(),
+            vram_estimate: None,
+        }
     }
 
     // ── File under (creation-time filing) ──────────────────────
