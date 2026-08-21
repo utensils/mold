@@ -5,14 +5,22 @@
 //! replaced between the check and the read. This module opens the file with
 //! [`mold_core::secure_file::open_regular_file_no_follow`] — no symlink in the
 //! filename or any parent component, regular files only, canonical
-//! traversal — and decodes the retained descriptor's bytes. The digest is
-//! taken from that same descriptor, so the bytes hashed are the bytes parsed.
+//! traversal — and decodes the retained descriptor's bytes.
+//!
+//! Retaining the descriptor is necessary but not sufficient. The bytes must
+//! also be read from it exactly **once**: hashing the descriptor and then
+//! reading it is two passes, and on shared storage an in-place write between
+//! them authenticates one set of bytes and executes another. [`AuthenticatedBytes`]
+//! is the whole answer — it performs the single read, hashes what it read, and
+//! offers no way to obtain a digest and a buffer that did not come from the
+//! same call.
 //!
 //! Permissions are deliberately NOT checked: a model artifact on shared
 //! storage with a collaborative umask is valid (see CLAUDE.md, "Model storage
 //! permissions invariant"). Authenticity comes from the content digest.
 
 use std::collections::HashSet;
+use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 
@@ -20,8 +28,9 @@ use anyhow::{Context, Result};
 use candle_onnx::onnx::ModelProto;
 use mold_core::manifest::ModelComponent;
 use mold_core::pulid_assets::pulid_manifest;
-use mold_core::secure_file::{open_regular_file_no_follow, sha256_open_file};
+use mold_core::secure_file::open_regular_file_no_follow;
 use prost::Message;
+use sha2::{Digest, Sha256};
 
 /// One ONNX graph plus the digest of the exact bytes it was decoded from.
 #[derive(Debug, Clone)]
@@ -149,30 +158,79 @@ pub fn pinned_sha256(component: ModelComponent) -> Option<&'static str> {
 pub fn load_onnx_model(path: &Path, expected_sha256: Option<&str>) -> Result<LoadedOnnxModel> {
     let mut file = open_regular_file_no_follow(path)
         .with_context(|| format!("failed to open the ONNX model at {}", path.display()))?;
-    let sha256 = sha256_open_file(&file)
-        .with_context(|| format!("failed to hash the ONNX model at {}", path.display()))?;
-    if let Some(expected) = expected_sha256 {
-        if !sha256.eq_ignore_ascii_case(expected) {
-            return Err(DigestMismatch {
-                path: path.display().to_string(),
-                expected: expected.to_string(),
-                found: sha256,
-            }
-            .into());
-        }
-    }
-    let mut buf = Vec::new();
-    file.read_to_end(&mut buf)
-        .with_context(|| format!("failed to read the ONNX model at {}", path.display()))?;
-    let bytes = buf.len();
-    let mut model = ModelProto::decode(buf.as_slice())
+    let authenticated = AuthenticatedBytes::read_once(&mut file, path)?;
+    authenticated.verify(expected_sha256, path)?;
+    let mut model = ModelProto::decode(authenticated.bytes())
         .with_context(|| format!("failed to decode the ONNX model at {}", path.display()))?;
     normalize_empty_optional_resize_inputs(&mut model);
     Ok(LoadedOnnxModel {
+        bytes: authenticated.bytes().len(),
+        sha256: authenticated.into_sha256(),
         model,
-        sha256,
-        bytes,
     })
+}
+
+/// One read of a retained descriptor, with the digest of exactly those bytes.
+///
+/// This type exists to make a specific bug unrepresentable. The obvious
+/// loader — hash the descriptor, then read it — performs **two** reads, and on
+/// shared storage an in-place write landing between them pairs an
+/// authenticated digest with unauthenticated bytes: the check passes and
+/// different bytes execute. Reading twice is not a slow version of reading
+/// once; it is a different, wrong operation.
+///
+/// So there is no constructor that takes a digest, none that takes bytes, and
+/// no accessor that yields one without the other having come from the same
+/// [`read_once`](Self::read_once) call. A caller cannot hold a digest for one
+/// read and a buffer from another, because it can never obtain them
+/// separately. `mold_core::secure_file::sha256_open_file` is deliberately
+/// unused here for the same reason — it takes a `&File` and hashes it, which
+/// necessarily leaves the bytes to be fetched by a second read.
+struct AuthenticatedBytes {
+    bytes: Vec<u8>,
+    sha256: String,
+}
+
+impl AuthenticatedBytes {
+    /// Read the whole descriptor exactly once and hash what was read.
+    ///
+    /// The descriptor comes from `open_regular_file_no_follow`, so it is
+    /// positioned at zero and no seek is needed — nor performed, which is what
+    /// keeps this to a single pass over the bytes.
+    fn read_once(file: &mut File, path: &Path) -> Result<Self> {
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)
+            .with_context(|| format!("failed to read the ONNX model at {}", path.display()))?;
+        let digest = Sha256::digest(&bytes);
+        Ok(Self {
+            bytes,
+            sha256: format!("{digest:x}"),
+        })
+    }
+
+    fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    fn into_sha256(self) -> String {
+        self.sha256
+    }
+
+    /// Compare against a manifest pin, if one was supplied.
+    fn verify(&self, expected: Option<&str>, path: &Path) -> Result<()> {
+        let Some(expected) = expected else {
+            return Ok(());
+        };
+        if self.sha256.eq_ignore_ascii_case(expected) {
+            return Ok(());
+        }
+        Err(DigestMismatch {
+            path: path.display().to_string(),
+            expected: expected.to_string(),
+            found: self.sha256.clone(),
+        }
+        .into())
+    }
 }
 
 #[cfg(test)]
@@ -287,6 +345,80 @@ mod tests {
         std::fs::write(&path, &bytes).unwrap();
         let digest = <sha2::Sha256 as sha2::Digest>::digest(&bytes);
         (path, format!("{digest:x}"))
+    }
+
+    /// The digest describes the bytes that were read, and the read happened
+    /// once. Cross-checked against `mold-core`'s own file hasher so this
+    /// hand-rolled digest cannot quietly diverge from the rest of mold.
+    #[test]
+    fn the_digest_describes_the_bytes_that_were_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("payload.bin");
+        let content: Vec<u8> = (0..4096u32).map(|i| (i % 251) as u8).collect();
+        std::fs::write(&path, &content).unwrap();
+
+        let mut file = open_regular_file_no_follow(&path).unwrap();
+        let authenticated = AuthenticatedBytes::read_once(&mut file, &path).unwrap();
+        assert_eq!(authenticated.bytes(), content.as_slice());
+        assert_eq!(
+            authenticated.sha256,
+            format!("{:x}", Sha256::digest(&content))
+        );
+        assert_eq!(
+            authenticated.into_sha256(),
+            mold_core::secure_file::sha256_open_file(&open_regular_file_no_follow(&path).unwrap())
+                .unwrap(),
+            "the single-read digest must agree with mold-core's file hasher"
+        );
+    }
+
+    #[test]
+    fn an_empty_file_still_hashes_what_was_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty.bin");
+        std::fs::write(&path, b"").unwrap();
+        let mut file = open_regular_file_no_follow(&path).unwrap();
+        let authenticated = AuthenticatedBytes::read_once(&mut file, &path).unwrap();
+        assert!(authenticated.bytes().is_empty());
+        assert_eq!(
+            authenticated.sha256,
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
+
+    /// Structural guard for the invariant [`AuthenticatedBytes`] is shaped
+    /// around: the module must contain exactly ONE read of the descriptor, and
+    /// must not reach for a hasher that takes a `&File` — which would
+    /// necessarily leave the bytes to a second read, reopening the window
+    /// where an in-place write authenticates one set of bytes and executes
+    /// another. A refactor that reintroduces the two-pass shape fails here.
+    #[test]
+    fn the_loader_reads_the_descriptor_exactly_once() {
+        let source = include_str!("onnx_graph.rs");
+        let code = source
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        // The needles are split so this test's own source does not count as a
+        // match — otherwise every assertion below would find itself.
+        let read_all = concat!("read_to", "_end");
+        let file_hasher = concat!("sha256_open", "_file");
+        let path_read = concat!("std::fs", "::read");
+        assert_eq!(
+            code.matches(read_all).count(),
+            1,
+            "the descriptor must be read exactly once"
+        );
+        assert_eq!(
+            code.matches(file_hasher).count(),
+            1,
+            "only the cross-check test above may name mold-core's &File hasher"
+        );
+        assert!(
+            !code.contains(path_read),
+            "a path-based read would abandon the retained descriptor entirely"
+        );
     }
 
     #[test]
