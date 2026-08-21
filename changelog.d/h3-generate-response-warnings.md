@@ -1,3 +1,3 @@
 ### Fixed
 
-- Fixed the MiniMax H3 private runtime failing to compile against the new `GenerateResponse.request_warnings` field, which broke every `h3`-featured release build; CI now compiles the shipping `h3` feature so a shared response-type change cannot land without it.
+- CI now compiles mold-inference's shipping `h3` feature, so a change to a shared response type can no longer land on `main` with the private MiniMax H3 construction site un-updated (that gap broke every `h3`-featured release build).
