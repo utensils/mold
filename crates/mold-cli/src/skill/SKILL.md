@@ -867,6 +867,7 @@ mold info flux-dev:q4        # Show model details and file sizes
 mold rm flux-dev:q4          # Remove a downloaded model
 mold rm flux-dev:q4 --force  # Remove without confirmation
 mold licenses                # Third-party model licenses and acceptance state
+mold licenses --local        # ...this machine's own, without asking the server
 ```
 
 ### Third-party model licenses
@@ -876,7 +877,8 @@ the InsightFace antelopev2 face models PuLID needs, non-commercial research
 only). Mold refuses to download them until acceptance is on record.
 
 ```bash
-mold licenses                                              # what needs accepting, and where
+mold licenses                # what needs accepting, and on which machine
+mold licenses --local        # this machine's own acceptances, never the server's
 mold pull pulid-flux --accept-license insightface-antelopev2
 ```
 
@@ -893,11 +895,19 @@ newer upstream revision invalidates existing acceptances and asks again.
 Accepting is offline — Mold never fetches the license text, so it works
 air-gapped. There is no environment-variable bypass.
 
-Over HTTP: `GET /api/licenses` lists ids, terms links, `accepted`, and
-`required_by`; `POST /api/downloads` and `POST /api/models/pull` take an
-additive `accept_licenses: []`; a gated download without it is `403` with code
-`LICENSE_NOT_ACCEPTED` and a structured `license` object. Servers advertise
-`capabilities.licenses: true`.
+Consent is bound to the terms that were displayed. When a server will record
+the acceptance, `mold pull` reads `GET /api/licenses` from THAT server, shows
+its terms, and sends back exactly those — a bare id would let a server on a
+different release resolve its own revision and record agreement to text the
+user never read.
+
+Over HTTP: `GET /api/licenses` lists ids, terms links, `sha256`, `accepted`,
+and `required_by`. `POST /api/downloads` and `POST /api/models/pull` take an
+additive `accept_licenses: [{ id, url, sha256 }]`. A gated download without one
+is `403` / `LICENSE_NOT_ACCEPTED`; terms the server does not pin are `409` /
+`LICENSE_TERMS_MISMATCH` carrying the server's own `url`/`sha256`/`canonical`
+so a client can re-display and retry. Both refusals write nothing. Servers
+advertise `capabilities.licenses: true`.
 
 ## Model discovery catalog
 

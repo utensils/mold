@@ -25,7 +25,10 @@ use tokio_util::io::ReaderStream;
 /// `accept_licenses` is omitted when empty so requests to older servers —
 /// which reject unknown fields on some builds and would otherwise see a field
 /// they never asked for — stay byte-identical to what they got before.
-fn pull_body(model: &str, accept_licenses: &[String]) -> serde_json::Value {
+fn pull_body(
+    model: &str,
+    accept_licenses: &[crate::types::LicenseAcceptance],
+) -> serde_json::Value {
     let mut body = serde_json::json!({ "model": model });
     if !accept_licenses.is_empty() {
         body["accept_licenses"] = serde_json::json!(accept_licenses);
@@ -1074,7 +1077,7 @@ impl MoldClient {
     pub async fn pull_model_accepting(
         &self,
         model: &str,
-        accept_licenses: &[String],
+        accept_licenses: &[crate::types::LicenseAcceptance],
     ) -> Result<String> {
         let resp = self
             .client
@@ -1129,7 +1132,7 @@ impl MoldClient {
     pub async fn pull_model_stream_accepting(
         &self,
         model: &str,
-        accept_licenses: &[String],
+        accept_licenses: &[crate::types::LicenseAcceptance],
         progress_tx: tokio::sync::mpsc::UnboundedSender<SseProgressEvent>,
     ) -> Result<()> {
         let mut resp = self

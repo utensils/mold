@@ -178,6 +178,7 @@ pub fn refusal(license: &ThirdPartyLicense) -> crate::types::LicenseRefusal {
         name: license.name.to_string(),
         url: license.url.to_string(),
         canonical: license.canonical.to_string(),
+        sha256: license.sha256.to_string(),
         summary: license.summary.to_string(),
     }
 }
@@ -207,19 +208,29 @@ impl std::fmt::Display for UnknownLicenseId {
 
 impl std::error::Error for UnknownLicenseId {}
 
-/// Resolve every id, then record all of them.
+/// Resolve and VERIFY every acceptance, then record them all.
 ///
-/// Resolution happens for the WHOLE list before the first write, so one bad id
-/// cannot leave a request half-applied — the caller's 400 then describes a
-/// root that was not touched.
+/// Two things are checked before anything is written, for the whole list:
+/// that the id is known, and that the `(url, sha256)` the caller displayed is
+/// the document this build pins. The second check is the point of the whole
+/// struct — the caller may be a client on a different Mold release, and
+/// recording its consent against terms of OUR choosing would store agreement
+/// to text the user never read.
+///
+/// Nothing is written until every entry passes, so a rejected request leaves a
+/// root the caller can describe as untouched.
 pub fn record_acceptances(
     mold_home: &Path,
-    ids: &[String],
+    acceptances: &[crate::types::LicenseAcceptance],
 ) -> Result<Vec<&'static ThirdPartyLicense>, RecordAcceptancesError> {
-    let mut resolved = Vec::with_capacity(ids.len());
-    for id in ids {
-        let license = license_by_id(id)
-            .ok_or_else(|| RecordAcceptancesError::Unknown(UnknownLicenseId(id.clone())))?;
+    let mut resolved = Vec::with_capacity(acceptances.len());
+    for acceptance in acceptances {
+        let license = license_by_id(&acceptance.id).ok_or_else(|| {
+            RecordAcceptancesError::Unknown(UnknownLicenseId(acceptance.id.clone()))
+        })?;
+        if !acceptance.matches(license.url, license.sha256) {
+            return Err(RecordAcceptancesError::TermsMismatch(license));
+        }
         resolved.push(license);
     }
     for license in &resolved {
@@ -233,6 +244,10 @@ pub fn record_acceptances(
 pub enum RecordAcceptancesError {
     /// The request named a license this build does not know — a client error.
     Unknown(UnknownLicenseId),
+    /// The caller accepted a DIFFERENT revision of a license this build knows.
+    /// Carries our pinned license so the refusal can show the caller what it
+    /// would have to accept instead.
+    TermsMismatch(&'static ThirdPartyLicense),
     /// The record could not be written — a server error.
     Io(io::Error),
 }
@@ -241,12 +256,29 @@ impl std::fmt::Display for RecordAcceptancesError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Unknown(error) => write!(f, "{error}"),
+            Self::TermsMismatch(license) => write!(
+                f,
+                "the accepted terms for '{}' are not the ones this server pins. \
+                 This server pins {} (sha256 {}). Review those terms and accept again.",
+                license.id, license.url, license.sha256
+            ),
             Self::Io(error) => write!(f, "failed to record license acceptance: {error}"),
         }
     }
 }
 
 impl std::error::Error for RecordAcceptancesError {}
+
+/// The acceptance payload for `license` as this build pins it.
+///
+/// Used by the CLI's older-server fallback, and by tests.
+pub fn acceptance_for(license: &ThirdPartyLicense) -> crate::types::LicenseAcceptance {
+    crate::types::LicenseAcceptance {
+        id: license.id.to_string(),
+        url: license.url.to_string(),
+        sha256: license.sha256.to_string(),
+    }
+}
 
 /// Path of the acceptance record inside a Mold data root.
 pub fn acceptance_path(mold_home: &Path) -> PathBuf {
@@ -484,6 +516,78 @@ mod tests {
         record_acceptance(home.path(), &INSIGHTFACE_ANTELOPEV2).unwrap();
         let record = load(home.path());
         assert_eq!(record.acceptances.len(), 1);
+    }
+
+    /// The consent-integrity rule: a caller may only have its acceptance
+    /// recorded against the document it actually displayed.
+    #[test]
+    fn recording_requires_the_terms_the_caller_displayed() {
+        let home = tempfile::tempdir().unwrap();
+        let ours = &INSIGHTFACE_ANTELOPEV2;
+
+        let honest = [acceptance_for(ours)];
+        record_acceptances(home.path(), &honest).unwrap();
+        assert!(is_accepted(home.path(), ours));
+
+        // A caller on a different release, resolving the same id to its own
+        // pinned revision.
+        let fresh = tempfile::tempdir().unwrap();
+        let other_revision = crate::types::LicenseAcceptance {
+            id: ours.id.to_string(),
+            url: "https://raw.githubusercontent.com/deepinsight/insightface/0000000000000000000000000000000000000000/README.md".to_string(),
+            sha256: ours.sha256.to_string(),
+        };
+        let error = record_acceptances(fresh.path(), &[other_revision]).unwrap_err();
+        assert!(matches!(
+            error,
+            RecordAcceptancesError::TermsMismatch(license) if license.id == ours.id
+        ));
+        assert!(
+            !is_accepted(fresh.path(), ours),
+            "a mismatched acceptance must record nothing"
+        );
+
+        // Same URL, different digest, is equally a mismatch — the URL alone
+        // is not the identity.
+        let wrong_digest = crate::types::LicenseAcceptance {
+            id: ours.id.to_string(),
+            url: ours.url.to_string(),
+            sha256: "0".repeat(64),
+        };
+        assert!(matches!(
+            record_acceptances(fresh.path(), &[wrong_digest]).unwrap_err(),
+            RecordAcceptancesError::TermsMismatch(_)
+        ));
+        assert!(!is_accepted(fresh.path(), ours));
+    }
+
+    #[test]
+    fn digest_casing_is_not_part_of_the_identity() {
+        let home = tempfile::tempdir().unwrap();
+        let ours = &INSIGHTFACE_ANTELOPEV2;
+        let upper = crate::types::LicenseAcceptance {
+            id: ours.id.to_string(),
+            url: ours.url.to_string(),
+            sha256: ours.sha256.to_ascii_uppercase(),
+        };
+        record_acceptances(home.path(), &[upper]).unwrap();
+        assert!(is_accepted(home.path(), ours));
+    }
+
+    /// A rejected entry must not leave earlier entries in the same request
+    /// applied — the refusal describes a root that was not touched.
+    #[test]
+    fn a_mismatch_late_in_the_list_writes_nothing_at_all() {
+        let home = tempfile::tempdir().unwrap();
+        let ours = &INSIGHTFACE_ANTELOPEV2;
+        let bad = crate::types::LicenseAcceptance {
+            id: ours.id.to_string(),
+            url: ours.url.to_string(),
+            sha256: "0".repeat(64),
+        };
+        let error = record_acceptances(home.path(), &[acceptance_for(ours), bad]).unwrap_err();
+        assert!(matches!(error, RecordAcceptancesError::TermsMismatch(_)));
+        assert!(!is_accepted(home.path(), ours));
     }
 
     #[test]

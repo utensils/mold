@@ -7861,6 +7861,46 @@ pub struct LicenseListing {
     pub licenses: Vec<ThirdPartyLicenseStatus>,
 }
 
+/// One license the user accepted, carrying the EXACT terms they were shown.
+///
+/// Deliberately not a bare id string. Acceptance is recorded on whichever
+/// machine runs the download, and that machine may be on a different Mold
+/// release with a different pinned revision of the same license. An id alone
+/// would let it resolve terms of its own choosing and record consent for text
+/// the user never read — the server must be able to prove it is storing
+/// agreement to the document that was actually displayed, so the identity
+/// travels with the id and a mismatch is refused rather than reconciled.
+///
+/// There is no bare-string compatibility shape on purpose: accepting one would
+/// reintroduce exactly the hole this struct closes, and no client has shipped
+/// against the id-only form.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct LicenseAcceptance {
+    /// Stable license id.
+    pub id: String,
+    /// Immutable, commit-pinned URL of the terms the user was shown.
+    pub url: String,
+    /// SHA-256 of the text at `url`, as displayed.
+    pub sha256: String,
+}
+
+impl LicenseAcceptance {
+    /// True when `self` names the same document as `(url, sha256)`.
+    ///
+    /// Digest comparison is case-insensitive because hex casing is not part of
+    /// the identity; the URL must match exactly.
+    pub fn matches(&self, url: &str, sha256: &str) -> bool {
+        self.url == url && self.sha256.eq_ignore_ascii_case(sha256)
+    }
+}
+
+/// Error code for an acceptance whose terms are not the ones this server pins.
+///
+/// Distinct from [`LICENSE_NOT_ACCEPTED`]: nothing is missing, the two sides
+/// simply disagree about what the license says. The refusal carries the
+/// server's own terms so a client can display those and retry.
+pub const LICENSE_TERMS_MISMATCH: &str = "LICENSE_TERMS_MISMATCH";
+
 /// The machine-readable half of a `LICENSE_NOT_ACCEPTED` refusal.
 ///
 /// Rides the error body beside the human message so a UI can render its own
@@ -7872,6 +7912,9 @@ pub struct LicenseRefusal {
     pub name: String,
     pub url: String,
     pub canonical: String,
+    /// SHA-256 of the text at `url`. Lets a client that was refused for a
+    /// terms mismatch re-display and re-send exactly what this server pins.
+    pub sha256: String,
     pub summary: String,
 }
 

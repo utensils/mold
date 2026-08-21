@@ -109,6 +109,30 @@ impl ApiError {
     /// exists — the server is declining to act until consent is on record.
     /// The structured `license` payload lets a client offer acceptance and
     /// retry with `accept_licenses`, which a prose-only error could not.
+    /// The caller accepted a different revision of a license this server
+    /// knows.
+    ///
+    /// `409` rather than `400`: the request is well-formed and the license is
+    /// real — the two sides disagree about the current terms, which a client
+    /// resolves by re-reading `GET /api/licenses` and accepting again. The
+    /// structured payload carries THIS server's `url`/`sha256`/`canonical` so
+    /// it can display them without a second round trip.
+    pub fn license_terms_mismatch(
+        license: &mold_core::license_acceptance::ThirdPartyLicense,
+    ) -> Self {
+        Self {
+            error: format!(
+                "the accepted terms for '{}' are not the ones this server pins.\n\n  {}\n  Terms (pinned): {}\n  sha256: {}\n  Project terms: {}\n\nReview those terms and accept again.",
+                license.id, license.summary, license.url, license.sha256, license.canonical
+            ),
+            code: mold_core::LICENSE_TERMS_MISMATCH.to_string(),
+            reference: None,
+            field: None,
+            license: Some(Box::new(mold_core::license_acceptance::refusal(license))),
+            status: StatusCode::CONFLICT,
+        }
+    }
+
     pub fn license_not_accepted(
         model: &str,
         license: &mold_core::license_acceptance::ThirdPartyLicense,
@@ -917,7 +941,7 @@ async fn require_server_model_acquisition(
 /// rejected rather than ignored.
 fn apply_download_license_acceptances(
     model: &str,
-    accept_licenses: &[String],
+    accept_licenses: &[mold_core::LicenseAcceptance],
 ) -> Result<(), ApiError> {
     use mold_core::license_acceptance;
 
@@ -934,6 +958,9 @@ fn apply_download_license_acceptances(
                         "UNKNOWN_LICENSE",
                         StatusCode::BAD_REQUEST,
                     )
+                }
+                license_acceptance::RecordAcceptancesError::TermsMismatch(ours) => {
+                    ApiError::license_terms_mismatch(ours)
                 }
                 license_acceptance::RecordAcceptancesError::Io(io) => {
                     ApiError::internal(format!("failed to record license acceptance: {io}"))
@@ -3743,11 +3770,12 @@ pub struct LoadModelBody {
     /// default placement strategy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpu: Option<usize>,
-    /// Third-party license ids the user has accepted. Honoured by
-    /// `POST /api/models/pull`; ignored by `/api/models/load`, which moves no
-    /// bytes over the network. Additive and empty by default.
+    /// Third-party licenses the user has accepted, each carrying the exact
+    /// terms they were shown. Honoured by `POST /api/models/pull`; ignored by
+    /// `/api/models/load`, which moves no bytes over the network. Additive and
+    /// empty by default.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub accept_licenses: Vec<String>,
+    pub accept_licenses: Vec<mold_core::LicenseAcceptance>,
 }
 
 #[utoipa::path(
@@ -7850,13 +7878,14 @@ async fn list_licenses_endpoint() -> Result<Json<mold_core::LicenseListing>, Api
 #[derive(serde::Deserialize, utoipa::ToSchema)]
 pub struct CreateDownloadBody {
     pub model: String,
-    /// Third-party license ids the user has accepted, recorded in this
-    /// server's Mold data root before the pull starts.
+    /// Third-party licenses the user has accepted, each carrying the exact
+    /// terms they were shown, recorded in this server's Mold data root before
+    /// the pull starts.
     ///
     /// Additive: absent means "accept nothing", which is what every existing
     /// client sends and leaves their behaviour unchanged.
     #[serde(default)]
-    pub accept_licenses: Vec<String>,
+    pub accept_licenses: Vec<mold_core::LicenseAcceptance>,
 }
 
 #[derive(serde::Serialize, utoipa::ToSchema)]

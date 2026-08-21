@@ -17,6 +17,7 @@ pub mod pulid;
 /// Per-variant PuLID injection coverage on a synthetic FLUX transformer.
 #[cfg(test)]
 pub(crate) mod pulid_variants;
+pub(crate) mod pulid_encoder;
 pub(crate) mod quantized_transformer;
 pub(crate) mod transformer;
 

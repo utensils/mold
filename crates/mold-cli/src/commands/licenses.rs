@@ -1,19 +1,65 @@
 //! `mold licenses` — third-party model licenses and their acceptance state.
 //!
 //! Acceptance is per Mold data root, so the only meaningful answer is "on
-//! which machine?". This command asks the server the pull would go to, and
-//! falls back to this machine's own root only when no server answers —
-//! reporting which one it read, because a user staring at "accepted" for the
-//! wrong host is exactly the confusion this command exists to prevent.
+//! which machine?". This command asks the server the pull would go to and
+//! names the root it read, because a user staring at "accepted" for the wrong
+//! host is exactly the confusion this command exists to prevent.
+//!
+//! It reads THIS machine's root only when there is genuinely no server to ask
+//! — a connection failure, or the explicit `--local` flag. An authentication
+//! failure, a 5xx, or a malformed body all mean a server IS there and did not
+//! answer the question; substituting local state then would report one
+//! machine's acceptances under another machine's name, which is the same class
+//! of bug as accepting on the wrong host in the first place.
 
 use anyhow::Result;
 use colored::Colorize;
 
-use crate::control::{is_loopback_host, CliContext};
+use crate::control::CliContext;
 use crate::output::status;
 use crate::theme;
 use crate::ui::col_width;
 use crate::AlreadyReported;
+
+/// Where a listing came from, for the header and for error wording.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LicenseSource {
+    Server(String),
+    ThisMachine,
+}
+
+impl LicenseSource {
+    fn label(&self) -> String {
+        match self {
+            Self::Server(host) => host.clone(),
+            Self::ThisMachine => "this machine".to_string(),
+        }
+    }
+}
+
+/// Decide what a failed `GET /api/licenses` means.
+///
+/// Split out from the I/O so every arm is unit-testable: the whole finding is
+/// that "the request failed" is not one outcome but two, and only one of them
+/// may be answered with local state.
+pub fn resolve_listing_failure(error: &anyhow::Error, host: &str) -> LicenseListingFailure {
+    match mold_core::classify_server_error(error) {
+        mold_core::ServerAvailability::FallbackLocal => LicenseListingFailure::NoServer,
+        mold_core::ServerAvailability::SurfaceError => {
+            LicenseListingFailure::Unusable(format!("{host} did not report its licenses: {error}"))
+        }
+    }
+}
+
+/// The two meanings of a failed listing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LicenseListingFailure {
+    /// Nothing is listening. This machine's root is the honest answer.
+    NoServer,
+    /// A server answered, but not with a listing — auth, 5xx, or a body that
+    /// would not parse. Reported against the host; never papered over.
+    Unusable(String),
+}
 
 fn local_statuses() -> Result<Vec<mold_core::ThirdPartyLicenseStatus>> {
     let Some(mold_home) = mold_core::Config::mold_dir() else {
@@ -26,21 +72,32 @@ fn local_statuses() -> Result<Vec<mold_core::ThirdPartyLicenseStatus>> {
     Ok(mold_core::license_acceptance::license_statuses(&mold_home))
 }
 
-pub async fn run() -> Result<()> {
+pub async fn run(local: bool) -> Result<()> {
     let ctx = CliContext::new(None);
     let host = ctx.client().host().to_string();
 
-    let (licenses, source) = match ctx.client().list_licenses().await {
-        Ok(licenses) => (licenses, host.clone()),
-        Err(_) if is_loopback_host(&host) => (local_statuses()?, "this machine".to_string()),
-        Err(_) => {
-            // A named remote that did not answer must not be papered over
-            // with local state — that would report the wrong machine's
-            // acceptances under the remote's name.
-            crate::ui::print_server_fallback(&host, "showing this machine's licenses");
-            (local_statuses()?, "this machine".to_string())
+    let (licenses, source) = if local {
+        (local_statuses()?, LicenseSource::ThisMachine)
+    } else {
+        match ctx.client().list_licenses().await {
+            Ok(licenses) => (licenses, LicenseSource::Server(host.clone())),
+            Err(error) => match resolve_listing_failure(&error, &host) {
+                LicenseListingFailure::NoServer => {
+                    crate::ui::print_server_fallback(&host, "showing this machine's licenses");
+                    (local_statuses()?, LicenseSource::ThisMachine)
+                }
+                LicenseListingFailure::Unusable(message) => {
+                    eprintln!("{} {message}", theme::prefix_error());
+                    eprintln!(
+                        "  Run {} to read this machine's own acceptances instead.",
+                        "mold licenses --local".bold()
+                    );
+                    return Err(AlreadyReported.into());
+                }
+            },
         }
     };
+    let source = source.label();
 
     if licenses.is_empty() {
         status!(
@@ -93,4 +150,50 @@ pub async fn run() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mold_core::error::MoldError;
+
+    /// Nothing is listening: this machine's root is the honest answer.
+    #[test]
+    fn a_connection_failure_falls_back_to_this_machine() {
+        let error = anyhow::Error::new(MoldError::Client("connect failed".into()));
+        assert_eq!(
+            resolve_listing_failure(&error, "http://box:7680"),
+            LicenseListingFailure::NoServer
+        );
+    }
+
+    /// A server IS there and refused or failed. Reporting local acceptances
+    /// under its name would answer a different question than the one asked.
+    #[test]
+    fn auth_and_server_errors_are_reported_against_the_host() {
+        for error in [
+            anyhow::anyhow!("HTTP 401 Unauthorized"),
+            anyhow::anyhow!("HTTP 500 Internal Server Error"),
+            anyhow::anyhow!("error decoding response body"),
+        ] {
+            match resolve_listing_failure(&error, "http://box:7680") {
+                LicenseListingFailure::Unusable(message) => {
+                    assert!(
+                        message.contains("http://box:7680"),
+                        "the failure must name the host: {message}"
+                    );
+                }
+                other => panic!("expected an unusable listing, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn source_labels_name_the_root_that_was_read() {
+        assert_eq!(
+            LicenseSource::Server("http://box:7680".into()).label(),
+            "http://box:7680"
+        );
+        assert_eq!(LicenseSource::ThisMachine.label(), "this machine");
+    }
 }
