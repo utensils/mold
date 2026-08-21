@@ -5,6 +5,7 @@ import {
   ID_WEIGHT_DEFAULT,
   ID_WEIGHT_MAX,
   IDENTITY_PHOTO_LABEL,
+  IDENTITY_PHOTO_UNAVAILABLE,
   IDENTITY_START_STEP_LABEL,
   IDENTITY_WEIGHT_LABEL,
   identityActiveCount,
@@ -180,6 +181,18 @@ describe("identityValidationError", () => {
     );
   });
 
+  it("blocks a reused print whose photo this device no longer holds", () => {
+    // The reattach descriptor carries provenance and no bytes. Rendering the
+    // reused settings without the face would quietly produce a different
+    // person, so it blocks — with the disclosure, not "empty payload".
+    expect(
+      identityValidationError({
+        ...base,
+        image: { base64: "", filename: "ada.png" },
+      }),
+    ).toBe(IDENTITY_PHOTO_UNAVAILABLE);
+  });
+
   it("applies the cheap decode pre-checks to the photo itself", () => {
     expect(
       identityValidationError({
@@ -293,7 +306,7 @@ describe("identityActiveCount", () => {
 
 describe("identityProvenance", () => {
   it("is absent for a print that carried no identity photo", () => {
-    expect(identityProvenance({ prompt: "x" })).toBeNull();
+    expect(identityProvenance({})).toBeNull();
     expect(identityProvenance(null)).toBeNull();
   });
 
@@ -357,6 +370,6 @@ describe("identityReuse", () => {
   });
 
   it("restores nothing for a print with no identity provenance", () => {
-    expect(identityReuse({ prompt: "x" })).toBeNull();
+    expect(identityReuse({})).toBeNull();
   });
 });

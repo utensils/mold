@@ -59,6 +59,11 @@ import {
   restoredNegativePrompt,
 } from "@studio/lib/negativePrompt";
 import { pipelineForControlId } from "@studio/lib/ltx2Control";
+import {
+  identityRequestFields,
+  identityReuse,
+  supportsIdentity,
+} from "@studio/lib/identityConditioning";
 import { validatePrintTitle } from "@studio/lib/libraryOrganization";
 import { firstLastFrameKeyframes } from "@studio/lib/sourceImageCapability";
 import { effectiveGenerationGuidance, isWanFamily } from "@studio/lib/generationCapabilities";
@@ -171,6 +176,22 @@ export interface GenerateForm {
    * source image, and meaningless without `sourceImage` — the pair ships as
    * the two-entry `keyframes` layout, never a lone keyframe. */
   endFrame: PickedImage | null;
+  /** Face-identity (PuLID) reference photo. Primary-form media beside the
+   * source wells, and deliberately NOT source conditioning: it is never
+   * fitted against the canvas and ships verbatim. A bytes-less entry is the
+   * reattach descriptor Reuse settings leaves behind when the local stash no
+   * longer holds the photo the print recorded. */
+  identityImage: PickedImage | null;
+  /** Identity strength; null = untouched, so the server default applies. */
+  identityWeight: number | null;
+  /** First identity-conditioned step; null = untouched. */
+  identityStartStep: number | null;
+  /** Whether the selected checkpoint accepts an identity photo, snapshotted
+   * from its resolved recipe / `/api/models` row exactly like
+   * `sourceImageCapability` — `buildRequest` takes only the form, and the
+   * capability is what decides whether the partition may ride the wire. Null
+   * means nothing has been read yet, which reads as "no". */
+  identitySupported: boolean | null;
   /** Ordered edit/reference strip, base64 each (no data-URI prefix). For Qwen,
    * index 0 is the edit Target and the rest are References. FLUX.2 Dev treats
    * every entry as an ordered Reference. Empty in single-source mode. */
@@ -256,6 +277,10 @@ export function newGenerateForm(): GenerateForm {
     sourceImageWidth: null,
     sourceImageHeight: null,
     endFrame: null,
+    identityImage: null,
+    identityWeight: null,
+    identityStartStep: null,
+    identitySupported: null,
     imageAttachments: [],
     sourceFit: { mode: "pad-repaint" },
     maskImage: null,
@@ -304,6 +329,7 @@ export function cloneGenerateForm(form: GenerateForm): GenerateForm {
       trainedWords: [...lora.trainedWords],
     })),
     endFrame: form.endFrame ? { ...form.endFrame } : null,
+    identityImage: form.identityImage ? { ...form.identityImage } : null,
     sourceVideo: form.sourceVideo ? { ...form.sourceVideo } : null,
     extendVideo: form.extendVideo ? { ...form.extendVideo } : null,
     keyframes: form.keyframes.map((keyframe) => ({
@@ -377,6 +403,10 @@ export function applyRecipeDefaults(
   const recipe = effectiveGenerationRecipe(m, pipeline);
   if (!recipe) return false;
 
+  // The pipeline chooses the recipe, and identity support is a recipe
+  // capability — re-resolve it here or a pipeline switch would keep the
+  // previous recipe's answer.
+  form.identitySupported = supportsIdentity(recipe, m);
   form.width = recipe.defaults.width;
   form.height = recipe.defaults.height;
   form.steps = recipe.defaults.steps;
@@ -462,6 +492,12 @@ export function reconcileModelCapabilities(form: GenerateForm, m: ModelEntry): v
     form.negativeExplicitClear = false;
   }
   const recipe = effectiveGenerationRecipe(m, form.pipeline);
+  // Identity is a property of the checkpoint, snapshotted here for the same
+  // reason as `sourceImageCapability`: the request builder takes only the
+  // form. The staged photo deliberately survives a switch that loses the
+  // capability — `buildRequest` keeps it off the wire, and the inline reason
+  // beside the well (plus the blocked submit) is what tells the user.
+  form.identitySupported = supportsIdentity(recipe, m);
   // A row refresh can resolve a persisted/template form against a newer
   // authoritative recipe. Fixed controls are not user choices: normalize the
   // hidden form value to the same value the disabled control displays, or the
@@ -702,6 +738,12 @@ export function resetAdvancedToModelDefaults(
     sourceImageWidth: form.sourceImageWidth,
     sourceImageHeight: form.sourceImageHeight,
     endFrame: form.endFrame,
+    // The identity photo is media, not a knob: Reset clears the strength and
+    // start step beside it (they rebuild from `newGenerateForm`) and leaves
+    // the attached face where the user put it. `identitySupported` is
+    // deliberately NOT preserved — the reset restores the model's default
+    // pipeline, and the capability belongs to the recipe that resolves.
+    identityImage: form.identityImage,
     imageAttachments: form.imageAttachments,
     sourceFit: form.sourceFit,
     maskImage: form.maskImage,
@@ -853,6 +895,21 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
       if (caps.supportsMask && form.maskImage) req.mask_image = form.maskImage;
     }
   }
+
+  // Face identity is its own conditioning partition (#1224), gated on the
+  // checkpoint's own advertised support. The photo is NEVER routed through
+  // source-fit preprocessing — it is a face reference, not a composition
+  // input — and an untouched knob stays absent so the server's own default
+  // remains authoritative. The shared policy owns every one of those rules.
+  Object.assign(
+    req,
+    identityRequestFields({
+      supported: form.identitySupported === true,
+      image: form.identityImage,
+      weight: form.identityWeight,
+      startStep: form.identityStartStep,
+    }),
+  );
 
   // ControlNet is independent conditioning, not an img2img derivative. An
   // SD1.5 request may carry a control image without a source image; nesting it
@@ -1070,6 +1127,17 @@ export function applyMetadataToForm(
   // be rebuilt from metadata).
   form.endFrame = null;
   form.audioFile = null;
+  // Identity: the knobs restore exactly, and the photo becomes a bytes-less
+  // reattach descriptor the async stash lookup fills in. Metadata records the
+  // digest, never the face, so an unresolved lookup must show the reattach
+  // state rather than silently render a different person. `identityRequestFields`
+  // refuses an empty payload, so this descriptor can never reach the wire.
+  const identity = identityReuse(metadata);
+  form.identityImage = identity
+    ? { filename: identity.name ?? "identity photo", base64: "" }
+    : null;
+  form.identityWeight = identity ? identity.weight : null;
+  form.identityStartStep = identity ? identity.startStep : null;
   form.h3Authoring = {
     ...emptyMinimaxH3AuthoringState(),
     firstFrame:
@@ -1144,6 +1212,13 @@ export function applyRequestToForm(
   form.sourceImageWidth = null;
   form.sourceImageHeight = null;
   form.sourceFit = parseSourceFitPolicy(request.source_fit) ?? form.sourceFit;
+  // A running job's exact request still carries the identity bytes, so this
+  // restore is lossless where the metadata one is not.
+  form.identityImage = request.id_image
+    ? { filename: request.id_image_name ?? "identity photo", base64: request.id_image }
+    : null;
+  form.identityWeight = request.id_weight ?? null;
+  form.identityStartStep = request.id_start_step ?? null;
   form.imageAttachments = [...(request.edit_images ?? [])];
   form.maskImage = request.mask_image ?? null;
   form.controlImage = request.control_image ?? null;

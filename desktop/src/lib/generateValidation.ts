@@ -8,6 +8,7 @@ import {
   type ModelResolutionContract,
 } from "@studio/lib/resolutions";
 import { guidanceOverridesError } from "@studio/lib/guidanceOverrides";
+import { identityValidationError } from "@studio/lib/identityConditioning";
 import { isMinimaxH3Family } from "@studio/lib/minimaxH3Authoring";
 import { sourceImageValidationError } from "@studio/lib/sourceImageCapability";
 import { submitsExtend } from "@studio/lib/extend";
@@ -31,6 +32,7 @@ export const MOBILE_MEDIA_BUDGET_ERROR =
 
 export type InlineGenerationMediaField =
   | "sourceImage"
+  | "identityImage"
   | "maskImage"
   | "controlImage"
   | "imageAttachments"
@@ -55,6 +57,9 @@ export function inlineGenerationMediaBytes(
 ): number {
   let total = 0;
   if (exclude !== "sourceImage") total += decodedBase64Bytes(form.sourceImage);
+  // The identity photo rides the same JSON body as every other inline input,
+  // so it spends the same budget even though it is never fitted.
+  if (exclude !== "identityImage") total += decodedBase64Bytes(form.identityImage?.base64);
   if (exclude !== "maskImage") total += decodedBase64Bytes(form.maskImage);
   if (exclude !== "controlImage") total += decodedBase64Bytes(form.controlImage);
   if (exclude !== "imageAttachments") {
@@ -277,6 +282,43 @@ export function sourceConditioningValidationError(
     }),
     hasEndFrame: caps.supportsEndFrame && Boolean(form.endFrame),
     frames: caps.supportsVideo ? form.frames : null,
+    model: form.model,
+  });
+}
+
+/**
+ * Why this form's face-identity partition (#1224) would be refused, in the
+ * server's own order — or `null` when it is valid, including "not used".
+ *
+ * Every rule lives in `@studio/lib/identityConditioning`; this only resolves
+ * the two inputs that are desktop-shaped. `hasSourceImage` is the source the
+ * REQUEST will carry, not the retained UI state: source media is parked
+ * across model switches so switching back restores the draft, and a parked
+ * image a checkpoint drops in `buildRequest` must not refuse an identity
+ * photo it never travels with — the same reading
+ * {@link sourceConditioningValidationError} takes.
+ */
+export function identityConditioningValidationError(form: GenerateForm): string | null {
+  const caps = generationCapabilitiesForFamily(
+    form.family,
+    form.model,
+    form.pipeline,
+    form.guidanceCapabilities,
+    form.sourceImageCapability,
+  );
+  const hasSourceImage =
+    caps.supportsImg2img &&
+    (caps.sourceImageMode === "single"
+      ? Boolean(form.sourceImage)
+      : form.imageAttachments.length > 0);
+  return identityValidationError({
+    supported: form.identitySupported === true,
+    image: form.identityImage,
+    weight: form.identityWeight,
+    startStep: form.identityStartStep,
+    steps: form.steps,
+    hasLora: form.loras.length > 0,
+    hasSourceImage,
     model: form.model,
   });
 }

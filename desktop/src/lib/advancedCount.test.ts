@@ -46,6 +46,25 @@ describe("advancedActiveCount", () => {
     expect(advancedActiveCount(form)).toBe(0);
   });
 
+  it("counts each touched identity knob, but never the photo well", () => {
+    const form = { ...newGenerateForm(), family: "flux", model: "flux-dev:q8" };
+    form.identitySupported = true;
+    // The photo lives in the primary form beside the source wells.
+    form.identityImage = { filename: "face.png", base64: "aWQ=" };
+    expect(advancedActiveCount(form)).toBe(0);
+    form.identityWeight = 0.6;
+    expect(advancedActiveCount(form)).toBe(1);
+    form.identityStartStep = 2;
+    expect(advancedActiveCount(form)).toBe(2);
+  });
+
+  it("ignores identity knobs on a checkpoint that does not accept a photo", () => {
+    const form = { ...newGenerateForm(), family: "flux", model: "flux-dev:bf16" };
+    form.identityWeight = 0.6;
+    form.identityStartStep = 2;
+    expect(advancedActiveCount(form)).toBe(0);
+  });
+
   it("counts each set wan recipe control, and none off-family", () => {
     const form = { ...newGenerateForm(), family: "wan", model: "wan22-t2v-a14b:q5" };
     form.scheduler = "dpm-pp";

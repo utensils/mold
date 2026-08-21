@@ -228,6 +228,12 @@ export interface ModelEntry {
   nsfw?: boolean | null;
   /** Model-specific LTX-2 audio output support; absent on older servers. */
   supports_audio?: boolean | null;
+  /** Checkpoint accepts a face-identity (PuLID) photo. Additive: absent on a
+   * server that predates identity conditioning and on a build without the
+   * adapter, and absence reads as "no" — offering the control optimistically
+   * would only queue work the host refuses. Read it through
+   * `@studio/lib/identityConditioning`, never raw. */
+  supports_identity?: boolean | null;
   /** Model can continue an existing video in one request. Absent on servers
    * that predate continuation — read absence as "no". */
   supports_extend?: boolean | null;
@@ -467,6 +473,18 @@ export interface GenerateRequest {
   /** Client-shaped source-fit policy provenance, echoed verbatim into
    * OutputMetadata so crop controls restore on reuse. Engine never reads it. */
   source_fit?: SourceFitPolicy;
+  /** Face-identity (PuLID) reference photo, base64 (no data-URI prefix).
+   * Deliberately NOT a composition input: it is never fitted, cropped, or
+   * resized against the canvas and carries no `source_fit` provenance. */
+  id_image?: string;
+  /** Provenance label for `id_image` — recorded into OutputMetadata (with the
+   * digest, never the bytes) so Reuse settings can look the photo back up. */
+  id_image_name?: string;
+  /** Identity strength, `0.0..=3.0`. Absent takes the server's own default. */
+  id_weight?: number;
+  /** First identity-conditioned denoise step; must be below `steps`. Absent
+   * takes the server's own default. */
+  id_start_step?: number;
   /** Qwen-Image-Edit multi-image inputs, base64 each (no data-URI prefix).
    * Order is load-bearing: first = primary edit target, rest = references. */
   edit_images?: string[];
@@ -666,6 +684,16 @@ export interface OutputMetadata {
   /** Client-shaped source-fit provenance echoed verbatim by the server
    * (additive; newer servers only). Parse defensively before restoring. */
   source_fit?: unknown;
+  /** Provenance label of the identity photo (additive; newer servers only). */
+  id_image_name?: string | null;
+  /** SHA-256 (hex) of the exact identity-photo bytes that rendered — the local
+   * stash key Reuse settings looks the face back up with. Metadata never
+   * carries the photo itself. */
+  id_image_sha256?: string | null;
+  /** Effective identity strength / first conditioned step the render applied
+   * (the server records what actually applied, not what the request asked). */
+  id_weight?: number | null;
+  id_start_step?: number | null;
   /** Ordered content keys for Qwen Image Edit inputs (newer servers only). */
   edit_image_sha256s?: string[] | null;
   /** Redacted ordered H3 reference provenance (newer servers only). */

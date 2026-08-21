@@ -2585,3 +2585,240 @@ describe("print title", () => {
     expect(form.title).toBe("Smurf village");
   });
 });
+
+// ── Face-identity conditioning (PuLID, #1224) ────────────────────────────────
+// The capability is snapshotted onto the form because `buildRequest` takes only
+// the form; every rule about what may ride the wire lives in the shared
+// `@studio/lib/identityConditioning` policy, so these cover the desktop wiring.
+
+describe("identity conditioning", () => {
+  /** `"absent"` models a server that predates identity conditioning. */
+  function identityModel(supported: boolean | "absent" = true): ModelEntry {
+    const entry: ModelEntry = {
+      ...ltx2Model(),
+      name: "flux-dev:q8",
+      family: "flux",
+      default_steps: 20,
+      default_guidance: 3.5,
+      default_width: 1024,
+      default_height: 1024,
+    };
+    if (supported !== "absent") entry.supports_identity = supported;
+    return entry;
+  }
+
+  function identityForm(supported: boolean | null = true): GenerateForm {
+    const form = newGenerateForm();
+    form.prompt = "a portrait";
+    form.model = "flux-dev:q8";
+    form.family = "flux";
+    form.steps = 20;
+    form.identitySupported = supported;
+    form.identityImage = { filename: "face.png", base64: "aWRlbnRpdHk=" };
+    return form;
+  }
+
+  it("starts absent on a fresh form", () => {
+    const form = newGenerateForm();
+    expect(form.identityImage).toBeNull();
+    expect(form.identityWeight).toBeNull();
+    expect(form.identityStartStep).toBeNull();
+    expect(form.identitySupported).toBeNull();
+  });
+
+  it("ships the photo and only the knobs the user touched", () => {
+    const form = identityForm();
+    const bare = buildRequest(form);
+    expect(bare.id_image).toBe("aWRlbnRpdHk=");
+    expect(bare.id_image_name).toBe("face.png");
+    // Untouched knobs stay absent so the server's own defaults stay authoritative.
+    expect(bare.id_weight).toBeUndefined();
+    expect(bare.id_start_step).toBeUndefined();
+
+    form.identityWeight = 0.6;
+    form.identityStartStep = 3;
+    const tuned = buildRequest(form);
+    expect(tuned.id_weight).toBe(0.6);
+    expect(tuned.id_start_step).toBe(3);
+  });
+
+  it("ships nothing when the checkpoint is not qualified or has not been read", () => {
+    for (const supported of [false, null] as const) {
+      const form = identityForm(supported);
+      form.identityWeight = 2;
+      form.identityStartStep = 1;
+      const req = buildRequest(form);
+      expect(req.id_image).toBeUndefined();
+      expect(req.id_image_name).toBeUndefined();
+      expect(req.id_weight).toBeUndefined();
+      expect(req.id_start_step).toBeUndefined();
+    }
+  });
+
+  it("ships nothing without a photo, even with the knobs set", () => {
+    const form = identityForm();
+    form.identityImage = null;
+    form.identityWeight = 2;
+    form.identityStartStep = 1;
+    const req = buildRequest(form);
+    expect(req.id_image).toBeUndefined();
+    expect(req.id_weight).toBeUndefined();
+    expect(req.id_start_step).toBeUndefined();
+  });
+
+  it("never fits the photo against the canvas — it rides untouched", () => {
+    const form = identityForm();
+    const req = buildRequest(form);
+    // `source_fit` is crop provenance for composition inputs; a face reference
+    // is not one, so an identity-only request carries no fit policy at all.
+    expect(req.source_fit).toBeUndefined();
+    expect(req.id_image).toBe(form.identityImage!.base64);
+  });
+
+  it("survives cloneGenerateForm without sharing the picked object", () => {
+    const form = identityForm();
+    form.identityWeight = 1.5;
+    form.identityStartStep = 2;
+    const snapshot = cloneGenerateForm(form);
+    expect(snapshot.identityWeight).toBe(1.5);
+    expect(snapshot.identityStartStep).toBe(2);
+    expect(snapshot.identityImage).toEqual(form.identityImage);
+    expect(snapshot.identityImage).not.toBe(form.identityImage);
+    expect(snapshot.identitySupported).toBe(true);
+  });
+
+  it("snapshots the capability from the model row on selection", () => {
+    const form = newGenerateForm();
+    applyModelDefaults(form, identityModel());
+    expect(form.identitySupported).toBe(true);
+
+    applyModelDefaults(form, identityModel(false));
+    expect(form.identitySupported).toBe(false);
+
+    // Absent on a server that predates identity conditioning ⇒ "no".
+    applyModelDefaults(form, identityModel("absent"));
+    expect(form.identitySupported).toBe(false);
+  });
+
+  it("prefers the server-authored recipe over the model row", () => {
+    const form = newGenerateForm();
+    // The row says yes; the authoritative recipe says no and wins.
+    reconcileModelCapabilities(form, {
+      ...profiledLtx2Model(),
+      supports_identity: true,
+    });
+    expect(form.identitySupported).toBe(false);
+  });
+
+  it("keeps the staged photo across a capability-losing model switch", () => {
+    const form = identityForm();
+    reconcileModelCapabilities(form, identityModel(false));
+    // Staged media survives — only the wire is gated, and the inline reason
+    // plus the blocked submit is what tells the user.
+    expect(form.identityImage).not.toBeNull();
+    expect(form.identitySupported).toBe(false);
+    expect(buildRequest(form).id_image).toBeUndefined();
+  });
+
+  it("Advanced reset keeps the photo and clears the two knobs", () => {
+    const form = identityForm();
+    form.identityWeight = 2.5;
+    form.identityStartStep = 4;
+    resetAdvancedToModelDefaults(form, identityModel());
+    expect(form.identityImage).toEqual({ filename: "face.png", base64: "aWRlbnRpdHk=" });
+    expect(form.identityWeight).toBeNull();
+    expect(form.identityStartStep).toBeNull();
+  });
+
+  it("the wholesale reset clears the photo too", () => {
+    const form = identityForm();
+    form.identityWeight = 2.5;
+    form.identityStartStep = 4;
+    resetFormToModelDefaults(form, identityModel());
+    expect(form.identityImage).toBeNull();
+    expect(form.identityWeight).toBeNull();
+    expect(form.identityStartStep).toBeNull();
+  });
+
+  it("reuse settings restores the knobs and a bytes-less reattach descriptor", () => {
+    const form = newGenerateForm();
+    applyMetadataToForm(
+      form,
+      {
+        prompt: "a portrait",
+        model: "flux-dev:q8",
+        seed: 1,
+        steps: 20,
+        guidance: 3.5,
+        width: 1024,
+        height: 1024,
+        id_image_name: "face.png",
+        id_image_sha256: "b".repeat(64),
+        id_weight: 0.8,
+        id_start_step: 2,
+      },
+      [identityModel()],
+    );
+    expect(form.identityWeight).toBe(0.8);
+    expect(form.identityStartStep).toBe(2);
+    expect(form.identityImage).toEqual({ filename: "face.png", base64: "" });
+    // A reattach descriptor carries no bytes, so it can never smuggle an empty
+    // `id_image` onto the wire.
+    expect(buildRequest(form).id_image).toBeUndefined();
+  });
+
+  it("reuse settings clears identity for a print that carried none", () => {
+    const form = identityForm();
+    form.identityWeight = 2;
+    form.identityStartStep = 1;
+    applyMetadataToForm(
+      form,
+      {
+        prompt: "a portrait",
+        model: "flux-dev:q8",
+        seed: 1,
+        steps: 20,
+        guidance: 3.5,
+        width: 1024,
+        height: 1024,
+      },
+      [identityModel()],
+    );
+    expect(form.identityImage).toBeNull();
+    expect(form.identityWeight).toBeNull();
+    expect(form.identityStartStep).toBeNull();
+  });
+
+  it("an exact queued request restores its identity partition", () => {
+    const form = newGenerateForm();
+    applyRequestToForm(
+      form,
+      {
+        prompt: "a portrait",
+        model: "flux-dev:q8",
+        width: 1024,
+        height: 1024,
+        steps: 20,
+        id_image: "aWRlbnRpdHk=",
+        id_image_name: "face.png",
+        id_weight: 1.4,
+        id_start_step: 1,
+      },
+      [identityModel()],
+    );
+    expect(form.identityImage).toEqual({ filename: "face.png", base64: "aWRlbnRpdHk=" });
+    expect(form.identityWeight).toBe(1.4);
+    expect(form.identityStartStep).toBe(1);
+    expect(form.identitySupported).toBe(true);
+  });
+
+  it("prepared and batch siblings inherit the partition (they share buildRequest)", () => {
+    const form = identityForm();
+    form.identityWeight = 1.2;
+    form.batchSize = 3;
+    const req = buildRequest(cloneGenerateForm(form));
+    expect(req.batch_size).toBe(3);
+    expect(req.id_image).toBe("aWRlbnRpdHk=");
+    expect(req.id_weight).toBe(1.2);
+  });
+});

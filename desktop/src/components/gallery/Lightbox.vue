@@ -32,6 +32,7 @@ import {
   type VideoExportOptions,
 } from "@studio/lib/videoExport";
 import { strengthSemanticsForModel } from "@studio/lib/strengthSemantics";
+import { identityProvenance } from "@studio/lib/identityConditioning";
 import {
   displayTitle,
   purgeCountdownFromPurgeAt,
@@ -259,6 +260,10 @@ const loraStack = computed(() => {
   if (m.loras?.length) return m.loras;
   return m.lora ? [{ path: m.lora, scale: m.lora_scale ?? 1.0 }] : [];
 });
+
+/** Face-identity provenance (#1224): names and digests only — saved metadata
+ * never carries the photo itself, which is exactly why the digest is shown. */
+const identity = computed(() => identityProvenance(meta.value));
 
 const schedulerName = computed(() => formatScheduler(meta.value.scheduler));
 const frames = computed(() => meta.value.frames ?? meta.value.video_frames ?? null);
@@ -707,6 +712,26 @@ async function performVideoExport(options: VideoExportOptions) {
               <dt class="text-caption text-ink-3">LoRA</dt>
               <dd class="data-mono truncate text-caption text-ink" :title="l.path">
                 {{ l.path }} × {{ l.scale.toFixed(2) }}
+              </dd>
+            </div>
+            <div
+              v-if="identity"
+              class="flex justify-between gap-2"
+              data-test="lightbox-identity-photo"
+            >
+              <dt class="text-caption text-ink-3">Identity photo</dt>
+              <dd
+                class="data-mono truncate text-caption text-ink"
+                :title="identity.sha256 ?? undefined"
+              >
+                {{ identity.name ?? "Identity photo"
+                }}<template v-if="identity.shortSha"> · {{ identity.shortSha }}</template>
+              </dd>
+            </div>
+            <div v-if="identity" class="flex justify-between gap-2" data-test="lightbox-identity">
+              <dt class="text-caption text-ink-3">Identity strength</dt>
+              <dd class="data-mono text-caption text-ink">
+                {{ identity.weight }} · from step {{ identity.startStep }}
               </dd>
             </div>
             <div v-if="fileSize" class="flex justify-between gap-2" data-test="lightbox-file-size">

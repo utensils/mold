@@ -23,7 +23,7 @@ import {
   type GenerationSourceMedia,
 } from "./generationSourceMedia";
 import { imageDimensionsFromBase64 } from "./imageDimensions";
-import type { GenerationRecipeProfile } from "./generationProfile";
+import type { GenerationCapabilitiesProfile } from "./generated/generationProfileV1";
 
 /** Section and control wording. One spelling, every surface. */
 export const IDENTITY_SECTION_LABEL = "Identity";
@@ -36,6 +36,10 @@ export const IDENTITY_PHOTO_HINT =
   "One clear, front-facing face. The render keeps this person's likeness; the photo itself is never composited in.";
 export const IDENTITY_WEIGHT_HINT =
   "How strongly the face is held. Higher preserves the likeness; lower lets the prompt reshape it.";
+/** Disclosure when the photo behind a reused print is no longer on this device. */
+export const IDENTITY_PHOTO_UNAVAILABLE =
+  "The identity photo for this print is not on this device — reattach it to render the same likeness.";
+
 export const IDENTITY_START_STEP_HINT =
   "Delay identity until the composition has settled. 0 pins the face from the first step.";
 
@@ -64,8 +68,15 @@ export interface IdentityModelEntry {
   supports_identity?: boolean | null;
 }
 
-/** Just enough of a resolved recipe to answer the capability question. */
-export type IdentityRecipe = Pick<GenerationRecipeProfile, "capabilities"> & {
+/**
+ * Just enough of a resolved recipe to answer the capability question.
+ *
+ * Deliberately narrower than `GenerationRecipeProfile`: this policy reads one
+ * flag, so requiring the whole recipe would force every caller (and every
+ * test) to build a complete profile to ask a yes/no question.
+ */
+export type IdentityRecipe = {
+  capabilities: Pick<GenerationCapabilitiesProfile, "supports_identity">;
   legacy_adapter?: true;
 };
 
@@ -168,6 +179,12 @@ export function identityValidationError(
   if (!input.image) {
     return `Attach an ${IDENTITY_PHOTO_LABEL.toLowerCase()}, or clear ${IDENTITY_WEIGHT_LABEL} and ${IDENTITY_START_STEP_LABEL}.`;
   }
+  // Provenance with no bytes is the reattach descriptor Reuse settings leaves
+  // behind when this device no longer holds the print's photo. It blocks —
+  // rendering the reused settings without the face would quietly produce a
+  // different person — but it says what to do rather than reporting an empty
+  // payload the user never chose.
+  if (!input.image.base64) return IDENTITY_PHOTO_UNAVAILABLE;
   if (!input.supported) {
     const named = input.model?.trim();
     return `${named || "This model"} does not support identity photos. Choose an identity-qualified model, or remove the photo.`;
@@ -389,7 +406,3 @@ export function restoreIdentityPhoto(
 ): Promise<GenerationSourceMedia | null> {
   return restoreGenerationSourceMedia(sha256);
 }
-
-/** Disclosure when the photo behind a reused print is no longer on this device. */
-export const IDENTITY_PHOTO_UNAVAILABLE =
-  "The identity photo for this print is not on this device — reattach it to render the same likeness.";

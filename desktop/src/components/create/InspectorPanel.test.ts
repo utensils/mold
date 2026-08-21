@@ -916,6 +916,40 @@ describe("InspectorPanel — source media in the primary form", () => {
     });
   });
 
+  it("renders the identity photo well right after source media when qualified", () => {
+    const form = formFor("flux");
+    form.model = "flux-dev:q8";
+    form.identitySupported = true;
+    const wrapper = mount(InspectorPanel, { props: { form } });
+    const field = wrapper.get("[data-test='inspector-identity']");
+    expect(field.find("[data-test='identity-photo-well']").exists()).toBe(true);
+    // Primary form, immediately below the source wells — never behind Advanced.
+    const order = wrapper
+      .findAll("[data-test='inspector-source-media'], [data-test='inspector-identity']")
+      .map((node) => node.attributes("data-test"));
+    expect(order).toEqual(["inspector-source-media", "inspector-identity"]);
+  });
+
+  it("hides identity entirely when the checkpoint has not said yes", async () => {
+    const form = formFor("flux");
+    form.model = "flux-dev:bf16";
+    const wrapper = mount(InspectorPanel, { props: { form } });
+    // Unread capability: absence is never evidence of support.
+    expect(wrapper.find("[data-test='inspector-identity']").exists()).toBe(false);
+    form.identitySupported = false;
+    await flushPromises();
+    expect(wrapper.find("[data-test='inspector-identity']").exists()).toBe(false);
+  });
+
+  it("keeps identity out of sequence mode", () => {
+    useSequenceDraftStore().output = "sequence";
+    const form = formFor("flux");
+    form.model = "flux-dev:q8";
+    form.identitySupported = true;
+    const wrapper = mount(InspectorPanel, { props: { form } });
+    expect(wrapper.find("[data-test='inspector-identity']").exists()).toBe(false);
+  });
+
   it("keeps H3 Ref2VA references out of the primary form", () => {
     const form = formFor("minimax-h3");
     form.model = "minimax-h3-ref2va:comfy-pruned-int8";

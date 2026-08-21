@@ -197,10 +197,40 @@ describe("Lightbox metadata panel", () => {
       "lightbox-pipeline",
       "lightbox-format",
       "lightbox-lora",
+      "lightbox-identity-photo",
+      "lightbox-identity",
       "lightbox-version",
     ]) {
       expect(wrapper.find(`[data-test='${row}']`).exists()).toBe(false);
     }
+  });
+
+  it("shows identity provenance — name, short digest, strength and start step", () => {
+    const wrapper = mountLightbox({
+      ...item,
+      metadata: {
+        ...item.metadata,
+        id_image_name: "face.png",
+        id_image_sha256: "a".repeat(64),
+        id_weight: 0.8,
+        id_start_step: 2,
+      },
+    });
+    const photo = wrapper.get("[data-test='lightbox-identity-photo']");
+    expect(photo.text()).toContain("face.png");
+    expect(photo.text()).toContain("a".repeat(12));
+    const knobs = wrapper.get("[data-test='lightbox-identity']");
+    expect(knobs.text()).toContain("0.8");
+    expect(knobs.text()).toContain("step 2");
+  });
+
+  it("shows the effective defaults for a print that recorded only the photo", () => {
+    const wrapper = mountLightbox({
+      ...item,
+      metadata: { ...item.metadata, id_image_name: "face.png" },
+    });
+    expect(wrapper.get("[data-test='lightbox-identity-photo']").text()).toContain("face.png");
+    expect(wrapper.get("[data-test='lightbox-identity']").text()).toContain("1");
   });
 
   it("shows a legacy single lora/lora_scale pair as a one-row stack", () => {

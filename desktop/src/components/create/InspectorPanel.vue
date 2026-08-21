@@ -37,6 +37,7 @@ import { modelDisplayName } from "../../lib/models";
 import { generationCapabilitiesForFamily } from "../../lib/capabilities";
 import { sourceMediaPlan } from "@studio/lib/sourceMediaPlan";
 import SourceImageWell from "../generate/SourceImageWell.vue";
+import IdentityWell from "./IdentityWell.vue";
 import { advancedActiveCount } from "../../lib/advancedCount";
 import { effectiveGenerationRecipe } from "@studio/lib/generationProfile";
 import {
@@ -224,6 +225,10 @@ const showSourceMedia = computed(
     sourcePlan.value.kind !== "none" &&
     sourcePlan.value.kind !== "h3-references",
 );
+/** Identity is capability-gated on positive knowledge only: an unread or
+ * absent `supports_identity` renders nothing at all rather than a control for
+ * a feature this host does not have. Sequence clips carry no identity slot. */
+const showIdentity = computed(() => !isSequence.value && props.form.identitySupported === true);
 const activeRecipe = computed(() =>
   effectiveGenerationRecipe(selectedModel.value, props.form.pipeline),
 );
@@ -585,6 +590,13 @@ function resetSettings() {
            whether (and how) it renders, exactly like resolutions. -->
       <div v-if="showSourceMedia" class="ms-field" data-test="inspector-source-media">
         <SourceImageWell :form="form" :selected-model="selectedModel" />
+      </div>
+
+      <!-- Identity photo — face conditioning is its own partition, not source
+           media, so it sits beside the source wells in the primary form and is
+           mounted only for a checkpoint that advertises identity support. -->
+      <div v-if="showIdentity" class="ms-field" data-test="inspector-identity">
+        <IdentityWell :form="form" />
       </div>
 
       <!-- The sequence's opening image sits in the same primary slot: staged
