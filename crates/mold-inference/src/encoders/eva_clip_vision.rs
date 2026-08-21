@@ -316,6 +316,31 @@ fn layer_norm(size: usize, vb: VarBuilder) -> Result<LayerNorm> {
     ))
 }
 
+/// L2-normalize each row, **in the tensor's own dtype**.
+///
+/// `pulid/pipeline_flux.py:178-179`:
+///
+/// ```python
+/// id_cond_vit_norm = torch.norm(id_cond_vit, 2, 1, True)
+/// id_cond_vit = torch.div(id_cond_vit, id_cond_vit_norm)
+/// ```
+///
+/// `id_cond_vit` is whatever the tower returned, and the tower was run in
+/// `weight_dtype` (`pipeline_flux.py:176`,
+/// `face_features_image.to(self.weight_dtype)`) — bfloat16 by default. So
+/// upstream takes the norm and the division in the narrow dtype, and mold has
+/// to as well or a BF16 deployment rounds differently from the reference it is
+/// supposed to match. Widening to f32 here looks like a free accuracy win and
+/// is actually a divergence.
+///
+/// The result stays in the input dtype for the same reason, and because it is
+/// concatenated with the ArcFace embedding before the IDFormer sees it — an F32
+/// half of that concatenation would be a dtype mismatch at the join.
+fn l2_normalize_rows(xs: &Tensor) -> Result<Tensor> {
+    let norm = xs.sqr()?.sum_keepdim(D::Minus1)?.sqrt()?;
+    Ok(xs.broadcast_div(&norm)?)
+}
+
 /// The tower.
 ///
 /// Build it from a `VarBuilder` rooted at the **`visual.` prefix already
@@ -419,10 +444,7 @@ impl EvaClipVisionTower {
         // token. `:545` then projects it through `head`.
         let cls = self.norm.forward(&xs)?.i((.., 0, ..))?;
         let projection = self.head.forward(&cls)?;
-        // `pipeline_flux.py:178-179`: L2-normalize along the feature axis.
-        let projection = projection.to_dtype(DType::F32)?;
-        let norm = projection.sqr()?.sum_keepdim(D::Minus1)?.sqrt()?;
-        let cls_projection = projection.broadcast_div(&norm)?;
+        let cls_projection = l2_normalize_rows(&projection)?;
 
         Ok(EvaClipVisionOutput {
             hidden_states,
@@ -596,6 +618,83 @@ mod tests {
         // The swapped order is a genuinely different function here.
         let (swapped, _) = max_errors(&actual, &reference(&doubled, &xs));
         assert!(swapped > 1e-3, "the gate order is not observable");
+    }
+
+    /// Upstream normalizes `id_cond_vit` in `weight_dtype`
+    /// (`pipeline_flux.py:178-179`, on the tensor the tower returned at
+    /// `:176`), so mold must not widen to f32 first. In f32 this is a no-op,
+    /// which the parity goldens still cover; in a narrow dtype it is the whole
+    /// difference.
+    #[test]
+    fn l2_normalization_stays_in_the_working_dtype() {
+        let device = Device::Cpu;
+        let raw = DeterministicStream::new(SEED_TOWER_INPUT).tensor(&[1, PROJECTION_DIM], &device);
+
+        // F32: unit length, and the reference behaviour is unchanged.
+        let f32_out = l2_normalize_rows(&raw).unwrap();
+        assert_eq!(f32_out.dtype(), DType::F32);
+        let norm: f32 = f32_out
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap()
+            .iter()
+            .map(|v| v * v)
+            .sum::<f32>()
+            .sqrt();
+        assert!((norm - 1.0).abs() < 1e-6, "f32 norm {norm}");
+
+        // F16: the result stays F16 — an F32 result would also be a dtype
+        // mismatch where this is concatenated with the ArcFace embedding.
+        let narrow = raw.to_dtype(DType::F16).unwrap();
+        let f16_out = l2_normalize_rows(&narrow).unwrap();
+        assert_eq!(f16_out.dtype(), DType::F16, "the working dtype was widened");
+
+        // ...and it matches a torch-style reference computed the same way:
+        // norm and division both in F16, exactly `torch.div(x, torch.norm(x))`.
+        let values = narrow
+            .to_dtype(DType::F32)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
+        let reference_norm =
+            half::f16::from_f32(values.iter().map(|v| v * v).sum::<f32>().sqrt()).to_f32();
+        let expected: Vec<f32> = values
+            .iter()
+            .map(|v| half::f16::from_f32(v / reference_norm).to_f32())
+            .collect();
+        let actual = f16_out
+            .to_dtype(DType::F32)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
+        let (absolute, _) = max_errors(&actual, &expected);
+        // Measured 2.4e-4. The reference above sums the 768 squares in f32 and
+        // rounds once; candle reduces in the storage dtype, and F16 addition
+        // near the resulting norm (~9) quantizes at ~8e-3, so the two norms
+        // differ by a few ulps and that propagates. Which accumulator a
+        // reduction uses is a backend detail neither upstream nor mold pins —
+        // what this test pins is that the DIVISION and the RESULT stay in the
+        // working dtype, which is what `pipeline_flux.py:178-179` does.
+        assert!(absolute < 1e-3, "f16 normalization drifted by {absolute}");
+
+        // The widened path this replaced is measurably different, so the test
+        // is not vacuous.
+        let widened = l2_normalize_rows(&narrow.to_dtype(DType::F32).unwrap())
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
+        let (widened_difference, _) = max_errors(&actual, &widened);
+        assert!(
+            widened_difference > 0.0,
+            "widening would have produced identical bytes"
+        );
     }
 
     fn load_tower(device: &Device) -> EvaClipVisionTower {
