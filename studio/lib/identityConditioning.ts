@@ -22,7 +22,6 @@ import {
   restoreGenerationSourceMedia,
   type GenerationSourceMedia,
 } from "./generationSourceMedia";
-import { imageDimensionsFromBase64 } from "./imageDimensions";
 import type { GenerationCapabilitiesProfile } from "./generated/generationProfileV1";
 
 /** Section and control wording. One spelling, every surface. */
@@ -134,10 +133,139 @@ function decodedBase64Bytes(base64: string): number {
   return Math.max(0, Math.floor((payload.length * 3) / 4) - padding);
 }
 
+/** Raw bytes of a base64 payload (data-URI prefix and URL-safe alphabet ok). */
+function decodeBase64(base64: string): Uint8Array | null {
+  const comma = base64.indexOf(",");
+  const payload = (comma >= 0 ? base64.slice(comma + 1) : base64)
+    .replace(/\s+/g, "")
+    .replace(/-/g, "+")
+    .replace(/_/g, "/");
+  if (!payload) return null;
+  try {
+    const binary = globalThis.atob(payload);
+    return Uint8Array.from(binary, (character) => character.charCodeAt(0));
+  } catch {
+    return null;
+  }
+}
+
+function u16be(bytes: Uint8Array, offset: number): number {
+  return bytes[offset]! * 0x100 + bytes[offset + 1]!;
+}
+
+function u32be(bytes: Uint8Array, offset: number): number {
+  return (
+    bytes[offset]! * 0x1000000 +
+    bytes[offset + 1]! * 0x10000 +
+    bytes[offset + 2]! * 0x100 +
+    bytes[offset + 3]!
+  );
+}
+
+const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+
+type HeaderDimensions =
+  { ok: true; width: number; height: number } | { ok: false; reason: string };
+
 /**
- * The cheap pre-checks the server runs from the encoded header alone, in the
+ * Header-declared dimensions of an identity photo, mirroring
+ * `mold_core::identity::header_dimensions` marker for marker.
+ *
+ * This deliberately does NOT reuse `imageDimensionsFromBase64`, whose bounded
+ * 1 MiB metadata prefix is right for a source image but wrong here: a camera
+ * JPEG can legally carry more than a megabyte of EXIF/ICC/thumbnail segments
+ * ahead of its start-of-frame, and reporting that as "not a PNG or JPEG"
+ * refuses a photo the server accepts. The walk spans the whole payload, which
+ * the encoded-size gate ahead of it has already bounded to 16 MiB — the same
+ * order and the same bound the server uses. Only container headers are read;
+ * the compressed image data is never touched.
+ */
+function identityHeaderDimensions(bytes: Uint8Array): HeaderDimensions {
+  const malformed = `${IDENTITY_PHOTO_LABEL} must be a PNG or JPEG image.`;
+
+  if (PNG_SIGNATURE.every((value, index) => bytes[index] === value)) {
+    // IHDR is mandatory and must be the first chunk: 4-byte length, 4-byte
+    // type, then width and height as big-endian u32.
+    if (
+      bytes.length < 24 ||
+      bytes[12] !== 0x49 ||
+      bytes[13] !== 0x48 ||
+      bytes[14] !== 0x44 ||
+      bytes[15] !== 0x52
+    ) {
+      return {
+        ok: false,
+        reason: `${IDENTITY_PHOTO_LABEL} is a truncated or malformed PNG: no IHDR header.`,
+      };
+    }
+    return { ok: true, width: u32be(bytes, 16), height: u32be(bytes, 20) };
+  }
+
+  if (!(bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff)) {
+    return { ok: false, reason: malformed };
+  }
+
+  let offset = 2;
+  while (offset + 1 < bytes.length) {
+    if (bytes[offset] !== 0xff) {
+      return {
+        ok: false,
+        reason: `${IDENTITY_PHOTO_LABEL} is a malformed JPEG: lost marker alignment.`,
+      };
+    }
+    // Fill bytes ahead of a marker are legal padding.
+    let markerAt = offset + 1;
+    while (markerAt < bytes.length && bytes[markerAt] === 0xff) markerAt += 1;
+    const marker = bytes[markerAt];
+    if (marker === undefined) break;
+    // Standalone markers carry no length and no payload.
+    if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd9)) {
+      offset = markerAt + 1;
+      continue;
+    }
+    const lengthAt = markerAt + 1;
+    if (lengthAt + 1 >= bytes.length) break;
+    const length = u16be(bytes, lengthAt);
+    if (length < 2) {
+      return {
+        ok: false,
+        reason: `${IDENTITY_PHOTO_LABEL} is a malformed JPEG: invalid segment length.`,
+      };
+    }
+    // SOF0..SOF15 except DHT (0xC4), JPG (0xC8) and DAC (0xCC).
+    const isStartOfFrame =
+      marker >= 0xc0 &&
+      marker <= 0xcf &&
+      marker !== 0xc4 &&
+      marker !== 0xc8 &&
+      marker !== 0xcc;
+    if (isStartOfFrame) {
+      // precision(1) height(2) width(2)
+      if (length < 7 || lengthAt + 6 >= bytes.length) {
+        return {
+          ok: false,
+          reason: `${IDENTITY_PHOTO_LABEL} is a truncated JPEG: incomplete start-of-frame header.`,
+        };
+      }
+      return {
+        ok: true,
+        height: u16be(bytes, lengthAt + 3),
+        width: u16be(bytes, lengthAt + 5),
+      };
+    }
+    offset = lengthAt + length;
+  }
+  return {
+    ok: false,
+    reason: `${IDENTITY_PHOTO_LABEL} is a truncated JPEG: no start-of-frame header.`,
+  };
+}
+
+/**
+ * The pre-checks the server runs from the encoded header alone, in the
  * server's own order: encoded length, then format, then declared dimensions.
- * Nothing here decodes the image.
+ * The compressed image data is never decoded, so this cannot be made to
+ * allocate on the caller's behalf.
  */
 export function identityImageError(base64: string): string | null {
   const bytes = decodedBase64Bytes(base64);
@@ -145,11 +273,16 @@ export function identityImageError(base64: string): string | null {
   if (bytes > ID_IMAGE_LIMITS.maxEncodedBytes) {
     return `${IDENTITY_PHOTO_LABEL} must be 16 MiB or smaller.`;
   }
-  const dimensions = imageDimensionsFromBase64(base64);
-  if (!dimensions) {
+  const decoded = decodeBase64(base64);
+  if (!decoded || decoded.length === 0) {
     return `${IDENTITY_PHOTO_LABEL} must be a PNG or JPEG image.`;
   }
-  const { width, height } = dimensions;
+  const header = identityHeaderDimensions(decoded);
+  if (!header.ok) return header.reason;
+  const { width, height } = header;
+  if (width === 0 || height === 0) {
+    return `${IDENTITY_PHOTO_LABEL} declares a zero dimension.`;
+  }
   if (
     width > ID_IMAGE_LIMITS.maxAxisPixels ||
     height > ID_IMAGE_LIMITS.maxAxisPixels

@@ -29,7 +29,11 @@ const PNG_1X1 = [
 
 function toBase64(bytes: readonly number[]): string {
   let binary = "";
-  for (const byte of bytes) binary += String.fromCharCode(byte);
+  // Chunked: the metadata fixtures below are megabytes long, and a per-byte
+  // concatenation of that is needlessly slow.
+  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+    binary += String.fromCharCode(...bytes.slice(offset, offset + 0x8000));
+  }
   return btoa(binary);
 }
 
@@ -44,6 +48,62 @@ function pngBase64(width = 1, height = 1): string {
   writeU32(16, width);
   writeU32(20, height);
   return toBase64(bytes);
+}
+
+function pngWithoutIhdr(): string {
+  const bytes = [...PNG_1X1];
+  // Rename the mandatory first chunk so the walk cannot find it.
+  bytes[12] = 0x49;
+  bytes[13] = 0x48;
+  bytes[14] = 0x44;
+  bytes[15] = 0x00;
+  return toBase64(bytes);
+}
+
+/**
+ * A baseline JPEG carrying `padBytes` of legal COM metadata ahead of its SOF0,
+ * which is how a real camera file pushes its start-of-frame past any bounded
+ * prefix a scanner might read.
+ */
+function jpegBytes(width: number, height: number, padBytes = 0): number[] {
+  const bytes: number[] = [0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10];
+  bytes.push(0x4a, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x00);
+  bytes.push(0x00, 0x01, 0x00, 0x01, 0x00, 0x00);
+  // COM segments cap at 65533 payload bytes, so large metadata is several.
+  let remaining = padBytes;
+  while (remaining > 0) {
+    const payload = Math.min(remaining, 65533);
+    const length = payload + 2;
+    bytes.push(0xff, 0xfe, (length >> 8) & 0xff, length & 0xff);
+    for (let index = 0; index < payload; index += 1) bytes.push(0x20);
+    remaining -= payload;
+  }
+  bytes.push(0xff, 0xc0, 0x00, 0x11, 0x08);
+  bytes.push((height >> 8) & 0xff, height & 0xff);
+  bytes.push((width >> 8) & 0xff, width & 0xff);
+  bytes.push(0x03, 0x01, 0x11, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x01);
+  bytes.push(0xff, 0xd9);
+  return bytes;
+}
+
+function jpegBase64(width: number, height: number, padBytes = 0): string {
+  return toBase64(jpegBytes(width, height, padBytes));
+}
+
+/** SOI plus one COM segment; the walk runs out of bytes before any SOF. */
+function jpegNoStartOfFrame(): string {
+  const bytes: number[] = [0xff, 0xd8, 0xff, 0xfe, 0x00, 0x0a];
+  for (let index = 0; index < 8; index += 1) bytes.push(0x20);
+  return toBase64(bytes);
+}
+
+/** SOF0 announcing a 17-byte segment that the payload cuts short. */
+function jpegTruncatedStartOfFrame(): string {
+  return toBase64([0xff, 0xd8, 0xff, 0xc0, 0x00, 0x11, 0x08, 0x00]);
+}
+
+function decodedLength(base64: string): number {
+  return atob(base64).length;
 }
 
 const PHOTO = { base64: pngBase64(), filename: "ada.png" };
@@ -212,6 +272,46 @@ describe("identityImageError", () => {
     expect(identityImageError(btoa("GIF89a not an image"))).toMatch(
       /PNG or JPEG/i,
     );
+  });
+
+  it("accepts a plain baseline JPEG", () => {
+    expect(identityImageError(jpegBase64(640, 480))).toBeNull();
+  });
+
+  it("finds a start-of-frame that sits past the first megabyte", () => {
+    // A camera JPEG legally carries EXIF, ICC, and an embedded thumbnail ahead
+    // of its SOF. The shared 1 MiB source-image prefix scanner cannot see past
+    // that and would report a photo the server accepts as "not a PNG or JPEG".
+    const photo = jpegBase64(4000, 3000, 1_500_000);
+    expect(decodedLength(photo)).toBeGreaterThan(1024 * 1024);
+    expect(identityImageError(photo)).toBeNull();
+  });
+
+  it("still applies the pixel limits to a photo behind large metadata", () => {
+    expect(identityImageError(jpegBase64(9000, 10, 1_500_000))).toMatch(/8192/);
+  });
+
+  it("refuses a JPEG whose markers never reach a start-of-frame", () => {
+    // SOI + one oversized COM segment and nothing else.
+    expect(identityImageError(jpegNoStartOfFrame())).toMatch(
+      /truncated JPEG: no start-of-frame/i,
+    );
+  });
+
+  it("refuses a JPEG whose start-of-frame header is cut short", () => {
+    expect(identityImageError(jpegTruncatedStartOfFrame())).toMatch(
+      /truncated JPEG: incomplete start-of-frame/i,
+    );
+  });
+
+  it("refuses a PNG with no IHDR chunk", () => {
+    expect(identityImageError(pngWithoutIhdr())).toMatch(
+      /truncated or malformed PNG/i,
+    );
+  });
+
+  it("refuses a header-declared zero dimension", () => {
+    expect(identityImageError(pngBase64(0, 0))).toMatch(/zero dimension/i);
   });
 
   it("refuses an empty payload", () => {
