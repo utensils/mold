@@ -1296,6 +1296,42 @@
                 command = "./scripts/ios.sh build \"$@\"";
               }
               {
+                category = "android";
+                name = "android-dev";
+                help = "run the Android app with Tauri hot reload";
+                command = "./scripts/android.sh dev \"$@\"";
+              }
+              {
+                category = "android";
+                name = "android-run";
+                help = "build and run the production app on Android";
+                command = "./scripts/android.sh run \"$@\"";
+              }
+              {
+                category = "android";
+                name = "android-check";
+                help = "build a debug ARM64 APK from the shared mobile shell";
+                command = "./scripts/android.sh check \"$@\"";
+              }
+              {
+                category = "android";
+                name = "android-build";
+                help = "build Android ARM64/ARMv7 app bundles for Google Play";
+                command = "./scripts/android.sh build \"$@\"";
+              }
+              {
+                category = "android";
+                name = "android-emulator";
+                help = "boot the external-storage Mold_API_37 emulator";
+                command = "./scripts/android.sh emulator \"$@\"";
+              }
+              {
+                category = "android";
+                name = "android-doctor";
+                help = "verify Android Studio, SDK, NDK, AVD, and cache paths";
+                command = "./scripts/android.sh doctor \"$@\"";
+              }
+              {
                 category = "desktop";
                 name = "desktop-dev";
                 help = "run the native Tauri desktop app with hot reload (Vite on :1430)";
