@@ -135,6 +135,13 @@ pub fn pinned_sha256(component: ModelComponent) -> Option<&'static str> {
 /// probe binary, which inspect arbitrary graphs by design;
 /// [`super::IdentityExtractor::load`] always supplies the manifest's pin.
 ///
+/// This is deliberately NOT
+/// [`mold_core::download::verify_pinned_file`], and must not be "simplified"
+/// into it. That function proves a file at PLACEMENT time and accepts a
+/// matching marker without rehashing, which is right for materialization and
+/// is precisely the assumption this check exists to stop relying on. The two
+/// are complementary: one proves what landed, the other proves what runs.
+///
 /// The decoded graph is normalized by
 /// [`normalize_empty_optional_resize_inputs`] before it is returned, so every
 /// caller evaluates the same shape.
