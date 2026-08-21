@@ -3,15 +3,31 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum NotificationAction {
-    Gallery { filename: String },
+    Gallery { filename: Option<String> },
+    Create,
+    Models,
+    Updates,
 }
 
 static PENDING_ACTION: std::sync::Mutex<Option<NotificationAction>> = std::sync::Mutex::new(None);
 
-/// Send through Apple's current UserNotifications framework so Notification
-/// Center associates the alert with the running signed Mold bundle and uses
-/// its CFBundleIconFile. The previous NSUserNotification/private-identity-image
-/// path is ignored by current macOS releases and produced a generic icon.
+fn activate(app: &tauri::AppHandle, action: NotificationAction) {
+    use tauri::{Emitter, Manager};
+
+    if let Ok(mut pending) = PENDING_ACTION.lock() {
+        *pending = Some(action.clone());
+    }
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+    let _ = app.emit("notification-action", action);
+}
+
+/// Send through the platform path that preserves a click action. macOS uses
+/// UserNotifications so Notification Center associates alerts with the signed
+/// Mold bundle; Linux retains the XDG notification handle until activation.
 #[tauri::command]
 pub async fn send_native_notification(
     app: tauri::AppHandle,
@@ -39,7 +55,34 @@ pub async fn send_native_notification(
         Ok(true)
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    {
+        let Some(action) = action else {
+            return Ok(false);
+        };
+        tauri::async_runtime::spawn_blocking(move || {
+            let mut notification = notify_rust::Notification::new();
+            notification.summary(&title).appname("Mold");
+            if let Some(body) = body.as_deref() {
+                notification.body(body);
+            }
+            notification.action("default", "Open Mold");
+            let handle = notification.show().map_err(|error| error.to_string())?;
+            std::thread::spawn(move || {
+                handle.wait_for_action(move |response| {
+                    if response == "default" {
+                        activate(&app, action);
+                    }
+                });
+            });
+            Ok::<_, String>(())
+        })
+        .await
+        .map_err(|error| error.to_string())??;
+        Ok(true)
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         let _ = (app, title, body, action);
         Ok(false)
@@ -130,11 +173,19 @@ fn send_macos_notification(
     content.setTitle(&NSString::from_str(title));
     content.setBody(&NSString::from_str(body.unwrap_or("")));
     let id = match action {
-        Some(NotificationAction::Gallery { filename }) => format!(
+        Some(NotificationAction::Gallery {
+            filename: Some(filename),
+        }) => format!(
             "mold-gallery:{}:{}",
             uuid::Uuid::new_v4(),
             base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(filename.as_bytes())
         ),
+        Some(NotificationAction::Gallery { filename: None }) => {
+            format!("mold-library:{}", uuid::Uuid::new_v4())
+        }
+        Some(NotificationAction::Create) => format!("mold-create:{}", uuid::Uuid::new_v4()),
+        Some(NotificationAction::Models) => format!("mold-models:{}", uuid::Uuid::new_v4()),
+        Some(NotificationAction::Updates) => format!("mold-updates:{}", uuid::Uuid::new_v4()),
         None => uuid::Uuid::new_v4().to_string(),
     };
     let identifier = NSString::from_str(&id);
@@ -156,6 +207,23 @@ fn send_macos_notification(
 fn action_from_identifier(identifier: &str) -> Option<NotificationAction> {
     use base64::Engine;
 
+    for (prefix, action) in [
+        (
+            "mold-library",
+            NotificationAction::Gallery { filename: None },
+        ),
+        ("mold-create", NotificationAction::Create),
+        ("mold-models", NotificationAction::Models),
+        ("mold-updates", NotificationAction::Updates),
+    ] {
+        if identifier
+            .strip_prefix(prefix)
+            .is_some_and(|suffix| suffix.starts_with(':') && suffix.len() > 1)
+        {
+            return Some(action);
+        }
+    }
+
     let mut parts = identifier.splitn(3, ':');
     if parts.next()? != "mold-gallery" || parts.next()?.is_empty() {
         return None;
@@ -164,14 +232,16 @@ fn action_from_identifier(identifier: &str) -> Option<NotificationAction> {
         .decode(parts.next()?)
         .ok()?;
     let filename = String::from_utf8(bytes).ok()?;
-    (!filename.is_empty()).then_some(NotificationAction::Gallery { filename })
+    (!filename.is_empty()).then_some(NotificationAction::Gallery {
+        filename: Some(filename),
+    })
 }
 
 #[cfg(target_os = "macos")]
 mod delegate {
     use super::{
         action_from_identifier, delegate_install_decision, macos_bundle_identifier,
-        DelegateInstall, NotificationAction, PENDING_ACTION,
+        DelegateInstall, NotificationAction,
     };
     use block2::DynBlock;
     use objc2::runtime::ProtocolObject;
@@ -180,7 +250,6 @@ mod delegate {
     use objc2_user_notifications::{
         UNNotificationResponse, UNUserNotificationCenter, UNUserNotificationCenterDelegate,
     };
-    use tauri::{Emitter, Manager};
 
     static APP: std::sync::OnceLock<tauri::AppHandle> = std::sync::OnceLock::new();
 
@@ -217,16 +286,8 @@ mod delegate {
     }
 
     fn activate(action: NotificationAction) {
-        if let Ok(mut pending) = PENDING_ACTION.lock() {
-            *pending = Some(action.clone());
-        }
         let Some(app) = APP.get() else { return };
-        if let Some(window) = app.get_webview_window("main") {
-            let _ = window.unminimize();
-            let _ = window.show();
-            let _ = window.set_focus();
-        }
-        let _ = app.emit("notification-action", action);
+        super::activate(app, action);
     }
 
     pub fn install(app: &tauri::AppHandle) {
@@ -321,9 +382,31 @@ mod tests {
         assert_eq!(
             action_from_identifier(&format!("mold-gallery:request-id:{encoded}")),
             Some(NotificationAction::Gallery {
-                filename: filename.into()
+                filename: Some(filename.into())
             })
         );
         assert_eq!(action_from_identifier("ordinary-request-id"), None);
+    }
+
+    #[test]
+    fn workspace_actions_decode_only_from_mold_identifiers() {
+        assert_eq!(
+            action_from_identifier("mold-library:request-id"),
+            Some(NotificationAction::Gallery { filename: None })
+        );
+        assert_eq!(
+            action_from_identifier("mold-create:request-id"),
+            Some(NotificationAction::Create)
+        );
+        assert_eq!(
+            action_from_identifier("mold-models:request-id"),
+            Some(NotificationAction::Models)
+        );
+        assert_eq!(
+            action_from_identifier("mold-updates:request-id"),
+            Some(NotificationAction::Updates)
+        );
+        assert_eq!(action_from_identifier("mold-create"), None);
+        assert_eq!(action_from_identifier("mold-models:"), None);
     }
 }

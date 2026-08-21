@@ -9,6 +9,7 @@ import ContextMenu from "./components/shell/ContextMenu.vue";
 import UpdateBanner from "./components/shell/UpdateBanner.vue";
 import { dockBadgeValue } from "./lib/dockBadge";
 import { ipc } from "./lib/ipc";
+import { notificationRoute, type NotificationAction } from "./lib/notificationAction";
 import { appIsBackground } from "./lib/notify";
 import {
   HOST_OFFLINE_DESCRIPTION,
@@ -55,10 +56,8 @@ const toasts = useToastStore();
 const ui = useUiStore();
 const updater = useUpdaterStore();
 
-function openNotificationAction(action: { kind: "gallery"; filename: string } | null) {
-  if (action?.kind === "gallery" && action.filename) {
-    void router.push({ path: "/library", query: { print: action.filename } });
-  }
+function openNotificationAction(action: NotificationAction | null) {
+  if (action) void router.push(notificationRoute(action));
 }
 
 let unlistenNotificationAction: (() => void) | null = null;
@@ -66,7 +65,7 @@ let unlistenNotificationAction: (() => void) | null = null;
 async function listenForNotificationActions() {
   if (!("__TAURI_INTERNALS__" in window)) return;
   const { listen } = await import("@tauri-apps/api/event");
-  unlistenNotificationAction = await listen<{ kind: "gallery"; filename: string }>(
+  unlistenNotificationAction = await listen<NotificationAction>(
     "notification-action",
     ({ payload }) => {
       // The native side retains the action in case activation races startup.

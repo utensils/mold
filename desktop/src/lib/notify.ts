@@ -4,6 +4,7 @@
  * unfocused. In a plain browser (no Tauri) these are all no-ops.
  */
 import { inTauri, ipc } from "./ipc";
+import type { NotificationAction } from "./notificationAction";
 import { useAppPrefsStore } from "../stores/appPrefs";
 
 let permissionResolved = false;
@@ -23,11 +24,6 @@ async function ensurePermission(): Promise<boolean> {
 /** True when the app is backgrounded — the moment a notification earns its keep. */
 export function appIsBackground(): boolean {
   return document.hidden || !document.hasFocus();
-}
-
-export interface NotificationAction {
-  kind: "gallery";
-  filename: string;
 }
 
 async function notify(title: string, body?: string, action?: NotificationAction): Promise<void> {
@@ -50,24 +46,29 @@ function dispatchNotification(title: string, body?: string, action?: Notificatio
 }
 
 export function notifyGenerated(prompt: string, filename?: string | null): void {
-  dispatchNotification(
-    `Generated — ${prompt.trim().slice(0, 40)}`,
-    undefined,
-    filename ? { kind: "gallery", filename } : undefined,
-  );
+  dispatchNotification(`Generated — ${prompt.trim().slice(0, 40)}`, undefined, {
+    kind: "gallery",
+    ...(filename ? { filename } : {}),
+  });
 }
 export function notifyGenerationFailed(message: string): void {
-  dispatchNotification("Generation failed", message.slice(0, 80));
+  dispatchNotification("Generation failed", message.slice(0, 80), { kind: "create" });
 }
 export function notifyChainFinished(frames: number): void {
-  dispatchNotification(`Chain finished · ${frames} frames`);
+  dispatchNotification(`Chain finished · ${frames} frames`, undefined, { kind: "gallery" });
 }
-export function notifyPulled(model: string): void {
-  dispatchNotification(`Pulled ${model}`);
+export function notifyPulled(model: string, action: NotificationAction = { kind: "models" }): void {
+  dispatchNotification(`Pulled ${model}`, undefined, action);
 }
-export function notifyPullFailed(model: string, message?: string): void {
-  dispatchNotification(`Couldn't pull ${model}`, message?.slice(0, 80));
+export function notifyPullFailed(
+  model: string,
+  message?: string,
+  action: NotificationAction = { kind: "models" },
+): void {
+  dispatchNotification(`Couldn't pull ${model}`, message?.slice(0, 80), action);
 }
 export function notifyUpdateAvailable(version: string): void {
-  dispatchNotification(`Mold ${version} is available`, "Open Mold to update and restart.");
+  dispatchNotification(`Mold ${version} is available`, "Open Mold to update and restart.", {
+    kind: "updates",
+  });
 }

@@ -328,6 +328,7 @@ interface MissingModelSubmission {
    */
   resumeAfterPull?: boolean;
 }
+let missingModelNotificationId = 0;
 
 /** An open machine picker for a pre-submit pull (more than one candidate). */
 const missingModelTargets = ref<{
@@ -503,10 +504,13 @@ async function pullMissingModel() {
     return;
   }
   const resumes = info.resumeAfterPull !== false;
+  const notificationOwner = `create-model:${++missingModelNotificationId}`;
+  downloads.armNotificationAction(info.model, bucketId, notificationOwner, { kind: "create" });
   try {
     // Watch the EXACT job the server enqueues; a stale completed pull of the
     // same model in history can then never trigger a premature resume.
     const jobId = await startCatalogDownload(info.model, route?.target, route?.kind === "remote");
+    downloads.refineNotificationAction(info.model, bucketId, notificationOwner, jobId);
     if (resumes) pullResume.arm({ ...armed, jobId });
     toasts.push(
       resumes
@@ -524,12 +528,16 @@ async function pullMissingModel() {
           : `${info.model} is already downloading on ${label} — press Generate again once it's ready.`,
       );
     } else if (/unknown model/i.test(String(err))) {
+      downloads.clearNotificationAction(info.model, bucketId, notificationOwner);
       toasts.push(
         `${label} can't pull ${info.model} by name — pull it from the Catalog there, then generate again.`,
         "error",
       );
     } else if (routeRequired.value) {
+      downloads.clearNotificationAction(info.model, bucketId, notificationOwner);
       toasts.push(String(err), "error");
+    } else {
+      downloads.clearNotificationAction(info.model, bucketId, notificationOwner);
     }
   }
 }
@@ -630,6 +638,7 @@ const expansionError = ref<string | null>(null);
 const expansionMissingModel = ref<{ model: string; route: HostRoute } | null>(null);
 interface ExpansionPullAttempt {
   id: number;
+  notificationOwner: string;
   model: string;
   route: HostRoute;
   phase: Exclude<ExpansionPullPhase, "missing">;
@@ -2593,8 +2602,10 @@ async function pullExpansionModel() {
   const route = missing.route;
   const bucket = downloadBucketForRoute(route);
   const baselineInFlight = [...bucket.activeJobs, ...bucket.queued];
+  const attemptId = ++expansionPullRequestId;
   const attempt: ExpansionPullAttempt = {
-    id: ++expansionPullRequestId,
+    id: attemptId,
+    notificationOwner: `create-expansion:${attemptId}`,
     model: missing.model,
     route: { ...route, target: { ...route.target } },
     phase: "connecting",
@@ -2610,6 +2621,7 @@ async function pullExpansionModel() {
   };
   expansionPullAttempt.value = attempt;
   const host = hosts.all.find((candidate) => candidate.id === route.hostId) ?? null;
+  const notificationHostId = downloadNotificationHostId(route);
   const streamHost = host
     ? {
         ...host,
@@ -2625,11 +2637,34 @@ async function pullExpansionModel() {
     await downloads.subscribe(streamHost ?? undefined);
     if (expansionPullAttempt.value?.id !== attempt.id) return;
     expansionPullAttempt.value.phase = "starting";
+    downloads.armNotificationAction(missing.model, notificationHostId, attempt.notificationOwner, {
+      kind: "create",
+    });
     const jobId = await startCatalogDownload(missing.model, route.target, route.kind === "remote");
-    if (expansionPullAttempt.value?.id !== attempt.id) return;
+    if (expansionPullAttempt.value?.id !== attempt.id) {
+      downloads.clearNotificationAction(
+        missing.model,
+        notificationHostId,
+        attempt.notificationOwner,
+      );
+      return;
+    }
     expansionPullAttempt.value.jobId = jobId;
+    downloads.refineNotificationAction(
+      missing.model,
+      notificationHostId,
+      attempt.notificationOwner,
+      jobId,
+    );
   } catch (error) {
-    if (expansionPullAttempt.value?.id !== attempt.id) return;
+    if (expansionPullAttempt.value?.id !== attempt.id) {
+      downloads.clearNotificationAction(
+        missing.model,
+        notificationHostId,
+        attempt.notificationOwner,
+      );
+      return;
+    }
     if (error instanceof ApiError && error.status === 409) {
       expansionPullAttempt.value.phase = "starting";
       expansionPullAttempt.value.allowExistingInFlight = true;
@@ -2645,6 +2680,7 @@ async function pullExpansionModel() {
         conflictId ?? expansionPullAttempt.value.baselineMatchingInFlightId;
       return;
     }
+    downloads.clearNotificationAction(missing.model, notificationHostId, attempt.notificationOwner);
     expansionPullAttempt.value.requestError =
       error instanceof Error ? error.message : `Couldn't pull ${missing.model} on ${route.label}.`;
   }
@@ -2657,13 +2693,26 @@ function downloadBucketForRoute(route: HostRoute): DownloadsState {
   return downloads.hostStates[route.hostId] ?? { activeJobs: [], queued: [], history: [] };
 }
 
+function downloadNotificationHostId(route: HostRoute): string | null {
+  return route.kind === "local" || route.hostId === downloads.primaryHostId ? null : route.hostId;
+}
+
 const expansionPullBucket = computed<DownloadsState>(() => {
   const route = expansionPullAttempt.value?.route ?? expansionMissingModel.value?.route;
   return route ? downloadBucketForRoute(route) : { activeJobs: [], queued: [], history: [] };
 });
 
 watch(expansionMissingModel, (missing) => {
-  if (!missing) expansionPullAttempt.value = null;
+  if (!missing && expansionPullAttempt.value) {
+    const attempt = expansionPullAttempt.value;
+    downloads.clearNotificationAction(
+      attempt.model,
+      downloadNotificationHostId(attempt.route),
+      attempt.notificationOwner,
+      attempt.jobId,
+    );
+    expansionPullAttempt.value = null;
+  }
 });
 
 watch(

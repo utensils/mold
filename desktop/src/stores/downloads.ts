@@ -12,6 +12,7 @@ import { sseStream } from "../lib/api/sse";
 import { startCatalogDownload } from "../lib/api/catalog";
 import { applyDownloadEvent, emptyDownloadsState, type DownloadsState } from "../lib/downloads";
 import { notifyPulled, notifyPullFailed } from "../lib/notify";
+import type { NotificationAction } from "../lib/notificationAction";
 import { useModelStore } from "./models";
 import { useHostModelsStore } from "./hostModels";
 import { useToastStore } from "./toasts";
@@ -35,10 +36,23 @@ export interface HostedDownloadJob {
   job: DownloadJob;
 }
 
+interface DownloadNotificationIntent {
+  owner: string;
+  action: NotificationAction;
+}
+
 const STREAM_OPEN_TIMEOUT_MS = 10_000;
 
 /** Scope prefix for the primary stream's rate samples (host streams use their id). */
 const PRIMARY_RATE_SCOPE = "primary";
+
+function notificationKey(
+  hostId: string | null | undefined,
+  identity: "job" | "model",
+  value: string,
+): string {
+  return JSON.stringify([hostId ?? PRIMARY_RATE_SCOPE, identity, value]);
+}
 
 /** One byte-count observation on an active download. */
 export interface RateSample {
@@ -101,6 +115,8 @@ export const useDownloadsStore = defineStore("downloads", {
     hostStates: {} as Record<string, DownloadHostState>,
     /** Sliding rate windows keyed `<scope>:<job id>` (scope = "primary" or host id). */
     rateSamples: {} as Record<string, RateSample[]>,
+    /** Semantic click destinations retained for pulls started outside Models. */
+    notificationActions: {} as Record<string, DownloadNotificationIntent>,
   }),
   getters: {
     /** In-flight rows for the tray: the active job first, then the queue. */
@@ -280,8 +296,9 @@ export const useDownloadsStore = defineStore("downloads", {
           try {
             const ev = JSON.parse(data) as DownloadEvent;
             this.apply(ev);
-            if (ev.type === "job_done") this.onJobComplete(ev.model);
+            if (ev.type === "job_done") this.onJobComplete(ev.id, ev.model);
             else if (ev.type === "job_failed") this.onJobFailed(ev.id);
+            else if (ev.type === "job_cancelled") this.onJobCancelled(ev.id);
           } catch {
             /* skip malformed frame */
           }
@@ -342,8 +359,9 @@ export const useDownloadsStore = defineStore("downloads", {
           try {
             const ev = JSON.parse(data) as DownloadEvent;
             this.applyForHost(host.id, ev);
-            if (ev.type === "job_done") this.onJobComplete(ev.model, host.id);
+            if (ev.type === "job_done") this.onJobComplete(ev.id, ev.model, host.id);
             else if (ev.type === "job_failed") this.onJobFailed(ev.id, host.id);
+            else if (ev.type === "job_cancelled") this.onJobCancelled(ev.id, host.id);
           } catch {
             /* skip malformed frame */
           }
@@ -375,10 +393,63 @@ export const useDownloadsStore = defineStore("downloads", {
       delete this.hostStates[hostId];
       this.clearRates(hostId);
     },
-    onJobComplete(model: string, hostId?: string) {
+    /**
+     * Retain the initiating surface for a pull. Register by model before POST
+     * so a 409/already-running pull is covered, then refine to the returned id.
+     */
+    armNotificationAction(
+      model: string,
+      hostId: string | null,
+      owner: string,
+      action: NotificationAction,
+    ) {
+      this.notificationActions[notificationKey(hostId, "model", model)] = { owner, action };
+    },
+    /** Move a still-owned pre-ID intent to the exact job. If a terminal event
+     * already consumed it, do nothing instead of resurrecting stale state. */
+    refineNotificationAction(
+      model: string,
+      hostId: string | null,
+      owner: string,
+      jobId?: string | null,
+    ): boolean {
+      if (!jobId) return true;
+      const modelKey = notificationKey(hostId, "model", model);
+      const intent = this.notificationActions[modelKey];
+      if (intent?.owner !== owner) return false;
+      delete this.notificationActions[modelKey];
+      this.notificationActions[notificationKey(hostId, "job", jobId)] = intent;
+      return true;
+    },
+    clearNotificationAction(
+      model: string,
+      hostId: string | null,
+      owner: string,
+      jobId?: string | null,
+    ) {
+      for (const key of [
+        notificationKey(hostId, "model", model),
+        ...(jobId ? [notificationKey(hostId, "job", jobId)] : []),
+      ]) {
+        if (this.notificationActions[key]?.owner === owner) delete this.notificationActions[key];
+      }
+    },
+    takeNotificationAction(
+      model: string,
+      hostId: string | null | undefined,
+      jobId: string,
+    ): NotificationAction | undefined {
+      const jobKey = notificationKey(hostId, "job", jobId);
+      const modelKey = notificationKey(hostId, "model", model);
+      const intent = this.notificationActions[jobKey] ?? this.notificationActions[modelKey];
+      delete this.notificationActions[jobKey];
+      delete this.notificationActions[modelKey];
+      return intent?.action;
+    },
+    onJobComplete(id: string, model: string, hostId?: string) {
       const host = hostId ? this.hostStates[hostId] : null;
       useToastStore().push(`Pulled ${model}${host ? ` on ${host.label}` : ""}`);
-      notifyPulled(model);
+      notifyPulled(model, this.takeNotificationAction(model, hostId, id) ?? { kind: "models" });
       if (host) void useHostModelsStore().refresh(true);
       else void useModelStore().fetch();
     },
@@ -394,7 +465,21 @@ export const useDownloadsStore = defineStore("downloads", {
       const suffix = host ? ` on ${host.label}` : "";
       const detail = job?.error ? ` — ${job.error}` : "";
       useToastStore().push(`Couldn't pull ${model}${suffix}${detail}`, "error");
-      notifyPullFailed(model, job?.error ?? undefined);
+      notifyPullFailed(
+        model,
+        job?.error ?? undefined,
+        this.takeNotificationAction(model, hostId, id) ?? { kind: "models" },
+      );
+    },
+    onJobCancelled(id: string, hostId?: string) {
+      const host = hostId ? this.hostStates[hostId] : null;
+      const job = (host?.history ?? this.history).find((candidate) => candidate.id === id);
+      if (job) {
+        const intent =
+          this.notificationActions[notificationKey(hostId, "job", id)] ??
+          this.notificationActions[notificationKey(hostId, "model", job.model)];
+        if (intent) this.clearNotificationAction(job.model, hostId ?? null, intent.owner, id);
+      }
     },
     /** Enqueue a plain-name model. A 409 means it's already queued/installed. */
     async createDownload(model: string) {
