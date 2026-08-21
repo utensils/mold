@@ -9346,6 +9346,33 @@ describe("MobileApp Create File under", () => {
     expect(wrapper!.findAll("[data-test='mobile-file-under-tag']")).toHaveLength(0);
   });
 
+  it("keeps the print's name and filing across both Reset controls", async () => {
+    // Neither Reset restores a MODEL default here: the print's name and the
+    // Library filing it carries are the user's, not the checkpoint's.
+    await openCreateWithFiling();
+
+    await fieldControl("Title").setValue("Smurfs");
+    await wrapper!.get("[data-test='mobile-file-under-add-tag']").trigger("click");
+    await wrapper!.get("[data-test='mobile-file-under-tag-input']").setValue("blue");
+    await wrapper!.get("[data-test='mobile-file-under-tag-add']").trigger("click");
+    await wrapper!.get("[data-test='mobile-file-under-tag-sheet-done']").trigger("click");
+
+    await wrapper!.get("[data-test='mobile-settings-reset']").trigger("click");
+    await flushPromises();
+
+    expect((fieldControl("Title").element as HTMLInputElement).value).toBe("Smurfs");
+    expect(wrapper!.get("[data-test='mobile-file-under-ghost']").text()).toContain("smurfs");
+    expect(wrapper!.get("[data-test='mobile-file-under-tag']").text()).toContain("blue");
+
+    await wrapper!.get("[data-test='mobile-open-advanced']").trigger("click");
+    await wrapper!.get("[data-test='mobile-advanced-reset']").trigger("click");
+    await flushPromises();
+
+    expect((fieldControl("Title").element as HTMLInputElement).value).toBe("Smurfs");
+    expect(wrapper!.get("[data-test='mobile-file-under-ghost']").text()).toContain("smurfs");
+    expect(wrapper!.get("[data-test='mobile-file-under-tag']").text()).toContain("blue");
+  });
+
   it("previews the creation-time filename with the title slug", async () => {
     await openCreateWithFiling();
 

@@ -658,17 +658,28 @@ function closeAdvancedSheet(): void {
 /** Restore every generation knob to the selected model's defaults, keeping the
  * prompt, the model, and any prepared batch size. Same contract as the desktop
  * inspector's Reset — the sheet's scoped reset below is deliberately narrower. */
-function resetCreateSettings(): void {
-  // Reset restores the MODEL's generation knobs. The print's name and the
-  // Library filing it carries are neither, and the phone has always kept the
-  // title across a reset — so they survive it whole.
+/**
+ * Run a wholesale form reset while keeping the print's own identity.
+ *
+ * `newGenerateForm()` clears `title`, `fileUnder`, and `fileUnderMatch`, and
+ * every reset path on the phone funnels through it. None of the three is a
+ * model-owned generation control — the phone has always kept the typed
+ * title across a Reset — so they are lifted out and put back.
+ * `fileUnderAutoTag` is left alone: the shared builder already preserves it as
+ * the Settings mirror it is.
+ */
+function keepingPrintIdentity(reset: () => void): void {
   const title = form.title;
   const fileUnder = form.fileUnder;
-  const fileUnderMatchSnapshot = form.fileUnderMatch;
-  resetFormToModelDefaults(form, selectedGenerationModel.value);
+  const match = form.fileUnderMatch;
+  reset();
   form.title = title;
   form.fileUnder = fileUnder;
-  form.fileUnderMatch = fileUnderMatchSnapshot;
+  form.fileUnderMatch = match;
+}
+
+function resetCreateSettings(): void {
+  keepingPrintIdentity(() => resetFormToModelDefaults(form, selectedGenerationModel.value));
   // The canvas is part of what Reset restores, so its authority resets with
   // it — otherwise the next model change would re-snap the reset canvas back
   // onto the attached source (#1166).
@@ -679,7 +690,8 @@ function resetCreateSettings(): void {
 /** Match the desktop Advanced reset: restore model-owned generation controls
  * while preserving the prompt, selected model, batch, and staged source media. */
 function resetAdvancedSettings(): void {
-  resetAdvancedToModelDefaults(form, selectedGenerationModel.value);
+  // The narrower of the two Resets must not take MORE than the wholesale one.
+  keepingPrintIdentity(() => resetAdvancedToModelDefaults(form, selectedGenerationModel.value));
   // The canvas comes back to the model's default, so its authority does too.
   canvasIntent.value = "model-default";
 }
@@ -3356,13 +3368,11 @@ async function loadTemplate(template: GenerationTemplate): Promise<void> {
   // generation setting. Loading one must not rename the print in progress or
   // re-file it, and the auto-tag mirror is a Settings preference that a
   // snapshot may not override.
-  const title = form.title;
-  const fileUnder = form.fileUnder;
-  const fileUnderMatchSnapshot = form.fileUnderMatch;
-  Object.assign(form, normalizeLegacyNegativeSnapshot(hydrated.form, generationModels.value));
-  form.title = title;
-  form.fileUnder = fileUnder;
-  form.fileUnderMatch = fileUnderMatchSnapshot;
+  keepingPrintIdentity(() =>
+    Object.assign(form, normalizeLegacyNegativeSnapshot(hydrated.form, generationModels.value)),
+  );
+  // Unlike a reset, a snapshot carries its own auto-tag mirror; Settings owns
+  // that preference, so re-read it rather than adopting the template's.
   form.fileUnderAutoTag = mobileSettings.autoTagTitle;
   const sameHost = !!template.scopeId && template.scopeId === selectedHostId.value;
   if (!sameHost) clearHostScopedGenerationSelections();
