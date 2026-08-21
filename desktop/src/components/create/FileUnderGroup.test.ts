@@ -184,6 +184,69 @@ describe("FileUnderGroup — tags", () => {
   });
 });
 
+/**
+ * The tag typed BEFORE the title existed. `validateNewTag` only guards the
+ * other order, so this state is reachable and the row must not draw the same
+ * name twice — `removeTag` retires the ghost AND drops the identical manual
+ * tag, so a ✕ on either twin would delete a tag the user only meant to
+ * de-duplicate.
+ */
+describe("FileUnderGroup — a manual tag the title later duplicates", () => {
+  function typedFirst(overrides: Parameters<typeof mountGroup>[0] = {}) {
+    return mountGroup({
+      title: "Smurfs",
+      state: addTag(emptyFileUnderState(), "smurfs"),
+      ...overrides,
+    });
+  }
+
+  it("absorbs the manual twin so exactly one chip renders", () => {
+    const wrapper = typedFirst();
+    expect(wrapper.get("[data-test='file-under-ghost-tag']").text()).toContain("smurfs");
+    expect(wrapper.findAll("[data-test='file-under-tag']")).toHaveLength(0);
+  });
+
+  it("absorbs it case-insensitively", () => {
+    const wrapper = typedFirst({ state: addTag(emptyFileUnderState(), "SMURFS") });
+    expect(wrapper.findAll("[data-test='file-under-tag']")).toHaveLength(0);
+  });
+
+  it("✕ on the one chip opts the print out and leaves no orphan behind", async () => {
+    const wrapper = typedFirst();
+    await wrapper.get("[data-test='file-under-ghost-remove']").trigger("click");
+    const next = emitted(wrapper);
+    expect(next.ghostRemoved).toBe(true);
+    expect(next.manualTags).toEqual([]);
+  });
+
+  it("keeps drawing a manual tag that merely resembles the ghost", () => {
+    const wrapper = typedFirst({ state: addTag(emptyFileUnderState(), "smurf") });
+    expect(wrapper.findAll("[data-test='file-under-tag']")).toHaveLength(1);
+  });
+
+  it("hands the chip back when the title stops deriving that slug", async () => {
+    const wrapper = typedFirst();
+    await wrapper.setProps({ title: "River studies" });
+    const chips = wrapper.findAll("[data-test='file-under-tag']");
+    expect(chips).toHaveLength(1);
+    expect(chips[0]!.text()).toContain("smurfs");
+  });
+
+  it("draws it as an ordinary chip while auto-tagging is off", () => {
+    const wrapper = typedFirst({ autoTagTitle: false });
+    expect(wrapper.find("[data-test='file-under-ghost-tag']").exists()).toBe(false);
+    expect(wrapper.findAll("[data-test='file-under-tag']")).toHaveLength(1);
+  });
+
+  it("draws it as an ordinary chip once the ghost is retired", () => {
+    const wrapper = typedFirst({
+      state: { ...addTag(emptyFileUnderState(), "smurfs"), ghostRemoved: true },
+    });
+    expect(wrapper.find("[data-test='file-under-ghost-tag']").exists()).toBe(false);
+    expect(wrapper.findAll("[data-test='file-under-tag']")).toHaveLength(1);
+  });
+});
+
 describe("FileUnderGroup — collection", () => {
   it("pre-selects the collection whose slug matches the title, and says so", () => {
     const wrapper = mountGroup();

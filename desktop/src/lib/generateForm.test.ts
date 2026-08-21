@@ -2469,6 +2469,101 @@ describe("resetAdvancedToModelDefaults", () => {
   });
 });
 
+/**
+ * The typed title and its "File under" filing are the PRINT's identity, not
+ * model-owned generation controls. Only ⌘N (`clearComposer`) clears them, so a
+ * Reset — wholesale or the narrower Advanced one — restores parameters without
+ * renaming or re-filing the print in progress. `fileUnderAutoTag` rides along
+ * for the same reason: it mirrors Settings ▸ Library, and a form rewrite is
+ * not a preference change.
+ */
+describe("a reset never clears the print's identity", () => {
+  const sdxl: ModelEntry = {
+    name: "sdxl:base",
+    family: "sdxl",
+    size_gb: 7,
+    is_loaded: false,
+    hf_repo: "r",
+    default_steps: 30,
+    default_guidance: 7,
+    default_width: 1024,
+    default_height: 768,
+    description: "",
+    downloaded: true,
+  };
+
+  function filedForm(): GenerateForm {
+    const form = newGenerateForm();
+    form.model = sdxl.name;
+    form.family = sdxl.family;
+    form.prompt = "a smurf village";
+    form.title = "Smurf Village";
+    form.fileUnderAutoTag = true;
+    form.fileUnder = pickCollection(addTag(emptyFileUnderState(), "blue"), {
+      name: "River studies",
+    });
+    form.fileUnderMatch = { id: "c1", name: "Smurf Village", slug: "smurf-village" };
+    // Advanced dirt a Reset genuinely is supposed to clear.
+    form.scheduler = "ddim";
+    form.upscaleModel = "esrgan";
+    return form;
+  }
+
+  function expectFiledAsBefore(form: GenerateForm): void {
+    expect(form.title).toBe("Smurf Village");
+    expect(form.fileUnderAutoTag).toBe(true);
+    expect(form.fileUnder.manualTags).toEqual(["blue"]);
+    expect(form.fileUnder.picked).toEqual({ name: "River studies" });
+    expect(form.fileUnder.pickedExplicitly).toBe(true);
+    expect(form.fileUnderMatch).toEqual({
+      id: "c1",
+      name: "Smurf Village",
+      slug: "smurf-village",
+    });
+    // …and the next request still carries all of it.
+    const request = buildRequest(form);
+    expect(request.title).toBe("Smurf Village");
+    expect(request.tags).toEqual(["smurf-village", "blue"]);
+    expect(request.collection).toEqual({ name: "River studies" });
+  }
+
+  it("survives the inspector's wholesale Reset", () => {
+    const form = filedForm();
+    resetFormToModelDefaults(form, sdxl);
+    expect(form.scheduler).toBe("default");
+    expect(form.upscaleModel).toBe("");
+    expectFiledAsBefore(form);
+  });
+
+  it("survives the narrower Advanced Reset, which must never take MORE", () => {
+    const form = filedForm();
+    resetAdvancedToModelDefaults(form, sdxl);
+    expect(form.scheduler).toBe("default");
+    expect(form.upscaleModel).toBe("");
+    expectFiledAsBefore(form);
+  });
+
+  it("survives either Reset with no model entry to reset to", () => {
+    const wholesale = filedForm();
+    resetFormToModelDefaults(wholesale, null);
+    expectFiledAsBefore(wholesale);
+    const advanced = filedForm();
+    resetAdvancedToModelDefaults(advanced, null);
+    expectFiledAsBefore(advanced);
+  });
+
+  it("leaves an untitled, unfiled print untitled and unfiled", () => {
+    const form = newGenerateForm();
+    form.model = sdxl.name;
+    form.family = sdxl.family;
+    resetFormToModelDefaults(form, sdxl);
+    expect(form.title).toBe("");
+    expect(form.fileUnder).toEqual(emptyFileUnderState());
+    expect(form.fileUnderMatch).toBeNull();
+    expect(form.fileUnderAutoTag).toBe(false);
+  });
+});
+
 describe("source label clearing invariants (review findings)", () => {
   it("applyMetadataToForm clears the label with the image", () => {
     const form = newGenerateForm();
@@ -2681,13 +2776,15 @@ describe("file under", () => {
     expect(buildRequest(form).collection).toEqual({ name: "River studies" });
   });
 
-  it("keeps the mirrored auto-tag setting across a wholesale reset", () => {
+  it("keeps the mirrored auto-tag setting and the filing across a wholesale reset", () => {
     const form = newGenerateForm();
     form.fileUnderAutoTag = true;
     form.fileUnder = addTag(form.fileUnder, "blue");
     resetFormToModelDefaults(form, null);
     expect(form.fileUnderAutoTag).toBe(true);
-    expect(form.fileUnder).toEqual(emptyFileUnderState());
+    // The filing belongs to the print, not to the model's parameters — only
+    // ⌘N clears it. See "a reset never clears the print's identity" above.
+    expect(form.fileUnder.manualTags).toEqual(["blue"]);
   });
 
   it("carries the title and the filing on the chain-create body", () => {

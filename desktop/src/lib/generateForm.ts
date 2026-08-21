@@ -698,10 +698,35 @@ export function normalizeLegacyNegativeSnapshot(
 }
 
 /**
+ * Run a wholesale form rewrite while the print keeps its own identity.
+ *
+ * `title`, `fileUnder`, and `fileUnderMatch` name and file THIS print; none of
+ * them is a model-owned generation control, and the desktop contract is that
+ * only ⌘N (`useGenerateFormStore.clearComposer`) clears them. Every rewrite
+ * short of that — both inspector Resets and a loaded template — goes through
+ * here so it restores parameters without renaming or re-filing the print in
+ * progress. `fileUnderAutoTag` rides along for a related reason: it mirrors
+ * Settings ▸ Library, and a form rewrite is not a preference change.
+ *
+ * Deliberately NOT applied to `applyRequestToForm` / `applyMetadataToForm`,
+ * which restore a recorded print and therefore restore its recorded identity
+ * too.
+ */
+export function keepingPrintIdentity(form: GenerateForm, rewrite: () => void): void {
+  const { title, fileUnder, fileUnderAutoTag, fileUnderMatch } = form;
+  rewrite();
+  form.title = title;
+  form.fileUnder = fileUnder;
+  form.fileUnderAutoTag = fileUnderAutoTag;
+  form.fileUnderMatch = fileUnderMatch;
+}
+
+/**
  * Restore every generation knob to the selected model's defaults. The prompt
  * (with its expand provenance), the model/family, and the batch size survive:
  * the prompt is the user's authored work, and prepared batch siblings must
- * never be silently resized by an unrelated control.
+ * never be silently resized by an unrelated control. The print's name and
+ * filing survive too — see {@link keepingPrintIdentity}.
  *
  * With no `ModelEntry` — an uninstalled or not-yet-resolved model — the named
  * model and family are kept and the form falls back to `newGenerateForm()`
@@ -712,11 +737,7 @@ export function resetFormToModelDefaults(
   m: ModelEntry | null | undefined,
 ): void {
   const { prompt, originalPrompt, batchSize, model, family } = form;
-  // The auto-tag mirror is a Settings preference, not a form value — a reset
-  // to model defaults must not silently switch the ghost chip back on.
-  const fileUnderAutoTag = form.fileUnderAutoTag;
-  Object.assign(form, newGenerateForm());
-  form.fileUnderAutoTag = fileUnderAutoTag;
+  keepingPrintIdentity(form, () => Object.assign(form, newGenerateForm()));
   if (m) {
     applyModelDefaults(form, m);
   } else {

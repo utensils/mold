@@ -31,7 +31,9 @@
  * `#` affordance is offered separately as `stripTagHash`, for a surface to
  * apply to TYPED input before calling `addTag` (never to a suggestion the
  * host reported, or picking `#blue` would file a different tag called
- * `blue`).
+ * `blue`). Searching is the exception `suggestTags` owns: it strips the
+ * QUERY itself, because a habit-typed `#gra` should still find `grain`, and
+ * the names it returns stay verbatim.
  *
  * Framework-free and browser-safe: no Vue, no Pinia, no DOM, no shell
  * imports. Every state helper returns a NEW state object so a surface can
@@ -512,8 +514,16 @@ export function downloadFileName(input: DownloadFileNameInput): string {
  * counts. Prefix matches come before substring matches, each group by count
  * descending then name (`sortTags`); tags already on the print are excluded;
  * an empty query lists everything by count so the field is useful before the
- * first keystroke. The query is normalized like a tag, so a typed `#` and
- * stray whitespace still match.
+ * first keystroke.
+ *
+ * The QUERY — and only the query — goes through `stripTagHash` as well as the
+ * tag normalization, because searching is the one place the `#` affordance is
+ * free: people type `#gra` out of habit, and matching that literally hides the
+ * plain `grain` they were reaching for. The host's own names are still matched
+ * and RETURNED verbatim, so a literal `#grain` comes back as `#grain` (a
+ * substring match on the stripped needle) and picking it files that exact tag.
+ * The strip is idempotent, so a surface that already applies it before calling
+ * gets the same answer.
  */
 export function suggestTags<T extends TagCount>(
   existing: readonly T[],
@@ -524,7 +534,7 @@ export function suggestTags<T extends TagCount>(
   const candidates = existing.filter(
     (tag) => !taken.has(requestTagKey(tag.name)),
   );
-  const needle = requestTagKey(query);
+  const needle = requestTagKey(stripTagHash(query));
   if (!needle) return sortTags(candidates);
   const prefix: T[] = [];
   const substring: T[] = [];

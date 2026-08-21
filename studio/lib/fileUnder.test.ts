@@ -748,15 +748,31 @@ describe("suggestTags", () => {
     ).toEqual(["grain"]);
   });
 
-  it("takes a typed # literally, so a host's #-tag is findable", () => {
+  it("strips a leading # from the QUERY, so a habit-typed hash still matches", () => {
     const tags = [...EXISTING_TAGS, { name: "#grain", count: 1 }];
-    expect(suggestTags(tags, "#grain", []).map((t) => t.name)).toEqual([
+    // `#gra` is how people type `gra`. The plain tag prefix-matches and the
+    // host's own literal `#grain` still matches as a substring.
+    expect(suggestTags(tags, "#gra", []).map((t) => t.name)).toEqual([
+      "grain",
       "#grain",
     ]);
-    // The surface applies the affordance when it wants the plain tag.
+    expect(suggestTags(tags, "#grain", []).map((t) => t.name)).toEqual([
+      "grain",
+      "#grain",
+    ]);
+    // A surface that already applies the affordance gets the same answer, so
+    // the existing `stripTagHash` call sites stay correct and unchanged.
     expect(
       suggestTags(tags, stripTagHash("#grain"), []).map((t) => t.name),
     ).toEqual(["grain", "#grain"]);
+  });
+
+  it("returns a host's hashed tag VERBATIM — only the query is stripped", () => {
+    const tags = [{ name: "#grain", count: 1 }];
+    expect(suggestTags(tags, "#gra", []).map((t) => t.name)).toEqual([
+      "#grain",
+    ]);
+    expect(suggestTags(tags, "gra", []).map((t) => t.name)).toEqual(["#grain"]);
   });
 });
 
