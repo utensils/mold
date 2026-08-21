@@ -70,10 +70,16 @@ const suggestions = computed(() =>
   suggestTags(props.tags, tagDraft.value, activeTags.value).slice(0, 8),
 );
 
-function commitTag(raw: string, { fromSuggestion = false } = {}) {
-  // A TYPED `#kodak` is the display habit and files as `kodak`; a SUGGESTION
-  // is a tag the host actually reported, so `#grain` files as `#grain`.
-  const name = fromSuggestion ? raw : stripTagHash(raw);
+/**
+ * Add a tag. `stripTagHash` is deliberately NOT part of `addTag`, so the
+ * split lives at the entry point: TYPED text loses a leading `#` (people type
+ * it out of habit and Rust would file the literal `#kodak`), while a
+ * SUGGESTION the host reported is added VERBATIM — stripping it there would
+ * file `grain` when the user picked the host's own `#grain`. Every entry point
+ * names its source; there is no default.
+ */
+function commitTag(raw: string, source: "typed" | "suggestion") {
+  const name = source === "typed" ? stripTagHash(raw) : raw;
   if (!name.trim()) {
     tagError.value = null;
     return;
@@ -90,7 +96,7 @@ function commitTag(raw: string, { fromSuggestion = false } = {}) {
 }
 
 function onTagEnter() {
-  commitTag(tagDraft.value);
+  commitTag(tagDraft.value, "typed");
 }
 
 function dropTag(name: string) {
@@ -299,7 +305,7 @@ onBeforeUnmount(() => {
           type="button"
           class="ms-fu__row"
           data-test="file-under-tag-suggestion"
-          @click="commitTag(tag.name, { fromSuggestion: true })"
+          @mousedown.prevent="commitTag(tag.name, 'suggestion')"
         >
           <span class="ms-fu__row-name">{{ tag.name }}</span>
           <span class="data-mono ms-fu__row-count">{{ tag.count }}</span>

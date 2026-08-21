@@ -1071,6 +1071,11 @@ export interface AutoChainRequest {
   batch_index?: number | null;
   batch_count?: number | null;
   output_mode?: "one-shot" | "sequence" | null;
+  /** A stitched long video is still ONE print, so it carries the same title
+   * and creation-time filing an unstitched one-shot would. */
+  title?: string;
+  tags?: string[];
+  collection?: { id?: string; name?: string };
 }
 
 /**

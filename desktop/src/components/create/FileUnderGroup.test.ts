@@ -97,6 +97,8 @@ describe("FileUnderGroup — tags", () => {
     expect(emitted(wrapper).manualTags).toEqual(["kodak gold"]);
   });
 
+  // The one rule `addTag` deliberately does NOT enforce: the `#` split lives
+  // at the entry point, so the same text takes two different paths.
   it("strips a leading # from TYPED input", async () => {
     const wrapper = mountGroup();
     const input = wrapper.get("[data-test='file-under-tag-input']");
@@ -105,12 +107,23 @@ describe("FileUnderGroup — tags", () => {
     expect(emitted(wrapper).manualTags).toEqual(["kodak"]);
   });
 
-  it("keeps a # that the HOST reported when the suggestion is clicked", async () => {
+  it("keeps the SAME leading # when the host reported it as a suggestion", async () => {
+    const wrapper = mountGroup({ tags: [{ name: "#kodak", count: 3 }] });
+    await wrapper.get("[data-test='file-under-tag-input']").setValue("kodak");
+    const rows = wrapper.findAll("[data-test='file-under-tag-suggestion']");
+    expect(rows.map((row) => row.text())).toContain("#kodak3");
+    // mousedown, not click: the input keeps focus so several tags can be
+    // picked in a row.
+    await rows[0]!.trigger("mousedown");
+    expect(emitted(wrapper).manualTags).toEqual(["#kodak"]);
+  });
+
+  it("adds a host-reported #tag verbatim from the suggestion list", async () => {
     const wrapper = mountGroup();
     await wrapper.get("[data-test='file-under-tag-input']").setValue("grain");
     const rows = wrapper.findAll("[data-test='file-under-tag-suggestion']");
     expect(rows.map((row) => row.text())).toContain("#grain4");
-    await rows[0]!.trigger("click");
+    await rows[0]!.trigger("mousedown");
     expect(emitted(wrapper).manualTags).toEqual(["#grain"]);
   });
 
