@@ -3454,6 +3454,10 @@ pub(crate) fn build_stage_generate_request(
         spatial_upscale: None,
         temporal_upscale: None,
         placement: chain.placement.clone(),
+        id_image: None,
+        id_image_name: None,
+        id_weight: None,
+        id_start_step: None,
     }
 }
 

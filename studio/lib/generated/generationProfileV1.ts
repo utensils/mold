@@ -69,7 +69,13 @@ export type SourceImageCapability = "unsupported" | "optional" | "required";
 
 export type Scheduler = "ddim" | "euler-ancestral" | "uni-pc" | "euler" | "dpm-pp";
 
-export type GenerationCapabilitiesProfile = { guidance: GuidanceCapabilities, negative_prompt: FeatureControlProfile, source_image?: SourceImageCapability | null, supports_lora: boolean, supports_controlnet: boolean, supports_sequence: boolean, supports_extend: boolean, supports_audio: boolean, source_video: FeatureControlProfile, mask: FeatureControlProfile, keyframes: FeatureControlProfile, audio: FeatureControlProfile, lora: AdapterControlProfile, controlnet: AdapterControlProfile, output: OutputCapabilitiesProfile, wan_recipe: WanRecipeCapabilitiesProfile, schedulers?: Array<Scheduler>, };
+export type GenerationCapabilitiesProfile = { guidance: GuidanceCapabilities, negative_prompt: FeatureControlProfile, source_image?: SourceImageCapability | null, supports_lora: boolean, supports_controlnet: boolean,
+/**
+ * Face-identity conditioning (`GenerateRequest.id_image`). True only for
+ * an identity-qualified checkpoint on a binary that links the identity
+ * adapter, so a client never offers a control this server would refuse.
+ */
+supports_identity: boolean, supports_sequence: boolean, supports_extend: boolean, supports_audio: boolean, source_video: FeatureControlProfile, mask: FeatureControlProfile, keyframes: FeatureControlProfile, audio: FeatureControlProfile, lora: AdapterControlProfile, controlnet: AdapterControlProfile, output: OutputCapabilitiesProfile, wan_recipe: WanRecipeCapabilitiesProfile, schedulers?: Array<Scheduler>, };
 
 export type GenerationRecipeProfile = { id: string, label: string, request_selector: RecipeSelector, defaults: GenerationDefaultsProfile, resolution: ResolutionProfile, steps: IntegerControl, guidance: FloatControl, temporal?: TemporalProfile | null, capabilities: GenerationCapabilitiesProfile, provenance?: Array<ProfileProvenance>, };
 

@@ -843,6 +843,10 @@ pub(crate) fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<Generat
         chain_job_id: None,
         chain: None,
         version: row.get(22)?,
+        id_image_name: None,
+        id_image_sha256: None,
+        id_weight: None,
+        id_start_step: None,
     };
     let source_s: String = row.get(26)?;
     let synthetic_i: i64 = row.get(27)?;
@@ -1014,6 +1018,10 @@ mod tests {
             chain_job_id: None,
             chain: None,
             version: "0.8.1".into(),
+            id_image_name: None,
+            id_image_sha256: None,
+            id_weight: None,
+            id_start_step: None,
         }
     }
 

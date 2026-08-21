@@ -2280,6 +2280,7 @@ describe("useGenerateForm — source image & first/last frames", () => {
               negative_prompt: { mode: "hidden", required: false },
               supports_lora: true,
               supports_controlnet: false,
+              supports_identity: false,
               supports_sequence: true,
               supports_extend: true,
               supports_audio: true,

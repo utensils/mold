@@ -22,6 +22,11 @@ h3 = []
 # Validation-only edge consumed by the authenticated private H3 server. This
 # does not expose artifacts, loaders, or model activation.
 h3-private-uat = []
+# PuLID-FLUX face-identity conditioning. Contract-only in mold-core: it flips
+# the advertised `supports_identity` capability so a client never offers a
+# control the binary cannot execute. Request validation is deliberately
+# feature-independent, because the wire shape does not change with the build.
+pulid = []
 
 [dependencies]
 anyhow = "1"

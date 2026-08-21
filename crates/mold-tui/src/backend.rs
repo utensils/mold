@@ -905,6 +905,10 @@ fn build_request(
         spatial_upscale: params.spatial_upscale,
         temporal_upscale: params.temporal_upscale,
         placement: None,
+        id_image: None,
+        id_image_name: None,
+        id_weight: None,
+        id_start_step: None,
     }
 }
 

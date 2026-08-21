@@ -1021,6 +1021,10 @@ mod tests {
             frames: None,
             fps: None,
             version: "test".into(),
+            id_image_name: None,
+            id_image_sha256: None,
+            id_weight: None,
+            id_start_step: None,
         }
     }
 
@@ -9641,6 +9645,10 @@ mod tests {
             chain_job_id: None,
             chain: None,
             version: "test".into(),
+            id_image_name: None,
+            id_image_sha256: None,
+            id_weight: None,
+            id_start_step: None,
         };
         let mut rec = GenerationRecord::from_save(
             dir.path(),
@@ -10561,6 +10569,10 @@ mod tests {
             chain_job_id: None,
             chain: None,
             version: "t".into(),
+            id_image_name: None,
+            id_image_sha256: None,
+            id_weight: None,
+            id_start_step: None,
         };
         let rec = GenerationRecord::from_save(
             dir.path(),

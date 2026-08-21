@@ -15,7 +15,8 @@ pub const UPSCALER_FAMILIES: &[&str] = &["upscaler"];
 
 /// Model families that are auxiliary (not standalone generators).
 /// ControlNet models are used via `--control-model`, not as the primary model.
-pub const AUXILIARY_FAMILIES: &[&str] = &["controlnet", "ltx2-control", "ltx2-camera-control"];
+pub const AUXILIARY_FAMILIES: &[&str] =
+    &["controlnet", "ltx2-control", "ltx2-camera-control", "pulid"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelComponent {
@@ -62,6 +63,24 @@ pub enum ModelComponent {
     TaskConfig,
     Decoder,  // Stage B decoder weights (Wuerstchen)
     Upscaler, // Upscaler model weights (Real-ESRGAN, etc.)
+    /// PuLID's face-identity adapter: the IDFormer encoder plus the extra
+    /// cross-attention blocks grafted onto the FLUX transformer. It is a
+    /// conditioning adapter, never a standalone checkpoint, so it is
+    /// deliberately not a [`ModelComponent::Transformer`] — filing it as one
+    /// would make `paths_from_downloads` demand a VAE for a bundle that has
+    /// no generator of its own.
+    IdentityAdapter,
+    /// The EVA02-CLIP-L-14-336 vision tower PuLID conditions on. The manifest
+    /// carries upstream's `.pt` release as an installer INPUT only; the
+    /// derived candle-loadable artifact is produced separately (#1229) and is
+    /// deliberately not a manifest file.
+    IdentityVisionEncoder,
+    /// SCRFD face detector (InsightFace antelopev2). Locates and aligns the
+    /// face crop the recognizer and vision tower are fed.
+    FaceDetector,
+    /// ArcFace `glintr100` face recognizer (InsightFace antelopev2). Produces
+    /// the identity embedding the adapter conditions on.
+    FaceRecognizer,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -152,6 +171,22 @@ impl ModelManifest {
     /// as the primary generation model.
     pub fn is_auxiliary(&self) -> bool {
         AUXILIARY_FAMILIES.contains(&self.family.as_str())
+    }
+
+    /// True when this manifest is a bundle of complete, runnable files that
+    /// never resolves to a [`ModelPaths`].
+    ///
+    /// These installs are "the files are on disk" and nothing more: there is
+    /// no transformer/VAE pair to discover, no `[models]` config entry, and
+    /// no default-model eligibility. Both the pull path and the
+    /// installed-state check read this one predicate so a bundle cannot be
+    /// downloaded by one rule and reported missing by another.
+    pub fn is_files_only_bundle(&self) -> bool {
+        self.is_utility()
+            || matches!(
+                self.family.as_str(),
+                "ltx2-control" | "ltx2-camera-control" | PULID_FAMILY
+            )
     }
 
     /// True if this model can be used as a primary generation model.
@@ -1331,6 +1366,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
     manifests.extend(crate::minimax_h3::manifests());
     manifests.extend(ltx2_control_manifests());
     manifests.extend(ltx2_camera_control_manifests());
+    manifests.extend(pulid_manifests());
     manifests.extend(controlnet_manifests());
     manifests.extend(qwen3_expand_manifests());
     manifests.extend(upscaler_manifests());
@@ -4988,6 +5024,106 @@ fn ltx2_camera_control_manifests() -> Vec<ModelManifest> {
         .collect()
 }
 
+/// Family name for the PuLID-FLUX identity-conditioning asset bundle.
+pub const PULID_FAMILY: &str = "pulid";
+
+/// Manifest name for the PuLID-FLUX v0.9.1 asset bundle.
+pub const PULID_FLUX_MANIFEST: &str = "pulid-flux";
+
+/// The PuLID-FLUX auxiliary asset bundle.
+///
+/// This is emphatically **not** a generation model: it is the four auxiliary
+/// artifacts a FLUX render needs before it can condition on a face. It is
+/// hidden (never offered as a checkpoint), auxiliary (never a default model),
+/// and files-only (never resolves to a [`ModelPaths`]). The
+/// [`ManifestDefaults`] are dummies for the same reason the LTX-2 control
+/// adapters' are — nothing ever reads them for a bundle that cannot generate.
+fn pulid_manifests() -> Vec<ModelManifest> {
+    vec![ModelManifest {
+        name: PULID_FLUX_MANIFEST.to_string(),
+        family: PULID_FAMILY.to_string(),
+        description: "PuLID-FLUX v0.9.1 identity conditioning — adapter, EVA02-CLIP vision tower, and InsightFace antelopev2 face models".to_string(),
+        files: vec![
+            // Upstream's own download: `pipeline_flux.py:95` calls
+            // `hf_hub_download('guozinan/PuLID', f'pulid_flux_{version}.safetensors')`.
+            ModelFile {
+                hf_repo: "guozinan/PuLID".to_string(),
+                hf_filename: "pulid_flux_v0.9.1.safetensors".to_string(),
+                component: ModelComponent::IdentityAdapter,
+                size_bytes: 1_142_099_520,
+                gated: false,
+                sha256: Some(
+                    "92c41c3af322b02e58e1b32842e4601e08c8f16ec1fe80089dbe957df510f51d",
+                ),
+            },
+            // `pipeline_flux.py:58` builds `EVA02-CLIP-L-14-336`; BAAI publishes
+            // that checkpoint as a PyTorch pickle in `QuanSun/EVA-CLIP`. Mold
+            // carries it as a conversion INPUT and never loads the `.pt`
+            // directly; the derived artifact is issue #1229's.
+            ModelFile {
+                hf_repo: "QuanSun/EVA-CLIP".to_string(),
+                hf_filename: "EVA02_CLIP_L_336_psz14_s6B.pt".to_string(),
+                component: ModelComponent::IdentityVisionEncoder,
+                size_bytes: 856_461_210,
+                gated: false,
+                sha256: Some(
+                    "84c3a17a228c567a155259b2245b0b59072bf7da510260a0a02ec54de6d50b05",
+                ),
+            },
+            // Provenance: InsightFace publishes antelopev2 as a zip on GitHub
+            // releases / Google Drive, which mold's HF-only `ModelFile` cannot
+            // express. PuLID itself resolves the pack from the Hugging Face
+            // mirror — `pipeline_flux.py:70`,
+            // `snapshot_download('DIAMONIK7777/antelopev2', ...)` — and both
+            // mirrored files hash to the pins below (verified 2026-08-21
+            // against the official antelopev2 digests), so mold pulls the
+            // same bytes upstream does.
+            //
+            // LICENSE: these two files are InsightFace *pretrained models*,
+            // which are "available for non-commercial research purposes only"
+            // (InsightFace README, "License"). The code is MIT; the weights are
+            // not. Mold does not bundle them and refuses to download them until
+            // the user has explicitly recorded acceptance — see
+            // [`crate::license_acceptance`].
+            ModelFile {
+                hf_repo: "DIAMONIK7777/antelopev2".to_string(),
+                hf_filename: "scrfd_10g_bnkps.onnx".to_string(),
+                component: ModelComponent::FaceDetector,
+                size_bytes: 16_923_827,
+                gated: false,
+                sha256: Some(
+                    "5838f7fe053675b1c7a08b633df49e7af5495cee0493c7dcf6697200b85b5b91",
+                ),
+            },
+            ModelFile {
+                hf_repo: "DIAMONIK7777/antelopev2".to_string(),
+                hf_filename: "glintr100.onnx".to_string(),
+                component: ModelComponent::FaceRecognizer,
+                size_bytes: 260_665_334,
+                gated: false,
+                sha256: Some(
+                    "4ab1d6435d639628a6f3e5008dd4f929edf4c4124b1a7169e1048f9fef534cdf",
+                ),
+            },
+        ],
+        // Dummy defaults: a files-only auxiliary bundle never generates, so
+        // nothing reads these. Mirrors `ltx2_control_manifests`.
+        defaults: ManifestDefaults {
+            steps: 1,
+            guidance: 0.0,
+            width: 16,
+            height: 16,
+            is_schnell: true,
+            scheduler: None,
+            negative_prompt: None,
+            frames: None,
+            fps: None,
+            source_image: None,
+        },
+        hidden: true,
+    }]
+}
+
 fn controlnet_manifests() -> Vec<ModelManifest> {
     let defaults = ManifestDefaults {
         steps: 25,
@@ -6524,6 +6660,89 @@ fn upscaler_manifests() -> Vec<ModelManifest> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn pulid_bundle_is_a_hidden_sha_pinned_auxiliary_bundle() {
+        let manifest = find_manifest(PULID_FLUX_MANIFEST).expect("pulid-flux resolves");
+        assert_eq!(manifest.family, PULID_FAMILY);
+        assert!(
+            manifest.hidden,
+            "the bundle is never offered as a checkpoint"
+        );
+        assert!(manifest.is_auxiliary());
+        assert!(!manifest.is_generation_model());
+        assert!(!manifest.is_utility());
+        assert!(!manifest.is_upscaler());
+        assert!(!manifest.is_gated());
+        assert!(
+            manifest.is_files_only_bundle(),
+            "the bundle has no transformer/VAE pair to resolve"
+        );
+
+        let components: Vec<ModelComponent> =
+            manifest.files.iter().map(|file| file.component).collect();
+        assert_eq!(components.len(), 4);
+        for expected in [
+            ModelComponent::IdentityAdapter,
+            ModelComponent::IdentityVisionEncoder,
+            ModelComponent::FaceDetector,
+            ModelComponent::FaceRecognizer,
+        ] {
+            assert!(
+                components.contains(&expected),
+                "missing component {expected:?}"
+            );
+        }
+
+        for file in &manifest.files {
+            assert!(
+                file.sha256.is_some_and(|hash| hash.len() == 64),
+                "{} must be sha256-pinned",
+                file.hf_filename
+            );
+            assert!(
+                file.size_bytes > 0,
+                "{} must declare a real byte size",
+                file.hf_filename
+            );
+        }
+    }
+
+    #[test]
+    fn pulid_bundle_never_resolves_to_model_paths() {
+        // `paths_from_downloads` exists to build a generator's paths. The
+        // bundle has no Transformer component at all, so it must decline
+        // rather than synthesize one — this is why `pulid_assets` exists.
+        let manifest = find_manifest(PULID_FLUX_MANIFEST).unwrap();
+        let downloads: Vec<(ModelComponent, PathBuf)> = manifest
+            .files
+            .iter()
+            .map(|file| (file.component, PathBuf::from(&file.hf_filename)))
+            .collect();
+        assert!(paths_from_downloads(&downloads, &manifest.family).is_none());
+    }
+
+    #[test]
+    fn pulid_assets_share_one_storage_root() {
+        let manifest = find_manifest(PULID_FLUX_MANIFEST).unwrap();
+        for file in &manifest.files {
+            assert_eq!(
+                storage_path(manifest, file),
+                PathBuf::from("shared")
+                    .join(PULID_FAMILY)
+                    .join(&file.hf_filename),
+                "{} must live in the shared pulid root",
+                file.hf_filename
+            );
+        }
+    }
+
+    #[test]
+    fn pulid_family_is_registered_as_auxiliary() {
+        assert!(AUXILIARY_FAMILIES.contains(&PULID_FAMILY));
+        assert!(!UTILITY_FAMILIES.contains(&PULID_FAMILY));
+        assert!(!UPSCALER_FAMILIES.contains(&PULID_FAMILY));
+    }
+
     /// The engine's absence fallback (`wan/pipeline.rs::resolve_negative_prompt`)
     /// and the advertised default must be one value: every wan manifest
     /// plants exactly the family constant. Only wan gets an engine-side
@@ -7405,7 +7624,10 @@ mod tests {
         // GGUFs for the dense 2.1 14B, which the engine already shape-detects.
         // Qwen distilled bump (#1042): +qwen-image-flash:{q4,q8} (NVIDIA DMD2
         // 4-step), +qwen-image-distill:{q4,q8} (DiffSynth Distill-Full 15-step),
-        assert_eq!(known_manifests().len(), 159);
+        // PuLID bump (#1220): +pulid-flux — one hidden auxiliary files-only
+        // bundle (identity adapter + EVA02-CLIP source + antelopev2 face
+        // models). Not a checkpoint; never a default-model candidate.
+        assert_eq!(known_manifests().len(), 160);
     }
 
     #[test]

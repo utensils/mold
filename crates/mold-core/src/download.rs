@@ -113,6 +113,12 @@ pub enum DownloadError {
     #[error("Missing component after download — this is a bug")]
     MissingComponent,
 
+    /// A file in the manifest is published under terms mold cannot accept on
+    /// the user's behalf. Carries the full actionable message so automatic and
+    /// server-side pulls surface the same wording the CLI does.
+    #[error("{message}")]
+    LicenseNotAccepted { license_id: String, message: String },
+
     #[error("{0}")]
     Other(String),
 
@@ -907,7 +913,39 @@ fn require_manifest_acquisition(manifest: &ModelManifest) -> Result<(), Download
     } else {
         crate::require_model_acquisition(&manifest.name, Some(&manifest.family))?;
     }
-    Ok(())
+    require_manifest_licenses_accepted(manifest)
+}
+
+/// Refuse to download any manifest carrying a file under a license the user
+/// has not explicitly accepted.
+///
+/// Checked at the manifest level, before the first byte moves, and from the
+/// one choke point every pull path already calls — an automatic or
+/// server-side auto-pull must fail here rather than acquire restricted
+/// weights on the user's behalf. A Mold data root that cannot be resolved
+/// fails closed: unverifiable is not accepted.
+fn require_manifest_licenses_accepted(manifest: &ModelManifest) -> Result<(), DownloadError> {
+    require_manifest_licenses_accepted_in(manifest, crate::Config::mold_dir().as_deref())
+}
+
+/// The pure half of the gate: decide against an explicit Mold data root.
+///
+/// `None` is a root that could not be resolved, which fails closed —
+/// unverifiable is not accepted.
+fn require_manifest_licenses_accepted_in(
+    manifest: &ModelManifest,
+    mold_home: Option<&std::path::Path>,
+) -> Result<(), DownloadError> {
+    let Some(license) = crate::license_acceptance::manifest_requires_license(manifest) else {
+        return Ok(());
+    };
+    if mold_home.is_some_and(|home| crate::license_acceptance::is_accepted(home, license)) {
+        return Ok(());
+    }
+    Err(DownloadError::LicenseNotAccepted {
+        license_id: license.id.to_string(),
+        message: crate::license_acceptance::acceptance_required_message(&manifest.name, license),
+    })
 }
 
 pub async fn pull_model(
@@ -1658,11 +1696,7 @@ pub fn cached_file_path_existing_only(
 /// VAE after the verified file has already landed. Upstream publishes the
 /// camera controls as individual `.safetensors` LoRAs (LTX-2 README:72-83).
 fn manifest_uses_files_only_pull(manifest: &ModelManifest) -> bool {
-    manifest.is_utility()
-        || matches!(
-            manifest.family.as_str(),
-            "ltx2-control" | "ltx2-camera-control"
-        )
+    manifest.is_files_only_bundle()
 }
 
 /// Download a model and save its paths to config. Returns the updated config
@@ -2420,6 +2454,67 @@ mod tests {
         assert!(!manifest_uses_files_only_pull(
             crate::manifest::find_manifest("controlnet-canny-sd15:fp16").unwrap()
         ));
+    }
+
+    #[test]
+    fn pulid_bundle_uses_the_files_only_pull() {
+        let manifest =
+            crate::manifest::find_manifest(crate::manifest::PULID_FLUX_MANIFEST).unwrap();
+        assert!(manifest_uses_files_only_pull(manifest));
+    }
+
+    #[test]
+    fn restricted_files_are_refused_until_the_license_is_accepted() {
+        use crate::license_acceptance::{
+            record_acceptance, ThirdPartyLicense, INSIGHTFACE_ANTELOPEV2,
+        };
+
+        let manifest =
+            crate::manifest::find_manifest(crate::manifest::PULID_FLUX_MANIFEST).unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let gate =
+            |home: Option<&std::path::Path>| require_manifest_licenses_accepted_in(manifest, home);
+
+        let error = gate(Some(home.path())).expect_err("an unaccepted license refuses the pull");
+        match &error {
+            DownloadError::LicenseNotAccepted {
+                license_id,
+                message,
+            } => {
+                assert_eq!(license_id, INSIGHTFACE_ANTELOPEV2.id);
+                assert!(message.contains("non-commercial research"));
+                assert!(message.contains("--accept-license insightface-antelopev2"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+
+        // A stale record — accepted against terms that have since changed —
+        // must not unlock the download.
+        const CHANGED_TERMS: &str =
+            "0000000000000000000000000000000000000000000000000000000000000000";
+        let stale = ThirdPartyLicense {
+            sha256: CHANGED_TERMS,
+            ..INSIGHTFACE_ANTELOPEV2
+        };
+        record_acceptance(home.path(), &stale).unwrap();
+        assert!(gate(Some(home.path())).is_err());
+
+        record_acceptance(home.path(), &INSIGHTFACE_ANTELOPEV2).unwrap();
+        gate(Some(home.path())).expect("an accepted license permits the pull");
+
+        // An unresolvable Mold data root fails closed rather than open.
+        assert!(gate(None).is_err());
+    }
+
+    #[test]
+    fn unrestricted_manifests_are_never_license_gated() {
+        for name in ["flux2-klein:q8", "controlnet-canny-sd15:fp16"] {
+            let manifest = crate::manifest::find_manifest(name).unwrap();
+            // Not even an unresolvable data root gates an unrestricted model.
+            require_manifest_licenses_accepted_in(manifest, None).unwrap_or_else(|error| {
+                panic!("{name} must not be license gated: {error}");
+            });
+        }
     }
 
     #[test]

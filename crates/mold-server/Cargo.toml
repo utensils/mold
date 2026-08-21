@@ -58,6 +58,10 @@ h3-private-uat = [
     "mp4",
     "cuda",
 ]
+# PuLID-FLUX face-identity conditioning. Off by default; forwards the
+# inference and core edges so `/api/models` advertises the capability only on
+# a binary that will actually link the adapter.
+pulid = ["mold-inference/pulid", "mold-core/pulid"]
 webp = ["mold-inference/webp"]
 metrics = ["dep:metrics", "dep:metrics-exporter-prometheus"]
 mdns = ["dep:mdns-sd"]

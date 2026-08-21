@@ -1264,6 +1264,12 @@ Run 'mold list' to see all available models.")]
         /// Skip SHA-256 verification after download
         #[arg(long)]
         skip_verify: bool,
+
+        /// Record acceptance of a third-party model license before pulling
+        /// (e.g. `insightface-antelopev2`). Some auxiliary assets are
+        /// published under terms mold will not accept on your behalf.
+        #[arg(long, value_name = "ID")]
+        accept_license: Option<String>,
     },
 
     /// Remove downloaded model(s) and their unique files
@@ -2241,7 +2247,14 @@ async fn run() -> anyhow::Result<()> {
         Commands::Trash { action } => {
             commands::trash::run(action).await?;
         }
-        Commands::Pull { model, skip_verify } => {
+        Commands::Pull {
+            model,
+            skip_verify,
+            accept_license,
+        } => {
+            if let Some(id) = accept_license.as_deref() {
+                commands::pull::accept_license(id)?;
+            }
             let opts = mold_core::download::PullOptions { skip_verify };
             if model.starts_with("hf:") || model.starts_with("cv:") {
                 match resolve_catalog_id(&model).await? {

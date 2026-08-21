@@ -133,6 +133,13 @@ pub async fn pull_and_configure(
                     eprintln!("If the file was intentionally updated on HuggingFace, use:");
                     eprintln!("  mold pull {} --skip-verify", canonical);
                 }
+                // Not a download failure — nothing was attempted. The error
+                // already carries the terms, the URL, and the exact command
+                // that records acceptance, so print it as its own refusal.
+                DownloadError::LicenseNotAccepted { ref message, .. } => {
+                    eprintln!();
+                    eprintln!("{} {message}", theme::icon_fail());
+                }
                 other => {
                     eprintln!();
                     eprintln!("{} Download failed: {other}", theme::icon_fail());
@@ -166,6 +173,58 @@ fn print_unknown_model_error(model: &str) {
     }
     eprintln!();
     eprintln!("Usage: mold pull <model>");
+}
+
+/// Record the user's acceptance of a third-party model license.
+///
+/// Prints the restriction and the canonical terms URL before writing the
+/// record, so `--accept-license` is never a silent flag: the user sees what
+/// they are agreeing to in the same invocation that agrees to it.
+pub fn accept_license(id: &str) -> Result<()> {
+    use mold_core::license_acceptance;
+
+    let Some(license) = license_acceptance::license_by_id(id) else {
+        eprintln!(
+            "{} unknown license id '{}'",
+            theme::prefix_error(),
+            id.bold()
+        );
+        eprintln!();
+        eprintln!("  Known licenses:");
+        for known in license_acceptance::THIRD_PARTY_LICENSES {
+            eprintln!("    {} — {}", known.id.bold(), known.name);
+        }
+        return Err(AlreadyReported.into());
+    };
+
+    let Some(mold_home) = Config::mold_dir() else {
+        eprintln!(
+            "{} could not resolve the Mold data directory to record acceptance",
+            theme::prefix_error()
+        );
+        return Err(AlreadyReported.into());
+    };
+
+    status!("{} {}", theme::icon_info(), license.name.bold());
+    status!("  {}", license.summary);
+    status!("  Terms: {}", license.url);
+    status!("");
+
+    license_acceptance::record_acceptance(&mold_home, license).map_err(|error| {
+        eprintln!(
+            "{} failed to record license acceptance: {error}",
+            theme::prefix_error()
+        );
+        anyhow::Error::from(AlreadyReported)
+    })?;
+
+    status!(
+        "{} recorded acceptance of {}",
+        theme::icon_done(),
+        license.id.bold()
+    );
+    status!("");
+    Ok(())
 }
 
 pub async fn run(model: &str, opts: &mold_core::download::PullOptions) -> Result<()> {

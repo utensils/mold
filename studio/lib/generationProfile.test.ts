@@ -67,6 +67,7 @@ function profileModel(): GenerationProfileModel {
       negative_prompt: { mode: "hidden" as const, required: false },
       supports_lora: false,
       supports_controlnet: false,
+      supports_identity: false,
       supports_sequence: false,
       supports_extend: false,
       supports_audio: false,

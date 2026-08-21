@@ -37,6 +37,9 @@ h3 = ["mp4", "mold-core/h3", "mold-inference/h3", "mold-server/h3"]
 # `cuda,h3`, which since #1164 builds H3 without its attention kernel; the
 # `mold-server` build fence requires the edge and fails such a recipe.
 h3-cuda = ["h3", "cuda", "mold-inference/h3-cuda", "mold-server/h3-cuda"]
+# PuLID-FLUX face-identity conditioning. Off by default and deliberately not
+# in any Nix or CI recipe yet — a later issue decides where it ships.
+pulid = ["mold-inference/pulid", "mold-server/pulid"]
 metrics = ["mold-server/metrics"]
 # LAN auto-discovery: advertise `mold serve` and browse via `mold server
 # discover`. Not in `default`; enabled in the release/Nix feature set.

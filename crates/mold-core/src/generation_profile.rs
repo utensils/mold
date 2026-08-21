@@ -267,6 +267,11 @@ pub struct GenerationCapabilitiesProfile {
     pub source_image: Option<SourceImageCapability>,
     pub supports_lora: bool,
     pub supports_controlnet: bool,
+    /// Face-identity conditioning (`GenerateRequest.id_image`). True only for
+    /// an identity-qualified checkpoint on a binary that links the identity
+    /// adapter, so a client never offers a control this server would refuse.
+    #[serde(default)]
+    pub supports_identity: bool,
     pub supports_sequence: bool,
     pub supports_extend: bool,
     pub supports_audio: bool,
@@ -312,6 +317,15 @@ impl GenerationProfileSet {
         self.recipes
             .iter()
             .find(|recipe| recipe.id == self.default_recipe_id)
+    }
+
+    /// Whether any selectable recipe of this model advertises face-identity
+    /// conditioning. `/api/models[].supports_identity` reads this rather than
+    /// re-deriving the predicate.
+    pub fn supports_identity(&self) -> bool {
+        self.recipes
+            .iter()
+            .any(|recipe| recipe.capabilities.supports_identity)
     }
 
     pub fn recipe_for_pipeline(
@@ -1088,6 +1102,11 @@ fn recipe(
         && !flux2_dev
         && input.source_image != Some(SourceImageCapability::Unsupported);
     let controlnet_supported = family == "sd15";
+    // Identity conditioning is advertised only when this binary actually
+    // links the adapter AND the checkpoint is one of the qualified ones —
+    // `crate::identity` is the single authority for the second half.
+    let identity_supported =
+        cfg!(feature = "pulid") && crate::identity::identity_qualified_model(input.model);
     let output = if audio_only {
         OutputCapabilitiesProfile {
             default_format: OutputFormat::Wav,
@@ -1179,6 +1198,7 @@ fn recipe(
             source_image: input.source_image,
             supports_lora: lora_supported,
             supports_controlnet: controlnet_supported,
+            supports_identity: identity_supported,
             supports_sequence: input.supports_sequence && !audio_only,
             supports_extend: input.supports_extend && !audio_only,
             supports_audio: input.supports_audio || audio_only,
@@ -1469,6 +1489,49 @@ mod tests {
             supports_sequence: false,
             supports_extend: false,
             supports_audio: false,
+        }
+    }
+
+    #[test]
+    fn identity_capability_is_off_in_a_build_without_the_adapter() {
+        // A binary that does not link the identity adapter must never
+        // advertise the control, however qualified the checkpoint is.
+        let profile = resolve_generation_profile(input("flux-dev:q8", "flux"));
+        let advertised = profile
+            .default_recipe()
+            .unwrap()
+            .capabilities
+            .supports_identity;
+        assert_eq!(advertised, cfg!(feature = "pulid"));
+        assert_eq!(profile.supports_identity(), cfg!(feature = "pulid"));
+    }
+
+    #[test]
+    fn identity_capability_is_never_advertised_for_an_unqualified_checkpoint() {
+        for (model, family) in [
+            ("flux-dev:bf16", "flux"),
+            ("flux-schnell:q8", "flux"),
+            ("flux2-klein", "flux2"),
+            ("sdxl-base:fp16", "sdxl"),
+            ("z-image-turbo:q4", "z-image"),
+        ] {
+            let profile = resolve_generation_profile(input(model, family));
+            assert!(
+                !profile.supports_identity(),
+                "{model} must not advertise identity conditioning"
+            );
+        }
+    }
+
+    #[cfg(feature = "pulid")]
+    #[test]
+    fn identity_capability_is_advertised_for_qualified_checkpoints_with_the_feature() {
+        for model in ["flux-dev", "flux-dev:q4", "flux-dev:q8", "flux-dev-q4"] {
+            let profile = resolve_generation_profile(input(model, "flux"));
+            assert!(
+                profile.supports_identity(),
+                "{model} must advertise identity conditioning"
+            );
         }
     }
 
