@@ -65,9 +65,7 @@ describe("pullResume store", () => {
         {
           status: "complete",
           error: null,
-          requestWarnings: [
-            "Reference timing was used; the requested frame count was adjusted",
-          ],
+          requestWarnings: ["Reference timing was used; the requested frame count was adjusted"],
         },
       ]),
     } as never);
