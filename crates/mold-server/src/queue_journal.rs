@@ -1682,6 +1682,51 @@ mod tests {
         );
     }
 
+    /// A queued print is durable, and so is the filing it was submitted
+    /// with: the journal stores the whole request as JSON, so a job replayed
+    /// after a restart lands under exactly the tags and collection the user
+    /// chose. Tags and a collection are ordinary request fields — unlike a
+    /// reference handle there is no secret here to exclude.
+    #[test]
+    fn a_journaled_request_round_trips_its_tags_and_collection() {
+        let journal = journal_with_db();
+        let request: mold_core::GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "a cat",
+            "model": "flux-dev:q4",
+            "width": 512,
+            "height": 512,
+            "steps": 4,
+            "guidance": 3.5,
+            "title": "Smurf Village",
+            "tags": ["smurfs", "village"],
+            "collection": { "name": "Sequences" },
+        }))
+        .expect("filed generate request");
+
+        let ticket = journal
+            .record(admission("job-filed", &request, Path::new("/gallery")))
+            .expect("the row is durable");
+
+        let rows = journal.list_all();
+        let row = rows
+            .iter()
+            .find(|row| row.id == "job-filed")
+            .expect("journaled row");
+        let replayed: mold_core::GenerateRequest =
+            serde_json::from_str(&row.request_json).expect("stored request parses");
+        assert_eq!(replayed.title.as_deref(), Some("Smurf Village"));
+        assert_eq!(
+            replayed.tags.as_deref(),
+            Some(["smurfs".to_string(), "village".to_string()].as_slice())
+        );
+        assert_eq!(
+            replayed.collection,
+            Some(mold_core::CollectionRef::by_name("Sequences"))
+        );
+
+        ticket.discard();
+    }
+
     #[test]
     fn a_disabled_journal_records_nothing_and_never_claims() {
         let journal = Arc::new(QueueJournal::disabled());

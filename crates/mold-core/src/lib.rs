@@ -28,6 +28,7 @@ pub mod manifest;
 pub mod media_paths;
 pub mod minimax_h3;
 pub mod model_policy;
+pub mod organization;
 pub mod print_title;
 pub mod pulid_assets;
 pub mod reference_upload;
@@ -82,9 +83,15 @@ pub use model_policy::{
     MINIMAX_H3_AUTHORIZATION_ISSUE_URL, MINIMAX_H3_AUTHORIZATION_REQUIRED,
     MINIMAX_H3_LICENSE_SHA256, MINIMAX_H3_LICENSE_URL,
 };
+pub use organization::{
+    collection_slug, compose_client_tags, normalize_request_tags, normalize_tag_name,
+    validate_collection_name, ComposedClientTags, MAX_COLLECTION_NAME_CHARS,
+    MAX_COLLECTION_SLUG_CHARS, MAX_REQUEST_TAGS, MAX_TAG_CHARS,
+};
 pub use print_title::{
-    default_output_filename_titled, strip_title_slug, title_slug, validate_print_title,
-    PRINT_TITLE_MAX_CHARS, TITLE_SLUG_MAX_LEN, TITLE_SLUG_SEPARATOR,
+    default_output_filename_titled, download_file_name, strip_title_slug, title_slug,
+    validate_print_title, DOWNLOAD_FALLBACK_STEM, DOWNLOAD_MODEL_SLUG_MAX_LEN,
+    DOWNLOAD_NAME_SEPARATOR, PRINT_TITLE_MAX_CHARS, TITLE_SLUG_MAX_LEN, TITLE_SLUG_SEPARATOR,
 };
 pub use reference_upload::{ReferenceUploadLease, ReferenceUploadSource};
 pub use types::GenerateRequest;
@@ -95,13 +102,14 @@ pub use validation::{
     dimension_warning, dimension_warning_composed, family_supports_lora, fit_to_model_dimensions,
     fit_to_model_dimensions_aligned, fit_to_target_area, fixed_fps_for_family,
     frame_offset_for_family, largest_ltx2_rung_within, ltx2_output_rung, ltx2_spatial_composition,
-    min_frames_for_family, prompt_required_for, prompt_required_with_conditioning,
-    recommended_dimensions, recommended_dimensions_composed,
+    materialize_request_organization, min_frames_for_family, prompt_required_for,
+    prompt_required_with_conditioning, recommended_dimensions, recommended_dimensions_composed,
     require_generate_request_model_activation, validate_generate_request,
     validate_generate_request_with_family, validate_generation_dimensions,
     validate_generation_dimensions_composed, validate_generation_dimensions_for_model,
-    validate_upscale_request, wan_dimension_alignment, Ltx2OutputRung, Ltx2SpatialComposition,
-    LORA_CAPABLE_FAMILIES, LTX2_OUTPUT_RUNGS,
+    validate_request_organization, validate_upscale_request, wan_dimension_alignment,
+    Ltx2OutputRung, Ltx2SpatialComposition, RequestOrganization, LORA_CAPABLE_FAMILIES,
+    LTX2_OUTPUT_RUNGS,
 };
 
 pub use expand::{

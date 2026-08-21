@@ -155,6 +155,7 @@ open state and expanded section persist across sessions
 | Upscale after generate | post-generate upscaler (Enter picks, `(off)` clears)                                                                                                                                 |
 | Output format          | png / jpeg / gif / apng / webp / mp4                                                                                                                                                 |
 | Video                  | Frames, FPS; Wan Flow shift; LTX-2 Pipeline, Audio default/on/off, Spatial native/1.5×/2×, Temporal native/2×, STG scale/blocks, CFG rescale, Modality scale, Guidance skip          |
+| File under             | Title, Tags, Collection — where the print lands in the Library                                                                                                                       |
 
 The LTX-2 Pipeline row cycles through **Auto**, **one-stage**, **two-stage**,
 **two-stage-hq**, and **distilled**. Auto omits the request field so the server
@@ -181,6 +182,59 @@ The Spatial and Temporal rows use the same optional latent-upscale fields as
 the other generation surfaces. `native` omits the matching request field;
 explicit choices are summarized on the collapsed Video row and reset when the
 model changes to a family that cannot use them.
+
+#### File under
+
+The last section files the print as you make it, so it arrives in the Library
+already named and organized instead of needing a second pass through the
+gallery. It has no capability gate — every model produces a print.
+
+| Row            | What it takes                                                                     |
+| -------------- | --------------------------------------------------------------------------------- |
+| **Title**      | The print's name (≤120 characters). Blank clears it.                              |
+| **Tags**       | Comma-separated, up to 20 of 1–64 characters. Blank clears them.                  |
+| **Collection** | One collection by name; created on the host when it does not exist. Blank clears. |
+
+**Enter** on a row opens its editor. Entry is checked before the editor will
+close: an over-long title, a tag with a control character, or a collection name
+with no letters or digits keeps the popup open with the reason beneath what you
+typed, so nothing the host would refuse reaches a request. **Esc** abandons the
+edit. Tags are trimmed and de-duplicated case-insensitively, and a collection
+name's whitespace is collapsed so the same name means the same collection on
+every machine.
+
+All three are absent until you touch them — an untouched form sends exactly the
+request it always did.
+
+While **Tag by title** is on (Settings ▸ Library, on by default), a titled print
+also picks up its own title slug as a tag. That is a client decision, not the
+host's, so the TUI shows it before you generate: the Tags row reads
+`auto: smurf-village` and the collapsed section summary repeats it. Turn the
+setting off and the derived tag disappears; the tags you typed stay.
+
+```
+ ▾ File under  “Smurf Village” · 2 tags · in Blue Period · auto: smurf-village
+  Title         Smurf Village
+  Tags          village, blue · auto: smurf-village
+  Collection    Blue Period
+```
+
+Filing is per-print intent rather than a preference: it is not restored on the
+next launch, it is not saved per model, and only **↺ Reset to model defaults**
+clears it. Generating keeps it, so a batch's siblings share the filing.
+
+If a host cannot apply what you filed — it is running without a metadata
+database, or the collection went away between listing it and pressing Generate
+— the print is still rendered and saved, and the TUI says what was dropped: a
+one-line `!` advisory on the Create view (several are joined with `·`) plus an
+entry per advisory in the Timeline. It is an advisory rather than an error
+because the render succeeded, and starting the next generation clears the line.
+The same row carries any other adjustment a host reports about an accepted
+request, such as a lip-dub clip retimed to its reference.
+
+A titled print's file is named `mold-{model}-{ts}[-{idx}]~{title-slug}.{ext}`,
+the same shape the server's gallery writes — renaming the print later never
+renames the file.
 
 The `↺ Reset to model defaults` action row at the bottom restores every
 parameter (keeping the model and your prompt). `qwen-image-edit` shows a
@@ -431,6 +485,14 @@ forever, max 3650, default 30). The value persists through the same
 settings-DB surface `mold config set` and the server's config API use,
 so every surface reads one window; `MOLD_GALLERY_TRASH_RETENTION_DAYS`
 overrides it with the usual **(env)** indicator.
+
+**Tag by title** sits beside it and edits `generate.auto_tag_title` (on by
+default): whether a titled print also picks up its own title slug as a tag.
+That is a client decision — the server never auto-tags, because it cannot
+tell a typed title from a scripted one — so the same key drives `mold run`
+and Create ▸ Advanced ▸ [File under](#file-under), which discloses the derived
+tag before you generate. Turning it off changes nothing about prints you
+already made.
 
 ### Field Types
 

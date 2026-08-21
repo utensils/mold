@@ -461,6 +461,11 @@ function buildChainRequest(
   return {
     output_mode: "one-shot",
     model: req.model,
+    // A request long enough to auto-chain still produces ONE print, so its
+    // title and its creation-time filing ride along to the stitched output.
+    title: req.title ?? undefined,
+    tags: req.tags,
+    collection: req.collection,
     motion_tail_frames: decision.motionTail,
     width: req.width,
     height: req.height,

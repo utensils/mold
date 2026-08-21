@@ -204,6 +204,17 @@ complete workflows.
   ▸ Library and Machines ▸ host edit retention. Hosts that do not advertise
   `gallery.organize` / `gallery.trash` show none of it and keep permanent
   deletes. See [Generating ▸ Browser UI](/guide/generating#browser-ui).
+- Creation-time filing ("File under") lets a print arrive already organized:
+  `GenerateRequest` and the chain body carry additive `title`, `tags`, and
+  `collection`, seeded onto the gallery row once, as it is created. The CLI
+  spells it `mold run --title/--tag/--collection` (with `--no-auto-tag` and
+  the `generate.auto_tag_title` preference); web, desktop, and iPhone Create
+  render a capability-gated **File under** group, and the TUI keeps it as the
+  last Create ▸ Advanced section. A sequence files the stitched print only,
+  batch and prepared siblings inherit their parent's filing, and a filing the
+  host cannot apply is dropped and reported on `x-mold-request-warning`
+  rather than failing the render. See
+  [Generating ▸ File under](/guide/generating#file-under).
 
 For model size and VRAM fit, see [Models Overview](/models/). For usage
 examples, see [Generating Images](/guide/generating).

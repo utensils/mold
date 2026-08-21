@@ -1275,6 +1275,7 @@ impl WuerstchenEngine {
         );
 
         Ok(GenerateResponse {
+            request_warnings: Vec::new(),
             audio: None,
             images: vec![ImageData {
                 data: image_bytes,
@@ -1502,6 +1503,7 @@ impl WuerstchenEngine {
         tracing::info!(generation_time_ms, seed, "Wuerstchen generation complete");
 
         Ok(GenerateResponse {
+            request_warnings: Vec::new(),
             audio: None,
             images: vec![ImageData {
                 data: image_bytes,

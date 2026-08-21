@@ -6243,6 +6243,7 @@ mod tests {
         });
         crate::h3_private_bridge::H3ClaimedRunOutput {
             response: GenerateResponse {
+                request_warnings: Vec::new(),
                 images: Vec::new(),
                 video,
                 audio: None,
@@ -7175,6 +7176,7 @@ mod tests {
         fn generate(&mut self, _req: &GenerateRequest) -> anyhow::Result<GenerateResponse> {
             std::fs::remove_file(&self.weights)?;
             Ok(GenerateResponse {
+                request_warnings: Vec::new(),
                 audio: None,
                 images: vec![self.generated.clone()],
                 video: None,
@@ -7213,6 +7215,7 @@ mod tests {
                 .recv()
                 .unwrap();
             Ok(GenerateResponse {
+                request_warnings: Vec::new(),
                 audio: None,
                 images: vec![ImageData {
                     data: vec![1, 2, 3],
@@ -7838,6 +7841,7 @@ mod tests {
         fn generate(&mut self, _req: &GenerateRequest) -> anyhow::Result<GenerateResponse> {
             self.record("generate");
             Ok(GenerateResponse {
+                request_warnings: Vec::new(),
                 audio: None,
                 images: vec![ImageData {
                     data: vec![1, 2, 3],
@@ -9104,6 +9108,7 @@ mod tests {
             .unwrap();
             let original = fake_upscale_image();
             let response = GenerateResponse {
+                request_warnings: Vec::new(),
                 audio: None,
                 images: vec![original.clone()],
                 video: None,
@@ -10704,6 +10709,7 @@ mod tests {
 
     fn fake_response() -> GenerateResponse {
         GenerateResponse {
+            request_warnings: Vec::new(),
             audio: None,
             images: vec![fake_image()],
             video: None,
@@ -11365,6 +11371,7 @@ mod tests {
         let worker = single_worker_pool_with_parked("flux-dev:q4", Duration::ZERO);
         let job = fake_upscale_job(Config::default(), "real-esrgan-x4plus:fp16");
         let mut response = GenerateResponse {
+            request_warnings: Vec::new(),
             audio: None,
             images: vec![],
             video: None,

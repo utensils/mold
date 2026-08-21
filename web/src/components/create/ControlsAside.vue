@@ -485,6 +485,12 @@ function lockLastSeed() {
       </p>
     </div>
 
+    <!-- "File under" (Create-time Library organization): after the
+         essentials, above Advanced on every width. The page owns the state
+         and the capability gate; the rail owns only its position, so the
+         phone sheet and the tablet+ column can't order it differently. -->
+    <slot name="file-under" />
+
     <button
       v-if="mobile"
       type="button"

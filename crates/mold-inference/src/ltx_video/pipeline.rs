@@ -1703,6 +1703,7 @@ impl LtxVideoEngine {
         ));
 
         Ok(GenerateResponse {
+            request_warnings: Vec::new(),
             audio: None,
             images: vec![],
             video: Some(VideoData {

@@ -27,13 +27,13 @@ use rusqlite::{params, Connection, OptionalExtension};
 use crate::path::canonical_dir_string;
 use crate::MetadataDb;
 
-/// Longest tag name accepted, in characters (after normalization).
-pub const MAX_TAG_CHARS: usize = 64;
-/// Longest collection name accepted, in characters (after whitespace
-/// normalization).
-pub const MAX_COLLECTION_NAME_CHARS: usize = 120;
-/// Longest collection slug produced by [`collection_slug`].
-pub const MAX_COLLECTION_SLUG_CHARS: usize = 80;
+// The normalization rules themselves live in `mold_core::organization`,
+// because admission has to refuse a bad tag before any model work is paid
+// for and mold-core cannot depend on mold-db. These are re-exports, not
+// copies: the caps and the algorithms have exactly one home.
+pub use mold_core::organization::{
+    collection_slug, MAX_COLLECTION_NAME_CHARS, MAX_COLLECTION_SLUG_CHARS, MAX_TAG_CHARS,
+};
 
 /// Typed outcome of an organization mutation.
 #[derive(Debug, thiserror::Error)]
@@ -111,24 +111,12 @@ pub struct BulkOrganize<'a> {
 /// Normalize a tag name: trim, collapse interior whitespace runs to a single
 /// space. Returns `None` for an empty result (callers ignore those) and an
 /// `Invalid` error for control characters or over-long names.
+///
+/// Delegates to [`mold_core::organization::normalize_tag_name`] and only
+/// re-types the error, so the rule admission enforces and the rule SQLite
+/// stores are the same rule.
 pub fn normalize_tag_name(raw: &str) -> OrgResult<Option<String>> {
-    // Whitespace controls (tab, newline) are collapsed below; anything else
-    // (NUL, escape, ...) has no place in a tag.
-    if raw.chars().any(|c| c.is_control() && !c.is_whitespace()) {
-        return Err(OrganizationError::Invalid(
-            "tag names must not contain control characters".into(),
-        ));
-    }
-    let collapsed = raw.split_whitespace().collect::<Vec<_>>().join(" ");
-    if collapsed.is_empty() {
-        return Ok(None);
-    }
-    if collapsed.chars().count() > MAX_TAG_CHARS {
-        return Err(OrganizationError::Invalid(format!(
-            "tag names must be at most {MAX_TAG_CHARS} characters"
-        )));
-    }
-    Ok(Some(collapsed))
+    mold_core::organization::normalize_tag_name(raw).map_err(OrganizationError::Invalid)
 }
 
 /// Normalize a list of tag names, dropping empties and case-insensitive
@@ -146,60 +134,11 @@ fn normalize_tag_list(raw: &[String]) -> OrgResult<Vec<String>> {
     Ok(out)
 }
 
-/// Slug for a collection name: lowercase ASCII, `[a-z0-9]` kept, every
-/// other character becomes `-`, runs collapsed, ends trimmed, at most
-/// [`MAX_COLLECTION_SLUG_CHARS`]. Same algorithm as `mold_core::title_slug`
-/// with a longer cap. `None` when nothing survives.
-pub fn collection_slug(name: &str) -> Option<String> {
-    let mut slug = String::with_capacity(name.len());
-    let mut pending_dash = false;
-    for ch in name.chars() {
-        let lowered = ch.to_ascii_lowercase();
-        if lowered.is_ascii_alphanumeric() {
-            if pending_dash && !slug.is_empty() {
-                slug.push('-');
-            }
-            pending_dash = false;
-            slug.push(lowered);
-        } else {
-            pending_dash = true;
-        }
-        if slug.len() >= MAX_COLLECTION_SLUG_CHARS {
-            break;
-        }
-    }
-    let slug: String = slug.chars().take(MAX_COLLECTION_SLUG_CHARS).collect();
-    let slug = slug.trim_matches('-').to_string();
-    if slug.is_empty() {
-        None
-    } else {
-        Some(slug)
-    }
-}
-
+/// Validate a collection name, returning `(normalized name, slug)`.
+/// Delegates to [`mold_core::organization::validate_collection_name`] and
+/// only re-types the error.
 fn validate_collection_name(raw: &str) -> OrgResult<(String, String)> {
-    if raw.chars().any(|c| c.is_control() && !c.is_whitespace()) {
-        return Err(OrganizationError::Invalid(
-            "collection names must not contain control characters".into(),
-        ));
-    }
-    let name = raw.split_whitespace().collect::<Vec<_>>().join(" ");
-    if name.is_empty() {
-        return Err(OrganizationError::Invalid(
-            "collection name must not be empty".into(),
-        ));
-    }
-    if name.chars().count() > MAX_COLLECTION_NAME_CHARS {
-        return Err(OrganizationError::Invalid(format!(
-            "collection names must be at most {MAX_COLLECTION_NAME_CHARS} characters"
-        )));
-    }
-    let slug = collection_slug(&name).ok_or_else(|| {
-        OrganizationError::Invalid(
-            "collection name must contain at least one letter or digit".into(),
-        )
-    })?;
-    Ok((name, slug))
+    mold_core::organization::validate_collection_name(raw).map_err(OrganizationError::Invalid)
 }
 
 fn normalize_title(title: Option<&str>) -> Option<String> {
@@ -279,6 +218,123 @@ pub(crate) fn attach_tags(
         )?;
     }
     Ok(())
+}
+
+/// What a creation-time seed actually applied to a freshly inserted row.
+///
+/// Returned so the server can emit the right SSE events without re-reading
+/// the DB: `gallery_updated` whenever anything landed, and
+/// `gallery_collections_changed` only when the seed had to create the
+/// collection.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SeededOrganization {
+    /// Tags attached, normalized. Empty when the print filed under none.
+    pub tags: Vec<String>,
+    /// Display name of the collection the print was filed into.
+    pub collection: Option<String>,
+    /// Id of that collection, so the `gallery_updated` row the server emits
+    /// carries real membership instead of an empty list.
+    pub collection_id: Option<String>,
+    /// True when the collection did not exist and this seed created it.
+    pub created_collection: bool,
+}
+
+impl SeededOrganization {
+    /// True when nothing was applied — the common case for an unfiled print.
+    pub fn is_empty(&self) -> bool {
+        self.tags.is_empty() && self.collection.is_none()
+    }
+}
+
+/// Seed a freshly inserted row's creation-time filing from its embedded
+/// metadata: attach `metadata.tags` and file it into `metadata.collection`.
+///
+/// **Seed-once, by construction.** This runs only on the INSERT branch of
+/// [`crate::db::upsert_with_conn`], never on the conflict branch, because
+/// organization is user-owned the moment the print exists: a reconcile
+/// refresh or a re-publication must not resurrect a tag the user removed.
+/// That mirrors how `generations.title` is seeded once and then kept.
+///
+/// The collection resolves by SLUG and is created when absent — the same
+/// cross-host create-by-name rule the V3 organization API uses, which is
+/// what lets "file under Smurf Village" mean the same thing on every
+/// machine in a fleet. Names that fail validation are skipped rather than
+/// failing the publication: a finished render must never be lost over its
+/// filing, and admission has already refused anything a client sent.
+pub(crate) fn seed_creation_organization(
+    conn: &Connection,
+    generation_id: i64,
+    metadata: &mold_core::OutputMetadata,
+    now_ms: i64,
+) -> OrgResult<SeededOrganization> {
+    let mut seeded = SeededOrganization::default();
+
+    if let Some(raw) = metadata.tags.as_deref() {
+        // Re-normalize: embedded metadata is bytes on disk, so a
+        // hand-edited or foreign-written chunk cannot smuggle an invalid
+        // tag past the rules. Bad ones are dropped, not fatal.
+        let tags: Vec<String> = raw
+            .iter()
+            .filter_map(|name| normalize_tag_name(name).ok().flatten())
+            .collect();
+        let tags = dedupe_case_insensitively(tags);
+        if !tags.is_empty() {
+            attach_tags(conn, generation_id, &tags, now_ms)?;
+            seeded.tags = tags;
+        }
+    }
+
+    if let Some(raw) = metadata.collection.as_deref() {
+        if let Ok((name, slug)) = validate_collection_name(raw) {
+            let (id, created) = match collection_id_for_slug(conn, &slug)? {
+                Some(id) => (id, false),
+                None => (
+                    create_collection_with_conn(conn, &name, &slug, now_ms)?,
+                    true,
+                ),
+            };
+            collection_add_ids(conn, &id, &[generation_id], now_ms)?;
+            seeded.collection = Some(name);
+            seeded.collection_id = Some(id);
+            seeded.created_collection = created;
+        }
+    }
+
+    Ok(seeded)
+}
+
+/// Drop case-insensitive duplicates, keeping the first spelling.
+fn dedupe_case_insensitively(names: Vec<String>) -> Vec<String> {
+    let mut seen: HashSet<String> = HashSet::new();
+    names
+        .into_iter()
+        .filter(|name| seen.insert(name.to_lowercase()))
+        .collect()
+}
+
+/// Insert a collection with an already-validated `(name, slug)` pair inside
+/// the caller's transaction, returning its new id. Loses a race to a
+/// concurrent creator gracefully by adopting the winner's row — the slug is
+/// the identity, so either row is the right answer.
+fn create_collection_with_conn(
+    conn: &Connection,
+    name: &str,
+    slug: &str,
+    now_ms: i64,
+) -> OrgResult<String> {
+    let id = uuid::Uuid::new_v4().to_string();
+    let inserted = conn.execute(
+        "INSERT INTO collections
+            (id, name, slug, description, cover_filename, created_at_ms, updated_at_ms)
+         VALUES (?1, ?2, ?3, NULL, NULL, ?4, ?4)",
+        params![id, name, slug, now_ms],
+    );
+    match inserted {
+        Ok(_) => Ok(id),
+        Err(e) if is_unique_violation(&e) => collection_id_for_slug(conn, slug)?
+            .ok_or_else(|| OrganizationError::Conflict(format!("collection slug '{slug}' race"))),
+        Err(e) => Err(e.into()),
+    }
 }
 
 fn detach_tags(conn: &Connection, generation_id: i64, names: &[String]) -> OrgResult<()> {
@@ -1471,5 +1527,82 @@ mod tests {
             Err(OrganizationError::Invalid(_))
         ));
         assert!(db.list_tags().unwrap().is_empty());
+    }
+
+    /// The rule admission enforces and the rule SQLite stores must be one
+    /// rule. mold-db delegates to mold-core and only re-types the error; if
+    /// anyone reintroduces a local copy, these disagree.
+    #[test]
+    fn normalization_delegates_to_mold_core() {
+        assert_eq!(MAX_TAG_CHARS, mold_core::MAX_TAG_CHARS);
+        assert_eq!(
+            MAX_COLLECTION_NAME_CHARS,
+            mold_core::MAX_COLLECTION_NAME_CHARS
+        );
+        assert_eq!(
+            MAX_COLLECTION_SLUG_CHARS,
+            mold_core::MAX_COLLECTION_SLUG_CHARS
+        );
+
+        for raw in [
+            "  smurf   village  ",
+            "line\nbreak",
+            "",
+            "   ",
+            "nul\0",
+            "Café",
+            &"x".repeat(MAX_TAG_CHARS + 1),
+        ] {
+            assert_eq!(
+                normalize_tag_name(raw).ok().flatten(),
+                mold_core::normalize_tag_name(raw).ok().flatten(),
+                "tag {raw:?}"
+            );
+            assert_eq!(
+                normalize_tag_name(raw).is_err(),
+                mold_core::normalize_tag_name(raw).is_err(),
+                "tag {raw:?}"
+            );
+            assert_eq!(collection_slug(raw), mold_core::collection_slug(raw));
+            assert_eq!(
+                validate_collection_name(raw).ok(),
+                mold_core::validate_collection_name(raw).ok(),
+                "collection {raw:?}"
+            );
+        }
+    }
+
+    /// The seeded print's tags and membership are visible to the ordinary
+    /// organization reads, so a filed-at-creation print is indistinguishable
+    /// from one the user filed by hand afterwards.
+    #[test]
+    fn a_seeded_print_reads_back_through_the_ordinary_organization_api() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        let mut metadata = meta();
+        metadata.tags = Some(vec!["Smurfs".into(), "smurfs".into(), "village".into()]);
+        metadata.collection = Some("Smurf Village".into());
+        let rec = GenerationRecord::from_save(
+            dir(),
+            "seeded.png",
+            OutputFormat::Png,
+            metadata,
+            RecordSource::Server,
+            1,
+        );
+        db.upsert(&rec).unwrap();
+
+        let org = db.print_organization(dir(), "seeded.png").unwrap().unwrap();
+        assert_eq!(org.tags, s(&["Smurfs", "village"]));
+        assert_eq!(
+            db.collection_slugs_for_print(dir(), "seeded.png").unwrap(),
+            s(&["smurf-village"])
+        );
+        // The tag shows up in the tag index with its use count, like any
+        // hand-applied tag.
+        let tags = db.list_tags().unwrap();
+        assert!(
+            tags.iter().any(|t| t.name == "Smurfs" && t.count == 1),
+            "{tags:?}"
+        );
     }
 }

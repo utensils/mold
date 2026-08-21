@@ -31,18 +31,32 @@ pub const TITLE_SLUG_SEPARATOR: char = '~';
 /// result is capped at [`TITLE_SLUG_MAX_LEN`] bytes (re-trimmed so the cut
 /// never leaves a dangling `-`). Returns `None` when nothing survives.
 pub fn title_slug(title: &str) -> Option<String> {
-    let mut slug = String::with_capacity(title.len().min(TITLE_SLUG_MAX_LEN));
+    slug_with_cap(title, TITLE_SLUG_MAX_LEN)
+}
+
+/// The slug algorithm behind [`title_slug`] and the download name's model
+/// component, parameterized by cap.
+///
+/// One algorithm, two caps — deliberately, because the browser mirror
+/// (`studio/lib/libraryOrganization.ts`'s `slugify`) is a single function
+/// called at both caps, and its parity fixtures pin it to *this* code. A
+/// second, separately-written sanitizer for the model component would sit
+/// outside those fixtures and could drift at the cap boundary, which is
+/// exactly the kind of divergence nobody notices until two machines name the
+/// same download differently.
+fn slug_with_cap(input: &str, max_len: usize) -> Option<String> {
+    let mut slug = String::with_capacity(input.len().min(max_len));
     let mut pending_dash = false;
-    for ch in title.chars() {
+    for ch in input.chars() {
         if ch.is_ascii_alphanumeric() {
             if pending_dash && !slug.is_empty() {
-                if slug.len() + 1 >= TITLE_SLUG_MAX_LEN {
+                if slug.len() + 1 >= max_len {
                     break;
                 }
                 slug.push('-');
             }
             pending_dash = false;
-            if slug.len() >= TITLE_SLUG_MAX_LEN {
+            if slug.len() >= max_len {
                 break;
             }
             slug.push(ch.to_ascii_lowercase());
@@ -101,6 +115,75 @@ pub fn default_output_filename_titled(
         .strip_suffix(suffix.as_str())
         .unwrap_or(legacy.as_str());
     format!("{stem}{TITLE_SLUG_SEPARATOR}{slug}.{ext}")
+}
+
+/// Separator between the components of a *download* file name.
+pub const DOWNLOAD_NAME_SEPARATOR: &str = "__";
+
+/// Maximum length, in bytes, of the model component of a download name.
+///
+/// Capped for a filesystem reason, not a cosmetic one: `cv:` / `hf:` ids are
+/// caller-supplied and unbounded, and `title(40) + model + s<20 digits> + ext`
+/// has to stay under the 255-byte filename limit every common filesystem
+/// enforces. Two very long model ids sharing a truncated name is a cosmetic
+/// annoyance in a Downloads folder; `ENAMETOOLONG` is a failed save.
+pub const DOWNLOAD_MODEL_SLUG_MAX_LEN: usize = 80;
+
+/// Last-resort stem when nothing about a print slugs to anything usable.
+pub const DOWNLOAD_FALLBACK_STEM: &str = "print";
+
+/// Name to suggest when the user saves or exports a print, which is a
+/// different question from what the gallery calls the file on disk.
+///
+/// The gallery filename is an identity — timestamped, never renamed, and
+/// stable across a rename of the print ([`title_slug`] folds the
+/// creation-time title in once and that is that). A download name is a
+/// *label*: it is read by a human in a Downloads folder, so it leads with
+/// the print's current title and drops the timestamp entirely:
+///
+/// ```text
+/// {title-slug}__{model}__s{seed}.{ext}
+/// ```
+///
+/// The three components are independent: each is dropped when it has nothing
+/// to contribute, and the survivors are joined with `__` (chosen because a
+/// single `-` is legal *inside* every one of them). An untitled print is
+/// `{model}__s{seed}.{ext}`; a model that slugs to nothing is
+/// `{title-slug}__s{seed}.{ext}`; and if nothing at all survives the stem is
+/// [`DOWNLOAD_FALLBACK_STEM`]. The model is sanitized so `flux-dev:q4`
+/// becomes `flux-dev-q4` and `cv:12345` becomes `cv-12345`, keeping the name
+/// portable across filesystems.
+///
+/// `seed` is not optional here because Rust never has an unresolved one — a
+/// saved print's `OutputMetadata.seed` is a `u64`. Browser mirrors that can
+/// hold a seedless gallery entry drop that segment, which is exactly what
+/// this function would do if it could.
+///
+/// This is the Rust authority; the browser surfaces mirror it.
+pub fn download_file_name(title: Option<&str>, model: &str, seed: u64, ext: &str) -> String {
+    let mut segments: Vec<String> = Vec::with_capacity(3);
+    segments.extend(title.and_then(title_slug));
+    segments.extend(slug_with_cap(model, DOWNLOAD_MODEL_SLUG_MAX_LEN));
+    segments.push(format!("s{seed}"));
+
+    let stem = if segments.is_empty() {
+        DOWNLOAD_FALLBACK_STEM.to_string()
+    } else {
+        segments.join(DOWNLOAD_NAME_SEPARATOR)
+    };
+    match normalize_download_extension(ext) {
+        Some(ext) => format!("{stem}.{ext}"),
+        None => stem,
+    }
+}
+
+/// Normalize a caller-supplied extension: a leading `.` is stripped (so
+/// `".PNG"` and `"png"` agree), the rest is lowercased, and anything that
+/// leaves nothing behind yields `None` — a bare trailing dot is not a
+/// filename anyone wants.
+fn normalize_download_extension(ext: &str) -> Option<String> {
+    let trimmed = ext.trim().trim_start_matches('.').trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_ascii_lowercase())
 }
 
 /// Strip a trailing `~<slug>` from a filename stem (no extension), returning
@@ -242,6 +325,172 @@ mod tests {
             strip_title_slug("mold-sdxl-1700000000000-2"),
             "mold-sdxl-1700000000000-2"
         );
+    }
+
+    #[test]
+    fn download_name_leads_with_the_title_slug() {
+        assert_eq!(
+            download_file_name(Some("Smurf Village at Dusk"), "flux-dev:q4", 42, "png"),
+            "smurf-village-at-dusk__flux-dev-q4__s42.png"
+        );
+    }
+
+    #[test]
+    fn download_name_falls_back_to_model_and_seed_without_a_usable_title() {
+        for title in [None, Some(""), Some("   "), Some("!!!"), Some("日本語")] {
+            assert_eq!(
+                download_file_name(title, "sdxl", 7, "jpeg"),
+                "sdxl__s7.jpeg",
+                "title {title:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn download_name_sanitizes_the_model_and_keeps_exactly_two_separators() {
+        let name = download_file_name(Some("Owl"), "ltx-2-19b-distilled:fp8", 1, "mp4");
+        assert_eq!(name, "owl__ltx-2-19b-distilled-fp8__s1.mp4");
+        assert_eq!(name.matches(DOWNLOAD_NAME_SEPARATOR).count(), 2, "{name}");
+        // Catalog ids keep their source prefix, readably.
+        assert_eq!(
+            download_file_name(None, "cv:12345", 9, "png"),
+            "cv-12345__s9.png"
+        );
+    }
+
+    /// Each component is independent: an absent one is dropped rather than
+    /// substituted, so the name never carries a placeholder word that looks
+    /// like a real title or model.
+    #[test]
+    fn download_name_drops_unusable_components_rather_than_substituting_them() {
+        // No title.
+        assert_eq!(
+            download_file_name(None, "flux-dev:q4", 42, "png"),
+            "flux-dev-q4__s42.png"
+        );
+        // No sluggable model.
+        assert_eq!(
+            download_file_name(Some("Owl"), "???", 42, "png"),
+            "owl__s42.png"
+        );
+        // Neither — the seed alone still names the file.
+        assert_eq!(download_file_name(None, "???", 42, "png"), "s42.png");
+    }
+
+    /// The model component is capped so a caller-supplied `cv:` / `hf:` id
+    /// cannot push the whole name past the 255-byte filename limit.
+    #[test]
+    fn download_name_caps_the_model_without_a_dangling_dash() {
+        let long = format!("hf:{}", "Segment/".repeat(40));
+        let name = download_file_name(Some("Owl"), &long, 42, "png");
+        let model = name
+            .strip_prefix("owl__")
+            .and_then(|rest| rest.strip_suffix("__s42.png"))
+            .expect("the model sits between the title and the seed");
+        assert!(model.len() <= DOWNLOAD_MODEL_SLUG_MAX_LEN, "{model}");
+        assert!(!model.ends_with('-'), "{model}");
+        assert!(!model.starts_with('-'), "{model}");
+        assert!(name.len() < 255, "{} bytes: {name}", name.len());
+        // A model exactly at the cap is kept whole.
+        let exact = "z".repeat(DOWNLOAD_MODEL_SLUG_MAX_LEN);
+        assert_eq!(
+            download_file_name(None, &exact, 1, "png"),
+            format!("{exact}__s1.png")
+        );
+    }
+
+    /// Extensions are caller-supplied on the browser side too, so `.PNG`,
+    /// `png`, and `""` must all agree — and an absent one must never leave a
+    /// bare trailing dot.
+    #[test]
+    fn download_name_normalizes_the_extension() {
+        for ext in ["png", ".png", "PNG", ".PNG", "  .Png "] {
+            assert_eq!(
+                download_file_name(Some("Owl"), "flux-dev", 1, ext),
+                "owl__flux-dev__s1.png",
+                "ext {ext:?}"
+            );
+        }
+        for ext in ["", "   ", "."] {
+            assert_eq!(
+                download_file_name(Some("Owl"), "flux-dev", 1, ext),
+                "owl__flux-dev__s1",
+                "ext {ext:?}"
+            );
+        }
+    }
+
+    /// A defensive last resort the Rust side cannot actually reach — `seed`
+    /// is a `u64`, so `s{seed}` is always a segment — but the browser mirror
+    /// can hold a seedless entry, and both must land on the same word.
+    #[test]
+    fn download_name_falls_back_to_a_shared_stem_word() {
+        assert_eq!(DOWNLOAD_FALLBACK_STEM, "print");
+    }
+
+    /// The title slug and the download name's model component are ONE
+    /// algorithm at two caps, matching the browser's single `slugify(input,
+    /// maxLen)`. A separately-written sanitizer would sit outside the shared
+    /// parity fixtures and could drift right at the cap boundary — where a
+    /// dash lands on the cut is exactly the fiddly part.
+    #[test]
+    fn both_slug_caps_run_the_same_algorithm() {
+        for input in [
+            "Smurf Village",
+            "flux-dev:q4",
+            "cv:12345",
+            "  ...Hello,   World!!!  ",
+            "Café au lait",
+            "日本語 cat 🐈",
+            "a -- b",
+            "!!!",
+        ] {
+            // Below both caps, the two agree exactly.
+            assert_eq!(
+                slug_with_cap(input, TITLE_SLUG_MAX_LEN),
+                slug_with_cap(input, DOWNLOAD_MODEL_SLUG_MAX_LEN),
+                "{input:?} is short enough that the cap cannot matter"
+            );
+            assert_eq!(title_slug(input), slug_with_cap(input, TITLE_SLUG_MAX_LEN));
+        }
+
+        // Walk the boundary: every length either side of both caps must cut
+        // cleanly, with no dangling dash and never over the cap.
+        for cap in [TITLE_SLUG_MAX_LEN, DOWNLOAD_MODEL_SLUG_MAX_LEN] {
+            for words in 1..40usize {
+                let input = "ab ".repeat(words);
+                let slug = slug_with_cap(&input, cap).unwrap();
+                assert!(slug.len() <= cap, "cap {cap}, words {words}: {slug}");
+                assert!(!slug.ends_with('-'), "cap {cap}, words {words}: {slug}");
+                assert!(!slug.starts_with('-'), "cap {cap}, words {words}: {slug}");
+            }
+            let solid = "x".repeat(cap * 2);
+            assert_eq!(slug_with_cap(&solid, cap).unwrap().len(), cap);
+        }
+    }
+
+    #[test]
+    fn download_name_carries_the_full_seed_range() {
+        assert_eq!(
+            download_file_name(None, "flux-dev", u64::MAX, "png"),
+            format!("flux-dev__s{}.png", u64::MAX)
+        );
+        assert_eq!(
+            download_file_name(None, "flux-dev", 0, "png"),
+            "flux-dev__s0.png"
+        );
+    }
+
+    /// The download name is a label; the gallery filename is an identity.
+    /// They must not converge — no timestamp here, no `~` separator there.
+    #[test]
+    fn download_name_is_not_the_gallery_filename() {
+        let gallery =
+            default_output_filename_titled("flux-dev:q4", 1700000000000, "png", 1, 0, Some("owl"));
+        let download = download_file_name(Some("Owl"), "flux-dev:q4", 42, "png");
+        assert_ne!(gallery, download);
+        assert!(!download.contains("1700000000000"), "{download}");
+        assert!(!download.contains(TITLE_SLUG_SEPARATOR), "{download}");
     }
 
     #[test]

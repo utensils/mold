@@ -92,6 +92,12 @@ pub const GALLERY_TRASH_RETENTION_DAYS: &str =
 /// Days a trashed print is retained before purge; `0` keeps it forever.
 pub const GALLERY_TRASH_RETENTION_DEFAULT: i64 = 30;
 
+/// Whether a titled print is also tagged with its title slug by the client
+/// that submits it. Registered in `mold_core::config_keys::ALL_KEYS`
+/// (section Generate). Unlike the older flat `generate.*` rows below, the
+/// user-facing key and the DB key are the same string.
+pub const GENERATE_AUTO_TAG_TITLE: &str = mold_core::config_keys::GENERATE_AUTO_TAG_TITLE_KEY;
+
 // Config — migration sentinel for the one-shot `config.toml → DB` pass.
 pub const CONFIG_MIGRATED_FROM_TOML: &str = "config.migrated_from_toml";
 
