@@ -576,7 +576,12 @@ refuse reaches the wire.
 Nothing about filing can fail a render. On `MOLD_DB_DISABLE=1`, or when a
 `{id}` collection was deleted between listing and Generate, the filing is
 dropped and reported on the `x-mold-request-warning` header — never silently,
-never as a refusal.
+never as a refusal. `MoldClient` reads that header on all four response paths
+into additive `GenerateResponse.request_warnings` / `ChainResponse
+.request_warnings`; `mold run` prints each one through `status!` (stderr when
+piped), and the TUI reads the same field off `GenerationComplete`. Never split
+the header on `; ` — the advisory prose contains that sequence, so a split
+renders one advisory as two half-sentences.
 
 ## Reference implementations
 

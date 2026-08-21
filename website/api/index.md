@@ -294,11 +294,20 @@ were adjusted to fit model constraints (e.g. multiples of 16, pixel cap). It
 carries dimension adjustments only.
 
 The `x-mold-request-warning` header carries **every** advisory about a request
-that was still accepted, `;`-separated — dimension adjustments plus anything
-else, such as a lip-dub render taking its frame count and frame rate from the
-reference clip instead of the values you sent. Prefer it over the dimension
-header if you want to surface all of them; the streaming endpoints deliver the
-same list as `info` progress events.
+that was still accepted — dimension adjustments plus anything else, such as a
+lip-dub render taking its frame count and frame rate from the reference clip
+instead of the values you sent, or a filing the host could not apply. Prefer it
+over the dimension header if you want to surface all of them; the streaming
+endpoints deliver the same list as `info` progress events, and the header is
+sent before the first SSE frame.
+
+::: warning Do not split this header on `; `
+Several advisories are joined with `; `, but the advisory text itself contains
+that sequence — "…were not applied; the print was generated and saved
+normally". Splitting on it turns one advisory into two dangling half-sentences.
+Show the value whole: the semicolons read as ordinary punctuation. `mold`'s own
+client does exactly that.
+:::
 
 ### Video and audio responses
 
