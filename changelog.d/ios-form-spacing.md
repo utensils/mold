@@ -1,0 +1,1 @@
+- **Improved iPhone form spacing.** Labels beneath segmented controls and sliders now keep consistent vertical separation for easier scanning.
