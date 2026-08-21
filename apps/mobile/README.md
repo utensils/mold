@@ -8,8 +8,8 @@ links or embeds the GPU inference stack; a saved Mold server owns the models,
 queue, downloads, generation work, and gallery media. Both native shells reuse
 this crate and the same Vue product frontend. The iPhone app is shipped through
 TestFlight. The Android app has native secure credentials, QR pairing, NSD
-discovery, media actions, and system-chrome synchronization; Android CI,
-release signing, and Play distribution remain release work.
+discovery, media actions, system-chrome synchronization, and an emulator-backed
+CI gate. Play signing and distribution remain release work.
 
 The app is designed for iPhone first and supports iOS 17 or later. iPad is a
 responsive secondary target.
@@ -581,7 +581,15 @@ Keep `apps/mobile/src-tauri/Info.ios.plist`, the generated Apple plist, and
 `gen/apple/project.yml` aligned when native capabilities change. Simulator
 builds must retain Xcode's ad-hoc signature so Keychain access works.
 
-## CI and TestFlight
+## CI and distribution
+
+`.github/workflows/android.yml` runs for Android and shared-mobile changes. It
+builds the ARM64 debug APK with the pinned NDK, then runs the native credential,
+MediaStore, clipboard, content-URI, and authenticated-share instrumentation
+tests on an Android 15 emulator. `./scripts/android.sh build` proves the local
+Play artifact path by producing the unsigned ARM64/ARMv7 release AAB; repository
+keystore secrets and Play Console publishing are intentionally not configured
+in the development workflow.
 
 `.github/workflows/ios.yml` runs for mobile-relevant pull requests and `main`
 changes, including shared component changes imported by the mobile entry. It

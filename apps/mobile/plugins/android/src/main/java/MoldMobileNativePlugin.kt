@@ -1,9 +1,14 @@
 package com.utensils.mold.mobile_native
 
+import android.Manifest
 import android.app.Activity
 import android.content.res.Configuration
+import android.os.Build
+import app.tauri.PermissionState
 import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
+import app.tauri.annotation.Permission
+import app.tauri.annotation.PermissionCallback
 import app.tauri.annotation.TauriPlugin
 import app.tauri.plugin.Invoke
 import app.tauri.plugin.JSObject
@@ -51,10 +56,25 @@ class AppearanceArgs {
     lateinit var appearance: String
 }
 
-@TauriPlugin
+private const val LEGACY_MEDIA_WRITE = "legacyMediaWrite"
+
+private sealed interface PendingLegacyMedia {
+    data class Image(val dataB64: String) : PendingLegacyMedia
+    data class Video(val url: String) : PendingLegacyMedia
+}
+
+@TauriPlugin(
+    permissions = [
+        Permission(
+            strings = [Manifest.permission.WRITE_EXTERNAL_STORAGE],
+            alias = LEGACY_MEDIA_WRITE,
+        ),
+    ],
+)
 class MoldMobileNativePlugin(private val hostActivity: Activity) : Plugin(hostActivity) {
     private val vault = CredentialVault(hostActivity.applicationContext)
     private val media = AndroidMedia(hostActivity.applicationContext)
+    private var pendingLegacyMedia: PendingLegacyMedia? = null
 
     @Command
     fun setApiKey(invoke: Invoke) {
@@ -104,19 +124,28 @@ class MoldMobileNativePlugin(private val hostActivity: Activity) : Plugin(hostAc
     @Command
     fun saveImageToPhotos(invoke: Invoke) {
         val args = invoke.parseArgs(ImageDataArgs::class.java)
-        runAsync(invoke, "save image") {
-            media.saveImage(args.dataB64)
-            invoke.resolve()
-        }
+        runWithLegacyMediaPermission(invoke, PendingLegacyMedia.Image(args.dataB64))
     }
 
     @Command
     fun saveVideoToPhotos(invoke: Invoke) {
         val args = invoke.parseArgs(VideoUrlArgs::class.java)
-        runAsync(invoke, "save video") {
-            media.saveVideo(args.url)
-            invoke.resolve()
+        runWithLegacyMediaPermission(invoke, PendingLegacyMedia.Video(args.url))
+    }
+
+    @PermissionCallback
+    fun legacyMediaWritePermissionCallback(invoke: Invoke) {
+        val pending = synchronized(this) {
+            pendingLegacyMedia.also { pendingLegacyMedia = null }
+        } ?: run {
+            invoke.reject("no media save is waiting for Photos access")
+            return
         }
+        if (getPermissionState(LEGACY_MEDIA_WRITE) !== PermissionState.GRANTED) {
+            invoke.reject("Photos access is required to save media on this Android version")
+            return
+        }
+        saveMedia(invoke, pending)
     }
 
     @Command
@@ -180,6 +209,45 @@ class MoldMobileNativePlugin(private val hostActivity: Activity) : Plugin(hostAc
         }.start()
     }
 
+    private fun runWithLegacyMediaPermission(invoke: Invoke, pending: PendingLegacyMedia) {
+        if (!needsLegacyMediaWritePermission(Build.VERSION.SDK_INT)) {
+            saveMedia(invoke, pending)
+            return
+        }
+        synchronized(this) {
+            if (pendingLegacyMedia != null) {
+                invoke.reject("another media save is waiting for Photos access")
+                return
+            }
+            pendingLegacyMedia = pending
+        }
+        try {
+            requestPermissionForAlias(
+                LEGACY_MEDIA_WRITE,
+                invoke,
+                "legacyMediaWritePermissionCallback",
+            )
+        } catch (error: Exception) {
+            synchronized(this) { pendingLegacyMedia = null }
+            invoke.reject(
+                "could not request Photos access: ${error.message ?: error.javaClass.simpleName}",
+            )
+        }
+    }
+
+    private fun saveMedia(invoke: Invoke, pending: PendingLegacyMedia) {
+        when (pending) {
+            is PendingLegacyMedia.Image -> runAsync(invoke, "save image") {
+                media.saveImage(pending.dataB64)
+                invoke.resolve()
+            }
+            is PendingLegacyMedia.Video -> runAsync(invoke, "save video") {
+                media.saveVideo(pending.url)
+                invoke.resolve()
+            }
+        }
+    }
+
     private inline fun resolveOrReject(invoke: Invoke, action: String, block: () -> Unit) {
         try {
             block()
@@ -188,3 +256,6 @@ class MoldMobileNativePlugin(private val hostActivity: Activity) : Plugin(hostAc
         }
     }
 }
+
+internal fun needsLegacyMediaWritePermission(sdkInt: Int): Boolean =
+    sdkInt <= Build.VERSION_CODES.P

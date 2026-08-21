@@ -7,6 +7,7 @@ import android.util.Base64
 import androidx.test.core.app.ApplicationProvider
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -16,6 +17,12 @@ import java.util.concurrent.atomic.AtomicReference
 class AndroidMediaInstrumentedTest {
     private val context: Context = ApplicationProvider.getApplicationContext()
     private val media = AndroidMedia(context)
+
+    @Test
+    fun requestsLegacyMediaPermissionOnlyBeforeScopedStorage() {
+        assertTrue(needsLegacyMediaWritePermission(28))
+        assertFalse(needsLegacyMediaWritePermission(29))
+    }
 
     @Test
     fun copiesImageAsReadableContentUri() {

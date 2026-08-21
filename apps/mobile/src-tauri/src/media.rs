@@ -192,7 +192,7 @@ async fn platform_copy_image(
             {
                 let _ = (_webview, bytes);
                 let _ = sender.send(Err(
-                    "copying images is not implemented on Android yet".to_string()
+                    "copying images is available in the mobile builds".to_string()
                 ));
             }
         })
@@ -273,7 +273,7 @@ async fn platform_save_image(
             {
                 let _ = (_webview, bytes);
                 let _ = sender.send(Err(
-                    "saving images is not implemented on Android yet".to_string()
+                    "saving images is available in the mobile builds".to_string()
                 ));
             }
         })
