@@ -828,26 +828,6 @@ model root lets whoever writes the weights write the sidecar too. An
 `id_weight` of `0` applies no identity at all and is completely
 inert: it plans no assets, downloads nothing, and adds no memory demand.
 
-**Surfaces.** The TUI's Create form carries an **Identity photo** section in
-the Advanced accordion — a local path row plus Strength and Start step — shown
-only while the selected checkpoint's `/api/models[]` entry advertises
-`supports_identity`. The path is opened no-follow and bounds-checked at entry,
-so a rejected file never leaves the picker; a model switch to an unqualified
-checkpoint keeps the photo, shows `mold_core::identity`'s own refusal on the
-row, and blocks Generate (`↺ Reset to model defaults` clears it). Library
-Details and the full print view render the saved provenance.
-
-The Discord bot exposes identity as its own `/identity` command — `identity`
-(PNG/JPEG attachment), `identity_strength`, `identity_start_step`, plus
-prompt/model/size/steps/guidance/seed — rather than as options on `/generate`,
-which already sits at Discord's hard 25-option ceiling. The bot refuses an
-oversized or wrong-container attachment before downloading it, checks both
-knobs and the model gate against the server's advertised `supports_identity`,
-and names the reference in the result embed. Both surfaces derive every label,
-range, limit, and refusal from `mold_core::identity`; neither restates one, and
-neither reads a local build feature to decide whether the renderer can execute
-identity conditioning.
-
 ### ControlNet (SD1.5 only)
 
 ```bash
