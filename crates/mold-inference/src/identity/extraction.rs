@@ -37,8 +37,12 @@
 //!
 //! Peak host RAM is the EVA tower (~609 MB f16 mmap'd, widened to f32
 //! activations) plus the two ONNX graphs (~278 MB) plus the IDFormer
-//! (~330 MB); see [`EXTRACTION_HOST_PEAK_BYTES`], which is what admission
-//! charges the host-RAM ledger.
+//! (~330 MB) — [`EXTRACTION_HOST_PEAK_BYTES`]. Admission charges the host-RAM
+//! ledger from the artifacts' own sizes through their `is_host_only` component
+//! roles rather than from this constant; the constant is the MEASUREMENT those
+//! charges are sized against, and the reason
+//! `memory_preflight::IDENTITY_VRAM_OVERHEAD_BYTES` no longer counts any of it
+//! as device memory.
 
 use anyhow::{Context, Result};
 use candle_core::{DType, Device, IndexOp, Tensor};
@@ -64,8 +68,12 @@ use super::{IdentityError, IdentityExtractor};
 /// | IDFormer (`pulid_encoder.*` of the adapter file), f32 | ~330 MB |
 ///
 /// The tower is dropped before the IDFormer is built, so the two large halves
-/// do not coexist; the peak is the tower stage. Rounded up to a round 1.4 GB
-/// so the ledger is charged a number that is conservative rather than exact.
+/// do not coexist; the peak is the tower stage. Rounded up to a round 1.4 GB so
+/// the figure is conservative rather than exact.
+///
+/// Nothing reads this at runtime — the ledger charges the artifacts themselves
+/// — so it is the recorded measurement, kept beside the code that produces it
+/// and pinned by a test, rather than an input to a calculation.
 pub const EXTRACTION_HOST_PEAK_BYTES: u64 = 1_400_000_000;
 
 /// What one extraction produced.
