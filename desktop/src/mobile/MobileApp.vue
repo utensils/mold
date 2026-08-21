@@ -7811,11 +7811,20 @@ function usesSoftwareKeyboard(target: EventTarget | null): target is HTMLElement
 }
 
 function syncVisualViewportOffset(): void {
-  const pageTop = window.visualViewport?.pageTop ?? window.scrollY;
+  const viewport = window.visualViewport;
+  const pageTop = viewport?.pageTop ?? window.scrollY;
   document.documentElement.style.setProperty(
     "--mobile-visual-viewport-page-top",
     `${Math.max(0, pageTop)}px`,
   );
+  if (viewport && Number.isFinite(viewport.height) && viewport.height > 0) {
+    document.documentElement.style.setProperty(
+      "--mobile-visual-viewport-height",
+      `${viewport.height}px`,
+    );
+  } else {
+    document.documentElement.style.removeProperty("--mobile-visual-viewport-height");
+  }
 }
 
 function restoreNativeViewport(): void {
@@ -7970,6 +7979,7 @@ onBeforeUnmount(() => {
   window.visualViewport?.removeEventListener("resize", syncVisualViewportOffset);
   window.visualViewport?.removeEventListener("scroll", syncVisualViewportOffset);
   document.documentElement.style.removeProperty("--mobile-visual-viewport-page-top");
+  document.documentElement.style.removeProperty("--mobile-visual-viewport-height");
   window.removeEventListener("pageshow", handleForegroundResume);
   cancelKeyboardViewportRestore();
   if (resultMediaRecoveryTimer !== null) {
