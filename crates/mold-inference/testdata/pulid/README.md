@@ -4,6 +4,9 @@ Fixtures captured from upstream `ToTheBeginning/PuLID` so mold's candle ports
 can be falsified against the reference implementation rather than against
 another reading of it.
 
+The face-extraction goldens (#1222) live in `faces/`, with their own
+`README.md` and `capture_goldens.py`; this file covers the adapter.
+
 ## `ca_goldens.safetensors` — `PerceiverAttentionCA` (#1221)
 
 The cross-attention module the FLUX adapter is twenty copies of

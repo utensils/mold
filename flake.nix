@@ -910,6 +910,12 @@
               pkgs.pkg-config
               pkgs.openssl
               pkgs.nasm
+              # `candle-onnx`'s build script drives `prost-build`, which shells
+              # out to `protoc` to parse `onnx.proto3`. Only the `pulid`
+              # feature pulls that crate in, so this is devshell-only until a
+              # release recipe enables it — at which point the crane
+              # `nativeBuildInputs` need it too.
+              pkgs.protobuf
               pkgs.sccache
               pkgs.git
               pkgs.gh
