@@ -716,7 +716,7 @@ const galleryDeleteConfirming = ref(false);
 const galleryColumns = ref(loadMobileGalleryColumns());
 const galleryZoom = createPinchZoom(galleryColumns.value);
 const galleryZoomAnnouncement = ref("");
-const galleryGrid = ref<HTMLElement | null>(null);
+const galleryPinchSurface = ref<HTMLElement | null>(null);
 const galleryDeleting = ref(false);
 const selectedPrint = ref<GalleryPrint | null>(null);
 // ── Library organization (V3 "Shelf") ───────────────────────────────────────
@@ -6821,7 +6821,8 @@ function finishGallerySelectionDrag(event?: PointerEvent): void {
 /**
  * Pinch over the Library grid to resize thumbnails, the iPhone counterpart to
  * the web/desktop thumbnail-size slider. It deliberately shares no state with
- * the gallery viewer's own gestures and owns only the grid element.
+ * the gallery viewer's own gestures and owns the whole print area, including
+ * the unused space below a short final row.
  */
 function beginGalleryPinch(event: PointerEvent): void {
   if (event.pointerType === "mouse") return;
@@ -6841,7 +6842,7 @@ function beginGalleryPinch(event: PointerEvent): void {
     if (galleryDragSelectionBaseline) gallerySelection.value = galleryDragSelectionBaseline;
     finishGallerySelectionDrag();
   }
-  galleryGrid.value?.style.setProperty("touch-action", "none");
+  galleryPinchSurface.value?.style.setProperty("touch-action", "none");
   event.preventDefault();
 }
 
@@ -6870,7 +6871,8 @@ function endGalleryPinch(event: PointerEvent): void {
   // second touch lands, so the next fresh touch sequence discards it.
   if (event.type === "pointerup" && isPinching(galleryZoom)) galleryPinchPendingClicks = 1;
   pinchPointerUp(galleryZoom, event.pointerId);
-  if (galleryZoom.points.size === 0) galleryGrid.value?.style.removeProperty("touch-action");
+  if (galleryZoom.points.size === 0)
+    galleryPinchSurface.value?.style.removeProperty("touch-action");
 }
 
 function selectAllGalleryPrints(): void {
@@ -7191,7 +7193,7 @@ function handleForegroundResume(): void {
   // from a plain scroll. Nothing can still be held after a resume, so drop them.
   galleryPinchPendingClicks = 0;
   resetPinch(galleryZoom, galleryColumns.value);
-  galleryGrid.value?.style.removeProperty("touch-action");
+  galleryPinchSurface.value?.style.removeProperty("touch-action");
   if ("__TAURI_INTERNALS__" in window) {
     void invoke("restore_mobile_viewport").catch(() => undefined);
   }
@@ -7463,7 +7465,11 @@ onBeforeUnmount(() => {
       {{ galleryZoomAnnouncement }}
     </p>
 
-    <section ref="mobileContent" class="mobile-content">
+    <section
+      ref="mobileContent"
+      class="mobile-content"
+      :class="{ 'is-library': !settingsOpen && tab === 'gallery' }"
+    >
       <MobileSettingsView
         v-if="settingsOpen"
         :settings="mobileSettings"
@@ -8526,104 +8532,109 @@ onBeforeUnmount(() => {
             {{ trashError }}
           </p>
           <div
-            v-if="galleryLoading || (libraryScope === 'trash' && trashLoading && !gallery.length)"
-            class="empty-state"
-          >
-            {{ libraryScope === "trash" ? "Loading trash…" : "Loading prints…" }}
-          </div>
-          <div
-            v-else-if="gallery.length"
-            class="gallery-grid"
-            :class="{ 'is-selecting': gallerySelectMode }"
-            ref="galleryGrid"
-            :style="{ '--mobile-gallery-columns': galleryColumns }"
-            :aria-label="`Prints, ${galleryColumns} across. Pinch to resize.`"
-            :data-gallery-columns="galleryColumns"
-            role="group"
-            data-test="mobile-gallery-grid"
+            ref="galleryPinchSurface"
+            class="mobile-gallery-pinch-surface"
+            data-test="mobile-gallery-pinch-surface"
             @pointerdown="beginGalleryPinch"
           >
-            <button
-              v-for="print in gallery"
-              :key="`${print.hostId}:${print.filename}`"
-              class="gallery-item"
-              :class="{ 'gallery-item-selected': gallerySelection.has(galleryPrintKey(print)) }"
-              type="button"
-              :aria-label="
-                gallerySelectMode
-                  ? tileLabel(
-                      print,
-                      gallerySelection.has(galleryPrintKey(print)) ? 'Deselect' : 'Select',
-                    )
-                  : tileLabel(print, 'Open')
-              "
-              :aria-pressed="
-                gallerySelectMode ? gallerySelection.has(galleryPrintKey(print)) : undefined
-              "
-              :data-gallery-print-key="galleryPrintKey(print)"
-              data-test="gallery-item"
-              @pointerdown="beginGallerySelectionDrag($event, print)"
-              @click="handleGalleryTileClick($event, print)"
+            <div
+              v-if="galleryLoading || (libraryScope === 'trash' && trashLoading && !gallery.length)"
+              class="empty-state"
             >
-              <img
-                :src="print.thumbnailUrl"
-                :alt="print.metadata.prompt || print.filename"
-                loading="lazy"
-              />
-              <span
-                v-if="isVideoItem(print) || isAudioItem(print)"
-                class="gallery-video-badge"
-                aria-hidden="true"
-                >{{ isAudioItem(print) ? "♪" : "▶" }}</span
+              {{ libraryScope === "trash" ? "Loading trash…" : "Loading prints…" }}
+            </div>
+            <div
+              v-else-if="gallery.length"
+              class="gallery-grid"
+              :class="{ 'is-selecting': gallerySelectMode }"
+              :style="{ '--mobile-gallery-columns': galleryColumns }"
+              :aria-label="`Prints, ${galleryColumns} across. Pinch to resize.`"
+              :data-gallery-columns="galleryColumns"
+              role="group"
+              data-test="mobile-gallery-grid"
+            >
+              <button
+                v-for="print in gallery"
+                :key="`${print.hostId}:${print.filename}`"
+                class="gallery-item"
+                :class="{ 'gallery-item-selected': gallerySelection.has(galleryPrintKey(print)) }"
+                type="button"
+                :aria-label="
+                  gallerySelectMode
+                    ? tileLabel(
+                        print,
+                        gallerySelection.has(galleryPrintKey(print)) ? 'Deselect' : 'Select',
+                      )
+                    : tileLabel(print, 'Open')
+                "
+                :aria-pressed="
+                  gallerySelectMode ? gallerySelection.has(galleryPrintKey(print)) : undefined
+                "
+                :data-gallery-print-key="galleryPrintKey(print)"
+                data-test="gallery-item"
+                @pointerdown="beginGallerySelectionDrag($event, print)"
+                @click="handleGalleryTileClick($event, print)"
               >
-              <span
-                v-if="!gallerySelectMode && libraryScope !== 'trash' && isFreshMobilePrint(print)"
-                class="gallery-new-badge"
-                data-test="new-badge"
-              >
-                New
-              </span>
-              <span
-                v-if="isUpscaledImage(print)"
-                class="gallery-upscaled-badge"
-                data-test="upscaled-badge"
-              >
-                Upscaled
-              </span>
-              <span
-                v-if="!gallerySelectMode && organizationOf(print)?.favorite"
-                class="gallery-favorite-badge"
-                data-test="favorite-badge"
-                aria-label="Favorite"
-                >♥</span
-              >
-              <span
-                v-if="libraryScope === 'trash' && purgeChipFor(print)"
-                class="gallery-purge-chip"
-                data-test="purge-chip"
-                >{{ purgeChipFor(print) }}</span
-              >
-              <span
-                v-if="gallerySelectMode"
-                class="gallery-selection-indicator"
-                data-test="mobile-gallery-selection-indicator"
-                aria-hidden="true"
-              >
-                {{ gallerySelection.has(galleryPrintKey(print)) ? "✓" : "" }}
-              </span>
-            </button>
-          </div>
-          <div v-else class="empty-state" data-test="mobile-library-empty">
-            {{ libraryEmptyCopy }}
-          </div>
-          <div
-            v-if="!galleryLoading && galleryRemaining"
-            ref="gallerySentinel"
-            class="gallery-scroll-sentinel"
-            data-test="mobile-gallery-sentinel"
-            aria-live="polite"
-          >
-            {{ galleryLoadingMore ? "Loading older prints…" : "" }}
+                <img
+                  :src="print.thumbnailUrl"
+                  :alt="print.metadata.prompt || print.filename"
+                  loading="lazy"
+                />
+                <span
+                  v-if="isVideoItem(print) || isAudioItem(print)"
+                  class="gallery-video-badge"
+                  aria-hidden="true"
+                  >{{ isAudioItem(print) ? "♪" : "▶" }}</span
+                >
+                <span
+                  v-if="!gallerySelectMode && libraryScope !== 'trash' && isFreshMobilePrint(print)"
+                  class="gallery-new-badge"
+                  data-test="new-badge"
+                >
+                  New
+                </span>
+                <span
+                  v-if="isUpscaledImage(print)"
+                  class="gallery-upscaled-badge"
+                  data-test="upscaled-badge"
+                >
+                  Upscaled
+                </span>
+                <span
+                  v-if="!gallerySelectMode && organizationOf(print)?.favorite"
+                  class="gallery-favorite-badge"
+                  data-test="favorite-badge"
+                  aria-label="Favorite"
+                  >♥</span
+                >
+                <span
+                  v-if="libraryScope === 'trash' && purgeChipFor(print)"
+                  class="gallery-purge-chip"
+                  data-test="purge-chip"
+                  >{{ purgeChipFor(print) }}</span
+                >
+                <span
+                  v-if="gallerySelectMode"
+                  class="gallery-selection-indicator"
+                  data-test="mobile-gallery-selection-indicator"
+                  aria-hidden="true"
+                >
+                  {{ gallerySelection.has(galleryPrintKey(print)) ? "✓" : "" }}
+                </span>
+              </button>
+            </div>
+            <div v-else class="empty-state" data-test="mobile-library-empty">
+              {{ libraryEmptyCopy }}
+            </div>
+            <div
+              v-if="!galleryLoading && galleryRemaining"
+              ref="gallerySentinel"
+              class="gallery-scroll-sentinel"
+              data-test="mobile-gallery-sentinel"
+              aria-live="polite"
+            >
+              {{ galleryLoadingMore ? "Loading older prints…" : "" }}
+            </div>
           </div>
         </template>
         <div

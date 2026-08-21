@@ -307,6 +307,11 @@ html.mobile-surface:has(.mobile-shell.is-pair-scanning) #app,
   padding: 16px max(16px, env(safe-area-inset-right)) 16px max(16px, env(safe-area-inset-left));
 }
 
+.mobile-content.is-library {
+  display: flex;
+  flex-direction: column;
+}
+
 /*
  * Output (One shot | Sequence) — a field in the Create form stack, not a
  * mode pair pinned above it. Same mobile-scoped @ui SegmentedControl override
@@ -2517,13 +2522,18 @@ button:disabled {
   margin-top: 16px;
 }
 
+.mobile-gallery-pinch-surface {
+  /* A short final row still leaves a generous gesture target. Keep one-finger
+     scrolling while the two-finger pinch stays ours. */
+  flex: 1 0 auto;
+  min-height: 42vh;
+  touch-action: pan-y;
+}
+
 .gallery-grid {
   display: grid;
   grid-template-columns: repeat(var(--mobile-gallery-columns, 3), minmax(0, 1fr));
   gap: 6px;
-  /* Keep one-finger scrolling while the two-finger pinch stays ours. The shell
-     already blocks page zoom, so nothing above this element wants the pinch. */
-  touch-action: pan-y;
 }
 
 .gallery-grid.is-selecting .gallery-item {

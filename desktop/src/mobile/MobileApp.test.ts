@@ -7754,6 +7754,20 @@ describe("mobile Library pinch-to-resize", () => {
     expect(localStorage.getItem("mold.mobile.galleryColumns.v1")).toBe("4");
   });
 
+  it("resizes from the unused print area instead of requiring both fingers over tiles", async () => {
+    const app = await openLibrary();
+    const surface = app.get("[data-test='mobile-gallery-pinch-surface']").element;
+
+    touchDown(surface, 73, 20, 700);
+    touchDown(surface, 74, 220, 700);
+    touchMove(74, 360, 700);
+    touchUp(74);
+    touchUp(73);
+    await app.vm.$nextTick();
+
+    expect(columnsOf(app)).toBe("2");
+  });
+
   it("restores the persisted size on the next visit", async () => {
     localStorage.setItem("mold.mobile.galleryColumns.v1", "5");
 

@@ -1,0 +1,1 @@
+- **Reliable iPhone Library pinch resizing.** Pinching anywhere in the Library print area now resizes thumbnails, including unused space below a short final row.

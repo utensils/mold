@@ -38,9 +38,11 @@ describe("mobile Library thumbnail sizing", () => {
   });
 
   it("reserves the two-finger pinch while one-finger scrolling still works", () => {
-    const base = css.match(/\.gallery-grid\s*\{([^}]*)\}/s);
+    const base = css.match(/\.mobile-gallery-pinch-surface\s*\{([^}]*)\}/s);
 
     expect(base?.[1]).toMatch(/touch-action:\s*pan-y\s*;/);
+    expect(base?.[1]).toMatch(/flex:\s*1 0 auto\s*;/);
+    expect(base?.[1]).toMatch(/min-height:\s*42vh\s*;/);
   });
 });
 
