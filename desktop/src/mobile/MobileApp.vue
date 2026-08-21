@@ -29,7 +29,10 @@ import { createUuid } from "@studio/lib/id";
 import { confirmCancellation } from "@studio/lib/cancellationRetry";
 import { filterRestrictedModels, modelAccessRestrictionFor } from "@studio/lib/modelAccess";
 import { expansionTaskForRequest } from "@studio/lib/expandTask";
-import { effectiveGenerationRecipe } from "@studio/lib/generationProfile";
+import {
+  effectiveGenerationRecipe,
+  fixedRecipeControlOverrides,
+} from "@studio/lib/generationProfile";
 import {
   conditioningFingerprint,
   defaultRemixDimensions,
@@ -1477,6 +1480,50 @@ const sourceControlsValid = computed(() => !caps.value.supportsImg2img || source
  * advertised text-to-video checkpoint hides the well entirely.
  */
 const sourceConditioningError = computed(() => sourceConditioningValidationError(form));
+const fixedRecipeControls = computed(() =>
+  fixedRecipeControlOverrides(
+    effectiveGenerationRecipe(selectedGenerationModel.value, form.pipeline),
+  ),
+);
+/**
+ * A fixed recipe control is authority the moment the recipe is known, and
+ * the gates below read the LIVE form: `stepsError` disables Develop through
+ * `developBlockerReason`, and `basicParametersValid` returns `generate()`
+ * early — both before the submit-time snap in `prepareGenerationRequest`
+ * can run. So a stale value would strand Develop behind an error on a
+ * control the user cannot edit.
+ *
+ * `applyModelDefaults` already reconciles a model *pick*; what it cannot
+ * cover is a later write straight into the form — gallery reuse restoring a
+ * print saved before the envelope was pinned goes through
+ * `applyMetadataToForm`, which can leave the model alone and only move
+ * `steps`. So this watches the VALUES, not just the recipe identity, and
+ * re-asserts only the fields that disagree (assigning an equal value would
+ * re-trigger it for nothing). Shared policy with desktop's
+ * `reconcileModelCapabilities`.
+ */
+watch(
+  () =>
+    [
+      fixedRecipeControls.value,
+      form.steps,
+      form.guidance,
+      form.width,
+      form.height,
+      form.frames,
+    ] as const,
+  () => {
+    const fixed = fixedRecipeControls.value;
+    if (fixed.steps !== undefined && form.steps !== fixed.steps) form.steps = fixed.steps;
+    if (fixed.guidance !== undefined && form.guidance !== fixed.guidance) {
+      form.guidance = fixed.guidance;
+    }
+    if (fixed.width !== undefined && form.width !== fixed.width) form.width = fixed.width;
+    if (fixed.height !== undefined && form.height !== fixed.height) form.height = fixed.height;
+    if (fixed.frames !== undefined && form.frames !== fixed.frames) form.frames = fixed.frames;
+  },
+  { immediate: true },
+);
 const stepsError = computed(() =>
   profileStepsValidationError(form.steps, selectedGenerationModel.value, form.pipeline),
 );
@@ -4370,6 +4417,17 @@ async function prepareGenerationRequest(
   isCurrent: () => boolean = () => true,
   signal?: AbortSignal,
 ) {
+  // Fixed recipe controls are not user choices: a stale draft value (restored
+  // before the recipe landed, model swapped under it) snaps to what the
+  // disabled control displays instead of queueing a shape the host refuses.
+  // It runs before the source fits below so their target is the canvas that
+  // actually renders. Shared with desktop and web.
+  Object.assign(
+    draft,
+    fixedRecipeControlOverrides(
+      effectiveGenerationRecipe(selectedGenerationModel.value, draft.pipeline),
+    ),
+  );
   const draftCaps = generationCapabilitiesForFamily(
     draft.family,
     draft.model,

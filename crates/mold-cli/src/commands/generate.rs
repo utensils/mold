@@ -240,6 +240,7 @@ fn effective_dimensions(
 /// admission cost has been paid.
 fn effective_generation_steps(
     is_h3: bool,
+    model: &str,
     model_cfg: &mold_core::ModelConfig,
     config: &Config,
     steps: Option<u32>,
@@ -248,6 +249,21 @@ fn effective_generation_steps(
         return steps;
     }
     if is_h3 {
+        // Compact layouts (base + Turbo tags) run exactly their tier's
+        // reviewed step count, so it comes from the identity — never from
+        // `default_steps`, which `build_model_catalog` launders a user
+        // `model_pref` into and which can therefore be stale. Only the
+        // official BF16 reference keeps the stored value; its ladder really
+        // is adjustable. An unrecognized identity takes the compact answer,
+        // the same fail-toward-the-stricter-contract rule as
+        // `source_fit_dimensions` above.
+        if mold_core::minimax_h3::layout_for_model(model)
+            != Some(mold_core::minimax_h3::Layout::OfficialBf16)
+        {
+            return mold_core::minimax_h3::turbo_tier_for_model(model)
+                .map(|tier| tier.steps)
+                .unwrap_or(mold_core::minimax_h3::COMFY_DEFAULT_STEPS);
+        }
         model_cfg
             .default_steps
             .unwrap_or(mold_core::minimax_h3::COMFY_DEFAULT_STEPS)
@@ -333,6 +349,7 @@ fn refit_request_after_pull(
     if cli_steps.is_none() {
         req.steps = effective_generation_steps(
             family.is_some_and(mold_core::minimax_h3::is_family),
+            &req.model,
             model_cfg,
             config,
             None,
@@ -836,7 +853,7 @@ pub async fn run(
         source_image.as_deref(),
         edit_images.as_deref(),
     )?;
-    let effective_steps = effective_generation_steps(is_h3, &model_cfg, &config, steps);
+    let effective_steps = effective_generation_steps(is_h3, model, &model_cfg, &config, steps);
     let guidance_caps = mold_core::GuidanceCapabilities::for_recipe(
         family.as_deref().unwrap_or_default(),
         model,
@@ -4406,13 +4423,13 @@ mod tests {
                 "{model}"
             );
             assert_eq!(
-                effective_generation_steps(true, &model_cfg, &config, None),
+                effective_generation_steps(true, model, &model_cfg, &config, None),
                 expected_steps,
                 "{model}"
             );
             // An explicit --steps always wins.
             assert_eq!(
-                effective_generation_steps(true, &model_cfg, &config, Some(2)),
+                effective_generation_steps(true, model, &model_cfg, &config, Some(2)),
                 2
             );
             assert_eq!(
@@ -4438,8 +4455,100 @@ mod tests {
         // default through the same path.
         let official = config.resolved_model_config(mold_core::minimax_h3::FL2VA_OFFICIAL);
         assert_eq!(
-            effective_generation_steps(true, &official, &config, None),
+            effective_generation_steps(
+                true,
+                mold_core::minimax_h3::FL2VA_OFFICIAL,
+                &official,
+                &config,
+                None
+            ),
             mold_core::minimax_h3::DEFAULT_STEPS
+        );
+    }
+
+    /// `build_model_catalog` launders a user's saved `model_pref` into
+    /// `ModelConfig.default_steps`, so a value stored before the reviewed
+    /// envelope was pinned can outlive it. The compact tiers run exactly
+    /// their own step count, so an omitted `--steps` must resolve from the
+    /// tier identity and never from that stored preference — otherwise the
+    /// CLI builds a request its own profile then refuses. An explicit
+    /// `--steps` stays user input: the profile answers it with the clear
+    /// fixed-at message rather than a silent snap. The hidden official BF16
+    /// reference keeps the stored value, because its ladder is adjustable.
+    #[test]
+    fn h3_compact_steps_ignore_a_stale_model_pref_default() {
+        let config = Config::default();
+        for (model, expected_steps) in [
+            (mold_core::minimax_h3::FL2VA_COMFY, 21),
+            (mold_core::minimax_h3::REF2VA_COMFY, 21),
+            (mold_core::minimax_h3::FL2VA_COMFY_TURBO_8STEP, 9),
+            (mold_core::minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P, 5),
+        ] {
+            let mut stale = config.resolved_model_config(model);
+            stale.default_steps = Some(30);
+            assert_eq!(
+                effective_generation_steps(true, model, &stale, &config, None),
+                expected_steps,
+                "{model}"
+            );
+            assert_eq!(
+                effective_generation_steps(true, model, &stale, &config, Some(30)),
+                30,
+                "{model}"
+            );
+
+            // End to end: the request the CLI builds from that stale config
+            // is admitted by the very profile that pins the envelope. A
+            // build without `mp4` withholds H3's MP4-only recipes entirely,
+            // so there is nothing to validate against there.
+            if let Some(profile) = local_generation_profile(&config, model)
+                .filter(|profile| profile.default_recipe().is_some())
+            {
+                let request: mold_core::GenerateRequest =
+                    serde_json::from_value(serde_json::json!({
+                        "prompt": "test",
+                        "model": model,
+                        "width": mold_core::minimax_h3::DEFAULT_WIDTH,
+                        "height": mold_core::minimax_h3::DEFAULT_HEIGHT,
+                        "steps": effective_generation_steps(true, model, &stale, &config, None),
+                        "guidance": 0.0,
+                        "frames": mold_core::minimax_h3::MIN_FRAMES,
+                        "fps": mold_core::minimax_h3::FIXED_FPS,
+                    }))
+                    .unwrap();
+                mold_core::generation_profile::validate_request_against_generation_profile(
+                    &profile, &request,
+                )
+                .unwrap_or_else(|error| panic!("{model}: {error}"));
+
+                // ...and the stale value the old code submitted is exactly
+                // what that profile refuses, with the message a user can act
+                // on. This is what an explicit `--steps 30` still earns.
+                let mut stale_request = request.clone();
+                stale_request.steps = 30;
+                assert!(
+                    mold_core::generation_profile::validate_request_against_generation_profile(
+                        &profile,
+                        &stale_request,
+                    )
+                    .unwrap_err()
+                    .contains("steps is fixed at"),
+                    "{model}"
+                );
+            }
+        }
+
+        let mut official = config.resolved_model_config(mold_core::minimax_h3::FL2VA_OFFICIAL);
+        official.default_steps = Some(30);
+        assert_eq!(
+            effective_generation_steps(
+                true,
+                mold_core::minimax_h3::FL2VA_OFFICIAL,
+                &official,
+                &config,
+                None
+            ),
+            30
         );
     }
 

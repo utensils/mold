@@ -4814,6 +4814,116 @@ describe("MobileApp wan source conditioning", () => {
     expect(wrapper.find("[data-test='mobile-h3-authoring-error']").exists()).toBe(false);
   });
 
+  it("snaps a stale steps value onto the recipe's fixed control instead of blocking Develop", async () => {
+    // The reviewed compact H3 tags pin steps at their tier count. Gallery
+    // reuse restores a print saved before that pin by writing straight into
+    // the live form (`applyMetadataToForm`), leaving the model alone and
+    // only moving `steps` — so the model-pick reconcile never runs. The
+    // submit-time snap cannot rescue it either: `stepsError` disables
+    // Develop and `basicParametersValid` returns `generate()` early, both
+    // first. The live form has to re-assert the fixed value itself.
+    const fixedStepsProfile = {
+      schema_version: 1,
+      profile_id: "minimax-h3.minimax-h3-fl2va",
+      profile_hash: "h3-compact-hash",
+      default_recipe_id: "default",
+      recipes: [
+        {
+          id: "default",
+          label: "Default",
+          request_selector: {},
+          defaults: { width: 1344, height: 768, steps: 21, guidance: 0, frames: 124, fps: 24 },
+          resolution: {
+            domain: "buckets" as const,
+            alignment: 32,
+            min_width: 64,
+            min_height: 64,
+            max_pixels: 1344 * 768,
+            off_bucket: "reject" as const,
+            aspect_groups: [
+              {
+                id: "7:4",
+                label: "7:4",
+                presets: [
+                  { id: "1344x768", width: 1344, height: 768, tier: "recommended" as const },
+                ],
+              },
+            ],
+          },
+          steps: { default: 21, min: 21, max: 21, step: 1, mode: "fixed" as const },
+          guidance: { default: 0, min: 0, max: 0, step: 0.1, mode: "fixed" as const },
+          temporal: {
+            frames: { default: 124, min: 124, max: 124, step: 17, mode: "fixed" as const },
+            frame_offset: 5,
+            fps: { mode: "fixed" as const, value: 24 },
+          },
+          capabilities: {
+            guidance: {
+              adjustable: false,
+              supports_negative_prompt: false,
+              fixed_scale: 0,
+            },
+            negative_prompt: { mode: "hidden" as const, required: false },
+            supports_lora: false,
+            supports_controlnet: false,
+            supports_sequence: false,
+            supports_extend: false,
+            supports_audio: true,
+            source_video: { mode: "hidden" as const, required: false },
+            mask: { mode: "hidden" as const, required: false },
+            keyframes: { mode: "hidden" as const, required: false },
+            audio: { mode: "hidden" as const, required: false },
+            lora: { mode: "hidden" as const, max_count: 0 },
+            controlnet: { mode: "hidden" as const, max_count: 0 },
+            output: {
+              default_format: "mp4" as const,
+              formats: ["mp4" as const],
+              audio_requires_mp4: true,
+            },
+            wan_recipe: {
+              mode: "hidden" as const,
+              supports_distill_strength: false,
+              supports_first_last_frame: false,
+            },
+            schedulers: [],
+          },
+          provenance: [],
+        },
+      ],
+    };
+    const h3Model = {
+      ...wanModel,
+      name: "minimax-h3-fl2va:comfy-pruned-int8",
+      family: "minimax-h3",
+      hf_repo: "Comfy-Org/MiniMax-H3",
+      default_steps: 21,
+      default_guidance: 0,
+      default_width: 1344,
+      default_height: 768,
+      default_frames: 124,
+      default_fps: 24,
+      generation_profile: fixedStepsProfile,
+    } as unknown as ModelEntry;
+    serveWan(h3Model);
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    const liveForm = wrapper.getComponent(MobileLoraControls).props("form") as GenerateForm;
+    expect(liveForm.steps).toBe(21);
+
+    // Exactly what reuse does for a print saved at the old flexible ladder:
+    // a direct write, same model, no reconcile.
+    liveForm.steps = 30;
+    await flushPromises();
+
+    expect(liveForm.steps).toBe(21);
+    await fieldControl("Prompt").setValue("a ship crossing violet lightning");
+    await flushPromises();
+    expect(wrapper.get("[data-test='mobile-develop-button']").attributes()).not.toHaveProperty(
+      "disabled",
+    );
+  });
+
   it("shows the H3 first-frame blocker before prompt entry and clears it after picking", async () => {
     const h3Model: ModelEntry = {
       ...wanModel,

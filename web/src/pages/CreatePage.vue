@@ -2883,6 +2883,15 @@ function validateSubmit(): boolean {
   if (fixedControls.guidance !== undefined) {
     form.state.value.guidance = fixedControls.guidance;
   }
+  if (fixedControls.width !== undefined) {
+    form.state.value.width = fixedControls.width;
+  }
+  if (fixedControls.height !== undefined) {
+    form.state.value.height = fixedControls.height;
+  }
+  if (fixedControls.frames !== undefined) {
+    form.state.value.frames = fixedControls.frames;
+  }
   // Resolution constraints are advisory — the server is the authority and
   // its own refusal surfaces as the failed job's error. Only malformed
   // input that cannot form a request blocks the submit (recipe or not).

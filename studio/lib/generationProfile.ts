@@ -679,14 +679,43 @@ export function profileAspectIdForResolution(
  * behind an error the user cannot correct. Desktop's
  * `reconcileModelCapabilities` and web's model-defaults/submit paths share
  * this so the two surfaces cannot drift.
+ *
+ * Resolution is fixed authority under exactly one shape: a bucket domain
+ * that refuses off-bucket sizes and advertises a single preset, which is
+ * H3's reviewed compact envelope. An absent `off_bucket` reads as Reject —
+ * the same fail-closed reading admission takes. Wan advertises buckets that
+ * only warn, and Wuerstchen advertises one preset on a dynamic canvas; a
+ * preset is a recommendation in both cases and neither snaps.
  */
 export function fixedRecipeControlOverrides(
   recipe: GenerationRecipeProfile | null | undefined,
-): { steps?: number; guidance?: number } {
-  const overrides: { steps?: number; guidance?: number } = {};
+): {
+  steps?: number;
+  guidance?: number;
+  width?: number;
+  height?: number;
+  frames?: number;
+} {
+  const overrides: ReturnType<typeof fixedRecipeControlOverrides> = {};
   if (recipe?.steps.mode === "fixed") overrides.steps = recipe.steps.default;
   if (recipe?.guidance.mode === "fixed") {
     overrides.guidance = recipe.guidance.default;
+  }
+  const resolution = recipe?.resolution;
+  if (
+    resolution?.domain === "buckets" &&
+    (resolution.off_bucket ?? "reject") !== "warn"
+  ) {
+    const [only, ...rest] = resolution.aspect_groups.flatMap(
+      (group) => group.presets,
+    );
+    if (only && rest.length === 0) {
+      overrides.width = only.width;
+      overrides.height = only.height;
+    }
+  }
+  if (recipe?.temporal?.frames.mode === "fixed") {
+    overrides.frames = recipe.temporal.frames.default;
   }
   return overrides;
 }
