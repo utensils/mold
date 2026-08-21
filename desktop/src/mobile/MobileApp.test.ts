@@ -6982,6 +6982,66 @@ describe("MobileApp gallery", () => {
     expect(fieldControl("FPS").element).toHaveProperty("value", "30");
   });
 
+  it("keeps generation notches after reusing an ordinary nightly LTX output", async () => {
+    const nightlyPrint: GalleryImage = {
+      ...print,
+      filename: "nightly-ltx.mp4",
+      metadata: {
+        prompt: "a live nightly print",
+        model: "ltx-2.3-22b-distilled:fp8",
+        seed: 44,
+        steps: 8,
+        guidance: 1,
+        width: 768,
+        height: 768,
+        frames: 217,
+        fps: 24,
+        pipeline: "distilled",
+        output_mode: "one-shot",
+        version: "0.23.3 (b3e803c 2026-08-21)",
+      },
+    };
+    const nightlyModel = {
+      ...model,
+      name: "ltx-2.3-22b-distilled:fp8",
+      default_steps: 8,
+      default_guidance: 1,
+      max_frames: 481,
+      frame_step: 8,
+      frame_offset: 1,
+      default_fps: 24,
+    };
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([nightlyModel]);
+      if (path === "/api/gallery") return Promise.resolve([nightlyPrint]);
+      if (path === "/api/activity") {
+        return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
+      }
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await vi.waitFor(() => expect(wrapper?.find("[data-test='gallery-item']").exists()).toBe(true));
+    await wrapper.get("[data-test='gallery-item']").trigger("click");
+    await flushPromises();
+    await wrapper.get("[data-test='gallery-viewer-reuse']").trigger("click");
+    await flushPromises();
+
+    const duration = wrapper.findAll(".video-duration")[0]!;
+    expect(duration.get("[data-test='video-duration-detail']").text()).toContain("3 generations");
+    expect(duration.findAll(".ms-slider__mark b").map((mark) => mark.text())).toEqual([
+      "1×",
+      "2×",
+      "3×",
+      "4×",
+      "5×",
+      "6×",
+    ]);
+  });
+
   it("restores the original source image attributes and crop when reusing a print", async () => {
     const sourcePrint: GalleryImage = {
       ...print,
