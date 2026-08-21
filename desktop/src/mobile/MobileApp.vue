@@ -162,6 +162,7 @@ import {
 import { sourceMediaPlan } from "@studio/lib/sourceMediaPlan";
 import { modelDisplayName, modelDisplayNameForId } from "../lib/models";
 import type {
+  ChainCreateRequest,
   CompleteEvent,
   CreateChainJobResponse,
   DownloadJob,
@@ -3106,7 +3107,7 @@ async function submitMobileSequence(): Promise<void> {
     // The stitched print is the only artifact a sequence puts in the gallery,
     // so it is what carries the Create title and the File under choice; an
     // intermediate clip never reaches the Library and is never filed.
-    const request = {
+    const request: ChainCreateRequest = {
       ...buildChainRequest(sequenceParams(requestForm, entry), clips, {
         motionTailFrames,
         enableAudio,
@@ -4482,17 +4483,13 @@ async function prepareGenerationRequest(
   }
   const mediaBudgetError = mobileMediaBudgetValidationError(draft);
   if (mediaBudgetError) throw new Error(mediaBudgetError);
-  return withPrintTitle(buildRequest(draft));
-}
-
-/** Stamp the Create title onto a mobile-built request (additive `title`;
- * absent when blank so the server's own default naming applies). Batch
- * siblings and prepared Batch N spread this request, so they inherit it. */
-function withPrintTitle(request: GenerateRequest): GenerateRequest {
-  const title = requestTitle(printTitle.value);
-  if (!title.ok) throw new Error(title.reason);
-  if (!title.title) return request;
-  return { ...request, title: title.title } as GenerateRequest;
+  // `buildRequest` stamps the additive `title` and the File under fields from
+  // the FROZEN draft. Nothing may re-read the live title here: source fitting
+  // and the placement fan-out can take minutes, and a title edited inside that
+  // window would ship a name whose own ghost tag and collection match were
+  // derived from the previous one. The title is validated at the tap boundary
+  // instead (`generate()`, `submitMobileSequence`).
+  return buildRequest(draft);
 }
 
 async function generate(): Promise<void> {
@@ -4594,6 +4591,10 @@ async function generate(): Promise<void> {
     !selectedModelAvailable.value ||
     !seedValid.value ||
     !parameterValid.value ||
+    // Refused at the tap, beside every other inline error, rather than thrown
+    // from inside source preparation — where it surfaced as "Couldn't prepare
+    // the source image" for what is really an over-long name.
+    !!printTitleError.value ||
     !sourceControlsValid.value ||
     !resolutionValid.value ||
     !basicParametersValid.value ||
@@ -5892,23 +5893,34 @@ const libraryHostChips = computed(() =>
 // reachable machine that can file, and an unread capability snapshot hides the
 // group and sends nothing.
 const fileUnderEnabled = computed(() =>
-  mobileFileUnderAvailable(generateTarget.value, connectedHosts.value, serverCapabilities),
+  mobileFileUnderAvailable(
+    generateTarget.value,
+    // Under an automatic policy the answer belongs to the machines the print
+    // could actually land on — the model-aware, access-filtered candidate set
+    // the fan-out will choose from — not to every reachable machine. A peer
+    // that can file but cannot run this checkpoint must not qualify the group.
+    isAutomaticTarget(generateTarget.value)
+      ? automaticRoutingCandidates(form.model, form.family).hosts
+      : connectedHosts.value,
+    serverCapabilities,
+  ),
 );
 const fileUnderCollections = computed(() =>
   mobileFileUnderCollections(libraryCollectionCards.value),
 );
-/** The fleet collection whose slug equals the live title's — held on the form
- * so the shared request builder can offer the match without knowing about
- * stores, exactly as the desktop inspector keeps it in sync. */
+/**
+ * The fleet collection whose slug equals the live title's.
+ *
+ * Deliberately NOT mirrored onto `form.fileUnderMatch` by a watcher: it is
+ * derived from a listing that can land at any moment (a host reconnecting, a
+ * first capability read), and `cloneGenerateForm` feeds the prepared/quick
+ * "inputs changed while the source was being prepared" fence. A listing that
+ * resolved mid-flight would refuse a submission nothing the user touched had
+ * changed. `applyFileUnderPolicy` writes the field once, at the tap boundary,
+ * where the request builder needs it.
+ */
 const fileUnderMatch = computed<FileUnderCollectionLike | null>(() =>
   fileUnderEnabled.value ? matchCollection(form.title, fileUnderCollections.value) : null,
-);
-watch(
-  fileUnderMatch,
-  (match) => {
-    form.fileUnderMatch = match ? { ...match } : null;
-  },
-  { immediate: true },
 );
 /**
  * The Library's own tag and collection listings are read as part of a gallery
@@ -5931,9 +5943,6 @@ watch(
  */
 function applyFileUnderPolicy(draft: GenerateForm): GenerateForm {
   if (fileUnderEnabled.value) {
-    // Read the match from its computed rather than the mirrored form field:
-    // the mirror's watcher has not necessarily flushed for a title edited in
-    // the same tick as the tap.
     const match = fileUnderMatch.value;
     draft.fileUnderMatch = match ? { ...match } : null;
     return draft;

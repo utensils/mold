@@ -143,6 +143,41 @@ describe("MobileFileUnder tags row", () => {
     );
   });
 
+  it("draws one chip when a typed tag later becomes the title's ghost", async () => {
+    // The tag is added FIRST, so `validateNewTag` never sees a ghost to refuse
+    // it against; the title arrives after and derives the same slug. Two
+    // identical chips would be bad enough, but a ✕ on either calls
+    // `removeTag`, which retires the ghost AND drops the manual twin.
+    mountGroup({ title: "" });
+    await typeTag("smurfs");
+    await wrapper!.setProps({ title: "Smurfs" });
+
+    expect(wrapper!.findAll("[data-test='mobile-file-under-tag']")).toHaveLength(0);
+    expect(wrapper!.get("[data-test='mobile-file-under-ghost']").text()).toContain("smurfs");
+  });
+
+  it("matches suggestions against the tag a typed hash would actually file", async () => {
+    mountGroup();
+    await openTagSheet();
+    await wrapper!.get("[data-test='mobile-file-under-tag-input']").setValue("#kod");
+
+    // `requestTagKey` keeps the `#`, so an unstripped query matches neither
+    // `kodak` nor the host's own `#kodak`.
+    expect(
+      wrapper!.findAll("[data-test='mobile-file-under-tag-suggestion']").map((row) => row.text()),
+    ).toEqual([expect.stringContaining("#kodak")]);
+  });
+
+  it("keeps Add disabled for a draft that strips to nothing", async () => {
+    mountGroup();
+    await openTagSheet();
+    await wrapper!.get("[data-test='mobile-file-under-tag-input']").setValue("##  ");
+
+    expect(
+      wrapper!.get("[data-test='mobile-file-under-tag-add']").attributes("disabled"),
+    ).toBeDefined();
+  });
+
   it("removes a real chip from the row without retiring the ghost", async () => {
     mountGroup();
     await typeTag("blue");

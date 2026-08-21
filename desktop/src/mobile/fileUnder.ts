@@ -18,11 +18,16 @@ import type { MobileHost } from "./hosts";
 /**
  * Whether Create may offer the File under group for the target in force.
  *
- * Mirrors web's `useFileUnder`: a PINNED machine answers for itself, while
- * under Auto / Most capable the print lands on one of several, so any
- * filing-capable machine among the reachable ones is enough. Positive
- * knowledge only — an unread or failed capability probe is not evidence, so
- * the group hides and nothing is filed.
+ * A PINNED machine answers for itself. Under Auto / Most capable the print
+ * lands on one of several, so one filing-capable machine among them is
+ * enough — but `hosts` must then be the CANDIDATE set the fan-out will
+ * actually choose from (model-aware and access-filtered), not the whole
+ * fleet. A peer that can file but cannot run the selected checkpoint would
+ * otherwise qualify the group for a print that routes elsewhere and lands
+ * unfiled, with nothing said.
+ *
+ * Positive knowledge only — an unread or failed capability probe is not
+ * evidence, so the group hides and nothing is filed.
  *
  * `capabilities` is deliberately loose: it is the same per-host snapshot
  * record the Library organization gate reads, and `fileUnderAvailable`

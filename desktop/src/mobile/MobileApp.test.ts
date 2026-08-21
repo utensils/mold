@@ -9373,6 +9373,138 @@ describe("MobileApp Create File under", () => {
     expect(wrapper!.get("[data-test='mobile-file-under-tag']").text()).toContain("blue");
   });
 
+  it("freezes the title with the filing it derived, not the one typed mid-flight", async () => {
+    // Source fitting and the placement fan-out can run for minutes. A title
+    // edited inside that window must not reach the wire on its own: its ghost
+    // tag and its collection match were derived from the OLD name, so shipping
+    // the new one alone files the print under a name nothing else agrees with.
+    const fitting = deferred<{ source: string; mask: string | null; changed: boolean }>();
+    applySourceFitPreprocess.mockImplementationOnce(() => fitting.promise);
+    await openCreateWithFiling();
+
+    await fieldControl("Title").setValue("Smurfs");
+    await fieldControl("Prompt").setValue("a village of small blue characters");
+    const form = wrapper!.getComponent(MobileLoraControls).props("form") as GenerateForm;
+    form.sourceImage = "c3JjCg==";
+    await flushPromises();
+
+    await wrapper!.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+    expect(openStreams).toHaveLength(0);
+
+    // The edit lands while the source is still being prepared.
+    await fieldControl("Title").setValue("Harbour lights");
+    fitting.resolve({ source: "c3JjCg==", mask: null, changed: false });
+    await flushPromises();
+
+    expect(openStreams).toHaveLength(1);
+    expect(openStreams[0]?.options.body.title).toBe("Smurfs");
+    expect(openStreams[0]?.options.body.tags).toEqual(["smurfs"]);
+    expect(openStreams[0]?.options.body.collection).toEqual({ name: "Smurfs" });
+  });
+
+  it("refuses an over-long title at the tap instead of blaming the source", async () => {
+    await openCreateWithFiling();
+
+    await fieldControl("Title").setValue("x".repeat(121));
+    await fieldControl("Prompt").setValue("a lighthouse");
+    await wrapper!.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+
+    expect(openStreams).toHaveLength(0);
+    expect(wrapper!.get("[data-test='mobile-create-title-error']").text()).toBe(
+      "Titles are at most 120 characters.",
+    );
+    // The old throw surfaced from inside source preparation.
+    expect(wrapper!.text()).not.toContain("Couldn’t prepare the source image");
+  });
+
+  it("never mirrors the derived collection match onto the live form", async () => {
+    // `cloneGenerateForm(form)` is the prepared/quick "inputs changed while the
+    // source was being prepared" fence. The title match is derived from a
+    // listing that can land at any moment — a host reconnecting, a first
+    // capability read — so mirroring it onto the form would refuse a
+    // submission nothing the user touched had changed. Only the submission
+    // clone carries it, written at the tap by `applyFileUnderPolicy`.
+    await openCreateWithFiling();
+
+    await fieldControl("Title").setValue("Smurfs");
+    expect(wrapper!.find("[data-test='mobile-file-under-collection-match']").exists()).toBe(true);
+
+    const form = wrapper!.getComponent(MobileLoraControls).props("form") as GenerateForm;
+    expect(form.fileUnderMatch).toBeNull();
+
+    await fieldControl("Prompt").setValue("a lighthouse");
+    await wrapper!.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+
+    expect(openStreams[0]?.options.body.collection).toEqual({ name: "Smurfs" });
+    expect(form.fileUnderMatch).toBeNull();
+  });
+
+  it("hides the group when only a machine that cannot run the model can file", async () => {
+    // Auto routes by model. A peer that advertises `gallery.organize` but does
+    // not hold the selected checkpoint is never a candidate, so it must not
+    // qualify a group whose print lands on the machine that CAN run it and
+    // then silently drops the filing.
+    const filer = {
+      id: "filer-id",
+      name: "Filer",
+      baseUrl: "http://filer:7680",
+      hostname: "filer",
+    };
+    localStorage.setItem(
+      "mold.mobile.hosts.v1",
+      JSON.stringify([
+        {
+          id: "studio-id",
+          name: "Studio",
+          baseUrl: target.baseUrl,
+          hostname: "studio",
+          online: false,
+        },
+        { ...filer, online: false },
+      ]),
+    );
+    apiJsonTo.mockImplementation((probe: unknown, path: string) => {
+      const isFiler = (probe as { baseUrl?: string } | undefined)?.baseUrl === filer.baseUrl;
+      if (path === "/api/status") {
+        return Promise.resolve(
+          isFiler ? { ...status, hostname: "filer", instance_id: "filer-id" } : status,
+        );
+      }
+      // Only Studio holds the model; only the Filer can organize.
+      if (path === "/api/models") return Promise.resolve(isFiler ? [] : [model]);
+      if (path === "/api/capabilities") {
+        return Promise.resolve(
+          isFiler
+            ? { gallery: { can_delete: true, organize: true } }
+            : { gallery: { can_delete: true, organize: false } },
+        );
+      }
+      if (path === "/api/gallery") return Promise.resolve([]);
+      if (path === "/api/gallery/collections") return Promise.resolve([]);
+      if (path === "/api/gallery/tags") return Promise.resolve([]);
+      if (path === "/api/activity")
+        return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await flushPromises();
+
+    expect(wrapper.find("[data-test='mobile-file-under']").exists()).toBe(false);
+
+    await fieldControl("Title").setValue("Smurfs");
+    await fieldControl("Prompt").setValue("a lighthouse");
+    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+
+    expect(openStreams).toHaveLength(1);
+    expect(openStreams[0]?.options.body.tags).toBeUndefined();
+    expect(openStreams[0]?.options.body.collection).toBeUndefined();
+  });
+
   it("previews the creation-time filename with the title slug", async () => {
     await openCreateWithFiling();
 

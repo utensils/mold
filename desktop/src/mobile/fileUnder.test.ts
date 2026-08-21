@@ -70,6 +70,18 @@ describe("mobileFileUnderAvailable", () => {
     ).toBe(false);
   });
 
+  it("answers for the candidate set it is given, not the whole fleet", () => {
+    // Callers hand automatic routing the model-aware, access-filtered
+    // candidates. A peer that can file but cannot run the checkpoint is not in
+    // that list, so it must not qualify a group whose print routes elsewhere.
+    const capabilities = { studio: cannotOrganize, plato: organizes };
+
+    expect(mobileFileUnderAvailable(AUTO_TARGET_ID, [host("studio")], capabilities)).toBe(false);
+    expect(
+      mobileFileUnderAvailable(AUTO_TARGET_ID, [host("studio"), host("plato")], capabilities),
+    ).toBe(true);
+  });
+
   it("hides the group when nothing is targeted at all", () => {
     expect(mobileFileUnderAvailable("", [], {})).toBe(false);
   });

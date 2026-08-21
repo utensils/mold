@@ -23,6 +23,7 @@ import {
   effectiveTags,
   pickCollection,
   removeTag,
+  requestTagKey,
   stripTagHash,
   suggestTags,
   validateNewTag,
@@ -68,11 +69,30 @@ const ghostVisible = computed(() => ghost.value !== null && !props.state.ghostRe
 /** Every chip currently filed, ghost first — the validation gate's context. */
 const activeTags = computed(() => effectiveTags(props.state, props.title, props.autoTagTitle));
 
+/**
+ * The chips the row draws after the ghost.
+ *
+ * A manual tag can become case-insensitively equal to the ghost when the title
+ * is typed AFTER the tag (`validateNewTag` only guards the other order), and
+ * the row would then draw the same name twice. `effectiveTags` already dedupes
+ * for the wire and the sheet; the row has to as well, because `removeTag`
+ * retires the ghost AND drops the identical manual tag, so a ✕ on either
+ * duplicate would delete a tag the user only meant to de-duplicate.
+ */
+const rowTags = computed(() => {
+  const ghostKey = ghostVisible.value && ghost.value ? requestTagKey(ghost.value) : null;
+  return props.state.manualTags.filter((tag) => requestTagKey(tag) !== ghostKey);
+});
+
 const tagDraft = ref("");
 const tagError = ref<string | null>(null);
 
+/** What `Add` would actually file: people type the `#` out of habit. */
+const tagDraftName = computed(() => stripTagHash(tagDraft.value).trim());
+// Query with the stripped name too — `requestTagKey` keeps a leading `#`, so a
+// typed `#kod` would otherwise match neither `kodak` nor a host's `#kodak`.
 const suggestions = computed(() =>
-  suggestTags(props.tags, tagDraft.value, activeTags.value).slice(0, 12),
+  suggestTags(props.tags, tagDraftName.value, activeTags.value).slice(0, 12),
 );
 
 /**
@@ -230,7 +250,7 @@ const previewStem = computed(() =>
           </button>
         </span>
         <span
-          v-for="tag in state.manualTags"
+          v-for="tag in rowTags"
           :key="tag"
           class="mobile-file-under-chip"
           data-test="mobile-file-under-tag"
@@ -338,7 +358,7 @@ const previewStem = computed(() =>
           <button
             class="primary-button"
             type="submit"
-            :disabled="!tagDraft.trim()"
+            :disabled="!tagDraftName"
             data-test="mobile-file-under-tag-add"
           >
             Add
