@@ -24,6 +24,7 @@ use crate::engine_base::EngineBase;
 use crate::image::{build_output_metadata, encode_image};
 use crate::progress::{ProgressCallback, ProgressReporter};
 
+use super::identity::{EngineIdentityState, ResolvedIdentity};
 use super::transformer::FluxTransformer;
 
 /// Some FLUX safetensors checkpoints store transformer tensors at the root
@@ -1033,6 +1034,10 @@ pub struct FluxEngine {
     /// Per-request placement override. Set at the start of `generate()`,
     /// cleared on exit. `None` preserves the existing VRAM-aware auto logic.
     pending_placement: Option<mold_core::types::DevicePlacement>,
+    /// PuLID face-identity conditioning: the frozen asset paths, the resident
+    /// adapter, and the pending identity embedding. Inert for every request
+    /// that does not condition on a face.
+    identity: EngineIdentityState,
 }
 
 impl FluxEngine {
@@ -1050,6 +1055,7 @@ impl FluxEngine {
         gpu_ordinal: usize,
         offload: bool,
         shared_pool: Option<Arc<Mutex<crate::shared_pool::SharedPool>>>,
+        identity_assets: Option<mold_core::pulid_assets::PulidPaths>,
     ) -> Self {
         Self {
             base: EngineBase::new(model_name, paths, load_strategy, gpu_ordinal),
@@ -1063,7 +1069,29 @@ impl FluxEngine {
             lora_delta_cache: Arc::new(Mutex::new(super::lora::LoraDeltaCache::new())),
             shared_pool,
             pending_placement: None,
+            identity: EngineIdentityState::new(identity_assets),
         }
+    }
+
+    /// Install the identity signal the next face-conditioned request will use.
+    ///
+    /// This is the seam the face extractor (#1223) fills: it turns
+    /// `GenerateRequest::id_image` into a `[1, 32, 2048]`
+    /// [`crate::flux::pulid::IdentityEmbedding`] and installs it here, after
+    /// which every injection site downstream is already wired. Until that
+    /// lands, only a test or dev harness calls this, and a conditioned request
+    /// with nothing installed is an explicit error rather than a silently
+    /// unconditioned render.
+    pub fn set_identity_embedding(
+        &mut self,
+        embedding: Option<crate::flux::pulid::IdentityEmbedding>,
+    ) {
+        self.identity.set_embedding(embedding);
+    }
+
+    /// The frozen PuLID adapter path, when admission prepared the bundle.
+    pub fn identity_adapter_path(&self) -> Option<&PathBuf> {
+        self.identity.adapter_path()
     }
 
     /// Return the LoRA delta cache handle, or `None` when disabled via
@@ -2169,6 +2197,19 @@ impl FluxEngine {
             .map(crate::img2img::pack_flux_inpaint_context)
             .transpose()?;
 
+        // Face identity. Resolved against the working dtype the state tensors
+        // were just cast to, so the adapter feeds the transformer what it
+        // expects; `None` here is the whole "no PuLID compute" story.
+        let identity = self
+            .identity
+            .resolve(req, &device, img_state.dtype(), &flux_cfg)?;
+        if let Some(identity) = &identity {
+            self.base.progress.info(&format!(
+                "PuLID identity conditioning active ({} cross-attention modules, resident)",
+                identity.runtime().adapter().len()
+            ));
+        }
+
         let denoise_label = format!("Denoising ({} steps)", timesteps.len().saturating_sub(1));
         self.base.progress.stage_start(&denoise_label);
         let denoise_start = Instant::now();
@@ -2185,6 +2226,7 @@ impl FluxEngine {
             &self.base.progress,
             inpaint_ctx.as_ref(),
             Some(&previewer),
+            identity.as_ref().map(ResolvedIdentity::runtime),
         )?;
 
         let img = flux::sampling::unpack(&img, height, width)?;
@@ -2300,6 +2342,39 @@ impl FluxEngine {
         if self.uses_sequential_generate_path() {
             return self.generate_sequential(req);
         }
+
+        // Face identity, resolved before `progress` takes its long-lived
+        // borrow of `self`. An unconditioned request drops any resident
+        // adapter here and yields `None`, which is what makes the denoise loop
+        // below take the exact code path a build with no identity request
+        // takes.
+        let identity = {
+            let (device, dtype, is_schnell) = self
+                .base
+                .loaded
+                .as_ref()
+                .map(|loaded| {
+                    (
+                        loaded.device.clone(),
+                        // The quantized transformer's state tensors are F32
+                        // (see `generate_with_embeddings`), so that — not the
+                        // loaded weight dtype — is what the adapter must feed.
+                        if loaded.is_quantized {
+                            DType::F32
+                        } else {
+                            loaded.dtype
+                        },
+                        loaded.is_schnell,
+                    )
+                })
+                .ok_or_else(|| anyhow::anyhow!("model not loaded — call load() first"))?;
+            let cfg = if is_schnell {
+                flux::model::Config::schnell()
+            } else {
+                flux::model::Config::dev()
+            };
+            self.identity.resolve(req, &device, dtype, &cfg)?
+        };
 
         // Eager mode: use pre-loaded components
         // LoRA is supported — the transformer is rebuilt from disk on each generation
@@ -2479,6 +2554,7 @@ impl FluxEngine {
                     height,
                     start,
                     self.base.gpu_ordinal,
+                    identity.as_ref(),
                 );
             }
 
@@ -2620,6 +2696,7 @@ impl FluxEngine {
                 height,
                 start,
                 self.base.gpu_ordinal,
+                identity.as_ref(),
             )
         })()
     }
@@ -2706,6 +2783,7 @@ impl FluxEngine {
         height: usize,
         start: Instant,
         gpu_ordinal: usize,
+        identity: Option<&ResolvedIdentity>,
     ) -> Result<GenerateResponse> {
         // 3. Generate initial noise (F32 for quantized, gpu_dtype for BF16)
         let noise_dtype = if loaded.is_quantized {
@@ -2846,6 +2924,7 @@ impl FluxEngine {
                 Some(&crate::latent_preview::LatentPreviewer::flux1(
                     height, width,
                 )),
+                identity.map(ResolvedIdentity::runtime),
             )?;
 
         // 7. Unpack latent to spatial
@@ -3125,6 +3204,7 @@ mod tests {
             0,
             true,
             None,
+            None,
         );
 
         assert!(engine.uses_sequential_generate_path());
@@ -3140,6 +3220,7 @@ mod tests {
             LoadStrategy::Eager,
             0,
             true,
+            None,
             None,
         );
 
@@ -3454,6 +3535,7 @@ mod tests {
             LoadStrategy::Sequential,
             0,
             false,
+            None,
             None,
         );
 

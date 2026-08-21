@@ -1,0 +1,25 @@
+{
+  "source": "ToTheBeginning/PuLID pulid/encoders_transformer.py::PerceiverAttentionCA",
+  "weights_file": "pulid_flux_v0.9.1.safetensors",
+  "weights_sha256": "92c41c3af322b02e58e1b32842e4601e08c8f16ec1fe80089dbe957df510f51d",
+  "torch": "2.13.0",
+  "dtype": "float32",
+  "dim": 3072,
+  "dim_head": 128,
+  "heads": 16,
+  "kv_dim": 2048,
+  "id_tokens": 32,
+  "image_tokens": 64,
+  "seed_ca_image": "0x50554c4944434149",
+  "seed_ca_id": "0x50554c4944434144",
+  "seed_ca_probe": "0x50554c4944434150",
+  "probe_count": 512,
+  "modules": [
+    0,
+    5,
+    9,
+    10,
+    15,
+    19
+  ]
+}
