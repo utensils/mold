@@ -150,9 +150,9 @@ describe("effectiveTags", () => {
 
 describe("addTag", () => {
   it("normalizes and appends", () => {
-    expect(addTag(emptyFileUnderState(), "  #Golden  Hour ").manualTags).toEqual(
-      ["Golden Hour"],
-    );
+    expect(
+      addTag(emptyFileUnderState(), "  #Golden  Hour ").manualTags,
+    ).toEqual(["Golden Hour"]);
   });
 
   it("ignores a blank tag", () => {
@@ -268,11 +268,7 @@ describe("effectiveCollection", () => {
   });
 
   it("keeps a cleared match cleared while the title slugs the same", () => {
-    const cleared = clearCollection(
-      emptyFileUnderState(),
-      "Sunsets",
-      COLLECTIONS,
-    );
+    const cleared = clearCollection(emptyFileUnderState(), "Sunsets");
     expect(effectiveCollection(cleared, "Sunsets", COLLECTIONS)).toBeNull();
     // Same slug, different typing — the clear must still stick.
     expect(effectiveCollection(cleared, "  sunsets  ", COLLECTIONS)).toBeNull();
@@ -280,11 +276,7 @@ describe("effectiveCollection", () => {
   });
 
   it("re-offers a NEW matching title after a clear", () => {
-    const cleared = clearCollection(
-      emptyFileUnderState(),
-      "Sunsets",
-      COLLECTIONS,
-    );
+    const cleared = clearCollection(emptyFileUnderState(), "Sunsets");
     expect(effectiveCollection(cleared, "Portraits", COLLECTIONS)?.name).toBe(
       "Portraits",
     );
@@ -292,16 +284,12 @@ describe("effectiveCollection", () => {
 
   it("clears an explicit pick without re-offering the title match", () => {
     const picked = pickCollection(emptyFileUnderState(), { name: "Barn Owls" });
-    const cleared = clearCollection(picked, "Sunsets", COLLECTIONS);
+    const cleared = clearCollection(picked, "Sunsets");
     expect(effectiveCollection(cleared, "Sunsets", COLLECTIONS)).toBeNull();
   });
 
   it("re-picking after a clear wins again", () => {
-    const cleared = clearCollection(
-      emptyFileUnderState(),
-      "Sunsets",
-      COLLECTIONS,
-    );
+    const cleared = clearCollection(emptyFileUnderState(), "Sunsets");
     const again = pickCollection(cleared, {
       id: "id-Sunsets",
       name: "Sunsets",
