@@ -6,6 +6,7 @@ const mobileHtml = readFileSync("index.mobile.html", "utf8");
 const preparedComponent = readFileSync("src/mobile/MobilePreparedExpansionBatch.vue", "utf8");
 const pullComponent = readFileSync("src/mobile/MobileExpansionPullStatus.vue", "utf8");
 const composerComponent = readFileSync("src/mobile/MobileSequenceComposer.vue", "utf8");
+const sharedParamsComponent = readFileSync("src/mobile/MobileSharedParams.vue", "utf8");
 const seamPillComponent = readFileSync("../ui/components/SeamPill.vue", "utf8");
 
 describe("mobile viewport scaling", () => {
@@ -234,6 +235,21 @@ describe("mobile style row", () => {
     expect(head?.[1]).toMatch(/min-height:\s*44px\s*;/);
     const chip = css.match(/\.mobile-style-chip\s*\{([^}]*)\}/s);
     expect(chip?.[1]).toMatch(/min-height:\s*44px\s*;/);
+  });
+});
+
+describe("mobile form spacing", () => {
+  it("preserves form rhythm after custom mobile controls", () => {
+    const output = css.match(/\.mobile-output-mode\s*\{([^}]*)\}/s);
+    const range = css.match(/\.mobile-range-field\s*\{([^}]*)\}/s);
+    const duration = css.match(/\.mobile-duration-field\s*\{([^}]*)\}/s);
+
+    expect(output?.[1]).toMatch(/margin:\s*14px 0\s*;/);
+    expect(range?.[1]).toMatch(/margin:\s*14px 0\s*;/);
+    expect(sharedParamsComponent).toMatch(
+      /<VideoDurationSlider[\s\S]*?class="mobile-duration-field"/,
+    );
+    expect(duration?.[1]).toMatch(/margin-bottom:\s*14px\s*;/);
   });
 });
 

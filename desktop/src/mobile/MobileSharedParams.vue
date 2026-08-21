@@ -105,6 +105,7 @@ const sourceDimensions = computed(() => {
   />
   <VideoDurationSlider
     v-if="supportsVideo && !showFps"
+    class="mobile-duration-field"
     :frames="form.frames"
     :fps="form.fps"
     :model="durationModel ?? model"
