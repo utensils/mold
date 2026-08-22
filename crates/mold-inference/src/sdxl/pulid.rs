@@ -354,6 +354,20 @@ impl SdxlPulidAdapter {
     /// The file also carries the IDFormer (`id_adapter.*`), which this ignores:
     /// only `id_adapter_attn_layers.*` is read. `dtype` is the UNet's working
     /// dtype — the file ships f16 and the `VarBuilder` casts on read.
+    ///
+    /// It is opened BY PATHNAME, deliberately and identically to
+    /// [`crate::flux::pulid::PulidAdapter::load`] and to the IDFormer half in
+    /// `identity::extraction`. The descriptor-retention rule exists for a
+    /// loader that has just authenticated bytes and would otherwise throw that
+    /// authentication away by reopening a name — the EVA02-CLIP and BiSeNet
+    /// conversions, whose `pickle_convert::AuthenticatedArtifact` hashes a
+    /// private copy and publishes through `renameat`. There is no fresher
+    /// authentication here to discard: the adapter is a manifest file whose
+    /// pinned digest the download verified when it wrote the
+    /// `.sha256-verified` marker, and admission freezes the exact path the
+    /// planned factory then proves local. Diverging from FLUX on this would
+    /// give one contract two answers for one question; if the adapter should
+    /// be re-authenticated at load, both families must move together.
     pub fn load(
         path: &Path,
         config: &UNet2DConditionModelConfig,

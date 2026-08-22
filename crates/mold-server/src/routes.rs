@@ -3693,6 +3693,17 @@ async fn placement_preview_for_request_authenticated(
         response.authoritative = true;
         return Ok(response);
     }
+    // Face identity is part of admission for exactly the same reason, and the
+    // preview reaches dependency preparation BEFORE the shared request
+    // validator runs. Without this, an unqualified checkpoint carrying an
+    // `id_image` — or a build without the `pulid` feature, or a LoRA beside
+    // the photograph — would have its preview plan the PuLID bundle and
+    // answer `planned` for a request generation then refuses.
+    if let Err(error) = mold_core::identity::validate_identity_conditioning(&request) {
+        let mut response = unavailable("infeasible", error);
+        response.authoritative = true;
+        return Ok(response);
+    }
     // Admission materializes the family's tuned default negative (wan) before
     // the scheduler prices the job, and `request_sensitive_activation_memory`
     // doubles its CFG activation factor for `guidance > 1` only when a

@@ -111,7 +111,7 @@ pub fn normalize_empty_optional_resize_inputs(model: &mut ModelProto) -> usize {
 /// The bytes on disk are not the bytes the manifest pinned.
 #[derive(Debug, thiserror::Error)]
 #[error(
-    "{path} does not match the pinned SHA-256 for this PuLID asset\n  expected {expected}\n  found    {found}\nre-pull the bundle: mold pull pulid-flux"
+    "{path} does not match the pinned SHA-256 for this PuLID asset\n  expected {expected}\n  found    {found}\nre-pull the bundle it came from: mold pull pulid-flux (or pulid-sdxl)"
 )]
 pub struct DigestMismatch {
     /// The file that failed.
@@ -133,7 +133,7 @@ pub struct DigestMismatch {
 pub enum ArtifactSizeError {
     /// The manifest pins an exact byte count and the file is not it.
     #[error(
-        "{path} is {found} bytes but the manifest pins {expected} for this PuLID asset\nre-pull the bundle: mold pull pulid-flux"
+        "{path} is {found} bytes but the manifest pins {expected} for this PuLID asset\nre-pull the bundle it came from: mold pull pulid-flux (or pulid-sdxl)"
     )]
     Mismatch {
         /// The file that failed.
