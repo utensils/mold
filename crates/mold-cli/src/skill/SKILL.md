@@ -746,13 +746,34 @@ mold run "a golden retriever" --image park.png --mask mask.png
 
 ### Face-identity conditioning (PuLID-FLUX)
 
-Additive `GenerateRequest` fields. **Not executable yet on any build**: the
-`pulid` feature compiles the wire contract and the FLUX engine now carries the
-cross-attention adapter, but nothing yet turns `id_image` into the embedding
-that adapter consumes, so `mold_core::identity::IDENTITY_RUNTIME_READY` stays
-`false`, no build advertises the capability, and every identity request is
-refused. Read `supports_identity` — never the feature — to decide whether to
-offer the control.
+Keep one person's face across arbitrary prompts. Qualified for `flux-dev:q4`
+and `flux-dev:q8`, on CUDA and Metal, in every official release build.
+
+```bash
+# One-time setup: the bundle is licence-gated and will not download without this
+mold pull pulid-flux --accept-license insightface-antelopev2
+
+mold run flux-dev:q4 "an astronaut in a diner" --id-image face.jpg
+mold run flux-dev:q4 "a Renaissance portrait" --id-image face.jpg --id-weight 0.6
+mold run flux-dev:q4 "a hiker on a ridge" --id-image face.jpg --id-start-step 4
+```
+
+| Flag                  | Default | Range                                    | Notes                                                                                                                 |
+| --------------------- | ------- | ---------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `--id-image <path>`   | —       | PNG/JPEG, ≤16 MiB, ≤8192 px/axis, ≤32 MP | Reference photograph                                                                                                  |
+| `--id-weight <f>`     | `1.0`   | `0.0`–`3.0`                              | `0` is completely inert: nothing pulled, loaded, or extracted, and the render is byte-identical to no identity at all |
+| `--id-start-step <n>` | `0`     | `< --steps`                              | First denoise step identity applies from                                                                              |
+
+Refused, by name rather than silently: any other model, a LoRA alongside an
+identity, img2img alongside an identity, and a build without the `pulid`
+feature. Works over `$MOLD_HOST` and with `--local`; the bundle and the licence
+acceptance must be on the machine that RENDERS, which for a remote run is the
+server. Saved metadata records the photograph's file name, its SHA-256, and the
+applied weight and start step — never the photograph. `mold rm pulid-flux`
+removes the bundle and the derived vision tower. Full guide:
+`website/guide/identity.md`.
+
+Wire contract — additive `GenerateRequest` fields (read `supports_identity`, never the feature, to decide whether to offer the control):
 
 | Field           | Purpose                                                                                                                                                                                    |
 | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
