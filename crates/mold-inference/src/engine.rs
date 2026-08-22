@@ -372,25 +372,23 @@ pub(crate) fn rand_seed() -> u64 {
         .as_nanos() as u64
 }
 
-/// Tolerance for treating a CFG (classifier-free guidance) scale as "1.0,
-/// disabled". When the active guidance is within this epsilon of 1.0 the
-/// uncond pass adds nothing — `cond + (cond - uncond) * 0 == cond` — so the
-/// pipeline can run a single conditional forward instead of batching
-/// `[uncond, cond]`. Used by LCM / Lightning / Turbo (guidance-distilled)
-/// workflows that ship with `cfg ≈ 1.0`.
+/// Tolerance for treating a CFG (classifier-free guidance) scale at or below
+/// `1.0` as disabled. Without an unconditional pass the pipeline runs the
+/// conditional prediction directly. This is required both for workflows that
+/// ship with `cfg ≈ 1.0` (LCM / Lightning) and for SDXL Turbo's `cfg = 0.0`.
 ///
-/// Matches ComfyUI's short-circuit at `comfy/samplers.py:370`
-/// (`if math.isclose(cond_scale, 1.0): uncond_ = None`). The default
-/// `math.isclose` rel-tol is `1e-9` — ours is looser (`1e-4`) because the
-/// caller-visible knob is a user-typed `f64` like `1.0` or `1.0000`.
+/// Diffusers enables CFG only when `guidance_scale > 1`. The epsilon also
+/// preserves ComfyUI's near-1 short-circuit at `comfy/samplers.py:370`
+/// (`if math.isclose(cond_scale, 1.0): uncond_ = None`); ours is deliberately
+/// looser because the caller-visible knob is a user-typed `f64`.
 pub(crate) const CFG_DISABLE_EPSILON: f64 = 1e-4;
 
-/// Returns `true` when classifier-free guidance is active for the given scale,
-/// i.e. when the unconditional forward pass meaningfully contributes to the
-/// final noise prediction. When `false`, callers should run a single
-/// conditional forward (saves ~2× denoise time).
-pub(crate) fn cfg_active(guidance: f64) -> bool {
-    (guidance - 1.0).abs() > CFG_DISABLE_EPSILON
+/// Returns `true` when classifier-free guidance is active for the given scale.
+/// Scales at or below `1.0` must run a single conditional forward: applying
+/// the CFG blend at `0.0` would select the unconditional prediction and erase
+/// prompt adherence entirely.
+pub fn cfg_active(guidance: f64) -> bool {
+    guidance > 1.0 + CFG_DISABLE_EPSILON
 }
 
 /// Resolve the effective `cfg_plus` flag for a request.
@@ -695,6 +693,19 @@ mod tests {
     #[test]
     fn test_cfg_disabled_at_guidance_1_0() {
         assert!(!cfg_active(1.0), "guidance=1.0 must take the fast path");
+    }
+
+    #[test]
+    fn test_cfg_disabled_at_sdxl_turbo_guidance_0_0() {
+        assert!(
+            !cfg_active(0.0),
+            "guidance=0.0 must use the conditional prediction directly"
+        );
+    }
+
+    #[test]
+    fn test_cfg_disabled_below_1_0() {
+        assert!(!cfg_active(0.5));
     }
 
     #[test]

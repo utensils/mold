@@ -2,6 +2,7 @@ use std::path::Path;
 
 use mold_core::{GenerateRequest, ModelPaths};
 use mold_inference::device::{activation_bytes, activation_family_for, ActivationFamily};
+use mold_inference::engine::cfg_active;
 
 use crate::routes::ApiError;
 
@@ -125,11 +126,13 @@ impl ActivationHint {
     /// strong family signal (catalog ID without an installed manifest, etc.)
     /// passing the empty string falls back to `ActivationFamily::FluxDit`.
     pub fn from_request(req: &GenerateRequest, family_slug: &str) -> Self {
-        // CFG-doubled forwards: SDXL/SD3 batch=2 when guidance ≈/> 1.0; FLUX,
-        // Z-Image, Flux.2 are guidance-distilled and run a single forward.
+        // CFG-doubled forwards: SDXL/SD3 batch=2 only while CFG is active;
+        // FLUX, Z-Image, and Flux.2 run a single forward.
         let family = activation_family_for(family_slug);
         let batch = match family {
-            ActivationFamily::SdxlUnet | ActivationFamily::Sd3Mmdit if req.guidance > 1.0 => 2,
+            ActivationFamily::SdxlUnet | ActivationFamily::Sd3Mmdit if cfg_active(req.guidance) => {
+                2
+            }
             _ => 1,
         };
         Self {
@@ -1563,7 +1566,7 @@ fn request_sensitive_activation_memory_with_wan_geometry(
     // The two forwards are also sequential, so CFG is a bounded additive term
     // rather than a multiplier — see `crate::wan_admission`.
     let wan = hint.is_some_and(|h| h.family == ActivationFamily::WanVideo);
-    let cfg_factor = if !wan && req.guidance > 1.0 && req.negative_prompt.is_some() {
+    let cfg_factor = if !wan && cfg_active(req.guidance) && req.negative_prompt.is_some() {
         2
     } else {
         1
