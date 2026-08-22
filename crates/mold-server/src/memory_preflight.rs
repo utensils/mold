@@ -2710,6 +2710,120 @@ mod fail_closed_tests {
         };
     }
 
+    /// The SDXL charge is the SDXL adapter's own arithmetic, derived from the
+    /// UNet's cross-attention layout rather than analogized from FLUX's.
+    ///
+    /// The engine computes the same figure from
+    /// `plan_attn_layers(sdxl_unet_layout())`, and
+    /// `mold_inference::sdxl::pulid`'s
+    /// `the_sdxl_adapters_resident_bytes_are_the_layer_tables_own_arithmetic`
+    /// pins the layer table itself against the checkpoint. This end holds the
+    /// budget honest without linking the engine.
+    #[test]
+    fn sdxl_identity_overhead_matches_the_adapters_own_resident_arithmetic() {
+        // `testdata/pulid_sdxl/attn_layer_map.json`: 70 attn2 modules, of
+        // which 10 are 640-wide (down_blocks.1 and up_blocks.1) and 60 are
+        // 1280-wide (down_blocks.2, up_blocks.0, and the mid block). Each
+        // carries a bias-free `id_to_k` and `id_to_v` of
+        // `[hidden_size, 2048]`.
+        const CROSS: u64 = 2048;
+        const NARROW: u64 = 640;
+        const WIDE: u64 = 1280;
+        const NARROW_LAYERS: u64 = 10;
+        const WIDE_LAYERS: u64 = 60;
+        const F16: u64 = 2;
+        let elements = 2 * CROSS * (NARROW_LAYERS * NARROW + WIDE_LAYERS * WIDE);
+        assert_eq!(elements, 340_787_200);
+        let adapter = elements * F16;
+
+        assert_eq!(
+            adapter, IDENTITY_SDXL_ADAPTER_BF16_BYTES,
+            "the adapter term must be the adapter's own resident arithmetic"
+        );
+        assert!(
+            IDENTITY_SDXL_VRAM_OVERHEAD_BYTES > adapter,
+            "the budget must leave room for the injections themselves"
+        );
+
+        // The largest identity branch is a 640-wide layer at 1024x1024 —
+        // 64x64 tokens after one downsample, doubled by the CFG batch. Its
+        // working set is the query, the attention output, and the combined
+        // result, plus a `[2, 10, 4096, 32]` score matrix.
+        const BATCH: u64 = 2;
+        const TOKENS: u64 = 64 * 64;
+        const HEADS: u64 = 10;
+        const ID_TOKENS: u64 = 32;
+        let one_injection =
+            (3 * BATCH * TOKENS * NARROW + BATCH * HEADS * TOKENS * ID_TOKENS) * F16;
+        let activations = IDENTITY_SDXL_VRAM_OVERHEAD_BYTES - adapter;
+        assert!(
+            activations >= 4 * one_injection,
+            "activation headroom {activations} must cover a 1024x1024 injection's working set \
+             ({one_injection}) several times over"
+        );
+        assert!(
+            activations < adapter,
+            "activation headroom {activations} must not exceed the weights it serves"
+        );
+
+        // SDXL's adapter is genuinely smaller than FLUX's and its attention
+        // runs at a quarter the token count, so the charge must be lower —
+        // charging FLUX's figure would park cards that can run this.
+        const { assert!(IDENTITY_SDXL_VRAM_OVERHEAD_BYTES < IDENTITY_VRAM_OVERHEAD_BYTES) };
+        assert_eq!(
+            identity_adapter_overhead_bytes(mold_core::identity::IdentityFamily::Sdxl),
+            IDENTITY_SDXL_VRAM_OVERHEAD_BYTES
+        );
+        assert_eq!(
+            identity_adapter_overhead_bytes(mold_core::identity::IdentityFamily::Flux),
+            IDENTITY_VRAM_OVERHEAD_BYTES
+        );
+    }
+
+    /// The estimate charges the family's OWN adapter, and a request naming
+    /// identity fields on an unqualified checkpoint charges no adapter at all
+    /// — admission refuses it, but the estimate runs first and must not
+    /// invent one.
+    #[test]
+    fn the_identity_charge_follows_the_family_of_the_requested_model() {
+        let mut sdxl: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "a portrait",
+            "model": "sdxl-base:fp16",
+            "width": 1024,
+            "height": 1024,
+            "steps": 25,
+            "guidance": 7.5,
+        }))
+        .unwrap();
+        assert_eq!(identity_overhead_family(&sdxl), None);
+
+        sdxl.id_image = Some(vec![0x89, 0x50, 0x4e, 0x47]);
+        assert_eq!(
+            identity_overhead_family(&sdxl),
+            Some(mold_core::identity::IdentityFamily::Sdxl)
+        );
+
+        let mut flux = sdxl.clone();
+        flux.model = "flux-dev:q8".to_string();
+        assert_eq!(
+            identity_overhead_family(&flux),
+            Some(mold_core::identity::IdentityFamily::Flux)
+        );
+
+        let mut turbo = sdxl.clone();
+        turbo.model = "sdxl-turbo:fp16".to_string();
+        assert!(request_charges_identity_overhead(&turbo));
+        assert_eq!(
+            identity_overhead_family(&turbo),
+            None,
+            "an unqualified checkpoint has no adapter to charge"
+        );
+
+        let mut zero = sdxl.clone();
+        zero.id_weight = Some(0.0);
+        assert_eq!(identity_overhead_family(&zero), None);
+    }
+
     /// Every artifact the extraction touches is host demand, and the adapter —
     /// the only device-resident one — is not.
     #[test]

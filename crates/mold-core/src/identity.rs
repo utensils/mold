@@ -629,6 +629,36 @@ pub fn request_identity_marker(req: &GenerateRequest) -> Option<String> {
     Some(format!("{:x}", hasher.finalize()))
 }
 
+/// Whether the extraction must also produce the UNCONDITIONAL identity.
+///
+/// The IDFormer over all-zero conditioning
+/// (`PuLID/pulid/pipeline_flux.py:188-192`, `pipeline_v1_1.py:243-247`) is a
+/// pure function of the adapter, memoized per adapter digest, and it is what a
+/// negative branch conditions on. Which renders HAVE a negative branch differs
+/// by family, and that is the whole content of this predicate:
+///
+/// * **FLUX** is guidance-distilled, so its negative branch is the true-CFG
+///   opt-in. An ordinary identity render has none and pays nothing.
+/// * **SDXL** runs classifier-free guidance as a matter of course
+///   (`pipeline_v1_1.py:306-316` drives the negative pass with
+///   `uncond_id_embedding`), so it always needs one. It is computed
+///   unconditionally rather than gated on `guidance > 1`, because the CFG
+///   threshold lives in the engine and duplicating it here would be a second
+///   authority for one question — and the value is memoized, so a render that
+///   turns guidance off pays for it once per process and never again.
+///
+/// A render that needs one and does not have it is an error at the engine,
+/// never a silently unconditioned negative pass.
+pub fn request_needs_unconditional_identity(req: &GenerateRequest) -> bool {
+    if !request_carries_identity_photo(req) || effective_id_weight(req) == 0.0 {
+        return false;
+    }
+    match identity_family(&req.model) {
+        Some(IdentityFamily::Sdxl) => true,
+        _ => request_uses_true_cfg(req),
+    }
+}
+
 /// Whether the request names either true-CFG knob.
 pub fn request_mentions_true_cfg(req: &GenerateRequest) -> bool {
     req.true_cfg.is_some() || req.cfg_start_step.is_some()
@@ -2464,6 +2494,38 @@ mod tests {
         assert!(validate_identity_conditioning(&req)
             .unwrap_err()
             .contains("at most"));
+    }
+
+    /// Which renders need the unconditional identity is a per-family question,
+    /// and getting it wrong on SDXL renders the negative pass unconditioned —
+    /// a plausible print with most of the identity cancelled out.
+    #[test]
+    fn the_unconditional_identity_is_needed_by_every_sdxl_render_and_only_true_cfg_flux() {
+        for model in IDENTITY_QUALIFIED_SDXL_MODELS {
+            let req = identity_request(model);
+            assert!(
+                request_needs_unconditional_identity(&req),
+                "{model} runs classifier-free guidance, so it always needs one"
+            );
+
+            let mut zero = identity_request(model);
+            zero.id_weight = Some(0.0);
+            assert!(!request_needs_unconditional_identity(&zero));
+        }
+
+        let plain_flux = identity_request("flux-dev:q8");
+        assert!(
+            !request_needs_unconditional_identity(&plain_flux),
+            "a distilled FLUX render has no negative branch to condition"
+        );
+        let mut true_cfg = identity_request("flux-dev:q8");
+        true_cfg.true_cfg = Some(2.0);
+        assert!(request_needs_unconditional_identity(&true_cfg));
+
+        // No photograph, no extraction, nothing to compute.
+        let mut bare = crate::test_support::minimal_generate_request("sdxl-base:fp16");
+        bare.steps = 25;
+        assert!(!request_needs_unconditional_identity(&bare));
     }
 
     // --- frozen embedding --------------------------------------------------

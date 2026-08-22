@@ -74,6 +74,55 @@ pub const ID_TOKEN_DIM: usize = 2048;
 /// under (`pipeline_v1_1.py:151-163` splits the file by it).
 pub const ADAPTER_PREFIX: &str = "id_adapter_attn_layers";
 
+/// SDXL's UNet cross-attention layout, for the layer table alone.
+///
+/// Mold owns this rather than reading it off the engine's own
+/// `StableDiffusionConfig` because candle keeps that struct's `unet` field
+/// private and exposes no accessor. The values are the published
+/// `stabilityai/stable-diffusion-xl-base-1.0/unet/config.json` — the same file
+/// candle transcribes in `StableDiffusionConfig::sdxl_` and `sdxl_turbo_`
+/// (whose UNet blocks are identical to each other), and the same file
+/// `testdata/pulid_sdxl/capture_attn_layer_map.py` built the real
+/// `diffusers.UNet2DConditionModel` from.
+///
+/// Only the fields [`plan_attn_layers`] reads are load-bearing — `blocks` and
+/// `layers_per_block`. The rest are filled in for completeness and are never
+/// used to construct anything.
+///
+/// Two defences make a drift between this and candle's copy fail loudly rather
+/// than render a mis-wired face: the layer table is pinned against the
+/// checkpoint's own tensor inventory by
+/// `the_sdxl_layer_table_matches_upstreams_own_processor_enumeration`, and at
+/// run time [`SdxlPulidHook::cross_attention`] refuses an index it was not
+/// planned for and a head count the UNet disagrees with.
+pub fn sdxl_unet_layout() -> UNet2DConditionModelConfig {
+    let block = |out_channels, use_cross_attn, attention_head_dim| {
+        candle_transformers::models::stable_diffusion::unet_2d::BlockConfig {
+            out_channels,
+            use_cross_attn,
+            attention_head_dim,
+        }
+    };
+    UNet2DConditionModelConfig {
+        blocks: vec![
+            block(320, None, 5),
+            block(640, Some(2), 10),
+            block(1280, Some(10), 20),
+        ],
+        center_input_sample: false,
+        cross_attention_dim: 2048,
+        downsample_padding: 1,
+        flip_sin_to_cos: true,
+        freq_shift: 0.,
+        layers_per_block: 2,
+        mid_block_scale_factor: 1.,
+        norm_eps: 1e-5,
+        norm_num_groups: 32,
+        sliced_attention_size: None,
+        use_linear_projection: true,
+    }
+}
+
 /// One hooked cross-attention module: where it sits in the forward pass, and
 /// which checkpoint index carries its weights.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -676,24 +725,7 @@ pub(crate) mod tests {
     /// (`stabilityai/stable-diffusion-xl-base-1.0/unet/config.json`), which is
     /// what `StableDiffusionConfig::sdxl` builds.
     pub(crate) fn sdxl_config() -> UNet2DConditionModelConfig {
-        UNet2DConditionModelConfig {
-            blocks: vec![
-                block(320, None, 5),
-                block(640, Some(2), 10),
-                block(1280, Some(10), 20),
-            ],
-            center_input_sample: false,
-            cross_attention_dim: 2048,
-            downsample_padding: 1,
-            flip_sin_to_cos: true,
-            freq_shift: 0.,
-            layers_per_block: 2,
-            mid_block_scale_factor: 1.,
-            norm_eps: 1e-5,
-            norm_num_groups: 32,
-            sliced_attention_size: None,
-            use_linear_projection: true,
-        }
+        sdxl_unet_layout()
     }
 
     /// SD1.5's UNet geometry, pinned only so the layout arithmetic is exercised
@@ -714,6 +746,10 @@ pub(crate) mod tests {
     /// A UNet small enough to construct on a CPU in milliseconds, with the same
     /// SHAPE of layout SDXL has: one attention-free block, one cross-attention
     /// block with more than one transformer layer, and a mid block.
+    pub(crate) fn sdxl_tiny_config() -> UNet2DConditionModelConfig {
+        tiny_config()
+    }
+
     fn tiny_config() -> UNet2DConditionModelConfig {
         UNet2DConditionModelConfig {
             blocks: vec![block(32, None, 2), block(64, Some(2), 4)],

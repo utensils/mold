@@ -622,6 +622,7 @@ where
                     load_strategy,
                     gpu_ordinal,
                     shared_pool,
+                    frozen.identity_assets.clone(),
                 )?))
             } else {
                 Ok(boxed_inference_engine(SDXLEngine::new(
@@ -632,6 +633,7 @@ where
                     load_strategy,
                     gpu_ordinal,
                     shared_pool,
+                    frozen.identity_assets.clone(),
                 )))
             }
         }

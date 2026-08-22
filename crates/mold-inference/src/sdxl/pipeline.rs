@@ -70,6 +70,11 @@ pub struct SDXLEngine {
     /// Empty when no LoRA is active. This is the SDXL equivalent of
     /// `FluxEngine::active_lora`.
     active_lora_fingerprint: Vec<(String, u64)>,
+    /// Face-identity conditioning: the frozen PuLID bundle, the embedding
+    /// admission extracted for the next request, and the resident adapter.
+    /// Inert — and costs nothing — for every request that does not condition
+    /// on a face.
+    identity: super::identity::SdxlIdentityState,
 }
 
 /// Compute a stable fingerprint for a LoRA stack: ordered list of
@@ -101,6 +106,7 @@ fn resolve_sdxl_vae_dtype(default_dtype: DType, single_file: bool) -> DType {
 }
 
 impl SDXLEngine {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         model_name: String,
         paths: ModelPaths,
@@ -109,6 +115,7 @@ impl SDXLEngine {
         load_strategy: LoadStrategy,
         gpu_ordinal: usize,
         shared_pool: Option<Arc<Mutex<crate::shared_pool::SharedPool>>>,
+        identity_assets: Option<mold_core::pulid_assets::PulidPaths>,
     ) -> Self {
         Self {
             base: EngineBase::new(model_name, paths, load_strategy, gpu_ordinal),
@@ -122,6 +129,7 @@ impl SDXLEngine {
             single_file_path: None,
             pending_loras: Vec::new(),
             active_lora_fingerprint: Vec::new(),
+            identity: super::identity::SdxlIdentityState::new(identity_assets),
         }
     }
 
@@ -161,6 +169,7 @@ impl SDXLEngine {
         load_strategy: LoadStrategy,
         gpu_ordinal: usize,
         shared_pool: Option<Arc<Mutex<crate::shared_pool::SharedPool>>>,
+        identity_assets: Option<mold_core::pulid_assets::PulidPaths>,
     ) -> Result<Self> {
         if !single_file_path.exists() {
             bail!(
@@ -228,6 +237,7 @@ impl SDXLEngine {
             single_file_path: Some(single_file_path),
             pending_loras: Vec::new(),
             active_lora_fingerprint: Vec::new(),
+            identity: super::identity::SdxlIdentityState::new(identity_assets),
         })
     }
 
@@ -302,6 +312,22 @@ impl SDXLEngine {
             tokenizers::Tokenizer::from_file(clip_tokenizer)
                 .map_err(|e| anyhow::anyhow!("failed to load {label} tokenizer: {e}"))?,
         ))
+    }
+
+    /// The PuLID adapter path admission froze, or `None`.
+    pub fn identity_adapter_path(&self) -> Option<&PathBuf> {
+        self.identity.adapter_path()
+    }
+
+    /// Device bytes the PuLID adapter is currently holding, or 0.
+    ///
+    /// The `InferenceEngine` trait has no resident-bytes method to fold this
+    /// into, so it is exposed here exactly as `FluxEngine` exposes its own: it
+    /// is the only way a caller can confirm that a park or an unload actually
+    /// released the adapter rather than leaving device memory nothing accounts
+    /// for.
+    pub fn identity_resident_bytes(&self) -> u64 {
+        self.identity.resident_bytes()
     }
 
     /// Create the SDXL config.
@@ -916,6 +942,7 @@ impl SDXLEngine {
         steps: u32,
         start_step: usize,
         inpaint_ctx: Option<&crate::img_utils::InpaintContext>,
+        identity: Option<&super::identity::ResolvedSdxlIdentity>,
     ) -> Result<()> {
         let use_cfg = cfg_active(guidance);
         let mut scheduler = crate::scheduler::build_scheduler(
@@ -948,6 +975,19 @@ impl SDXLEngine {
             None
         };
 
+        // Face identity, when this render conditions on one. The runtime is the
+        // gate: `hook_for_step` yields `None` before `id_start_step` and at an
+        // effective weight of 0, and a `None` step calls the UNet's ordinary
+        // `forward` — so an inactive step executes the exact code an
+        // unconditioned build executes.
+        let identity_runtime = identity.map(super::identity::ResolvedSdxlIdentity::runtime);
+        if let Some(resolved) = identity {
+            self.base.progress.info(&format!(
+                "Face identity: {} cross-attention modules",
+                resolved.module_count()
+            ));
+        }
+
         let denoise_label = format!("Denoising ({} steps)", active_timesteps.len());
         self.base.progress.stage_start(&denoise_label);
         let denoise_start = Instant::now();
@@ -962,7 +1002,19 @@ impl SDXLEngine {
             };
 
             let latent_input = scheduler.scale_model_input(latent_input, t)?;
-            let noise_pred = unet.forward(&latent_input, t as f64, text_embeddings)?;
+            // `start_step` is img2img's offset into the schedule; identity
+            // conditioning and img2img are mutually exclusive at the request
+            // contract, so for an identity render `step_idx` IS the absolute
+            // step `id_start_step` is measured against.
+            let hook = identity_runtime
+                .as_ref()
+                .and_then(|runtime| runtime.hook_for_step(start_step + step_idx));
+            let noise_pred = match hook.as_ref() {
+                Some(hook) => {
+                    unet.forward_with_hook(&latent_input, t as f64, text_embeddings, hook)?
+                }
+                None => unet.forward(&latent_input, t as f64, text_embeddings)?,
+            };
 
             // Hold onto the raw uncond row when CFG++ is active so we can use
             // it as the renoise direction below; standard path discards it
@@ -1453,6 +1505,17 @@ impl SDXLEngine {
             (latents.to_dtype(dtype)?, 0, None)
         };
 
+        // Resolved before the denoise and released with the UNet: the adapter
+        // is ~682 MB the VAE decode's conv2d intermediates would otherwise
+        // have to compete with, on exactly the machine that chose sequential
+        // loading.
+        let identity = self.identity.resolve(
+            req,
+            cfg_active(guidance),
+            &device,
+            dtype,
+            &super::pulid::sdxl_unet_layout(),
+        )?;
         self.denoise_loop(
             &unet,
             &text_embeddings,
@@ -1463,9 +1526,12 @@ impl SDXLEngine {
             req.steps,
             start_step,
             inpaint_ctx.as_ref(),
+            identity.as_ref(),
         )?;
 
         drop(inpaint_ctx);
+        drop(identity);
+        self.identity.drop_adapter();
         drop(unet);
         drop(text_embeddings);
         device.synchronize()?;
@@ -1679,6 +1745,13 @@ impl SDXLEngine {
             .unet
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("UNet not loaded"))?;
+        let identity = self.identity.resolve(
+            req,
+            cfg_active(guidance),
+            &loaded.device,
+            loaded.dtype,
+            &super::pulid::sdxl_unet_layout(),
+        )?;
         self.denoise_loop(
             unet,
             &text_embeddings,
@@ -1689,10 +1762,16 @@ impl SDXLEngine {
             req.steps,
             start_step,
             inpaint_ctx.as_ref(),
+            identity.as_ref(),
         )?;
 
         // Drop UNet before VAE decode to free VRAM for conv2d intermediates.
+        // The identity adapter goes with it, through BOTH of its owners — the
+        // render's handle and the engine's resident slot — because releasing
+        // one of them frees nothing.
         drop(inpaint_ctx);
+        drop(identity);
+        self.identity.drop_adapter();
         let _ = loaded;
         let loaded = self.base.loaded.as_mut().unwrap();
         loaded.unet = None;
@@ -1768,6 +1847,30 @@ impl SDXLEngine {
 }
 
 impl InferenceEngine for SDXLEngine {
+    /// SDXL is the second family that can honour this, so it overrides the
+    /// trait's refusal exactly as FLUX does.
+    ///
+    /// Both halves come from the same frozen value, so a render cannot end up
+    /// with this request's identity and a previous request's unconditional
+    /// one. SDXL needs the unconditional half for every classifier-free
+    /// render, not just an opt-in branch, so an absent one is caught at
+    /// resolve time rather than silently rendering the negative pass
+    /// unconditioned.
+    fn install_identity_embedding(
+        &mut self,
+        embedding: Option<&mold_core::identity::FrozenIdentityEmbedding>,
+    ) -> Result<()> {
+        let uncond = embedding
+            .map(super::pulid::SdxlIdentityEmbedding::uncond_from_frozen)
+            .transpose()?
+            .flatten();
+        let embedding = embedding
+            .map(super::pulid::SdxlIdentityEmbedding::from_frozen)
+            .transpose()?;
+        self.identity.set_embedding(embedding, uncond);
+        Ok(())
+    }
+
     fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
         self.base.progress.checkpoint()?;
         self.pending_placement = req.placement.clone();
@@ -1804,6 +1907,10 @@ impl InferenceEngine for SDXLEngine {
         clear_cache(&self.source_latent_cache);
         clear_cache(&self.mask_cache);
         self.active_lora_fingerprint.clear();
+        // Not optional: `ModelCache` parks by calling this and zeroing the
+        // entry's `vram_bytes` while keeping the engine cached, so an adapter
+        // that survived would be device memory nothing accounts for.
+        self.identity.drop_adapter();
     }
 
     fn set_on_progress(&mut self, callback: ProgressCallback) {
@@ -1905,6 +2012,7 @@ mod tests {
             LoadStrategy::Eager,
             0,
             None,
+            None,
         )
         .expect("constructor must accept a valid SDXL single-file layout");
 
@@ -1975,6 +2083,7 @@ mod tests {
             LoadStrategy::Eager,
             0,
             Some(shared_pool),
+            None,
         );
 
         let loaded_l = engine
@@ -2035,6 +2144,7 @@ mod tests {
             LoadStrategy::Eager,
             0,
             Some(shared_pool),
+            None,
         );
 
         let loaded = engine.load_vae_cpu_tensors().unwrap().unwrap();
@@ -2062,6 +2172,7 @@ mod tests {
             false,
             LoadStrategy::Eager,
             0,
+            None,
             None,
         );
 
@@ -2108,6 +2219,7 @@ mod tests {
             false,
             LoadStrategy::Eager,
             0,
+            None,
             None,
         )
         .expect("constructor");
@@ -2250,6 +2362,7 @@ mod tests {
             LoadStrategy::Eager,
             0,
             None,
+            None,
         )
         .expect("constructor must accept is_turbo = true");
 
@@ -2276,6 +2389,7 @@ mod tests {
             false,
             LoadStrategy::Eager,
             0,
+            None,
             None,
         )
         .expect("constructor must accept is_turbo = false");
