@@ -301,17 +301,33 @@ at f16/bf16.
    its geometry (16 `attn2` modules, pinned against
    `attn_layer_map_sd15.json`), so if one is ever published the work is a
    manifest entry and a qualified-model list.
-3. **The adapter is opened by pathname on both families.** A review raised
-   the descriptor-retention rule for `SdxlPulidAdapter::load`. It was left as
-   it is, matching `flux::pulid::PulidAdapter::load` and the IDFormer half of
-   the extraction, and the reasoning is now recorded on the function: the rule
-   protects a loader that has just authenticated bytes and would throw that
-   away by reopening a name (the EVA02-CLIP and BiSeNet conversions), and the
-   adapter has no such fresher authentication — its pin was verified at
-   download time and admission freezes the exact path. If mold decides a
-   manifest-pinned adapter should be re-authenticated at load, FLUX and SDXL
-   must move together; doing it for one family would give one contract two
-   answers.
+3. **PuLID weights are opened by pathname, on both families — file a
+   cross-family hardening issue.** Two independent review passes raised the
+   descriptor-retention rule against `SdxlPulidAdapter::load`. It was left as
+   it is and the reasoning recorded on the function, because the change is
+   genuinely cross-cutting rather than a line in this PR:
+
+   - **Four sibling loaders do the same thing** — `sdxl::pulid` and
+     `flux::pulid`'s adapters, and the `id_adapter.*` / `pulid_encoder.*`
+     IDFormer loads in `identity::extraction`. Hardening one gives a single
+     contract two answers.
+   - **The rule's target is a different case.** It protects a loader that has
+     just authenticated bytes and would throw that away by reopening a name —
+     the EVA02-CLIP and BiSeNet conversions, whose
+     `pickle_convert::AuthenticatedArtifact` hashes a private copy and
+     publishes through `renameat`. A manifest adapter has no fresher
+     authentication to discard: its pin was verified at download time, and
+     admission freezes the exact path the planned factory proves local.
+   - **The mechanism is not free.** `VarBuilder::from_mmaped_safetensors`
+     takes paths. Authenticating means either a ~1 GB private read — which
+     defeats the mmap the whole residency accounting is built on — or a candle
+     API that accepts a retained descriptor. The second is the right answer and
+     belongs with the `StableDiffusionConfig::unet()` accessor in follow-up 1.
+
+   The residual risk is a group-writable model root where another member
+   replaces a pinned adapter between download and load. Real, but identical
+   for FLUX today, so it is an existing invariant gap this PR inherits rather
+   than one it opens.
 4. **iPhone, TUI, and Discord** are untouched by design — they gate on
    `supports_identity` and get SDXL for free — but none of them has an SDXL
    identity UAT yet.

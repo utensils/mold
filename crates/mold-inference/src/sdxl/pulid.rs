@@ -365,9 +365,17 @@ impl SdxlPulidAdapter {
     /// authentication here to discard: the adapter is a manifest file whose
     /// pinned digest the download verified when it wrote the
     /// `.sha256-verified` marker, and admission freezes the exact path the
-    /// planned factory then proves local. Diverging from FLUX on this would
-    /// give one contract two answers for one question; if the adapter should
-    /// be re-authenticated at load, both families must move together.
+    /// planned factory then proves local.
+    ///
+    /// Re-authenticating it at load is a real hardening, and a real
+    /// cross-family change rather than a line here. Four sibling loaders open
+    /// PuLID weights this way — both adapters and both IDFormer halves — so
+    /// doing it for one would give a single contract two answers, and the
+    /// mechanism is not free: `VarBuilder::from_mmaped_safetensors` takes
+    /// paths, so authenticating means either a 1 GB private read (which
+    /// defeats the mmap the residency accounting is built on) or a candle API
+    /// that accepts a retained descriptor. Tracked as a follow-up in
+    /// `docs/architecture/pulid-1228-docs.md`; do not fix it here alone.
     pub fn load(
         path: &Path,
         config: &UNet2DConditionModelConfig,
