@@ -72,8 +72,20 @@ mold-core = { path = "../../crates/mold-core", package = "mold-ai-core", version
 mold-db = { path = "../../crates/mold-db", package = "mold-ai-db", version = "0.23.3" }
 mold-server = { path = "../../crates/mold-server", package = "mold-ai-server", version = "0.23.3", features = [
   "expand",
-  "mp4",
   "mdns",
+] }
+
+# AAC muxing is everywhere except Windows. `mp4` pulls `fdk-aac-sys`, whose
+# `FDK_archdef.h` recognises only GCC/Clang architecture macros and falls
+# through to a `#warning` for every MSVC target — and MSVC raises that as the
+# fatal C1021, so the crate cannot build with the Microsoft toolchain on x64 or
+# ARM64. Cargo features are additive per target, so this entry turns `mp4` on
+# for every non-Windows target and leaves the Windows build with mold's own
+# `#[cfg(not(feature = "mp4"))]` arm: video still renders and muxes through the
+# pure-Rust mp4 writer, and only a generated AAC track is refused, by name.
+[target.'cfg(not(windows))'.dependencies]
+mold-server = { path = "../../crates/mold-server", package = "mold-ai-server", version = "0.23.3", features = [
+  "mp4",
 ] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
