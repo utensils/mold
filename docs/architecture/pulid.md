@@ -551,6 +551,63 @@ error, never a silent distilled render: `req.guidance` is chosen for whichever
 regime is running, so dropping the branch renders at a guidance value the caller
 picked for a branch that never ran.
 
+### Absence is the failure mode, so both shapes are capability-gated
+
+Serde ignores unknown fields. A server that predates `id_images` therefore
+ACCEPTS a multi-photograph request and renders it with no identity at all, and
+one that predates `true_cfg` accepts a branched request and renders the
+distilled path at a guidance value the caller chose for a branch that never ran.
+Both are the accept-and-ignore this contract refuses everywhere else, and
+neither is visible to anyone.
+
+`GET /api/capabilities.identity` is the fix:
+`{ multi_photo, max_photos, true_cfg }`, built by
+`IdentityCapabilities::advertised()` straight from `mold_core::identity`'s
+constants — one authority, so it cannot advertise a bound the validator does not
+enforce — and gated on `identity_runtime_available()` so a build that cannot
+execute identity advertises nothing.
+
+**Absence reads as NO.** The whole block is `#[serde(default)]` all-false, which
+is exactly what an older server's response deserializes to; there is no
+"unknown" state to be permissive about. `mold run`'s remote path probes ONLY
+when the request carries several photographs or engages the branch
+(`commands::identity::request_needs_identity_capabilities`), so a single
+`--id-image` still costs no round trip, and refuses by name through
+`ensure_server_understands_identity` rather than submitting.
+
+A probe that cannot REACH the host is deliberately not a refusal: the caller's
+next step is the ordinary remote attempt, which fails the same way and falls
+back to local inference, where both shapes are honoured in full. Turning an
+unreachable host into a hard error would take that fallback away from exactly
+the requests that need it most. `--local` never probes at all.
+
+### The estimate has to know about the second forward
+
+A branched step runs two transformer forwards, so a branched render is close to
+twice the denoise wall clock of an identical ordinary one. Two things follow,
+and both are in `scheduler/mod.rs`:
+
+`generation_shape_bucket` carries a `:cfg<permille>` suffix, so branched and
+ordinary runs of the same geometry never share a learned bucket. Sharing one
+would teach the model an average that is wrong for both, and that number is what
+a client renders as a queue ETA and what `placement-preview` compares when Auto
+picks a host. The suffix is the multiplier rather than a bare flag, so a run
+starting the branch at step 1 and one starting it at step 15 also stay separate;
+everything that does not engage the branch renders `cfg1000`.
+
+`static_generation_time_ms` — the cold estimate, which is exactly what a first
+true-CFG render hits — scales its denoise term by
+`1 + (steps - cfg_start_step) / steps`. The branched FRACTION, never a flat 2x,
+because a late-starting branch genuinely runs fewer double steps. The fixed
+1,000 ms setup term is outside the multiplier: true CFG doubles denoise, not
+loading.
+
+`denoise_forward_multiplier_permille` returns exactly `1_000` for every request
+that does not engage the branch, so an inert scale and a zero identity weight
+are byte-identical in both the key and the estimate rather than merely close.
+Placement preview reads both functions through the shared estimate path, so it
+cannot drift from admission.
+
 ### Memory
 
 `memory_preflight::TRUE_CFG_VRAM_OVERHEAD_BYTES` (150 MB) is charged on top of

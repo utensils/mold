@@ -13,3 +13,8 @@
   turn it on. It roughly doubles denoise time, which admission now accounts for;
   the default `1.0` is inert and renders bit-identically to before
   ([#1226](https://github.com/utensils/mold/issues/1226)).
+- **Identity request shapes are capability-gated.** `GET /api/capabilities` now
+  reports `identity: { multi_photo, max_photos, true_cfg }`, and `mold run`
+  refuses several photographs or `--true-cfg` against a server that does not
+  advertise them instead of submitting fields that server would silently drop
+  ([#1226](https://github.com/utensils/mold/issues/1226)).

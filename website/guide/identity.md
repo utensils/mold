@@ -131,6 +131,29 @@ accepted rather than discovering mid-denoise.
 `--true-cfg 1.0` is inert in exactly the way `--id-weight 0` is: the branch is
 never constructed and the render is bit-identical to one that never named it.
 
+### Older servers
+
+Both of the above are additive request fields, and a server that predates them
+does not reject them — it **ignores** them. Sending several photographs to such
+a server would render with no face at all; sending `--true-cfg` would render the
+ordinary distilled path with no negative branch. Neither would tell you.
+
+So `mold run` asks first. When the render target does not advertise
+`capabilities.identity`, the request is **refused by name** rather than
+submitted:
+
+```
+$ mold run flux-dev:q4 "a chef" --id-image a.jpg --id-image b.jpg
+error: http://gpu-box:7680 does not support more than one identity photograph,
+       and sending several to it would render with no face at all. Use a single
+       --id-image, or upgrade that server.
+```
+
+A single `--id-image` needs no such check — every identity-capable server has
+always understood it — and `--local` is unaffected. If the server cannot be
+reached at all, nothing is refused: the ordinary local fallback takes over, and
+both shapes work in full there.
+
 ### Choosing a photograph
 
 - One clearly visible face, looking roughly at the camera. If several faces are
@@ -198,6 +221,8 @@ message rather than silently rendered:
   qualified only alongside an active identity (a photograph and a non-zero
   `--id-weight`). They are refused on an ordinary FLUX render rather than
   accepted and ignored.
+- **Older servers refuse both.** They are gated on
+  `GET /api/capabilities.identity`; see [Older servers](#older-servers).
 - Multiple photographs and true CFG are **CLI and API only** so far. The web,
   desktop, iPhone, TUI, and Discord surfaces still offer a single photograph and
   no true-CFG control.

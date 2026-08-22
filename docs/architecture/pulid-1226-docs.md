@@ -71,7 +71,28 @@ Suggested as a new paragraph immediately after the identity-photo invariant.
 > render is never admitted on the plain estimate. Web, desktop, iPhone, TUI, and
 > Discord are a separate issue.
 
-### 1c. Amend the PuLID face-extraction bullet
+### 1c. Add the capability sentence to the identity invariant
+
+Absence of a capability is the difference between a refusal and a print of the
+wrong person, so it belongs in the invariant itself. Suggested addition to the
+identity-photo invariant paragraph:
+
+> Both additive shapes are CAPABILITY-GATED, because an older server DROPS an
+> unknown field rather than rejecting it: `id_images` alone renders with no face
+> in it and `true_cfg` alone renders the distilled path at a guidance value
+> chosen for a branch that never ran. `GET /api/capabilities.identity`
+> (`{ multi_photo, max_photos, true_cfg }`, built by
+> `IdentityCapabilities::advertised()` from `mold_core::identity`'s own
+> constants so it can never advertise a bound the validator does not enforce) is
+> the authority, and ABSENCE READS AS NO — the whole block is `#[serde(default)]`
+> all-false, which is exactly what an older server's response deserializes to. A
+> client that needs either shape probes first and refuses by name; the singular
+> `id_image` predates the block and pays no round trip. A probe that cannot
+> reach the host is deliberately not a refusal, because the ordinary remote
+> attempt fails the same way and falls back to local inference, where both
+> shapes are honoured in full.
+
+### 1d. Amend the PuLID face-extraction bullet
 
 The bullet beginning **"PuLID face extraction is a CPU `candle-onnx` path…"**
 ends by listing deliberate deviations. Append:
@@ -127,10 +148,16 @@ Flag table rows:
 | `--true-cfg N` | `1.0` | 1.0–10.0, `1.0` = off. Requires `--id-image` and a non-zero `--id-weight`. ~2x denoise time. |
 | `--cfg-start-step N` | `1` | Requires `--true-cfg`. Must be `< --steps`. |
 
-Gotcha worth stating explicitly for an agent:
+Gotchas worth stating explicitly for an agent:
 
 > `--negative-prompt` does nothing on FLUX unless `--true-cfg` is above 1.0 —
 > FLUX.1-dev is guidance-distilled and has no negative branch without it.
+
+> Repeated `--id-image` and `--true-cfg` need a server that advertises
+> `capabilities.identity`. Against an older one `mold run` refuses by name
+> rather than submitting, because that server would drop the fields and render
+> without them. A single `--id-image` works against any identity-capable
+> server.
 
 ---
 
@@ -138,6 +165,14 @@ Gotcha worth stating explicitly for an agent:
 
 No navigation change. Everything lands inside the existing
 `website/guide/identity.md` page, which is already in the sidebar.
+
+If `website/guide/remote-workflows.md` or an API-reference page enumerates
+`GET /api/capabilities` fields, add:
+
+> `identity: { multi_photo, max_photos, true_cfg }` — which face-identity
+> request shapes this server understands. Absent on servers that predate it, and
+> absence means no: a client that wants several photographs or true CFG must
+> refuse rather than send fields an older server would silently drop.
 
 ---
 
@@ -196,3 +231,12 @@ either attachment-list handling or a second command.
   (`app_flux.py:221`); `cfg_start_step` defaults to `1` (`app_flux.py:68`).
 - **Single-photograph metadata is unchanged.** Plural provenance fields are
   written only for the plural form.
+- **Both additive shapes are capability-gated** through a new
+  `capabilities.identity` block; absence reads as NO. A probe that cannot reach
+  the host is not a refusal, so the offline local-fallback path is preserved.
+- **The true-CFG branch is part of the estimate identity.** The shape-bucket key
+  carries a `:cfg<permille>` suffix so learned samples never mix branched and
+  ordinary runs, and the static estimate scales the denoise term (not the fixed
+  setup term) by `1 + (steps - cfg_start_step)/steps` — the branched fraction,
+  never a flat 2x. Placement preview reads the same two functions, so Auto host
+  choice cannot misprice a branched render.
