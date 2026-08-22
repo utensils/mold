@@ -305,7 +305,12 @@ pub async fn run_generation(
                     }
                 };
 
-                let result = try_server_generate(&client, &req, &metadata_snapshot, &tx).await;
+                let host_label = iter_params
+                    .target_host_name
+                    .clone()
+                    .unwrap_or_else(|| url.clone());
+                let result =
+                    try_server_generate(&client, &host_label, &req, &metadata_snapshot, &tx).await;
                 if matches!(&result, ServerResult::Done) {
                     if let Some(lease) = reference_session.as_mut() {
                         lease.mark_consumed();
@@ -591,10 +596,14 @@ fn h3_runtime_unavailable_message(url: Option<&str>) -> String {
 /// auto-pull it and retry once.
 async fn try_server_generate(
     client: &MoldClient,
+    host_label: &str,
     req: &GenerateRequest,
     metadata_snapshot: &GenerationMetadataSnapshot,
     tx: &mpsc::UnboundedSender<BackgroundEvent>,
 ) -> ServerResult {
+    if let Err(error) = prepare_remote_licensed_dependencies(client, host_label, req, tx).await {
+        return ServerResult::Error(error);
+    }
     let is_h3 = mold_core::minimax_h3::task_for_model(&req.model).is_some();
     let (progress_tx, mut progress_rx) = mpsc::unbounded_channel::<SseProgressEvent>();
 
@@ -675,6 +684,226 @@ async fn try_server_generate(
     }
 }
 
+async fn request_license_consent(
+    host_label: String,
+    requirements: Vec<crate::app::LicenseDownloadRequirement>,
+    tx: &mpsc::UnboundedSender<BackgroundEvent>,
+) -> Result<bool, String> {
+    if requirements.is_empty() {
+        return Ok(true);
+    }
+    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+    tx.send(BackgroundEvent::LicenseRequired {
+        host_label,
+        requirements,
+        response: response_tx,
+    })
+    .map_err(|_| "the license review UI is unavailable".to_string())?;
+    response_rx
+        .await
+        .map_err(|_| "the license review was closed".to_string())
+}
+
+fn grouped_license_requirements(
+    pending: &[mold_core::PendingModelDownload],
+) -> Vec<crate::app::LicenseDownloadRequirement> {
+    let mut by_model = std::collections::BTreeMap::<
+        String,
+        std::collections::BTreeMap<String, mold_core::LicenseRefusal>,
+    >::new();
+    for download in pending {
+        let Some(model) = download.install_model.as_ref() else {
+            continue;
+        };
+        let licenses = by_model.entry(model.clone()).or_default();
+        for license in &download.licenses {
+            licenses.insert(
+                format!("{}\0{}\0{}", license.id, license.url, license.sha256),
+                license.clone(),
+            );
+        }
+    }
+    by_model
+        .into_iter()
+        .filter_map(|(install_model, licenses)| {
+            (!licenses.is_empty()).then(|| crate::app::LicenseDownloadRequirement {
+                install_model,
+                licenses: licenses.into_values().collect(),
+            })
+        })
+        .collect()
+}
+
+async fn prepare_remote_licensed_dependencies(
+    client: &MoldClient,
+    host_label: &str,
+    req: &GenerateRequest,
+    tx: &mpsc::UnboundedSender<BackgroundEvent>,
+) -> Result<(), String> {
+    let preview = match client.preview_generation_placement(req.clone(), 1).await {
+        Ok(preview) => preview,
+        // Compatibility: an older server has no structured preflight. Its
+        // existing admission error remains visible, but cannot be accepted in
+        // place because it exposes no safe pinned-terms contract.
+        Err(error) if mold_core::client::is_missing_endpoint_error(&error) => return Ok(()),
+        Err(error) => {
+            return Err(format!(
+                "Could not verify licensed dependencies on {host_label}: {error}"
+            ));
+        }
+    };
+    let requirements = grouped_license_requirements(&preview.pending_downloads);
+    if !request_license_consent(host_label.to_string(), requirements.clone(), tx).await? {
+        return Err("License acceptance cancelled; nothing was queued.".to_string());
+    }
+    for requirement in requirements {
+        let acceptances = requirement
+            .licenses
+            .iter()
+            .map(|license| mold_core::LicenseAcceptance {
+                id: license.id.clone(),
+                url: license.url.clone(),
+                sha256: license.sha256.clone(),
+            })
+            .collect::<Vec<_>>();
+        let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
+        let progress_events = tx.clone();
+        tokio::spawn(async move {
+            while let Some(event) = progress_rx.recv().await {
+                let _ = progress_events.send(BackgroundEvent::Progress(event));
+            }
+        });
+        client
+            .pull_model_stream_accepting(&requirement.install_model, &acceptances, progress_tx)
+            .await
+            .map_err(|error| {
+                format!(
+                    "Failed to download '{}' on {host_label}: {error}",
+                    requirement.install_model
+                )
+            })?;
+    }
+    Ok(())
+}
+
+pub async fn pull_remote_model_with_consent(
+    client: &MoldClient,
+    host_label: String,
+    model: String,
+    tx: mpsc::UnboundedSender<BackgroundEvent>,
+) -> Result<(), String> {
+    let statuses = match client.list_licenses().await {
+        Ok(statuses) => statuses,
+        Err(error) if mold_core::client::is_missing_endpoint_error(&error) => Vec::new(),
+        Err(error) => {
+            return Err(format!("Could not read licenses on {host_label}: {error}"));
+        }
+    };
+    let licenses = statuses
+        .into_iter()
+        .filter(|license| {
+            !license.accepted && license.required_by.iter().any(|name| name == &model)
+        })
+        .map(|license| mold_core::LicenseRefusal {
+            id: license.id,
+            name: license.name,
+            url: license.url,
+            canonical: license.canonical,
+            sha256: license.sha256,
+            summary: license.summary,
+        })
+        .collect::<Vec<_>>();
+    let requirements = (!licenses.is_empty())
+        .then(|| crate::app::LicenseDownloadRequirement {
+            install_model: model.clone(),
+            licenses,
+        })
+        .into_iter()
+        .collect::<Vec<_>>();
+    if !request_license_consent(host_label, requirements.clone(), &tx).await? {
+        return Err("License acceptance cancelled; nothing was downloaded.".to_string());
+    }
+    let acceptances = requirements
+        .iter()
+        .flat_map(|requirement| &requirement.licenses)
+        .map(|license| mold_core::LicenseAcceptance {
+            id: license.id.clone(),
+            url: license.url.clone(),
+            sha256: license.sha256.clone(),
+        })
+        .collect::<Vec<_>>();
+    let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
+    let progress_events = tx.clone();
+    tokio::spawn(async move {
+        while let Some(event) = progress_rx.recv().await {
+            let _ = progress_events.send(BackgroundEvent::Progress(event));
+        }
+    });
+    client
+        .pull_model_stream_accepting(&model, &acceptances, progress_tx)
+        .await
+        .map_err(|error| format!("Server pull failed: {error}"))
+}
+
+pub async fn pull_local_model_with_consent(
+    model: String,
+    tx: mpsc::UnboundedSender<BackgroundEvent>,
+) -> Result<(), String> {
+    let home = mold_core::Config::mold_dir()
+        .ok_or_else(|| "Could not resolve the Mold data directory".to_string())?;
+    let config = mold_core::Config::load_or_default();
+    let missing_files = mold_core::manifest::find_manifest(&model)
+        .map(|manifest| {
+            manifest
+                .files
+                .iter()
+                .filter(|file| config.complete_manifest_file_path(manifest, file).is_none())
+                .map(|file| file.hf_filename.as_str())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let licenses =
+        mold_core::license_acceptance::unaccepted_for_manifest_files(&model, missing_files, &home);
+    let requirements = (!licenses.is_empty())
+        .then(|| crate::app::LicenseDownloadRequirement {
+            install_model: model.clone(),
+            licenses,
+        })
+        .into_iter()
+        .collect::<Vec<_>>();
+    if !request_license_consent("This device".to_string(), requirements.clone(), &tx).await? {
+        return Err("License acceptance cancelled; nothing was downloaded.".to_string());
+    }
+    let acceptances = requirements
+        .iter()
+        .flat_map(|requirement| &requirement.licenses)
+        .map(|license| mold_core::LicenseAcceptance {
+            id: license.id.clone(),
+            url: license.url.clone(),
+            sha256: license.sha256.clone(),
+        })
+        .collect::<Vec<_>>();
+    mold_core::license_acceptance::record_acceptances(&home, &acceptances)
+        .map_err(|error| format!("Could not record license acceptance: {error}"))?;
+    auto_pull_model(&model, &tx).await.map(|_| ())
+}
+
+/// Materialize auxiliary bundles the in-process TUI engine needs before it
+/// starts. The consent/download loop is bundle-generic; request policy merely
+/// names which registered bundles apply.
+async fn prepare_local_licensed_dependencies(
+    request: &GenerateRequest,
+    config: &mold_core::Config,
+    tx: &mpsc::UnboundedSender<BackgroundEvent>,
+) -> Result<(), String> {
+    for bundle in mold_core::manifest::auxiliary_manifests_for_request(request) {
+        if config.manifest_model_needs_download(bundle) {
+            pull_local_model_with_consent(bundle.to_string(), tx.clone()).await?;
+        }
+    }
+    Ok(())
+}
+
 /// Single attempt to generate via server (SSE with blocking fallback).
 async fn try_server_generate_once(
     client: &MoldClient,
@@ -714,6 +943,21 @@ async fn run_local_generation(
         return;
     }
 
+    let offload = params.offload;
+    let req = match build_request(&params, &prompt, &negative_prompt) {
+        Ok(req) => req,
+        Err(message) => {
+            let _ = tx.send(BackgroundEvent::Error(message));
+            return;
+        }
+    };
+    if let Err(message) = prepare_local_licensed_dependencies(&req, &config, &tx).await {
+        let _ = tx.send(BackgroundEvent::Error(message));
+        return;
+    }
+    // A bundle pull may have updated model paths or their configured root.
+    config = Config::load_or_default();
+
     // Resolve model paths — auto-pull if not downloaded
     let model_paths = match ModelPaths::resolve(&model_name, &config) {
         Some(paths) => paths,
@@ -741,14 +985,6 @@ async fn run_local_generation(
         }
     };
 
-    let offload = params.offload;
-    let req = match build_request(&params, &prompt, &negative_prompt) {
-        Ok(req) => req,
-        Err(message) => {
-            let _ = tx.send(BackgroundEvent::Error(message));
-            return;
-        }
-    };
     let tx_clone = tx.clone();
 
     let result = tokio::task::spawn_blocking(move || {
@@ -1133,6 +1369,32 @@ pub fn remove_model(model_name: String, tx: mpsc::UnboundedSender<BackgroundEven
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn license_requirements_group_future_terms_by_install_bundle() {
+        let terms = mold_core::LicenseRefusal {
+            id: "future-research-weights".into(),
+            name: "Future research weights".into(),
+            url: "https://example.test/pinned".into(),
+            canonical: "https://example.test/project".into(),
+            sha256: "a".repeat(64),
+            summary: "Research use only.".into(),
+        };
+        let dependency = |name: &str| mold_core::PendingModelDownload {
+            kind: "identity_encoder".into(),
+            name: name.into(),
+            repo: "example/future".into(),
+            bytes: 42,
+            install_model: Some("future-face-adapter".into()),
+            licenses: vec![terms.clone()],
+        };
+
+        let grouped = grouped_license_requirements(&[dependency("one"), dependency("two")]);
+
+        assert_eq!(grouped.len(), 1);
+        assert_eq!(grouped[0].install_model, "future-face-adapter");
+        assert_eq!(grouped[0].licenses, vec![terms]);
+    }
 
     /// #787 round 3: a Local-target (or Auto-fallback) run with an untouched
     /// wan editor used to snapshot `None` even though the engine substitutes

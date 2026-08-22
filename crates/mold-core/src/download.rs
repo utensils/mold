@@ -1144,18 +1144,17 @@ pub fn require_license_accepted(
     hf_filename: &str,
     mold_home: Option<&std::path::Path>,
 ) -> Result<(), DownloadError> {
-    let Some(license) =
-        crate::license_acceptance::license_for_manifest_file(manifest_name, hf_filename)
-    else {
-        return Ok(());
-    };
-    if mold_home.is_some_and(|home| crate::license_acceptance::is_accepted(home, license)) {
-        return Ok(());
+    for license in crate::license_acceptance::licenses_for_manifest_file(manifest_name, hf_filename)
+    {
+        if mold_home.is_some_and(|home| crate::license_acceptance::is_accepted(home, license)) {
+            continue;
+        }
+        return Err(DownloadError::LicenseNotAccepted {
+            license_id: license.id.to_string(),
+            message: crate::license_acceptance::acceptance_required_message(manifest_name, license),
+        });
     }
-    Err(DownloadError::LicenseNotAccepted {
-        license_id: license.id.to_string(),
-        message: crate::license_acceptance::acceptance_required_message(manifest_name, license),
-    })
+    Ok(())
 }
 
 pub async fn pull_model(

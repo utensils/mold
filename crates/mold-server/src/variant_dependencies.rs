@@ -284,6 +284,7 @@ pub(crate) async fn ensure_downloaded(
         expected_sha256,
         subdir,
     } = dependency;
+    let install_model = expected_sha256.map(|pin| pin.repair_model.to_string());
     let cached = if policy == DependencyMaterializationPolicy::ExistingOnly {
         mold_core::download::cached_file_path_existing_only(
             models_root,
@@ -328,6 +329,19 @@ pub(crate) async fn ensure_downloaded(
                 name: filename.to_string(),
                 repo: repo.to_string(),
                 bytes,
+                licenses: install_model
+                    .as_deref()
+                    .and_then(|model| {
+                        mold_core::Config::mold_dir().map(|home| {
+                            mold_core::license_acceptance::unaccepted_for_manifest_files(
+                                model,
+                                [filename],
+                                &home,
+                            )
+                        })
+                    })
+                    .unwrap_or_default(),
+                install_model,
             },
             path: mold_core::download::planned_single_file_path_in(models_root, filename, subdir),
             container,
@@ -1571,6 +1585,8 @@ pub(crate) async fn prepare_inputs_for_devices(
                                 repo: dependency.download.repo.clone(),
                                 filename: dependency.download.name.clone(),
                                 bytes: dependency.download.bytes,
+                                install_model: dependency.download.install_model.clone(),
+                                licenses: dependency.download.licenses.clone(),
                                 container: dependency.container,
                                 quantization: dependency.quantization,
                             },
@@ -2088,16 +2104,24 @@ pub async fn prepare_local_execution_inputs(
     request: &GenerateRequest,
     devices: Vec<DeviceFact>,
 ) -> Result<PreparedExecutionInputs, String> {
-    let mut context = DependencyPreparationContext::default();
-    #[cfg(feature = "h3")]
-    if mold_core::minimax_h3::task_for_model(&request.model).is_some() {
-        context.h3_private_ingress_grant = crate::h3_private_bridge::classify_h3_private_ingress(
-            request,
-            None,
-            H3_PUBLIC_LOCAL_INSTANCE_ID,
-        )
-        .map_err(|error| error.error)?;
-    }
+    let context = {
+        #[cfg(feature = "h3")]
+        {
+            let mut context = DependencyPreparationContext::default();
+            if mold_core::minimax_h3::task_for_model(&request.model).is_some() {
+                context.h3_private_ingress_grant =
+                    crate::h3_private_bridge::classify_h3_private_ingress(
+                        request,
+                        None,
+                        H3_PUBLIC_LOCAL_INSTANCE_ID,
+                    )
+                    .map_err(|error| error.error)?;
+            }
+            context
+        }
+        #[cfg(not(feature = "h3"))]
+        DependencyPreparationContext::default()
+    };
     prepare_inputs_for_devices(
         None,
         "local",

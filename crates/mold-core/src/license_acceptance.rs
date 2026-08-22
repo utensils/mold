@@ -109,31 +109,48 @@ pub fn license_by_id(id: &str) -> Option<&'static ThirdPartyLicense> {
         .find(|license| license.id == id)
 }
 
-/// The license covering one manifest file, if that file is gated on
-/// acceptance.
+/// Whether one registered license covers one manifest file.
+///
+/// Keep policy in this registry predicate rather than in callers. A future
+/// file may be covered by more than one license; every consumer enumerates
+/// [`licenses_for_manifest_file`] and therefore enforces all of them.
+fn license_covers_manifest_file(
+    license: &ThirdPartyLicense,
+    manifest_name: &str,
+    hf_filename: &str,
+) -> bool {
+    license.id == INSIGHTFACE_ANTELOPEV2.id
+        && manifest_name == crate::manifest::PULID_FLUX_MANIFEST
+        && matches!(hf_filename, "scrfd_10g_bnkps.onnx" | "glintr100.onnx")
+}
+
+/// Every license covering one manifest file.
 ///
 /// Keyed on `(manifest name, hf filename)` rather than on the repository so a
 /// mirror that also hosts unrestricted files is not over-gated.
-pub fn license_for_manifest_file(
-    manifest_name: &str,
-    hf_filename: &str,
-) -> Option<&'static ThirdPartyLicense> {
-    if manifest_name == crate::manifest::PULID_FLUX_MANIFEST
-        && matches!(hf_filename, "scrfd_10g_bnkps.onnx" | "glintr100.onnx")
-    {
-        return Some(&INSIGHTFACE_ANTELOPEV2);
-    }
-    None
+pub fn licenses_for_manifest_file<'a>(
+    manifest_name: &'a str,
+    hf_filename: &'a str,
+) -> impl Iterator<Item = &'static ThirdPartyLicense> + 'a {
+    THIRD_PARTY_LICENSES
+        .iter()
+        .copied()
+        .filter(move |license| license_covers_manifest_file(license, manifest_name, hf_filename))
 }
 
-/// True when any file in `manifest` is gated on an unaccepted license.
-pub fn manifest_requires_license(
+/// Every distinct license required by a manifest.
+pub fn licenses_for_manifest(
     manifest: &crate::manifest::ModelManifest,
-) -> Option<&'static ThirdPartyLicense> {
-    manifest
+) -> Vec<&'static ThirdPartyLicense> {
+    let mut by_id = std::collections::BTreeMap::new();
+    for license in manifest
         .files
         .iter()
-        .find_map(|file| license_for_manifest_file(&manifest.name, &file.hf_filename))
+        .flat_map(|file| licenses_for_manifest_file(&manifest.name, &file.hf_filename))
+    {
+        by_id.entry(license.id).or_insert(license);
+    }
+    by_id.into_values().collect()
 }
 
 /// Manifest names that cannot be downloaded until `license` is accepted.
@@ -146,8 +163,8 @@ pub fn manifests_requiring(license: &ThirdPartyLicense) -> Vec<String> {
         .iter()
         .filter(|manifest| {
             manifest.files.iter().any(|file| {
-                license_for_manifest_file(&manifest.name, &file.hf_filename)
-                    .is_some_and(|found| found.id == license.id)
+                licenses_for_manifest_file(&manifest.name, &file.hf_filename)
+                    .any(|found| found.id == license.id)
             })
         })
         .map(|manifest| manifest.name.clone())
@@ -181,6 +198,48 @@ pub fn refusal(license: &ThirdPartyLicense) -> crate::types::LicenseRefusal {
         sha256: license.sha256.to_string(),
         summary: license.summary.to_string(),
     }
+}
+
+/// Exact outstanding terms for one installable manifest bundle.
+///
+/// This is the registry-driven bridge between model acquisition and every UI:
+/// callers never special-case a model or license id, and a future manifest
+/// license automatically rides the same placement/download contract.
+pub fn unaccepted_for_manifest(
+    manifest_name: &str,
+    mold_home: &Path,
+) -> Vec<crate::types::LicenseRefusal> {
+    let Some(manifest) = crate::manifest::known_manifests()
+        .iter()
+        .find(|manifest| manifest.name == manifest_name)
+    else {
+        return Vec::new();
+    };
+    unaccepted_for_manifest_files(
+        manifest_name,
+        manifest.files.iter().map(|file| file.hf_filename.as_str()),
+        mold_home,
+    )
+}
+
+/// Exact outstanding terms for selected files in one installable bundle.
+///
+/// Placement previews pass only files they actually need to fetch. This keeps
+/// an already-present gated asset from prompting merely because a different,
+/// unrestricted file in the same bundle is missing.
+pub fn unaccepted_for_manifest_files<'a>(
+    manifest_name: &'a str,
+    hf_filenames: impl IntoIterator<Item = &'a str>,
+    mold_home: &Path,
+) -> Vec<crate::types::LicenseRefusal> {
+    let mut seen = std::collections::BTreeSet::new();
+    hf_filenames
+        .into_iter()
+        .flat_map(|filename| licenses_for_manifest_file(manifest_name, filename))
+        .filter(|license| !is_accepted(mold_home, license))
+        .filter(|license| seen.insert(license.id))
+        .map(refusal)
+        .collect()
 }
 
 /// An `accept_licenses` entry naming a license this build does not know.
@@ -405,33 +464,47 @@ mod tests {
     #[test]
     fn antelopev2_files_are_gated_and_nothing_else_is() {
         assert_eq!(
-            license_for_manifest_file("pulid-flux", "scrfd_10g_bnkps.onnx"),
-            Some(&INSIGHTFACE_ANTELOPEV2)
+            licenses_for_manifest_file("pulid-flux", "scrfd_10g_bnkps.onnx").collect::<Vec<_>>(),
+            vec![&INSIGHTFACE_ANTELOPEV2]
         );
         assert_eq!(
-            license_for_manifest_file("pulid-flux", "glintr100.onnx"),
-            Some(&INSIGHTFACE_ANTELOPEV2)
+            licenses_for_manifest_file("pulid-flux", "glintr100.onnx").collect::<Vec<_>>(),
+            vec![&INSIGHTFACE_ANTELOPEV2]
         );
-        assert_eq!(
-            license_for_manifest_file("pulid-flux", "pulid_flux_v0.9.1.safetensors"),
-            None
+        assert!(
+            licenses_for_manifest_file("pulid-flux", "pulid_flux_v0.9.1.safetensors")
+                .next()
+                .is_none()
         );
-        assert_eq!(
-            license_for_manifest_file("pulid-flux", "EVA02_CLIP_L_336_psz14_s6B.pt"),
-            None
+        assert!(
+            licenses_for_manifest_file("pulid-flux", "EVA02_CLIP_L_336_psz14_s6B.pt")
+                .next()
+                .is_none()
         );
         // facexlib is MIT, weights included, so the BiSeNet parser carries
         // none of the antelopev2 restriction even though it arrives in the
         // same bundle (#1225).
-        assert_eq!(
-            license_for_manifest_file("pulid-flux", "parsing_bisenet.pth"),
-            None
+        assert!(
+            licenses_for_manifest_file("pulid-flux", "parsing_bisenet.pth")
+                .next()
+                .is_none()
         );
         // Same filename under a different manifest is not gated.
-        assert_eq!(
-            license_for_manifest_file("flux-dev:q4", "glintr100.onnx"),
-            None
-        );
+        assert!(licenses_for_manifest_file("flux-dev:q4", "glintr100.onnx")
+            .next()
+            .is_none());
+    }
+
+    #[test]
+    fn outstanding_terms_are_derived_from_the_manifest_registry() {
+        let home = tempfile::tempdir().unwrap();
+        let outstanding = unaccepted_for_manifest("pulid-flux", home.path());
+        assert_eq!(outstanding, vec![refusal(&INSIGHTFACE_ANTELOPEV2)]);
+        assert!(unaccepted_for_manifest("flux-dev:q4", home.path()).is_empty());
+        assert!(unaccepted_for_manifest("not-a-model", home.path()).is_empty());
+
+        record_acceptance(home.path(), &INSIGHTFACE_ANTELOPEV2).unwrap();
+        assert!(unaccepted_for_manifest("pulid-flux", home.path()).is_empty());
     }
 
     #[test]

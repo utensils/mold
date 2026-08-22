@@ -166,7 +166,11 @@ import SegmentedControl from "@ui/components/SegmentedControl.vue";
 import LiveActivityList from "@ui/components/LiveActivityList.vue";
 import ErrorNotice from "@ui/components/ErrorNotice.vue";
 import ActionBlocker from "@ui/components/ActionBlocker.vue";
+import LicenseAcceptanceDialog from "@studio/components/LicenseAcceptanceDialog.vue";
+import { useLicenseAcceptance } from "@studio/composables/useLicenseAcceptance";
+import { licenseRequirements } from "@studio/lib/licenseAcceptance";
 import { upscaleImage } from "../lib/api/upscale";
+import { openExternal } from "../lib/openExternal";
 import {
   generationCapabilitiesForFamily,
   isFlux2DevModel,
@@ -553,6 +557,7 @@ const tab = ref<Tab>("generate");
 // first paint) so the legacy `mold.mobile.create-mode.v1` key migrates into
 // the shared draft and existing installs land back in Sequence.
 const draft = useSequenceDraftStore();
+const licenseAcceptance = useLicenseAcceptance();
 draft.hydrate();
 const mobileContent = ref<HTMLElement | null>(null);
 const settingsOpen = ref(false);
@@ -5164,6 +5169,16 @@ async function generate(): Promise<void> {
   if (identityRefusal) {
     setGenerationStatus(identityRefusal, true);
     generationAnnouncement.value = identityRefusal;
+    releasePreparedSubmission();
+    return;
+  }
+
+  const accepted = await licenseAcceptance.request({
+    hostLabel: route.label,
+    target: route.target,
+    requirements: licenseRequirements(placement?.pending_downloads),
+  });
+  if (!accepted || !submissionGuard.isCurrent(token)) {
     releasePreparedSubmission();
     return;
   }
@@ -9986,6 +10001,8 @@ onBeforeUnmount(() => {
       @close="generatedViewerOpen = false"
       @reuse="generatedViewerOpen = false"
     />
+
+    <LicenseAcceptanceDialog :open-external="openExternal" />
 
     <nav v-if="!settingsOpen" class="mobile-tabs" aria-label="Primary">
       <button

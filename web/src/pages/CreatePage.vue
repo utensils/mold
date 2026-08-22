@@ -220,6 +220,8 @@ import { usePullResume } from "../composables/usePullResume";
 import { useFileUnder } from "../composables/useFileUnder";
 import { autoTagTitle } from "../lib/fileUnder";
 import ModelInstallTargetDialog from "../components/models/ModelInstallTargetDialog.vue";
+import { useLicenseAcceptance } from "@studio/composables/useLicenseAcceptance";
+import { licenseRequirements } from "@studio/lib/licenseAcceptance";
 import { profileConflictMessage } from "@studio/lib/profileFleet";
 import { generationCapabilitiesForFamily } from "../lib/generateCapabilities";
 import {
@@ -290,6 +292,7 @@ const router = useRouter();
 const { status } = useStatusPoll();
 const queue = useQueue();
 const routing = useHostRouting();
+const licenseAcceptance = useLicenseAcceptance();
 const installTargets = useModelInstallTargets();
 const pullResume = usePullResume();
 const liveActivity = useLiveActivity(routing);
@@ -2143,6 +2146,15 @@ async function onSubmitSequenceInner(
       );
     }
     route = feasibility.route;
+    const accepted = await licenseAcceptance.request({
+      hostLabel: route.label,
+      target: {
+        baseUrl: route.target.baseUrl,
+        apiKey: route.target.apiKey ?? null,
+      },
+      requirements: licenseRequirements(feasibility.preview?.pending_downloads),
+    });
+    if (!accepted || !isCurrent()) return;
     // Title and filing describe the STITCHED print — a sequence renders one
     // print, and the clips it stitches are never filed individually.
     const operationId = createUuid();
@@ -3794,6 +3806,17 @@ async function onSubmitInner(
     return;
   }
   route = finalizedRoute;
+  const accepted = await licenseAcceptance.request({
+    hostLabel: route.label,
+    target: {
+      baseUrl: route.target.baseUrl,
+      apiKey: route.target.apiKey ?? null,
+    },
+    requirements: licenseRequirements(
+      finalizedResult.preview?.pending_downloads,
+    ),
+  });
+  if (!accepted || !isCurrent()) return;
   submitRequestCopies(req, decision, route);
   quickPrepared.value = null;
   // Push to history immediately so ↑ recalls it before the server round-trips.

@@ -5038,6 +5038,24 @@ pub const PULID_FAMILY: &str = "pulid";
 /// Manifest name for the PuLID-FLUX v0.9.1 asset bundle.
 pub const PULID_FLUX_MANIFEST: &str = "pulid-flux";
 
+/// Installable auxiliary bundles required by one concrete generation request.
+///
+/// Clients use this registry-driven answer to run the same generic
+/// consent/download loop for local execution that servers derive during
+/// placement. Adding a future request-bound auxiliary bundle belongs here,
+/// never as a model id embedded in an individual UI.
+pub fn auxiliary_manifests_for_request(
+    request: &crate::types::GenerateRequest,
+) -> Vec<&'static str> {
+    let mut manifests = Vec::new();
+    if crate::identity::request_mentions_identity(request)
+        && crate::identity::effective_id_weight(request) > 0.0
+    {
+        manifests.push(PULID_FLUX_MANIFEST);
+    }
+    manifests
+}
+
 /// The PuLID-FLUX auxiliary asset bundle.
 ///
 /// This is emphatically **not** a generation model: it is the four auxiliary
@@ -6692,6 +6710,31 @@ fn upscaler_manifests() -> Vec<ModelManifest> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn request_auxiliary_bundle_registry_tracks_active_identity_only() {
+        let mut request: crate::types::GenerateRequest =
+            serde_json::from_value(serde_json::json!({
+                "prompt": "portrait",
+                "model": "flux-dev:q8",
+                "width": 1024,
+                "height": 1024,
+                "steps": 20,
+                "seed": 1,
+                "id_image": "AQ=="
+            }))
+            .unwrap();
+        assert_eq!(
+            auxiliary_manifests_for_request(&request),
+            vec![PULID_FLUX_MANIFEST]
+        );
+
+        request.id_weight = Some(0.0);
+        assert!(auxiliary_manifests_for_request(&request).is_empty());
+        request.id_image = None;
+        request.id_weight = None;
+        assert!(auxiliary_manifests_for_request(&request).is_empty());
+    }
 
     #[test]
     fn pulid_bundle_is_a_hidden_sha_pinned_auxiliary_bundle() {

@@ -1137,6 +1137,26 @@ impl MoldClient {
         Ok(listing.licenses)
     }
 
+    /// Read-only dependency and device plan for an exact generation request.
+    /// Newer clients use the additive pending-license metadata to pause for
+    /// consent before admission starts any download.
+    pub async fn preview_generation_placement(
+        &self,
+        request: crate::types::GenerateRequest,
+        copies: u32,
+    ) -> Result<crate::types::GenerationPlacementPreview> {
+        let preview = self
+            .client
+            .post(format!("{}/api/generate/placement-preview", self.base_url))
+            .json(&crate::types::GenerationPlacementPreviewRequest { request, copies })
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        Ok(preview)
+    }
+
     /// Request graceful server shutdown.
     pub async fn shutdown_server(&self) -> Result<()> {
         self.client
@@ -1856,6 +1876,21 @@ fn should_fallback_loras_endpoint(err: &anyhow::Error) -> bool {
             matches!(
                 status,
                 StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED
+            )
+        })
+}
+
+/// True only when an HTTP endpoint is absent on an otherwise responding
+/// older server. Callers may use this for additive API compatibility, but
+/// must not turn authentication, transport, or server failures into a legacy
+/// fallback that could mutate state without a successful preflight.
+pub fn is_missing_endpoint_error(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<reqwest::Error>()
+        .and_then(reqwest::Error::status)
+        .is_some_and(|status| {
+            matches!(
+                status,
+                reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::METHOD_NOT_ALLOWED
             )
         })
 }

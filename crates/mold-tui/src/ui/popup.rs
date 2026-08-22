@@ -21,6 +21,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         Some(Popup::HistorySearch { .. }) => render_history_search(frame, app),
         Some(Popup::CommandPalette { .. }) => render_command_palette(frame, app),
         Some(Popup::Confirm { message, .. }) => render_confirm(frame, app, message.clone()),
+        Some(Popup::LicenseReview { .. }) => render_license_review(frame, app),
         Some(Popup::SettingsInput { .. }) => render_settings_input(frame, app),
         Some(Popup::Info { message }) => render_info(frame, app, message.clone()),
         Some(Popup::UpscaleModelSelector { .. }) => render_upscale_model_selector(frame, app),
@@ -1246,6 +1247,58 @@ fn render_confirm(frame: &mut Frame, app: &App, message: String) {
     frame.render_widget(paragraph, area);
 }
 
+fn render_license_review(frame: &mut Frame, app: &App) {
+    let Some(Popup::LicenseReview {
+        host_label,
+        requirements,
+        ..
+    }) = &app.popup
+    else {
+        return;
+    };
+    let theme = &app.theme;
+    let area = centered_rect(frame.area(), 72, 72);
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme.popup_border())
+        .title(" Review third-party license ")
+        .title_style(theme.title_focused())
+        .style(theme.popup_bg());
+    let mut text = vec![
+        Line::from(format!("Acceptance applies only to {host_label}.")),
+        Line::from(""),
+    ];
+    for requirement in requirements {
+        text.push(Line::from(Span::styled(
+            format!("Download: {}", requirement.install_model),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        )));
+        for license in &requirement.licenses {
+            text.push(Line::from(Span::styled(
+                license.name.clone(),
+                Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+            )));
+            text.push(Line::from(license.summary.clone()));
+            text.push(Line::from(format!("Pinned terms: {}", license.url)));
+            text.push(Line::from(format!("Project terms: {}", license.canonical)));
+        }
+        text.push(Line::from(""));
+    }
+    text.push(Line::from(vec![
+        Span::styled("Enter/y", theme.status_key()),
+        Span::styled(" Accept and download  ", Style::default().fg(theme.text)),
+        Span::styled("Esc/n", theme.status_key()),
+        Span::styled(" Cancel", Style::default().fg(theme.text)),
+    ]));
+    frame.render_widget(
+        Paragraph::new(text).block(block).wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
 fn render_info(frame: &mut Frame, app: &App, message: String) {
     let theme = &app.theme;
     let area = centered_rect(frame.area(), 55, 20);
@@ -1415,6 +1468,32 @@ mod tests {
             message: message.to_string(),
             on_confirm: ConfirmAction::DeleteGalleryImage,
         })
+    }
+
+    #[test]
+    fn license_review_names_the_exact_host_bundle_and_terms() {
+        let (response, _receiver) = tokio::sync::oneshot::channel();
+        let rendered = render_popup_to_string(crate::app::Popup::LicenseReview {
+            host_label: "hal9000".into(),
+            requirements: vec![crate::app::LicenseDownloadRequirement {
+                install_model: "future-face-adapter".into(),
+                licenses: vec![mold_core::LicenseRefusal {
+                    id: "future-license".into(),
+                    name: "Future model terms".into(),
+                    url: "https://example.test/pinned".into(),
+                    canonical: "https://example.test/project".into(),
+                    sha256: "b".repeat(64),
+                    summary: "Research only.".into(),
+                }],
+            }],
+            response: Some(response),
+        });
+
+        assert!(rendered.contains("Acceptance applies only to hal9000"));
+        assert!(rendered.contains("Download: future-face-adapter"));
+        assert!(rendered.contains("Future model terms"));
+        assert!(rendered.contains("https://example.test/pinned"));
+        assert!(rendered.contains("Accept and download"));
     }
 
     /// Render one popup over a stand-in `App` and collapse the buffer into

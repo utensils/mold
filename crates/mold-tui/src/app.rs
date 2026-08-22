@@ -37,6 +37,14 @@ pub(crate) struct PromptTransformSnapshot {
     pub source_kind: mold_core::RemixSourceKind,
 }
 
+/// One registry-derived bundle whose exact terms must be accepted before the
+/// TUI can download it. Presentation and key handling are model-agnostic.
+#[derive(Debug, Clone)]
+pub struct LicenseDownloadRequirement {
+    pub install_model: String,
+    pub licenses: Vec<mold_core::LicenseRefusal>,
+}
+
 /// Events sent from background tasks to the main TUI loop.
 pub enum BackgroundEvent {
     /// Progress update from generation or model pull.
@@ -54,6 +62,12 @@ pub enum BackgroundEvent {
     },
     /// Generation or background task failed.
     Error(String),
+    /// A background placement/download check paused for explicit consent.
+    LicenseRequired {
+        host_label: String,
+        requirements: Vec<LicenseDownloadRequirement>,
+        response: tokio::sync::oneshot::Sender<bool>,
+    },
     /// A reviewable prompt transform completed. The token fences late results
     /// after the user edits or starts another request.
     PromptTransformComplete {
@@ -1814,6 +1828,11 @@ pub enum Popup {
         message: String,
         on_confirm: ConfirmAction,
     },
+    LicenseReview {
+        host_label: String,
+        requirements: Vec<LicenseDownloadRequirement>,
+        response: Option<tokio::sync::oneshot::Sender<bool>>,
+    },
     SettingsInput {
         key: SettingsKey,
         input: String,
@@ -3461,6 +3480,11 @@ impl App {
     /// Close the active popup and refresh the preview image so it re-renders
     /// over the area the popup occupied.
     fn close_popup(&mut self) {
+        if let Some(Popup::LicenseReview { response, .. }) = self.popup.as_mut() {
+            if let Some(response) = response.take() {
+                let _ = response.send(false);
+            }
+        }
         self.popup = None;
         self.refresh_preview_protocol();
     }
@@ -3984,6 +4008,18 @@ impl App {
                     }
                     _ => self.close_popup(),
                 },
+                Some(Popup::LicenseReview { response, .. }) => match key.code {
+                    KeyCode::Char('y') | KeyCode::Enter => {
+                        let response = response.take();
+                        self.popup = None;
+                        self.refresh_preview_protocol();
+                        if let Some(response) = response {
+                            let _ = response.send(true);
+                        }
+                    }
+                    KeyCode::Esc | KeyCode::Char('n') => self.close_popup(),
+                    _ => {}
+                },
                 Some(Popup::Info { .. }) => {
                     // Dismiss info popup on any key
                     self.close_popup();
@@ -4506,17 +4542,22 @@ impl App {
                     if self.should_poll_remote() {
                         // Pull via server when connected remotely
                         let url = self.server_url.clone().unwrap();
+                        let host_label = self
+                            .resource_info
+                            .server_status
+                            .as_ref()
+                            .and_then(|status| status.hostname.clone())
+                            .unwrap_or_else(|| url.clone());
                         self.tokio_handle.spawn(async move {
                             let client = mold_core::MoldClient::new(&url);
-                            let (progress_tx, mut progress_rx) =
-                                mpsc::unbounded_channel::<SseProgressEvent>();
-                            let tx_fwd = tx.clone();
-                            tokio::spawn(async move {
-                                while let Some(event) = progress_rx.recv().await {
-                                    let _ = tx_fwd.send(BackgroundEvent::Progress(event));
-                                }
-                            });
-                            match client.pull_model_stream(&model_name, progress_tx).await {
+                            match crate::backend::pull_remote_model_with_consent(
+                                &client,
+                                host_label,
+                                model_name.clone(),
+                                tx.clone(),
+                            )
+                            .await
+                            {
                                 Ok(()) => {
                                     let _ = tx.send(BackgroundEvent::PullComplete(model_name));
                                 }
@@ -4530,8 +4571,11 @@ impl App {
                     } else {
                         // Pull locally when no server connected
                         self.tokio_handle.spawn(async move {
-                            if let Err(msg) =
-                                crate::backend::auto_pull_model(&model_name, &tx).await
+                            if let Err(msg) = crate::backend::pull_local_model_with_consent(
+                                model_name.clone(),
+                                tx.clone(),
+                            )
+                            .await
                             {
                                 let _ = tx.send(BackgroundEvent::Error(msg));
                             }
@@ -8173,6 +8217,17 @@ impl App {
                     self.generate.error_message = Some(msg);
                     self.generate.progress.generation_started_at = None;
                     self.generate.progress.stage_started_at = None;
+                }
+                BackgroundEvent::LicenseRequired {
+                    host_label,
+                    requirements,
+                    response,
+                } => {
+                    self.popup = Some(Popup::LicenseReview {
+                        host_label,
+                        requirements,
+                        response: Some(response),
+                    });
                 }
                 BackgroundEvent::GalleryScanComplete(scan) => {
                     self.gallery.offline_hosts = scan.offline_hosts;

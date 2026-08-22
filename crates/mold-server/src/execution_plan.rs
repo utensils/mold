@@ -1144,6 +1144,8 @@ pub struct PendingArtifactIdentity {
     pub repo: String,
     pub filename: String,
     pub bytes: u64,
+    pub install_model: Option<String>,
+    pub licenses: Vec<mold_core::LicenseRefusal>,
     /// Registry-declared container of the artifact admission will land here.
     /// The preview must not claim GGUF for a `.safetensors`, `.pt`, or `.onnx`
     /// dependency it has never read.
@@ -1159,6 +1161,8 @@ impl PendingArtifactIdentity {
             name: self.filename.clone(),
             repo: self.repo.clone(),
             bytes: self.bytes,
+            install_model: self.install_model.clone(),
+            licenses: self.licenses.clone(),
         }
     }
 
