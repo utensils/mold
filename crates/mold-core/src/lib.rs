@@ -78,10 +78,10 @@ pub use media_paths::{configured_media_roots, parse_media_roots_env, resolve_ser
 pub use model_policy::{
     model_access_capabilities, model_acquisition, model_acquisition_available, model_activation,
     model_activation_available, model_artifact_activation, require_model_acquisition,
-    require_model_activation, require_model_artifact_activation, ModelAccessCapabilities,
-    ModelAccessRestriction, ModelActivation, ModelActivationError,
-    MINIMAX_H3_AUTHORIZATION_ISSUE_URL, MINIMAX_H3_AUTHORIZATION_REQUIRED,
-    MINIMAX_H3_LICENSE_SHA256, MINIMAX_H3_LICENSE_URL,
+    require_model_activation, require_model_artifact_activation,
+    require_registered_manifest_activation, ModelAccessCapabilities, ModelAccessRestriction,
+    ModelActivation, ModelActivationError, MINIMAX_H3_AUTHORIZATION_ISSUE_URL,
+    MINIMAX_H3_AUTHORIZATION_REQUIRED, MINIMAX_H3_LICENSE_SHA256, MINIMAX_H3_LICENSE_URL,
 };
 pub use organization::{
     collection_slug, compose_client_tags, normalize_request_tags, normalize_tag_name,

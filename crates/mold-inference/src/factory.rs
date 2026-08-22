@@ -982,10 +982,14 @@ mod tests {
 
     #[test]
     fn frozen_factory_never_calls_h3_loader_before_the_runtime_gate() {
-        for model in [
+        #[cfg(feature = "h3")]
+        let models = vec![mold_core::minimax_h3::REF2VA_COMFY];
+        #[cfg(not(feature = "h3"))]
+        let models = vec![
             mold_core::minimax_h3::FL2VA_COMFY,
             mold_core::minimax_h3::REF2VA_COMFY,
-        ] {
+        ];
+        for model in models {
             let mut frozen = FrozenEngineConfig::resolve(model, &Config::default());
             frozen.family = mold_core::minimax_h3::FAMILY.to_string();
             frozen.h3_factory_authority = Some(h3_factory_authority(&frozen, model));
@@ -1020,9 +1024,16 @@ mod tests {
         for alias in mold_core::minimax_h3::FAMILY_ALIASES {
             assert_eq!(
                 factory_family_availability(alias),
-                Some(FactoryFamilyAvailability::ContractOnly)
+                Some(if cfg!(feature = "h3") {
+                    FactoryFamilyAvailability::Runnable
+                } else {
+                    FactoryFamilyAvailability::ContractOnly
+                })
             );
-            assert!(crate::production_family_capability_for_family(alias).is_none());
+            assert_eq!(
+                crate::production_family_capability_for_family(alias).is_some(),
+                cfg!(feature = "h3")
+            );
         }
         assert_eq!(
             factory_family_availability("flux"),

@@ -342,6 +342,8 @@ pub enum Mode {
 pub enum BackendQualification {
     /// The implementation target is CUDA, but no runnable engine is registered.
     ContractTarget,
+    /// The backend is part of the supported public runtime.
+    Supported,
     /// The execution path exists and is qualified for correctness only;
     /// throughput is deliberately unqualified. This mirrors
     /// `mold_inference::BackendQualification::CorrectnessOnly`, the tier Wan
@@ -400,17 +402,20 @@ pub const ALL_MODES: &[Mode] = &[
 ];
 
 pub const fn capabilities(task: Task) -> Capabilities {
+    let fl2va_runtime = cfg!(feature = "h3") && matches!(task, Task::Fl2va);
     Capabilities {
-        runtime_available: false,
+        runtime_available: fl2va_runtime,
         backends: BackendApplicability {
-            cuda: BackendQualification::ContractTarget,
+            cuda: if fl2va_runtime {
+                BackendQualification::Supported
+            } else {
+                BackendQualification::ContractTarget
+            },
             // The Apple Silicon execution path landed in #1164: family-scoped
             // BF16, a folded audio-VAE reduction, chunked dense attention, the
             // portable INT8 arm, and fp8 refused by name. It is advertised as
-            // correctness-only and stays that way until perf UAT on real
-            // hardware, per the Wan #800 precedent. Note this is the *path*
-            // tier: `runtime_available` above still gates whether any H3
-            // engine is registered at all.
+            // correctness-only and stays that way until performance UAT, per
+            // the Wan #800 precedent.
             metal: BackendQualification::CorrectnessOnly,
             cpu: BackendQualification::Unsupported,
         },
@@ -2518,7 +2523,7 @@ pub(crate) fn manifests() -> Vec<ModelManifest> {
         description: match (task, layout) {
             (Task::Fl2va, Layout::OfficialBf16) => "MiniMax H3 FL2VA official BF16 transformer/conditioner + FP32 VAEs (qualification reference; hidden from downloads)",
             (Task::Ref2va, Layout::OfficialBf16) => "MiniMax H3 Ref2VA official BF16 transformer/conditioner + FP32 VAEs (qualification reference; hidden from downloads)",
-            (Task::Fl2va, Layout::ComfyPrunedInt8ConvrotNvfp4Awq) => "MiniMax H3 FL2VA Comfy pruned INT8-convrot + NVFP4-AWQ (downloadable; execution requires a qualified CUDA host)",
+            (Task::Fl2va, Layout::ComfyPrunedInt8ConvrotNvfp4Awq) => "MiniMax H3 FL2VA Comfy pruned INT8-convrot + NVFP4-AWQ (CUDA or Apple Metal)",
             (Task::Ref2va, Layout::ComfyPrunedInt8ConvrotNvfp4Awq) => "MiniMax H3 Ref2VA Comfy pruned INT8-convrot + NVFP4-AWQ (downloadable; execution requires a qualified CUDA host)",
         }
         .to_string(),
@@ -2546,7 +2551,7 @@ pub(crate) fn manifests() -> Vec<ModelManifest> {
             name: tier.model.to_string(),
             family: FAMILY.to_string(),
             description: format!(
-                "MiniMax H3 FL2VA Comfy pruned INT8-convrot + NVFP4-AWQ with the reviewed {} LoRA (downloadable; execution requires a qualified CUDA host)",
+                "MiniMax H3 FL2VA Comfy pruned INT8-convrot + NVFP4-AWQ with the reviewed {} LoRA (CUDA or Apple Metal)",
                 tier.display_label
             ),
             files,
@@ -3424,12 +3429,20 @@ mod tests {
     }
 
     #[test]
-    fn capabilities_are_truthful_before_runtime_exists() {
+    fn capabilities_are_truthful_for_the_public_fl2va_runtime() {
         for task in [Task::Fl2va, Task::Ref2va] {
             let caps = capabilities(task);
-            assert!(!caps.runtime_available);
+            let fl2va_runtime = cfg!(feature = "h3") && task == Task::Fl2va;
+            assert_eq!(caps.runtime_available, fl2va_runtime);
             assert_eq!(caps.native_batch_sizes, &[1]);
-            assert_eq!(caps.backends.cuda, BackendQualification::ContractTarget);
+            assert_eq!(
+                caps.backends.cuda,
+                if fl2va_runtime {
+                    BackendQualification::Supported
+                } else {
+                    BackendQualification::ContractTarget
+                }
+            );
             // #1164: Metal is a real execution path, qualified for
             // correctness only. CPU stays unsupported — a real capability
             // limit, not a licence gate.
@@ -3523,18 +3536,26 @@ mod tests {
             assert_eq!(contract.task, task);
             assert_eq!(contract.layout, layout);
             assert_eq!(contract.generation.modes, modes);
-            assert!(!contract.generation.runtime_available);
+            let runnable = cfg!(feature = "h3") && task == Task::Fl2va;
+            assert_eq!(contract.generation.runtime_available, runnable);
             assert_eq!(contract.generation.native_batch_sizes, &[1]);
             assert_eq!(
                 contract.generation.backends,
                 BackendApplicability {
-                    cuda: BackendQualification::ContractTarget,
+                    cuda: if runnable {
+                        BackendQualification::Supported
+                    } else {
+                        BackendQualification::ContractTarget
+                    },
                     metal: BackendQualification::CorrectnessOnly,
                     cpu: BackendQualification::Unsupported,
                 }
             );
             assert!(contract.generation.synchronized_audio);
-            assert!(runnable_capability_contract_for_model(model).is_none());
+            assert_eq!(
+                runnable_capability_contract_for_model(model).is_some(),
+                runnable
+            );
             observed_modes.extend_from_slice(modes);
         }
         observed_modes.sort_by_key(|mode| *mode as u8);
@@ -3543,7 +3564,10 @@ mod tests {
 
         for alias in FAMILY_ALIASES {
             assert!(capability_contract_for_model(alias).is_some());
-            assert!(runnable_capability_contract_for_model(alias).is_none());
+            assert_eq!(
+                runnable_capability_contract_for_model(alias).is_some(),
+                cfg!(feature = "h3")
+            );
         }
 
         let advertised = crate::build_model_catalog(&crate::Config::default(), None, false);
@@ -3590,7 +3614,10 @@ mod tests {
             fl_turbo_4,
         ] {
             let contract = manifest_contract(manifest).unwrap();
-            assert!(!contract.runtime_available);
+            assert_eq!(
+                contract.runtime_available,
+                cfg!(feature = "h3") && contract.task == Task::Fl2va
+            );
             assert_eq!(contract.license_url, MINIMAX_H3_LICENSE_URL);
             assert_eq!(contract.license_sha256, LICENSE_SHA256);
             assert_eq!(

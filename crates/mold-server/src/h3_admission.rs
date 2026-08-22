@@ -3319,7 +3319,10 @@ mod tests {
             semantic.h3_factory_authority_sha256.as_deref(),
             Some(authority.identity_sha256())
         );
-        assert!(!minimax_h3::capabilities(minimax_h3::Task::Fl2va).runtime_available);
+        assert_eq!(
+            minimax_h3::capabilities(minimax_h3::Task::Fl2va).runtime_available,
+            cfg!(feature = "h3")
+        );
     }
 
     #[test]

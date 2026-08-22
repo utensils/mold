@@ -918,31 +918,10 @@ async fn require_server_model_activation(
     drop(config);
 
     if let Some(manifest) = mold_core::manifest::find_manifest(&resolved) {
-        require_registered_manifest_activation(manifest).map_err(ApiError::model_activation)?;
+        mold_core::require_registered_manifest_activation(manifest)
+            .map_err(ApiError::model_activation)?;
     }
     Ok(family)
-}
-
-/// Validate a source-controlled manifest for execution without treating its
-/// pinned upstream file locators as caller-selected model identities.
-///
-/// Reviewed H3 manifests are the only authority allowed to turn those raw
-/// repository paths into runnable local artifacts. Re-applying the public
-/// identity gate to their `hf_repo` / `hf_filename` fields rejects the exact
-/// reviewed manifests themselves, while raw `hf:` requests remain gated at
-/// the request-model check above.
-fn require_registered_manifest_activation(
-    manifest: &mold_core::manifest::ModelManifest,
-) -> Result<(), mold_core::ModelActivationError> {
-    mold_core::require_model_activation(&manifest.name, Some(&manifest.family))?;
-    if mold_core::minimax_h3::is_reviewed_compact_model(&manifest.name) {
-        return Ok(());
-    }
-    for file in &manifest.files {
-        mold_core::require_model_activation(&file.hf_repo, Some(&manifest.family))?;
-        mold_core::require_model_activation(&file.hf_filename, Some(&manifest.family))?;
-    }
-    Ok(())
 }
 
 /// Validate discovery/storage authority without implying that the same model
@@ -2906,14 +2885,8 @@ async fn require_upscale_model_activation(
         .map_err(ApiError::model_activation)?;
     }
     if let Some(manifest) = manifest {
-        mold_core::require_model_activation(&manifest.name, Some(&manifest.family))
+        mold_core::require_registered_manifest_activation(manifest)
             .map_err(ApiError::model_activation)?;
-        for file in &manifest.files {
-            mold_core::require_model_activation(&file.hf_repo, Some(&manifest.family))
-                .map_err(ApiError::model_activation)?;
-            mold_core::require_model_activation(&file.hf_filename, Some(&manifest.family))
-                .map_err(ApiError::model_activation)?;
-        }
     }
     Ok(())
 }
@@ -8393,7 +8366,7 @@ mod tests {
         let manifest =
             mold_core::manifest::find_manifest(mold_core::minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P)
                 .expect("reviewed H3 Turbo manifest");
-        require_registered_manifest_activation(manifest)
+        mold_core::require_registered_manifest_activation(manifest)
             .expect("source-controlled reviewed manifest must activate");
         assert!(mold_core::require_model_activation(
             "hf:Comfy-Org/MiniMax-H3",

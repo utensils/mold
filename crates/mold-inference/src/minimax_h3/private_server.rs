@@ -107,6 +107,7 @@ use crate::{
     H3FactoryAuthorityInput, H3FactoryComponentAuthority, H3FactoryComponentRole,
     H3FactoryConditionerPlacement, H3FactoryEndpointAnchor, H3FactoryExecutionBudgetEchoInput,
     H3FactoryPreparedRequestInput, H3FactoryPreparedRowsInput, H3FactoryQuantizationAuthority,
+    H3FactoryTargetBudgetInput,
 };
 
 pub(crate) const RUNTIME_QUALIFICATION_SCHEMA: &str =
@@ -654,11 +655,23 @@ pub(crate) fn private_h3_admission_host_floor_bytes(
 #[cfg(feature = "mp4")]
 fn precheck_private_h3_admission_capacity(
     bounds: &H3PrivateRuntimeBoundRecord,
+    compute_capability: Option<(u16, u16)>,
     available_device_bytes: u64,
     available_host_headroom_bytes: u64,
 ) -> Result<()> {
     let device_floor = private_h3_admission_device_floor_bytes(bounds)?;
     let host_floor = private_h3_admission_host_floor_bytes(bounds)?;
+    if compute_capability.is_none() {
+        let unified_floor = device_floor.max(host_floor);
+        if unified_floor > available_device_bytes {
+            bail!(
+                "private H3 Metal admission needs at least {unified_floor} unified-memory bytes \
+                 before any request-specific term, exceeding the {available_device_bytes} byte \
+                 admission sample"
+            )
+        }
+        return Ok(());
+    }
     if device_floor > available_device_bytes || host_floor > available_host_headroom_bytes {
         bail!(
             "private H3 admission needs at least {device_floor} device and {host_floor} host \
@@ -728,9 +741,20 @@ fn precheck_private_h3_prepared_rows(
 fn check_private_h3_target_budget_fits(
     predicted_device_peak_bytes: u64,
     predicted_host_increment_bytes: u64,
+    compute_capability: Option<(u16, u16)>,
     available_device_bytes: u64,
     available_host_headroom_bytes: u64,
 ) -> Result<()> {
+    if compute_capability.is_none() {
+        let unified_peak = predicted_device_peak_bytes.max(predicted_host_increment_bytes);
+        if unified_peak > available_device_bytes {
+            bail!(
+                "private H3 Metal canonical target needs {unified_peak} unified-memory bytes but \
+                 the admission sample offers {available_device_bytes}"
+            )
+        }
+        return Ok(());
+    }
     if predicted_device_peak_bytes > available_device_bytes {
         bail!(
             "private H3 canonical target needs {predicted_device_peak_bytes} device bytes but the \
@@ -744,6 +768,81 @@ fn check_private_h3_target_budget_fits(
         )
     }
     Ok(())
+}
+
+/// Exact peak of H3's reviewed phase order on an Apple unified-memory device.
+///
+/// Host and device charges within one phase coexist and are therefore added;
+/// different phases are mutually exclusive under the authenticated load/drop
+/// policy and are therefore compared with `max`. Taking the maximum of the two
+/// independent aggregate peaks would miss the smaller simultaneous charge.
+#[cfg(feature = "mp4")]
+fn private_h3_unified_target_peak_bytes(budget: &H3FactoryTargetBudgetInput) -> Result<u64> {
+    let phases = [
+        (
+            budget.reference_decode_phase_device_bytes,
+            budget.reference_decode_phase_host_bytes,
+        ),
+        (
+            budget.reference_preprocess_phase_device_bytes,
+            budget.reference_preprocess_phase_host_bytes,
+        ),
+        (
+            budget.reference_visual_encode_phase_device_bytes,
+            budget.reference_visual_encode_phase_host_bytes,
+        ),
+        (
+            budget.reference_audio_encode_phase_device_bytes,
+            budget.reference_audio_encode_phase_host_bytes,
+        ),
+        (
+            budget.vae_load_phase_device_bytes,
+            budget.vae_load_phase_host_bytes,
+        ),
+        (
+            budget.qwen_encode_phase_device_bytes,
+            budget.qwen_encode_phase_host_bytes,
+        ),
+        (
+            budget.qwen_transfer_phase_device_bytes,
+            budget.qwen_transfer_phase_host_bytes,
+        ),
+        (
+            budget.condition_encode_phase_device_bytes,
+            budget.condition_encode_phase_host_bytes,
+        ),
+        (
+            budget.noise_allocation_phase_device_bytes,
+            budget.noise_allocation_phase_host_bytes,
+        ),
+        (
+            budget.transformer_load_phase_device_bytes,
+            budget.transformer_load_phase_host_bytes,
+        ),
+        (
+            budget.denoise_phase_device_bytes,
+            budget.denoise_phase_host_bytes,
+        ),
+        (
+            budget.visual_decode_phase_device_bytes,
+            budget.visual_decode_phase_host_bytes,
+        ),
+        (
+            budget.audio_decode_phase_device_bytes,
+            budget.audio_decode_phase_host_bytes,
+        ),
+        (
+            budget.waveform_transfer_phase_device_bytes,
+            budget.waveform_transfer_phase_host_bytes,
+        ),
+        (budget.mux_phase_device_bytes, budget.mux_phase_host_bytes),
+    ];
+    phases.into_iter().try_fold(0, |peak, (device, host)| {
+        device
+            .checked_add(host)
+            .map(|phase| peak.max(phase))
+            .ok_or_else(|| anyhow!("private H3 unified-memory target phase overflow"))
+    })
 }
 
 impl H3PrivateRuntimeBoundRecord {
@@ -1507,6 +1606,7 @@ fn prepare_reviewed_h3_private_fl2va_admission(
     let precheck_bounds = runtime_qualification_source.precheck_bounds();
     precheck_private_h3_admission_capacity(
         &precheck_bounds,
+        compute_capability,
         available_device_bytes,
         available_host_headroom_bytes,
     )?;
@@ -1801,20 +1901,30 @@ fn prepare_reviewed_h3_private_fl2va_admission(
         runtime_qualification.bounds(),
         turbo_adapter.as_ref(),
     )?;
-    let predicted_device_peak_bytes = prepared_attempt.target_budget.predicted_device_peak_bytes;
-    let predicted_host_increment_bytes = prepared_attempt
+    let raw_device_peak_bytes = prepared_attempt.target_budget.predicted_device_peak_bytes;
+    let raw_host_increment_bytes = prepared_attempt
         .target_budget
         .predicted_host_increment_bytes;
+    let (predicted_device_peak_bytes, predicted_host_increment_bytes) =
+        if compute_capability.is_none() {
+            (
+                private_h3_unified_target_peak_bytes(&prepared_attempt.target_budget)?,
+                0,
+            )
+        } else {
+            (raw_device_peak_bytes, raw_host_increment_bytes)
+        };
     check_private_h3_target_budget_fits(
         predicted_device_peak_bytes,
         predicted_host_increment_bytes,
+        compute_capability,
         available_device_bytes,
         available_host_headroom_bytes,
     )?;
     let budget_echo = H3FactoryExecutionBudgetEchoInput {
         prepared_attempt_identity_sha256: prepared_attempt.identity_sha256.clone(),
-        device_peak_bytes: predicted_device_peak_bytes,
-        host_increment_bytes: predicted_host_increment_bytes,
+        device_peak_bytes: raw_device_peak_bytes,
+        host_increment_bytes: raw_host_increment_bytes,
     };
     let enriched = base_factory_authority.with_private_prepared_attempt(
         prepared_attempt.clone(),
@@ -7666,6 +7776,7 @@ mod tests {
             );
             precheck_private_h3_admission_capacity(
                 &ceilings,
+                Some((8, 9)),
                 SM89_CAMPAIGN_DEVICE_SAMPLE_BYTES,
                 SM89_CAMPAIGN_HOST_SAMPLE_BYTES,
             )
@@ -8446,19 +8557,35 @@ mod tests {
             // at it, so a refusal always implies the exact sums cannot fit.
             assert!(precheck_private_h3_admission_capacity(
                 bounds,
+                Some((8, 9)),
                 device_floor.saturating_sub(1),
                 u64::MAX
             )
             .is_err());
             assert!(precheck_private_h3_admission_capacity(
                 bounds,
+                Some((8, 9)),
                 u64::MAX,
                 host_floor.saturating_sub(1)
             )
             .is_err());
-            assert!(
-                precheck_private_h3_admission_capacity(bounds, device_floor, host_floor).is_ok()
-            );
+            assert!(precheck_private_h3_admission_capacity(
+                bounds,
+                Some((8, 9)),
+                device_floor,
+                host_floor
+            )
+            .is_ok());
+
+            let unified_floor = device_floor.max(host_floor);
+            assert!(precheck_private_h3_admission_capacity(
+                bounds,
+                None,
+                unified_floor.saturating_sub(1),
+                1
+            )
+            .is_err());
+            precheck_private_h3_admission_capacity(bounds, None, unified_floor, 1).unwrap();
         }
     }
 
@@ -8472,6 +8599,7 @@ mod tests {
         check_private_h3_target_budget_fits(
             9_000_000_000,
             7_000_000_000,
+            Some((8, 9)),
             9_000_000_000,
             7_000_000_000,
         )
@@ -8480,6 +8608,7 @@ mod tests {
         let device = check_private_h3_target_budget_fits(
             9_000_000_001,
             7_000_000_000,
+            Some((8, 9)),
             9_000_000_000,
             7_000_000_000,
         )
@@ -8493,6 +8622,7 @@ mod tests {
         let host = check_private_h3_target_budget_fits(
             9_000_000_000,
             7_000_000_001,
+            Some((8, 9)),
             9_000_000_000,
             7_000_000_000,
         )
@@ -8502,6 +8632,21 @@ mod tests {
         assert!(host.contains("7000000000"), "{host}");
         assert!(host.contains("host"), "{host}");
         assert!(!host.contains("device"), "{host}");
+
+        check_private_h3_target_budget_fits(9_000_000_000, 7_000_000_000, None, 9_000_000_000, 1)
+            .unwrap();
+        let metal = check_private_h3_target_budget_fits(
+            9_000_000_001,
+            7_000_000_000,
+            None,
+            9_000_000_000,
+            1,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(metal.contains("9000000001"), "{metal}");
+        assert!(metal.contains("9000000000"), "{metal}");
+        assert!(metal.contains("unified-memory"), "{metal}");
     }
 
     #[cfg(feature = "h3")]

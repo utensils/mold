@@ -1313,10 +1313,19 @@ pub(crate) async fn prepare_inputs_for_devices(
 ) -> Result<PreparedExecutionInputs, String> {
     #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     if let Some(grant) = context.h3_private_ingress_grant.clone() {
-        let live_state = state.ok_or_else(|| {
-            "MiniMax H3 private dependency preparation has no server instance authority".to_string()
-        })?;
-        grant.validate_for_request(request, live_state.instance_id.as_str())?;
+        #[cfg(feature = "h3")]
+        let instance_id = state.map_or(H3_PUBLIC_LOCAL_INSTANCE_ID, |state| {
+            state.instance_id.as_str()
+        });
+        #[cfg(not(feature = "h3"))]
+        let instance_id = state
+            .ok_or_else(|| {
+                "MiniMax H3 private dependency preparation has no server instance authority"
+                    .to_string()
+            })?
+            .instance_id
+            .as_str();
+        grant.validate_for_request(request, instance_id)?;
         return prepare_h3_private_inputs_for_devices(
             state,
             work_id,
@@ -1918,6 +1927,11 @@ async fn prepare_h3_private_inputs_for_devices(
         ));
     }
 
+    #[cfg(feature = "h3")]
+    let instance_id = state.map_or(H3_PUBLIC_LOCAL_INSTANCE_ID, |state| {
+        state.instance_id.as_str()
+    });
+    #[cfg(not(feature = "h3"))]
     let instance_id = state
         .ok_or_else(|| {
             "MiniMax H3 private admission lost its server instance authority".to_string()
@@ -2068,6 +2082,16 @@ pub async fn prepare_local_execution_inputs(
     request: &GenerateRequest,
     devices: Vec<DeviceFact>,
 ) -> Result<PreparedExecutionInputs, String> {
+    let mut context = DependencyPreparationContext::default();
+    #[cfg(feature = "h3")]
+    if mold_core::minimax_h3::task_for_model(&request.model).is_some() {
+        context.h3_private_ingress_grant = crate::h3_private_bridge::classify_h3_private_ingress(
+            request,
+            None,
+            H3_PUBLIC_LOCAL_INSTANCE_ID,
+        )
+        .map_err(|error| error.error)?;
+    }
     prepare_inputs_for_devices(
         None,
         "local",
@@ -2076,10 +2100,16 @@ pub async fn prepare_local_execution_inputs(
         devices,
         None,
         DependencyMaterializationPolicy::Admission,
-        DependencyPreparationContext::default(),
+        context,
     )
     .await
 }
+
+/// Stable instance identity for the in-process forced-local public H3 route.
+/// It never crosses a transport boundary; it only binds preparation and
+/// execution to the same CLI process authority.
+#[cfg(feature = "h3")]
+const H3_PUBLIC_LOCAL_INSTANCE_ID: &str = "mold-public-forced-local";
 
 #[cfg(test)]
 mod tests {

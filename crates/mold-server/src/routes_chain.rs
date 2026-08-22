@@ -147,13 +147,9 @@ fn require_chain_manifest_artifact_activation(
     artifact_root: &std::path::Path,
 ) -> Result<(), ApiError> {
     let family = Some(manifest.family.as_str());
-    mold_core::require_model_activation(&manifest.name, family)
+    mold_core::require_registered_manifest_activation(manifest)
         .map_err(ApiError::model_activation)?;
     for file in &manifest.files {
-        mold_core::require_model_activation(&file.hf_repo, family)
-            .map_err(ApiError::model_activation)?;
-        mold_core::require_model_activation(&file.hf_filename, family)
-            .map_err(ApiError::model_activation)?;
         let storage_path = mold_core::manifest::storage_path(manifest, file);
         require_chain_artifact_path_activation(&storage_path, artifact_root, family)?;
         require_chain_artifact_path_activation(
