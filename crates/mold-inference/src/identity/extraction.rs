@@ -341,7 +341,15 @@ pub(crate) fn compose_identity_token_sets_observed(
 ) -> Result<ComposedIdentityTokens> {
     anyhow::ensure!(!faces.is_empty(), "composing needs at least one face");
     let device = Device::Cpu;
-    let mut stage_started = std::time::Instant::now();
+    // Everything before the tower's forward pass is one window, and the parse
+    // is subtracted out of it below rather than restarting the clock — a
+    // restart would silently drop whatever ran before the parse (materializing
+    // the tower, decoding the crop) from every stage's account.
+    let setup_started = std::time::Instant::now();
+    // Assigned exactly once, inside the block below, which runs
+    // unconditionally — so it is declared without a value rather than with a
+    // zero nobody ever reads.
+    let parse_elapsed;
     // Both derived artifacts arrive as verified MAPPINGS, never as pathnames a
     // loader would resolve a second time — see
     // `pickle_convert::AuthenticatedArtifact`.
@@ -427,7 +435,7 @@ pub(crate) fn compose_identity_token_sets_observed(
         }
         outputs
     };
-    stage_started = std::time::Instant::now();
+    let mut stage_started = std::time::Instant::now();
 
     // SAFETY: the ordinary mold safetensors mmap contract — the file must not
     // be mutated while the IDFormer holds it.

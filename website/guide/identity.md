@@ -184,7 +184,7 @@ your photograph
    your print
 ```
 
-The mask is not a background *removal*: the face is greyscaled too, so the
+The mask is not a background _removal_: the face is greyscaled too, so the
 vision tower sees shape and no colour at all. That is what PuLID was trained
 against, and skipping it costs about a thousandfold in how closely the
 extracted identity matches the reference implementation.
