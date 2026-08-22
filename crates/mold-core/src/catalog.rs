@@ -147,6 +147,45 @@ pub fn declared_audio_capability(family: &str, model: &str) -> Option<bool> {
     None
 }
 
+/// The width/height/steps/frames a recipe pins when it is fixed authority.
+///
+/// `None` whenever the recipe leaves any of them adjustable — a preset on a
+/// dynamic canvas is a recommendation, and overriding a user's remembered
+/// size with it would be a regression, not a fix. Today only H3's reviewed
+/// compact envelope answers: a single-preset bucket domain that refuses
+/// off-bucket sizes, with fixed steps and a fixed frame count.
+fn pinned_recipe_defaults(
+    profile: &crate::GenerationProfileSet,
+) -> Option<(u32, u32, u32, Option<u32>)> {
+    let recipe = profile.default_recipe()?;
+    if recipe.steps.mode != crate::ControlMode::Fixed {
+        return None;
+    }
+    let resolution = &recipe.resolution;
+    if resolution.domain != crate::ResolutionDomain::Buckets
+        || resolution.off_bucket != Some(crate::generation_profile::OffBucketPolicy::Reject)
+    {
+        return None;
+    }
+    let mut presets = resolution
+        .aspect_groups
+        .iter()
+        .flat_map(|group| group.presets.iter());
+    let only = presets.next()?;
+    if presets.next().is_some() {
+        return None;
+    }
+    let temporal = recipe.temporal.as_ref();
+    let frames = match temporal {
+        Some(temporal) if temporal.frames.mode == crate::ControlMode::Fixed => {
+            Some(temporal.frames.default)
+        }
+        Some(_) => return None,
+        None => None,
+    };
+    Some((only.width, only.height, recipe.defaults.steps, frames))
+}
+
 pub fn build_model_catalog(
     config: &Config,
     loaded_model: Option<&str>,
@@ -190,6 +229,21 @@ pub fn build_model_catalog(
             },
         );
         let resolution = resolution_defaults_from_profile(&generation_profile);
+        // A recipe whose controls are fixed authority owns its own defaults.
+        // Everything above is laundered through user `model_prefs`, so an
+        // entry written when H3's compact tags still advertised the official
+        // ladder would otherwise ship a row saying "default 345 frames,
+        // maximum 124" — and first-party clients seed their forms from the
+        // default, not the maximum, which is the request the runtime then
+        // refuses. `recipe()` already forces these for the compact envelope;
+        // this reads them back rather than restating the rule.
+        let (default_width, default_height, default_steps, default_frames) =
+            pinned_recipe_defaults(&generation_profile).unwrap_or((
+                default_width,
+                default_height,
+                default_steps,
+                default_frames,
+            ));
 
         models.push(ModelInfoExtended {
             downloaded,
@@ -512,6 +566,64 @@ mod tests {
     /// refusal. This caught `max_frames_for_family_at_fps` answering the
     /// official BF16 ladder for a compact identity, because it discriminates
     /// on family and the envelope is a property of the layout.
+    /// A remembered preference must not survive into a row whose recipe is
+    /// fixed authority. `model_prefs` entries written before the compact tags
+    /// were pinned can hold the official ladder's 345 frames and a canvas the
+    /// engine refuses; clients seed their forms from `default_*`, not from the
+    /// ceilings, so a stale default is a request that is guaranteed to fail
+    /// however correct the maximum beside it is.
+    #[test]
+    fn a_stale_model_pref_cannot_reach_a_compact_h3_row() {
+        let mut config = crate::Config::default();
+        config.models.insert(
+            crate::minimax_h3::FL2VA_COMFY.to_string(),
+            crate::config::ModelConfig {
+                default_frames: Some(345),
+                default_width: Some(768),
+                default_height: Some(768),
+                default_steps: Some(30),
+                ..Default::default()
+            },
+        );
+
+        let catalog = super::build_model_catalog(&config, None, false);
+        let row = catalog
+            .iter()
+            .find(|row| row.info.name == crate::minimax_h3::FL2VA_COMFY)
+            .expect("the compact FL2VA row is always catalogued");
+
+        assert_eq!(row.defaults.default_frames, Some(124));
+        assert_eq!(row.defaults.default_width, crate::minimax_h3::DEFAULT_WIDTH);
+        assert_eq!(
+            row.defaults.default_height,
+            crate::minimax_h3::DEFAULT_HEIGHT
+        );
+        assert_eq!(
+            row.defaults.default_steps,
+            crate::minimax_h3::COMFY_DEFAULT_STEPS
+        );
+
+        // A dynamic-canvas family keeps honouring the same preference, so the
+        // pinning is scoped to fixed authority rather than applied to every
+        // row that happens to advertise a preset.
+        let mut flux_config = crate::Config::default();
+        flux_config.models.insert(
+            "flux-dev:q8".to_string(),
+            crate::config::ModelConfig {
+                default_width: Some(768),
+                default_height: Some(768),
+                ..Default::default()
+            },
+        );
+        let flux = super::build_model_catalog(&flux_config, None, false);
+        let flux_row = flux
+            .iter()
+            .find(|row| row.info.name == "flux-dev:q8")
+            .expect("flux-dev:q8 is always catalogued");
+        assert_eq!(flux_row.defaults.default_width, 768);
+        assert_eq!(flux_row.defaults.default_height, 768);
+    }
+
     #[test]
     fn compact_h3_rows_advertise_their_own_profile_envelope() {
         let config = crate::Config::default();
