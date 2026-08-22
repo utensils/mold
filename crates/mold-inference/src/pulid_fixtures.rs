@@ -240,6 +240,44 @@ pub(crate) fn scale_relative_error(actual: &[f32], expected: &[f32], peak: f32) 
     }
 }
 
+/// The committed SDXL golden directory (#1228).
+///
+/// A sibling of [`testdata_dir`] rather than a subdirectory of it: the two sets
+/// were captured by different scripts against different checkpoints, and
+/// regenerating one must never require re-running the other.
+pub(crate) fn sdxl_testdata_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/pulid_sdxl")
+}
+
+/// Load one named array out of an SDXL golden file as f32 on the CPU.
+pub(crate) fn sdxl_golden(file: &str, name: &str) -> Tensor {
+    let path = sdxl_testdata_dir().join(file);
+    let tensors = candle_core::safetensors::load(&path, &Device::Cpu)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+    tensors
+        .get(name)
+        .unwrap_or_else(|| panic!("golden {name} is missing from {}", path.display()))
+        .to_dtype(DType::F32)
+        .expect("golden is numeric")
+}
+
+impl GoldenStats {
+    /// The same five slots, read from an SDXL golden file.
+    pub(crate) fn load_sdxl(file: &str, name: &str) -> Self {
+        Self::from_tensor(name, sdxl_golden(file, name))
+    }
+}
+
+/// Seeds for the SDXL fixtures, mirroring
+/// `testdata/pulid_sdxl/capture_*.py`. The ASCII spells `PULIDSX*`, chosen so
+/// this set can never collide with the FLUX one above.
+pub(crate) const SEED_SDXL_IDFORMER_ID: u64 = 0x50554C4944535849; // PULIDSXI
+pub(crate) const SEED_SDXL_IDFORMER_VIT: u64 = 0x50554C4944535856; // PULIDSXV
+pub(crate) const SEED_SDXL_ATTN_QUERY: u64 = 0x50554C4944535851; // PULIDSXQ
+pub(crate) const SEED_SDXL_ATTN_ATTENDED: u64 = 0x50554C4944535841; // PULIDSXA
+pub(crate) const SEED_SDXL_ATTN_ID: u64 = 0x50554C4944535845; // PULIDSXE
+pub(crate) const SEED_SDXL_ATTN_PROBE: u64 = 0x50554C4944535850; // PULIDSXP
+
 /// Root of the pinned PuLID checkpoints for weight-gated tests. Point
 /// `MOLD_TEST_PULID_ASSETS` at a directory holding
 /// `EVA02_CLIP_L_336_psz14_s6B.pt` and `pulid_flux_v0.9.1.safetensors`

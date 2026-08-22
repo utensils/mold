@@ -438,6 +438,7 @@ mod tests {
     #[test]
     fn a_device_placement_request_reaches_the_models_rather_than_being_refused() {
         let paths = PulidPaths {
+            family: mold_core::identity::IdentityFamily::Flux,
             adapter: Path::new("/nonexistent/adapter.safetensors").to_path_buf(),
             vision_encoder_source: Path::new("/nonexistent/eva.pt").to_path_buf(),
             face_detector: Path::new("/nonexistent/scrfd.onnx").to_path_buf(),
