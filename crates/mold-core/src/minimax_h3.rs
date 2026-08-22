@@ -614,6 +614,35 @@ pub const fn valid_frame_count(frames: u32) -> bool {
         && (frames - FRAME_OFFSET).is_multiple_of(FRAME_STEP)
 }
 
+/// The single frame count `model` may render, when its layout admits exactly
+/// one.
+///
+/// `None` means the model takes the family range. The reviewed compact layouts
+/// answer [`REVIEWED_COMPACT_FRAMES`]: their runtime envelope validates the
+/// clip length by equality, so for them the floor and the ceiling are the same
+/// number and the family range is not the question to ask.
+pub fn fixed_frames_for_model(family: &str, model: &str) -> Option<u32> {
+    uses_reviewed_compact_envelope(family, model).then_some(REVIEWED_COMPACT_FRAMES)
+}
+
+/// [`recommended_frames`], narrowed by the concrete model.
+///
+/// Normalizing a stale or off-grid frame count for a compact tag must land on
+/// the clip length that runs, not on the family floor — otherwise repairing a
+/// restored request produces one the runtime refuses.
+pub fn recommended_frames_for_model(family: &str, model: &str, frames: u32) -> u32 {
+    fixed_frames_for_model(family, model).unwrap_or_else(|| recommended_frames(frames))
+}
+
+/// [`valid_frame_count`], narrowed by the concrete model. A compact tag admits
+/// exactly one clip length; every other H3 identity takes the family grid.
+pub fn valid_frame_count_for_model(family: &str, model: &str, frames: u32) -> bool {
+    match fixed_frames_for_model(family, model) {
+        Some(fixed) => frames == fixed,
+        None => valid_frame_count(frames),
+    }
+}
+
 pub fn recommended_frames(frames: u32) -> u32 {
     if frames <= MIN_FRAMES {
         return MIN_FRAMES;

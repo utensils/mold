@@ -72,7 +72,7 @@ import {
   wanRecipeToWire,
 } from "@studio/lib/wanRecipe";
 import {
-  MINIMAX_H3_MIN_FRAMES,
+  MINIMAX_H3_REVIEWED_COMPACT_FRAMES,
   emptyMinimaxH3AuthoringState,
   isMinimaxH3Family,
   minimaxH3BoundaryFromSourceMetadata,
@@ -313,7 +313,7 @@ function modelDefaultsPatch(
   );
   if (capabilities.supportsVideo) {
     next.frames = isMinimaxH3Family(model.family)
-      ? (model.default_frames ?? MINIMAX_H3_MIN_FRAMES)
+      ? (model.default_frames ?? MINIMAX_H3_REVIEWED_COMPACT_FRAMES)
       : videoFramesForModelSelection(next.frames, model);
     // The model's advertised rate is applied like steps/guidance — it is only
     // absent-server/absent-field that leaves the current value in place.

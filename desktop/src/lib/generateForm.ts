@@ -83,7 +83,7 @@ import {
   fixedRecipeControlOverrides,
 } from "@studio/lib/generationProfile";
 import {
-  MINIMAX_H3_MIN_FRAMES,
+  MINIMAX_H3_REVIEWED_COMPACT_FRAMES,
   cloneMinimaxH3AuthoringState,
   emptyMinimaxH3AuthoringState,
   isMinimaxH3Family,
@@ -401,7 +401,7 @@ export function applyModelDefaults(form: GenerateForm, m: ModelEntry): void {
   form.guidance = m.default_guidance;
   form.guidanceCapabilities = m.guidance_capabilities ?? null;
   if (isMinimaxH3Family(m.family)) {
-    form.frames = m.default_frames ?? MINIMAX_H3_MIN_FRAMES;
+    form.frames = m.default_frames ?? MINIMAX_H3_REVIEWED_COMPACT_FRAMES;
   } else if (m.default_frames != null) {
     form.frames = videoFramesForModelSelection(form.frames, m);
   }

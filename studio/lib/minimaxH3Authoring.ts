@@ -30,7 +30,14 @@ export {
 } from "./minimaxH3Identity";
 
 export const MINIMAX_H3_FIXED_FPS = 24;
-export const MINIMAX_H3_MIN_FRAMES = 124;
+// Mirrors `mold_core::minimax_h3::REVIEWED_COMPACT_FRAMES` — the exact clip
+// length the reviewed compact runtime renders, which every Studio surface
+// authors because the official BF16 tags are policy-hidden and never reach a
+// picker. Deliberately NOT `MIN_FRAMES`, whose 107 is the family floor derived
+// from the model card's 4-second minimum: the two were one constant until they
+// were separated, and a compact request clamped to 107 is one the runtime
+// refuses.
+export const MINIMAX_H3_REVIEWED_COMPACT_FRAMES = 124;
 // Mirrors `mold_core::minimax_h3::MAX_FRAMES`. 345, not 362: the next grid
 // value is 15.083 s at the family's fixed 24 fps, which the diffusers path
 // rejects. This is the fallback for a server that does not advertise its own
@@ -343,7 +350,7 @@ export function minimaxH3AuthoringCapabilities(
     task,
     runtimeAvailable: model.runtime_available !== false && !restricted,
     fixedFps: MINIMAX_H3_FIXED_FPS,
-    minFrames: MINIMAX_H3_MIN_FRAMES,
+    minFrames: MINIMAX_H3_REVIEWED_COMPACT_FRAMES,
     maxFrames: MINIMAX_H3_MAX_FRAMES,
     frameStep: MINIMAX_H3_FRAME_STEP,
     frameOffset: MINIMAX_H3_FRAME_OFFSET,
@@ -623,10 +630,10 @@ export function serializeMinimaxH3Authoring<T extends H3Request>(
   const frames = Math.min(
     MINIMAX_H3_MAX_FRAMES,
     Math.max(
-      MINIMAX_H3_MIN_FRAMES,
+      MINIMAX_H3_REVIEWED_COMPACT_FRAMES,
       MINIMAX_H3_FRAME_OFFSET +
         Math.round(
-          (Number(request.frames ?? MINIMAX_H3_MIN_FRAMES) -
+          (Number(request.frames ?? MINIMAX_H3_REVIEWED_COMPACT_FRAMES) -
             MINIMAX_H3_FRAME_OFFSET) /
             MINIMAX_H3_FRAME_STEP,
         ) *

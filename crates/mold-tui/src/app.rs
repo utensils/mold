@@ -1130,7 +1130,10 @@ pub(crate) fn normalize_generate_params_for_family(params: &mut GenerateParams, 
         return;
     }
 
-    params.frames = mold_core::minimax_h3::recommended_frames(params.frames);
+    // Model-aware: a compact tag renders exactly one clip length, so
+    // repairing a stale count must land on that, not on the family floor.
+    params.frames =
+        mold_core::minimax_h3::recommended_frames_for_model(family, &params.model, params.frames);
     params.fps = mold_core::minimax_h3::FIXED_FPS;
     params.format = OutputFormat::Mp4;
     params.enable_audio = Some(true);
@@ -5027,8 +5030,14 @@ impl App {
                     Some(TuiVideoGrid {
                         step,
                         offset,
-                        min_frames: mold_core::validation::min_frames_for_family(&family)
-                            .unwrap_or(offset),
+                        // Model-aware, matching the recipe path above: a
+                        // compact H3 tag renders exactly one clip length, so
+                        // its floor is that length and not the family's.
+                        min_frames: mold_core::validation::min_frames_for_model(
+                            &family,
+                            &self.generate.params.model,
+                        )
+                        .unwrap_or(offset),
                         fixed_fps: mold_core::validation::fixed_fps_for_family(&family),
                         runtime_seconds: entry
                             .and_then(|entry| entry.defaults.max_runtime_seconds)
@@ -13038,7 +13047,7 @@ mod tests {
         assert_eq!(app.generate.params.strength, 1.0);
         assert_eq!(
             app.generate.params.frames,
-            mold_core::minimax_h3::MIN_FRAMES
+            mold_core::minimax_h3::REVIEWED_COMPACT_FRAMES
         );
         assert_eq!(app.generate.params.fps, mold_core::minimax_h3::FIXED_FPS);
         assert_eq!(app.generate.params.scheduler, None);
@@ -13056,11 +13065,11 @@ mod tests {
         assert_eq!(app.generate.params.format, OutputFormat::Mp4);
         assert_eq!(app.generate.params.enable_audio, Some(true));
 
-        app.generate.params.frames = mold_core::minimax_h3::MIN_FRAMES;
+        app.generate.params.frames = mold_core::minimax_h3::REVIEWED_COMPACT_FRAMES;
         app.adjust_field(ParamField::Frames, -1);
         assert_eq!(
             app.generate.params.frames,
-            mold_core::minimax_h3::MIN_FRAMES
+            mold_core::minimax_h3::REVIEWED_COMPACT_FRAMES
         );
         app.generate.params.fps = 12;
         app.adjust_field(ParamField::Fps, 1);
@@ -13070,7 +13079,7 @@ mod tests {
         app.adjust_field(ParamField::Frames, 1);
         assert_eq!(
             app.generate.params.frames,
-            mold_core::minimax_h3::MIN_FRAMES + mold_core::minimax_h3::FRAME_STEP
+            mold_core::minimax_h3::REVIEWED_COMPACT_FRAMES + mold_core::minimax_h3::FRAME_STEP
         );
     }
 
@@ -13093,7 +13102,10 @@ mod tests {
         session.apply_to_params(&mut params);
         normalize_generate_params_for_family(&mut params, "minimax_h3");
 
-        assert_eq!(params.frames, mold_core::minimax_h3::MIN_FRAMES);
+        assert_eq!(
+            params.frames,
+            mold_core::minimax_h3::REVIEWED_COMPACT_FRAMES
+        );
         assert_eq!(params.fps, mold_core::minimax_h3::FIXED_FPS);
         assert_eq!(params.format, OutputFormat::Mp4);
         assert_eq!(params.enable_audio, Some(true));
@@ -13138,7 +13150,7 @@ mod tests {
 
             assert_eq!(
                 app.generate.params.frames,
-                mold_core::minimax_h3::MIN_FRAMES
+                mold_core::minimax_h3::REVIEWED_COMPACT_FRAMES
             );
             assert_eq!(app.generate.params.fps, mold_core::minimax_h3::FIXED_FPS);
             assert_eq!(app.generate.params.format, OutputFormat::Mp4);

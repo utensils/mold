@@ -3,7 +3,7 @@ import {
   MINIMAX_H3_FIXED_FPS,
   MINIMAX_H3_FRAME_OFFSET,
   MINIMAX_H3_FRAME_STEP,
-  MINIMAX_H3_MIN_FRAMES,
+  MINIMAX_H3_REVIEWED_COMPACT_FRAMES,
 } from "./minimaxH3Authoring";
 import {
   decideGenerateRequestRouting,
@@ -62,9 +62,9 @@ const FAMILY_FRAME_OFFSET: ReadonlyMap<string, number> = new Map([
 ]);
 
 const FAMILY_MIN_FRAMES: ReadonlyMap<string, number> = new Map([
-  ["minimax-h3", MINIMAX_H3_MIN_FRAMES],
-  ["minimax_h3", MINIMAX_H3_MIN_FRAMES],
-  ["minimaxh3", MINIMAX_H3_MIN_FRAMES],
+  ["minimax-h3", MINIMAX_H3_REVIEWED_COMPACT_FRAMES],
+  ["minimax_h3", MINIMAX_H3_REVIEWED_COMPACT_FRAMES],
+  ["minimaxh3", MINIMAX_H3_REVIEWED_COMPACT_FRAMES],
 ]);
 
 const FAMILY_FIXED_FPS: ReadonlyMap<string, number> = new Map([

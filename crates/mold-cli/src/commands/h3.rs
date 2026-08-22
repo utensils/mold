@@ -167,11 +167,23 @@ pub(crate) fn prepare_authoring(
             fps.unwrap_or_default()
         );
     }
+    // A reviewed compact checkpoint renders exactly one clip length, so the
+    // family's `17n+5` range is not the question to ask of it: accepting the
+    // family floor here would prepare a request the runtime then refuses.
+    let fixed_frames = minimax_h3::fixed_frames_for_model(minimax_h3::FAMILY, model);
     let frames = match duration_seconds {
         Some(seconds) => frames_for_duration(seconds)?,
         None => frames.unwrap_or(minimax_h3::REVIEWED_COMPACT_FRAMES),
     };
-    if !minimax_h3::valid_frame_count(frames) {
+    if let Some(fixed) = fixed_frames {
+        if frames != fixed {
+            anyhow::bail!(
+                "{model} renders exactly {fixed} frames ({:.2} seconds at {} fps); received {frames}",
+                f64::from(fixed) / f64::from(minimax_h3::FIXED_FPS),
+                minimax_h3::FIXED_FPS,
+            );
+        }
+    } else if !minimax_h3::valid_frame_count(frames) {
         anyhow::bail!(
             "MiniMax H3 --frames must be {}n+{} from {} through {}; received {} (nearest valid value: {})",
             minimax_h3::FRAME_STEP,
