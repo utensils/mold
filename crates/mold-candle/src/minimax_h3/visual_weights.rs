@@ -127,6 +127,7 @@ pub struct ValidatedVisualVaeWeights {
     layout: WeightLayout,
     inspection: VisualVaeWeightInspection,
     files: Vec<VisualWeightFileIdentity>,
+    authenticated_staging_descriptor: bool,
 }
 
 impl ValidatedVisualVaeWeights {
@@ -153,7 +154,14 @@ impl ValidatedVisualVaeWeights {
     pub(crate) fn revalidate_files(&self) -> Result<()> {
         for expected in &self.files {
             let current = current_visual_weight_file_identity(expected)?;
-            let mismatches = visual_weight_file_identity_mismatches(&current, expected);
+            let mut mismatches = visual_weight_file_identity_mismatches(&current, expected);
+            if self.authenticated_staging_descriptor && expected.descriptor_bound {
+                // The caller owns a retained, content-authenticated private
+                // file descriptor and revalidates its underlying file after
+                // construction. macOS `/dev/fd` may drift only this synthetic
+                // metadata axis while reopening the same descriptor.
+                mismatches.retain(|axis| *axis != "changed-time");
+            }
             if !mismatches.is_empty() {
                 bail!(
                     "validated H3 visual VAE artifact changed after inspection: {} ({})",
@@ -809,6 +817,7 @@ pub fn validate_diffusers_weight_index(
             header_identity_sha256: hex_digest(identity.finalize()),
         },
         files,
+        authenticated_staging_descriptor: false,
     })
 }
 
@@ -821,7 +830,7 @@ pub fn validate_comfy_weight_file(
     config: &MiniMaxH3VisualVaeConfig,
     weight_path: &Path,
 ) -> Result<ValidatedVisualVaeWeights> {
-    validate_comfy_weight_file_inner(config, weight_path, true)
+    validate_comfy_weight_file_inner(config, weight_path, true, false)
 }
 
 /// Validate the Comfy visual VAE through a retained process descriptor.
@@ -841,13 +850,34 @@ pub fn validate_comfy_weight_file_from_opened_descriptor(
     if !is_descriptor || !has_numeric_descriptor {
         bail!("H3 Comfy visual VAE opened authority must use a process descriptor path")
     }
-    validate_comfy_weight_file_inner(config, weight_path, false)
+    validate_comfy_weight_file_inner(config, weight_path, false, false)
+}
+
+/// Validate a descriptor for Mold's private content-authenticated staging
+/// copy. The caller must retain the underlying file and re-authenticate it
+/// after construction; only this route tolerates macOS `/dev/fd` ctime drift.
+pub fn validate_comfy_weight_file_from_authenticated_staging_descriptor(
+    config: &MiniMaxH3VisualVaeConfig,
+    weight_path: &Path,
+) -> Result<ValidatedVisualVaeWeights> {
+    let parent = weight_path.parent();
+    let is_descriptor =
+        parent == Some(Path::new("/dev/fd")) || parent == Some(Path::new("/proc/self/fd"));
+    let has_numeric_descriptor = weight_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| !name.is_empty() && name.bytes().all(|byte| byte.is_ascii_digit()));
+    if !is_descriptor || !has_numeric_descriptor {
+        bail!("H3 authenticated staging authority must use a process descriptor path")
+    }
+    validate_comfy_weight_file_inner(config, weight_path, false, true)
 }
 
 fn validate_comfy_weight_file_inner(
     config: &MiniMaxH3VisualVaeConfig,
     weight_path: &Path,
     require_canonical_filename: bool,
+    authenticated_staging_descriptor: bool,
 ) -> Result<ValidatedVisualVaeWeights> {
     config.validate_production_contract()?;
     if require_canonical_filename {
@@ -907,6 +937,7 @@ fn validate_comfy_weight_file_inner(
             header_identity_sha256: hex_digest(identity.finalize()),
         },
         files: vec![file_identity],
+        authenticated_staging_descriptor,
     })
 }
 
@@ -1528,6 +1559,32 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn authenticated_staging_descriptor_defers_ctime_to_outer_content_fence() {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let storage_path = directory.path().join(COMFY_VISUAL_VAE_FILENAME);
+        let retained = write_sparse_production_comfy_weights(&storage_path);
+        #[cfg(target_os = "linux")]
+        let descriptor_path = PathBuf::from(format!("/proc/self/fd/{}", retained.as_raw_fd()));
+        #[cfg(not(target_os = "linux"))]
+        let descriptor_path = PathBuf::from(format!("/dev/fd/{}", retained.as_raw_fd()));
+        let validated = validate_comfy_weight_file_from_authenticated_staging_descriptor(
+            &MiniMaxH3VisualVaeConfig::production(),
+            &descriptor_path,
+        )
+        .unwrap();
+
+        retained
+            .set_permissions(std::fs::Permissions::from_mode(0o440))
+            .unwrap();
+        validated.revalidate_files().unwrap();
+        validated.mmap_var_builder(&Device::Cpu).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn descriptor_bound_fingerprint_survives_storage_path_replacement() {
         use std::os::fd::AsRawFd;
 
@@ -1554,6 +1611,7 @@ mod tests {
                 header_identity_sha256: "test".into(),
             },
             files: vec![identity],
+            authenticated_staging_descriptor: false,
         };
         let digest = token
             .component_fingerprint(&mut NoopVisualWeightReadObserver)
@@ -1798,6 +1856,7 @@ mod tests {
                 header_identity_sha256: "test".into(),
             },
             files: vec![visual_weight_file_identity(&path).unwrap()],
+            authenticated_staging_descriptor: false,
         };
         let mut bytes = std::fs::read(&path).unwrap();
         bytes.push(9);

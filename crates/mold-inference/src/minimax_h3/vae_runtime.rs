@@ -18,7 +18,7 @@ use mold_candle::minimax_h3::{
     expected_visual_vae_parameter_bytes, inspect_audio_vae_config_bytes,
     inspect_safetensors_header, inspect_visual_vae_config_bytes,
     load_validated_audio_vae_with_observer, validate_audio_safetensors,
-    validate_comfy_weight_file_from_opened_descriptor, AudioTensorLayout, AudioVae,
+    validate_comfy_weight_file_from_authenticated_staging_descriptor, AudioTensorLayout, AudioVae,
     AudioVaeLoadObserver, DecodeComputePolicy, MiniMaxH3VisualVae, VisualAttentionBackend,
     VisualVaeEvent, VisualVaeObserver,
 };
@@ -995,11 +995,12 @@ fn inspect_visual_component(
             message: error.to_string(),
         }
     })?;
-    let validated = validate_comfy_weight_file_from_opened_descriptor(&config, weight_path)
-        .map_err(|error| H3ComfyVaeLoadError::Validation {
-            role: H3ComfyVaeArtifactRole::VisualWeights,
-            message: error.to_string(),
-        })?;
+    let validated =
+        validate_comfy_weight_file_from_authenticated_staging_descriptor(&config, weight_path)
+            .map_err(|error| H3ComfyVaeLoadError::Validation {
+                role: H3ComfyVaeArtifactRole::VisualWeights,
+                message: error.to_string(),
+            })?;
     let resident_device_weight_bytes = expected_visual_vae_parameter_bytes(&config, DType::F16)
         .map_err(|error| H3ComfyVaeLoadError::Validation {
             role: H3ComfyVaeArtifactRole::VisualWeights,
@@ -1386,10 +1387,11 @@ impl VaeFactory for ProductionVaeFactory {
         let header = inspect_safetensors_header(weight_path).map_err(|error| {
             FactoryError::validation(H3ComfyVaeArtifactRole::VisualWeights, error)
         })?;
-        let validated = validate_comfy_weight_file_from_opened_descriptor(&config, weight_path)
-            .map_err(|error| {
-                FactoryError::validation(H3ComfyVaeArtifactRole::VisualWeights, error)
-            })?;
+        let validated =
+            validate_comfy_weight_file_from_authenticated_staging_descriptor(&config, weight_path)
+                .map_err(|error| {
+                    FactoryError::validation(H3ComfyVaeArtifactRole::VisualWeights, error)
+                })?;
         let resident_device_weight_bytes = expected_visual_vae_parameter_bytes(&config, DType::F16)
             .map_err(|error| {
                 FactoryError::validation(H3ComfyVaeArtifactRole::VisualWeights, error)
