@@ -2380,8 +2380,7 @@ mod tests {
         // Nor its base64 encoding, which is how `Vec<u8>` would actually land.
         let encoded = {
             use base64::Engine as _;
-            base64::engine::general_purpose::STANDARD
-                .encode(request.id_image.as_ref().unwrap())
+            base64::engine::general_purpose::STANDARD.encode(request.id_image.as_ref().unwrap())
         };
         assert!(!serialized.contains(&encoded));
     }

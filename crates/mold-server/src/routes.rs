@@ -9028,7 +9028,10 @@ mod tests {
         let merged = super::merge_render_warnings(admission, &[identity.to_string()]);
         let all = merged.all().collect::<Vec<_>>();
         assert!(all.contains(&identity), "{all:?}");
-        assert!(all.contains(&"the requested collection was dropped"), "{all:?}");
+        assert!(
+            all.contains(&"the requested collection was dropped"),
+            "{all:?}"
+        );
         // The dimension advisory keeps its own channel.
         assert_eq!(merged.dimension.as_deref(), Some("rounded 1023 up to 1024"));
         assert_eq!(

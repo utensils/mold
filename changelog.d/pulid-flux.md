@@ -33,3 +33,19 @@
   detector, the recognizer, and the vision tower run on the host at admission and
   are charged there; only the cross-attention adapter is resident on the
   generation device ([#1223](https://github.com/utensils/mold/issues/1223)).
+- **Face identity works in the desktop app.** The desktop app is its own build
+  and had never compiled the feature, so its **This device** engine never
+  advertised identity and the photo well simply never appeared — a silent
+  absence with nothing in the interface to explain it. It now ships in every
+  desktop recipe ([#1223](https://github.com/utensils/mold/issues/1223)).
+- **Your reference photograph is never written to disk.** A face photo is
+  biometric data supplied for one render, so it is excluded from the durable
+  generation queue and redacted from batch recovery manifests. The cost is
+  honest: a queued identity print is reported as not-resumable rather than
+  quietly replayed, and a batch interrupted mid-flight is refused rather than
+  re-rendered with the face missing
+  ([#1223](https://github.com/utensils/mold/issues/1223)).
+- **Mold tells you when it had to choose a face.** If a reference photograph
+  contains several faces, mold conditions on the largest one and now says so —
+  in the CLI, over HTTP, and in the browser — instead of only writing it to the
+  server log ([#1223](https://github.com/utensils/mold/issues/1223)).

@@ -434,10 +434,7 @@ mod tests {
     static IN_FLIGHT: AtomicU64 = AtomicU64::new(0);
     static PEAK_IN_FLIGHT: AtomicU64 = AtomicU64::new(0);
 
-    fn overlap_observing_stub(
-        _: &PulidPaths,
-        image: &[u8],
-    ) -> Result<ResolvedIdentity, String> {
+    fn overlap_observing_stub(_: &PulidPaths, image: &[u8]) -> Result<ResolvedIdentity, String> {
         let now = IN_FLIGHT.fetch_add(1, Ordering::SeqCst) + 1;
         PEAK_IN_FLIGHT.fetch_max(now, Ordering::SeqCst);
         // Long enough that a genuinely concurrent peer would be observed.
@@ -526,7 +523,9 @@ mod tests {
             .expect("the stub extractor answers");
 
         assert!(resolved.embedding.is_some());
-        let warning = resolved.warning.expect("an unforced face choice is reported");
+        let warning = resolved
+            .warning
+            .expect("an unforced face choice is reported");
         assert!(warning.contains("faces were detected"), "{warning}");
         assert!(warning.contains("largest"), "{warning}");
     }

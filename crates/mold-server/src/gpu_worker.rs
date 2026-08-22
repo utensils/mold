@@ -4110,7 +4110,11 @@ fn process_job_with_sink(
             // delivery before #1223, which reached nobody who supplied the
             // photograph.
             if let Some(warning) = identity_warning {
-                if !response.request_warnings.iter().any(|held| held == &warning) {
+                if !response
+                    .request_warnings
+                    .iter()
+                    .any(|held| held == &warning)
+                {
                     response.request_warnings.push(warning);
                 }
             }
