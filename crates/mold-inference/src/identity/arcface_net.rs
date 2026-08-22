@@ -197,8 +197,17 @@ impl IResNet100 {
         // which is what the fully-connected layer's 25088 columns are ordered
         // by.
         let xs = xs.flatten_from(1)?;
-        // `Gemm(alpha = 1, beta = 1, transB = 1)`.
-        let xs = xs.matmul(&self.fc_weight.t()?.contiguous()?)?;
+        // `Gemm(alpha = 1, beta = 1, transB = 1)`: `Y = X @ W^T + B`.
+        //
+        // Computed as `W @ X^T` rather than `X @ W^T` on purpose. `W` is
+        // `[512, 25088]` — 51 MB — so materializing its transpose is 51 MB read
+        // and 51 MB written **per forward**, which measured as roughly a fifth
+        // of the whole 112x112 embedding. `X^T` is 25088 values. Same product,
+        // one transpose of the small operand.
+        let xs = self
+            .fc_weight
+            .matmul(&xs.t()?.contiguous()?)?
+            .reshape((1, EMBEDDING_DIM))?;
         let xs = xs.broadcast_add(&self.fc_bias.reshape((1, EMBEDDING_DIM))?)?;
         let xs = self.features.forward(&xs)?;
         Ok(xs.flatten_all()?.to_vec1::<f32>()?)

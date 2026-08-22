@@ -358,13 +358,17 @@ That position is chosen, not incidental.
   `batch_runtime::submit_child` clones into every `BatchChildExecution`. Storing
   the embedding there makes "one extraction, every sibling" structural rather
   than a convention somebody has to keep.
-- **On the CPU**, because `candle-onnx` materializes every initializer on
-  `Device::Cpu` and refuses anything else — and because at admission the
-  scheduler has not leased a device yet, so there is no GPU to run it on. That
-  constraint turns into the guarantee the issue asked for: extraction's ~1.4 GB
-  peak is allocated and released before the job is dispatched, so it *cannot*
-  overlap the T5/CLIP encode peak. No scheduled slot and no new typed
-  learned-scheduling phase was needed, because the two peaks cannot coexist.
+- **On the CPU**, because at admission the scheduler has not leased a device
+  yet, so there is no GPU to run it on. (Until #1227 there was a second reason:
+  `candle-onnx` materializes every initializer on `Device::Cpu` and refuses
+  anything else. The two face networks are now resident `candle` modules that
+  take a device — `identity::scrfd_net`, `identity::arcface_net` — so only the
+  admission-ordering reason remains, and `docs/architecture/pulid-perf.md` §3
+  designs the phase that would lift it.) That constraint turns into the
+  guarantee the issue asked for: extraction's ~1.4 GB peak is allocated and
+  released before the job is dispatched, so it *cannot* overlap the T5/CLIP
+  encode peak. No scheduled slot and no new typed learned-scheduling phase was
+  needed, because the two peaks cannot coexist.
 
 ### The frozen value
 

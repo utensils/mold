@@ -140,6 +140,31 @@ fn adapter_sha256() -> String {
         .to_string()
 }
 
+/// Which half of [`compose_identity_tokens_observed`] a timing sample belongs
+/// to.
+///
+/// `docs/architecture/pulid-perf.md` §0 recorded that this half of the
+/// extraction had never been measured anywhere in the repository, and §4 made
+/// measuring it the first deliverable of the implementation phase. The two
+/// halves are reported separately because they are separately expensive and
+/// separately optimizable: the tower is a 24-block ViT over 577 tokens, the
+/// IDFormer is a much smaller cross-attention stack over 32 queries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComposeStage {
+    /// Materializing the derived safetensors, preprocessing the crop, and
+    /// building the EVA02-CLIP vision tower — everything before its forward
+    /// pass. Separate from [`ComposeStage::EvaForward`] because it is what the
+    /// drop-and-reload rule pays for on every request, and therefore what a
+    /// residency change would buy back.
+    EvaBuild,
+    /// The EVA02-CLIP vision tower's forward pass.
+    EvaForward,
+    /// Reading the adapter and building the PuLID IDFormer.
+    IdFormerBuild,
+    /// The IDFormer's forward pass.
+    IdFormerForward,
+}
+
 /// Run the EVA tower and the IDFormer over one aligned crop.
 ///
 /// Split out from [`extract_identity_embedding`] so the weight-gated parity
@@ -149,7 +174,24 @@ pub(crate) fn compose_identity_tokens(
     arcface: &[f32],
     eva_crop_512: &image::RgbImage,
 ) -> Result<Vec<f32>> {
+    compose_identity_tokens_observed(paths, arcface, eva_crop_512, &mut |_, _| {})
+}
+
+/// [`compose_identity_tokens`] with a per-stage wall-clock observer.
+///
+/// The observer is the ONLY difference — `compose_identity_tokens` delegates
+/// here with a no-op, so there is one implementation and the benchmark cannot
+/// drift from the production path by measuring a copy of it. It exists for
+/// `pulid_face_probe bench --full`, which §4 requires before any performance
+/// claim about identity extraction is made.
+pub fn compose_identity_tokens_observed(
+    paths: &PulidPaths,
+    arcface: &[f32],
+    eva_crop_512: &image::RgbImage,
+    observe: &mut dyn FnMut(ComposeStage, std::time::Duration),
+) -> Result<Vec<f32>> {
     let device = Device::Cpu;
+    let mut stage_started = std::time::Instant::now();
     let vision_path = ensure_eva_clip_vision_safetensors(paths)
         .context("materializing the EVA02-CLIP vision tower")?;
 
@@ -178,11 +220,15 @@ pub(crate) fn compose_identity_tokens(
         };
         let tower = EvaClipVisionTower::new(vb, &device)
             .context("building the EVA02-CLIP-L-14-336 vision tower")?;
+        observe(ComposeStage::EvaBuild, stage_started.elapsed());
+        stage_started = std::time::Instant::now();
         let output = tower
             .forward(&pixels)
             .context("running the EVA02-CLIP vision tower")?;
+        observe(ComposeStage::EvaForward, stage_started.elapsed());
         (output.hidden_states, output.cls_projection)
     };
+    stage_started = std::time::Instant::now();
 
     // `pipeline_flux.py:181`: `cat([id_ante_embedding, id_cond_vit])` — the
     // RAW ArcFace output, not the L2-normalized one; only the CLIP projection
@@ -203,18 +249,22 @@ pub(crate) fn compose_identity_tokens(
         .with_context(|| format!("reading the PuLID adapter {}", paths.adapter.display()))?
     };
     let idformer = IdFormer::new(vb.pp("pulid_encoder")).context("building the PuLID IDFormer")?;
+    observe(ComposeStage::IdFormerBuild, stage_started.elapsed());
+    stage_started = std::time::Instant::now();
     let tokens = idformer
         .forward(&id_cond, &hidden_states)
         .context("running the PuLID IDFormer")?;
 
     let tokens = tokens.i(0).context("the IDFormer returned no batch")?;
-    tokens
+    let tokens = tokens
         .flatten_all()
         .context("flattening the identity tokens")?
         .to_dtype(DType::F32)
         .context("the identity tokens are numeric")?
         .to_vec1::<f32>()
-        .context("reading the identity tokens")
+        .context("reading the identity tokens")?;
+    observe(ComposeStage::IdFormerForward, stage_started.elapsed());
+    Ok(tokens)
 }
 
 #[cfg(test)]

@@ -255,3 +255,87 @@ fn the_shipped_constructors_stay_cpu_resident() {
         .device()
         .is_cpu());
 }
+
+// ---------------------------------------------------------------------------
+// Weight-gated: the performance property, pinned relatively.
+// ---------------------------------------------------------------------------
+
+/// Warmups and measured runs, the `pulid_face_probe` gate protocol.
+const GATE_WARMUPS: usize = 5;
+const GATE_RUNS: usize = 20;
+
+/// The port must never be SLOWER than the evaluator it replaced.
+///
+/// This is deliberately a **relative** pin rather than a millisecond ceiling.
+/// An absolute number is a property of the machine and the machine's load —
+/// `pulid-face-extraction.md` records a p95 that tripled under load average 83
+/// — so a committed millisecond threshold either flakes on a busy box or is set
+/// so loose it catches nothing. Running both evaluators alternately in one loop
+/// makes them share whatever contention exists, and the ratio survives it.
+///
+/// It is not a hypothetical guard. The first version of `arcface_net` computed
+/// the fully-connected layer as `X @ W^T` and so materialized a transpose of
+/// the 51 MB weight on **every forward**, which made the "faster" port 6%
+/// slower than `simple_eval`; this ratio is what caught it.
+///
+/// The margin is generous — the port only has to not regress — because the
+/// measured win is small: see `docs/architecture/pulid-perf.md` §4, which
+/// records why re-materialization turned out not to be the cost centre.
+const NO_SLOWER_THAN: f64 = 0.95;
+
+fn p95(mut samples: Vec<f64>) -> f64 {
+    samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let rank = ((0.95 * samples.len() as f64).ceil() as usize).clamp(1, samples.len());
+    samples[rank - 1]
+}
+
+fn milliseconds(f: impl FnOnce()) -> f64 {
+    let started = std::time::Instant::now();
+    f();
+    started.elapsed().as_secs_f64() * 1000.0
+}
+
+#[test]
+#[ignore = "requires the antelopev2 ONNX models via MOLD_TEST_PULID_ASSETS"]
+fn the_resident_port_is_never_slower_than_the_evaluator_it_replaced() {
+    let dir = assets().expect("set MOLD_TEST_PULID_ASSETS to the antelopev2 directory");
+    let detector = load_onnx_model(&dir.join("scrfd_10g_bnkps.onnx"), None).expect("the model");
+    let recognizer = load_onnx_model(&dir.join("glintr100.onnx"), None).expect("the model");
+    let scrfd = ScrfdNet::new(&detector.model, &Device::Cpu).expect("the hand port builds");
+    let arcface = IResNet100::new(&recognizer.model, &Device::Cpu).expect("the hand port builds");
+
+    let (image, landmarks, _) = fixtures().remove(0);
+    let boxed = letterbox_top_left(&image, 640);
+    let detect_blob = ScrfdDetector::blob(&boxed.image).expect("the blob builds");
+    let crop = norm_crop(&image, &landmarks).expect("a warpable face");
+    let embed_blob = ArcFaceRecognizer::blob(&crop).expect("the blob builds");
+
+    let mut port = Vec::new();
+    let mut oracle = Vec::new();
+    for i in 0..(GATE_WARMUPS + GATE_RUNS) {
+        // Alternated inside one iteration so both see the same contention.
+        let p = milliseconds(|| {
+            scrfd.forward(&detect_blob).expect("the port runs");
+            arcface.forward(&embed_blob).expect("the port runs");
+        });
+        let o = milliseconds(|| {
+            mold_inference::identity::scrfd_net::reference_forward(&detector.model, &detect_blob)
+                .expect("candle-onnx runs");
+            mold_inference::identity::arcface_net::reference_forward(&recognizer.model, &embed_blob)
+                .expect("candle-onnx runs");
+        });
+        if i >= GATE_WARMUPS {
+            port.push(p);
+            oracle.push(o);
+        }
+    }
+    let (port_p95, oracle_p95) = (p95(port), p95(oracle));
+    let ratio = oracle_p95 / port_p95;
+    println!("face stack p95: port {port_p95:.1} ms, candle-onnx {oracle_p95:.1} ms ({ratio:.2}x)");
+    assert!(
+        ratio >= NO_SLOWER_THAN,
+        "the resident port is {ratio:.2}x the evaluator it replaced \
+         ({port_p95:.1} ms vs {oracle_p95:.1} ms); a resident forward must not cost more than one \
+         that re-materializes 278 MB of initializers per call"
+    );
+}
