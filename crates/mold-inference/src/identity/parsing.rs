@@ -411,6 +411,27 @@ impl BiSeNetParser {
         })
     }
 
+    /// Build from a derived safetensors file on disk.
+    ///
+    /// The convenience `new` wants for callers that hold a path rather than a
+    /// `VarBuilder` — the `dev-bins` probe, and any future consumer that is
+    /// not already inside the extraction.
+    ///
+    /// # Safety contract
+    ///
+    /// The file is mmap'd, so it must not be mutated while the parser holds
+    /// it. Production reaches this through
+    /// `pickle_convert::ensure_bisenet_parser_safetensors`, which has just
+    /// authenticated those bytes against a compiled-in pin.
+    pub fn from_safetensors(path: &std::path::Path, device: &Device) -> Result<Self> {
+        // SAFETY: see the contract above.
+        let vb = unsafe {
+            VarBuilder::from_mmaped_safetensors(std::slice::from_ref(&path.to_path_buf()), DType::F32, device)
+                .with_context(|| format!("reading the face parser {}", path.display()))?
+        };
+        Self::new(vb, device)
+    }
+
     /// `BiSeNet.forward`'s first output (`bisenet.py:126-135`), already
     /// upsampled to the input resolution and reduced to per-pixel labels —
     /// which is `parsing_out.argmax(dim=1)` at `pipeline_flux.py:165`.

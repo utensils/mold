@@ -70,12 +70,14 @@ use super::{IdentityError, IdentityExtractor};
 /// | --- | --- |
 /// | SCRFD `scrfd_10g_bnkps.onnx` graph, decoded | 17 MB |
 /// | ArcFace `glintr100.onnx` graph, decoded | 261 MB |
+/// | BiSeNet face parser, f32 mmap + f32 activations | 53 MB + ~200 MB |
 /// | EVA02-CLIP vision tower, f16 mmap + f32 activations | 609 MB + ~180 MB |
 /// | IDFormer (`pulid_encoder.*` of the adapter file), f32 | ~330 MB |
 ///
-/// The tower is dropped before the IDFormer is built, so the two large halves
-/// do not coexist; the peak is the tower stage. Rounded up to a round 1.4 GB so
-/// the figure is conservative rather than exact.
+/// The parser is dropped before the tower is built and the tower before the
+/// IDFormer, so the three large stages do not coexist; the peak is the tower
+/// stage. Rounded up to a round 1.4 GB so the figure is conservative rather
+/// than exact.
 ///
 /// Nothing reads this at runtime — the ledger charges the artifacts themselves
 /// — so it is the recorded measurement, kept beside the code that produces it
@@ -504,6 +506,100 @@ fn run_idformer(idformer: &IdFormer, id_cond: &Tensor, hidden: &[Tensor]) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The whole extraction, mask included, against upstream's on a real
+    /// photograph.
+    ///
+    /// Every other PuLID fixture pins one stage on a synthetic input. This
+    /// one starts from a committed portrait's aligned crop and the RAW
+    /// ArcFace embedding #1222 captured beside it, and compares the `[1, 32,
+    /// 2048]` value FLUX is actually conditioned on. It is the acceptance pin
+    /// #1225 exists to satisfy: a mask that were subtly wrong would pass every
+    /// per-stage test above and fail here.
+    #[test]
+    #[ignore = "requires the pinned PuLID checkpoints via MOLD_TEST_PULID_ASSETS"]
+    fn the_identity_matches_upstream_end_to_end() {
+        /// Largest deviation, as a fraction of the golden tensor's own peak.
+        /// The whole stack's f32 accumulation, over a real image rather than
+        /// the synthetic input the per-stage goldens use.
+        /// Measured worst on these four faces: 1.02e-5.
+        const RELATIVE_BUDGET: f32 = 5e-5;
+        const SEED_PARSE_PROBE: u64 = 0x50554C49_44505253;
+
+        if std::env::var_os("MOLD_TEST_PULID_ASSETS").is_none() {
+            eprintln!("skipping: MOLD_TEST_PULID_ASSETS is unset");
+            return;
+        }
+        let testdata = crate::pulid_fixtures::testdata_dir();
+        let faces = testdata.join("faces");
+        let paths = PulidPaths {
+            adapter: crate::pulid_fixtures::pulid_asset("pulid_flux_v0.9.1.safetensors"),
+            vision_encoder_source: crate::pulid_fixtures::pulid_asset(
+                "EVA02_CLIP_L_336_psz14_s6B.pt",
+            ),
+            face_detector: crate::pulid_fixtures::pulid_asset("scrfd_10g_bnkps.onnx"),
+            face_recognizer: crate::pulid_fixtures::pulid_asset("glintr100.onnx"),
+            face_parser_source: crate::pulid_fixtures::pulid_asset("parsing_bisenet.pth"),
+        };
+
+        let goldens = candle_core::safetensors::load(
+            testdata.join("parse_goldens.safetensors"),
+            &Device::Cpu,
+        )
+        .expect("the #1225 goldens are committed");
+        let sources = std::fs::read_to_string(faces.join("sources.json")).unwrap();
+        let stems: Vec<String> = sources
+            .split("\"file\": \"")
+            .skip(1)
+            .filter_map(|rest| rest.split('"').next())
+            .map(|file| file.trim_end_matches(".jpg").to_string())
+            .collect();
+        assert!(!stems.is_empty());
+
+        for stem in stems {
+            let golden_json: serde_json::Value = serde_json::from_str(
+                &std::fs::read_to_string(faces.join(format!("{stem}.golden.json"))).unwrap(),
+            )
+            .unwrap();
+            let arcface: Vec<f32> = golden_json["embedding"]
+                .as_array()
+                .expect("the #1222 golden carries the raw embedding")
+                .iter()
+                .map(|value| value.as_f64().unwrap() as f32)
+                .collect();
+            let crop = image::open(faces.join(format!("{stem}.eva512.png")))
+                .unwrap()
+                .to_rgb8();
+
+            let tokens =
+                compose_identity_tokens_observed(&paths, &arcface, &crop, &mut |_, _| {}).unwrap();
+            assert_eq!(tokens.len(), 32 * 2048);
+
+            // The identity probe is the fourth draw from the capture script's
+            // stream, after the label, masked and preprocess probes.
+            let mut stream = crate::pulid_fixtures::DeterministicStream::new(SEED_PARSE_PROBE);
+            let plane = (crop.width() * crop.height()) as usize;
+            let _ = stream.indices(crate::pulid_fixtures::PROBE_COUNT, plane);
+            let _ = stream.indices(crate::pulid_fixtures::PROBE_COUNT, 3 * plane);
+            let _ = stream.indices(crate::pulid_fixtures::PROBE_COUNT, 3 * 336 * 336);
+            let indices = stream.indices(crate::pulid_fixtures::PROBE_COUNT, tokens.len());
+
+            let expected = goldens[&format!("{stem}.identity.probe")]
+                .to_vec1::<f32>()
+                .unwrap();
+            let stats = goldens[&format!("{stem}.identity.stats")]
+                .to_vec1::<f32>()
+                .unwrap();
+            let peak = stats[4];
+            let actual: Vec<f32> = indices.iter().map(|i| tokens[*i as usize]).collect();
+            let relative = crate::pulid_fixtures::scale_relative_error(&actual, &expected, peak);
+            eprintln!("{stem}: identity relative error {relative:.3e} of peak {peak:.1}");
+            assert!(
+                relative <= RELATIVE_BUDGET,
+                "{stem}: identity relative error {relative}"
+            );
+        }
+    }
 
     /// The peak is what the host-RAM ledger is charged, so it must stay a
     /// number a reviewer can check against the table in the doc comment rather

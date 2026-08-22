@@ -38,6 +38,19 @@ Writes, per face:
   * `<stem>.preprocess.probe` 512 scattered values of the 336 tensor the tower
                               actually receives (masked, bicubic, CLIP-normalized)
 
+With `--eva` and `--adapter` it additionally runs the rest of upstream's
+pipeline on that tensor — the EVA02-CLIP-L-14-336 tower and the IDFormer,
+concatenated with the RAW ArcFace embedding #1222 already committed in
+`faces/<stem>.golden.json` — and records the FINAL identity:
+
+  * `<stem>.identity.probe`   512 scattered values of the `[1, 32, 2048]` output
+  * `<stem>.identity.stats`   [mean, std, min, max, peak] over the whole tensor
+
+That is the end-to-end pin: it is the only fixture in the tree that compares
+mold's whole extraction, mask included, against upstream's on a real
+photograph. It needs `--pulid-repo` as well, for upstream's own
+`eva_clip` and `pulid` modules.
+
 Probe indices come from the same `xorshift64*` stream the encoder goldens use
 (`capture_eva_goldens.py`), so nothing has to be committed to describe them.
 """
@@ -100,19 +113,65 @@ def to_gray(img: torch.Tensor) -> torch.Tensor:
     return x.repeat(1, 3, 1, 1)
 
 
+def build_identity_stack(pulid_repo: Path, eva: Path, adapter: Path):
+    """Upstream's tower and IDFormer, exactly as `capture_eva_goldens.py` builds them."""
+    from functools import partial
+
+    import torch.nn as nn
+    from safetensors.torch import load_file
+
+    sys.path.insert(0, str(pulid_repo))
+    from eva_clip.eva_vit_model import EVAVisionTransformer
+    from pulid.encoders_transformer import IDFormer
+
+    visual = EVAVisionTransformer(
+        img_size=336, patch_size=14, num_classes=768, use_mean_pooling=False,
+        init_values=None, patch_dropout=0.0, embed_dim=1024, depth=24,
+        num_heads=16, mlp_ratio=2.6667, qkv_bias=True, drop_path_rate=0.0,
+        norm_layer=partial(nn.LayerNorm, eps=1e-6), xattn=False, rope=True,
+        postnorm=False, pt_hw_seq_len=16, intp_freq=True, naiveswiglu=True,
+        subln=True,
+    )
+    state = torch.load(eva, map_location="cpu", weights_only=True)
+    _, unexpected = visual.load_state_dict(
+        {k[len("visual."):]: v.float() for k, v in state.items() if k.startswith("visual.")},
+        strict=False,
+    )
+    assert not unexpected, unexpected
+
+    encoder = IDFormer().eval().float()
+    adapter_state = load_file(adapter)
+    prefix = "pulid_encoder."
+    encoder.load_state_dict(
+        {k[len(prefix):]: v.float() for k, v in adapter_state.items() if k.startswith(prefix)},
+        strict=True,
+    )
+    return visual.eval().float(), encoder
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--facexlib-repo", type=Path, required=True)
     parser.add_argument("--weights", type=Path, required=True)
     parser.add_argument("--faces", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--pulid-repo", type=Path)
+    parser.add_argument("--eva", type=Path)
+    parser.add_argument("--adapter", type=Path)
     args = parser.parse_args()
+    end_to_end = bool(args.eva and args.adapter and args.pulid_repo)
 
     sys.path.insert(0, str(args.facexlib_repo))
     from facexlib.parsing import init_parsing_model
     from torchvision.transforms import InterpolationMode
     from torchvision.transforms.functional import normalize, resize
     from PIL import Image
+
+    tower = idformer = None
+    if end_to_end:
+        tower, idformer = build_identity_stack(
+            args.pulid_repo, args.eva, args.adapter
+        )
 
     device = torch.device("cpu")
     face_parse = init_parsing_model(
@@ -167,6 +226,35 @@ def main() -> int:
         arrays[f"{stem}.preprocess.probe"] = flat_pre[
             torch.from_numpy(pre_idx)
         ].contiguous()
+
+        if end_to_end:
+            golden = json.loads(
+                (args.faces / f"{stem}.golden.json").read_text()
+            )
+            arcface = torch.tensor(golden["embedding"], dtype=torch.float32).unsqueeze(0)
+            with torch.no_grad():
+                # `pipeline_flux.py:175-181`
+                cls, hidden = tower(
+                    preprocessed, return_all_features=False, return_hidden=True,
+                    shuffle=False,
+                )
+                cls = cls / torch.norm(cls, 2, 1, True)
+                identity = idformer(torch.cat([arcface, cls], dim=-1), hidden)
+            flat_identity = identity.reshape(-1)
+            identity_idx = stream.indices(PROBE_COUNT, flat_identity.numel())
+            arrays[f"{stem}.identity.probe"] = flat_identity[
+                torch.from_numpy(identity_idx)
+            ].contiguous()
+            arrays[f"{stem}.identity.stats"] = torch.tensor(
+                [
+                    float(flat_identity.mean()),
+                    float(flat_identity.std(unbiased=False)),
+                    float(flat_identity.min()),
+                    float(flat_identity.max()),
+                    float(flat_identity.abs().max()),
+                ],
+                dtype=torch.float32,
+            )
 
         present = sorted(int(v) for v in torch.unique(flat_labels))
         meta[stem] = {
