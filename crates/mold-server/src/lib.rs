@@ -8,6 +8,7 @@ pub mod catalog_credentials;
 pub(crate) mod chain_execution;
 pub mod chain_job_runner;
 pub mod chain_limits;
+pub(crate) mod dir_sync;
 mod gallery_authority;
 #[allow(dead_code)]
 mod h3_admission;

@@ -9,6 +9,10 @@ import { nextTick, ref } from "vue";
 import Icon from "@ui/components/Icon.vue";
 import Keycap from "@ui/components/Keycap.vue";
 import CollectionCard, { type CoverTile } from "./CollectionCard.vue";
+import { shiftShortcutLabel } from "../../lib/platform";
+
+// Windows and Linux spell this chord Ctrl+Shift+N, not the mac glyph pair.
+const newCollectionChord = shiftShortcutLabel("N");
 
 export interface ShelfCard {
   slug: string;
@@ -123,7 +127,9 @@ defineExpose({ startCreate, isCreating: () => creating.value });
         >
           New collection
         </button>
-        <span class="font-utility text-[10.5px] text-ink-3"><Keycap>⌘⇧N</Keycap></span>
+        <span class="font-utility text-[10.5px] text-ink-3"
+          ><Keycap>{{ newCollectionChord }}</Keycap></span
+        >
         <span class="text-[11.5px] text-ink-3">
           Name it, then add prints from the grid or a selection.
         </span>

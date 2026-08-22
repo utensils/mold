@@ -98,12 +98,15 @@ fn decode_native_path(bytes: Vec<u8>) -> Option<PathBuf> {
 
     // An odd length is a torn or foreign write, never something
     // `encode_native_path` produced: miss rather than guess at a path.
-    if bytes.len() % 2 != 0 {
+    if !bytes.len().is_multiple_of(2) {
         return None;
     }
     let wide: Vec<u16> = bytes
-        .chunks_exact(2)
-        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .copied()
+        .map(u16::from_le_bytes)
         .collect();
     Some(PathBuf::from(std::ffi::OsString::from_wide(&wide)))
 }

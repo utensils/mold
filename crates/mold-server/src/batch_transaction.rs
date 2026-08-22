@@ -6447,15 +6447,9 @@ fn directory_sync_is_unsupported(error: &anyhow::Error) -> bool {
     }
 }
 
-#[cfg(unix)]
 fn sync_dir(path: &Path) -> anyhow::Result<()> {
-    File::open(path)?.sync_all()?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn sync_dir(_path: &Path) -> anyhow::Result<()> {
-    Ok(())
+    crate::dir_sync::sync_directory(path)
+        .with_context(|| format!("fsync directory '{}'", path.display()))
 }
 
 #[cfg(test)]

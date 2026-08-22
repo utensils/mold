@@ -232,8 +232,11 @@ pub async fn reveal_output_file(
     from_trash: Option<bool>,
 ) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
-    // Gallery filenames are server-generated basenames; refuse traversal.
-    if filename.contains('/') || filename.contains("..") {
+    // Gallery filenames are server-generated basenames; refuse traversal
+    // through the ONE gallery rule rather than a second, weaker copy of it.
+    // The local spelling missed `\` and `:`, both of which reach a second
+    // location on Windows.
+    if !crate::gallery::valid_filename(&filename) {
         return Err("Invalid filename.".into());
     }
     let _ = state;

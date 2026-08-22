@@ -10,7 +10,7 @@ use anyhow::Context as _;
 use mold_inference::InferenceCancellationToken;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -1910,15 +1910,9 @@ fn atomic_write_parent_json(path: &Path, value: &impl Serialize) -> anyhow::Resu
     result
 }
 
-#[cfg(unix)]
 fn sync_parent_dir(path: &Path) -> anyhow::Result<()> {
-    File::open(path)?.sync_all()?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn sync_parent_dir(_path: &Path) -> anyhow::Result<()> {
-    Ok(())
+    crate::dir_sync::sync_directory(path)
+        .with_context(|| format!("fsync parent directory '{}'", path.display()))
 }
 
 #[cfg(test)]

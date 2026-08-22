@@ -243,14 +243,8 @@ fn work_id(parent_id: &str, attempt_generation: u64, stage_index: u32) -> String
 }
 
 fn sync_directory(path: &Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        std::fs::File::open(path)
-            .with_context(|| format!("opening directory '{}' for fsync", path.display()))?
-            .sync_all()
-            .with_context(|| format!("fsync directory '{}'", path.display()))?;
-    }
-    Ok(())
+    crate::dir_sync::sync_directory(path)
+        .with_context(|| format!("fsync directory '{}'", path.display()))
 }
 
 #[cfg(test)]

@@ -125,12 +125,20 @@ fn output_dir() -> Option<std::path::PathBuf> {
     (!config.is_output_disabled()).then(|| config.effective_output_dir())
 }
 
-fn valid_filename(filename: &str) -> bool {
+/// A gallery filename is a server-generated basename
+/// (`mold-{model}-{ts}[-{idx}]~{slug}.{ext}`), so anything that can address a
+/// second location is refused. The colon is here for Windows and matters on
+/// every platform's copy of the rule: `Path::join` treats `C:evil` as
+/// drive-relative and REPLACES the gallery directory rather than appending to
+/// it, and `name.png:hidden` names an NTFS alternate data stream. Neither can
+/// occur in a name mold produced.
+pub(crate) fn valid_filename(filename: &str) -> bool {
     !filename.is_empty()
         && filename != "."
         && filename != ".."
         && !filename.contains('/')
         && !filename.contains('\\')
+        && !filename.contains(':')
         && !filename.contains('\0')
 }
 
@@ -1716,6 +1724,11 @@ mod tests {
     fn gallery_protocol_rejects_path_traversal() {
         assert!(!valid_filename("../secrets.json"));
         assert!(!valid_filename("nested/image.png"));
+        assert!(!valid_filename("nested\\image.png"));
+        // `Path::join` resolves a drive-relative name against that drive's own
+        // working directory, leaving the gallery root behind entirely.
+        assert!(!valid_filename("C:evil.png"));
+        assert!(!valid_filename("mold-flux-1.png:hidden"));
         assert!(valid_filename("mold-flux-1.png"));
     }
 
@@ -2168,10 +2181,24 @@ mod tests {
         let outside = tempfile::tempdir().unwrap();
         let victim = outside.path().join("victim.png");
         std::fs::write(&victim, b"x").unwrap();
+
+        // Name-shaped escapes are refused on every platform. `C:victim.png` is
+        // the Windows one that a `/`-and-`..` guard lets through: `Path::join`
+        // reads it as drive-relative and drops the gallery root.
+        for escape in ["../victim.png", "..\\victim.png", "C:victim.png"] {
+            assert!(
+                offline_trash(dir.path(), Some(&db), escape, 5).is_err(),
+                "{escape} was not refused"
+            );
+        }
+
+        // The symlink arm needs a privilege Windows does not grant by default.
         #[cfg(unix)]
-        std::os::unix::fs::symlink(&victim, dir.path().join("link.png")).unwrap();
-        #[cfg(unix)]
-        assert!(offline_trash(dir.path(), Some(&db), "link.png", 5).is_err());
+        {
+            std::os::unix::fs::symlink(&victim, dir.path().join("link.png")).unwrap();
+            assert!(offline_trash(dir.path(), Some(&db), "link.png", 5).is_err());
+        }
+
         assert!(victim.exists());
     }
 

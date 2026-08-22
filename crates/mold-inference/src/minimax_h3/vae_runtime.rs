@@ -1946,7 +1946,14 @@ fn sweep_stale_stage_directories_with_expiry(
                 }
             }
             #[cfg(not(unix))]
-            continue;
+            {
+                // No `kill(pid, 0)` equivalent here, so another process's
+                // stage directory is left alone rather than removed on a
+                // guess — the same conservative answer the unix arm gives a
+                // live owner.
+                let _ = owner;
+                continue;
+            }
         } else {
             // Legacy unowned name: without an owner to test, only age proves
             // abandonment.
@@ -2508,19 +2515,32 @@ fn validate_private_storage_directory(path: &Path, label: &str) -> LoadResult<Pa
             "private H3 {label} must be a real directory"
         )));
     }
+    // The remaining checks assume Unix ownership semantics, so a non-Unix
+    // host refuses private H3 storage outright rather than admitting it on the
+    // two checks above. Keeping the refusal inside a `cfg` block — instead of
+    // a bare early `return` followed by the Unix body — is what stops the rest
+    // of the function from compiling as an unreachable statement there.
     #[cfg(not(unix))]
-    return Err(H3ComfyVaeLoadError::InvalidPlan(
-        "private H3 storage resolution currently requires Unix ownership semantics".into(),
-    ));
-    let canonical = std::fs::canonicalize(path).map_err(|error| {
-        H3ComfyVaeLoadError::InvalidPlan(format!("cannot canonicalize private H3 {label}: {error}"))
-    })?;
-    if canonical != path {
-        return Err(H3ComfyVaeLoadError::InvalidPlan(format!(
-            "private H3 {label} must not contain aliases or symlink components"
-        )));
+    {
+        let _ = label;
+        Err(H3ComfyVaeLoadError::InvalidPlan(
+            "private H3 storage resolution currently requires Unix ownership semantics".into(),
+        ))
     }
-    Ok(canonical)
+    #[cfg(unix)]
+    {
+        let canonical = std::fs::canonicalize(path).map_err(|error| {
+            H3ComfyVaeLoadError::InvalidPlan(format!(
+                "cannot canonicalize private H3 {label}: {error}"
+            ))
+        })?;
+        if canonical != path {
+            return Err(H3ComfyVaeLoadError::InvalidPlan(format!(
+                "private H3 {label} must not contain aliases or symlink components"
+            )));
+        }
+        Ok(canonical)
+    }
 }
 
 fn production_artifacts(manifest: &ModelManifest) -> LoadResult<Vec<ExpectedArtifact>> {

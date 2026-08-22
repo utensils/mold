@@ -109,6 +109,13 @@ objc2-quartz-core = { version = "0.3.2", default-features = false, features = ["
 # Linux notification-body clicks carry the same semantic routes as macOS.
 notify-rust = "4.18"
 
+[target.'cfg(target_os = "windows")'.dependencies]
+# Same reason as Linux: the plugin's JS `sendNotification` shows a toast but
+# surfaces no activation, so a click could not route to the gallery/model/
+# update the alert is about. This is the crate the plugin itself uses on
+# Windows, reached directly for its `on_activated` callback.
+tauri-winrt-notification = "0.7"
+
 [features]
 default = []
 # CPU-only by default so CI runs without a GPU; desktop-dev/desktop-build

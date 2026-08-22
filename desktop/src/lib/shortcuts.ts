@@ -32,9 +32,20 @@ export interface KeyLike {
   shiftKey: boolean;
 }
 
-/** Plain ⌘A (no other modifiers) — WebKit's Select All command. */
-export function isSelectAllChord(e: KeyLike): boolean {
-  return e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && (e.key === "a" || e.key === "A");
+/**
+ * The platform's plain Select All chord, no other modifiers: ⌘A on macOS,
+ * Ctrl+A everywhere else. It is read for two jobs at once — suppressing the
+ * webview's own Select All over app chrome, and driving Library's real
+ * Select All — so a meta-only test does not merely skip a macOS paint quirk on
+ * Windows and Linux, it leaves Ctrl+A doing nothing in the Library.
+ */
+export function isSelectAllChord(
+  e: KeyLike,
+  platform: DesktopPlatform = CURRENT_PLATFORM,
+): boolean {
+  if (e.altKey || e.shiftKey) return false;
+  if (!(e.key === "a" || e.key === "A")) return false;
+  return platform === "macos" ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey;
 }
 
 /** Input types that hold selectable text (an unset `type` defaults to text). */

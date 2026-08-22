@@ -3405,35 +3405,67 @@ fn artifact_metadata_identity(
         use std::os::windows::fs::MetadataExt;
         use std::os::windows::io::AsRawHandle;
         use windows_sys::Win32::Storage::FileSystem::{
-            FileBasicInfo, GetFileInformationByHandleEx, FILE_BASIC_INFO,
+            FileBasicInfo, GetFileInformationByHandle, GetFileInformationByHandleEx,
+            BY_HANDLE_FILE_INFORMATION, FILE_BASIC_INFO,
         };
-        let change_time = std::fs::File::open(_path)
+
+        // `Metadata::volume_serial_number` / `file_index` are the obvious
+        // spelling and are NIGHTLY-ONLY (`windows_by_handle`, rust#63010), so
+        // read the same two fields from `GetFileInformationByHandle`, which is
+        // stable — the identical route `batch_transaction::windows_file_identity`
+        // already takes. Both readings come off ONE handle: opening the path
+        // twice would let a replacement between the two calls pair a file id
+        // with another file's ChangeTime, which is exactly the substitution
+        // this identity exists to catch.
+        let (volume_serial, file_index, change_time) = std::fs::File::open(_path)
             .ok()
-            .and_then(|file| {
-                let mut info = std::mem::MaybeUninit::<FILE_BASIC_INFO>::uninit();
+            .map(|file| {
+                let handle = file.as_raw_handle() as _;
+                let mut by_handle = std::mem::MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::uninit();
                 // SAFETY: `file` owns a valid handle for the duration of the
-                // call and `info` is correctly sized/aligned for FileBasicInfo.
+                // call and `by_handle` is correctly sized writable storage.
+                let identity =
+                    unsafe { GetFileInformationByHandle(handle, by_handle.as_mut_ptr()) };
+                let (volume_serial, file_index) = if identity != 0 {
+                    // SAFETY: a successful call initialized every field.
+                    let info = unsafe { by_handle.assume_init() };
+                    (
+                        info.dwVolumeSerialNumber,
+                        (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
+                    )
+                } else {
+                    (0, 0)
+                };
+
+                let mut basic = std::mem::MaybeUninit::<FILE_BASIC_INFO>::uninit();
+                // SAFETY: same handle, and `basic` is correctly sized/aligned
+                // for FileBasicInfo.
                 let result = unsafe {
                     GetFileInformationByHandleEx(
-                        file.as_raw_handle() as _,
+                        handle,
                         FileBasicInfo,
-                        info.as_mut_ptr().cast(),
+                        basic.as_mut_ptr().cast(),
                         std::mem::size_of::<FILE_BASIC_INFO>() as u32,
                     )
                 };
                 // SAFETY: Win32 initializes the entire FILE_BASIC_INFO on a
                 // nonzero result.
-                (result != 0).then(|| unsafe { info.assume_init().ChangeTime as u64 })
+                let change_time = (result != 0)
+                    .then(|| unsafe { basic.assume_init().ChangeTime as u64 })
+                    .unwrap_or(0);
+
+                (volume_serial, file_index, change_time)
             })
-            .unwrap_or(0);
+            .unwrap_or((0, 0, 0));
+
         ArtifactMetadataIdentity {
             len: metadata.file_size(),
             // File ID catches replacement; NTFS ChangeTime catches an
             // in-place overwrite even if last-write time and size are
             // restored by the caller.
             platform_identity: vec![
-                u64::from(metadata.volume_serial_number().unwrap_or(0)),
-                metadata.file_index().unwrap_or(0),
+                u64::from(volume_serial),
+                file_index,
                 metadata.creation_time(),
                 change_time,
             ],

@@ -2310,10 +2310,7 @@ fn publish_file_idempotently(staged: &Path, final_path: &Path, bytes: &[u8]) -> 
         )
     })?;
     if let Some(parent) = final_path.parent() {
-        #[cfg(unix)]
-        std::fs::File::open(parent)
-            .with_context(|| format!("opening final output directory '{}'", parent.display()))?
-            .sync_all()
+        crate::dir_sync::sync_directory(parent)
             .with_context(|| format!("fsync final output directory '{}'", parent.display()))?;
     }
     Ok(())

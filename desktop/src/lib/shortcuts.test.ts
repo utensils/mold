@@ -90,16 +90,31 @@ describe("resolveShellShortcut", () => {
 
 describe("isSelectAllChord", () => {
   it("recognizes plain ⌘A in either case", () => {
-    expect(isSelectAllChord(key("a"))).toBe(true);
-    expect(isSelectAllChord(key("A"))).toBe(true);
+    expect(isSelectAllChord(key("a"), "macos")).toBe(true);
+    expect(isSelectAllChord(key("A"), "macos")).toBe(true);
+  });
+
+  it("recognizes plain Ctrl+A on Windows and Linux", () => {
+    const ctrlA = key("a", { metaKey: false, ctrlKey: true });
+    expect(isSelectAllChord(ctrlA, "windows")).toBe(true);
+    expect(isSelectAllChord(ctrlA, "linux")).toBe(true);
+  });
+
+  it("does not cross the platform modifier", () => {
+    expect(isSelectAllChord(key("a"), "windows")).toBe(false);
+    expect(isSelectAllChord(key("a", { metaKey: false, ctrlKey: true }), "macos")).toBe(false);
   });
 
   it("rejects other keys and extra modifiers", () => {
-    expect(isSelectAllChord(key("a", { metaKey: false }))).toBe(false);
-    expect(isSelectAllChord(key("a", { shiftKey: true }))).toBe(false);
-    expect(isSelectAllChord(key("a", { altKey: true }))).toBe(false);
-    expect(isSelectAllChord(key("a", { ctrlKey: true }))).toBe(false);
-    expect(isSelectAllChord(key("b"))).toBe(false);
+    expect(isSelectAllChord(key("a", { metaKey: false }), "macos")).toBe(false);
+    expect(isSelectAllChord(key("a", { shiftKey: true }), "macos")).toBe(false);
+    expect(isSelectAllChord(key("a", { altKey: true }), "macos")).toBe(false);
+    expect(isSelectAllChord(key("a", { ctrlKey: true }), "macos")).toBe(false);
+    expect(isSelectAllChord(key("b"), "macos")).toBe(false);
+    expect(isSelectAllChord(key("a", { metaKey: true, ctrlKey: true }), "windows")).toBe(false);
+    expect(
+      isSelectAllChord(key("a", { metaKey: false, ctrlKey: true, altKey: true }), "windows"),
+    ).toBe(false);
   });
 });
 
