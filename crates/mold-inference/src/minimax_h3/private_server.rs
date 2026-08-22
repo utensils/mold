@@ -1571,8 +1571,11 @@ fn prepare_reviewed_h3_private_fl2va_admission(
     } = input;
     if device_id.trim().is_empty()
         || compute_capability.is_some_and(|capability| capability.0 == 0)
-        || available_device_bytes == 0
-        || available_host_headroom_bytes == 0
+        || !private_h3_capacity_sample_is_concrete(
+            compute_capability,
+            available_device_bytes,
+            available_host_headroom_bytes,
+        )
     {
         bail!("private H3 admission requires one concrete nonempty GPU capacity sample")
     }
@@ -2010,6 +2013,16 @@ fn prepare_reviewed_h3_private_fl2va_admission(
         available_host_headroom_bytes,
     )?;
     Ok(evidence)
+}
+
+#[cfg(feature = "mp4")]
+fn private_h3_capacity_sample_is_concrete(
+    compute_capability: Option<(u16, u16)>,
+    available_device_bytes: u64,
+    available_host_headroom_bytes: u64,
+) -> bool {
+    available_device_bytes > 0
+        && (compute_capability.is_none() || available_host_headroom_bytes > 0)
 }
 
 #[cfg(feature = "mp4")]
@@ -7489,6 +7502,20 @@ mod tests {
         let mut fence = owner_fence_for(&base_factory());
         fence.predicted_host_increment_bytes = 0;
         assert!(fence.validate().is_err());
+    }
+
+    #[cfg(feature = "mp4")]
+    #[test]
+    fn metal_capacity_sample_needs_only_the_unified_pool() {
+        assert!(private_h3_capacity_sample_is_concrete(None, 40, 0));
+        assert!(!private_h3_capacity_sample_is_concrete(None, 0, 40));
+    }
+
+    #[cfg(feature = "mp4")]
+    #[test]
+    fn cuda_capacity_sample_still_needs_both_physical_pools() {
+        assert!(private_h3_capacity_sample_is_concrete(Some((8, 9)), 40, 40));
+        assert!(!private_h3_capacity_sample_is_concrete(Some((8, 9)), 40, 0,));
     }
 
     /// The resolved queue/worker form of an FL2VA request, matching what the
