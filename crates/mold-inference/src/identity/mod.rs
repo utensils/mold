@@ -107,24 +107,16 @@ pub struct IdentityExtractor {
 impl IdentityExtractor {
     /// Load the detector and recognizer from a resolved PuLID bundle.
     ///
-    /// `device` is accepted for symmetry with every other engine and is
-    /// asserted, not honoured. Since #1227 the two networks are ordinary
-    /// resident candle modules that *could* be placed anywhere
-    /// ([`scrfd_net::ScrfdNet::new`], [`arcface_net::IResNet100::new`] both
-    /// take a device), so this is no longer an evaluator limitation — it is the
-    /// call-site contract: extraction runs at ADMISSION, before the scheduler
-    /// has leased a device, so there is no device to name yet
-    /// (`docs/architecture/pulid-perf.md` §1 and §3, which design the post-lease
-    /// phase that would lift this). A non-CPU request is an explicit error
-    /// rather than a silent demotion.
+    /// `device` is HONOURED as of #1227 phase 2. Phase 1 made both networks
+    /// ordinary resident candle modules ([`scrfd_net::ScrfdNet::new`],
+    /// [`arcface_net::IResNet100::new`] both place their weights), and phase 2
+    /// moved the extraction inside the leased job, so there is finally a device
+    /// to name (`docs/architecture/pulid-perf.md` §5). The assertion this used
+    /// to carry — "extraction runs at admission, before a device is leased" —
+    /// described the call site rather than the arithmetic, and the call site
+    /// moved.
     pub fn load(paths: &PulidPaths, device: &candle_core::Device) -> Result<Self> {
-        if !device.is_cpu() {
-            anyhow::bail!(
-                "PuLID face extraction runs on the CPU: it happens at admission, before a \
-                 device is leased (docs/architecture/pulid-perf.md)"
-            );
-        }
-        Self::from_paths(&paths.face_detector, &paths.face_recognizer)
+        Self::from_paths_on_device(&paths.face_detector, &paths.face_recognizer, device)
     }
 
     /// Load from explicit model paths. Used by tests, which hold the files
@@ -138,6 +130,15 @@ impl IdentityExtractor {
     /// call [`onnx_graph::load_onnx_model`] with `None` instead, and get no
     /// extractor out of it.
     pub fn from_paths(detector: &Path, recognizer: &Path) -> Result<Self> {
+        Self::from_paths_on_device(detector, recognizer, &candle_core::Device::Cpu)
+    }
+
+    /// [`Self::from_paths`], placing both networks on `device`.
+    pub fn from_paths_on_device(
+        detector: &Path,
+        recognizer: &Path,
+        device: &candle_core::Device,
+    ) -> Result<Self> {
         let det = onnx_graph::load_onnx_model(
             detector,
             onnx_graph::pinned_artifact(ModelComponent::FaceDetector),
@@ -147,8 +148,9 @@ impl IdentityExtractor {
             onnx_graph::pinned_artifact(ModelComponent::FaceRecognizer),
         )?;
         Ok(Self {
-            detector: ScrfdDetector::new(det.model).context("loading the SCRFD detector")?,
-            recognizer: ArcFaceRecognizer::new(rec.model)
+            detector: ScrfdDetector::new_on_device(det.model, device)
+                .context("loading the SCRFD detector")?,
+            recognizer: ArcFaceRecognizer::new_on_device(rec.model, device)
                 .context("loading the ArcFace recognizer")?,
             detector_sha256: det.sha256,
             recognizer_sha256: rec.sha256,
@@ -335,8 +337,13 @@ mod tests {
         assert_eq!(EVA_CROP_BORDER_RGB, [132, 133, 135]);
     }
 
+    /// Phase 1's `a_gpu_placement_request_is_refused_rather_than_silently_demoted`
+    /// inverted: #1227 phase 2 moved extraction inside the leased job, so a
+    /// non-CPU device is now the ordinary case and must reach the same file
+    /// open a CPU device does. A refusal here would mean the extraction had
+    /// silently stayed on the host after the phase moved.
     #[test]
-    fn a_gpu_placement_request_is_refused_rather_than_silently_demoted() {
+    fn a_device_placement_request_reaches_the_models_rather_than_being_refused() {
         let paths = PulidPaths {
             adapter: Path::new("/nonexistent/adapter.safetensors").to_path_buf(),
             vision_encoder_source: Path::new("/nonexistent/eva.pt").to_path_buf(),
@@ -354,5 +361,18 @@ mod tests {
             format!("{cpu_err:#}").contains("scrfd.onnx"),
             "a CPU load must reach the file open: {cpu_err:#}"
         );
+        // A real accelerator is not available in every build or on every CI
+        // runner, so the device arm is asserted only where one exists. Where
+        // it does, it must fail on the ABSENT MODEL, never on the placement.
+        if let Ok(device) = candle_core::Device::new_metal(0) {
+            let err = match IdentityExtractor::load(&paths, &device) {
+                Ok(_) => panic!("nonexistent models must not load"),
+                Err(err) => err,
+            };
+            assert!(
+                format!("{err:#}").contains("scrfd.onnx"),
+                "a device load must reach the file open too: {err:#}"
+            );
+        }
     }
 }

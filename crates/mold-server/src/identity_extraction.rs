@@ -236,10 +236,11 @@ async fn extract_blocking(
 ) -> Result<ResolvedIdentity, String> {
     let outcome = tokio::task::spawn_blocking(move || {
         let borrowed: Vec<&[u8]> = images.iter().map(Vec::as_slice).collect();
-        mold_inference::identity::extraction::extract_identity_embeddings(
+        mold_inference::identity::extraction::extract_identity_embeddings_at(
             &paths,
             &borrowed,
             want_uncond,
+            mold_inference::identity::extraction::ExtractionPlacement::Host,
         )
     })
     .await

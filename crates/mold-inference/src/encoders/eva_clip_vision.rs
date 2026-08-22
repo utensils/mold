@@ -369,18 +369,28 @@ impl EvaClipVisionTower {
     /// shared model root lets another member rename. [`Self::new`] stays for
     /// the golden test, which builds a `VarBuilder` over a file it converted
     /// itself moments earlier inside its own temporary directory.
+    /// `dtype` is the tower's WORKING dtype, chosen by
+    /// [`crate::identity::extraction::eva_working_dtype`] from the device it
+    /// will run on. It is a parameter rather than a constant because the
+    /// derived file stores f16 and asking for f32 costs a widening pass over
+    /// 609 MB into ~1.2 GB — `pulid-perf.md` §4 measured that pass as half of
+    /// the single largest line item in the whole extraction. Upstream runs
+    /// this tower narrow too (`PuLID/pulid/pipeline_flux.py:60` casts it to
+    /// `weight_dtype`, bf16 in `app_flux.py:45`), so the narrow arm is
+    /// upstream's own behaviour and the wide one is mold's CPU concession.
     pub(crate) fn from_authenticated(
         artifact: &super::pickle_convert::AuthenticatedArtifact,
         device: &Device,
+        dtype: candle_core::DType,
     ) -> Result<Self> {
-        let vb =
-            VarBuilder::from_slice_safetensors(artifact.bytes(), candle_core::DType::F32, device)
-                .with_context(|| {
+        let vb = VarBuilder::from_slice_safetensors(artifact.bytes(), dtype, device).with_context(
+            || {
                 format!(
                     "reading the vision tower {}",
                     artifact.display_path().display()
                 )
-            })?;
+            },
+        )?;
         Self::new(vb, device)
     }
 

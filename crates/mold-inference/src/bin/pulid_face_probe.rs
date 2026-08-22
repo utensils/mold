@@ -5,6 +5,8 @@
 //! pulid_face_probe inventory <dir> [--write <path>]
 //! pulid_face_probe bench     <dir> [--warmups 5] [--runs 20]
 //!                                  [--compare] [--regress-against halcyon|plato]
+//!                                  [--regress-against-full halcyon|plato]
+//!                                  [--device cpu|metal]
 //!                                  [--full --adapter <path> --eva <path>]
 //! pulid_face_probe gate      <graph.onnx>
 //! ```
@@ -37,6 +39,12 @@
 //! * `--regress-against` turns §1's "p95 at least 25% faster" acceptance
 //!   criterion into a mechanical check against the baselines committed to this
 //!   repository, instead of a percentage a reviewer recomputes by hand (§4).
+//! * `--device` places the WHOLE extraction — detector, recognizer, parser,
+//!   tower, IDFormer — on that device (#1227 phase 2). `cpu` is the default and
+//!   is what every committed baseline was measured on.
+//! * `--regress-against-full` is `--regress-against` stated over the WHOLE
+//!   extraction rather than the face stack, which is what §5 moved the 25%
+//!   criterion to once §4 showed the face stack was 13% of the problem.
 //! * `--full` additionally measures the EVA02-CLIP tower and the IDFormer,
 //!   which §0 found had **no number anywhere in the repository** even though
 //!   they run on every conditioned request. It needs the rest of the bundle:
@@ -74,6 +82,22 @@ const LATENCY_BUDGET_MS: f64 = 2000.0;
 const BASELINE_HALCYON_P95_MS: f64 = 415.7;
 const BASELINE_PLATO_P95_MS: f64 = 1574.5;
 
+/// #1227 phase 1's recorded WHOLE-extraction warm p95 on halcyon.
+///
+/// `pulid-perf.md` §4's four-stage table, and the number §5 states phase 2's
+/// acceptance against: 25% under it is 2,147.9 ms. It is deliberately the
+/// phase-1 figure and not a re-measurement — a threshold edited to match the
+/// outcome measures nothing (§4's own words about the face-stack pin).
+///
+/// It predates #1292's BiSeNet mask, which added a stage the phase-1 run never
+/// paid. That makes the criterion HARDER, not looser, so it stands unchanged.
+const BASELINE_HALCYON_FULL_P95_MS: f64 = 2863.9;
+
+/// plato has no phase-1 whole-extraction measurement — §4 records the skip
+/// rather than a number nobody took. `--regress-against-full plato` says so
+/// instead of comparing against a fabricated baseline.
+const BASELINE_PLATO_FULL_P95_MS: Option<f64> = None;
+
 /// §1's acceptance criterion, "p95 at least 25% faster", as a ratio.
 const REGRESSION_MARGIN: f64 = 0.75;
 
@@ -87,6 +111,8 @@ const PARSER: &str = "parsing_bisenet.pth";
 struct Baseline {
     host: &'static str,
     p95_ms: f64,
+    /// The whole-extraction baseline, where §4 recorded one.
+    full_p95_ms: Option<f64>,
 }
 
 fn baseline_for(name: &str) -> Result<Baseline> {
@@ -94,12 +120,30 @@ fn baseline_for(name: &str) -> Result<Baseline> {
         "halcyon" => Ok(Baseline {
             host: "halcyon",
             p95_ms: BASELINE_HALCYON_P95_MS,
+            full_p95_ms: Some(BASELINE_HALCYON_FULL_P95_MS),
         }),
         "plato" => Ok(Baseline {
             host: "plato",
             p95_ms: BASELINE_PLATO_P95_MS,
+            full_p95_ms: BASELINE_PLATO_FULL_P95_MS,
         }),
         other => bail!("unknown baseline host `{other}`; pulid-perf.md names halcyon and plato"),
+    }
+}
+
+/// Resolve `--device`.
+///
+/// Named rather than probed: a benchmark that silently fell back to the CPU
+/// because Metal was unavailable would record a CPU number under a device
+/// heading, which is the one mistake a device measurement cannot survive.
+fn device_for(name: &str) -> Result<Device> {
+    match name {
+        "cpu" => Ok(Device::Cpu),
+        "metal" => Device::new_metal(0)
+            .context("--device metal needs a Metal device and a build with the `metal` feature"),
+        "cuda" => Device::new_cuda(0)
+            .context("--device cuda needs a CUDA device and a build with the `cuda` feature"),
+        other => bail!("unknown device `{other}`; use cpu, metal, or cuda"),
     }
 }
 
@@ -271,8 +315,12 @@ struct BenchOptions {
     compare: bool,
     /// Apply §1's "at least 25% faster" criterion against a named host.
     regress_against: Option<Baseline>,
+    /// Apply §5's whole-extraction criterion against a named host.
+    regress_against_full: Option<Baseline>,
     /// Also measure the EVA tower and the IDFormer.
     full: Option<PulidPaths>,
+    /// Where the whole extraction runs.
+    device: Device,
 }
 
 /// Sorted samples plus the two percentiles every row reports.
@@ -305,7 +353,9 @@ fn run_bench(dir: &Path, options: BenchOptions) -> Result<()> {
         runs,
         compare,
         regress_against,
+        regress_against_full,
         full,
+        device,
     } = options;
     let advisory = validate_bench_args(warmups, runs)?;
     if let Some(note) = &advisory {
@@ -321,6 +371,7 @@ fn run_bench(dir: &Path, options: BenchOptions) -> Result<()> {
             "release"
         }
     );
+    println!("device: {}", device_label(&device));
     println!("load average at start: {}", load_average());
     let rss_start = peak_rss_bytes();
 
@@ -330,8 +381,8 @@ fn run_bench(dir: &Path, options: BenchOptions) -> Result<()> {
     // The oracle keeps its own copy of each graph, because the shipped
     // constructors consume theirs — which is the point of #1227.
     let oracle = compare.then(|| (detector_model.model.clone(), recognizer_model.model.clone()));
-    let detector = ScrfdDetector::new(detector_model.model)?;
-    let recognizer = ArcFaceRecognizer::new(recognizer_model.model)?;
+    let detector = ScrfdDetector::new_on_device(detector_model.model, &device)?;
+    let recognizer = ArcFaceRecognizer::new_on_device(recognizer_model.model, &device)?;
     println!(
         "decode+construct: {:.1} ms   peak RSS after load: {:.1} MiB",
         load.elapsed().as_secs_f64() * 1000.0,
@@ -346,6 +397,9 @@ fn run_bench(dir: &Path, options: BenchOptions) -> Result<()> {
     let mut detect_ms = Vec::new();
     let mut embed_ms = Vec::new();
     let mut parse_ms = Vec::new();
+    let mut parser_build_ms = Vec::new();
+    let mut eva_auth_ms = Vec::new();
+    let mut eva_construct_ms = Vec::new();
     let mut eva_build_ms = Vec::new();
     let mut eva_forward_ms = Vec::new();
     let mut idformer_build_ms = Vec::new();
@@ -353,12 +407,13 @@ fn run_bench(dir: &Path, options: BenchOptions) -> Result<()> {
     for i in 0..(warmups + runs) {
         let d = timed(|| detector.detect(&source).context("SCRFD evaluation"))?;
         let e = timed(|| recognizer.embed_crop(&crop).context("ArcFace evaluation"))?;
-        let mut stages = [0.0f64; 5];
+        let mut stages = [0.0f64; 8];
         if let Some(paths) = &full {
             compose_identity_tokens_observed(
                 paths,
                 &arcface_vector,
                 &eva_crop,
+                &device,
                 &mut |stage, elapsed| {
                     let ms = elapsed.as_secs_f64() * 1000.0;
                     let slot = match stage {
@@ -367,6 +422,9 @@ fn run_bench(dir: &Path, options: BenchOptions) -> Result<()> {
                         ComposeStage::EvaForward => 2,
                         ComposeStage::IdFormerBuild => 3,
                         ComposeStage::IdFormerForward => 4,
+                        ComposeStage::ParserBuild => 5,
+                        ComposeStage::EvaAuthenticate => 6,
+                        ComposeStage::EvaConstruct => 7,
                     };
                     stages[slot] = ms;
                 },
@@ -382,6 +440,9 @@ fn run_bench(dir: &Path, options: BenchOptions) -> Result<()> {
                 eva_forward_ms.push(stages[2]);
                 idformer_build_ms.push(stages[3]);
                 idformer_forward_ms.push(stages[4]);
+                parser_build_ms.push(stages[5]);
+                eva_auth_ms.push(stages[6]);
+                eva_construct_ms.push(stages[7]);
             }
         }
     }
@@ -405,6 +466,14 @@ fn run_bench(dir: &Path, options: BenchOptions) -> Result<()> {
         // residency change (`pulid-perf.md` §3) would buy back.
         report("bisenet", parse_ms.clone());
         report("eva-build", eva_build_ms.clone());
+        // The three rows below DECOMPOSE `eva-build` — they are measured
+        // inside its window, so they are never added to the total. §5 asked
+        // for exactly this split: the authenticate half is a 609 MB re-hash
+        // and the construct half is a dtype widening, and 1,268 ms of
+        // undifferentiated "build" said nothing about which to attack.
+        report("  parser", parser_build_ms.clone());
+        report("  eva-auth", eva_auth_ms.clone());
+        report("  eva-ctor", eva_construct_ms.clone());
         report("eva-forward", eva_forward_ms.clone());
         report("idformer-build", idformer_build_ms.clone());
         report("idformer-fwd", idformer_forward_ms.clone());
@@ -419,6 +488,12 @@ fn run_bench(dir: &Path, options: BenchOptions) -> Result<()> {
     }
 
     if let Some((detector_graph, recognizer_graph)) = oracle {
+        // The oracle is `candle-onnx`, which places every initializer on
+        // `Device::Cpu` and refuses anything else — that is §1's whole
+        // argument for the hand port. `--compare` is therefore a CPU-only
+        // comparison, and running the port arm on an accelerator beside it
+        // would report a device speedup as an evaluator speedup.
+        debug_assert!(device.is_cpu());
         println!("\n--- paired against the candle-onnx oracle (the path #1227 replaced) ---");
         // Paired and INTERLEAVED, on byte-identical blobs, comparing network to
         // network rather than production entry point to raw graph. Two
@@ -558,7 +633,49 @@ fn run_bench(dir: &Path, options: BenchOptions) -> Result<()> {
             );
         }
     }
+
+    if let Some(baseline) = regress_against_full {
+        let Some(per_image) = full_p95 else {
+            bail!(
+                "--regress-against-full needs --full: there is no whole-extraction p95 without it"
+            );
+        };
+        let Some(recorded) = baseline.full_p95_ms else {
+            bail!(
+                "no whole-extraction baseline is recorded for {}; pulid-perf.md §4 records the \
+                 skip rather than a number nobody took",
+                baseline.host
+            );
+        };
+        let ceiling = recorded * REGRESSION_MARGIN;
+        let improvement = (1.0 - per_image / recorded) * 100.0;
+        println!(
+            "\nREGRESSION (whole extraction) vs {} ({recorded:.1} ms baseline): p95 \
+             {per_image:.1} ms is {improvement:.1}% faster, ceiling {ceiling:.1} ms -> {}",
+            baseline.host,
+            if per_image <= ceiling { "PASS" } else { "FAIL" }
+        );
+        if advisory.is_some() {
+            bail!("--regress-against-full needs the gate protocol, not an advisory sample count");
+        }
+        if per_image > ceiling {
+            bail!(
+                "regression gate failed: whole-extraction p95 {per_image:.1} ms exceeds \
+                 {ceiling:.1} ms (75% of the {} baseline)",
+                baseline.host
+            );
+        }
+    }
     Ok(())
+}
+
+/// How a device is named in a recorded measurement.
+fn device_label(device: &Device) -> &'static str {
+    match device {
+        Device::Cpu => "cpu",
+        Device::Cuda(_) => "cuda:0",
+        Device::Metal(_) => "metal:0",
+    }
 }
 
 /// The 1-minute load average, so a recorded number carries the conditions it
@@ -581,6 +698,7 @@ fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let usage = "usage: pulid_face_probe <inventory|bench> <assets-dir> [--write PATH] \
                  [--warmups N] [--runs N] [--compare] [--regress-against halcyon|plato] \
+                 [--regress-against-full halcyon|plato] [--device cpu|metal|cuda] \
                  [--full --adapter PATH --eva PATH]\n       \
                  pulid_face_probe gate <graph.onnx>";
     if args.len() < 3 {
@@ -592,6 +710,8 @@ fn main() -> Result<()> {
     let mut runs = GATE_RUNS;
     let mut compare = false;
     let mut regress_against: Option<Baseline> = None;
+    let mut regress_against_full: Option<Baseline> = None;
+    let mut device_name = "cpu".to_string();
     let mut full = false;
     let mut adapter: Option<PathBuf> = None;
     let mut eva: Option<PathBuf> = None;
@@ -621,6 +741,14 @@ fn main() -> Result<()> {
             }
             "--regress-against" => {
                 regress_against = Some(baseline_for(&value(i, "--regress-against")?)?);
+                i += 2;
+            }
+            "--regress-against-full" => {
+                regress_against_full = Some(baseline_for(&value(i, "--regress-against-full")?)?);
+                i += 2;
+            }
+            "--device" => {
+                device_name = value(i, "--device")?;
                 i += 2;
             }
             "--full" => {
@@ -661,6 +789,13 @@ fn main() -> Result<()> {
                 }
                 None
             };
+            let device = device_for(&device_name)?;
+            if compare && !device.is_cpu() {
+                bail!(
+                    "--compare is a CPU-only comparison: the candle-onnx oracle it measures \
+                     against places every initializer on Device::Cpu and refuses anything else"
+                );
+            }
             run_bench(
                 &dir,
                 BenchOptions {
@@ -668,7 +803,9 @@ fn main() -> Result<()> {
                     runs,
                     compare,
                     regress_against,
+                    regress_against_full,
                     full,
+                    device,
                 },
             )
         }
@@ -728,6 +865,32 @@ mod tests {
         assert_eq!(baseline_for("plato").unwrap().p95_ms, 1574.5);
         let err = baseline_for("hal9000").unwrap_err();
         assert!(format!("{err}").contains("halcyon and plato"), "{err}");
+    }
+
+    /// §5's acceptance number, stated once. 2,863.9 x 0.75 = 2,147.9 ms is the
+    /// figure the doc publishes, and a build that quietly moved either input
+    /// would move the acceptance criterion with it.
+    #[test]
+    fn the_whole_extraction_ceiling_is_the_number_the_doc_publishes() {
+        let baseline = baseline_for("halcyon").unwrap().full_p95_ms.unwrap();
+        assert_eq!(baseline, 2863.9);
+        let ceiling = baseline * REGRESSION_MARGIN;
+        assert!((ceiling - 2147.925).abs() < 1e-9, "{ceiling}");
+    }
+
+    /// plato has no phase-1 whole-extraction measurement. Asking for one must
+    /// say so, not compare against a fabricated number.
+    #[test]
+    fn a_host_without_a_full_baseline_reports_the_gap() {
+        assert!(baseline_for("plato").unwrap().full_p95_ms.is_none());
+    }
+
+    #[test]
+    fn devices_are_named_rather_than_probed() {
+        assert!(device_for("cpu").unwrap().is_cpu());
+        let err = device_for("gpu").unwrap_err();
+        assert!(format!("{err}").contains("cpu, metal, or cuda"), "{err}");
+        assert_eq!(device_label(&Device::Cpu), "cpu");
     }
 
     /// "At least 25% faster" has to mean one thing. A build landing exactly on

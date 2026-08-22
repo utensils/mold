@@ -25,26 +25,34 @@
 //!                 IdFormer -> [1, 32, 2048] -> FrozenIdentityEmbedding
 //! ```
 //!
-//! **Everything here runs on the CPU, deliberately.** `candle-onnx`
-//! materializes every initializer on `Device::Cpu` and refuses anything else
-//! (`IdentityExtractor::load`), and the two candle halves follow it for a
-//! reason that outlives that constraint: this runs at *admission*, before the
-//! scheduler has picked a device, so there is no GPU to run it on yet — and
-//! that is exactly what satisfies #1223's "a measured slot that does not
-//! overlap the T5/CLIP encode peak". The extraction has completed and released
-//! its memory before the job is dispatched, so the two peaks cannot coexist by
-//! construction rather than by scheduling luck. The result is a
-//! device-independent 256 KiB value, which is what lets one extraction serve
-//! every sibling of a batch on every device it fans out to.
+//! **Everything here takes a device**, as of #1227 phase 2. It used to be
+//! hardcoded to `Device::Cpu` for two reasons that have both expired:
+//! `candle-onnx` could not place a tensor anywhere else (phase 1 replaced it
+//! with resident candle ports, `identity/scrfd_net.rs` and
+//! `identity/arcface_net.rs`), and the extraction ran at *admission*, before
+//! the scheduler had leased anything, so there was no device to name. Phase 2
+//! moved the call site inside the leased job — first, before prompt encode —
+//! which is what `docs/architecture/pulid-perf.md` §5 designs and why
+//! [`ExtractionPlacement`] exists.
+//!
+//! What has NOT changed is the drop-and-reload discipline, and it is now
+//! load-bearing in a stronger way: the tower, the parser, the two face
+//! networks, and the IDFormer are built, forwarded, and fully released BEFORE
+//! `flux::identity::EngineIdentityState` begins the adapter's residency for
+//! that dispatch. The extraction is a strictly earlier, strictly disjoint
+//! phase of the same lease, never a third resident beside the ~1.14 GB adapter
+//! and the transformer's own peak. The result is still a device-independent
+//! 256 KiB value, which is what lets one extraction serve every sibling of a
+//! batch on every device it fans out to.
 //!
 //! Peak host RAM is the EVA tower — its 609 MB f16 file read into a private
-//! buffer, widened to ~1.2 GB of f32 weights, plus activations — beside the two
-//! ONNX graphs (~278 MB); see [`EXTRACTION_HOST_PEAK_BYTES`]. Admission charges the host-RAM
-//! ledger from the artifacts' own sizes through their `is_host_only` component
-//! roles rather than from this constant; the constant is the MEASUREMENT those
-//! charges are sized against, and the reason
-//! `memory_preflight::IDENTITY_VRAM_OVERHEAD_BYTES` no longer counts any of it
-//! as device memory.
+//! buffer, materialized at [`eva_working_dtype`]'s working dtype, plus
+//! activations — beside the two ONNX graphs (~278 MB); see
+//! [`EXTRACTION_HOST_PEAK_BYTES`]. On a device placement most of that becomes
+//! device memory instead, charged by
+//! `memory_preflight::IDENTITY_EXTRACTION_VRAM_OVERHEAD_BYTES`; the private
+//! authenticated copy stays on the host either way, because that is what the
+//! `VarBuilder` reads from.
 
 use anyhow::{Context, Result};
 use candle_core::{DType, Device, IndexOp, Tensor};
@@ -90,6 +98,84 @@ pub use mold_core::identity::EXTRACTION_HOST_PEAK_BYTES;
 /// `5 * 577 * 1024 * 4` = 11,816,960 bytes, plus the projection, rounded up.
 pub const EXTRACTION_RETAINED_BYTES_PER_IMAGE: u64 = 12_000_000;
 
+/// Where one extraction runs.
+///
+/// The server names a placement, never a `candle_core::Device`: `mold-server`
+/// deliberately does not depend on candle (CLAUDE.md's crate-boundary rule),
+/// and the device a leased job owns is identified by backend and ordinal
+/// everywhere else in the scheduler. Resolution goes through
+/// [`crate::device::metal_device`] and friends so a Metal ordinal reuses this
+/// process's existing device rather than minting a second one with a split
+/// identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExtractionPlacement {
+    /// The host. Every CPU-only build, the `--local` CLI on a CPU device, and
+    /// any job whose lease is not a GPU.
+    Host,
+    /// The render's own leased GPU (#1227 phase 2).
+    Gpu {
+        backend: mold_core::GpuBackend,
+        ordinal: usize,
+    },
+}
+
+impl ExtractionPlacement {
+    /// Open the device this placement names.
+    ///
+    /// Never falls back: a placement that cannot be opened is an error the
+    /// caller must propagate, exactly as
+    /// `device::create_exact_gpu_device` refuses to substitute a backend for
+    /// an admitted plan's. Silently demoting to the host would run the
+    /// extraction against a memory grant that was made for the GPU.
+    pub fn device(&self) -> Result<Device> {
+        match self {
+            Self::Host => Ok(Device::Cpu),
+            Self::Gpu {
+                backend: mold_core::GpuBackend::Metal,
+                ordinal,
+            } => crate::device::metal_device(*ordinal),
+            Self::Gpu {
+                backend: mold_core::GpuBackend::Cuda,
+                ordinal,
+            } => {
+                #[cfg(feature = "cuda")]
+                {
+                    Device::new_cuda(*ordinal).map_err(|error| {
+                        anyhow::anyhow!(
+                            "failed to open CUDA device {ordinal} for face extraction: {error}"
+                        )
+                    })
+                }
+                #[cfg(not(feature = "cuda"))]
+                {
+                    anyhow::bail!(
+                        "face extraction was placed on CUDA device {ordinal} but this build has \
+                         no CUDA support"
+                    )
+                }
+            }
+        }
+    }
+}
+
+/// Extract, average, compose, and freeze the identity for one request on the
+/// device a placement names.
+///
+/// The entry point the server calls once phase 2 moved extraction inside the
+/// leased job. [`extract_identity_embeddings`] is the same thing with an
+/// already-opened device, which is what the CLI and the benchmark hold.
+pub fn extract_identity_embeddings_at(
+    paths: &PulidPaths,
+    images: &[&[u8]],
+    want_uncond: bool,
+    placement: ExtractionPlacement,
+) -> std::result::Result<IdentityExtraction, IdentityError> {
+    let device = placement
+        .device()
+        .map_err(|error| IdentityError::Runtime(error.context("placing the face extraction")))?;
+    extract_identity_embeddings(paths, images, want_uncond, &device)
+}
+
 /// What one extraction produced.
 #[derive(Debug)]
 pub struct IdentityExtraction {
@@ -107,8 +193,9 @@ pub struct IdentityExtraction {
 pub fn extract_identity_embedding(
     paths: &PulidPaths,
     image_bytes: &[u8],
+    device: &Device,
 ) -> std::result::Result<IdentityExtraction, IdentityError> {
-    extract_identity_embeddings(paths, &[image_bytes], false)
+    extract_identity_embeddings(paths, &[image_bytes], false, device)
 }
 
 /// Extract, average, compose, and freeze the identity for one request.
@@ -151,13 +238,14 @@ pub fn extract_identity_embeddings(
     paths: &PulidPaths,
     images: &[&[u8]],
     want_uncond: bool,
+    device: &Device,
 ) -> std::result::Result<IdentityExtraction, IdentityError> {
     // The bounded-decode limits are the request contract's, checked before any
     // decoder sees the bytes. Admission has already applied them, but this is
     // a public entry point and the check costs a header read.
     mold_core::identity::validate_id_images(images).map_err(IdentityError::Decode)?;
 
-    let extractor = IdentityExtractor::load(paths, &Device::Cpu)
+    let extractor = IdentityExtractor::load(paths, device)
         .context("loading the PuLID face-extraction models")?;
 
     let count = images.len();
@@ -184,7 +272,7 @@ pub fn extract_identity_embeddings(
         faces.push((features.arcface.raw, features.eva_crop_512));
     }
 
-    let composed = compose_identity_token_sets(paths, &faces, want_uncond)
+    let composed = compose_identity_token_sets(paths, &faces, want_uncond, device)
         .context("composing the PuLID identity embedding")?;
     let tokens = mold_core::identity::average_identity_tokens(&composed.per_image)
         .map_err(|reason| IdentityError::Runtime(anyhow::anyhow!(reason)))?;
@@ -257,7 +345,26 @@ pub enum ComposeStage {
     /// [`ComposeStage::Parse`]. Separate from [`ComposeStage::EvaForward`]
     /// because it is what the drop-and-reload rule pays for on every request,
     /// and therefore what a residency change would buy back.
+    ///
+    /// The three stages below DECOMPOSE this one rather than sitting beside
+    /// it: each is measured inside this window, so a caller that sums every
+    /// stage must count `EvaBuild` alone. `pulid-perf.md` §5 asked for the
+    /// split because the two halves of the largest line item in the pipeline
+    /// have completely different fixes — one is a 609 MB re-hash, the other is
+    /// an f16 -> f32 widening — and 1,268 ms of undifferentiated "build" said
+    /// nothing about which to spend effort on.
     EvaBuild,
+    /// Materializing and building the BiSeNet face parser. A SUBSET of
+    /// [`ComposeStage::EvaBuild`]'s window: the parser is built (and dropped)
+    /// before the tower, inside it.
+    ParserBuild,
+    /// Re-reading the 609 MB derived tower into a private buffer and proving
+    /// it against the compiled-in pin. A SUBSET of [`ComposeStage::EvaBuild`].
+    EvaAuthenticate,
+    /// Constructing the tower's modules from those verified bytes — the
+    /// `VarBuilder` pass that materializes every weight at the working dtype.
+    /// A SUBSET of [`ComposeStage::EvaBuild`].
+    EvaConstruct,
     /// The EVA02-CLIP vision tower's forward pass.
     EvaForward,
     /// Reading the adapter and building the PuLID IDFormer.
@@ -278,10 +385,11 @@ pub fn compose_identity_tokens_observed(
     paths: &PulidPaths,
     arcface: &[f32],
     eva_crop_512: &image::RgbImage,
+    device: &Device,
     observe: &mut dyn FnMut(ComposeStage, std::time::Duration),
 ) -> Result<Vec<f32>> {
     let faces = [(arcface.to_vec(), eva_crop_512.clone())];
-    let composed = compose_identity_token_sets_observed(paths, &faces, false, observe)?;
+    let composed = compose_identity_token_sets_observed(paths, &faces, false, device, observe)?;
     composed
         .per_image
         .into_iter()
@@ -302,8 +410,9 @@ pub(crate) fn compose_identity_token_sets(
     paths: &PulidPaths,
     faces: &[(Vec<f32>, image::RgbImage)],
     want_uncond: bool,
+    device: &Device,
 ) -> Result<ComposedIdentityTokens> {
-    compose_identity_token_sets_observed(paths, faces, want_uncond, &mut |_, _| {})
+    compose_identity_token_sets_observed(paths, faces, want_uncond, device, &mut |_, _| {})
 }
 
 /// The one implementation: every photograph, the optional unconditional
@@ -331,10 +440,11 @@ pub(crate) fn compose_identity_token_sets_observed(
     paths: &PulidPaths,
     faces: &[(Vec<f32>, image::RgbImage)],
     want_uncond: bool,
+    device: &Device,
     observe: &mut dyn FnMut(ComposeStage, std::time::Duration),
 ) -> Result<ComposedIdentityTokens> {
     anyhow::ensure!(!faces.is_empty(), "composing needs at least one face");
-    let device = Device::Cpu;
+    let tower_dtype = eva_working_dtype(device);
     // Everything before the tower's first forward pass is one window, and the
     // per-crop parse work is subtracted out of it below rather than restarting
     // the clock — a restart would silently drop whatever ran before the parse
@@ -362,10 +472,13 @@ pub(crate) fn compose_identity_token_sets_observed(
         // consumes it, so its 53 MB copy is released as soon as the parser owns
         // its tensors.
         let parser = {
+            let started = std::time::Instant::now();
             let artifact = ensure_bisenet_parser_safetensors(paths)
                 .context("materializing the BiSeNet face parser")?;
-            BiSeNetParser::from_authenticated(&artifact, &device)
-                .context("building the BiSeNet face parser")?
+            let parser = BiSeNetParser::from_authenticated(&artifact, device)
+                .context("building the BiSeNet face parser")?;
+            observe(ComposeStage::ParserBuild, started.elapsed());
+            parser
         };
         let mut prepared = Vec::with_capacity(faces.len());
         for (_, eva_crop_512) in faces {
@@ -376,7 +489,7 @@ pub(crate) fn compose_identity_token_sets_observed(
                 .labels(&planar, height, width)
                 .context("parsing the aligned face crop")?;
             apply_pulid_face_mask(&mut planar, &labels).context("masking the aligned face crop")?;
-            let pixels = preprocess_planar_rgb(&planar, height, width, &device)
+            let pixels = preprocess_planar_rgb(&planar, height, width, device)
                 .context("preprocessing the aligned face crop for EVA02-CLIP")?;
             let elapsed = parse_started.elapsed();
             parse_elapsed += elapsed;
@@ -395,10 +508,15 @@ pub(crate) fn compose_identity_token_sets_observed(
         // them, so the tower's 609 MB copy is released as soon as it owns its
         // tensors.
         let tower = {
+            let started = std::time::Instant::now();
             let artifact = ensure_eva_clip_vision_safetensors(paths)
                 .context("materializing the EVA02-CLIP vision tower")?;
-            EvaClipVisionTower::from_authenticated(&artifact, &device)
-                .context("building the EVA02-CLIP-L-14-336 vision tower")?
+            observe(ComposeStage::EvaAuthenticate, started.elapsed());
+            let started = std::time::Instant::now();
+            let tower = EvaClipVisionTower::from_authenticated(&artifact, device, tower_dtype)
+                .context("building the EVA02-CLIP-L-14-336 vision tower")?;
+            observe(ComposeStage::EvaConstruct, started.elapsed());
+            tower
         };
         // Everything paid once before the first forward, minus the per-crop
         // parse work the pre-pass already reported. Restarting the clock after
@@ -436,7 +554,7 @@ pub(crate) fn compose_identity_token_sets_observed(
         VarBuilder::from_mmaped_safetensors(
             std::slice::from_ref(&paths.adapter),
             DType::F32,
-            &device,
+            device,
         )
         .with_context(|| format!("reading the PuLID adapter {}", paths.adapter.display()))?
     };
@@ -449,11 +567,25 @@ pub(crate) fn compose_identity_token_sets_observed(
         // `pipeline_flux.py:181`: `cat([id_ante_embedding, id_cond_vit])` — the
         // RAW ArcFace output, not the L2-normalized one; only the CLIP
         // projection is normalized, and the tower already did that.
-        let arcface = Tensor::from_slice(arcface, (1, arcface.len()), &device)
+        let arcface = Tensor::from_slice(arcface, (1, arcface.len()), device)
             .context("materializing the ArcFace embedding")?;
-        let id_cond = Tensor::cat(&[&arcface, cls_projection], 1)
+        // The tower may have run narrow (see [`eva_working_dtype`]); the
+        // IDFormer's own `VarBuilder` is f32, and candle refuses a mixed-dtype
+        // `cat` and matmul. Widening HERE rather than inside the tower keeps
+        // the narrowing scoped to the tower's arithmetic: the IDFormer half
+        // computes in exactly the dtype its committed goldens were captured
+        // in, whatever device the tower ran on.
+        let cls_projection = cls_projection
+            .to_dtype(DType::F32)
+            .context("widening the EVA02-CLIP projection for the IDFormer")?;
+        let hidden_states = hidden_states
+            .iter()
+            .map(|hidden| hidden.to_dtype(DType::F32))
+            .collect::<candle_core::Result<Vec<_>>>()
+            .context("widening the EVA02-CLIP hidden states for the IDFormer")?;
+        let id_cond = Tensor::cat(&[&arcface, &cls_projection], 1)
             .context("concatenating the ArcFace and EVA02-CLIP conditions")?;
-        per_image.push(run_idformer(&idformer, &id_cond, hidden_states)?);
+        per_image.push(run_idformer(&idformer, &id_cond, &hidden_states)?);
         observe(ComposeStage::IdFormerForward, stage_started.elapsed());
     }
 
@@ -465,11 +597,13 @@ pub(crate) fn compose_identity_token_sets_observed(
         // photograph they were shaped from cannot matter.
         let (hidden_states, cls_projection) = &vision[0];
         let width = ID_ANTE_DIM + cls_projection.dim(1)?;
-        let id_uncond = Tensor::zeros((1, width), DType::F32, &device)
+        let id_uncond = Tensor::zeros((1, width), DType::F32, device)
             .context("materializing the unconditional identity condition")?;
+        // Shaped from the tower's output but built at the IDFormer's dtype,
+        // for the same reason the conditional branch widens above.
         let hidden_uncond = hidden_states
             .iter()
-            .map(|hidden| hidden.zeros_like())
+            .map(|hidden| Tensor::zeros(hidden.shape(), DType::F32, device))
             .collect::<candle_core::Result<Vec<_>>>()
             .context("materializing the unconditional vision hidden states")?;
         let uncond = run_idformer(&idformer, &id_uncond, &hidden_uncond)?;
@@ -480,6 +614,36 @@ pub(crate) fn compose_identity_token_sets_observed(
     };
 
     Ok(ComposedIdentityTokens { per_image, uncond })
+}
+
+/// The EVA02-CLIP tower's working dtype on `device`.
+///
+/// The derived tower is stored f16 — it is a straight conversion of the
+/// released `EVA02_CLIP_L_336_psz14_s6B.pt`, which BAAI ships in fp16 — so
+/// asking a `VarBuilder` for f32 does not merely cost a copy, it costs a
+/// widening pass that writes ~1.2 GB. `pulid-perf.md` §4 measured that pass as
+/// half of `eva-build`, itself the single largest line item in the extraction,
+/// and §5 made removing it phase 2's first target.
+///
+/// Narrow is also what upstream does: `PuLID/pulid/pipeline_flux.py:60` casts
+/// the whole tower to `weight_dtype`, which `PuLID/app_flux.py:45` sets to
+/// bfloat16 — strictly fewer mantissa bits than the f16 the file already
+/// holds. EVA-CLIP's own factory takes the same route
+/// (`PuLID/eva_clip/factory.py:342-344`). So the f16 arm is upstream's
+/// behaviour and the f32 arm is mold's CPU concession, not the other way
+/// round.
+///
+/// CPU stays f32 for two reasons and neither is precision: candle has no
+/// narrow CPU kernels — an f16 matmul there is emulated element by element —
+/// and every committed parity golden for this tower was captured against the
+/// f32 CPU path. A CPU-only build must keep costing exactly what it cost
+/// before phase 2.
+pub fn eva_working_dtype(device: &Device) -> DType {
+    if device.is_cpu() {
+        DType::F32
+    } else {
+        DType::F16
+    }
 }
 
 /// Width of the raw ArcFace half of the IDFormer's conditioning vector.
@@ -567,8 +731,14 @@ mod tests {
                 .unwrap()
                 .to_rgb8();
 
-            let tokens =
-                compose_identity_tokens_observed(&paths, &arcface, &crop, &mut |_, _| {}).unwrap();
+            let tokens = compose_identity_tokens_observed(
+                &paths,
+                &arcface,
+                &crop,
+                &Device::Cpu,
+                &mut |_, _| {},
+            )
+            .unwrap();
             assert_eq!(tokens.len(), 32 * 2048);
 
             // The identity probe is the fourth draw from the capture script's
@@ -683,12 +853,13 @@ mod tests {
         };
         let png = b"\x89PNG\r\n\x1a\n".to_vec();
         let too_many: Vec<&[u8]> = vec![png.as_slice(); mold_core::identity::ID_IMAGES_MAX + 1];
-        let error = extract_identity_embeddings(&paths, &too_many, false).unwrap_err();
+        let error =
+            extract_identity_embeddings(&paths, &too_many, false, &Device::Cpu).unwrap_err();
         let rendered = format!("{error:#}");
         assert!(rendered.contains("at most"), "{rendered}");
         assert!(!rendered.contains("scrfd.onnx"), "{rendered}");
 
-        let error = extract_identity_embeddings(&paths, &[], false).unwrap_err();
+        let error = extract_identity_embeddings(&paths, &[], false, &Device::Cpu).unwrap_err();
         assert!(format!("{error:#}").contains("must not be empty"));
     }
 
@@ -704,7 +875,7 @@ mod tests {
             face_recognizer: "/nonexistent/glintr100.onnx".into(),
             face_parser_source: "/nonexistent/parsing_bisenet.pth".into(),
         };
-        let error = extract_identity_embedding(&paths, b"not an image").unwrap_err();
+        let error = extract_identity_embedding(&paths, b"not an image", &Device::Cpu).unwrap_err();
         let rendered = format!("{error:#}");
         assert!(rendered.contains("PNG or JPEG"), "{rendered}");
         assert!(
