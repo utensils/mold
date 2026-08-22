@@ -2,7 +2,7 @@
 //!
 //! H3 acquisition and execution are separate authorities. The compact
 //! upstream checkpoints are downloadable, while runtime admission remains
-//! limited to an independently qualified CUDA route. This module records the
+//! limited to independently qualified backend routes. This module records the
 //! immutable model/layout/request facts shared by both boundaries.
 
 use crate::manifest::{ManifestDefaults, ModelComponent, ModelFile, ModelManifest};
@@ -2498,9 +2498,9 @@ fn defaults_with_steps(steps: u32) -> ManifestDefaults {
 }
 
 /// Pinned manifests used for exact identity, storage, and runtime work.
-/// Official BF16 manifests remain qualification references; compact upstream
-/// manifests are visible for direct download even when the current host cannot
-/// execute them.
+/// Every pinned upstream layout is visible for direct download even when the
+/// current host cannot execute it. Download authority and runtime authority
+/// remain deliberately independent.
 pub(crate) fn manifests() -> Vec<ModelManifest> {
     let mut manifests: Vec<ModelManifest> = [
         (FL2VA_OFFICIAL, Task::Fl2va, Layout::OfficialBf16),
@@ -2521,9 +2521,9 @@ pub(crate) fn manifests() -> Vec<ModelManifest> {
         name: name.to_string(),
         family: FAMILY.to_string(),
         description: match (task, layout) {
-            (Task::Fl2va, Layout::OfficialBf16) => "MiniMax H3 FL2VA official BF16 transformer/conditioner + FP32 VAEs (qualification reference; hidden from downloads)",
-            (Task::Ref2va, Layout::OfficialBf16) => "MiniMax H3 Ref2VA official BF16 transformer/conditioner + FP32 VAEs (qualification reference; hidden from downloads)",
-            (Task::Fl2va, Layout::ComfyPrunedInt8ConvrotNvfp4Awq) => "MiniMax H3 FL2VA Comfy pruned INT8-convrot + NVFP4-AWQ (CUDA or Apple Metal)",
+            (Task::Fl2va, Layout::OfficialBf16) => "MiniMax H3 FL2VA official BF16 transformer/conditioner + FP32 VAEs (downloadable qualification reference; execution unavailable)",
+            (Task::Ref2va, Layout::OfficialBf16) => "MiniMax H3 Ref2VA official BF16 transformer/conditioner + FP32 VAEs (downloadable qualification reference; execution unavailable)",
+            (Task::Fl2va, Layout::ComfyPrunedInt8ConvrotNvfp4Awq) => "MiniMax H3 FL2VA Comfy pruned INT8-convrot + NVFP4-AWQ (downloadable; CUDA or Apple Metal)",
             (Task::Ref2va, Layout::ComfyPrunedInt8ConvrotNvfp4Awq) => "MiniMax H3 Ref2VA Comfy pruned INT8-convrot + NVFP4-AWQ (downloadable; execution requires a qualified CUDA host)",
         }
         .to_string(),
@@ -2532,7 +2532,7 @@ pub(crate) fn manifests() -> Vec<ModelManifest> {
             Layout::ComfyPrunedInt8ConvrotNvfp4Awq => comfy_files(task),
         },
         defaults: defaults(layout),
-        hidden: layout == Layout::OfficialBf16,
+        hidden: false,
     })
     .collect();
     // The reviewed FL2VA Turbo tiers are the compact FL2VA stack plus one
@@ -3579,6 +3579,8 @@ mod tests {
         assert_eq!(
             advertised_h3,
             std::collections::BTreeSet::from([
+                FL2VA_OFFICIAL,
+                REF2VA_OFFICIAL,
                 FL2VA_COMFY,
                 REF2VA_COMFY,
                 FL2VA_COMFY_TURBO_8STEP,
@@ -3592,15 +3594,15 @@ mod tests {
     }
 
     #[test]
-    fn manifests_expose_only_compact_downloads_and_cannot_mix_task_transformers() {
+    fn manifests_expose_every_pinned_download_and_cannot_mix_task_transformers() {
         let fl_official = find_manifest(FL2VA_OFFICIAL).unwrap();
         let ref_official = find_manifest(REF2VA_OFFICIAL).unwrap();
         let fl_comfy = find_manifest(FL2VA_COMFY).unwrap();
         let ref_comfy = find_manifest(REF2VA_COMFY).unwrap();
         let fl_turbo_8 = find_manifest(FL2VA_COMFY_TURBO_8STEP).unwrap();
         let fl_turbo_4 = find_manifest(FL2VA_COMFY_TURBO_4STEP_768P).unwrap();
-        assert!(fl_official.hidden);
-        assert!(ref_official.hidden);
+        assert!(!fl_official.hidden);
+        assert!(!ref_official.hidden);
         assert!(!fl_comfy.hidden);
         assert!(!ref_comfy.hidden);
         assert!(!fl_turbo_8.hidden);
@@ -3687,6 +3689,8 @@ mod tests {
         assert_eq!(
             visible,
             std::collections::BTreeSet::from([
+                FL2VA_OFFICIAL,
+                REF2VA_OFFICIAL,
                 FL2VA_COMFY,
                 REF2VA_COMFY,
                 FL2VA_COMFY_TURBO_8STEP,
