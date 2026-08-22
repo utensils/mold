@@ -98,6 +98,7 @@ describe("mobileFileUnderCollections", () => {
           hostIds: ["studio", "plato"],
           hostsLabel: "studio · plato",
           cover: null,
+          hidden: false,
         },
       ]),
     ).toEqual([{ name: "Smurfs", slug: "smurfs", count: 12 }]);

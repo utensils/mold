@@ -26,6 +26,7 @@ import {
   sortTags,
   tagKey,
   unionOrganization,
+  visibleTagCounts,
   type MergedCollection,
   type OrganizationFanoutOp,
   type OrganizationMutation,
@@ -44,6 +45,7 @@ import {
   restoreTrashed,
   sweepTrash as sweepTrashOn,
   updateCollection,
+  updateCollectionHidden,
 } from "@studio/api/galleryOrganization";
 
 export type {
@@ -533,6 +535,40 @@ export const useGalleryStore = defineStore("gallery", {
         );
       };
     },
+    /** Excludes members of hidden collections only from the default Prints scope. */
+    visibleInDefaultLibrary(): (entry: MergedPrint) => boolean {
+      const hiddenSlugs = new Set(
+        this.mergedCollections
+          .filter((collection) => collection.hidden)
+          .map((collection) => collection.slug),
+      );
+      const organizationOf = this.organizationOf;
+      return (entry) =>
+        !organizationOf(entry).collections.some((slug) => hiddenSlugs.has(slug));
+    },
+    /** Logical prints available to default filter-chip counts. */
+    basePrints(): MergedPrint[] {
+      return this.scope === "prints"
+        ? this.merged.filter(this.visibleInDefaultLibrary)
+        : this.merged;
+    },
+    /** Header/chip count before host, kind, search, and organization narrowing. */
+    basePrintCount(): number {
+      return this.basePrints.length;
+    },
+    /** Exact tag counts over the same logical prints as the default grid. */
+    filterChipTags(): TagCount[] {
+      const visible = this.basePrints;
+      const excluded =
+        this.scope === "prints"
+          ? this.merged.filter((entry) => !this.visibleInDefaultLibrary(entry))
+          : [];
+      return visibleTagCounts(
+        this.mergedTags,
+        visible.map(this.organizationOf),
+        excluded.map(this.organizationOf),
+      );
+    },
     /** Logical prints per collection slug, over the merged live grid — the
      *  count a shelf card shows (a mirrored print counts once). */
     collectionCounts(): (slug: string) => number {
@@ -624,7 +660,9 @@ export const useGalleryStore = defineStore("gallery", {
       const wantsFavorites = this.favoritesOnly;
       const tagKeys = this.tagFilter.map((t) => tagKey(t)).filter((k) => k.length > 0);
       const slug = this.scope === "collections" ? this.collectionSlug : null;
-      if (!wantsFavorites && tagKeys.length === 0 && !slug) return entries;
+      if (this.scope === "prints") entries = entries.filter(this.visibleInDefaultLibrary);
+      if (!wantsFavorites && tagKeys.length === 0 && !slug)
+        return entries;
       const organizationOf = this.organizationOf;
       entries = entries.filter((entry) => {
         const org = organizationOf(entry);
@@ -674,7 +712,10 @@ export const useGalleryStore = defineStore("gallery", {
      *  the host-chip-filtered set only, so chip labels stay stable while the
      *  kind chip or search narrows the grid. */
     kindCounts(): GalleryKindCounts {
-      const entries = this.hostFiltered;
+      const entries =
+        this.scope === "prints"
+          ? this.hostFiltered.filter(this.visibleInDefaultLibrary)
+          : this.hostFiltered;
       let video = 0;
       let audio = 0;
       for (const e of entries) {
@@ -690,11 +731,21 @@ export const useGalleryStore = defineStore("gallery", {
     },
     /** Per-source chips for the gallery header (HostFilterChips adds All). */
     chipCounts(): GalleryChip[] {
-      return this.sources.map((s) => ({
-        key: s.key,
-        label: s.label,
-        count: this.buckets[s.key]?.items.length ?? 0,
-      }));
+      return this.sources.map((source) => {
+        const items = this.buckets[source.key]?.items ?? [];
+        const count =
+          this.scope === "prints"
+            ? items.filter((item) =>
+                this.visibleInDefaultLibrary({
+                  item,
+                  sourceKey: source.key,
+                  hostLabel: source.label,
+                  availableOn: [source],
+                }),
+              ).length
+            : items.length;
+        return { key: source.key, label: source.label, count };
+      });
     },
     /** Bytes across the filtered set — the header stat. */
     totalBytes(): number {
@@ -1616,6 +1667,25 @@ export const useGalleryStore = defineStore("gallery", {
         this.collectionSlug = slugOfCollection(trimmed) || slug;
       }
       return outcome;
+    },
+    /** Hide/show the collection on every host holding the slug. */
+    async setCollectionHidden(slug: string, hidden: boolean): Promise<FanoutResult> {
+      const merged = this.mergedCollections.find((collection) => collection.slug === slug);
+      if (!merged)
+        return { applied: 0, failed: 0, failedHosts: [], error: "Collection not found." };
+      const keys = merged.hosts.map((host) => host.hostId);
+      const results = await Promise.allSettled(
+        merged.hosts.map(async (host) => {
+          const target = this.targetOf(host.hostId);
+          if (!target) throw new Error("Host is not connected.");
+          const updated = await updateCollectionHidden(target, host.id, hidden);
+          const bucket = this.ensureCollectionsBucket(host.hostId);
+          const at = bucket.items.findIndex((collection) => collection.id === host.id);
+          if (at === -1) bucket.items.push(updated);
+          else bucket.items.splice(at, 1, updated);
+        }),
+      );
+      return this.settleHosts(keys, results);
     },
     /** Delete the collection on every host (never its prints). */
     async deleteCollection(slug: string): Promise<FanoutResult> {

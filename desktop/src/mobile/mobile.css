@@ -4594,6 +4594,14 @@ button:disabled {
   font-size: 12px;
 }
 
+.mobile-collection-copy > .mobile-collection-hidden {
+  font-family: var(--font-utility);
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
 .mobile-collection-count {
   font-family: var(--font-utility);
   color: var(--ink-2);

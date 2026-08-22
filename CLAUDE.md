@@ -229,6 +229,8 @@ Sequence mode on web, desktop, and iPhone filters the picker to chain-capable in
 
 ## Key design decisions
 
+**Hidden collections invariant:** A collection's additive `hidden` flag fans out to every host copy. Hidden collections stay visible and openable in Collections, but their member prints are excluded from the default Prints grid and every text-search result on web, desktop, iPhone, and Android; collection drill-in always reveals them.
+
 1. **Crate boundaries are clean** — `mold-cli` doesn't depend on candle; `mold-server` doesn't depend on clap; `mold-discord` only depends on `mold-core`.
 2. **candle over tch/ort** — pure Rust, no libtorch. Mold keeps upstream Candle's official crate names so the ecosystem shares one `Tensor` type. Application-owned models and public-API extensions live in `mold-ai-candle`; the narrow same-name `[patch.crates-io]` compatibility branch contains only backend changes that cannot be implemented outside Candle and is removed patch-by-patch as upstream accepts them.
 3. **Single binary** — `mold` includes `serve` via `mold-server` library; GPU flags forward `mold-cli` → `mold-server` → `mold-inference`.

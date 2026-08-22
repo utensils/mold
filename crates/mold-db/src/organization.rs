@@ -85,6 +85,8 @@ pub struct CollectionRow {
     pub slug: String,
     pub description: Option<String>,
     pub cover_filename: Option<String>,
+    /// Whether members are omitted from the default Library grid and search.
+    pub hidden: bool,
     /// Number of prints in the collection.
     pub count: u64,
     pub created_at_ms: i64,
@@ -456,7 +458,7 @@ fn touch_collection(conn: &Connection, collection_id: &str, now_ms: i64) -> OrgR
 fn read_collection(conn: &Connection, id: &str) -> OrgResult<Option<CollectionRow>> {
     Ok(conn
         .query_row(
-            "SELECT c.id, c.name, c.slug, c.description, c.cover_filename,
+            "SELECT c.id, c.name, c.slug, c.description, c.cover_filename, c.hidden,
                     (SELECT COUNT(*) FROM collection_items ci WHERE ci.collection_id = c.id),
                     c.created_at_ms, c.updated_at_ms
              FROM collections c WHERE c.id = ?1",
@@ -473,9 +475,10 @@ fn collection_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<CollectionRow>
         slug: r.get(2)?,
         description: r.get(3)?,
         cover_filename: r.get(4)?,
-        count: r.get::<_, i64>(5)?.max(0) as u64,
-        created_at_ms: r.get(6)?,
-        updated_at_ms: r.get(7)?,
+        hidden: r.get::<_, i64>(5)? != 0,
+        count: r.get::<_, i64>(6)?.max(0) as u64,
+        created_at_ms: r.get(7)?,
+        updated_at_ms: r.get(8)?,
     })
 }
 
@@ -836,7 +839,7 @@ impl MetadataDb {
     pub fn list_collections(&self) -> OrgResult<Vec<CollectionRow>> {
         self.with_conn_typed(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT c.id, c.name, c.slug, c.description, c.cover_filename,
+                "SELECT c.id, c.name, c.slug, c.description, c.cover_filename, c.hidden,
                         (SELECT COUNT(*) FROM collection_items ci WHERE ci.collection_id = c.id),
                         c.created_at_ms, c.updated_at_ms
                  FROM collections c
@@ -862,6 +865,7 @@ impl MetadataDb {
         name: Option<&str>,
         description: Option<&str>,
         cover_filename: Option<&str>,
+        hidden: Option<bool>,
     ) -> OrgResult<CollectionRow> {
         let renamed = name.map(validate_collection_name).transpose()?;
         let description = description.map(|d| normalize_title(Some(d)));
@@ -908,6 +912,12 @@ impl MetadataDb {
                 conn.execute(
                     "UPDATE collections SET cover_filename = ?2 WHERE id = ?1",
                     params![id, cover],
+                )?;
+            }
+            if let Some(hidden) = hidden {
+                conn.execute(
+                    "UPDATE collections SET hidden = ?2 WHERE id = ?1",
+                    params![id, hidden],
                 )?;
             }
             touch_collection(conn, id, now)?;
@@ -1297,23 +1307,29 @@ mod tests {
 
         let other = db.create_collection("Day Owls", None).unwrap();
         assert!(matches!(
-            db.update_collection(&other.id, Some("NIGHT-OWLS"), None, None),
+            db.update_collection(&other.id, Some("NIGHT-OWLS"), None, None, None),
             Err(OrganizationError::Conflict(_))
         ));
         // Renaming to a different casing of itself is fine.
         let renamed = db
-            .update_collection(&c.id, Some("NIGHT OWLS"), Some(""), None)
+            .update_collection(&c.id, Some("NIGHT OWLS"), Some(""), None, None)
             .unwrap();
         assert_eq!(renamed.name, "NIGHT OWLS");
         assert_eq!(renamed.slug, "night-owls");
         assert_eq!(renamed.description, None);
+
+        let hidden = db
+            .update_collection(&c.id, None, None, None, Some(true))
+            .unwrap();
+        assert!(hidden.hidden);
+        assert!(db.get_collection(&c.id).unwrap().unwrap().hidden);
 
         assert_eq!(db.list_collections().unwrap().len(), 2);
         assert!(db.delete_collection(&other.id).unwrap());
         assert!(!db.delete_collection(&other.id).unwrap());
         assert!(db.get_collection(&other.id).unwrap().is_none());
         assert!(matches!(
-            db.update_collection(&other.id, Some("x"), None, None),
+            db.update_collection(&other.id, Some("x"), None, None, None),
             Err(OrganizationError::NotFound)
         ));
     }
@@ -1351,11 +1367,11 @@ mod tests {
 
         // Cover must be a member; removing the cover clears it.
         assert!(matches!(
-            db.update_collection(&c.id, None, None, Some("nope.png")),
+            db.update_collection(&c.id, None, None, Some("nope.png"), None),
             Err(OrganizationError::Invalid(_))
         ));
         let with_cover = db
-            .update_collection(&c.id, None, None, Some("a.png"))
+            .update_collection(&c.id, None, None, Some("a.png"), None)
             .unwrap();
         assert_eq!(with_cover.cover_filename.as_deref(), Some("a.png"));
         assert_eq!(

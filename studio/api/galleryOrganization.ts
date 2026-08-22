@@ -110,6 +110,24 @@ export function updateCollection(
   );
 }
 
+/**
+ * Update collection visibility and verify the server actually understood it.
+ * Older organizing servers ignore unknown PATCH fields while still returning
+ * 200, so a successful response alone cannot prove that hiding took effect.
+ */
+export async function updateCollectionHidden(
+  target: ApiTarget,
+  id: string,
+  hidden: boolean,
+): Promise<Collection> {
+  const updated = await updateCollection(target, id, { hidden });
+  const matches = hidden ? updated.hidden === true : updated.hidden !== true;
+  if (!matches) {
+    throw new Error("This host does not support hidden collections.");
+  }
+  return updated;
+}
+
 /** Deletes the collection only — never the prints in it (D7). */
 export async function deleteCollection(
   target: ApiTarget,

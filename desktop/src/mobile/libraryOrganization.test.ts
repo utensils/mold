@@ -165,6 +165,9 @@ describe("organization index and filters", () => {
 
     expect(filterLibraryPrints(representatives, base, organizationOf)).toHaveLength(2);
     expect(
+      filterLibraryPrints(representatives, base, organizationOf, copiesOf, new Set(["smurfs"])),
+    ).toEqual([copies[2]]);
+    expect(
       filterLibraryPrints(representatives, { ...base, favoritesOnly: true }, organizationOf),
     ).toEqual([copies[0]]);
     expect(

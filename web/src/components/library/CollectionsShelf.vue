@@ -26,6 +26,7 @@ const emit = defineEmits<{
   (e: "open", slug: string): void;
   (e: "new"): void;
   (e: "rename", slug: string): void;
+  (e: "hidden", slug: string, hidden: boolean): void;
   (e: "delete", slug: string): void;
 }>();
 
@@ -80,9 +81,15 @@ function metaLine(card: CollectionCard): string {
               <Icon name="collection" :size="22" :stroke-width="1.5" />
             </span>
           </span>
-          <span class="ccard__name" data-test="collection-name">{{
-            card.name
-          }}</span>
+          <span class="ccard__name" data-test="collection-name"
+            >{{ card.name }}
+            <span
+              v-if="card.merged.hidden"
+              class="ccard__hidden"
+              data-test="collection-hidden-badge"
+              >Hidden</span
+            ></span
+          >
           <span class="ccard__meta" data-test="collection-meta">{{
             metaLine(card)
           }}</span>
@@ -116,6 +123,17 @@ function metaLine(card: CollectionCard): string {
           data-test="collection-card-menu"
           @click.stop
         >
+          <button
+            type="button"
+            role="menuitem"
+            data-test="collection-hidden"
+            @click="
+              closeMenu();
+              emit('hidden', card.slug, !card.merged.hidden);
+            "
+          >
+            {{ card.merged.hidden ? "Show in Library" : "Hide from Library" }}
+          </button>
           <button
             type="button"
             role="menuitem"
@@ -282,6 +300,14 @@ function metaLine(card: CollectionCard): string {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.ccard__hidden {
+  margin-left: 6px;
+  color: var(--ink-3);
+  font-family: var(--f-mono);
+  font-size: 9.5px;
+  font-weight: 500;
+  text-transform: uppercase;
 }
 .ccard__meta {
   font-family: var(--f-mono);

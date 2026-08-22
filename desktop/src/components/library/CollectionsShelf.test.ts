@@ -25,6 +25,7 @@ const cards: ShelfCard[] = [
       { path: "/api/gallery/thumbnail/d.png", target: null, cacheKey: "plato" },
       { path: "/api/gallery/thumbnail/e.png", target: null, cacheKey: "plato" },
     ],
+    hidden: true,
   },
   {
     slug: "river-studies",
@@ -33,6 +34,7 @@ const cards: ShelfCard[] = [
     hostLabels: ["This Mac"],
     updatedAt: null,
     covers: [],
+    hidden: false,
   },
 ];
 
@@ -44,7 +46,8 @@ describe("CollectionCard", () => {
     });
     expect(wrapper.findAll("img")).toHaveLength(4);
     expect(wrapper.get("[data-test='collection-mosaic']").classes()).toContain("grid-cols-2");
-    expect(wrapper.get("[data-test='collection-name']").text()).toBe("Smurfs");
+    expect(wrapper.get("[data-test='collection-name']").text()).toContain("Smurfs");
+    expect(wrapper.get("[data-test='collection-hidden-badge']").text()).toBe("Hidden");
     const meta = wrapper.get("[data-test='collection-meta']");
     expect(meta.text()).toBe("9 prints · This Mac · plato");
     expect(meta.classes()).toContain("font-utility");

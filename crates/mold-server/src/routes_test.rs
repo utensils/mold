@@ -12597,6 +12597,7 @@ mod tests {
         assert_eq!(created["slug"], "smurf-village");
         assert_eq!(created["description"], "blue");
         assert_eq!(created["count"], 0);
+        assert!(created.get("hidden").is_none());
         assert!(matches!(
             events.try_recv().unwrap(),
             mold_core::ServerEvent::GalleryCollectionsChanged {}
@@ -12672,13 +12673,13 @@ mod tests {
         assert_eq!(detail["collection"]["id"], id);
         assert_eq!(detail["filenames"], serde_json::json!(["b.png"]));
 
-        // Rename + cover.
+        // Rename + cover + hide from the default Library.
         let resp = app
             .clone()
             .oneshot(json_request(
                 "PATCH",
                 &format!("/api/gallery/collections/{id}"),
-                serde_json::json!({"name": "Gargamel", "cover_filename": "b.png"}),
+                serde_json::json!({"name": "Gargamel", "cover_filename": "b.png", "hidden": true}),
             ))
             .await
             .unwrap();
@@ -12686,6 +12687,7 @@ mod tests {
         let updated = json_body(resp).await;
         assert_eq!(updated["slug"], "gargamel");
         assert_eq!(updated["cover_filename"], "b.png");
+        assert_eq!(updated["hidden"], true);
         // A cover that is not a member → 422.
         let resp = app
             .clone()
@@ -12702,6 +12704,7 @@ mod tests {
         let listed = gallery_rows(&app, "/api/gallery/collections").await;
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0]["name"], "Gargamel");
+        assert_eq!(listed[0]["hidden"], true);
         let rows = gallery_rows(&app, "/api/gallery").await;
         let b = rows.iter().find(|r| r["filename"] == "b.png").unwrap();
         assert_eq!(b["collections"], serde_json::json!([id]));
