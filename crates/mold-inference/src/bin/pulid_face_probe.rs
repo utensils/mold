@@ -139,7 +139,10 @@ fn baseline_for(name: &str) -> Result<Baseline> {
 fn device_for(name: &str) -> Result<Device> {
     match name {
         "cpu" => Ok(Device::Cpu),
-        "metal" => Device::new_metal(0)
+        // Through `device::metal_device`, never `Device::new_metal`: every
+        // Metal construction in mold goes through that memo, and a second
+        // device for one GPU has a split identity.
+        "metal" => mold_inference::device::metal_device(0)
             .context("--device metal needs a Metal device and a build with the `metal` feature"),
         "cuda" => Device::new_cuda(0)
             .context("--device cuda needs a CUDA device and a build with the `cuda` feature"),

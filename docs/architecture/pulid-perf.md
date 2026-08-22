@@ -711,9 +711,144 @@ existing `capture_goldens.py`/`capture_eva_goldens.py` fixtures,
 `MOLD_TEST_PULID_ASSETS`-gated, `#[ignore]`d in the ordinary suite exactly as
 they are today.
 
+
+---
+
+## 4b. MEASURED: phase 2, on halcyon
+
+Same box, same 5-warmup / 20-run protocol, same release build, load average
+reported at both ends of every run. Three configurations, taken back to back:
+**CPU before** is this branch's parent commit (35b58acc, which already carries
+#1292's BiSeNet mask — the phase-1 table in §4 predates it and therefore never
+paid the `bisenet` row); **CPU after** is item 1 alone; **Metal** is items 1
+and 2 together, which is what halcyon actually runs.
+
+| stage | CPU before | CPU after | Metal |
+| --- | ---: | ---: | ---: |
+| `scrfd` | 158.0 | 158.9 | 63.9 |
+| `arcface` | 193.8 | 198.5 | 34.4 |
+| **face stack** | **351.7** | **365.0** | **97.9** |
+| `bisenet` (per-crop parse + mask, #1292) | 147.4 | 149.7 | 51.1 |
+| `eva-build` | 1355.6 | 186.2 | 81.6 |
+| — `parser` (materialize + build BiSeNet) | 99.1 | 5.6 | 8.8 |
+| — `eva-auth` (609 MB private read + SHA-256) | 1124.2 | 51.5 | 32.5 |
+| — `eva-ctor` (`VarBuilder` at the working dtype) | 126.4 | 128.5 | 40.9 |
+| `eva-forward` | 986.6 | 974.7 | 92.9 |
+| `idformer-build` | 46.0 | 46.2 | 55.1 |
+| `idformer-fwd` | 206.3 | 196.4 | 17.9 |
+| **whole extraction** | **3073.6** | **1907.3** | **395.3** |
+
+All figures are p95 milliseconds per image. Load average 7.6–9.6 throughout;
+the box was running peer builds and never went quiet, which is why the three
+columns were taken in one session rather than compared against §4's absolutes.
+
+### The split §5 asked for, and what it said
+
+§5 predicted `eva-build` was "roughly half `derived_artifact_is_authentic`
+re-hashing 609 MB and half widening f16 → f32 into ~1.2 GB". **It is not.**
+The re-proof is **1,124 ms of the 1,356 ms** and the widening is **126 ms**.
+On an M4 Max a 609 MB → 1.2 GB dtype conversion is a memory-bandwidth
+operation and costs about what you would expect from 500 GB/s; the SHA-256
+is not, because the `sha2` crate takes its portable path here and runs at
+roughly 550 MB/s.
+
+That matters beyond bookkeeping: had the split not been measured first, the
+obvious fix — build the tower at its stored f16 — would have bought 126 ms and
+the 25% criterion would have been missed on the host by a wide margin. The
+decision record's own instruction to measure before deciding is what produced
+the right target.
+
+So item 1 is a memo, not a dtype change:
+`pickle_convert::open_authenticated` memoizes the SHA-256 pass on the file's
+own `(dev, ino, size, mtime, ctime)` identity **plus the pin**, re-read from
+the same retained descriptor after the private copy is taken, with a mismatch
+falling through to an ordinary full read-and-hash. It is
+`mold_core::download::pinned_file_digest`'s memo applied to the one artifact
+that reads its bytes privately. `ctime` is the load-bearing field: `utimensat`
+lets an owner set `mtime` to anything, but no userspace call holds `ctime`
+still across a write. The private-read-then-build contract is untouched — the
+copy is still what the `VarBuilder` reads, and the memo only ever removes a
+pass over it. `eva-auth` 1,124 → 51 ms, and the BiSeNet parser's own
+materialization falls out with it, 99 → 6 ms.
+
+The dtype change shipped anyway, as part of item 2: `eva_working_dtype` keeps
+the tower f32 on the host — where candle has no narrow kernels and where every
+committed parity golden was captured — and f16 on a device, which is the dtype
+the derived file already stores and *narrower* than upstream's own cast
+(`PuLID/pulid/pipeline_flux.py:60` casts the tower to `weight_dtype`, bf16 in
+`PuLID/app_flux.py:45`). The IDFormer half still computes in f32 whatever the
+tower did.
+
+### The device path
+
+`eva-forward` **986.6 → 92.9 ms**, a 10.6x speedup on the stage that was 79%
+of a phase-1 extraction, and the face stack 351.7 → 97.9 ms almost for free
+once the device exists — which is exactly the shape §5 predicted and §1 got
+wrong. `idformer-build` is the one stage that got *slower* on Metal (46 →
+55 ms), because it stops being a lazy mmap and starts being a 605 MB host →
+device copy; it is 14% of a 395 ms extraction and not worth a residency
+argument.
+
+A note on how these were measured: Metal enqueues, so the first device run of
+this benchmark reported `eva-forward` at **3.2 ms** and hid 300 GFLOP inside
+the IDFormer's `to_vec1`. `compose_identity_token_sets_observed` now
+synchronizes at every stage boundary (`settle`), which costs nothing — the
+pipeline was already serial — and is the difference between a measurement and
+a story.
+
+### Acceptance
+
+| criterion | result |
+| --- | --- |
+| whole-extraction p95 ≤ **2,147.9 ms** on halcyon | **PASS** — 1,907.3 ms on the CPU (33.4% under), 395.3 ms on Metal (86.2% under) |
+| device path within the recorded parity tolerance | **PASS** — worst 3.82e-5 of peak across the four committed portraits, against the 5e-5 the whole-stack golden already states. No new tolerance |
+| measured device peak within 10% of the charged term | **not measured** — see plato, below |
+| ordering: the tower is released before the adapter is resident | **PASS** — structural: extraction runs before the model load, and `EngineIdentityState` cannot begin until the engine exists |
+
+The threshold was not moved. It is 25% under the phase-1 figure of 2,863.9 ms,
+which is a *harder* target than it looks now: the phase-1 run predates #1292's
+BiSeNet mask, so the comparable before-figure on this branch's parent is
+3,073.6 ms and the CPU result is 38% under that.
+
+The cache (item 3) is deliberately absent from every number above.
+`bench --full` drives `compose_identity_tokens_observed`, which does not
+consult it, so these are cold-extraction figures. What the cache is worth is a
+separate measurement, taken through the production entry point on Metal:
+**cold 2,184.8 ms → warm 1.8 ms**, with the second extraction opening no
+detector, recognizer, parser, tower, or adapter at all.
+
+### plato: not measured, again, and what that leaves open
+
+Named rather than quietly omitted, as §4 did. plato has no mold checkout and no
+PuLID bundle on it; standing both up means a CUDA `nix develop`, a release
+build of `mold-ai-inference` with `pulid,cuda,dev-bins` (nvcc kernels), and a
+~2.5 GB pull, which is well past the half hour this phase had for it.
+
+Two things are therefore unverified on CUDA and should be the first thing the
+next person with an L40S runs:
+
+- `the_measured_device_peak_is_within_ten_percent_of_the_charged_term`
+  (`tests/pulid_device_parity.rs`). It is CUDA-only by construction — on
+  unified memory there is no second pool to measure and `free_vram_bytes`
+  reports system availability, which moves by gigabytes for unrelated reasons.
+  `EXTRACTION_DEVICE_PEAK_BYTES` is therefore currently justified by
+  derivation from the artifacts' pinned sizes (its own doc carries the table),
+  not by a live sample.
+- The CUDA arm of the device path itself. The arithmetic is device-generic
+  candle and the Metal arm agrees with the host to 3.8e-5, but "no CUDA
+  measurement" is a different statement from "CUDA measured fine".
+
 ---
 
 ## 5. Phase 2 — the plan the phase-1 numbers actually justify
+
+> **SHIPPED.** Every item below is implemented; §4b records what it measured
+> and where the plan was wrong. Read this section as the plan it was — the two
+> predictions it got wrong (the `eva-build` split, and "the tower wants its
+> stored dtype" as the fix for the expensive half) are corrected inline and in
+> §4b rather than edited away, for the same reason §1's falsified premise was
+> left standing. One item is **not** verified: the CUDA device-peak
+> measurement, because plato was again out of budget. §4b says so explicitly.
 
 Phase 1 kept extraction exactly where it was: CPU, at admission, before any
 lease. §4 says that is now the expensive decision, not a free one. This section
@@ -728,7 +863,7 @@ into that file at once buys nothing and costs a merge.
 
 | stage | p50 today | phase 2 |
 | --- | ---: | --- |
-| `eva-build` | 1268 ms | **the first target, and it is not a device question.** Roughly half is `derived_artifact_is_authentic` re-hashing 609 MB and half is widening f16 → f32 into ~1.2 GB. Measure that split first (one more `ComposeStage`); the hash half wants a process-lifetime memo keyed on `(dev, ino, size, mtime)` **plus** a re-verify on any mismatch — never a bare "we checked once" flag, because the whole point of the compiled-in `DERIVED_SHA256` is that the file may change under us — and the widening half wants the tower built at its stored f16/bf16 dtype on a device that has one. |
+| `eva-build` | 1268 ms | **the first target, and it is not a device question.** Roughly half is `derived_artifact_is_authentic` re-hashing 609 MB and half is widening f16 → f32 into ~1.2 GB. Measure that split first (one more `ComposeStage`); the hash half wants a process-lifetime memo keyed on `(dev, ino, size, mtime)` **plus** a re-verify on any mismatch — never a bare "we checked once" flag, because the whole point of the compiled-in `DERIVED_SHA256` is that the file may change under us — and the widening half wants the tower built at its stored f16/bf16 dtype on a device that has one. <br><br> **MEASURED: the split is 1,124 / 126, not half and half.** The memo is the whole win (1,124 → 51 ms) and the dtype change is worth 126 ms. Both shipped, and the instruction to measure the split before choosing is what stopped the cheap half being mistaken for the expensive one. §4b has the table. The memo key also carries `ctime` and the pin, neither of which this line named. |
 | `eva-forward` | 969 ms | **moves to the leased device.** ~300 GFLOP of dense f32 matmul is the canonical GPU workload; candle already runs this tower on any device, and phase 1 is what makes the whole stack device-capable. |
 | `idformer-fwd` | 194 ms | moves with it — same `VarBuilder`, same device, no separate decision. |
 | `scrfd` / `arcface` | 360 ms | move last, or not at all. They are 13% of the extraction and their kernels are small; taking them along is nearly free once the device exists, but they do not justify the lease-ordering change on their own. That was §1's mistake and phase 2 must not repeat it. |
@@ -777,7 +912,13 @@ memory a conditioned FLUX render has spare.
 ### Acceptance
 
 Stated over the **whole extraction**, which is what §4 showed the previous
-criterion should have been stated over all along.
+criterion should have been stated over all along. **Results in §4b**; one
+clause below did not survive contact and is corrected there rather than here:
+"byte-identical to the CPU path's" is not achievable across devices at all —
+different kernels reassociate — so the criterion that shipped is the
+already-recorded 5e-5 whole-stack tolerance, met at a measured 3.82e-5. The
+consequence that clause was worried about is handled instead by the cache key
+carrying no device (§2), so one fleet still has one fingerprint per face.
 
 - **Speed**: whole-extraction p95 at least **25% under 2,863.9 ms**, i.e.
   **≤ 2,147.9 ms** on halcyon under `pulid_face_probe bench --full` at the
@@ -808,7 +949,27 @@ criterion should have been stated over all along.
   it implies, and the `ProgressPhase::IdentityExtract` scheduler phase +
   schema v21 bump that would give it learned runtime evidence (§3) — gated on
   §4's extended measurement actually showing GPU dispatch is worth the
-  lease-ordering change, not assumed from the issue title alone.
+  lease-ordering change, not assumed from the issue title alone. **All of this
+  shipped in phase 2**, at schema v22 rather than v21 (the tree had moved),
+  and §4b records the result.
+
+### What phase 2 shipped
+
+- **Item 1, the `eva-build` tax**: measured first (three new decomposing
+  `ComposeStage`s), then memoized. `eva-auth` 1,124 → 51 ms. The prediction
+  about which half was expensive was wrong and §4b says so.
+- **Item 2, post-lease device dispatch**: the whole extraction moved from
+  `variant_dependencies::prepare_inputs_for_devices` to inside the leased job,
+  before the model load, as `ProgressPhase::IdentityExtract` with schema v22's
+  `ewma_identity_extract_ms`. `ExtractionSlot` retired in favour of the frozen
+  plan's own ledger discipline; `EXTRACTION_DEVICE_PEAK_BYTES` charged as its
+  own named term, once through the unified gate on Metal.
+- **Item 3, the per-photograph cache**: §2's design, placed inside
+  `extract_identity_embeddings` rather than at the server call site, so a set
+  with two cached references and one new one extracts exactly the new one. Cold
+  2,184.8 ms → warm 1.8 ms.
+- **Item 4, qualification**: `--device`, `--regress-against-full`, the
+  decomposed rows, and the numbers in §4b. plato skipped again, named again.
 
 ### What phase 1 actually shipped, and what it changed about the above
 

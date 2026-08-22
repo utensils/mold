@@ -196,6 +196,29 @@ The label agreement is exact: on all four faces every one of the 262 144
 pixels matches, which is why the histogram bound is 1e-4 rather than something
 that would tolerate a real drift.
 
+### Device parity (#1227 phase 2)
+
+`tests/pulid_device_parity.rs` compares the WHOLE extraction run on an
+accelerator against the same extraction run on the host, over these same four
+portraits. It invents no tolerance: it reuses the `5e-5` "final identity,
+relative to its own peak" row above, because that is what the value FLUX is
+conditioned on is already qualified at.
+
+| host tower | device tower | measured worst, relative to peak |
+| --- | --- | --- |
+| f32, `Device::Cpu` | f16, Metal (M4 Max) | **3.82e-5** |
+
+The device tower is narrow by
+`identity::extraction::eva_working_dtype`, which is upstream's own choice —
+`PuLID/pulid/pipeline_flux.py:60` casts the tower to `weight_dtype`, bf16 in
+`PuLID/app_flux.py:45` — so the host's f32 is the wide outlier. That an f16
+tower stays inside an f32-derived bound is a measurement, not an assumption,
+and it is less surprising than it looks: the IDFormer attends over 577 tokens
+per scale and the CLS projection is L2-normalized, so per-element f16 error
+averages down rather than accumulating.
+
+CUDA is **not measured**; see `docs/architecture/pulid-perf.md` §4b.
+
 ### Regenerating
 
 Needs a torch venv, a facexlib checkout (a bare clone needs a

@@ -88,7 +88,10 @@ fn accelerator() -> Option<Device> {
     if let Ok(device) = Device::new_cuda(0) {
         return Some(device);
     }
-    Device::new_metal(0).ok()
+    // Through the crate's own memo rather than `Device::new_metal`, for the
+    // reason `production_code_never_constructs_a_metal_device_directly` pins:
+    // two devices for one GPU have a split identity.
+    mold_inference::device::metal_device(0).ok()
 }
 
 /// Every committed face fixture's aligned crop and raw ArcFace embedding.

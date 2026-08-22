@@ -169,12 +169,12 @@ an older one behaves.
 
 ```
 your photograph
-      |  SCRFD detects the face and five landmarks       (CPU)
-      |  ArcFace embeds the aligned 112x112 crop         (CPU)
-      |  BiSeNet segments the aligned 512x512 crop       (CPU)
+      |  SCRFD detects the face and five landmarks       (GPU)
+      |  ArcFace embeds the aligned 112x112 crop         (GPU)
+      |  BiSeNet segments the aligned 512x512 crop       (GPU)
       |    background -> white, face -> greyscale
-      |  EVA02-CLIP-L-14-336 encodes that masked crop    (CPU)
-      |  IDFormer resamples both into 32 identity tokens (CPU)
+      |  EVA02-CLIP-L-14-336 encodes that masked crop    (GPU)
+      |  IDFormer resamples both into 32 identity tokens (GPU)
       v
   [32 x 2048] identity
       |
@@ -189,15 +189,32 @@ vision tower sees shape and no colour at all. That is what PuLID was trained
 against, and skipping it costs about a thousandfold in how closely the
 extracted identity matches the reference implementation.
 
-Everything up to the 32 tokens runs **once**, on the CPU, when the request is
-admitted — before the model is even placed on a GPU. A batch of eight siblings
-extracts the face once and all eight reuse the identical value. That also means
-identity extraction never competes with the text encoders for memory: it has
-finished and released its ~2.4 GB before the render starts.
+### When it runs, and what it costs
+
+Everything up to the 32 tokens runs **once per request**, on the same GPU that
+will render the print, as the first thing that GPU does — before the checkpoint
+is even loaded. A batch of eight siblings extracts the face once and all eight
+reuse the identical value.
+
+It is deliberately over before the render begins. The detector, the recognizer,
+the parser, the vision tower, and the IDFormer are each built, run, and fully
+released in turn, so none of them is ever resident beside the checkpoint or
+beside the identity adapter. Mold shows it as its own **Extracting face
+identity** stage, and the queue learns how long it takes on your hardware and
+includes it in the time estimates it shows you.
+
+Measured on an Apple M4 Max, one extraction is about **0.4 s** on the GPU and
+about **1.9 s** on a CPU-only host. Rendering the same face again within a
+session is under **2 ms** — the identity is cached in memory, keyed on the
+photograph and on every model file involved, so a repaired or updated bundle
+never serves a stale face. Nothing is written to disk: a face embedding is
+biometric data, and mold keeps it only for as long as the server runs.
 
 On the GPU, identity costs about **1.25 GB** of VRAM beside the checkpoint (the
 adapter's twenty cross-attention modules plus their activations) and roughly
-10% of denoise time.
+10% of denoise time. The extraction itself needs about **1.1 GB** more while it
+runs, which mold reserves for you when the job is queued and releases before
+the checkpoint loads.
 
 ## Provenance
 

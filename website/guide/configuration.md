@@ -583,7 +583,17 @@ plan instead of being silently substituted.
 Scheduler observations keep setup separate from execution. Typed cold-load,
 warm-reload, prompt-encode, denoise, VAE, and upscale timings feed bounded
 learned estimates; metadata schema v15 persists runtime independently so a
-candidate receives exactly its cold or warm setup charge. Multi-host Create
+candidate receives exactly its cold or warm setup charge. Face-identity
+extraction is one of those phases as of schema v22: a request that conditions
+on a photograph runs the whole PuLID face stack on its own leased GPU before
+the checkpoint loads, reports it as an **Extracting face identity** stage, and
+feeds its measured duration back into the estimates. Its device memory is part
+of the plan the scheduler admits, so a conditioned render queues against what
+it needs; on Apple Silicon that reservation is made once against unified
+memory rather than separately against host RAM. Within one server run, the
+identity for a photograph already seen is reused from memory instead of being
+re-extracted — keyed on the photograph and on every model file involved, so a
+repaired bundle invalidates it — and it is never written to disk. Multi-host Create
 uses `POST /api/generate/placement-preview` as a read-only final feasibility
 check for ordinary generation. A planned response can name known encoder
 dependencies in `pending_downloads` — and, for a request that conditions on a

@@ -1287,11 +1287,19 @@ mod tests {
         );
     }
 
-    /// Every test that observes [`artifact_verification_count`] must run
-    /// alone: the memo and its counter are process-global on purpose, so two
-    /// tests measuring at once would each see the other's reads.
+    /// Every test that calls [`open_authenticated`] must run alone: the memo
+    /// and its counter are process-global on purpose, so a peer proving its
+    /// own artifact in parallel would land in this one's delta. Held by the
+    /// four memo tests AND by every other test that verifies an artifact,
+    /// which is what makes the deltas mean anything.
     #[cfg(test)]
     static MEMO_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Serialize against every other artifact verification in this process.
+    #[cfg(test)]
+    fn memo_guard() -> std::sync::MutexGuard<'static, ()> {
+        MEMO_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
     /// Write `bytes` and return the pin that names them.
     fn pinned_file(dir: &Path, name: &str, bytes: &[u8]) -> (PathBuf, PinnedDerived) {
@@ -1313,7 +1321,7 @@ mod tests {
     /// second call must not hash again.
     #[test]
     fn a_derived_artifact_is_hashed_once_per_process_not_once_per_request() {
-        let _guard = MEMO_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = memo_guard();
         forget_verified_artifacts();
         let dir = tempfile::tempdir().unwrap();
         let (path, pin) = pinned_file(dir.path(), "weights.safetensors", b"the derived bytes");
@@ -1339,7 +1347,7 @@ mod tests {
     /// rather than inherited.
     #[test]
     fn a_rewritten_artifact_is_proven_again_rather_than_remembered() {
-        let _guard = MEMO_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = memo_guard();
         forget_verified_artifacts();
         let dir = tempfile::tempdir().unwrap();
         let (path, pin) = pinned_file(dir.path(), "weights.safetensors", b"the derived bytes");
@@ -1364,7 +1372,7 @@ mod tests {
     /// the digest, not served from the memo.
     #[test]
     fn a_tampered_artifact_is_refused_after_a_successful_proof() {
-        let _guard = MEMO_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = memo_guard();
         forget_verified_artifacts();
         let dir = tempfile::tempdir().unwrap();
         let (path, pin) = pinned_file(dir.path(), "weights.safetensors", b"the derived bytes");
@@ -1385,7 +1393,7 @@ mod tests {
     /// carries the pin as well as the file.
     #[test]
     fn the_memo_is_keyed_on_the_pin_as_well_as_the_file() {
-        let _guard = MEMO_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = memo_guard();
         forget_verified_artifacts();
         let dir = tempfile::tempdir().unwrap();
         let (path, pin) = pinned_file(dir.path(), "weights.safetensors", b"the derived bytes");
@@ -2014,6 +2022,7 @@ mod tests {
     #[test]
     #[ignore = "requires the pinned PuLID checkpoints via MOLD_TEST_PULID_ASSETS"]
     fn tampered_weights_are_reconverted_despite_a_matching_sidecar() {
+        let _guard = memo_guard();
         let source = pulid_asset("EVA02_CLIP_L_336_psz14_s6B.pt");
         let dir = tempfile::tempdir().unwrap();
         let staged_source = dir.path().join("EVA02_CLIP_L_336_psz14_s6B.pt");
@@ -2080,6 +2089,7 @@ mod tests {
     /// between the check and the load.
     #[test]
     fn a_renamed_artifact_cannot_be_handed_to_a_loader() {
+        let _guard = memo_guard();
         let dir = tempfile::tempdir().unwrap();
         let destination = dir.path().join("derived.safetensors");
         write_atomically(&[raw("a", &[1.0, 2.0], &[2])], &destination).unwrap();
@@ -2109,6 +2119,7 @@ mod tests {
     /// this is a write another member is permitted to make.
     #[test]
     fn an_in_place_write_cannot_reach_a_loader_after_the_digest() {
+        let _guard = memo_guard();
         use std::io::Seek;
 
         let dir = tempfile::tempdir().unwrap();
@@ -2155,6 +2166,7 @@ mod tests {
     /// larger.
     #[test]
     fn a_wrong_length_is_refused_before_the_bytes_are_read() {
+        let _guard = memo_guard();
         let dir = tempfile::tempdir().unwrap();
         let destination = dir.path().join("derived.safetensors");
         write_atomically(&[raw("a", &[1.0, 2.0], &[2])], &destination).unwrap();
