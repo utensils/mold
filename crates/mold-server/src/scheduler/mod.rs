@@ -729,9 +729,19 @@ fn compose_prepared_generation(pending: &mut PendingGeneration, prepared: Prepar
         .prepared_inputs
         .as_ref()
         .and_then(|inputs| inputs.identity_embedding.clone());
+    // The advisory the extraction produced belongs to the same value and
+    // outlives re-preparation for the same reason: a child never extracts, so
+    // it would otherwise lose the parent's "which face did you pick" note.
+    let identity_warning = pending
+        .prepared_inputs
+        .as_ref()
+        .and_then(|inputs| inputs.identity_warning.clone());
     pending.prepared_inputs = prepared.execution_inputs;
     if let (Some(inputs), Some(identity)) = (pending.prepared_inputs.as_mut(), frozen_identity) {
         inputs.identity_embedding = Some(identity);
+    }
+    if let (Some(inputs), Some(warning)) = (pending.prepared_inputs.as_mut(), identity_warning) {
+        inputs.identity_warning.get_or_insert(warning);
     }
 }
 

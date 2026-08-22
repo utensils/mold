@@ -3992,6 +3992,17 @@ fn process_job_with_sink(
                 .as_ref()
                 .and_then(|child| child.prepared_inputs.identity_embedding.clone())
         });
+    // The advisory that came with that identity, read from the same two
+    // places, so a batch child reports it exactly as its parent does.
+    let identity_warning = job
+        .prepared_execution_inputs
+        .as_ref()
+        .and_then(|inputs| inputs.identity_warning.clone())
+        .or_else(|| {
+            job.batch_child
+                .as_ref()
+                .and_then(|child| child.prepared_inputs.identity_warning.clone())
+        });
     // Run inference — cache mutex is FREE during this.
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         ensure_worker_not_poisoned(worker, &model_name)?;
@@ -4091,6 +4102,18 @@ fn process_job_with_sink(
 
             // Attach GPU ordinal to response.
             response.gpu = Some(ordinal);
+
+            // Admission's identity advisory is a property of this print, so
+            // it rides the response the client actually receives — the JSON
+            // route turns it into `x-mold-request-warning` and the SSE route
+            // into the complete event. Logging it server-side was the only
+            // delivery before #1223, which reached nobody who supplied the
+            // photograph.
+            if let Some(warning) = identity_warning {
+                if !response.request_warnings.iter().any(|held| held == &warning) {
+                    response.request_warnings.push(warning);
+                }
+            }
 
             if response.images.is_empty() && response.video.is_none() && response.audio.is_none() {
                 let err_msg =

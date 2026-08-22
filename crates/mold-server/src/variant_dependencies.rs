@@ -1588,16 +1588,23 @@ pub(crate) async fn prepare_inputs_for_devices(
     // This is the whole of #1223's extraction lifetime: a batch parent clones
     // this struct into every child, so every sibling and every denoise step
     // reuses this exact embedding. See `crate::identity_extraction`.
-    let identity_embedding = match context.frozen_identity.clone() {
+    let resolved_identity = match context.frozen_identity.clone() {
         // A batch child, re-prepared by the scheduler: the parent already
         // resolved this exact face. Reusing it is the contract, not an
-        // optimization.
-        Some(frozen) => Some(frozen),
+        // optimization. No warning rides along, because the sibling did not
+        // extract — the parent's prepared inputs already carry it, and every
+        // child clones those.
+        Some(frozen) => crate::identity_extraction::ResolvedIdentity {
+            embedding: Some(frozen),
+            warning: None,
+        },
         // Placement preview is a read-only probe. It must never spend seconds
         // and 1.4 GB running the extractor, and it does not need to: identity
         // changes the memory demand, which `memory_preflight` charges from the
         // request, not from the embedding.
-        None if policy == DependencyMaterializationPolicy::ExistingOnly => None,
+        None if policy == DependencyMaterializationPolicy::ExistingOnly => {
+            crate::identity_extraction::ResolvedIdentity::default()
+        }
         None => {
             let identity_paths = by_device
                 .values()
@@ -1606,6 +1613,10 @@ pub(crate) async fn prepare_inputs_for_devices(
                 .await?
         }
     };
+    let crate::identity_extraction::ResolvedIdentity {
+        embedding: identity_embedding,
+        warning: identity_warning,
+    } = resolved_identity;
 
     let prepared = PreparedExecutionInputs {
         authority_fingerprint,
@@ -1613,6 +1624,7 @@ pub(crate) async fn prepare_inputs_for_devices(
         retryable_device_failures: failures,
         model_config_overlay,
         identity_embedding,
+        identity_warning,
         #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
         h3_private_ingress_grant: context.h3_private_ingress_grant,
         #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
@@ -1934,6 +1946,7 @@ async fn prepare_h3_private_inputs_for_devices(
         // The private H3 ingress has no face-identity path; FLUX is the only
         // family qualified for it.
         identity_embedding: None,
+        identity_warning: None,
         h3_private_ingress_grant: Some(rebound_grant),
         h3_private_admission_by_device: admissions,
     })

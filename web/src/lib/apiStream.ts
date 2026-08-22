@@ -1,5 +1,8 @@
 import { streamSse } from "./sse";
-import { requestWarningsFromHeaders } from "@studio/lib/requestWarnings";
+import {
+  requestWarningsFromCompleteEvent,
+  requestWarningsFromHeaders,
+} from "@studio/lib/requestWarnings";
 
 export type StreamError =
   | { kind: "http"; status: number; retryAfter?: number; body: string }
@@ -54,6 +57,11 @@ export async function postSseJsonStream<TBody, TProgress, TComplete>(
         }
         if (evt.event === "complete") {
           terminal = true;
+          // Advisories the RENDER produced arrive here, not in the response
+          // headers: the identity extraction's "several faces, largest used"
+          // is only known after the job runs, long after `onOpen` fired.
+          const rendered = requestWarningsFromCompleteEvent(parsed);
+          if (rendered.length > 0) opts.handlers.onRequestWarnings?.(rendered);
           opts.handlers.onComplete(parsed as TComplete);
         } else if (evt.event === "error") {
           terminal = true;

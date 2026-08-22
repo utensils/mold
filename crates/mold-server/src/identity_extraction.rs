@@ -143,18 +143,34 @@ pub(crate) fn request_resolves_identity(request: &GenerateRequest) -> bool {
     crate::identity_dependencies::request_needs_identity_assets(request)
 }
 
+/// What one parent request's identity resolution produced.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct ResolvedIdentity {
+    /// `None` for every request that does not condition on a face.
+    pub(crate) embedding: Option<FrozenIdentityEmbedding>,
+    /// A caller-facing advisory the extraction produced — today only "several
+    /// faces were found, the largest was used".
+    ///
+    /// It travels with the embedding rather than being logged and forgotten:
+    /// the person who supplied a group photograph is the one who needs to know
+    /// which face was picked, and a `tracing::warn!` on the server reaches
+    /// nobody holding a CLI or a browser.
+    pub(crate) warning: Option<String>,
+}
+
 /// Extract and freeze the identity for one parent request.
 ///
-/// Returns `Ok(None)` for every request that does not condition on a face.
-/// A request that does, but whose bundle did not resolve, is an error: a print
-/// that renders without the face nobody would be told about is exactly what
-/// `mold_core::identity` refuses at the contract boundary.
+/// Returns an empty [`ResolvedIdentity`] for every request that does not
+/// condition on a face. A request that does, but whose bundle did not resolve,
+/// is an error: a print that renders without the face nobody would be told
+/// about is exactly what `mold_core::identity` refuses at the contract
+/// boundary.
 pub(crate) async fn resolve_identity_embedding(
     request: &GenerateRequest,
     paths: Option<&PulidPaths>,
-) -> Result<Option<FrozenIdentityEmbedding>, String> {
+) -> Result<ResolvedIdentity, String> {
     if !request_resolves_identity(request) {
-        return Ok(None);
+        return Ok(ResolvedIdentity::default());
     }
     let Some(image) = request.id_image.clone() else {
         return Err(
@@ -190,10 +206,7 @@ pub(crate) async fn resolve_identity_embedding(
 /// It is CPU-bound for seconds — two ONNX graph decodes, a 609 MB tower load,
 /// and a 24-block forward — so it never runs on a reactor thread.
 #[cfg(feature = "pulid")]
-async fn extract_blocking(
-    paths: PulidPaths,
-    image: Vec<u8>,
-) -> Result<Option<FrozenIdentityEmbedding>, String> {
+async fn extract_blocking(paths: PulidPaths, image: Vec<u8>) -> Result<ResolvedIdentity, String> {
     let outcome = tokio::task::spawn_blocking(move || {
         mold_inference::identity::extraction::extract_identity_embedding(&paths, &image)
     })
@@ -204,7 +217,10 @@ async fn extract_blocking(
     if let Some(warning) = &outcome.warning {
         tracing::warn!(target: "mold::identity", "{warning}");
     }
-    Ok(Some(outcome.embedding))
+    Ok(ResolvedIdentity {
+        embedding: Some(outcome.embedding),
+        warning: outcome.warning,
+    })
 }
 
 /// A build without `pulid` never reaches here: the request contract refuses
@@ -213,15 +229,12 @@ async fn extract_blocking(
 /// into `prepare_inputs_for_devices`, which would be a second place the
 /// lifetime could diverge.
 #[cfg(not(feature = "pulid"))]
-async fn extract_blocking(
-    _paths: PulidPaths,
-    _image: Vec<u8>,
-) -> Result<Option<FrozenIdentityEmbedding>, String> {
+async fn extract_blocking(_paths: PulidPaths, _image: Vec<u8>) -> Result<ResolvedIdentity, String> {
     Err(mold_core::identity::IDENTITY_BUILD_UNSUPPORTED.to_string())
 }
 
 #[cfg(test)]
-type Stub = fn(&PulidPaths, &[u8]) -> Result<Option<FrozenIdentityEmbedding>, String>;
+type Stub = fn(&PulidPaths, &[u8]) -> Result<ResolvedIdentity, String>;
 
 #[cfg(test)]
 static TEST_STUB: std::sync::Mutex<Option<Stub>> = std::sync::Mutex::new(None);
@@ -322,8 +335,23 @@ mod tests {
         }
     }
 
-    fn stub(_: &PulidPaths, image: &[u8]) -> Result<Option<FrozenIdentityEmbedding>, String> {
-        Ok(Some(stub_embedding(image)))
+    fn stub(_: &PulidPaths, image: &[u8]) -> Result<ResolvedIdentity, String> {
+        Ok(ResolvedIdentity {
+            embedding: Some(stub_embedding(image)),
+            warning: None,
+        })
+    }
+
+    /// The multi-face advisory the real extractor emits, so the plumbing that
+    /// carries it out of admission can be tested without a group photograph.
+    fn stub_with_warning(_: &PulidPaths, image: &[u8]) -> Result<ResolvedIdentity, String> {
+        Ok(ResolvedIdentity {
+            embedding: Some(stub_embedding(image)),
+            warning: Some(
+                "3 faces were detected in the identity image; conditioning on the largest one"
+                    .to_string(),
+            ),
+        })
     }
 
     /// The zero-weight rule, at the one gate that could break it: no
@@ -334,7 +362,7 @@ mod tests {
         let resolved = resolve_identity_embedding(&request(Some(0.0)), Some(&paths()))
             .await
             .expect("a zero weight is inert, not an error");
-        assert!(resolved.is_none());
+        assert!(resolved.embedding.is_none());
         assert_eq!(stubbed.extractions(), 0);
     }
 
@@ -347,7 +375,7 @@ mod tests {
         let resolved = resolve_identity_embedding(&plain, Some(&paths()))
             .await
             .expect("nothing to resolve");
-        assert!(resolved.is_none());
+        assert!(resolved.embedding.is_none());
         assert_eq!(stubbed.extractions(), 0);
     }
 
@@ -357,6 +385,7 @@ mod tests {
         let frozen = resolve_identity_embedding(&request(None), Some(&paths()))
             .await
             .expect("the stub extractor answers")
+            .embedding
             .expect("a conditioned request resolves an identity");
         assert_eq!(stubbed.extractions(), 1);
         assert_eq!(
@@ -408,13 +437,16 @@ mod tests {
     fn overlap_observing_stub(
         _: &PulidPaths,
         image: &[u8],
-    ) -> Result<Option<FrozenIdentityEmbedding>, String> {
+    ) -> Result<ResolvedIdentity, String> {
         let now = IN_FLIGHT.fetch_add(1, Ordering::SeqCst) + 1;
         PEAK_IN_FLIGHT.fetch_max(now, Ordering::SeqCst);
         // Long enough that a genuinely concurrent peer would be observed.
         std::thread::sleep(std::time::Duration::from_millis(60));
         IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
-        Ok(Some(stub_embedding(image)))
+        Ok(ResolvedIdentity {
+            embedding: Some(stub_embedding(image)),
+            warning: None,
+        })
     }
 
     /// Two admissions arriving together must not both allocate the ~1.4 GB
@@ -434,9 +466,12 @@ mod tests {
         let second = resolve_identity_embedding(&two, Some(&paths));
         let (first, second) = tokio::join!(first, second);
 
-        assert!(first.expect("first extraction").is_some());
+        assert!(first.expect("first extraction").embedding.is_some());
         assert!(
-            second.expect("the queued extraction still runs").is_some(),
+            second
+                .expect("the queued extraction still runs")
+                .embedding
+                .is_some(),
             "serializing must queue the second request, not refuse it"
         );
         assert_eq!(stubbed.extractions(), 2);
@@ -475,8 +510,36 @@ mod tests {
         assert!(resolve_identity_embedding(&request(None), Some(&paths()))
             .await
             .expect("an unknown reading is not a refusal")
+            .embedding
             .is_some());
         assert_eq!(stubbed.extractions(), 1);
+    }
+
+    /// The extractor's own advisory — which of several faces it picked —
+    /// must leave this module with the embedding. Logging it server-side, as
+    /// it was before #1223, reaches nobody holding a CLI or a browser.
+    #[tokio::test]
+    async fn the_multi_face_advisory_travels_with_the_identity() {
+        let _stubbed = StubbedExtractor::install(stub_with_warning);
+        let resolved = resolve_identity_embedding(&request(None), Some(&paths()))
+            .await
+            .expect("the stub extractor answers");
+
+        assert!(resolved.embedding.is_some());
+        let warning = resolved.warning.expect("an unforced face choice is reported");
+        assert!(warning.contains("faces were detected"), "{warning}");
+        assert!(warning.contains("largest"), "{warning}");
+    }
+
+    /// A single-face photograph is the ordinary case and says nothing.
+    #[tokio::test]
+    async fn an_unambiguous_identity_carries_no_advisory() {
+        let _stubbed = StubbedExtractor::install(stub);
+        let resolved = resolve_identity_embedding(&request(None), Some(&paths()))
+            .await
+            .expect("the stub extractor answers");
+        assert!(resolved.embedding.is_some());
+        assert!(resolved.warning.is_none());
     }
 
     /// The charged peak is the measurement, not a second number that can

@@ -858,6 +858,26 @@ impl RequestWarnings {
     }
 }
 
+/// Fold advisories the RENDER produced into the ones admission produced.
+///
+/// Admission's advisories are known before the job runs; a render's are not —
+/// the identity extraction's "several faces, largest used" is decided while
+/// preparing the job's dependencies, long after this handler built its
+/// `RequestWarnings`. Both belong on the one header, because a caller reading
+/// `x-mold-request-warning` is asking "is there anything I should know about
+/// this print", not "at which stage was it noticed".
+///
+/// Deduplicating rather than appending blindly: a batch child and its parent
+/// carry the same identity advisory, and a caller should see it once.
+fn merge_render_warnings(mut warnings: RequestWarnings, from_render: &[String]) -> RequestWarnings {
+    for warning in from_render {
+        if !warnings.other.iter().any(|held| held == warning) {
+            warnings.other.push(warning.clone());
+        }
+    }
+    warnings
+}
+
 async fn require_server_model_activation(
     state: &AppState,
     model_name: &str,
@@ -2284,6 +2304,7 @@ async fn generate(
         Ok(job_result) => {
             let img = job_result.image;
             let response = job_result.response;
+            let warnings = merge_render_warnings(warnings, &response.request_warnings);
             let content_type = HeaderValue::from_static(img.format.content_type());
             let mut headers = HeaderMap::new();
             headers.insert(header::CONTENT_TYPE, content_type);
@@ -8988,6 +9009,51 @@ mod tests {
             headers.get("x-mold-request-warning").unwrap(),
             "first advisory; second"
         );
+    }
+
+    /// The identity extraction decides which of several faces to condition on
+    /// while preparing the job's dependencies — long after this handler built
+    /// its admission advisories. Before #1223 that decision was a server-side
+    /// `tracing::warn!` and the person who handed mold a group photograph was
+    /// never told which face it picked.
+    #[test]
+    fn advisories_the_render_produced_join_the_request_warning_header() {
+        let admission = super::RequestWarnings {
+            dimension: Some("rounded 1023 up to 1024".to_string()),
+            other: vec!["the requested collection was dropped".to_string()],
+        };
+        let identity =
+            "3 faces were detected in the identity image; conditioning on the largest one";
+
+        let merged = super::merge_render_warnings(admission, &[identity.to_string()]);
+        let all = merged.all().collect::<Vec<_>>();
+        assert!(all.contains(&identity), "{all:?}");
+        assert!(all.contains(&"the requested collection was dropped"), "{all:?}");
+        // The dimension advisory keeps its own channel.
+        assert_eq!(merged.dimension.as_deref(), Some("rounded 1023 up to 1024"));
+        assert_eq!(
+            super::request_warning_headers(&merged.all().map(str::to_string).collect::<Vec<_>>())
+                .get("x-mold-request-warning")
+                .unwrap(),
+            "the requested collection was dropped; \
+             3 faces were detected in the identity image; conditioning on the largest one; \
+             rounded 1023 up to 1024"
+        );
+    }
+
+    /// A batch child carries its parent's identity advisory, so the same text
+    /// can arrive twice. A caller should see it once.
+    #[test]
+    fn a_repeated_render_advisory_is_not_duplicated() {
+        let held = "3 faces were detected in the identity image; conditioning on the largest one";
+        let merged = super::merge_render_warnings(
+            super::RequestWarnings {
+                dimension: None,
+                other: vec![held.to_string()],
+            },
+            &[held.to_string()],
+        );
+        assert_eq!(merged.all().count(), 1);
     }
 
     #[tokio::test]

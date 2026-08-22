@@ -2017,6 +2017,7 @@ mod tests {
             execution_equivalence_fingerprint: "same".to_string(),
             prepared_inputs: PreparedExecutionInputs {
                 identity_embedding: None,
+                identity_warning: None,
                 authority_fingerprint: "prepared".to_string(),
                 by_device: BTreeMap::new(),
                 retryable_device_failures: BTreeMap::new(),

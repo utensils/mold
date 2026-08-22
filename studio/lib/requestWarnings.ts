@@ -25,3 +25,26 @@ export function requestWarningsFromHeaders(
     return warning ? [warning] : [];
   });
 }
+
+/**
+ * Read advisories off an SSE completion event.
+ *
+ * A streaming render has no response headers to carry them: the only headers
+ * a caller ever sees arrived before the job ran, and an advisory the render
+ * itself produced — which of several faces the identity extractor conditioned
+ * on — is decided long after that. The server therefore repeats them in the
+ * completion payload, and this is the one reader.
+ *
+ * Defensive about the shape because the field is additive: an older server
+ * omits it entirely, and nothing here may throw on a completion event that
+ * otherwise delivered a perfectly good print.
+ */
+export function requestWarningsFromCompleteEvent(event: unknown): string[] {
+  if (typeof event !== "object" || event === null) return [];
+  const raw = (event as { request_warnings?: unknown }).request_warnings;
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((value) => {
+    const warning = typeof value === "string" ? value.trim() : "";
+    return warning ? [warning] : [];
+  });
+}

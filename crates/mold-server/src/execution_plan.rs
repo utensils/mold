@@ -1029,6 +1029,16 @@ pub struct PreparedExecutionInputs {
     /// `None` covers every request that does not condition on a face, an
     /// explicit `id_weight` of 0, and a build without the `pulid` feature.
     pub identity_embedding: Option<mold_core::identity::FrozenIdentityEmbedding>,
+    /// A caller-facing advisory the identity extraction produced — today only
+    /// "several faces were found, the largest was used".
+    ///
+    /// It rides here beside the embedding, and therefore into every batch
+    /// child that clones these inputs, because the person who handed mold a
+    /// group photograph is the one who needs to know which face it picked. The
+    /// worker copies it onto `GenerateResponse.request_warnings` at
+    /// completion, which is what puts it on `x-mold-request-warning` for the
+    /// JSON path and in the SSE complete event for the streaming one.
+    pub identity_warning: Option<String>,
     /// Payload-free authenticated authority for the private H3 ingress. This
     /// is only a transport seam; per-device admission evidence is attached by
     /// dependency preparation before generic execution planning may consume it.
@@ -6081,6 +6091,7 @@ mod tests {
         selected_config.t5_variant = Some("fp16".to_string());
         selected_config.selected_t5_path = Some(selected_t5.clone());
         let prepared = PreparedExecutionInputs {
+            identity_warning: None,
             identity_embedding: None,
             authority_fingerprint: preparation_authority_fingerprint(
                 &config,
@@ -6168,6 +6179,7 @@ mod tests {
         let engine_config =
             mold_inference::FrozenEngineConfig::resolve(&request.model, &effective_config);
         let prepared = PreparedExecutionInputs {
+            identity_warning: None,
             identity_embedding: None,
             authority_fingerprint: preparation_authority_fingerprint(
                 &effective_config,
@@ -6227,6 +6239,7 @@ mod tests {
         let paths = ModelPaths::resolve(&request.model, &config).unwrap();
         let engine_config = mold_inference::FrozenEngineConfig::resolve(&request.model, &config);
         let prepared = PreparedExecutionInputs {
+            identity_warning: None,
             identity_embedding: None,
             authority_fingerprint: preparation_authority_fingerprint(
                 &config,
@@ -6694,6 +6707,7 @@ mod tests {
         let paths = ModelPaths::resolve(&request.model, &config).unwrap();
         let engine_config = mold_inference::FrozenEngineConfig::resolve(&request.model, &config);
         let prepared = PreparedExecutionInputs {
+            identity_warning: None,
             identity_embedding: None,
             authority_fingerprint: preparation_authority_fingerprint(
                 &config,

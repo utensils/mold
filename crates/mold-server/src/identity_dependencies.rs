@@ -811,7 +811,10 @@ mod tests {
 
         let frozen = crate::identity_extraction::stub_embedding(b"parent-face");
         let stubbed = crate::identity_extraction::StubbedExtractor::install(|_, image| {
-            Ok(Some(crate::identity_extraction::stub_embedding(image)))
+            Ok(crate::identity_extraction::ResolvedIdentity {
+                embedding: Some(crate::identity_extraction::stub_embedding(image)),
+                warning: None,
+            })
         });
 
         let prepared = prepare_inputs_for_devices(
@@ -862,7 +865,10 @@ mod tests {
         let (_root, config) = flux_case(models.path());
 
         let stubbed = crate::identity_extraction::StubbedExtractor::install(|_, image| {
-            Ok(Some(crate::identity_extraction::stub_embedding(image)))
+            Ok(crate::identity_extraction::ResolvedIdentity {
+                embedding: Some(crate::identity_extraction::stub_embedding(image)),
+                warning: None,
+            })
         });
 
         let prepared = prepare_inputs_for_devices(
@@ -906,7 +912,10 @@ mod tests {
         let (_root, config) = flux_case(models.path());
 
         let stubbed = crate::identity_extraction::StubbedExtractor::install(|_, image| {
-            Ok(Some(crate::identity_extraction::stub_embedding(image)))
+            Ok(crate::identity_extraction::ResolvedIdentity {
+                embedding: Some(crate::identity_extraction::stub_embedding(image)),
+                warning: None,
+            })
         });
 
         // The parent. `freeze_batch_plan` validates a `batch_size = 1` clone,
@@ -917,6 +926,7 @@ mod tests {
         )
         .await
         .expect("the stub extractor answers")
+        .embedding
         .expect("a conditioned parent resolves an identity");
         assert_eq!(stubbed.extractions(), 1);
 
@@ -963,6 +973,47 @@ mod tests {
         );
     }
 
+    /// A re-prepared batch child must not invent a second copy of its
+    /// parent's advisory. The child never extracts, so it has nothing of its
+    /// own to report; the note reaches it by cloning the parent's prepared
+    /// inputs, and `merge_prepared` carries it across re-preparation.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_reused_identity_reports_no_advisory_of_its_own() {
+        let models = TempDir::new().unwrap();
+        let home = TempDir::new().unwrap();
+        let _env = EnvGuard::new(home.path(), models.path());
+        let (_root, config) = flux_case(models.path());
+
+        let _stubbed = crate::identity_extraction::StubbedExtractor::install(|_, image| {
+            Ok(crate::identity_extraction::ResolvedIdentity {
+                embedding: Some(crate::identity_extraction::stub_embedding(image)),
+                warning: Some("3 faces were detected".to_string()),
+            })
+        });
+
+        let prepared = prepare_inputs_for_devices(
+            None,
+            "child",
+            &request(None, true),
+            &config,
+            vec![device()],
+            None,
+            DependencyMaterializationPolicy::ExistingOnly,
+            DependencyPreparationContext {
+                frozen_identity: Some(crate::identity_extraction::stub_embedding(b"parent-face")),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(prepared.identity_embedding.is_some());
+        assert!(
+            prepared.identity_warning.is_none(),
+            "a sibling that did not extract has no advisory of its own to add"
+        );
+    }
+
     /// The zero-weight rule, end to end through preparation: no assets, no
     /// embedding, and byte-identical prepared inputs to a request that never
     /// mentioned identity.
@@ -975,7 +1026,10 @@ mod tests {
         let (_root, config) = flux_case(models.path());
 
         let stubbed = crate::identity_extraction::StubbedExtractor::install(|_, image| {
-            Ok(Some(crate::identity_extraction::stub_embedding(image)))
+            Ok(crate::identity_extraction::ResolvedIdentity {
+                embedding: Some(crate::identity_extraction::stub_embedding(image)),
+                warning: None,
+            })
         });
 
         let prepared = prepare_inputs_for_devices(
