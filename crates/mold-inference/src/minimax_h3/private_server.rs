@@ -2431,7 +2431,11 @@ impl H3PrivateFl2VaOwnerFenceFacts {
                 .is_some_and(|capability| capability.0 == 0)
             || self.memory_ledger_sequence == 0
             || self.predicted_device_peak_bytes == 0
-            || self.predicted_host_increment_bytes == 0
+            // Metal folds simultaneously-live host and device bytes into the
+            // one reviewed unified-memory peak, so its independent host claim
+            // is deliberately zero. CUDA retains two physical pools and must
+            // carry a positive host increment.
+            || (self.compute_capability.is_some() && self.predicted_host_increment_bytes == 0)
             || !valid_sha256(&self.work_identity_sha256)
             || !valid_sha256(&self.cancellation_scope_identity_sha256)
             || !valid_sha256(&self.admission_evidence_identity_sha256)
@@ -7468,6 +7472,23 @@ mod tests {
             predicted_device_peak_bytes: 7,
             predicted_host_increment_bytes: 8,
         }
+    }
+
+    #[cfg(feature = "mp4")]
+    #[test]
+    fn metal_owner_fence_accepts_the_unified_zero_host_claim() {
+        let mut fence = owner_fence_for(&base_factory());
+        fence.compute_capability = None;
+        fence.predicted_host_increment_bytes = 0;
+        fence.validate().unwrap();
+    }
+
+    #[cfg(feature = "mp4")]
+    #[test]
+    fn cuda_owner_fence_requires_an_independent_host_claim() {
+        let mut fence = owner_fence_for(&base_factory());
+        fence.predicted_host_increment_bytes = 0;
+        assert!(fence.validate().is_err());
     }
 
     /// The resolved queue/worker form of an FL2VA request, matching what the
