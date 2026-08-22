@@ -106,9 +106,9 @@ contract.
 ## Mold Studio for desktop
 
 Create locally on Apple Silicon or NVIDIA, or connect every Mold machine you
-use. The native desktop app keeps generation, a unified multi-host Library,
-model discovery, live downloads, queues, telemetry, and RunPod in one focused
-workspace.
+use. The native macOS, Linux, and Windows desktop app keeps generation, a
+unified multi-host Library, model discovery, live downloads, queues, telemetry,
+and RunPod in one focused workspace.
 
 [![Mold Studio desktop app generating an owl](/screenshots/mold-studio-desktop.png)](/guide/desktop)
 

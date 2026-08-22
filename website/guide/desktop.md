@@ -6,8 +6,9 @@ including LAN/Tailscale setup, Create, Library, Models, Machines, themes, and
 TestFlight distribution.
 :::
 
-mold ships a native macOS and Linux desktop app — a Tauri 2 shell around a
-Vue 3 + TypeScript frontend built on the **Mold Studio** design system. Its Mold
+mold ships a native macOS, Linux, and Windows desktop app — a Tauri 2 shell
+around a Vue 3 + TypeScript frontend built on the **Mold Studio** design
+system. Its Mold
 and Safelight theme families create a disciplined "digital darkroom" that treats
 every generation as a print being developed without recoloring the media itself.
 The workspace rail collapses between 210 px and 62 px, and a StatusPopover at
@@ -15,7 +16,9 @@ its foot summarizes engine and queue activity.
 
 ::: info
 The desktop app lives in `desktop/`. Local generation uses Metal on Apple
-Silicon and CUDA on x86_64 Linux.
+Silicon and CUDA on x86_64 Linux and Windows. On a machine with no supported
+GPU — an ARM64 Windows laptop, for instance — the app still runs and connects
+to a remote `mold serve` machine.
 :::
 
 ![Mold Studio desktop app generating an owl](/screenshots/mold-studio-desktop.png)
@@ -40,6 +43,12 @@ Linux builds are currently source/CI distributions: `nix build
 50-series. B200/sm100 is server-only; desktop connects to it remotely.
 `desktop-build` produces the native package on NixOS and a CUDA AppImage on
 conventional Linux. Tagged releases do not publish the AppImage yet.
+
+Windows is also a source/CI distribution today: `scripts\windows.ps1 build`
+produces an NSIS installer locally, and the `Desktop` workflow attaches an
+unsigned x64 installer to every `main` run. Tagged releases do not publish a
+signed Windows installer yet — see [Windows](#windows) below for the toolchain,
+the helper script, and the two capabilities that are still absent.
 
 ## What it is
 
@@ -277,16 +286,18 @@ surface powers it, so anything the app does maps to a documented endpoint.
   clipboard — the app chrome is not selectable, so that button is how a long
   server error leaves the app. Opening the panel marks everything read; Clear
   empties it.
-- **Native desktop integration** — platform menus and shortcuts, Linux native
-  window decorations, macOS overlay chrome, and background notifications on
-  generation, chain, and pull completion. macOS uses UserNotifications so a
-  signed release inherits Mold's bundle identity and app icon.
+- **Native desktop integration** — platform menus and shortcuts, Linux and
+  Windows native window decorations, macOS overlay chrome, and background
+  notifications on generation, chain, and pull completion. macOS uses
+  UserNotifications so a signed release inherits Mold's bundle identity and app
+  icon; Windows uses a WinRT toast whose click routes to the print, model, or
+  update the alert names, exactly as the macOS and Linux notifications do.
 
 ## Updates
 
 This section describes Mold's in-app desktop updater. Automatic signed desktop
-updates are currently macOS-only; Linux Nix/AppImage builds report updates as
-unsupported and are replaced manually. The iPhone app updates through
+updates are currently macOS-only; Linux Nix/AppImage builds and Windows
+installer builds report updates as unsupported and are replaced manually. The iPhone app updates through
 TestFlight after mobile-relevant `main` changes pass iOS CI, App Store Connect
 reports the build `VALID`, and internal tester access is verified.
 
@@ -508,10 +519,84 @@ wire types as the CLI and web UI:
   **Reconnected to `<machine>`** notification confirms it. The web UI behaves
   the same way.
 
+## Windows
+
+Windows is a first-class desktop target: the same Tauri crate and the same
+Mold Studio frontend, rendered by WebView2 instead of WebKit. Both x64 and
+ARM64 (Snapdragon Surface devices) build and run.
+
+### Toolchain
+
+`scripts\windows.ps1 doctor` checks the whole list and names anything missing
+with the command that installs it; `scripts\windows.ps1 setup` installs what it
+can. What it looks for:
+
+| Component                                        | Why                                                            |
+| ------------------------------------------------ | -------------------------------------------------------------- |
+| Visual Studio Build Tools (C++)                  | the MSVC linker and the `cc` builds inside the dependency tree |
+| Rust ≥ 1.93 (`aarch64`/`x86_64-pc-windows-msvc`) | the workspace MSRV                                             |
+| Microsoft Edge WebView2 Runtime                  | the webview the app renders in                                 |
+| Bun                                              | the frontend build and test runner                             |
+| `tauri-cli`                                      | `cargo tauri dev` / `build` (setup installs it)                |
+| protoc (optional)                                | required for the `pulid` face-identity feature                 |
+| NASM (optional, x64)                             | `openh264` builds a faster assembly path when it is present    |
+
+### Commands
+
+`scripts\windows.ps1` is the Windows peer of the Nix devshell's `desktop-*`
+commands — the devshell itself does not run on Windows:
+
+```powershell
+scripts\windows.ps1 doctor   # verify the toolchain, name what is missing
+scripts\windows.ps1 setup    # install what doctor can install
+scripts\windows.ps1 dev      # Tauri app with hot reload (Vite on :1430)
+scripts\windows.ps1 ui       # frontend-only Vite server
+scripts\windows.ps1 check    # rustfmt, clippy -D warnings, vue-tsc, prettier
+scripts\windows.ps1 test     # cargo test (CPU) + vitest
+scripts\windows.ps1 build    # NSIS installer plus the standalone Mold.exe
+scripts\windows.ps1 clean    # drop the desktop build outputs
+```
+
+The feature recipe is resolved per machine and printed by `doctor`: CPU-only by
+default, `cuda` added on an x64 host with a CUDA toolkit, and `pulid` added when
+protoc is on PATH. `MOLD_WINDOWS_FEATURES` replaces the whole recipe;
+`MOLD_WINDOWS_CUDA=1` and `MOLD_WINDOWS_NO_PULID=1` each move one axis.
+
+### What is not there yet
+
+Two capabilities are absent rather than degraded, and both say so by name:
+
+- **Generated AAC audio tracks.** The `mp4` feature pulls `fdk-aac-sys`, whose
+  `FDK_archdef.h` recognises only GCC/Clang architecture macros and falls
+  through to a `#warning` — which MSVC raises as the fatal error C1021, on x64
+  and ARM64 alike. Video renders and muxes normally through the pure-Rust
+  writer; only an explicitly requested audio track is refused.
+- **In-app updates.** The updater's preflight is built around macOS bundle
+  identity, `codesign`/Gatekeeper, and `RENAME_SWAP`. Windows reports updates
+  as unsupported and is replaced by re-running the installer.
+
+Signed Windows installers are also still to come; the `main` CI artifact is
+unsigned, so SmartScreen will warn on first run.
+
+### Notes for contributors
+
+- The repository pins LF line endings in the working tree via `.gitattributes`.
+  Git's default `core.autocrlf` on Windows would otherwise check the tree out
+  as CRLF, which prettier rejects for every file.
+- On ARM64, `.cargo/config.toml` enables the `fullfp16` target feature for
+  `aarch64-pc-windows-msvc`. `gemm-common`'s inline `fmla v.8h` requires it and
+  it is not baseline on Windows, so without the flag the build type-checks and
+  then fails during codegen — `cargo check` never sees it.
+- Enable Windows long-path support (`LongPathsEnabled`). Cargo target paths in
+  this tree get deep enough to matter.
+
 ## Development
 
 Run inside `nix develop` (the devshell wires up Metal or CUDA, Bun, Tauri, and
 Linux WebKitGTK/GStreamer dependencies):
+
+On Windows the devshell is not available; use `scripts\windows.ps1` instead —
+see [Windows](#windows) above.
 
 ```bash
 desktop-dev        # Tauri app with hot reload (Vite on :1430)
@@ -535,7 +620,9 @@ sign/notarize path and intentionally exits on Linux.
 
 The Rust crate under `desktop/src-tauri` is its own cargo root (excluded from
 the workspace); the frontend lives in `desktop/src`. CI runs the `desktop-check`
-and `desktop-test` gates via `.github/workflows/desktop.yml`.
+and `desktop-test` gates via `.github/workflows/desktop.yml`, which also carries
+a `windows-latest` job running clippy and the tests on every relevant pull
+request and building the NSIS installer on `main`.
 
 The separate remote-only iOS crate lives under `apps/mobile/src-tauri`; its
 shared frontend entry is `desktop/src/mobile`. Mobile CI runs through
