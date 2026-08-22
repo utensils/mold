@@ -334,8 +334,7 @@ mod tests {
     use super::*;
     use crate::pulid_fixtures::{
         golden, max_errors, pulid_asset, scale_relative_error, true_cfg_golden,
-        DeterministicStream, GoldenStats,
-        SEED_IDFORMER_ID, SEED_IDFORMER_VIT,
+        DeterministicStream, GoldenStats, SEED_IDFORMER_ID, SEED_IDFORMER_VIT,
     };
     use candle_core::{DType, Device};
 
@@ -655,7 +654,10 @@ mod tests {
             "idformer.uncond: {error:.3e} of the {} scale",
             expected_stats.peak
         );
-        assert!(error < 1e-4, "the unconditional identity drifted by {error}");
+        assert!(
+            error < 1e-4,
+            "the unconditional identity drifted by {error}"
+        );
     }
 
     /// The five identity tokens must be in every scale's key/value context,

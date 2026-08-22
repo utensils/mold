@@ -328,10 +328,7 @@ pub(crate) fn stub_embedding(image: &[u8]) -> FrozenIdentityEmbedding {
 /// The set-aware form: records every source in order, and attaches an
 /// unconditional half exactly when the request asked for one.
 #[cfg(test)]
-pub(crate) fn stub_embedding_for(
-    images: &[Vec<u8>],
-    want_uncond: bool,
-) -> FrozenIdentityEmbedding {
+pub(crate) fn stub_embedding_for(images: &[Vec<u8>], want_uncond: bool) -> FrozenIdentityEmbedding {
     let values: Vec<f32> = (0..mold_core::identity::ID_EMBEDDING_VALUES)
         .map(|index| (index % 97) as f32 / 97.0)
         .collect();
@@ -388,7 +385,11 @@ mod tests {
         }
     }
 
-    fn stub(_: &PulidPaths, images: &[Vec<u8>], want_uncond: bool) -> Result<ResolvedIdentity, String> {
+    fn stub(
+        _: &PulidPaths,
+        images: &[Vec<u8>],
+        want_uncond: bool,
+    ) -> Result<ResolvedIdentity, String> {
         Ok(ResolvedIdentity {
             embedding: Some(stub_embedding_for(images, want_uncond)),
             warning: None,

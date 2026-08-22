@@ -5332,7 +5332,12 @@ mod tests {
         assert!(metadata.id_image_names.is_none());
         assert!(metadata.id_image_sha256s.is_none());
         let json = serde_json::to_string(&metadata).unwrap();
-        for key in ["id_image_names", "id_image_sha256s", "true_cfg", "cfg_start_step"] {
+        for key in [
+            "id_image_names",
+            "id_image_sha256s",
+            "true_cfg",
+            "cfg_start_step",
+        ] {
             assert!(!json.contains(key), "{key} must be absent: {json}");
         }
 
@@ -5357,7 +5362,10 @@ mod tests {
         );
         // The effective knobs are recorded from the plural form too.
         assert_eq!(metadata.id_weight, Some(0.9));
-        assert_eq!(metadata.id_start_step, Some(crate::identity::ID_START_STEP_DEFAULT));
+        assert_eq!(
+            metadata.id_start_step,
+            Some(crate::identity::ID_START_STEP_DEFAULT)
+        );
     }
 
     /// The true-CFG provenance is recorded only when the print actually ran the

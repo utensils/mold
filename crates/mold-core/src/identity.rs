@@ -1688,7 +1688,10 @@ mod tests {
 
         let too_many = multi_request(ID_IMAGES_MAX + 1);
         let error = validate_identity_conditioning(&too_many).unwrap_err();
-        assert!(error.contains(&format!("at most {ID_IMAGES_MAX}")), "{error}");
+        assert!(
+            error.contains(&format!("at most {ID_IMAGES_MAX}")),
+            "{error}"
+        );
     }
 
     #[test]
@@ -1699,7 +1702,10 @@ mod tests {
         let mut req = multi_request(0);
         req.id_images = Some(Vec::new());
         let error = validate_identity_conditioning(&req).unwrap_err();
-        assert!(error.contains("id_image (or id_images) is required"), "{error}");
+        assert!(
+            error.contains("id_image (or id_images) is required"),
+            "{error}"
+        );
     }
 
     /// The per-image limits are the single form's, applied to each photograph,
@@ -1732,14 +1738,17 @@ mod tests {
     /// has to buffer.
     #[test]
     fn the_whole_set_is_bounded_by_total_bytes_and_total_pixels() {
-        assert!(
-            ID_IMAGES_TOTAL_ENCODED_BYTES_MAX < ID_IMAGES_MAX * ID_IMAGE_LIMITS.max_encoded_bytes,
-            "a total bound at the per-image sum would never bite"
-        );
-        assert!(
-            ID_IMAGES_TOTAL_DECODED_PIXELS_MAX
-                < ID_IMAGES_MAX as u64 * ID_IMAGE_LIMITS.max_decoded_pixels
-        );
+        // A total bound sitting at the per-image sum would never bite.
+        const {
+            assert!(
+                ID_IMAGES_TOTAL_ENCODED_BYTES_MAX
+                    < ID_IMAGES_MAX * ID_IMAGE_LIMITS.max_encoded_bytes
+            );
+            assert!(
+                ID_IMAGES_TOTAL_DECODED_PIXELS_MAX
+                    < ID_IMAGES_MAX as u64 * ID_IMAGE_LIMITS.max_decoded_pixels
+            );
+        }
 
         let mut fat = png_1x1();
         fat.resize(ID_IMAGE_LIMITS.max_encoded_bytes, 0);
@@ -1752,12 +1761,8 @@ mod tests {
         // are not.
         let wide = jpeg_with_dimensions(8000, 4000);
         assert!(validate_id_image_bytes(&wide).is_ok());
-        let error = validate_id_images(&[
-            wide.as_slice(),
-            wide.as_slice(),
-            wide.as_slice(),
-        ])
-        .unwrap_err();
+        let error =
+            validate_id_images(&[wide.as_slice(), wide.as_slice(), wide.as_slice()]).unwrap_err();
         assert!(error.contains("pixels in total"), "{error}");
     }
 
@@ -1777,7 +1782,10 @@ mod tests {
         let mut singular = identity_request("flux-dev:q8");
         singular.id_image_names = Some(vec!["a.png".to_string()]);
         let error = validate_identity_conditioning(&singular).unwrap_err();
-        assert!(error.contains("id_image_names requires id_images"), "{error}");
+        assert!(
+            error.contains("id_image_names requires id_images"),
+            "{error}"
+        );
     }
 
     /// The zero-weight rule is unchanged by the plural form: it plans nothing,
@@ -1804,7 +1812,11 @@ mod tests {
         assert_eq!(effective_true_cfg(&req), TRUE_CFG_OFF);
         assert!(!request_uses_true_cfg(&req));
 
-        for scale in [1.0, 1.0 + TRUE_CFG_EPSILON / 2.0, 1.0 - TRUE_CFG_EPSILON / 2.0] {
+        for scale in [
+            1.0,
+            1.0 + TRUE_CFG_EPSILON / 2.0,
+            1.0 - TRUE_CFG_EPSILON / 2.0,
+        ] {
             req.true_cfg = Some(scale);
             assert!(
                 !request_uses_true_cfg(&req),
@@ -1904,7 +1916,10 @@ mod tests {
         assert_eq!(averaged, reordered);
 
         // One set is itself, exactly — never a mean that rounds.
-        assert_eq!(average_identity_tokens(&[one.clone()]).unwrap(), one);
+        assert_eq!(
+            average_identity_tokens(std::slice::from_ref(&one)).unwrap(),
+            one
+        );
         assert!(average_identity_tokens(&[]).is_err());
     }
 
@@ -1916,11 +1931,16 @@ mod tests {
             assets(),
         )
         .expect("a two-photograph identity");
-        assert_eq!(frozen.source_sha256s(), ["aa".to_string(), "bb".to_string()]);
+        assert_eq!(
+            frozen.source_sha256s(),
+            ["aa".to_string(), "bb".to_string()]
+        );
         assert_eq!(frozen.source_sha256(), "aa");
         assert!(!frozen.has_uncond());
 
-        assert!(FrozenIdentityEmbedding::from_sources(&tokens(0.25), Vec::new(), assets()).is_err());
+        assert!(
+            FrozenIdentityEmbedding::from_sources(&tokens(0.25), Vec::new(), assets()).is_err()
+        );
         assert!(FrozenIdentityEmbedding::from_sources(
             &tokens(0.25),
             vec!["x".to_string(); ID_IMAGES_MAX + 1],
@@ -1936,7 +1956,8 @@ mod tests {
     fn the_single_photograph_fingerprint_is_unchanged() {
         let values = tokens(0.5);
         let assets = assets();
-        let frozen = FrozenIdentityEmbedding::new(&values, "source-digest", assets.clone()).unwrap();
+        let frozen =
+            FrozenIdentityEmbedding::new(&values, "source-digest", assets.clone()).unwrap();
 
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();

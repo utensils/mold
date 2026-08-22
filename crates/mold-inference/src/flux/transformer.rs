@@ -116,9 +116,7 @@ impl FluxTransformer {
                     // `PuLID/flux/sampling.py:145`: the negative branch takes
                     // the UNCONDITIONAL identity, gated by the SAME
                     // `id_start_step` as the conditional one.
-                    let neg_hook = branch
-                        .pulid
-                        .and_then(|runtime| runtime.hook_for_step(step));
+                    let neg_hook = branch.pulid.and_then(|runtime| runtime.hook_for_step(step));
                     let neg_pred = self.forward_once(
                         &img,
                         img_ids,
@@ -185,9 +183,15 @@ impl FluxTransformer {
         hook: Option<&dyn BlockHook>,
     ) -> Result<Tensor> {
         let pred = match (self, hook) {
-            (Self::BF16(m), None) => {
-                m.forward(img, img_ids, txt, txt_ids, t_vec, vec_, Some(guidance_tensor))?
-            }
+            (Self::BF16(m), None) => m.forward(
+                img,
+                img_ids,
+                txt,
+                txt_ids,
+                t_vec,
+                vec_,
+                Some(guidance_tensor),
+            )?,
             (Self::BF16(m), Some(hook)) => m.forward_with_hook(
                 img,
                 img_ids,
@@ -198,9 +202,15 @@ impl FluxTransformer {
                 Some(guidance_tensor),
                 hook,
             )?,
-            (Self::Quantized(m), None) => {
-                m.forward(img, img_ids, txt, txt_ids, t_vec, vec_, Some(guidance_tensor))?
-            }
+            (Self::Quantized(m), None) => m.forward(
+                img,
+                img_ids,
+                txt,
+                txt_ids,
+                t_vec,
+                vec_,
+                Some(guidance_tensor),
+            )?,
             (Self::Quantized(m), Some(hook)) => m.forward_with_hook(
                 img,
                 img_ids,

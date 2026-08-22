@@ -25,8 +25,8 @@ use crate::image::{build_output_metadata, encode_image};
 use crate::progress::{ProgressCallback, ProgressReporter};
 
 use super::identity::{EngineIdentityState, RenderIdentity};
-use super::transformer::TrueCfgBranch;
 use super::transformer::FluxTransformer;
+use super::transformer::TrueCfgBranch;
 
 /// Some FLUX safetensors checkpoints store transformer tensors at the root
 /// while others nest them under `model.diffusion_model`.
@@ -1762,188 +1762,191 @@ impl FluxEngine {
             None => None,
         };
 
-        let (t5_emb, clip_emb, neg_t5_emb, neg_clip_emb) = if let Some(((t5_emb, clip_emb), negative)) =
-            cached_conditioning
-        {
-            let (neg_t5_emb, neg_clip_emb) = negative.unzip();
-            (t5_emb, clip_emb, neg_t5_emb, neg_clip_emb)
-        } else {
-            // --- Phase 1: T5 encoding ---
-            // Reserve-adjusted reading drives the variant choice.
-            let free = usable_free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
-            self.base.progress.stage_start("Selecting T5 encoder");
-            let t5_resolve_start = Instant::now();
-            let t5_preference = self.t5_variant.as_deref();
-            let (resolved_t5_path, t5_on_gpu, _t5_auto_device_label) =
-                crate::encoders::variant_resolution::resolve_t5_variant(
+        let (t5_emb, clip_emb, neg_t5_emb, neg_clip_emb) =
+            if let Some(((t5_emb, clip_emb), negative)) = cached_conditioning {
+                let (neg_t5_emb, neg_clip_emb) = negative.unzip();
+                (t5_emb, clip_emb, neg_t5_emb, neg_clip_emb)
+            } else {
+                // --- Phase 1: T5 encoding ---
+                // Reserve-adjusted reading drives the variant choice.
+                let free = usable_free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
+                self.base.progress.stage_start("Selecting T5 encoder");
+                let t5_resolve_start = Instant::now();
+                let t5_preference = self.t5_variant.as_deref();
+                let (resolved_t5_path, t5_on_gpu, _t5_auto_device_label) =
+                    crate::encoders::variant_resolution::resolve_t5_variant(
+                        &self.base.progress,
+                        t5_preference,
+                        &device,
+                        free,
+                        &t5_encoder_path,
+                    )?;
+                self.base
+                    .progress
+                    .stage_done("Selecting T5 encoder", t5_resolve_start.elapsed());
+
+                let t5_ref = effective_device_ref(
+                    self.pending_placement.as_ref(),
+                    |adv| adv.t5.clone(),
+                    true,
+                );
+                let auto_t5_device = if t5_on_gpu {
+                    device.clone()
+                } else {
+                    Device::Cpu
+                };
+                let t5_device_owned =
+                    crate::device::resolve_device(Some(t5_ref), || Ok(auto_t5_device.clone()))?;
+                let t5_device = &t5_device_owned;
+                let t5_on_gpu = !t5_device.is_cpu();
+                let t5_device_label = if t5_on_gpu { "GPU" } else { "CPU" };
+                let t5_dtype = if t5_on_gpu { gpu_dtype } else { DType::F32 };
+
+                let t5_size = std::fs::metadata(&resolved_t5_path)
+                    .map(|m| m.len())
+                    .unwrap_or(0);
+                // T5 activations: ~256 MB workspace (floor) — small relative to
+                // the 9 GB encoder weights and only resident during encoding.
+                let t5_activation_budget = crate::device::activation_bytes(
+                    req.width,
+                    req.height,
+                    1,
+                    crate::device::dtype_bytes(t5_dtype),
+                    crate::device::ActivationFamily::SmallTransformer,
+                );
+                preflight_memory_check("T5 encoder", t5_size, t5_activation_budget)?;
+                if let Some(status) = memory_status_string() {
+                    self.base.progress.info(&status);
+                }
+
+                let t5_stage_label = format!("Loading T5 encoder ({t5_device_label})");
+                self.base.progress.stage_start(&t5_stage_label);
+                let t5_stage = Instant::now();
+                let cached_t5_tok = self.get_cached_tokenizer(&t5_tokenizer_path);
+                let cached_t5_tensors = self.get_cached_safetensors(&resolved_t5_path)?;
+                let mut t5 = encoders::t5::T5Encoder::load_with_tokenizer_and_tensors(
+                    &resolved_t5_path,
+                    &t5_tokenizer_path,
+                    t5_device,
+                    t5_dtype,
                     &self.base.progress,
-                    t5_preference,
-                    &device,
-                    free,
-                    &t5_encoder_path,
+                    cached_t5_tok,
+                    cached_t5_tensors,
                 )?;
-            self.base
-                .progress
-                .stage_done("Selecting T5 encoder", t5_resolve_start.elapsed());
+                self.cache_tokenizer(&t5_tokenizer_path, t5.tokenizer_arc());
+                self.base
+                    .progress
+                    .stage_done(&t5_stage_label, t5_stage.elapsed());
 
-            let t5_ref =
-                effective_device_ref(self.pending_placement.as_ref(), |adv| adv.t5.clone(), true);
-            let auto_t5_device = if t5_on_gpu {
-                device.clone()
-            } else {
-                Device::Cpu
-            };
-            let t5_device_owned =
-                crate::device::resolve_device(Some(t5_ref), || Ok(auto_t5_device.clone()))?;
-            let t5_device = &t5_device_owned;
-            let t5_on_gpu = !t5_device.is_cpu();
-            let t5_device_label = if t5_on_gpu { "GPU" } else { "CPU" };
-            let t5_dtype = if t5_on_gpu { gpu_dtype } else { DType::F32 };
-
-            let t5_size = std::fs::metadata(&resolved_t5_path)
-                .map(|m| m.len())
-                .unwrap_or(0);
-            // T5 activations: ~256 MB workspace (floor) — small relative to
-            // the 9 GB encoder weights and only resident during encoding.
-            let t5_activation_budget = crate::device::activation_bytes(
-                req.width,
-                req.height,
-                1,
-                crate::device::dtype_bytes(t5_dtype),
-                crate::device::ActivationFamily::SmallTransformer,
-            );
-            preflight_memory_check("T5 encoder", t5_size, t5_activation_budget)?;
-            if let Some(status) = memory_status_string() {
-                self.base.progress.info(&status);
-            }
-
-            let t5_stage_label = format!("Loading T5 encoder ({t5_device_label})");
-            self.base.progress.stage_start(&t5_stage_label);
-            let t5_stage = Instant::now();
-            let cached_t5_tok = self.get_cached_tokenizer(&t5_tokenizer_path);
-            let cached_t5_tensors = self.get_cached_safetensors(&resolved_t5_path)?;
-            let mut t5 = encoders::t5::T5Encoder::load_with_tokenizer_and_tensors(
-                &resolved_t5_path,
-                &t5_tokenizer_path,
-                t5_device,
-                t5_dtype,
-                &self.base.progress,
-                cached_t5_tok,
-                cached_t5_tensors,
-            )?;
-            self.cache_tokenizer(&t5_tokenizer_path, t5.tokenizer_arc());
-            self.base
-                .progress
-                .stage_done(&t5_stage_label, t5_stage.elapsed());
-
-            self.base.progress.stage_start("Encoding prompt (T5)");
-            let encode_t5 = Instant::now();
-            // Park to CPU immediately so the transformer load + LoRA merge
-            // window (next 200–500 ms) doesn't have to budget for ~12 MB of
-            // T5 output sitting on GPU. Idempotent on the GGUF path where T5
-            // already produces CPU tensors.
-            let t5_emb = park_cond_to_cpu(&t5.encode(&req.prompt, &device, gpu_dtype)?)?;
-            // The negative branch's T5 conditioning, while T5 is still here.
-            let neg_t5_emb = match true_cfg_negative.as_deref() {
-                Some(negative) => Some(park_cond_to_cpu(
-                    &t5.encode(negative, &device, gpu_dtype)?,
-                )?),
-                None => None,
-            };
-            self.base.progress.phase_done(
-                crate::ProgressPhase::PromptEncode,
-                "Encoding prompt (T5)",
-                encode_t5.elapsed(),
-            );
-
-            drop(t5);
-            self.base.progress.info("Freed T5 encoder");
-            tracing::info!("T5 encoder dropped (sequential mode)");
-
-            // --- Phase 2: CLIP encoding ---
-            // Reserve-adjusted reading — should_use_gpu must respect the
-            // same OS / cuBLAS workspace headroom as the T5 placement above.
-            let free_for_clip = usable_free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
-            let clip_on_gpu = should_use_gpu(
-                device.is_cuda(),
-                device.is_metal(),
-                free_for_clip,
-                CLIP_VRAM_THRESHOLD,
-            );
-            let clip_ref = effective_device_ref(
-                self.pending_placement.as_ref(),
-                |adv| adv.clip_l.clone(),
-                true,
-            );
-            let auto_clip_device = if clip_on_gpu {
-                device.clone()
-            } else {
-                Device::Cpu
-            };
-            let clip_device_owned =
-                crate::device::resolve_device(Some(clip_ref), || Ok(auto_clip_device.clone()))?;
-            let clip_device = &clip_device_owned;
-            let clip_on_gpu = !clip_device.is_cpu();
-            let clip_dtype = if clip_on_gpu { gpu_dtype } else { DType::F32 };
-            let clip_device_label = if clip_on_gpu { "GPU" } else { "CPU" };
-
-            let clip_stage_label = format!("Loading CLIP encoder ({clip_device_label})");
-            self.base.progress.stage_start(&clip_stage_label);
-            let clip_stage = Instant::now();
-            let cached_clip_tok = self.get_cached_tokenizer(&clip_tokenizer_path);
-            let cached_clip_tensors = self.get_cached_safetensors(&clip_encoder_path)?;
-            let clip = encoders::clip::ClipEncoder::load_with_tokenizer_and_tensors(
-                &clip_encoder_path,
-                &clip_tokenizer_path,
-                clip_device,
-                clip_dtype,
-                &self.base.progress,
-                cached_clip_tok,
-                cached_clip_tensors,
-            )?;
-            self.cache_tokenizer(&clip_tokenizer_path, clip.tokenizer_arc());
-            self.base
-                .progress
-                .stage_done(&clip_stage_label, clip_stage.elapsed());
-
-            self.base.progress.stage_start("Encoding prompt (CLIP)");
-            let encode_clip = Instant::now();
-            // Park to CPU for the same reason as T5 above — keeps the
-            // TE→transformer transition window from carrying GPU residency
-            // we don't need.
-            let (clip_emb, neg_clip_emb) = {
-                let mut clip = clip;
-                let positive = park_cond_to_cpu(&clip.encode(&req.prompt, &device, gpu_dtype)?)?;
-                let negative = match true_cfg_negative.as_deref() {
-                    Some(negative) => Some(park_cond_to_cpu(
-                        &clip.encode(negative, &device, gpu_dtype)?,
-                    )?),
+                self.base.progress.stage_start("Encoding prompt (T5)");
+                let encode_t5 = Instant::now();
+                // Park to CPU immediately so the transformer load + LoRA merge
+                // window (next 200–500 ms) doesn't have to budget for ~12 MB of
+                // T5 output sitting on GPU. Idempotent on the GGUF path where T5
+                // already produces CPU tensors.
+                let t5_emb = park_cond_to_cpu(&t5.encode(&req.prompt, &device, gpu_dtype)?)?;
+                // The negative branch's T5 conditioning, while T5 is still here.
+                let neg_t5_emb = match true_cfg_negative.as_deref() {
+                    Some(negative) => {
+                        Some(park_cond_to_cpu(&t5.encode(negative, &device, gpu_dtype)?)?)
+                    }
                     None => None,
                 };
-                (positive, negative)
+                self.base.progress.phase_done(
+                    crate::ProgressPhase::PromptEncode,
+                    "Encoding prompt (T5)",
+                    encode_t5.elapsed(),
+                );
+
+                drop(t5);
+                self.base.progress.info("Freed T5 encoder");
+                tracing::info!("T5 encoder dropped (sequential mode)");
+
+                // --- Phase 2: CLIP encoding ---
+                // Reserve-adjusted reading — should_use_gpu must respect the
+                // same OS / cuBLAS workspace headroom as the T5 placement above.
+                let free_for_clip = usable_free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
+                let clip_on_gpu = should_use_gpu(
+                    device.is_cuda(),
+                    device.is_metal(),
+                    free_for_clip,
+                    CLIP_VRAM_THRESHOLD,
+                );
+                let clip_ref = effective_device_ref(
+                    self.pending_placement.as_ref(),
+                    |adv| adv.clip_l.clone(),
+                    true,
+                );
+                let auto_clip_device = if clip_on_gpu {
+                    device.clone()
+                } else {
+                    Device::Cpu
+                };
+                let clip_device_owned =
+                    crate::device::resolve_device(Some(clip_ref), || Ok(auto_clip_device.clone()))?;
+                let clip_device = &clip_device_owned;
+                let clip_on_gpu = !clip_device.is_cpu();
+                let clip_dtype = if clip_on_gpu { gpu_dtype } else { DType::F32 };
+                let clip_device_label = if clip_on_gpu { "GPU" } else { "CPU" };
+
+                let clip_stage_label = format!("Loading CLIP encoder ({clip_device_label})");
+                self.base.progress.stage_start(&clip_stage_label);
+                let clip_stage = Instant::now();
+                let cached_clip_tok = self.get_cached_tokenizer(&clip_tokenizer_path);
+                let cached_clip_tensors = self.get_cached_safetensors(&clip_encoder_path)?;
+                let clip = encoders::clip::ClipEncoder::load_with_tokenizer_and_tensors(
+                    &clip_encoder_path,
+                    &clip_tokenizer_path,
+                    clip_device,
+                    clip_dtype,
+                    &self.base.progress,
+                    cached_clip_tok,
+                    cached_clip_tensors,
+                )?;
+                self.cache_tokenizer(&clip_tokenizer_path, clip.tokenizer_arc());
+                self.base
+                    .progress
+                    .stage_done(&clip_stage_label, clip_stage.elapsed());
+
+                self.base.progress.stage_start("Encoding prompt (CLIP)");
+                let encode_clip = Instant::now();
+                // Park to CPU for the same reason as T5 above — keeps the
+                // TE→transformer transition window from carrying GPU residency
+                // we don't need.
+                let (clip_emb, neg_clip_emb) = {
+                    let mut clip = clip;
+                    let positive =
+                        park_cond_to_cpu(&clip.encode(&req.prompt, &device, gpu_dtype)?)?;
+                    let negative = match true_cfg_negative.as_deref() {
+                        Some(negative) => Some(park_cond_to_cpu(
+                            &clip.encode(negative, &device, gpu_dtype)?,
+                        )?),
+                        None => None,
+                    };
+                    (positive, negative)
+                };
+                self.base.progress.phase_done(
+                    crate::ProgressPhase::PromptEncode,
+                    "Encoding prompt (CLIP)",
+                    encode_clip.elapsed(),
+                );
+
+                self.base.progress.info("Freed CLIP encoder");
+                tracing::info!("CLIP encoder dropped (sequential mode)");
+
+                // Cache stores via `CachedTensor::from_tensor`, which itself
+                // moves to CPU; passing CPU tensors here avoids an unnecessary
+                // round-trip on the GGUF path.
+                Self::store_prompt_cache(&self.prompt_cache, &req.prompt, &t5_emb, &clip_emb)?;
+                if let (Some(negative), Some(neg_t5), Some(neg_clip)) = (
+                    true_cfg_negative.as_deref(),
+                    neg_t5_emb.as_ref(),
+                    neg_clip_emb.as_ref(),
+                ) {
+                    Self::store_prompt_cache(&self.prompt_cache, negative, neg_t5, neg_clip)?;
+                }
+                (t5_emb, clip_emb, neg_t5_emb, neg_clip_emb)
             };
-            self.base.progress.phase_done(
-                crate::ProgressPhase::PromptEncode,
-                "Encoding prompt (CLIP)",
-                encode_clip.elapsed(),
-            );
-
-            self.base.progress.info("Freed CLIP encoder");
-            tracing::info!("CLIP encoder dropped (sequential mode)");
-
-            // Cache stores via `CachedTensor::from_tensor`, which itself
-            // moves to CPU; passing CPU tensors here avoids an unnecessary
-            // round-trip on the GGUF path.
-            Self::store_prompt_cache(&self.prompt_cache, &req.prompt, &t5_emb, &clip_emb)?;
-            if let (Some(negative), Some(neg_t5), Some(neg_clip)) = (
-                true_cfg_negative.as_deref(),
-                neg_t5_emb.as_ref(),
-                neg_clip_emb.as_ref(),
-            ) {
-                Self::store_prompt_cache(&self.prompt_cache, negative, neg_t5, neg_clip)?;
-            }
-            (t5_emb, clip_emb, neg_t5_emb, neg_clip_emb)
-        };
 
         // Synchronize to ensure freed T5/CLIP VRAM is reclaimed before
         // loading the transformer (critical for FP8 models that expand to F16).
@@ -2683,9 +2686,8 @@ impl FluxEngine {
             // True CFG needs a second conditioning pair, from the negative
             // prompt (`PuLID/app_flux.py:111`). Absent for every request that
             // does not run the branch.
-            let true_cfg_negative: Option<String> =
-                mold_core::identity::request_uses_true_cfg(req)
-                    .then(|| req.negative_prompt.clone().unwrap_or_default());
+            let true_cfg_negative: Option<String> = mold_core::identity::request_uses_true_cfg(req)
+                .then(|| req.negative_prompt.clone().unwrap_or_default());
 
             // Both halves or neither: a cache hit that returned only the
             // positive would skip the encoder reload the negative still needs.

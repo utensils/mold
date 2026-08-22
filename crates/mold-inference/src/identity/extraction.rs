@@ -473,8 +473,8 @@ mod tests {
     /// inside the charge admission makes.
     #[test]
     fn the_charged_peak_still_covers_the_largest_admissible_photograph_set() {
-        let extra = EXTRACTION_RETAINED_BYTES_PER_IMAGE
-            * (mold_core::identity::ID_IMAGES_MAX as u64 - 1);
+        let extra =
+            EXTRACTION_RETAINED_BYTES_PER_IMAGE * (mold_core::identity::ID_IMAGES_MAX as u64 - 1);
         // The five retained f32 hidden states, from the tower's own shape.
         let measured_per_image: u64 = 5 * 577 * 1024 * 4;
         assert!(
@@ -510,10 +510,7 @@ mod tests {
             face_recognizer: "/nonexistent/glintr100.onnx".into(),
         };
         let png = b"\x89PNG\r\n\x1a\n".to_vec();
-        let too_many: Vec<&[u8]> = vec![
-            png.as_slice();
-            mold_core::identity::ID_IMAGES_MAX + 1
-        ];
+        let too_many: Vec<&[u8]> = vec![png.as_slice(); mold_core::identity::ID_IMAGES_MAX + 1];
         let error = extract_identity_embeddings(&paths, &too_many, false).unwrap_err();
         let rendered = format!("{error:#}");
         assert!(rendered.contains("at most"), "{rendered}");

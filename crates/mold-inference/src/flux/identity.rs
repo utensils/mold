@@ -381,15 +381,12 @@ impl EngineIdentityState {
         // for at a guidance value chosen for a branch that never ran.
         let negative = match asked.true_cfg {
             Some(scale) => {
-                let uncond = self
-                    .pending_uncond_embedding
-                    .clone()
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "this request asks for true classifier-free guidance but no \
+                let uncond = self.pending_uncond_embedding.clone().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "this request asks for true classifier-free guidance but no \
                              unconditional identity embedding was frozen for it"
-                        )
-                    })?;
+                    )
+                })?;
                 Some(NegativeIdentity {
                     // `PuLID/flux/sampling.py:145-146`: the negative branch uses
                     // the same `id_weight` and the same `id_start_step`.
@@ -629,17 +626,17 @@ pub(crate) mod tests {
         let mut state = EngineIdentityState::new(None);
         state.set_embedding(
             Some(
-            IdentityEmbedding::new(
-                Tensor::zeros(
-                    (
-                        crate::flux::pulid::ID_TOKENS,
-                        crate::flux::pulid::ID_TOKEN_DIM,
-                    ),
-                    DType::F32,
-                    &Device::Cpu,
+                IdentityEmbedding::new(
+                    Tensor::zeros(
+                        (
+                            crate::flux::pulid::ID_TOKENS,
+                            crate::flux::pulid::ID_TOKEN_DIM,
+                        ),
+                        DType::F32,
+                        &Device::Cpu,
+                    )
+                    .unwrap(),
                 )
-                .unwrap(),
-            )
                 .unwrap(),
             ),
             None,
