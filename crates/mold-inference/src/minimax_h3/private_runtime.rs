@@ -486,7 +486,7 @@ fn validate_private_attention_facts(
         actual.model_contract,
     )
     .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-    if expected.generic_backend != AttentionBackend::Flash
+    if expected.generic_backend != private_h3_generic_attention_backend(expected.device)
         || expected.generic_chunk != AttentionChunkPolicy::Off
         || expected.runtime_backend != actual.backend
         || expected.kernel != actual.kernel
@@ -505,6 +505,14 @@ fn validate_private_attention_facts(
         bail!("private MiniMax H3 concrete attention differs from frozen typed authority");
     }
     Ok(())
+}
+
+fn private_h3_generic_attention_backend(device: H3AttentionDevice) -> AttentionBackend {
+    match device {
+        H3AttentionDevice::Metal => AttentionBackend::Math,
+        H3AttentionDevice::Cuda { .. } => AttentionBackend::Flash,
+        H3AttentionDevice::Cpu => AttentionBackend::Math,
+    }
 }
 
 fn validate_private_checkpoint_facts(
@@ -803,6 +811,20 @@ mod tests {
         .unwrap();
         let checkpoint = checkpoint_facts();
         validate_private_checkpoint_facts(&checkpoint, &checkpoint).unwrap();
+    }
+
+    #[test]
+    fn generic_attention_backend_follows_the_bound_device() {
+        assert_eq!(
+            private_h3_generic_attention_backend(H3AttentionDevice::Metal),
+            AttentionBackend::Math,
+        );
+        assert_eq!(
+            private_h3_generic_attention_backend(H3AttentionDevice::Cuda {
+                compute_capability: Some((8, 9)),
+            }),
+            AttentionBackend::Flash,
+        );
     }
 
     #[test]
