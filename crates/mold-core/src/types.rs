@@ -7868,6 +7868,49 @@ pub struct ExpandCapabilities {
     pub model: Option<String>,
 }
 
+/// Face-identity conditioning shapes this server understands.
+///
+/// This block exists because the alternative is silent accept-and-ignore. A
+/// server that predates a field simply DROPS it: send `id_images` to one and it
+/// renders with no identity at all, send `true_cfg` and it renders the
+/// distilled path at a guidance value chosen for a branch that never ran. Both
+/// are prints of the wrong thing with nothing to say so, which is exactly what
+/// `crate::identity` refuses everywhere else.
+///
+/// Absence therefore means NO, never unknown — an older server omits the whole
+/// block, so a client that needs either shape must refuse rather than submit.
+/// The singular `id_image` form predates this and needs no gate: every server
+/// that accepts identity at all understands it.
+///
+/// Every value is derived from `crate::identity`'s own constants, so this can
+/// never advertise a bound the validator does not enforce.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdentityCapabilities {
+    /// The server understands `id_images` / `id_image_names` and averages the
+    /// set into one identity.
+    pub multi_photo: bool,
+    /// Maximum photographs one request may carry. Meaningless — and always
+    /// `crate::identity::ID_IMAGES_MAX` — when `multi_photo` is true.
+    pub max_photos: u32,
+    /// The server understands `true_cfg` / `cfg_start_step` and runs the PuLID
+    /// negative branch.
+    pub true_cfg: bool,
+}
+
+impl IdentityCapabilities {
+    /// What a build that can execute identity conditioning advertises.
+    ///
+    /// One constructor, read straight from the contract module, so the
+    /// advertisement and the validator cannot drift.
+    pub fn advertised() -> Self {
+        Self {
+            multi_photo: true,
+            max_photos: crate::identity::ID_IMAGES_MAX as u32,
+            true_cfg: true,
+        }
+    }
+}
+
 // ── Device inventory ────────────────────────────────────────────────────────
 
 /// Runtime-visible device classification. CUDA ordinals are deliberately not
@@ -8200,6 +8243,11 @@ pub struct ServerCapabilities {
     /// absence here means unknown so newer clients may still try expansion.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expand: Option<ExpandCapabilities>,
+    /// Absent on older servers, and absence means NO — see
+    /// [`IdentityCapabilities`]. A client that wants several photographs or
+    /// true CFG must refuse rather than submit into a silent drop.
+    #[serde(default)]
+    pub identity: IdentityCapabilities,
     /// This server exposes `GET /api/licenses` and honours `accept_licenses`
     /// on its download routes.
     ///

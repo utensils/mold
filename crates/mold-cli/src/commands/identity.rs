@@ -177,6 +177,67 @@ pub fn read_id_image(path: &Path) -> Result<(Vec<u8>, String)> {
     Ok((bytes, display_name(path)))
 }
 
+/// Whether this request needs the server to understand a shape older builds
+/// silently drop.
+///
+/// Only the two additive shapes: several photographs, and an engaged true-CFG
+/// branch. The singular `id_image` predates the capability block and every
+/// server that accepts identity at all understands it, so an ordinary
+/// one-photograph render must never pay a round trip for this.
+pub fn request_needs_identity_capabilities(request: &mold_core::GenerateRequest) -> bool {
+    request
+        .id_images
+        .as_ref()
+        .is_some_and(|images| !images.is_empty())
+        || mold_core::identity::request_uses_true_cfg(request)
+}
+
+/// Refuse a request whose shape this server would silently drop.
+///
+/// Unknown JSON fields are ignored, not rejected, so a server that predates
+/// these shapes ACCEPTS the request and renders something else: `id_images`
+/// alone becomes a render with no identity in it at all, and `true_cfg` becomes
+/// the distilled path at a guidance value the caller chose for a branch that
+/// never ran. Both are prints of the wrong thing with nothing to say so, which
+/// is the accept-and-ignore `mold_core::identity` refuses everywhere else — so
+/// the client refuses instead of submitting.
+///
+/// Absence is NO, never unknown: `ServerCapabilities::identity` defaults to all
+/// false, which is exactly what an older server's response deserializes to.
+pub fn ensure_server_understands_identity(
+    request: &mold_core::GenerateRequest,
+    capabilities: &mold_core::ServerCapabilities,
+    host: &str,
+) -> Result<()> {
+    let identity = &capabilities.identity;
+
+    if let Some(images) = request.id_images.as_ref().filter(|i| !i.is_empty()) {
+        if !identity.multi_photo {
+            anyhow::bail!(
+                "{host} does not support more than one identity photograph, and sending several \
+                 to it would render with no face at all. Use a single --id-image, or upgrade \
+                 that server."
+            );
+        }
+        let max = identity.max_photos as usize;
+        if max > 0 && images.len() > max {
+            anyhow::bail!(
+                "{host} accepts at most {max} identity photographs and {} were given",
+                images.len()
+            );
+        }
+    }
+
+    if mold_core::identity::request_uses_true_cfg(request) && !identity.true_cfg {
+        anyhow::bail!(
+            "{host} does not support --true-cfg, and sending it would silently render the \
+             ordinary distilled path with no negative branch. Remove --true-cfg, or upgrade \
+             that server."
+        );
+    }
+    Ok(())
+}
+
 /// The file's own name, with any directory component discarded.
 fn display_name(path: &Path) -> String {
     path.file_name()
@@ -422,6 +483,120 @@ mod tests {
             rendered.contains(&mold_core::identity::ID_IMAGES_MAX.to_string()),
             "{rendered}"
         );
+    }
+
+    /// Built through the wire shape rather than an exhaustive struct literal,
+    /// so an unrelated request field landing does not edit this file.
+    fn request_for_gate() -> mold_core::GenerateRequest {
+        serde_json::from_value(serde_json::json!({
+            "prompt": "a portrait",
+            "model": "flux-dev:q8",
+            "width": 1024,
+            "height": 1024,
+            "steps": 20,
+            "guidance": 3.5,
+            "batch_size": 1,
+        }))
+        .expect("the minimal generate-request wire shape")
+    }
+
+    fn capabilities(identity: mold_core::IdentityCapabilities) -> mold_core::ServerCapabilities {
+        mold_core::ServerCapabilities {
+            identity,
+            ..Default::default()
+        }
+    }
+
+    /// An ordinary render, and a single-photograph identity render, must never
+    /// need the probe — the singular form predates the capability block and a
+    /// round trip for it would be pure latency.
+    #[test]
+    fn only_the_additive_shapes_need_the_capability_probe() {
+        let plain = request_for_gate();
+        assert!(!request_needs_identity_capabilities(&plain));
+
+        let mut single = request_for_gate();
+        single.id_image = Some(png_1x1());
+        single.id_weight = Some(0.8);
+        single.id_start_step = Some(2);
+        assert!(!request_needs_identity_capabilities(&single));
+
+        // An inert scale engages nothing, so it needs nothing.
+        let mut inert = single.clone();
+        inert.true_cfg = Some(1.0);
+        assert!(!request_needs_identity_capabilities(&inert));
+
+        let mut branched = single.clone();
+        branched.true_cfg = Some(2.0);
+        assert!(request_needs_identity_capabilities(&branched));
+
+        let mut plural = request_for_gate();
+        plural.id_images = Some(vec![png_1x1(), png_1x1()]);
+        assert!(request_needs_identity_capabilities(&plural));
+    }
+
+    /// A server that predates these fields deserializes to an all-false block,
+    /// and both shapes must be refused against it by name rather than
+    /// submitted into a silent drop.
+    #[test]
+    fn an_older_server_is_refused_by_name_for_both_shapes() {
+        let older = capabilities(mold_core::IdentityCapabilities::default());
+
+        let mut plural = request_for_gate();
+        plural.id_images = Some(vec![png_1x1(), png_1x1()]);
+        let error = ensure_server_understands_identity(&plural, &older, "http://gpu-box:7680")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("http://gpu-box:7680"), "{error}");
+        assert!(
+            error.contains("more than one identity photograph"),
+            "{error}"
+        );
+        assert!(error.contains("no face at all"), "{error}");
+
+        let mut branched = request_for_gate();
+        branched.id_image = Some(png_1x1());
+        branched.true_cfg = Some(2.0);
+        let error = ensure_server_understands_identity(&branched, &older, "http://gpu-box:7680")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("http://gpu-box:7680"), "{error}");
+        assert!(error.contains("--true-cfg"), "{error}");
+        assert!(error.contains("no negative branch"), "{error}");
+    }
+
+    /// An older server still renders a single-photograph identity perfectly
+    /// well, so the gate must let it through untouched.
+    #[test]
+    fn an_older_server_still_accepts_a_single_photograph_identity() {
+        let older = capabilities(mold_core::IdentityCapabilities::default());
+        let mut single = request_for_gate();
+        single.id_image = Some(png_1x1());
+        single.id_weight = Some(0.8);
+        ensure_server_understands_identity(&single, &older, "http://gpu-box:7680")
+            .expect("the singular form predates the capability block");
+    }
+
+    #[test]
+    fn a_current_server_accepts_both_shapes_within_its_advertised_cap() {
+        let current = capabilities(mold_core::IdentityCapabilities::advertised());
+        let mut request = request_for_gate();
+        request.id_images = Some(vec![png_1x1(); mold_core::identity::ID_IMAGES_MAX]);
+        request.true_cfg = Some(2.0);
+        ensure_server_understands_identity(&request, &current, "http://gpu-box:7680")
+            .expect("a current server understands both");
+
+        // A server advertising a SMALLER cap than this client's own bound is
+        // still the authority on its own limit.
+        let smaller = capabilities(mold_core::IdentityCapabilities {
+            multi_photo: true,
+            max_photos: 2,
+            true_cfg: true,
+        });
+        let error = ensure_server_understands_identity(&request, &smaller, "http://gpu-box:7680")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("at most 2"), "{error}");
     }
 
     #[test]

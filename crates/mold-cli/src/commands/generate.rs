@@ -136,6 +136,35 @@ fn validate_local_request(req: &GenerateRequest, config: &Config) -> Result<()> 
     Ok(())
 }
 
+/// Ask the server whether it understands this request's additive identity
+/// shapes, and refuse rather than submit when it does not.
+///
+/// Returns immediately — with no round trip at all — for every request that
+/// does not carry several photographs or engage true CFG, which is every
+/// ordinary render and every single-photograph identity render.
+///
+/// A probe that cannot reach the server is deliberately NOT a refusal. The
+/// caller's next step is the ordinary remote attempt, which fails the same way
+/// and falls back to local inference — where both shapes are honoured in full.
+/// Turning an unreachable host into a hard error here would take that fallback
+/// away from exactly the requests that need it most.
+async fn require_remote_identity_capabilities(
+    client: &mold_core::MoldClient,
+    request: &mold_core::GenerateRequest,
+) -> Result<()> {
+    if !crate::commands::identity::request_needs_identity_capabilities(request) {
+        return Ok(());
+    }
+    let Ok(capabilities) = client.server_capabilities().await else {
+        return Ok(());
+    };
+    crate::commands::identity::ensure_server_understands_identity(
+        request,
+        &capabilities,
+        client.host(),
+    )
+}
+
 fn local_generation_delivery_capabilities() -> mold_core::GenerationDeliveryCapabilities {
     mold_core::GenerationDeliveryCapabilities::new(cfg!(feature = "mp4"), cfg!(feature = "webp"))
 }
@@ -1038,12 +1067,23 @@ pub async fn run(
         require_local_request_model_activation(&req, &config)?;
         materialize_local_builtin_control(&mut req, &config).await?;
         materialize_local_builtin_camera_controls(&mut req, &config).await?;
-    } else if !reference_uploads.is_empty() {
-        // Upload sessions bind the complete request. Freeze a random seed now
-        // rather than changing it between session creation and generation.
-        req.seed = Some(base_seed);
-        reference_session =
-            bind_remote_reference_uploads(ctx.client(), &mut req, reference_uploads).await?;
+    } else {
+        // Several photographs and true CFG are additive fields an older server
+        // would DROP rather than reject, rendering a print with no face in it
+        // or with no negative branch and saying nothing. Ask before submitting.
+        // Only these two shapes pay the round trip; a single `--id-image`
+        // predates the capability block and every identity-capable server
+        // understands it.
+        require_remote_identity_capabilities(ctx.client(), &req).await?;
+
+        if !reference_uploads.is_empty() {
+            // Upload sessions bind the complete request. Freeze a random seed
+            // now rather than changing it between session creation and
+            // generation.
+            req.seed = Some(base_seed);
+            reference_session =
+                bind_remote_reference_uploads(ctx.client(), &mut req, reference_uploads).await?;
+        }
     }
 
     // Warn if user-provided dimensions don't match model recommendations.
