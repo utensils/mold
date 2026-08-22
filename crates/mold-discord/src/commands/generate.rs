@@ -348,7 +348,15 @@ fn resolve_video_timing(
         .or_else(|| mold_core::validation::frame_offset_for_family(family))
         .unwrap_or(1)
         .max(1);
-    let min_frames = mold_core::validation::min_frames_for_family(family).unwrap_or(offset);
+    // Prefer the server-advertised floor, exactly as `step`, `offset`, and
+    // `max_runtime_seconds` above do. It is model-aware, so a reviewed compact
+    // H3 tag reports its own fixed 124-frame clip rather than the family's
+    // 107-frame floor — snapping a 4.4 s request onto the family floor would
+    // build a request the generation profile then rejects.
+    let min_frames = defaults
+        .and_then(|value| value.min_frames)
+        .or_else(|| mold_core::validation::min_frames_for_family(family))
+        .unwrap_or(offset);
     let max_frames = if let Some(runtime_seconds) = max_runtime_seconds {
         let raw = runtime_seconds
             .saturating_mul(resolved_fps)

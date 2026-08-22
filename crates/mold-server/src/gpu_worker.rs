@@ -6141,7 +6141,7 @@ mod tests {
         request.model = mold_core::minimax_h3::FL2VA_COMFY.to_string();
         request.width = mold_core::minimax_h3::DEFAULT_WIDTH;
         request.height = mold_core::minimax_h3::DEFAULT_HEIGHT;
-        request.frames = Some(mold_core::minimax_h3::MIN_FRAMES);
+        request.frames = Some(mold_core::minimax_h3::REVIEWED_COMPACT_FRAMES);
         request.fps = Some(mold_core::minimax_h3::FIXED_FPS);
         request.seed = Some(7);
         request.guidance = 0.0;
@@ -6389,7 +6389,7 @@ mod tests {
                 seed: 7,
                 width: mold_core::minimax_h3::DEFAULT_WIDTH,
                 height: mold_core::minimax_h3::DEFAULT_HEIGHT,
-                frames: mold_core::minimax_h3::MIN_FRAMES,
+                frames: mold_core::minimax_h3::REVIEWED_COMPACT_FRAMES,
                 fps: mold_core::minimax_h3::FIXED_FPS,
                 reference_fingerprint_sha256: None,
                 resolved_reference_fingerprint_sha256: None,
