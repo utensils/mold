@@ -1102,6 +1102,16 @@ fn private_execution_location_matches(
     }
 }
 
+fn private_h3_pipeline_backend_kind(
+    compute_capability: Option<(u16, u16)>,
+) -> H3PipelineBackendKind {
+    if compute_capability.is_some() {
+        H3PipelineBackendKind::Cuda
+    } else {
+        H3PipelineBackendKind::Metal
+    }
+}
+
 /// Snapshot the safe execution-lease surface once. In particular, the Candle
 /// device is cloned from one call and becomes the only device the bound
 /// transformer stream may later use.
@@ -1908,7 +1918,7 @@ where
         let cancellation_slot = H3PrivateComfyCancellationSlot::default();
         let cancellation_guard = cancellation_slot.install(progress)?;
         let identity = H3PipelineBackendIdentity {
-            kind: H3PipelineBackendKind::Cuda,
+            kind: private_h3_pipeline_backend_kind(admitted.compute_capability),
             device_id: admitted.device_id.clone(),
             execution_fingerprint: admitted.execution_fingerprint.clone(),
         };
@@ -3353,6 +3363,18 @@ mod tests {
             Some((8, 9)),
             2,
         ));
+    }
+
+    #[test]
+    fn private_pipeline_identity_follows_the_admitted_device_kind() {
+        assert_eq!(
+            private_h3_pipeline_backend_kind(None),
+            H3PipelineBackendKind::Metal,
+        );
+        assert_eq!(
+            private_h3_pipeline_backend_kind(Some((8, 9))),
+            H3PipelineBackendKind::Cuda,
+        );
     }
 
     struct AlternatingDeviceLease {
