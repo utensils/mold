@@ -2006,6 +2006,34 @@ async fn clear_global_upscaler_cache(state: &AppState) {
     }
 }
 
+/// Hand back the host RAM an unload just made unreachable.
+///
+/// `ModelCache::unload_active` parks the engine, which drops its loaded state,
+/// but two things survive that on their own: component weight maps the shared
+/// pool is keeping alive for reuse, and freed pages sitting in idle glibc
+/// arenas. Neither is visible to the caller, and before #1273 the observable
+/// result was an unload that changed the process's RSS by nothing at all while
+/// host admission kept refusing work. Release what nothing references and trim,
+/// so `DELETE /api/models/unload` is a real recovery action.
+///
+/// Entries an engine still streams from (SD3's offloaded MMDiT) have a live
+/// strong count and are left alone.
+fn release_host_memory_after_unload(state: &AppState) {
+    let released = state
+        .shared_pool
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .release_unreferenced_cpu_tensors();
+    let rss_pre_trim = crate::gpu_worker::trim_malloc_arenas();
+    let rss_after = crate::resources::ram_snapshot().used_by_mold;
+    tracing::info!(
+        shared_pool_released_mb = released / 1_000_000,
+        rss_pre_trim_mb = rss_pre_trim.map(|value| value / 1_000_000).unwrap_or(0),
+        rss_after_mb = rss_after / 1_000_000,
+        "released host memory after model unload"
+    );
+}
+
 async fn schedule_standalone_upscale(
     state: &AppState,
     model: String,
@@ -4362,12 +4390,15 @@ async fn unload_model(
                 .collect();
             format!("unloaded {}", joined.join(", "))
         };
+        release_host_memory_after_unload(&state);
         return Ok((StatusCode::OK, msg));
     }
 
     // Legacy single-GPU path.
     clear_global_upscaler_cache(&state).await;
-    Ok((StatusCode::OK, model_manager::unload_model(&state).await))
+    let message = model_manager::unload_model(&state).await;
+    release_host_memory_after_unload(&state);
+    Ok((StatusCode::OK, message))
 }
 
 // ── DELETE /api/models/:model ─────────────────────────────────────────────────

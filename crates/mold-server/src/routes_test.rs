@@ -8069,6 +8069,63 @@ mod tests {
         assert!(!snapshot.is_loaded);
     }
 
+    /// Minimal single-tensor safetensors file, written without pulling the
+    /// `safetensors` crate into the server's dev graph.
+    fn write_tiny_safetensors(path: &std::path::Path) {
+        let header = br#"{"weight":{"dtype":"F32","shape":[2],"data_offsets":[0,8]}}"#;
+        let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+        bytes.extend_from_slice(header);
+        bytes.extend_from_slice(&1.0f32.to_le_bytes());
+        bytes.extend_from_slice(&2.0f32.to_le_bytes());
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    /// #1273: unload has to give host RAM back. The shared CPU tensor pool
+    /// outlives every engine, so parking the active model alone left component
+    /// weight maps resident that nothing could reach and nothing would ever
+    /// free — the reason a 64 GB host that had rendered images could no longer
+    /// admit MiniMax H3 without a process restart.
+    #[tokio::test]
+    async fn unload_releases_unreferenced_shared_pool_cpu_tensors() {
+        let state = AppState::with_engine(MockEngine::ready());
+        let dir = tempfile::tempdir().unwrap();
+        let weights = dir.path().join("vae.safetensors");
+        write_tiny_safetensors(&weights);
+
+        {
+            let mut pool = state.shared_pool.lock().unwrap();
+            drop(
+                pool.load_cpu_tensors(std::slice::from_ref(&weights))
+                    .unwrap(),
+            );
+            assert!(
+                pool.retained_cpu_tensor_bytes() > 0,
+                "pool should have retained the small component"
+            );
+        }
+
+        let app = app_with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::delete("/api/models/unload")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        assert_eq!(
+            state
+                .shared_pool
+                .lock()
+                .unwrap()
+                .retained_cpu_tensor_bytes(),
+            0,
+            "unload must release pooled CPU weights nothing still holds"
+        );
+    }
+
     #[tokio::test]
     async fn unload_no_model_returns_200_with_message() {
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
