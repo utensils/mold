@@ -237,7 +237,7 @@ fn is_minimax_h3_identity(value: &str) -> bool {
 
 fn is_reviewed_minimax_h3_acquisition_identity(value: &str) -> bool {
     let normalized = value.trim().to_ascii_lowercase();
-    normalized == "minimax-h3" || minimax_h3::is_reviewed_compact_model(&normalized)
+    minimax_h3::resolve_model_name(&normalized).is_some()
 }
 
 pub fn is_reviewed_minimax_h3_model(value: &str) -> bool {
@@ -345,6 +345,19 @@ mod tests {
             model_activation("minimax-h3", Some("minimax-h3")),
             ModelActivation::ComplianceGated
         );
+
+        for official in [minimax_h3::FL2VA_OFFICIAL, minimax_h3::REF2VA_OFFICIAL] {
+            assert_eq!(
+                model_acquisition(official, Some("minimax-h3")),
+                ModelActivation::Available,
+                "{official}"
+            );
+            assert_eq!(
+                model_activation(official, Some("minimax-h3")),
+                ModelActivation::ComplianceGated,
+                "{official}"
+            );
+        }
 
         for unreviewed in [
             "hf:Comfy-Org/MiniMax-H3",
@@ -461,6 +474,16 @@ mod tests {
             assert_eq!(
                 model_activation(reviewed, Some("minimax-h3")),
                 ModelActivation::Available
+            );
+        }
+        for official in [minimax_h3::FL2VA_OFFICIAL, minimax_h3::REF2VA_OFFICIAL] {
+            assert_eq!(
+                model_acquisition(official, Some("minimax-h3")),
+                ModelActivation::Available
+            );
+            assert_eq!(
+                model_activation(official, Some("minimax-h3")),
+                ModelActivation::ComplianceGated
             );
         }
         for unreviewed in [

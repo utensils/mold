@@ -2551,7 +2551,7 @@ pub(crate) fn manifests() -> Vec<ModelManifest> {
             name: tier.model.to_string(),
             family: FAMILY.to_string(),
             description: format!(
-                "MiniMax H3 FL2VA Comfy pruned INT8-convrot + NVFP4-AWQ with the reviewed {} LoRA (CUDA or Apple Metal)",
+                "MiniMax H3 FL2VA Comfy pruned INT8-convrot + NVFP4-AWQ with the reviewed {} LoRA (downloadable; CUDA or Apple Metal)",
                 tier.display_label
             ),
             files,
