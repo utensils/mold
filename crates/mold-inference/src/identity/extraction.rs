@@ -583,16 +583,14 @@ pub fn extract_identity_embeddings(
                 let extractor = IdentityExtractor::load(paths, device)
                     .context("loading the PuLID face-extraction models")?;
                 for &index in &still_missing {
-                    let features = extractor.extract(images[index]).map_err(|error| {
-                        if count == 1 {
-                            error
-                        } else {
-                            IdentityError::Runtime(anyhow::anyhow!(
-                                "identity photo {} of {count}: {error}",
-                                index + 1
-                            ))
-                        }
-                    })?;
+                    // `in_photo_set` names which photograph while PRESERVING the
+                    // category. Rebuilding this as a `Runtime` — which is what
+                    // the `format!` it replaced did — reports a photograph with
+                    // no detectable face as a device fault, and three such
+                    // requests degrade a healthy GPU.
+                    let features = extractor
+                        .extract(images[index])
+                        .map_err(|error| error.in_photo_set(index + 1, count))?;
                     detected_warnings.push(features.warning);
                     faces.push((features.arcface.raw, features.eva_crop_512));
                 }

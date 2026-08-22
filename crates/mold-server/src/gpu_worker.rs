@@ -10902,6 +10902,27 @@ mod tests {
         assert!(!worker.poisoned.load(Ordering::SeqCst));
         assert!(worker_unavailable(&worker, "flux-dev:q4").is_none());
 
+        // The SET shape takes the same path. `IdentityError::in_photo_set`
+        // names which photograph without changing whose fault it is, so
+        // "identity photo 2 of 3: no face was detected" is still the caller's
+        // — it used to be rebuilt as a `Runtime` and counted as a device
+        // fault.
+        for _ in 0..3 {
+            let refused = settle_identity_extraction_failure(
+                &worker,
+                "flux-dev:q4",
+                &IdentityFailure::user_input(
+                    "identity photo 2 of 3: no face was detected in the identity image",
+                ),
+            );
+            assert!(refused.contains("identity photo 2 of 3"), "{refused}");
+        }
+        assert_eq!(
+            worker.consecutive_failures.load(Ordering::SeqCst),
+            0,
+            "a bad photograph in a SET must not degrade a healthy GPU either"
+        );
+
         // A device-attributable failure — a load that could not place weights
         // — is an ordinary job failure and does count.
         let engine = settle_identity_extraction_failure(

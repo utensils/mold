@@ -222,7 +222,30 @@ These files are owned by this branch and are current:
   reservation, and the in-memory cache.
 - `changelog.d/pulid-perf-gpu.md`.
 
-## 5. Known gaps a reviewer should see
+## 5. A pre-existing break this branch did NOT cause
+
+`cargo check -p mold-ai-server --features h3,metal,expand,mdns,metrics,mp4,pulid,webp`
+— the reviewed Apple Silicon H3 recipe that
+`crates/mold-server/tests/h3_server_features.rs::the_shipping_metal_recipe_passes_the_reviewed_build_fence`
+declares shippable — does not compile, on this branch OR on `origin/main`
+(verified at `20bb47bd`):
+
+```
+error[E0433]: cannot find module or crate `cudarc`      gpu_worker.rs:1407
+error[E0425]: cannot find function `device_memory_api_error`  gpu_worker.rs:4943
+```
+
+Both sites are gated for `h3` without `cuda`. CI never catches it because the
+only H3 server builds it runs are CUDA ones, and the allowlist test validates
+the feature SET without compiling it. Worth its own issue; out of scope here,
+and named so the next person running an H3 feature check does not mistake it
+for phase 2's.
+
+Note also that `--features h3` alone is refused BY DESIGN: `build.rs`'s
+reviewed-build fence requires a complete CUDA or Metal recipe, so there is no
+minimal H3 server edge to check against.
+
+## 6. Known gaps a reviewer should see
 
 - **CUDA is measured** (plato, 4x L40S): whole extraction 573.2 ms on a QUIET
   box and 688-795 ms under its normal load average of 10-32, parity worst

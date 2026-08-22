@@ -1950,9 +1950,13 @@ async fn prepare_h3_private_inputs_for_devices(
         retryable_device_failures: failures,
         model_config_overlay: None,
         // The private H3 ingress has no face-identity path; FLUX is the only
-        // family qualified for it.
+        // family qualified for it. The pin is minted empty rather than omitted
+        // so this literal keeps compiling as the struct grows — a
+        // feature-gated initializer is exactly the shape #1262 broke on,
+        // because no default-feature build ever type-checks it.
         identity_embedding: None,
         identity_warning: None,
+        identity_pin: crate::execution_plan::IdentityPin::default(),
         h3_private_ingress_grant: Some(rebound_grant),
         h3_private_admission_by_device: admissions,
     })

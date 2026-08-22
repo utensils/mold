@@ -73,6 +73,21 @@ pub enum IdentityError {
     /// Anything in the model, graph, or evaluator path.
     #[error(transparent)]
     Runtime(#[from] anyhow::Error),
+    /// A refusal about ONE photograph of a set, naming which.
+    ///
+    /// A wrapper rather than a re-worded variant, because the category has to
+    /// survive: #1227 phase 2 made the category decide whether a failure
+    /// touches the GPU's health, and collapsing "no face in photo 2 of 3" into
+    /// [`Self::Runtime`] would report a bad photograph as a bad card. The
+    /// message is byte-identical to the `format!` this replaced.
+    #[error("identity photo {index} of {count}: {source}")]
+    Photo {
+        /// One-based, as the caller supplied them.
+        index: usize,
+        count: usize,
+        #[source]
+        source: Box<IdentityError>,
+    },
 }
 
 impl IdentityError {
@@ -92,6 +107,22 @@ impl IdentityError {
         match self {
             Self::NoFaceDetected | Self::Decode(_) | Self::Alignment(_) => true,
             Self::Runtime(_) => false,
+            // A set does not change whose fault a photograph is.
+            Self::Photo { source, .. } => source.is_user_input(),
+        }
+    }
+
+    /// Name which photograph of a set this refusal is about, preserving its
+    /// category. A one-photograph set is the singular form and is returned
+    /// unchanged, so its message stays exactly what every surface has shown.
+    pub fn in_photo_set(self, index: usize, count: usize) -> Self {
+        if count == 1 {
+            return self;
+        }
+        Self::Photo {
+            index,
+            count,
+            source: Box::new(self),
         }
     }
 }
@@ -356,6 +387,47 @@ mod tests {
     fn the_eva_border_is_facexlibs_bgr_grey_reversed() {
         // facexlib passes (135, 133, 132) to cv2 on a BGR image.
         assert_eq!(EVA_CROP_BORDER_RGB, [132, 133, 135]);
+    }
+
+    /// Whose fault a refusal is decides whether it touches a GPU's health
+    /// counter (#1227 phase 2), so the category has to survive being told
+    /// WHICH photograph of a set it came from.
+    #[test]
+    fn naming_the_photograph_preserves_whose_fault_it_is() {
+        // A one-photograph set is the singular form: unchanged, so its message
+        // stays exactly what every surface has always shown.
+        let single = IdentityError::NoFaceDetected.in_photo_set(1, 1);
+        assert!(matches!(single, IdentityError::NoFaceDetected));
+        assert_eq!(
+            single.to_string(),
+            "no face was detected in the identity image"
+        );
+        assert!(single.is_user_input());
+
+        // A real set names the photograph and keeps the category. The message
+        // is byte-identical to the `format!` this replaced.
+        let located = IdentityError::NoFaceDetected.in_photo_set(2, 3);
+        assert_eq!(
+            located.to_string(),
+            "identity photo 2 of 3: no face was detected in the identity image"
+        );
+        assert!(
+            located.is_user_input(),
+            "a faceless photograph is the caller's, whether it is one of one or one of three"
+        );
+
+        for user_input in [
+            IdentityError::Decode("not a PNG or JPEG".to_string()),
+            IdentityError::Alignment("degenerate landmarks".to_string()),
+        ] {
+            assert!(user_input.in_photo_set(1, 4).is_user_input());
+        }
+
+        // And a device fault stays a device fault.
+        let runtime = IdentityError::Runtime(anyhow::anyhow!("CUDA_ERROR_ILLEGAL_ADDRESS"))
+            .in_photo_set(3, 4);
+        assert!(!runtime.is_user_input());
+        assert!(runtime.to_string().contains("identity photo 3 of 4"));
     }
 
     /// Phase 1's `a_gpu_placement_request_is_refused_rather_than_silently_demoted`

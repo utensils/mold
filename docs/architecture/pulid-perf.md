@@ -913,9 +913,12 @@ Measured on **plato** (128-core x86_64 NixOS, 4x L40S) at `3163ed47`, after PR
 
 p95 milliseconds per image, **on a quiet box**. That caveat is load-bearing:
 under plato's normal load average of 10-32 the same build measures the whole
-extraction at **688-795 ms**. The 573.2 ms figure is the floor, not the
-expectation, and any comparison drawn against it has to carry the load average
-the way §4's own cautionary example demands.
+extraction at **688-795 ms**. Two quiet-box runs a commit apart came in at
+**573.2** and **565.3 ms**, so the floor is reproducible to about 1.5%; it is
+still a floor and not the expectation, and any comparison drawn against it has
+to carry the load average the way §4's own cautionary example demands.
+`--regress-against-full plato` passes at 90.6% faster than the CPU baseline
+below.
 
 `BASELINE_PLATO_FULL_P95_MS` is the **CPU 6,024.9**, not this CUDA number, and
 the first attempt got that wrong in an instructive way. A
@@ -984,10 +987,11 @@ rather than quietly fixed, because both are easy to reintroduce:
 
 Measured properly — through `extract_identity_embeddings`, from a fresh CUDA
 context, cold, no warm-up, taking the allocator high-water — the whole-extraction
-device peak is **643,825,664 bytes at `3163ed47`** (945,815,552 at the earlier
-head `99889dd5`; the ~302 MB difference is `glintr100` and its activations no
-longer coexisting with the tower, after the face stack's lifetime was narrowed
-to the photographs that actually need detecting). Per-stage deltas: parser
+device peak is **637,534,208 bytes**, reproduced bit-for-bit at `d9cf0ebe`
+(643,825,664 at `3163ed47`; 945,815,552 at the earlier head `99889dd5`, where the ~302 MB
+difference is `glintr100` and its activations no longer coexisting with the
+tower, after the face stack's lifetime was narrowed to the photographs that
+actually need detecting). Per-stage deltas: parser
 +33.6 MB, `eva-ctor` +570.4 MB (the f16 tower, as designed — the widening never
 appears), `eva-forward` +6.3 MB, `idformer-build` +33.6 MB.
 
