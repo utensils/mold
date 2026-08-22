@@ -153,10 +153,12 @@ impl ValidatedVisualVaeWeights {
     pub(crate) fn revalidate_files(&self) -> Result<()> {
         for expected in &self.files {
             let current = current_visual_weight_file_identity(expected)?;
-            if !same_visual_weight_file_identity(&current, expected) {
+            let mismatches = visual_weight_file_identity_mismatches(&current, expected);
+            if !mismatches.is_empty() {
                 bail!(
-                    "validated H3 visual VAE artifact changed after inspection: {}",
-                    expected.canonical_path.display()
+                    "validated H3 visual VAE artifact changed after inspection: {} ({})",
+                    expected.canonical_path.display(),
+                    mismatches.join(", ")
                 )
             }
         }
@@ -1147,20 +1149,57 @@ fn same_visual_weight_file_identity(
     opened: &VisualWeightFileIdentity,
     expected: &VisualWeightFileIdentity,
 ) -> bool {
+    visual_weight_file_identity_mismatches(opened, expected).is_empty()
+}
+
+fn visual_weight_file_identity_mismatches(
+    opened: &VisualWeightFileIdentity,
+    expected: &VisualWeightFileIdentity,
+) -> Vec<&'static str> {
+    let mut mismatches = Vec::new();
+    if opened.canonical_path != expected.canonical_path {
+        mismatches.push("path");
+    }
+    if opened.logical_name != expected.logical_name {
+        mismatches.push("logical-name");
+    }
+    if opened.descriptor_bound != expected.descriptor_bound {
+        mismatches.push("descriptor-binding");
+    }
+    if opened.len != expected.len {
+        mismatches.push("length");
+    }
+    #[cfg(unix)]
+    if opened.inode != expected.inode {
+        mismatches.push("inode");
+    }
+    #[cfg(unix)]
+    if opened.modified_seconds != expected.modified_seconds
+        || opened.modified_nanoseconds != expected.modified_nanoseconds
+    {
+        mismatches.push("modified-time");
+    }
+    #[cfg(unix)]
+    if opened.changed_seconds != expected.changed_seconds
+        || opened.changed_nanoseconds != expected.changed_nanoseconds
+    {
+        mismatches.push("changed-time");
+    }
+    #[cfg(unix)]
+    if opened.device != expected.device {
+        mismatches.push("device");
+    }
     #[cfg(all(unix, not(target_os = "linux")))]
     if expected.descriptor_bound {
         // macOS reports a synthetic device id when statting `/dev/fd/N`, but
         // the descriptor's own metadata retains the underlying filesystem id.
-        return opened.canonical_path == expected.canonical_path
-            && opened.descriptor_bound == expected.descriptor_bound
-            && opened.len == expected.len
-            && opened.inode == expected.inode
-            && opened.modified_seconds == expected.modified_seconds
-            && opened.modified_nanoseconds == expected.modified_nanoseconds
-            && opened.changed_seconds == expected.changed_seconds
-            && opened.changed_nanoseconds == expected.changed_nanoseconds;
+        mismatches.retain(|axis| *axis != "device");
     }
-    opened == expected
+    #[cfg(not(unix))]
+    if opened.modified != expected.modified {
+        mismatches.push("modified-time");
+    }
+    mismatches
 }
 
 fn visual_weight_file_identity_from_metadata(
@@ -1439,6 +1478,9 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let storage_path = directory.path().join(COMFY_VISUAL_VAE_FILENAME);
         let retained = write_sparse_production_comfy_weights(&storage_path);
+        let mut permissions = retained.metadata().unwrap().permissions();
+        permissions.set_readonly(true);
+        retained.set_permissions(permissions).unwrap();
         #[cfg(target_os = "linux")]
         let descriptor_path = PathBuf::from(format!("/proc/self/fd/{}", retained.as_raw_fd()));
         #[cfg(not(target_os = "linux"))]
