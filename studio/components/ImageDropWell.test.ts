@@ -1,8 +1,22 @@
 import { mount } from "@vue/test-utils";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import ImageDropWell from "./ImageDropWell.vue";
 
 describe("ImageDropWell", () => {
+  it("delegates a pick to a native shell without opening the file input", async () => {
+    const wrapper = mount(ImageDropWell, {
+      props: { testId: "native", nativePicker: true },
+    });
+    const input = wrapper.get("[data-test='native-file']")
+      .element as HTMLInputElement;
+    const click = vi.spyOn(input, "click");
+
+    await wrapper.get("[data-test='native-well']").trigger("click");
+
+    expect(wrapper.emitted("pick")).toHaveLength(1);
+    expect(click).not.toHaveBeenCalled();
+  });
+
   it("opens the file picker from the drop zone and emits the chosen file", async () => {
     const wrapper = mount(ImageDropWell, { props: { testId: "t" } });
     const input = wrapper.get("[data-test='t-file']");
@@ -87,5 +101,23 @@ describe("ImageDropWell", () => {
     expect(zone.text()).toContain("opening.png");
     expect(zone.text()).toContain("Reattach original media");
     expect(wrapper.find("[data-test='t-remove']").exists()).toBe(true);
+  });
+
+  it("exposes Android's 48dp touch target to every attached action", () => {
+    const wrapper = mount(ImageDropWell, {
+      props: {
+        testId: "t",
+        image: "cG5n",
+        touchFriendly: true,
+        touchTargetSize: 48,
+      },
+    });
+
+    expect(wrapper.attributes("style")).toContain(
+      "--image-well-touch-target: 48px",
+    );
+    expect(
+      wrapper.get("[data-test='t-remove']").attributes("aria-label"),
+    ).toContain("Remove");
   });
 });

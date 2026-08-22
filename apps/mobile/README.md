@@ -109,10 +109,16 @@ pushed screen opened from the header.
   Create stack beside the source wells, mounted only while the resolved recipe
   or the model row's additive `supports_identity` says yes — positive knowledge
   only, so an unread or older host renders nothing rather than a disabled
-  control. Picking uses the well's own file input, which is the native
-  photo/camera picker; the gallery escape hatch the source wells offer is
-  deliberately absent, because a gallery print is a render, not a reference
-  photograph. The bytes travel VERBATIM: an identity photo is never routed
+  control. On iOS the well uses the native WebView file input. On Android it
+  opens a 48dp source sheet backed by `pick_identity_photo`: **Choose photo**
+  uses the platform Photo Picker (with the document picker fallback before API
+  33), and **Take photo** uses a temporary FileProvider content URI. Neither
+  path asks for broad photo-library access. Android resolves provider size
+  metadata and refuses anything over 16 MiB before opening the byte stream; the
+  system back gesture closes the source sheet without changing the draft. The
+  gallery escape hatch the source wells offer is deliberately absent, because
+  a gallery print is a render, not a reference photograph. The bytes travel
+  VERBATIM: an identity photo is never routed
   through source-fit preprocessing and carries no `source_fit` provenance. A
   photo staged before a capability-losing model switch is PARKED — retained in
   the form, kept off the wire by `buildRequest`, Develop still enabled — and
@@ -500,7 +506,7 @@ android-doctor             # print and verify every resolved path
 android-emulator           # boot Mold_API_37 (Pixel 9 Pro / Android 17)
 android-dev                # Tauri hot reload
 android-check              # debug ARM64 APK build
-android-test               # Keystore, MediaStore, content-URI, and share tests
+android-test               # Keystore, picker/camera, MediaStore, content-URI, and share tests
 android-run                # production-mode run
 android-build              # ARM64/ARMv7 Google Play AAB
 ```

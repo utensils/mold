@@ -86,4 +86,14 @@ impl<R: Runtime> MoldMobileNative<R> {
             .run_mobile_plugin("setMobileAppearance", AppearanceRequest { appearance })
             .map_err(Into::into)
     }
+
+    pub async fn pick_identity_photo(
+        &self,
+        source: String,
+    ) -> crate::Result<IdentityPhotoResponse> {
+        self.0
+            .run_mobile_plugin_async("pickIdentityPhoto", IdentityPhotoRequest { source })
+            .await
+            .map_err(Into::into)
+    }
 }

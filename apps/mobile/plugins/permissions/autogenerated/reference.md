@@ -118,6 +118,32 @@ Denies the get_api_key command without any pre-configured scope.
 <tr>
 <td>
 
+`mold-mobile-native:allow-pick-identity-photo`
+
+</td>
+<td>
+
+Enables the pick_identity_photo command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`mold-mobile-native:deny-pick-identity-photo`
+
+</td>
+<td>
+
+Denies the pick_identity_photo command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
 `mold-mobile-native:allow-save-image-to-photos`
 
 </td>
