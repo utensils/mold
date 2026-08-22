@@ -23,7 +23,7 @@
 //! ## Why the extraction never overlaps the encode peak
 //!
 //! It runs at admission, before the scheduler has leased a device, so the T5
-//! and CLIP encoders it must not compete with do not exist yet. Its ~1.4 GB of
+//! and CLIP encoders it must not compete with do not exist yet. Its ~2.4 GB of
 //! host RAM (see `EXTRACTION_HOST_PEAK_BYTES`) is allocated and released
 //! before the job is dispatched. That is a stronger guarantee than a scheduled
 //! slot: the two peaks cannot coexist rather than being arranged not to.
@@ -513,7 +513,7 @@ mod tests {
         })
     }
 
-    /// Two admissions arriving together must not both allocate the ~1.4 GB
+    /// Two admissions arriving together must not both allocate the ~2.4 GB
     /// peak. A host with room for exactly one extraction has to serve them one
     /// after the other; summing the peaks is how an otherwise-fine box OOMs.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

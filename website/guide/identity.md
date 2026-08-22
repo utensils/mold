@@ -171,7 +171,7 @@ an older one behaves.
 your photograph
       |  SCRFD detects the face and five landmarks       (CPU)
       |  ArcFace embeds the aligned 112x112 crop         (CPU)
-      |  BiSeNet segments the aligned 512x512 crop        (CPU)
+      |  BiSeNet segments the aligned 512x512 crop       (CPU)
       |    background -> white, face -> greyscale
       |  EVA02-CLIP-L-14-336 encodes that masked crop    (CPU)
       |  IDFormer resamples both into 32 identity tokens (CPU)
@@ -193,7 +193,7 @@ Everything up to the 32 tokens runs **once**, on the CPU, when the request is
 admitted — before the model is even placed on a GPU. A batch of eight siblings
 extracts the face once and all eight reuse the identical value. That also means
 identity extraction never competes with the text encoders for memory: it has
-finished and released its ~1.4 GB before the render starts.
+finished and released its ~2.4 GB before the render starts.
 
 On the GPU, identity costs about **1.25 GB** of VRAM beside the checkpoint (the
 adapter's twenty cross-attention modules plus their activations) and roughly

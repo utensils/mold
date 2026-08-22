@@ -1677,6 +1677,7 @@ mod tests {
             vision: "vision".to_string(),
             face_detector: "detector".to_string(),
             face_recognizer: "recognizer".to_string(),
+            face_parser: "parser".to_string(),
         }
     }
 
@@ -1996,10 +1997,18 @@ mod tests {
     }
 
     /// A single-photograph identity with no unconditional half must fingerprint
-    /// exactly as it did before either feature existed — otherwise every frozen
-    /// plan recorded by an older build stops matching itself.
+    /// from exactly the recipe below: the domain tag, the source digest, each
+    /// asset digest in order, then the values. Neither multiple photographs nor
+    /// the unconditional half may enter it, or every frozen plan recorded by an
+    /// older build stops matching itself.
+    ///
+    /// The ASSET SET is the one thing that has ever legitimately changed it:
+    /// #1225 added the BiSeNet face parser, and a different parser produces a
+    /// different mask and therefore a different identity. That is the field's
+    /// whole purpose, and it is why this test recomputes the digest rather than
+    /// pinning a hex literal — the recipe is the invariant, not the output.
     #[test]
-    fn the_single_photograph_fingerprint_is_unchanged() {
+    fn the_single_photograph_fingerprint_follows_the_recipe() {
         let values = tokens(0.5);
         let assets = assets();
         let frozen =
@@ -2015,6 +2024,7 @@ mod tests {
             &assets.vision,
             &assets.face_detector,
             &assets.face_recognizer,
+            &assets.face_parser,
         ] {
             hasher.update(digest.as_bytes());
             hasher.update(b"\0");

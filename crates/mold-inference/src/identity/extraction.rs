@@ -316,7 +316,7 @@ pub(crate) fn compose_identity_token_sets(
 /// still never coexist, and the only thing that scales with N is the retained
 /// hidden
 /// states — [`EXTRACTION_RETAINED_BYTES_PER_IMAGE`], ~12 MB each against a
-/// 1.4 GB peak.
+/// 2.4 GB peak.
 ///
 /// The observer sees [`ComposeStage::EvaBuild`] and
 /// [`ComposeStage::IdFormerBuild`] exactly once each, because they are paid
@@ -375,8 +375,7 @@ pub(crate) fn compose_identity_token_sets_observed(
             let labels = parser
                 .labels(&planar, height, width)
                 .context("parsing the aligned face crop")?;
-            apply_pulid_face_mask(&mut planar, &labels)
-                .context("masking the aligned face crop")?;
+            apply_pulid_face_mask(&mut planar, &labels).context("masking the aligned face crop")?;
             let pixels = preprocess_planar_rgb(&planar, height, width, &device)
                 .context("preprocessing the aligned face crop for EVA02-CLIP")?;
             let elapsed = parse_started.elapsed();
@@ -653,11 +652,15 @@ mod tests {
             EXTRACTION_RETAINED_BYTES_PER_IMAGE < 2 * measured_per_image,
             "a charge more than twice the measurement parks hosts that could run this"
         );
+        // The same terms the single-photograph test uses, so the two cannot
+        // disagree about what the tower stage costs.
         const SCRFD: u64 = 16_923_827;
         const GLINTR100: u64 = 260_665_334;
-        const TOWER: u64 = 609 * 1_000_000;
+        const TOWER_VERIFIED_BYTES: u64 = crate::encoders::pickle_convert::EVA_DERIVED.size_bytes;
+        const TOWER_WEIGHTS: u64 = 2 * TOWER_VERIFIED_BYTES;
         const TOWER_ACTIVATIONS: u64 = 180 * 1_000_000;
-        let peak = SCRFD + GLINTR100 + TOWER + TOWER_ACTIVATIONS + extra;
+        let peak =
+            SCRFD + GLINTR100 + TOWER_VERIFIED_BYTES + TOWER_WEIGHTS + TOWER_ACTIVATIONS + extra;
         assert!(
             EXTRACTION_HOST_PEAK_BYTES >= peak,
             "the charged peak {EXTRACTION_HOST_PEAK_BYTES} must cover {peak} at \
