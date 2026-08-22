@@ -44,6 +44,8 @@ export interface Job {
   /** Total clips reported by the chain stream. */
   chainStageCount: number | null;
   error: string | null;
+  /** Advisories from an accepted request; each header value stays whole. */
+  requestWarnings: string[];
   /** Structured transport-close marker used by resume reconciliation. */
   interrupted: boolean;
   /** The host ended this job's stream while KEEPING the job: it journalled the
@@ -116,6 +118,7 @@ export function newJob(req: GenerateRequest): Job {
     chainStageIndex: null,
     chainStageCount: null,
     error: null,
+    requestWarnings: [],
     interrupted: false,
     retainedByHost: false,
     submittedAtUnixMs: Date.now(),

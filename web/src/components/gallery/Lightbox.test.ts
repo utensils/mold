@@ -280,7 +280,7 @@ describe("Lightbox organization (title · ♥ · tags · collections · trash)",
     ).toEqual(["outdoor3"]);
     await tagInput.setValue("#Keep");
     await tagInput.trigger("keydown", { key: "Enter" });
-    expect(wrapper.emitted("add-tag")?.[0]).toEqual([tagged, "Keep"]);
+    expect(wrapper.emitted("add-tag")?.[0]).toEqual([tagged, "#Keep"]);
     await wrapper.get("[data-test='tag-remove']").trigger("click");
     expect(wrapper.emitted("remove-tag")?.[0]).toEqual([tagged, "blue"]);
 

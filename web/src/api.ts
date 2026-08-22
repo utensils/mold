@@ -30,6 +30,7 @@ import type {
   AmendResponse as AmendResponseWire,
   ChainValidationResponse,
 } from "@studio/lib/api/chainTypes";
+import { requestWarningsFromHeaders } from "@studio/lib/requestWarnings";
 export type {
   ChainValidationResponse,
   ChainValidationStage,
@@ -265,6 +266,7 @@ export interface GenerateStreamHandlers {
   onProgress: (evt: SseProgressEvent) => void;
   onComplete: (evt: SseCompleteEvent) => void;
   onError: (err: StreamError) => void;
+  onRequestWarnings?: (warnings: string[]) => void;
 }
 
 /**
@@ -382,6 +384,7 @@ export interface ChainStreamHandlers {
   onProgress: (evt: ChainProgressEvent) => void;
   onComplete: (evt: SseChainCompleteEvent) => void;
   onError: (err: StreamError) => void;
+  onRequestWarnings?: (warnings: string[]) => void;
 }
 
 /** POST /api/generate/chain/stream — SSE stream for chained video
@@ -456,12 +459,23 @@ export async function createChainJob(
   req: ChainRequestWire,
   target?: StreamTarget,
   operationId?: string,
+  onRequestWarnings?: (warnings: string[]) => void,
 ): Promise<CreateChainJobResponse> {
-  return chainJobJson("", target, {
+  const path = "/api/chain-jobs";
+  const res = await fetch(`${targetBase(target)}${path}`, {
     method: "POST",
-    body: req,
-    operationId,
+    headers: {
+      "content-type": "application/json",
+      ...(operationId ? { "x-mold-operation-id": operationId } : {}),
+      ...targetHeaders(target),
+    },
+    body: JSON.stringify(req),
   });
+  if (res.ok) {
+    const warnings = requestWarningsFromHeaders(res.headers);
+    if (warnings.length > 0) onRequestWarnings?.(warnings);
+  }
+  return requireJson<CreateChainJobResponse>(res, "POST /api/chain-jobs");
 }
 
 export async function listChainJobs(

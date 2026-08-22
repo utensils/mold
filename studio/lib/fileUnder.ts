@@ -23,12 +23,9 @@
  * `mold_core` by its own parity fixtures. Rust remains the authority for
  * every limit and rule mirrored below.
  *
- * Tag normalization is the one deliberate exception. The Library's
- * `normalizeTagName` also strips a leading `#` — a display affordance the V3
- * tag editors chose — but `mold_core::organization::normalize_tag_name` does
- * NOT: `#blue` is the literal tag `#blue` there. A request tag is storage,
- * not display, so `normalizeRequestTag` below mirrors Rust exactly and the
- * `#` affordance is offered separately as `stripTagHash`, for a surface to
+ * Tag normalization mirrors the Library and Rust: `#blue` is the literal tag
+ * `#blue`. The Create form still offers `#` as a typed-input affordance through
+ * `stripTagHash`, for a surface to
  * apply to TYPED input before calling `addTag` (never to a suggestion the
  * host reported, or picking `#blue` would file a different tag called
  * `blue`). Searching is the exception `suggestTags` owns: it strips the

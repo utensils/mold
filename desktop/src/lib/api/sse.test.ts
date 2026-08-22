@@ -53,6 +53,7 @@ describe("sseStream", () => {
     });
 
     expect(onOpen).toHaveBeenCalledTimes(2);
+    expect(onOpen).toHaveBeenLastCalledWith(expect.any(Response));
   });
 
   for (const status of [401, 403, 404]) {

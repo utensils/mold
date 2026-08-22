@@ -1,6 +1,6 @@
 import { defineStore } from "pinia";
 import { emptyFileUnderState } from "@studio/lib/fileUnder";
-import { applyModelDefaults, newGenerateForm } from "../lib/generateForm";
+import { applyModelDefaults, keepingPrintIdentity, newGenerateForm } from "../lib/generateForm";
 import type { ModelEntry } from "../lib/api/types";
 
 /**
@@ -44,7 +44,7 @@ export const useGenerateFormStore = defineStore("generateForm", {
      * object identity — the view and child panels hold references to it.
      */
     resetAll() {
-      Object.assign(this.form, newGenerateForm());
+      keepingPrintIdentity(this.form, () => Object.assign(this.form, newGenerateForm()));
     },
   },
 });

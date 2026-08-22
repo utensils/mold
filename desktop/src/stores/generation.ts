@@ -43,6 +43,7 @@ import {
   type ReferenceUploadCapabilities,
   type ReferenceUploadLease,
 } from "@studio/api/referenceUploads";
+import { requestWarningsFromHeaders } from "@studio/lib/requestWarnings";
 
 export {
   applyChainProgress,
@@ -875,6 +876,9 @@ export const useGenerationStore = defineStore("generation", {
           ? { headers: { "X-Mold-SSE-Payload": "metadata-only" } }
           : {}),
         ...(streamTarget ? { target: streamTarget } : {}),
+        onOpen: (response) => {
+          job.requestWarnings = requestWarningsFromHeaders(response.headers);
+        },
         onEvent: (event, data) => {
           const current = job;
           // Abort/reset/cancel and terminal frames are final. Some SSE

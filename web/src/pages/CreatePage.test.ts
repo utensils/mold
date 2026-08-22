@@ -1747,6 +1747,7 @@ describe("CreatePage layout and behavior", () => {
       }),
       expect.objectContaining({ baseUrl: expect.any(String) }),
       expect.stringMatching(/^[0-9a-f-]{36}$/),
+      expect.any(Function),
     );
     expect(placementPreviewMock).toHaveBeenCalledWith(
       expect.objectContaining({ baseUrl: expect.any(String) }),

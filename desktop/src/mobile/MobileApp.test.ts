@@ -313,9 +313,17 @@ beforeEach(() => {
       return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
     return Promise.reject(new Error(`Unexpected API path: ${path}`));
   });
-  apiFetchTo.mockReset().mockResolvedValue({
-    blob: () => Promise.resolve(new Blob(["thumbnail"])),
-  } as Response);
+  apiFetchTo
+    .mockReset()
+    .mockImplementation(async (requestTarget: unknown, path: string, init?: RequestInit) => {
+      if (path === "/api/chain-jobs" && init?.method === "POST") {
+        const body = await apiJsonTo(requestTarget, path, init);
+        return new Response(JSON.stringify(body));
+      }
+      return {
+        blob: () => Promise.resolve(new Blob(["thumbnail"])),
+      } as Response;
+    });
   openStreams.length = 0;
   sseStream.mockReset().mockImplementation(
     (
@@ -882,6 +890,20 @@ describe("MobileApp sequence generation", () => {
       }
       return Promise.reject(new Error(`Unexpected API path: ${path}`));
     });
+    apiFetchTo.mockImplementation(
+      async (requestTarget: unknown, path: string, init?: RequestInit) => {
+        if (path === "/api/chain-jobs" && init?.method === "POST") {
+          const body = await apiJsonTo(requestTarget, path, init);
+          return new Response(JSON.stringify(body), {
+            headers: {
+              "x-mold-request-warning":
+                "Reference timing was adjusted; the sequence still rendered.",
+            },
+          });
+        }
+        return { blob: () => Promise.resolve(new Blob(["thumbnail"])) } as Response;
+      },
+    );
 
     let finishPreview!: (value: Awaited<ReturnType<typeof previewChainPlacement>>) => void;
     previewChainPlacement.mockReturnValueOnce(
@@ -939,6 +961,12 @@ describe("MobileApp sequence generation", () => {
     });
     expect(recovery).not.toContain(target.apiKey);
     expect(wrapper.get("[data-test='mobile-sequence-job']").text()).toContain("queued");
+    const advisory = wrapper.get("[data-test='mobile-request-advisories']");
+    expect(advisory.text()).toContain(
+      "Reference timing was adjusted; the sequence still rendered.",
+    );
+    await advisory.get("[data-test='mobile-request-advisories-dismiss']").trigger("click");
+    expect(wrapper.find("[data-test='mobile-request-advisories']").exists()).toBe(false);
   });
 
   it("parks a retained opening image when the checkpoint reads no source image", async () => {

@@ -11,7 +11,7 @@ export interface StreamOptions {
   signal: AbortSignal;
   onEvent: (event: string, data: string) => void;
   /** Called whenever the server accepts the SSE response, including reconnects. */
-  onOpen?: () => void;
+  onOpen?: (response: Response) => void;
   /** Called when the initial connection cannot be established. */
   onOpenError?: (error: Error) => void;
   /** Called when the stream ends or errors after retries. */
@@ -78,7 +78,7 @@ export async function sseStream(path: string, options: StreamOptions): Promise<v
           throw error;
         }
         opened = true;
-        options.onOpen?.();
+        options.onOpen?.(response);
         return Promise.resolve();
       },
       onmessage(msg) {

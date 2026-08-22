@@ -62,7 +62,13 @@ beforeEach(() => {
         : { jobs: [] },
     ),
   );
-  apiFetchTo.mockResolvedValue({});
+  apiFetchTo.mockImplementation((_target: ApiTarget, path: string, init?: RequestInit) =>
+    Promise.resolve(
+      path === "/api/chain-jobs" && init?.method === "POST"
+        ? new Response(JSON.stringify({ job_id: "remote-chain-1" }))
+        : {},
+    ),
+  );
   readyHosts();
 });
 
@@ -125,7 +131,7 @@ describe("create", () => {
     const store = useChainJobsStore();
     const jobId = await store.create(REMOTE_ID, request);
     expect(jobId).toBe("remote-chain-1");
-    expect(apiJsonTo).toHaveBeenCalledWith(
+    expect(apiFetchTo).toHaveBeenCalledWith(
       REMOTE_TARGET,
       "/api/chain-jobs",
       expect.objectContaining({ method: "POST" }),
