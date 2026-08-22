@@ -366,15 +366,14 @@ depending on localized WebKit error text. On resume, pre-ID queue and durable
 chain joins are bounded to the original submission window, so a later
 fixed-seed duplicate cannot be mistaken for the interrupted print or cancelled
 as its zombie. Background failure notifications wait for this reconciliation.
-Whether a still-queued row is cleared is decided per job, never per host: the
-`/api/queue` row's additive `durable` says whether the host journalled THAT
-job, and only then does reconciliation keep polling instead of deleting it
-(deleting would destroy exactly the work the host kept). `queue.durable_queue`
-is deliberately not consulted — a host that can promise durability still
-reports `durable: false` for a job it excluded at admission (no gallery target,
-reference-upload media, an oversized request), and waiting on one of those
-would hang forever. An absent field is an older server, and the zombie row is
-cleared as before. A `held` row is listed but never auto-run, so it settles
+Every still-queued row remains owned by the host after its client stream dies.
+Reconciliation keeps polling and never sends `DELETE /api/queue/:id`; only the
+explicit Cancel action may revoke accepted work. The row's additive `durable`
+says only whether THAT job can be replayed after a server restart. A host can
+therefore report `durable: false` for reference-upload media or an oversized
+request while continuing to process it normally in the current server process.
+An absent field on an older server receives the same non-destructive treatment.
+A `held` row is listed but never auto-run, so it settles
 immediately with the host's `held_reason`. A terminal error frame carrying
 `retained` is likewise treated as an interruption rather than a failure, so the
 job is reconciled back to life instead of announcing a failure the host is

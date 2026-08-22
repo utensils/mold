@@ -5223,8 +5223,8 @@ async function generate(): Promise<void> {
     if (unmounted || jobs.length === 0) return;
     // iOS suspension kills every held SSE socket: jobs that settled with a
     // dead-transport error are re-queried against their frozen submission
-    // route (finished prints render, still-running jobs re-attach, zombies
-    // are cleared) BEFORE any summary copy is composed, so raw transport
+    // route (finished prints render, queued/running jobs re-attach without
+    // cancellation) BEFORE any summary copy is composed, so raw transport
     // text never reaches the status line or the announcement channel.
     await reconcileInterruptedGenerationJobs(jobs, {
       target: { ...route.target },

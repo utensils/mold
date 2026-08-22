@@ -5709,29 +5709,35 @@ describe("MobileApp foreground resume", () => {
     expect(wrapper.find("[data-test='mobile-generation-queue']").exists()).toBe(false);
   });
 
-  it("clears a zombie queued job and explains the interruption without transport jargon", async () => {
+  it("keeps a queued job running after iOS suspends its stream", async () => {
+    let queueCalls = 0;
     apiJsonTo.mockImplementation((_target: unknown, path: string) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([model]);
       if (path === "/api/queue") {
+        queueCalls += 1;
         return Promise.resolve({
-          entries: [
-            {
-              id: "job-9",
-              model: model.name,
-              state: "queued",
-              position: 0,
-              started_at_unix_ms: 0,
-            },
-          ],
+          entries:
+            queueCalls === 1
+              ? [
+                  {
+                    id: "job-9",
+                    model: model.name,
+                    state: "queued",
+                    position: 0,
+                    durable: false,
+                    started_at_unix_ms: 0,
+                  },
+                ]
+              : [],
         });
       }
-      if (path === "/api/gallery") return Promise.resolve([]);
+      if (path === "/api/gallery") return Promise.resolve([resumedPrint]);
       return Promise.reject(new Error(`Unexpected API path: ${path}`));
     });
     wrapper = mountMobileApp();
     await flushPromises();
-    await submitSeededPrompt("a print the suspension orphaned", 41);
+    await submitSeededPrompt("a ship crossing violet lightning", 77);
     openStreams[0]!.options.onEvent(
       "progress",
       JSON.stringify({ type: "queued", position: 1, id: "job-9" }),
@@ -5739,18 +5745,34 @@ describe("MobileApp foreground resume", () => {
     killStream(0, "The network connection was lost.");
     await flushPromises();
 
-    expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/queue/job-9", { method: "DELETE" });
-    const summary = wrapper.get("[data-test='mobile-generation-summary']").text();
-    expect(summary).toBe(
-      "The connection dropped while this print waited in Studio’s queue. Develop again to requeue it.",
+    expect(apiFetchTo).not.toHaveBeenCalledWith(target, "/api/queue/job-9", {
+      method: "DELETE",
+    });
+    expect(wrapper.get("[data-test='mobile-generation-summary']").text()).toBe("seed 77");
+    expect(wrapper.text()).not.toContain("network connection was lost");
+    expect(wrapper.findAll(".sr-only[aria-live='polite']")[1]?.text()).toBe(
+      "Generation completed.",
     );
-    expect(summary).not.toContain("network connection was lost");
-    expect(
-      wrapper.get("[data-test='mobile-generation-summary']").find("[role='alert']").exists(),
-    ).toBe(true);
-    expect(wrapper.findAll(".sr-only[aria-live='polite']")[1]?.text()).toContain(
-      "Generation failed.",
+  });
+
+  it("detaches without cancelling accepted work when the app closes", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await submitSeededPrompt("a queue that survives app closure", 42);
+    openStreams[0]!.options.onEvent(
+      "progress",
+      JSON.stringify({ type: "queued", position: 1, id: "job-close" }),
     );
+    const signal = openStreams[0]!.options.signal;
+
+    wrapper.unmount();
+    wrapper = null;
+    await flushPromises();
+
+    expect(signal.aborted).toBe(true);
+    expect(apiFetchTo).not.toHaveBeenCalledWith(target, "/api/queue/job-close", {
+      method: "DELETE",
+    });
   });
 
   it("re-attaches to a print still developing on the host and completes it", async () => {
