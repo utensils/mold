@@ -567,7 +567,7 @@ mod tests {
 
     #[test]
     fn production_family_batch_registry_is_explicit_valid_and_singleton_only() {
-        let mut expected = vec![
+        let expected = vec![
             "flux",
             "flux2",
             "sd15",
@@ -582,7 +582,11 @@ mod tests {
             "wuerstchen",
         ];
         #[cfg(feature = "h3")]
-        expected.insert(9, mold_core::minimax_h3::FAMILY);
+        let expected = {
+            let mut expected = expected;
+            expected.insert(9, mold_core::minimax_h3::FAMILY);
+            expected
+        };
         assert_eq!(
             production_batch_capabilities()
                 .iter()
