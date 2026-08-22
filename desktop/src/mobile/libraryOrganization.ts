@@ -244,13 +244,26 @@ export function filterLibraryPrints<T extends { hostId: string; filename: string
   filters: MobileLibraryFilters,
   organizationOf: (print: T) => OrganizationUnion | undefined,
   copiesOf: (print: T) => readonly { hostId: string }[] = (print) => [print],
+  hiddenCollectionSlugs: ReadonlySet<string> = new Set(),
 ): T[] {
   return prints.filter((print) => {
     if (filters.hostId && !copiesOf(print).some((copy) => copy.hostId === filters.hostId)) {
       return false;
     }
-    if (!filters.favoritesOnly && !filters.tag && !filters.collectionSlug) return true;
+    if (
+      !filters.favoritesOnly &&
+      !filters.tag &&
+      !filters.collectionSlug &&
+      hiddenCollectionSlugs.size === 0
+    )
+      return true;
     const organization = organizationOf(print);
+    if (
+      hiddenCollectionSlugs.size > 0 &&
+      (organization?.collections ?? []).some((slug) => hiddenCollectionSlugs.has(slug))
+    ) {
+      return false;
+    }
     if (filters.favoritesOnly && !organization?.favorite) return false;
     if (filters.tag && !(organization?.tags ?? []).some((tag) => tagKey(tag) === filters.tag)) {
       return false;
@@ -330,6 +343,7 @@ export interface MobileCollectionCard {
   /** "This Mac · plato" style label from the host names. */
   hostsLabel: string;
   cover: { hostId: string; filename: string } | null;
+  hidden: boolean;
 }
 
 export function collectionCards(
@@ -345,6 +359,7 @@ export function collectionCards(
       hostIds,
       hostsLabel: hostIds.map((id) => hostNames[id] ?? id).join(" · "),
       cover: collection.cover,
+      hidden: collection.hidden === true,
     };
   });
 }

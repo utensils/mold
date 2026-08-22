@@ -6211,8 +6211,19 @@ mod tests {
         }
     }
 
-    fn fake_h3_facts() -> crate::h3_private_bridge::H3PreparedAttemptFacts {
+    /// Prepared-attempt facts for the fake runtime bound to `work_id`.
+    ///
+    /// The real `InferenceH3PreparedAttempt` echoes the work identity,
+    /// cancellation scope, and ledger sequence it received from the owner's
+    /// `H3AttemptScope::private_run_context`, and
+    /// `validate_h3_prepared_attempt_facts` re-derives them from the claim.
+    /// So the double takes them from the same derivation rather than a
+    /// constant, which the fence correctly reads as a changed owner run
+    /// binding (#1204).
+    fn fake_h3_facts(work_id: &str) -> crate::h3_private_bridge::H3PreparedAttemptFacts {
         let identity = |byte: char| std::iter::repeat_n(byte, 64).collect::<String>();
+        let (work_identity_sha256, cancellation_scope_identity_sha256, memory_ledger_sequence) =
+            crate::h3_attempt::private_run_binding_for_test(work_id);
         crate::h3_private_bridge::H3PreparedAttemptFacts {
             device_id: "cuda:0".to_string(),
             device_ordinal: 0,
@@ -6223,9 +6234,9 @@ mod tests {
             admission_evidence_identity_sha256: identity('e'),
             artifact_qualification_identity_sha256: identity('f'),
             runtime_qualification_identity_sha256: identity('1'),
-            work_identity_sha256: identity('2'),
-            cancellation_scope_identity_sha256: identity('3'),
-            memory_ledger_sequence: 23,
+            work_identity_sha256,
+            cancellation_scope_identity_sha256,
+            memory_ledger_sequence,
             consumption_identity_sha256: identity('4'),
             predicted_device_peak_bytes: 11_000_000_000,
             predicted_host_increment_bytes: 2_000_000_000,
@@ -6347,7 +6358,8 @@ mod tests {
         job: &mut GpuJob,
         outcome: FakeH3Outcome,
     ) -> (Arc<AtomicUsize>, Arc<AtomicUsize>) {
-        install_fake_h3_attempt_with_facts(job, outcome, fake_h3_facts())
+        let facts = fake_h3_facts(&job.id);
+        install_fake_h3_attempt_with_facts(job, outcome, facts)
     }
 
     fn install_fake_h3_attempt_with_facts(
@@ -6374,6 +6386,92 @@ mod tests {
             drops: Arc::clone(&drops),
         }));
         (runs, drops)
+    }
+
+    /// Host headroom the Scheduler V2 stand-in grants, comfortably above the
+    /// fake attempt's `predicted_host_increment_bytes`.
+    const FAKE_SCHEDULER_HOST_HEADROOM_BYTES: u64 = 64 * 1024 * 1024 * 1024;
+
+    #[derive(Clone, Copy)]
+    enum FakeSchedulerV2Mode {
+        /// Answer the host-memory recheck and keep forwarding worker events.
+        Live,
+        /// Answer the host-memory recheck, then drop the receiver so the
+        /// allocation commit that follows cannot reach the scheduler.
+        ClosedAfterRecheck,
+    }
+
+    /// Scheduler V2 stand-in for the claimed-H3 owner tests.
+    ///
+    /// `run_claimed_h3_generation` requests ledger-aware host headroom before
+    /// the CUDA allocation boundary and blocks on the scheduler's reply
+    /// (#1099), so a bare channel with no responder stalls the owner thread for
+    /// five seconds and then fails the job on that timeout instead of on what
+    /// the test is actually asserting. This answers exactly `HostMemoryRecheck`
+    /// and forwards every other worker event untouched, so the event-stream
+    /// assertions still see only what the worker itself emitted.
+    struct FakeSchedulerV2 {
+        tx: tokio::sync::mpsc::UnboundedSender<crate::scheduler::WorkerEvent>,
+        forwarded: tokio::sync::mpsc::UnboundedReceiver<crate::scheduler::WorkerEvent>,
+        responder: std::thread::JoinHandle<()>,
+    }
+
+    impl FakeSchedulerV2 {
+        fn sender(&self) -> &tokio::sync::mpsc::UnboundedSender<crate::scheduler::WorkerEvent> {
+            &self.tx
+        }
+
+        /// Close the stand-in and hand back the worker events it forwarded.
+        /// Joining the responder is what makes `try_recv` deterministic.
+        fn settle(self) -> tokio::sync::mpsc::UnboundedReceiver<crate::scheduler::WorkerEvent> {
+            let FakeSchedulerV2 {
+                tx,
+                forwarded,
+                responder,
+            } = self;
+            drop(tx);
+            responder
+                .join()
+                .expect("fake Scheduler V2 responder must not panic");
+            forwarded
+        }
+    }
+
+    fn fake_scheduler_v2(mode: FakeSchedulerV2Mode) -> FakeSchedulerV2 {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (forward_tx, forwarded) = tokio::sync::mpsc::unbounded_channel();
+        let answers_recheck = cfg!(any(feature = "h3", feature = "h3-private-uat"));
+        let responder =
+            if !answers_recheck && matches!(mode, FakeSchedulerV2Mode::ClosedAfterRecheck) {
+                // This build compiles the host-memory recheck out, so a scheduler
+                // that must already be gone by the allocation commit has to be gone
+                // before the owner thread starts — dropping the receiver here, not
+                // on the responder, is what makes that ordering deterministic.
+                rx.close();
+                drop(rx);
+                std::thread::spawn(|| {})
+            } else {
+                std::thread::spawn(move || {
+                    while let Some(event) = rx.blocking_recv() {
+                        match event {
+                            crate::scheduler::WorkerEvent::HostMemoryRecheck { reply, .. } => {
+                                let _ = reply.send(Ok(FAKE_SCHEDULER_HOST_HEADROOM_BYTES));
+                                if matches!(mode, FakeSchedulerV2Mode::ClosedAfterRecheck) {
+                                    break;
+                                }
+                            }
+                            other => {
+                                let _ = forward_tx.send(other);
+                            }
+                        }
+                    }
+                })
+            };
+        FakeSchedulerV2 {
+            tx,
+            forwarded,
+            responder,
+        }
     }
 
     fn run_fake_claimed_h3(
@@ -6438,14 +6536,15 @@ mod tests {
         job.output_dir = Some(output.path().to_path_buf());
         let (runs, drops) = install_fake_h3_attempt(&mut job, FakeH3Outcome::Success);
         let worker = single_worker_pool_with_parked("cache-sentinel", Duration::ZERO);
-        let (scheduler_tx, mut scheduler_rx) = tokio::sync::mpsc::unbounded_channel();
+        let scheduler = fake_scheduler_v2(FakeSchedulerV2Mode::Live);
 
         let owner_worker = Arc::clone(&worker);
-        let owner_scheduler = scheduler_tx.clone();
+        let owner_scheduler = scheduler.sender().clone();
         let settlements =
             std::thread::spawn(move || run_fake_claimed_h3(&owner_worker, job, &owner_scheduler))
                 .join()
                 .expect("fake H3 owner thread must not panic");
+        let mut scheduler_rx = scheduler.settle();
         let result = result_rx.await.unwrap().expect("fake H3 success result");
 
         assert_eq!(runs.load(Ordering::SeqCst), 1);
@@ -6504,7 +6603,7 @@ mod tests {
         job.model = job.request.model.clone();
         let resolved =
             crate::reference_uploads::ResolvedReferenceSet::authority_only_for_test(&job.request);
-        let mut facts = fake_h3_facts();
+        let mut facts = fake_h3_facts(id);
         facts.media = crate::h3_private_bridge::H3PreparedMediaContract::from_request(
             &job.request,
             Some(resolved.fingerprint()),
@@ -6521,14 +6620,15 @@ mod tests {
         let (runs, drops) =
             install_fake_h3_attempt_with_facts(&mut job, FakeH3Outcome::Success, facts);
         let worker = single_worker_pool_with_parked("cache-sentinel", Duration::ZERO);
-        let (scheduler_tx, mut scheduler_rx) = tokio::sync::mpsc::unbounded_channel();
+        let scheduler = fake_scheduler_v2(FakeSchedulerV2Mode::Live);
 
         let owner_worker = Arc::clone(&worker);
-        let owner_scheduler = scheduler_tx.clone();
+        let owner_scheduler = scheduler.sender().clone();
         let settlements =
             std::thread::spawn(move || run_fake_claimed_h3(&owner_worker, job, &owner_scheduler))
                 .join()
                 .expect("fake Ref2VA owner thread must not panic");
+        let mut scheduler_rx = scheduler.settle();
         let result = result_rx.await.unwrap().expect("fake Ref2VA success");
 
         assert_eq!(runs.load(Ordering::SeqCst), 1);
@@ -6586,7 +6686,7 @@ mod tests {
         job.model = job.request.model.clone();
         let admitted =
             crate::reference_uploads::ResolvedReferenceSet::authority_only_for_test(&job.request);
-        let mut facts = fake_h3_facts();
+        let mut facts = fake_h3_facts(id);
         facts.media = crate::h3_private_bridge::H3PreparedMediaContract::from_request(
             &job.request,
             Some(admitted.fingerprint()),
@@ -6605,13 +6705,14 @@ mod tests {
             crate::reference_uploads::ResolvedReferenceSet::authority_only_for_test(&job.request),
         );
         let worker = single_worker_pool_with_parked("cache-sentinel", Duration::ZERO);
-        let (scheduler_tx, mut scheduler_rx) = tokio::sync::mpsc::unbounded_channel();
+        let scheduler = fake_scheduler_v2(FakeSchedulerV2Mode::Live);
         let owner_worker = Arc::clone(&worker);
-        let owner_scheduler = scheduler_tx.clone();
+        let owner_scheduler = scheduler.sender().clone();
         let settlements =
             std::thread::spawn(move || run_fake_claimed_h3(&owner_worker, job, &owner_scheduler))
                 .join()
                 .expect("order-drift owner thread must not panic");
+        let mut scheduler_rx = scheduler.settle();
         let error = match result_rx.await.unwrap() {
             Err(error) => error,
             Ok(_) => panic!("reordered Ref2VA authority unexpectedly published"),
@@ -6638,7 +6739,7 @@ mod tests {
         job.model = job.request.model.clone();
         let resolved =
             crate::reference_uploads::ResolvedReferenceSet::authority_only_for_test(&job.request);
-        let mut facts = fake_h3_facts();
+        let mut facts = fake_h3_facts(id);
         facts.media = crate::h3_private_bridge::H3PreparedMediaContract::from_request(
             &job.request,
             Some(resolved.fingerprint()),
@@ -6648,13 +6749,14 @@ mod tests {
         let (runs, drops) =
             install_fake_h3_attempt_with_facts(&mut job, FakeH3Outcome::Cancelled, facts);
         let worker = single_worker_pool_with_parked("cache-sentinel", Duration::ZERO);
-        let (scheduler_tx, mut scheduler_rx) = tokio::sync::mpsc::unbounded_channel();
+        let scheduler = fake_scheduler_v2(FakeSchedulerV2Mode::Live);
         let owner_worker = Arc::clone(&worker);
-        let owner_scheduler = scheduler_tx.clone();
+        let owner_scheduler = scheduler.sender().clone();
         let settlements =
             std::thread::spawn(move || run_fake_claimed_h3(&owner_worker, job, &owner_scheduler))
                 .join()
                 .expect("cancelled Ref2VA owner thread must not panic");
+        let mut scheduler_rx = scheduler.settle();
         let error = match result_rx.await.unwrap() {
             Err(error) => error,
             Ok(_) => panic!("cancelled Ref2VA attempt unexpectedly published"),
@@ -6707,9 +6809,10 @@ mod tests {
                 drop(fake);
             }
             let worker = single_worker_pool_with_parked("cache-sentinel", Duration::ZERO);
-            let (scheduler_tx, mut scheduler_rx) = tokio::sync::mpsc::unbounded_channel();
+            let scheduler = fake_scheduler_v2(FakeSchedulerV2Mode::Live);
 
-            let settlements = run_fake_claimed_h3(&worker, job, &scheduler_tx);
+            let settlements = run_fake_claimed_h3(&worker, job, scheduler.sender());
+            let mut scheduler_rx = scheduler.settle();
             let error = match result_rx.await.unwrap() {
                 Err(error) => error,
                 Ok(_) => panic!("identity-mismatched H3 attempt unexpectedly completed"),
@@ -6768,9 +6871,10 @@ mod tests {
             job.output_dir = Some(output.path().to_path_buf());
             let (runs, drops) = install_fake_h3_attempt(&mut job, outcome);
             let worker = single_worker_pool_with_parked("cache-sentinel", Duration::ZERO);
-            let (scheduler_tx, _scheduler_rx) = tokio::sync::mpsc::unbounded_channel();
+            let scheduler = fake_scheduler_v2(FakeSchedulerV2Mode::Live);
 
-            let settlements = run_fake_claimed_h3(&worker, job, &scheduler_tx);
+            let settlements = run_fake_claimed_h3(&worker, job, scheduler.sender());
+            drop(scheduler.settle());
             let error = match result_rx.await.unwrap() {
                 Err(error) => error,
                 Ok(_) => panic!("invalid fake H3 attempt unexpectedly completed"),
@@ -6801,10 +6905,12 @@ mod tests {
         job.output_dir = Some(output.path().to_path_buf());
         let (runs, drops) = install_fake_h3_attempt(&mut job, FakeH3Outcome::Success);
         let worker = single_worker_pool_with_parked("cache-sentinel", Duration::ZERO);
-        let (scheduler_tx, scheduler_rx) = tokio::sync::mpsc::unbounded_channel();
-        drop(scheduler_rx);
+        // The host-memory recheck is answered so the attempt reaches the
+        // allocation commit; the scheduler is gone only from that point on.
+        let scheduler = fake_scheduler_v2(FakeSchedulerV2Mode::ClosedAfterRecheck);
 
-        let settlements = run_fake_claimed_h3(&worker, job, &scheduler_tx);
+        let settlements = run_fake_claimed_h3(&worker, job, scheduler.sender());
+        drop(scheduler.settle());
         let error = match result_rx.await.unwrap() {
             Err(error) => error,
             Ok(_) => panic!("H3 attempt completed without a scheduler allocation commit"),
@@ -6834,10 +6940,10 @@ mod tests {
         let (runs, drops) =
             install_fake_h3_attempt(&mut job, FakeH3Outcome::SwallowAllocationCommitFailure);
         let worker = single_worker_pool_with_parked("cache-sentinel", Duration::ZERO);
-        let (scheduler_tx, scheduler_rx) = tokio::sync::mpsc::unbounded_channel();
-        drop(scheduler_rx);
+        let scheduler = fake_scheduler_v2(FakeSchedulerV2Mode::ClosedAfterRecheck);
 
-        let settlements = run_fake_claimed_h3(&worker, job, &scheduler_tx);
+        let settlements = run_fake_claimed_h3(&worker, job, scheduler.sender());
+        drop(scheduler.settle());
         let error = match result_rx.await.unwrap() {
             Err(error) => error,
             Ok(_) => panic!("H3 attempt published after swallowing a callback failure"),
@@ -6878,9 +6984,10 @@ mod tests {
             let (runs, drops) =
                 install_fake_h3_attempt(&mut job, FakeH3Outcome::PublicationFault(fault));
             let worker = single_worker_pool_with_parked("cache-sentinel", Duration::ZERO);
-            let (scheduler_tx, _scheduler_rx) = tokio::sync::mpsc::unbounded_channel();
+            let scheduler = fake_scheduler_v2(FakeSchedulerV2Mode::Live);
 
-            let settlements = run_fake_claimed_h3(&worker, job, &scheduler_tx);
+            let settlements = run_fake_claimed_h3(&worker, job, scheduler.sender());
+            drop(scheduler.settle());
             let error = match result_rx.await.unwrap() {
                 Err(error) => error,
                 Ok(_) => panic!("invalid H3 publication unexpectedly completed"),
@@ -6906,7 +7013,7 @@ mod tests {
     async fn claimed_h3_publication_accepts_container_rounded_duration() {
         let (job, _result_rx, _progress_rx, _queue_rx, _queue, _registry) =
             claimed_h3_job_fixture("claimed-h3-rounded-duration").await;
-        let facts = fake_h3_facts();
+        let facts = fake_h3_facts(&job.id);
         let claimed_output = fake_h3_output(&facts, true, false);
         let duration_ms = claimed_output.identity_echo.duration_ms;
         let worker = single_worker_pool_with_parked("cache-sentinel", Duration::ZERO);
@@ -6951,7 +7058,7 @@ mod tests {
             let id = format!("claimed-h3-contract-fault-{index}");
             let (job, _result_rx, _progress_rx, _queue_rx, _queue, _registry) =
                 claimed_h3_job_fixture(&id).await;
-            let mut facts = fake_h3_facts();
+            let mut facts = fake_h3_facts(&id);
             apply_fake_h3_contract_fault(&mut facts.media, fault);
             let worker = single_worker_pool_with_parked("cache-sentinel", Duration::ZERO);
             let claimed_output = fake_h3_output(&facts, true, false);
@@ -6973,7 +7080,7 @@ mod tests {
         let id = "claimed-h3-invalid-request-contract";
         let (mut job, _result_rx, _progress_rx, _queue_rx, _queue, _registry) =
             claimed_h3_job_fixture(id).await;
-        let facts = fake_h3_facts();
+        let facts = fake_h3_facts(id);
         let claimed_output = fake_h3_output(&facts, true, false);
         job.request.model = SENTINEL.to_string();
         job.model = SENTINEL.to_string();
@@ -7004,9 +7111,10 @@ mod tests {
             job.output_dir = Some(output.path().to_path_buf());
             let (runs, drops) = install_fake_h3_attempt(&mut job, outcome);
             let worker = single_worker_pool_with_parked("cache-sentinel", Duration::ZERO);
-            let (scheduler_tx, _scheduler_rx) = tokio::sync::mpsc::unbounded_channel();
+            let scheduler = fake_scheduler_v2(FakeSchedulerV2Mode::Live);
 
-            let settlements = run_fake_claimed_h3(&worker, job, &scheduler_tx);
+            let settlements = run_fake_claimed_h3(&worker, job, scheduler.sender());
+            drop(scheduler.settle());
             let error = match result_rx.await.unwrap() {
                 Err(error) => error,
                 Ok(_) => panic!("quarantined fake H3 attempt unexpectedly completed"),

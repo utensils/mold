@@ -60,6 +60,7 @@ import {
 import {
   tagKey,
   trashRetentionSummary,
+  visibleTagCounts,
   type MergedCollection,
   type OrganizationMutation,
 } from "@studio/lib/libraryOrganization";
@@ -100,6 +101,7 @@ import {
   mergedCollections,
   mergedTags,
   renameCollectionEverywhere,
+  setCollectionHiddenEverywhere,
   retentionHosts,
   setCollectionCover,
   type FanoutResult,
@@ -436,7 +438,27 @@ function missingHostError(entry: GalleryImage): Error {
 // ── Organization state (merged across hosts) ───────────────────────────────
 const resolver = computed(() => collectionResolver(snapshots.value));
 const collections = computed(() => mergedCollections(snapshots.value));
+const hiddenCollectionSlugs = computed(
+  () =>
+    new Set(
+      collections.value
+        .filter((collection) => collection.hidden)
+        .map((collection) => collection.slug),
+    ),
+);
 const tags = computed(() => mergedTags(snapshots.value));
+const filterChipTags = computed(() => {
+  const visible = filterByOrganization(entries.value, {
+    excludeCollectionSlugs:
+      scope.value === "prints" ? hiddenCollectionSlugs.value : undefined,
+  });
+  const visibleKeys = new Set(visible.map((entry) => keyOf(entry)));
+  const excluded =
+    scope.value === "prints"
+      ? entries.value.filter((entry) => !visibleKeys.has(keyOf(entry)))
+      : [];
+  return visibleTagCounts(tags.value, visible, excluded);
+});
 const canOrganize = computed(() => anyHostOrganizes(snapshots.value));
 const canTrash = computed(() => anyHostTrashes(snapshots.value));
 const organizingHostCount = computed(
@@ -475,7 +497,11 @@ const currentCard = computed(() =>
     : null,
 );
 const favoriteCount = computed(
-  () => entries.value.filter((e) => e.favorite).length,
+  () =>
+    filterByOrganization(entries.value, {
+      excludeCollectionSlugs:
+        scope.value === "prints" ? hiddenCollectionSlugs.value : undefined,
+    }).filter((entry) => entry.favorite).length,
 );
 const retentionSummary = computed(() =>
   trashRetentionSummary(retentionHosts(snapshots.value)),
@@ -1004,6 +1030,20 @@ async function renameCollection(slug: string) {
   }
 }
 
+async function setCollectionHidden(slug: string, hidden: boolean) {
+  const collection = collections.value.find(
+    (candidate) => candidate.slug === slug,
+  );
+  if (!collection) return;
+  const result = await setCollectionHiddenEverywhere(
+    collection,
+    hidden,
+    hostById,
+  );
+  reportFanout(result, hidden ? "hide the collection" : "show the collection");
+  await refresh();
+}
+
 async function deleteCollection(slug: string) {
   const collection = collections.value.find((c) => c.slug === slug);
   if (!collection) return;
@@ -1370,6 +1410,8 @@ const organizationFiltered = computed(() => {
     favoritesOnly: favoritesOnly.value,
     tags: tagFilter.value,
     collectionSlug: scope.value === "collections" ? collectionSlug.value : null,
+    excludeCollectionSlugs:
+      scope.value === "prints" ? hiddenCollectionSlugs.value : undefined,
   });
 });
 
@@ -1379,7 +1421,12 @@ const filtered = computed(() => {
   return organizationFiltered.value.filter((e) => entryMatchesSearch(e, q));
 });
 
-const total = computed(() => entries.value.length);
+const total = computed(
+  () =>
+    filterByOrganization(entries.value, {
+      excludeCollectionSlugs: hiddenCollectionSlugs.value,
+    }).length,
+);
 const searchActive = computed(() => search.value.trim().length > 0);
 const organizationFilterActive = computed(
   () => favoritesOnly.value || tagFilter.value.length > 0,
@@ -2323,7 +2370,7 @@ onBeforeUnmount(() => {
       :organize="canOrganize"
       :favorites-only="favoritesOnly"
       :favorite-count="favoriteCount"
-      :tags="tags"
+      :tags="filterChipTags"
       :active-tags="tagFilter"
       :host-options="hostOptions"
       :host-filter="hostFilter"
@@ -2489,6 +2536,7 @@ onBeforeUnmount(() => {
           @open="openCollection"
           @new="onNewCollection()"
           @rename="renameCollection"
+          @hidden="setCollectionHidden"
           @delete="deleteCollection"
         />
       </template>

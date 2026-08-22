@@ -164,6 +164,8 @@ export interface MergedCollection {
   hosts: MergedCollectionHost[];
   /** First non-null cover across hosts, in input order. */
   cover: { hostId: string; filename: string } | null;
+  /** True when any host copy is hidden. Mutations fan out to keep copies aligned. */
+  hidden?: boolean;
 }
 
 function resolvedCollectionSlug(entry: Collection): string {
@@ -184,7 +186,14 @@ export function mergeCollectionsAcrossHosts(
       if (!slug) continue;
       let merged = bySlug.get(slug);
       if (!merged) {
-        merged = { slug, name: entry.name, count: 0, hosts: [], cover: null };
+        merged = {
+          slug,
+          name: entry.name,
+          count: 0,
+          hosts: [],
+          cover: null,
+          hidden: false,
+        };
         bySlug.set(slug, merged);
       }
       merged.count += entry.count;
@@ -193,6 +202,7 @@ export function mergeCollectionsAcrossHosts(
         id: entry.id,
         count: entry.count,
       });
+      if (entry.hidden === true) merged.hidden = true;
       if (!merged.cover && entry.cover_filename) {
         merged.cover = { hostId: host.hostId, filename: entry.cover_filename };
       }
@@ -553,4 +563,52 @@ export function sortTags<T extends TagCount>(list: readonly T[]): T[] {
   return [...list].sort(
     (a, b) => b.count - a.count || compareNames(a.name, b.name),
   );
+}
+
+/** Exact logical-print tag counts for filter chips (one count per print/tag). */
+export function tagCountsForOrganizations(
+  organizations: readonly { tags?: readonly string[] | null }[],
+): TagCount[] {
+  const counts = new Map<string, TagCount>();
+  for (const organization of organizations) {
+    const seen = new Set<string>();
+    for (const raw of organization.tags ?? []) {
+      const name = normalizeTagName(raw);
+      const key = tagKey(name);
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      const existing = counts.get(key);
+      if (existing) existing.count += 1;
+      else counts.set(key, { name, count: 1 });
+    }
+  }
+  return sortTags([...counts.values()]);
+}
+
+/**
+ * Filter-chip tag counts with a compatibility fallback for older gallery rows
+ * that do not carry per-print tags. Known memberships use exact logical-print
+ * counts; inventory-only tags remain available unless they are known to occur
+ * exclusively on excluded prints.
+ */
+export function visibleTagCounts(
+  inventory: readonly TagCount[],
+  visibleOrganizations: readonly { tags?: readonly string[] | null }[],
+  excludedOrganizations: readonly { tags?: readonly string[] | null }[] = [],
+): TagCount[] {
+  const exact = tagCountsForOrganizations(visibleOrganizations);
+  const exactByKey = new Map(exact.map((tag) => [tagKey(tag.name), tag]));
+  const excludedKeys = new Set(
+    tagCountsForOrganizations(excludedOrganizations).map((tag) =>
+      tagKey(tag.name),
+    ),
+  );
+  const result = new Map<string, TagCount>();
+  for (const tag of inventory) {
+    const key = tagKey(tag.name);
+    if (!key || (excludedKeys.has(key) && !exactByKey.has(key))) continue;
+    result.set(key, exactByKey.get(key) ?? { ...tag });
+  }
+  for (const [key, tag] of exactByKey) result.set(key, tag);
+  return sortTags([...result.values()]);
 }

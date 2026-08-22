@@ -25,6 +25,7 @@ vi.mock("@studio/api/galleryOrganization", () => ({
   listCollections: vi.fn(),
   createCollection: vi.fn(),
   updateCollection: vi.fn(),
+  updateCollectionHidden: vi.fn(),
   deleteCollection: vi.fn(),
   setCollectionItems: vi.fn(),
   listTags: vi.fn(),
@@ -1389,6 +1390,44 @@ describe("organization union + filters", () => {
     const gallery = seed();
     gallery.query = "grain";
     expect(gallery.filtered.map((e) => e.item.filename)).toEqual(["shared.png"]);
+  });
+
+  it("omits hidden collection members from Prints and search but keeps drill-in access", () => {
+    const gallery = seed();
+    gallery.collectionsByHost["local"] = loadedCollections([
+      { ...collection("l1", "Smurfs", 1), hidden: true },
+    ]);
+    gallery.collectionsByHost["hal9000-7680"] = loadedCollections([
+      { ...collection("h9", "Smurfs", 2), hidden: true },
+      collection("h2", "River studies", 0),
+    ]);
+    expect(gallery.filtered.map((entry) => entry.item.filename)).toEqual(["solo.png"]);
+    expect(gallery.basePrintCount).toBe(1);
+    expect(gallery.kindCounts).toEqual({ all: 1, image: 1, video: 0, audio: 0 });
+    expect(gallery.chipCounts.map(({ key, count }) => ({ key, count }))).toEqual([
+      { key: "local", count: 1 },
+      { key: "hal9000-7680", count: 0 },
+    ]);
+    expect(gallery.filterChipTags).toEqual([
+      { name: "blue", count: 1 },
+      { name: "portrait", count: 1 },
+    ]);
+    gallery.query = "shared";
+    expect(gallery.filtered).toEqual([]);
+    gallery.query = "";
+    gallery.scope = "collections";
+    gallery.collectionSlug = "smurfs";
+    expect(gallery.basePrintCount).toBe(3);
+    expect(gallery.kindCounts.all).toBe(3);
+    expect(gallery.filterChipTags).toEqual([
+      { name: "Blue", count: 2 },
+      { name: "keep", count: 1 },
+      { name: "portrait", count: 1 },
+    ]);
+    expect(gallery.filtered.map((entry) => entry.item.filename)).toEqual([
+      "shared.png",
+      "remote.png",
+    ]);
   });
 });
 

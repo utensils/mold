@@ -17,6 +17,7 @@ export interface ShelfCard {
   hostLabels: string[];
   updatedAt: number | null;
   covers: CoverTile[];
+  hidden: boolean;
 }
 
 withDefaults(
@@ -76,6 +77,7 @@ defineExpose({ startCreate, isCreating: () => creating.value });
       :host-labels="card.hostLabels"
       :updated-at="card.updatedAt"
       :covers="card.covers"
+      :hidden="card.hidden"
       :now-ms="nowMs"
       :data-slug="card.slug"
       @open="emit('open', card.slug)"

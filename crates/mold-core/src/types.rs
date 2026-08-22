@@ -7343,6 +7343,9 @@ pub struct Collection {
     /// the newest member.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cover_filename: Option<String>,
+    /// Whether members are omitted from the default Library grid and search.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub hidden: bool,
     /// Number of prints in the collection (trashed members included; they
     /// keep their membership until purged).
     pub count: u64,
@@ -7436,6 +7439,9 @@ pub struct CollectionUpdateRequest {
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cover_filename: Option<String>,
+    /// Hide/show this collection's members in the default Library and search.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hidden: Option<bool>,
 }
 
 /// Body of `PUT /api/gallery/collections/:id/items` — gallery filenames to
@@ -9165,12 +9171,14 @@ mod server_event_tests {
             slug: "smurfs".into(),
             description: None,
             cover_filename: Some("cat.png".into()),
+            hidden: false,
             count: 3,
             created_at: 1_700_000_000,
             updated_at: 1_700_000_050,
         };
         let wire = serde_json::to_value(&collection).unwrap();
         assert!(wire.get("description").is_none());
+        assert!(wire.get("hidden").is_none());
         assert_eq!(wire["cover_filename"], "cat.png");
         let back: Collection = serde_json::from_value(wire).unwrap();
         assert_eq!(back, collection);

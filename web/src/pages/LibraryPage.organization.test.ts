@@ -53,6 +53,12 @@ const orgApi = vi.hoisted(() => ({
     updated_at: 0,
   })),
   updateCollection: vi.fn(async () => ({})),
+  updateCollectionHidden: vi.fn(
+    async (_target: unknown, id: string, hidden: boolean) => ({
+      id,
+      hidden,
+    }),
+  ),
   deleteCollection: vi.fn(async () => undefined),
   setCollectionItems: vi.fn(async () => null),
   trashMany: vi.fn(async () => undefined),
@@ -437,7 +443,7 @@ describe("Collections scope", () => {
     });
   });
 
-  it("renames and deletes a collection with a plain confirm that names it", async () => {
+  it("hides, renames, and deletes a collection with a plain confirm that names it", async () => {
     const wrapper = await mounted();
     await wrapper
       .get("[data-test='library-scope']")
@@ -455,6 +461,15 @@ describe("Collections scope", () => {
       ORIGIN_TARGET,
       "c-smurfs",
       { name: "Blue folk" },
+    );
+
+    await card.get("[data-test='collection-menu']").trigger("click");
+    await card.get("[data-test='collection-hidden']").trigger("click");
+    await flushPromises();
+    expect(orgApi.updateCollectionHidden).toHaveBeenCalledWith(
+      ORIGIN_TARGET,
+      "c-smurfs",
+      true,
     );
 
     await card.get("[data-test='collection-menu']").trigger("click");

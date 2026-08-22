@@ -64,6 +64,7 @@ import {
   planOrganizationFanout,
   tagKey,
   trashRetentionSummary,
+  visibleTagCounts,
   type OrganizationMutation,
   type OrganizationUnion,
 } from "@studio/lib/libraryOrganization";
@@ -76,6 +77,7 @@ import {
   listTags as listHostTags,
   listTrash as listHostTrash,
   updateCollection as updateHostCollection,
+  updateCollectionHidden as updateHostCollectionHidden,
 } from "@studio/api/galleryOrganization";
 import {
   defaultClipFrames,
@@ -6260,6 +6262,10 @@ const hostNamesById = computed(() =>
 const libraryCollectionCards = computed<MobileCollectionCard[]>(() =>
   collectionCards(mergedCollectionsFor(hostCollections, connectedHosts.value), hostNamesById.value),
 );
+const hiddenCollectionSlugs = computed(
+  () =>
+    new Set(libraryCollectionCards.value.filter((card) => card.hidden).map((card) => card.slug)),
+);
 // Scoped to connected hosts so a disconnected or forgotten machine's
 // retained bucket leaves no ghost chips (its bucket is also pruned below).
 const mergedTags = computed(() =>
@@ -6268,7 +6274,30 @@ const mergedTags = computed(() =>
     connectedHosts.value.map((host) => host.id),
   ),
 );
-const libraryTagChips = computed(() => tagChipPlan(mergedTags.value, libraryFilters.tag));
+const libraryFilterTags = computed(() => {
+  const representatives = groupLogicalGalleryPrints(galleryCopies).map(
+    (group) => group.representative,
+  );
+  const visible =
+    libraryScope.value === "prints"
+      ? representatives.filter(
+          (print) =>
+            !(organizationOf(print)?.collections ?? []).some((slug) =>
+              hiddenCollectionSlugs.value.has(slug),
+            ),
+        )
+      : representatives;
+  const excluded =
+    libraryScope.value === "prints"
+      ? representatives.filter((print) => !visible.includes(print))
+      : [];
+  return visibleTagCounts(
+    mergedTags.value,
+    visible.map((print) => organizationOf(print) ?? { tags: [] }),
+    excluded.map((print) => organizationOf(print) ?? { tags: [] }),
+  );
+});
+const libraryTagChips = computed(() => tagChipPlan(libraryFilterTags.value, libraryFilters.tag));
 
 const libraryHostChips = computed(() =>
   connectedHosts.value.length > 1
@@ -6486,9 +6515,20 @@ function rebuildGalleryOrganization(): void {
     selectedHostId.value || null,
   );
   const counts: Record<string, number> = {};
-  for (const copy of galleryCopies) counts[copy.hostId] = (counts[copy.hostId] ?? 0) + 1;
+  for (const copy of galleryCopies) {
+    const hidden = (organizationOf(copy)?.collections ?? []).some((slug) =>
+      hiddenCollectionSlugs.value.has(slug),
+    );
+    if (!hidden) counts[copy.hostId] = (counts[copy.hostId] ?? 0) + 1;
+  }
   libraryHostCounts.value = counts;
-  libraryPrintCount.value = groupLogicalGalleryPrints(galleryCopies).length;
+  const logicalPrints = groupLogicalGalleryPrints(galleryCopies);
+  libraryPrintCount.value = logicalPrints.filter(
+    (group) =>
+      !(organizationOf(group.representative)?.collections ?? []).some((slug) =>
+        hiddenCollectionSlugs.value.has(slug),
+      ),
+  ).length;
   trashCount.value = groupLogicalGalleryPrints(trashCopies).length;
 }
 
@@ -6502,8 +6542,12 @@ function visibleRepresentatives(): PendingGalleryPrint[] {
       : libraryScope.value === "collections"
         ? { ...EMPTY_LIBRARY_FILTERS, collectionSlug: libraryFilters.collectionSlug }
         : { ...EMPTY_LIBRARY_FILTERS };
-  return filterLibraryPrints(representatives, filters, organizationOf, (print) =>
-    logicalCopiesOf(copies, print),
+  return filterLibraryPrints(
+    representatives,
+    filters,
+    organizationOf,
+    (print) => logicalCopiesOf(copies, print),
+    libraryScope.value === "prints" ? hiddenCollectionSlugs.value : new Set(),
   );
 }
 
@@ -6996,6 +7040,44 @@ async function renameCollectionFromSheet(): Promise<void> {
     closeLibrarySheet();
   } finally {
     librarySheetBusy.value = false;
+  }
+}
+
+async function setCollectionHidden(card: MobileCollectionCard): Promise<void> {
+  organizationBusy.value = true;
+  organizationError.value = "";
+  try {
+    const hosts = connectedHosts.value.filter((host) =>
+      collectionOnHost(hostCollections, host.id, card.slug),
+    );
+    const hidden = !card.hidden;
+    const results = await Promise.allSettled(
+      hosts.map((host) =>
+        updateHostCollectionHidden(
+          mobileHostTarget(host),
+          collectionOnHost(hostCollections, host.id, card.slug)!.id,
+          hidden,
+        ),
+      ),
+    );
+    const failures = results.flatMap((result, index) =>
+      result.status === "rejected"
+        ? [{ hostId: hosts[index]!.id, hostName: hosts[index]!.name, error: result.reason }]
+        : [],
+    );
+    if (failures.length > 0) {
+      organizationError.value = fanoutFailureMessage(
+        `${hidden ? "hide" : "show"} “${card.name}”`,
+        failures,
+        (error, name) => describeTransportError(error, name),
+      );
+    }
+    await refreshHostOrganization(hosts.map((host) => host.id));
+    rebuildGalleryOrganization();
+    await requeueGallery();
+    collectionMenuSlug.value = null;
+  } finally {
+    organizationBusy.value = false;
   }
 }
 
@@ -9082,6 +9164,12 @@ onBeforeUnmount(() => {
                 <span class="mobile-collection-copy">
                   <strong>{{ card.name }}</strong>
                   <span
+                    v-if="card.hidden"
+                    class="mobile-collection-hidden"
+                    data-test="mobile-collection-hidden-badge"
+                    >Hidden</span
+                  >
+                  <span
                     ><span class="mobile-collection-count">{{ card.count }}</span>
                     <template v-if="card.hostsLabel"> · {{ card.hostsLabel }}</template></span
                   >
@@ -9107,6 +9195,15 @@ onBeforeUnmount(() => {
                   Delete collection “{{ card.name }}”? Its prints stay in the Library.
                 </p>
                 <div class="row-actions">
+                  <button
+                    class="secondary-button"
+                    type="button"
+                    :disabled="organizationBusy"
+                    data-test="mobile-collection-hidden"
+                    @click="setCollectionHidden(card)"
+                  >
+                    {{ card.hidden ? "Show in Library" : "Hide from Library" }}
+                  </button>
                   <button
                     class="secondary-button"
                     type="button"
@@ -9599,7 +9696,7 @@ onBeforeUnmount(() => {
         >
           <div class="mobile-library-tag-list">
             <button
-              v-for="tag in mergedTags"
+              v-for="tag in libraryFilterTags"
               :key="`all-${tag.name}`"
               class="mobile-library-chip"
               type="button"
