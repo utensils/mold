@@ -2135,6 +2135,12 @@ mod tests {
         for (frames, video_latents, audio_latents) in [(124, 37, 207), (345, 102, 575)] {
             let mut req = request();
             req.frames = Some(frames);
+            // Geometry is a family property, but the reviewed compact tags
+            // admit exactly one clip length, so the long boundary is exercised
+            // through the official layout that actually spans the grid.
+            if frames != contract::REVIEWED_COMPACT_FRAMES {
+                req.model = contract::FL2VA_OFFICIAL.to_string();
+            }
             let prepared = prepared(&req);
             assert_eq!(prepared.geometry.latent_frames, video_latents);
             assert_eq!(prepared.geometry.audio_latents_per_channel, audio_latents);
