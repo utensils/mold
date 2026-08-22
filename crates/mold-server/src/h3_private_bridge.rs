@@ -625,7 +625,11 @@ fn reviewed_h3_private_generation_profile_for(
         source_image: Some(mold_core::SourceImageCapability::Required),
         supports_sequence: false,
         supports_extend: false,
-        supports_audio: true,
+        // Same single authority as the row: H3 declares synchronized audio.
+        supports_audio: mold_core::catalog::declared_audio_capability(
+            mold_core::minimax_h3::FAMILY,
+            model,
+        ) == Some(true),
     });
     let recipe = profile.recipes.first_mut()?;
     let pixels = u64::from(width).checked_mul(u64::from(height))?;
@@ -864,7 +868,13 @@ fn h3_model_row(
         kind: Some("checkpoint".into()),
         modality: Some("video".into()),
         nsfw: None,
-        supports_audio: Some(true),
+        // The family's own declaration, never a literal: the manifest row for
+        // this same identity derives from it too, so the executable row and
+        // the cold row can never advertise diverging audio contracts (#841).
+        supports_audio: mold_core::catalog::declared_audio_capability(
+            mold_core::minimax_h3::FAMILY,
+            model,
+        ),
         supports_identity: Some(false),
         supports_extend: Some(false),
         extend_default_overlap_frames: None,

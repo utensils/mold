@@ -15574,7 +15574,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "minimax-h3.minimax-h3-fl2va",
-        "profile_hash": "9cb07be96af69e8ab9067a0956e9797ec3845c9862ff7dc2089c3d4b0f69ebee",
+        "profile_hash": "8fac546289e59b2720572b3fe09c5a8f1c89920ffe93c27a8a1bed820cb96064",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -15664,7 +15664,7 @@
               "supports_identity": false,
               "supports_sequence": false,
               "supports_extend": false,
-              "supports_audio": false,
+              "supports_audio": true,
               "source_video": {
                 "mode": "hidden",
                 "required": false,
@@ -15734,7 +15734,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "minimax-h3.minimax-h3-fl2va",
-        "profile_hash": "cd87034f31ea1675f73e03d1018735143524089ecab30b19a45ff18a80300ffc",
+        "profile_hash": "40077f4d3de3ee1691133c04c143f36bededa786e905255dffcd3cf16d042047",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -15824,7 +15824,7 @@
               "supports_identity": false,
               "supports_sequence": false,
               "supports_extend": false,
-              "supports_audio": false,
+              "supports_audio": true,
               "source_video": {
                 "mode": "hidden",
                 "required": false,
@@ -15894,7 +15894,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "minimax-h3.minimax-h3-fl2va",
-        "profile_hash": "bbc7b9707d4828bdac78969501bfd7e60e66842572802cbb6f26b1f7ea0b1841",
+        "profile_hash": "263b62ec3171281adbaea8192d43f34af70b0275fcaae293386fef4cae418b6d",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -15984,7 +15984,7 @@
               "supports_identity": false,
               "supports_sequence": false,
               "supports_extend": false,
-              "supports_audio": false,
+              "supports_audio": true,
               "source_video": {
                 "mode": "hidden",
                 "required": false,
@@ -16054,7 +16054,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "minimax-h3.minimax-h3-fl2va",
-        "profile_hash": "770fd244c7de0d66bef0c44af825081c4ee64365d496a25bc738be30e9f562a3",
+        "profile_hash": "baf5ebbfd706859adbfcd3b7b66378e4fbe7412fe94fc482bac99dc0f50f2034",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -16203,7 +16203,7 @@
               "supports_identity": false,
               "supports_sequence": false,
               "supports_extend": false,
-              "supports_audio": false,
+              "supports_audio": true,
               "source_video": {
                 "mode": "hidden",
                 "required": false,
@@ -16273,7 +16273,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "minimax-h3.minimax-h3-ref2va",
-        "profile_hash": "ac9308b6315187cbb42f8cc480e177ed4150816e8764b825bc2a0edfdb7304f5",
+        "profile_hash": "5e89be5624da519875e268e7d67951e6813e019ceecf04b7a735fa4b0379e07f",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -16363,7 +16363,7 @@
               "supports_identity": false,
               "supports_sequence": false,
               "supports_extend": false,
-              "supports_audio": false,
+              "supports_audio": true,
               "source_video": {
                 "mode": "hidden",
                 "required": false,
@@ -16433,7 +16433,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "minimax-h3.minimax-h3-ref2va",
-        "profile_hash": "b88c7b1085bb77cdb8bd2e059a15e67cb92547647f90f645955dabd6b45523e0",
+        "profile_hash": "1ec8cf397fdfa2d5da47e32f40162236fb66dba6059edfd39400cfa76a4184c3",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -16582,7 +16582,7 @@
               "supports_identity": false,
               "supports_sequence": false,
               "supports_extend": false,
-              "supports_audio": false,
+              "supports_audio": true,
               "source_video": {
                 "mode": "hidden",
                 "required": false,
