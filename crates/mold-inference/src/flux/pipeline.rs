@@ -25,6 +25,7 @@ use crate::image::{build_output_metadata, encode_image};
 use crate::progress::{ProgressCallback, ProgressReporter};
 
 use super::identity::{EngineIdentityState, RenderIdentity};
+use super::transformer::TrueCfgBranch;
 use super::transformer::FluxTransformer;
 
 /// Some FLUX safetensors checkpoints store transformer tensors at the root
@@ -1082,11 +1083,14 @@ impl FluxEngine {
     /// lands, only a test or dev harness calls this, and a conditioned request
     /// with nothing installed is an explicit error rather than a silently
     /// unconditioned render.
+    /// `uncond` is the unconditional identity a PuLID true-CFG render's
+    /// negative branch injects; `None` for every render that does not run one.
     pub fn set_identity_embedding(
         &mut self,
         embedding: Option<crate::flux::pulid::IdentityEmbedding>,
+        uncond: Option<crate::flux::pulid::IdentityEmbedding>,
     ) {
-        self.identity.set_embedding(embedding);
+        self.identity.set_embedding(embedding, uncond);
     }
 
     /// The frozen PuLID adapter path, when admission prepared the bundle.
@@ -1723,14 +1727,46 @@ impl FluxEngine {
             .progress
             .info("Using sequential loading (load-use-drop) to minimize peak memory");
 
-        let (t5_emb, clip_emb) = if let Some((t5_emb, clip_emb)) = Self::restore_prompt_cache(
+        // True CFG needs a SECOND conditioning pair, from the negative prompt.
+        // FLUX is guidance-distilled and has never encoded one, so it is
+        // encoded here, beside the positive, while the encoders are loaded —
+        // there is no later point in this path where they still exist. Absent
+        // for every request that does not run the branch, which is the gate
+        // that keeps an ordinary render paying nothing
+        // (`PuLID/app_flux.py:111`: `prepare(..., prompt=neg_prompt) if
+        // use_true_cfg else None`).
+        let true_cfg_negative: Option<String> = mold_core::identity::request_uses_true_cfg(req)
+            .then(|| req.negative_prompt.clone().unwrap_or_default());
+
+        // Both halves come from the cache or neither does: restoring only the
+        // positive would let this path skip loading the encoders the negative
+        // still needs.
+        let cached_conditioning = match Self::restore_prompt_cache(
             &self.base.progress,
             &self.prompt_cache,
             &req.prompt,
             &device,
             gpu_dtype,
         )? {
-            (t5_emb, clip_emb)
+            Some(positive) => match true_cfg_negative.as_deref() {
+                None => Some((positive, None)),
+                Some(negative) => Self::restore_prompt_cache(
+                    &self.base.progress,
+                    &self.prompt_cache,
+                    negative,
+                    &device,
+                    gpu_dtype,
+                )?
+                .map(|negative| (positive, Some(negative))),
+            },
+            None => None,
+        };
+
+        let (t5_emb, clip_emb, neg_t5_emb, neg_clip_emb) = if let Some(((t5_emb, clip_emb), negative)) =
+            cached_conditioning
+        {
+            let (neg_t5_emb, neg_clip_emb) = negative.unzip();
+            (t5_emb, clip_emb, neg_t5_emb, neg_clip_emb)
         } else {
             // --- Phase 1: T5 encoding ---
             // Reserve-adjusted reading drives the variant choice.
@@ -1807,6 +1843,13 @@ impl FluxEngine {
             // T5 output sitting on GPU. Idempotent on the GGUF path where T5
             // already produces CPU tensors.
             let t5_emb = park_cond_to_cpu(&t5.encode(&req.prompt, &device, gpu_dtype)?)?;
+            // The negative branch's T5 conditioning, while T5 is still here.
+            let neg_t5_emb = match true_cfg_negative.as_deref() {
+                Some(negative) => Some(park_cond_to_cpu(
+                    &t5.encode(negative, &device, gpu_dtype)?,
+                )?),
+                None => None,
+            };
             self.base.progress.phase_done(
                 crate::ProgressPhase::PromptEncode,
                 "Encoding prompt (T5)",
@@ -1868,9 +1911,16 @@ impl FluxEngine {
             // Park to CPU for the same reason as T5 above — keeps the
             // TE→transformer transition window from carrying GPU residency
             // we don't need.
-            let clip_emb = {
+            let (clip_emb, neg_clip_emb) = {
                 let mut clip = clip;
-                park_cond_to_cpu(&clip.encode(&req.prompt, &device, gpu_dtype)?)?
+                let positive = park_cond_to_cpu(&clip.encode(&req.prompt, &device, gpu_dtype)?)?;
+                let negative = match true_cfg_negative.as_deref() {
+                    Some(negative) => Some(park_cond_to_cpu(
+                        &clip.encode(negative, &device, gpu_dtype)?,
+                    )?),
+                    None => None,
+                };
+                (positive, negative)
             };
             self.base.progress.phase_done(
                 crate::ProgressPhase::PromptEncode,
@@ -1885,7 +1935,14 @@ impl FluxEngine {
             // moves to CPU; passing CPU tensors here avoids an unnecessary
             // round-trip on the GGUF path.
             Self::store_prompt_cache(&self.prompt_cache, &req.prompt, &t5_emb, &clip_emb)?;
-            (t5_emb, clip_emb)
+            if let (Some(negative), Some(neg_t5), Some(neg_clip)) = (
+                true_cfg_negative.as_deref(),
+                neg_t5_emb.as_ref(),
+                neg_clip_emb.as_ref(),
+            ) {
+                Self::store_prompt_cache(&self.prompt_cache, negative, neg_t5, neg_clip)?;
+            }
+            (t5_emb, clip_emb, neg_t5_emb, neg_clip_emb)
         };
 
         // Synchronize to ensure freed T5/CLIP VRAM is reclaimed before
@@ -2250,6 +2307,17 @@ impl FluxEngine {
         };
 
         let state = flux::sampling::State::new(&t5_emb_state, &clip_emb_state, &img_state)?;
+        // The negative branch's conditioning, prepared exactly as the positive
+        // one is and over the SAME image latent — upstream's
+        // `prepare(t5, clip, img=x, prompt=neg_prompt)`
+        // (`PuLID/app_flux.py:111`).
+        let negative_state = negative_conditioning_state(
+            neg_t5_emb.as_ref(),
+            neg_clip_emb.as_ref(),
+            &img_state,
+            &device,
+            is_quantized,
+        )?;
         let inpaint_ctx = inpaint_ctx
             .as_ref()
             .map(crate::img2img::pack_flux_inpaint_context)
@@ -2274,19 +2342,25 @@ impl FluxEngine {
         let denoise_start = Instant::now();
 
         let previewer = crate::latent_preview::LatentPreviewer::flux1(height, width);
-        let img = flux_model.denoise(
-            &state.img,
-            &state.img_ids,
-            &state.txt,
-            &state.txt_ids,
-            &state.vec,
-            &timesteps,
-            req.guidance,
-            &self.base.progress,
-            inpaint_ctx.as_ref(),
-            Some(&previewer),
-            identity.runtime(),
-        )?;
+        // Scoped so both immutable borrows of `identity` end before the
+        // release below needs it mutably.
+        let img = {
+            let true_cfg = resolve_true_cfg_branch(&identity, negative_state.as_ref())?;
+            flux_model.denoise(
+                &state.img,
+                &state.img_ids,
+                &state.txt,
+                &state.txt_ids,
+                &state.vec,
+                &timesteps,
+                req.guidance,
+                &self.base.progress,
+                inpaint_ctx.as_ref(),
+                Some(&previewer),
+                identity.runtime(),
+                true_cfg.as_ref(),
+            )?
+        };
 
         let img = flux::sampling::unpack(&img, height, width)?;
         self.base
@@ -2606,19 +2680,45 @@ impl FluxEngine {
                 progress.stage_done(xformer_label, reload_start.elapsed());
             }
 
-            if let Some((t5_emb, clip_emb)) = Self::restore_prompt_cache(
+            // True CFG needs a second conditioning pair, from the negative
+            // prompt (`PuLID/app_flux.py:111`). Absent for every request that
+            // does not run the branch.
+            let true_cfg_negative: Option<String> =
+                mold_core::identity::request_uses_true_cfg(req)
+                    .then(|| req.negative_prompt.clone().unwrap_or_default());
+
+            // Both halves or neither: a cache hit that returned only the
+            // positive would skip the encoder reload the negative still needs.
+            let cached_conditioning = match Self::restore_prompt_cache(
                 progress,
                 prompt_cache,
                 &req.prompt,
                 &loaded_device,
                 loaded_dtype,
             )? {
+                Some(positive) => match true_cfg_negative.as_deref() {
+                    None => Some((positive, None)),
+                    Some(negative) => Self::restore_prompt_cache(
+                        progress,
+                        prompt_cache,
+                        negative,
+                        &loaded_device,
+                        loaded_dtype,
+                    )?
+                    .map(|negative| (positive, Some(negative))),
+                },
+                None => None,
+            };
+            if let Some(((t5_emb, clip_emb), negative)) = cached_conditioning {
+                let (neg_t5_emb, neg_clip_emb) = negative.unzip();
                 return Self::generate_with_embeddings(
                     progress,
                     req,
                     &mut loaded,
                     t5_emb,
                     clip_emb,
+                    neg_t5_emb,
+                    neg_clip_emb,
                     seed,
                     width,
                     height,
@@ -2671,6 +2771,15 @@ impl FluxEngine {
                 &loaded_device,
                 loaded_dtype,
             )?)?;
+            // The negative branch's T5 conditioning, while T5 is still loaded.
+            let neg_t5_emb = match true_cfg_negative.as_deref() {
+                Some(negative) => Some(park_cond_to_cpu(&loaded.t5.encode(
+                    negative,
+                    &loaded_device,
+                    loaded_dtype,
+                )?)?),
+                None => None,
+            };
             progress.phase_done(
                 crate::ProgressPhase::PromptEncode,
                 "Encoding prompt (T5)",
@@ -2685,6 +2794,14 @@ impl FluxEngine {
                 &loaded_device,
                 loaded_dtype,
             )?)?;
+            let neg_clip_emb = match true_cfg_negative.as_deref() {
+                Some(negative) => Some(park_cond_to_cpu(&loaded.clip.encode(
+                    negative,
+                    &loaded_device,
+                    loaded_dtype,
+                )?)?),
+                None => None,
+            };
             progress.phase_done(
                 crate::ProgressPhase::PromptEncode,
                 "Encoding prompt (CLIP)",
@@ -2694,6 +2811,13 @@ impl FluxEngine {
             // CachedTensor::from_tensor already moves to CPU — passing CPU
             // tensors here avoids the round-trip on the GGUF path.
             Self::store_prompt_cache(prompt_cache, &req.prompt, &t5_emb, &clip_emb)?;
+            if let (Some(negative), Some(neg_t5), Some(neg_clip)) = (
+                true_cfg_negative.as_deref(),
+                neg_t5_emb.as_ref(),
+                neg_clip_emb.as_ref(),
+            ) {
+                Self::store_prompt_cache(prompt_cache, negative, neg_t5, neg_clip)?;
+            }
 
             // Drop or park encoders to free GPU memory for denoising.
             //
@@ -2761,6 +2885,8 @@ impl FluxEngine {
                 &mut loaded,
                 t5_emb,
                 clip_emb,
+                neg_t5_emb,
+                neg_clip_emb,
                 seed,
                 width,
                 height,
@@ -2772,6 +2898,64 @@ impl FluxEngine {
     }
 }
 
+/// Prepare the negative branch's conditioning, or `None` when this render does
+/// not run one.
+///
+/// Mirrors the positive path exactly — the same device migration, the same
+/// quantized-F32 cast, and the same `State::new` over the SAME image latent —
+/// because upstream builds it with the identical `prepare()` call
+/// (`PuLID/app_flux.py:111`) and any divergence here would be a difference the
+/// guidance formula then amplifies.
+fn negative_conditioning_state(
+    neg_t5_emb: Option<&candle_core::Tensor>,
+    neg_clip_emb: Option<&candle_core::Tensor>,
+    img_state: &candle_core::Tensor,
+    device: &Device,
+    is_quantized: bool,
+) -> Result<Option<flux::sampling::State>> {
+    let (Some(t5), Some(clip)) = (neg_t5_emb, neg_clip_emb) else {
+        return Ok(None);
+    };
+    let t5 = t5.to_device(device)?;
+    let clip = clip.to_device(device)?;
+    let (t5, clip) = if is_quantized {
+        (t5.to_dtype(DType::F32)?, clip.to_dtype(DType::F32)?)
+    } else {
+        (t5, clip)
+    };
+    Ok(Some(flux::sampling::State::new(&t5, &clip, img_state)?))
+}
+
+/// Pair the resolved unconditional identity with the negative conditioning.
+///
+/// `None` — the ordinary case — is what makes the denoise loop take the path it
+/// always took. The mismatch arm is deliberately an error rather than a silent
+/// downgrade: `req.guidance` is chosen for whichever regime is running, so
+/// dropping the branch would render at a distilled guidance value the caller
+/// picked for a true-CFG render and say nothing.
+fn resolve_true_cfg_branch<'a>(
+    identity: &'a RenderIdentity<'_>,
+    negative_state: Option<&'a flux::sampling::State>,
+) -> Result<Option<TrueCfgBranch<'a>>> {
+    let Some((pulid, scale, start_step)) = identity.negative() else {
+        return Ok(None);
+    };
+    let state = negative_state.ok_or_else(|| {
+        anyhow::anyhow!(
+            "true classifier-free guidance was resolved for this render but its negative \
+             prompt was never encoded"
+        )
+    })?;
+    Ok(Some(TrueCfgBranch {
+        scale,
+        start_step,
+        txt: &state.txt,
+        txt_ids: &state.txt_ids,
+        vec_: &state.vec,
+        pulid: Some(pulid),
+    }))
+}
+
 impl InferenceEngine for FluxEngine {
     /// FLUX is the one family that can honour this, so it is the one family
     /// that overrides the trait's refusal.
@@ -2779,10 +2963,17 @@ impl InferenceEngine for FluxEngine {
         &mut self,
         embedding: Option<&mold_core::identity::FrozenIdentityEmbedding>,
     ) -> Result<()> {
+        // Both halves come from the same frozen value, so a true-CFG render
+        // cannot end up with this request's identity and a previous request's
+        // unconditional one.
+        let uncond = embedding
+            .map(crate::flux::pulid::IdentityEmbedding::uncond_from_frozen)
+            .transpose()?
+            .flatten();
         let embedding = embedding
             .map(crate::flux::pulid::IdentityEmbedding::from_frozen)
             .transpose()?;
-        self.set_identity_embedding(embedding);
+        self.set_identity_embedding(embedding, uncond);
         Ok(())
     }
 
@@ -2868,6 +3059,10 @@ impl FluxEngine {
         loaded: &mut LoadedFlux,
         t5_emb: candle_core::Tensor,
         clip_emb: candle_core::Tensor,
+        // `neg_t5_emb` / `neg_clip_emb` are the negative prompt's conditioning,
+        // present only for a render that runs the PuLID true-CFG branch.
+        neg_t5_emb: Option<candle_core::Tensor>,
+        neg_clip_emb: Option<candle_core::Tensor>,
         seed: u64,
         width: usize,
         height: usize,
@@ -2982,6 +3177,15 @@ impl FluxEngine {
 
         // Build sampling state
         let state = flux::sampling::State::new(&t5_emb_state, &clip_emb_state, &img_state)?;
+        // Upstream's `prepare(t5, clip, img=x, prompt=neg_prompt)`
+        // (`PuLID/app_flux.py:111`) — the same image latent, the other prompt.
+        let negative_state = negative_conditioning_state(
+            neg_t5_emb.as_ref(),
+            neg_clip_emb.as_ref(),
+            &img_state,
+            &loaded.device,
+            loaded.is_quantized,
+        )?;
         let inpaint_ctx = inpaint_ctx
             .as_ref()
             .map(crate::img2img::pack_flux_inpaint_context)
@@ -2997,25 +3201,29 @@ impl FluxEngine {
         );
 
         // Denoise — guidance from request (0.0 for schnell, 3.5+ for dev/finetuned)
-        let img = loaded
-            .flux_model
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("transformer not loaded"))?
-            .denoise(
-                &state.img,
-                &state.img_ids,
-                &state.txt,
-                &state.txt_ids,
-                &state.vec,
-                &timesteps,
-                req.guidance,
-                progress,
-                inpaint_ctx.as_ref(),
-                Some(&crate::latent_preview::LatentPreviewer::flux1(
-                    height, width,
-                )),
-                identity.runtime(),
-            )?;
+        let img = {
+            let true_cfg = resolve_true_cfg_branch(identity, negative_state.as_ref())?;
+            loaded
+                .flux_model
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("transformer not loaded"))?
+                .denoise(
+                    &state.img,
+                    &state.img_ids,
+                    &state.txt,
+                    &state.txt_ids,
+                    &state.vec,
+                    &timesteps,
+                    req.guidance,
+                    progress,
+                    inpaint_ctx.as_ref(),
+                    Some(&crate::latent_preview::LatentPreviewer::flux1(
+                        height, width,
+                    )),
+                    identity.runtime(),
+                    true_cfg.as_ref(),
+                )?
+        };
 
         // 7. Unpack latent to spatial
         let img = flux::sampling::unpack(&img, height, width)?;

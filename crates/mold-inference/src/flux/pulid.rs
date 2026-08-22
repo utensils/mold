@@ -402,6 +402,24 @@ impl IdentityEmbedding {
         )?)
     }
 
+    /// Rehydrate the UNCONDITIONAL identity frozen beside the real one, when
+    /// this request runs a true-CFG negative branch.
+    ///
+    /// `None` for every request that does not, which is what keeps the ~256 KiB
+    /// and the second cross-attention context off every ordinary render.
+    pub fn uncond_from_frozen(
+        frozen: &mold_core::identity::FrozenIdentityEmbedding,
+    ) -> Result<Option<Self>> {
+        let Some(values) = frozen.uncond_values() else {
+            return Ok(None);
+        };
+        Ok(Some(Self::new(Tensor::from_vec(
+            values,
+            (1, ID_TOKENS, ID_TOKEN_DIM),
+            &Device::Cpu,
+        )?)?))
+    }
+
     /// Read the embedding from a safetensors file.
     ///
     /// `name` defaults to `pulid_id`, the tensor name stable-diffusion.cpp's

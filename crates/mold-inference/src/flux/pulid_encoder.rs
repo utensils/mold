@@ -333,7 +333,8 @@ impl IdFormer {
 mod tests {
     use super::*;
     use crate::pulid_fixtures::{
-        golden, max_errors, pulid_asset, scale_relative_error, DeterministicStream, GoldenStats,
+        golden, max_errors, pulid_asset, scale_relative_error, true_cfg_golden,
+        DeterministicStream, GoldenStats,
         SEED_IDFORMER_ID, SEED_IDFORMER_VIT,
     };
     use candle_core::{DType, Device};
@@ -606,6 +607,55 @@ mod tests {
         let error = scale_relative_error(&actual, &expected, expected_stats.peak);
         println!("idformer: {error:.3e} of the {} scale", expected_stats.peak);
         assert!(error < 1e-4, "idformer drifted by {error}");
+    }
+
+    /// The UNCONDITIONAL identity the true-CFG negative branch conditions on
+    /// (#1226), against upstream's own value.
+    ///
+    /// `PuLID/pulid/pipeline_flux.py:188-192` builds it by running the IDFormer
+    /// on `zeros_like(id_cond)` and a zeroed hidden state per scale. It is NOT
+    /// a zero tensor — the IDFormer has biases, LayerNorms, and learned latent
+    /// queries, so all-zero inputs land it around +-13000, the same regime the
+    /// noise fixture above exercises. Getting this wrong would produce a
+    /// plausible render at the wrong guidance direction, which is precisely the
+    /// class of bug a golden exists to catch.
+    ///
+    /// It is a pure function of the adapter weights: no photograph reaches it,
+    /// which is why one committed tensor is the whole answer and why the
+    /// composer computes it once rather than per photograph.
+    #[test]
+    #[ignore = "requires the pinned PuLID checkpoints via MOLD_TEST_PULID_ASSETS"]
+    fn the_unconditional_identity_matches_upstream() {
+        let device = Device::Cpu;
+        let encoder = load_encoder(&device);
+        let id_uncond = Tensor::zeros((1, ID_COND_DIM), DType::F32, &device).unwrap();
+        let hidden_uncond: Vec<Tensor> = (0..SCALES)
+            .map(|_| Tensor::zeros((1, 577, DIM), DType::F32, &device).unwrap())
+            .collect();
+
+        let output = encoder.forward(&id_uncond, &hidden_uncond).unwrap();
+        assert_eq!(output.dims(), &[1, NUM_QUERIES, OUTPUT_DIM]);
+
+        let expected_stats = GoldenStats::load_true_cfg("idformer.uncond.stats");
+        expected_stats.assert_matches(&GoldenStats::measure(&output), 1e-4, "idformer.uncond");
+        assert!(
+            expected_stats.peak > 1.0,
+            "the unconditional identity is not a zero tensor; a golden that says it is \
+             was captured wrong"
+        );
+
+        let actual = output.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let expected = true_cfg_golden("idformer.uncond")
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
+        let error = scale_relative_error(&actual, &expected, expected_stats.peak);
+        println!(
+            "idformer.uncond: {error:.3e} of the {} scale",
+            expected_stats.peak
+        );
+        assert!(error < 1e-4, "the unconditional identity drifted by {error}");
     }
 
     /// The five identity tokens must be in every scale's key/value context,

@@ -252,26 +252,14 @@ pub enum ComposeStage {
     IdFormerForward,
 }
 
-/// Run the EVA tower and the IDFormer over one aligned crop.
+/// Run the EVA tower and the IDFormer over one aligned crop, with a per-stage
+/// wall-clock observer.
 ///
-/// Split out from [`extract_identity_embedding`] so the weight-gated parity
-/// test can drive it from a crop it produced by other means. The
-/// one-photograph case of [`compose_identity_token_sets`].
-pub(crate) fn compose_identity_tokens(
-    paths: &PulidPaths,
-    arcface: &[f32],
-    eva_crop_512: &image::RgbImage,
-) -> Result<Vec<f32>> {
-    compose_identity_tokens_observed(paths, arcface, eva_crop_512, &mut |_, _| {})
-}
-
-/// [`compose_identity_tokens`] with a per-stage wall-clock observer.
-///
-/// The observer is the ONLY difference — `compose_identity_tokens` delegates
-/// here with a no-op, so there is one implementation and the benchmark cannot
-/// drift from the production path by measuring a copy of it. It exists for
-/// `pulid_face_probe bench --full`, which §4 requires before any performance
-/// claim about identity extraction is made.
+/// The one-photograph case of [`compose_identity_token_sets_observed`], and the
+/// entry point `pulid_face_probe bench --full` drives — which §4 requires
+/// before any performance claim about identity extraction is made. It
+/// delegates rather than duplicating, so the benchmark cannot drift from the
+/// production path by measuring a copy of it.
 pub fn compose_identity_tokens_observed(
     paths: &PulidPaths,
     arcface: &[f32],
