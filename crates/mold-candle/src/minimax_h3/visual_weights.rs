@@ -1189,6 +1189,13 @@ fn visual_weight_file_identity_mismatches(
     if opened.device != expected.device {
         mismatches.push("device");
     }
+    #[cfg(unix)]
+    if expected.descriptor_bound {
+        // ctime records metadata changes such as a collaborative chmod; it is
+        // not model-content identity. The retained descriptor, inode, length,
+        // and mtime continue to fence replacement and in-place mutation.
+        mismatches.retain(|axis| *axis != "changed-time");
+    }
     #[cfg(all(unix, not(target_os = "linux")))]
     if expected.descriptor_bound {
         // macOS reports a synthetic device id when statting `/dev/fd/N`, but

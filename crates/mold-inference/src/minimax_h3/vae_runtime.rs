@@ -2063,8 +2063,8 @@ impl StagedWeight {
         })?;
         if path_metadata.file_type().is_symlink()
             || !path_metadata.file_type().is_file()
-            || descriptor_identity != self.identity
-            || file_identity(&path_metadata)? != self.identity
+            || !same_staged_file_identity(&descriptor_identity, &self.identity)
+            || !same_staged_file_identity(&file_identity(&path_metadata)?, &self.identity)
         {
             return Err(artifact_error(
                 self.role,
@@ -2092,6 +2092,25 @@ impl StagedWeight {
         ] {
             digest.update(value.to_le_bytes());
         }
+    }
+}
+
+fn same_staged_file_identity(opened: &FileIdentity, expected: &FileIdentity) -> bool {
+    #[cfg(unix)]
+    {
+        // Permission and other metadata-only changes update ctime without
+        // changing model content. Staging already retains the descriptor and
+        // authenticated bytes; device, inode, length, and mtime preserve the
+        // replacement and in-place mutation fences.
+        opened.len == expected.len
+            && opened.device == expected.device
+            && opened.inode == expected.inode
+            && opened.modified_seconds == expected.modified_seconds
+            && opened.modified_nanoseconds == expected.modified_nanoseconds
+    }
+    #[cfg(not(unix))]
+    {
+        opened == expected
     }
 }
 
@@ -3308,6 +3327,41 @@ mod tests {
             &mut FakeFactory,
         )
         .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sealed_staging_accepts_permission_only_ctime_drift() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let source = tempfile::tempdir().unwrap();
+        let staging_root = tempfile::tempdir().unwrap();
+        let (paths, artifacts) = write_artifacts(source.path(), b"\x08visual");
+        let plan = FrozenH3ComfyVaeLoadPlan::synthetic(
+            paths,
+            staging_root.path().to_path_buf(),
+            artifacts,
+        )
+        .unwrap();
+        let mut observer = RecordingObserver::default();
+        let mut opened = H3ComfyVaeArtifactRole::WEIGHTS
+            .into_iter()
+            .map(|role| {
+                OpenedArtifact::open(
+                    plan.artifact(role).unwrap().clone(),
+                    plan.paths.get(role),
+                    &mut observer,
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let staged = StagedWeights::create(&plan, &mut opened, &mut observer).unwrap();
+        let visual = staged
+            .storage_path(H3ComfyVaeArtifactRole::VisualWeights)
+            .unwrap();
+        std::fs::set_permissions(visual, std::fs::Permissions::from_mode(0o440)).unwrap();
+
+        staged.validate("after permission change").unwrap();
     }
 
     #[test]
