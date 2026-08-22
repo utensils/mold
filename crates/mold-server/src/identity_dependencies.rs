@@ -825,8 +825,13 @@ mod tests {
             vec![device(), second_device()],
             None,
             DependencyMaterializationPolicy::ExistingOnly,
+            // Without an `h3` feature this struct has exactly one field, so the
+            // update base is a no-op there; it only carries the cfg-gated fields
+            // when the build actually has them.
+            #[allow(clippy::needless_update)]
             DependencyPreparationContext {
                 frozen_identity: Some(frozen.clone()),
+                ..Default::default()
             },
         )
         .await
@@ -946,8 +951,13 @@ mod tests {
                 vec![device(), second_device()],
                 None,
                 DependencyMaterializationPolicy::ExistingOnly,
+                // Without an `h3` feature this struct has exactly one field, so the
+                // update base is a no-op there; it only carries the cfg-gated fields
+                // when the build actually has them.
+                #[allow(clippy::needless_update)]
                 DependencyPreparationContext {
                     frozen_identity: Some(parent.clone()),
+                    ..Default::default()
                 },
             )
             .await
@@ -1000,8 +1010,13 @@ mod tests {
             vec![device()],
             None,
             DependencyMaterializationPolicy::ExistingOnly,
+            // Without an `h3` feature this struct has exactly one field, so the
+            // update base is a no-op there; it only carries the cfg-gated fields
+            // when the build actually has them.
+            #[allow(clippy::needless_update)]
             DependencyPreparationContext {
                 frozen_identity: Some(crate::identity_extraction::stub_embedding(b"parent-face")),
+                ..Default::default()
             },
         )
         .await
