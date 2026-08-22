@@ -1686,7 +1686,7 @@ fn process_scheduled_chain_stage(
 /// pages via `madvise(MADV_DONTNEED)`. Cheap (~ms), glibc-only, gated so we can
 /// A/B with `MOLD_MALLOC_TRIM=0`. `None` means the trim was disabled and no RSS
 /// was sampled.
-fn trim_malloc_arenas() -> Option<u64> {
+pub(crate) fn trim_malloc_arenas() -> Option<u64> {
     let enabled = std::env::var("MOLD_MALLOC_TRIM")
         .map(|value| value != "0")
         .unwrap_or(true);
