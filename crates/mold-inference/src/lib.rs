@@ -19,7 +19,7 @@ mod factory;
 pub mod flux;
 pub mod flux2;
 mod h3_factory;
-/// PuLID-FLUX face detection and identity embedding (#1222). Gated on the
+/// PuLID face detection and identity embedding (#1222). Gated on the
 /// `pulid` feature, which is what pulls `candle-onnx` into the build.
 #[cfg(feature = "pulid")]
 pub mod identity;

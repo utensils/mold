@@ -57,7 +57,7 @@
 use anyhow::{Context, Result};
 use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_nn::VarBuilder;
-use mold_core::identity::{FrozenIdentityEmbedding, IdentityAssetDigests};
+use mold_core::identity::{FrozenIdentityEmbedding, IdentityAssetDigests, IdentityFamily};
 use mold_core::manifest::ModelComponent;
 use mold_core::pulid_assets::PulidPaths;
 
@@ -296,15 +296,21 @@ fn cache_put(key: String, value: CachedIdentity) {
 /// Every asset digest this build's extraction will record, known before any of
 /// them is opened.
 ///
+/// The adapter is family-specific, so the digest that enters the key is the
+/// family's own manifest pin — which is what keeps a FLUX identity and an SDXL
+/// identity for the SAME photograph two different cache entries. They are
+/// different IDFormers producing genuinely different tensors; a key that
+/// ignored the family would serve one render the other's face embedding.
+///
 /// A cache key needs the digests BEFORE the extraction runs, which is why they
 /// are resolved from the manifest pins and compiled-in constants here rather
 /// than from an [`IdentityAssetDigests`] a request has not produced yet. The
 /// two cannot disagree: the loaders refuse any file whose bytes do not hash to
 /// the pin, so a post-load digest that differed from this one would have
 /// failed the load instead of being recorded.
-pub fn pinned_asset_digests() -> IdentityAssetDigests {
+pub fn pinned_asset_digests(family: IdentityFamily) -> IdentityAssetDigests {
     IdentityAssetDigests {
-        adapter: adapter_sha256(),
+        adapter: adapter_sha256(family),
         vision: EVA_DERIVED_SHA256.to_string(),
         face_detector: super::onnx_graph::pinned_artifact(ModelComponent::FaceDetector)
             .map(|pin| pin.sha256.to_string())
@@ -498,7 +504,7 @@ pub fn extract_identity_embeddings(
     mold_core::identity::validate_id_images(images).map_err(IdentityError::Decode)?;
 
     let count = images.len();
-    let assets = pinned_asset_digests();
+    let assets = pinned_asset_digests(paths.family);
     let sources: Vec<String> = images
         .iter()
         .map(|bytes| mold_core::identity::id_image_sha256(bytes))
@@ -661,13 +667,32 @@ pub fn extract_identity_embeddings(
     })
 }
 
+/// The safetensors prefix the IDFormer's weights live under.
+///
+/// The one family-specific fact about extraction. Upstream instantiates the
+/// identical `IDFormer` class in both pipelines — same file
+/// (`pulid/encoders_transformer.py`), same defaults, same shapes, confirmed by
+/// `id_adapter.latents` `[1, 32, 1024]` and `id_adapter.proj_out`
+/// `[1024, 2048]` matching the FLUX golden exactly
+/// (`testdata/pulid_sdxl/README.md`) — and stores it under a different leading
+/// module name in each checkpoint.
+pub fn idformer_prefix(family: IdentityFamily) -> &'static str {
+    match family {
+        // `pipeline_flux.py:99-109`.
+        IdentityFamily::Flux => "pulid_encoder",
+        // `pipeline_v1_1.py:151-163`, whose `getattr(self, module)` resolves
+        // `id_adapter` to `self.id_adapter = IDFormer()`.
+        IdentityFamily::Sdxl => "id_adapter",
+    }
+}
+
 /// The manifest's pin for the adapter file.
 ///
 /// Recorded rather than re-hashed: `mold pull` verified these 1.1 GB against
 /// this exact digest when it wrote them, and re-reading the whole file on every
 /// conditioned request would cost more than the extraction it annotates.
-fn adapter_sha256() -> String {
-    mold_core::pulid_assets::pulid_manifest()
+fn adapter_sha256(family: IdentityFamily) -> String {
+    mold_core::pulid_assets::pulid_manifest_for(family)
         .files
         .iter()
         .find(|file| file.component == ModelComponent::IdentityAdapter)
@@ -921,8 +946,11 @@ pub(crate) fn compose_identity_token_sets_observed(
     // derived and hashed moments ago. There is no fresher authentication here
     // to throw away by reopening a name (see `adapter_sha256`, and
     // `pickle_convert::AuthenticatedArtifact` for the case that is different).
-    // `pipeline_flux.py:99-109` splits the checkpoint by leading module name;
-    // the IDFormer half is `pulid_encoder.*`.
+    // `pipeline_flux.py:99-109` and `pipeline_v1_1.py:151-163` both split the
+    // checkpoint by leading module name; the IDFormer half is `pulid_encoder.*`
+    // in the FLUX file and `id_adapter.*` in the SDXL v1.1 file. The two are
+    // the SAME class with the same shapes — upstream instantiates one
+    // `IDFormer()` in each pipeline — so only the prefix differs.
     let vb = unsafe {
         VarBuilder::from_mmaped_safetensors(
             std::slice::from_ref(&paths.adapter),
@@ -931,7 +959,8 @@ pub(crate) fn compose_identity_token_sets_observed(
         )
         .with_context(|| format!("reading the PuLID adapter {}", paths.adapter.display()))?
     };
-    let idformer = IdFormer::new(vb.pp("pulid_encoder")).context("building the PuLID IDFormer")?;
+    let idformer = IdFormer::new(vb.pp(idformer_prefix(paths.family)))
+        .context("building the PuLID IDFormer")?;
     settle(device)?;
     observe(ComposeStage::IdFormerBuild, stage_started.elapsed());
 
@@ -1069,6 +1098,144 @@ fn run_idformer(idformer: &IdFormer, id_cond: &Tensor, hidden: &[Tensor]) -> Res
 mod tests {
     use super::*;
 
+    /// Parity for the SDXL half of `idformer_prefix` (#1228).
+    ///
+    /// The claim it defends is that `id_adapter.*` and `pulid_encoder.*` hold
+    /// the SAME class — upstream instantiates one bare `IDFormer()` in each
+    /// pipeline — so mold's single port serves both and only the prefix moves.
+    /// A prefix that resolved nothing would build an IDFormer of zeros and
+    /// return a plausible-looking tensor, which is exactly why this is a
+    /// golden rather than a shape assertion.
+    ///
+    /// Weight-gated, mirroring `flux::pulid_encoder`'s own goldens:
+    ///
+    /// ```text
+    /// MOLD_TEST_PULID_ASSETS=/path/to/pulid \
+    ///   cargo test --release -p mold-ai-inference --features pulid \
+    ///     --lib identity::extraction -- --ignored --nocapture
+    /// ```
+    mod sdxl_idformer_parity {
+        use super::*;
+        use crate::pulid_fixtures::{
+            pulid_asset, scale_relative_error, DeterministicStream, GoldenStats,
+            SEED_SDXL_IDFORMER_ID, SEED_SDXL_IDFORMER_VIT,
+        };
+        use candle_core::Device;
+
+        const GOLDEN_FILE: &str = "idformer_goldens.safetensors";
+        /// `capture_idformer_goldens.py`'s `ID_COND_DIM`: 512 ArcFace + 768
+        /// EVA02-CLIP-L-14-336 projection. Deliberately NOT 1792 — see that
+        /// directory's README, correction 1.
+        const ID_COND_DIM: usize = 512 + 768;
+        const VIT_TOKENS: usize = 577;
+        const VIT_DIM: usize = 1024;
+        const SCALES: usize = 5;
+
+        /// The README measures f16 INPUT sensitivity at 6.5e-5 relative; a
+        /// port compared against the f32 golden should sit far below that.
+        /// FLUX's own `IdFormer` golden lands at 1.5e-7 absolute-vs-peak, so
+        /// the budget is set an order of magnitude above that measurement and
+        /// two below the input-sensitivity floor: a real regression in the
+        /// attention, the softmax widening, or the `proj_out` orientation
+        /// moves this by whole percent.
+        const TOLERANCE: f32 = 1.0e-5;
+
+        fn load_sdxl_idformer(device: &Device) -> IdFormer {
+            let adapter = pulid_asset("pulid_v1.1.safetensors");
+            let vb = unsafe {
+                candle_nn::VarBuilder::from_mmaped_safetensors(&[adapter], DType::F32, device)
+                    .unwrap()
+            };
+            IdFormer::new(vb.pp(idformer_prefix(IdentityFamily::Sdxl))).unwrap()
+        }
+
+        fn assert_case(label: &str, output: &Tensor) {
+            let stats = GoldenStats::load_sdxl(GOLDEN_FILE, &format!("{label}.stats"));
+            stats.assert_matches(&GoldenStats::measure(output), 1e-4, label);
+
+            let actual = output.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+            let expected = crate::pulid_fixtures::sdxl_golden(GOLDEN_FILE, label)
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap();
+            let error = scale_relative_error(&actual, &expected, stats.peak);
+            println!("{label}: {error:.3e} of the {} scale", stats.peak);
+            assert!(error < TOLERANCE, "{label} drifted by {error}");
+        }
+
+        fn single_inputs(device: &Device) -> (Tensor, Vec<Tensor>) {
+            // The capture draws `(1, 1, 1280)` from one stream; mold's port
+            // takes `[batch, 1280]` because it averages ACROSS photographs
+            // after the IDFormer rather than stacking them into it, so the
+            // same 1280 values arrive one rank lower.
+            let id_cond =
+                DeterministicStream::new(SEED_SDXL_IDFORMER_ID).tensor(&[1, ID_COND_DIM], device);
+            let hidden = (0..SCALES)
+                .map(|index| {
+                    DeterministicStream::new(SEED_SDXL_IDFORMER_VIT + index as u64)
+                        .tensor(&[1, VIT_TOKENS, VIT_DIM], device)
+                })
+                .collect();
+            (id_cond, hidden)
+        }
+
+        #[test]
+        #[ignore = "requires the pinned PuLID checkpoints via MOLD_TEST_PULID_ASSETS"]
+        fn the_sdxl_prefix_loads_the_same_idformer_upstream_does() {
+            let device = Device::Cpu;
+            let idformer = load_sdxl_idformer(&device);
+            let (id_cond, hidden) = single_inputs(&device);
+            let output = idformer.forward(&id_cond, &hidden).unwrap();
+            assert_eq!(
+                output.dims(),
+                &[
+                    1,
+                    mold_core::identity::ID_EMBEDDING_TOKENS,
+                    mold_core::identity::ID_EMBEDDING_DIM
+                ]
+            );
+            assert_case("idformer.single.output", &output);
+        }
+
+        /// The unconditional identity SDXL's negative CFG branch conditions on
+        /// (`pipeline_v1_1.py:243-247`). It is NOT a zero tensor — the
+        /// IDFormer has biases, LayerNorms, and learned latent queries — so a
+        /// port that shortcut it to zeros would render the negative branch
+        /// unconditioned and quietly halve the identity in the guided result.
+        #[test]
+        #[ignore = "requires the pinned PuLID checkpoints via MOLD_TEST_PULID_ASSETS"]
+        fn the_sdxl_unconditional_identity_matches_upstream() {
+            let device = Device::Cpu;
+            let idformer = load_sdxl_idformer(&device);
+            let id_cond = Tensor::zeros((1, ID_COND_DIM), DType::F32, &device).unwrap();
+            let hidden: Vec<Tensor> = (0..SCALES)
+                .map(|_| Tensor::zeros((1, VIT_TOKENS, VIT_DIM), DType::F32, &device).unwrap())
+                .collect();
+            let output = idformer.forward(&id_cond, &hidden).unwrap();
+            let peak = GoldenStats::load_sdxl(GOLDEN_FILE, "idformer.uncond.output.stats").peak;
+            assert!(peak > 1.0, "the unconditional identity is not near zero");
+            assert_case("idformer.uncond.output", &output);
+        }
+
+        /// The committed `idformer.two_image.output` golden documents
+        /// upstream's stacking path (`pipeline_v1_1.py:249-256`), which mold
+        /// deliberately does NOT follow: it averages the IDFormer's OUTPUTS
+        /// instead (`cubiq/PuLID_ComfyUI`'s `pulid.py:415-419`), which is why
+        /// `IdFormer::forward` takes one photograph's conditioning at a time.
+        /// Asserting the divergence keeps a future reader from "fixing" the
+        /// port to match a golden it was never meant to reproduce.
+        #[test]
+        fn the_two_image_golden_documents_a_path_mold_does_not_take() {
+            let device = Device::Cpu;
+            let stacked = Tensor::zeros((1, 2, ID_COND_DIM), DType::F32, &device).unwrap();
+            assert!(
+                stacked.dims2().is_err(),
+                "upstream's stacked id_cond is rank 3; mold's IDFormer takes rank 2 per photograph"
+            );
+        }
+    }
+
     /// Every test that observes the process-global cache counter must run
     /// alone, for the same reason the memo tests in `pickle_convert` do.
     static CACHE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -1092,7 +1259,7 @@ mod tests {
     /// rather than been recorded.
     #[test]
     fn the_cache_key_digests_are_all_available_before_anything_is_loaded() {
-        let assets = pinned_asset_digests();
+        let assets = pinned_asset_digests(IdentityFamily::Flux);
         for (label, digest) in [
             ("adapter", &assets.adapter),
             ("vision", &assets.vision),
@@ -1422,6 +1589,7 @@ mod tests {
         let testdata = crate::pulid_fixtures::testdata_dir();
         let faces = testdata.join("faces");
         let paths = PulidPaths {
+            family: IdentityFamily::Flux,
             adapter: crate::pulid_fixtures::pulid_asset("pulid_flux_v0.9.1.safetensors"),
             vision_encoder_source: crate::pulid_fixtures::pulid_asset(
                 "EVA02_CLIP_L_336_psz14_s6B.pt",
@@ -1528,7 +1696,7 @@ mod tests {
     /// fingerprint stop distinguishing bundles.
     #[test]
     fn the_adapter_digest_is_the_manifest_pin() {
-        let sha = adapter_sha256();
+        let sha = adapter_sha256(IdentityFamily::Flux);
         assert_eq!(sha.len(), 64, "{sha}");
         assert_ne!(sha, "unpinned");
     }
@@ -1574,6 +1742,7 @@ mod tests {
     #[test]
     fn an_over_budget_set_is_refused_before_any_model_loads() {
         let paths = PulidPaths {
+            family: IdentityFamily::Flux,
             adapter: "/nonexistent/adapter.safetensors".into(),
             vision_encoder_source: "/nonexistent/eva.pt".into(),
             face_detector: "/nonexistent/scrfd.onnx".into(),
@@ -1598,6 +1767,7 @@ mod tests {
     #[test]
     fn an_invalid_payload_is_refused_before_any_model_loads() {
         let paths = PulidPaths {
+            family: IdentityFamily::Flux,
             adapter: "/nonexistent/adapter.safetensors".into(),
             vision_encoder_source: "/nonexistent/eva.pt".into(),
             face_detector: "/nonexistent/scrfd.onnx".into(),

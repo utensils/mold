@@ -1628,7 +1628,12 @@ mod tests {
             ("flux-dev:bf16", "flux"),
             ("flux-schnell:q8", "flux"),
             ("flux2-klein", "flux2"),
-            ("sdxl-base:fp16", "sdxl"),
+            // Being an SDXL checkpoint is necessary and never sufficient:
+            // these four are the family's recorded refusals.
+            ("sdxl-turbo:fp16", "sdxl"),
+            ("playground-v2.5:fp16", "sdxl"),
+            ("pony-v6:fp16", "sdxl"),
+            ("cyberrealistic-pony:fp16", "sdxl"),
             ("z-image-turbo:q4", "z-image"),
         ] {
             let profile = resolve_generation_profile(input(model, family));
@@ -1649,6 +1654,13 @@ mod tests {
         }
         for model in ["flux-dev", "flux-dev:q4", "flux-dev:q8", "flux-dev-q4"] {
             let profile = resolve_generation_profile(input(model, "flux"));
+            assert!(
+                profile.supports_identity(),
+                "{model} must advertise identity conditioning"
+            );
+        }
+        for model in crate::identity::IDENTITY_QUALIFIED_SDXL_MODELS {
+            let profile = resolve_generation_profile(input(model, "sdxl"));
             assert!(
                 profile.supports_identity(),
                 "{model} must advertise identity conditioning"

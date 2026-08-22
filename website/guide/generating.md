@@ -177,20 +177,29 @@ that likeness while the prompt decides everything else. The photo itself is
 never composited into the output, and it is never cropped or resized to the
 canvas — it is a reference, not a composition input.
 
-Identity conditioning is deliberately narrow today. It is offered only for the
-**identity-qualified checkpoints** — `flux-dev:q4` and `flux-dev:q8` — on a
-server built with the off-by-default `pulid` feature, and it cannot be combined
-with a LoRA or with an img2img source image. Every other model, and every
-server that was not built with the feature, refuses the request with a named
-reason rather than rendering a print with no face in it.
+Identity conditioning is deliberately narrow today. It is offered only for
+**identity-qualified checkpoints** on a server built with the off-by-default
+`pulid` feature, and it cannot be combined with a LoRA or with an img2img
+source image. Every other model, and every server that was not built with the
+feature, refuses the request with a named reason rather than rendering a print
+with no face in it. The live, authoritative list is whatever the server
+advertises per model as `supports_identity` — today that means FLUX's
+`flux-dev:q4` / `flux-dev:q8` and SDXL's `sdxl-base:fp16`,
+`juggernaut-xl:fp16`, `realvis-xl:fp16`, and `dreamshaper-xl:fp16`; see the
+[Identity Photos guide](/guide/identity) for the full list and why an SDXL
+fine-tune isn't automatically included.
 
-The identity assets (the PuLID-FLUX adapter, its vision tower, and the
-InsightFace face detector/recognizer) install as one hidden bundle. The
-InsightFace weights are licensed for non-commercial research only, so Mold will
-not download them until you accept that licence once per `MOLD_HOME`:
+The identity assets (an adapter, a shared vision tower, and the InsightFace
+face detector/recognizer) install as one of two hidden bundles — `pulid-flux`
+for FLUX, `pulid-sdxl` for SDXL — that share everything except the adapter
+itself, so a machine with one already installed pulls only the other's
+adapter. The InsightFace weights are licensed for non-commercial research
+only, so Mold will not download them until you accept that licence once per
+`MOLD_HOME`:
 
 ```bash
 mold pull pulid-flux --accept-license insightface-antelopev2
+mold pull pulid-sdxl --accept-license insightface-antelopev2
 ```
 
 See [Third-party model licenses](/guide/configuration#third-party-model-licenses)

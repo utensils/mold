@@ -75,6 +75,7 @@ fn pulid_asset(name: &str) -> Option<PathBuf> {
 
 fn paths() -> Option<PulidPaths> {
     Some(PulidPaths {
+        family: mold_core::identity::IdentityFamily::Flux,
         adapter: pulid_asset("pulid_flux_v0.9.1.safetensors")?,
         vision_encoder_source: pulid_asset("EVA02_CLIP_L_336_psz14_s6B.pt")?,
         face_detector: pulid_asset("scrfd_10g_bnkps.onnx")?,

@@ -119,8 +119,16 @@ fn license_covers_manifest_file(
     manifest_name: &str,
     hf_filename: &str,
 ) -> bool {
+    // Every PuLID bundle carries the same two antelopev2 graphs, because the
+    // face extractor is shared across families. The gate follows the FILES,
+    // never one bundle's name — `pulid-sdxl` fetches the identical restricted
+    // weights and must ask the identical question.
+    let is_pulid_bundle = matches!(
+        manifest_name,
+        crate::manifest::PULID_FLUX_MANIFEST | crate::manifest::PULID_SDXL_MANIFEST
+    );
     license.id == INSIGHTFACE_ANTELOPEV2.id
-        && manifest_name == crate::manifest::PULID_FLUX_MANIFEST
+        && is_pulid_bundle
         && matches!(hf_filename, "scrfd_10g_bnkps.onnx" | "glintr100.onnx")
 }
 

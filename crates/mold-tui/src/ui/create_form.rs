@@ -21,7 +21,7 @@ const DETAIL_DOT_COUNT: u32 = 8;
 
 /// The Advanced accordion sections, in display order. `Video` is a
 /// capability-gated TUI addition beyond the spec's six image sections;
-/// `Identity` is the PuLID-FLUX face-reference section — gated on the
+/// `Identity` is the PuLID face-reference section — gated on the
 /// selected checkpoint's advertised `/api/models[].supports_identity`, never
 /// on the family or on a locally compiled feature; and `Filing` is the
 /// creation-time "File under" section, which is about where the print lands
@@ -1119,7 +1119,7 @@ mod tests {
         }
     }
 
-    // ── identity (PuLID-FLUX) ───────────────────────────────────
+    // ── identity (PuLID) ────────────────────────────────────────
 
     /// The Identity section is advertised-only. `capabilities_for_model`
     /// reads `/api/models[].supports_identity`; the family says nothing, an

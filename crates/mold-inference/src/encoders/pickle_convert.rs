@@ -2149,6 +2149,7 @@ mod tests {
         let staged_source = dir.path().join("EVA02_CLIP_L_336_psz14_s6B.pt");
         std::fs::copy(&source, &staged_source).unwrap();
         let paths = PulidPaths {
+            family: mold_core::identity::IdentityFamily::Flux,
             adapter: dir.path().join("adapter.safetensors"),
             vision_encoder_source: staged_source,
             face_detector: dir.path().join("det.onnx"),

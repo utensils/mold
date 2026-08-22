@@ -1,4 +1,4 @@
-//! Face-identity (PuLID-FLUX) authoring for the terminal surface.
+//! Face-identity (PuLID) authoring for the terminal surface.
 //!
 //! The Create form's Advanced ▸ Identity section collects a local photo path
 //! plus the two knobs `mold_core::identity` owns. Everything semantic —

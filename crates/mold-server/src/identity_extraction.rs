@@ -245,20 +245,24 @@ pub fn resolve_identity_for_lease(
              or id_image_names is set",
         ));
     }
-    // The unconditional identity is computed only for a request that actually
-    // runs the true-CFG negative branch; an ordinary identity render pays
-    // nothing for it.
-    let want_uncond = mold_core::identity::request_uses_true_cfg(request);
+    // Which renders need the unconditional identity is a per-family question
+    // — FLUX's true-CFG opt-in versus SDXL's always-on classifier-free
+    // negative pass — and `mold_core::identity` owns it so this and the
+    // engine's own requirement cannot disagree.
+    let want_uncond = mold_core::identity::request_needs_unconditional_identity(request);
     let Some(paths) = paths.cloned() else {
         // A missing bundle is a machine that has not been provisioned, not a
         // photograph the caller can fix — but it is equally not a fault the
         // GPU's health counter can act on, and every retry will hit it. Named
         // as request-scoped so a mis-provisioned host is not also degraded.
-        return Err(IdentityFailure::user_input(
-            "this request asks for face-identity conditioning but no PuLID bundle resolved on \
-             any eligible device; run `mold pull pulid-flux --accept-license \
-             insightface-antelopev2`",
-        ));
+        return Err(IdentityFailure::user_input(format!(
+            "this request asks for face-identity conditioning but no PuLID bundle resolved \
+                 on any eligible device; run `mold pull {bundle} --accept-license \
+                 insightface-antelopev2`",
+            bundle = mold_core::identity::identity_family(&request.model)
+                .map(mold_core::identity::IdentityFamily::manifest)
+                .unwrap_or(mold_core::manifest::PULID_FLUX_MANIFEST),
+        )));
     };
 
     #[cfg(test)]
@@ -452,6 +456,7 @@ mod tests {
 
     fn paths() -> PulidPaths {
         PulidPaths {
+            family: mold_core::identity::IdentityFamily::Flux,
             adapter: "/models/shared/pulid/adapter.safetensors".into(),
             vision_encoder_source: "/models/shared/pulid/eva.pt".into(),
             face_detector: "/models/shared/pulid/scrfd.onnx".into(),

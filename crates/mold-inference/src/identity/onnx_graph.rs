@@ -34,8 +34,9 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use candle_onnx::onnx::ModelProto;
+use mold_core::identity::IdentityFamily;
 use mold_core::manifest::ModelComponent;
-use mold_core::pulid_assets::pulid_manifest;
+use mold_core::pulid_assets::pulid_manifest_for;
 use mold_core::secure_file::open_regular_file_no_follow;
 use prost::Message;
 use sha2::{Digest, Sha256};
@@ -110,7 +111,7 @@ pub fn normalize_empty_optional_resize_inputs(model: &mut ModelProto) -> usize {
 /// The bytes on disk are not the bytes the manifest pinned.
 #[derive(Debug, thiserror::Error)]
 #[error(
-    "{path} does not match the pinned SHA-256 for this PuLID asset\n  expected {expected}\n  found    {found}\nre-pull the bundle: mold pull pulid-flux"
+    "{path} does not match the pinned SHA-256 for this PuLID asset\n  expected {expected}\n  found    {found}\nre-pull the bundle it came from: mold pull pulid-flux (or pulid-sdxl)"
 )]
 pub struct DigestMismatch {
     /// The file that failed.
@@ -132,7 +133,7 @@ pub struct DigestMismatch {
 pub enum ArtifactSizeError {
     /// The manifest pins an exact byte count and the file is not it.
     #[error(
-        "{path} is {found} bytes but the manifest pins {expected} for this PuLID asset\nre-pull the bundle: mold pull pulid-flux"
+        "{path} is {found} bytes but the manifest pins {expected} for this PuLID asset\nre-pull the bundle it came from: mold pull pulid-flux (or pulid-sdxl)"
     )]
     Mismatch {
         /// The file that failed.
@@ -181,14 +182,21 @@ pub struct PinnedArtifact {
     pub size_bytes: u64,
 }
 
-/// The manifest's pin for one PuLID component.
+/// The manifest's pin for one SHARED PuLID component.
 ///
-/// Read from [`mold_core::pulid_assets::pulid_manifest`] rather than copied,
-/// so there is exactly one place a pin lives. `None` for a component the
-/// manifest does not pin, which for this bundle cannot happen — a completeness
-/// test in `manifest.rs` requires all four — but is not worth a panic.
+/// Read from the manifest rather than copied, so there is exactly one place a
+/// pin lives. `None` for a component the manifest does not pin, which for this
+/// bundle cannot happen — a completeness test in `manifest.rs` requires all
+/// five — but is not worth a panic.
+///
+/// Deliberately takes no family: every component this answers for is one of the
+/// four EXTRACTION artifacts, which both bundles carry identically at the same
+/// on-disk path. `the_shared_extraction_pins_agree_across_families` pins that
+/// claim. The family-specific `IdentityAdapter` is
+/// `extraction::adapter_sha256`'s question, not this one.
 pub fn pinned_artifact(component: ModelComponent) -> Option<PinnedArtifact> {
-    let file = pulid_manifest()
+    debug_assert_ne!(component, ModelComponent::IdentityAdapter);
+    let file = pulid_manifest_for(IdentityFamily::Flux)
         .files
         .iter()
         .find(|file| file.component == component)?;
@@ -201,7 +209,7 @@ pub fn pinned_artifact(component: ModelComponent) -> Option<PinnedArtifact> {
 /// Just the digest half of [`pinned_artifact`], for callers cross-checking a
 /// pin they already hold.
 pub fn pinned_sha256(component: ModelComponent) -> Option<&'static str> {
-    pulid_manifest()
+    pulid_manifest_for(IdentityFamily::Flux)
         .files
         .iter()
         .find(|file| file.component == component)

@@ -7289,6 +7289,76 @@ mod tests {
         assert_eq!(json_body(response).await["code"], "UNAUTHORIZED");
     }
 
+    /// A placement preview is authoritative, so it must never answer
+    /// `planned` for a request generation would refuse. The identity contract
+    /// is checked at the same seam the source-image contract (#772) is, and
+    /// for the same reason: preview reaches dependency preparation BEFORE the
+    /// shared request validator runs, so without this an unqualified
+    /// checkpoint carrying an `id_image` would have the PuLID bundle planned
+    /// for it and then be 422'd at generate.
+    #[tokio::test]
+    async fn a_placement_preview_refuses_identity_on_an_unqualified_checkpoint() {
+        let state = AppState::for_tests();
+        let preview = |model: &str| {
+            let state = state.clone();
+            let model = model.to_string();
+            async move {
+                let response = app_with_state(state)
+                    .oneshot(
+                        Request::post("/api/generate/placement-preview")
+                            .header("content-type", "application/json")
+                            .body(Body::from(
+                                serde_json::json!({
+                                    "request": {
+                                        "prompt": "a portrait",
+                                        "model": model,
+                                        "width": 1024,
+                                        "height": 1024,
+                                        "steps": 25,
+                                        "guidance": 7.5,
+                                        "id_image": "iVBORw0KGgo=",
+                                    },
+                                    "copies": 1
+                                })
+                                .to_string(),
+                            ))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+                json_body(response).await
+            }
+        };
+
+        // A refused SDXL tier: qualification is enumerated, not inherited
+        // from the family.
+        let body = preview("sdxl-turbo:fp16").await;
+        assert_eq!(body["outcome"], "infeasible");
+        assert_eq!(body["authoritative"], true);
+        // Either identity refusal is correct here and both are the request
+        // contract's own wording: the model gate on a `pulid` build, the
+        // missing-build-support refusal without the feature.
+        assert!(
+            body["reason"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("face-identity"),
+            "{body}"
+        );
+        assert!(
+            body["pending_downloads"]
+                .as_array()
+                .is_none_or(|downloads| downloads.is_empty()),
+            "a refused preview must plan no PuLID bundle: {body}"
+        );
+
+        // A model with no identity support at all, for the same reason.
+        let body = preview("z-image-turbo:q4").await;
+        assert_eq!(body["outcome"], "infeasible");
+        assert_eq!(body["authoritative"], true);
+    }
+
     #[tokio::test]
     async fn reviewed_reference_upload_session_requires_explicit_auth_before_staging() {
         let state = AppState::for_tests();

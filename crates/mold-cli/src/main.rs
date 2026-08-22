@@ -1118,11 +1118,14 @@ Examples:
         #[arg(long, requires = "image", help_heading = "img2img", value_hint = ValueHint::FilePath)]
         mask: Option<String>,
 
-        /// Reference photograph to preserve the face of (PuLID-FLUX). Repeat
-        /// up to 4 times to average several references of the same person.
-        /// Qualified for flux-dev:q4 and flux-dev:q8 on a server built with
-        /// the `pulid` feature; needs `mold pull pulid-flux --accept-license
-        /// insightface-antelopev2`.
+        /// Reference photograph to preserve the face of (PuLID). Repeat up to
+        /// 4 times to average several references of the same person.
+        /// Qualified for flux-dev:q4 / flux-dev:q8 (`mold pull pulid-flux`)
+        /// and for sdxl-base:fp16, juggernaut-xl:fp16, realvis-xl:fp16,
+        /// dreamshaper-xl:fp16 (`mold pull pulid-sdxl`), on a server built
+        /// with the `pulid` feature. Either bundle needs
+        /// `--accept-license insightface-antelopev2`; a machine that already
+        /// has one pulls only the other's adapter.
         #[arg(
             long,
             conflicts_with_all = ["image", "lora"],
@@ -1145,6 +1148,8 @@ Examples:
         /// Above 1.0 each step from --cfg-start-step runs a second forward
         /// over --negative-prompt and the unconditional identity. Requires
         /// --id-image; upstream recommends lowering --guidance to 1.0 with it.
+        /// FLUX only — it exists because FLUX [dev] is guidance-distilled, and
+        /// on SDXL --guidance already IS the classifier-free scale.
         #[arg(long, requires = "id_image", help_heading = "Identity")]
         true_cfg: Option<f64>,
 

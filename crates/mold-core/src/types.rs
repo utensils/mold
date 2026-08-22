@@ -1242,7 +1242,7 @@ pub struct GenerateRequest {
     /// Face-identity reference image for identity conditioning (raw PNG/JPEG
     /// bytes, base64-encoded in JSON). Milestone 1 accepts this only on the
     /// identity-qualified checkpoints named by
-    /// `mold_core::identity::IDENTITY_QUALIFIED_MODELS`, and never alongside
+    /// `mold_core::identity::identity_qualified_models()`, and never alongside
     /// a LoRA or an img2img `source_image`. The payload is bounds-checked
     /// from its header alone before any decode
     /// (`identity::validate_id_image_bytes`).

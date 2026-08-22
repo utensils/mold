@@ -14,6 +14,7 @@
 
 use std::path::{Path, PathBuf};
 
+use mold_core::identity::IdentityFamily;
 use mold_core::manifest::{ModelComponent, ModelFile, ModelManifest};
 use mold_core::pulid_assets::PulidPaths;
 use mold_core::GenerateRequest;
@@ -24,14 +25,52 @@ use crate::variant_dependencies::{
     MissingDependency, PinnedDigest,
 };
 
-/// The one family that can condition on an identity.
+/// The bundle this request's engine will condition with, or a refusal.
 ///
-/// `mold_core::identity` already restricts identity conditioning to two
-/// qualified FLUX checkpoints at the request boundary, so reaching this with
-/// anything else means the gate was bypassed. Refusing is deliberate: an
-/// identity that is accepted and then silently ignored is the failure slice A
-/// exists to prevent.
-const IDENTITY_FAMILY: &str = "flux";
+/// Keyed on the resolved model FAMILY, because the family is what selects the
+/// engine and therefore what decides which adapter the checkpoint can accept:
+/// PuLID-FLUX injects between transformer blocks, PuLID v1.1 injects into the
+/// UNet's cross-attentions, and neither file loads in the other's engine.
+/// `mold_core::identity` already restricts identity conditioning to the
+/// enumerated qualified checkpoints at the request boundary, so reaching this
+/// with an unconditioning family means that gate was bypassed. Refusing is
+/// deliberate: an identity that is accepted and then silently ignored is the
+/// failure this slice exists to prevent.
+///
+/// When the request's model IS one of the qualified names, its own family has
+/// to agree with the resolved one.
+fn identity_family_for(request: &GenerateRequest, family: &str) -> Result<IdentityFamily, String> {
+    let resolved = IdentityFamily::ALL
+        .iter()
+        .copied()
+        .find(|candidate| candidate.family() == family)
+        .ok_or_else(|| {
+            format!("identity conditioning is not supported by model family '{family}'")
+        })?;
+    // A qualified checkpoint's own family has to agree with the resolved one.
+    // A config that registered `sdxl-base:fp16` under `family = "flux"` would
+    // otherwise be handed the FLUX bundle and fail deep inside the adapter
+    // load, after the download was paid for.
+    //
+    // Whether the MODEL is qualified at all is not asked here. That is the
+    // request contract's question, and both paths that reach this have already
+    // been asked it: admission through `validate_identity_conditioning`, and
+    // placement preview through the authoritative identity gate in
+    // `routes::placement_preview_for_request_authenticated` — the same seam the
+    // source-image contract uses, and for the same reason, so a preview can
+    // never plan a bundle for a request generation would refuse.
+    if let Some(from_model) = mold_core::identity::identity_family(&request.model) {
+        if from_model != resolved {
+            return Err(format!(
+                "identity conditioning for '{}' expects model family '{}', but this model \
+                 resolved to '{family}'",
+                request.model,
+                from_model.family()
+            ));
+        }
+    }
+    Ok(resolved)
+}
 
 /// Whether this request will actually condition on a face.
 ///
@@ -131,13 +170,8 @@ pub(crate) async fn materialize_identity_assets(
     if !request_needs_identity_assets(request) {
         return Ok(());
     }
-    if family != IDENTITY_FAMILY {
-        return Err(format!(
-            "identity conditioning is not supported by model family '{family}'"
-        ));
-    }
-
-    let manifest = mold_core::pulid_assets::pulid_manifest();
+    let identity_family = identity_family_for(request, family)?;
+    let manifest = mold_core::pulid_assets::pulid_manifest_for(identity_family);
     if context.policy == DependencyMaterializationPolicy::Admission {
         require_identity_licenses(
             manifest,
@@ -220,6 +254,7 @@ pub(crate) async fn materialize_identity_assets(
 
     let missing = |what: &str| format!("the PuLID manifest is missing its {what}");
     frozen.identity_assets = Some(PulidPaths {
+        family: identity_family,
         adapter: adapter.ok_or_else(|| missing("identity adapter"))?,
         vision_encoder_source: vision_encoder_source
             .ok_or_else(|| missing("identity vision encoder"))?,
@@ -334,7 +369,7 @@ mod tests {
     }
 
     fn expected_paths(models_dir: &Path) -> PulidPaths {
-        let manifest = mold_core::pulid_assets::pulid_manifest();
+        let manifest = mold_core::pulid_assets::pulid_manifest_for(IdentityFamily::Flux);
         let resolve = |component: ModelComponent| {
             let file = manifest
                 .files
@@ -344,6 +379,7 @@ mod tests {
             models_dir.join(mold_core::manifest::storage_path(manifest, file))
         };
         PulidPaths {
+            family: IdentityFamily::Flux,
             adapter: resolve(ModelComponent::IdentityAdapter),
             vision_encoder_source: resolve(ModelComponent::IdentityVisionEncoder),
             face_detector: resolve(ModelComponent::FaceDetector),
@@ -362,7 +398,7 @@ mod tests {
     /// anyone who can drop weights also drop the sidecar that vouches for them.
     /// Every use below asserts that mold refuses it.
     fn install_forged_bundle(config: &Config) {
-        let manifest = mold_core::pulid_assets::pulid_manifest();
+        let manifest = mold_core::pulid_assets::pulid_manifest_for(IdentityFamily::Flux);
         let models_dir = config.resolved_models_dir();
         for file in &manifest.files {
             let path = models_dir.join(mold_core::manifest::storage_path(manifest, file));
@@ -386,7 +422,7 @@ mod tests {
             ..Config::default()
         };
 
-        let manifest = mold_core::pulid_assets::pulid_manifest();
+        let manifest = mold_core::pulid_assets::pulid_manifest_for(IdentityFamily::Flux);
         let planned = manifest
             .files
             .iter()
@@ -401,12 +437,176 @@ mod tests {
 
         assert_eq!(
             planned,
-            mold_core::pulid_assets::pulid_storage_paths(&config)
+            mold_core::pulid_assets::pulid_storage_paths_for(&config, IdentityFamily::Flux)
         );
         assert!(manifest
             .files
             .iter()
             .all(|file| identity_storage_subdir(manifest, file) == "shared/pulid"));
+    }
+
+    const SDXL_MODEL: &str = "prepared-sdxl";
+
+    /// An SDXL model config whose family selects the v1.1 bundle.
+    fn sdxl_case(models_dir: &Path) -> (TempDir, Config) {
+        let root = TempDir::new().unwrap();
+        for name in [
+            "unet.safetensors",
+            "vae.safetensors",
+            "clip_l.safetensors",
+            "clip_g.safetensors",
+            "clip_l_tokenizer.json",
+            "clip_g_tokenizer.json",
+        ] {
+            std::fs::write(root.path().join(name), b"prepared").unwrap();
+        }
+        let file = |name: &str| root.path().join(name).display().to_string();
+        let mut config = Config {
+            models_dir: models_dir.display().to_string(),
+            ..Config::default()
+        };
+        config.models.insert(
+            SDXL_MODEL.to_string(),
+            ModelConfig {
+                transformer: Some(file("unet.safetensors")),
+                vae: Some(file("vae.safetensors")),
+                clip_encoder: Some(file("clip_l.safetensors")),
+                clip_encoder_2: Some(file("clip_g.safetensors")),
+                clip_tokenizer: Some(file("clip_l_tokenizer.json")),
+                clip_tokenizer_2: Some(file("clip_g_tokenizer.json")),
+                family: Some("sdxl".to_string()),
+                ..ModelConfig::default()
+            },
+        );
+        (root, config)
+    }
+
+    fn sdxl_request() -> GenerateRequest {
+        let mut request: GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"a portrait","model":"prepared-sdxl","width":1024,"height":1024,"steps":25,"guidance":7.5}"#,
+        )
+        .unwrap();
+        request.id_image = Some(vec![0x89, 0x50, 0x4e, 0x47]);
+        request
+    }
+
+    /// The bundle follows the family, and the SDXL one differs from the FLUX
+    /// one by exactly its adapter — which is what makes "a machine with
+    /// pulid-flux pulls only the 984 MB adapter" true rather than aspirational.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn an_sdxl_request_plans_the_v1_1_bundle() {
+        let models = TempDir::new().unwrap();
+        let home = TempDir::new().unwrap();
+        let _env = EnvGuard::new(home.path(), models.path());
+        let (_root, config) = sdxl_case(models.path());
+
+        let prepared = prepare_inputs_for_devices(
+            None,
+            "placement-preview",
+            &sdxl_request(),
+            &config,
+            vec![device()],
+            None,
+            DependencyMaterializationPolicy::ExistingOnly,
+            DependencyPreparationContext::default(),
+        )
+        .await
+        .unwrap();
+
+        let downloads = prepared.pending_downloads_for_device("cuda:0");
+        let by_kind = downloads
+            .iter()
+            .map(|download| {
+                (
+                    download.kind.as_str(),
+                    (
+                        download.repo.as_str(),
+                        download.name.as_str(),
+                        download.bytes,
+                    ),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(
+            by_kind["identity_adapter"],
+            ("guozinan/PuLID", "pulid_v1.1.safetensors", 984_405_232)
+        );
+        // The four extraction artifacts are the FLUX bundle's, byte for byte.
+        assert_eq!(
+            by_kind["identity_vision_encoder"],
+            (
+                "QuanSun/EVA-CLIP",
+                "EVA02_CLIP_L_336_psz14_s6B.pt",
+                856_461_210
+            )
+        );
+        assert_eq!(
+            by_kind["face_detector"],
+            (
+                "DIAMONIK7777/antelopev2",
+                "scrfd_10g_bnkps.onnx",
+                16_923_827
+            )
+        );
+        assert_eq!(
+            by_kind["face_recognizer"],
+            ("DIAMONIK7777/antelopev2", "glintr100.onnx", 260_665_334)
+        );
+        assert_eq!(
+            by_kind["face_parser"],
+            ("leonelhs/facexlib", "parsing_bisenet.pth", 53_289_463)
+        );
+
+        let frozen = &prepared.by_device["cuda:0"].engine_config;
+        let assets = frozen
+            .identity_assets
+            .as_ref()
+            .expect("the SDXL bundle is frozen into the plan");
+        assert_eq!(assets.family, IdentityFamily::Sdxl);
+        assert!(assets
+            .adapter
+            .ends_with("shared/pulid/pulid_v1.1.safetensors"));
+        // Every shared artifact lands where the FLUX bundle puts it, so a
+        // machine that already holds one pulls only the other's adapter.
+        assert!(assets
+            .face_detector
+            .ends_with("shared/pulid/scrfd_10g_bnkps.onnx"));
+        assert!(assets
+            .vision_encoder_source
+            .ends_with("shared/pulid/EVA02_CLIP_L_336_psz14_s6B.pt"));
+    }
+
+    /// A family that cannot condition is refused rather than handed some
+    /// other family's adapter, and a qualified checkpoint registered under
+    /// the wrong family is refused before the download is paid for.
+    #[test]
+    fn the_bundle_choice_refuses_a_family_that_cannot_condition() {
+        let mut request = sdxl_request();
+        assert_eq!(
+            identity_family_for(&request, "sdxl").unwrap(),
+            IdentityFamily::Sdxl
+        );
+        assert_eq!(
+            identity_family_for(&request, "flux").unwrap(),
+            IdentityFamily::Flux,
+            "a name the qualified list does not know leaves the family to decide; \
+             whether it may condition at all is the request contract's question"
+        );
+
+        let error = identity_family_for(&request, "z-image").unwrap_err();
+        assert!(error.contains("z-image"), "{error}");
+
+        // A qualified checkpoint's own family has to agree with the resolved
+        // one, so a mis-registered config is refused before the download.
+        request.model = "sdxl-base:fp16".to_string();
+        assert_eq!(
+            identity_family_for(&request, "sdxl").unwrap(),
+            IdentityFamily::Sdxl
+        );
+        let error = identity_family_for(&request, "flux").unwrap_err();
+        assert!(error.contains("sdxl-base:fp16"), "{error}");
+        assert!(error.contains("expects model family 'sdxl'"), "{error}");
     }
 
     /// A read-only placement preview must report the whole bundle, with its
@@ -594,7 +794,8 @@ mod tests {
         );
         // The preview stays read-only about them: nothing deleted, nothing
         // attested, nothing refused.
-        for path in mold_core::pulid_assets::pulid_storage_paths(&config) {
+        for path in mold_core::pulid_assets::pulid_storage_paths_for(&config, IdentityFamily::Flux)
+        {
             assert!(path.exists(), "{}", path.display());
         }
         // The planned paths are still frozen — they are where admission will
@@ -690,7 +891,7 @@ mod tests {
         // no files on disk, admission's next move is a real download, and a
         // forged bundle can no longer stand in for one (which is the point of
         // the pinned check).
-        let manifest = mold_core::pulid_assets::pulid_manifest();
+        let manifest = mold_core::pulid_assets::pulid_manifest_for(IdentityFamily::Flux);
         assert!(require_identity_licenses(manifest, models.path(), Some(home.path())).is_err());
         mold_core::license_acceptance::record_acceptance(
             home.path(),
@@ -727,7 +928,7 @@ mod tests {
         // The adapter's bytes are not its pin, and its forged marker is left
         // deliberately IN PLACE — the whole point is that the sidecar buys the
         // attacker nothing.
-        let manifest = mold_core::pulid_assets::pulid_manifest();
+        let manifest = mold_core::pulid_assets::pulid_manifest_for(IdentityFamily::Flux);
         let adapter_file = manifest
             .files
             .iter()

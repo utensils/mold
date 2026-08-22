@@ -122,11 +122,13 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ## PuLID (identity conditioning)
 
-Mold's PuLID-FLUX identity conditioning follows
+Mold's PuLID identity conditioning follows
 [PuLID](https://github.com/ToTheBeginning/PuLID) by ByteDance as its reference
-implementation, and pulls the published PuLID-FLUX v0.9.1 adapter weights from
-the Hugging Face repository `guozinan/PuLID`. No PuLID source file is vendored
-in Mold; the port is original Rust against candle.
+implementation, and pulls two published adapters from the same Hugging Face
+repository `guozinan/PuLID`: `pulid_flux_v0.9.1.safetensors` for FLUX (the
+`pulid-flux` bundle) and `pulid_v1.1.safetensors` for SDXL (the `pulid-sdxl`
+bundle). No PuLID source file is vendored in Mold; both ports are original
+Rust against candle.
 
 PuLID is licensed under the Apache License, Version 2.0
 (<https://github.com/ToTheBeginning/PuLID/blob/main/LICENSE>).
@@ -157,10 +159,13 @@ on demand, and only after the user has explicitly recorded acceptance of the
 InsightFace model license:
 
     mold pull pulid-flux --accept-license insightface-antelopev2
+    mold pull pulid-sdxl --accept-license insightface-antelopev2
 
-The acceptance is written to `$MOLD_HOME/license-acceptances.json`. Without
-one, every download path — the CLI, the server's auto-pull, and every automatic
-client-driven pull — refuses before any byte is fetched.
+The acceptance is written to `$MOLD_HOME/license-acceptances.json` and covers
+both the `pulid-flux` and `pulid-sdxl` bundles, which pull the same two
+antelopev2 files. Without one, every download path — the CLI, the server's
+auto-pull, and every automatic client-driven pull — refuses before any byte is
+fetched.
 
 The terms Mold shows are pinned to an exact upstream revision:
 `deepinsight/insightface` commit `7fadd420c2351d0ffa8cac403421c1a3ed733365`,
@@ -214,8 +219,9 @@ vendored for this step, and Mold downloads no model for it.
 
 PuLID also masks that crop before the vision tower sees it, using the BiSeNet
 face parser facexlib publishes (`pulid/pipeline_flux.py:53`, `:161-170`). Mold
-pulls the released checkpoint `parsing_bisenet.pth` as part of the
-`pulid-flux` bundle, from the Hugging Face mirror
+pulls the released checkpoint `parsing_bisenet.pth` as part of either the
+`pulid-flux` or the `pulid-sdxl` bundle — it is one of the four shared
+extraction files both bundles pull identically — from the Hugging Face mirror
 [`leonelhs/facexlib`](https://huggingface.co/leonelhs/facexlib) whose LFS
 object is byte-identical to facexlib's own GitHub release
 (<https://github.com/xinntao/facexlib/releases/download/v0.2.0/parsing_bisenet.pth>,
@@ -229,8 +235,9 @@ vendored anywhere in Mold, which ships no Python.
 
 Unlike the InsightFace pretrained models above, facexlib places **no**
 non-commercial restriction on its released weights: the project is MIT and its
-licence covers the repository as published. `mold pull pulid-flux` therefore
-requires no recorded acceptance for `parsing_bisenet.pth`.
+licence covers the repository as published. `mold pull pulid-flux` and
+`mold pull pulid-sdxl` therefore require no recorded acceptance for
+`parsing_bisenet.pth`.
 
 facexlib is licensed under the MIT License
 (<https://github.com/xinntao/facexlib/blob/master/LICENSE>).
