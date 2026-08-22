@@ -5,7 +5,7 @@
 //! them is a transformer or a VAE. [`crate::manifest::paths_from_downloads`] therefore
 //! cannot represent it: it exists to build a [`crate::ModelPaths`], which
 //! requires a generator. This module resolves the bundle on its own terms
-//! instead, and answers only one question: are all four files present, and
+//! instead, and answers only one question: are all five files present, and
 //! where?
 
 use std::path::PathBuf;
