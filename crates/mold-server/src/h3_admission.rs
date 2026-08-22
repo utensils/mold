@@ -2512,7 +2512,10 @@ mod tests {
         assert_eq!(short.audio_samples_per_channel, 165_333);
         assert_eq!(short.rows.total_packed_rows, 37_838);
 
-        let (_, long) = prepared(minimax_h3::FL2VA_COMFY, 345);
+        // Row arithmetic is a family property; the reviewed compact tags admit
+        // exactly one clip length, so the long product is exercised through
+        // the official layout that actually spans the grid.
+        let (_, long) = prepared(minimax_h3::FL2VA_OFFICIAL, 345);
         assert_eq!(long.video_latent_frames, 102);
         assert_eq!(long.rows.target_video_rows, 102_816);
         assert_eq!(long.audio_latents_per_channel, 575);
@@ -2636,7 +2639,9 @@ mod tests {
         short_request.references = Some(vec![reference.clone()]);
         let (_, short) =
             H3PreparedRequestShape::from_prepared_request(&short_request, 128, 512).unwrap();
-        let mut long_request = request(minimax_h3::REF2VA_COMFY, 345);
+        // Same reason as `target_rows_are_exact_for_124_and_345_frame_products`:
+        // the 345-frame product needs the layout whose grid reaches it.
+        let mut long_request = request(minimax_h3::REF2VA_OFFICIAL, 345);
         long_request.references = Some(vec![reference]);
         let (_, long) =
             H3PreparedRequestShape::from_prepared_request(&long_request, 128, 512).unwrap();
