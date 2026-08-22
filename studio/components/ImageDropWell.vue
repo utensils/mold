@@ -30,6 +30,10 @@ const props = withDefaults(
     testId?: string;
     /** iPhone invariant: keeps every tappable control at least 44pt tall. */
     touchFriendly?: boolean;
+    /** Platform-specific minimum touch target; Android uses 48dp. */
+    touchTargetSize?: number;
+    /** Delegates acquisition to a native shell instead of the hidden input. */
+    nativePicker?: boolean;
   }>(),
   {
     image: null,
@@ -45,10 +49,17 @@ const props = withDefaults(
     alt: "Attached image",
     testId: "image-well",
     touchFriendly: false,
+    touchTargetSize: 44,
+    nativePicker: false,
   },
 );
 
-const emit = defineEmits<{ file: [file: File]; gallery: []; clear: [] }>();
+const emit = defineEmits<{
+  file: [file: File];
+  gallery: [];
+  clear: [];
+  pick: [];
+}>();
 
 const input = ref<HTMLInputElement | null>(null);
 const dragOver = ref(false);
@@ -63,7 +74,9 @@ const previewUrl = computed(() =>
 const needsReattach = computed(() => !props.image && !!props.filename);
 
 function pick(): void {
-  if (!inert.value) input.value?.click();
+  if (inert.value) return;
+  if (props.nativePicker) emit("pick");
+  else input.value?.click();
 }
 function onChange(event: Event): void {
   const el = event.target as HTMLInputElement;
@@ -83,7 +96,15 @@ function onDrop(event: DragEvent): void {
 </script>
 
 <template>
-  <div class="image-well" :class="{ 'image-well--touch': touchFriendly }">
+  <div
+    class="image-well"
+    :class="{ 'image-well--touch': touchFriendly }"
+    :style="
+      touchFriendly
+        ? { '--image-well-touch-target': `${touchTargetSize}px` }
+        : undefined
+    "
+  >
     <input
       ref="input"
       type="file"
@@ -260,11 +281,11 @@ function onDrop(event: DragEvent): void {
   cursor: default;
 }
 .image-well--touch .image-well__gallery {
-  min-height: 44px;
+  min-height: var(--image-well-touch-target, 44px);
 }
 .image-well--touch .image-well__clear {
-  width: 44px;
-  height: 44px;
+  width: var(--image-well-touch-target, 44px);
+  height: var(--image-well-touch-target, 44px);
   font-size: 14px;
 }
 </style>

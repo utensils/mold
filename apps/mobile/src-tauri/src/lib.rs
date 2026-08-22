@@ -4,6 +4,7 @@
 
 mod appearance;
 mod discovery;
+mod identity;
 mod keychain;
 mod media;
 mod viewport;
@@ -49,6 +50,7 @@ pub fn run() {
             keychain::keychain_set_api_key,
             keychain::keychain_get_api_key,
             keychain::keychain_delete_api_key,
+            identity::pick_identity_photo,
             media::copy_image_to_clipboard,
             media::save_image_to_photos,
             media::save_video_to_photos,

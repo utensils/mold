@@ -108,6 +108,7 @@ export default defineConfig({
             { text: 'Terminal UI', link: '/guide/tui' },
             { text: 'Desktop App', link: '/guide/desktop' },
             { text: 'iPhone App', link: '/guide/iphone' },
+            { text: 'Android App', link: '/guide/android' },
             { text: 'Machines', link: '/guide/machines' },
             { text: 'Image-to-Image', link: '/guide/img2img' },
             { text: 'Upscaling', link: '/guide/upscaling' },

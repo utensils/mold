@@ -16,8 +16,10 @@ const props = withDefaults(
     /** Trailing label of the one closing control. */
     doneLabel?: string;
     testId?: string;
+    /** Platform-specific minimum target for the closing control. */
+    touchTargetSize?: number;
   }>(),
-  { doneLabel: "Done", testId: "mobile-library-sheet" },
+  { doneLabel: "Done", testId: "mobile-library-sheet", touchTargetSize: 46 },
 );
 
 const emit = defineEmits<{ close: [] }>();
@@ -66,6 +68,7 @@ function onKeydown(event: KeyboardEvent): void {
     :aria-label="title"
     :aria-hidden="open ? undefined : 'true'"
     :data-test="testId"
+    :style="{ '--mobile-sheet-touch-target': `${touchTargetSize}px` }"
     @keydown="onKeydown"
   >
     <button

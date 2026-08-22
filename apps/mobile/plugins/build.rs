@@ -7,6 +7,7 @@ const COMMANDS: &[&str] = &[
     "save_image_to_photos",
     "save_video_to_photos",
     "share_exported_animation",
+    "pick_identity_photo",
     "set_mobile_appearance",
 ];
 
