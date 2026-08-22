@@ -1442,7 +1442,7 @@ Provenance: [Upstream](https://github.com/MiniMax-AI/MiniMax-H3) at `fa6891ff7cd
 
 Schema 1 · hash `baf5ebbfd706859adbfcd3b7b66378e4fbe7412fe94fc482bac99dc0f50f2034` · default recipe `default`
 
-Models: `minimax-h3-fl2va:official-bf16` (policy-hidden).
+Models: `minimax-h3-fl2va:official-bf16`.
 
 #### Default (`default`)
 
@@ -1485,7 +1485,7 @@ Provenance: [Upstream](https://github.com/MiniMax-AI/MiniMax-H3) at `fa6891ff7cd
 
 Schema 1 · hash `1ec8cf397fdfa2d5da47e32f40162236fb66dba6059edfd39400cfa76a4184c3` · default recipe `default`
 
-Models: `minimax-h3-ref2va:official-bf16` (policy-hidden).
+Models: `minimax-h3-ref2va:official-bf16`.
 
 #### Default (`default`)
 
