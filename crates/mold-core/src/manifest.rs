@@ -6794,6 +6794,42 @@ mod tests {
         assert!(auxiliary_manifests_for_request(&request).is_empty());
     }
 
+    /// The bundle follows the checkpoint's family: an SDXL identity request
+    /// needs `pulid-sdxl`, a FLUX one `pulid-flux`, and a checkpoint no family
+    /// qualifies needs nothing — admission refuses it before any download.
+    #[test]
+    fn request_auxiliary_bundle_follows_the_identity_family() {
+        let request_for = |model: &str| -> crate::types::GenerateRequest {
+            serde_json::from_value(serde_json::json!({
+                "prompt": "portrait",
+                "model": model,
+                "width": 1024,
+                "height": 1024,
+                "steps": 20,
+                "seed": 1,
+                "id_image": "AQ=="
+            }))
+            .unwrap()
+        };
+        assert_eq!(
+            auxiliary_manifests_for_request(&request_for("sdxl-base:fp16")),
+            vec![PULID_SDXL_MANIFEST]
+        );
+        assert_eq!(
+            auxiliary_manifests_for_request(&request_for("juggernaut-xl")),
+            vec![PULID_SDXL_MANIFEST],
+            "a bare name resolves before the family is chosen"
+        );
+        assert_eq!(
+            auxiliary_manifests_for_request(&request_for("flux-dev")),
+            vec![PULID_FLUX_MANIFEST]
+        );
+        assert!(
+            auxiliary_manifests_for_request(&request_for("sdxl-turbo:fp16")).is_empty(),
+            "an unqualified checkpoint is refused at admission, so it needs no bundle"
+        );
+    }
+
     #[test]
     fn pulid_bundle_is_a_hidden_sha_pinned_auxiliary_bundle() {
         let manifest = find_manifest(PULID_FLUX_MANIFEST).expect("pulid-flux resolves");
