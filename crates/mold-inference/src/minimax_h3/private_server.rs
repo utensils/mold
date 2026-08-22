@@ -868,7 +868,6 @@ fn private_h3_qwen_route(
         )
     }
 }
-
 impl H3PrivateRuntimeBoundRecord {
     fn into_authority(self) -> H3PrivateQualifiedRuntimeBounds {
         H3PrivateQualifiedRuntimeBounds {
