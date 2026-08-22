@@ -918,16 +918,31 @@ async fn require_server_model_activation(
     drop(config);
 
     if let Some(manifest) = mold_core::manifest::find_manifest(&resolved) {
-        mold_core::require_model_activation(&manifest.name, Some(&manifest.family))
-            .map_err(ApiError::model_activation)?;
-        for file in &manifest.files {
-            mold_core::require_model_activation(&file.hf_repo, Some(&manifest.family))
-                .map_err(ApiError::model_activation)?;
-            mold_core::require_model_activation(&file.hf_filename, Some(&manifest.family))
-                .map_err(ApiError::model_activation)?;
-        }
+        require_registered_manifest_activation(manifest).map_err(ApiError::model_activation)?;
     }
     Ok(family)
+}
+
+/// Validate a source-controlled manifest for execution without treating its
+/// pinned upstream file locators as caller-selected model identities.
+///
+/// Reviewed H3 manifests are the only authority allowed to turn those raw
+/// repository paths into runnable local artifacts. Re-applying the public
+/// identity gate to their `hf_repo` / `hf_filename` fields rejects the exact
+/// reviewed manifests themselves, while raw `hf:` requests remain gated at
+/// the request-model check above.
+fn require_registered_manifest_activation(
+    manifest: &mold_core::manifest::ModelManifest,
+) -> Result<(), mold_core::ModelActivationError> {
+    mold_core::require_model_activation(&manifest.name, Some(&manifest.family))?;
+    if mold_core::minimax_h3::is_reviewed_compact_model(&manifest.name) {
+        return Ok(());
+    }
+    for file in &manifest.files {
+        mold_core::require_model_activation(&file.hf_repo, Some(&manifest.family))?;
+        mold_core::require_model_activation(&file.hf_filename, Some(&manifest.family))?;
+    }
+    Ok(())
 }
 
 /// Validate discovery/storage authority without implying that the same model
@@ -8371,6 +8386,20 @@ mod tests {
     fn h3_models_do_not_publish_a_family_wide_access_restriction() {
         let access = mold_core::model_access_capabilities();
         assert!(access.restrictions.is_empty());
+    }
+
+    #[test]
+    fn reviewed_h3_manifest_executes_without_authorizing_raw_repository_ids() {
+        let manifest =
+            mold_core::manifest::find_manifest(mold_core::minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P)
+                .expect("reviewed H3 Turbo manifest");
+        require_registered_manifest_activation(manifest)
+            .expect("source-controlled reviewed manifest must activate");
+        assert!(mold_core::require_model_activation(
+            "hf:Comfy-Org/MiniMax-H3",
+            Some(mold_core::minimax_h3::FAMILY),
+        )
+        .is_err());
     }
 
     /// #787: an absent negative on a wan request materializes the tuned
