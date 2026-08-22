@@ -3131,12 +3131,24 @@ fn validate_base_factory(
         || factory.compute_capability() != owner.compute_capability
         || factory.prepared_target_attempt_identities().is_some()
         || !factory.attention_runtime_identity_sha256().is_empty()
-        || factory.attention_backend() != AttentionBackend::Flash
+        || factory.attention_backend()
+            != private_h3_factory_attention_backend(owner.compute_capability)
         || factory.attention_chunk() != AttentionChunkPolicy::Off
     {
         bail!("private H3 base factory differs from the exact frozen owner route")
     }
     Ok(())
+}
+
+#[cfg(feature = "mp4")]
+const fn private_h3_factory_attention_backend(
+    compute_capability: Option<(u16, u16)>,
+) -> AttentionBackend {
+    if compute_capability.is_some() {
+        AttentionBackend::Flash
+    } else {
+        AttentionBackend::Math
+    }
 }
 
 /// The route every reopen gate below the fence is keyed on, derived from the
@@ -7516,6 +7528,19 @@ mod tests {
     fn cuda_capacity_sample_still_needs_both_physical_pools() {
         assert!(private_h3_capacity_sample_is_concrete(Some((8, 9)), 40, 40));
         assert!(!private_h3_capacity_sample_is_concrete(Some((8, 9)), 40, 0,));
+    }
+
+    #[cfg(feature = "mp4")]
+    #[test]
+    fn frozen_factory_attention_backend_follows_the_device_route() {
+        assert_eq!(
+            private_h3_factory_attention_backend(None),
+            AttentionBackend::Math,
+        );
+        assert_eq!(
+            private_h3_factory_attention_backend(Some((8, 9))),
+            AttentionBackend::Flash,
+        );
     }
 
     /// The resolved queue/worker form of an FL2VA request, matching what the
