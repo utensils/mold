@@ -134,8 +134,10 @@ h3_recipe_files=(
 
 while IFS= read -r feature_list; do
   [[ -n "$feature_list" ]] || continue
+  has_metal=false
+  grep -qx 'metal' <<< "$(tr ',' '\n' <<< "$feature_list")" && has_metal=true
   while IFS= read -r feature; do
-    [[ "$feature" == "h3" ]] \
+    [[ "$feature" == "h3" && "$has_metal" != true ]] \
       && fail "a shipping recipe enables the bare h3 feature ('$feature_list'); SM89 recipes must name h3-cuda"
   done < <(tr ',' '\n' <<< "$feature_list")
 done < <(enabled_feature_lists "${h3_recipe_files[@]}")
@@ -144,8 +146,9 @@ for fixture in 'cuda,h3,preview' 'h3' 'dev-bins,h3'; do
   grep -qx 'h3' <<< "$(tr ',' '\n' <<< "$fixture")" \
     || fail "bare-h3 scanner missed fixture: $fixture"
 done
-for fixture in 'h3-cuda,preview' 'dev-bins,h3-private-uat' 'cuda,h3-attention-rc'; do
-  if grep -qx 'h3' <<< "$(tr ',' '\n' <<< "$fixture")"; then
+for fixture in 'h3-cuda,preview' 'dev-bins,h3-private-uat' 'cuda,h3-attention-rc' 'h3,metal,preview'; do
+  fixture_features="$(tr ',' '\n' <<< "$fixture")"
+  if grep -qx 'h3' <<< "$fixture_features" && ! grep -qx 'metal' <<< "$fixture_features"; then
     fail "bare-h3 scanner rejected allowed fixture: $fixture"
   fi
 done
@@ -155,7 +158,10 @@ done
 require_text flake.nix \
   'if computeCap == "89" then "h3-cuda" else "cuda"' \
   "a flake feature helper no longer selects the h3-cuda edge for SM89"
-if grep -Eq '"cuda,h3"|,h3"' flake.nix; then
+require_text flake.nix \
+  '"metal,h3"' \
+  "the Darwin feature helper no longer enables the public H3 Metal path"
+if grep -Eq '"cuda,h3"' flake.nix; then
   fail "flake.nix still composes a bare cuda,h3 feature string"
 fi
 
