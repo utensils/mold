@@ -1042,6 +1042,17 @@ fn validate_private_execution_route_facts(
         },
         None => H3AttentionDevice::Metal,
     };
+    let pooled_metal_location = if admitted.compute_capability.is_none() {
+        Some(
+            crate::device::metal_device(admitted.device_ordinal)
+                .map_err(|error| {
+                    anyhow::anyhow!("cannot resolve pooled Metal execution device: {error}")
+                })?
+                .location(),
+        )
+    } else {
+        None
+    };
     let mut mismatches = Vec::new();
     for (axis, mismatch) in [
         ("active", !actual.active),
@@ -1062,6 +1073,7 @@ fn validate_private_execution_route_facts(
                 actual.location,
                 admitted.compute_capability,
                 admitted.device_ordinal,
+                pooled_metal_location,
             ),
         ),
         (
@@ -1090,14 +1102,15 @@ fn private_execution_location_matches(
     actual: DeviceLocation,
     compute_capability: Option<(u16, u16)>,
     device_ordinal: usize,
+    pooled_metal_location: Option<DeviceLocation>,
 ) -> bool {
     match (compute_capability, actual) {
         (Some(_), DeviceLocation::Cuda { gpu_id }) => gpu_id == device_ordinal,
         // Candle's Metal gpu_id is a process-global MetalDevice identity, not
-        // a physical GPU ordinal. The private constructor already selects the
-        // pooled device for the admitted ordinal; binding retains that exact
-        // Device while backend and stable device_id fence the physical route.
-        (None, DeviceLocation::Metal { .. }) => true,
+        // a physical GPU ordinal. Compare it to the location of Mold's pooled
+        // device for the admitted ordinal so a separately minted MetalDevice
+        // fails at binding instead of at the first cross-device kernel.
+        (None, DeviceLocation::Metal { .. }) => pooled_metal_location == Some(actual),
         _ => false,
     }
 }
@@ -3347,21 +3360,31 @@ mod tests {
             DeviceLocation::Metal { gpu_id: 41 },
             None,
             0,
+            Some(DeviceLocation::Metal { gpu_id: 41 }),
+        ));
+        assert!(!private_execution_location_matches(
+            DeviceLocation::Metal { gpu_id: 42 },
+            None,
+            0,
+            Some(DeviceLocation::Metal { gpu_id: 41 }),
         ));
         assert!(private_execution_location_matches(
             DeviceLocation::Cuda { gpu_id: 2 },
             Some((8, 9)),
             2,
+            None,
         ));
         assert!(!private_execution_location_matches(
             DeviceLocation::Cuda { gpu_id: 41 },
             Some((8, 9)),
             2,
+            None,
         ));
         assert!(!private_execution_location_matches(
             DeviceLocation::Metal { gpu_id: 2 },
             Some((8, 9)),
             2,
+            None,
         ));
     }
 

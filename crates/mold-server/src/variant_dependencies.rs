@@ -1981,14 +1981,13 @@ async fn prepare_h3_private_inputs_for_devices(
                 engine_config: frozen,
                 pending_artifacts: BTreeMap::new(),
                 prepared_available_vram_bytes: device.available_vram_bytes,
-                // H3's artifact/layout route is exact and never selects a
-                // dependency variant from capacity. Marking it sensitive made
-                // Metal compare its stable unified-memory admission against
-                // the post-authentication live sample, discard successful
-                // evidence, and re-hash the 44 GB stack forever. Execution
-                // planning and the final owner boundary still revalidate the
-                // frozen peak before any allocation.
-                capacity_sensitive: false,
+                // H3's CUDA and Metal artifact/layout routes are exact and do
+                // not select a dependency variant from capacity. Replanning
+                // either route would only discard authenticated evidence and
+                // re-hash the 44 GB stack. Execution planning and the final
+                // owner boundary still revalidate the frozen peak before any
+                // allocation on both backends.
+                capacity_sensitive: h3_preparation_capacity_sensitive(device.backend),
             },
         );
         admissions.insert(device_id, evidence);
@@ -2020,6 +2019,13 @@ async fn prepare_h3_private_inputs_for_devices(
         h3_private_ingress_grant: Some(rebound_grant),
         h3_private_admission_by_device: admissions,
     })
+}
+
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+const fn h3_preparation_capacity_sensitive(backend: mold_core::GpuBackend) -> bool {
+    match backend {
+        mold_core::GpuBackend::Cuda | mold_core::GpuBackend::Metal => false,
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -2151,6 +2157,17 @@ const H3_PUBLIC_LOCAL_INSTANCE_ID: &str = "mold-public-forced-local";
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "h3")]
+    #[test]
+    fn h3_exact_routes_are_capacity_insensitive_on_cuda_and_metal() {
+        assert!(!h3_preparation_capacity_sensitive(
+            mold_core::GpuBackend::Cuda
+        ));
+        assert!(!h3_preparation_capacity_sensitive(
+            mold_core::GpuBackend::Metal
+        ));
+    }
     use mold_core::{DevicePlacement, DeviceRef, ModelConfig};
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use tempfile::TempDir;

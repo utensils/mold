@@ -4294,7 +4294,10 @@ impl FrozenH3FactoryAuthority {
         })
     }
 
-    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+    // Shipping `h3` execution must consume activation evidence through
+    // `private_fl2va_runtime_authority_with_activation`; only the private UAT
+    // build retains this no-evidence projection.
+    #[cfg(feature = "h3-private-uat")]
     #[allow(dead_code)]
     pub(crate) fn private_fl2va_runtime_authority(&self) -> Result<H3PrivateFl2VaFactoryAuthority> {
         self.validate_frozen()?;
@@ -6828,6 +6831,9 @@ mod tests {
         assert!(frozen
             .validate_engine_seam(contract::FL2VA_COMFY, 0, true)
             .is_ok());
+        assert!(frozen
+            .validate_engine_seam(contract::FL2VA_COMFY_TURBO_8STEP, 0, true)
+            .is_err());
         assert!(!media_model_matches_h3_authority(
             contract::FL2VA_COMFY_TURBO_8STEP,
             &frozen

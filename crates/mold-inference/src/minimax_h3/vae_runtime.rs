@@ -1794,6 +1794,9 @@ struct StagedWeight {
     path: PathBuf,
     opened_path: PathBuf,
     identity: FileIdentity,
+    expected_content_sha256: String,
+    #[cfg(unix)]
+    accepted_changed_time: std::sync::Mutex<Option<(i64, i64)>>,
     file: File,
 }
 
@@ -2078,14 +2081,133 @@ impl StagedWeight {
                 format!("cannot stat private staging path {operation}: {error}"),
             )
         })?;
+        let path_identity = file_identity(&path_metadata)?;
         if path_metadata.file_type().is_symlink()
             || !path_metadata.file_type().is_file()
             || !same_staged_file_identity(&descriptor_identity, &self.identity)
-            || !same_staged_file_identity(&file_identity(&path_metadata)?, &self.identity)
+            || !same_staged_file_identity(&path_identity, &self.identity)
         {
             return Err(artifact_error(
                 self.role,
                 format!("retained staging descriptor or path changed {operation}"),
+            ));
+        }
+        #[cfg(unix)]
+        self.authenticate_changed_time_drift(&descriptor_identity, &path_identity, operation)?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn authenticate_changed_time_drift(
+        &self,
+        descriptor_identity: &FileIdentity,
+        path_identity: &FileIdentity,
+        operation: &str,
+    ) -> LoadResult<()> {
+        let current = (
+            descriptor_identity.changed_seconds,
+            descriptor_identity.changed_nanoseconds,
+        );
+        let path_current = (
+            path_identity.changed_seconds,
+            path_identity.changed_nanoseconds,
+        );
+        if current != path_current {
+            return Err(artifact_error(
+                self.role,
+                format!("retained staging descriptor and path ctime differ {operation}"),
+            ));
+        }
+        let original = (
+            self.identity.changed_seconds,
+            self.identity.changed_nanoseconds,
+        );
+        if current == original {
+            return Ok(());
+        }
+        let mut accepted = self.accepted_changed_time.lock().map_err(|_| {
+            artifact_error(self.role, "staging ctime authentication mutex is poisoned")
+        })?;
+        if accepted.as_ref() == Some(&current) {
+            return Ok(());
+        }
+        self.reauthenticate_staged_content(operation, current)?;
+        *accepted = Some(current);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn reauthenticate_staged_content(
+        &self,
+        operation: &str,
+        expected_changed_time: (i64, i64),
+    ) -> LoadResult<()> {
+        let mut file = File::open(&self.path).map_err(|error| {
+            artifact_error(
+                self.role,
+                format!("cannot reopen private staging file {operation}: {error}"),
+            )
+        })?;
+        let opened = file_identity(&file.metadata().map_err(|error| {
+            artifact_error(
+                self.role,
+                format!("cannot stat reopened staging file {operation}: {error}"),
+            )
+        })?)?;
+        if !same_staged_file_identity(&opened, &self.identity)
+            || (opened.changed_seconds, opened.changed_nanoseconds) != expected_changed_time
+        {
+            return Err(artifact_error(
+                self.role,
+                format!("private staging file changed before ctime authentication {operation}"),
+            ));
+        }
+        let mut digest = Sha256::new();
+        let mut buffer = vec![0_u8; AUTHENTICATION_CHUNK_BYTES];
+        let mut total = 0_u64;
+        loop {
+            let read = file.read(&mut buffer).map_err(|error| {
+                artifact_error(
+                    self.role,
+                    format!("cannot re-authenticate private staging file {operation}: {error}"),
+                )
+            })?;
+            if read == 0 {
+                break;
+            }
+            total = total
+                .checked_add(read as u64)
+                .ok_or_else(|| artifact_error(self.role, "staging byte count overflow"))?;
+            digest.update(&buffer[..read]);
+        }
+        let closed = file_identity(&file.metadata().map_err(|error| {
+            artifact_error(
+                self.role,
+                format!("cannot restat private staging file {operation}: {error}"),
+            )
+        })?)?;
+        let path = file_identity(&std::fs::symlink_metadata(&self.path).map_err(|error| {
+            artifact_error(
+                self.role,
+                format!("cannot restat private staging path {operation}: {error}"),
+            )
+        })?)?;
+        if total != self.identity.len
+            || !same_staged_file_identity(&closed, &self.identity)
+            || !same_staged_file_identity(&path, &self.identity)
+            || (closed.changed_seconds, closed.changed_nanoseconds) != expected_changed_time
+            || (path.changed_seconds, path.changed_nanoseconds) != expected_changed_time
+        {
+            return Err(artifact_error(
+                self.role,
+                format!("private staging file changed during ctime authentication {operation}"),
+            ));
+        }
+        let digest = format!("{:x}", digest.finalize());
+        if !digest.eq_ignore_ascii_case(&self.expected_content_sha256) {
+            return Err(artifact_error(
+                self.role,
+                format!("private staging content changed during {operation}"),
             ));
         }
         Ok(())
@@ -2115,10 +2237,8 @@ impl StagedWeight {
 fn same_staged_file_identity(opened: &FileIdentity, expected: &FileIdentity) -> bool {
     #[cfg(unix)]
     {
-        // Permission and other metadata-only changes update ctime without
-        // changing model content. Staging already retains the descriptor and
-        // authenticated bytes; device, inode, length, and mtime preserve the
-        // replacement and in-place mutation fences.
+        // ctime is authenticated separately: permission-only drift re-hashes
+        // the retained private copy before its new ctime may be cached.
         opened.len == expected.len
             && opened.device == expected.device
             && opened.inode == expected.inode
@@ -2235,6 +2355,9 @@ fn stage_weight(
         path: target,
         opened_path,
         identity,
+        expected_content_sha256: artifact.expected.content_sha256.clone(),
+        #[cfg(unix)]
+        accepted_changed_time: std::sync::Mutex::new(None),
         file: output,
     };
     staged.validate("after sealing")?;
@@ -3391,6 +3514,76 @@ mod tests {
         std::fs::set_permissions(visual, std::fs::Permissions::from_mode(0o440)).unwrap();
 
         staged.validate("after permission change").unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sealed_staging_rejects_same_length_mutation_with_restored_mtime() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+
+        let source = tempfile::tempdir().unwrap();
+        let staging_root = tempfile::tempdir().unwrap();
+        let (paths, artifacts) = write_artifacts(source.path(), b"\x08visual");
+        let plan = FrozenH3ComfyVaeLoadPlan::synthetic(
+            paths,
+            staging_root.path().to_path_buf(),
+            artifacts,
+        )
+        .unwrap();
+        let mut observer = RecordingObserver::default();
+        let mut opened = H3ComfyVaeArtifactRole::WEIGHTS
+            .into_iter()
+            .map(|role| {
+                OpenedArtifact::open(
+                    plan.artifact(role).unwrap().clone(),
+                    plan.paths.get(role),
+                    &mut observer,
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let staged = StagedWeights::create(&plan, &mut opened, &mut observer).unwrap();
+        let visual = staged
+            .storage_path(H3ComfyVaeArtifactRole::VisualWeights)
+            .unwrap();
+        let before = std::fs::metadata(visual).unwrap();
+        std::fs::set_permissions(visual, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let mut writer = OpenOptions::new()
+            .write(true)
+            .mode(0o640)
+            .open(visual)
+            .unwrap();
+        writer.write_all(b"X").unwrap();
+        writer.flush().unwrap();
+        drop(writer);
+        let path = CString::new(visual.as_os_str().as_bytes()).unwrap();
+        let times = [
+            libc::timespec {
+                tv_sec: before.atime(),
+                tv_nsec: before.atime_nsec(),
+            },
+            libc::timespec {
+                tv_sec: before.mtime(),
+                tv_nsec: before.mtime_nsec(),
+            },
+        ];
+        // SAFETY: `path` is a live NUL-terminated filesystem path and `times`
+        // supplies exactly the two timestamps required by utimensat.
+        assert_eq!(
+            unsafe { libc::utimensat(libc::AT_FDCWD, path.as_ptr(), times.as_ptr(), 0) },
+            0
+        );
+        std::fs::set_permissions(visual, std::fs::Permissions::from_mode(0o440)).unwrap();
+
+        let error = staged.validate("after in-place mutation").unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("private staging content changed"),
+            "{error}"
+        );
     }
 
     #[test]

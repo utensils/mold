@@ -1189,13 +1189,6 @@ fn visual_weight_file_identity_mismatches(
     if opened.device != expected.device {
         mismatches.push("device");
     }
-    #[cfg(unix)]
-    if expected.descriptor_bound {
-        // ctime records metadata changes such as a collaborative chmod; it is
-        // not model-content identity. The retained descriptor, inode, length,
-        // and mtime continue to fence replacement and in-place mutation.
-        mismatches.retain(|axis| *axis != "changed-time");
-    }
     #[cfg(all(unix, not(target_os = "linux")))]
     if expected.descriptor_bound {
         // macOS reports a synthetic device id when statting `/dev/fd/N`, but
@@ -1505,6 +1498,32 @@ mod tests {
         validated.revalidate_files().unwrap();
         validated.mmap_var_builder(&Device::Cpu).unwrap();
         assert_eq!(validated.files[0].canonical_path, descriptor_path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn descriptor_bound_validation_rejects_post_inspection_ctime_drift() {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let storage_path = directory.path().join(COMFY_VISUAL_VAE_FILENAME);
+        let retained = write_sparse_production_comfy_weights(&storage_path);
+        #[cfg(target_os = "linux")]
+        let descriptor_path = PathBuf::from(format!("/proc/self/fd/{}", retained.as_raw_fd()));
+        #[cfg(not(target_os = "linux"))]
+        let descriptor_path = PathBuf::from(format!("/dev/fd/{}", retained.as_raw_fd()));
+        let validated = validate_comfy_weight_file_from_opened_descriptor(
+            &MiniMaxH3VisualVaeConfig::production(),
+            &descriptor_path,
+        )
+        .unwrap();
+
+        retained
+            .set_permissions(std::fs::Permissions::from_mode(0o440))
+            .unwrap();
+        let error = validated.revalidate_files().unwrap_err().to_string();
+        assert!(error.contains("changed-time"), "{error}");
     }
 
     #[cfg(unix)]
