@@ -12,11 +12,16 @@
 //! that were on the table, is recorded in
 //! `docs/architecture/pulid-face-extraction.md`.
 //!
+//! The BiSeNet mask PuLID applies to that crop before the tower sees it
+//! (`PuLID/pulid/pipeline_flux.py:161-170`) lives in [`parsing`] and is
+//! applied by [`extraction`], which owns the crop-to-tower step.
+//!
 //! Deliberately NOT implemented here, and named rather than silently skipped:
-//! facexlib's RetinaFace detector and its BiSeNet background mask, both of
-//! which PuLID applies before the EVA tower
-//! (`PuLID/pulid/pipeline_flux.py:145-170`). Issue #1225 owns them; #1222's
-//! fidelity gate decides whether the milestone needs them.
+//! facexlib's RetinaFace detector, which upstream uses for the 512 crop's
+//! landmarks while taking the ArcFace embedding from InsightFace's SCRFD
+//! (`pipeline_flux.py:127-147`). Mold warps both crops from ONE SCRFD
+//! detection. #1225 measured that divergence end to end rather than assuming
+//! it away; the numbers are in `docs/architecture/pulid-face-extraction.md`.
 
 pub mod align;
 pub mod arcface;
@@ -25,6 +30,7 @@ pub mod extraction;
 pub mod onnx_graph;
 pub mod onnx_inventory;
 pub mod onnx_weights;
+pub mod parsing;
 pub mod scrfd;
 pub mod scrfd_net;
 pub mod warp;
@@ -296,6 +302,7 @@ mod tests {
             vision_encoder_source: Path::new("/nonexistent/eva.pt").to_path_buf(),
             face_detector: Path::new("/nonexistent/scrfd.onnx").to_path_buf(),
             face_recognizer: Path::new("/nonexistent/glintr100.onnx").to_path_buf(),
+            face_parser_source: Path::new("/nonexistent/parsing_bisenet.pth").to_path_buf(),
         };
         // A CPU device gets as far as opening the (absent) files; only the
         // device check can fail before that, which is what this pins.

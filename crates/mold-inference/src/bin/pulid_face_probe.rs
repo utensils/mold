@@ -345,6 +345,7 @@ fn run_bench(dir: &Path, options: BenchOptions) -> Result<()> {
 
     let mut detect_ms = Vec::new();
     let mut embed_ms = Vec::new();
+    let mut parse_ms = Vec::new();
     let mut eva_build_ms = Vec::new();
     let mut eva_forward_ms = Vec::new();
     let mut idformer_build_ms = Vec::new();
@@ -352,7 +353,7 @@ fn run_bench(dir: &Path, options: BenchOptions) -> Result<()> {
     for i in 0..(warmups + runs) {
         let d = timed(|| detector.detect(&source).context("SCRFD evaluation"))?;
         let e = timed(|| recognizer.embed_crop(&crop).context("ArcFace evaluation"))?;
-        let mut stages = [0.0f64; 4];
+        let mut stages = [0.0f64; 5];
         if let Some(paths) = &full {
             compose_identity_tokens_observed(
                 paths,
@@ -361,10 +362,11 @@ fn run_bench(dir: &Path, options: BenchOptions) -> Result<()> {
                 &mut |stage, elapsed| {
                     let ms = elapsed.as_secs_f64() * 1000.0;
                     let slot = match stage {
-                        ComposeStage::EvaBuild => 0,
-                        ComposeStage::EvaForward => 1,
-                        ComposeStage::IdFormerBuild => 2,
-                        ComposeStage::IdFormerForward => 3,
+                        ComposeStage::Parse => 0,
+                        ComposeStage::EvaBuild => 1,
+                        ComposeStage::EvaForward => 2,
+                        ComposeStage::IdFormerBuild => 3,
+                        ComposeStage::IdFormerForward => 4,
                     };
                     stages[slot] = ms;
                 },
@@ -375,10 +377,11 @@ fn run_bench(dir: &Path, options: BenchOptions) -> Result<()> {
             detect_ms.push(d);
             embed_ms.push(e);
             if full.is_some() {
-                eva_build_ms.push(stages[0]);
-                eva_forward_ms.push(stages[1]);
-                idformer_build_ms.push(stages[2]);
-                idformer_forward_ms.push(stages[3]);
+                parse_ms.push(stages[0]);
+                eva_build_ms.push(stages[1]);
+                eva_forward_ms.push(stages[2]);
+                idformer_build_ms.push(stages[3]);
+                idformer_forward_ms.push(stages[4]);
             }
         }
     }
@@ -400,13 +403,17 @@ fn run_bench(dir: &Path, options: BenchOptions) -> Result<()> {
         // questions: the forward is arithmetic, the build is what the
         // drop-and-reload rule re-pays on every request and is therefore what a
         // residency change (`pulid-perf.md` §3) would buy back.
+        report("bisenet", parse_ms.clone());
         report("eva-build", eva_build_ms.clone());
         report("eva-forward", eva_forward_ms.clone());
         report("idformer-build", idformer_build_ms.clone());
         report("idformer-fwd", idformer_forward_ms.clone());
         for (i, sample) in total.iter_mut().enumerate() {
-            *sample +=
-                eva_build_ms[i] + eva_forward_ms[i] + idformer_build_ms[i] + idformer_forward_ms[i];
+            *sample += parse_ms[i]
+                + eva_build_ms[i]
+                + eva_forward_ms[i]
+                + idformer_build_ms[i]
+                + idformer_forward_ms[i];
         }
         full_p95 = Some(report("per-image", total));
     }

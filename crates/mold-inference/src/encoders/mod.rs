@@ -1,5 +1,6 @@
 pub(crate) mod clip;
-pub(crate) mod eva_clip_convert;
+pub(crate) mod legacy_pth;
+pub(crate) mod pickle_convert;
 pub(crate) mod eva_clip_preprocess;
 pub(crate) mod eva_clip_vision;
 pub(crate) mod mistral3;

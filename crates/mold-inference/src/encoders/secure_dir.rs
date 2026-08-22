@@ -27,7 +27,7 @@
 //! moment a second crate needs it; it lives here while PuLID is its only
 //! consumer.
 
-// Consumed only by `eva_clip_convert`, which is itself unreachable until the
+// Consumed only by `pickle_convert`, which is itself unreachable until the
 // FLUX integration lands. See that module's note.
 #![allow(dead_code)]
 
@@ -349,7 +349,7 @@ mod imp {
         ///
         /// Only legitimate for a directory no other user can reach, and the
         /// result must still be re-opened through the descriptor before it is
-        /// trusted. See `eva_clip_convert::write_atomically`.
+        /// trusted. See `pickle_convert::write_atomically`.
         pub(crate) fn unsafe_path_for(&self, name: &str) -> PathBuf {
             self.display_path.join(name)
         }

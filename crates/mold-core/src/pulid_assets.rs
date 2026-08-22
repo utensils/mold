@@ -91,7 +91,7 @@ pub fn missing_pulid_files(config: &Config) -> Vec<&'static ModelFile> {
 ///
 /// The name lives here rather than beside the converter in `mold-inference`
 /// because removal has to delete it and `mold-core` cannot see that crate. It
-/// is the converter's authority all the same — `encoders::eva_clip_convert`
+/// is the converter's authority all the same — `encoders::pickle_convert`
 /// reads it from here — so the two can never name different files.
 pub const DERIVED_VISION_FILENAME: &str = "eva02_clip_l_336_vision.safetensors";
 

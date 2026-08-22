@@ -11,6 +11,8 @@
 //!         |  IdentityExtractor (candle-onnx, CPU)
 //!         v
 //!   arcface [1, 512] (raw)      eva_crop_512 (RGB)
+//!         |                             |  BiSeNetParser -> labels
+//!         |                             |  background -> white, face -> grey
 //!         |                             |  eva_clip_preprocess (bicubic 336)
 //!         |                             v
 //!         |                     EvaClipVisionTower
@@ -51,11 +53,15 @@ use mold_core::identity::{FrozenIdentityEmbedding, IdentityAssetDigests};
 use mold_core::manifest::ModelComponent;
 use mold_core::pulid_assets::PulidPaths;
 
-use crate::encoders::eva_clip_convert::{ensure_eva_clip_vision_safetensors, DERIVED_SHA256};
+use crate::encoders::pickle_convert::{
+    ensure_bisenet_parser_safetensors, ensure_eva_clip_vision_safetensors, BISENET_DERIVED_SHA256,
+    EVA_DERIVED_SHA256,
+};
 use crate::encoders::eva_clip_preprocess::{planar_rgb_from_image, preprocess_planar_rgb};
 use crate::encoders::eva_clip_vision::EvaClipVisionTower;
 use crate::flux::pulid_encoder::IdFormer;
 
+use super::parsing::{apply_pulid_face_mask, BiSeNetParser};
 use super::{IdentityError, IdentityExtractor};
 
 /// Host bytes one extraction peaks at, measured on the shipped artifacts.
@@ -189,9 +195,10 @@ pub fn extract_identity_embeddings(
 
     let assets = IdentityAssetDigests {
         adapter: adapter_sha256(),
-        vision: DERIVED_SHA256.to_string(),
+        vision: EVA_DERIVED_SHA256.to_string(),
         face_detector: extractor.detector_sha256().to_string(),
         face_recognizer: extractor.recognizer_sha256().to_string(),
+        face_parser: BISENET_DERIVED_SHA256.to_string(),
     };
     let sources = images
         .iter()
@@ -238,11 +245,22 @@ fn adapter_sha256() -> String {
 /// IDFormer is a much smaller cross-attention stack over 32 queries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ComposeStage {
-    /// Materializing the derived safetensors, preprocessing the crop, and
-    /// building the EVA02-CLIP vision tower — everything before its forward
-    /// pass. Separate from [`ComposeStage::EvaForward`] because it is what the
-    /// drop-and-reload rule pays for on every request, and therefore what a
-    /// residency change would buy back.
+    /// Segmenting one aligned crop with the BiSeNet parser, applying PuLID's
+    /// mask, and preprocessing the result for the tower (#1225) — everything
+    /// that turns one photograph into tower input. Emitted once PER
+    /// photograph, even though the parser itself is materialized once, because
+    /// it is per-crop work; the materialization falls inside
+    /// [`ComposeStage::EvaBuild`]'s window, which subtracts these out.
+    ///
+    /// Reported apart from `EvaBuild` because it is a whole second network: a
+    /// reader comparing the tower's cost to the extraction's would otherwise
+    /// be silently attributing the parse to the tower.
+    Parse,
+    /// Materializing the derived safetensors and building the EVA02-CLIP
+    /// vision tower — everything before its forward pass that is not
+    /// [`ComposeStage::Parse`]. Separate from [`ComposeStage::EvaForward`]
+    /// because it is what the drop-and-reload rule pays for on every request,
+    /// and therefore what a residency change would buy back.
     EvaBuild,
     /// The EVA02-CLIP vision tower's forward pass.
     EvaForward,
@@ -295,10 +313,12 @@ pub(crate) fn compose_identity_token_sets(
 /// The one implementation: every photograph, the optional unconditional
 /// identity, and the per-stage observer.
 ///
-/// The tower is built ONCE and run per photograph, then dropped; the IDFormer
-/// is built once afterwards and run per photograph. That ordering is why N
-/// photographs do not multiply the host peak: the two large halves still never
-/// coexist, and the only thing that scales with N is the retained hidden
+/// Every crop is parsed and masked first, with the parser resident once and
+/// dropped; the tower is then built ONCE and run per photograph, then dropped;
+/// the IDFormer is built once afterwards and run per photograph. That ordering
+/// is why N photographs do not multiply the host peak: the three large halves
+/// still never coexist, and the only thing that scales with N is the retained
+/// hidden
 /// states — [`EXTRACTION_RETAINED_BYTES_PER_IMAGE`], ~12 MB each against a
 /// 1.4 GB peak.
 ///
@@ -308,8 +328,9 @@ pub(crate) fn compose_identity_token_sets(
 /// the tower outside the loop. `EvaForward` and `IdFormerForward` are emitted
 /// once PER photograph (and once more for the unconditional identity), so a
 /// caller measuring a set sees the per-photograph cost rather than a sum it
-/// cannot decompose. `pulid_face_probe bench --full` passes one photograph, so
-/// its samples are unchanged.
+/// cannot decompose. [`ComposeStage::Parse`] is likewise once per photograph.
+/// `pulid_face_probe bench --full` passes one photograph, so its samples are
+/// unchanged.
 pub(crate) fn compose_identity_token_sets_observed(
     paths: &PulidPaths,
     faces: &[(Vec<f32>, image::RgbImage)],
@@ -321,6 +342,55 @@ pub(crate) fn compose_identity_token_sets_observed(
     let mut stage_started = std::time::Instant::now();
     let vision_path = ensure_eva_clip_vision_safetensors(paths)
         .context("materializing the EVA02-CLIP vision tower")?;
+
+    // `pipeline_flux.py:161-174`: every crop is parsed, masked, and only then
+    // resized and normalized for the tower. Both models read the SAME `[0, 1]`
+    // planar tensor and normalize it differently — ImageNet for the parser,
+    // OpenAI CLIP for the tower — so it is built once per crop here and the
+    // normalizations stay inside the two consumers.
+    //
+    // This is a PRE-PASS over every photograph rather than work inside the
+    // tower's loop, for the reason the tower itself is built outside that loop:
+    // the parser is a second network, and parsing everything first lets it be
+    // dropped before the tower is built. The three large halves still never
+    // coexist.
+    let mut parse_elapsed = std::time::Duration::ZERO;
+    let prepared: Vec<Tensor> = {
+        let parser_path = ensure_bisenet_parser_safetensors(paths)
+            .context("materializing the BiSeNet face parser")?;
+        // SAFETY: the same mmap contract every other mold safetensors loader
+        // relies on. These bytes were just authenticated against
+        // `BISENET_DERIVED_SHA256`.
+        let parser = {
+            let vb = unsafe {
+                VarBuilder::from_mmaped_safetensors(
+                    std::slice::from_ref(&parser_path),
+                    DType::F32,
+                    &device,
+                )
+                .with_context(|| format!("reading the face parser {}", parser_path.display()))?
+            };
+            BiSeNetParser::new(vb, &device).context("building the BiSeNet face parser")?
+        };
+        let mut prepared = Vec::with_capacity(faces.len());
+        for (_, eva_crop_512) in faces {
+            let parse_started = std::time::Instant::now();
+            let image = image::DynamicImage::ImageRgb8(eva_crop_512.clone());
+            let (mut planar, height, width) = planar_rgb_from_image(&image);
+            let labels = parser
+                .labels(&planar, height, width)
+                .context("parsing the aligned face crop")?;
+            apply_pulid_face_mask(&mut planar, &labels)
+                .context("masking the aligned face crop")?;
+            let pixels = preprocess_planar_rgb(&planar, height, width, &device)
+                .context("preprocessing the aligned face crop for EVA02-CLIP")?;
+            let elapsed = parse_started.elapsed();
+            parse_elapsed += elapsed;
+            observe(ComposeStage::Parse, elapsed);
+            prepared.push(pixels);
+        }
+        prepared
+    };
 
     // The tower and the IDFormer are built and dropped in sequence, never held
     // together: the tower is 609 MB and the IDFormer's `id_embedding_mapping`
@@ -340,19 +410,20 @@ pub(crate) fn compose_identity_token_sets_observed(
         };
         let tower = EvaClipVisionTower::new(vb, &device)
             .context("building the EVA02-CLIP-L-14-336 vision tower")?;
-        observe(ComposeStage::EvaBuild, stage_started.elapsed());
+        // Everything paid once before the first forward, minus the per-crop
+        // parse work the pre-pass already reported. Restarting the clock after
+        // the pre-pass instead would silently drop materializing the tower from
+        // every stage's account.
+        observe(
+            ComposeStage::EvaBuild,
+            stage_started.elapsed().saturating_sub(parse_elapsed),
+        );
 
         let mut outputs = Vec::with_capacity(faces.len());
-        for (_, eva_crop_512) in faces {
+        for pixels in &prepared {
             stage_started = std::time::Instant::now();
-            let pixels = {
-                let image = image::DynamicImage::ImageRgb8(eva_crop_512.clone());
-                let (planar, height, width) = planar_rgb_from_image(&image);
-                preprocess_planar_rgb(&planar, height, width, &device)
-                    .context("preprocessing the aligned face crop for EVA02-CLIP")?
-            };
             let output = tower
-                .forward(&pixels)
+                .forward(pixels)
                 .context("running the EVA02-CLIP vision tower")?;
             observe(ComposeStage::EvaForward, stage_started.elapsed());
             outputs.push((output.hidden_states, output.cls_projection));
@@ -508,6 +579,7 @@ mod tests {
             vision_encoder_source: "/nonexistent/eva.pt".into(),
             face_detector: "/nonexistent/scrfd.onnx".into(),
             face_recognizer: "/nonexistent/glintr100.onnx".into(),
+            face_parser_source: "/nonexistent/parsing_bisenet.pth".into(),
         };
         let png = b"\x89PNG\r\n\x1a\n".to_vec();
         let too_many: Vec<&[u8]> = vec![png.as_slice(); mold_core::identity::ID_IMAGES_MAX + 1];
@@ -530,6 +602,7 @@ mod tests {
             vision_encoder_source: "/nonexistent/eva.pt".into(),
             face_detector: "/nonexistent/scrfd.onnx".into(),
             face_recognizer: "/nonexistent/glintr100.onnx".into(),
+            face_parser_source: "/nonexistent/parsing_bisenet.pth".into(),
         };
         let error = extract_identity_embedding(&paths, b"not an image").unwrap_err();
         let rendered = format!("{error:#}");

@@ -344,7 +344,7 @@ fn l2_normalize_rows(xs: &Tensor) -> Result<Tensor> {
 /// The tower.
 ///
 /// Build it from a `VarBuilder` rooted at the **`visual.` prefix already
-/// stripped** — that is what [`super::eva_clip_convert`] writes, and what
+/// stripped** — that is what [`super::pickle_convert`] writes, and what
 /// keeps this file from knowing anything about the CLIP text half.
 #[derive(Debug)]
 pub(crate) struct EvaClipVisionTower {
@@ -701,8 +701,8 @@ mod tests {
         let source = pulid_asset("EVA02_CLIP_L_336_psz14_s6B.pt");
         let staging = std::env::temp_dir().join("mold-pulid-eva-parity");
         std::fs::create_dir_all(&staging).unwrap();
-        let converted = staging.join(super::super::eva_clip_convert::DERIVED_FILENAME);
-        super::super::eva_clip_convert::convert_eva_clip_vision(&source, &converted).unwrap();
+        let converted = staging.join(super::super::pickle_convert::EVA_DERIVED_FILENAME);
+        super::super::pickle_convert::convert_eva_clip_vision(&source, &converted).unwrap();
         let vb = unsafe {
             VarBuilder::from_mmaped_safetensors(&[converted], DType::F32, device).unwrap()
         };
