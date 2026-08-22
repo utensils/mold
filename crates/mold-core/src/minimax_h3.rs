@@ -521,6 +521,21 @@ pub fn task_for_model(model: &str) -> Option<Task> {
     }
 }
 
+/// Whether `model` renders under the reviewed **compact** envelope: exactly
+/// one canvas, one frame count, and a fixed per-tier step count.
+///
+/// This is the single authority for that question. `generation_profile`'s
+/// recipe builder, the `/api/models` row builder, and the request validator
+/// all ask it, because a row that advertises a wider envelope than the
+/// profile beside it is a request the user was told would work and the
+/// engine refuses after the load is paid for. `family` gates the question so
+/// a non-H3 model can never answer it; within the family an unrecognized
+/// identity answers `true` — fail toward the stricter envelope, the same
+/// direction `presets_for_identity` takes.
+pub fn uses_reviewed_compact_envelope(family: &str, model: &str) -> bool {
+    is_family(family) && layout_for_model(model) != Some(Layout::OfficialBf16)
+}
+
 pub fn layout_for_model(model: &str) -> Option<Layout> {
     let canonical = resolve_model_name(model)?;
     if canonical.ends_with(":official-bf16") {

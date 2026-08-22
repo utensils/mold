@@ -1383,13 +1383,13 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 
 ### `minimax-h3-fl2va:comfy-pruned-int8`
 
-Schema 1 · hash `8fac546289e59b2720572b3fe09c5a8f1c89920ffe93c27a8a1bed820cb96064` · default recipe `default`
+Schema 1 · hash `0416694a3bd93aac1a559ddf54914c3441d8cea1331049104fab6b89f9bb4085` · default recipe `default`
 
 Models: `minimax-h3-fl2va:comfy-pruned-int8`.
 
 #### Default (`default`)
 
-- Resolution: buckets; alignment `32`; minimum `64x64`; maximum `1069056` pixels; axis limit `none`; aspect range `0.25–4`.
+- Resolution: buckets; alignment `32`; minimum `64x64`; maximum `1032192` pixels; axis limit `1344`; aspect range `0.25–4`.
 - Defaults: `1344x768`, 21 steps, guidance 0.
 - Steps: 21–21 by 1; guidance: 0–0 by 0.1 (Fixed).
 - Temporal: frames 124–124 on `17n+5` (default 124); FPS fixed 24; duration limit 15s.
@@ -1402,13 +1402,13 @@ Provenance: [Upstream](https://github.com/MiniMax-AI/MiniMax-H3) at `fa6891ff7cd
 
 ### `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p`
 
-Schema 1 · hash `40077f4d3de3ee1691133c04c143f36bededa786e905255dffcd3cf16d042047` · default recipe `default`
+Schema 1 · hash `5ecdbc17d708eed39f90a227a2e486714b299b131e3499b4e269cabbb02197f1` · default recipe `default`
 
 Models: `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p`.
 
 #### Default (`default`)
 
-- Resolution: buckets; alignment `32`; minimum `64x64`; maximum `1069056` pixels; axis limit `none`; aspect range `0.25–4`.
+- Resolution: buckets; alignment `32`; minimum `64x64`; maximum `1032192` pixels; axis limit `1344`; aspect range `0.25–4`.
 - Defaults: `1344x768`, 5 steps, guidance 0.
 - Steps: 5–5 by 1; guidance: 0–0 by 0.1 (Fixed).
 - Temporal: frames 124–124 on `17n+5` (default 124); FPS fixed 24; duration limit 15s.
@@ -1421,13 +1421,13 @@ Provenance: [Upstream](https://github.com/MiniMax-AI/MiniMax-H3) at `fa6891ff7cd
 
 ### `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step`
 
-Schema 1 · hash `263b62ec3171281adbaea8192d43f34af70b0275fcaae293386fef4cae418b6d` · default recipe `default`
+Schema 1 · hash `428df21c4169638e6012f6d6482c6dc8def20f1fbe98776b55c835c8dbd75748` · default recipe `default`
 
 Models: `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step`.
 
 #### Default (`default`)
 
-- Resolution: buckets; alignment `32`; minimum `64x64`; maximum `1069056` pixels; axis limit `none`; aspect range `0.25–4`.
+- Resolution: buckets; alignment `32`; minimum `64x64`; maximum `1032192` pixels; axis limit `1344`; aspect range `0.25–4`.
 - Defaults: `1344x768`, 9 steps, guidance 0.
 - Steps: 9–9 by 1; guidance: 0–0 by 0.1 (Fixed).
 - Temporal: frames 124–124 on `17n+5` (default 124); FPS fixed 24; duration limit 15s.
@@ -1464,13 +1464,13 @@ Provenance: [Upstream](https://github.com/MiniMax-AI/MiniMax-H3) at `fa6891ff7cd
 
 ### `minimax-h3-ref2va:comfy-pruned-int8`
 
-Schema 1 · hash `5e89be5624da519875e268e7d67951e6813e019ceecf04b7a735fa4b0379e07f` · default recipe `default`
+Schema 1 · hash `66e6cd39a81e0b416c58951089a187a03d3bfb1889bf2aabf5977c1ea3eb09c2` · default recipe `default`
 
 Models: `minimax-h3-ref2va:comfy-pruned-int8`.
 
 #### Default (`default`)
 
-- Resolution: buckets; alignment `32`; minimum `64x64`; maximum `1069056` pixels; axis limit `none`; aspect range `0.25–4`.
+- Resolution: buckets; alignment `32`; minimum `64x64`; maximum `1032192` pixels; axis limit `1344`; aspect range `0.25–4`.
 - Defaults: `1344x768`, 21 steps, guidance 0.
 - Steps: 21–21 by 1; guidance: 0–0 by 0.1 (Fixed).
 - Temporal: frames 124–124 on `17n+5` (default 124); FPS fixed 24; duration limit 15s.

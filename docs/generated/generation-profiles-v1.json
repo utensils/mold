@@ -15574,7 +15574,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "minimax-h3.minimax-h3-fl2va",
-        "profile_hash": "8fac546289e59b2720572b3fe09c5a8f1c89920ffe93c27a8a1bed820cb96064",
+        "profile_hash": "0416694a3bd93aac1a559ddf54914c3441d8cea1331049104fab6b89f9bb4085",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -15594,7 +15594,8 @@
               "alignment": 32,
               "min_width": 64,
               "min_height": 64,
-              "max_pixels": 1069056,
+              "max_pixels": 1032192,
+              "max_axis_pixels": 1344,
               "min_aspect_ratio": 0.25,
               "max_aspect_ratio": 4.0,
               "off_bucket": "reject",
@@ -15734,7 +15735,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "minimax-h3.minimax-h3-fl2va",
-        "profile_hash": "40077f4d3de3ee1691133c04c143f36bededa786e905255dffcd3cf16d042047",
+        "profile_hash": "5ecdbc17d708eed39f90a227a2e486714b299b131e3499b4e269cabbb02197f1",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -15754,7 +15755,8 @@
               "alignment": 32,
               "min_width": 64,
               "min_height": 64,
-              "max_pixels": 1069056,
+              "max_pixels": 1032192,
+              "max_axis_pixels": 1344,
               "min_aspect_ratio": 0.25,
               "max_aspect_ratio": 4.0,
               "off_bucket": "reject",
@@ -15894,7 +15896,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "minimax-h3.minimax-h3-fl2va",
-        "profile_hash": "263b62ec3171281adbaea8192d43f34af70b0275fcaae293386fef4cae418b6d",
+        "profile_hash": "428df21c4169638e6012f6d6482c6dc8def20f1fbe98776b55c835c8dbd75748",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -15914,7 +15916,8 @@
               "alignment": 32,
               "min_width": 64,
               "min_height": 64,
-              "max_pixels": 1069056,
+              "max_pixels": 1032192,
+              "max_axis_pixels": 1344,
               "min_aspect_ratio": 0.25,
               "max_aspect_ratio": 4.0,
               "off_bucket": "reject",
@@ -16273,7 +16276,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "minimax-h3.minimax-h3-ref2va",
-        "profile_hash": "5e89be5624da519875e268e7d67951e6813e019ceecf04b7a735fa4b0379e07f",
+        "profile_hash": "66e6cd39a81e0b416c58951089a187a03d3bfb1889bf2aabf5977c1ea3eb09c2",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -16293,7 +16296,8 @@
               "alignment": 32,
               "min_width": 64,
               "min_height": 64,
-              "max_pixels": 1069056,
+              "max_pixels": 1032192,
+              "max_axis_pixels": 1344,
               "min_aspect_ratio": 0.25,
               "max_aspect_ratio": 4.0,
               "off_bucket": "reject",

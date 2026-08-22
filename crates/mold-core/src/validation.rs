@@ -408,6 +408,31 @@ pub fn max_frames_for_family(family: &str) -> Option<u32> {
     max_frames_for_family_at_fps(family, LTX2_DEFAULT_FPS)
 }
 
+/// [`max_frames_for_family_at_fps`], narrowed by the concrete model.
+///
+/// Per model, not per family: H3's duration ceiling is a property of the
+/// **layout**, not the family. The official BF16 tags reach the 345-frame
+/// upstream grid; the reviewed compact tags render exactly one frame count,
+/// and `generation_profile` already pins their recipe to it. Answering the
+/// family here is what let a compact row advertise a 345-frame slider beside
+/// a profile that fixes 124 — a size the user was told would work and the
+/// engine refuses after the load is paid for.
+pub fn max_frames_for_model_at_fps(family: &str, model: &str, fps: u32) -> Option<u32> {
+    if crate::minimax_h3::uses_reviewed_compact_envelope(family, model) {
+        return Some(crate::minimax_h3::MIN_FRAMES);
+    }
+    max_frames_for_family_at_fps(family, fps)
+}
+
+/// [`max_frames_absolute_for_family`], narrowed by the concrete model. See
+/// [`max_frames_for_model_at_fps`] for why the H3 answer is per layout.
+pub fn max_frames_absolute_for_model(family: &str, model: &str) -> Option<u32> {
+    if crate::minimax_h3::uses_reviewed_compact_envelope(family, model) {
+        return Some(crate::minimax_h3::MIN_FRAMES);
+    }
+    max_frames_absolute_for_family(family)
+}
+
 /// Minimum requestable frame count for families that impose one above the
 /// generic single-frame floor. `None` retains the historical minimum of one.
 pub fn min_frames_for_family(family: &str) -> Option<u32> {

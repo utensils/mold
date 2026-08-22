@@ -201,8 +201,9 @@ pub fn build_model_catalog(
                 default_frames,
                 default_fps,
                 min_frames: crate::validation::min_frames_for_family(&manifest.family),
-                max_frames: crate::validation::max_frames_for_family_at_fps(
+                max_frames: crate::validation::max_frames_for_model_at_fps(
                     &manifest.family,
+                    &manifest.name,
                     model_cfg
                         .effective_fps()
                         .unwrap_or(crate::validation::LTX2_DEFAULT_FPS),
@@ -210,8 +211,9 @@ pub fn build_model_catalog(
                 max_runtime_seconds: crate::validation::max_runtime_seconds_for_family(
                     &manifest.family,
                 ),
-                max_frames_absolute: crate::validation::max_frames_absolute_for_family(
+                max_frames_absolute: crate::validation::max_frames_absolute_for_model(
                     &manifest.family,
+                    &manifest.name,
                 ),
                 frame_step: crate::validation::frame_step_for_family(&manifest.family),
                 frame_offset: crate::validation::frame_offset_for_family(&manifest.family),
@@ -393,14 +395,17 @@ pub fn build_model_catalog(
                 default_frames,
                 default_fps,
                 min_frames: crate::validation::min_frames_for_family(&family),
-                max_frames: crate::validation::max_frames_for_family_at_fps(
+                max_frames: crate::validation::max_frames_for_model_at_fps(
                     &family,
+                    name,
                     model_cfg
                         .effective_fps()
                         .unwrap_or(crate::validation::LTX2_DEFAULT_FPS),
                 ),
                 max_runtime_seconds: crate::validation::max_runtime_seconds_for_family(&family),
-                max_frames_absolute: crate::validation::max_frames_absolute_for_family(&family),
+                max_frames_absolute: crate::validation::max_frames_absolute_for_model(
+                    &family, name,
+                ),
                 frame_step: crate::validation::frame_step_for_family(&family),
                 frame_offset: crate::validation::frame_offset_for_family(&family),
                 default_negative_prompt,
@@ -500,6 +505,70 @@ fn sort_models_by_variant_quality(models: &mut [ModelInfoExtended]) {
 
 #[cfg(test)]
 mod tests {
+    /// Every reviewed-compact H3 row must advertise exactly the envelope its
+    /// own generation profile pins. The two are read by the same client in
+    /// the same response, so a row that offers 345 frames beside a profile
+    /// that fixes 124 is a slider the user can move into a guaranteed
+    /// refusal. This caught `max_frames_for_family_at_fps` answering the
+    /// official BF16 ladder for a compact identity, because it discriminates
+    /// on family and the envelope is a property of the layout.
+    #[test]
+    fn compact_h3_rows_advertise_their_own_profile_envelope() {
+        let config = crate::Config::default();
+        let catalog = super::build_model_catalog(&config, None, false);
+        let mut checked = 0usize;
+        for row in &catalog {
+            if !crate::minimax_h3::uses_reviewed_compact_envelope(&row.info.family, &row.info.name)
+            {
+                continue;
+            }
+            let profile = crate::generation_profile_for_manifest_with_defaults(
+                crate::manifest::find_manifest(&row.info.name)
+                    .expect("every compact H3 row has a built-in manifest"),
+                crate::GenerationDefaultsProfile {
+                    width: row.defaults.default_width,
+                    height: row.defaults.default_height,
+                    steps: row.defaults.default_steps,
+                    guidance: row.defaults.default_guidance,
+                    frames: row.defaults.default_frames,
+                    fps: row.defaults.default_fps,
+                    negative_prompt: None,
+                },
+            );
+            let recipe = profile
+                .default_recipe()
+                .expect("every H3 profile has a default recipe");
+            let frames = recipe
+                .temporal
+                .as_ref()
+                .map(|temporal| &temporal.frames)
+                .expect("every H3 recipe carries a temporal block");
+            assert_eq!(
+                row.defaults.max_frames,
+                Some(frames.max),
+                "{} row max_frames disagrees with its profile",
+                row.info.name
+            );
+            assert_eq!(
+                row.defaults.max_frames_absolute,
+                Some(frames.max),
+                "{} row max_frames_absolute disagrees with its profile",
+                row.info.name
+            );
+            assert_eq!(
+                row.defaults.min_frames,
+                Some(frames.min),
+                "{} row min_frames disagrees with its profile",
+                row.info.name
+            );
+            checked += 1;
+        }
+        assert!(
+            checked >= 2,
+            "expected both compact H3 task partitions in the catalog, saw {checked}"
+        );
+    }
+
     use super::*;
     use crate::manifest::{find_manifest, storage_path};
     use crate::test_support::ENV_LOCK;

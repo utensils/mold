@@ -1000,9 +1000,7 @@ fn recipe(
     // frame count. All three are derived from the identity, never from
     // `input.default_*` — those are laundered through user `model_prefs` in
     // `build_model_catalog` and can carry a stale off-envelope value.
-    let h3_compact = family == "minimax-h3"
-        && crate::minimax_h3::layout_for_model(input.model)
-            != Some(crate::minimax_h3::Layout::OfficialBf16);
+    let h3_compact = crate::minimax_h3::uses_reviewed_compact_envelope(family, input.model);
     let h3_compact_steps = crate::minimax_h3::turbo_tier_for_model(input.model)
         .map(|tier| tier.steps)
         .unwrap_or(crate::minimax_h3::COMFY_DEFAULT_STEPS);
@@ -1078,13 +1076,24 @@ fn recipe(
             alignment,
             min_width: alignment.max(64),
             min_height: alignment.max(64),
-            max_pixels: validation::max_pixels_for_family_composed(Some(family), composition),
+            // The compact stack admits exactly one canvas, so its ceilings
+            // are that canvas. The family constants are the *official* BF16
+            // ladder's headroom and sit above every compact preset, which
+            // lets a client that reads the ceiling rather than the buckets
+            // offer a size admission refuses.
+            max_pixels: if h3_compact {
+                u64::from(crate::minimax_h3::DEFAULT_WIDTH)
+                    * u64::from(crate::minimax_h3::DEFAULT_HEIGHT)
+            } else {
+                validation::max_pixels_for_family_composed(Some(family), composition)
+            },
             source_max_pixels: (family == "qwen-image-edit")
                 .then_some(validation::QWEN_IMAGE_EDIT_SOURCE_MAX_PIXELS),
-            max_axis_pixels: validation::max_axis_pixels_for_family_composed(
-                Some(family),
-                composition,
-            ),
+            max_axis_pixels: if h3_compact {
+                Some(crate::minimax_h3::DEFAULT_WIDTH.max(crate::minimax_h3::DEFAULT_HEIGHT))
+            } else {
+                validation::max_axis_pixels_for_family_composed(Some(family), composition)
+            },
             min_aspect_ratio: (family == "minimax-h3")
                 .then_some(crate::minimax_h3::MIN_ASPECT_RATIO),
             max_aspect_ratio: (family == "minimax-h3")
