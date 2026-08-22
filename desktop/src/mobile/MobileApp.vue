@@ -793,6 +793,7 @@ const galleryRemaining = ref(0);
 const gallerySentinel = ref<HTMLElement | null>(null);
 const gallerySentinelVisible = ref(false);
 const gallerySelectMode = ref(false);
+let nativeGalleryContextKey: string | null = null;
 const gallerySelection = ref<Set<string>>(new Set());
 const galleryDeleteConfirming = ref(false);
 /** Library thumbnail size, driven by the pinch gesture below. */
@@ -7293,6 +7294,26 @@ function toggleGallerySelection(print: GalleryPrint): void {
   galleryDeleteConfirming.value = false;
 }
 
+function rememberNativeGalleryContext(print: GalleryPrint): void {
+  nativeGalleryContextKey = galleryPrintKey(print);
+  if (isNativeIOSRuntime()) {
+    void invoke("extend_gallery_context_menu").catch(() => undefined);
+  }
+}
+
+function selectNativeGalleryContextPrint(): void {
+  const key = nativeGalleryContextKey;
+  nativeGalleryContextKey = null;
+  if (!key) return;
+  const print = gallery.value.find((candidate) => galleryPrintKey(candidate) === key);
+  if (!print) return;
+  setGallerySelectMode(true);
+  const next = new Set(gallerySelection.value);
+  next.add(key);
+  gallerySelection.value = next;
+  galleryDeleteConfirming.value = false;
+}
+
 function applyGalleryDragSelection(print: GalleryPrint): void {
   const key = galleryPrintKey(print);
   if (galleryDragVisited.has(key)) return;
@@ -7908,6 +7929,7 @@ onMounted(async () => {
   window.addEventListener("pointermove", moveGallerySelectionDrag, { passive: false });
   window.addEventListener("pointerup", finishGallerySelectionDrag);
   window.addEventListener("pointercancel", finishGallerySelectionDrag);
+  window.addEventListener("mold:native-gallery-select", selectNativeGalleryContextPrint);
   // The pinch tracks globally so a finger that slides off the grid mid-gesture
   // still reports, and so a lift outside the grid always ends it.
   window.addEventListener("pointermove", moveGalleryPinch, { passive: false });
@@ -7987,6 +8009,8 @@ onBeforeUnmount(() => {
   window.removeEventListener("pointermove", moveGallerySelectionDrag);
   window.removeEventListener("pointerup", finishGallerySelectionDrag);
   window.removeEventListener("pointercancel", finishGallerySelectionDrag);
+  window.removeEventListener("mold:native-gallery-select", selectNativeGalleryContextPrint);
+  nativeGalleryContextKey = null;
   finishGallerySelectionDrag();
   window.removeEventListener("pointermove", moveGalleryPinch);
   window.removeEventListener("pointerup", endGalleryPinch);
@@ -9269,6 +9293,7 @@ onBeforeUnmount(() => {
                   :src="print.thumbnailUrl"
                   :alt="print.metadata.prompt || print.filename"
                   loading="lazy"
+                  @contextmenu="rememberNativeGalleryContext(print)"
                 />
                 <span
                   v-if="isVideoItem(print) || isAudioItem(print)"

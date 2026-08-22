@@ -6682,7 +6682,8 @@ describe("MobileApp gallery", () => {
     expect(wrapper.text()).not.toContain("host unavailable");
   });
 
-  it("keeps the native image context menu and enters multi-select from Select", async () => {
+  it("keeps the native image context menu and enters multi-select from its native Select action", async () => {
+    isNativeIOSRuntime.mockReturnValue(true);
     wrapper = mountMobileApp();
     await flushPromises();
     await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
@@ -6692,9 +6693,10 @@ describe("MobileApp gallery", () => {
     wrapper.get("[data-test='gallery-item'] img").element.dispatchEvent(contextMenu);
     expect(contextMenu.defaultPrevented).toBe(false);
     expect(wrapper.find("[data-test='mobile-gallery-actions']").exists()).toBe(false);
+    expect(invoke).toHaveBeenCalledWith("extend_gallery_context_menu");
 
-    await wrapper.get("[data-test='mobile-gallery-select']").trigger("click");
-    await wrapper.get("[data-test='gallery-item']").trigger("click");
+    window.dispatchEvent(new CustomEvent("mold:native-gallery-select"));
+    await flushPromises();
     expect(wrapper.get("[data-test='mobile-gallery-actions']").text()).toContain("1 selected");
     expect(wrapper.get("[data-test='gallery-item']").attributes("aria-pressed")).toBe("true");
     expect(wrapper.get("[data-test='mobile-gallery-selection-indicator']").text()).toBe("✓");
