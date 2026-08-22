@@ -420,6 +420,13 @@ mod tests {
             license_for_manifest_file("pulid-flux", "EVA02_CLIP_L_336_psz14_s6B.pt"),
             None
         );
+        // facexlib is MIT, weights included, so the BiSeNet parser carries
+        // none of the antelopev2 restriction even though it arrives in the
+        // same bundle (#1225).
+        assert_eq!(
+            license_for_manifest_file("pulid-flux", "parsing_bisenet.pth"),
+            None
+        );
         // Same filename under a different manifest is not gated.
         assert_eq!(
             license_for_manifest_file("flux-dev:q4", "glintr100.onnx"),

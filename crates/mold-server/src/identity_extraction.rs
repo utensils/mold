@@ -343,6 +343,7 @@ pub(crate) fn stub_embedding_for(images: &[Vec<u8>], want_uncond: bool) -> Froze
             vision: "stub-vision".to_string(),
             face_detector: "stub-detector".to_string(),
             face_recognizer: "stub-recognizer".to_string(),
+            face_parser: "stub-parser".to_string(),
         },
     )
     .expect("the stub embedding is correctly shaped");
@@ -382,6 +383,7 @@ mod tests {
             vision_encoder_source: "/models/shared/pulid/eva.pt".into(),
             face_detector: "/models/shared/pulid/scrfd.onnx".into(),
             face_recognizer: "/models/shared/pulid/glintr100.onnx".into(),
+            face_parser_source: "/models/shared/pulid/parsing_bisenet.pth".into(),
         }
     }
 

@@ -6,9 +6,17 @@
 //! pulid_face_probe bench     <dir> [--warmups 5] [--runs 20]
 //!                                  [--compare] [--regress-against halcyon|plato]
 //!                                  [--full --adapter <path> --eva <path>]
+//! pulid_face_probe gate      <graph.onnx>
 //! ```
 //!
-//! `<dir>` holds `scrfd_10g_bnkps.onnx` and `glintr100.onnx`.
+//! `<dir>` holds `scrfd_10g_bnkps.onnx`, `glintr100.onnx`, and
+//! `parsing_bisenet.pth`.
+//!
+//! `gate` runs the same op/attribute gate over ONE arbitrary graph, which is
+//! how #1225 qualified (and disqualified) a candidate ONNX export of
+//! facexlib's BiSeNet face parser before any of it was ported. It takes a
+//! pathname rather than a bundle because the graph under test is not yet a
+//! manifest artifact and has no pin to check it against.
 //!
 //! `inventory` prints (and optionally writes) the op/attribute inventory the
 //! hermetic gate test consumes.
@@ -71,6 +79,8 @@ const REGRESSION_MARGIN: f64 = 0.75;
 
 const DETECTOR: &str = "scrfd_10g_bnkps.onnx";
 const RECOGNIZER: &str = "glintr100.onnx";
+/// facexlib's face parser, as its own release ships it.
+const PARSER: &str = "parsing_bisenet.pth";
 
 /// A named measurement host from `pulid-perf.md` §4.
 #[derive(Debug, Clone, Copy)]
@@ -174,38 +184,65 @@ fn inventory_for(dir: &Path, file: &str) -> Result<(GraphInventory, String, usiz
     Ok((inventory, loaded.sha256, loaded.bytes))
 }
 
+/// Print one graph's inventory and its verdict. Returns true when the gate
+/// FAILED, so a caller running several graphs can report every one of them
+/// before it exits non-zero.
+fn report_inventory(label: &str, inventory: &GraphInventory, sha256: &str, bytes: usize) -> bool {
+    println!("=== {label}  sha256={sha256}  {bytes} bytes");
+    println!("    opset: {:?}", inventory.opset);
+    for sig in &inventory.signatures {
+        let attrs = sig
+            .attributes
+            .iter()
+            .map(|a| format!("{}={}", a.name, a.value))
+            .collect::<Vec<_>>()
+            .join(" ");
+        println!("    x{:<4} {:<20} {attrs}", sig.count, sig.op_type);
+    }
+    let unsupported = unsupported_by_candle_onnx(inventory);
+    let failed = !unsupported.is_empty();
+    if failed {
+        println!("    OP GATE: FAIL");
+        for item in &unsupported {
+            println!("      - {item}");
+        }
+    } else {
+        println!("    OP GATE: pass — every op and attribute is implemented");
+    }
+    for ignored in ignored_attributes(inventory) {
+        println!(
+            "    ignored: {}.{}={} — {}",
+            ignored.op_type, ignored.attribute, ignored.value, ignored.harmless_because
+        );
+    }
+    failed
+}
+
+/// Run the op gate over one arbitrary graph.
+///
+/// Unpinned by construction: a candidate export is not a manifest artifact, so
+/// there is nothing to authenticate it against. `load_onnx_model`'s
+/// `UNPINNED_MAX_BYTES` bound still applies, which is why this stays a probe
+/// subcommand and never a runtime path.
+fn run_gate(graph: &Path) -> Result<()> {
+    let loaded = load_onnx_model(graph, None)?;
+    let inventory = graph_inventory(&loaded.model)?;
+    let label = graph
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| graph.display().to_string());
+    if report_inventory(&label, &inventory, &loaded.sha256, loaded.bytes) {
+        bail!("the op gate failed; candle-onnx cannot run {label} as-is");
+    }
+    Ok(())
+}
+
 fn run_inventory(dir: &Path, write: Option<&Path>) -> Result<()> {
     let mut all = serde_json::Map::new();
     let mut failed = false;
     for file in [DETECTOR, RECOGNIZER] {
         let (inventory, sha256, bytes) = inventory_for(dir, file)?;
-        println!("=== {file}  sha256={sha256}  {bytes} bytes");
-        println!("    opset: {:?}", inventory.opset);
-        for sig in &inventory.signatures {
-            let attrs = sig
-                .attributes
-                .iter()
-                .map(|a| format!("{}={}", a.name, a.value))
-                .collect::<Vec<_>>()
-                .join(" ");
-            println!("    x{:<4} {:<20} {attrs}", sig.count, sig.op_type);
-        }
-        let unsupported = unsupported_by_candle_onnx(&inventory);
-        if unsupported.is_empty() {
-            println!("    OP GATE: pass — every op and attribute is implemented");
-        } else {
-            failed = true;
-            println!("    OP GATE: FAIL");
-            for item in &unsupported {
-                println!("      - {item}");
-            }
-        }
-        for ignored in ignored_attributes(&inventory) {
-            println!(
-                "    ignored: {}.{}={} — {}",
-                ignored.op_type, ignored.attribute, ignored.value, ignored.harmless_because
-            );
-        }
+        failed |= report_inventory(file, &inventory, &sha256, bytes);
         all.insert(
             file.to_string(),
             serde_json::json!({ "sha256": sha256, "bytes": bytes, "inventory": inventory }),
@@ -537,7 +574,8 @@ fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let usage = "usage: pulid_face_probe <inventory|bench> <assets-dir> [--write PATH] \
                  [--warmups N] [--runs N] [--compare] [--regress-against halcyon|plato] \
-                 [--full --adapter PATH --eva PATH]";
+                 [--full --adapter PATH --eva PATH]\n       \
+                 pulid_face_probe gate <graph.onnx>";
     if args.len() < 3 {
         bail!("{usage}");
     }
@@ -608,6 +646,7 @@ fn main() -> Result<()> {
                     )?,
                     face_detector: dir.join(DETECTOR),
                     face_recognizer: dir.join(RECOGNIZER),
+                    face_parser_source: dir.join(PARSER),
                 })
             } else {
                 if adapter.is_some() || eva.is_some() {
@@ -626,6 +665,7 @@ fn main() -> Result<()> {
                 },
             )
         }
+        "gate" => run_gate(&dir),
         other => bail!("unknown subcommand `{other}`\n{usage}"),
     }
 }

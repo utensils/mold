@@ -664,6 +664,11 @@ pub struct IdentityAssetDigests {
     pub face_detector: String,
     /// `glintr100.onnx`.
     pub face_recognizer: String,
+    /// The derived `bisenet_face_parser.safetensors`, not the `.pth` source
+    /// — as with `vision`, the parser that ran is the artifact that matters.
+    /// The mask it produces changes what the vision tower sees, so a different
+    /// parser is a different identity.
+    pub face_parser: String,
 }
 
 /// One identity, extracted once and frozen for every sibling of a batch.
@@ -891,6 +896,7 @@ fn fingerprint_of(
         &assets.vision,
         &assets.face_detector,
         &assets.face_recognizer,
+        &assets.face_parser,
     ] {
         hasher.update(digest.as_bytes());
         hasher.update(b"\0");
@@ -1531,6 +1537,7 @@ mod tests {
             vision: "b".repeat(64),
             face_detector: "c".repeat(64),
             face_recognizer: "d".repeat(64),
+            face_parser: "e".repeat(64),
         }
     }
 
