@@ -2635,6 +2635,20 @@ button:disabled {
   object-fit: cover;
 }
 
+.gallery-item img.is-thumbnail-pending {
+  opacity: 0;
+}
+
+.gallery-thumbnail-pending {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: var(--ink-3);
+  font-family: var(--font-utility);
+  font-size: 20px;
+}
+
 .gallery-video-badge {
   position: absolute;
   right: 8px;

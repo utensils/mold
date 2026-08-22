@@ -4767,7 +4767,7 @@ describe("MobileApp generation queue", () => {
     expect(galleryCalls).toBe(2);
   });
 
-  it("auto-loads older prints on scroll and serializes with a completion refresh", async () => {
+  it("auto-loads older prints and defers a completion refresh while the viewer is open", async () => {
     const prints = Array.from({ length: 41 }, (_, index) => ({
       ...print,
       filename: `print-${index}.mp4`,
@@ -4793,20 +4793,13 @@ describe("MobileApp generation queue", () => {
     );
     expect(wrapper.find("button.gallery-more").exists()).toBe(false);
 
-    const olderThumbnail = { release: null as (() => void) | null };
-    apiFetchTo.mockImplementationOnce(
-      () =>
-        new Promise<Response>((resolve) => {
-          olderThumbnail.release = () =>
-            resolve({ blob: () => Promise.resolve(new Blob(["older"])) } as Response);
-        }),
-    );
     scrollToGallerySentinel();
-    await vi.waitFor(() =>
-      expect(wrapper?.get("[data-test='mobile-gallery-sentinel']").text()).toBe(
-        "Loading older prints…",
-      ),
-    );
+    await vi.waitFor(() => expect(wrapper?.findAll("[data-test='gallery-item']")).toHaveLength(41));
+    expect(wrapper.find("[data-test='mobile-gallery-sentinel']").exists()).toBe(false);
+
+    await wrapper.get("[data-test='gallery-item']").trigger("click");
+    await flushPromises();
+    expect(wrapper.find("[data-test='gallery-viewer']").exists()).toBe(true);
 
     openStreams[0]!.options.onEvent(
       "complete",
@@ -4821,15 +4814,6 @@ describe("MobileApp generation queue", () => {
       }),
     );
     openStreams[0]!.resolve();
-    await flushPromises();
-    expect(galleryCalls).toBe(1);
-
-    await wrapper.get("[data-test='gallery-item']").trigger("click");
-    await flushPromises();
-    expect(wrapper.find("[data-test='gallery-viewer']").exists()).toBe(true);
-
-    if (!olderThumbnail.release) throw new Error("Older thumbnail request did not start");
-    olderThumbnail.release();
     await flushPromises();
     expect(galleryCalls).toBe(1);
 
@@ -4872,8 +4856,158 @@ describe("MobileApp generation queue", () => {
     scrollToGallerySentinel();
 
     await vi.waitFor(() => expect(thumbnailCall).toBe(81));
-    expect(wrapper.findAll("[data-test='gallery-item']")).toHaveLength(41);
+    expect(wrapper.findAll("[data-test='gallery-item']")).toHaveLength(81);
+    expect(wrapper.findAll("[data-test='gallery-thumbnail-pending']")).toHaveLength(40);
     expect(wrapper.find("[data-test='mobile-gallery-sentinel']").exists()).toBe(false);
+  });
+
+  it("does not let a stalled thumbnail block every older print", async () => {
+    vi.useFakeTimers();
+    try {
+      const prints = Array.from({ length: 81 }, (_, index) => ({
+        ...print,
+        filename: `stalled-pagination-print-${index}.mp4`,
+        timestamp: print.timestamp - index,
+      }));
+      apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+        if (path === "/api/status") return Promise.resolve(status);
+        if (path === "/api/models") return Promise.resolve([model]);
+        if (path === "/api/gallery") return Promise.resolve(prints);
+        return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      });
+      let thumbnailCall = 0;
+      let stalledSignal: AbortSignal | undefined;
+      const requestedPaths: string[] = [];
+      apiFetchTo.mockImplementation((_target, path, init) => {
+        thumbnailCall += 1;
+        requestedPaths.push(path);
+        if (thumbnailCall === 41) {
+          stalledSignal = init?.signal;
+          // Model a WebView transport that ignores AbortSignal as well as
+          // never resolving. The page deadline must still advance the grid.
+          return new Promise(() => {});
+        }
+        return Promise.resolve({
+          blob: () => Promise.resolve(new Blob([`thumbnail-${thumbnailCall}`])),
+        } as Response);
+      });
+
+      wrapper = mountMobileApp();
+      await vi.advanceTimersByTimeAsync(0);
+      await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(wrapper.findAll("[data-test='gallery-item']")).toHaveLength(40);
+
+      scrollToGallerySentinel();
+      await vi.advanceTimersByTimeAsync(50);
+
+      expect(wrapper.findAll("[data-test='gallery-item']")).toHaveLength(81);
+      expect(wrapper.findAll("[data-test='gallery-thumbnail-pending']")).toHaveLength(1);
+      expect(wrapper.text()).not.toContain("Loading older prints…");
+
+      await vi.advanceTimersByTimeAsync(5_020);
+
+      expect(stalledSignal?.aborted).toBe(true);
+      expect(requestedPaths).toContain("/api/gallery/thumbnail/stalled-pagination-print-80.mp4");
+      expect(wrapper.findAll("[data-test='gallery-item']")).toHaveLength(81);
+      expect(wrapper.findAll("[data-test='gallery-thumbnail-pending']")).toHaveLength(1);
+      expect(wrapper.find("[data-test='mobile-gallery-sentinel']").exists()).toBe(false);
+      expect(wrapper.text()).not.toContain("Loading older prints…");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("retries a failed thumbnail without blocking later prints", async () => {
+    vi.useFakeTimers();
+    try {
+      const prints = Array.from({ length: 41 }, (_, index) => ({
+        ...print,
+        filename: `retry-pagination-print-${index}.mp4`,
+        timestamp: print.timestamp - index,
+      }));
+      apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+        if (path === "/api/status") return Promise.resolve(status);
+        if (path === "/api/models") return Promise.resolve([model]);
+        if (path === "/api/gallery") return Promise.resolve(prints);
+        return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      });
+      const attempts = new Map<string, number>();
+      apiFetchTo.mockImplementation((_target, path) => {
+        const attempt = (attempts.get(path) ?? 0) + 1;
+        attempts.set(path, attempt);
+        if (path.endsWith("retry-pagination-print-40.mp4") && attempt === 1) {
+          return Promise.reject(new Error("temporary thumbnail failure"));
+        }
+        return Promise.resolve({
+          blob: () => Promise.resolve(new Blob([`${path}-${attempt}`])),
+        } as Response);
+      });
+
+      wrapper = mountMobileApp();
+      await vi.advanceTimersByTimeAsync(0);
+      await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+      await vi.advanceTimersByTimeAsync(0);
+      scrollToGallerySentinel();
+      await vi.advanceTimersByTimeAsync(20);
+
+      expect(wrapper.findAll("[data-test='gallery-item']")).toHaveLength(41);
+      expect(wrapper.findAll("[data-test='gallery-thumbnail-pending']")).toHaveLength(1);
+
+      await vi.advanceTimersByTimeAsync(4_000);
+
+      expect(wrapper.find("[data-test='gallery-thumbnail-pending']").exists()).toBe(false);
+      expect(attempts.get("/api/gallery/thumbnail/retry-pagination-print-40.mp4")).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("aborts pending thumbnail work when the mobile app unmounts", async () => {
+    const prints = Array.from({ length: 41 }, (_, index) => ({
+      ...print,
+      filename: `unmount-pagination-print-${index}.mp4`,
+      timestamp: print.timestamp - index,
+    }));
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/gallery") return Promise.resolve(prints);
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    const lateThumbnail = deferred<Response>();
+    let pendingSignal: AbortSignal | undefined;
+    apiFetchTo.mockImplementation((_target, path, init) => {
+      if (path.endsWith("unmount-pagination-print-40.mp4")) {
+        pendingSignal = init?.signal;
+        return lateThumbnail.promise;
+      }
+      return Promise.resolve({ blob: () => Promise.resolve(new Blob([path])) } as Response);
+    });
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await vi.waitFor(() =>
+      expect(wrapper?.find("[data-test='mobile-gallery-sentinel']").exists()).toBe(true),
+    );
+    scrollToGallerySentinel();
+    await vi.waitFor(() => expect(pendingSignal).toBeDefined());
+    const objectUrlsBeforeUnmount = vi.mocked(URL.createObjectURL).mock.calls.length;
+    const timeoutSpy = vi.spyOn(globalThis, "setTimeout");
+
+    wrapper.unmount();
+    wrapper = null;
+    expect(pendingSignal?.aborted).toBe(true);
+    timeoutSpy.mockClear();
+    lateThumbnail.resolve({ blob: () => Promise.resolve(new Blob(["late"])) } as Response);
+    await flushPromises();
+
+    expect(URL.createObjectURL).toHaveBeenCalledTimes(objectUrlsBeforeUnmount);
+    expect(
+      timeoutSpy.mock.calls.filter(([, delay]) => typeof delay === "number" && delay >= 2_000),
+    ).toHaveLength(0);
+    timeoutSpy.mockRestore();
   });
 
   it("keeps focus stable when the viewer closes before a queued Gallery refresh starts", async () => {
@@ -4901,20 +5035,11 @@ describe("MobileApp generation queue", () => {
       expect(wrapper?.find("[data-test='mobile-gallery-sentinel']").exists()).toBe(true),
     );
 
-    const olderThumbnail = { release: null as (() => void) | null };
-    apiFetchTo.mockImplementationOnce(
-      () =>
-        new Promise<Response>((resolve) => {
-          olderThumbnail.release = () =>
-            resolve({ blob: () => Promise.resolve(new Blob(["older"])) } as Response);
-        }),
-    );
     scrollToGallerySentinel();
-    await vi.waitFor(() =>
-      expect(wrapper?.get("[data-test='mobile-gallery-sentinel']").text()).toBe(
-        "Loading older prints…",
-      ),
-    );
+    await vi.waitFor(() => expect(wrapper?.findAll("[data-test='gallery-item']")).toHaveLength(41));
+
+    await wrapper.get("[data-test='gallery-item']").trigger("click");
+    await flushPromises();
 
     openStreams[0]!.options.onEvent(
       "complete",
@@ -4932,18 +5057,11 @@ describe("MobileApp generation queue", () => {
     await flushPromises();
     expect(galleryCalls).toBe(1);
 
-    await wrapper.get("[data-test='gallery-item']").trigger("click");
-    await flushPromises();
     await wrapper.get("[data-test='gallery-viewer-close']").trigger("click");
-    await flushPromises();
+    await vi.waitFor(() => expect(galleryCalls).toBe(2));
 
     expect(wrapper.find("[data-test='gallery-viewer']").exists()).toBe(false);
     expect(document.activeElement).toBe(wrapper.get("[data-test='mobile-tab-gallery']").element);
-    expect(galleryCalls).toBe(1);
-
-    if (!olderThumbnail.release) throw new Error("Older thumbnail request did not start");
-    olderThumbnail.release();
-    await vi.waitFor(() => expect(galleryCalls).toBe(2));
     await vi.waitFor(() => expect(wrapper?.findAll("[data-test='gallery-item']")).toHaveLength(40));
     expect(document.activeElement).toBe(wrapper.get("[data-test='mobile-tab-gallery']").element);
   });

@@ -202,6 +202,9 @@ pushed screen opened from the header.
   counterpart to the web/desktop thumbnail-size slider. The choice persists at
   `mold.mobile.galleryColumns.v1`, separately from the shared pixel-target key
   so a phone's zoom never rewrites a Mac's grid, and defaults to three across.
+  Infinite scroll gives each thumbnail load a fixed deadline and keeps paging
+  while its sentinel remains visible, so one stalled iOS or Android WebView
+  request can never strand older prints behind a permanent loading state.
   Tap the 44pt **Select** control to enter multi-select, then select all, clear,
   or delete the chosen prints. Delete removes every matching copy from
   reachable saved hosts; a host failure leaves that copy visible and reports
