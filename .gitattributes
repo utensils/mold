@@ -1,1 +1,47 @@
+# Line endings are LF in the repository AND in every working tree, including
+# Windows ones. Git's default `core.autocrlf=true` on a Windows install would
+# otherwise check the whole tree out as CRLF, which is not cosmetic here:
+# prettier defaults to `endOfLine: "lf"` and flags every file, so `desktop-check`
+# and the `web`/`docs` CI gates cannot pass from a Windows clone, and a
+# CRLF-terminated `#!/usr/bin/env bash` shebang is not a valid interpreter path.
+# `eol=lf` overrides the user's autocrlf setting for this repo alone.
+* text=auto eol=lf
+
+# Windows batch parsers are the one place CRLF is load-bearing: a `.bat` or
+# `.cmd` with LF endings can mis-execute labels and multi-line blocks.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Never touched: binary content, and the golden fixtures whose exact bytes are
+# the assertion (parity tensors, PNG/JPEG preprocessing goldens, tokenizers).
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.icns binary
+*.pdf binary
+*.zip binary
+*.gz binary
+*.jar binary
+*.ttf binary
+*.otf binary
+*.woff binary
+*.woff2 binary
+*.webm binary
+*.mp4 binary
+*.mov binary
+*.wav binary
+*.safetensors binary
+*.gguf binary
+*.onnx binary
+*.pth binary
+*.bin binary
+*.b64 binary
+
+# Xcode project files are machine-owned; leave their bytes alone.
+*.pbxproj -text
+
+# Keep the existing rich diff for single-file components.
 *.vue text diff
