@@ -1050,17 +1050,39 @@ fn validate_private_execution_route_facts(
             gpu_id: admitted.device_ordinal,
         },
     };
-    if !actual.active
-        || actual.lease_id.trim().is_empty()
-        || actual.device_id != admitted.device_id
-        || actual.execution_fingerprint != admitted.execution_fingerprint
-        || actual.backend
-            != H3CandleBackendDevice::from_compute_capability(admitted.compute_capability)
-        || actual.location != expected_location
-        || admitted.attention.device != expected_attention_device
-        || actual.attention_device != admitted.attention.device
-    {
-        bail!("private MiniMax H3 execution route differs before component binding");
+    let mut mismatches = Vec::new();
+    for (axis, mismatch) in [
+        ("active", !actual.active),
+        ("lease-id", actual.lease_id.trim().is_empty()),
+        ("device-id", actual.device_id != admitted.device_id),
+        (
+            "execution-fingerprint",
+            actual.execution_fingerprint != admitted.execution_fingerprint,
+        ),
+        (
+            "backend",
+            actual.backend
+                != H3CandleBackendDevice::from_compute_capability(admitted.compute_capability),
+        ),
+        ("location", actual.location != expected_location),
+        (
+            "admitted-attention",
+            admitted.attention.device != expected_attention_device,
+        ),
+        (
+            "execution-attention",
+            actual.attention_device != admitted.attention.device,
+        ),
+    ] {
+        if mismatch {
+            mismatches.push(axis);
+        }
+    }
+    if !mismatches.is_empty() {
+        bail!(
+            "private MiniMax H3 execution route differs before component binding: {}",
+            mismatches.join(", ")
+        );
     }
     Ok(())
 }
