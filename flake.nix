@@ -1449,7 +1449,7 @@
                       done
                       bun install --frozen-lockfile
                       cd desktop
-                      cargo tauri build --features metal --bundles app,dmg "$@"
+                      cargo tauri build --features ${desktopFeatures} --bundles app,dmg "$@"
                       cd ..
                       app="desktop/src-tauri/target/release/bundle/macos/Mold.app"
                       dmg=$(find desktop/src-tauri/target/release/bundle/dmg -maxdepth 1 -name '*.dmg' -print -quit)
@@ -1471,6 +1471,9 @@
                   ${desktopSetup}
                   cargo fmt --manifest-path desktop/src-tauri/Cargo.toml -- --check
                   cargo clippy --manifest-path desktop/src-tauri/Cargo.toml --all-targets -- -D warnings
+                  # `pulid` is in every shipped desktop recipe, so its lints
+                  # belong in the gate rather than first on a release runner.
+                  cargo clippy --manifest-path desktop/src-tauri/Cargo.toml --all-targets --features pulid -- -D warnings
                   bun install --frozen-lockfile
                   cd desktop
                   bunx vue-tsc -b

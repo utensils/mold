@@ -28,6 +28,7 @@ import {
 } from "../lib/chainRouting";
 import {
   applyChainProgress,
+  applyCompletionWarnings,
   applyProgress,
   base64ToBlobUrl,
   chainCompleteToComplete,
@@ -47,6 +48,7 @@ import { requestWarningsFromHeaders } from "@studio/lib/requestWarnings";
 
 export {
   applyChainProgress,
+  applyCompletionWarnings,
   applyProgress,
   base64ToBlobUrl,
   chainCompleteToComplete,
@@ -896,6 +898,7 @@ export const useGenerationStore = defineStore("generation", {
               const complete = chainRoute
                 ? chainCompleteToComplete(JSON.parse(data) as SseChainCompleteEvent, req)
                 : (JSON.parse(data) as CompleteEvent);
+              applyCompletionWarnings(current, complete);
               const useSavedResult =
                 !complete.image ||
                 (current.metadataOnlyCompletion &&

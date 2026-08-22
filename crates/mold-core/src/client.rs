@@ -630,6 +630,14 @@ impl MoldClient {
                     }
                     "complete" => {
                         let complete: SseCompleteEvent = serde_json::from_str(&data)?;
+                        // The render's own advisories live here, not in the
+                        // headers captured above — they were written before
+                        // the job ran. Both channels, or the caller sees only
+                        // half of what the server told it.
+                        let request_warnings = merge_completion_warnings(
+                            &request_warnings,
+                            &complete.request_warnings,
+                        );
                         let payload =
                             base64::engine::general_purpose::STANDARD.decode(&complete.image)?;
                         let b64 = base64::engine::general_purpose::STANDARD;
@@ -1948,6 +1956,34 @@ fn parse_request_warnings(headers: &reqwest::header::HeaderMap) -> Vec<String> {
         .collect()
 }
 
+/// Fold the advisories a completion event carried into the ones the response
+/// headers carried.
+///
+/// A streaming render has two delivery channels and needs both. The headers
+/// arrive before the first SSE frame, so they can only carry what admission
+/// already knew — a retimed lip dub, a filing the host could not apply. An
+/// advisory the RENDER produced, such as which of several detected faces the
+/// identity extractor conditioned on, is decided while the job is being
+/// prepared, long after those headers were written; it can only travel in the
+/// completion event. Reading one channel and not the other is how `mold run`
+/// silently swallowed the multi-face notice (#1223).
+///
+/// Header advisories keep their position, because they describe what happened
+/// first. Duplicates are dropped: the server may repeat an advisory in the
+/// completion event that it already sent as a header, and a caller should see
+/// it once.
+fn merge_completion_warnings(from_headers: &[String], from_completion: &[String]) -> Vec<String> {
+    let mut merged = from_headers.to_vec();
+    for warning in from_completion {
+        let warning = warning.trim();
+        if warning.is_empty() || merged.iter().any(|held| held == warning) {
+            continue;
+        }
+        merged.push(warning.to_owned());
+    }
+    merged
+}
+
 /// Parse video metadata from HTTP response headers.
 /// Returns `Some` when `x-mold-video-frames` is present, indicating a video response.
 fn parse_video_headers(headers: &reqwest::header::HeaderMap) -> Option<VideoMeta> {
@@ -3009,6 +3045,133 @@ mod tests {
             "strength": 1.0
         }))
         .unwrap()
+    }
+
+    /// A one-shot SSE server that emits the given response headers and then a
+    /// single complete event.
+    async fn spawn_completing_stream_server(
+        header_warnings: &'static [&'static str],
+        complete: serde_json::Value,
+    ) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let mut request = Vec::new();
+            let mut buf = [0u8; 1024];
+            while let Ok(read) = socket.read(&mut buf).await {
+                if read == 0 {
+                    return;
+                }
+                request.extend_from_slice(&buf[..read]);
+                if request.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let advisories = header_warnings
+                .iter()
+                .map(|warning| format!("x-mold-request-warning: {warning}\r\n"))
+                .collect::<String>();
+            let body = format!("event: complete\ndata: {complete}\n\n");
+            let _ = socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n{advisories}\
+                         Content-Length: {}\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await;
+            let _ = socket.flush().await;
+        });
+        base
+    }
+
+    fn complete_event(warnings: serde_json::Value) -> serde_json::Value {
+        let png = base64::engine::general_purpose::STANDARD.encode([0x89, b'P', b'N', b'G']);
+        serde_json::json!({
+            "image": png,
+            "format": "png",
+            "width": 64,
+            "height": 64,
+            "seed_used": 7,
+            "generation_time_ms": 12,
+            "model": "flux-dev:q4",
+            "request_warnings": warnings,
+        })
+    }
+
+    /// The identity extractor decides which of several detected faces to
+    /// condition on while the job is being prepared — after the response
+    /// headers were written, so the only channel it can travel on is the
+    /// completion event. Reading headers alone is how `mold run` swallowed
+    /// the notice entirely (#1223).
+    #[tokio::test]
+    async fn streaming_surfaces_an_advisory_the_render_produced() {
+        let identity =
+            "3 faces were detected in the identity image; conditioning on the largest one";
+        let base = spawn_completing_stream_server(
+            &["the requested collection was dropped"],
+            complete_event(serde_json::json!([identity])),
+        )
+        .await;
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let response = MoldClient::new(&base)
+            .generate_stream(&stream_request(), tx)
+            .await
+            .expect("the stream completes")
+            .expect("the server supports SSE");
+
+        assert_eq!(
+            response.request_warnings,
+            vec![
+                "the requested collection was dropped".to_string(),
+                identity.to_string(),
+            ],
+            "both channels must reach the caller, admission's first"
+        );
+    }
+
+    /// An older server omits the field entirely, and an ordinary render sends
+    /// an empty one. Neither may disturb the header advisories.
+    #[tokio::test]
+    async fn a_completion_without_advisories_keeps_the_header_ones() {
+        let mut event = complete_event(serde_json::json!([]));
+        event.as_object_mut().unwrap().remove("request_warnings");
+        let base = spawn_completing_stream_server(&["a lip dub was retimed"], event).await;
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let response = MoldClient::new(&base)
+            .generate_stream(&stream_request(), tx)
+            .await
+            .expect("the stream completes")
+            .expect("the server supports SSE");
+
+        assert_eq!(
+            response.request_warnings,
+            vec!["a lip dub was retimed".to_string()]
+        );
+    }
+
+    /// A server may repeat a header advisory in the completion event. The
+    /// caller should see it once, and prose containing `"; "` is never split.
+    #[test]
+    fn merging_completion_advisories_dedupes_and_never_splits_prose() {
+        let prose = "Tags were not applied; the print was generated and saved normally.";
+        assert_eq!(
+            super::merge_completion_warnings(
+                &[prose.to_string()],
+                &[prose.to_string(), "  ".to_string(), " kept ".to_string()],
+            ),
+            vec![prose.to_string(), "kept".to_string()]
+        );
+        assert!(super::merge_completion_warnings(&[], &[]).is_empty());
     }
 
     #[tokio::test]

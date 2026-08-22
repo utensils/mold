@@ -86,6 +86,15 @@ grep -Fq '"pulid"' <<< "$desktop_feature_recipe" \
   || fail "the Nix desktop feature recipe no longer builds face identity"
 grep -Fq 'buildFeatures = desktopFeaturesFor computeCap;' "$repo_root/flake.nix" \
   || fail "the Nix desktop packages no longer use the shared desktop feature recipe"
+# Every `cargo tauri` invocation in the devshell — dev, build, and the signed
+# `desktop-release` distribution path a maintainer runs by hand — must take the
+# shared recipe. `desktop-release` hard-coded `--features metal` and would have
+# produced a signed DMG with face identity missing, while the CI-built nightly
+# from the same tree had it.
+while IFS= read -r invocation; do
+  grep -Fq -- '--features ${desktopFeatures}' <<< "$invocation" \
+    || fail "a devshell cargo tauri command does not use the shared desktop feature recipe: $invocation"
+done < <(grep -F 'cargo tauri ' "$repo_root/flake.nix")
 grep -Fq 'pkgs.protobuf' "$repo_root/flake.nix" \
   || fail "the Nix build has no protoc for candle-onnx"
 distribution="$repo_root/.github/workflows/desktop-distribution.yml"
