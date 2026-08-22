@@ -438,6 +438,17 @@ pub fn build_model_catalog(
             supports_audio: declared_audio_capability(&family, name).unwrap_or(family == "ltx2"),
         });
         let resolution = resolution_defaults_from_profile(&generation_profile);
+        // Same authority as the manifest branch above: a config-only entry
+        // reaches here for a reviewed H3 id that `find_manifest` missed, and
+        // narrowing its ceiling while leaving a remembered 345-frame default
+        // in place rebuilds the exact contradiction this fix removes.
+        let (default_width, default_height, default_steps, default_frames) =
+            pinned_recipe_defaults(&generation_profile).unwrap_or((
+                default_width,
+                default_height,
+                default_steps,
+                default_frames,
+            ));
 
         models.push(ModelInfoExtended {
             downloaded: true,
