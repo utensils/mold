@@ -1,11 +1,11 @@
 //! On-disk resolution for the PuLID-FLUX auxiliary asset bundle.
 //!
-//! The bundle is four unrelated artifacts — an identity adapter, a vision
-//! tower, a face detector, and a face recognizer — and none of them is a
-//! transformer or a VAE. [`crate::manifest::paths_from_downloads`] therefore
+//! The bundle is five unrelated artifacts — an identity adapter, a vision
+//! tower, a face detector, a face recognizer, and a face parser — and none of
+//! them is a transformer or a VAE. [`crate::manifest::paths_from_downloads`] therefore
 //! cannot represent it: it exists to build a [`crate::ModelPaths`], which
 //! requires a generator. This module resolves the bundle on its own terms
-//! instead, and answers only one question: are all four files present, and
+//! instead, and answers only one question: are all five files present, and
 //! where?
 
 use std::path::PathBuf;
@@ -27,6 +27,10 @@ pub struct PulidPaths {
     pub face_detector: PathBuf,
     /// InsightFace antelopev2 ArcFace recognizer.
     pub face_recognizer: PathBuf,
+    /// facexlib's BiSeNet face parser. A conversion INPUT, like
+    /// [`Self::vision_encoder_source`] — callers must not hand this `.pth` to
+    /// a safetensors loader.
+    pub face_parser_source: PathBuf,
 }
 
 /// The PuLID-FLUX manifest.
@@ -44,7 +48,7 @@ fn file_for(component: ModelComponent) -> Option<&'static ModelFile> {
         .find(|file| file.component == component)
 }
 
-/// Resolve the bundle, returning `Some` only when **all four** files are
+/// Resolve the bundle, returning `Some` only when **all five** files are
 /// completely on disk.
 ///
 /// A partially present bundle is deliberately `None` rather than a struct with
@@ -61,6 +65,7 @@ pub fn pulid_paths(config: &Config) -> Option<PulidPaths> {
         vision_encoder_source: resolve(ModelComponent::IdentityVisionEncoder)?,
         face_detector: resolve(ModelComponent::FaceDetector)?,
         face_recognizer: resolve(ModelComponent::FaceRecognizer)?,
+        face_parser_source: resolve(ModelComponent::FaceParser)?,
     })
 }
 
@@ -86,13 +91,22 @@ pub fn missing_pulid_files(config: &Config) -> Vec<&'static ModelFile> {
 ///
 /// The name lives here rather than beside the converter in `mold-inference`
 /// because removal has to delete it and `mold-core` cannot see that crate. It
-/// is the converter's authority all the same — `encoders::eva_clip_convert`
+/// is the converter's authority all the same — `encoders::pickle_convert`
 /// reads it from here — so the two can never name different files.
 pub const DERIVED_VISION_FILENAME: &str = "eva02_clip_l_336_vision.safetensors";
 
 /// Provenance sidecar written beside [`DERIVED_VISION_FILENAME`]. Never read
 /// back to decide anything; deleted with the artifact it describes.
 pub const DERIVED_VISION_SIDECAR_FILENAME: &str = "eva02_clip_l_336_vision.json";
+
+/// The BiSeNet face parser mold DERIVES from facexlib's `.pth` on first use.
+///
+/// Here for the same reason [`DERIVED_VISION_FILENAME`] is: removal has to
+/// delete it, and `mold-core` cannot see `mold-inference`.
+pub const DERIVED_PARSER_FILENAME: &str = "bisenet_face_parser.safetensors";
+
+/// Provenance sidecar written beside [`DERIVED_PARSER_FILENAME`].
+pub const DERIVED_PARSER_SIDECAR_FILENAME: &str = "bisenet_face_parser.json";
 
 /// The artifacts mold derived rather than downloaded, present or not.
 ///
@@ -114,6 +128,8 @@ pub fn derived_pulid_paths(config: &Config) -> Vec<PathBuf> {
         vec![
             root.join(DERIVED_VISION_FILENAME),
             root.join(DERIVED_VISION_SIDECAR_FILENAME),
+            root.join(DERIVED_PARSER_FILENAME),
+            root.join(DERIVED_PARSER_SIDECAR_FILENAME),
         ]
     })
     .unwrap_or_default()
@@ -161,6 +177,7 @@ mod tests {
         ModelComponent::IdentityVisionEncoder,
         ModelComponent::FaceDetector,
         ModelComponent::FaceRecognizer,
+        ModelComponent::FaceParser,
     ];
 
     #[test]
@@ -201,20 +218,21 @@ mod tests {
         };
 
         assert!(pulid_paths(&config).is_none());
-        assert_eq!(missing_pulid_files(&config).len(), 4);
+        assert_eq!(missing_pulid_files(&config).len(), 5);
 
         mark(&[
             ModelComponent::IdentityAdapter,
             ModelComponent::IdentityVisionEncoder,
             ModelComponent::FaceDetector,
+            ModelComponent::FaceRecognizer,
         ]);
         assert!(
             pulid_paths(&config).is_none(),
-            "three of four assets is not an install"
+            "four of five assets is not an install"
         );
         let missing = missing_pulid_files(&config);
         assert_eq!(missing.len(), 1);
-        assert_eq!(missing[0].component, ModelComponent::FaceRecognizer);
+        assert_eq!(missing[0].component, ModelComponent::FaceParser);
 
         mark(ALL);
         let paths = pulid_paths(&config).expect("complete bundle resolves");
@@ -230,6 +248,9 @@ mod tests {
         assert!(paths
             .face_recognizer
             .ends_with("shared/pulid/glintr100.onnx"));
+        assert!(paths
+            .face_parser_source
+            .ends_with("shared/pulid/parsing_bisenet.pth"));
         assert!(missing_pulid_files(&config).is_empty());
         assert!(pulid_is_installed(&config));
     }
@@ -280,7 +301,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let config = config_for(dir.path());
         let paths = pulid_storage_paths(&config);
-        assert_eq!(paths.len(), 4);
+        assert_eq!(paths.len(), 5);
         assert!(paths.iter().all(|path| !path.exists()));
     }
 
@@ -292,7 +313,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let config = config_for(dir.path());
         let derived = derived_pulid_paths(&config);
-        assert_eq!(derived.len(), 2);
+        assert_eq!(derived.len(), 4);
 
         let source = pulid_storage_paths(&config)
             .into_iter()
@@ -307,5 +328,11 @@ mod tests {
         assert!(derived
             .iter()
             .any(|path| path.file_name().unwrap() == DERIVED_VISION_SIDECAR_FILENAME));
+        assert!(derived
+            .iter()
+            .any(|path| path.file_name().unwrap() == DERIVED_PARSER_FILENAME));
+        assert!(derived
+            .iter()
+            .any(|path| path.file_name().unwrap() == DERIVED_PARSER_SIDECAR_FILENAME));
     }
 }

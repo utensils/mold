@@ -2353,6 +2353,7 @@ mod tests {
                 vision: "b".repeat(64),
                 face_detector: "c".repeat(64),
                 face_recognizer: "d".repeat(64),
+                face_parser: "e".repeat(64),
             },
         )
         .expect("a well-shaped embedding")

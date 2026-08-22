@@ -53,6 +53,7 @@ fn pending_kind(component: ModelComponent) -> Option<&'static str> {
         ModelComponent::IdentityVisionEncoder => "identity_vision_encoder",
         ModelComponent::FaceDetector => "face_detector",
         ModelComponent::FaceRecognizer => "face_recognizer",
+        ModelComponent::FaceParser => "face_parser",
         _ => return None,
     })
 }
@@ -63,6 +64,9 @@ fn pending_container(component: ModelComponent) -> Option<PendingArtifactContain
         ModelComponent::IdentityAdapter => PendingArtifactContainer::Safetensors,
         // A PyTorch pickle carried as a conversion input, never loaded as-is.
         ModelComponent::IdentityVisionEncoder => PendingArtifactContainer::TorchArchive,
+        // facexlib publishes the parser as a pickle too, and it is carried on
+        // the same terms: a conversion input, never loaded as-is.
+        ModelComponent::FaceParser => PendingArtifactContainer::TorchArchive,
         ModelComponent::FaceDetector | ModelComponent::FaceRecognizer => {
             PendingArtifactContainer::Onnx
         }
@@ -146,6 +150,7 @@ pub(crate) async fn materialize_identity_assets(
     let mut vision_encoder_source: Option<PathBuf> = None;
     let mut face_detector: Option<PathBuf> = None;
     let mut face_recognizer: Option<PathBuf> = None;
+    let mut face_parser_source: Option<PathBuf> = None;
     for file in &manifest.files {
         let kind = pending_kind(file.component).ok_or_else(|| {
             format!(
@@ -177,9 +182,9 @@ pub(crate) async fn materialize_identity_assets(
                 expected_bytes: Some(file.size_bytes),
                 kind,
                 container,
-                // None of the four is quantized: the adapter and the vision
-                // tower ship at their trained precision and the ONNX models
-                // carry no GGUF-style variant at all.
+                // None of the five is quantized: the adapter, the vision
+                // tower, and the parser ship at their trained precision and
+                // the ONNX models carry no GGUF-style variant at all.
                 quantization: None,
                 // Every PuLID file is SHA-256 pinned in the manifest, and this
                 // is the only place that pin is enforced for them: the
@@ -204,6 +209,7 @@ pub(crate) async fn materialize_identity_assets(
             ModelComponent::IdentityVisionEncoder => vision_encoder_source = Some(path),
             ModelComponent::FaceDetector => face_detector = Some(path),
             ModelComponent::FaceRecognizer => face_recognizer = Some(path),
+            ModelComponent::FaceParser => face_parser_source = Some(path),
             other => {
                 return Err(format!(
                     "the PuLID manifest carries an unexpected component {other:?}"
@@ -219,6 +225,7 @@ pub(crate) async fn materialize_identity_assets(
             .ok_or_else(|| missing("identity vision encoder"))?,
         face_detector: face_detector.ok_or_else(|| missing("face detector"))?,
         face_recognizer: face_recognizer.ok_or_else(|| missing("face recognizer"))?,
+        face_parser_source: face_parser_source.ok_or_else(|| missing("face parser"))?,
     });
     Ok(())
 }
@@ -341,6 +348,7 @@ mod tests {
             vision_encoder_source: resolve(ModelComponent::IdentityVisionEncoder),
             face_detector: resolve(ModelComponent::FaceDetector),
             face_recognizer: resolve(ModelComponent::FaceRecognizer),
+            face_parser_source: resolve(ModelComponent::FaceParser),
         }
     }
 
@@ -425,7 +433,7 @@ mod tests {
         .unwrap();
 
         let downloads = prepared.pending_downloads_for_device("cuda:0");
-        assert_eq!(downloads.len(), 4, "{downloads:?}");
+        assert_eq!(downloads.len(), 5, "{downloads:?}");
         let by_kind = downloads
             .iter()
             .map(|download| {
@@ -466,6 +474,10 @@ mod tests {
         assert_eq!(
             by_kind["face_recognizer"],
             ("DIAMONIK7777/antelopev2", "glintr100.onnx", 260_665_334)
+        );
+        assert_eq!(
+            by_kind["face_parser"],
+            ("leonelhs/facexlib", "parsing_bisenet.pth", 53_289_463)
         );
 
         let device_inputs = &prepared.by_device["cuda:0"];
@@ -560,7 +572,7 @@ mod tests {
 
         assert_eq!(
             prepared.pending_downloads_for_device("cuda:0").len(),
-            4,
+            5,
             "unproven bytes are not evidence that nothing needs downloading"
         );
         // The preview stays read-only about them: nothing deleted, nothing

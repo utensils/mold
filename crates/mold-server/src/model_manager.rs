@@ -1467,6 +1467,7 @@ fn manifest_component_kind(component: mold_core::manifest::ModelComponent) -> &'
         ModelComponent::IdentityVisionEncoder => "identity_vision_encoder",
         ModelComponent::FaceDetector => "face_detector",
         ModelComponent::FaceRecognizer => "face_recognizer",
+        ModelComponent::FaceParser => "face_parser",
     }
 }
 
@@ -1501,6 +1502,7 @@ fn manifest_component_name(component: mold_core::manifest::ModelComponent, filen
         ModelComponent::IdentityVisionEncoder => "identity vision encoder",
         ModelComponent::FaceDetector => "face detector",
         ModelComponent::FaceRecognizer => "face recognizer",
+        ModelComponent::FaceParser => "face parser",
     }
 }
 

@@ -1929,7 +1929,8 @@ fn resolved_manifest_paths_exist(
         ModelComponent::IdentityAdapter
         | ModelComponent::IdentityVisionEncoder
         | ModelComponent::FaceDetector
-        | ModelComponent::FaceRecognizer => false,
+        | ModelComponent::FaceRecognizer
+        | ModelComponent::FaceParser => false,
         ModelComponent::Decoder => paths.decoder.as_ref().is_some_and(|path| path.exists()),
         ModelComponent::Upscaler => paths.transformer.exists(),
     })

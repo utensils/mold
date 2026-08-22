@@ -23,7 +23,7 @@
 //! ## Why the extraction never overlaps the encode peak
 //!
 //! It runs at admission, before the scheduler has leased a device, so the T5
-//! and CLIP encoders it must not compete with do not exist yet. Its ~1.4 GB of
+//! and CLIP encoders it must not compete with do not exist yet. Its ~2.4 GB of
 //! host RAM (see `EXTRACTION_HOST_PEAK_BYTES`) is allocated and released
 //! before the job is dispatched. That is a stronger guarantee than a scheduled
 //! slot: the two peaks cannot coexist rather than being arranged not to.
@@ -85,11 +85,14 @@ static EXTRACTION_SLOT: tokio::sync::Semaphore = tokio::sync::Semaphore::const_n
 
 /// Bytes one extraction is charged.
 ///
-/// Restated here rather than read from `mold_inference` because that module is
-/// behind the `pulid` feature while this gate is not; a build without the
-/// feature still admits and refuses requests. `the_charged_peak_matches_the_
-/// measurement` pins the two together on the builds that have both.
-const EXTRACTION_PEAK_BYTES: u64 = 1_400_000_000;
+/// Read from `mold_core::identity`, which is compiled unconditionally, rather
+/// than from `mold_inference`, whose identity module is behind the `pulid`
+/// feature while this gate is not — a build without the feature still admits
+/// and refuses requests. It used to be a second literal, and the two drifted by
+/// a gigabyte the first time the measurement moved.
+/// `the_charged_peak_matches_the_measurement` pins this against the inference
+/// crate's re-export on the builds that have both.
+const EXTRACTION_PEAK_BYTES: u64 = mold_core::identity::EXTRACTION_HOST_PEAK_BYTES;
 
 /// Reads host memory. Injectable so the gate can be tested without a machine
 /// that happens to be short on RAM.
@@ -343,6 +346,7 @@ pub(crate) fn stub_embedding_for(images: &[Vec<u8>], want_uncond: bool) -> Froze
             vision: "stub-vision".to_string(),
             face_detector: "stub-detector".to_string(),
             face_recognizer: "stub-recognizer".to_string(),
+            face_parser: "stub-parser".to_string(),
         },
     )
     .expect("the stub embedding is correctly shaped");
@@ -382,6 +386,7 @@ mod tests {
             vision_encoder_source: "/models/shared/pulid/eva.pt".into(),
             face_detector: "/models/shared/pulid/scrfd.onnx".into(),
             face_recognizer: "/models/shared/pulid/glintr100.onnx".into(),
+            face_parser_source: "/models/shared/pulid/parsing_bisenet.pth".into(),
         }
     }
 
@@ -508,7 +513,7 @@ mod tests {
         })
     }
 
-    /// Two admissions arriving together must not both allocate the ~1.4 GB
+    /// Two admissions arriving together must not both allocate the ~2.4 GB
     /// peak. A host with room for exactly one extraction has to serve them one
     /// after the other; summing the peaks is how an otherwise-fine box OOMs.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

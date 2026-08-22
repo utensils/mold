@@ -12,11 +12,16 @@
 //! that were on the table, is recorded in
 //! `docs/architecture/pulid-face-extraction.md`.
 //!
+//! The BiSeNet mask PuLID applies to that crop before the tower sees it
+//! (`PuLID/pulid/pipeline_flux.py:161-170`) lives in [`parsing`] and is
+//! applied by [`extraction`], which owns the crop-to-tower step.
+//!
 //! Deliberately NOT implemented here, and named rather than silently skipped:
-//! facexlib's RetinaFace detector and its BiSeNet background mask, both of
-//! which PuLID applies before the EVA tower
-//! (`PuLID/pulid/pipeline_flux.py:145-170`). Issue #1225 owns them; #1222's
-//! fidelity gate decides whether the milestone needs them.
+//! facexlib's RetinaFace detector, which upstream uses for the 512 crop's
+//! landmarks while taking the ArcFace embedding from InsightFace's SCRFD
+//! (`pipeline_flux.py:127-147`). Mold warps both crops from ONE SCRFD
+//! detection. #1225 measured that divergence end to end rather than assuming
+//! it away; the numbers are in `docs/architecture/pulid-face-extraction.md`.
 
 pub mod align;
 pub mod arcface;
@@ -25,6 +30,7 @@ pub mod extraction;
 pub mod onnx_graph;
 pub mod onnx_inventory;
 pub mod onnx_weights;
+pub mod parsing;
 pub mod scrfd;
 pub mod scrfd_net;
 pub mod warp;
@@ -226,6 +232,18 @@ impl IdentityExtractor {
 /// central. Several faces is not an error, but it IS a decision the user did
 /// not make, so it returns a warning the caller surfaces through
 /// `x-mold-request-warning`.
+///
+/// Upstream applies that rule to the ArcFace branch only. Its 512 crop comes
+/// from a SECOND detector, facexlib's RetinaFace, run with
+/// `only_center_face=True` (`pipeline_flux.py:145`), which on a group
+/// photograph selects a different person — `get_center_face` minimizes
+/// distance to the image centre (`face_restoration_helper.py:152-163`) while
+/// `get_largest_face` maximizes area (`:71-89`). The two halves of one
+/// identity would then describe two faces, which is upstream's defect and not
+/// a behaviour to reproduce. Mold runs ONE detection and hands the same face
+/// to both crops; #1225 measured what that costs on a single-face photograph
+/// (where the two rules agree by construction) and recorded it in
+/// `docs/architecture/pulid-face-extraction.md`.
 pub fn select_face(faces: &[DetectedFace]) -> Option<(DetectedFace, Option<String>)> {
     let largest = faces.iter().copied().max_by(|a, b| {
         a.area()
@@ -283,6 +301,34 @@ mod tests {
         assert!(warning.contains("largest"), "{warning}");
     }
 
+    /// The centre-vs-largest divergence, made concrete.
+    ///
+    /// Upstream would embed the small central face and crop the large offset
+    /// one. Mold picks one face for both, and says which.
+    #[test]
+    fn one_detection_serves_both_crops_even_when_centre_and_largest_disagree() {
+        // A 1000x1000 frame: a small face dead centre, a large one off to the
+        // side. `get_center_face` would take the first, `get_largest_face`
+        // the second.
+        let central = face([460.0, 460.0, 540.0, 540.0], 0.95);
+        let large = face([600.0, 100.0, 900.0, 500.0], 0.90);
+        assert!(central.area() < large.area());
+        let centre_of_frame = [500.0, 500.0];
+        let distance = |f: &DetectedFace| {
+            let cx = (f.bbox[0] + f.bbox[2]) / 2.0 - centre_of_frame[0];
+            let cy = (f.bbox[1] + f.bbox[3]) / 2.0 - centre_of_frame[1];
+            (cx * cx + cy * cy).sqrt()
+        };
+        assert!(
+            distance(&central) < distance(&large),
+            "the fixture must actually make the two rules disagree"
+        );
+
+        let (chosen, warning) = select_face(&[central, large]).unwrap();
+        assert_eq!(chosen.bbox, large.bbox, "mold follows the ArcFace rule");
+        assert!(warning.is_some(), "an unforced choice is reported");
+    }
+
     #[test]
     fn the_eva_border_is_facexlibs_bgr_grey_reversed() {
         // facexlib passes (135, 133, 132) to cv2 on a BGR image.
@@ -296,6 +342,7 @@ mod tests {
             vision_encoder_source: Path::new("/nonexistent/eva.pt").to_path_buf(),
             face_detector: Path::new("/nonexistent/scrfd.onnx").to_path_buf(),
             face_recognizer: Path::new("/nonexistent/glintr100.onnx").to_path_buf(),
+            face_parser_source: Path::new("/nonexistent/parsing_bisenet.pth").to_path_buf(),
         };
         // A CPU device gets as far as opening the (absent) files; only the
         // device check can fail before that, which is what this pins.

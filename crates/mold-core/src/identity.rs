@@ -16,6 +16,45 @@
 
 use crate::types::GenerateRequest;
 
+/// Host bytes one extraction peaks at, measured on the shipped artifacts.
+///
+/// | Stage | Bytes |
+/// | --- | --- |
+/// | SCRFD `scrfd_10g_bnkps.onnx` graph, decoded | 17 MB |
+/// | ArcFace `glintr100.onnx` graph, decoded | 261 MB |
+/// | BiSeNet parser: verified buffer + f32 weights + activations | 53 + 53 + ~200 MB |
+/// | EVA02-CLIP tower: verified buffer + f32 weights + activations | 609 + 1218 + ~180 MB |
+/// | IDFormer (`pulid_encoder.*` of the adapter file), f32 | ~330 MB |
+///
+/// Two things about the tower row are easy to get wrong and both are load-bearing.
+///
+/// The **verified buffer** is the artifact's own bytes, read into private
+/// memory so the digest and the load observe the same bytes
+/// (`pickle_convert::AuthenticatedArtifact` — a shared mapping would let
+/// another writer edit the file after the check, and `0664` weights are
+/// supported storage). It is transient: each artifact is scoped to the build
+/// that consumes it and released the moment that module owns its tensors. It
+/// does NOT replace the row beside it — the buffer is f16 on disk and the
+/// weights are f32 in memory, so during construction both exist.
+///
+/// The **f32 weights** are 609 MB of f16 widened by the `VarBuilder`'s
+/// `DType::F32`. That widening always happened; the old table simply did not
+/// name it, which is why this figure went up without the code getting hungrier
+/// in any way a mapping would have avoided.
+///
+/// The parser is dropped before the tower is built and the tower before the
+/// IDFormer, so the three large stages do not coexist; the peak is the tower
+/// stage, at ~2.1 GB. Rounded up to a round 2.4 GB so the figure is
+/// conservative rather than exact.
+///
+/// It lives HERE rather than beside the code it measures because the admission
+/// gate that charges it (`mold-server`'s `identity_extraction`) is compiled
+/// without the `pulid` feature and cannot see `mold-inference`'s identity
+/// module. `mold_inference::identity::extraction` re-exports it and proves it
+/// covers every stage from the artifacts' own pinned sizes; a second literal
+/// here and there is what let the two drift by a gigabyte.
+pub const EXTRACTION_HOST_PEAK_BYTES: u64 = 2_400_000_000;
+
 /// Models qualified to accept identity conditioning in milestone 1.
 ///
 /// These are resolved manifest names. A request naming the bare `flux-dev`
@@ -664,6 +703,11 @@ pub struct IdentityAssetDigests {
     pub face_detector: String,
     /// `glintr100.onnx`.
     pub face_recognizer: String,
+    /// The derived `bisenet_face_parser.safetensors`, not the `.pth` source
+    /// — as with `vision`, the parser that ran is the artifact that matters.
+    /// The mask it produces changes what the vision tower sees, so a different
+    /// parser is a different identity.
+    pub face_parser: String,
 }
 
 /// One identity, extracted once and frozen for every sibling of a batch.
@@ -891,6 +935,7 @@ fn fingerprint_of(
         &assets.vision,
         &assets.face_detector,
         &assets.face_recognizer,
+        &assets.face_parser,
     ] {
         hasher.update(digest.as_bytes());
         hasher.update(b"\0");
@@ -1531,6 +1576,7 @@ mod tests {
             vision: "b".repeat(64),
             face_detector: "c".repeat(64),
             face_recognizer: "d".repeat(64),
+            face_parser: "e".repeat(64),
         }
     }
 
@@ -1631,6 +1677,7 @@ mod tests {
             vision: "vision".to_string(),
             face_detector: "detector".to_string(),
             face_recognizer: "recognizer".to_string(),
+            face_parser: "parser".to_string(),
         }
     }
 
@@ -1950,10 +1997,18 @@ mod tests {
     }
 
     /// A single-photograph identity with no unconditional half must fingerprint
-    /// exactly as it did before either feature existed — otherwise every frozen
-    /// plan recorded by an older build stops matching itself.
+    /// from exactly the recipe below: the domain tag, the source digest, each
+    /// asset digest in order, then the values. Neither multiple photographs nor
+    /// the unconditional half may enter it, or every frozen plan recorded by an
+    /// older build stops matching itself.
+    ///
+    /// The ASSET SET is the one thing that has ever legitimately changed it:
+    /// #1225 added the BiSeNet face parser, and a different parser produces a
+    /// different mask and therefore a different identity. That is the field's
+    /// whole purpose, and it is why this test recomputes the digest rather than
+    /// pinning a hex literal — the recipe is the invariant, not the output.
     #[test]
-    fn the_single_photograph_fingerprint_is_unchanged() {
+    fn the_single_photograph_fingerprint_follows_the_recipe() {
         let values = tokens(0.5);
         let assets = assets();
         let frozen =
@@ -1969,6 +2024,7 @@ mod tests {
             &assets.vision,
             &assets.face_detector,
             &assets.face_recognizer,
+            &assets.face_parser,
         ] {
             hasher.update(digest.as_bytes());
             hasher.update(b"\0");

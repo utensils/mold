@@ -27,7 +27,7 @@
 //! moment a second crate needs it; it lives here while PuLID is its only
 //! consumer.
 
-// Consumed only by `eva_clip_convert`, which is itself unreachable until the
+// Consumed only by `pickle_convert`, which is itself unreachable until the
 // FLUX integration lands. See that module's note.
 #![allow(dead_code)]
 
@@ -171,6 +171,23 @@ pub(crate) fn parent_protects_entries(path: &Path) -> std::result::Result<(), Un
 ///
 /// Never re-resolve `display_path` to do work: it is precisely the thing this
 /// type exists to stop trusting.
+/// Create mode for a file that will be PUBLISHED into the model root.
+///
+/// `0o666` is not a permission grant: `openat`'s mode argument is masked by the
+/// process umask, so this is exactly "whatever this process creates files as".
+/// A collaborative `0o002` umask therefore yields `0o664` and a shared model
+/// root stays readable by the group that prepared it, which is what
+/// `CLAUDE.md`'s model-storage invariant requires of runnable weights — an
+/// explicit `0o600` here survives the publish rename and leaves every other
+/// user unable to read the artifact, reconverting it on every load.
+pub(crate) const PUBLISHED_FILE_MODE: u32 = 0o666;
+
+/// Create mode for a file that is NEVER published: the transient private copy
+/// of a source checkpoint, staged in a world-writable tmp root. Owner-only is
+/// right here for the same reason it is wrong above — nothing else has any
+/// business reading it, and it never becomes a runnable artifact.
+pub(crate) const PRIVATE_FILE_MODE: u32 = 0o600;
+
 pub(crate) struct Dir {
     #[cfg(unix)]
     file: File,
@@ -349,7 +366,7 @@ mod imp {
         ///
         /// Only legitimate for a directory no other user can reach, and the
         /// result must still be re-opened through the descriptor before it is
-        /// trusted. See `eva_clip_convert::write_atomically`.
+        /// trusted. See `pickle_convert::write_atomically`.
         pub(crate) fn unsafe_path_for(&self, name: &str) -> PathBuf {
             self.display_path.join(name)
         }

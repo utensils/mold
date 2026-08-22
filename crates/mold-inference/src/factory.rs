@@ -516,6 +516,7 @@ where
             &assets.vision_encoder_source,
             &assets.face_detector,
             &assets.face_recognizer,
+            &assets.face_parser_source,
         ]
     });
     for path in frozen
@@ -1149,6 +1150,50 @@ mod tests {
         assert!(error
             .to_string()
             .contains("refusing post-lease dependency resolution"));
+    }
+
+    /// Every frozen PuLID asset — the parser included — must already be local
+    /// at post-lease construction; a bundle that lost its fifth file between
+    /// admission and dispatch fails closed exactly like the other four.
+    #[test]
+    fn prepared_identity_bundle_missing_parser_fails_before_engine_construction() {
+        let root = tempfile::tempdir().unwrap();
+        let present = |name: &str| {
+            let path = root.path().join(name);
+            std::fs::write(&path, b"stub").unwrap();
+            path
+        };
+        let missing_parser = root.path().join("parsing_bisenet.pth");
+        let mut frozen = FrozenEngineConfig::resolve("z-image:bf16", &Config::default());
+        frozen.family = "z-image".into();
+        frozen.identity_assets = Some(mold_core::pulid_assets::PulidPaths {
+            adapter: present("pulid_flux_v0.9.1.safetensors"),
+            vision_encoder_source: present("EVA02_CLIP_L_336_psz14_s6B.pt"),
+            face_detector: present("scrfd_10g_bnkps.onnx"),
+            face_recognizer: present("glintr100.onnx"),
+            face_parser_source: missing_parser.clone(),
+        });
+
+        let error = create_engine_with_frozen_config(
+            "z-image:bf16".into(),
+            dummy_paths(),
+            &frozen,
+            LoadStrategy::Sequential,
+            0,
+            false,
+            None,
+        )
+        .err()
+        .expect("a missing frozen face parser must fail before engine construction");
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains("refusing post-lease dependency resolution"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains(&missing_parser.display().to_string()),
+            "{rendered}"
+        );
     }
 
     #[test]

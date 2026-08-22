@@ -66,6 +66,9 @@ pub enum ComponentRole {
     FaceDetector,
     /// InsightFace ArcFace recognizer. ONNX, and CPU-only in milestone 1.
     FaceRecognizer,
+    /// facexlib's BiSeNet face parser. Runs on the host beside the other two,
+    /// masking the aligned crop before the vision tower sees it (#1225).
+    FaceParser,
 }
 
 impl ComponentRole {
@@ -99,7 +102,8 @@ impl ComponentRole {
                 // admission, before the scheduler has leased a device (#1223):
                 // both InsightFace ONNX graphs, and the EVA02-CLIP tower that
                 // turns the aligned crop into the IDFormer's five hidden
-                // states. None of the three ever touches the generation
+                // states, and the BiSeNet parser that masks that crop.
+                // None of the four ever touches the generation
                 // device, so their bytes are host demand and never VRAM.
                 //
                 // `IdentityAdapter` is deliberately NOT in this list: its
@@ -110,6 +114,7 @@ impl ComponentRole {
                 // the residency that matters for placement is the device one.
                 | Self::FaceDetector
                 | Self::FaceRecognizer
+                | Self::FaceParser
                 | Self::IdentityVisionEncoder
         )
     }
@@ -2221,6 +2226,10 @@ fn concrete_artifacts_for_family(
         artifacts.insert(
             ComponentRole::FaceRecognizer,
             identity.face_recognizer.clone(),
+        );
+        artifacts.insert(
+            ComponentRole::FaceParser,
+            identity.face_parser_source.clone(),
         );
     }
     artifacts

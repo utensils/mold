@@ -6,12 +6,15 @@ Fixtures for `crates/mold-inference`'s EVA02-CLIP-L-14-336 vision tower
 (`src/flux/pulid_encoder.rs`). Issue
 [#1229](https://github.com/utensils/mold/issues/1229).
 
-> This directory holds two independent golden sets. The **face extraction**
+> This directory holds three independent golden sets. The **face extraction**
 > fixtures — detection, alignment, and the ArcFace embedding
 > ([#1222](https://github.com/utensils/mold/issues/1222)) — live in `faces/`
-> with their own `faces/README.md` and their own `capture_goldens.py`. This
-> file covers only the encoder set below, whose capture script is
-> `capture_eva_goldens.py`.
+> with their own `faces/README.md` and their own `capture_goldens.py`. The
+> **face parsing and end-to-end identity** fixtures
+> ([#1225](https://github.com/utensils/mold/issues/1225)) are
+> `parse_goldens.*` plus `faces/<stem>.parsed512.png`, captured by
+> `capture_parse_goldens.py` and described below. This file otherwise covers
+> the encoder set, whose capture script is `capture_eva_goldens.py`.
 
 ## Provenance
 
@@ -74,6 +77,10 @@ with the weights could forge it to match.
 | `true_cfg_goldens.safetensors` | The unconditional identity embedding (256 KB) |
 | `true_cfg_goldens.json` | Its statistics and capture parameters |
 | `capture_true_cfg_goldens.py` | Provenance for the two files above |
+| `parse_goldens.safetensors` | The #1225 face-parsing and end-to-end identity fixtures (30 KB) |
+| `parse_goldens.json` | Their statistics, label sets, and capture parameters |
+| `capture_parse_goldens.py` | Provenance for both |
+| `export_bisenet_onnx.py` | Reproduces the op gate that made the parser a candle port, not an ONNX graph |
 
 `faces/`, `fetch_faces.py`, `onnx-inventory.json` and `capture_goldens.py`
 belong to the face-extraction goldens and are documented in
@@ -149,6 +156,66 @@ Large tensors are pinned by a 512-element probe **plus** whole-tensor
 statistics rather than in full: the probe catches a value error, the statistics
 catch a defect that misses every probe index. The IDFormer output is small
 enough to commit whole, so it is.
+
+## `parse_goldens.safetensors` — the face parser and the whole extraction (#1225)
+
+Captured by `capture_parse_goldens.py` from facexlib's BiSeNet
+(`parsing_bisenet.pth`, sha256 `468e13ca…26567`, MIT) applied to the 512 crops
+`faces/` already carries, so the only variable is what upstream's parser and
+mask do to a crop both implementations agree on.
+
+| Name | Shape | Pins |
+| --- | --- | --- |
+| `<stem>.labels.probe` | `[512]` u8 | 512 scattered labels of the argmax map |
+| `<stem>.labels.histogram` | `[19]` i64 | Per-class pixel counts over the whole crop |
+| `<stem>.masked.probe` | `[512]` | 512 scattered values of the masked f32 crop |
+| `<stem>.preprocess.probe` | `[512]` | 512 scattered values of the 336 tensor the tower receives |
+| `<stem>.identity.probe` | `[512]` | 512 scattered values of the final `[1, 32, 2048]` identity |
+| `<stem>.identity.stats` | `[5]` | `[mean, std, min, max, peak]` of the same |
+
+`faces/<stem>.parsed512.png` is the masked crop itself — `face_features_image`
+at `pipeline_flux.py:169`, rounded to u8 — committed whole because a mask is
+the kind of thing a human should be able to look at.
+
+Probe indices come from seed `PULIDPRS` (`0x50554C4944505253`), drawn in
+capture order: labels, masked, preprocess, identity. A Rust test that wants
+the third set has to draw the first two first, and the tests say so.
+
+### Measured agreement
+
+| check | tolerance | measured worst |
+| --- | --- | --- |
+| per-class pixel count, as a fraction of the crop | 1e-4 | < 5e-7 |
+| probed labels differing (of 512) | 1 | 0 |
+| masked crop, mean abs channel delta | 0.02 / 255 | 0.0001 |
+| masked crop, fraction of channels differing at all | 1e-3 | 9.2e-5 |
+| masked, resized, CLIP-normalized tensor, max abs | 1e-3 | 4.3e-5 |
+| final identity, relative to its own peak | 5e-5 | 1.0e-5 |
+
+The label agreement is exact: on all four faces every one of the 262 144
+pixels matches, which is why the histogram bound is 1e-4 rather than something
+that would tolerate a real drift.
+
+### Regenerating
+
+Needs a torch venv, a facexlib checkout (a bare clone needs a
+`facexlib/version.py`; see the script), and the parser weights. The `--eva`
+and `--adapter` arguments are optional and add the end-to-end identity
+fixtures:
+
+```bash
+python crates/mold-inference/testdata/pulid/capture_parse_goldens.py \
+  --facexlib-repo tmp/facexlib \
+  --weights /path/to/facexlib-weights \
+  --faces   crates/mold-inference/testdata/pulid/faces \
+  --out     crates/mold-inference/testdata/pulid \
+  --pulid-repo tmp/PuLID \
+  --eva     /path/to/EVA02_CLIP_L_336_psz14_s6B.pt \
+  --adapter /path/to/pulid_flux_v0.9.1.safetensors
+```
+
+The `.parsed512.png` files are force-added past the repo-wide `*.png` ignore,
+like their `.eva512.png` inputs.
 
 ## Tensor mapping
 
@@ -345,4 +412,3 @@ python crates/mold-inference/testdata/pulid/capture_ca_goldens.py \
 
 Needs only `torch` and `safetensors`. `tmp/` is gitignored and is where the
 upstream clone lives.
-||||||| cc276d63

@@ -344,7 +344,7 @@ fn l2_normalize_rows(xs: &Tensor) -> Result<Tensor> {
 /// The tower.
 ///
 /// Build it from a `VarBuilder` rooted at the **`visual.` prefix already
-/// stripped** — that is what [`super::eva_clip_convert`] writes, and what
+/// stripped** — that is what [`super::pickle_convert`] writes, and what
 /// keeps this file from knowing anything about the CLIP text half.
 #[derive(Debug)]
 pub(crate) struct EvaClipVisionTower {
@@ -360,6 +360,30 @@ pub(crate) struct EvaClipVisionTower {
 }
 
 impl EvaClipVisionTower {
+    /// Build from an artifact [`super::pickle_convert`] has already
+    /// authenticated.
+    ///
+    /// The production entry point, and deliberately not a path: see
+    /// [`super::pickle_convert::AuthenticatedArtifact`] for why a loader that
+    /// hashed a pathname and then reopened it would be re-resolving a name a
+    /// shared model root lets another member rename. [`Self::new`] stays for
+    /// the golden test, which builds a `VarBuilder` over a file it converted
+    /// itself moments earlier inside its own temporary directory.
+    pub(crate) fn from_authenticated(
+        artifact: &super::pickle_convert::AuthenticatedArtifact,
+        device: &Device,
+    ) -> Result<Self> {
+        let vb =
+            VarBuilder::from_slice_safetensors(artifact.bytes(), candle_core::DType::F32, device)
+                .with_context(|| {
+                format!(
+                    "reading the vision tower {}",
+                    artifact.display_path().display()
+                )
+            })?;
+        Self::new(vb, device)
+    }
+
     pub(crate) fn new(vb: VarBuilder, device: &Device) -> Result<Self> {
         let dtype = vb.dtype();
         let patch_embed = Conv2d::new(
@@ -701,8 +725,8 @@ mod tests {
         let source = pulid_asset("EVA02_CLIP_L_336_psz14_s6B.pt");
         let staging = std::env::temp_dir().join("mold-pulid-eva-parity");
         std::fs::create_dir_all(&staging).unwrap();
-        let converted = staging.join(super::super::eva_clip_convert::DERIVED_FILENAME);
-        super::super::eva_clip_convert::convert_eva_clip_vision(&source, &converted).unwrap();
+        let converted = staging.join(super::super::pickle_convert::EVA_DERIVED_FILENAME);
+        super::super::pickle_convert::convert_eva_clip_vision(&source, &converted).unwrap();
         let vb = unsafe {
             VarBuilder::from_mmaped_safetensors(&[converted], DType::F32, device).unwrap()
         };

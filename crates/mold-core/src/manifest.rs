@@ -81,6 +81,14 @@ pub enum ModelComponent {
     /// ArcFace `glintr100` face recognizer (InsightFace antelopev2). Produces
     /// the identity embedding the adapter conditions on.
     FaceRecognizer,
+    /// facexlib's BiSeNet face parser. Segments the aligned 512 crop so
+    /// PuLID's background-to-white / face-to-grey mask can be applied before
+    /// the vision tower sees it (`PuLID/pulid/pipeline_flux.py:161-170`). The
+    /// manifest carries upstream's `.pth` release as an installer INPUT only,
+    /// exactly like [`ModelComponent::IdentityVisionEncoder`]; the derived
+    /// candle-loadable artifact is produced on first use and is deliberately
+    /// not a manifest file.
+    FaceParser,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5105,6 +5113,31 @@ fn pulid_manifests() -> Vec<ModelManifest> {
                     "4ab1d6435d639628a6f3e5008dd4f929edf4c4124b1a7169e1048f9fef534cdf",
                 ),
             },
+            // `pipeline_flux.py:53` builds facexlib's BiSeNet face parser
+            // (`init_parsing_model(model_name='bisenet')`), which facexlib
+            // itself downloads from its own GitHub release
+            // (`facexlib/parsing/__init__.py:9-11`,
+            // `.../releases/download/v0.2.0/parsing_bisenet.pth`). A GitHub
+            // release is not something `ModelFile` can express, so mold pulls
+            // the Hugging Face mirror whose LFS object hashes to the same
+            // bytes — the antelopev2 precedent above, verified 2026-08-21
+            // against the digest of the GitHub download itself.
+            //
+            // LICENSE: facexlib is MIT (Xintao Wang, 2020) and its released
+            // weights ship under that licence, so this file carries none of
+            // the antelopev2 non-commercial restriction and needs no recorded
+            // acceptance. Mold carries it as a conversion INPUT and never
+            // loads the `.pth` directly.
+            ModelFile {
+                hf_repo: "leonelhs/facexlib".to_string(),
+                hf_filename: "parsing_bisenet.pth".to_string(),
+                component: ModelComponent::FaceParser,
+                size_bytes: 53_289_463,
+                gated: false,
+                sha256: Some(
+                    "468e13ca13a9b43cc0881a9f99083a430e9c0a38abd935431d1c28ee94b26567",
+                ),
+            },
         ],
         // Dummy defaults: a files-only auxiliary bundle never generates, so
         // nothing reads these. Mirrors `ltx2_control_manifests`.
@@ -6680,12 +6713,13 @@ mod tests {
 
         let components: Vec<ModelComponent> =
             manifest.files.iter().map(|file| file.component).collect();
-        assert_eq!(components.len(), 4);
+        assert_eq!(components.len(), 5);
         for expected in [
             ModelComponent::IdentityAdapter,
             ModelComponent::IdentityVisionEncoder,
             ModelComponent::FaceDetector,
             ModelComponent::FaceRecognizer,
+            ModelComponent::FaceParser,
         ] {
             assert!(
                 components.contains(&expected),

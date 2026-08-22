@@ -11,6 +11,8 @@
 //!         |  IdentityExtractor (candle-onnx, CPU)
 //!         v
 //!   arcface [1, 512] (raw)      eva_crop_512 (RGB)
+//!         |                             |  BiSeNetParser -> labels
+//!         |                             |  background -> white, face -> grey
 //!         |                             |  eva_clip_preprocess (bicubic 336)
 //!         |                             v
 //!         |                     EvaClipVisionTower
@@ -35,9 +37,9 @@
 //! device-independent 256 KiB value, which is what lets one extraction serve
 //! every sibling of a batch on every device it fans out to.
 //!
-//! Peak host RAM is the EVA tower (~609 MB f16 mmap'd, widened to f32
-//! activations) plus the two ONNX graphs (~278 MB) plus the IDFormer
-//! (~330 MB) — [`EXTRACTION_HOST_PEAK_BYTES`]. Admission charges the host-RAM
+//! Peak host RAM is the EVA tower — its 609 MB f16 file read into a private
+//! buffer, widened to ~1.2 GB of f32 weights, plus activations — beside the two
+//! ONNX graphs (~278 MB); see [`EXTRACTION_HOST_PEAK_BYTES`]. Admission charges the host-RAM
 //! ledger from the artifacts' own sizes through their `is_host_only` component
 //! roles rather than from this constant; the constant is the MEASUREMENT those
 //! charges are sized against, and the reason
@@ -51,30 +53,30 @@ use mold_core::identity::{FrozenIdentityEmbedding, IdentityAssetDigests};
 use mold_core::manifest::ModelComponent;
 use mold_core::pulid_assets::PulidPaths;
 
-use crate::encoders::eva_clip_convert::{ensure_eva_clip_vision_safetensors, DERIVED_SHA256};
 use crate::encoders::eva_clip_preprocess::{planar_rgb_from_image, preprocess_planar_rgb};
 use crate::encoders::eva_clip_vision::EvaClipVisionTower;
+use crate::encoders::pickle_convert::{
+    ensure_bisenet_parser_safetensors, ensure_eva_clip_vision_safetensors, BISENET_DERIVED_SHA256,
+    EVA_DERIVED_SHA256,
+};
 use crate::flux::pulid_encoder::IdFormer;
 
+use super::parsing::{apply_pulid_face_mask, BiSeNetParser};
 use super::{IdentityError, IdentityExtractor};
 
 /// Host bytes one extraction peaks at, measured on the shipped artifacts.
 ///
-/// | Stage | Bytes |
-/// | --- | --- |
-/// | SCRFD `scrfd_10g_bnkps.onnx` graph, decoded | 17 MB |
-/// | ArcFace `glintr100.onnx` graph, decoded | 261 MB |
-/// | EVA02-CLIP vision tower, f16 mmap + f32 activations | 609 MB + ~180 MB |
-/// | IDFormer (`pulid_encoder.*` of the adapter file), f32 | ~330 MB |
+/// Re-exported from [`mold_core::identity`], which is the one authority: the
+/// admission gate in `mold-server` charges this number and is compiled WITHOUT
+/// the `pulid` feature, so it cannot read a constant that lives here. It used
+/// to restate the literal, and the two drifted by a gigabyte the moment this
+/// measurement moved — an admission gate under-charging by that much is a host
+/// that OOMs instead of queuing.
 ///
-/// The tower is dropped before the IDFormer is built, so the two large halves
-/// do not coexist; the peak is the tower stage. Rounded up to a round 1.4 GB so
-/// the figure is conservative rather than exact.
-///
-/// Nothing reads this at runtime — the ledger charges the artifacts themselves
-/// — so it is the recorded measurement, kept beside the code that produces it
-/// and pinned by a test, rather than an input to a calculation.
-pub const EXTRACTION_HOST_PEAK_BYTES: u64 = 1_400_000_000;
+/// The measurement itself is documented on the core constant, and
+/// `the_charged_host_peak_covers_every_stage_of_the_extraction` below re-derives
+/// it from the artifacts' own pinned sizes, which only this crate can see.
+pub use mold_core::identity::EXTRACTION_HOST_PEAK_BYTES;
 
 /// Host bytes each ADDITIONAL identity photograph adds to that peak.
 ///
@@ -189,9 +191,10 @@ pub fn extract_identity_embeddings(
 
     let assets = IdentityAssetDigests {
         adapter: adapter_sha256(),
-        vision: DERIVED_SHA256.to_string(),
+        vision: EVA_DERIVED_SHA256.to_string(),
         face_detector: extractor.detector_sha256().to_string(),
         face_recognizer: extractor.recognizer_sha256().to_string(),
+        face_parser: BISENET_DERIVED_SHA256.to_string(),
     };
     let sources = images
         .iter()
@@ -238,11 +241,22 @@ fn adapter_sha256() -> String {
 /// IDFormer is a much smaller cross-attention stack over 32 queries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ComposeStage {
-    /// Materializing the derived safetensors, preprocessing the crop, and
-    /// building the EVA02-CLIP vision tower — everything before its forward
-    /// pass. Separate from [`ComposeStage::EvaForward`] because it is what the
-    /// drop-and-reload rule pays for on every request, and therefore what a
-    /// residency change would buy back.
+    /// Segmenting one aligned crop with the BiSeNet parser, applying PuLID's
+    /// mask, and preprocessing the result for the tower (#1225) — everything
+    /// that turns one photograph into tower input. Emitted once PER
+    /// photograph, even though the parser itself is materialized once, because
+    /// it is per-crop work; the materialization falls inside
+    /// [`ComposeStage::EvaBuild`]'s window, which subtracts these out.
+    ///
+    /// Reported apart from `EvaBuild` because it is a whole second network: a
+    /// reader comparing the tower's cost to the extraction's would otherwise
+    /// be silently attributing the parse to the tower.
+    Parse,
+    /// Materializing the derived safetensors and building the EVA02-CLIP
+    /// vision tower — everything before its forward pass that is not
+    /// [`ComposeStage::Parse`]. Separate from [`ComposeStage::EvaForward`]
+    /// because it is what the drop-and-reload rule pays for on every request,
+    /// and therefore what a residency change would buy back.
     EvaBuild,
     /// The EVA02-CLIP vision tower's forward pass.
     EvaForward,
@@ -295,12 +309,14 @@ pub(crate) fn compose_identity_token_sets(
 /// The one implementation: every photograph, the optional unconditional
 /// identity, and the per-stage observer.
 ///
-/// The tower is built ONCE and run per photograph, then dropped; the IDFormer
-/// is built once afterwards and run per photograph. That ordering is why N
-/// photographs do not multiply the host peak: the two large halves still never
-/// coexist, and the only thing that scales with N is the retained hidden
+/// Every crop is parsed and masked first, with the parser resident once and
+/// dropped; the tower is then built ONCE and run per photograph, then dropped;
+/// the IDFormer is built once afterwards and run per photograph. That ordering
+/// is why N photographs do not multiply the host peak: the three large halves
+/// still never coexist, and the only thing that scales with N is the retained
+/// hidden
 /// states — [`EXTRACTION_RETAINED_BYTES_PER_IMAGE`], ~12 MB each against a
-/// 1.4 GB peak.
+/// 2.4 GB peak.
 ///
 /// The observer sees [`ComposeStage::EvaBuild`] and
 /// [`ComposeStage::IdFormerBuild`] exactly once each, because they are paid
@@ -308,8 +324,9 @@ pub(crate) fn compose_identity_token_sets(
 /// the tower outside the loop. `EvaForward` and `IdFormerForward` are emitted
 /// once PER photograph (and once more for the unconditional identity), so a
 /// caller measuring a set sees the per-photograph cost rather than a sum it
-/// cannot decompose. `pulid_face_probe bench --full` passes one photograph, so
-/// its samples are unchanged.
+/// cannot decompose. [`ComposeStage::Parse`] is likewise once per photograph.
+/// `pulid_face_probe bench --full` passes one photograph, so its samples are
+/// unchanged.
 pub(crate) fn compose_identity_token_sets_observed(
     paths: &PulidPaths,
     faces: &[(Vec<f32>, image::RgbImage)],
@@ -318,41 +335,85 @@ pub(crate) fn compose_identity_token_sets_observed(
 ) -> Result<ComposedIdentityTokens> {
     anyhow::ensure!(!faces.is_empty(), "composing needs at least one face");
     let device = Device::Cpu;
+    // Everything before the tower's first forward pass is one window, and the
+    // per-crop parse work is subtracted out of it below rather than restarting
+    // the clock — a restart would silently drop whatever ran before the parse
+    // (materializing the tower, decoding the crops) from every stage's
+    // account. `parse_elapsed` accumulates because `Parse` is emitted once per
+    // photograph.
     let mut stage_started = std::time::Instant::now();
-    let vision_path = ensure_eva_clip_vision_safetensors(paths)
-        .context("materializing the EVA02-CLIP vision tower")?;
+    let mut parse_elapsed = std::time::Duration::ZERO;
+    // `pipeline_flux.py:161-174`: every crop is parsed, masked, and only then
+    // resized and normalized for the tower. Both models read the SAME `[0, 1]`
+    // planar tensor and normalize it differently — ImageNet for the parser,
+    // OpenAI CLIP for the tower — so it is built once per crop here and the
+    // normalizations stay inside the two consumers.
+    //
+    // This is a PRE-PASS over every photograph rather than work inside the
+    // tower's loop, for the reason the tower itself is built outside that loop:
+    // the parser is a second network, and parsing everything first lets it be
+    // dropped before the tower is built. The three large halves still never
+    // coexist.
+    let prepared: Vec<Tensor> = {
+        // The derived artifact arrives as verified private BYTES — never a
+        // pathname a loader would resolve a second time, never a shared mapping
+        // another writer could edit underneath it. See
+        // `pickle_convert::AuthenticatedArtifact`. Scoped to the build that
+        // consumes it, so its 53 MB copy is released as soon as the parser owns
+        // its tensors.
+        let parser = {
+            let artifact = ensure_bisenet_parser_safetensors(paths)
+                .context("materializing the BiSeNet face parser")?;
+            BiSeNetParser::from_authenticated(&artifact, &device)
+                .context("building the BiSeNet face parser")?
+        };
+        let mut prepared = Vec::with_capacity(faces.len());
+        for (_, eva_crop_512) in faces {
+            let parse_started = std::time::Instant::now();
+            let image = image::DynamicImage::ImageRgb8(eva_crop_512.clone());
+            let (mut planar, height, width) = planar_rgb_from_image(&image);
+            let labels = parser
+                .labels(&planar, height, width)
+                .context("parsing the aligned face crop")?;
+            apply_pulid_face_mask(&mut planar, &labels).context("masking the aligned face crop")?;
+            let pixels = preprocess_planar_rgb(&planar, height, width, &device)
+                .context("preprocessing the aligned face crop for EVA02-CLIP")?;
+            let elapsed = parse_started.elapsed();
+            parse_elapsed += elapsed;
+            observe(ComposeStage::Parse, elapsed);
+            prepared.push(pixels);
+        }
+        prepared
+    };
 
     // The tower and the IDFormer are built and dropped in sequence, never held
     // together: the tower is 609 MB and the IDFormer's `id_embedding_mapping`
     // alone is a 1280 x 5120 matrix, and admission is the one place in the
     // process where host RAM is not already committed to a render.
     let vision: Vec<(Vec<Tensor>, Tensor)> = {
-        // SAFETY: the same mmap contract every other mold safetensors loader
-        // relies on — the file must not be mutated while the tower holds it.
-        // These bytes were just authenticated against `DERIVED_SHA256`.
-        let vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(
-                std::slice::from_ref(&vision_path),
-                DType::F32,
-                &device,
-            )
-            .with_context(|| format!("reading the vision tower {}", vision_path.display()))?
+        // As above: verified private bytes, scoped to the build that consumes
+        // them, so the tower's 609 MB copy is released as soon as it owns its
+        // tensors.
+        let tower = {
+            let artifact = ensure_eva_clip_vision_safetensors(paths)
+                .context("materializing the EVA02-CLIP vision tower")?;
+            EvaClipVisionTower::from_authenticated(&artifact, &device)
+                .context("building the EVA02-CLIP-L-14-336 vision tower")?
         };
-        let tower = EvaClipVisionTower::new(vb, &device)
-            .context("building the EVA02-CLIP-L-14-336 vision tower")?;
-        observe(ComposeStage::EvaBuild, stage_started.elapsed());
+        // Everything paid once before the first forward, minus the per-crop
+        // parse work the pre-pass already reported. Restarting the clock after
+        // the pre-pass instead would silently drop materializing the tower from
+        // every stage's account.
+        observe(
+            ComposeStage::EvaBuild,
+            stage_started.elapsed().saturating_sub(parse_elapsed),
+        );
 
         let mut outputs = Vec::with_capacity(faces.len());
-        for (_, eva_crop_512) in faces {
+        for pixels in &prepared {
             stage_started = std::time::Instant::now();
-            let pixels = {
-                let image = image::DynamicImage::ImageRgb8(eva_crop_512.clone());
-                let (planar, height, width) = planar_rgb_from_image(&image);
-                preprocess_planar_rgb(&planar, height, width, &device)
-                    .context("preprocessing the aligned face crop for EVA02-CLIP")?
-            };
             let output = tower
-                .forward(&pixels)
+                .forward(pixels)
                 .context("running the EVA02-CLIP vision tower")?;
             observe(ComposeStage::EvaForward, stage_started.elapsed());
             outputs.push((output.hidden_states, output.cls_projection));
@@ -361,8 +422,16 @@ pub(crate) fn compose_identity_token_sets_observed(
     };
     stage_started = std::time::Instant::now();
 
-    // SAFETY: as above. `pipeline_flux.py:99-109` splits the checkpoint by
-    // leading module name; the IDFormer half is `pulid_encoder.*`.
+    // SAFETY: the ordinary mold safetensors mmap contract — the file must not
+    // be mutated while the IDFormer holds it.
+    //
+    // This one IS loaded by pathname, and deliberately: the adapter is a
+    // MANIFEST file whose digest the download verified, not an artifact mold
+    // derived and hashed moments ago. There is no fresher authentication here
+    // to throw away by reopening a name (see `adapter_sha256`, and
+    // `pickle_convert::AuthenticatedArtifact` for the case that is different).
+    // `pipeline_flux.py:99-109` splits the checkpoint by leading module name;
+    // the IDFormer half is `pulid_encoder.*`.
     let vb = unsafe {
         VarBuilder::from_mmaped_safetensors(
             std::slice::from_ref(&paths.adapter),
@@ -434,6 +503,100 @@ fn run_idformer(idformer: &IdFormer, id_cond: &Tensor, hidden: &[Tensor]) -> Res
 mod tests {
     use super::*;
 
+    /// The whole extraction, mask included, against upstream's on a real
+    /// photograph.
+    ///
+    /// Every other PuLID fixture pins one stage on a synthetic input. This
+    /// one starts from a committed portrait's aligned crop and the RAW
+    /// ArcFace embedding #1222 captured beside it, and compares the `[1, 32,
+    /// 2048]` value FLUX is actually conditioned on. It is the acceptance pin
+    /// #1225 exists to satisfy: a mask that were subtly wrong would pass every
+    /// per-stage test above and fail here.
+    #[test]
+    #[ignore = "requires the pinned PuLID checkpoints via MOLD_TEST_PULID_ASSETS"]
+    fn the_identity_matches_upstream_end_to_end() {
+        /// Largest deviation, as a fraction of the golden tensor's own peak.
+        /// The whole stack's f32 accumulation, over a real image rather than
+        /// the synthetic input the per-stage goldens use.
+        /// Measured worst on these four faces: 1.02e-5.
+        const RELATIVE_BUDGET: f32 = 5e-5;
+        const SEED_PARSE_PROBE: u64 = 0x50554C49_44505253;
+
+        if std::env::var_os("MOLD_TEST_PULID_ASSETS").is_none() {
+            eprintln!("skipping: MOLD_TEST_PULID_ASSETS is unset");
+            return;
+        }
+        let testdata = crate::pulid_fixtures::testdata_dir();
+        let faces = testdata.join("faces");
+        let paths = PulidPaths {
+            adapter: crate::pulid_fixtures::pulid_asset("pulid_flux_v0.9.1.safetensors"),
+            vision_encoder_source: crate::pulid_fixtures::pulid_asset(
+                "EVA02_CLIP_L_336_psz14_s6B.pt",
+            ),
+            face_detector: crate::pulid_fixtures::pulid_asset("scrfd_10g_bnkps.onnx"),
+            face_recognizer: crate::pulid_fixtures::pulid_asset("glintr100.onnx"),
+            face_parser_source: crate::pulid_fixtures::pulid_asset("parsing_bisenet.pth"),
+        };
+
+        let goldens = candle_core::safetensors::load(
+            testdata.join("parse_goldens.safetensors"),
+            &Device::Cpu,
+        )
+        .expect("the #1225 goldens are committed");
+        let sources = std::fs::read_to_string(faces.join("sources.json")).unwrap();
+        let stems: Vec<String> = sources
+            .split("\"file\": \"")
+            .skip(1)
+            .filter_map(|rest| rest.split('"').next())
+            .map(|file| file.trim_end_matches(".jpg").to_string())
+            .collect();
+        assert!(!stems.is_empty());
+
+        for stem in stems {
+            let golden_json: serde_json::Value = serde_json::from_str(
+                &std::fs::read_to_string(faces.join(format!("{stem}.golden.json"))).unwrap(),
+            )
+            .unwrap();
+            let arcface: Vec<f32> = golden_json["embedding"]
+                .as_array()
+                .expect("the #1222 golden carries the raw embedding")
+                .iter()
+                .map(|value| value.as_f64().unwrap() as f32)
+                .collect();
+            let crop = image::open(faces.join(format!("{stem}.eva512.png")))
+                .unwrap()
+                .to_rgb8();
+
+            let tokens =
+                compose_identity_tokens_observed(&paths, &arcface, &crop, &mut |_, _| {}).unwrap();
+            assert_eq!(tokens.len(), 32 * 2048);
+
+            // The identity probe is the fourth draw from the capture script's
+            // stream, after the label, masked and preprocess probes.
+            let mut stream = crate::pulid_fixtures::DeterministicStream::new(SEED_PARSE_PROBE);
+            let plane = (crop.width() * crop.height()) as usize;
+            let _ = stream.indices(crate::pulid_fixtures::PROBE_COUNT, plane);
+            let _ = stream.indices(crate::pulid_fixtures::PROBE_COUNT, 3 * plane);
+            let _ = stream.indices(crate::pulid_fixtures::PROBE_COUNT, 3 * 336 * 336);
+            let indices = stream.indices(crate::pulid_fixtures::PROBE_COUNT, tokens.len());
+
+            let expected = goldens[&format!("{stem}.identity.probe")]
+                .to_vec1::<f32>()
+                .unwrap();
+            let stats = goldens[&format!("{stem}.identity.stats")]
+                .to_vec1::<f32>()
+                .unwrap();
+            let peak = stats[4];
+            let actual: Vec<f32> = indices.iter().map(|i| tokens[*i as usize]).collect();
+            let relative = crate::pulid_fixtures::scale_relative_error(&actual, &expected, peak);
+            eprintln!("{stem}: identity relative error {relative:.3e} of peak {peak:.1}");
+            assert!(
+                relative <= RELATIVE_BUDGET,
+                "{stem}: identity relative error {relative}"
+            );
+        }
+    }
+
     /// The peak is what the host-RAM ledger is charged, so it must stay a
     /// number a reviewer can check against the table in the doc comment rather
     /// than a value that drifted.
@@ -441,12 +604,16 @@ mod tests {
     fn the_charged_host_peak_covers_every_stage_of_the_extraction() {
         const SCRFD: u64 = 16_923_827;
         const GLINTR100: u64 = 260_665_334;
-        // The derived vision tower, f16.
-        const TOWER: u64 = 609 * 1_000_000;
+        // The derived vision tower's own bytes, read into a private buffer so
+        // the digest and the load see the same ones. Transient, but alive
+        // while the weights below are being materialized from it.
+        const TOWER_VERIFIED_BYTES: u64 = crate::encoders::pickle_convert::EVA_DERIVED.size_bytes;
+        // The same weights as f32: the `VarBuilder` widens the f16 file.
+        const TOWER_WEIGHTS: u64 = 2 * TOWER_VERIFIED_BYTES;
         // f32 activations for 577 tokens x 1024 across 24 blocks, plus the
         // five retained hidden states.
         const TOWER_ACTIVATIONS: u64 = 180 * 1_000_000;
-        let peak = SCRFD + GLINTR100 + TOWER + TOWER_ACTIVATIONS;
+        let peak = SCRFD + GLINTR100 + TOWER_VERIFIED_BYTES + TOWER_WEIGHTS + TOWER_ACTIVATIONS;
         assert!(
             EXTRACTION_HOST_PEAK_BYTES >= peak,
             "the charged peak {EXTRACTION_HOST_PEAK_BYTES} must cover the measured {peak}"
@@ -485,11 +652,15 @@ mod tests {
             EXTRACTION_RETAINED_BYTES_PER_IMAGE < 2 * measured_per_image,
             "a charge more than twice the measurement parks hosts that could run this"
         );
+        // The same terms the single-photograph test uses, so the two cannot
+        // disagree about what the tower stage costs.
         const SCRFD: u64 = 16_923_827;
         const GLINTR100: u64 = 260_665_334;
-        const TOWER: u64 = 609 * 1_000_000;
+        const TOWER_VERIFIED_BYTES: u64 = crate::encoders::pickle_convert::EVA_DERIVED.size_bytes;
+        const TOWER_WEIGHTS: u64 = 2 * TOWER_VERIFIED_BYTES;
         const TOWER_ACTIVATIONS: u64 = 180 * 1_000_000;
-        let peak = SCRFD + GLINTR100 + TOWER + TOWER_ACTIVATIONS + extra;
+        let peak =
+            SCRFD + GLINTR100 + TOWER_VERIFIED_BYTES + TOWER_WEIGHTS + TOWER_ACTIVATIONS + extra;
         assert!(
             EXTRACTION_HOST_PEAK_BYTES >= peak,
             "the charged peak {EXTRACTION_HOST_PEAK_BYTES} must cover {peak} at \
@@ -508,6 +679,7 @@ mod tests {
             vision_encoder_source: "/nonexistent/eva.pt".into(),
             face_detector: "/nonexistent/scrfd.onnx".into(),
             face_recognizer: "/nonexistent/glintr100.onnx".into(),
+            face_parser_source: "/nonexistent/parsing_bisenet.pth".into(),
         };
         let png = b"\x89PNG\r\n\x1a\n".to_vec();
         let too_many: Vec<&[u8]> = vec![png.as_slice(); mold_core::identity::ID_IMAGES_MAX + 1];
@@ -530,6 +702,7 @@ mod tests {
             vision_encoder_source: "/nonexistent/eva.pt".into(),
             face_detector: "/nonexistent/scrfd.onnx".into(),
             face_recognizer: "/nonexistent/glintr100.onnx".into(),
+            face_parser_source: "/nonexistent/parsing_bisenet.pth".into(),
         };
         let error = extract_identity_embedding(&paths, b"not an image").unwrap_err();
         let rendered = format!("{error:#}");
