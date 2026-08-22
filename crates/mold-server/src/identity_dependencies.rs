@@ -14,6 +14,7 @@
 
 use std::path::{Path, PathBuf};
 
+use mold_core::identity::IdentityFamily;
 use mold_core::manifest::{ModelComponent, ModelFile, ModelManifest};
 use mold_core::pulid_assets::PulidPaths;
 use mold_core::GenerateRequest;
@@ -24,14 +25,31 @@ use crate::variant_dependencies::{
     MissingDependency, PinnedDigest,
 };
 
-/// The one family that can condition on an identity.
+/// The bundle this request's checkpoint conditions with, or a refusal.
 ///
-/// `mold_core::identity` already restricts identity conditioning to two
-/// qualified FLUX checkpoints at the request boundary, so reaching this with
-/// anything else means the gate was bypassed. Refusing is deliberate: an
-/// identity that is accepted and then silently ignored is the failure slice A
-/// exists to prevent.
-const IDENTITY_FAMILY: &str = "flux";
+/// `mold_core::identity::identity_family` already restricts identity
+/// conditioning to the enumerated qualified checkpoints at the request
+/// boundary, so reaching this with anything else means the gate was bypassed.
+/// Refusing is deliberate: an identity that is accepted and then silently
+/// ignored is the failure this slice exists to prevent.
+///
+/// The `family` argument is checked as well as the model, because the two are
+/// separately resolved — a config whose `family` disagreed with the manifest
+/// would otherwise plan the wrong adapter for a checkpoint the model gate had
+/// already accepted.
+fn identity_family_for(request: &GenerateRequest, family: &str) -> Result<IdentityFamily, String> {
+    let resolved = mold_core::identity::identity_family(&request.model)
+        .ok_or_else(|| mold_core::identity::identity_model_gate_message(&request.model))?;
+    if resolved.family() != family {
+        return Err(format!(
+            "identity conditioning for '{}' expects model family '{}', but this model resolved \
+             to '{family}'",
+            request.model,
+            resolved.family()
+        ));
+    }
+    Ok(resolved)
+}
 
 /// Whether this request will actually condition on a face.
 ///
@@ -131,13 +149,8 @@ pub(crate) async fn materialize_identity_assets(
     if !request_needs_identity_assets(request) {
         return Ok(());
     }
-    if family != IDENTITY_FAMILY {
-        return Err(format!(
-            "identity conditioning is not supported by model family '{family}'"
-        ));
-    }
-
-    let manifest = mold_core::pulid_assets::pulid_manifest();
+    let identity_family = identity_family_for(request, family)?;
+    let manifest = mold_core::pulid_assets::pulid_manifest_for(identity_family);
     if context.policy == DependencyMaterializationPolicy::Admission {
         require_identity_licenses(
             manifest,
@@ -220,6 +233,7 @@ pub(crate) async fn materialize_identity_assets(
 
     let missing = |what: &str| format!("the PuLID manifest is missing its {what}");
     frozen.identity_assets = Some(PulidPaths {
+        family: identity_family,
         adapter: adapter.ok_or_else(|| missing("identity adapter"))?,
         vision_encoder_source: vision_encoder_source
             .ok_or_else(|| missing("identity vision encoder"))?,
@@ -334,7 +348,7 @@ mod tests {
     }
 
     fn expected_paths(models_dir: &Path) -> PulidPaths {
-        let manifest = mold_core::pulid_assets::pulid_manifest();
+        let manifest = mold_core::pulid_assets::pulid_manifest_for(IdentityFamily::Flux);
         let resolve = |component: ModelComponent| {
             let file = manifest
                 .files
@@ -344,6 +358,7 @@ mod tests {
             models_dir.join(mold_core::manifest::storage_path(manifest, file))
         };
         PulidPaths {
+            family: IdentityFamily::Flux,
             adapter: resolve(ModelComponent::IdentityAdapter),
             vision_encoder_source: resolve(ModelComponent::IdentityVisionEncoder),
             face_detector: resolve(ModelComponent::FaceDetector),
@@ -362,7 +377,7 @@ mod tests {
     /// anyone who can drop weights also drop the sidecar that vouches for them.
     /// Every use below asserts that mold refuses it.
     fn install_forged_bundle(config: &Config) {
-        let manifest = mold_core::pulid_assets::pulid_manifest();
+        let manifest = mold_core::pulid_assets::pulid_manifest_for(IdentityFamily::Flux);
         let models_dir = config.resolved_models_dir();
         for file in &manifest.files {
             let path = models_dir.join(mold_core::manifest::storage_path(manifest, file));
@@ -386,7 +401,7 @@ mod tests {
             ..Config::default()
         };
 
-        let manifest = mold_core::pulid_assets::pulid_manifest();
+        let manifest = mold_core::pulid_assets::pulid_manifest_for(IdentityFamily::Flux);
         let planned = manifest
             .files
             .iter()
@@ -401,7 +416,7 @@ mod tests {
 
         assert_eq!(
             planned,
-            mold_core::pulid_assets::pulid_storage_paths(&config)
+            mold_core::pulid_assets::pulid_storage_paths_for(&config, IdentityFamily::Flux)
         );
         assert!(manifest
             .files
@@ -594,7 +609,8 @@ mod tests {
         );
         // The preview stays read-only about them: nothing deleted, nothing
         // attested, nothing refused.
-        for path in mold_core::pulid_assets::pulid_storage_paths(&config) {
+        for path in mold_core::pulid_assets::pulid_storage_paths_for(&config, IdentityFamily::Flux)
+        {
             assert!(path.exists(), "{}", path.display());
         }
         // The planned paths are still frozen — they are where admission will
@@ -690,7 +706,7 @@ mod tests {
         // no files on disk, admission's next move is a real download, and a
         // forged bundle can no longer stand in for one (which is the point of
         // the pinned check).
-        let manifest = mold_core::pulid_assets::pulid_manifest();
+        let manifest = mold_core::pulid_assets::pulid_manifest_for(IdentityFamily::Flux);
         assert!(require_identity_licenses(manifest, models.path(), Some(home.path())).is_err());
         mold_core::license_acceptance::record_acceptance(
             home.path(),
@@ -727,7 +743,7 @@ mod tests {
         // The adapter's bytes are not its pin, and its forged marker is left
         // deliberately IN PLACE — the whole point is that the sidecar buys the
         // attacker nothing.
-        let manifest = mold_core::pulid_assets::pulid_manifest();
+        let manifest = mold_core::pulid_assets::pulid_manifest_for(IdentityFamily::Flux);
         let adapter_file = manifest
             .files
             .iter()

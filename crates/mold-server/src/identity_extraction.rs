@@ -452,6 +452,7 @@ mod tests {
 
     fn paths() -> PulidPaths {
         PulidPaths {
+            family: mold_core::identity::IdentityFamily::Flux,
             adapter: "/models/shared/pulid/adapter.safetensors".into(),
             vision_encoder_source: "/models/shared/pulid/eva.pt".into(),
             face_detector: "/models/shared/pulid/scrfd.onnx".into(),

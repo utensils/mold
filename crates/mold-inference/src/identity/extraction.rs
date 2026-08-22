@@ -57,7 +57,7 @@
 use anyhow::{Context, Result};
 use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_nn::VarBuilder;
-use mold_core::identity::{FrozenIdentityEmbedding, IdentityAssetDigests};
+use mold_core::identity::{FrozenIdentityEmbedding, IdentityAssetDigests, IdentityFamily};
 use mold_core::manifest::ModelComponent;
 use mold_core::pulid_assets::PulidPaths;
 
@@ -296,15 +296,21 @@ fn cache_put(key: String, value: CachedIdentity) {
 /// Every asset digest this build's extraction will record, known before any of
 /// them is opened.
 ///
+/// The adapter is family-specific, so the digest that enters the key is the
+/// family's own manifest pin — which is what keeps a FLUX identity and an SDXL
+/// identity for the SAME photograph two different cache entries. They are
+/// different IDFormers producing genuinely different tensors; a key that
+/// ignored the family would serve one render the other's face embedding.
+///
 /// A cache key needs the digests BEFORE the extraction runs, which is why they
 /// are resolved from the manifest pins and compiled-in constants here rather
 /// than from an [`IdentityAssetDigests`] a request has not produced yet. The
 /// two cannot disagree: the loaders refuse any file whose bytes do not hash to
 /// the pin, so a post-load digest that differed from this one would have
 /// failed the load instead of being recorded.
-pub fn pinned_asset_digests() -> IdentityAssetDigests {
+pub fn pinned_asset_digests(family: IdentityFamily) -> IdentityAssetDigests {
     IdentityAssetDigests {
-        adapter: adapter_sha256(),
+        adapter: adapter_sha256(family),
         vision: EVA_DERIVED_SHA256.to_string(),
         face_detector: super::onnx_graph::pinned_artifact(ModelComponent::FaceDetector)
             .map(|pin| pin.sha256.to_string())
@@ -498,7 +504,7 @@ pub fn extract_identity_embeddings(
     mold_core::identity::validate_id_images(images).map_err(IdentityError::Decode)?;
 
     let count = images.len();
-    let assets = pinned_asset_digests();
+    let assets = pinned_asset_digests(paths.family);
     let sources: Vec<String> = images
         .iter()
         .map(|bytes| mold_core::identity::id_image_sha256(bytes))
@@ -661,13 +667,32 @@ pub fn extract_identity_embeddings(
     })
 }
 
+/// The safetensors prefix the IDFormer's weights live under.
+///
+/// The one family-specific fact about extraction. Upstream instantiates the
+/// identical `IDFormer` class in both pipelines — same file
+/// (`pulid/encoders_transformer.py`), same defaults, same shapes, confirmed by
+/// `id_adapter.latents` `[1, 32, 1024]` and `id_adapter.proj_out`
+/// `[1024, 2048]` matching the FLUX golden exactly
+/// (`testdata/pulid_sdxl/README.md`) — and stores it under a different leading
+/// module name in each checkpoint.
+pub fn idformer_prefix(family: IdentityFamily) -> &'static str {
+    match family {
+        // `pipeline_flux.py:99-109`.
+        IdentityFamily::Flux => "pulid_encoder",
+        // `pipeline_v1_1.py:151-163`, whose `getattr(self, module)` resolves
+        // `id_adapter` to `self.id_adapter = IDFormer()`.
+        IdentityFamily::Sdxl => "id_adapter",
+    }
+}
+
 /// The manifest's pin for the adapter file.
 ///
 /// Recorded rather than re-hashed: `mold pull` verified these 1.1 GB against
 /// this exact digest when it wrote them, and re-reading the whole file on every
 /// conditioned request would cost more than the extraction it annotates.
-fn adapter_sha256() -> String {
-    mold_core::pulid_assets::pulid_manifest()
+fn adapter_sha256(family: IdentityFamily) -> String {
+    mold_core::pulid_assets::pulid_manifest_for(family)
         .files
         .iter()
         .find(|file| file.component == ModelComponent::IdentityAdapter)
@@ -921,8 +946,11 @@ pub(crate) fn compose_identity_token_sets_observed(
     // derived and hashed moments ago. There is no fresher authentication here
     // to throw away by reopening a name (see `adapter_sha256`, and
     // `pickle_convert::AuthenticatedArtifact` for the case that is different).
-    // `pipeline_flux.py:99-109` splits the checkpoint by leading module name;
-    // the IDFormer half is `pulid_encoder.*`.
+    // `pipeline_flux.py:99-109` and `pipeline_v1_1.py:151-163` both split the
+    // checkpoint by leading module name; the IDFormer half is `pulid_encoder.*`
+    // in the FLUX file and `id_adapter.*` in the SDXL v1.1 file. The two are
+    // the SAME class with the same shapes — upstream instantiates one
+    // `IDFormer()` in each pipeline — so only the prefix differs.
     let vb = unsafe {
         VarBuilder::from_mmaped_safetensors(
             std::slice::from_ref(&paths.adapter),
@@ -931,7 +959,8 @@ pub(crate) fn compose_identity_token_sets_observed(
         )
         .with_context(|| format!("reading the PuLID adapter {}", paths.adapter.display()))?
     };
-    let idformer = IdFormer::new(vb.pp("pulid_encoder")).context("building the PuLID IDFormer")?;
+    let idformer = IdFormer::new(vb.pp(idformer_prefix(paths.family)))
+        .context("building the PuLID IDFormer")?;
     settle(device)?;
     observe(ComposeStage::IdFormerBuild, stage_started.elapsed());
 
@@ -1092,7 +1121,7 @@ mod tests {
     /// rather than been recorded.
     #[test]
     fn the_cache_key_digests_are_all_available_before_anything_is_loaded() {
-        let assets = pinned_asset_digests();
+        let assets = pinned_asset_digests(IdentityFamily::Flux);
         for (label, digest) in [
             ("adapter", &assets.adapter),
             ("vision", &assets.vision),

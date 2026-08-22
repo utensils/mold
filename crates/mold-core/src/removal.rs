@@ -91,8 +91,11 @@ pub fn model_owned_paths(config: &Config, canonical: &str) -> Vec<String> {
             // that walks the manifest can see the result — so a removal that
             // enumerated manifest files alone would leave 609 MB of derived
             // weights and their sidecar behind.
+            // Both PuLID bundles own the derived artifacts: they are converted
+            // from the SHARED extraction inputs, so each names them and the
+            // ref-counting above keeps the surviving bundle's copy.
             let derived: Vec<std::path::PathBuf> =
-                if manifest.name == crate::manifest::PULID_FLUX_MANIFEST {
+                if manifest.family == crate::manifest::PULID_FAMILY {
                     crate::pulid_assets::derived_pulid_paths(config)
                 } else {
                     Vec::new()

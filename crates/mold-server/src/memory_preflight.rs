@@ -627,6 +627,61 @@ const WAN_REQUEST_AWARE_HEADROOM_BYTES: u64 = 2_000_000_000;
 /// only path that builds one is CPU inference, which this gate does not govern.
 pub(crate) const IDENTITY_VRAM_OVERHEAD_BYTES: u64 = 1_250_000_000;
 
+/// Device memory an SDXL face-identity render needs beside the checkpoint it
+/// conditions.
+///
+/// The SDXL adapter is a different shape from FLUX's and is derived the same
+/// way — from the checkpoint's own header, not from an analogy:
+///
+/// | Term | Bytes | Where it comes from |
+/// | --- | --- | --- |
+/// | `id_adapter_attn_layers.*`, 70 x (`id_to_k` + `id_to_v`), f16/bf16 | 681,574,400 | pinned below against `sdxl::pulid::SdxlPulidAdapter::resident_bytes` |
+/// | Cross-attention activation headroom | 168,425,600 | see the arithmetic below |
+/// | **Total** | **850,000,000** | |
+///
+/// The weight term is exact. Each of the 70 UNet cross-attentions carries two
+/// bias-free `[hidden_size, 2048]` linears, and the layer table is
+/// `10 x 640 + 60 x 1280` (`testdata/pulid_sdxl/attn_layer_map.json`):
+/// `2 x 2048 x (10 x 640 + 60 x 1280) = 340,787,200` elements, `x 2` bytes at the
+/// engine's f16/bf16 compute dtype. The checkpoint's OTHER half —
+/// `id_adapter.*`, the 151,398,400-element IDFormer — is deliberately NOT in
+/// this figure: it belongs to the extraction phase, which is charged by
+/// [`IDENTITY_EXTRACTION_VRAM_OVERHEAD_BYTES`] and has been released before a
+/// single denoise step runs.
+///
+/// The activation term is generous by construction. The largest identity
+/// branch is a 640-wide layer at 1024x1024 — `[2, 4096, 640]` under the CFG
+/// batch, whose query, id-attention output, and combined result are three such
+/// tensors plus a `[2, 10, 4096, 32]` score matrix and two `[2, 32, 640]`
+/// projections: ~37 MB at bf16, and only one layer's worth is live at a time.
+/// Charging ~168 MB leaves better than 4x for allocator caching across the 70
+/// injections rather than budgeting to the arithmetic exactly.
+///
+/// Smaller than FLUX's 1.25 GB because the adapter is smaller and SDXL's
+/// attention runs at a quarter the token count, not because anything was
+/// trimmed.
+pub(crate) const IDENTITY_SDXL_VRAM_OVERHEAD_BYTES: u64 = 850_000_000;
+
+/// The adapter half of [`IDENTITY_SDXL_VRAM_OVERHEAD_BYTES`], pinned against
+/// the engine's own arithmetic by
+/// `sdxl_identity_overhead_matches_the_adapters_own_resident_arithmetic`. The
+/// documented decomposition of the budget rather than a second input to it, so
+/// only that test reads it.
+#[cfg(test)]
+pub(crate) const IDENTITY_SDXL_ADAPTER_BF16_BYTES: u64 = 681_574_400;
+
+/// The device overhead one family's resident adapter costs.
+///
+/// One switch so the estimate cannot charge FLUX's 1.25 GB for an SDXL render
+/// (which parks cards that could run it) or SDXL's 850 MB for a FLUX one
+/// (which admits a render with 400 MB nowhere to go).
+pub(crate) fn identity_adapter_overhead_bytes(family: mold_core::identity::IdentityFamily) -> u64 {
+    match family {
+        mold_core::identity::IdentityFamily::Flux => IDENTITY_VRAM_OVERHEAD_BYTES,
+        mold_core::identity::IdentityFamily::Sdxl => IDENTITY_SDXL_VRAM_OVERHEAD_BYTES,
+    }
+}
+
 /// Device memory the face-identity EXTRACTION peaks at, beside
 /// [`IDENTITY_VRAM_OVERHEAD_BYTES`].
 ///
@@ -674,6 +729,20 @@ pub(crate) const IDENTITY_ADAPTER_BF16_BYTES: u64 = 839_270_400;
 pub(crate) fn request_charges_identity_overhead(req: &GenerateRequest) -> bool {
     mold_core::identity::request_mentions_identity(req)
         && mold_core::identity::effective_id_weight(req) > 0.0
+}
+
+/// The identity family whose overhead this request is charged, or `None` when
+/// it conditions on no face at all.
+///
+/// Both halves are required: a request may name identity fields on a model
+/// that is not qualified — admission refuses it, but the estimate runs first
+/// and must not invent an adapter for a checkpoint that has none.
+pub(crate) fn identity_overhead_family(
+    req: &GenerateRequest,
+) -> Option<mold_core::identity::IdentityFamily> {
+    request_charges_identity_overhead(req)
+        .then(|| mold_core::identity::identity_family(&req.model))
+        .flatten()
 }
 
 /// Device memory a PuLID true-CFG render needs beside
@@ -1462,11 +1531,14 @@ pub(crate) fn estimate_generation_memory_for_request(
     // Identity conditioning adds resident weights and activations to whichever
     // arm produced the peak. Charged from the request rather than from a path,
     // because the assets are not part of the checkpoint's `ModelPaths`.
-    let peak = if request_charges_identity_overhead(req) {
-        peak.saturating_add(IDENTITY_VRAM_OVERHEAD_BYTES)
-            .saturating_add(IDENTITY_EXTRACTION_VRAM_OVERHEAD_BYTES)
-    } else {
-        peak
+    // The adapter term follows the FAMILY, because the adapter does. The
+    // extraction term does not: the detector, recognizer, parser, and tower are
+    // shared, and only the IDFormer's prefix differs.
+    let peak = match identity_overhead_family(req) {
+        Some(family) => peak
+            .saturating_add(identity_adapter_overhead_bytes(family))
+            .saturating_add(IDENTITY_EXTRACTION_VRAM_OVERHEAD_BYTES),
+        None => peak,
     };
     // A true-CFG render's second forward per step is additional resident
     // conditioning and a second cross-attention pass. Charged separately from

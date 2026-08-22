@@ -1,0 +1,169 @@
+{
+  "source": "ToTheBeginning/PuLID pulid/attention_processor.py::IDAttnProcessor2_0 (id_embedding branch only, NUM_ZERO=0, ORTHO=ORTHO_v2=False)",
+  "adapter_file": "pulid_v1.1.safetensors",
+  "adapter_sha256": "4cb8ceec1078e0165399b88332ab3c5971619111b8e1730e6bae64144aabae41",
+  "torch": "2.13.0",
+  "dtype": "float32",
+  "batch": 2,
+  "seq": 64,
+  "id_tokens": 32,
+  "cross_attention_dim": 2048,
+  "id_scales": [
+    1.0,
+    0.7
+  ],
+  "probe_count": 512,
+  "stat_slots": [
+    "mean",
+    "std",
+    "min",
+    "max",
+    "peak"
+  ],
+  "seeds": {
+    "query_base": "0x50554c4944535851",
+    "attended_base": "0x50554c4944535841",
+    "id_embedding_base": "0x50554c4944535845",
+    "probe_base": "0x50554c4944535850",
+    "note": "each layer adds its own processor_index to every base seed"
+  },
+  "chosen_processor_indices": [
+    1,
+    121,
+    49
+  ],
+  "layers": [
+    {
+      "processor_index": 1,
+      "module_name": "down_blocks.1.attentions.0.transformer_blocks.0.attn2",
+      "hidden_size": 640,
+      "heads": 10,
+      "dim_head": 64,
+      "cross_attention_dim": 2048,
+      "combined_s1p0": {
+        "shape": [
+          2,
+          64,
+          640
+        ],
+        "mean": -0.0006556174790176783,
+        "std": 0.6205431037761803,
+        "min": -1.9184590578079224,
+        "max": 1.9168834686279297,
+        "l2": 177.60989919302392
+      },
+      "combined_s0p7": {
+        "shape": [
+          2,
+          64,
+          640
+        ],
+        "mean": -0.00033055145224096804,
+        "std": 0.5982403565956205,
+        "min": -1.5873198509216309,
+        "max": 1.6262390613555908,
+        "l2": 171.22640747933895
+      },
+      "id_hidden_states": {
+        "shape": [
+          2,
+          64,
+          640
+        ],
+        "mean": -0.0010835531763788487,
+        "std": 0.23193688487754527,
+        "min": -1.3142147064208984,
+        "max": 0.9688149690628052,
+        "l2": 66.38493448238862
+      }
+    },
+    {
+      "processor_index": 121,
+      "module_name": "mid_block.attentions.0.transformer_blocks.0.attn2",
+      "hidden_size": 1280,
+      "heads": 20,
+      "dim_head": 64,
+      "cross_attention_dim": 2048,
+      "combined_s1p0": {
+        "shape": [
+          2,
+          64,
+          1280
+        ],
+        "mean": 0.0010461775565723031,
+        "std": 0.6270519810134678,
+        "min": -2.377901554107666,
+        "max": 2.0678677558898926,
+        "l2": 253.81314958324856
+      },
+      "combined_s0p7": {
+        "shape": [
+          2,
+          64,
+          1280
+        ],
+        "mean": 0.0012585994932784671,
+        "std": 0.6020684927435579,
+        "min": -1.9147484302520752,
+        "max": 1.729459285736084,
+        "l2": 243.7007237818932
+      },
+      "id_hidden_states": {
+        "shape": [
+          2,
+          64,
+          1280
+        ],
+        "mean": -0.0007080731033340546,
+        "std": 0.2450844580422082,
+        "min": -1.5531047582626343,
+        "max": 1.4336165189743042,
+        "l2": 99.20362765299159
+      }
+    },
+    {
+      "processor_index": 49,
+      "module_name": "up_blocks.0.attentions.0.transformer_blocks.0.attn2",
+      "hidden_size": 1280,
+      "heads": 20,
+      "dim_head": 64,
+      "cross_attention_dim": 2048,
+      "combined_s1p0": {
+        "shape": [
+          2,
+          64,
+          1280
+        ],
+        "mean": 0.0029402589387227175,
+        "std": 0.6409089148715559,
+        "min": -2.190896987915039,
+        "max": 2.309415817260742,
+        "l2": 259.4244187301792
+      },
+      "combined_s0p7": {
+        "shape": [
+          2,
+          64,
+          1280
+        ],
+        "mean": 0.0023422542684419013,
+        "std": 0.6090153552218441,
+        "min": -1.7943272590637207,
+        "max": 1.9085121154785156,
+        "l2": 246.5139066546303
+      },
+      "id_hidden_states": {
+        "shape": [
+          2,
+          64,
+          1280
+        ],
+        "mean": 0.0019933490187684253,
+        "std": 0.2804612463690276,
+        "min": -1.6249113082885742,
+        "max": 1.5685598850250244,
+        "l2": 113.5255980120133
+      }
+    }
+  ]
+}

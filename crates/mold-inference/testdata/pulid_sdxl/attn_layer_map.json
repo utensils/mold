@@ -1,0 +1,2056 @@
+{
+  "source": "diffusers UNet2DConditionModel.attn_processors traversal, mirroring PuLID/pulid/pipeline_v1_1.py:129-149 hack_unet_attn_layers",
+  "unet_repo": "stabilityai/stable-diffusion-xl-base-1.0",
+  "unet_subfolder": "unet",
+  "cross_attention_dim": 2048,
+  "block_out_channels": [
+    320,
+    640,
+    1280
+  ],
+  "total_processors": 140,
+  "attn1_count": 70,
+  "attn2_count": 70,
+  "checkpoint": {
+    "file": "pulid_v1.1.safetensors",
+    "sha256": "4cb8ceec1078e0165399b88332ab3c5971619111b8e1730e6bae64144aabae41",
+    "assertions": [
+      "every attn2 processor_index has id_to_k/id_to_v weights",
+      "every attn1 processor_index has none",
+      "id_to_k out_features == hidden_size",
+      "checkpoint weighted indices == traversal attn2 indices (no orphans)"
+    ]
+  },
+  "layers": [
+    {
+      "processor_index": 0,
+      "module_name": "down_blocks.1.attentions.0.transformer_blocks.0.attn1",
+      "kind": "attn1",
+      "hidden_size": 640,
+      "cross_attention_dim": null,
+      "heads": 10,
+      "dim_head": 64
+    },
+    {
+      "processor_index": 1,
+      "module_name": "down_blocks.1.attentions.0.transformer_blocks.0.attn2",
+      "kind": "attn2",
+      "hidden_size": 640,
+      "cross_attention_dim": 2048,
+      "heads": 10,
+      "dim_head": 64,
+      "attn2_ordinal": 0,
+      "checkpoint": {
+        "id_to_k.weight": [
+          640,
+          2048
+        ],
+        "id_to_v.weight": [
+          640,
+          2048
+        ]
+      }
+    },
+    {
+      "processor_index": 2,
+      "module_name": "down_blocks.1.attentions.0.transformer_blocks.1.attn1",
+      "kind": "attn1",
+      "hidden_size": 640,
+      "cross_attention_dim": null,
+      "heads": 10,
+      "dim_head": 64
+    },
+    {
+      "processor_index": 3,
+      "module_name": "down_blocks.1.attentions.0.transformer_blocks.1.attn2",
+      "kind": "attn2",
+      "hidden_size": 640,
+      "cross_attention_dim": 2048,
+      "heads": 10,
+      "dim_head": 64,
+      "attn2_ordinal": 1,
+      "checkpoint": {
+        "id_to_k.weight": [
+          640,
+          2048
+        ],
+        "id_to_v.weight": [
+          640,
+          2048
+        ]
+      }
+    },
+    {
+      "processor_index": 4,
+      "module_name": "down_blocks.1.attentions.1.transformer_blocks.0.attn1",
+      "kind": "attn1",
+      "hidden_size": 640,
+      "cross_attention_dim": null,
+      "heads": 10,
+      "dim_head": 64
+    },
+    {
+      "processor_index": 5,
+      "module_name": "down_blocks.1.attentions.1.transformer_blocks.0.attn2",
+      "kind": "attn2",
+      "hidden_size": 640,
+      "cross_attention_dim": 2048,
+      "heads": 10,
+      "dim_head": 64,
+      "attn2_ordinal": 2,
+      "checkpoint": {
+        "id_to_k.weight": [
+          640,
+          2048
+        ],
+        "id_to_v.weight": [
+          640,
+          2048
+        ]
+      }
+    },
+    {
+      "processor_index": 6,
+      "module_name": "down_blocks.1.attentions.1.transformer_blocks.1.attn1",
+      "kind": "attn1",
+      "hidden_size": 640,
+      "cross_attention_dim": null,
+      "heads": 10,
+      "dim_head": 64
+    },
+    {
+      "processor_index": 7,
+      "module_name": "down_blocks.1.attentions.1.transformer_blocks.1.attn2",
+      "kind": "attn2",
+      "hidden_size": 640,
+      "cross_attention_dim": 2048,
+      "heads": 10,
+      "dim_head": 64,
+      "attn2_ordinal": 3,
+      "checkpoint": {
+        "id_to_k.weight": [
+          640,
+          2048
+        ],
+        "id_to_v.weight": [
+          640,
+          2048
+        ]
+      }
+    },
+    {
+      "processor_index": 8,
+      "module_name": "down_blocks.2.attentions.0.transformer_blocks.0.attn1",
+      "kind": "attn1",
+      "hidden_size": 1280,
+      "cross_attention_dim": null,
+      "heads": 20,
+      "dim_head": 64
+    },
+    {
+      "processor_index": 9,
+      "module_name": "down_blocks.2.attentions.0.transformer_blocks.0.attn2",
+      "kind": "attn2",
+      "hidden_size": 1280,
+      "cross_attention_dim": 2048,
+      "heads": 20,
+      "dim_head": 64,
+      "attn2_ordinal": 4,
+      "checkpoint": {
+        "id_to_k.weight": [
+          1280,
+          2048
+        ],
+        "id_to_v.weight": [
+          1280,
+          2048
+        ]
+      }
+    },
+    {
+      "processor_index": 10,
+      "module_name": "down_blocks.2.attentions.0.transformer_blocks.1.attn1",
+      "kind": "attn1",
+      "hidden_size": 1280,
+      "cross_attention_dim": null,
+      "heads": 20,
+      "dim_head": 64
+    },
+    {
+      "processor_index": 11,
+      "module_name": "down_blocks.2.attentions.0.transformer_blocks.1.attn2",
+      "kind": "attn2",
+      "hidden_size": 1280,
+      "cross_attention_dim": 2048,
+      "heads": 20,
+      "dim_head": 64,
+      "attn2_ordinal": 5,
+      "checkpoint": {
+        "id_to_k.weight": [
+          1280,
+          2048
+        ],
+        "id_to_v.weight": [
+          1280,
+          2048
+        ]
+      }
+    },
+    {
+      "processor_index": 12,
+      "module_name": "down_blocks.2.attentions.0.transformer_blocks.2.attn1",
+      "kind": "attn1",
+      "hidden_size": 1280,
+      "cross_attention_dim": null,
+      "heads": 20,
+      "dim_head": 64
+    },
+    {
+      "processor_index": 13,
+      "module_name": "down_blocks.2.attentions.0.transformer_blocks.2.attn2",
+      "kind": "attn2",
+      "hidden_size": 1280,
+      "cross_attention_dim": 2048,
+      "heads": 20,
+      "dim_head": 64,
+      "attn2_ordinal": 6,
+      "checkpoint": {
+        "id_to_k.weight": [
+          1280,
+          2048
+        ],
+        "id_to_v.weight": [
+          1280,
+          2048
+        ]
+      }
+    },
+    {
+      "processor_index": 14,
+      "module_name": "down_blocks.2.attentions.0.transformer_blocks.3.attn1",
+      "kind": "attn1",
+      "hidden_size": 1280,
+      "cross_attention_dim": null,
+      "heads": 20,
+      "dim_head": 64
+    },
+    {
+      "processor_index": 15,
+      "module_name": "down_blocks.2.attentions.0.transformer_blocks.3.attn2",
+      "kind": "attn2",
+      "hidden_size": 1280,
+      "cross_attention_dim": 2048,
+      "heads": 20,
+      "dim_head": 64,
+      "attn2_ordinal": 7,
+      "checkpoint": {
+        "id_to_k.weight": [
+          1280,
+          2048
+        ],
+        "id_to_v.weight": [
+          1280,
+          2048
+        ]
+      }
+    },
+    {
+      "processor_index": 16,
+      "module_name": "down_blocks.2.attentions.0.transformer_blocks.4.attn1",
+      "kind": "attn1",
+      "hidden_size": 1280,
+      "cross_attention_dim": null,
+      "heads": 20,
+      "dim_head": 64
+    },
+    {
+      "processor_index": 17,
+      "module_name": "down_blocks.2.attentions.0.transformer_blocks.4.attn2",
+      "kind": "attn2",
+      "hidden_size": 1280,
+      "cross_attention_dim": 2048,
+      "heads": 20,
+      "dim_head": 64,
+      "attn2_ordinal": 8,
+      "checkpoint": {
+        "id_to_k.weight": [
+          1280,
+          2048
+        ],
+        "id_to_v.weight": [
+          1280,
+          2048
+        ]
+      }
+    },
+    {
+      "processor_index": 18,
+      "module_name": "down_blocks.2.attentions.0.transformer_blocks.5.attn1",
+      "kind": "attn1",
+      "hidden_size": 1280,
+      "cross_attention_dim": null,
+      "heads": 20,
+      "dim_head": 64
+    },
+    {
+      "processor_index": 19,
+      "module_name": "down_blocks.2.attentions.0.transformer_blocks.5.attn2",
+      "kind": "attn2",
+      "hidden_size": 1280,
+      "cross_attention_dim": 2048,
+      "heads": 20,
+      "dim_head": 64,
+      "attn2_ordinal": 9,
+      "checkpoint": {
+        "id_to_k.weight": [
+          1280,
+          2048
+        ],
+        "id_to_v.weight": [
+          1280,
+          2048
+        ]
+      }
+    },
+    {
+      "processor_index": 20,
+      "module_name": "down_blocks.2.attentions.0.transformer_blocks.6.attn1",
+      "kind": "attn1",
+      "hidden_size": 1280,
+      "cross_attention_dim": null,
+      "heads": 20,
+      "dim_head": 64
+    },
+    {
+      "processor_index": 21,
+      "module_name": "down_blocks.2.attentions.0.transformer_blocks.6.attn2",
+      "kind": "attn2",
+      "hidden_size": 1280,
+      "cross_attention_dim": 2048,
+      "heads": 20,
+      "dim_head": 64,
+      "attn2_ordinal": 10,
+      "checkpoint": {
+        "id_to_k.weight": [
+          1280,
+          2048
+        ],
+        "id_to_v.weight": [
+          1280,
+          2048
+        ]
+      }
+    },
+    {
+      "processor_index": 22,
+      "module_name": "down_blocks.2.attentions.0.transformer_blocks.7.attn1",
+      "kind": "attn1",
+      "hidden_size": 1280,
+      "cross_attention_dim": null,
+      "heads": 20,
+      "dim_head": 64
+    },
+    {
+      "processor_index": 23,
+      "module_name": "down_blocks.2.attentions.0.transformer_blocks.7.attn2",
+      "kind": "attn2",
+      "hidden_size": 1280,
+      "cross_attention_dim": 2048,
+      "heads": 20,
+      "dim_head": 64,
+      "attn2_ordinal": 11,
+      "checkpoint": {
+        "id_to_k.weight": [
+          1280,
+          2048
+        ],
+        "id_to_v.weight": [
+          1280,
+          2048
+        ]
+      }
+    },
+    {
+      "processor_index": 24,
+      "module_name": "down_blocks.2.attentions.0.transformer_blocks.8.attn1",
+      "kind": "attn1",
+      "hidden_size": 1280,
+      "cross_attention_dim": null,
+      "heads": 20,
+      "dim_head": 64
+    },
+    {
+      "processor_index": 25,
+      "module_name": "down_blocks.2.attentions.0.transformer_blocks.8.attn2",
+      "kind": "attn2",
+      "hidden_size": 1280,
+      "cross_attention_dim": 2048,
+      "heads": 20,
+      "dim_head": 64,
+      "attn2_ordinal": 12,
+      "checkpoint": {
+        "id_to_k.weight": [
+          1280,
+          2048
+        ],
+        "id_to_v.weight": [
+          1280,
+          2048
+        ]
+      }
+    },
+    {
+      "processor_index": 26,
+      "module_name": "down_blocks.2.attentions.0.transformer_blocks.9.attn1",
+      "kind": "attn1",
+      "hidden_size": 1280,
+      "cross_attention_dim": null,
+      "heads": 20,
+      "dim_head": 64
+    },
+    {
+      "processor_index": 27,
+      "module_name": "down_blocks.2.attentions.0.transformer_blocks.9.attn2",
+      "kind": "attn2",
+      "hidden_size": 1280,
+      "cross_attention_dim": 2048,
+      "heads": 20,
+      "dim_head": 64,
+      "attn2_ordinal": 13,
+      "checkpoint": {
+        "id_to_k.weight": [
+          1280,
+          2048
+        ],
+        "id_to_v.weight": [
+          1280,
+          2048
+        ]
+      }
+    },
+    {
+      "processor_index": 28,
+      "module_name": "down_blocks.2.attentions.1.transformer_blocks.0.attn1",
+      "kind": "attn1",
+      "hidden_size": 1280,
+      "cross_attention_dim": null,
+      "heads": 20,
+      "dim_head": 64
+    },
+    {
+      "processor_index": 29,
+      "module_name": "down_blocks.2.attentions.1.transformer_blocks.0.attn2",
+      "kind": "attn2",
+      "hidden_size": 1280,
+      "cross_attention_dim": 2048,
+      "heads": 20,
+      "dim_head": 64,
+      "attn2_ordinal": 14,
+      "checkpoint": {
+        "id_to_k.weight": [
+          1280,
+          2048
+        ],
+        "id_to_v.weight": [
+          1280,
+          2048
+        ]
+      }
+    },
+    {
+      "processor_index": 30,
+      "module_name": "down_blocks.2.attentions.1.transformer_blocks.1.attn1",
+      "kind": "attn1",
+      "hidden_size": 1280,
+      "cross_attention_dim": null,
+      "heads": 20,
+      "dim_head": 64
+    },
+    {
+      "processor_index": 31,
+      "module_name": "down_blocks.2.attentions.1.transformer_blocks.1.attn2",
+      "kind": "attn2",
+      "hidden_size": 1280,
+      "cross_attention_dim": 2048,
+      "heads": 20,
+      "dim_head": 64,
+      "attn2_ordinal": 15,
+      "checkpoint": {
+        "id_to_k.weight": [
+          1280,
+          2048
+        ],
+        "id_to_v.weight": [
+          1280,
+          2048
+        ]
+      }
+    },
+    {
+      "processor_index": 32,
+      "module_name": "down_blocks.2.attentions.1.transformer_blocks.2.attn1",
+      "kind": "attn1",
+      "hidden_size": 1280,
+      "cross_attention_dim": null,
+      "heads": 20,
+      "dim_head": 64
+    },
+    {
+      "processor_index": 33,
+      "module_name": "down_blocks.2.attentions.1.transformer_blocks.2.attn2",
+      "kind": "attn2",
+      "hidden_size": 1280,
+      "cross_attention_dim": 2048,
+      "heads": 20,
+      "dim_head": 64,
+      "attn2_ordinal": 16,
+      "checkpoint": {
+        "id_to_k.weight": [
+          1280,
+          2048
+        ],
+        "id_to_v.weight": [
+          1280,
+          2048
+        ]
+      }
+    },
+    {
+      "processor_index": 34,
+      "module_name": "down_blocks.2.attentions.1.transformer_blocks.3.attn1",
+      "kind": "attn1",
+      "hidden_size": 1280,
+      "cross_attention_dim": null,
+      "heads": 20,
+      "dim_head": 64
+    },
+    {
+      "processor_index": 35,
+      "module_name": "down_blocks.2.attentions.1.transformer_blocks.3.attn2",
+      "kind": "attn2",
+      "hidden_size": 1280,
+      "cross_attention_dim": 2048,
+      "heads": 20,
+      "dim_head": 64,
+      "attn2_ordinal": 17,
+      "checkpoint": {
+        "id_to_k.weight": [
+          1280,
+          2048
+        ],
+        "id_to_v.weight": [
+          1280,
+          2048
+        ]
+      }
+    },
+    {
+      "processor_index": 36,
+      "module_name": "down_blocks.2.attentions.1.transformer_blocks.4.attn1",
+      "kind": "attn1",
+      "hidden_size": 1280,
+      "cross_attention_dim": null,
+      "heads": 20,
+      "dim_head": 64
+    },
+    {
+      "processor_index": 37,
+      "module_name": "down_blocks.2.attentions.1.transformer_blocks.4.attn2",
+      "kind": "attn2",
+      "hidden_size": 1280,
+      "cross_attention_dim": 2048,
+      "heads": 20,
+      "dim_head": 64,
+      "attn2_ordinal": 18,
+      "checkpoint": {
+        "id_to_k.weight": [
+          1280,
+          2048
+        ],
+        "id_to_v.weight": [
+          1280,
+          2048
+        ]
+      }
+    },
+    {
+      "processor_index": 38,
+      "module_name": "down_blocks.2.attentions.1.transformer_blocks.5.attn1",
+      "kind": "attn1",
+      "hidden_size": 1280,
+      "cross_attention_dim": null,
+      "heads": 20,
+      "dim_head": 64
+    },
+    {
+      "processor_index": 39,
+      "module_name": "down_blocks.2.attentions.1.transformer_blocks.5.attn2",
+      "kind": "attn2",
+      "hidden_size": 1280,
+      "cross_attention_dim": 2048,
+      "heads": 20,
+      "dim_head": 64,
+      "attn2_ordinal": 19,
+      "checkpoint": {
+        "id_to_k.weight": [
+          1280,
+          2048
+        ],
+        "id_to_v.weight": [
+          1280,
+          2048
+        ]
+      }
+    },
+    {
+      "processor_index": 40,
+      "module_name": "down_blocks.2.attentions.1.transformer_blocks.6.attn1",
+      "kind": "attn1",
+      "hidden_size": 1280,
+      "cross_attention_dim": null,
+      "heads": 20,
+      "dim_head": 64
+    },
+    {
+      "processor_index": 41,
+      "module_name": "down_blocks.2.attentions.1.transformer_blocks.6.attn2",
+      "kind": "attn2",
+      "hidden_size": 1280,
+      "cross_attention_dim": 2048,
+      "heads": 20,
+      "dim_head": 64,
+      "attn2_ordinal": 20,
+      "checkpoint": {
+        "id_to_k.weight": [
+          1280,
+          2048
+        ],
+        "id_to_v.weight": [
+          1280,
+          2048
+        ]
+      }
+    },
+    {
+      "processor_index": 42,
+      "module_name": "down_blocks.2.attentions.1.transformer_blocks.7.attn1",
+      "kind": "attn1",
+      "hidden_size": 1280,
+      "cross_attention_dim": null,
+      "heads": 20,
+      "dim_head": 64
+    },
+    {
+      "processor_index": 43,
+      "module_name": "down_blocks.2.attentions.1.transformer_blocks.7.attn2",
+      "kind": "attn2",
+      "hidden_size": 1280,
+      "cross_attention_dim": 2048,
+      "heads": 20,
+      "dim_head": 64,
+      "attn2_ordinal": 21,
+      "checkpoint": {
+        "id_to_k.weight": [
+          1280,
+          2048
+        ],
+        "id_to_v.weight": [
+          1280,
+          2048
+        ]
+      }
+    },
+    {
+      "processor_index": 44,
+      "module_name": "down_blocks.2.attentions.1.transformer_blocks.8.attn1",
+      "kind": "attn1",
+      "hidden_size": 1280,
+      "cross_attention_dim": null,
+      "heads": 20,
+      "dim_head": 64
+    },
+    {
+      "processor_index": 45,
+      "module_name": "down_blocks.2.attentions.1.transformer_blocks.8.attn2",
+      "kind": "attn2",
+      "hidden_size": 1280,
+      "cross_attention_dim": 2048,
+      "heads": 20,
+      "dim_head": 64,
+      "attn2_ordinal": 22,
+      "checkpoint": {
+        "id_to_k.weight": [
+          1280,
+          2048
+        ],
+        "id_to_v.weight": [
+          1280,
+          2048
+        ]
+      }
+    },
+    {
+      "processor_index": 46,
+      "module_name": "down_blocks.2.attentions.1.transformer_blocks.9.attn1",
+      "kind": "attn1",
+      "hidden_size": 1280,
+      "cross_attention_dim": null,
+      "heads": 20,
+      "dim_head": 64
+    },
+    {
+      "processor_index": 47,
+      "module_name": "down_blocks.2.attentions.1.transformer_blocks.9.attn2",
+      "kind": "attn2",
+      "hidden_size": 1280,
+      "cross_attention_dim": 2048,
+      "heads": 20,
+      "dim_head": 64,
+      "attn2_ordinal": 23,
+      "checkpoint": {
+        "id_to_k.weight": [
+          1280,
+          2048
+        ],
+        "id_to_v.weight": [
+          1280,
+          2048
+        ]
+      }
+    },
+    {
+      "processor_index": 48,
+      "module_name": "up_blocks.0.attentions.0.transformer_blocks.0.attn1",
+      "kind": "attn1",
+      "hidden_size": 1280,
+      "cross_attention_dim": null,
+      "heads": 20,
+      "dim_head": 64
+    },
+    {
+      "processor_index": 49,
+      "module_name": "up_blocks.0.attentions.0.transformer_blocks.0.attn2",
+      "kind": "attn2",
+      "hidden_size": 1280,
+      "cross_attention_dim": 2048,
+      "heads": 20,
+      "dim_head": 64,
+      "attn2_ordinal": 24,
+      "checkpoint": {
+        "id_to_k.weight": [
+          1280,
+          2048
+        ],
+        "id_to_v.weight": [
+          1280,
+          2048
+        ]
+      }
+    },
+    {
+      "processor_index": 50,
+      "module_name": "up_blocks.0.attentions.0.transformer_blocks.1.attn1",
+      "kind": "attn1",
+      "hidden_size": 1280,
+      "cross_attention_dim": null,
+      "heads": 20,
+      "dim_head": 64
+    },
+    {
+      "processor_index": 51,
+      "module_name": "up_blocks.0.attentions.0.transformer_blocks.1.attn2",
+      "kind": "attn2",
+      "hidden_size": 1280,
+      "cross_attention_dim": 2048,
+      "heads": 20,
+      "dim_head": 64,
+      "attn2_ordinal": 25,
+      "checkpoint": {
+        "id_to_k.weight": [
+          1280,
+          2048
+        ],
+        "id_to_v.weight": [
+          1280,
+          2048
+        ]
+      }
+    },
+    {
+      "processor_index": 52,
+      "module_name": "up_blocks.0.attentions.0.transformer_blocks.2.attn1",
+      "kind": "attn1",
+      "hidden_size": 1280,
+      "cross_attention_dim": null,
+      "heads": 20,
+      "dim_head": 64
+    },
+    {
+      "processor_index": 53,
+      "module_name": "up_blocks.0.attentions.0.transformer_blocks.2.attn2",
+      "kind": "attn2",
+      "hidden_size": 1280,
+      "cross_attention_dim": 2048,
+      "heads": 20,
+      "dim_head": 64,
+      "attn2_ordinal": 26,
+      "checkpoint": {
+        "id_to_k.weight": [
+          1280,
+          2048
+        ],
+        "id_to_v.weight": [
+          1280,
+          2048
+        ]
+      }
+    },
+    {
+      "processor_index": 54,
+      "module_name": "up_blocks.0.attentions.0.transformer_blocks.3.attn1",
+      "kind": "attn1",
+      "hidden_size": 1280,
+      "cross_attention_dim": null,
+      "heads": 20,
+      "dim_head": 64
+    },
+    {
+      "processor_index": 55,
+      "module_name": "up_blocks.0.attentions.0.transformer_blocks.3.attn2",
+      "kind": "attn2",
+      "hidden_size": 1280,
+      "cross_attention_dim": 2048,
+      "heads": 20,
+      "dim_head": 64,
+      "attn2_ordinal": 27,
+      "checkpoint": {
+        "id_to_k.weight": [
+          1280,
+          2048
+        ],
+        "id_to_v.weight": [
+          1280,
+          2048
+        ]
+      }
+    },
+    {
+      "processor_index": 56,
+      "module_name": "up_blocks.0.attentions.0.transformer_blocks.4.attn1",
+      "kind": "attn1",
+      "hidden_size": 1280,
+      "cross_attention_dim": null,
+      "heads": 20,
+      "dim_head": 64
+    },
+    {
+      "processor_index": 57,
+      "module_name": "up_blocks.0.attentions.0.transformer_blocks.4.attn2",
+      "kind": "attn2",
+      "hidden_size": 1280,
+      "cross_attention_dim": 2048,
+      "heads": 20,
+      "dim_head": 64,
+      "attn2_ordinal": 28,
+      "checkpoint": {
+        "id_to_k.weight": [
+          1280,
+          2048
+        ],
+        "id_to_v.weight": [
+          1280,
+          2048
+        ]
+      }
+    },
+    {
+      "processor_index": 58,
+      "module_name": "up_blocks.0.attentions.0.transformer_blocks.5.attn1",
+      "kind": "attn1",
+      "hidden_size": 1280,
+      "cross_attention_dim": null,
+      "heads": 20,
+      "dim_head": 64
+    },
+    {
+      "processor_index": 59,
+      "module_name": "up_blocks.0.attentions.0.transformer_blocks.5.attn2",
+      "kind": "attn2",
+      "hidden_size": 1280,
+      "cross_attention_dim": 2048,
+      "heads": 20,
+      "dim_head": 64,
+      "attn2_ordinal": 29,
+      "checkpoint": {
+        "id_to_k.weight": [
+          1280,
+          2048
+        ],
+        "id_to_v.weight": [
+          1280,
+          2048
+        ]
+      }
+    },
+    {
+      "processor_index": 60,
+      "module_name": "up_blocks.0.attentions.0.transformer_blocks.6.attn1",
+      "kind": "attn1",
+      "hidden_size": 1280,
+      "cross_attention_dim": null,
+      "heads": 20,
+      "dim_head": 64
+    },
+    {
+      "processor_index": 61,
+      "module_name": "up_blocks.0.attentions.0.transformer_blocks.6.attn2",
+      "kind": "attn2",
+      "hidden_size": 1280,
+      "cross_attention_dim": 2048,
+      "heads": 20,
+      "dim_head": 64,
+      "attn2_ordinal": 30,
+      "checkpoint": {
+        "id_to_k.weight": [
+          1280,
+          2048
+        ],
+        "id_to_v.weight": [
+          1280,
+          2048
+        ]
+      }
+    },
+    {
+      "processor_index": 62,
+      "module_name": "up_blocks.0.attentions.0.transformer_blocks.7.attn1",
+      "kind": "attn1",
+      "hidden_size": 1280,
+      "cross_attention_dim": null,
+      "heads": 20,
+      "dim_head": 64
+    },
+    {
+      "processor_index": 63,
+      "module_name": "up_blocks.0.attentions.0.transformer_blocks.7.attn2",
+      "kind": "attn2",
+      "hidden_size": 1280,
+      "cross_attention_dim": 2048,
+      "heads": 20,
+      "dim_head": 64,
+      "attn2_ordinal": 31,
+      "checkpoint": {
+        "id_to_k.weight": [
+          1280,
+          2048
+        ],
+        "id_to_v.weight": [
+          1280,
+          2048
+        ]
+      }
+    },
+    {
+      "processor_index": 64,
+      "module_name": "up_blocks.0.attentions.0.transformer_blocks.8.attn1",
+      "kind": "attn1",
+      "hidden_size": 1280,
+      "cross_attention_dim": null,
+      "heads": 20,
+      "dim_head": 64
+    },
+    {
+      "processor_index": 65,
+      "module_name": "up_blocks.0.attentions.0.transformer_blocks.8.attn2",
+      "kind": "attn2",
+      "hidden_size": 1280,
+      "cross_attention_dim": 2048,
+      "heads": 20,
+      "dim_head": 64,
+      "attn2_ordinal": 32,
+      "checkpoint": {
+        "id_to_k.weight": [
+          1280,
+          2048
+        ],
+        "id_to_v.weight": [
+          1280,
+          2048
+        ]
+      }
+    },
+    {
+      "processor_index": 66,
+      "module_name": "up_blocks.0.attentions.0.transformer_blocks.9.attn1",
+      "kind": "attn1",
+      "hidden_size": 1280,
+      "cross_attention_dim": null,
+      "heads": 20,
+      "dim_head": 64
+    },
+    {
+      "processor_index": 67,
+      "module_name": "up_blocks.0.attentions.0.transformer_blocks.9.attn2",
+      "kind": "attn2",
+      "hidden_size": 1280,
+      "cross_attention_dim": 2048,
+      "heads": 20,
+      "dim_head": 64,
+      "attn2_ordinal": 33,
+      "checkpoint": {
+        "id_to_k.weight": [
+          1280,
+          2048
+        ],
+        "id_to_v.weight": [
+          1280,
+          2048
+        ]
+      }
+    },
+    {
+      "processor_index": 68,
+      "module_name": "up_blocks.0.attentions.1.transformer_blocks.0.attn1",
+      "kind": "attn1",
+      "hidden_size": 1280,
+      "cross_attention_dim": null,
+      "heads": 20,
+      "dim_head": 64
+    },
+    {
+      "processor_index": 69,
+      "module_name": "up_blocks.0.attentions.1.transformer_blocks.0.attn2",
+      "kind": "attn2",
+      "hidden_size": 1280,
+      "cross_attention_dim": 2048,
+      "heads": 20,
+      "dim_head": 64,
+      "attn2_ordinal": 34,
+      "checkpoint": {
+        "id_to_k.weight": [
+          1280,
+          2048
+        ],
+        "id_to_v.weight": [
+          1280,
+          2048
+        ]
+      }
+    },
+    {
+      "processor_index": 70,
+      "module_name": "up_blocks.0.attentions.1.transformer_blocks.1.attn1",
+      "kind": "attn1",
+      "hidden_size": 1280,
+      "cross_attention_dim": null,
+      "heads": 20,
+      "dim_head": 64
+    },
+    {
+      "processor_index": 71,
+      "module_name": "up_blocks.0.attentions.1.transformer_blocks.1.attn2",
+      "kind": "attn2",
+      "hidden_size": 1280,
+      "cross_attention_dim": 2048,
+      "heads": 20,
+      "dim_head": 64,
+      "attn2_ordinal": 35,
+      "checkpoint": {
+        "id_to_k.weight": [
+          1280,
+          2048
+        ],
+        "id_to_v.weight": [
+          1280,
+          2048
+        ]
+      }
+    },
+    {
+      "processor_index": 72,
+      "module_name": "up_blocks.0.attentions.1.transformer_blocks.2.attn1",
+      "kind": "attn1",
+      "hidden_size": 1280,
+      "cross_attention_dim": null,
+      "heads": 20,
+      "dim_head": 64
+    },
+    {
+      "processor_index": 73,
+      "module_name": "up_blocks.0.attentions.1.transformer_blocks.2.attn2",
+      "kind": "attn2",
+      "hidden_size": 1280,
+      "cross_attention_dim": 2048,
+      "heads": 20,
+      "dim_head": 64,
+      "attn2_ordinal": 36,
+      "checkpoint": {
+        "id_to_k.weight": [
+          1280,
+          2048
+        ],
+        "id_to_v.weight": [
+          1280,
+          2048
+        ]
+      }
+    },
+    {
+      "processor_index": 74,
+      "module_name": "up_blocks.0.attentions.1.transformer_blocks.3.attn1",
+      "kind": "attn1",
+      "hidden_size": 1280,
+      "cross_attention_dim": null,
+      "heads": 20,
+      "dim_head": 64
+    },
+    {
+      "processor_index": 75,
+      "module_name": "up_blocks.0.attentions.1.transformer_blocks.3.attn2",
+      "kind": "attn2",
+      "hidden_size": 1280,
+      "cross_attention_dim": 2048,
+      "heads": 20,
+      "dim_head": 64,
+      "attn2_ordinal": 37,
+      "checkpoint": {
+        "id_to_k.weight": [
+          1280,
+          2048
+        ],
+        "id_to_v.weight": [
+          1280,
+          2048
+        ]
+      }
+    },
+    {
+      "processor_index": 76,
+      "module_name": "up_blocks.0.attentions.1.transformer_blocks.4.attn1",
+      "kind": "attn1",
+      "hidden_size": 1280,
+      "cross_attention_dim": null,
+      "heads": 20,
+      "dim_head": 64
+    },
+    {
+      "processor_index": 77,
+      "module_name": "up_blocks.0.attentions.1.transformer_blocks.4.attn2",
+      "kind": "attn2",
+      "hidden_size": 1280,
+      "cross_attention_dim": 2048,
+      "heads": 20,
+      "dim_head": 64,
+      "attn2_ordinal": 38,
+      "checkpoint": {
+        "id_to_k.weight": [
+          1280,
+          2048
+        ],
+        "id_to_v.weight": [
+          1280,
+          2048
+        ]
+      }
+    },
+    {
+      "processor_index": 78,
+      "module_name": "up_blocks.0.attentions.1.transformer_blocks.5.attn1",
+      "kind": "attn1",
+      "hidden_size": 1280,
+      "cross_attention_dim": null,
+      "heads": 20,
+      "dim_head": 64
+    },
+    {
+      "processor_index": 79,
+      "module_name": "up_blocks.0.attentions.1.transformer_blocks.5.attn2",
+      "kind": "attn2",
+      "hidden_size": 1280,
+      "cross_attention_dim": 2048,
+      "heads": 20,
+      "dim_head": 64,
+      "attn2_ordinal": 39,
+      "checkpoint": {
+        "id_to_k.weight": [
+          1280,
+          2048
+        ],
+        "id_to_v.weight": [
+          1280,
+          2048
+        ]
+      }
+    },
+    {
+      "processor_index": 80,
+      "module_name": "up_blocks.0.attentions.1.transformer_blocks.6.attn1",
+      "kind": "attn1",
+      "hidden_size": 1280,
+      "cross_attention_dim": null,
+      "heads": 20,
+      "dim_head": 64
+    },
+    {
+      "processor_index": 81,
+      "module_name": "up_blocks.0.attentions.1.transformer_blocks.6.attn2",
+      "kind": "attn2",
+      "hidden_size": 1280,
+      "cross_attention_dim": 2048,
+      "heads": 20,
+      "dim_head": 64,
+      "attn2_ordinal": 40,
+      "checkpoint": {
+        "id_to_k.weight": [
+          1280,
+          2048
+        ],
+        "id_to_v.weight": [
+          1280,
+          2048
+        ]
+      }
+    },
+    {
+      "processor_index": 82,
+      "module_name": "up_blocks.0.attentions.1.transformer_blocks.7.attn1",
+      "kind": "attn1",
+      "hidden_size": 1280,
+      "cross_attention_dim": null,
+      "heads": 20,
+      "dim_head": 64
+    },
+    {
+      "processor_index": 83,
+      "module_name": "up_blocks.0.attentions.1.transformer_blocks.7.attn2",
+      "kind": "attn2",
+      "hidden_size": 1280,
+      "cross_attention_dim": 2048,
+      "heads": 20,
+      "dim_head": 64,
+      "attn2_ordinal": 41,
+      "checkpoint": {
+        "id_to_k.weight": [
+          1280,
+          2048
+        ],
+        "id_to_v.weight": [
+          1280,
+          2048
+        ]
+      }
+    },
+    {
+      "processor_index": 84,
+      "module_name": "up_blocks.0.attentions.1.transformer_blocks.8.attn1",
+      "kind": "attn1",
+      "hidden_size": 1280,
+      "cross_attention_dim": null,
+      "heads": 20,
+      "dim_head": 64
+    },
+    {
+      "processor_index": 85,
+      "module_name": "up_blocks.0.attentions.1.transformer_blocks.8.attn2",
+      "kind": "attn2",
+      "hidden_size": 1280,
+      "cross_attention_dim": 2048,
+      "heads": 20,
+      "dim_head": 64,
+      "attn2_ordinal": 42,
+      "checkpoint": {
+        "id_to_k.weight": [
+          1280,
+          2048
+        ],
+        "id_to_v.weight": [
+          1280,
+          2048
+        ]
+      }
+    },
+    {
+      "processor_index": 86,
+      "module_name": "up_blocks.0.attentions.1.transformer_blocks.9.attn1",
+      "kind": "attn1",
+      "hidden_size": 1280,
+      "cross_attention_dim": null,
+      "heads": 20,
+      "dim_head": 64
+    },
+    {
+      "processor_index": 87,
+      "module_name": "up_blocks.0.attentions.1.transformer_blocks.9.attn2",
+      "kind": "attn2",
+      "hidden_size": 1280,
+      "cross_attention_dim": 2048,
+      "heads": 20,
+      "dim_head": 64,
+      "attn2_ordinal": 43,
+      "checkpoint": {
+        "id_to_k.weight": [
+          1280,
+          2048
+        ],
+        "id_to_v.weight": [
+          1280,
+          2048
+        ]
+      }
+    },
+    {
+      "processor_index": 88,
+      "module_name": "up_blocks.0.attentions.2.transformer_blocks.0.attn1",
+      "kind": "attn1",
+      "hidden_size": 1280,
+      "cross_attention_dim": null,
+      "heads": 20,
+      "dim_head": 64
+    },
+    {
+      "processor_index": 89,
+      "module_name": "up_blocks.0.attentions.2.transformer_blocks.0.attn2",
+      "kind": "attn2",
+      "hidden_size": 1280,
+      "cross_attention_dim": 2048,
+      "heads": 20,
+      "dim_head": 64,
+      "attn2_ordinal": 44,
+      "checkpoint": {
+        "id_to_k.weight": [
+          1280,
+          2048
+        ],
+        "id_to_v.weight": [
+          1280,
+          2048
+        ]
+      }
+    },
+    {
+      "processor_index": 90,
+      "module_name": "up_blocks.0.attentions.2.transformer_blocks.1.attn1",
+      "kind": "attn1",
+      "hidden_size": 1280,
+      "cross_attention_dim": null,
+      "heads": 20,
+      "dim_head": 64
+    },
+    {
+      "processor_index": 91,
+      "module_name": "up_blocks.0.attentions.2.transformer_blocks.1.attn2",
+      "kind": "attn2",
+      "hidden_size": 1280,
+      "cross_attention_dim": 2048,
+      "heads": 20,
+      "dim_head": 64,
+      "attn2_ordinal": 45,
+      "checkpoint": {
+        "id_to_k.weight": [
+          1280,
+          2048
+        ],
+        "id_to_v.weight": [
+          1280,
+          2048
+        ]
+      }
+    },
+    {
+      "processor_index": 92,
+      "module_name": "up_blocks.0.attentions.2.transformer_blocks.2.attn1",
+      "kind": "attn1",
+      "hidden_size": 1280,
+      "cross_attention_dim": null,
+      "heads": 20,
+      "dim_head": 64
+    },
+    {
+      "processor_index": 93,
+      "module_name": "up_blocks.0.attentions.2.transformer_blocks.2.attn2",
+      "kind": "attn2",
+      "hidden_size": 1280,
+      "cross_attention_dim": 2048,
+      "heads": 20,
+      "dim_head": 64,
+      "attn2_ordinal": 46,
+      "checkpoint": {
+        "id_to_k.weight": [
+          1280,
+          2048
+        ],
+        "id_to_v.weight": [
+          1280,
+          2048
+        ]
+      }
+    },
+    {
+      "processor_index": 94,
+      "module_name": "up_blocks.0.attentions.2.transformer_blocks.3.attn1",
+      "kind": "attn1",
+      "hidden_size": 1280,
+      "cross_attention_dim": null,
+      "heads": 20,
+      "dim_head": 64
+    },
+    {
+      "processor_index": 95,
+      "module_name": "up_blocks.0.attentions.2.transformer_blocks.3.attn2",
+      "kind": "attn2",
+      "hidden_size": 1280,
+      "cross_attention_dim": 2048,
+      "heads": 20,
+      "dim_head": 64,
+      "attn2_ordinal": 47,
+      "checkpoint": {
+        "id_to_k.weight": [
+          1280,
+          2048
+        ],
+        "id_to_v.weight": [
+          1280,
+          2048
+        ]
+      }
+    },
+    {
+      "processor_index": 96,
+      "module_name": "up_blocks.0.attentions.2.transformer_blocks.4.attn1",
+      "kind": "attn1",
+      "hidden_size": 1280,
+      "cross_attention_dim": null,
+      "heads": 20,
+      "dim_head": 64
+    },
+    {
+      "processor_index": 97,
+      "module_name": "up_blocks.0.attentions.2.transformer_blocks.4.attn2",
+      "kind": "attn2",
+      "hidden_size": 1280,
+      "cross_attention_dim": 2048,
+      "heads": 20,
+      "dim_head": 64,
+      "attn2_ordinal": 48,
+      "checkpoint": {
+        "id_to_k.weight": [
+          1280,
+          2048
+        ],
+        "id_to_v.weight": [
+          1280,
+          2048
+        ]
+      }
+    },
+    {
+      "processor_index": 98,
+      "module_name": "up_blocks.0.attentions.2.transformer_blocks.5.attn1",
+      "kind": "attn1",
+      "hidden_size": 1280,
+      "cross_attention_dim": null,
+      "heads": 20,
+      "dim_head": 64
+    },
+    {
+      "processor_index": 99,
+      "module_name": "up_blocks.0.attentions.2.transformer_blocks.5.attn2",
+      "kind": "attn2",
+      "hidden_size": 1280,
+      "cross_attention_dim": 2048,
+      "heads": 20,
+      "dim_head": 64,
+      "attn2_ordinal": 49,
+      "checkpoint": {
+        "id_to_k.weight": [
+          1280,
+          2048
+        ],
+        "id_to_v.weight": [
+          1280,
+          2048
+        ]
+      }
+    },
+    {
+      "processor_index": 100,
+      "module_name": "up_blocks.0.attentions.2.transformer_blocks.6.attn1",
+      "kind": "attn1",
+      "hidden_size": 1280,
+      "cross_attention_dim": null,
+      "heads": 20,
+      "dim_head": 64
+    },
+    {
+      "processor_index": 101,
+      "module_name": "up_blocks.0.attentions.2.transformer_blocks.6.attn2",
+      "kind": "attn2",
+      "hidden_size": 1280,
+      "cross_attention_dim": 2048,
+      "heads": 20,
+      "dim_head": 64,
+      "attn2_ordinal": 50,
+      "checkpoint": {
+        "id_to_k.weight": [
+          1280,
+          2048
+        ],
+        "id_to_v.weight": [
+          1280,
+          2048
+        ]
+      }
+    },
+    {
+      "processor_index": 102,
+      "module_name": "up_blocks.0.attentions.2.transformer_blocks.7.attn1",
+      "kind": "attn1",
+      "hidden_size": 1280,
+      "cross_attention_dim": null,
+      "heads": 20,
+      "dim_head": 64
+    },
+    {
+      "processor_index": 103,
+      "module_name": "up_blocks.0.attentions.2.transformer_blocks.7.attn2",
+      "kind": "attn2",
+      "hidden_size": 1280,
+      "cross_attention_dim": 2048,
+      "heads": 20,
+      "dim_head": 64,
+      "attn2_ordinal": 51,
+      "checkpoint": {
+        "id_to_k.weight": [
+          1280,
+          2048
+        ],
+        "id_to_v.weight": [
+          1280,
+          2048
+        ]
+      }
+    },
+    {
+      "processor_index": 104,
+      "module_name": "up_blocks.0.attentions.2.transformer_blocks.8.attn1",
+      "kind": "attn1",
+      "hidden_size": 1280,
+      "cross_attention_dim": null,
+      "heads": 20,
+      "dim_head": 64
+    },
+    {
+      "processor_index": 105,
+      "module_name": "up_blocks.0.attentions.2.transformer_blocks.8.attn2",
+      "kind": "attn2",
+      "hidden_size": 1280,
+      "cross_attention_dim": 2048,
+      "heads": 20,
+      "dim_head": 64,
+      "attn2_ordinal": 52,
+      "checkpoint": {
+        "id_to_k.weight": [
+          1280,
+          2048
+        ],
+        "id_to_v.weight": [
+          1280,
+          2048
+        ]
+      }
+    },
+    {
+      "processor_index": 106,
+      "module_name": "up_blocks.0.attentions.2.transformer_blocks.9.attn1",
+      "kind": "attn1",
+      "hidden_size": 1280,
+      "cross_attention_dim": null,
+      "heads": 20,
+      "dim_head": 64
+    },
+    {
+      "processor_index": 107,
+      "module_name": "up_blocks.0.attentions.2.transformer_blocks.9.attn2",
+      "kind": "attn2",
+      "hidden_size": 1280,
+      "cross_attention_dim": 2048,
+      "heads": 20,
+      "dim_head": 64,
+      "attn2_ordinal": 53,
+      "checkpoint": {
+        "id_to_k.weight": [
+          1280,
+          2048
+        ],
+        "id_to_v.weight": [
+          1280,
+          2048
+        ]
+      }
+    },
+    {
+      "processor_index": 108,
+      "module_name": "up_blocks.1.attentions.0.transformer_blocks.0.attn1",
+      "kind": "attn1",
+      "hidden_size": 640,
+      "cross_attention_dim": null,
+      "heads": 10,
+      "dim_head": 64
+    },
+    {
+      "processor_index": 109,
+      "module_name": "up_blocks.1.attentions.0.transformer_blocks.0.attn2",
+      "kind": "attn2",
+      "hidden_size": 640,
+      "cross_attention_dim": 2048,
+      "heads": 10,
+      "dim_head": 64,
+      "attn2_ordinal": 54,
+      "checkpoint": {
+        "id_to_k.weight": [
+          640,
+          2048
+        ],
+        "id_to_v.weight": [
+          640,
+          2048
+        ]
+      }
+    },
+    {
+      "processor_index": 110,
+      "module_name": "up_blocks.1.attentions.0.transformer_blocks.1.attn1",
+      "kind": "attn1",
+      "hidden_size": 640,
+      "cross_attention_dim": null,
+      "heads": 10,
+      "dim_head": 64
+    },
+    {
+      "processor_index": 111,
+      "module_name": "up_blocks.1.attentions.0.transformer_blocks.1.attn2",
+      "kind": "attn2",
+      "hidden_size": 640,
+      "cross_attention_dim": 2048,
+      "heads": 10,
+      "dim_head": 64,
+      "attn2_ordinal": 55,
+      "checkpoint": {
+        "id_to_k.weight": [
+          640,
+          2048
+        ],
+        "id_to_v.weight": [
+          640,
+          2048
+        ]
+      }
+    },
+    {
+      "processor_index": 112,
+      "module_name": "up_blocks.1.attentions.1.transformer_blocks.0.attn1",
+      "kind": "attn1",
+      "hidden_size": 640,
+      "cross_attention_dim": null,
+      "heads": 10,
+      "dim_head": 64
+    },
+    {
+      "processor_index": 113,
+      "module_name": "up_blocks.1.attentions.1.transformer_blocks.0.attn2",
+      "kind": "attn2",
+      "hidden_size": 640,
+      "cross_attention_dim": 2048,
+      "heads": 10,
+      "dim_head": 64,
+      "attn2_ordinal": 56,
+      "checkpoint": {
+        "id_to_k.weight": [
+          640,
+          2048
+        ],
+        "id_to_v.weight": [
+          640,
+          2048
+        ]
+      }
+    },
+    {
+      "processor_index": 114,
+      "module_name": "up_blocks.1.attentions.1.transformer_blocks.1.attn1",
+      "kind": "attn1",
+      "hidden_size": 640,
+      "cross_attention_dim": null,
+      "heads": 10,
+      "dim_head": 64
+    },
+    {
+      "processor_index": 115,
+      "module_name": "up_blocks.1.attentions.1.transformer_blocks.1.attn2",
+      "kind": "attn2",
+      "hidden_size": 640,
+      "cross_attention_dim": 2048,
+      "heads": 10,
+      "dim_head": 64,
+      "attn2_ordinal": 57,
+      "checkpoint": {
+        "id_to_k.weight": [
+          640,
+          2048
+        ],
+        "id_to_v.weight": [
+          640,
+          2048
+        ]
+      }
+    },
+    {
+      "processor_index": 116,
+      "module_name": "up_blocks.1.attentions.2.transformer_blocks.0.attn1",
+      "kind": "attn1",
+      "hidden_size": 640,
+      "cross_attention_dim": null,
+      "heads": 10,
+      "dim_head": 64
+    },
+    {
+      "processor_index": 117,
+      "module_name": "up_blocks.1.attentions.2.transformer_blocks.0.attn2",
+      "kind": "attn2",
+      "hidden_size": 640,
+      "cross_attention_dim": 2048,
+      "heads": 10,
+      "dim_head": 64,
+      "attn2_ordinal": 58,
+      "checkpoint": {
+        "id_to_k.weight": [
+          640,
+          2048
+        ],
+        "id_to_v.weight": [
+          640,
+          2048
+        ]
+      }
+    },
+    {
+      "processor_index": 118,
+      "module_name": "up_blocks.1.attentions.2.transformer_blocks.1.attn1",
+      "kind": "attn1",
+      "hidden_size": 640,
+      "cross_attention_dim": null,
+      "heads": 10,
+      "dim_head": 64
+    },
+    {
+      "processor_index": 119,
+      "module_name": "up_blocks.1.attentions.2.transformer_blocks.1.attn2",
+      "kind": "attn2",
+      "hidden_size": 640,
+      "cross_attention_dim": 2048,
+      "heads": 10,
+      "dim_head": 64,
+      "attn2_ordinal": 59,
+      "checkpoint": {
+        "id_to_k.weight": [
+          640,
+          2048
+        ],
+        "id_to_v.weight": [
+          640,
+          2048
+        ]
+      }
+    },
+    {
+      "processor_index": 120,
+      "module_name": "mid_block.attentions.0.transformer_blocks.0.attn1",
+      "kind": "attn1",
+      "hidden_size": 1280,
+      "cross_attention_dim": null,
+      "heads": 20,
+      "dim_head": 64
+    },
+    {
+      "processor_index": 121,
+      "module_name": "mid_block.attentions.0.transformer_blocks.0.attn2",
+      "kind": "attn2",
+      "hidden_size": 1280,
+      "cross_attention_dim": 2048,
+      "heads": 20,
+      "dim_head": 64,
+      "attn2_ordinal": 60,
+      "checkpoint": {
+        "id_to_k.weight": [
+          1280,
+          2048
+        ],
+        "id_to_v.weight": [
+          1280,
+          2048
+        ]
+      }
+    },
+    {
+      "processor_index": 122,
+      "module_name": "mid_block.attentions.0.transformer_blocks.1.attn1",
+      "kind": "attn1",
+      "hidden_size": 1280,
+      "cross_attention_dim": null,
+      "heads": 20,
+      "dim_head": 64
+    },
+    {
+      "processor_index": 123,
+      "module_name": "mid_block.attentions.0.transformer_blocks.1.attn2",
+      "kind": "attn2",
+      "hidden_size": 1280,
+      "cross_attention_dim": 2048,
+      "heads": 20,
+      "dim_head": 64,
+      "attn2_ordinal": 61,
+      "checkpoint": {
+        "id_to_k.weight": [
+          1280,
+          2048
+        ],
+        "id_to_v.weight": [
+          1280,
+          2048
+        ]
+      }
+    },
+    {
+      "processor_index": 124,
+      "module_name": "mid_block.attentions.0.transformer_blocks.2.attn1",
+      "kind": "attn1",
+      "hidden_size": 1280,
+      "cross_attention_dim": null,
+      "heads": 20,
+      "dim_head": 64
+    },
+    {
+      "processor_index": 125,
+      "module_name": "mid_block.attentions.0.transformer_blocks.2.attn2",
+      "kind": "attn2",
+      "hidden_size": 1280,
+      "cross_attention_dim": 2048,
+      "heads": 20,
+      "dim_head": 64,
+      "attn2_ordinal": 62,
+      "checkpoint": {
+        "id_to_k.weight": [
+          1280,
+          2048
+        ],
+        "id_to_v.weight": [
+          1280,
+          2048
+        ]
+      }
+    },
+    {
+      "processor_index": 126,
+      "module_name": "mid_block.attentions.0.transformer_blocks.3.attn1",
+      "kind": "attn1",
+      "hidden_size": 1280,
+      "cross_attention_dim": null,
+      "heads": 20,
+      "dim_head": 64
+    },
+    {
+      "processor_index": 127,
+      "module_name": "mid_block.attentions.0.transformer_blocks.3.attn2",
+      "kind": "attn2",
+      "hidden_size": 1280,
+      "cross_attention_dim": 2048,
+      "heads": 20,
+      "dim_head": 64,
+      "attn2_ordinal": 63,
+      "checkpoint": {
+        "id_to_k.weight": [
+          1280,
+          2048
+        ],
+        "id_to_v.weight": [
+          1280,
+          2048
+        ]
+      }
+    },
+    {
+      "processor_index": 128,
+      "module_name": "mid_block.attentions.0.transformer_blocks.4.attn1",
+      "kind": "attn1",
+      "hidden_size": 1280,
+      "cross_attention_dim": null,
+      "heads": 20,
+      "dim_head": 64
+    },
+    {
+      "processor_index": 129,
+      "module_name": "mid_block.attentions.0.transformer_blocks.4.attn2",
+      "kind": "attn2",
+      "hidden_size": 1280,
+      "cross_attention_dim": 2048,
+      "heads": 20,
+      "dim_head": 64,
+      "attn2_ordinal": 64,
+      "checkpoint": {
+        "id_to_k.weight": [
+          1280,
+          2048
+        ],
+        "id_to_v.weight": [
+          1280,
+          2048
+        ]
+      }
+    },
+    {
+      "processor_index": 130,
+      "module_name": "mid_block.attentions.0.transformer_blocks.5.attn1",
+      "kind": "attn1",
+      "hidden_size": 1280,
+      "cross_attention_dim": null,
+      "heads": 20,
+      "dim_head": 64
+    },
+    {
+      "processor_index": 131,
+      "module_name": "mid_block.attentions.0.transformer_blocks.5.attn2",
+      "kind": "attn2",
+      "hidden_size": 1280,
+      "cross_attention_dim": 2048,
+      "heads": 20,
+      "dim_head": 64,
+      "attn2_ordinal": 65,
+      "checkpoint": {
+        "id_to_k.weight": [
+          1280,
+          2048
+        ],
+        "id_to_v.weight": [
+          1280,
+          2048
+        ]
+      }
+    },
+    {
+      "processor_index": 132,
+      "module_name": "mid_block.attentions.0.transformer_blocks.6.attn1",
+      "kind": "attn1",
+      "hidden_size": 1280,
+      "cross_attention_dim": null,
+      "heads": 20,
+      "dim_head": 64
+    },
+    {
+      "processor_index": 133,
+      "module_name": "mid_block.attentions.0.transformer_blocks.6.attn2",
+      "kind": "attn2",
+      "hidden_size": 1280,
+      "cross_attention_dim": 2048,
+      "heads": 20,
+      "dim_head": 64,
+      "attn2_ordinal": 66,
+      "checkpoint": {
+        "id_to_k.weight": [
+          1280,
+          2048
+        ],
+        "id_to_v.weight": [
+          1280,
+          2048
+        ]
+      }
+    },
+    {
+      "processor_index": 134,
+      "module_name": "mid_block.attentions.0.transformer_blocks.7.attn1",
+      "kind": "attn1",
+      "hidden_size": 1280,
+      "cross_attention_dim": null,
+      "heads": 20,
+      "dim_head": 64
+    },
+    {
+      "processor_index": 135,
+      "module_name": "mid_block.attentions.0.transformer_blocks.7.attn2",
+      "kind": "attn2",
+      "hidden_size": 1280,
+      "cross_attention_dim": 2048,
+      "heads": 20,
+      "dim_head": 64,
+      "attn2_ordinal": 67,
+      "checkpoint": {
+        "id_to_k.weight": [
+          1280,
+          2048
+        ],
+        "id_to_v.weight": [
+          1280,
+          2048
+        ]
+      }
+    },
+    {
+      "processor_index": 136,
+      "module_name": "mid_block.attentions.0.transformer_blocks.8.attn1",
+      "kind": "attn1",
+      "hidden_size": 1280,
+      "cross_attention_dim": null,
+      "heads": 20,
+      "dim_head": 64
+    },
+    {
+      "processor_index": 137,
+      "module_name": "mid_block.attentions.0.transformer_blocks.8.attn2",
+      "kind": "attn2",
+      "hidden_size": 1280,
+      "cross_attention_dim": 2048,
+      "heads": 20,
+      "dim_head": 64,
+      "attn2_ordinal": 68,
+      "checkpoint": {
+        "id_to_k.weight": [
+          1280,
+          2048
+        ],
+        "id_to_v.weight": [
+          1280,
+          2048
+        ]
+      }
+    },
+    {
+      "processor_index": 138,
+      "module_name": "mid_block.attentions.0.transformer_blocks.9.attn1",
+      "kind": "attn1",
+      "hidden_size": 1280,
+      "cross_attention_dim": null,
+      "heads": 20,
+      "dim_head": 64
+    },
+    {
+      "processor_index": 139,
+      "module_name": "mid_block.attentions.0.transformer_blocks.9.attn2",
+      "kind": "attn2",
+      "hidden_size": 1280,
+      "cross_attention_dim": 2048,
+      "heads": 20,
+      "dim_head": 64,
+      "attn2_ordinal": 69,
+      "checkpoint": {
+        "id_to_k.weight": [
+          1280,
+          2048
+        ],
+        "id_to_v.weight": [
+          1280,
+          2048
+        ]
+      }
+    }
+  ]
+}

@@ -5051,128 +5051,186 @@ pub fn auxiliary_manifests_for_request(
     if crate::identity::request_mentions_identity(request)
         && crate::identity::effective_id_weight(request) > 0.0
     {
-        manifests.push(PULID_FLUX_MANIFEST);
+        // The bundle follows the checkpoint's family — `pulid-flux` or
+        // `pulid-sdxl` — through the one identity authority; a model no family
+        // qualifies needs no bundle because admission refuses it first.
+        if let Some(family) = crate::identity::identity_family(&request.model) {
+            manifests.push(family.manifest());
+        }
     }
     manifests
 }
 
-/// The PuLID-FLUX auxiliary asset bundle.
+/// Manifest name for the PuLID v1.1 (SDXL) asset bundle.
+pub const PULID_SDXL_MANIFEST: &str = "pulid-sdxl";
+
+/// The four extraction artifacts every PuLID bundle shares.
 ///
-/// This is emphatically **not** a generation model: it is the four auxiliary
-/// artifacts a FLUX render needs before it can condition on a face. It is
-/// hidden (never offered as a checkpoint), auxiliary (never a default model),
-/// and files-only (never resolves to a [`ModelPaths`]). The
-/// [`ManifestDefaults`] are dummies for the same reason the LTX-2 control
-/// adapters' are — nothing ever reads them for a bundle that cannot generate.
-fn pulid_manifests() -> Vec<ModelManifest> {
-    vec![ModelManifest {
-        name: PULID_FLUX_MANIFEST.to_string(),
-        family: PULID_FAMILY.to_string(),
-        description: "PuLID-FLUX v0.9.1 identity conditioning — adapter, EVA02-CLIP vision tower, and InsightFace antelopev2 face models".to_string(),
-        files: vec![
-            // Upstream's own download: `pipeline_flux.py:95` calls
-            // `hf_hub_download('guozinan/PuLID', f'pulid_flux_{version}.safetensors')`.
-            ModelFile {
-                hf_repo: "guozinan/PuLID".to_string(),
-                hf_filename: "pulid_flux_v0.9.1.safetensors".to_string(),
-                component: ModelComponent::IdentityAdapter,
-                size_bytes: 1_142_099_520,
-                gated: false,
-                sha256: Some(
-                    "92c41c3af322b02e58e1b32842e4601e08c8f16ec1fe80089dbe957df510f51d",
-                ),
-            },
-            // `pipeline_flux.py:58` builds `EVA02-CLIP-L-14-336`; BAAI publishes
-            // that checkpoint as a PyTorch pickle in `QuanSun/EVA-CLIP`. Mold
-            // carries it as a conversion INPUT and never loads the `.pt`
-            // directly; the derived artifact is issue #1229's.
-            ModelFile {
-                hf_repo: "QuanSun/EVA-CLIP".to_string(),
-                hf_filename: "EVA02_CLIP_L_336_psz14_s6B.pt".to_string(),
-                component: ModelComponent::IdentityVisionEncoder,
-                size_bytes: 856_461_210,
-                gated: false,
-                sha256: Some(
-                    "84c3a17a228c567a155259b2245b0b59072bf7da510260a0a02ec54de6d50b05",
-                ),
-            },
-            // Provenance: InsightFace publishes antelopev2 as a zip on GitHub
-            // releases / Google Drive, which mold's HF-only `ModelFile` cannot
-            // express. PuLID itself resolves the pack from the Hugging Face
-            // mirror — `pipeline_flux.py:70`,
-            // `snapshot_download('DIAMONIK7777/antelopev2', ...)` — and both
-            // mirrored files hash to the pins below (verified 2026-08-21
-            // against the official antelopev2 digests), so mold pulls the
-            // same bytes upstream does.
-            //
-            // LICENSE: these two files are InsightFace *pretrained models*,
-            // which are "available for non-commercial research purposes only"
-            // (InsightFace README, "License"). The code is MIT; the weights are
-            // not. Mold does not bundle them and refuses to download them until
-            // the user has explicitly recorded acceptance — see
-            // [`crate::license_acceptance`].
-            ModelFile {
-                hf_repo: "DIAMONIK7777/antelopev2".to_string(),
-                hf_filename: "scrfd_10g_bnkps.onnx".to_string(),
-                component: ModelComponent::FaceDetector,
-                size_bytes: 16_923_827,
-                gated: false,
-                sha256: Some(
-                    "5838f7fe053675b1c7a08b633df49e7af5495cee0493c7dcf6697200b85b5b91",
-                ),
-            },
-            ModelFile {
-                hf_repo: "DIAMONIK7777/antelopev2".to_string(),
-                hf_filename: "glintr100.onnx".to_string(),
-                component: ModelComponent::FaceRecognizer,
-                size_bytes: 260_665_334,
-                gated: false,
-                sha256: Some(
-                    "4ab1d6435d639628a6f3e5008dd4f929edf4c4124b1a7169e1048f9fef534cdf",
-                ),
-            },
-            // `pipeline_flux.py:53` builds facexlib's BiSeNet face parser
-            // (`init_parsing_model(model_name='bisenet')`), which facexlib
-            // itself downloads from its own GitHub release
-            // (`facexlib/parsing/__init__.py:9-11`,
-            // `.../releases/download/v0.2.0/parsing_bisenet.pth`). A GitHub
-            // release is not something `ModelFile` can express, so mold pulls
-            // the Hugging Face mirror whose LFS object hashes to the same
-            // bytes — the antelopev2 precedent above, verified 2026-08-21
-            // against the digest of the GitHub download itself.
-            //
-            // LICENSE: facexlib is MIT (Xintao Wang, 2020) and its released
-            // weights ship under that licence, so this file carries none of
-            // the antelopev2 non-commercial restriction and needs no recorded
-            // acceptance. Mold carries it as a conversion INPUT and never
-            // loads the `.pth` directly.
-            ModelFile {
-                hf_repo: "leonelhs/facexlib".to_string(),
-                hf_filename: "parsing_bisenet.pth".to_string(),
-                component: ModelComponent::FaceParser,
-                size_bytes: 53_289_463,
-                gated: false,
-                sha256: Some(
-                    "468e13ca13a9b43cc0881a9f99083a430e9c0a38abd935431d1c28ee94b26567",
-                ),
-            },
-        ],
-        // Dummy defaults: a files-only auxiliary bundle never generates, so
-        // nothing reads these. Mirrors `ltx2_control_manifests`.
-        defaults: ManifestDefaults {
-            steps: 1,
-            guidance: 0.0,
-            width: 16,
-            height: 16,
-            is_schnell: true,
-            scheduler: None,
-            negative_prompt: None,
-            frames: None,
-            fps: None,
-            source_image: None,
+/// The vision tower, the two InsightFace graphs, and the BiSeNet parser belong
+/// to the FACE EXTRACTOR, which is identical for FLUX and SDXL — upstream's
+/// `pipeline_v1_1.py:get_id_embedding` is the same algorithm as
+/// `pipeline_flux.py`'s, over the same networks. Only the identity adapter
+/// differs, so the bundles share one file list and, because every one of these
+/// is a shared (non-model-specific) component of the same `pulid` family, one
+/// on-disk copy under `shared/pulid/`. A machine that already has `pulid-flux`
+/// pulls exactly the 984 MB SDXL adapter and nothing else.
+fn shared_pulid_extraction_files() -> Vec<ModelFile> {
+    vec![
+        // `pipeline_flux.py:58` builds `EVA02-CLIP-L-14-336`; BAAI publishes
+        // that checkpoint as a PyTorch pickle in `QuanSun/EVA-CLIP`. Mold
+        // carries it as a conversion INPUT and never loads the `.pt`
+        // directly; the derived artifact is issue #1229's.
+        ModelFile {
+            hf_repo: "QuanSun/EVA-CLIP".to_string(),
+            hf_filename: "EVA02_CLIP_L_336_psz14_s6B.pt".to_string(),
+            component: ModelComponent::IdentityVisionEncoder,
+            size_bytes: 856_461_210,
+            gated: false,
+            sha256: Some("84c3a17a228c567a155259b2245b0b59072bf7da510260a0a02ec54de6d50b05"),
         },
-        hidden: true,
-    }]
+        // Provenance: InsightFace publishes antelopev2 as a zip on GitHub
+        // releases / Google Drive, which mold's HF-only `ModelFile` cannot
+        // express. PuLID itself resolves the pack from the Hugging Face
+        // mirror — `pipeline_flux.py:70`,
+        // `snapshot_download('DIAMONIK7777/antelopev2', ...)` — and both
+        // mirrored files hash to the pins below (verified 2026-08-21
+        // against the official antelopev2 digests), so mold pulls the
+        // same bytes upstream does.
+        //
+        // LICENSE: these two files are InsightFace *pretrained models*,
+        // which are "available for non-commercial research purposes only"
+        // (InsightFace README, "License"). The code is MIT; the weights are
+        // not. Mold does not bundle them and refuses to download them until
+        // the user has explicitly recorded acceptance — see
+        // [`crate::license_acceptance`].
+        ModelFile {
+            hf_repo: "DIAMONIK7777/antelopev2".to_string(),
+            hf_filename: "scrfd_10g_bnkps.onnx".to_string(),
+            component: ModelComponent::FaceDetector,
+            size_bytes: 16_923_827,
+            gated: false,
+            sha256: Some("5838f7fe053675b1c7a08b633df49e7af5495cee0493c7dcf6697200b85b5b91"),
+        },
+        ModelFile {
+            hf_repo: "DIAMONIK7777/antelopev2".to_string(),
+            hf_filename: "glintr100.onnx".to_string(),
+            component: ModelComponent::FaceRecognizer,
+            size_bytes: 260_665_334,
+            gated: false,
+            sha256: Some("4ab1d6435d639628a6f3e5008dd4f929edf4c4124b1a7169e1048f9fef534cdf"),
+        },
+        // `pipeline_flux.py:53` builds facexlib's BiSeNet face parser
+        // (`init_parsing_model(model_name='bisenet')`), which facexlib
+        // itself downloads from its own GitHub release
+        // (`facexlib/parsing/__init__.py:9-11`,
+        // `.../releases/download/v0.2.0/parsing_bisenet.pth`). A GitHub
+        // release is not something `ModelFile` can express, so mold pulls
+        // the Hugging Face mirror whose LFS object hashes to the same
+        // bytes — the antelopev2 precedent above, verified 2026-08-21
+        // against the digest of the GitHub download itself.
+        //
+        // LICENSE: facexlib is MIT (Xintao Wang, 2020) and its released
+        // weights ship under that licence, so this file carries none of
+        // the antelopev2 non-commercial restriction and needs no recorded
+        // acceptance. Mold carries it as a conversion INPUT and never
+        // loads the `.pth` directly.
+        ModelFile {
+            hf_repo: "leonelhs/facexlib".to_string(),
+            hf_filename: "parsing_bisenet.pth".to_string(),
+            component: ModelComponent::FaceParser,
+            size_bytes: 53_289_463,
+            gated: false,
+            sha256: Some("468e13ca13a9b43cc0881a9f99083a430e9c0a38abd935431d1c28ee94b26567"),
+        },
+    ]
+}
+
+/// Dummy defaults: a files-only auxiliary bundle never generates, so nothing
+/// reads these. Mirrors `ltx2_control_manifests`.
+fn pulid_bundle_defaults() -> ManifestDefaults {
+    ManifestDefaults {
+        steps: 1,
+        guidance: 0.0,
+        width: 16,
+        height: 16,
+        is_schnell: true,
+        scheduler: None,
+        negative_prompt: None,
+        frames: None,
+        fps: None,
+        source_image: None,
+    }
+}
+
+/// The PuLID auxiliary asset bundles, one per qualified base architecture.
+///
+/// These are emphatically **not** generation models: each is an identity
+/// adapter plus the four auxiliary artifacts a render needs before it can
+/// condition on a face. They are hidden (never offered as a checkpoint),
+/// auxiliary (never a default model), and files-only (never resolve to a
+/// [`ModelPaths`]).
+fn pulid_manifests() -> Vec<ModelManifest> {
+    vec![
+        ModelManifest {
+            name: PULID_FLUX_MANIFEST.to_string(),
+            family: PULID_FAMILY.to_string(),
+            description: "PuLID-FLUX v0.9.1 identity conditioning — adapter, EVA02-CLIP vision tower, and InsightFace antelopev2 face models".to_string(),
+            files: {
+                let mut files = vec![
+            // Upstream's own download: `pipeline_flux.py:95` calls
+                    // `hf_hub_download('guozinan/PuLID', f'pulid_flux_{version}.safetensors')`.
+                    ModelFile {
+                        hf_repo: "guozinan/PuLID".to_string(),
+                        hf_filename: "pulid_flux_v0.9.1.safetensors".to_string(),
+                        component: ModelComponent::IdentityAdapter,
+                        size_bytes: 1_142_099_520,
+                        gated: false,
+                        sha256: Some(
+                            "92c41c3af322b02e58e1b32842e4601e08c8f16ec1fe80089dbe957df510f51d",
+                        ),
+                    },
+                ];
+                files.extend(shared_pulid_extraction_files());
+                files
+            },
+            defaults: pulid_bundle_defaults(),
+            hidden: true,
+        },
+        ModelManifest {
+            name: PULID_SDXL_MANIFEST.to_string(),
+            family: PULID_FAMILY.to_string(),
+            description: "PuLID v1.1 identity conditioning for SDXL — adapter, EVA02-CLIP vision tower, and InsightFace antelopev2 face models".to_string(),
+            files: {
+                let mut files = vec![
+                    // Upstream's own download: `pipeline_v1_1.py:152` calls
+                    // `hf_hub_download('guozinan/PuLID', 'pulid_v1.1.safetensors')`.
+                    // The file carries BOTH halves of the SDXL adapter:
+                    // `id_adapter.*` is the IDFormer (the same class FLUX's
+                    // `pulid_encoder.*` holds) and
+                    // `id_adapter_attn_layers.<i>.{id_to_k,id_to_v}` are the 70
+                    // UNet cross-attention injections.
+                    //
+                    // LICENSE: PuLID itself is Apache-2.0, so this file needs no
+                    // recorded acceptance. The two antelopev2 graphs beside it
+                    // still do — the extractor is shared, so the gate is too.
+                    ModelFile {
+                        hf_repo: "guozinan/PuLID".to_string(),
+                        hf_filename: "pulid_v1.1.safetensors".to_string(),
+                        component: ModelComponent::IdentityAdapter,
+                        size_bytes: 984_405_232,
+                        gated: false,
+                        sha256: Some(
+                            "4cb8ceec1078e0165399b88332ab3c5971619111b8e1730e6bae64144aabae41",
+                        ),
+                    },
+                ];
+                files.extend(shared_pulid_extraction_files());
+                files
+            },
+            defaults: pulid_bundle_defaults(),
+            hidden: true,
+        },
+    ]
 }
 
 fn controlnet_manifests() -> Vec<ModelManifest> {
@@ -7704,7 +7762,11 @@ mod tests {
         // PuLID bump (#1220): +pulid-flux — one hidden auxiliary files-only
         // bundle (identity adapter + EVA02-CLIP source + antelopev2 face
         // models). Not a checkpoint; never a default-model candidate.
-        assert_eq!(known_manifests().len(), 160);
+        // PuLID SDXL bump (#1228): +pulid-sdxl — the second hidden auxiliary
+        // files-only bundle. It carries the SAME four extraction artifacts as
+        // `pulid-flux` at the SAME `shared/pulid/` paths and differs by one
+        // file, the PuLID v1.1 adapter.
+        assert_eq!(known_manifests().len(), 161);
     }
 
     #[test]

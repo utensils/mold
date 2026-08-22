@@ -400,13 +400,19 @@ pub fn create_engine_with_pool(
     // it there would make every admitted job's frozen config disagree with the
     // live one the moment the bundle is installed.
     //
-    // `pulid_paths` returns `Some` only for a complete, on-disk bundle, so the
-    // "every populated frozen path must already be local" check in
+    // `pulid_paths_for` returns `Some` only for a complete, on-disk bundle, so
+    // the "every populated frozen path must already be local" check in
     // `create_engine_with_frozen_config` holds by construction. It is inert for
     // a request that does not condition on a face — the engine loads nothing
     // until one does.
+    //
+    // The bundle follows the MODEL, because the adapter does: a FLUX engine
+    // resolving the SDXL bundle would freeze a checkpoint whose `pulid_ca.*`
+    // prefix does not exist. `identity_family` is the same authority admission
+    // uses, so the forced-local and served paths choose identically.
     if frozen.identity_assets.is_none() {
-        frozen.identity_assets = mold_core::pulid_assets::pulid_paths(config);
+        frozen.identity_assets = mold_core::identity::identity_family(&model_name)
+            .and_then(|family| mold_core::pulid_assets::pulid_paths_for(config, family));
     }
     create_engine_with_frozen_config(
         model_name,
@@ -1178,6 +1184,7 @@ mod tests {
         let mut frozen = FrozenEngineConfig::resolve("z-image:bf16", &Config::default());
         frozen.family = "z-image".into();
         frozen.identity_assets = Some(mold_core::pulid_assets::PulidPaths {
+            family: mold_core::identity::IdentityFamily::Flux,
             adapter: present("pulid_flux_v0.9.1.safetensors"),
             vision_encoder_source: present("EVA02_CLIP_L_336_psz14_s6B.pt"),
             face_detector: present("scrfd_10g_bnkps.onnx"),

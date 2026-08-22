@@ -1,0 +1,92 @@
+{
+  "note": "id_cond dim is 1280 (512 arcface + 768 eva-clip-l-14-336 proj), NOT 1792 \u2014 verified against id_adapter.id_embedding_mapping.0.weight == [1024, 1280] in the checkpoint header",
+  "id_cond_dim": 1280,
+  "vit_scales": 5,
+  "vit_tokens": 577,
+  "vit_dim": 1024,
+  "stat_slots": [
+    "mean",
+    "std",
+    "min",
+    "max",
+    "peak"
+  ],
+  "seeds": {
+    "id_cond": "0x50554c4944535849",
+    "vit_hidden_base": "0x50554c4944535856",
+    "id_cond_2nd_image": "0x50554c4944535832"
+  },
+  "cast_f16_inputs": false,
+  "single": {
+    "id_cond_shape": [
+      1,
+      1,
+      1280
+    ],
+    "vit_hidden_shape": [
+      5,
+      1,
+      577,
+      1024
+    ],
+    "output": {
+      "shape": [
+        1,
+        32,
+        2048
+      ],
+      "mean": 0.008462682892684065,
+      "std": 0.8915222276635012,
+      "min": -11.68153190612793,
+      "max": 8.947585105895996,
+      "l2": 228.23997243686347
+    }
+  },
+  "uncond": {
+    "source": "pipeline_v1_1.py:243-247 \u2014 zeros of the single-image shapes above",
+    "output": {
+      "shape": [
+        1,
+        32,
+        2048
+      ],
+      "mean": 0.009397398394819179,
+      "std": 0.8953076693027656,
+      "min": -11.566095352172852,
+      "max": 10.28701400756836,
+      "l2": 229.2113886204271
+    }
+  },
+  "two_image": {
+    "id_cond_shape": [
+      1,
+      2,
+      1280
+    ],
+    "vit_hidden_shape": [
+      5,
+      1,
+      1154,
+      1024
+    ],
+    "output": {
+      "shape": [
+        1,
+        32,
+        2048
+      ],
+      "mean": 0.006582870875941144,
+      "std": 0.8973664935529343,
+      "min": -12.088408470153809,
+      "max": 9.259465217590332,
+      "l2": 229.73200343789176
+    }
+  },
+  "provenance": {
+    "source": "ToTheBeginning/PuLID pulid/encoders_transformer.py::IDFormer, loaded from pulid_v1.1.safetensors id_adapter.* tensors",
+    "adapter_file": "pulid_v1.1.safetensors",
+    "adapter_sha256": "4cb8ceec1078e0165399b88332ab3c5971619111b8e1730e6bae64144aabae41",
+    "torch": "2.13.0",
+    "dtype": "float32"
+  }
+}

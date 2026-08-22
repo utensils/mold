@@ -293,7 +293,7 @@ pub trait InferenceEngine: Send + Sync {
             anyhow::bail!(
                 "this engine does not support face-identity conditioning; \
                  identity is qualified only for {}",
-                mold_core::identity::IDENTITY_QUALIFIED_MODELS.join(" and ")
+                mold_core::identity::identity_qualified_models().join(", ")
             );
         }
         Ok(())
