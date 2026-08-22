@@ -1583,40 +1583,45 @@ pub(crate) async fn prepare_inputs_for_devices(
                 .join("; ")
         ));
     }
-    // The identity is resolved ONCE, here, after the per-device loop and
-    // before any fan-out, and the value is device-independent by construction.
-    // This is the whole of #1223's extraction lifetime: a batch parent clones
-    // this struct into every child, so every sibling and every denoise step
-    // reuses this exact embedding. See `crate::identity_extraction`.
-    let resolved_identity = match context.frozen_identity.clone() {
-        // A batch child, re-prepared by the scheduler: the parent already
-        // resolved this exact face. Reusing it is the contract, not an
-        // optimization. No warning rides along, because the sibling did not
-        // extract — the parent's prepared inputs already carry it, and every
-        // child clones those.
-        Some(frozen) => crate::identity_extraction::ResolvedIdentity {
-            embedding: Some(frozen),
-            warning: None,
-        },
-        // Placement preview is a read-only probe. It must never spend seconds
-        // and 1.4 GB running the extractor, and it does not need to: identity
-        // changes the memory demand, which `memory_preflight` charges from the
-        // request, not from the embedding.
-        None if policy == DependencyMaterializationPolicy::ExistingOnly => {
-            crate::identity_extraction::ResolvedIdentity::default()
-        }
-        None => {
-            let identity_paths = by_device
-                .values()
-                .find_map(|device| device.engine_config.identity_assets.clone());
-            crate::identity_extraction::resolve_identity_embedding(request, identity_paths.as_ref())
-                .await?
-        }
-    };
-    let crate::identity_extraction::ResolvedIdentity {
-        embedding: identity_embedding,
-        warning: identity_warning,
-    } = resolved_identity;
+    // The identity is NOT resolved here any more. #1227 phase 2 moved the
+    // extraction inside the leased job and onto the render's own device
+    // (`docs/architecture/pulid-perf.md` §5), because the EVA02-CLIP tower was
+    // 79% of a 2,840 ms host extraction and there is no device to name until a
+    // lease exists. What survives is the ONE case admission still answers: a
+    // batch child re-prepared by the scheduler carries its parent's frozen
+    // value, and reusing it is the contract rather than an optimization.
+    //
+    // No warning rides along with that value, because the child did not
+    // extract — the parent's prepared inputs already carry it, and every child
+    // clones those.
+    //
+    // Placement preview is unaffected for the same reason it always was: it is
+    // a read-only probe that must never run the extractor, and identity
+    // changes the memory demand, which `memory_preflight` charges from the
+    // request rather than from the embedding.
+    let _ = policy;
+    let identity_embedding = context.frozen_identity.clone();
+    let identity_warning: Option<String> = None;
+    // The batch-lifetime authority for "one identity per parent". Minted here,
+    // once, for the preparation a parent's plan is frozen from — every child
+    // clones `PreparedExecutionInputs` and therefore shares this exact `Arc`,
+    // so whichever child extracts first pins the result for all of them. A
+    // re-prepared child inherits its parent's cell through
+    // `compose_prepared_generation`, which carries it exactly as it carries the
+    // frozen embedding.
+    //
+    // Pre-filled when preparation already holds the answer, so a re-prepared
+    // child never re-extracts even if its own dispatch reaches the pin first.
+    let identity_pin = crate::execution_plan::IdentityPin::default();
+    if let Some(frozen) = identity_embedding.clone() {
+        // The advisory a re-prepared child carries is its parent's, and it is
+        // already on `PreparedExecutionInputs`; pinning `None` here would let a
+        // sibling that reads the pin lose it.
+        let _ = identity_pin.pin(crate::execution_plan::PinnedIdentity {
+            embedding: frozen,
+            warning: context.frozen_identity_warning.clone(),
+        });
+    }
 
     let prepared = PreparedExecutionInputs {
         authority_fingerprint,
@@ -1625,6 +1630,7 @@ pub(crate) async fn prepare_inputs_for_devices(
         model_config_overlay,
         identity_embedding,
         identity_warning,
+        identity_pin,
         #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
         h3_private_ingress_grant: context.h3_private_ingress_grant,
         #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
@@ -1944,9 +1950,13 @@ async fn prepare_h3_private_inputs_for_devices(
         retryable_device_failures: failures,
         model_config_overlay: None,
         // The private H3 ingress has no face-identity path; FLUX is the only
-        // family qualified for it.
+        // family qualified for it. The pin is minted empty rather than omitted
+        // so this literal keeps compiling as the struct grows — a
+        // feature-gated initializer is exactly the shape #1262 broke on,
+        // because no default-feature build ever type-checks it.
         identity_embedding: None,
         identity_warning: None,
+        identity_pin: crate::execution_plan::IdentityPin::default(),
         h3_private_ingress_grant: Some(rebound_grant),
         h3_private_admission_by_device: admissions,
     })
@@ -1975,6 +1985,14 @@ pub struct DependencyPreparationContext {
     /// chances for the siblings to disagree. Populated, the extraction is
     /// skipped entirely and the parent's exact value is carried forward.
     pub(crate) frozen_identity: Option<mold_core::identity::FrozenIdentityEmbedding>,
+    /// The advisory that came with [`Self::frozen_identity`].
+    ///
+    /// Carried beside it so the pin this preparation mints holds the pair. A
+    /// child that reads the pin never enters the resolver, so an advisory left
+    /// out here is one the sibling never reports — and "several faces were
+    /// found, the largest was used" is exactly the note the person who supplied
+    /// a group photograph needs on every print of the batch.
+    pub(crate) frozen_identity_warning: Option<String>,
 }
 
 pub async fn prepare_execution_inputs(

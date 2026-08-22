@@ -758,7 +758,17 @@ fn compose_prepared_generation(pending: &mut PendingGeneration, prepared: Prepar
         .prepared_inputs
         .as_ref()
         .and_then(|inputs| inputs.identity_warning.clone());
+    // The batch-lifetime identity cell outlives re-preparation for the same
+    // reason the frozen value does: a fresh preparation mints a fresh cell, and
+    // a child that adopted one would stop sharing its parent's.
+    let identity_pin = pending
+        .prepared_inputs
+        .as_ref()
+        .map(|inputs| inputs.identity_pin.clone());
     pending.prepared_inputs = prepared.execution_inputs;
+    if let (Some(inputs), Some(pin)) = (pending.prepared_inputs.as_mut(), identity_pin) {
+        inputs.identity_pin = pin;
+    }
     if let (Some(inputs), Some(identity)) = (pending.prepared_inputs.as_mut(), frozen_identity) {
         inputs.identity_embedding = Some(identity);
     }
@@ -1797,12 +1807,21 @@ impl Coordinator {
                 .prepared_inputs
                 .as_ref()
                 .and_then(|inputs| inputs.identity_embedding.clone());
+            // Its advisory travels with it, so the pin this preparation mints
+            // holds the pair a sibling reading it will report.
+            let frozen_identity_warning = pending
+                .prepared_inputs
+                .as_ref()
+                .and_then(|inputs| inputs.identity_warning.clone());
             #[cfg(not(any(feature = "h3", feature = "h3-private-uat")))]
-            let context =
-                crate::variant_dependencies::DependencyPreparationContext { frozen_identity };
+            let context = crate::variant_dependencies::DependencyPreparationContext {
+                frozen_identity,
+                frozen_identity_warning,
+            };
             #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
             let context = crate::variant_dependencies::DependencyPreparationContext {
                 frozen_identity,
+                frozen_identity_warning,
                 ..context
             };
             let preparer = self.preparer.clone();
@@ -6160,6 +6179,7 @@ fn load_estimate_store(state: &AppState) -> EstimateStore {
                 ewma_audio_decode_ms: record.ewma_audio_decode_ms,
                 ewma_mux_ms: record.ewma_mux_ms,
                 ewma_upscale_ms: record.ewma_upscale_ms,
+                ewma_identity_extract_ms: record.ewma_identity_extract_ms,
                 vram_conservative_bytes: record.vram_high_water_bytes,
                 host_conservative_bytes: record.host_high_water_bytes,
                 failure_count: record.failure_count,
@@ -6198,6 +6218,7 @@ fn estimate_record(bucket: &EstimateBucket) -> mold_db::SchedulerEstimateRecord 
         ewma_audio_decode_ms: bucket.ewma_audio_decode_ms,
         ewma_mux_ms: bucket.ewma_mux_ms,
         ewma_upscale_ms: bucket.ewma_upscale_ms,
+        ewma_identity_extract_ms: bucket.ewma_identity_extract_ms,
         vram_high_water_bytes: bucket.vram_conservative_bytes,
         host_high_water_bytes: bucket.host_conservative_bytes,
         failure_count: bucket.failure_count,
@@ -14525,6 +14546,7 @@ mod tests {
             ewma_audio_decode_ms: None,
             ewma_mux_ms: None,
             ewma_upscale_ms: None,
+            ewma_identity_extract_ms: None,
             vram_conservative_bytes: Some(24_884_805_632),
             host_conservative_bytes: None,
             failure_count: 3,

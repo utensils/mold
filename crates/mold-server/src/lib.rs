@@ -32,7 +32,11 @@ pub mod generation_cancel;
 pub mod gpu_pool;
 pub mod gpu_worker;
 mod identity_dependencies;
-mod identity_extraction;
+/// Public so the forced-local CLI path can run the same extraction the
+/// server's worker runs, at the same point in the lease. `mold-cli` builds its
+/// own engine from an admitted plan and must not grow a second identity
+/// lifetime.
+pub mod identity_extraction;
 pub mod instance;
 pub mod job_registry;
 pub mod job_supervisor;

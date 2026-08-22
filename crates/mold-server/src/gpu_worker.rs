@@ -27,6 +27,7 @@ thread_local! {
         const { RefCell::new(mold_scheduler::EstimatePhaseTimings {
             cold_load_ms: None,
             warm_reload_ms: None,
+            identity_extract_ms: None,
             prompt_encode_ms: None,
             denoise_ms: None,
             vae_ms: None,
@@ -102,6 +103,9 @@ fn record_phase_timing(event: &mold_inference::ProgressEvent) {
                 name: _,
             } => match phase {
                 mold_inference::ProgressPhase::ModelLoad => {}
+                mold_inference::ProgressPhase::IdentityExtract => {
+                    add_phase_sample(&mut timings.identity_extract_ms, *elapsed)
+                }
                 mold_inference::ProgressPhase::PromptEncode => {
                     add_phase_sample(&mut timings.prompt_encode_ms, *elapsed)
                 }
@@ -3626,6 +3630,43 @@ impl Drop for SingletonCancelGuard<'_> {
     }
 }
 
+/// Classify a face-extraction failure, quarantining the worker on a fatal CUDA
+/// context, and return the message the caller reports.
+///
+/// #1227 phase 2 put real CUDA kernels in this phase — a 24-block ViT and two
+/// convolutional backbones, ahead of the model load — so it is now a place a
+/// context can die. A fatal driver error invalidates every CUDA object this
+/// worker owns, and CLAUDE.md's rule is absolute: such a context is never
+/// reused or reset in process. Reporting an illegal address here as an
+/// ordinary job failure would leave the next BUFFERED job to inherit the
+/// poison, which is exactly the failure `ensure_model_ready_sync_inner_guarded`
+/// and the generation path already quarantine for.
+///
+/// A fatal context is deliberately not counted against this GPU's reliability
+/// record: the process is going down for a restart either way, and degrading a
+/// healthy card out of rotation on the way out helps nobody. That mirrors the
+/// model-load arm's `count_worker_failure = false`.
+fn settle_identity_extraction_failure(
+    worker: &GpuWorker,
+    model_name: &str,
+    error: &crate::identity_extraction::IdentityFailure,
+) -> String {
+    if has_fatal_cuda_error(&error.message) {
+        quarantine_poisoned_worker(worker);
+        return fatal_cuda_user_message(model_name);
+    }
+    // Only a device-attributable failure may touch this worker's health. A
+    // photograph with no detectable face is reproducible on every GPU in the
+    // fleet, so counting it would degrade a card for something no card could
+    // have done differently — and on a single-GPU host three bad photographs
+    // would take the whole machine out of rotation for a minute, telling the
+    // person who supplied them an unrelated story about GPU health.
+    if !error.user_input {
+        record_failure(worker);
+    }
+    format!("face-identity conditioning failed: {error}")
+}
+
 fn process_job_with_sink(
     worker: &GpuWorker,
     mut job: GpuJob,
@@ -3775,6 +3816,127 @@ fn process_job_with_sink(
         let _ = job.result_tx.send(Err(err_msg));
         return false;
     }
+
+    // Face-identity extraction, FIRST, before anything else this lease does
+    // (#1227 phase 2, `docs/architecture/pulid-perf.md` §5).
+    //
+    // Before the model load rather than merely before prompt encode, and that
+    // ordering is the drop-before-adapter rule made concrete: the detector,
+    // the recognizer, the parser, the tower, and the IDFormer are all built,
+    // forwarded, and fully released here, so on a cold load none of them ever
+    // coexists with the transformer, let alone with the ~1.14 GB PuLID adapter
+    // `EngineIdentityState` makes resident below. A warm cache hit does have
+    // the transformer resident already, which is exactly why
+    // `memory_preflight::IDENTITY_EXTRACTION_VRAM_OVERHEAD_BYTES` is charged
+    // additively rather than as a maximum.
+    //
+    // A batch child whose parent already froze this face reuses that value and
+    // extracts nothing; a sibling that arrives second is answered by the
+    // per-photograph cache in `mold_inference::identity::extraction` without
+    // opening a model. Either way the counter moves once per parent.
+    let identity_started = Instant::now();
+    let carried_identity = job
+        .prepared_execution_inputs
+        .as_ref()
+        .and_then(|inputs| inputs.identity_embedding.clone())
+        .or_else(|| {
+            job.batch_child
+                .as_ref()
+                .and_then(|child| child.prepared_inputs.identity_embedding.clone())
+        });
+    let mut identity_warning = job
+        .prepared_execution_inputs
+        .as_ref()
+        .and_then(|inputs| inputs.identity_warning.clone())
+        .or_else(|| {
+            job.batch_child
+                .as_ref()
+                .and_then(|child| child.prepared_inputs.identity_warning.clone())
+        });
+    // The batch plan's own cell, shared by every sibling. Consulted BEFORE the
+    // resolver: a sibling arriving after another has already extracted takes
+    // that exact embedding, whatever the bounded per-photograph LRU has done in
+    // the meantime. The cache is a cross-request accelerator; this is the
+    // authority for "one identity per parent".
+    let identity_pin = job
+        .prepared_execution_inputs
+        .as_ref()
+        .map(|inputs| inputs.identity_pin.clone())
+        .or_else(|| {
+            job.batch_child
+                .as_ref()
+                .map(|child| child.prepared_inputs.identity_pin.clone())
+        });
+    // The pin carries the advisory too, so a sibling that never enters the
+    // resolver still reports which face was chosen.
+    let pinned = identity_pin.as_ref().and_then(|pin| pin.get());
+    if let Some(warning) = pinned.as_ref().and_then(|pinned| pinned.warning.clone()) {
+        identity_warning.get_or_insert(warning);
+    }
+    let frozen_identity = match carried_identity.or_else(|| pinned.map(|pinned| pinned.embedding)) {
+        Some(frozen) => Some(frozen),
+        None => {
+            let identity_paths = job
+                .execution_plan
+                .as_ref()
+                .and_then(|plan| plan.engine_config.identity_assets.clone());
+            let pin = identity_pin.clone().unwrap_or_default();
+            match crate::identity_extraction::resolve_pinned_identity_for_lease(
+                &job.request,
+                identity_paths.as_ref(),
+                &pin,
+                worker.gpu.backend,
+                ordinal,
+            ) {
+                Ok(resolved) => {
+                    // Only a resolution that actually COMPUTED reports the
+                    // phase. A sibling served from the per-photograph cache,
+                    // or one that waited on a peer's single flight, costs
+                    // about two milliseconds — recording that would drag
+                    // `ewma_identity_extract_ms` to a figure no cold request
+                    // can meet and make every conditioned ETA wrong.
+                    if resolved.extracted {
+                        let elapsed = identity_started.elapsed();
+                        // The scheduler's learned evidence for this phase.
+                        // Only the sibling that actually extracted reports it;
+                        // every other one leaves `identity_extract_ms` at
+                        // `None`, exactly as `cold_load_ms` does on a warm
+                        // reuse.
+                        record_phase_timing(&mold_inference::ProgressEvent::PhaseDone {
+                            phase: mold_inference::ProgressPhase::IdentityExtract,
+                            name: "Extracting face identity".to_string(),
+                            elapsed,
+                        });
+                        if let Some(ref tx) = job.progress_tx {
+                            let _ = tx.send(SseMessage::Progress(progress_to_sse(
+                                mold_inference::ProgressEvent::StageDone {
+                                    name: "Extracting face identity".to_string(),
+                                    elapsed,
+                                },
+                            )));
+                        }
+                    }
+                    if let Some(warning) = resolved.warning {
+                        identity_warning.get_or_insert(warning);
+                    }
+                    resolved.embedding
+                }
+                Err(error) => {
+                    let err_msg = settle_identity_extraction_failure(worker, &model_name, &error);
+                    tracing::error!(
+                        gpu = ordinal,
+                        model = %model_name,
+                        "face-identity conditioning failed: {error}"
+                    );
+                    if let Some(ref tx) = job.progress_tx {
+                        let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
+                    }
+                    let _ = job.result_tx.send(Err(err_msg));
+                    return false;
+                }
+            }
+        }
+    };
 
     // Ensure model is loaded on this GPU.
     let config_snapshot = job.config.blocking_read().clone();
@@ -3976,33 +4138,13 @@ fn process_job_with_sink(
             .expect("failed to spawn RSS watchdog")
     };
 
-    // Install the identity admission froze for this request, or clear it.
+    // Install the identity this lease resolved above, or clear it.
     //
     // Unconditional in both directions: the engine is cached across requests
     // and an embedding left installed would condition the NEXT print on the
-    // PREVIOUS person. This is also the one place the extraction lifetime
-    // terminates — the value was resolved once at parent admission and is only
-    // ever read from here on.
-    let frozen_identity = job
-        .prepared_execution_inputs
-        .as_ref()
-        .and_then(|inputs| inputs.identity_embedding.clone())
-        .or_else(|| {
-            job.batch_child
-                .as_ref()
-                .and_then(|child| child.prepared_inputs.identity_embedding.clone())
-        });
-    // The advisory that came with that identity, read from the same two
-    // places, so a batch child reports it exactly as its parent does.
-    let identity_warning = job
-        .prepared_execution_inputs
-        .as_ref()
-        .and_then(|inputs| inputs.identity_warning.clone())
-        .or_else(|| {
-            job.batch_child
-                .as_ref()
-                .and_then(|child| child.prepared_inputs.identity_warning.clone())
-        });
+    // PREVIOUS person. This is where the extraction lifetime terminates — the
+    // value was resolved once, before the model load, and is only ever read
+    // from here on.
     // Run inference — cache mutex is FREE during this.
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         ensure_worker_not_poisoned(worker, &model_name)?;
@@ -10721,6 +10863,112 @@ mod tests {
         assert!(!is_fatal_cuda_error(&anyhow::anyhow!(
             "CublasError(CUBLAS_STATUS_NOT_INITIALIZED)"
         )));
+    }
+
+    /// #1227 phase 2 runs the EVA tower, both face backbones, and the IDFormer
+    /// on the leased GPU before the model is even loaded, so a fatal driver
+    /// error can now originate there. It must quarantine exactly as one from
+    /// the model load or the generation does — otherwise the next BUFFERED job
+    /// picks up the poisoned context and the fatal-context invariant is gone.
+    ///
+    /// And the counterpart: an unusable PHOTOGRAPH must leave the worker's
+    /// reliability counter alone. That counter takes a sick card out of
+    /// rotation; a face that is not there is reproducible on every card in the
+    /// fleet, and on a single-GPU host three bad photographs would otherwise
+    /// degrade the whole machine for a minute.
+    #[test]
+    fn a_fatal_cuda_error_during_face_extraction_quarantines_the_worker() {
+        use crate::identity_extraction::IdentityFailure;
+
+        let worker = single_worker_pool_with_parked("flux-dev:q4", Duration::ZERO);
+
+        // A refusal about the caller's photograph. Reported, never counted.
+        for _ in 0..3 {
+            let refused = settle_identity_extraction_failure(
+                &worker,
+                "flux-dev:q4",
+                &IdentityFailure::user_input("no face was detected in the identity image"),
+            );
+            assert!(
+                refused.contains("no face was detected"),
+                "the caller must be told what is wrong with the photograph: {refused}"
+            );
+        }
+        assert_eq!(
+            worker.consecutive_failures.load(Ordering::SeqCst),
+            0,
+            "three unusable photographs must not degrade a healthy GPU"
+        );
+        assert!(!worker.poisoned.load(Ordering::SeqCst));
+        assert!(worker_unavailable(&worker, "flux-dev:q4").is_none());
+
+        // The SET shape takes the same path. `IdentityError::in_photo_set`
+        // names which photograph without changing whose fault it is, so
+        // "identity photo 2 of 3: no face was detected" is still the caller's
+        // — it used to be rebuilt as a `Runtime` and counted as a device
+        // fault.
+        for _ in 0..3 {
+            let refused = settle_identity_extraction_failure(
+                &worker,
+                "flux-dev:q4",
+                &IdentityFailure::user_input(
+                    "identity photo 2 of 3: no face was detected in the identity image",
+                ),
+            );
+            assert!(refused.contains("identity photo 2 of 3"), "{refused}");
+        }
+        assert_eq!(
+            worker.consecutive_failures.load(Ordering::SeqCst),
+            0,
+            "a bad photograph in a SET must not degrade a healthy GPU either"
+        );
+
+        // A device-attributable failure — a load that could not place weights
+        // — is an ordinary job failure and does count.
+        let engine = settle_identity_extraction_failure(
+            &worker,
+            "flux-dev:q4",
+            &IdentityFailure::device("loading the PuLID face-extraction models: broken pipe"),
+        );
+        assert!(
+            engine.contains("face-identity conditioning failed"),
+            "{engine}"
+        );
+        assert_eq!(worker.consecutive_failures.load(Ordering::SeqCst), 1);
+        assert!(!worker.poisoned.load(Ordering::SeqCst));
+
+        // A fatal context is not a job failure. On a FRESH worker it
+        // quarantines and reports the restart message, and the failure counter
+        // it leaves behind is `quarantine_poisoned_worker`'s own latch — the
+        // same 3 that `quarantine_helper_ignores_ordinary_errors_and_latches_fatal_errors`
+        // pins — rather than an ordinary `record_failure` on top of it.
+        let worker = single_worker_pool_with_parked("flux-dev:q4", Duration::ZERO);
+        let fatal = settle_identity_extraction_failure(
+            &worker,
+            "flux-dev:q4",
+            &IdentityFailure::device(
+                "extracting the face identity: DriverError(CUDA_ERROR_ILLEGAL_ADDRESS, an \
+                 illegal memory access was encountered)",
+            ),
+        );
+        assert!(fatal.contains("Restart the mold server"), "{fatal}");
+        assert!(worker.poisoned.load(Ordering::SeqCst));
+        assert_eq!(worker.consecutive_failures.load(Ordering::SeqCst), 3);
+        assert!(
+            worker.degraded_until.read().unwrap().is_none(),
+            "a fatal context must not also degrade the GPU on its way out"
+        );
+
+        // And this is what makes the next buffered job safe: dispatch asks
+        // `worker_unavailable` before touching CUDA, and it now refuses.
+        let unavailable =
+            worker_unavailable(&worker, "flux-dev:q4").expect("a poisoned worker is unavailable");
+        assert!(
+            unavailable.message.contains("Restart the mold server"),
+            "{}",
+            unavailable.message
+        );
+        assert!(ensure_worker_not_poisoned(&worker, "flux-dev:q4").is_err());
     }
 
     #[tokio::test]

@@ -627,6 +627,37 @@ const WAN_REQUEST_AWARE_HEADROOM_BYTES: u64 = 2_000_000_000;
 /// only path that builds one is CPU inference, which this gate does not govern.
 pub(crate) const IDENTITY_VRAM_OVERHEAD_BYTES: u64 = 1_250_000_000;
 
+/// Device memory the face-identity EXTRACTION peaks at, beside
+/// [`IDENTITY_VRAM_OVERHEAD_BYTES`].
+///
+/// #1220 charged the whole PuLID stack to VRAM on the assumption the extractor
+/// would run on the generation device; #1223 removed it because the extractor
+/// ran on the host at admission. #1227 phase 2 moved it back onto the render's
+/// own leased device — so the charge returns, but as its OWN named term rather
+/// than folded into the adapter's, because the two answer different questions:
+/// every identity render pays the adapter for the whole denoise, and this is a
+/// strictly earlier, strictly disjoint phase that is released before the
+/// adapter loads.
+///
+/// It is charged ADDITIVELY rather than as a maximum against the adapter term,
+/// and that is deliberate. The engine cache is warm across requests, so the
+/// transformer may well already be resident when this phase runs; a term that
+/// assumed the peak phases were mutually exclusive would admit a render with
+/// nowhere to put this one. The figure itself is
+/// [`mold_core::identity::EXTRACTION_DEVICE_PEAK_BYTES`], whose doc carries the
+/// per-artifact derivation, and `pulid_device_parity.rs`'s
+/// `the_measured_device_peak_is_within_ten_percent_of_the_charged_term` is the
+/// live check on it.
+///
+/// **Metal charges this once and nothing else.** Unified memory means these
+/// bytes ARE host bytes, and mold's standing rule is that Metal reserves no
+/// host RAM separately — its host claim rides the unified device gate. On CUDA
+/// the host side is only the private authenticated copy the `VarBuilder` reads
+/// from, which the identity artifacts' own `is_host_only` component roles
+/// already charge from their pinned sizes.
+pub(crate) const IDENTITY_EXTRACTION_VRAM_OVERHEAD_BYTES: u64 =
+    mold_core::identity::EXTRACTION_DEVICE_PEAK_BYTES;
+
 /// The adapter half of [`IDENTITY_VRAM_OVERHEAD_BYTES`], pinned against the
 /// engine's own arithmetic by
 /// `identity_overhead_matches_the_adapters_own_resident_arithmetic`. It is the
@@ -1433,6 +1464,7 @@ pub(crate) fn estimate_generation_memory_for_request(
     // because the assets are not part of the checkpoint's `ModelPaths`.
     let peak = if request_charges_identity_overhead(req) {
         peak.saturating_add(IDENTITY_VRAM_OVERHEAD_BYTES)
+            .saturating_add(IDENTITY_EXTRACTION_VRAM_OVERHEAD_BYTES)
     } else {
         peak
     };
@@ -2029,15 +2061,21 @@ mod fail_closed_tests {
         );
 
         assert!(request_charges_identity_overhead(&request));
+        // TWO named terms since #1227 phase 2: the adapter's residency for the
+        // whole denoise, and the extraction phase that now runs on this same
+        // leased device before the model loads. Summed rather than maxed —
+        // see `IDENTITY_EXTRACTION_VRAM_OVERHEAD_BYTES` for why a warm engine
+        // cache makes the disjointness argument unavailable to admission.
+        let identity_terms = IDENTITY_VRAM_OVERHEAD_BYTES + IDENTITY_EXTRACTION_VRAM_OVERHEAD_BYTES;
         assert_eq!(
             estimate(&request),
-            plain + IDENTITY_VRAM_OVERHEAD_BYTES,
-            "an identity render must be charged exactly the named overhead"
+            plain + identity_terms,
+            "an identity render must be charged exactly the named overheads"
         );
 
         let mut weighted = request.clone();
         weighted.id_weight = Some(0.85);
-        assert_eq!(estimate(&weighted), plain + IDENTITY_VRAM_OVERHEAD_BYTES);
+        assert_eq!(estimate(&weighted), plain + identity_terms);
     }
 
     /// A true-CFG render runs a second forward per step over a second
@@ -2099,7 +2137,7 @@ mod fail_closed_tests {
         assert!(!request_charges_true_cfg_overhead(&zero));
         assert_eq!(
             estimate(&zero),
-            identity_only - IDENTITY_VRAM_OVERHEAD_BYTES
+            identity_only - IDENTITY_VRAM_OVERHEAD_BYTES - IDENTITY_EXTRACTION_VRAM_OVERHEAD_BYTES
         );
     }
 

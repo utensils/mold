@@ -96,6 +96,10 @@ pub enum EstimateOutcome {
 pub struct EstimatePhaseTimings {
     pub cold_load_ms: Option<u64>,
     pub warm_reload_ms: Option<u64>,
+    /// Face-identity extraction (#1227 phase 2). Present only on the one
+    /// sibling that performed the once-per-parent extraction; `None`
+    /// everywhere else, including every request that conditions on no face.
+    pub identity_extract_ms: Option<u64>,
     pub prompt_encode_ms: Option<u64>,
     pub denoise_ms: Option<u64>,
     pub vae_ms: Option<u64>,
@@ -130,6 +134,8 @@ pub struct EstimateBucket {
     pub ewma_runtime_ms: Option<f64>,
     pub ewma_load_ms: Option<f64>,
     pub ewma_warm_reload_ms: Option<f64>,
+    /// Added in schema v22 beside [`EstimatePhaseTimings::identity_extract_ms`].
+    pub ewma_identity_extract_ms: Option<f64>,
     pub ewma_prompt_encode_ms: Option<f64>,
     pub ewma_denoise_ms: Option<f64>,
     pub ewma_vae_ms: Option<f64>,
@@ -255,6 +261,13 @@ impl EstimateStore {
                         bucket.ewma_warm_reload_ms,
                         observation.phases.warm_reload_ms.map(|value| value as f64),
                     );
+                    bucket.ewma_identity_extract_ms = update_optional_ewma(
+                        bucket.ewma_identity_extract_ms,
+                        observation
+                            .phases
+                            .identity_extract_ms
+                            .map(|value| value as f64),
+                    );
                     bucket.ewma_prompt_encode_ms = update_optional_ewma(
                         bucket.ewma_prompt_encode_ms,
                         observation
@@ -330,6 +343,11 @@ impl EstimateStore {
                         ewma_warm_reload_ms: observation
                             .phases
                             .warm_reload_ms
+                            .filter(|_| successful)
+                            .map(|value| value as f64),
+                        ewma_identity_extract_ms: observation
+                            .phases
+                            .identity_extract_ms
                             .filter(|_| successful)
                             .map(|value| value as f64),
                         ewma_prompt_encode_ms: observation

@@ -509,6 +509,28 @@ fn recovery_envelope(
     )
 }
 
+/// The identity marker this envelope records, from whichever authority exists.
+///
+/// #1227 phase 2 moved extraction inside the lease, so a NEW identity parent no
+/// longer has a frozen embedding when its manifest is written — only a
+/// re-prepared child does. The embedding stays preferred when it is there
+/// (its fingerprint names something a reader can correlate with the print),
+/// and `mold_core::identity::request_identity_marker` is the payload-free
+/// fallback derived from the request BEFORE redaction.
+///
+/// Never `None` for a request that conditions on a face. That is the whole
+/// point: the redaction removes the only fields
+/// `mold_core::identity::request_mentions_identity` can see on an ordinary CLI
+/// request, so without this the refusal at decode silently stops firing.
+fn envelope_identity_marker(
+    request: &GenerateRequest,
+    identity: Option<&mold_core::identity::FrozenIdentityEmbedding>,
+) -> Option<String> {
+    identity
+        .map(|identity| identity.fingerprint().to_string())
+        .or_else(|| mold_core::identity::request_identity_marker(request))
+}
+
 /// The redaction itself, independent of the plan's shape so the rule can be
 /// stated and tested on its own.
 fn redacted_recovery_envelope(
@@ -516,6 +538,10 @@ fn redacted_recovery_envelope(
     execution_equivalence_fingerprint: &str,
     identity: Option<&mold_core::identity::FrozenIdentityEmbedding>,
 ) -> LiveBatchRecoveryEnvelope {
+    // Derived from the ORIGINAL request, before the redaction below removes
+    // the fields it is derived from. Computing it afterwards is the bug this
+    // ordering exists to prevent.
+    let marker = envelope_identity_marker(request, identity);
     let mut request = request.clone();
     // Both wire shapes: a manifest that kept `id_images` because the redaction
     // only knew about `id_image` would leave a whole set of photographs on
@@ -526,7 +552,7 @@ fn redacted_recovery_envelope(
         version: LIVE_BATCH_RECOVERY_VERSION,
         request,
         execution_equivalence_fingerprint: execution_equivalence_fingerprint.to_string(),
-        identity_fingerprint: identity.map(|identity| identity.fingerprint().to_string()),
+        identity_fingerprint: marker,
     }
 }
 
@@ -2022,6 +2048,7 @@ mod tests {
             prepared_inputs: PreparedExecutionInputs {
                 identity_embedding: None,
                 identity_warning: None,
+                identity_pin: Default::default(),
                 authority_fingerprint: "prepared".to_string(),
                 by_device: BTreeMap::new(),
                 retryable_device_failures: BTreeMap::new(),
@@ -2357,6 +2384,76 @@ mod tests {
             },
         )
         .expect("a well-shaped embedding")
+    }
+
+    /// The post-lease shape, and the hole it opened.
+    ///
+    /// #1227 phase 2 moved extraction inside the lease, so a NEW identity
+    /// parent's plan carries no frozen embedding when its manifest is written.
+    /// The redaction then clears `id_image`/`id_images` — and on the ordinary
+    /// CLI request, which names neither `id_weight` nor `id_image_name`
+    /// because both have defaults, that leaves NOTHING for
+    /// `request_mentions_identity` to see. Without a marker the recovered
+    /// attempt looks like a plain batch, passes decode, and resumes its
+    /// remaining siblings with no face at all.
+    ///
+    /// The fixture above deliberately does not exercise this: it sets both
+    /// optional fields, so they survive redaction and keep the refusal firing
+    /// for the wrong reason.
+    #[test]
+    fn an_identity_batch_with_no_frozen_embedding_is_still_refused_after_recovery() {
+        let mut request = identity_request(4);
+        // The shape that has nothing left after redaction.
+        request.id_weight = None;
+        request.id_image_name = None;
+        assert!(mold_core::identity::request_mentions_identity(&request));
+
+        // Post-lease: nothing is frozen at preparation time.
+        let envelope = redacted_recovery_envelope(&request, "frozen", None);
+        assert!(envelope.request.id_image.is_none());
+        assert!(
+            !mold_core::identity::request_mentions_identity(&envelope.request),
+            "the fixture must actually reproduce the post-redaction blind spot"
+        );
+        assert!(
+            envelope.identity_fingerprint.is_some(),
+            "an identity batch must record a marker even with no frozen embedding"
+        );
+
+        let value = serde_json::to_value(&envelope).unwrap();
+        let error = decode_recovery_envelope(&value)
+            .expect_err("an identity batch must never be resumed faceless");
+        assert!(
+            format!("{error:#}").contains("reference photograph"),
+            "{error:#}"
+        );
+
+        // And the marker is payload-free.
+        let serialized = serde_json::to_string(&envelope).unwrap();
+        assert!(!serialized.contains("pretend-this-is-a-face"));
+        let encoded = {
+            use base64::Engine as _;
+            base64::engine::general_purpose::STANDARD.encode(request.id_image.as_ref().unwrap())
+        };
+        assert!(!serialized.contains(&encoded));
+    }
+
+    /// The marker is derived from the request's identity inputs, so it is
+    /// stable for one batch and absent for a batch that conditions on nothing.
+    /// An ordinary batch must stay resumable — a marker that fired for every
+    /// request would refuse every recovery.
+    #[test]
+    fn a_plain_batch_records_no_identity_marker_and_stays_resumable() {
+        let mut plain = identity_request(4);
+        plain.id_image = None;
+        plain.id_image_name = None;
+        plain.id_weight = None;
+        assert!(!mold_core::identity::request_mentions_identity(&plain));
+
+        let envelope = redacted_recovery_envelope(&plain, "frozen", None);
+        assert!(envelope.identity_fingerprint.is_none());
+        decode_recovery_envelope(&serde_json::to_value(&envelope).unwrap())
+            .expect("a batch with no face is resumable exactly as before");
     }
 
     /// The durable manifest is a JSON file that outlives the process. A

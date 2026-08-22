@@ -73,6 +73,58 @@ pub enum IdentityError {
     /// Anything in the model, graph, or evaluator path.
     #[error(transparent)]
     Runtime(#[from] anyhow::Error),
+    /// A refusal about ONE photograph of a set, naming which.
+    ///
+    /// A wrapper rather than a re-worded variant, because the category has to
+    /// survive: #1227 phase 2 made the category decide whether a failure
+    /// touches the GPU's health, and collapsing "no face in photo 2 of 3" into
+    /// [`Self::Runtime`] would report a bad photograph as a bad card. The
+    /// message is byte-identical to the `format!` this replaced.
+    #[error("identity photo {index} of {count}: {source}")]
+    Photo {
+        /// One-based, as the caller supplied them.
+        index: usize,
+        count: usize,
+        #[source]
+        source: Box<IdentityError>,
+    },
+}
+
+impl IdentityError {
+    /// Whether this refusal is about the PHOTOGRAPH the caller supplied rather
+    /// than about the machine that tried to read it.
+    ///
+    /// #1227 phase 2 runs the extraction on the render's leased GPU, so its
+    /// failures now reach a worker's reliability counter. Three unusable
+    /// photographs must not degrade a healthy card out of rotation for a
+    /// minute: a face that is not there, a payload that will not decode, and
+    /// landmarks that will not fit the template are all answers about the
+    /// input, reproducible on any device, and the caller's to fix.
+    ///
+    /// [`Self::Runtime`] is the only device-attributable arm — a load failure,
+    /// a kernel failure, a driver fault — and is the only one that counts.
+    pub fn is_user_input(&self) -> bool {
+        match self {
+            Self::NoFaceDetected | Self::Decode(_) | Self::Alignment(_) => true,
+            Self::Runtime(_) => false,
+            // A set does not change whose fault a photograph is.
+            Self::Photo { source, .. } => source.is_user_input(),
+        }
+    }
+
+    /// Name which photograph of a set this refusal is about, preserving its
+    /// category. A one-photograph set is the singular form and is returned
+    /// unchanged, so its message stays exactly what every surface has shown.
+    pub fn in_photo_set(self, index: usize, count: usize) -> Self {
+        if count == 1 {
+            return self;
+        }
+        Self::Photo {
+            index,
+            count,
+            source: Box::new(self),
+        }
+    }
 }
 
 /// Everything one identity image yields.
@@ -107,24 +159,16 @@ pub struct IdentityExtractor {
 impl IdentityExtractor {
     /// Load the detector and recognizer from a resolved PuLID bundle.
     ///
-    /// `device` is accepted for symmetry with every other engine and is
-    /// asserted, not honoured. Since #1227 the two networks are ordinary
-    /// resident candle modules that *could* be placed anywhere
-    /// ([`scrfd_net::ScrfdNet::new`], [`arcface_net::IResNet100::new`] both
-    /// take a device), so this is no longer an evaluator limitation — it is the
-    /// call-site contract: extraction runs at ADMISSION, before the scheduler
-    /// has leased a device, so there is no device to name yet
-    /// (`docs/architecture/pulid-perf.md` §1 and §3, which design the post-lease
-    /// phase that would lift this). A non-CPU request is an explicit error
-    /// rather than a silent demotion.
+    /// `device` is HONOURED as of #1227 phase 2. Phase 1 made both networks
+    /// ordinary resident candle modules ([`scrfd_net::ScrfdNet::new`],
+    /// [`arcface_net::IResNet100::new`] both place their weights), and phase 2
+    /// moved the extraction inside the leased job, so there is finally a device
+    /// to name (`docs/architecture/pulid-perf.md` §5). The assertion this used
+    /// to carry — "extraction runs at admission, before a device is leased" —
+    /// described the call site rather than the arithmetic, and the call site
+    /// moved.
     pub fn load(paths: &PulidPaths, device: &candle_core::Device) -> Result<Self> {
-        if !device.is_cpu() {
-            anyhow::bail!(
-                "PuLID face extraction runs on the CPU: it happens at admission, before a \
-                 device is leased (docs/architecture/pulid-perf.md)"
-            );
-        }
-        Self::from_paths(&paths.face_detector, &paths.face_recognizer)
+        Self::from_paths_on_device(&paths.face_detector, &paths.face_recognizer, device)
     }
 
     /// Load from explicit model paths. Used by tests, which hold the files
@@ -138,6 +182,15 @@ impl IdentityExtractor {
     /// call [`onnx_graph::load_onnx_model`] with `None` instead, and get no
     /// extractor out of it.
     pub fn from_paths(detector: &Path, recognizer: &Path) -> Result<Self> {
+        Self::from_paths_on_device(detector, recognizer, &candle_core::Device::Cpu)
+    }
+
+    /// [`Self::from_paths`], placing both networks on `device`.
+    pub fn from_paths_on_device(
+        detector: &Path,
+        recognizer: &Path,
+        device: &candle_core::Device,
+    ) -> Result<Self> {
         let det = onnx_graph::load_onnx_model(
             detector,
             onnx_graph::pinned_artifact(ModelComponent::FaceDetector),
@@ -147,8 +200,9 @@ impl IdentityExtractor {
             onnx_graph::pinned_artifact(ModelComponent::FaceRecognizer),
         )?;
         Ok(Self {
-            detector: ScrfdDetector::new(det.model).context("loading the SCRFD detector")?,
-            recognizer: ArcFaceRecognizer::new(rec.model)
+            detector: ScrfdDetector::new_on_device(det.model, device)
+                .context("loading the SCRFD detector")?,
+            recognizer: ArcFaceRecognizer::new_on_device(rec.model, device)
                 .context("loading the ArcFace recognizer")?,
             detector_sha256: det.sha256,
             recognizer_sha256: rec.sha256,
@@ -335,8 +389,54 @@ mod tests {
         assert_eq!(EVA_CROP_BORDER_RGB, [132, 133, 135]);
     }
 
+    /// Whose fault a refusal is decides whether it touches a GPU's health
+    /// counter (#1227 phase 2), so the category has to survive being told
+    /// WHICH photograph of a set it came from.
     #[test]
-    fn a_gpu_placement_request_is_refused_rather_than_silently_demoted() {
+    fn naming_the_photograph_preserves_whose_fault_it_is() {
+        // A one-photograph set is the singular form: unchanged, so its message
+        // stays exactly what every surface has always shown.
+        let single = IdentityError::NoFaceDetected.in_photo_set(1, 1);
+        assert!(matches!(single, IdentityError::NoFaceDetected));
+        assert_eq!(
+            single.to_string(),
+            "no face was detected in the identity image"
+        );
+        assert!(single.is_user_input());
+
+        // A real set names the photograph and keeps the category. The message
+        // is byte-identical to the `format!` this replaced.
+        let located = IdentityError::NoFaceDetected.in_photo_set(2, 3);
+        assert_eq!(
+            located.to_string(),
+            "identity photo 2 of 3: no face was detected in the identity image"
+        );
+        assert!(
+            located.is_user_input(),
+            "a faceless photograph is the caller's, whether it is one of one or one of three"
+        );
+
+        for user_input in [
+            IdentityError::Decode("not a PNG or JPEG".to_string()),
+            IdentityError::Alignment("degenerate landmarks".to_string()),
+        ] {
+            assert!(user_input.in_photo_set(1, 4).is_user_input());
+        }
+
+        // And a device fault stays a device fault.
+        let runtime = IdentityError::Runtime(anyhow::anyhow!("CUDA_ERROR_ILLEGAL_ADDRESS"))
+            .in_photo_set(3, 4);
+        assert!(!runtime.is_user_input());
+        assert!(runtime.to_string().contains("identity photo 3 of 4"));
+    }
+
+    /// Phase 1's `a_gpu_placement_request_is_refused_rather_than_silently_demoted`
+    /// inverted: #1227 phase 2 moved extraction inside the leased job, so a
+    /// non-CPU device is now the ordinary case and must reach the same file
+    /// open a CPU device does. A refusal here would mean the extraction had
+    /// silently stayed on the host after the phase moved.
+    #[test]
+    fn a_device_placement_request_reaches_the_models_rather_than_being_refused() {
         let paths = PulidPaths {
             adapter: Path::new("/nonexistent/adapter.safetensors").to_path_buf(),
             vision_encoder_source: Path::new("/nonexistent/eva.pt").to_path_buf(),
@@ -354,5 +454,18 @@ mod tests {
             format!("{cpu_err:#}").contains("scrfd.onnx"),
             "a CPU load must reach the file open: {cpu_err:#}"
         );
+        // A real accelerator is not available in every build or on every CI
+        // runner, so the device arm is asserted only where one exists. Where
+        // it does, it must fail on the ABSENT MODEL, never on the placement.
+        if let Ok(device) = candle_core::Device::new_metal(0) {
+            let err = match IdentityExtractor::load(&paths, &device) {
+                Ok(_) => panic!("nonexistent models must not load"),
+                Err(err) => err,
+            };
+            assert!(
+                format!("{err:#}").contains("scrfd.onnx"),
+                "a device load must reach the file open too: {err:#}"
+            );
+        }
     }
 }

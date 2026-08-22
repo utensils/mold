@@ -391,14 +391,14 @@ impl BiSeNetParser {
     /// [`Self::from_authenticated`], so no caller can arrive here holding a
     /// `VarBuilder` it built from an unverified pathname.
     ///
-    /// `device` is asserted rather than honoured, for the same reason
-    /// [`super::IdentityExtractor::load`] asserts it: the whole extraction runs
-    /// on the host at admission, before the scheduler has leased a device.
+    /// `device` is HONOURED as of #1227 phase 2, which moved the whole
+    /// extraction inside the leased job and onto its device
+    /// (`docs/architecture/pulid-perf.md` §5). It used to be asserted CPU for
+    /// the same reason [`super::IdentityExtractor::load`] asserted it — there
+    /// was no leased device to name at admission — and that reason expired
+    /// with the call site, not with the arithmetic: every module below is
+    /// ordinary `candle_nn`, which places wherever its `VarBuilder` does.
     fn from_var_builder(vb: VarBuilder, device: &Device) -> Result<Self> {
-        ensure!(
-            device.is_cpu(),
-            "PuLID face parsing runs on the CPU beside the rest of the extraction"
-        );
         Ok(Self {
             cp: ContextPath::new(vb.pp("cp")).context("building the BiSeNet context path")?,
             ffm: FeatureFusion::new(256, 256, vb.pp("ffm"))

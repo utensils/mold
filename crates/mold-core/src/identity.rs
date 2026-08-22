@@ -55,6 +55,168 @@ use crate::types::GenerateRequest;
 /// here and there is what let the two drift by a gigabyte.
 pub const EXTRACTION_HOST_PEAK_BYTES: u64 = 2_400_000_000;
 
+/// Device bytes one extraction peaks at while it runs on a leased GPU.
+///
+/// #1227 phase 2 moved the extraction from the host at admission onto the
+/// render's own leased device (`docs/architecture/pulid-perf.md` §5), so this
+/// joins `memory_preflight::IDENTITY_VRAM_OVERHEAD_BYTES` and
+/// `TRUE_CFG_VRAM_OVERHEAD_BYTES` as its OWN named term on the peak estimate.
+/// It is charged additively for the same reason those are: the phases run in
+/// one grant, and a term that quietly assumed another phase's bytes were free
+/// would admit a render with nowhere to put this one.
+///
+/// **MEASURED**, on plato (L40S, CUDA), through the production entry point
+/// from a fresh context with no warm-up, taking the allocator's high-water
+/// mark: **643,825,664 bytes**. Per-stage deltas, which is what makes the
+/// table below a description rather than a guess:
+///
+/// | Stage | Device delta | What it is |
+/// | --- | ---: | --- |
+/// | BiSeNet parser build | +33,554,432 | f32 parser, dropped before the tower |
+/// | Face stack (SCRFD + ArcFace) | included above | their weights are freed into the same pool the tower then reuses |
+/// | EVA02-CLIP tower construct | +570,425,344 | f16, the file's own dtype — the widening `eva_working_dtype` avoids never appears |
+/// | EVA02-CLIP tower forward | +6,291,456 | activations, small because the tower is 577 tokens |
+/// | IDFormer build | +33,554,432 | reuses the pool the tower released |
+/// | **Peak** | **643,825,664** | |
+///
+/// The peak is far below the sum of the parts because the composer scopes each
+/// stage to the block that consumes it — the same drop-and-reload discipline
+/// the host peak is derived under — and candle's CUDA allocator hands the
+/// freed blocks straight back to the next stage. An earlier head measured
+/// 945,815,552; the ~302 MB it lost is `glintr100` plus its activations no
+/// longer coexisting with the tower, after the face stack's lifetime was
+/// narrowed to the photographs that actually need detecting.
+///
+/// **The charge stays 700,000,000**, and the band the test applies had to be
+/// restated rather than the constant retuned. Three cold runs on plato
+/// measured 637,534,208 / 643,825,664 / 643,825,664 — a 6.3 MB spread — and a
+/// naive `measured >= 0.9 * charged` puts the floor at 630,000,000, only
+/// 7.5 MB under the smallest of them. Raising the charge makes that WORSE, not
+/// better: 710,000,000 would floor at 639,000,000 and fail on the 637.5 MB run
+/// that has already been observed.
+///
+/// The tension is structural, not numerical. The measurement is one
+/// photograph; the charge deliberately budgets for [`ID_IMAGES_MAX`], whose
+/// extra retained hidden states are
+/// `EXTRACTION_RETAINED_BYTES_PER_IMAGE` each — see
+/// [`EXTRACTION_DEVICE_MULTI_IMAGE_ALLOWANCE_BYTES`]. So the over-charge check
+/// nets that allowance out first, and what remains is a genuine ±10% band
+/// around a single-photograph run: floor 597,600,000, some 40 MB under the
+/// smallest observation.
+///
+/// The resulting charge covers the largest admissible set (643,825,664 + 36 MB
+/// = 679,825,664) with ~20 MB left for allocator block rounding, which differs
+/// by driver and card. A rounder 1.1 GB — the pre-measurement derivation, which
+/// assumed SCRFD and ArcFace stayed resident beside the tower and added ~120 MB
+/// of activation headroom — is 1.71x the truth and would park renders an L40S
+/// could run, which is the exact mistake #1223 called out when it removed
+/// #1220's placeholder.
+///
+/// **Metal charges this ONCE, through the unified device gate**, and adds
+/// nothing to the host ledger — CLAUDE.md's rule that Metal reserves no host
+/// RAM separately. On CUDA the device bytes here and the host bytes in
+/// [`EXTRACTION_HOST_PEAK_BYTES`] are two genuinely separate pools and both are
+/// charged, the host side being only the private authenticated copy the
+/// `VarBuilder` reads from rather than the whole widened stack.
+pub const EXTRACTION_DEVICE_PEAK_BYTES: u64 = 700_000_000;
+
+/// The measurement [`EXTRACTION_DEVICE_PEAK_BYTES`] is sized against, so the
+/// charge and the number it came from cannot drift apart silently.
+///
+/// Taken on plato (L40S) at `3163ed47` through `extract_identity_embeddings`
+/// from a fresh CUDA context, cold, allocator high-water. The weight-gated
+/// `the_measured_device_peak_is_within_ten_percent_of_the_charged_term`
+/// re-takes it on any CUDA host.
+pub const EXTRACTION_DEVICE_PEAK_MEASURED_BYTES: u64 = 643_825_664;
+
+/// The part of [`EXTRACTION_DEVICE_PEAK_BYTES`] reserved for photographs a
+/// single-photograph measurement cannot observe.
+///
+/// A set does not multiply the peak — the tower is built once and run per
+/// photograph — so the only term that scales is the retained
+/// `[1, 577, 1024]` hidden states each one contributes, at
+/// `EXTRACTION_RETAINED_BYTES_PER_IMAGE` apiece for the
+/// [`ID_IMAGES_MAX`] - 1 photographs beyond the first.
+///
+/// It exists as its own constant because the weight-gated device-peak test
+/// nets it out before applying its ±10% band. Without that, a test that
+/// measures ONE photograph is checking it against a charge sized for FOUR, and
+/// the honest measurement sits permanently at the bottom of the band — 7.5 MB
+/// from failing, as plato's three runs showed.
+pub const EXTRACTION_DEVICE_MULTI_IMAGE_ALLOWANCE_BYTES: u64 =
+    EXTRACTION_RETAINED_BYTES_PER_IMAGE * (ID_IMAGES_MAX as u64 - 1);
+
+/// Host bytes each ADDITIONAL identity photograph adds to a peak.
+///
+/// Mirrored from `mold_inference::identity::extraction`, which derives it from
+/// the tower's own shape, so the device allowance above can be composed
+/// without the `pulid` feature. `the_retained_per_image_charge_is_one_number`
+/// pins the two together on builds that have both.
+pub const EXTRACTION_RETAINED_BYTES_PER_IMAGE: u64 = 12_000_000;
+
+/// The semantic version of the face-extraction pipeline.
+///
+/// Every input to a cached identity that is NOT a file — the arithmetic itself
+/// — is represented by this number, and it exists because
+/// `docs/architecture/pulid-perf.md` §2 identified the one invalidation case
+/// that is not structural: a code change to SCRFD, the alignment, the warp,
+/// ArcFace, the EVA preprocessing, the tower, the mask, or the IDFormer would
+/// otherwise serve a stale embedding under an unchanged photo-plus-asset-SHA
+/// key, because none of those files moved.
+///
+/// **Bump it in the same PR as any semantic change to that stack.** A reviewer
+/// can then check the constant actually moved;
+/// `the_cache_key_changes_when_the_pipeline_version_does` pins that it is an
+/// input at all.
+///
+/// | version | shipped in |
+/// | --- | --- |
+/// | 1 | #1227 phase 2, the first build with a cache to invalidate |
+pub const IDENTITY_PIPELINE_VERSION: u32 = 1;
+
+/// The key one photograph's extracted identity is cached under.
+///
+/// Composed exactly as [`FrozenIdentityEmbedding::fingerprint`] is — domain
+/// separated, NUL-joined, SHA-256 — but over the inputs that are all knowable
+/// BEFORE the extraction runs, which is what a cache needs and what an output
+/// fingerprint cannot supply. `docs/architecture/pulid-perf.md` §2 enumerates
+/// each one and why it is mandatory rather than an optimization to drop:
+/// keying on the photograph alone would serve a stale identity across a repair
+/// pull that swapped the adapter, or across a code change
+/// [`IDENTITY_PIPELINE_VERSION`] exists to catch.
+///
+/// It is deliberately per-PHOTOGRAPH and carries no request state: multi-photo
+/// averaging happens after the IDFormer (`cubiq/PuLID_ComfyUI`'s
+/// `pulid.py:406,415-419`), so each photograph of a set hits or misses this
+/// key independently and the request's own ordering — which the composed
+/// fingerprint IS sensitive to — never reaches it.
+///
+/// It also deliberately carries no DEVICE. The device path and the host path
+/// agree on the identity to a measured tolerance rather than bit-for-bit, so
+/// including the device would give one fleet several fingerprints for one
+/// face; pinning whichever device computed it first makes the value stable for
+/// the process, which is what provenance wants.
+pub fn identity_cache_key(image_sha256: &str, assets: &IdentityAssetDigests) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(b"mold.identity.cache.v1\0");
+    hasher.update(image_sha256.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(IDENTITY_PIPELINE_VERSION.to_le_bytes());
+    hasher.update(b"\0");
+    for digest in [
+        &assets.adapter,
+        &assets.vision,
+        &assets.face_detector,
+        &assets.face_recognizer,
+        &assets.face_parser,
+    ] {
+        hasher.update(digest.as_bytes());
+        hasher.update(b"\0");
+    }
+    format!("{:x}", hasher.finalize())
+}
+
 /// Models qualified to accept identity conditioning in milestone 1.
 ///
 /// These are resolved manifest names. A request naming the bare `flux-dev`
@@ -303,6 +465,44 @@ pub fn request_mentions_identity(req: &GenerateRequest) -> bool {
         || req.id_image_names.is_some()
         || req.id_weight.is_some()
         || req.id_start_step.is_some()
+}
+
+/// A payload-free marker that this request conditioned on a face.
+///
+/// The durable live-batch manifest needs to recognise itself as an identity
+/// batch after a restart, and it cannot do that from the request alone: the
+/// redaction that keeps the photograph off disk clears `id_image` and
+/// `id_images`, and a request that named neither `id_weight` nor
+/// `id_image_name` — the ordinary CLI shape, since both have defaults — has
+/// nothing left for [`request_mentions_identity`] to see. A recovered attempt
+/// would then look like a plain batch, pass validation, and resume its
+/// remaining siblings with no face at all: prints of the wrong person, under
+/// the requested name, with nothing downstream noticing.
+///
+/// So the marker is derived BEFORE redaction and travels instead of the
+/// photograph. It is a SHA-256 over the photographs' own SHA-256s and the
+/// effective conditioning knobs — never the bytes, and never an embedding
+/// (which is a biometric derivative and is exactly what
+/// [`FrozenIdentityEmbedding`]'s `Debug` exists to keep out of files). Its
+/// only job is to be `Some`.
+///
+/// `None` for a request that conditions on no face, so an ordinary batch
+/// records nothing and stays resumable.
+pub fn request_identity_marker(req: &GenerateRequest) -> Option<String> {
+    if !request_mentions_identity(req) {
+        return None;
+    }
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(b"mold.identity.batch-marker.v1\0");
+    for photo in identity_images(req) {
+        hasher.update(id_image_sha256(photo).as_bytes());
+        hasher.update(b"\0");
+    }
+    hasher.update(effective_id_weight(req).to_le_bytes());
+    hasher.update(effective_id_start_step(req).to_le_bytes());
+    hasher.update(effective_true_cfg(req).to_le_bytes());
+    Some(format!("{:x}", hasher.finalize()))
 }
 
 /// Whether the request names either true-CFG knob.

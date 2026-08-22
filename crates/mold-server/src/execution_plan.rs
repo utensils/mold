@@ -998,6 +998,69 @@ pub struct DeviceFact {
     pub available_vram_bytes: u64,
 }
 
+/// The one identity a batch parent's siblings share, filled by whichever of
+/// them extracts first.
+///
+/// #1227 phase 2 moved extraction into each lease, so the "one embedding per
+/// parent" guarantee that used to come from preparation ordering now has to
+/// come from somewhere else. The per-photograph cache and its single flight
+/// give it *within* a window: concurrent siblings compose once and take the
+/// winner's tokens. But that cache is a bounded 16-entry LRU and an
+/// accelerator, not an authority — sixteen distinct photographs extracted
+/// between one wave of siblings and the next, or before a retry, evict the
+/// parent's entry and a later child re-extracts, possibly on another GPU and
+/// therefore with an embedding that differs at the measured device tolerance.
+/// Exact sibling reuse is the contract; equal-within-tolerance is not equal.
+///
+/// So the batch plan owns this cell, every child clones the same `Arc`, and the
+/// first child to extract pins its result for every later one — for the
+/// lifetime of the batch, independent of what the LRU does in between.
+///
+/// Empty (and cheap) for every request that conditions on no face.
+#[derive(Clone, Debug, Default)]
+pub struct IdentityPin(std::sync::Arc<std::sync::OnceLock<PinnedIdentity>>);
+
+/// What a parent pins: the identity AND the advisory that came with it.
+///
+/// The advisory is here rather than beside it because a later child skips the
+/// resolver entirely on a pin hit, and post-lease preparation leaves
+/// `identity_warning` empty — so a child that took the pin would silently drop
+/// "several faces were found, the largest was used". The person who supplied a
+/// group photograph needs that on every print of the batch, not just on
+/// whichever sibling happened to extract.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PinnedIdentity {
+    pub embedding: mold_core::identity::FrozenIdentityEmbedding,
+    pub warning: Option<String>,
+}
+
+impl IdentityPin {
+    /// The pinned identity and advisory, if a sibling has already extracted.
+    pub fn get(&self) -> Option<PinnedIdentity> {
+        self.0.get().cloned()
+    }
+
+    /// Pin `value`, and return whatever is pinned afterwards.
+    ///
+    /// The return matters more than the call: a loser gets the WINNER's
+    /// embedding back and must use that, discarding its own. Returning `()` and
+    /// letting the caller keep its own value would leave two siblings holding
+    /// two tolerance-different identities while looking like it had worked.
+    pub fn pin(&self, value: PinnedIdentity) -> PinnedIdentity {
+        let _ = self.0.set(value);
+        self.0
+            .get()
+            .cloned()
+            .expect("a cell that was just set holds a value")
+    }
+}
+
+impl PartialEq for IdentityPin {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.get() == other.0.get()
+    }
+}
+
 /// Concrete engine inputs produced by asynchronous dependency preparation.
 ///
 /// The map is keyed by stable runtime device id because mixed-capacity hosts
@@ -1044,6 +1107,9 @@ pub struct PreparedExecutionInputs {
     /// completion, which is what puts it on `x-mold-request-warning` for the
     /// JSON path and in the SSE complete event for the streaming one.
     pub identity_warning: Option<String>,
+    /// The batch-lifetime authority for "one identity per parent". See
+    /// [`IdentityPin`]; empty for every request that conditions on no face.
+    pub identity_pin: IdentityPin,
     /// Payload-free authenticated authority for the private H3 ingress. This
     /// is only a transport seam; per-device admission evidence is attached by
     /// dependency preparation before generic execution planning may consume it.
@@ -6135,6 +6201,7 @@ mod tests {
         let prepared = PreparedExecutionInputs {
             identity_warning: None,
             identity_embedding: None,
+            identity_pin: Default::default(),
             authority_fingerprint: preparation_authority_fingerprint(
                 &config,
                 &request,
@@ -6223,6 +6290,7 @@ mod tests {
         let prepared = PreparedExecutionInputs {
             identity_warning: None,
             identity_embedding: None,
+            identity_pin: Default::default(),
             authority_fingerprint: preparation_authority_fingerprint(
                 &effective_config,
                 &request,
@@ -6283,6 +6351,7 @@ mod tests {
         let prepared = PreparedExecutionInputs {
             identity_warning: None,
             identity_embedding: None,
+            identity_pin: Default::default(),
             authority_fingerprint: preparation_authority_fingerprint(
                 &config,
                 &request,
@@ -6751,6 +6820,7 @@ mod tests {
         let prepared = PreparedExecutionInputs {
             identity_warning: None,
             identity_embedding: None,
+            identity_pin: Default::default(),
             authority_fingerprint: preparation_authority_fingerprint(
                 &config,
                 &request,

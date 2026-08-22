@@ -24,6 +24,9 @@ pub struct SchedulerEstimateRecord {
     pub ewma_audio_decode_ms: Option<f64>,
     pub ewma_mux_ms: Option<f64>,
     pub ewma_upscale_ms: Option<f64>,
+    /// Schema v22 (#1227 phase 2). Appended after the existing columns so no
+    /// earlier `SELECT` index moves.
+    pub ewma_identity_extract_ms: Option<f64>,
     pub vram_high_water_bytes: Option<u64>,
     pub host_high_water_bytes: Option<u64>,
     pub failure_count: u64,
@@ -53,7 +56,8 @@ impl<'a> SchedulerEstimates<'a> {
                         ewma_mux_ms, ewma_upscale_ms,
                         vram_high_water_bytes, host_high_water_bytes,
                         failure_count, invalidated_count, last_outcome,
-                        last_fallback_reason, last_invalidated_plan_reason, last_observed_at
+                        last_fallback_reason, last_invalidated_plan_reason, last_observed_at,
+                        ewma_identity_extract_ms
                  FROM scheduler_estimates
                  ORDER BY estimate_key",
             )?;
@@ -90,6 +94,7 @@ impl<'a> SchedulerEstimates<'a> {
                     last_fallback_reason: row.get(24)?,
                     last_invalidated_plan_reason: row.get(25)?,
                     last_observed_at: row.get(26)?,
+                    ewma_identity_extract_ms: row.get(27)?,
                 })
             })?;
             rows.collect::<Result<Vec<_>, _>>()
@@ -108,8 +113,9 @@ impl<'a> SchedulerEstimates<'a> {
                     ewma_mux_ms, ewma_upscale_ms,
                     vram_high_water_bytes, host_high_water_bytes,
                     failure_count, invalidated_count, last_outcome,
-                    last_fallback_reason, last_invalidated_plan_reason, last_observed_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27)
+                    last_fallback_reason, last_invalidated_plan_reason, last_observed_at,
+                    ewma_identity_extract_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28)
                  ON CONFLICT(estimate_key) DO UPDATE SET
                     device_class = excluded.device_class,
                     model_family = excluded.model_family,
@@ -136,7 +142,8 @@ impl<'a> SchedulerEstimates<'a> {
                     last_outcome = excluded.last_outcome,
                     last_fallback_reason = excluded.last_fallback_reason,
                     last_invalidated_plan_reason = excluded.last_invalidated_plan_reason,
-                    last_observed_at = excluded.last_observed_at",
+                    last_observed_at = excluded.last_observed_at,
+                    ewma_identity_extract_ms = excluded.ewma_identity_extract_ms",
                 params![
                     record.estimate_key,
                     record.device_class,
@@ -169,6 +176,7 @@ impl<'a> SchedulerEstimates<'a> {
                     record.last_fallback_reason,
                     record.last_invalidated_plan_reason,
                     record.last_observed_at,
+                    record.ewma_identity_extract_ms,
                 ],
             )?;
             Ok(())

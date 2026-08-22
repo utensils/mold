@@ -604,11 +604,27 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         version: 21,
         kind: MigrationKind::Sql(V21_HIDDEN_COLLECTIONS),
     },
+    Migration {
+        version: 22,
+        kind: MigrationKind::Sql(V22_IDENTITY_EXTRACT_ESTIMATE),
+    },
 ];
+
+/// #1227 phase 2 moved face-identity extraction from admission onto the
+/// render's leased device, where it became a typed scheduler phase
+/// (`ProgressPhase::IdentityExtract`). Its EWMA needs a column: unlike an
+/// additive Rust `Option` an old row already reads as `NULL`, SQLite needs the
+/// column to exist before the new `INSERT`/`UPDATE` can name it.
+///
+/// Appended after every existing column so no `SELECT` index in
+/// `scheduler_estimates.rs` moves.
+const V22_IDENTITY_EXTRACT_ESTIMATE: &str = r#"
+ALTER TABLE scheduler_estimates ADD COLUMN ewma_identity_extract_ms REAL;
+"#;
 
 /// The highest migration version this build ships. Exposed publicly so
 /// operators / tests can assert what schema level they're running against.
-pub const SCHEMA_VERSION: i64 = 21;
+pub const SCHEMA_VERSION: i64 = 22;
 
 /// v1 → v2: rewrite every `output_dir` value to its canonical form so
 /// rows written by the v0.8.x release (which keyed on raw paths) keep
@@ -984,7 +1000,7 @@ mod tests {
             SCHEMA_VERSION,
             "fresh DB must end at the latest SCHEMA_VERSION",
         );
-        assert_eq!(SCHEMA_VERSION, 21);
+        assert_eq!(SCHEMA_VERSION, 22);
         assert!(table_exists(&conn, "device_preferences"));
         assert_eq!(
             column_names(&conn, "device_preferences"),
@@ -1137,8 +1153,8 @@ mod tests {
 
         apply_pending(&mut conn).unwrap();
 
-        assert_eq!(current_version(&conn).unwrap(), 21);
-        assert_eq!(SCHEMA_VERSION, 21);
+        assert_eq!(current_version(&conn).unwrap(), 22);
+        assert_eq!(SCHEMA_VERSION, 22);
         assert!(table_exists(&conn, "generation_queue"));
         let columns = column_names(&conn, "generation_queue");
         for expected in [
@@ -1201,8 +1217,8 @@ mod tests {
 
         apply_pending(&mut conn).unwrap();
 
-        assert_eq!(current_version(&conn).unwrap(), 21);
-        assert_eq!(SCHEMA_VERSION, 21);
+        assert_eq!(current_version(&conn).unwrap(), 22);
+        assert_eq!(SCHEMA_VERSION, 22);
         let columns = column_names(&conn, "generations");
         for expected in ["title", "favorite", "trashed_at_ms"] {
             assert!(
@@ -1463,7 +1479,7 @@ mod v9_tests {
 
     #[test]
     fn schema_version_is_current() {
-        assert_eq!(SCHEMA_VERSION, 21);
+        assert_eq!(SCHEMA_VERSION, 22);
     }
 
     #[test]

@@ -62,9 +62,12 @@ use mold_core::pulid_assets::PulidPaths;
 use mold_core::secure_file::{open_regular_file_no_follow, sha256_open_file};
 use safetensors::tensor::{serialize_to_file, Dtype as SafeDtype, TensorView};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 /// The derived artifact's filename, written beside the `.pt` it came from.
 /// The derived artifact's name. `mold_core` is the authority — removal has to
@@ -943,6 +946,171 @@ impl std::fmt::Debug for AuthenticatedArtifact {
     }
 }
 
+/// Everything `fstat` can say about the file a set of verified bytes came
+/// from, which is what [`ARTIFACT_VERIFIED`] is keyed on.
+///
+/// Richer than [`secure_dir::identity`]'s `(dev, ino)` on purpose: an in-place
+/// write leaves the inode alone, so the memo has to notice content changes as
+/// well as replacements. `ctime` is the load-bearing field — `utimensat` lets
+/// a file's owner set `mtime` to anything, but no userspace call can hold
+/// `ctime` still across a write, because the kernel stamps it on every inode
+/// change including that `utimensat`.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+struct ArtifactIdentity {
+    len: u64,
+    platform: [u64; 6],
+}
+
+impl ArtifactIdentity {
+    /// Whether this identity is fine-grained enough to memoize on.
+    ///
+    /// The memo's whole safety argument is that a write moves `ctime`. On a
+    /// filesystem whose timestamps have one-second granularity — HFS+, ext3,
+    /// some network mounts — two same-length writes inside one tick produce an
+    /// IDENTICAL key, and the second one's bytes would be built without ever
+    /// being hashed. Nanosecond fields that are BOTH zero are the signature of
+    /// exactly that: a real nanosecond filesystem effectively never lands both
+    /// on zero, and a coarse one always does.
+    ///
+    /// So a coarse identity is not memoized at all — never consulted, never
+    /// recorded — and every load there pays the full SHA-256. That is slower
+    /// and correct, which is the right way round; the memo is an optimization
+    /// and the pin is the contract.
+    #[cfg(unix)]
+    fn is_fine_grained(&self) -> bool {
+        let [_dev, _ino, _mtime, mtime_nsec, _ctime, ctime_nsec] = self.platform;
+        mtime_nsec != 0 || ctime_nsec != 0
+    }
+
+    /// Non-Unix has no `ctime` at all, so the memo is never eligible there.
+    /// The degraded `(size, mtime)` key `pinned_file_identity` falls back to is
+    /// acceptable for a digest CACHE, whose entry is a value it re-derives;
+    /// it is not acceptable for skipping the derivation entirely.
+    #[cfg(not(unix))]
+    fn is_fine_grained(&self) -> bool {
+        false
+    }
+}
+
+fn artifact_identity(file: &File) -> Result<ArtifactIdentity> {
+    let metadata = file
+        .metadata()
+        .context("failed to stat a derived artifact")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Ok(ArtifactIdentity {
+            len: metadata.len(),
+            platform: [
+                metadata.dev(),
+                metadata.ino(),
+                metadata.mtime() as u64,
+                metadata.mtime_nsec() as u64,
+                metadata.ctime() as u64,
+                metadata.ctime_nsec() as u64,
+            ],
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        let mtime = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok());
+        Ok(ArtifactIdentity {
+            len: metadata.len(),
+            platform: [
+                mtime.map_or(0, |value| value.as_secs()),
+                mtime.map_or(0, |value| u64::from(value.subsec_nanos())),
+                0,
+                0,
+                0,
+                0,
+            ],
+        })
+    }
+}
+
+type VerifiedArtifacts = Mutex<HashSet<(ArtifactIdentity, &'static str)>>;
+
+/// Files this process has already read end to end and proven against a pin.
+///
+/// `docs/architecture/pulid-perf.md` §4 measured the re-proof at **1,118 ms**
+/// of a 2,840 ms extraction — the single largest line item in the pipeline,
+/// and pure per-request setup: the same 609 MB, hashed again, on every
+/// conditioned request, because the drop-and-reload rule rebuilds the tower
+/// each time. §5 made removing it phase 2's first target and named the shape:
+/// a process-lifetime memo keyed on the file's own identity, never a bare "we
+/// checked once" flag.
+///
+/// Three properties keep it honest, and dropping any one of them turns it into
+/// that flag:
+///
+/// * The key carries the PIN as well as the identity, so a build that
+///   re-pinned the artifact cannot inherit the old proof.
+/// * The identity is re-read from the SAME retained descriptor AFTER the
+///   private copy is taken, and a memo hit needs both readings to agree. A
+///   write that lands between them moves `ctime` and misses.
+/// * A miss is an ordinary full read-and-hash, not an error. Nothing is ever
+///   accepted on the memo's say-so that the first pass did not prove.
+///
+/// This is `mold_core::download::pinned_file_digest`'s memo applied to the one
+/// artifact that reads its bytes privately rather than hashing a descriptor in
+/// place — the same shape, the same key material, and (see below) the same
+/// residual. The private-copy contract in [`AuthenticatedArtifact`] is
+/// unchanged, because the copy is what the `VarBuilder` reads and the memo only
+/// ever removes the SHA-256 pass over it.
+///
+/// ## The residual, stated rather than implied
+///
+/// The key is METADATA, not content. A same-length in-place overwrite that
+/// lands inside a single timestamp tick produces the same key as the bytes
+/// before it, and would be served from the memo without being hashed.
+///
+/// Two things bound that, and the second is why it is accepted rather than
+/// merely tolerated:
+///
+/// * **Granularity is fenced.** [`ArtifactIdentity::is_fine_grained`] refuses
+///   to memoize at all when both nanosecond fields are zero, which is the
+///   signature of a one-second-granularity filesystem. On such a mount every
+///   load pays the full hash. What remains is a same-length write landing in
+///   the same NANOSECOND on a filesystem that reports them — and `ctime` is
+///   not settable by userspace at all, so this is a race, not a mechanism.
+/// * **It is exactly `pinned_file_digest`'s residual**, which already guards
+///   every model weight mold loads on every install. Accepting a different
+///   answer here would mean the 609 MB tower were held to a stricter standard
+///   than the 24 GB checkpoint beside it, for no reason anyone could state.
+///
+/// The alternative — keeping the verified private copy resident for the process
+/// lifetime, which makes the bytes immutable by construction — was considered
+/// and rejected on cost: it is 609 MB of host RAM held forever against a
+/// re-read that the memo already reduces to ~50 ms, on a phase whose whole
+/// point was to stop paying for the tower when nothing is using it.
+fn artifact_verified() -> &'static VerifiedArtifacts {
+    static VERIFIED: OnceLock<VerifiedArtifacts> = OnceLock::new();
+    VERIFIED.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+static ARTIFACT_FULL_VERIFICATIONS: AtomicU64 = AtomicU64::new(0);
+
+/// How many times this process has hashed a derived artifact end to end.
+///
+/// Exported for the tests that prove the memo works: a 609 MB tower must be
+/// hashed once per process per unchanged file, not once per request.
+pub(crate) fn artifact_verification_count() -> u64 {
+    ARTIFACT_FULL_VERIFICATIONS.load(Ordering::Relaxed)
+}
+
+/// Drop every memoized proof. Test-only: the memo is process-global, so a test
+/// that wants to observe a full verification has to start from nothing.
+#[cfg(test)]
+pub(crate) fn forget_verified_artifacts() {
+    artifact_verified()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clear();
+}
+
 /// Open `destination` and prove it is the artifact `pin` names.
 ///
 /// Resolves the final component through the parent's descriptor (`openat`,
@@ -960,6 +1128,12 @@ impl std::fmt::Debug for AuthenticatedArtifact {
 /// not already proved — the bytes are private by then — so it is a diagnostic:
 /// a concurrent republication is reported as itself rather than as a stale
 /// load.
+///
+/// The SHA-256 pass over the private copy is memoized on the file's own
+/// identity — see [`artifact_verified`], which carries the whole argument.
+/// Everything else here runs every time: the descriptor is re-resolved, the
+/// size is re-checked, and the bytes are re-read into a fresh private buffer,
+/// because that buffer is what the caller builds from.
 pub(crate) fn open_authenticated(
     destination: &Path,
     pin: PinnedDerived,
@@ -980,10 +1154,8 @@ pub(crate) fn open_authenticated(
     // `fstat` on the retained descriptor, never a `stat` on the path: the
     // point of holding the descriptor is that this describes the same file the
     // bytes come from.
-    let reported = file
-        .metadata()
-        .with_context(|| format!("failed to stat {}", destination.display()))?
-        .len();
+    let identity_before = artifact_identity(&file)?;
+    let reported = identity_before.len;
     ensure!(
         reported == pin.size_bytes,
         "{} is {reported} bytes, but this build pins {}",
@@ -1006,13 +1178,43 @@ pub(crate) fn open_authenticated(
         bytes.len()
     );
 
-    let sha256 = format!("{:x}", Sha256::digest(&bytes));
-    ensure!(
-        sha256 == pin.sha256,
-        "{} hashes to {sha256}, but this build pins {}",
-        destination.display(),
-        pin.sha256
-    );
+    // The identity is re-read from the SAME descriptor, after the copy: a
+    // memo hit needs the file to have been untouched across the whole read,
+    // and a full verification only records a proof for an identity that held
+    // still while it was being taken.
+    let identity_after = artifact_identity(&file)?;
+    // Both readings must agree AND the timestamps must be fine-grained enough
+    // to have noticed a write between them. A coarse filesystem is never
+    // memoized, in either direction.
+    let stable = identity_before == identity_after && identity_after.is_fine_grained();
+    let memoized = stable
+        && artifact_verified()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains(&(identity_after, pin.sha256));
+    let sha256 = if memoized {
+        // Proven earlier in this process, from a file that has not been
+        // written or replaced since. `pin.sha256` is what the digest would
+        // have been; recording it as the artifact's digest keeps
+        // `AuthenticatedArtifact::sha256` meaning exactly what it meant before.
+        pin.sha256.to_string()
+    } else {
+        let sha256 = format!("{:x}", Sha256::digest(&bytes));
+        ARTIFACT_FULL_VERIFICATIONS.fetch_add(1, Ordering::Relaxed);
+        ensure!(
+            sha256 == pin.sha256,
+            "{} hashes to {sha256}, but this build pins {}",
+            destination.display(),
+            pin.sha256
+        );
+        if stable {
+            artifact_verified()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert((identity_after, pin.sha256));
+        }
+        sha256
+    };
     ensure!(
         identity(&dir.open_file(name)?)? == read_identity,
         "{} was replaced while it was being verified",
@@ -1143,6 +1345,192 @@ mod tests {
         assert_eq!(
             loaded["a.weight"].to_vec1::<f32>().unwrap(),
             vec![1.0_f32, 2.0]
+        );
+    }
+
+    /// Every test that calls [`open_authenticated`] must run alone: the memo
+    /// and its counter are process-global on purpose, so a peer proving its
+    /// own artifact in parallel would land in this one's delta. Held by the
+    /// four memo tests AND by every other test that verifies an artifact,
+    /// which is what makes the deltas mean anything.
+    #[cfg(test)]
+    static MEMO_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Serialize against every other artifact verification in this process.
+    #[cfg(test)]
+    fn memo_guard() -> std::sync::MutexGuard<'static, ()> {
+        MEMO_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Write `bytes` and return the pin that names them.
+    fn pinned_file(dir: &Path, name: &str, bytes: &[u8]) -> (PathBuf, PinnedDerived) {
+        let path = dir.join(name);
+        std::fs::write(&path, bytes).unwrap();
+        let sha: &'static str = Box::leak(format!("{:x}", Sha256::digest(bytes)).into_boxed_str());
+        (
+            path,
+            PinnedDerived {
+                sha256: sha,
+                size_bytes: bytes.len() as u64,
+            },
+        )
+    }
+
+    /// The whole of #1227 phase 2's first win: `pulid-perf.md` §4 measured the
+    /// re-proof of the 609 MB tower at 1,118 ms on EVERY conditioned request,
+    /// because the drop-and-reload rule rebuilds the tower each time. The
+    /// second call must not hash again.
+    #[test]
+    fn a_derived_artifact_is_hashed_once_per_process_not_once_per_request() {
+        let _guard = memo_guard();
+        forget_verified_artifacts();
+        let dir = tempfile::tempdir().unwrap();
+        let (path, pin) = pinned_file(dir.path(), "weights.safetensors", b"the derived bytes");
+
+        let before = artifact_verification_count();
+        let first = open_authenticated(&path, pin).unwrap();
+        assert_eq!(artifact_verification_count(), before + 1);
+        let second = open_authenticated(&path, pin).unwrap();
+        assert_eq!(
+            artifact_verification_count(),
+            before + 1,
+            "the second call re-hashed the artifact"
+        );
+        // A memo hit must be indistinguishable in what it RETURNS: same bytes,
+        // same recorded digest. It only ever removes the SHA-256 pass.
+        assert_eq!(first.bytes(), second.bytes());
+        assert_eq!(first.sha256(), second.sha256());
+        assert_eq!(first.sha256(), pin.sha256);
+    }
+
+    /// The memo is not a "we checked once" flag. A file rewritten under the
+    /// same name — same bytes, even — has a new `ctime`, so it is proven again
+    /// rather than inherited.
+    #[test]
+    fn a_rewritten_artifact_is_proven_again_rather_than_remembered() {
+        let _guard = memo_guard();
+        forget_verified_artifacts();
+        let dir = tempfile::tempdir().unwrap();
+        let (path, pin) = pinned_file(dir.path(), "weights.safetensors", b"the derived bytes");
+
+        let before = artifact_verification_count();
+        open_authenticated(&path, pin).unwrap();
+        assert_eq!(artifact_verification_count(), before + 1);
+        // Same content, new inode: exactly the rename the private-copy
+        // contract exists to survive.
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(&path, b"the derived bytes").unwrap();
+        open_authenticated(&path, pin).unwrap();
+        assert_eq!(
+            artifact_verification_count(),
+            before + 2,
+            "a replaced file inherited an earlier proof"
+        );
+    }
+
+    /// The memo's key is metadata, so it is only ever consulted where the
+    /// metadata is fine-grained enough to have noticed a write.
+    ///
+    /// A filesystem reporting whole-second timestamps sets both nanosecond
+    /// fields to zero, and two same-length writes inside one tick would then
+    /// share a key. Such an identity is refused outright — never consulted,
+    /// never recorded — so every load there hashes.
+    #[test]
+    fn a_coarse_timestamp_identity_is_never_memoized() {
+        let mut coarse = ArtifactIdentity {
+            len: 17,
+            platform: [1, 2, 3, 0, 4, 0],
+        };
+        assert!(
+            !coarse.is_fine_grained(),
+            "whole-second timestamps must not be memoized"
+        );
+        // Either nanosecond field being non-zero is a real nanosecond FS.
+        coarse.platform[3] = 1;
+        assert!(coarse.is_fine_grained());
+        coarse.platform[3] = 0;
+        coarse.platform[5] = 1;
+        assert!(coarse.is_fine_grained());
+    }
+
+    /// The identity a memo hit is keyed on is re-read from the SAME retained
+    /// descriptor AFTER the private copy is taken, and both readings must
+    /// agree. Ordering is the whole safety argument: a stat taken only before
+    /// the read cannot see a write that lands during it.
+    ///
+    /// Asserted structurally, because the race it guards cannot be provoked
+    /// deterministically — what can be checked is that the code does the two
+    /// reads in the required order and requires them to match.
+    #[test]
+    fn the_memo_key_is_re_read_after_the_private_copy() {
+        let source = include_str!("pickle_convert.rs");
+        let body = source
+            .split_once("pub(crate) fn open_authenticated(")
+            .expect("the function exists")
+            .1;
+        let before = body.find("let identity_before = artifact_identity(&file)?;");
+        let read = body.find(".read_to_end(&mut bytes)");
+        let after = body.find("let identity_after = artifact_identity(&file)?;");
+        let (before, read, after) = (
+            before.expect("a stat before the read"),
+            read.expect("the private read"),
+            after.expect("a stat after the read"),
+        );
+        assert!(before < read, "the first stat must precede the read");
+        assert!(
+            read < after,
+            "the memo key must be re-read AFTER the private copy, or a write \
+             landing during the read is invisible to it"
+        );
+        assert!(
+            body.contains("identity_before == identity_after"),
+            "a memo hit must require both readings to agree"
+        );
+    }
+
+    /// The case the memo exists to not break: bytes swapped in place for a
+    /// same-length impostor, after a successful proof. It must be refused on
+    /// the digest, not served from the memo.
+    #[test]
+    fn a_tampered_artifact_is_refused_after_a_successful_proof() {
+        let _guard = memo_guard();
+        forget_verified_artifacts();
+        let dir = tempfile::tempdir().unwrap();
+        let (path, pin) = pinned_file(dir.path(), "weights.safetensors", b"the derived bytes");
+        open_authenticated(&path, pin).unwrap();
+
+        // In place, same length, same name, same inode. Only `mtime`/`ctime`
+        // move, which is precisely what the memo key notices.
+        let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.write_all(b"the FORGED bytes!").unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+
+        let error = open_authenticated(&path, pin).unwrap_err();
+        assert!(format!("{error:#}").contains("hashes to"), "{error:#}");
+    }
+
+    /// A re-pinned build must not inherit the previous pin's proof, so the key
+    /// carries the pin as well as the file.
+    #[test]
+    fn the_memo_is_keyed_on_the_pin_as_well_as_the_file() {
+        let _guard = memo_guard();
+        forget_verified_artifacts();
+        let dir = tempfile::tempdir().unwrap();
+        let (path, pin) = pinned_file(dir.path(), "weights.safetensors", b"the derived bytes");
+        open_authenticated(&path, pin).unwrap();
+
+        let other = PinnedDerived {
+            sha256: "0000000000000000000000000000000000000000000000000000000000000000",
+            size_bytes: pin.size_bytes,
+        };
+        let before = artifact_verification_count();
+        let error = open_authenticated(&path, other).unwrap_err();
+        assert!(format!("{error:#}").contains("hashes to"), "{error:#}");
+        assert_eq!(
+            artifact_verification_count(),
+            before + 1,
+            "a different pin must be answered by hashing, never by the memo"
         );
     }
 
@@ -1755,6 +2143,7 @@ mod tests {
     #[test]
     #[ignore = "requires the pinned PuLID checkpoints via MOLD_TEST_PULID_ASSETS"]
     fn tampered_weights_are_reconverted_despite_a_matching_sidecar() {
+        let _guard = memo_guard();
         let source = pulid_asset("EVA02_CLIP_L_336_psz14_s6B.pt");
         let dir = tempfile::tempdir().unwrap();
         let staged_source = dir.path().join("EVA02_CLIP_L_336_psz14_s6B.pt");
@@ -1821,6 +2210,7 @@ mod tests {
     /// between the check and the load.
     #[test]
     fn a_renamed_artifact_cannot_be_handed_to_a_loader() {
+        let _guard = memo_guard();
         let dir = tempfile::tempdir().unwrap();
         let destination = dir.path().join("derived.safetensors");
         write_atomically(&[raw("a", &[1.0, 2.0], &[2])], &destination).unwrap();
@@ -1850,6 +2240,7 @@ mod tests {
     /// this is a write another member is permitted to make.
     #[test]
     fn an_in_place_write_cannot_reach_a_loader_after_the_digest() {
+        let _guard = memo_guard();
         use std::io::Seek;
 
         let dir = tempfile::tempdir().unwrap();
@@ -1896,6 +2287,7 @@ mod tests {
     /// larger.
     #[test]
     fn a_wrong_length_is_refused_before_the_bytes_are_read() {
+        let _guard = memo_guard();
         let dir = tempfile::tempdir().unwrap();
         let destination = dir.path().join("derived.safetensors");
         write_atomically(&[raw("a", &[1.0, 2.0], &[2])], &destination).unwrap();
