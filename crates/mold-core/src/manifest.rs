@@ -5038,6 +5038,24 @@ pub const PULID_FAMILY: &str = "pulid";
 /// Manifest name for the PuLID-FLUX v0.9.1 asset bundle.
 pub const PULID_FLUX_MANIFEST: &str = "pulid-flux";
 
+/// Installable auxiliary bundles required by one concrete generation request.
+///
+/// Clients use this registry-driven answer to run the same generic
+/// consent/download loop for local execution that servers derive during
+/// placement. Adding a future request-bound auxiliary bundle belongs here,
+/// never as a model id embedded in an individual UI.
+pub fn auxiliary_manifests_for_request(
+    request: &crate::types::GenerateRequest,
+) -> Vec<&'static str> {
+    let mut manifests = Vec::new();
+    if crate::identity::request_mentions_identity(request)
+        && crate::identity::effective_id_weight(request) > 0.0
+    {
+        manifests.push(PULID_FLUX_MANIFEST);
+    }
+    manifests
+}
+
 /// The PuLID-FLUX auxiliary asset bundle.
 ///
 /// This is emphatically **not** a generation model: it is the four auxiliary
@@ -6694,6 +6712,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn request_auxiliary_bundle_registry_tracks_active_identity_only() {
+        let mut request: crate::types::GenerateRequest =
+            serde_json::from_value(serde_json::json!({
+                "prompt": "portrait",
+                "model": "flux-dev:q8",
+                "width": 1024,
+                "height": 1024,
+                "steps": 20,
+                "seed": 1,
+                "id_image": "AQ=="
+            }))
+            .unwrap();
+        assert_eq!(
+            auxiliary_manifests_for_request(&request),
+            vec![PULID_FLUX_MANIFEST]
+        );
+
+        request.id_weight = Some(0.0);
+        assert!(auxiliary_manifests_for_request(&request).is_empty());
+        request.id_image = None;
+        request.id_weight = None;
+        assert!(auxiliary_manifests_for_request(&request).is_empty());
+    }
+
+    #[test]
     fn pulid_bundle_is_a_hidden_sha_pinned_auxiliary_bundle() {
         let manifest = find_manifest(PULID_FLUX_MANIFEST).expect("pulid-flux resolves");
         assert_eq!(manifest.family, PULID_FAMILY);
@@ -7640,7 +7683,7 @@ mod tests {
 
     #[test]
     fn known_manifests_count() {
-        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 9 Flux.2 + 29 Qwen-Image/Qwen-Image-Edit + 1 Wuerstchen + 5 LTX Video + 6 LTX-2 + 14 Wan + 6 MiniMax H3 contracts (2 visible compact + 2 visible FL2VA Turbo tags + 2 hidden official) + 7 LTX-2 controls + 7 LTX-2 camera controls + 3 ControlNet + 2 Qwen3-Expand + 7 Upscaler + 20 Companion = 159
+        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 9 Flux.2 + 29 Qwen-Image/Qwen-Image-Edit + 1 Wuerstchen + 5 LTX Video + 6 LTX-2 + 14 Wan + 6 visible MiniMax H3 contracts + 7 LTX-2 controls + 7 LTX-2 camera controls + 3 ControlNet + 2 Qwen3-Expand + 7 Upscaler + 20 Companion = 159
         // Wan fp8 bump (#777): +wan22-{t2v,i2v}-a14b:fp8 — the Comfy-Org
         // fp8-scaled expert pairs.
         // Wan bump: +wan22-{t2v,i2v}-a14b:{q5,q8} — the two-expert A14B tiers.

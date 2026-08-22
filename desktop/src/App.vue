@@ -7,6 +7,8 @@ import Toasts from "./components/shell/Toasts.vue";
 import CommandPalette from "./components/shell/CommandPalette.vue";
 import ContextMenu from "./components/shell/ContextMenu.vue";
 import UpdateBanner from "./components/shell/UpdateBanner.vue";
+import LicenseAcceptanceDialog from "@studio/components/LicenseAcceptanceDialog.vue";
+import { openExternal } from "./lib/openExternal";
 import { dockBadgeValue } from "./lib/dockBadge";
 import { ipc } from "./lib/ipc";
 import { notificationRoute, type NotificationAction } from "./lib/notificationAction";
@@ -331,5 +333,6 @@ onUnmounted(() => {
     <Toasts />
     <CommandPalette />
     <ContextMenu />
+    <LicenseAcceptanceDialog :open-external="openExternal" />
   </div>
 </template>

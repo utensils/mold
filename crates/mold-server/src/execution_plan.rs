@@ -1144,6 +1144,8 @@ pub struct PendingArtifactIdentity {
     pub repo: String,
     pub filename: String,
     pub bytes: u64,
+    pub install_model: Option<String>,
+    pub licenses: Vec<mold_core::LicenseRefusal>,
     /// Registry-declared container of the artifact admission will land here.
     /// The preview must not claim GGUF for a `.safetensors`, `.pt`, or `.onnx`
     /// dependency it has never read.
@@ -1159,6 +1161,8 @@ impl PendingArtifactIdentity {
             name: self.filename.clone(),
             repo: self.repo.clone(),
             bytes: self.bytes,
+            install_model: self.install_model.clone(),
+            licenses: self.licenses.clone(),
         }
     }
 
@@ -1361,7 +1365,7 @@ pub fn eligible_devices_for_request(
 /// Placement-only counterpart for an already authenticated private H3
 /// ingress grant. It deliberately does not call model/artifact activation;
 /// inference preflight owns that authority. The canonical private runtime
-/// keeps Qwen on the host and requires transformer/VAE execution on one CUDA
+/// keeps Qwen on the host and requires transformer/VAE execution on one CUDA or Metal
 /// owner, while preserving the generic explicit-device conflict semantics.
 #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 pub(crate) fn eligible_devices_for_private_h3(
@@ -1622,6 +1626,13 @@ fn resolve_private_h3_execution_plans(
         let Some(evidence) = prepared.h3_private_admission_by_device.get(&device.id) else {
             continue;
         };
+        let available_device_bytes = if device.backend == GpuBackend::Metal {
+            mold_inference::device::metal_unified_capacity_with_safety_floor(
+                device.available_vram_bytes,
+            )
+        } else {
+            device.available_vram_bytes
+        };
         // Ask the host-memory question directly, before the frozen evidence is
         // revalidated. The live headroom recheck is one of `validate_for`'s
         // conjuncts and its refusal is a single opaque sentence, so the
@@ -1645,19 +1656,14 @@ fn resolve_private_h3_execution_plans(
             request,
             &device.id,
             device.ordinal,
-            device.compute_capability.ok_or_else(|| {
-                ExecutionPlanError::PreparedInputsStale(format!(
-                    "MiniMax H3 device '{}' lost its CUDA compute capability",
-                    device.id
-                ))
-            })?,
-            device.available_vram_bytes,
+            device.compute_capability,
+            available_device_bytes,
             available_host_headroom_bytes,
         ) {
             rejections.push(DeviceInfeasibility {
                 device_id: device.id,
                 predicted_peak_bytes: evidence.predicted_device_peak_bytes(),
-                available_bytes: device.available_vram_bytes,
+                available_bytes: available_device_bytes,
                 advice: Some(format!(
                     "private admission evidence no longer fits: {error:#}"
                 )),

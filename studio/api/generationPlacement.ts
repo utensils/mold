@@ -37,6 +37,8 @@ export interface PlacementPendingDownload {
   name: string;
   repo: string;
   bytes?: number | null;
+  install_model?: string | null;
+  licenses?: import("../lib/licenseAcceptance").LicenseTerms[] | null;
 }
 
 export interface PlacementMissingComponent {
@@ -125,6 +127,7 @@ function validPendingDownloads(value: unknown): boolean {
       return false;
     }
     const row = download as Record<string, unknown>;
+    const licenses = row.licenses;
     return (
       typeof row.kind === "string" &&
       row.kind.length > 0 &&
@@ -134,7 +137,34 @@ function validPendingDownloads(value: unknown): boolean {
       row.repo.length > 0 &&
       (row.bytes === undefined ||
         row.bytes === null ||
-        nonNegativeSafeInteger(row.bytes))
+        nonNegativeSafeInteger(row.bytes)) &&
+      (row.install_model === undefined ||
+        row.install_model === null ||
+        (typeof row.install_model === "string" &&
+          row.install_model.length > 0)) &&
+      (licenses === undefined ||
+        licenses === null ||
+        (Array.isArray(licenses) &&
+          licenses.every((license) => {
+            if (
+              typeof license !== "object" ||
+              license === null ||
+              Array.isArray(license)
+            ) {
+              return false;
+            }
+            const terms = license as Record<string, unknown>;
+            return [
+              "id",
+              "name",
+              "url",
+              "canonical",
+              "sha256",
+              "summary",
+            ].every(
+              (key) => typeof terms[key] === "string" && terms[key].length > 0,
+            );
+          })))
     );
   });
 }

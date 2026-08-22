@@ -10,6 +10,7 @@ import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import CardSurface from "@ui/components/CardSurface.vue";
 import PairingAccessPanel from "@studio/components/PairingAccessPanel.vue";
 import DevicePanel from "@studio/components/DevicePanel.vue";
+import LicenseSettingsPanel from "@studio/components/LicenseSettingsPanel.vue";
 import type { DeviceInfo } from "@studio/api/devices";
 import { setQueueDevicePin, type QueuePlan } from "@studio/api/queuePlan";
 import ConfigSettingsPanel from "../components/ConfigSettingsPanel.vue";
@@ -457,6 +458,11 @@ onBeforeUnmount(() => {
         </div>
       </CardSurface>
     </template>
+
+    <p class="kicker">Model licenses</p>
+    <CardSurface class="settings__card">
+      <LicenseSettingsPanel :target="pairingTarget" host-label="This machine" />
+    </CardSurface>
 
     <p class="kicker">About</p>
     <CardSurface class="settings__card settings__card--list" :padded="false">

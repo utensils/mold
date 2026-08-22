@@ -8680,6 +8680,17 @@ pub struct PendingModelDownload {
     pub name: String,
     pub repo: String,
     pub bytes: u64,
+    /// Manifest bundle admission will install to materialize this file.
+    ///
+    /// Additive and generic: clients use this as the retry target after any
+    /// outstanding `licenses` are accepted instead of inferring a model name
+    /// from a repository or dependency kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install_model: Option<String>,
+    /// Exact, server-pinned terms that still block this dependency.
+    /// Empty means admission may transparently materialize it on first use.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub licenses: Vec<LicenseRefusal>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]

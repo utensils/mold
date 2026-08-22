@@ -918,14 +918,8 @@ async fn require_server_model_activation(
     drop(config);
 
     if let Some(manifest) = mold_core::manifest::find_manifest(&resolved) {
-        mold_core::require_model_activation(&manifest.name, Some(&manifest.family))
+        mold_core::require_registered_manifest_activation(manifest)
             .map_err(ApiError::model_activation)?;
-        for file in &manifest.files {
-            mold_core::require_model_activation(&file.hf_repo, Some(&manifest.family))
-                .map_err(ApiError::model_activation)?;
-            mold_core::require_model_activation(&file.hf_filename, Some(&manifest.family))
-                .map_err(ApiError::model_activation)?;
-        }
     }
     Ok(family)
 }
@@ -960,7 +954,8 @@ async fn require_server_model_acquisition(
 /// Unknown ids are a `400` and nothing is written; see
 /// [`mold_core::license_acceptance::record_acceptances`] for why they are
 /// rejected rather than ignored.
-fn apply_download_license_acceptances(
+async fn apply_download_license_acceptances(
+    state: &AppState,
     model: &str,
     accept_licenses: &[mold_core::LicenseAcceptance],
 ) -> Result<(), ApiError> {
@@ -990,20 +985,30 @@ fn apply_download_license_acceptances(
         })?;
     }
 
-    // Re-derive from the manifest rather than trusting the accepted list: a
-    // request may name one license while the model needs another.
+    // Re-derive every term from the manifest rather than trusting the
+    // accepted list: a request may name one license while the model needs
+    // another. Only files this pull would fetch are gated; an already-present
+    // restricted artifact does not require retroactive consent merely because
+    // an unrelated file in the same bundle needs repair.
     let resolved = mold_core::manifest::resolve_model_name(model);
     let Some(manifest) = mold_core::manifest::find_manifest(&resolved) else {
         // Unknown models are the enqueue path's 400 to report, not ours.
         return Ok(());
     };
-    let Some(license) = license_acceptance::manifest_requires_license(manifest) else {
-        return Ok(());
-    };
-    if license_acceptance::is_accepted(&mold_home, license) {
-        return Ok(());
+    let config = state.config.read().await;
+    for file in &manifest.files {
+        if config.complete_manifest_file_path(manifest, file).is_some() {
+            continue;
+        }
+        for license in
+            license_acceptance::licenses_for_manifest_file(&manifest.name, &file.hf_filename)
+        {
+            if !license_acceptance::is_accepted(&mold_home, license) {
+                return Err(ApiError::license_not_accepted(&manifest.name, license));
+            }
+        }
     }
-    Err(ApiError::license_not_accepted(&manifest.name, license))
+    Ok(())
 }
 
 pub(crate) async fn require_server_generation_request_activation(
@@ -2891,14 +2896,8 @@ async fn require_upscale_model_activation(
         .map_err(ApiError::model_activation)?;
     }
     if let Some(manifest) = manifest {
-        mold_core::require_model_activation(&manifest.name, Some(&manifest.family))
+        mold_core::require_registered_manifest_activation(manifest)
             .map_err(ApiError::model_activation)?;
-        for file in &manifest.files {
-            mold_core::require_model_activation(&file.hf_repo, Some(&manifest.family))
-                .map_err(ApiError::model_activation)?;
-            mold_core::require_model_activation(&file.hf_filename, Some(&manifest.family))
-                .map_err(ApiError::model_activation)?;
-        }
     }
     Ok(())
 }
@@ -3858,6 +3857,8 @@ async fn placement_preview_for_request_authenticated(
                             name: adapter.download_model.to_string(),
                             repo: adapter.hf_repo.to_string(),
                             bytes: control_pending_download_bytes(adapter, &path),
+                            install_model: Some(adapter.download_model.to_string()),
+                            licenses: Vec::new(),
                         });
                 }
                 let artifact_fingerprint = format!(":ic-lora:{}", adapter.sha256);
@@ -3891,6 +3892,8 @@ async fn placement_preview_for_request_authenticated(
                             name: preset.hf_filename.to_string(),
                             repo: preset.hf_repo.to_string(),
                             bytes: preset.size_bytes,
+                            install_model: None,
+                            licenses: Vec::new(),
                         });
                 }
                 let artifact_fingerprint = format!(":camera-control:{}", preset.sha256);
@@ -4084,7 +4087,7 @@ async fn pull_model_endpoint(
     require_server_model_acquisition(&state, &body.model).await?;
     // Before ANY branch below — the catalog repair path enqueues downloads
     // too, and a refusal must happen before bytes move on either route.
-    apply_download_license_acceptances(&body.model, &body.accept_licenses)?;
+    apply_download_license_acceptances(&state, &body.model, &body.accept_licenses).await?;
     let wants_sse = headers
         .get(header::ACCEPT)
         .and_then(|v| v.to_str().ok())
@@ -8126,7 +8129,9 @@ pub async fn create_download(
     if let Err(error) = require_server_model_acquisition(&state, &body.model).await {
         return error.into_response();
     }
-    if let Err(error) = apply_download_license_acceptances(&body.model, &body.accept_licenses) {
+    if let Err(error) =
+        apply_download_license_acceptances(&state, &body.model, &body.accept_licenses).await
+    {
         return error.into_response();
     }
     match state.downloads.enqueue(body.model.clone()).await {
@@ -8371,6 +8376,20 @@ mod tests {
     fn h3_models_do_not_publish_a_family_wide_access_restriction() {
         let access = mold_core::model_access_capabilities();
         assert!(access.restrictions.is_empty());
+    }
+
+    #[test]
+    fn reviewed_h3_manifest_executes_without_authorizing_raw_repository_ids() {
+        let manifest =
+            mold_core::manifest::find_manifest(mold_core::minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P)
+                .expect("reviewed H3 Turbo manifest");
+        mold_core::require_registered_manifest_activation(manifest)
+            .expect("source-controlled reviewed manifest must activate");
+        assert!(mold_core::require_model_activation(
+            "hf:Comfy-Org/MiniMax-H3",
+            Some(mold_core::minimax_h3::FAMILY),
+        )
+        .is_err());
     }
 
     /// #787: an absent negative on a wan request materializes the tuned

@@ -13323,6 +13323,8 @@ mod tests {
                 repo: "owner/qwen3".to_string(),
                 filename: "qwen3-q8.gguf".to_string(),
                 bytes: 1_000_000_000,
+                install_model: None,
+                licenses: Vec::new(),
                 container: crate::execution_plan::PendingArtifactContainer::Gguf,
                 quantization: Some(crate::execution_plan::QuantizationVariant::Q8),
             },

@@ -191,7 +191,12 @@ export interface TransientHost {
 }
 
 export type FeasibilityResult =
-  | { kind: "route"; route: HostRoute }
+  | {
+      kind: "route";
+      route: HostRoute;
+      /** Exact preview that selected this route. Null only for legacy hosts. */
+      preview?: GenerationPlacementPreview | null;
+    }
   | {
       kind: "profile_mismatch";
       perHost: Array<{
@@ -795,6 +800,7 @@ async function resolveFeasibleWithPreview(
       if (chosen.apiKey) target.apiKey = chosen.apiKey;
       return {
         kind: "route",
+        preview: planned[0].preview,
         route: {
           hostId: chosen.id,
           label: chosen.label,
@@ -827,7 +833,12 @@ async function resolveFeasibleWithPreview(
       unsupportedIds.includes(id),
     );
     const route = resolveRoute(originRoutable, selection, legacyModelIds);
-    if (route) return { kind: "route", route: withReferenceUploads(route)! };
+    if (route)
+      return {
+        kind: "route",
+        route: withReferenceUploads(route)!,
+        preview: null,
+      };
   }
 
   const transient = probes.flatMap((probe) => {
@@ -1125,6 +1136,7 @@ async function revalidateFeasibleWithPreview(
   }
   return {
     kind: "route",
+    preview: classification === "planned" ? preview : null,
     route: {
       hostId: route.hostId,
       label: route.label,

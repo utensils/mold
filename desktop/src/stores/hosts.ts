@@ -12,6 +12,7 @@ import {
   previewRequestForSiblingFanout,
   requiresAuthoritativePlacement,
   type MissingModelPlacement,
+  type GenerationPlacementPreview,
   type PlacementPreviewOptions,
   type PlacementMissingComponent,
 } from "@studio/api/generationPlacement";
@@ -210,7 +211,7 @@ export interface HostProbeFailure {
 export type HostFeasibilityFailure = HostPlacementFailure | HostProbeFailure;
 
 export type FeasibleRouteResult =
-  | { kind: "route"; route: HostRoute }
+  | { kind: "route"; route: HostRoute; preview?: GenerationPlacementPreview | null }
   | {
       kind: "profile_mismatch";
       perHost: Array<{
@@ -929,7 +930,7 @@ export const useHostsStore = defineStore("hosts", {
         if (planned.length > 0) {
           const chosen = candidates.find((host) => host.id === planned[0]!.hostId);
           const route = chosen ? hostRoute(chosen, this.capabilities[chosen.id]) : null;
-          if (route) return { kind: "route", route };
+          if (route) return { kind: "route", route, preview: planned[0]!.preview };
         }
 
         const unsupportedIds = settledProbes
@@ -958,7 +959,7 @@ export const useHostsStore = defineStore("hosts", {
             chosen = pickAutoHost(withModel.length > 0 ? withModel : legacy);
           }
           const route = chosen ? hostRoute(chosen, this.capabilities[chosen.id]) : null;
-          if (route) return { kind: "route", route };
+          if (route) return { kind: "route", route, preview: null };
         }
 
         const failures = settledProbes.flatMap<HostFeasibilityFailure>((probe) => {

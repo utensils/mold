@@ -373,6 +373,38 @@ const PRODUCTION_FAMILY_CAPABILITIES: &[FamilyBatchCapability] = &[
             "crates/mold-inference/src/ltx_video/pipeline.rs::decode_apng_round_trips_rgb_frames",
         ),
     },
+    #[cfg(feature = "h3")]
+    FamilyBatchCapability {
+        family: mold_core::minimax_h3::FAMILY,
+        aliases: &["minimax_h3", "minimaxh3"],
+        backends: BackendApplicability {
+            cuda: BackendQualification::Supported,
+            metal: BackendQualification::CorrectnessOnly,
+            cpu: BackendQualification::Unsupported,
+        },
+        placement: ComponentPlacementCapability {
+            text_encoder_cpu: true,
+            vae_cpu: false,
+            audio_components_cpu: false,
+        },
+        block_offload: true,
+        tiled_vae: TiledVaeCapability::NativeTemporalChunks,
+        execution: SINGLETON,
+        determinism: EXACT,
+        seed_contract: CPU_SEED,
+        media: MediaKind::Video,
+        workflows: WorkflowCapabilities {
+            source: true,
+            edit_references: false,
+            lora: true,
+            generated_audio: true,
+            chain: false,
+        },
+        tier1: TIER1,
+        tier2: deep(
+            "crates/mold-inference/src/minimax_h3/private_fl2va_runtime.rs::streamed_core_requires_the_bound_backend",
+        ),
+    },
     FamilyBatchCapability {
         family: "ltx2",
         aliases: &["ltx-2", "ltx2.3"],
@@ -535,7 +567,7 @@ mod tests {
 
     #[test]
     fn production_family_batch_registry_is_explicit_valid_and_singleton_only() {
-        let expected = [
+        let expected = vec![
             "flux",
             "flux2",
             "sd15",
@@ -549,6 +581,12 @@ mod tests {
             "wan",
             "wuerstchen",
         ];
+        #[cfg(feature = "h3")]
+        let expected = {
+            let mut expected = expected;
+            expected.insert(9, mold_core::minimax_h3::FAMILY);
+            expected
+        };
         assert_eq!(
             production_batch_capabilities()
                 .iter()

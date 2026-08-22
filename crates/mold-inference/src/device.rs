@@ -1773,6 +1773,24 @@ pub fn total_system_memory_bytes() -> Option<u64> {
     (ret == 0 && size > 0).then_some(size)
 }
 
+/// Stable unified-memory capacity for an explicitly selected large Metal job.
+///
+/// `free + inactive` is the right immediate-pressure sample for ordinary
+/// scheduling, but it excludes clean active file cache and compressed or
+/// swappable application pages. H3 authenticates ~44 GB of model files before
+/// allocation, so that sample falls sharply from the verification I/O itself
+/// and can make a 48 GB Mac report only ~20 GB even though the reviewed 33.9 GB
+/// runtime fits while retaining the canonical host safety floor. For this
+/// explicit large-model path, use installed unified memory minus the same
+/// `max(15%, 8 GiB)` floor as the host ledger. If installed memory cannot be
+/// queried, retain the live sample unchanged.
+pub fn metal_unified_capacity_with_safety_floor(live_available_bytes: u64) -> u64 {
+    total_system_memory_bytes().map_or(live_available_bytes, |total| {
+        let safety_floor = total.saturating_mul(15).saturating_div(100).max(8 << 30);
+        total.saturating_sub(safety_floor)
+    })
+}
+
 #[cfg(not(target_os = "macos"))]
 pub fn total_system_memory_bytes() -> Option<u64> {
     None
@@ -3296,6 +3314,18 @@ mod tests {
             installed >= available,
             "installed RAM ({installed}) must bound available ({available})"
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn large_metal_capacity_retains_the_canonical_host_safety_floor() {
+        let installed = total_system_memory_bytes().expect("macOS reports installed RAM");
+        let floor = (installed.saturating_mul(15) / 100).max(8 << 30);
+        assert_eq!(
+            metal_unified_capacity_with_safety_floor(1),
+            installed.saturating_sub(floor)
+        );
+        assert!(floor >= 8 << 30);
     }
 
     // --- should_use_gpu: Metal always GPU ---

@@ -1,0 +1,1 @@
+- **Compile the reviewed MiniMax H3 Metal server.** The Apple Silicon H3 recipe now keeps CUDA-only preparation containment out of Metal builds, and macOS CI compiles that exact feature set to prevent drift ([#1296](https://github.com/utensils/mold/issues/1296)).

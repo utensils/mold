@@ -4,6 +4,8 @@ import { useRoute } from "vue-router";
 import AccordionSection from "@ui/components/AccordionSection.vue";
 import CardSurface from "@ui/components/CardSurface.vue";
 import PairingAccessPanel from "@studio/components/PairingAccessPanel.vue";
+import LicenseSettingsPanel from "@studio/components/LicenseSettingsPanel.vue";
+import { openExternal } from "../lib/openExternal";
 import AppearanceCard from "../components/settings/AppearanceCard.vue";
 import UpdatesSection from "../components/settings/UpdatesSection.vue";
 import AboutSection from "../components/settings/AboutSection.vue";
@@ -148,6 +150,17 @@ function toggle(id: SectionId): void {
               :suggested-base-url="pairingBaseUrl"
               host-label="This device"
             />
+          </section>
+
+          <section data-test="license-settings-region">
+            <div class="edge-code mb-2.5 uppercase">Model licenses</div>
+            <CardSurface>
+              <LicenseSettingsPanel
+                :target="pairingTarget"
+                host-label="This device"
+                :open-external="openExternal"
+              />
+            </CardSurface>
           </section>
 
           <section ref="updatesCard" data-test="updates-card">

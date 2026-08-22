@@ -229,6 +229,15 @@ pub(crate) async fn plan_local_batch(
 }
 
 #[cfg(any(feature = "cuda", feature = "metal"))]
+fn local_execution_capacity(backend: mold_core::GpuBackend, sampled_bytes: u64) -> u64 {
+    if backend == mold_core::GpuBackend::Metal {
+        mold_inference::device::metal_unified_capacity_with_safety_floor(sampled_bytes)
+    } else {
+        sampled_bytes
+    }
+}
+
+#[cfg(any(feature = "cuda", feature = "metal"))]
 pub(crate) fn build_local_engine_from_plan(
     request: &mold_core::GenerateRequest,
     config: &Config,
@@ -243,16 +252,18 @@ pub(crate) fn build_local_engine_from_plan(
         request,
         Some(prepared),
     )?;
-    let current_free =
-        mold_inference::device::free_vram_bytes(plan.device_ordinal).ok_or_else(|| {
+    let sampled_current_free = mold_inference::device::free_vram_bytes(plan.device_ordinal)
+        .ok_or_else(|| {
             anyhow::anyhow!(
                 "current free VRAM is unavailable for GPU {}",
                 plan.device_ordinal
             )
         })?;
+    let current_free = local_execution_capacity(plan.device_backend, sampled_current_free);
     if current_free < plan.predicted_vram_peak_bytes {
         anyhow::bail!(
-            "local execution plan invalidated before CUDA: GPU {} now has {} bytes free but the exact plan requires {}",
+            "local execution plan invalidated before {:?}: GPU {} now has {} bytes free but the exact plan requires {}",
+            plan.device_backend,
             plan.device_ordinal,
             current_free,
             plan.predicted_vram_peak_bytes
@@ -571,6 +582,15 @@ impl LocalBatchAdmission {
 mod tests {
     use super::*;
     use crate::test_support::ENV_LOCK;
+
+    #[cfg(any(feature = "cuda", feature = "metal"))]
+    #[test]
+    fn cuda_local_execution_capacity_preserves_the_live_sample() {
+        assert_eq!(
+            local_execution_capacity(mold_core::GpuBackend::Cuda, 17_123_456_789),
+            17_123_456_789
+        );
+    }
 
     #[test]
     fn apply_local_engine_env_overrides_sets_qwen2_overrides() {

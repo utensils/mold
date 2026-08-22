@@ -284,6 +284,7 @@ pub(crate) async fn ensure_downloaded(
         expected_sha256,
         subdir,
     } = dependency;
+    let install_model = expected_sha256.map(|pin| pin.repair_model.to_string());
     let cached = if policy == DependencyMaterializationPolicy::ExistingOnly {
         mold_core::download::cached_file_path_existing_only(
             models_root,
@@ -328,6 +329,19 @@ pub(crate) async fn ensure_downloaded(
                 name: filename.to_string(),
                 repo: repo.to_string(),
                 bytes,
+                licenses: install_model
+                    .as_deref()
+                    .and_then(|model| {
+                        mold_core::Config::mold_dir().map(|home| {
+                            mold_core::license_acceptance::unaccepted_for_manifest_files(
+                                model,
+                                [filename],
+                                &home,
+                            )
+                        })
+                    })
+                    .unwrap_or_default(),
+                install_model,
             },
             path: mold_core::download::planned_single_file_path_in(models_root, filename, subdir),
             container,
@@ -1313,10 +1327,19 @@ pub(crate) async fn prepare_inputs_for_devices(
 ) -> Result<PreparedExecutionInputs, String> {
     #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     if let Some(grant) = context.h3_private_ingress_grant.clone() {
-        let live_state = state.ok_or_else(|| {
-            "MiniMax H3 private dependency preparation has no server instance authority".to_string()
-        })?;
-        grant.validate_for_request(request, live_state.instance_id.as_str())?;
+        #[cfg(feature = "h3")]
+        let instance_id = state.map_or(H3_PUBLIC_LOCAL_INSTANCE_ID, |state| {
+            state.instance_id.as_str()
+        });
+        #[cfg(not(feature = "h3"))]
+        let instance_id = state
+            .ok_or_else(|| {
+                "MiniMax H3 private dependency preparation has no server instance authority"
+                    .to_string()
+            })?
+            .instance_id
+            .as_str();
+        grant.validate_for_request(request, instance_id)?;
         return prepare_h3_private_inputs_for_devices(
             state,
             work_id,
@@ -1562,6 +1585,8 @@ pub(crate) async fn prepare_inputs_for_devices(
                                 repo: dependency.download.repo.clone(),
                                 filename: dependency.download.name.clone(),
                                 bytes: dependency.download.bytes,
+                                install_model: dependency.download.install_model.clone(),
+                                licenses: dependency.download.licenses.clone(),
                                 container: dependency.container,
                                 quantization: dependency.quantization,
                             },
@@ -1792,7 +1817,8 @@ async fn prepare_h3_private_inputs_for_devices(
     let mut evidence_by_device = BTreeMap::new();
     let mut failures = BTreeMap::new();
 
-    for device in devices {
+    for mut device in devices {
+        #[cfg(not(feature = "h3"))]
         if device.backend != mold_core::GpuBackend::Cuda {
             failures.insert(
                 device.id,
@@ -1800,13 +1826,35 @@ async fn prepare_h3_private_inputs_for_devices(
             );
             continue;
         }
-        let Some(compute_capability) = device.compute_capability else {
+        #[cfg(feature = "h3")]
+        if !matches!(
+            device.backend,
+            mold_core::GpuBackend::Cuda | mold_core::GpuBackend::Metal
+        ) {
+            failures.insert(device.id, "MiniMax H3 requires CUDA or Metal".to_string());
+            continue;
+        }
+        let compute_capability = device.compute_capability;
+        if device.backend == mold_core::GpuBackend::Cuda && compute_capability.is_none() {
             failures.insert(
                 device.id,
-                "MiniMax H3 private UAT requires exact CUDA compute capability".to_string(),
+                "MiniMax H3 CUDA requires exact compute capability".to_string(),
             );
             continue;
-        };
+        }
+        if device.backend == mold_core::GpuBackend::Metal && compute_capability.is_some() {
+            failures.insert(
+                device.id,
+                "MiniMax H3 Metal route carried a CUDA compute capability".to_string(),
+            );
+            continue;
+        }
+        if device.backend == mold_core::GpuBackend::Metal {
+            device.available_vram_bytes =
+                mold_inference::device::metal_unified_capacity_with_safety_floor(
+                    device.available_vram_bytes,
+                );
+        }
         let admission_request = resolved_request.clone();
         let paths = uat_paths.clone();
         // Each device's admission mints its own descriptors rather than
@@ -1901,6 +1949,11 @@ async fn prepare_h3_private_inputs_for_devices(
         ));
     }
 
+    #[cfg(feature = "h3")]
+    let instance_id = state.map_or(H3_PUBLIC_LOCAL_INSTANCE_ID, |state| {
+        state.instance_id.as_str()
+    });
+    #[cfg(not(feature = "h3"))]
     let instance_id = state
         .ok_or_else(|| {
             "MiniMax H3 private admission lost its server instance authority".to_string()
@@ -2051,6 +2104,24 @@ pub async fn prepare_local_execution_inputs(
     request: &GenerateRequest,
     devices: Vec<DeviceFact>,
 ) -> Result<PreparedExecutionInputs, String> {
+    let context = {
+        #[cfg(feature = "h3")]
+        {
+            let mut context = DependencyPreparationContext::default();
+            if mold_core::minimax_h3::task_for_model(&request.model).is_some() {
+                context.h3_private_ingress_grant =
+                    crate::h3_private_bridge::classify_h3_private_ingress(
+                        request,
+                        None,
+                        H3_PUBLIC_LOCAL_INSTANCE_ID,
+                    )
+                    .map_err(|error| error.error)?;
+            }
+            context
+        }
+        #[cfg(not(feature = "h3"))]
+        DependencyPreparationContext::default()
+    };
     prepare_inputs_for_devices(
         None,
         "local",
@@ -2059,10 +2130,16 @@ pub async fn prepare_local_execution_inputs(
         devices,
         None,
         DependencyMaterializationPolicy::Admission,
-        DependencyPreparationContext::default(),
+        context,
     )
     .await
 }
+
+/// Stable instance identity for the in-process forced-local public H3 route.
+/// It never crosses a transport boundary; it only binds preparation and
+/// execution to the same CLI process authority.
+#[cfg(feature = "h3")]
+const H3_PUBLIC_LOCAL_INSTANCE_ID: &str = "mold-public-forced-local";
 
 #[cfg(test)]
 mod tests {

@@ -954,19 +954,29 @@ impl H3QualifiedRuntimeFacts {
                 packed_rows: shape.rows.total_packed_rows,
             });
         }
-        let capability = device.compute_capability.ok_or_else(|| {
-            H3AdmissionError::DeviceUnsupported(
-                "H3 CUDA admission requires an explicit compute capability".to_string(),
-            )
-        })?;
-        if capability < self.minimum_compute_capability {
-            return Err(H3AdmissionError::DeviceUnsupported(format!(
-                "H3 runtime requires CUDA compute capability {}.{}, got {}.{}",
-                self.minimum_compute_capability.0,
-                self.minimum_compute_capability.1,
-                capability.0,
-                capability.1
-            )));
+        match (device.backend, device.compute_capability) {
+            (GpuBackend::Cuda, Some(capability))
+                if capability >= self.minimum_compute_capability => {}
+            (GpuBackend::Cuda, Some(capability)) => {
+                return Err(H3AdmissionError::DeviceUnsupported(format!(
+                    "H3 runtime requires CUDA compute capability {}.{}, got {}.{}",
+                    self.minimum_compute_capability.0,
+                    self.minimum_compute_capability.1,
+                    capability.0,
+                    capability.1
+                )));
+            }
+            (GpuBackend::Cuda, None) => {
+                return Err(H3AdmissionError::DeviceUnsupported(
+                    "H3 CUDA admission requires an explicit compute capability".to_string(),
+                ));
+            }
+            (GpuBackend::Metal, None) => {}
+            (GpuBackend::Metal, Some(_)) => {
+                return Err(H3AdmissionError::DeviceUnsupported(
+                    "H3 Metal admission must not carry a CUDA compute capability".to_string(),
+                ));
+            }
         }
         if shape.rows.total_packed_rows > self.maximum_packed_rows {
             return Err(H3AdmissionError::QualifiedAttentionRequired {
@@ -1116,7 +1126,8 @@ pub(crate) struct H3FrozenExecutionPlan {
     pub layout: H3PublishedLayout,
     pub device_id: String,
     pub device_ordinal: usize,
-    pub compute_capability: (u16, u16),
+    /// `Some` identifies an exact CUDA architecture; `None` identifies Metal.
+    pub compute_capability: Option<(u16, u16)>,
     pub checkpoint_fingerprint: String,
     pub config_fingerprint: String,
     pub header_fingerprint: String,
@@ -1203,7 +1214,7 @@ pub(crate) enum H3AdmissionError {
         available_bytes: u64,
     },
     #[error(
-        "MiniMax H3 product-size packed attention ({packed_rows} rows) requires a qualified lossless CUDA runtime"
+        "MiniMax H3 product-size packed attention ({packed_rows} rows) requires a qualified lossless GPU runtime"
     )]
     QualifiedAttentionRequired { packed_rows: u64 },
     #[error("MiniMax H3 placement is pending landed artifacts: {paths:?}")]
@@ -1258,9 +1269,11 @@ pub(crate) fn plan_h3_admission(
         });
     }
     let device = &devices[0];
-    if device.id.trim().is_empty() || device.backend != GpuBackend::Cuda {
+    if device.id.trim().is_empty()
+        || !matches!(device.backend, GpuBackend::Cuda | GpuBackend::Metal)
+    {
         return Err(H3AdmissionError::DeviceUnsupported(
-            "the initial H3 authority is CUDA-only".to_string(),
+            "H3 admission requires one CUDA or Metal GPU".to_string(),
         ));
     }
     if task != artifacts.task {
@@ -1504,11 +1517,7 @@ pub(crate) fn plan_h3_admission(
         layout: artifacts.layout,
         device_id: device.id.clone(),
         device_ordinal: device.ordinal,
-        compute_capability: device.compute_capability.ok_or_else(|| {
-            H3AdmissionError::DeviceUnsupported(
-                "H3 CUDA admission requires an exact compute capability".to_string(),
-            )
-        })?,
+        compute_capability: device.compute_capability,
         checkpoint_fingerprint: checkpoint.checkpoint_fingerprint.clone(),
         config_fingerprint: checkpoint.config_fingerprint.clone(),
         header_fingerprint: checkpoint.header_fingerprint.clone(),
@@ -1680,7 +1689,7 @@ pub(crate) fn reject_normal_h3_admission(model: &str, family: &str) -> H3NormalA
 /// exposing paths or bytes and without activating an H3 loader.
 ///
 /// Construction is transactional: `engine_config` is mutated only after the
-/// execution fingerprint, exact CUDA route, component set, attention evidence,
+/// execution fingerprint, exact GPU route, component set, attention evidence,
 /// streaming policy, and layout-specific quantization all agree.
 pub(crate) fn bind_h3_factory_authority(
     plan: &H3FrozenExecutionPlan,
@@ -1692,11 +1701,7 @@ pub(crate) fn bind_h3_factory_authority(
     plan.validate_execution_fingerprint()?;
     artifacts.validate_landed()?;
     checkpoint.validate(artifacts)?;
-    let compute_capability = device.compute_capability.ok_or_else(|| {
-        H3AdmissionError::DeviceUnsupported(
-            "H3 factory binding requires an exact CUDA compute capability".to_string(),
-        )
-    })?;
+    let compute_capability = device.compute_capability;
     let expected_qwen_output_transfer_device_bytes = match plan.qwen_placement {
         H3QwenPlacement::AssignedGpuThenDrop => 0,
         H3QwenPlacement::HostCpuThenDrop => {
@@ -1710,7 +1715,7 @@ pub(crate) fn bind_h3_factory_authority(
         || plan.device_id != device.id
         || plan.device_ordinal != device.ordinal
         || plan.compute_capability != compute_capability
-        || device.backend != GpuBackend::Cuda
+        || !matches!(device.backend, GpuBackend::Cuda | GpuBackend::Metal)
         || plan.checkpoint_fingerprint != checkpoint.checkpoint_fingerprint
         || plan.config_fingerprint != checkpoint.config_fingerprint
         || plan.header_fingerprint != checkpoint.header_fingerprint
@@ -1733,9 +1738,12 @@ pub(crate) fn bind_h3_factory_authority(
         ));
     }
     let conditioner_placement = match plan.qwen_placement {
-        H3QwenPlacement::AssignedGpuThenDrop => {
-            mold_inference::H3FactoryConditionerPlacement::AssignedCudaThenDrop
-        }
+        H3QwenPlacement::AssignedGpuThenDrop => match device.backend {
+            GpuBackend::Cuda => mold_inference::H3FactoryConditionerPlacement::AssignedCudaThenDrop,
+            GpuBackend::Metal => {
+                mold_inference::H3FactoryConditionerPlacement::AssignedMetalThenDrop
+            }
+        },
         H3QwenPlacement::HostCpuThenDrop => {
             mold_inference::H3FactoryConditionerPlacement::HostCpuThenDrop
         }
@@ -1772,10 +1780,7 @@ pub(crate) fn bind_h3_factory_authority(
             model: artifacts.model.clone(),
             device_id: plan.device_id.clone(),
             device_ordinal: plan.device_ordinal,
-            // Admission still binds a CUDA route only (`DeviceUnsupported`
-            // above), so the capability is always present here; the factory
-            // input is optional because a Metal plan carries none.
-            compute_capability: Some(compute_capability),
+            compute_capability,
             execution_fingerprint: plan.execution_fingerprint.clone(),
             conditioner_placement,
             qwen_parameter_bytes: plan.qwen_memory.source_parameter_bytes,
@@ -2262,6 +2267,16 @@ mod tests {
         }
     }
 
+    fn metal(vram: u64) -> H3AdmissionDevice {
+        H3AdmissionDevice {
+            id: "metal-0".to_string(),
+            ordinal: 0,
+            backend: GpuBackend::Metal,
+            compute_capability: None,
+            available_vram_bytes: vram,
+        }
+    }
+
     fn prepared(model: &str, frames: u32) -> (H3FrozenTask, H3PreparedRequestShape) {
         H3PreparedRequestShape::from_prepared_request(&request(model, frames), 128, 0).unwrap()
     }
@@ -2497,8 +2512,35 @@ mod tests {
 
         assert_eq!(plan.canonical_model, minimax_h3::FL2VA_COMFY);
         assert_eq!(plan.device_id, "gpu-0");
-        assert_eq!(plan.compute_capability, (8, 9));
+        assert_eq!(plan.compute_capability, Some((8, 9)));
         assert_eq!(plan.execution_fingerprint.len(), 64);
+        plan.validate_execution_fingerprint().unwrap();
+    }
+
+    #[test]
+    fn metal_admission_freezes_a_capability_free_backend_route() {
+        let inventory = landed_inventory(minimax_h3::FL2VA_COMFY);
+        let checkpoint = checkpoint(&inventory);
+        let runtime = qualified_runtime();
+        let (task, shape) = prepared(minimax_h3::FL2VA_COMFY, 124);
+        let device = metal(48 * GIB);
+        let plan = plan_h3_admission(
+            task,
+            shape,
+            &inventory,
+            &checkpoint,
+            Some(&runtime),
+            std::slice::from_ref(&device),
+            H3HostMemory {
+                total_bytes: 96 * GIB,
+                available_bytes: 96 * GIB,
+            },
+            H3AdmissionPolicy::default(),
+        )
+        .unwrap();
+
+        assert_eq!(plan.device_id, "metal-0");
+        assert_eq!(plan.compute_capability, None);
         plan.validate_execution_fingerprint().unwrap();
     }
 
@@ -3231,7 +3273,7 @@ mod tests {
         assert_eq!(authority.canonical_model(), minimax_h3::FL2VA_COMFY);
         assert_eq!(authority.device_id(), plan.device_id);
         assert_eq!(authority.device_ordinal(), plan.device_ordinal);
-        assert_eq!(plan.compute_capability, (8, 9));
+        assert_eq!(plan.compute_capability, Some((8, 9)));
         assert_eq!(authority.compute_capability(), Some((8, 9)));
         assert_eq!(
             authority.execution_fingerprint(),
@@ -3284,7 +3326,10 @@ mod tests {
             semantic.h3_factory_authority_sha256.as_deref(),
             Some(authority.identity_sha256())
         );
-        assert!(!minimax_h3::capabilities(minimax_h3::Task::Fl2va).runtime_available);
+        assert_eq!(
+            minimax_h3::capabilities(minimax_h3::Task::Fl2va).runtime_available,
+            cfg!(feature = "h3")
+        );
     }
 
     #[test]

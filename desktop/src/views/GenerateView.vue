@@ -21,6 +21,9 @@ import PreparedExpansionBatch from "../components/generate/PreparedExpansionBatc
 import GenerateErrorNotice from "../components/generate/GenerateErrorNotice.vue";
 import MissingModelDialog from "../components/generate/MissingModelDialog.vue";
 import DownloadTargetDialog from "../components/models/DownloadTargetDialog.vue";
+import { useLicenseAcceptance } from "@studio/composables/useLicenseAcceptance";
+import { licenseRequirements } from "@studio/lib/licenseAcceptance";
+import type { GenerationPlacementPreview } from "@studio/api/generationPlacement";
 import CreateHeader from "../components/create/CreateHeader.vue";
 import ActivityStrip from "../components/create/ActivityStrip.vue";
 import ComposerCard from "../components/create/ComposerCard.vue";
@@ -254,6 +257,7 @@ const videoExportCapabilities = ref<VideoExportCapabilities>(DEFAULT_VIDEO_EXPOR
 const hostGallery = useGalleryStore();
 const downloads = useDownloadsStore();
 const pullResume = usePullResumeStore();
+const licenseAcceptance = useLicenseAcceptance();
 const liveActivity = useLiveActivityStore();
 
 function placementFailureMessage(result: Exclude<FeasibleRouteResult, { kind: "route" }>): string {
@@ -1776,6 +1780,28 @@ async function generateSequence() {
       );
       return;
     }
+    const feasibility = await hosts.resolveFeasible(hostRoute.hostId, request, 1, { signal });
+    if (!isCurrent()) return;
+    if (
+      feasibility.kind !== "route" ||
+      feasibility.route.hostId !== hostRoute.hostId ||
+      feasibility.route.target.baseUrl !== hostRoute.target.baseUrl ||
+      feasibility.route.target.apiKey !== hostRoute.target.apiKey
+    ) {
+      toasts.push(
+        feasibility.kind === "route"
+          ? "The sequence machine changed while checking dependencies. Nothing was queued."
+          : placementFailureMessage(feasibility),
+        "error",
+      );
+      return;
+    }
+    const accepted = await licenseAcceptance.request({
+      hostLabel: hostRoute.label,
+      target: hostRoute.target,
+      requirements: licenseRequirements(feasibility.preview?.pending_downloads),
+    });
+    if (!accepted || !isCurrent()) return;
     if (editing) {
       const operationId = createUuid();
       const amend: AmendRequest = {
@@ -3233,6 +3259,7 @@ async function generate() {
     // upscale-then-fit needs a route before preprocessing; local fit policies
     // can finalize the source first and avoid a duplicate placement preview.
     let route: HostRoute | null = preparedSubmission?.route ?? quickSubmission?.route ?? null;
+    let placementPreview: GenerationPlacementPreview | null = null;
     const routeRequiredForPreprocessing = sourcePreprocessingNeedsRoute(draft);
     let routeResolvedAgainstFinalRequest = false;
     let sourcePreprocessed = false;
@@ -3307,6 +3334,7 @@ async function generate() {
         return;
       }
       route = feasibility.route;
+      placementPreview = feasibility.preview ?? null;
       routeResolvedAgainstFinalRequest = sourcePreprocessed;
     }
     if (!sourcePreprocessed) {
@@ -3423,7 +3451,14 @@ async function generate() {
         return;
       }
       route = finalizedRoute;
+      placementPreview = finalized.kind === "route" ? (finalized.preview ?? null) : null;
     }
+    const accepted = await licenseAcceptance.request({
+      hostLabel: route.label,
+      target: route.target,
+      requirements: licenseRequirements(placementPreview?.pending_downloads),
+    });
+    if (!accepted || !submissionGuard.isCurrent(submitToken)) return;
     // Stash exact img2img/Qwen-edit bytes by the hashes the server records so
     // Reuse settings can restore local files and fitted sources later.
     // Fire-and-forget — never blocks the submit.

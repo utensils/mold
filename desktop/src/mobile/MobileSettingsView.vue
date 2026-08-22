@@ -3,6 +3,7 @@ import { onBeforeUnmount, ref, watch } from "vue";
 import { parseDeviceListResponse, setDeviceEnabled, type DeviceInfo } from "@studio/api/devices";
 import { listQueue, setQueueDevicePin, type QueuePlan } from "@studio/api/queuePlan";
 import DevicePanel from "@studio/components/DevicePanel.vue";
+import LicenseSettingsPanel from "@studio/components/LicenseSettingsPanel.vue";
 import { canMutateDevice } from "@studio/lib/deviceLifecycle";
 import { apiJsonTo } from "../lib/api/client";
 import type { ServerCapabilities } from "../lib/api/types";
@@ -330,6 +331,17 @@ onBeforeUnmount(() => {
           />
         </label>
       </fieldset>
+    </section>
+
+    <section class="mobile-settings-section" aria-labelledby="mobile-settings-license-title">
+      <div class="mobile-settings-section-copy">
+        <h2 id="mobile-settings-license-title">Model licenses</h2>
+      </div>
+      <LicenseSettingsPanel
+        :target="host ? mobileHostTarget(host) : null"
+        :host-label="host?.name ?? 'Selected host'"
+        :open-external="openExternal"
+      />
     </section>
 
     <section

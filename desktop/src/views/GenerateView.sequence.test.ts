@@ -2,11 +2,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
 import { enableAutoUnmount, flushPromises, mount } from "@vue/test-utils";
 
-const { routerPush, routerReplace, routeQuery } = vi.hoisted(() => ({
-  routerPush: vi.fn(),
-  routerReplace: vi.fn(),
-  routeQuery: { value: {} as Record<string, unknown> },
-}));
+const { routerPush, routerReplace, routeQuery, licenseRequest, placementDownloads } = vi.hoisted(
+  () => ({
+    routerPush: vi.fn(),
+    routerReplace: vi.fn(),
+    routeQuery: { value: {} as Record<string, unknown> },
+    licenseRequest: vi.fn().mockResolvedValue(true),
+    placementDownloads: { value: [] as unknown[] },
+  }),
+);
 vi.mock("vue-router", () => ({
   useRouter: () => ({ push: routerPush, replace: routerReplace }),
   useRoute: () => ({ query: routeQuery.value }),
@@ -23,6 +27,35 @@ vi.mock("../lib/api/client", () => ({
   ApiError: class ApiError extends Error {
     status = 0;
   },
+}));
+vi.mock("@studio/api/generationPlacement", async (importOriginal) => {
+  const original = await importOriginal<typeof import("@studio/api/generationPlacement")>();
+  const planned = () =>
+    Promise.resolve({
+      version: 1,
+      authoritative: true,
+      state_version: 1,
+      plan_version: 1,
+      outcome: "planned",
+      candidate: {
+        device_id: "local",
+        execution_fingerprint: "sequence-test",
+        predicted_start_after_ms: 0,
+        predicted_completion_after_ms: 1,
+        setup_ms: 0,
+        setup_kind: "warm",
+        estimate_confidence: "high",
+      },
+      pending_downloads: placementDownloads.value,
+    });
+  return {
+    ...original,
+    previewGenerationPlacement: vi.fn(planned),
+    previewChainPlacement: vi.fn(planned),
+  };
+});
+vi.mock("@studio/composables/useLicenseAcceptance", () => ({
+  useLicenseAcceptance: () => ({ request: licenseRequest }),
 }));
 vi.mock("../lib/ipc", () => ({
   inTauri: () => false,
@@ -99,6 +132,8 @@ beforeEach(() => {
   routerPush.mockClear();
   routerReplace.mockClear();
   routeQuery.value = {};
+  licenseRequest.mockReset().mockResolvedValue(true);
+  placementDownloads.value = [];
   installedPayload = [];
   apiJson.mockReset();
   apiJson.mockImplementation((path: unknown) =>
@@ -114,6 +149,24 @@ beforeEach(() => {
   apiJsonTo.mockImplementation((_target: unknown, path: unknown) => {
     if (path === "/api/chain-jobs") return Promise.resolve({ jobs: [] });
     if (path === "/api/models") return Promise.resolve(installedPayload);
+    if (path === "/api/generate/placement-preview") {
+      return Promise.resolve({
+        version: 1,
+        authoritative: true,
+        state_version: 1,
+        plan_version: 1,
+        outcome: "planned",
+        candidate: {
+          device_id: "local",
+          execution_fingerprint: "sequence-test",
+          predicted_start_after_ms: 0,
+          predicted_completion_after_ms: 1,
+          setup_ms: 0,
+          setup_kind: "warm",
+          estimate_confidence: "high",
+        },
+      });
+    }
     return Promise.resolve({});
   });
   window.localStorage?.clear?.();
@@ -121,6 +174,68 @@ beforeEach(() => {
 afterEach(() => (document.body.innerHTML = ""));
 
 describe("GenerateView — sequence output", () => {
+  it("queues nothing on license cancel and resumes exactly once after acceptance", async () => {
+    readyLocal();
+    installedPayload = [videoModel];
+    useModelStore().all = [videoModel];
+    useGenerateFormStore().form.model = videoModel.name;
+    const draft = useSequenceDraftStore();
+    draft.output = "sequence";
+    draft.ensureClips(25);
+    draft.clips[0]!.prompt = "opening shot";
+    draft.clips[1]!.prompt = "closing shot";
+    placementDownloads.value = [
+      {
+        kind: "future_runtime",
+        name: "future-runtime.bin",
+        repo: "future/repository",
+        bytes: 1024,
+        install_model: "future-video-assets",
+        licenses: [
+          {
+            id: "future-video-license",
+            name: "Future video terms",
+            url: "https://example.test/pinned",
+            canonical: "https://example.test/project",
+            sha256: "c".repeat(64),
+            summary: "Research use only.",
+          },
+        ],
+      },
+    ];
+    licenseRequest.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    apiFetchTo.mockResolvedValue(Response.json({ job_id: "licensed-sequence" }));
+
+    const wrapper = mountView();
+    await flushPromises();
+    const composer = wrapper.findComponent({ name: "SequenceComposer" });
+    apiJsonTo.mockClear();
+    composer.vm.$emit("submit");
+    await flushPromises();
+    await vi.waitFor(() => expect(licenseRequest).toHaveBeenCalledTimes(1));
+    expect(
+      apiFetchTo.mock.calls.filter(
+        ([, path, init]) =>
+          path === "/api/chain-jobs" && (init as RequestInit | undefined)?.method === "POST",
+      ),
+    ).toHaveLength(0);
+
+    composer.vm.$emit("submit");
+    await flushPromises();
+    await vi.waitFor(() => expect(licenseRequest).toHaveBeenCalledTimes(2));
+    expect(
+      apiFetchTo.mock.calls.filter(
+        ([, path, init]) =>
+          path === "/api/chain-jobs" && (init as RequestInit | undefined)?.method === "POST",
+      ),
+    ).toHaveLength(1);
+    expect(licenseRequest).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        requirements: [expect.objectContaining({ installModel: "future-video-assets" })],
+      }),
+    );
+  });
+
   it("offers Save image, Use as source, and Copy file path on a completed still", async () => {
     readyLocal();
     installedPayload = [imageModel];

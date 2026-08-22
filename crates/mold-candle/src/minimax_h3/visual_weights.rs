@@ -536,7 +536,18 @@ fn diffusers_to_comfy_direct_key(target: &str) -> String {
 }
 
 pub fn inspect_safetensors_header(path: &Path) -> Result<SafetensorsHeader> {
-    let identity = visual_weight_file_identity(path)?;
+    // A retained staging descriptor must stay descriptor-bound. Canonicalizing
+    // `/dev/fd/N` on macOS either fails or resolves it back through the
+    // replaceable staging pathname, defeating both portability and the inode
+    // fence the caller deliberately retained (#1296).
+    let descriptor_bound = path.parent().is_some_and(|parent| {
+        parent == Path::new("/dev/fd") || parent == Path::new("/proc/self/fd")
+    });
+    let identity = if descriptor_bound {
+        visual_weight_file_identity_from_descriptor(path)?
+    } else {
+        visual_weight_file_identity(path)?
+    };
     inspect_safetensors_header_for_identity(&identity)
 }
 

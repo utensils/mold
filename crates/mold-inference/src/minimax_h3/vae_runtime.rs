@@ -6,7 +6,7 @@
 //! Comfy task manifest. Each source is opened and identity-fenced exactly once.
 //! The two weight files are authenticated while being copied into one private,
 //! bounded staging directory; Candle may reopen only those private copies.
-//! Both CUDA-resident models finish construction before staging is removed.
+//! Both accelerator-resident models finish construction before staging is removed.
 
 use std::collections::BTreeSet;
 use std::fs::{File, OpenOptions};
@@ -262,11 +262,10 @@ impl FrozenH3ComfyVaeLoadPlan {
             || manifest.name != model
             || manifest.family != contract::FAMILY
             || manifest_authority.layout != contract::Layout::ComfyPrunedInt8ConvrotNvfp4Awq
-            || manifest_authority.runtime_available
+            || (!cfg!(feature = "h3") && manifest_authority.runtime_available)
         {
             return Err(H3ComfyVaeLoadError::InvalidPlan(
-                "private H3 VAE storage resolution requires an exact inactive compact manifest"
-                    .into(),
+                "private H3 VAE storage resolution requires an exact compact manifest".into(),
             ));
         }
         let path_for = |role: H3ComfyVaeArtifactRole| -> LoadResult<PathBuf> {
@@ -488,12 +487,15 @@ impl FrozenH3ComfyVaeLoadPlan {
         Ok(plan)
     }
 
-    fn requires_cuda(&self) -> bool {
+    fn supports_device(&self, device: &Device) -> bool {
+        if device.is_cuda() || device.is_metal() {
+            return true;
+        }
         #[cfg(test)]
         if self.synthetic {
-            return false;
+            return true;
         }
-        true
+        false
     }
 }
 
@@ -848,9 +850,9 @@ pub(crate) fn load_h3_comfy_vae_runtime_from_authority(
     observer: &mut dyn H3ComfyVaeLoadObserver,
 ) -> LoadResult<H3ComfyVaeRuntimeBundle> {
     authority.validate()?;
-    if authority.plan.requires_cuda() && !device.is_cuda() {
+    if !authority.plan.supports_device(device) {
         return Err(H3ComfyVaeLoadError::InvalidPlan(
-            "production Comfy VAE construction requires the frozen CUDA route".into(),
+            "production Comfy VAE construction requires the frozen CUDA or Metal route".into(),
         ));
     }
     let H3AuthenticatedComfyVaeAuthority {
@@ -1520,7 +1522,7 @@ impl VaeFactory for ProductionVaeFactory {
         };
         // SAFETY: `weight_path` is a read-only file inside the loader's private
         // staging directory. That directory remains owned until construction
-        // completes, and this production path accepts CUDA only, so every
+        // completes, and this production path accepts accelerator devices, so every
         // returned parameter tensor is copied into device storage before the
         // staging directory is removed.
         let model = unsafe {
@@ -1620,9 +1622,9 @@ fn load_with_factory<F: VaeFactory>(
     factory: &mut F,
 ) -> LoadResult<H3ComfyVaeRuntimeBundle<F::Visual, F::Audio>> {
     plan.validate()?;
-    if plan.requires_cuda() && !device.is_cuda() {
+    if !plan.supports_device(device) {
         return Err(H3ComfyVaeLoadError::InvalidPlan(
-            "production Comfy VAE construction requires the frozen CUDA route".into(),
+            "production Comfy VAE construction requires the frozen CUDA or Metal route".into(),
         ));
     }
     let mut opened = Vec::with_capacity(H3ComfyVaeArtifactRole::ALL.len());
@@ -3312,6 +3314,14 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let staged = StagedWeights::create(&plan, &mut opened, &mut observer).unwrap();
+        let descriptor_header_error =
+            inspect_safetensors_header(staged.path(H3ComfyVaeArtifactRole::VisualWeights).unwrap())
+                .unwrap_err()
+                .to_string();
+        assert!(
+            !descriptor_header_error.contains("No such file or directory"),
+            "descriptor-aware header inspection must reach the retained bytes: {descriptor_header_error}"
+        );
         let target = staged
             .storage_path(H3ComfyVaeArtifactRole::VisualWeights)
             .unwrap()

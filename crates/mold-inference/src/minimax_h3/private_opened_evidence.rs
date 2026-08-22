@@ -499,9 +499,9 @@ fn private_comfy_manifest(task: Task) -> Result<&'static ModelManifest> {
         || manifest.family != contract::FAMILY
         || manifest_contract.task != task
         || manifest_contract.layout != Layout::ComfyPrunedInt8ConvrotNvfp4Awq
-        || manifest_contract.runtime_available
+        || (!cfg!(feature = "h3") && manifest_contract.runtime_available)
     {
-        bail!("private H3 storage requires the exact inactive {expected_model} Comfy manifest")
+        bail!("private H3 storage requires the exact {expected_model} Comfy manifest")
     }
     Ok(manifest)
 }

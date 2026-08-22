@@ -145,6 +145,33 @@ pub fn require_model_activation(
     }
 }
 
+/// Validate one exact source-controlled manifest for runtime use.
+///
+/// A reviewed H3 manifest deliberately contains raw upstream repository and
+/// filename identities that remain forbidden as caller-selected models. Those
+/// locators are safe only when the manifest is the exact static registry
+/// object; a clone or caller-authored lookalike must not self-authorize.
+pub fn require_registered_manifest_activation(
+    manifest: &crate::manifest::ModelManifest,
+) -> Result<(), ModelActivationError> {
+    require_model_activation(&manifest.name, Some(&manifest.family))?;
+    let contains_gated_source = manifest.files.iter().any(|file| {
+        require_model_activation(&file.hf_repo, Some(&manifest.family)).is_err()
+            || require_model_activation(&file.hf_filename, Some(&manifest.family)).is_err()
+    });
+    if !contains_gated_source {
+        return Ok(());
+    }
+    let registered = crate::manifest::find_manifest(&manifest.name);
+    if is_reviewed_minimax_h3_model(&manifest.name)
+        && registered.is_some_and(|registered| std::ptr::eq(registered, manifest))
+    {
+        Ok(())
+    } else {
+        Err(ModelActivationError)
+    }
+}
+
 /// Return the activation state for one concrete model artifact path.
 ///
 /// `artifact_root` is a caller-owned trust boundary such as
@@ -210,7 +237,7 @@ fn is_minimax_h3_identity(value: &str) -> bool {
 
 fn is_reviewed_minimax_h3_acquisition_identity(value: &str) -> bool {
     let normalized = value.trim().to_ascii_lowercase();
-    normalized == "minimax-h3" || minimax_h3::is_reviewed_compact_model(&normalized)
+    minimax_h3::resolve_model_name(&normalized).is_some()
 }
 
 pub fn is_reviewed_minimax_h3_model(value: &str) -> bool {
@@ -318,6 +345,19 @@ mod tests {
             model_activation("minimax-h3", Some("minimax-h3")),
             ModelActivation::ComplianceGated
         );
+
+        for official in [minimax_h3::FL2VA_OFFICIAL, minimax_h3::REF2VA_OFFICIAL] {
+            assert_eq!(
+                model_acquisition(official, Some("minimax-h3")),
+                ModelActivation::Available,
+                "{official}"
+            );
+            assert_eq!(
+                model_activation(official, Some("minimax-h3")),
+                ModelActivation::ComplianceGated,
+                "{official}"
+            );
+        }
 
         for unreviewed in [
             "hf:Comfy-Org/MiniMax-H3",
@@ -436,6 +476,16 @@ mod tests {
                 ModelActivation::Available
             );
         }
+        for official in [minimax_h3::FL2VA_OFFICIAL, minimax_h3::REF2VA_OFFICIAL] {
+            assert_eq!(
+                model_acquisition(official, Some("minimax-h3")),
+                ModelActivation::Available
+            );
+            assert_eq!(
+                model_activation(official, Some("minimax-h3")),
+                ModelActivation::ComplianceGated
+            );
+        }
         for unreviewed in [
             "hf:Comfy-Org/MiniMax-H3",
             "minimax-h3:custom",
@@ -446,5 +496,19 @@ mod tests {
                 ModelActivation::ComplianceGated
             );
         }
+    }
+
+    #[test]
+    fn only_the_registered_h3_manifest_may_bind_its_raw_sources() {
+        let registered = crate::manifest::find_manifest(minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P)
+            .expect("reviewed H3 Turbo manifest");
+        require_registered_manifest_activation(registered)
+            .expect("the exact source-controlled manifest must activate");
+
+        let copied = registered.clone();
+        assert!(require_registered_manifest_activation(&copied).is_err());
+        assert!(
+            require_model_activation("hf:Comfy-Org/MiniMax-H3", Some(minimax_h3::FAMILY),).is_err()
+        );
     }
 }

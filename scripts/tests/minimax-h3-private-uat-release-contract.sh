@@ -437,8 +437,8 @@ require_text crates/mold-inference/src/minimax_h3/private_server.rs \
   'let phase_owner = bind_private_comfy_fl2va_phase_owner(' \
   "private H3 server facade does not bind its prepared evidence into the singular phase owner"
 require_text crates/mold-inference/src/minimax_h3/private_server.rs \
-  'let cuda_device = commit_private_h3_allocation_then(&mut allocation_commit, || {' \
-  "private H3 server facade does not commit the scheduler allocation before CUDA construction"
+  'commit_private_h3_allocation_then(&mut allocation_commit, || {' \
+  "private H3 server facade does not commit the scheduler allocation before execution-device construction"
 require_text crates/mold-inference/src/minimax_h3/private_server.rs \
   'let mut attempt = CudaExecutionAttempt::begin_unbound()' \
   "private H3 server facade does not install containment before CUDA context construction"

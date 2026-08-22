@@ -150,12 +150,7 @@ fn require_manifest_model_activation(id: &str) -> Result<()> {
     let Some(manifest) = mold_core::manifest::find_manifest(id) else {
         return Ok(());
     };
-    mold_core::require_model_activation(&manifest.name, Some(&manifest.family))?;
-    for file in &manifest.files {
-        mold_core::require_model_activation(&file.hf_repo, Some(&manifest.family))?;
-        mold_core::require_model_activation(&file.hf_filename, Some(&manifest.family))?;
-    }
-    Ok(())
+    mold_core::require_registered_manifest_activation(manifest).map_err(anyhow::Error::new)
 }
 
 fn require_configured_model_activation(config: &Config, id: &str) -> Result<()> {

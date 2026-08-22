@@ -292,17 +292,25 @@ pub(crate) fn advertised_h3_private_capability(
             .devices
             .iter()
             .filter(|device| {
-                device.backend == mold_core::GpuBackend::Cuda
-                    && device.schedulable
+                matches!(
+                    device.backend,
+                    mold_core::GpuBackend::Cuda | mold_core::GpuBackend::Metal
+                ) && device.schedulable
                     && device.ordinal.is_some()
-                    && device.compute_capability.is_some()
             })
             .filter_map(|device| {
-                let (major, minor) = device.compute_capability.as_deref()?.split_once('.')?;
+                let compute_capability = match device.backend {
+                    mold_core::GpuBackend::Cuda => {
+                        let (major, minor) =
+                            device.compute_capability.as_deref()?.split_once('.')?;
+                        Some((major.parse().ok()?, minor.parse().ok()?))
+                    }
+                    mold_core::GpuBackend::Metal => None,
+                };
                 Some(mold_inference::H3PrivatePresentationRoute {
                     device_id: &device.id,
                     device_ordinal: device.ordinal?,
-                    compute_capability: (major.parse().ok()?, minor.parse().ok()?),
+                    compute_capability,
                 })
             })
             .collect::<Vec<_>>();
@@ -527,8 +535,8 @@ fn build_fl2va_capability(models_root: &std::path::Path) -> Option<mold_core::Mi
     Some(mold_core::MiniMaxH3Capability {
         runtime_available: true,
         qualification: mold_core::MiniMaxH3QualificationCapability {
-            backend: "cuda".into(),
-            metal_supported: false,
+            backend: "cuda-or-metal".into(),
+            metal_supported: true,
             minimum_host_ram_bytes: crate::h3_admission::H3_CURATED_HOST_RAM_RECOMMENDATION_BYTES,
             // Measured bounds from the first real FL2VA render (2026-08-19,
             // hal9000 RTX 4090 SM89, 1216 s) cut the denoise workspace caps
@@ -546,7 +554,9 @@ fn build_fl2va_capability(models_root: &std::path::Path) -> Option<mold_core::Mi
             // has actually rendered, not before. Admission gates on the exact
             // per-attempt budget regardless; this tier is advisory.
             minimum_vram_bytes: 24 * 1024 * 1024 * 1024,
-            attention_profile: "FlashAttention v2 BF16 on exact CUDA SM89".into(),
+            attention_profile:
+                "FlashAttention v2 BF16 on CUDA SM89; chunked dense BF16 correctness on Metal"
+                    .into(),
             quantization_profile: "Comfy pruned INT8-convrot + Qwen NVFP4-AWQ".into(),
         },
         partitions: vec![mold_core::MiniMaxH3PartitionCapability {
@@ -1510,9 +1520,7 @@ pub(crate) fn prepare_for_owner(
             .as_ref()
             .map(crate::reference_uploads::ResolvedReferenceSet::fingerprint),
     )?;
-    let compute_capability = worker.gpu.compute_capability.ok_or_else(|| {
-        "MiniMax H3 preparation requires exact CUDA compute capability".to_string()
-    })?;
+    let compute_capability = worker.gpu.compute_capability;
     let device_id = crate::scheduler::worker_device_id(worker);
     let admission_evidence = prepared_inputs
         .h3_private_admission_by_device
@@ -1707,16 +1715,16 @@ fn private_uat_path(name: &str, fallback: std::path::PathBuf) -> std::path::Path
 fn validate_private_h3_live_owner_route(
     expected_device_id: &str,
     expected_device_ordinal: usize,
-    expected_compute_capability: (u16, u16),
+    expected_compute_capability: Option<(u16, u16)>,
     actual_device_id: &str,
     actual_device_ordinal: usize,
-    actual_compute_capability: (u16, u16),
+    actual_compute_capability: Option<(u16, u16)>,
 ) -> Result<(), String> {
     if expected_device_id != actual_device_id
         || expected_device_ordinal != actual_device_ordinal
         || expected_compute_capability != actual_compute_capability
     {
-        return Err("MiniMax H3 CUDA route changed after allocation-free admission".to_string());
+        return Err("MiniMax H3 GPU route changed after allocation-free admission".to_string());
     }
     Ok(())
 }
@@ -1866,8 +1874,8 @@ mod tests {
             .expect("complete manifest projection must advertise");
 
         assert!(capability.runtime_available);
-        assert_eq!(capability.qualification.backend, "cuda");
-        assert!(!capability.qualification.metal_supported);
+        assert_eq!(capability.qualification.backend, "cuda-or-metal");
+        assert!(capability.qualification.metal_supported);
         assert_eq!(capability.partitions.len(), 1);
         assert_eq!(capability.partitions[0].task, "fl2va");
         assert_eq!(
@@ -2160,7 +2168,7 @@ mod structural_tests {
             .components
             .iter()
             .all(|component| component.state == "installed"));
-        assert!(!capability.qualification.metal_supported);
+        assert!(capability.qualification.metal_supported);
     }
 
     fn request(model: &str) -> mold_core::GenerateRequest {
@@ -2535,11 +2543,24 @@ mod structural_tests {
 
     #[test]
     fn private_owner_route_rejects_changed_compute_capability() {
-        super::validate_private_h3_live_owner_route("cuda:0", 0, (8, 9), "cuda:0", 0, (8, 9))
-            .expect("unchanged live route must validate");
-        let error =
-            super::validate_private_h3_live_owner_route("cuda:0", 0, (8, 9), "cuda:0", 0, (9, 0))
-                .expect_err("changed compute capability must fail the second owner fence");
-        assert!(error.contains("CUDA route changed"));
+        super::validate_private_h3_live_owner_route(
+            "cuda:0",
+            0,
+            Some((8, 9)),
+            "cuda:0",
+            0,
+            Some((8, 9)),
+        )
+        .expect("unchanged live route must validate");
+        let error = super::validate_private_h3_live_owner_route(
+            "cuda:0",
+            0,
+            Some((8, 9)),
+            "cuda:0",
+            0,
+            Some((9, 0)),
+        )
+        .expect_err("changed compute capability must fail the second owner fence");
+        assert!(error.contains("GPU route changed"));
     }
 }

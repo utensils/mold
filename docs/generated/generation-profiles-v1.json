@@ -16051,7 +16051,7 @@
         {
           "model": "minimax-h3-fl2va:official-bf16",
           "family": "minimax-h3",
-          "hidden": true
+          "hidden": false
         }
       ],
       "profile": {
@@ -16431,7 +16431,7 @@
         {
           "model": "minimax-h3-ref2va:official-bf16",
           "family": "minimax-h3",
-          "hidden": true
+          "hidden": false
         }
       ],
       "profile": {

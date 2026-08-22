@@ -225,7 +225,7 @@
           # feature implies neither CUDA nor the SM89 attention kernel, and
           # `h3-cuda` implies `cuda` so it replaces the device feature.
           desktopFeatureFor =
-            computeCap: if isLinux then if computeCap == "89" then "h3-cuda" else "cuda" else "metal";
+            computeCap: if isLinux then if computeCap == "89" then "h3-cuda" else "cuda" else "metal,h3";
           # The desktop app's complete feature recipe. `pulid` rides every
           # desktop build for the same reason it rides every `mold` release
           # recipe (#1223): the embedded This-device server advertises
@@ -265,7 +265,7 @@
                 if computeCap == "89" then "h3-cuda" else "cuda"
               },preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid"
             else if gpuFeature != "" then
-              "${gpuFeature},preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid"
+              "${gpuFeature},h3,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid"
             else
               "preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid";
 

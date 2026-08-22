@@ -68,16 +68,12 @@ impl H3FactoryComponentAuthority {
 
 /// Where the scheduler placed the Qwen conditioner for one frozen attempt.
 ///
-/// `AssignedCudaThenDrop` is CUDA-named on purpose and is NOT auto-mapped onto
-/// Apple Silicon. A Metal route reaches this enum with
-/// `compute_capability: None`, and silently reading a CUDA-named placement as
-/// `MetalResident` would freeze a plan whose recorded intent nobody wrote --
-/// so the pair is refused at construction instead (#1164). A Metal
-/// device-resident conditioner needs its own variant, added when Metal
-/// execution is qualified and something actually places one.
+/// CUDA and Metal use distinct device-resident variants so a frozen authority
+/// can never silently cross backend classes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum H3FactoryConditionerPlacement {
     AssignedCudaThenDrop,
+    AssignedMetalThenDrop,
     HostCpuThenDrop,
 }
 
@@ -1432,7 +1428,8 @@ impl H3FactoryPreparedAttemptAuthority {
             || self.target_budget.qwen_retained_header_host_bytes
                 != projection.qwen_retained_raw_header_bytes
             || match projection.conditioner_placement {
-                H3FactoryConditionerPlacement::AssignedCudaThenDrop => {
+                H3FactoryConditionerPlacement::AssignedCudaThenDrop
+                | H3FactoryConditionerPlacement::AssignedMetalThenDrop => {
                     self.target_budget.qwen_activation_device_bytes
                         != projection.qwen_activation_workspace_bytes
                 }
@@ -2615,7 +2612,8 @@ fn validate_target_budget(
         "H3 VAE load phase",
     )?;
     let qwen_encode = match conditioner_placement {
-        H3FactoryConditionerPlacement::AssignedCudaThenDrop => checked_u64_sum(
+        H3FactoryConditionerPlacement::AssignedCudaThenDrop
+        | H3FactoryConditionerPlacement::AssignedMetalThenDrop => checked_u64_sum(
             [
                 memory.fixed_runtime_device_bytes,
                 retained_vaes,
@@ -2631,7 +2629,8 @@ fn validate_target_budget(
         )?,
     };
     let qwen_transfer = match conditioner_placement {
-        H3FactoryConditionerPlacement::AssignedCudaThenDrop => 0,
+        H3FactoryConditionerPlacement::AssignedCudaThenDrop
+        | H3FactoryConditionerPlacement::AssignedMetalThenDrop => 0,
         H3FactoryConditionerPlacement::HostCpuThenDrop => checked_u64_sum(
             [
                 memory.fixed_runtime_device_bytes,
@@ -3168,7 +3167,8 @@ fn validate_target_budget(
         predicted_device
     );
     match conditioner_placement {
-        H3FactoryConditionerPlacement::AssignedCudaThenDrop => {
+        H3FactoryConditionerPlacement::AssignedCudaThenDrop
+        | H3FactoryConditionerPlacement::AssignedMetalThenDrop => {
             expect!(
                 "qwen_host_parameter_bytes (cuda placement)",
                 memory.qwen_host_parameter_bytes != 0
@@ -3940,6 +3940,7 @@ impl FrozenH3FactoryAuthority {
     pub fn new_contract_only(input: H3FactoryAuthorityInput) -> Result<Self> {
         let model_contract = contract::capability_contract_for_model(&input.model)
             .ok_or_else(|| anyhow!("{:?} has no MiniMax H3 capability contract", input.model))?;
+        #[cfg(not(feature = "h3"))]
         if model_contract.generation.runtime_available {
             bail!(
                 "contract-only MiniMax H3 factory authority cannot be created for a runnable contract"
@@ -4114,27 +4115,28 @@ impl FrozenH3FactoryAuthority {
                 })
                 .collect::<Result<Vec<_>>>()?,
         )?;
-        // A CUDA-named placement on a route with no compute capability is a
-        // Metal route wearing a CUDA plan: the conditioner would freeze as
-        // `CudaResident`, hash into the authority identity as `qwen-cuda`, and
-        // then be validated only for device-id equality -- which a Metal
-        // device id satisfies. Refuse it rather than translate it.
         if input.compute_capability.is_none()
             && input.conditioner_placement == H3FactoryConditionerPlacement::AssignedCudaThenDrop
         {
-            bail!(
-                "MiniMax H3 Metal route cannot freeze the CUDA-assigned conditioner placement; \
-                 Metal has no device-resident conditioner placement yet"
-            );
+            bail!("MiniMax H3 CUDA conditioner placement does not match its frozen Metal backend");
+        }
+        if input.compute_capability.is_some()
+            && input.conditioner_placement == H3FactoryConditionerPlacement::AssignedMetalThenDrop
+        {
+            bail!("MiniMax H3 Metal conditioner placement does not match its frozen CUDA backend");
         }
         let conditioner_execution = match input.conditioner_placement {
             H3FactoryConditionerPlacement::AssignedCudaThenDrop => {
                 H3ConditionerExecution::CudaResident
             }
+            H3FactoryConditionerPlacement::AssignedMetalThenDrop => {
+                H3ConditionerExecution::MetalResident
+            }
             H3FactoryConditionerPlacement::HostCpuThenDrop => H3ConditionerExecution::CpuOffloaded,
         };
         let conditioner_device = match input.conditioner_placement {
-            H3FactoryConditionerPlacement::AssignedCudaThenDrop => input.device_id.clone(),
+            H3FactoryConditionerPlacement::AssignedCudaThenDrop
+            | H3FactoryConditionerPlacement::AssignedMetalThenDrop => input.device_id.clone(),
             H3FactoryConditionerPlacement::HostCpuThenDrop => "cpu".to_string(),
         };
         let conditioner_placement = FrozenH3ConditionerPlacement::new(
@@ -4618,7 +4620,7 @@ impl FrozenH3FactoryAuthority {
         self.validate_frozen()?;
         let request_contract = contract::capability_contract_for_model(model)
             .ok_or_else(|| anyhow!("{model:?} has no MiniMax H3 capability contract"))?;
-        if request_contract.canonical_model != self.canonical_model()
+        if !media_model_matches_h3_authority(model, self)
             || request_contract.task != self.task()
             || gpu_ordinal != self.device_ordinal
             || offload != self.block_offload
@@ -4757,7 +4759,7 @@ impl FrozenH3FactoryAuthority {
         let request_contract = contract::capability_contract_for_model(model)
             .ok_or_else(|| anyhow!("{model:?} has no MiniMax H3 capability contract"))?;
         if !contract::is_family(family)
-            || request_contract.canonical_model != self.canonical_model()
+            || !media_model_matches_h3_authority(model, self)
             || request_contract.task != self.task()
             || gpu_ordinal != self.device_ordinal
             || offload != self.block_offload
@@ -4799,6 +4801,7 @@ fn frozen_identity(authority: &FrozenH3FactoryAuthority) -> String {
     hash.update(authority.device_ordinal.to_le_bytes());
     hash.update(match authority.conditioner_placement {
         H3FactoryConditionerPlacement::AssignedCudaThenDrop => b"qwen-cuda".as_slice(),
+        H3FactoryConditionerPlacement::AssignedMetalThenDrop => b"qwen-metal".as_slice(),
         H3FactoryConditionerPlacement::HostCpuThenDrop => b"qwen-cpu".as_slice(),
     });
     hash.update(authority.qwen_parameter_bytes.to_le_bytes());
@@ -6801,6 +6804,15 @@ mod tests {
             contract::FL2VA_COMFY_TURBO_4STEP_768P,
             &frozen
         ));
+        assert!(frozen
+            .validate_engine_seam(contract::FL2VA_COMFY_TURBO_4STEP_768P, 0, true)
+            .is_ok());
+        assert_eq!(
+            frozen
+                .validate_engine_seam(contract::FL2VA_COMFY, 0, true)
+                .is_ok(),
+            cfg!(feature = "h3-private-uat")
+        );
         assert!(!media_model_matches_h3_authority(
             contract::FL2VA_COMFY_TURBO_8STEP,
             &frozen

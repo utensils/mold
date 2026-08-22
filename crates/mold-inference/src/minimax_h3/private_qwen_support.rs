@@ -329,9 +329,9 @@ fn production_support_contracts(model: &str) -> Result<Vec<SupportFileContract>>
         || manifest.family != contract::FAMILY
         || manifest_authority.task != task
         || manifest_authority.layout != Layout::ComfyPrunedInt8ConvrotNvfp4Awq
-        || manifest_authority.runtime_available
+        || (!cfg!(feature = "h3") && manifest_authority.runtime_available)
     {
-        bail!("private H3 Qwen support requires the exact inactive Comfy manifest")
+        bail!("private H3 Qwen support requires the exact Comfy manifest")
     }
 
     let mut contracts = Vec::with_capacity(SupportRole::ALL.len());

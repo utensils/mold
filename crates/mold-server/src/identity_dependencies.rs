@@ -434,6 +434,23 @@ mod tests {
 
         let downloads = prepared.pending_downloads_for_device("cuda:0");
         assert_eq!(downloads.len(), 5, "{downloads:?}");
+        assert!(downloads
+            .iter()
+            .all(|download| download.install_model.as_deref() == Some("pulid-flux")));
+        let licensed_files = downloads
+            .iter()
+            .filter(|download| !download.licenses.is_empty())
+            .map(|download| download.name.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            licensed_files,
+            std::collections::BTreeSet::from(["glintr100.onnx", "scrfd_10g_bnkps.onnx"])
+        );
+        assert!(downloads.iter().all(|download| {
+            download.licenses.is_empty()
+                || (download.licenses.len() == 1
+                    && download.licenses[0].id == "insightface-antelopev2")
+        }));
         let by_kind = downloads
             .iter()
             .map(|download| {
