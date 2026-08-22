@@ -10436,6 +10436,10 @@ describe("MobileApp identity photo", () => {
 
     await wrapper.get("[data-test='identity-well']").trigger("click");
     expect(wrapper.get("[data-test='mobile-identity-picker']").classes()).toContain("is-open");
+    expect(well().props("touchTargetSize")).toBe(48);
+    expect(wrapper.get("[data-test='mobile-identity-picker']").attributes("style")).toContain(
+      "--mobile-sheet-touch-target: 48px",
+    );
     await wrapper.get("[data-test='mobile-identity-pick-library']").trigger("click");
     await flushPromises();
 
