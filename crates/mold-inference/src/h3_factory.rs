@@ -4618,7 +4618,7 @@ impl FrozenH3FactoryAuthority {
         self.validate_frozen()?;
         let request_contract = contract::capability_contract_for_model(model)
             .ok_or_else(|| anyhow!("{model:?} has no MiniMax H3 capability contract"))?;
-        if request_contract.canonical_model != self.canonical_model()
+        if !media_model_matches_h3_authority(model, self)
             || request_contract.task != self.task()
             || gpu_ordinal != self.device_ordinal
             || offload != self.block_offload
@@ -4757,7 +4757,7 @@ impl FrozenH3FactoryAuthority {
         let request_contract = contract::capability_contract_for_model(model)
             .ok_or_else(|| anyhow!("{model:?} has no MiniMax H3 capability contract"))?;
         if !contract::is_family(family)
-            || request_contract.canonical_model != self.canonical_model()
+            || !media_model_matches_h3_authority(model, self)
             || request_contract.task != self.task()
             || gpu_ordinal != self.device_ordinal
             || offload != self.block_offload
@@ -6802,6 +6802,12 @@ mod tests {
             contract::FL2VA_COMFY_TURBO_4STEP_768P,
             &frozen
         ));
+        assert!(frozen
+            .validate_engine_seam(contract::FL2VA_COMFY_TURBO_4STEP_768P, 0, true)
+            .is_ok());
+        assert!(frozen
+            .validate_engine_seam(contract::FL2VA_COMFY, 0, true)
+            .is_err());
         assert!(!media_model_matches_h3_authority(
             contract::FL2VA_COMFY_TURBO_8STEP,
             &frozen
