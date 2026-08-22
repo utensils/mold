@@ -6297,9 +6297,7 @@ const libraryFilterTags = computed(() => {
     excluded.map((print) => organizationOf(print) ?? { tags: [] }),
   );
 });
-const libraryTagChips = computed(() =>
-  tagChipPlan(libraryFilterTags.value, libraryFilters.tag),
-);
+const libraryTagChips = computed(() => tagChipPlan(libraryFilterTags.value, libraryFilters.tag));
 
 const libraryHostChips = computed(() =>
   connectedHosts.value.length > 1

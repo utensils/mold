@@ -543,8 +543,7 @@ export const useGalleryStore = defineStore("gallery", {
           .map((collection) => collection.slug),
       );
       const organizationOf = this.organizationOf;
-      return (entry) =>
-        !organizationOf(entry).collections.some((slug) => hiddenSlugs.has(slug));
+      return (entry) => !organizationOf(entry).collections.some((slug) => hiddenSlugs.has(slug));
     },
     /** Logical prints available to default filter-chip counts. */
     basePrints(): MergedPrint[] {
@@ -661,8 +660,7 @@ export const useGalleryStore = defineStore("gallery", {
       const tagKeys = this.tagFilter.map((t) => tagKey(t)).filter((k) => k.length > 0);
       const slug = this.scope === "collections" ? this.collectionSlug : null;
       if (this.scope === "prints") entries = entries.filter(this.visibleInDefaultLibrary);
-      if (!wantsFavorites && tagKeys.length === 0 && !slug)
-        return entries;
+      if (!wantsFavorites && tagKeys.length === 0 && !slug) return entries;
       const organizationOf = this.organizationOf;
       entries = entries.filter((entry) => {
         const org = organizationOf(entry);
