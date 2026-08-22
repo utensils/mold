@@ -1635,14 +1635,28 @@ fn validate_request_contract_with_reference_authority(
     // read 124 — so an advertised final keyframe at index 123 would be refused
     // for exceeding a duration nothing else believes in.
     let frames = req.frames.unwrap_or(REVIEWED_COMPACT_FRAMES);
-    if !valid_frame_count(frames) {
-        let mut error = violation(
-            "MINIMAX_H3_FRAME_GRID",
-            format!(
-                "MiniMax H3 frames must be {FRAME_STEP}n+{FRAME_OFFSET} from {MIN_FRAMES} through {MAX_FRAMES}; received {frames}"
+    // Model-aware, because authenticated private H3 ingress bypasses
+    // generation-profile validation: a compact request carrying the family
+    // floor would otherwise enter admission and the queue before failing
+    // against the runtime envelope, which is a refusal after the load is paid
+    // for rather than at the door.
+    if !valid_frame_count_for_model(FAMILY, &req.model, frames) {
+        let mut error = match fixed_frames_for_model(FAMILY, &req.model) {
+            Some(fixed) => violation(
+                "MINIMAX_H3_FRAME_GRID",
+                format!(
+                    "{} renders exactly {fixed} frames; received {frames}",
+                    req.model
+                ),
             ),
-        );
-        error.recommended_frames = Some(recommended_frames(frames));
+            None => violation(
+                "MINIMAX_H3_FRAME_GRID",
+                format!(
+                    "MiniMax H3 frames must be {FRAME_STEP}n+{FRAME_OFFSET} from {MIN_FRAMES} through {MAX_FRAMES}; received {frames}"
+                ),
+            ),
+        };
+        error.recommended_frames = Some(recommended_frames_for_model(FAMILY, &req.model, frames));
         return Err(error);
     }
 
@@ -2713,7 +2727,7 @@ mod tests {
             batch_index: None,
             batch_count: None,
             lora: None,
-            frames: Some(MIN_FRAMES),
+            frames: Some(REVIEWED_COMPACT_FRAMES),
             fps: Some(FIXED_FPS),
             upscale_model: None,
             gif_preview: false,
@@ -2856,7 +2870,7 @@ mod tests {
             Mode::FirstFrameToAudioVideo
         );
         req.keyframes = Some(vec![crate::KeyframeCondition {
-            frame: MIN_FRAMES - 1,
+            frame: REVIEWED_COMPACT_FRAMES - 1,
             image: vec![2],
             name: None,
         }]);
@@ -3125,7 +3139,8 @@ mod tests {
             "fps": 24.0
         }))
         .unwrap();
-        let error = reference_prepared_shape_for_target(&reference, MIN_FRAMES).unwrap_err();
+        let error =
+            reference_prepared_shape_for_target(&reference, REVIEWED_COMPACT_FRAMES).unwrap_err();
         assert_eq!(error.code, "MINIMAX_H3_REFERENCE_EXACT_VIDEO_SHAPE");
         assert_eq!(error.field, Some("frame_count"));
     }
@@ -3141,7 +3156,8 @@ mod tests {
             "channels": 2
         }))
         .unwrap();
-        let error = reference_prepared_shape_for_target(&audio, MIN_FRAMES).unwrap_err();
+        let error =
+            reference_prepared_shape_for_target(&audio, REVIEWED_COMPACT_FRAMES).unwrap_err();
         assert_eq!(error.code, "MINIMAX_H3_REFERENCE_EXACT_AUDIO_SHAPE");
         assert_eq!(error.field, Some("sample_count"));
 
@@ -3152,7 +3168,8 @@ mod tests {
         {
             *audio_sample_count = None;
         }
-        let error = reference_prepared_shape_for_target(&video, MIN_FRAMES).unwrap_err();
+        let error =
+            reference_prepared_shape_for_target(&video, REVIEWED_COMPACT_FRAMES).unwrap_err();
         assert_eq!(error.code, "MINIMAX_H3_REFERENCE_EXACT_AUDIO_SHAPE");
         assert_eq!(error.field, Some("sample_count"));
     }
@@ -3385,7 +3402,7 @@ mod tests {
         assert_eq!(error.code, "MINIMAX_H3_FRAME_GRID");
         assert_eq!(error.recommended_frames, Some(124));
 
-        req.frames = Some(MAX_FRAMES);
+        req.frames = Some(REVIEWED_COMPACT_FRAMES);
         req.width = 1056;
         req.height = 1056;
         let error = validate_request_contract(&req, Task::Fl2va).unwrap_err();

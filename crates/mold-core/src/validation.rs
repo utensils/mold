@@ -3654,7 +3654,7 @@ mod tests {
         req.width = crate::minimax_h3::DEFAULT_WIDTH;
         req.height = crate::minimax_h3::DEFAULT_HEIGHT;
         req.steps = crate::minimax_h3::DEFAULT_STEPS;
-        req.frames = Some(crate::minimax_h3::MIN_FRAMES);
+        req.frames = Some(crate::minimax_h3::REVIEWED_COMPACT_FRAMES);
         req.fps = Some(crate::minimax_h3::FIXED_FPS);
         req.output_format = Some(OutputFormat::Mp4);
         req.enable_audio = Some(true);
@@ -3687,7 +3687,7 @@ mod tests {
         let mut req = valid_h3_request(crate::minimax_h3::FL2VA_COMFY);
         req.source_image = Some(png_bytes());
         req.keyframes = Some(vec![crate::KeyframeCondition {
-            frame: crate::minimax_h3::MIN_FRAMES - 1,
+            frame: crate::minimax_h3::REVIEWED_COMPACT_FRAMES - 1,
             image: jpeg_bytes(),
             name: None,
         }]);
