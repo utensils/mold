@@ -11,6 +11,18 @@ adapter, and the FLUX attention hooks are other issues'.
 
 Code: `crates/mold-inference/src/identity/`, behind the `pulid` feature.
 
+> **Step 0's runtime choice was superseded by
+> [#1227](https://github.com/utensils/mold/issues/1227).** `candle-onnx` no
+> longer evaluates either graph at request time: `identity/scrfd_net.rs` and
+> `identity/arcface_net.rs` run them as resident `candle` modules built once
+> from the same SHA-pinned files, and `candle_onnx::simple_eval` survives only
+> as the parity oracle those modules are tested against. Everything else on this
+> page still stands — the op inventory, the pinned digests, the alignment and
+> warp goldens, the tolerances, and the deferrals — and the measured latencies
+> below remain the baselines #1227 compares against.
+> `docs/architecture/pulid-perf.md` §4 records what that swap actually bought,
+> including the part of Step 0's reasoning it falsified.
+
 ---
 
 ## Step 0 — the runtime decision

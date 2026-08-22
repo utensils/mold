@@ -20,10 +20,13 @@
 
 pub mod align;
 pub mod arcface;
+pub mod arcface_net;
 pub mod extraction;
 pub mod onnx_graph;
 pub mod onnx_inventory;
+pub mod onnx_weights;
 pub mod scrfd;
+pub mod scrfd_net;
 pub mod warp;
 
 use std::path::Path;
@@ -99,15 +102,20 @@ impl IdentityExtractor {
     /// Load the detector and recognizer from a resolved PuLID bundle.
     ///
     /// `device` is accepted for symmetry with every other engine and is
-    /// asserted, not honoured: `candle-onnx` materializes every tensor on the
-    /// CPU (see [`arcface::ArcFaceRecognizer::device`]), so a caller that
-    /// believes it placed this on a GPU would be wrong. A non-CPU request is
-    /// an explicit error rather than a silent demotion.
+    /// asserted, not honoured. Since #1227 the two networks are ordinary
+    /// resident candle modules that *could* be placed anywhere
+    /// ([`scrfd_net::ScrfdNet::new`], [`arcface_net::IResNet100::new`] both
+    /// take a device), so this is no longer an evaluator limitation — it is the
+    /// call-site contract: extraction runs at ADMISSION, before the scheduler
+    /// has leased a device, so there is no device to name yet
+    /// (`docs/architecture/pulid-perf.md` §1 and §3, which design the post-lease
+    /// phase that would lift this). A non-CPU request is an explicit error
+    /// rather than a silent demotion.
     pub fn load(paths: &PulidPaths, device: &candle_core::Device) -> Result<Self> {
         if !device.is_cpu() {
             anyhow::bail!(
-                "PuLID face extraction runs on the CPU: candle-onnx materializes every \
-                 initializer on Device::Cpu (candle-onnx/src/eval.rs:191-232)"
+                "PuLID face extraction runs on the CPU: it happens at admission, before a \
+                 device is leased (docs/architecture/pulid-perf.md)"
             );
         }
         Self::from_paths(&paths.face_detector, &paths.face_recognizer)
