@@ -73,11 +73,11 @@ MOLD_HOST=http://gpu-box:7680 mold run flux-dev:q4 "a chef in a kitchen" \
 
 ### Flags
 
-| Flag              | Default | Meaning                                                                                                                 |
-| ----------------- | ------- | ----------------------------------------------------------------------------------------------------------------------- |
-| `--id-image`      | —       | Reference photograph. PNG or JPEG, at most 16 MiB, 8192 px per axis, 32 MP.                                              |
+| Flag              | Default | Meaning                                                                                                                   |
+| ----------------- | ------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `--id-image`      | —       | Reference photograph. PNG or JPEG, at most 16 MiB, 8192 px per axis, 32 MP.                                               |
 | `--id-weight`     | `1.0`   | Identity strength, `0.0`–`3.0`. Around `0.6`–`0.8` trades likeness for prompt adherence; above `1.2` starts to look waxy. |
-| `--id-start-step` | `0`     | First denoise step identity is applied from. Must be below `--steps`.                                                    |
+| `--id-start-step` | `0`     | First denoise step identity is applied from. Must be below `--steps`.                                                     |
 
 **`--id-weight 0` is completely inert.** Nothing is pulled, decoded, loaded, or
 extracted, and the render is byte-identical to the same seed with no identity
@@ -162,16 +162,16 @@ flag.
 
 ## Licenses
 
-| Artifact                                  | License                                                                              |
-| ----------------------------------------- | ------------------------------------------------------------------------------------ |
-| `pulid_flux_v0.9.1.safetensors`           | Apache-2.0 ([guozinan/PuLID](https://huggingface.co/guozinan/PuLID))                  |
-| `EVA02_CLIP_L_336_psz14_s6B.pt`           | MIT ([QuanSun/EVA-CLIP](https://huggingface.co/QuanSun/EVA-CLIP))                     |
-| `scrfd_10g_bnkps.onnx`, `glintr100.onnx`  | InsightFace pretrained models — **non-commercial research only**                      |
-| `flux-dev:q4` / `flux-dev:q8`             | FLUX.1-dev Non-Commercial License                                                     |
+| Artifact                                 | License                                                              |
+| ---------------------------------------- | -------------------------------------------------------------------- |
+| `pulid_flux_v0.9.1.safetensors`          | Apache-2.0 ([guozinan/PuLID](https://huggingface.co/guozinan/PuLID)) |
+| `EVA02_CLIP_L_336_psz14_s6B.pt`          | MIT ([QuanSun/EVA-CLIP](https://huggingface.co/QuanSun/EVA-CLIP))    |
+| `scrfd_10g_bnkps.onnx`, `glintr100.onnx` | InsightFace pretrained models — **non-commercial research only**     |
+| `flux-dev:q4` / `flux-dev:q8`            | FLUX.1-dev Non-Commercial License                                    |
 
 Mold ships none of these; it downloads them on request, and refuses the
-InsightFace pair until acceptance is recorded. The InsightFace *code* is MIT;
-the *weights* are not, and that distinction is the reason for the gate.
+InsightFace pair until acceptance is recorded. The InsightFace _code_ is MIT;
+the _weights_ are not, and that distinction is the reason for the gate.
 
 ## Troubleshooting
 
