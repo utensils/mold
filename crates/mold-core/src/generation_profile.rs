@@ -747,7 +747,11 @@ pub fn generation_profile_for_manifest_with_defaults(
             family,
             manifest.defaults.source_image,
         ),
-        supports_audio: family == "ltx2",
+        // A family that declares its own audio contract answers here (H3
+        // always renders synchronized audio); LTX-2 keeps the optimistic
+        // family answer the server's per-checkpoint probe then narrows.
+        supports_audio: crate::catalog::declared_audio_capability(family, &manifest.name)
+            .unwrap_or(family == "ltx2"),
     })
 }
 

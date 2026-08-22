@@ -3176,6 +3176,44 @@ mod tests {
         assert_eq!(combined[0].supports_audio, Some(true));
     }
 
+    /// `/api/models` must advertise H3's synchronized audio for every
+    /// reviewed identity. The inference-side probe registry has no H3 arm on
+    /// purpose — H3 audio is a family declaration, not a checkpoint header
+    /// fact — so the row arrives pre-filled and both annotation passes must
+    /// leave it alone (#841).
+    #[test]
+    fn h3_rows_survive_the_audio_and_profile_annotation_passes() {
+        let config = Config::default();
+        let mut catalog = mold_core::catalog::build_model_catalog(&config, None, false);
+        annotate_audio_capabilities(&mut catalog, &config);
+        annotate_source_image_capabilities(&mut catalog, &config);
+        synchronize_generation_profile_capabilities(&mut catalog);
+        retain_deliverable_generation_profiles(&mut catalog);
+
+        assert!(
+            !mold_inference::audio::output_probe_registered(mold_core::minimax_h3::FAMILY),
+            "H3 audio is declared by the family, never probed from a checkpoint",
+        );
+        for model in mold_core::minimax_h3::REVIEWED_COMPACT_MODELS {
+            let entry = catalog
+                .iter()
+                .find(|entry| entry.info.name == *model)
+                .unwrap_or_else(|| panic!("{model} is missing from /api/models"));
+            assert_eq!(
+                entry.supports_audio,
+                Some(true),
+                "{model} must advertise synchronized audio",
+            );
+            assert!(entry
+                .generation_profile
+                .as_ref()
+                .unwrap()
+                .recipes
+                .iter()
+                .all(|recipe| recipe.capabilities.supports_audio));
+        }
+    }
+
     #[test]
     fn runtime_probe_refreshes_generation_profile_and_hash() {
         let mut catalog = mold_core::catalog::build_model_catalog(&Config::default(), None, false);

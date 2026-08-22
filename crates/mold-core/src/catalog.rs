@@ -125,6 +125,28 @@ pub fn chain_capable_family(family: &str) -> bool {
     matches!(family, "ltx2" | "ltx-video" | "wan")
 }
 
+/// Whether a concrete model renders an audio track, when that is settled
+/// before any checkpoint is read.
+///
+/// `None` means "not settled here" — the server's header probe
+/// (`mold_inference::audio`) still owns the answer. LTX-2 is exactly that
+/// case: a runnable video checkpoint may omit the audio VAE and vocoder, so
+/// the family cannot answer for it.
+///
+/// MiniMax H3 is not a probe question. The family declares
+/// `synchronized_audio: true` with `audio_disable_supported: false`, so every
+/// H3 render carries audio and no request or checkpoint can turn it off.
+/// Deriving the row from that one declaration is what keeps `/api/models`
+/// truthful for a client that has never heard of H3 (#841) — the alternative
+/// is every surface hard-coding the family's AV behaviour from its name.
+pub fn declared_audio_capability(family: &str, model: &str) -> Option<bool> {
+    if crate::minimax_h3::is_family(family) {
+        let task = crate::minimax_h3::task_for_model(model)?;
+        return Some(crate::minimax_h3::capabilities(task).synchronized_audio);
+    }
+    None
+}
+
 pub fn build_model_catalog(
     config: &Config,
     loaded_model: Option<&str>,
@@ -236,7 +258,10 @@ pub fn build_model_catalog(
             kind: None,
             modality: None,
             nsfw: None,
-            supports_audio: None,
+            // Settled only where the family itself declares it (H3). LTX-2
+            // and everything else stay `None` so the server's checkpoint
+            // probe remains the authority.
+            supports_audio: declared_audio_capability(&manifest.family, &manifest.name),
             // One authority: the profile this entry already advertises.
             supports_identity: Some(generation_profile.supports_identity()),
             // Wan continues a clip the way its chain seam does — the source's
@@ -348,7 +373,13 @@ pub fn build_model_catalog(
             source_image: None,
             supports_sequence: sequence_capable,
             supports_extend: extend_capable_model(&family, source_image_contract),
-            supports_audio: family == "ltx2",
+            // Same authority as the row below. A config-only entry can reach
+            // this branch for a reviewed H3 id that `find_manifest` missed
+            // (policy matches the id case-insensitively, the manifest lookup
+            // does not), and a recipe saying `false` beside a row saying
+            // `true` is worse than either alone: a client may let the profile
+            // win.
+            supports_audio: declared_audio_capability(&family, name).unwrap_or(family == "ltx2"),
         });
         let resolution = resolution_defaults_from_profile(&generation_profile);
 
@@ -396,7 +427,7 @@ pub fn build_model_catalog(
             kind: None,
             modality: None,
             nsfw: None,
-            supports_audio: None,
+            supports_audio: declared_audio_capability(&family, name),
             // One authority: the profile this entry already advertises.
             supports_identity: Some(generation_profile.supports_identity()),
             supports_extend: Some(extend_capable_model(&family, source_image_contract)),
@@ -912,6 +943,57 @@ mod tests {
         ] {
             assert!(catalog.iter().any(|entry| entry.name == model));
             crate::require_model_activation(model, Some("minimax-h3")).unwrap();
+        }
+    }
+
+    /// H3 always renders synchronized audio: the family declares
+    /// `synchronized_audio: true` with `audio_disable_supported: false`, and
+    /// no checkpoint can turn it off. Every reviewed identity must advertise
+    /// that on the row AND inside the profile recipe, so a third-party client
+    /// never has to guess the family's AV behaviour from its name (#841).
+    #[test]
+    fn h3_rows_advertise_the_families_synchronized_audio_declaration() {
+        let catalog = build_model_catalog(&Config::default(), None, false);
+
+        for model in crate::minimax_h3::REVIEWED_COMPACT_MODELS {
+            let entry = catalog
+                .iter()
+                .find(|entry| entry.info.name == *model)
+                .unwrap_or_else(|| panic!("{model} is missing from the model catalog"));
+            let task = crate::minimax_h3::task_for_model(model).unwrap();
+            let declared = crate::minimax_h3::capabilities(task).synchronized_audio;
+            assert!(declared, "{model} must declare synchronized audio");
+            assert_eq!(
+                entry.supports_audio,
+                Some(declared),
+                "{model} must advertise the declared audio capability, not null",
+            );
+            for recipe in &entry.generation_profile.as_ref().unwrap().recipes {
+                assert!(
+                    recipe.capabilities.supports_audio,
+                    "{model} recipe {} must carry the declared audio capability",
+                    recipe.id,
+                );
+            }
+        }
+    }
+
+    /// The probe-backed families keep answering `None` here: LTX-2 audio is a
+    /// checkpoint fact the server fills from safetensors headers, and a
+    /// pre-empted `Some(false)` would erase that probe.
+    #[test]
+    fn non_declaring_families_leave_audio_capability_unresolved() {
+        let catalog = build_model_catalog(&Config::default(), None, false);
+
+        for entry in catalog
+            .iter()
+            .filter(|entry| !crate::minimax_h3::is_family(&entry.info.family))
+        {
+            assert_eq!(
+                entry.supports_audio, None,
+                "{} must leave audio capability to the server probe",
+                entry.info.name,
+            );
         }
     }
 
