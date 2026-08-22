@@ -1837,4 +1837,25 @@ mod tests {
         );
         ticket.discard();
     }
+
+    /// The plural wire shape is the SAME photograph, so it is excluded the same
+    /// way. A predicate that only knew about `id_image` would journal every
+    /// multi-reference request's faces into `mold.db` — the exact outcome the
+    /// exclusion exists to prevent (#1226).
+    #[test]
+    fn a_multi_photograph_request_is_excluded_from_the_database_too() {
+        let journal = journal_with_db();
+        let mut request = request();
+        request.model = "flux-dev:q4".to_string();
+        request.id_images = Some(vec![
+            b"\x89PNG\r\n\x1a\n-first-face".to_vec(),
+            b"\x89PNG\r\n\x1a\n-second-face".to_vec(),
+        ]);
+        request.id_image_names = Some(vec!["one.png".to_string(), "two.png".to_string()]);
+
+        assert!(journal
+            .record(admission("job-1", &request, Path::new("/gallery")))
+            .is_none());
+        assert!(rows(&journal).is_empty());
+    }
 }
