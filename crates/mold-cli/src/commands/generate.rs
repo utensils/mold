@@ -143,11 +143,21 @@ fn validate_local_request(req: &GenerateRequest, config: &Config) -> Result<()> 
 /// does not carry several photographs or engage true CFG, which is every
 /// ordinary render and every single-photograph identity render.
 ///
-/// A probe that cannot reach the server is deliberately NOT a refusal. The
+/// A probe that cannot REACH the server is deliberately not a refusal. The
 /// caller's next step is the ordinary remote attempt, which fails the same way
 /// and falls back to local inference — where both shapes are honoured in full.
 /// Turning an unreachable host into a hard error here would take that fallback
 /// away from exactly the requests that need it most.
+///
+/// Every OTHER failure is a refusal, and that distinction is the whole point. A
+/// reachable server that predates `/api/capabilities`, or whose response cannot
+/// be decoded, answers this probe with a 404 or a parse error — and then
+/// ACCEPTS the generate request while dropping the very fields we asked about.
+/// Treating that like an unreachable host is the silent accept-and-ignore all
+/// over again, so it is read as "identity unsupported" instead and refused
+/// through the same named message. `MoldClient::is_connection_error` is the
+/// existing authority for which failures mean "server unreachable, fall back to
+/// local"; this reuses it rather than inventing a second rule.
 async fn require_remote_identity_capabilities(
     client: &mold_core::MoldClient,
     request: &mold_core::GenerateRequest,
@@ -155,8 +165,12 @@ async fn require_remote_identity_capabilities(
     if !crate::commands::identity::request_needs_identity_capabilities(request) {
         return Ok(());
     }
-    let Ok(capabilities) = client.server_capabilities().await else {
-        return Ok(());
+    let capabilities = match client.server_capabilities().await {
+        Ok(capabilities) => capabilities,
+        Err(error) if mold_core::MoldClient::is_connection_error(&error) => return Ok(()),
+        // Reachable, but it could not tell us — which is exactly how an older
+        // server answers. Absence is NO.
+        Err(_) => mold_core::ServerCapabilities::default(),
     };
     crate::commands::identity::ensure_server_understands_identity(
         request,
@@ -3932,6 +3946,121 @@ mod tests {
             None,
         )
         .await
+    }
+
+    /// A request that needs the additive shapes, for the probe tests.
+    fn multi_photo_request() -> GenerateRequest {
+        let mut request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "a portrait",
+            "model": "flux-dev:q8",
+            "width": 1024,
+            "height": 1024,
+            "steps": 20,
+            "guidance": 3.5,
+            "batch_size": 1,
+        }))
+        .expect("the minimal generate-request wire shape");
+        request.id_images = Some(vec![vec![0x89, 0x50, 0x4e, 0x47], vec![0xff, 0xd8, 0xff]]);
+        request
+    }
+
+    /// A REACHABLE server that cannot answer the probe is the dangerous case,
+    /// not the safe one: a build predating `/api/capabilities` answers 404 here
+    /// and then accepts the generate request while dropping `id_images`. It
+    /// must be read as "identity unsupported" and refused by name.
+    #[tokio::test]
+    async fn a_reachable_server_that_cannot_answer_the_probe_is_refused() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        for response in [
+            ResponseTemplate::new(404),
+            ResponseTemplate::new(500),
+            // Reachable and 200, but not a capabilities document.
+            ResponseTemplate::new(200).set_body_string("not json"),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/api/capabilities"))
+                .respond_with(response)
+                .mount(&server)
+                .await;
+
+            let client = MoldClient::new(&server.uri());
+            let error = require_remote_identity_capabilities(&client, &multi_photo_request())
+                .await
+                .expect_err("a server that cannot answer must not be sent the request")
+                .to_string();
+            assert!(error.contains(&server.uri()), "{error}");
+            assert!(
+                error.contains("more than one identity photograph"),
+                "{error}"
+            );
+        }
+    }
+
+    /// An UNREACHABLE server is the safe case: the ordinary remote attempt is
+    /// about to fail the same way and fall back to local inference, where both
+    /// shapes are honoured in full. Refusing here would take that fallback away
+    /// from exactly the requests that need it.
+    #[tokio::test]
+    async fn an_unreachable_server_leaves_the_local_fallback_alone() {
+        // A port nothing is listening on: the probe fails to connect, which is
+        // the one failure class `is_connection_error` recognises.
+        let client = MoldClient::new("http://127.0.0.1:1");
+        require_remote_identity_capabilities(&client, &multi_photo_request())
+            .await
+            .expect("an unreachable host must not be turned into a hard refusal");
+    }
+
+    /// A current server answers, and the request goes through untouched.
+    #[tokio::test]
+    async fn a_current_server_lets_the_request_through() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/capabilities"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(mold_core::ServerCapabilities {
+                    identity: mold_core::IdentityCapabilities::advertised(),
+                    ..Default::default()
+                }),
+            )
+            .mount(&server)
+            .await;
+
+        let client = MoldClient::new(&server.uri());
+        require_remote_identity_capabilities(&client, &multi_photo_request())
+            .await
+            .expect("a current server understands the plural shape");
+    }
+
+    /// And an ordinary request never probes at all — not even against a server
+    /// that would refuse it. The mock is mounted to fail loudly if it is asked.
+    #[tokio::test]
+    async fn an_ordinary_request_never_probes() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/capabilities"))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let client = MoldClient::new(&server.uri());
+        let mut single: GenerateRequest = multi_photo_request();
+        single.id_images = None;
+        single.id_image = Some(vec![0x89, 0x50, 0x4e, 0x47]);
+        single.id_weight = Some(0.8);
+        require_remote_identity_capabilities(&client, &single)
+            .await
+            .expect("a single photograph predates the capability block");
+        // Dropping the server asserts the `expect(0)`.
     }
 
     async fn mount_reference_v2_authority(server: &wiremock::MockServer) {
