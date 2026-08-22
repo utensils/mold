@@ -53,7 +53,9 @@
 // otherwise force either a premature `pub` surface or a stub caller.
 #![allow(dead_code)]
 
-use super::secure_dir::{identity, parent_protects_entries, Dir};
+use super::secure_dir::{
+    identity, parent_protects_entries, Dir, PRIVATE_FILE_MODE, PUBLISHED_FILE_MODE,
+};
 use anyhow::{bail, ensure, Context, Result};
 use candle_core::pickle::PthTensors;
 use mold_core::pulid_assets::PulidPaths;
@@ -258,9 +260,24 @@ impl PrivateStagingDir {
         &self.dir
     }
 
-    /// Create a staged file, remembering the name for cleanup.
-    fn create_file(&self, name: &str) -> Result<File> {
-        let file = self.dir.create_file(name, 0o600)?;
+    /// Create a staged file that will be PUBLISHED, remembering the name for
+    /// cleanup.
+    ///
+    /// The mode a staged file is created with is the mode the published
+    /// artifact keeps: `renameat` moves the inode, and `serialize_to_file`'s
+    /// own open truncates rather than re-creates. So this takes the process's
+    /// default create mode — see [`PUBLISHED_FILE_MODE`]. The staging
+    /// DIRECTORY stays `0o700`, which is what closes the rename race; that is
+    /// a property of the directory only, and never of the published parent.
+    fn create_published_file(&self, name: &str) -> Result<File> {
+        let file = self.dir.create_file(name, PUBLISHED_FILE_MODE)?;
+        self.staged.borrow_mut().push(name.to_string());
+        Ok(file)
+    }
+
+    /// Create a staged file that will never leave the staging directory.
+    fn create_private_file(&self, name: &str) -> Result<File> {
+        let file = self.dir.create_file(name, PRIVATE_FILE_MODE)?;
         self.staged.borrow_mut().push(name.to_string());
         Ok(file)
     }
@@ -454,7 +471,7 @@ fn stage_private_copy(
         .seek(SeekFrom::Start(0))
         .context("failed to rewind the source descriptor")?;
 
-    let mut target = staging.create_file(name)?;
+    let mut target = staging.create_private_file(name)?;
     let mut digest = Sha256::new();
     let mut buffer = vec![0_u8; 1024 * 1024];
     loop {
@@ -540,7 +557,7 @@ fn write_atomically_with_hook(
         .collect::<Result<Vec<_>>>()?;
     // Claim the name exclusively first, so `serialize_to_file`'s own open can
     // only ever truncate a regular file we created.
-    drop(staging.create_file(STAGED)?);
+    drop(staging.create_published_file(STAGED)?);
     serialize_to_file(views, &None, &staging.dir().unsafe_path_for(STAGED))
         .context("failed to write the staged safetensors")?;
 
@@ -562,7 +579,7 @@ fn write_atomically_with_hook(
 fn publish_bytes(bytes: &[u8], destination: &Path) -> Result<()> {
     const STAGED: &str = "payload";
     let staging = PrivateStagingDir::create_beside(destination)?;
-    let mut file = staging.create_file(STAGED)?;
+    let mut file = staging.create_published_file(STAGED)?;
     file.write_all(bytes)
         .context("failed to write the staged payload")?;
     file.sync_all()
@@ -1330,6 +1347,74 @@ mod tests {
 
     /// The staging directory is owner-only, which is what lets
     /// `serialize_to_file` and the pickle reader open paths inside it by name.
+    /// `umask` is process-global, so the two tests that move it take this in
+    /// turn. They restore it before releasing the guard.
+    #[cfg(unix)]
+    static UMASK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Run `body` with `umask` set, whatever it was before.
+    #[cfg(unix)]
+    fn with_umask<T>(mask: libc::mode_t, body: impl FnOnce() -> T) -> T {
+        let _guard = UMASK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: `umask` cannot fail and returns the previous value.
+        let previous = unsafe { libc::umask(mask) };
+        let result = body();
+        unsafe { libc::umask(previous) };
+        result
+    }
+
+    /// A published artifact must be readable by whoever the umask says, because
+    /// runnable model weights are never owner-only — `CLAUDE.md`'s
+    /// model-storage invariant makes a collaborative `0o664` root legitimate,
+    /// and an owner-only artifact leaves every other user of a shared root
+    /// either unable to load it or reconverting it on every request.
+    ///
+    /// The staged file's mode is the published file's mode: `renameat` moves
+    /// the inode. So this is a test of what `create_published_file` asks for.
+    #[test]
+    #[cfg(unix)]
+    fn a_published_artifact_is_group_readable_under_a_collaborative_umask() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let destination = dir.path().join("derived.safetensors");
+
+        with_umask(0o002, || {
+            write_atomically(&[raw("a", &[1.0, 2.0], &[2])], &destination).unwrap();
+        });
+
+        let mode = std::fs::metadata(&destination)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o664, "published as {mode:o}, not the umask's 0o664");
+        // The sidecar rides the same primitive and is provenance, not a secret.
+        let sidecar = sidecar_path(&destination);
+        with_umask(0o002, || {
+            write_sidecar(&destination, EVA_SOURCE_SHA256, "deadbeef").unwrap();
+        });
+        let mode = std::fs::metadata(&sidecar).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o664, "sidecar published as {mode:o}");
+    }
+
+    /// The private copy of a SOURCE checkpoint is the opposite case, and must
+    /// not follow the umask: it is staged in a tmp root other users can reach,
+    /// it is never published, and nothing else has any business reading it.
+    #[test]
+    #[cfg(unix)]
+    fn the_private_source_copy_stays_owner_only_whatever_the_umask() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let staging = PrivateStagingDir::create_beside(&dir.path().join("out.bin")).unwrap();
+        let path = with_umask(0o000, || {
+            let file = staging.create_private_file("source.pt").unwrap();
+            drop(file);
+            staging.dir().unsafe_path_for("source.pt")
+        });
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "the private copy was {mode:o}");
+    }
+
     #[test]
     #[cfg(unix)]
     fn the_staging_directory_is_owner_only() {

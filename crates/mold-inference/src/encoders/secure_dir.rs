@@ -171,6 +171,23 @@ pub(crate) fn parent_protects_entries(path: &Path) -> std::result::Result<(), Un
 ///
 /// Never re-resolve `display_path` to do work: it is precisely the thing this
 /// type exists to stop trusting.
+/// Create mode for a file that will be PUBLISHED into the model root.
+///
+/// `0o666` is not a permission grant: `openat`'s mode argument is masked by the
+/// process umask, so this is exactly "whatever this process creates files as".
+/// A collaborative `0o002` umask therefore yields `0o664` and a shared model
+/// root stays readable by the group that prepared it, which is what
+/// `CLAUDE.md`'s model-storage invariant requires of runnable weights — an
+/// explicit `0o600` here survives the publish rename and leaves every other
+/// user unable to read the artifact, reconverting it on every load.
+pub(crate) const PUBLISHED_FILE_MODE: u32 = 0o666;
+
+/// Create mode for a file that is NEVER published: the transient private copy
+/// of a source checkpoint, staged in a world-writable tmp root. Owner-only is
+/// right here for the same reason it is wrong above — nothing else has any
+/// business reading it, and it never becomes a runnable artifact.
+pub(crate) const PRIVATE_FILE_MODE: u32 = 0o600;
+
 pub(crate) struct Dir {
     #[cfg(unix)]
     file: File,

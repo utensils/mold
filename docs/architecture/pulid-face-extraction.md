@@ -581,6 +581,21 @@ structural guard, in the style of `onnx_graph`'s — the parser's production cod
 never names a path type at all — and its sibling asserts no mapping type is
 reachable from any of the four files in the chain.
 
+**A published artifact follows the umask, not the staging directory.** The
+staging directory is `0o700` and must stay that way — that is what closes the
+rename race — but the FILE inside it was created `0o600`, and `renameat` moves
+the inode, so both derived artifacts were landing in the model root readable
+only by whoever converted them. On a shared root that is either a load that
+cannot happen or a reconversion on every request, and `CLAUDE.md`'s
+model-storage invariant is explicit that runnable weights are never owner-only:
+owner-only is for credentials. `create_published_file` therefore asks for
+`0o666`, which is not a grant — `openat`'s mode argument is masked by the
+umask — so a collaborative `0o002` umask yields `0o664`. The transient private
+copy of a SOURCE pickle keeps `0o600`, because it is staged in a world-writable
+tmp root and never published. Two tests pin the pair, one per direction, and
+the `0o700` assertion on the staging directory stays. This was one primitive
+and both artifacts were affected, the EVA tower included.
+
 The cost is honest and charged: a transient 609 MB (tower) or 53 MB (parser)
 copy, scoped to the build that consumes it and released as soon as that module
 owns its tensors. `EXTRACTION_HOST_PEAK_BYTES` went from 1.4 GB to 2.4 GB when
