@@ -360,10 +360,11 @@ PASS  cosine 0.5993  (threshold 0.28)  q8-portrait-id-frank-rubio.png
 PASS  cosine 0.7241  (threshold 0.28)  q8-portrait-id-kayla-barron.png
 ```
 
-Both land in PuLID's own 0.6-0.8 band, and both sit within 0.03 of the q4
-numbers (0.6055 / 0.7016), in opposite directions — which is the expected
-result for a change that only alters the transformer's quantization. The
-adapter does not read it.
+0.7241 lands strictly inside PuLID's own 0.6-0.8 band; 0.5993 sits just below
+it, at the band's lower edge. Both sit within 0.03 of the q4 numbers
+(0.6055 / 0.7016), in opposite directions — which is the expected result for
+a change that only alters the transformer's quantization. The adapter does
+not read it.
 
 The seed-matched unconditioned baseline was scored as a control and SCRFD found
 **no face in it at all** — the same outcome the q4 baseline produced at this

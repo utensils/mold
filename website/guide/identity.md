@@ -236,19 +236,16 @@ message rather than silently rendered:
   desktop, iPhone, TUI, and Discord surfaces still offer a single photograph and
   no true-CFG control.
 
-Also not implemented: facexlib's background mask (upstream applies one before
-the vision tower).
-
 ## Removing it
 
 ```bash
 mold rm pulid-flux
 ```
 
-This deletes all four downloaded artifacts and the vision tower mold derived
-from them on first use. Your recorded licence acceptance stays — `mold licenses`
-shows it, and it is what lets a later `mold pull pulid-flux` proceed without the
-flag.
+This deletes all five downloaded artifacts and the vision tower and face
+parser mold derived from them on first use. Your recorded licence acceptance
+stays — `mold licenses` shows it, and it is what lets a later
+`mold pull pulid-flux` proceed without the flag.
 
 ## Licenses
 

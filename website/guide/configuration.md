@@ -587,9 +587,9 @@ candidate receives exactly its cold or warm setup charge. Multi-host Create
 uses `POST /api/generate/placement-preview` as a read-only final feasibility
 check for ordinary generation. A planned response can name known encoder
 dependencies in `pending_downloads` — and, for a request that conditions on a
-face, the four PuLID identity assets under the `identity_adapter`,
-`identity_vision_encoder`, `face_detector`, and `face_recognizer` kinds; those
-downloads and the low-confidence
+face, the five PuLID identity assets under the `identity_adapter`,
+`identity_vision_encoder`, `face_detector`, `face_recognizer`, and
+`face_parser` kinds; those downloads and the low-confidence
 estimate include only devices selected by that candidate plan. The preview does not
 fetch them, uses a separate registry-identity fingerprint, and admission
 recomputes the plan after the files land. Cold installed Civitai and Hugging
