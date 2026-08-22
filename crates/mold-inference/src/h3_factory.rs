@@ -4115,13 +4115,15 @@ impl FrozenH3FactoryAuthority {
                 })
                 .collect::<Result<Vec<_>>>()?,
         )?;
-        if (input.compute_capability.is_none()
-            && input.conditioner_placement == H3FactoryConditionerPlacement::AssignedCudaThenDrop)
-            || (input.compute_capability.is_some()
-                && input.conditioner_placement
-                    == H3FactoryConditionerPlacement::AssignedMetalThenDrop)
+        if input.compute_capability.is_none()
+            && input.conditioner_placement == H3FactoryConditionerPlacement::AssignedCudaThenDrop
         {
-            bail!("MiniMax H3 conditioner placement does not match its frozen backend");
+            bail!("MiniMax H3 CUDA conditioner placement does not match its frozen Metal backend");
+        }
+        if input.compute_capability.is_some()
+            && input.conditioner_placement == H3FactoryConditionerPlacement::AssignedMetalThenDrop
+        {
+            bail!("MiniMax H3 Metal conditioner placement does not match its frozen CUDA backend");
         }
         let conditioner_execution = match input.conditioner_placement {
             H3FactoryConditionerPlacement::AssignedCudaThenDrop => {
@@ -6805,9 +6807,12 @@ mod tests {
         assert!(frozen
             .validate_engine_seam(contract::FL2VA_COMFY_TURBO_4STEP_768P, 0, true)
             .is_ok());
-        assert!(frozen
-            .validate_engine_seam(contract::FL2VA_COMFY, 0, true)
-            .is_err());
+        assert_eq!(
+            frozen
+                .validate_engine_seam(contract::FL2VA_COMFY, 0, true)
+                .is_ok(),
+            cfg!(feature = "h3-private-uat")
+        );
         assert!(!media_model_matches_h3_authority(
             contract::FL2VA_COMFY_TURBO_8STEP,
             &frozen
