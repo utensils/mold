@@ -6411,17 +6411,23 @@ fn denoise_forward_multiplier_permille(request: &mold_core::GenerateRequest) -> 
 }
 
 fn generation_shape_bucket(request: &mold_core::GenerateRequest) -> String {
-    // The true-CFG arm is part of the bucket KEY, not just the static
-    // estimate: a branched run and an ordinary one of the same geometry take
-    // roughly twice the denoise time, and letting their samples share a bucket
-    // teaches the learned model an average that is wrong for both. The
-    // multiplier is the discriminator rather than a bare flag, so a run that
-    // starts the branch at step 1 and one that starts it at step 15 stay
-    // separate too. Requests that do not engage it all render `cfg1000`, which
-    // is what keeps every existing bucket's identity stable apart from that
-    // suffix.
-    format!(
-        "{}x{}:s{}:f{}:fps{}:a{}:src{}:edit{}:lora{}:b{}:cfg{}",
+    // The true-CFG arm is part of the bucket KEY, not just the static estimate:
+    // a branched run and an ordinary one of the same geometry take roughly
+    // twice the denoise time, and letting their samples share a bucket teaches
+    // the learned model an average that is wrong for both. The multiplier is
+    // the discriminator rather than a bare flag, so a run that starts the
+    // branch at step 1 and one that starts it at step 15 stay separate too.
+    //
+    // The suffix is APPENDED ONLY for an engaged branch, and that is not a
+    // tidiness choice. `scheduler_estimates` is persisted and keyed on this
+    // string, and it carries more than learned timings — the failure-only VRAM
+    // floors live there too. Renaming every ordinary bucket on upgrade would
+    // strand all of it, so a shape already known to OOM would be admitted again
+    // until it failed a second time. An unbranched request must therefore
+    // produce the byte-identical legacy key, which
+    // `an_ordinary_request_keeps_the_legacy_bucket_key` pins against a literal.
+    let base = format!(
+        "{}x{}:s{}:f{}:fps{}:a{}:src{}:edit{}:lora{}:b{}",
         request.width,
         request.height,
         request.steps,
@@ -6432,8 +6438,11 @@ fn generation_shape_bucket(request: &mold_core::GenerateRequest) -> String {
         request.edit_images.as_ref().map_or(0, Vec::len),
         u8::from(request.lora.is_some() || request.loras.as_ref().is_some_and(|v| !v.is_empty())),
         request.batch_size,
-        denoise_forward_multiplier_permille(request),
-    )
+    );
+    match denoise_forward_multiplier_permille(request) {
+        1_000 => base,
+        multiplier => format!("{base}:cfg{multiplier}"),
+    }
 }
 
 fn static_generation_time_ms(request: &mold_core::GenerateRequest) -> u64 {
@@ -6774,6 +6783,41 @@ mod true_cfg_estimate_tests {
         assert_eq!(
             generation_shape_bucket(&plain),
             generation_shape_bucket(&zero)
+        );
+    }
+
+    /// `scheduler_estimates` is PERSISTED and keyed on this string, and it
+    /// carries the failure-only VRAM floors as well as the learned timings. A
+    /// suffix on every ordinary bucket would rename all of them on upgrade, so
+    /// a shape already known to OOM would be admitted again until it failed
+    /// once more. The literal is the current format, captured; changing it is
+    /// a migration, not an edit.
+    #[test]
+    fn an_ordinary_request_keeps_the_legacy_bucket_key() {
+        let plain = request();
+        assert_eq!(
+            generation_shape_bucket(&plain),
+            "1024x1024:s20:f1:fps0:a0:src0:edit0:lora0:b1"
+        );
+        assert!(
+            !generation_shape_bucket(&plain).contains("cfg"),
+            "an unbranched request must carry no discriminator at all"
+        );
+    }
+
+    /// The engaged form is the legacy key plus one suffix — an extension of the
+    /// existing namespace, never a replacement for it.
+    #[test]
+    fn an_engaged_branch_extends_the_legacy_bucket_key() {
+        let mut branched = request();
+        branched.true_cfg = Some(2.0);
+        branched.cfg_start_step = Some(0);
+        assert_eq!(
+            generation_shape_bucket(&branched),
+            "1024x1024:s20:f1:fps0:a0:src0:edit0:lora0:b1:cfg2000"
+        );
+        assert!(
+            generation_shape_bucket(&branched).starts_with(&generation_shape_bucket(&request()))
         );
     }
 
