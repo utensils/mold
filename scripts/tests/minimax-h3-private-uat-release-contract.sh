@@ -23,6 +23,84 @@ require_text() {
   grep -Fq -- "$text" "$file" || fail "$message"
 }
 
+# Ordering gates below anchor on source markers and compare their line numbers.
+# A marker that resolves to zero or several lines must FAIL rather than be
+# swallowed: `(( ))` treats a multi-line value as a syntax error, which returns
+# non-zero and therefore reads as "the ordering is fine" (#1207). Every marker
+# resolution goes through one of these helpers so an ambiguous anchor is
+# reported by name instead of silently disarming its check.
+#
+# `fail` exits the command substitution; the caller's plain assignment inherits
+# that status and `set -e` ends the script. Assign these at top level only —
+# `local x=$(...)` would mask the status.
+marker_lines() {
+  # Reads text on stdin; prints one line number per match of the fixed marker.
+  grep -nF -- "$1" | cut -d: -f1
+}
+
+sole_line_of() {
+  # Exactly one match of $2 in the text on stdin, reported as $1.
+  local label=$1
+  local marker=$2
+  local -a hits=()
+  local line
+  while IFS= read -r line; do
+    hits+=("$line")
+  done < <(marker_lines "$marker")
+  if ((${#hits[@]} != 1)); then
+    fail "release-contract marker '${label}' resolved ${#hits[@]} lines (expected exactly 1): ${marker}"
+  fi
+  printf '%s\n' "${hits[0]}"
+}
+
+first_line_of() {
+  # First match of $2 in the text on stdin, reported as $1. Used where the
+  # marker legitimately repeats and the invariant is about the earliest one.
+  local label=$1
+  local marker=$2
+  local -a hits=()
+  local line
+  while IFS= read -r line; do
+    hits+=("$line")
+  done < <(marker_lines "$marker")
+  if ((${#hits[@]} == 0)); then
+    fail "release-contract marker '${label}' resolved no lines: ${marker}"
+  fi
+  printf '%s\n' "${hits[0]}"
+}
+
+sole_file_line() {
+  # Exactly one match of $3 inside the inclusive absolute line range
+  # [${4:-1}, ${5:-end}] of file $2, reported as $1. The range is how a marker
+  # that repeats verbatim in a sibling function still names one occurrence.
+  local label=$1
+  local file=$2
+  local marker=$3
+  local lo=${4:-1}
+  local hi=${5:-0}
+  local -a hits=()
+  local line
+  while IFS= read -r line; do
+    hits+=("$line")
+  done < <(marker_lines "$marker" <"$file" \
+    | awk -v lo="$lo" -v hi="$hi" '$1 >= lo && (hi == 0 || $1 <= hi)')
+  if ((${#hits[@]} != 1)); then
+    fail "release-contract marker '${label}' resolved ${#hits[@]} lines in ${file} within [${lo},${hi:-end}] (expected exactly 1): ${marker}"
+  fi
+  printf '%s\n' "${hits[0]}"
+}
+
+block_end() {
+  # Absolute line of the top-level `}` closing the block that starts at $2.
+  local file=$1
+  local start=$2
+  local line
+  line=$(awk -v s="$start" 'NR > s && $0 == "}" { print NR; exit }' "$file")
+  [[ -n "$line" ]] \
+    || fail "release-contract could not find the end of the block starting at ${file}:${start}"
+  printf '%s\n' "$line"
+}
+
 require_text crates/mold-candle/Cargo.toml \
   'h3-private-uat = []' \
   "mold-candle does not keep the private H3 runtime behind its own feature"
@@ -381,15 +459,18 @@ runner_source=$(awk '
   capture { print }
   capture && /^fn private_run_output/ { exit }
 ' crates/mold-inference/src/minimax_h3/private_server.rs)
-boundary_line=$(grep -nF 'with_private_h3_cuda_execution_attempt(||' <<<"$runner_source" | cut -d: -f1)
-commit_line=$(grep -nF 'commit_private_h3_allocation_then' <<<"$runner_source" | cut -d: -f1)
-device_line=$(grep -nF 'Device::new_cuda' <<<"$runner_source" | cut -d: -f1)
-execute_line=$(grep -nF 'run_private_comfy_fl2va_attempt' <<<"$runner_source" | cut -d: -f1)
-sync_line=$(grep -nF '.synchronize()' <<<"$runner_source" | cut -d: -f1)
-if [[ -z "$boundary_line" || -z "$commit_line" || -z "$device_line" \
-  || -z "$execute_line" || -z "$sync_line" ]] \
-  || (( boundary_line >= commit_line || commit_line >= device_line \
-    || device_line >= execute_line || execute_line >= sync_line )); then
+boundary_line=$(sole_line_of 'runner containment boundary' \
+  'with_private_h3_cuda_execution_attempt(||' <<<"$runner_source")
+commit_line=$(sole_line_of 'runner allocation commit' \
+  'commit_private_h3_allocation_then' <<<"$runner_source")
+device_line=$(sole_line_of 'runner CUDA construction' \
+  'Device::new_cuda' <<<"$runner_source")
+execute_line=$(sole_line_of 'runner FL2VA execution' \
+  'run_private_comfy_fl2va_attempt' <<<"$runner_source")
+sync_line=$(sole_line_of 'runner completion synchronization' \
+  '.synchronize()' <<<"$runner_source")
+if ((boundary_line >= commit_line || commit_line >= device_line \
+  || device_line >= execute_line || execute_line >= sync_line)); then
   fail "private H3 containment, allocation, construction, execution, and completion ordering changed"
 fi
 require_text crates/mold-inference/src/minimax_h3/private_server.rs \
@@ -404,12 +485,11 @@ prepare_source=$(sed -n \
 if grep -Fq 'Device::new_cuda' <<<"$prepare_source"; then
   fail "private H3 preparation constructs a CUDA device before the owner allocation commit"
 fi
-reviewed_line=$(grep -nF 'private_runtime_qualification_source(' \
-  <<<"$prepare_source" | head -n 1 | cut -d: -f1)
-artifact_line=$(grep -nF 'qualify_private_artifacts_with_control' \
-  <<<"$prepare_source" | head -n 1 | cut -d: -f1)
-if [[ -z "$reviewed_line" || -z "$artifact_line" ]] \
-  || (( reviewed_line >= artifact_line )); then
+reviewed_line=$(first_line_of 'prepared reviewed-record gate' \
+  'private_runtime_qualification_source(' <<<"$prepare_source")
+artifact_line=$(first_line_of 'prepared artifact qualification' \
+  'qualify_private_artifacts_with_control' <<<"$prepare_source")
+if ((reviewed_line >= artifact_line)); then
   fail "private H3 reviewed-record hash gate no longer precedes bulk artifact qualification"
 fi
 admission_source=$(sed -n \
@@ -418,12 +498,11 @@ admission_source=$(sed -n \
 if grep -Fq 'Device::new_cuda' <<<"$admission_source"; then
   fail "private H3 admission constructs a CUDA device"
 fi
-admission_reviewed_line=$(grep -nF 'private_runtime_qualification_source(' \
-  <<<"$admission_source" | head -n 1 | cut -d: -f1)
-admission_artifact_line=$(grep -nF 'qualify_private_artifacts_with_control' \
-  <<<"$admission_source" | head -n 1 | cut -d: -f1)
-if [[ -z "$admission_reviewed_line" || -z "$admission_artifact_line" ]] \
-  || (( admission_reviewed_line >= admission_artifact_line )); then
+admission_reviewed_line=$(first_line_of 'admission reviewed-record gate' \
+  'private_runtime_qualification_source(' <<<"$admission_source")
+admission_artifact_line=$(first_line_of 'admission artifact qualification' \
+  'qualify_private_artifacts_with_control' <<<"$admission_source")
+if ((admission_reviewed_line >= admission_artifact_line)); then
   fail "private H3 admission no longer checks reviewed evidence before bulk artifact I/O"
 fi
 require_text crates/mold-inference/src/minimax_h3/private_runtime.rs \
@@ -470,16 +549,18 @@ done
 owner_bind=$(sed -n \
   '/pub(crate) fn bind_private_comfy_fl2va_phase_owner/,/^}/p' \
   crates/mold-inference/src/minimax_h3/private_fl2va_runtime.rs)
-prepared_line=$(grep -nF 'prepared.revalidate()?;' <<<"$owner_bind" | cut -d: -f1)
-qwen_capture_line=$(grep -nF 'H3PrivateQwenArtifactAuthority::capture(&qwen_support, &opened_qwen)?;' \
-  <<<"$owner_bind" | cut -d: -f1)
-overlap_line=$(grep -nF 'validate_prepared_overlap_binding(' <<<"$owner_bind" | cut -d: -f1)
-bind_line=$(grep -nF 'let bound_transformer = bind_private_comfy_stream(' <<<"$owner_bind" | cut -d: -f1)
-attempt_line=$(grep -nF 'let attempt = H3PrivateAttemptAuthority::new' <<<"$owner_bind" | cut -d: -f1)
-if [[ -z "$prepared_line" || -z "$qwen_capture_line" || -z "$overlap_line" \
-  || -z "$bind_line" || -z "$attempt_line" ]] \
-  || (( prepared_line >= qwen_capture_line || qwen_capture_line >= overlap_line \
-    || overlap_line >= bind_line || bind_line >= attempt_line )); then
+prepared_line=$(sole_line_of 'owner prepared revalidation' \
+  'prepared.revalidate()?;' <<<"$owner_bind")
+qwen_capture_line=$(sole_line_of 'owner Qwen artifact capture' \
+  'H3PrivateQwenArtifactAuthority::capture(&qwen_support, &opened_qwen)?;' <<<"$owner_bind")
+overlap_line=$(sole_line_of 'owner overlap binding' \
+  'validate_prepared_overlap_binding(' <<<"$owner_bind")
+bind_line=$(sole_line_of 'owner checkpoint binding' \
+  'let bound_transformer = bind_private_comfy_stream(' <<<"$owner_bind")
+attempt_line=$(sole_line_of 'owner singular attempt' \
+  'let attempt = H3PrivateAttemptAuthority::new' <<<"$owner_bind")
+if ((prepared_line >= qwen_capture_line || qwen_capture_line >= overlap_line \
+  || overlap_line >= bind_line || bind_line >= attempt_line)); then
   fail "private H3 prepared, Qwen, overlap, checkpoint, and singular-attempt binding order changed"
 fi
 if grep -Fq 'load_authorized_from_opened' <<<"$owner_bind"; then
@@ -494,24 +575,62 @@ if [[ $(grep -Fc 'bound_execution.device()' <<<"$owner_bind") -ne 1 ]] \
   fail "private H3 bound execution token is not shared with checkpoint binding and consumed by the attempt"
 fi
 runtime_source=crates/mold-inference/src/minimax_h3/private_fl2va_runtime.rs
-vae_load_line=$(grep -nF 'let loaded = load_h3_comfy_vae_runtime_from_authority(' "$runtime_source" | cut -d: -f1)
-qwen_load_line=$(grep -nF 'let qwen = H3PrivateQwenAdapter::load_authorized_from_opened(' "$runtime_source" | cut -d: -f1)
-vae_park_line=$(grep -nF 'drop(self.vae.take());' "$runtime_source" | head -n 1 | cut -d: -f1)
-transformer_load_line=$(grep -nF 'let stream = load_and_pair_private_comfy_stream(' "$runtime_source" | cut -d: -f1)
-transformer_drop_line=$(grep -nF 'drop(self.denoiser.take());' "$runtime_source" | cut -d: -f1)
-vae_reload_line=$(grep -nF 'self.construct_vaes(reload, checkpoint)?;' "$runtime_source" | cut -d: -f1)
-vae_drop_line=$(grep -nF 'drop(self.vae.take());' "$runtime_source" | tail -n 1 | cut -d: -f1)
-terminal_line=$(grep -nF 'let identity_echo = backend.terminal_identity_echo()?;' "$runtime_source" | cut -d: -f1)
-mux_line=$(grep -nF 'let output = super::pipeline::finalize_av(' "$runtime_source" | cut -d: -f1)
-if [[ -z "$vae_load_line" || -z "$qwen_load_line" || -z "$transformer_load_line" \
-  || -z "$vae_park_line" || -z "$transformer_drop_line" || -z "$vae_reload_line" \
-  || -z "$vae_drop_line" || -z "$terminal_line" || -z "$mux_line" ]] \
-  || (( vae_load_line >= qwen_load_line || qwen_load_line >= vae_park_line \
-    || vae_park_line >= transformer_load_line \
-    || transformer_load_line >= transformer_drop_line \
-    || transformer_drop_line >= vae_reload_line || vae_reload_line >= vae_drop_line \
-    || vae_drop_line >= terminal_line || terminal_line >= mux_line )); then
+# The Ref2VA backend and its attempt are verbatim twins of the FL2VA phase
+# markers, so each anchor is resolved inside the block that identifies the
+# FL2VA occurrence rather than by a whole-file grep. `H3PrivatePhaseBackend`'s
+# inherent impl owns VAE construction; the `H3Fl2VaBackend` impl owns the
+# encode/park/denoise/decode phases; `run_private_comfy_fl2va_attempt` owns the
+# terminal identity echo and the mux.
+phase_impl_line=$(sole_file_line 'phase backend impl' "$runtime_source" \
+  'impl<C, E, A> H3PrivatePhaseBackend<C, E, A>')
+phase_impl_end=$(block_end "$runtime_source" "$phase_impl_line")
+fl2va_impl_line=$(sole_file_line 'FL2VA backend impl' "$runtime_source" \
+  'impl<C, E, A> H3Fl2VaBackend for H3PrivatePhaseBackend<C, E, A>')
+fl2va_impl_end=$(block_end "$runtime_source" "$fl2va_impl_line")
+fl2va_attempt_line=$(sole_file_line 'FL2VA attempt' "$runtime_source" \
+  'pub(crate) fn run_private_comfy_fl2va_attempt<C, E, A>(')
+fl2va_attempt_end=$(block_end "$runtime_source" "$fl2va_attempt_line")
+fl2va_decode_audio_line=$(sole_file_line 'FL2VA audio decode' "$runtime_source" \
+  'fn decode_audio(' "$fl2va_impl_line" "$fl2va_impl_end")
+vae_load_line=$(sole_file_line 'VAE construction' "$runtime_source" \
+  'let loaded = load_h3_comfy_vae_runtime_from_authority(' \
+  "$phase_impl_line" "$phase_impl_end")
+qwen_load_line=$(sole_file_line 'FL2VA Qwen load' "$runtime_source" \
+  'let qwen = H3PrivateQwenAdapter::load_authorized_from_opened(' \
+  "$fl2va_impl_line" "$fl2va_impl_end")
+vae_park_line=$(sole_file_line 'FL2VA VAE park' "$runtime_source" \
+  'drop(self.vae.take());' "$fl2va_impl_line" "$((fl2va_decode_audio_line - 1))")
+transformer_load_line=$(sole_file_line 'FL2VA transformer load' "$runtime_source" \
+  'let stream = load_and_pair_private_comfy_stream(' "$fl2va_impl_line" "$fl2va_impl_end")
+transformer_drop_line=$(sole_file_line 'FL2VA transformer drop' "$runtime_source" \
+  'drop(self.denoiser.take());' "$fl2va_impl_line" "$fl2va_impl_end")
+vae_reload_line=$(sole_file_line 'FL2VA VAE reload' "$runtime_source" \
+  'self.construct_vaes(reload, checkpoint)?;' "$fl2va_impl_line" "$fl2va_impl_end")
+vae_drop_line=$(sole_file_line 'FL2VA VAE drop' "$runtime_source" \
+  'drop(self.vae.take());' "$fl2va_decode_audio_line" "$fl2va_impl_end")
+terminal_line=$(sole_file_line 'FL2VA terminal identity echo' "$runtime_source" \
+  'let identity_echo = backend.terminal_identity_echo()?;' \
+  "$fl2va_attempt_line" "$fl2va_attempt_end")
+mux_line=$(sole_file_line 'FL2VA AV mux' "$runtime_source" \
+  'let output = super::pipeline::finalize_av(' "$fl2va_attempt_line" "$fl2va_attempt_end")
+if ((vae_load_line >= qwen_load_line || qwen_load_line >= vae_park_line \
+  || vae_park_line >= transformer_load_line \
+  || transformer_load_line >= transformer_drop_line \
+  || transformer_drop_line >= vae_reload_line || vae_reload_line >= vae_drop_line \
+  || vae_drop_line >= terminal_line || terminal_line >= mux_line)); then
   fail "private H3 phase runtime no longer parks, reloads, and drops components before terminal-only mux"
+fi
+# The developer-only Ref2VA attempt owns the same terminal-before-mux rule.
+ref2va_attempt_line=$(sole_file_line 'Ref2VA attempt' "$runtime_source" \
+  'pub(crate) fn run_private_comfy_ref2va_attempt<C, E, A>(')
+ref2va_attempt_end=$(block_end "$runtime_source" "$ref2va_attempt_line")
+ref2va_terminal_line=$(sole_file_line 'Ref2VA terminal identity echo' "$runtime_source" \
+  'let identity_echo = backend.terminal_identity_echo()?;' \
+  "$ref2va_attempt_line" "$ref2va_attempt_end")
+ref2va_mux_line=$(sole_file_line 'Ref2VA AV mux' "$runtime_source" \
+  'let output = super::pipeline::finalize_av(' "$ref2va_attempt_line" "$ref2va_attempt_end")
+if ((ref2va_terminal_line >= ref2va_mux_line)); then
+  fail "private H3 Ref2VA attempt no longer captures its terminal identity before the mux"
 fi
 require_text "$runtime_source" \
   'pub(crate) struct H3PrivatePhaseIdentityEcho {' \
