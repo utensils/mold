@@ -27,6 +27,23 @@
 //! host RAM (see `EXTRACTION_HOST_PEAK_BYTES`) is allocated and released
 //! before the job is dispatched. That is a stronger guarantee than a scheduled
 //! slot: the two peaks cannot coexist rather than being arranged not to.
+//!
+//! ## Why extractions do not overlap EACH OTHER
+//!
+//! That argument covers the encoders and says nothing about a second identity
+//! request arriving while the first is extracting. Admission is concurrent —
+//! two clients, or one client's `/api/generate` racing a prepared batch's
+//! `freeze_batch_plan` — and two extractions peak at ~2.8 GB together, which
+//! is enough to OOM a 8 GB box that was going to run both renders fine.
+//!
+//! [`ExtractionSlot`] is that gate. It is deliberately NOT the scheduler's
+//! `HostMemoryLedger`: the ledger is private state owned by the planner task
+//! and keyed on leases, and extraction happens strictly BEFORE this job has a
+//! lease — it is one of the inputs to the plan the ledger will later reserve
+//! against. Re-entering the planner from admission to charge a transient CPU
+//! peak would invert that ownership. The slot instead does the two things the
+//! requirement actually asks for: serialize (so peaks never sum) and refuse
+//! (so a host that cannot fit even one says so instead of dying).
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -47,6 +64,73 @@ static EXTRACTIONS: AtomicU64 = AtomicU64::new(0);
 #[cfg(test)]
 pub(crate) fn extraction_count() -> u64 {
     EXTRACTIONS.load(Ordering::SeqCst)
+}
+
+/// Serializes identity extractions and charges each one against real host
+/// headroom.
+///
+/// One permit, because there is no throughput argument for two: an extraction
+/// is CPU-bound for a second or more and holds
+/// [`EXTRACTION_HOST_PEAK_BYTES`], so running two concurrently doubles the
+/// peak to buy nothing. Queuing is the correct behaviour, not a compromise.
+static EXTRACTION_SLOT: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+
+/// Bytes one extraction is charged.
+///
+/// Restated here rather than read from `mold_inference` because that module is
+/// behind the `pulid` feature while this gate is not; a build without the
+/// feature still admits and refuses requests. `the_charged_peak_matches_the_
+/// measurement` pins the two together on the builds that have both.
+const EXTRACTION_PEAK_BYTES: u64 = 1_400_000_000;
+
+/// Reads host memory. Injectable so the gate can be tested without a machine
+/// that happens to be short on RAM.
+#[cfg(test)]
+static TEST_AVAILABLE_HOST_BYTES: AtomicU64 = AtomicU64::new(u64::MAX);
+
+fn available_host_bytes() -> Option<u64> {
+    #[cfg(test)]
+    {
+        let forced = TEST_AVAILABLE_HOST_BYTES.load(Ordering::SeqCst);
+        if forced != u64::MAX {
+            return Some(forced);
+        }
+    }
+    let ram = crate::resources::ram_snapshot();
+    // Absent means unknown, and unknown must not refuse: a container that
+    // cannot report `MemAvailable` would otherwise lose face identity
+    // entirely. The serialization above still holds there.
+    ram.available
+}
+
+/// Held for the duration of one extraction; releasing it admits the next.
+struct ExtractionSlot(#[allow(dead_code)] tokio::sync::SemaphorePermit<'static>);
+
+impl ExtractionSlot {
+    /// Wait for the slot, then charge the peak against a FRESH reading.
+    ///
+    /// The order is the whole point. Sampling first would read headroom that a
+    /// peer extraction is about to consume; sampling after the permit is held
+    /// means this process has at most one extraction outstanding and the
+    /// reading is about this one.
+    async fn acquire() -> Result<Self, String> {
+        let permit = EXTRACTION_SLOT
+            .acquire()
+            .await
+            .map_err(|_| "the identity extraction slot was closed".to_string())?;
+        if let Some(available) = available_host_bytes() {
+            if available < EXTRACTION_PEAK_BYTES {
+                return Err(format!(
+                    "not enough host memory to extract a face identity: this needs about \
+                     {needed} MB and {available} MB is available. Free memory or retry when \
+                     the host is less busy.",
+                    needed = EXTRACTION_PEAK_BYTES / 1_000_000,
+                    available = available / 1_000_000,
+                ));
+            }
+        }
+        Ok(Self(permit))
+    }
 }
 
 /// Whether this request resolves an identity at all.
@@ -86,6 +170,10 @@ pub(crate) async fn resolve_identity_embedding(
                 .to_string(),
         );
     };
+
+    // Held across the whole extraction, including the stubbed path, so the
+    // serialization is the same thing the tests observe.
+    let _slot = ExtractionSlot::acquire().await?;
 
     EXTRACTIONS.fetch_add(1, Ordering::SeqCst);
 
@@ -292,6 +380,113 @@ mod tests {
             stubbed.extractions(),
             0,
             "nothing may be counted for a request that could not run"
+        );
+    }
+
+    /// Forces the host-memory reading for the duration of a test, and restores
+    /// it afterwards even on panic.
+    struct ForcedHostMemory;
+
+    impl ForcedHostMemory {
+        fn available(bytes: u64) -> Self {
+            TEST_AVAILABLE_HOST_BYTES.store(bytes, Ordering::SeqCst);
+            Self
+        }
+    }
+
+    impl Drop for ForcedHostMemory {
+        fn drop(&mut self) {
+            TEST_AVAILABLE_HOST_BYTES.store(u64::MAX, Ordering::SeqCst);
+        }
+    }
+
+    /// Counts how many stubbed extractions are in flight at once, and the
+    /// highest that number ever reached.
+    static IN_FLIGHT: AtomicU64 = AtomicU64::new(0);
+    static PEAK_IN_FLIGHT: AtomicU64 = AtomicU64::new(0);
+
+    fn overlap_observing_stub(
+        _: &PulidPaths,
+        image: &[u8],
+    ) -> Result<Option<FrozenIdentityEmbedding>, String> {
+        let now = IN_FLIGHT.fetch_add(1, Ordering::SeqCst) + 1;
+        PEAK_IN_FLIGHT.fetch_max(now, Ordering::SeqCst);
+        // Long enough that a genuinely concurrent peer would be observed.
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
+        Ok(Some(stub_embedding(image)))
+    }
+
+    /// Two admissions arriving together must not both allocate the ~1.4 GB
+    /// peak. A host with room for exactly one extraction has to serve them one
+    /// after the other; summing the peaks is how an otherwise-fine box OOMs.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_identity_preparations_serialize_on_the_extraction_slot() {
+        let stubbed = StubbedExtractor::install(overlap_observing_stub);
+        // Room for one peak, not two — the ledger sized below two peaks.
+        let _memory = ForcedHostMemory::available(EXTRACTION_PEAK_BYTES + 200_000_000);
+        IN_FLIGHT.store(0, Ordering::SeqCst);
+        PEAK_IN_FLIGHT.store(0, Ordering::SeqCst);
+
+        let (one, two) = (request(None), request(None));
+        let paths = paths();
+        let first = resolve_identity_embedding(&one, Some(&paths));
+        let second = resolve_identity_embedding(&two, Some(&paths));
+        let (first, second) = tokio::join!(first, second);
+
+        assert!(first.expect("first extraction").is_some());
+        assert!(
+            second.expect("the queued extraction still runs").is_some(),
+            "serializing must queue the second request, not refuse it"
+        );
+        assert_eq!(stubbed.extractions(), 2);
+        assert_eq!(
+            PEAK_IN_FLIGHT.load(Ordering::SeqCst),
+            1,
+            "two extractions must never hold their host peaks at the same time"
+        );
+    }
+
+    /// A host that cannot fit even one extraction is told so, rather than
+    /// being taken down by the allocation.
+    #[tokio::test]
+    async fn a_host_without_room_for_one_extraction_refuses_instead_of_allocating() {
+        let stubbed = StubbedExtractor::install(stub);
+        let _memory = ForcedHostMemory::available(EXTRACTION_PEAK_BYTES / 2);
+
+        let error = resolve_identity_embedding(&request(None), Some(&paths()))
+            .await
+            .expect_err("a host with half the peak available cannot extract");
+        assert!(error.contains("not enough host memory"), "{error}");
+        assert_eq!(
+            stubbed.extractions(),
+            0,
+            "the refusal must happen before the extractor is entered"
+        );
+    }
+
+    /// Unknown is not empty. A container that cannot report `MemAvailable`
+    /// must keep face identity rather than losing it to a missing reading.
+    #[tokio::test]
+    async fn an_unreadable_host_reading_does_not_refuse() {
+        let stubbed = StubbedExtractor::install(stub);
+        let _memory = ForcedHostMemory::available(u64::MAX);
+
+        assert!(resolve_identity_embedding(&request(None), Some(&paths()))
+            .await
+            .expect("an unknown reading is not a refusal")
+            .is_some());
+        assert_eq!(stubbed.extractions(), 1);
+    }
+
+    /// The charged peak is the measurement, not a second number that can
+    /// drift away from it.
+    #[cfg(feature = "pulid")]
+    #[test]
+    fn the_charged_peak_matches_the_measurement() {
+        assert_eq!(
+            EXTRACTION_PEAK_BYTES,
+            mold_inference::identity::extraction::EXTRACTION_HOST_PEAK_BYTES
         );
     }
 }
