@@ -254,7 +254,10 @@ pub fn build_model_catalog(
                 default_height,
                 default_frames,
                 default_fps,
-                min_frames: crate::validation::min_frames_for_family(&manifest.family),
+                min_frames: crate::validation::min_frames_for_model(
+                    &manifest.family,
+                    &manifest.name,
+                ),
                 max_frames: crate::validation::max_frames_for_model_at_fps(
                     &manifest.family,
                     &manifest.name,
@@ -459,7 +462,7 @@ pub fn build_model_catalog(
                 default_height,
                 default_frames,
                 default_fps,
-                min_frames: crate::validation::min_frames_for_family(&family),
+                min_frames: crate::validation::min_frames_for_model(&family, name),
                 max_frames: crate::validation::max_frames_for_model_at_fps(
                     &family,
                     name,

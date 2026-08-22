@@ -126,7 +126,7 @@ impl H3Fl2VaGeometry {
     fn from_request(req: &GenerateRequest, mode: Mode, endpoint_count: usize) -> Result<Self> {
         let width = usize::try_from(req.width).context("H3 width does not fit usize")?;
         let height = usize::try_from(req.height).context("H3 height does not fit usize")?;
-        let frames = usize::try_from(req.frames.unwrap_or(contract::MIN_FRAMES))
+        let frames = usize::try_from(req.frames.unwrap_or(contract::REVIEWED_COMPACT_FRAMES))
             .context("H3 frame count does not fit usize")?;
         let latent_frames = VisualTemporalGeometry::default().encoded_frames(frames)?;
         let latent_width = width / VIDEO_VAE_SPATIAL_COMPRESSION;
@@ -1120,7 +1120,7 @@ pub(crate) fn collect_endpoint_bytes(
     req: &GenerateRequest,
     mode: Mode,
 ) -> Result<Vec<(H3EndpointAnchor, &[u8])>> {
-    let last_frame = req.frames.unwrap_or(contract::MIN_FRAMES) - 1;
+    let last_frame = req.frames.unwrap_or(contract::REVIEWED_COMPACT_FRAMES) - 1;
     let mut first = req.source_image.as_deref();
     let mut last = None;
     for keyframe in req.keyframes.as_deref().unwrap_or_default() {
@@ -2135,6 +2135,12 @@ mod tests {
         for (frames, video_latents, audio_latents) in [(124, 37, 207), (345, 102, 575)] {
             let mut req = request();
             req.frames = Some(frames);
+            // Geometry is a family property, but the reviewed compact tags
+            // admit exactly one clip length, so the long boundary is exercised
+            // through the official layout that actually spans the grid.
+            if frames != contract::REVIEWED_COMPACT_FRAMES {
+                req.model = contract::FL2VA_OFFICIAL.to_string();
+            }
             let prepared = prepared(&req);
             assert_eq!(prepared.geometry.latent_frames, video_latents);
             assert_eq!(prepared.geometry.audio_latents_per_channel, audio_latents);

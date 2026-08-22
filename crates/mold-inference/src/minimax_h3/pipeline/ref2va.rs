@@ -280,7 +280,7 @@ fn prepare_request_with_authority(
         .references
         .as_deref()
         .ok_or_else(|| anyhow!("MiniMax H3 Ref2VA lost its validated references"))?;
-    let frames = req.frames.unwrap_or(contract::MIN_FRAMES);
+    let frames = req.frames.unwrap_or(contract::REVIEWED_COMPACT_FRAMES);
     let shapes = contract::reference_prepared_shapes_for_target(source_references, frames)
         .map_err(|error| anyhow!("{}: {}", error.code, error.message))?;
     let mut references = Vec::with_capacity(source_references.len());

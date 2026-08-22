@@ -2378,7 +2378,9 @@ impl OutputMetadata {
         };
         let references = req.references.as_ref().and_then(|references| {
             (!references.is_empty()).then(|| {
-                let target_frames = req.frames.unwrap_or(crate::minimax_h3::MIN_FRAMES);
+                let target_frames = req
+                    .frames
+                    .unwrap_or(crate::minimax_h3::REVIEWED_COMPACT_FRAMES);
                 references
                     .iter()
                     .enumerate()
@@ -8477,7 +8479,7 @@ mod minimax_h3_capability_tests {
                 request: Some(MiniMaxH3RequestCapability {
                     width: crate::minimax_h3::DEFAULT_WIDTH,
                     height: crate::minimax_h3::DEFAULT_HEIGHT,
-                    frames: crate::minimax_h3::MIN_FRAMES,
+                    frames: crate::minimax_h3::REVIEWED_COMPACT_FRAMES,
                     fps: crate::minimax_h3::FIXED_FPS,
                     steps: crate::minimax_h3::COMFY_DEFAULT_STEPS,
                     batch_size: 1,

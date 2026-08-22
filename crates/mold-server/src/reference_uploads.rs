@@ -2489,7 +2489,7 @@ mod tests {
             "guidance": 0.0,
             "batch_size": 1,
             "strength": 1.0,
-            "frames": minimax_h3::MIN_FRAMES,
+            "frames": minimax_h3::REVIEWED_COMPACT_FRAMES,
             "fps": minimax_h3::FIXED_FPS,
             "output_format": "mp4"
         }))

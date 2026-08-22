@@ -84,7 +84,7 @@ mod tests {
             "steps": mold_core::minimax_h3::DEFAULT_STEPS,
             "guidance": 0.0,
             "batch_size": batch_size,
-            "frames": mold_core::minimax_h3::MIN_FRAMES,
+            "frames": mold_core::minimax_h3::REVIEWED_COMPACT_FRAMES,
             "fps": mold_core::minimax_h3::FIXED_FPS,
             "output_format": "mp4"
         })
@@ -7302,7 +7302,7 @@ mod tests {
                 "steps": mold_core::minimax_h3::DEFAULT_STEPS,
                 "guidance": 0.0,
                 "batch_size": 1,
-                "frames": mold_core::minimax_h3::MIN_FRAMES,
+                "frames": mold_core::minimax_h3::REVIEWED_COMPACT_FRAMES,
                 "fps": mold_core::minimax_h3::FIXED_FPS,
                 "output_format": "mp4",
                 "references": [{

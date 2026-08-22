@@ -803,16 +803,26 @@ fn installed_catalog_models(
                 default_guidance: guidance,
                 default_frames: frames,
                 default_fps: fps,
-                min_frames: mold_core::validation::min_frames_for_family(&sidecar.family),
-                max_frames: mold_core::validation::max_frames_for_family_at_fps(
+                // Model-aware, matching `mold_core::catalog`'s row builders:
+                // an unrecognized H3 identity deliberately takes the reviewed
+                // compact envelope, so its profile is fixed at one clip length
+                // while the family helpers would advertise the official
+                // BF16 ladder beside it.
+                min_frames: mold_core::validation::min_frames_for_model(
                     &sidecar.family,
+                    &sidecar.id,
+                ),
+                max_frames: mold_core::validation::max_frames_for_model_at_fps(
+                    &sidecar.family,
+                    &sidecar.id,
                     fps.unwrap_or(mold_core::validation::LTX2_DEFAULT_FPS),
                 ),
                 max_runtime_seconds: mold_core::validation::max_runtime_seconds_for_family(
                     &sidecar.family,
                 ),
-                max_frames_absolute: mold_core::validation::max_frames_absolute_for_family(
+                max_frames_absolute: mold_core::validation::max_frames_absolute_for_model(
                     &sidecar.family,
+                    &sidecar.id,
                 ),
                 frame_step: mold_core::validation::frame_step_for_family(&sidecar.family),
                 frame_offset: mold_core::validation::frame_offset_for_family(&sidecar.family),

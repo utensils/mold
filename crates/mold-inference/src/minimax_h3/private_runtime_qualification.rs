@@ -1054,7 +1054,7 @@ mod tests {
         H3PrivateRuntimeEnvelopeRecord {
             width: minimax_h3::DEFAULT_WIDTH,
             height: minimax_h3::DEFAULT_HEIGHT,
-            frames: minimax_h3::MIN_FRAMES,
+            frames: minimax_h3::REVIEWED_COMPACT_FRAMES,
             fps: minimax_h3::FIXED_FPS,
             batch_size: 1,
             max_steps: minimax_h3::COMFY_DEFAULT_STEPS,

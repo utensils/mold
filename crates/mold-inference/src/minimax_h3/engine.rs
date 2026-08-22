@@ -270,7 +270,7 @@ impl H3Fl2VaEngine {
         if output.mode != expected_mode
             || output.width != request.width
             || output.height != request.height
-            || output.frames != request.frames.unwrap_or(contract::MIN_FRAMES)
+            || output.frames != request.frames.unwrap_or(contract::REVIEWED_COMPACT_FRAMES)
             || output.fps != contract::FIXED_FPS
             || request.seed.is_some_and(|seed| seed != output.seed)
             || output.audio_sample_rate != contract::AUDIO_SAMPLE_RATE_HZ
@@ -362,7 +362,7 @@ fn ref2va_reference_fingerprint(request: &GenerateRequest) -> Result<String> {
         .context("MiniMax H3 Ref2VA request lost ordered references")?;
     let shapes = contract::reference_prepared_shapes_for_target(
         references,
-        request.frames.unwrap_or(contract::MIN_FRAMES),
+        request.frames.unwrap_or(contract::REVIEWED_COMPACT_FRAMES),
     )
     .map_err(|error| anyhow::anyhow!("{}: {}", error.code, error.message))?;
     let metadata = references

@@ -348,7 +348,15 @@ fn resolve_video_timing(
         .or_else(|| mold_core::validation::frame_offset_for_family(family))
         .unwrap_or(1)
         .max(1);
-    let min_frames = mold_core::validation::min_frames_for_family(family).unwrap_or(offset);
+    // Prefer the server-advertised floor, exactly as `step`, `offset`, and
+    // `max_runtime_seconds` above do. It is model-aware, so a reviewed compact
+    // H3 tag reports its own fixed 124-frame clip rather than the family's
+    // 107-frame floor — snapping a 4.4 s request onto the family floor would
+    // build a request the generation profile then rejects.
+    let min_frames = defaults
+        .and_then(|value| value.min_frames)
+        .or_else(|| mold_core::validation::min_frames_for_family(family))
+        .unwrap_or(offset);
     let max_frames = if let Some(runtime_seconds) = max_runtime_seconds {
         let raw = runtime_seconds
             .saturating_mul(resolved_fps)
@@ -533,7 +541,7 @@ pub fn build_generate_request(params: BuildParams<'_>) -> GenerateRequest {
                 .frames
                 .or_else(|| params.defaults.and_then(|value| value.default_frames))
                 .unwrap_or(if is_h3 {
-                    mold_core::minimax_h3::MIN_FRAMES
+                    mold_core::minimax_h3::REVIEWED_COMPACT_FRAMES
                 } else {
                     25
                 }),
@@ -1756,7 +1764,7 @@ mod tests {
     #[test]
     fn h3_duration_uses_its_five_offset_frame_grid() {
         let defs = mold_core::ModelDefaults {
-            default_frames: Some(mold_core::minimax_h3::MIN_FRAMES),
+            default_frames: Some(mold_core::minimax_h3::REVIEWED_COMPACT_FRAMES),
             default_fps: Some(mold_core::minimax_h3::FIXED_FPS),
             max_runtime_seconds: Some(mold_core::minimax_h3::MAX_DURATION_SECONDS),
             max_frames_absolute: Some(mold_core::minimax_h3::MAX_FRAMES),
@@ -1793,10 +1801,13 @@ mod tests {
                 Some(&defs),
                 None,
                 None,
-                Some(4.9),
+                Some(3.9),
             )
             .unwrap_err(),
-            "MiniMax H3 duration must be at least 5 seconds."
+            format!(
+                "MiniMax H3 duration must be at least {} seconds.",
+                mold_core::minimax_h3::MIN_DURATION_SECONDS
+            )
         );
     }
 
@@ -1813,7 +1824,7 @@ mod tests {
         let frames_error = resolve_video_timing(
             Some("minimax_h3"),
             None,
-            Some(mold_core::minimax_h3::MIN_FRAMES),
+            Some(mold_core::minimax_h3::REVIEWED_COMPACT_FRAMES),
             Some(30),
             None,
         )
@@ -1826,7 +1837,7 @@ mod tests {
     #[test]
     fn h3_request_builder_preserves_mandatory_av_contract() {
         let defs = mold_core::ModelDefaults {
-            default_frames: Some(mold_core::minimax_h3::MIN_FRAMES),
+            default_frames: Some(mold_core::minimax_h3::REVIEWED_COMPACT_FRAMES),
             default_fps: Some(mold_core::minimax_h3::FIXED_FPS),
             default_width: mold_core::minimax_h3::DEFAULT_WIDTH,
             default_height: mold_core::minimax_h3::DEFAULT_HEIGHT,
