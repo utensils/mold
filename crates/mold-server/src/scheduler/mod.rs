@@ -6387,9 +6387,41 @@ fn insufficient_vram_is_terminal(required_peak_bytes: u64, largest_total_vram_by
     largest_total_vram_bytes > 0 && required_peak_bytes > largest_total_vram_bytes
 }
 
+/// The forward passes one denoise step of this request performs, as a
+/// permille multiplier over the ordinary single-forward cost.
+///
+/// PuLID true CFG runs a SECOND transformer forward on every step from
+/// `cfg_start_step` onwards (`PuLID/flux/sampling.py:136-149`), and the earlier
+/// steps run one. So the denoise cost scales by
+/// `1 + (steps - cfg_start_step) / steps` — the branched fraction of the run,
+/// never a flat 2x, because a request that starts the branch late genuinely
+/// pays less.
+///
+/// Returns exactly `1_000` for every request that does not engage the branch,
+/// which keeps an inert scale and a zero identity weight byte-identical in the
+/// estimate rather than merely close.
+fn denoise_forward_multiplier_permille(request: &mold_core::GenerateRequest) -> u64 {
+    if !mold_core::identity::request_uses_true_cfg(request) {
+        return 1_000;
+    }
+    let steps = u64::from(request.steps).max(1);
+    let start = u64::from(mold_core::identity::effective_cfg_start_step(request)).min(steps);
+    let branched = steps.saturating_sub(start);
+    1_000 + branched.saturating_mul(1_000) / steps
+}
+
 fn generation_shape_bucket(request: &mold_core::GenerateRequest) -> String {
+    // The true-CFG arm is part of the bucket KEY, not just the static
+    // estimate: a branched run and an ordinary one of the same geometry take
+    // roughly twice the denoise time, and letting their samples share a bucket
+    // teaches the learned model an average that is wrong for both. The
+    // multiplier is the discriminator rather than a bare flag, so a run that
+    // starts the branch at step 1 and one that starts it at step 15 stay
+    // separate too. Requests that do not engage it all render `cfg1000`, which
+    // is what keeps every existing bucket's identity stable apart from that
+    // suffix.
     format!(
-        "{}x{}:s{}:f{}:fps{}:a{}:src{}:edit{}:lora{}:b{}",
+        "{}x{}:s{}:f{}:fps{}:a{}:src{}:edit{}:lora{}:b{}:cfg{}",
         request.width,
         request.height,
         request.steps,
@@ -6400,19 +6432,23 @@ fn generation_shape_bucket(request: &mold_core::GenerateRequest) -> String {
         request.edit_images.as_ref().map_or(0, Vec::len),
         u8::from(request.lora.is_some() || request.loras.as_ref().is_some_and(|v| !v.is_empty())),
         request.batch_size,
+        denoise_forward_multiplier_permille(request),
     )
 }
 
 fn static_generation_time_ms(request: &mold_core::GenerateRequest) -> u64 {
     let megapixels = (u64::from(request.width) * u64::from(request.height)).div_ceil(1_000_000);
     let frames = u64::from(request.frames.unwrap_or(1));
-    1_000u64.saturating_add(
-        megapixels
-            .max(1)
-            .saturating_mul(u64::from(request.steps).max(1))
-            .saturating_mul(frames)
-            .saturating_mul(125),
-    )
+    // The 1_000 ms term is fixed overhead and is deliberately outside the
+    // multiplier: true CFG doubles denoise steps, not setup.
+    let denoise_ms = megapixels
+        .max(1)
+        .saturating_mul(u64::from(request.steps).max(1))
+        .saturating_mul(frames)
+        .saturating_mul(125)
+        .saturating_mul(denoise_forward_multiplier_permille(request))
+        / 1_000;
+    1_000u64.saturating_add(denoise_ms)
 }
 
 /// `host_bytes` must be the plan's `admission_host_demand_bytes`, never its raw
@@ -6632,6 +6668,185 @@ fn monotonic_deadline_ms(deadline: Instant) -> u64 {
             .try_into()
             .unwrap_or(u64::MAX),
     )
+}
+
+#[cfg(test)]
+mod true_cfg_estimate_tests {
+    use super::*;
+
+    fn request() -> mold_core::GenerateRequest {
+        let mut request: mold_core::GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "a portrait",
+            "model": "flux-dev:q8",
+            "width": 1024,
+            "height": 1024,
+            "steps": 20,
+            "guidance": 3.5,
+            "batch_size": 1,
+        }))
+        .expect("the minimal generate-request wire shape");
+        request.id_image = Some(vec![0x89, 0x50, 0x4e, 0x47]);
+        request
+    }
+
+    /// A request that does not engage the branch must be EXACTLY the ordinary
+    /// single-forward cost — not merely close. Anything else would move every
+    /// existing estimate the day this landed.
+    #[test]
+    fn an_unbranched_request_has_exactly_the_ordinary_multiplier() {
+        let plain = request();
+        assert_eq!(denoise_forward_multiplier_permille(&plain), 1_000);
+
+        // An inert scale is inert here too.
+        let mut inert = request();
+        inert.true_cfg = Some(1.0);
+        assert_eq!(denoise_forward_multiplier_permille(&inert), 1_000);
+
+        // And a zero identity weight renders the plain print.
+        let mut zero = request();
+        zero.true_cfg = Some(2.5);
+        zero.id_weight = Some(0.0);
+        assert_eq!(denoise_forward_multiplier_permille(&zero), 1_000);
+    }
+
+    /// The multiplier is the BRANCHED FRACTION of the run, never a flat 2x: a
+    /// request that starts the branch late genuinely runs fewer double steps.
+    #[test]
+    fn the_multiplier_is_the_branched_fraction_of_the_run() {
+        let mut from_zero = request();
+        from_zero.true_cfg = Some(2.0);
+        from_zero.cfg_start_step = Some(0);
+        assert_eq!(denoise_forward_multiplier_permille(&from_zero), 2_000);
+
+        // The default start of 1 leaves 19 of 20 steps branched.
+        let mut default_start = request();
+        default_start.true_cfg = Some(2.0);
+        assert_eq!(denoise_forward_multiplier_permille(&default_start), 1_950);
+
+        let mut halfway = request();
+        halfway.true_cfg = Some(2.0);
+        halfway.cfg_start_step = Some(10);
+        assert_eq!(denoise_forward_multiplier_permille(&halfway), 1_500);
+
+        let mut last_step = request();
+        last_step.true_cfg = Some(2.0);
+        last_step.cfg_start_step = Some(19);
+        assert_eq!(denoise_forward_multiplier_permille(&last_step), 1_050);
+    }
+
+    /// The learned model keys on the shape bucket, so a branched run and an
+    /// ordinary one of the same geometry must NOT share a bucket — their
+    /// samples would teach an average that is wrong for both, and the ETA a
+    /// client renders (and the Auto host placement-preview picks) comes from
+    /// exactly that number.
+    #[test]
+    fn the_shape_bucket_separates_branched_runs_from_ordinary_ones() {
+        let plain = request();
+        let mut branched = request();
+        branched.true_cfg = Some(2.0);
+        assert_ne!(
+            generation_shape_bucket(&plain),
+            generation_shape_bucket(&branched)
+        );
+
+        // And two branched runs that start the branch at different steps are
+        // different amounts of work, so they are different buckets too.
+        let mut later = request();
+        later.true_cfg = Some(2.0);
+        later.cfg_start_step = Some(10);
+        assert_ne!(
+            generation_shape_bucket(&branched),
+            generation_shape_bucket(&later)
+        );
+
+        // An inert scale and a zero weight must land in the ORDINARY bucket
+        // byte-for-byte, or their samples are stranded from the runs they are
+        // identical to.
+        let mut inert = request();
+        inert.true_cfg = Some(1.0);
+        assert_eq!(
+            generation_shape_bucket(&plain),
+            generation_shape_bucket(&inert)
+        );
+        let mut zero = request();
+        zero.true_cfg = Some(2.5);
+        zero.id_weight = Some(0.0);
+        assert_eq!(
+            generation_shape_bucket(&plain),
+            generation_shape_bucket(&zero)
+        );
+    }
+
+    /// The cold estimate is what a host with no learned samples answers with,
+    /// which is exactly the case a first true-CFG render hits. It has to scale
+    /// the denoise term and leave the fixed setup term alone.
+    #[test]
+    fn the_static_estimate_scales_the_denoise_term_only() {
+        let plain = request();
+        let mut branched = request();
+        branched.true_cfg = Some(2.0);
+        branched.cfg_start_step = Some(0);
+
+        let plain_ms = static_generation_time_ms(&plain);
+        let branched_ms = static_generation_time_ms(&branched);
+        // 1_000 ms of fixed setup, then a doubled denoise term.
+        assert_eq!(branched_ms - 1_000, 2 * (plain_ms - 1_000));
+
+        let mut halfway = request();
+        halfway.true_cfg = Some(2.0);
+        halfway.cfg_start_step = Some(10);
+        assert_eq!(
+            static_generation_time_ms(&halfway) - 1_000,
+            (plain_ms - 1_000) * 3 / 2
+        );
+
+        // Byte-identical for everything that does not engage the branch.
+        let mut inert = request();
+        inert.true_cfg = Some(1.0);
+        assert_eq!(static_generation_time_ms(&inert), plain_ms);
+    }
+
+    /// Placement preview must read the SAME predicate — it drives the Auto
+    /// host choice by predicted completion, and a branched render mispriced as
+    /// ordinary would win a race it cannot actually win. It shares the estimate
+    /// path rather than restating it, and this is the check that says so.
+    #[test]
+    fn the_placement_preview_estimate_path_is_the_branched_one() {
+        let mut branched = request();
+        branched.true_cfg = Some(2.0);
+        branched.cfg_start_step = Some(0);
+
+        // `placement_preview_dag_cancellable` builds its per-plan estimate from
+        // exactly these two functions, so pinning them pins the preview.
+        assert!(mold_core::identity::request_uses_true_cfg(&branched));
+        assert!(generation_shape_bucket(&branched).ends_with(":cfg2000"));
+        assert!(static_generation_time_ms(&branched) > static_generation_time_ms(&request()));
+
+        // `static_generation_estimate` floors `predicted_run_ms` at
+        // `WorkKind::Generation`'s 30 s static timing, which dominates every
+        // small render — so the geometry here is deliberately large enough to
+        // clear it, which is where the branch can actually move the answer.
+        // Below the floor the shape bucket is what keeps the two apart, and it
+        // does so from the first learned sample.
+        let mut big = branched.clone();
+        big.width = 2048;
+        big.height = 2048;
+        big.steps = 50;
+        let mut big_plain = request();
+        big_plain.width = 2048;
+        big_plain.height = 2048;
+        big_plain.steps = 50;
+
+        let static_estimate = static_generation_estimate(&big, 1_000, 2_000);
+        let plain_estimate = static_generation_estimate(&big_plain, 1_000, 2_000);
+        assert!(
+            static_estimate.predicted_run_ms > plain_estimate.predicted_run_ms,
+            "{} must exceed {}",
+            static_estimate.predicted_run_ms,
+            plain_estimate.predicted_run_ms
+        );
+        assert_eq!(static_estimate.cold_setup_ms, plain_estimate.cold_setup_ms);
+    }
 }
 
 #[cfg(test)]
