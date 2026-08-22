@@ -281,13 +281,22 @@ const GATE_RUNS: usize = 20;
 ///
 /// The margin is generous — the port only has to not regress — because the
 /// measured win is small: see `docs/architecture/pulid-perf.md` §4, which
-/// records why re-materialization turned out not to be the cost centre.
+/// records why re-materialization turned out not to be the cost centre. It is
+/// still tight enough to catch the transpose bug, which cost ~16% of the
+/// recognizer.
 const NO_SLOWER_THAN: f64 = 0.95;
 
-fn p95(mut samples: Vec<f64>) -> f64 {
+/// The best and median samples.
+///
+/// The ratio below is taken over the BEST sample of each side, not the p95.
+/// Both evaluators are deterministic, so their fastest run is the one least
+/// contaminated by another process — and this box routinely sits at load
+/// average 15 with peer builds running, where a p95 is whatever stall happened
+/// to land in the 19th sample. The median is reported alongside so a reader can
+/// see the spread rather than trusting one number.
+fn best_and_median(mut samples: Vec<f64>) -> (f64, f64) {
     samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let rank = ((0.95 * samples.len() as f64).ceil() as usize).clamp(1, samples.len());
-    samples[rank - 1]
+    (samples[0], samples[samples.len() / 2])
 }
 
 fn milliseconds(f: impl FnOnce()) -> f64 {
@@ -333,13 +342,65 @@ fn the_resident_port_is_never_slower_than_the_evaluator_it_replaced() {
             oracle.push(o);
         }
     }
-    let (port_p95, oracle_p95) = (p95(port), p95(oracle));
-    let ratio = oracle_p95 / port_p95;
-    println!("face stack p95: port {port_p95:.1} ms, candle-onnx {oracle_p95:.1} ms ({ratio:.2}x)");
+    let (port_best, port_median) = best_and_median(port);
+    let (oracle_best, oracle_median) = best_and_median(oracle);
+    let ratio = oracle_best / port_best;
+    println!(
+        "face stack: port {port_best:.1}/{port_median:.1} ms, candle-onnx \
+         {oracle_best:.1}/{oracle_median:.1} ms (best/median), {ratio:.2}x"
+    );
     assert!(
         ratio >= NO_SLOWER_THAN,
         "the resident port is {ratio:.2}x the evaluator it replaced \
-         ({port_p95:.1} ms vs {oracle_p95:.1} ms); a resident forward must not cost more than one \
-         that re-materializes 278 MB of initializers per call"
+         ({port_best:.1} ms vs {oracle_best:.1} ms best of {GATE_RUNS}); a resident forward must \
+         not cost more than one that re-materializes 278 MB of initializers per call"
     );
+}
+
+/// The device seam, exercised end to end rather than only at the blob.
+///
+/// `place_input`'s unit test proves the input follows the weights; this proves
+/// the rest of the network does too — every convolution, the folded batch
+/// norms, the PReLUs, and the `Gemm` — because a seam that compiles but cannot
+/// complete a forward is not a seam. It is what makes
+/// `docs/architecture/pulid-perf.md` §5 implementable rather than aspirational.
+///
+/// Metal reassociates reductions differently from the CPU, so the comparison is
+/// a tolerance rather than bit-identity — deliberately looser than the
+/// CPU-vs-`candle-onnx` budgets above, and still far tighter than the 0.99
+/// cosine the upstream gate asks for.
+#[cfg(all(target_os = "macos", feature = "metal"))]
+#[test]
+#[ignore = "requires the antelopev2 ONNX models via MOLD_TEST_PULID_ASSETS"]
+fn the_device_seam_completes_a_forward_off_the_cpu() {
+    let dir = assets().expect("set MOLD_TEST_PULID_ASSETS to the antelopev2 directory");
+    // `metal_device`, never `Device::new_metal`. Two reasons, and the second
+    // is the one that bites: mold opens each Metal GPU exactly once per
+    // process (a second device for the same GPU is the split-identity bug),
+    // and `device::tests::production_code_never_constructs_a_metal_device_directly`
+    // scans every `.rs` under `crates/` treating everything before the first
+    // `#[cfg(test)]` as production — which, in an integration-test file that
+    // has no such marker, is the whole file.
+    let Ok(metal) = mold_inference::device::metal_device(0) else {
+        eprintln!("skipping: no Metal device on this machine");
+        return;
+    };
+    let recognizer = load_onnx_model(&dir.join("glintr100.onnx"), None).expect("the model loads");
+    let on_cpu = IResNet100::new(&recognizer.model, &Device::Cpu).expect("the CPU port builds");
+    let on_metal = IResNet100::new(&recognizer.model, &metal).expect("the Metal port builds");
+    assert!(on_metal.device().same_device(&metal));
+
+    let (image, landmarks, _) = fixtures().remove(0);
+    let crop = norm_crop(&image, &landmarks).expect("a warpable face");
+    // The blob is built on the CPU, as production builds it: this call is the
+    // regression the finding was about.
+    let blob = ArcFaceRecognizer::blob(&crop).expect("the blob builds");
+
+    let host = on_cpu.forward(&blob).expect("the CPU forward");
+    let device = on_metal.forward(&blob).expect("the Metal forward");
+    let delta = max_abs(&host, &device, "embedding");
+    let cosine =
+        ArcFaceEmbedding { raw: host }.cosine_similarity(&ArcFaceEmbedding { raw: device });
+    println!("metal vs cpu: worst |delta| {delta:e}, cosine {cosine:.8}");
+    assert!(cosine >= 0.9999, "metal cosine {cosine:.8} against the CPU");
 }

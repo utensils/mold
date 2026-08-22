@@ -52,7 +52,7 @@ use candle_core::{Device, Module, Tensor};
 use candle_nn::Conv2d;
 use candle_onnx::onnx::ModelProto;
 
-use super::onnx_weights::WeightTape;
+use super::onnx_weights::{place_input, WeightTape};
 use super::scrfd::{ANCHORS_PER_CELL, FEATURE_STRIDES};
 
 /// Backbone channel widths, in stage order.
@@ -271,8 +271,14 @@ impl ScrfdNet {
     }
 
     /// Run the network over one `[1, 3, H, W]` blob.
+    ///
+    /// The blob arrives from [`super::scrfd::ScrfdDetector::blob`], which builds
+    /// it on the CPU because that is where an `RgbImage` lives. It is moved onto
+    /// the weights' device first — a clone on today's CPU path, and the
+    /// difference between working and a cross-device `Conv` failure on any
+    /// other.
     pub fn forward(&self, blob: &Tensor) -> Result<ScrfdRawOutputs> {
-        let mut xs = blob.clone();
+        let mut xs = place_input(blob, &self.device)?;
         for conv in &self.stem {
             xs = conv.forward(&xs)?.relu()?;
         }

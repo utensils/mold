@@ -98,6 +98,25 @@ impl FoldedBatchNorm {
     }
 }
 
+/// Move an input blob onto the device the weights are resident on.
+///
+/// Both face networks take their input from image code that builds on the CPU
+/// (`ScrfdDetector::blob`, `ArcFaceRecognizer::blob`) — an `RgbImage` lives in
+/// host memory, so there is nowhere else for it to start. The weights, since
+/// #1227, live wherever the caller placed them. candle refuses a convolution
+/// whose input and kernel are on different devices, so the very first `Conv`
+/// would fail the moment anything passed a non-CPU device to
+/// `ScrfdNet::new` / `IResNet100::new` — the seam that exists precisely so
+/// `pulid-perf.md` §5 can.
+///
+/// `Tensor::to_device` short-circuits to a clone when the devices already
+/// match, so this is free on today's CPU-only path and cannot change its
+/// numerics.
+pub fn place_input(blob: &Tensor, device: &Device) -> Result<Tensor> {
+    blob.to_device(device)
+        .context("moving the face-network input onto the device holding its weights")
+}
+
 /// Every float initializer of one graph, plus a cursor over its nodes.
 pub struct WeightTape<'a> {
     nodes: Vec<&'a NodeProto>,
@@ -194,10 +213,17 @@ impl<'a> WeightTape<'a> {
                     proto.raw_data.len()
                 );
             }
+            // `as_chunks` rather than `chunks_exact`: same iteration, but it
+            // yields `[u8; 4]` directly so `from_le_bytes` needs no
+            // reassembly, and clippy's `chunks_exact_to_as_chunks` asks for it.
+            // The length check above already proved the remainder is empty.
+            // Mirrors `mold_core::identity::FrozenIdentityEmbedding::values`.
             proto
                 .raw_data
-                .chunks_exact(4)
-                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|chunk| f32::from_le_bytes(*chunk))
                 .collect()
         } else {
             proto.float_data.clone()
@@ -465,6 +491,55 @@ mod tests {
             }),
             ..Default::default()
         }
+    }
+
+    /// The CPU path must be a no-op in every sense: same device, same values,
+    /// and no reallocation-driven difference the parity goldens could pick up.
+    #[test]
+    fn placing_a_cpu_input_on_the_cpu_changes_nothing() {
+        let blob =
+            Tensor::from_vec(vec![1.0f32, -2.0, 3.5, 0.0], (1, 1, 2, 2), &Device::Cpu).unwrap();
+        let placed = place_input(&blob, &Device::Cpu).unwrap();
+        assert!(placed.device().same_device(&Device::Cpu));
+        assert_eq!(
+            placed.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+            blob.flatten_all().unwrap().to_vec1::<f32>().unwrap()
+        );
+    }
+
+    /// The case the CPU test cannot reach: a host-built blob meeting weights
+    /// that are not on the host. Without this move candle rejects the first
+    /// convolution outright, so the device seam would be a seam in name only.
+    #[cfg(all(target_os = "macos", feature = "metal"))]
+    #[test]
+    fn a_cpu_input_is_moved_onto_a_metal_net() {
+        // `crate::device::metal_device`, never `Device::new_metal`: mold opens
+        // each Metal GPU exactly once per process, and a second device for the
+        // same GPU is the split-identity bug
+        // `production_code_never_constructs_a_metal_device_directly` exists to
+        // stop. A test that compared against a device production would never
+        // use would be testing something else.
+        let Ok(metal) = crate::device::metal_device(0) else {
+            eprintln!("skipping: no Metal device on this machine");
+            return;
+        };
+        let values = vec![1.0f32, -2.0, 3.5, 0.0];
+        let blob = Tensor::from_vec(values.clone(), (1, 1, 2, 2), &Device::Cpu).unwrap();
+        let placed = place_input(&blob, &metal).unwrap();
+        assert!(
+            placed.device().same_device(&metal),
+            "the input must follow the weights, not the image decoder"
+        );
+        assert_eq!(
+            placed
+                .to_device(&Device::Cpu)
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap(),
+            values
+        );
     }
 
     #[test]

@@ -43,7 +43,7 @@ use candle_core::{Device, Module, Tensor};
 use candle_nn::{Conv2d, PReLU};
 use candle_onnx::onnx::ModelProto;
 
-use super::onnx_weights::{FoldedBatchNorm, WeightTape};
+use super::onnx_weights::{place_input, FoldedBatchNorm, WeightTape};
 
 /// `iresnet100`'s block ladder, `iresnet.py:190`.
 const LAYER_BLOCKS: [usize; 4] = [3, 13, 30, 3];
@@ -182,12 +182,17 @@ impl IResNet100 {
     }
 
     /// Embed one `[1, 3, 112, 112]` blob, returning the RAW 512-d output.
+    ///
+    /// The blob arrives from [`super::arcface::ArcFaceRecognizer::blob`], built
+    /// on the CPU where the aligned crop lives, and is moved onto the weights'
+    /// device first — see [`place_input`].
     pub fn forward(&self, blob: &Tensor) -> Result<Vec<f32>> {
         let (batch, _, _, _) = blob.dims4()?;
         if batch != 1 {
             bail!("the ArcFace port runs one crop at a time, got a batch of {batch}");
         }
-        let mut xs = self.stem_conv.forward(blob)?;
+        let blob = place_input(blob, &self.device)?;
+        let mut xs = self.stem_conv.forward(&blob)?;
         xs = self.stem_prelu.forward(&xs)?;
         for block in &self.blocks {
             xs = block.forward(&xs)?;
