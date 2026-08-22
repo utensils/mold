@@ -3830,7 +3830,13 @@ fn process_job_with_sink(
                 ordinal,
             ) {
                 Ok(resolved) => {
-                    if resolved.embedding.is_some() {
+                    // Only a resolution that actually COMPUTED reports the
+                    // phase. A sibling served from the per-photograph cache,
+                    // or one that waited on a peer's single flight, costs
+                    // about two milliseconds — recording that would drag
+                    // `ewma_identity_extract_ms` to a figure no cold request
+                    // can meet and make every conditioned ETA wrong.
+                    if resolved.extracted {
                         let elapsed = identity_started.elapsed();
                         // The scheduler's learned evidence for this phase.
                         // Only the sibling that actually extracted reports it;

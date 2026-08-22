@@ -825,6 +825,7 @@ mod tests {
         let stubbed =
             crate::identity_extraction::StubbedExtractor::install(|_, images, want_uncond| {
                 Ok(crate::identity_extraction::ResolvedIdentity {
+                    extracted: true,
                     embedding: Some(crate::identity_extraction::stub_embedding_for(
                         images,
                         want_uncond,
@@ -888,6 +889,7 @@ mod tests {
         let stubbed =
             crate::identity_extraction::StubbedExtractor::install(|_, images, want_uncond| {
                 Ok(crate::identity_extraction::ResolvedIdentity {
+                    extracted: true,
                     embedding: Some(crate::identity_extraction::stub_embedding_for(
                         images,
                         want_uncond,
@@ -939,6 +941,7 @@ mod tests {
         let stubbed =
             crate::identity_extraction::StubbedExtractor::install(|_, images, want_uncond| {
                 Ok(crate::identity_extraction::ResolvedIdentity {
+                    extracted: true,
                     embedding: Some(crate::identity_extraction::stub_embedding_for(
                         images,
                         want_uncond,
@@ -1027,6 +1030,7 @@ mod tests {
         let _stubbed =
             crate::identity_extraction::StubbedExtractor::install(|_, images, want_uncond| {
                 Ok(crate::identity_extraction::ResolvedIdentity {
+                    extracted: true,
                     embedding: Some(crate::identity_extraction::stub_embedding_for(
                         images,
                         want_uncond,
@@ -1076,6 +1080,7 @@ mod tests {
         let stubbed =
             crate::identity_extraction::StubbedExtractor::install(|_, images, want_uncond| {
                 Ok(crate::identity_extraction::ResolvedIdentity {
+                    extracted: true,
                     embedding: Some(crate::identity_extraction::stub_embedding_for(
                         images,
                         want_uncond,

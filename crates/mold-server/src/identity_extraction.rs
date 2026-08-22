@@ -86,6 +86,16 @@ pub(crate) fn request_resolves_identity(request: &GenerateRequest) -> bool {
 /// What one parent request's identity resolution produced.
 #[derive(Debug, Default, Clone)]
 pub struct ResolvedIdentity {
+    /// Whether this resolution actually COMPUTED an identity, or whether every
+    /// photograph came from the per-photograph cache — including the case
+    /// where a batch sibling waited on another sibling's single flight and
+    /// took its tokens.
+    ///
+    /// Two things read it and both would be wrong without it: the
+    /// once-per-parent counter, which must not count a sibling that computed
+    /// nothing, and `ProgressPhase::IdentityExtract`, which must not teach the
+    /// scheduler that this phase costs the two milliseconds a cache hit costs.
+    pub extracted: bool,
     /// `None` for every request that does not condition on a face.
     pub embedding: Option<FrozenIdentityEmbedding>,
     /// A caller-facing advisory the extraction produced — today only "several
@@ -148,14 +158,24 @@ pub fn resolve_identity_for_lease(
         );
     };
 
-    EXTRACTIONS.fetch_add(1, Ordering::SeqCst);
-
     #[cfg(test)]
-    if let Some(stub) = test_stub() {
-        return stub(&paths, &images, want_uncond);
-    }
+    let resolved = match test_stub() {
+        Some(stub) => stub(&paths, &images, want_uncond)?,
+        None => extract_on_device(paths, images, want_uncond, backend, ordinal)?,
+    };
+    #[cfg(not(test))]
+    let resolved = extract_on_device(paths, images, want_uncond, backend, ordinal)?;
 
-    extract_on_device(paths, images, want_uncond, backend, ordinal)
+    // Counted on what was COMPUTED, not on what was asked for, and through the
+    // one arm both paths take. Four siblings of one parent resolve four times
+    // and extract once — the first holds the photograph's single flight and
+    // the other three take its tokens — so counting resolutions would report
+    // four and the once-per-parent contract would stop being checkable exactly
+    // when it started mattering.
+    if resolved.extracted {
+        EXTRACTIONS.fetch_add(1, Ordering::SeqCst);
+    }
+    Ok(resolved)
 }
 
 /// The real extraction, on the leased device.
@@ -187,6 +207,7 @@ fn extract_on_device(
         tracing::warn!(target: "mold::identity", "{warning}");
     }
     Ok(ResolvedIdentity {
+        extracted: outcome.extracted,
         embedding: Some(outcome.embedding),
         warning: outcome.warning,
     })
@@ -335,6 +356,7 @@ mod tests {
         want_uncond: bool,
     ) -> Result<ResolvedIdentity, String> {
         Ok(ResolvedIdentity {
+            extracted: true,
             embedding: Some(stub_embedding_for(images, want_uncond)),
             warning: None,
         })
@@ -354,6 +376,7 @@ mod tests {
         want_uncond: bool,
     ) -> Result<ResolvedIdentity, String> {
         Ok(ResolvedIdentity {
+            extracted: true,
             embedding: Some(stub_embedding_for(images, want_uncond)),
             warning: Some(
                 "3 faces were detected in the identity image; conditioning on the largest one"
@@ -444,6 +467,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(60));
         IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
         Ok(ResolvedIdentity {
+            extracted: true,
             embedding: Some(stub_embedding_for(images, want_uncond)),
             warning: None,
         })
@@ -578,6 +602,86 @@ mod tests {
         .embedding
         .expect("an identity")
         .has_uncond());
+    }
+
+    /// A resolution served from the per-photograph cache — or from a peer
+    /// sibling's single flight — is not an extraction, and must not be counted
+    /// as one. Without this the once-per-parent counter reports the number of
+    /// SIBLINGS, which is the number it exists to distinguish from.
+    #[test]
+    fn a_resolution_that_computed_nothing_is_not_counted() {
+        fn cache_served(
+            _: &PulidPaths,
+            images: &[Vec<u8>],
+            want_uncond: bool,
+        ) -> Result<ResolvedIdentity, String> {
+            Ok(ResolvedIdentity {
+                extracted: false,
+                embedding: Some(stub_embedding_for(images, want_uncond)),
+                warning: None,
+            })
+        }
+        let stubbed = StubbedExtractor::install(cache_served);
+        for _ in 0..4 {
+            assert!(resolve_identity_for_lease(
+                &request(None),
+                Some(&paths()),
+                LEASED_BACKEND,
+                LEASED_ORDINAL
+            )
+            .expect("a cached resolution still answers")
+            .embedding
+            .is_some());
+        }
+        assert_eq!(
+            stubbed.extractions(),
+            0,
+            "four siblings served from the cache are zero extractions"
+        );
+    }
+
+    /// Every sibling of a batch derives the SAME cache key, because the key is
+    /// a pure function of the photograph bytes each child carries plus the
+    /// build's own asset digests — nothing request-scoped reaches it.
+    ///
+    /// This is why the children need no frozen key handed down from the
+    /// parent: content addressing already gives them one, and a second copy
+    /// travelling in the plan would be an authority that could disagree with
+    /// the bytes it claims to describe. What the parent's preparation cannot
+    /// supply — and what the single flight does — is making them compute it
+    /// once.
+    #[test]
+    fn every_batch_sibling_derives_the_same_cache_key() {
+        let assets = mold_core::identity::IdentityAssetDigests {
+            adapter: "a".repeat(64),
+            vision: "v".repeat(64),
+            face_detector: "d".repeat(64),
+            face_recognizer: "r".repeat(64),
+            face_parser: "p".repeat(64),
+        };
+        let parent = request(None);
+        let keys: std::collections::BTreeSet<String> = (1..=4u32)
+            .map(|index| {
+                let mut child = parent.clone();
+                child.batch_id = Some("parent".to_string());
+                child.batch_index = Some(index);
+                child.batch_count = Some(4);
+                child.seed = Some(u64::from(index));
+                let photo = mold_core::identity::identity_images(&child)
+                    .into_iter()
+                    .next()
+                    .expect("every child carries the parent's photograph");
+                mold_core::identity::identity_cache_key(
+                    &mold_core::identity::id_image_sha256(photo),
+                    &assets,
+                )
+            })
+            .collect();
+        assert_eq!(
+            keys.len(),
+            1,
+            "four siblings must resolve to one cache key, not four"
+        );
     }
 
     /// The charged peaks are the measurements, not second numbers that can

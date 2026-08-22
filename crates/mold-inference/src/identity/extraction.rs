@@ -308,6 +308,107 @@ pub fn pinned_asset_digests() -> IdentityAssetDigests {
     }
 }
 
+/// One lock per cache key, so concurrent callers asking for the SAME
+/// photograph compute it once and every other one takes that result.
+///
+/// The cache alone is not enough and the gap is not theoretical. A
+/// `batch_size = 4` parent is prepared before fan-out, its children are
+/// dispatched to several GPU worker threads at once, and each child resolves
+/// its own identity — so four threads can all miss a cold cache in the window
+/// between `cache_get` and `cache_put`, run the whole 300 GFLOP stack four
+/// times, and, because they are on different devices, end up with four
+/// embeddings that differ at the measured 3.82e-5 device tolerance. Four
+/// siblings of one print conditioned on four slightly different faces is not a
+/// performance bug.
+///
+/// So the miss path is single-flight: the first caller holds the key's lock and
+/// computes, every other caller BLOCKS on that lock and then re-reads the
+/// cache, taking the tokens the winner stored. "One extraction per parent" is
+/// therefore true by construction rather than by preparation ordering, and the
+/// siblings' embeddings are bit-identical rather than merely equivalent.
+///
+/// Blocking rather than async because the callers are GPU owner threads, which
+/// is also why this is a `std::sync::Mutex`: there is no reactor to yield to,
+/// and an extraction holds the device anyway.
+///
+/// **Locks are always acquired in sorted key order.** A multi-photograph set
+/// takes several at once, and two requests sharing a subset of photographs in
+/// different orders would otherwise deadlock.
+///
+/// A failed flight stores nothing, so the key is simply released and the next
+/// caller — or a retry — computes it for real. There is deliberately no
+/// negative caching: an extraction failure is a torn file or an absent face,
+/// both of which a later attempt may legitimately see differently.
+type FlightRegistry =
+    std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<std::sync::Mutex<()>>>>;
+
+fn flight_registry() -> &'static FlightRegistry {
+    static FLIGHTS: std::sync::OnceLock<FlightRegistry> = std::sync::OnceLock::new();
+    FLIGHTS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// The flight lock for every key in `keys`, deduplicated and SORTED.
+fn flights_for(keys: &[String]) -> Vec<std::sync::Arc<std::sync::Mutex<()>>> {
+    let mut ordered: Vec<&String> = keys.iter().collect();
+    ordered.sort();
+    ordered.dedup();
+    let mut registry = flight_registry()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    ordered
+        .into_iter()
+        .map(|key| {
+            registry
+                .entry(key.clone())
+                .or_insert_with(|| std::sync::Arc::new(std::sync::Mutex::new(())))
+                .clone()
+        })
+        .collect()
+}
+
+/// Drop registry entries nobody is holding any more.
+///
+/// Called after the guards AND the local `Arc`s are gone, so a `strong_count`
+/// of one means the registry is the only owner and no peer is waiting on it.
+/// Skipping this would leak one mutex per distinct photograph for the life of
+/// the process.
+fn release_flights(keys: &[String]) {
+    let mut registry = flight_registry()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    for key in keys {
+        if registry
+            .get(key)
+            .is_some_and(|held| std::sync::Arc::strong_count(held) == 1)
+        {
+            registry.remove(key);
+        }
+    }
+}
+
+/// The flight key for the unconditional identity.
+///
+/// Not a cache key and never an LRU entry — `pulid-perf.md` §2 is explicit that
+/// the uncond is a degenerate memo rather than a keyed entry. This is only a
+/// lock name, and it exists for the same reason the per-photograph flights do:
+/// the uncond rides the frozen fingerprint through `with_uncond`, so two
+/// siblings computing it on two devices would disagree there too.
+fn uncond_flight_key(adapter_sha256: &str) -> String {
+    format!("mold.identity.uncond.flight/{adapter_sha256}")
+}
+
+static IDENTITY_EXTRACTIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Photographs (and unconditional identities) this process has actually
+/// composed, as opposed to served from the cache.
+///
+/// This is the counter that makes "exactly once per parent" checkable now that
+/// resolution happens per sibling inside each lease: a `batch_size = 4` parent
+/// across two devices must move it by exactly one.
+pub fn identity_extraction_count() -> u64 {
+    IDENTITY_EXTRACTIONS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// What one extraction produced.
 #[derive(Debug)]
 pub struct IdentityExtraction {
@@ -316,6 +417,17 @@ pub struct IdentityExtraction {
     /// A caller-surfacable advisory — today only "several faces were found".
     /// Travels to the client as `x-mold-request-warning`.
     pub warning: Option<String>,
+    /// Whether anything was actually computed, or whether every photograph
+    /// (and the unconditional identity, when asked for) came from the cache.
+    ///
+    /// The caller needs this for two things it would otherwise get wrong. The
+    /// once-per-parent counter must not count a sibling that waited on a
+    /// flight and took the winner's tokens; and
+    /// `ProgressPhase::IdentityExtract` must not teach the scheduler that this
+    /// phase takes two milliseconds, which is what a cache hit costs and what
+    /// would drag `ewma_identity_extract_ms` to a figure no cold request can
+    /// meet.
+    pub extracted: bool,
 }
 
 /// Extract, compose, and freeze the identity for one request.
@@ -408,48 +520,107 @@ pub fn extract_identity_embeddings(
         .filter(|index| cached[*index].is_none())
         .collect();
 
+    let mut extracted = false;
     if !missing.is_empty() || (want_uncond && uncond.is_none()) {
-        let extractor = IdentityExtractor::load(paths, device)
-            .context("loading the PuLID face-extraction models")?;
-        let mut faces = Vec::with_capacity(missing.len());
-        let mut detected_warnings = Vec::with_capacity(missing.len());
-        for &index in &missing {
-            let features = extractor.extract(images[index]).map_err(|error| {
-                if count == 1 {
-                    error
-                } else {
-                    IdentityError::Runtime(anyhow::anyhow!(
-                        "identity photo {} of {count}: {error}",
-                        index + 1
-                    ))
-                }
-            })?;
-            detected_warnings.push(features.warning);
-            faces.push((features.arcface.raw, features.eva_crop_512));
+        // Everything this call might have to compute, named as flight keys.
+        // Taking them all before re-reading the cache is what makes the
+        // re-read authoritative: a peer that beat us here has already stored
+        // its result and released.
+        let mut flight_keys: Vec<String> = missing.iter().map(|&i| keys[i].clone()).collect();
+        if want_uncond && uncond.is_none() {
+            flight_keys.push(uncond_flight_key(&assets.adapter));
         }
-        let composed =
-            compose_identity_token_sets(paths, &faces, want_uncond && uncond.is_none(), device)
-                .context("composing the PuLID identity embedding")?;
-        for ((&index, tokens), warning) in missing
+        let arcs = flights_for(&flight_keys);
+        let _flights: Vec<std::sync::MutexGuard<'_, ()>> = arcs
             .iter()
-            .zip(composed.per_image)
-            .zip(detected_warnings)
-        {
-            let value = CachedIdentity {
-                tokens: std::sync::Arc::new(tokens),
-                warning,
-            };
-            cache_put(keys[index].clone(), value.clone());
-            cached[index] = Some(value);
-        }
-        if let Some(fresh) = composed.uncond {
-            let fresh = std::sync::Arc::new(fresh);
-            *uncond_memo()
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) =
-                Some((assets.adapter.clone(), fresh.clone()));
-            uncond = Some(fresh);
-        }
+            .map(|lock| lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner()))
+            .collect();
+
+        let outcome = (|| -> std::result::Result<bool, IdentityError> {
+            // Re-read under the flights. Whatever a peer computed while we
+            // waited is now visible, and taking ITS value rather than
+            // recomputing is what makes two siblings byte-identical rather
+            // than merely equivalent within tolerance.
+            for &index in &missing {
+                if let Some(value) = cache_get(&keys[index]) {
+                    cached[index] = Some(value);
+                }
+            }
+            if want_uncond && uncond.is_none() {
+                uncond = uncond_memo()
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .as_ref()
+                    .filter(|(digest, _)| digest == &assets.adapter)
+                    .map(|(_, tokens)| tokens.clone());
+            }
+            let still_missing: Vec<usize> = missing
+                .iter()
+                .copied()
+                .filter(|index| cached[*index].is_none())
+                .collect();
+            let need_uncond = want_uncond && uncond.is_none();
+            if still_missing.is_empty() && !need_uncond {
+                return Ok(false);
+            }
+
+            // The face stack is loaded ONLY for photographs that still need
+            // detecting. An uncond-only miss — the first true-CFG request
+            // after an ordinary one, whose photograph is already cached —
+            // needs the IDFormer and nothing else, and opening SCRFD and
+            // ArcFace for it would place ~278 MB on the device to run neither.
+            let mut faces = Vec::with_capacity(still_missing.len());
+            let mut detected_warnings = Vec::with_capacity(still_missing.len());
+            if !still_missing.is_empty() {
+                let extractor = IdentityExtractor::load(paths, device)
+                    .context("loading the PuLID face-extraction models")?;
+                for &index in &still_missing {
+                    let features = extractor.extract(images[index]).map_err(|error| {
+                        if count == 1 {
+                            error
+                        } else {
+                            IdentityError::Runtime(anyhow::anyhow!(
+                                "identity photo {} of {count}: {error}",
+                                index + 1
+                            ))
+                        }
+                    })?;
+                    detected_warnings.push(features.warning);
+                    faces.push((features.arcface.raw, features.eva_crop_512));
+                }
+            }
+            let composed = compose_identity_token_sets(paths, &faces, need_uncond, device)
+                .context("composing the PuLID identity embedding")?;
+            IDENTITY_EXTRACTIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            for ((&index, tokens), warning) in still_missing
+                .iter()
+                .zip(composed.per_image)
+                .zip(detected_warnings)
+            {
+                let value = CachedIdentity {
+                    tokens: std::sync::Arc::new(tokens),
+                    warning,
+                };
+                cache_put(keys[index].clone(), value.clone());
+                cached[index] = Some(value);
+            }
+            if let Some(fresh) = composed.uncond {
+                let fresh = std::sync::Arc::new(fresh);
+                *uncond_memo()
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                    Some((assets.adapter.clone(), fresh.clone()));
+                uncond = Some(fresh);
+            }
+            Ok(true)
+        })();
+
+        // The guards and the local handles go first, so `release_flights` can
+        // tell "the registry is the only owner" from "a peer is still waiting".
+        drop(_flights);
+        drop(arcs);
+        release_flights(&flight_keys);
+        extracted = outcome?;
     }
 
     let mut warnings = Vec::new();
@@ -480,6 +651,7 @@ pub fn extract_identity_embeddings(
     Ok(IdentityExtraction {
         embedding,
         warning: (!warnings.is_empty()).then(|| warnings.join("; ")),
+        extracted,
     })
 }
 
@@ -1085,6 +1257,137 @@ mod tests {
         assert_eq!(PROJECTION_DIM, 768);
         assert_eq!(HIDDEN_STATE_BLOCKS.len(), 5);
         assert_eq!(ID_ANTE_DIM + PROJECTION_DIM, 1280);
+    }
+
+    /// The gap the cache alone leaves open: concurrent callers for one key must
+    /// compute once, and every other one must take THAT value rather than an
+    /// equivalent one it computed itself.
+    ///
+    /// Exercised on the flight primitive directly rather than through the
+    /// extractor, so it needs no weights and can actually run N threads: the
+    /// production path's only addition is what it does inside the flight.
+    #[test]
+    fn concurrent_callers_for_one_key_compute_exactly_once() {
+        let _guard = CACHE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        forget_cached_identities();
+        const THREADS: usize = 8;
+        let key = "one-photograph".to_string();
+        let computed = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+
+        let seen: Vec<Vec<f32>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..THREADS)
+                .map(|index| {
+                    let key = key.clone();
+                    let computed = computed.clone();
+                    scope.spawn(move || {
+                        if let Some(hit) = cache_get(&key) {
+                            return hit.tokens.as_ref().clone();
+                        }
+                        let arcs = flights_for(std::slice::from_ref(&key));
+                        let guards: Vec<_> = arcs
+                            .iter()
+                            .map(|lock| lock.lock().unwrap_or_else(|e| e.into_inner()))
+                            .collect();
+                        let value = match cache_get(&key) {
+                            Some(hit) => hit,
+                            None => {
+                                let seq =
+                                    computed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                // Every thread would produce a DIFFERENT value,
+                                // so an equal result can only mean one compute.
+                                let value = CachedIdentity {
+                                    tokens: std::sync::Arc::new(vec![
+                                        seq as f32 * 1000.0 + index as f32,
+                                    ]),
+                                    warning: None,
+                                };
+                                cache_put(key.clone(), value.clone());
+                                value
+                            }
+                        };
+                        drop(guards);
+                        drop(arcs);
+                        release_flights(std::slice::from_ref(&key));
+                        value.tokens.as_ref().clone()
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+
+        assert_eq!(
+            computed.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "{THREADS} concurrent callers for one key must compute once"
+        );
+        assert!(
+            seen.windows(2).all(|pair| pair[0] == pair[1]),
+            "every caller must return the winner's exact value: {seen:?}"
+        );
+    }
+
+    /// A flight that fails stores nothing and releases the key, so the next
+    /// caller computes for real. Negative caching would turn a torn file or a
+    /// momentarily faceless frame into a permanent refusal.
+    #[test]
+    fn a_failed_flight_releases_the_key_so_a_retry_can_run() {
+        let _guard = CACHE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        forget_cached_identities();
+        let key = "retry-me".to_string();
+        let keys = std::slice::from_ref(&key);
+
+        // A flight that stores nothing, as a failing extraction does.
+        {
+            let arcs = flights_for(keys);
+            let guards: Vec<_> = arcs
+                .iter()
+                .map(|lock| lock.lock().unwrap_or_else(|e| e.into_inner()))
+                .collect();
+            drop(guards);
+            drop(arcs);
+            release_flights(keys);
+        }
+        assert!(
+            !flight_registry().lock().unwrap().contains_key(&key),
+            "a settled flight must not leak a mutex per photograph"
+        );
+        assert!(cache_get(&key).is_none(), "a failure must cache nothing");
+
+        // And the key is takeable again.
+        let arcs = flights_for(keys);
+        assert_eq!(arcs.len(), 1);
+        drop(arcs);
+        release_flights(keys);
+    }
+
+    /// Flights are taken in sorted order so two requests sharing a subset of
+    /// photographs in different orders cannot deadlock. Stated over the
+    /// ordering function rather than by racing two threads, because a
+    /// deadlock test that passes proves only that it did not deadlock today.
+    #[test]
+    fn flights_are_taken_in_one_global_order() {
+        let _guard = CACHE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let forward = ["b".to_string(), "a".to_string(), "c".to_string()];
+        let reverse = ["c".to_string(), "b".to_string(), "a".to_string()];
+        let ptrs = |keys: &[String]| -> Vec<usize> {
+            let arcs = flights_for(keys);
+            let ptrs = arcs
+                .iter()
+                .map(|arc| std::sync::Arc::as_ptr(arc) as usize)
+                .collect();
+            drop(arcs);
+            ptrs
+        };
+        let one = ptrs(&forward);
+        let two = ptrs(&reverse);
+        assert_eq!(one, two, "two orderings of the same set must lock alike");
+        release_flights(&forward);
+
+        // Duplicates collapse: a set naming one photograph twice must take one
+        // lock, not attempt to lock the same mutex twice and hang.
+        let doubled = ["x".to_string(), "x".to_string()];
+        assert_eq!(flights_for(&doubled).len(), 1);
+        release_flights(&doubled);
     }
 
     /// The whole extraction, mask included, against upstream's on a real

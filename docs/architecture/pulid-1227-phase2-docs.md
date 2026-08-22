@@ -111,6 +111,33 @@ and the EVA02-CLIP release is converted before it is ever loaded** bullet.
 >   never persisted: these are a biometric derivative, and `pulid-perf.md` §2's
 >   argument against persistence is a retention story, not a performance one.
 >   Cold 2,184.8 ms → warm 1.8 ms, opening no models at all.
+>
+> - **The identity cache is SINGLE-FLIGHT, because the callers are sibling
+>   GPU threads.** A plain get/put was right while extraction ran once per
+>   parent at admission; post-lease, a `batch_size = 4` parent's children are
+>   dispatched together and all four miss a cold cache in the window between
+>   the get and the put — N times the work, and N embeddings differing at the
+>   measured 3.82e-5 device tolerance, i.e. four siblings of one print
+>   conditioned on four slightly different faces with four different frozen
+>   fingerprints. The miss path therefore takes a per-key lock and a waiter
+>   **re-reads the cache and takes the winner's tokens** rather than computing
+>   its own; sibling embeddings are byte-identical by construction. Locks are
+>   taken in SORTED key order (a multi-photograph set takes several, and two
+>   requests sharing a subset in different orders would deadlock), the
+>   unconditional identity has its own flight key because its value reaches the
+>   fingerprint, and a failed flight stores nothing and releases the key —
+>   never negative-cache an extraction failure. The children need no frozen key
+>   from the parent: the key is a pure function of the bytes each child already
+>   carries, so content addressing already gives them one, and a second copy in
+>   the plan would be an authority that could disagree with those bytes.
+>   `identity_extraction_count` counts what was COMPOSED and
+>   `ResolvedIdentity::extracted` carries that to the server, so the
+>   once-per-parent counter is checkable again AND
+>   `ProgressPhase::IdentityExtract` is emitted only by the sibling that did
+>   the work — a cache hit reporting its ~2 ms would drag
+>   `ewma_identity_extract_ms` to a figure no cold request could meet.
+>   An uncond-only miss (first true-CFG request after an ordinary one) loads
+>   the IDFormer alone and never the face stack: 60.6 ms against ~340 ms.
 
 ### 1c. Amend the metadata-DB paragraph
 

@@ -317,3 +317,137 @@ fn a_repeat_photograph_is_served_from_the_cache_without_loading_anything() {
         different.embedding.fingerprint()
     );
 }
+
+/// The batch case, end to end: N threads resolving ONE photograph at once must
+/// compose it once and all receive the identical frozen identity.
+///
+/// This is the failure the per-photograph cache alone does not prevent. A
+/// `batch_size = 4` parent is prepared before fan-out and its children are
+/// dispatched to several GPU worker threads, each resolving its own identity —
+/// so without the single flight all four miss the cold cache together, run the
+/// whole stack four times, and (on different devices) end up conditioned on
+/// four faces that differ at the device tolerance. The fingerprints below are
+/// the check that matters: equal-within-tolerance is not equal.
+#[test]
+#[ignore = "requires the pinned PuLID checkpoints via MOLD_TEST_PULID_ASSETS"]
+fn concurrent_siblings_of_one_parent_extract_once_and_agree_exactly() {
+    use mold_inference::identity::extraction::{
+        extract_identity_embeddings, forget_cached_identities, identity_extraction_count,
+    };
+
+    const SIBLINGS: usize = 4;
+    let Some(paths) = paths() else {
+        eprintln!("skipping: MOLD_TEST_PULID_ASSETS is unset or incomplete");
+        return;
+    };
+    let device = accelerator().unwrap_or(Device::Cpu);
+    let photo = std::fs::read(
+        testdata_dir()
+            .join("faces")
+            .join("frank-rubio-official-portrait.jpg"),
+    )
+    .expect("the portrait fixture is committed");
+
+    forget_cached_identities();
+    let before = identity_extraction_count();
+    let fingerprints: Vec<String> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..SIBLINGS)
+            .map(|_| {
+                let paths = &paths;
+                let device = &device;
+                let photo = &photo;
+                scope.spawn(move || {
+                    extract_identity_embeddings(paths, &[photo.as_slice()], true, device)
+                        .expect("every sibling resolves")
+                        .embedding
+                        .fingerprint()
+                        .to_string()
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+
+    assert_eq!(
+        identity_extraction_count() - before,
+        1,
+        "{SIBLINGS} concurrent siblings must compose the identity exactly once"
+    );
+    let unique: std::collections::BTreeSet<&String> = fingerprints.iter().collect();
+    assert_eq!(
+        unique.len(),
+        1,
+        "every sibling must carry the byte-identical identity: {fingerprints:?}"
+    );
+}
+
+/// A true-CFG request whose photograph is already cached needs the IDFormer
+/// and nothing else. Loading SCRFD and ArcFace for it places ~278 MB on the
+/// device to run neither.
+///
+/// Observed through the composer's own stage callback, which is the only
+/// evidence that distinguishes "did not need them" from "needed them and was
+/// fast": a face-stack load would have to emit its work somewhere, and the
+/// stage the caller sees is `IdFormerBuild` alone.
+#[test]
+#[ignore = "requires the pinned PuLID checkpoints via MOLD_TEST_PULID_ASSETS"]
+fn an_uncond_only_miss_opens_neither_face_graph() {
+    use mold_inference::identity::extraction::{
+        extract_identity_embeddings, forget_cached_identities, identity_extraction_count,
+    };
+
+    let Some(paths) = paths() else {
+        eprintln!("skipping: MOLD_TEST_PULID_ASSETS is unset or incomplete");
+        return;
+    };
+    let device = accelerator().unwrap_or(Device::Cpu);
+    let photo = std::fs::read(
+        testdata_dir()
+            .join("faces")
+            .join("frank-rubio-official-portrait.jpg"),
+    )
+    .expect("the portrait fixture is committed");
+
+    forget_cached_identities();
+    // An ordinary identity render first: the photograph lands in the cache and
+    // no unconditional identity is computed, because nothing asked for one.
+    let plain = extract_identity_embeddings(&paths, &[photo.as_slice()], false, &device)
+        .expect("the ordinary render resolves");
+    assert!(plain.extracted);
+    assert!(!plain.embedding.has_uncond());
+
+    // Now the same face with true CFG. Only the uncond is missing.
+    let before = identity_extraction_count();
+    let started = std::time::Instant::now();
+    let branched = extract_identity_embeddings(&paths, &[photo.as_slice()], true, &device)
+        .expect("the true-CFG render resolves");
+    let elapsed = started.elapsed();
+    assert!(branched.embedding.has_uncond(), "the uncond was computed");
+    assert!(branched.extracted, "an uncond miss is a real computation");
+    assert_eq!(identity_extraction_count() - before, 1);
+    assert_eq!(
+        branched.embedding.source_sha256s(),
+        plain.embedding.source_sha256s(),
+        "the cached photograph must be reused, not re-detected"
+    );
+
+    // The face stack is ~278 MB of graph decode plus two forwards. Its absence
+    // is what makes this fast; the bound is generous because the IDFormer's
+    // own 605 MB build is still paid.
+    eprintln!("uncond-only miss: {:.1} ms", elapsed.as_secs_f64() * 1000.0);
+    assert!(
+        elapsed < std::time::Duration::from_millis(1500),
+        "an uncond-only miss loaded more than the IDFormer: {elapsed:?}"
+    );
+
+    // And a third call needs nothing at all.
+    let before = identity_extraction_count();
+    let warm = extract_identity_embeddings(&paths, &[photo.as_slice()], true, &device)
+        .expect("the repeat resolves");
+    assert!(!warm.extracted, "everything was cached");
+    assert_eq!(identity_extraction_count(), before);
+    assert_eq!(
+        warm.embedding.fingerprint(),
+        branched.embedding.fingerprint()
+    );
+}

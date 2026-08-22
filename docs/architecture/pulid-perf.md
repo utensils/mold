@@ -810,6 +810,50 @@ which is a *harder* target than it looks now: the phase-1 run predates #1292's
 BiSeNet mask, so the comparable before-figure on this branch's parent is
 3,073.6 ms and the CPU result is 38% under that.
 
+### The cache is single-flight, and that is not an optimization
+
+§2 designed the cache as a lock-free get/put around the extraction, which was
+correct while extraction ran once per parent at admission. Phase 2 moved it
+into each lease, so the callers are now N sibling GPU worker threads that
+arrive together — and a plain get/put lets all N miss a cold cache in the
+window between the get and the put. That costs N times the work, which is
+merely bad, and produces N embeddings that differ at the measured 3.82e-5
+device tolerance, which is worse: four siblings of one print conditioned on
+four slightly different faces, with four different frozen fingerprints.
+
+So the miss path takes a per-key lock (`flights_for` / `release_flights`), and
+a caller that waits **re-reads the cache and takes the winner's tokens** rather
+than computing its own. Sibling embeddings are byte-identical by construction,
+not equal within a tolerance. Locks are acquired in sorted key order because a
+multi-photograph set takes several at once and two requests sharing a subset in
+different orders would otherwise deadlock; the unconditional identity gets its
+own flight key for the same reason its value reaches the fingerprint. A failed
+flight stores nothing and releases the key — there is no negative caching,
+because a torn file or a momentarily undetectable face is not a permanent
+answer.
+
+The counter moved with it. `identity_extraction_count` counts what was
+COMPOSED, and `ResolvedIdentity::extracted` carries that back to the server, so
+the once-per-parent contract is checkable again (four siblings, one extraction)
+and `ProgressPhase::IdentityExtract` is emitted only for the sibling that did
+the work — a cache hit reporting its ~2 ms would drag
+`ewma_identity_extract_ms` to a figure no cold request could meet.
+
+The children need no frozen key handed down from the parent: the key is a pure
+function of the photograph bytes each child already carries plus the build's
+own asset digests, so four siblings derive one key by content addressing. A
+second copy travelling in the plan would be an authority that could disagree
+with the bytes it claims to describe. What preparation could not give them, and
+the flight does, is computing it once.
+
+### An uncond-only miss loads only the IDFormer
+
+The first true-CFG request after an ordinary one has its photograph cached and
+only its unconditional identity missing. That value depends on no photograph
+(`pipeline_flux.py:188-192`), so the face stack is not loaded at all — opening
+SCRFD and ArcFace would place ~278 MB on the device to run neither. Measured on
+Metal: **60.6 ms**, against ~340 ms if the graphs had been decoded.
+
 The cache (item 3) is deliberately absent from every number above.
 `bench --full` drives `compose_identity_tokens_observed`, which does not
 consult it, so these are cold-extraction figures. What the cache is worth is a
