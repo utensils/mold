@@ -1027,7 +1027,7 @@ onBeforeUnmount(() => {
       >
         {{ forgetPending ? `Forget ${host.name}?` : "Forget host" }}
       </button>
-      <p>Forgetting removes this address and its API key from this iPhone.</p>
+      <p>Forgetting removes this address and its API key from this phone.</p>
     </section>
   </div>
 </template>

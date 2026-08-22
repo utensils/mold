@@ -1,4 +1,5 @@
 import { streamSse } from "./sse";
+import { requestWarningsFromHeaders } from "@studio/lib/requestWarnings";
 
 export type StreamError =
   | { kind: "http"; status: number; retryAfter?: number; body: string }
@@ -8,6 +9,7 @@ export interface PostSseJsonHandlers<TProgress, TComplete> {
   onProgress: (evt: TProgress) => void;
   onComplete: (evt: TComplete) => void;
   onError: (err: StreamError) => void;
+  onRequestWarnings?: (warnings: string[]) => void;
 }
 
 export interface PostSseJsonOptions<TBody, TProgress, TComplete> {
@@ -37,6 +39,11 @@ export async function postSseJsonStream<TBody, TProgress, TComplete>(
       body: opts.body,
       signal: opts.signal,
       headers: opts.headers,
+      onOpen: (res) => {
+        if (!opts.handlers.onRequestWarnings) return;
+        const warnings = requestWarningsFromHeaders(res.headers);
+        if (warnings.length > 0) opts.handlers.onRequestWarnings(warnings);
+      },
       onEvent: (evt) => {
         if (!evt.data) return;
         let parsed: unknown;

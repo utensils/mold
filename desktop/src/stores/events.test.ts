@@ -86,7 +86,7 @@ describe("events subscription", () => {
 
     await events.subscribe();
     const options = vi.mocked(sseStream).mock.calls[0]![1]!;
-    options.onOpen?.();
+    options.onOpen?.(new Response());
     options.onEvent?.(
       "message",
       JSON.stringify({

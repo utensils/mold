@@ -21,7 +21,7 @@ import {
   type VideoExportCapabilities,
   type VideoExportOptions,
 } from "@studio/lib/videoExport";
-import { isNativeIOSRuntime } from "./platform";
+import { isNativeAndroidRuntime, isNativeIOSRuntime } from "./platform";
 import {
   collectionSlug,
   displayTitle,
@@ -507,7 +507,7 @@ async function performVideoExport(options: VideoExportOptions): Promise<void> {
   try {
     const path = videoExportPath(props.item.filename);
     const filename = videoExportFilename(props.item.filename, options.format);
-    const native = isNativeIOSRuntime();
+    const native = isNativeIOSRuntime() || isNativeAndroidRuntime();
     if (native) {
       const outcome = await invoke<"shared" | "cancelled">("share_exported_animation", {
         url: `${props.target.baseUrl}${path}`,

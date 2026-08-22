@@ -92,10 +92,17 @@
               "rustfmt"
               "clippy"
             ];
-            targets = lib.optionals isDarwin [
-              "aarch64-apple-ios"
-              "aarch64-apple-ios-sim"
-            ];
+            targets =
+              (lib.optionals isDarwin [
+                "aarch64-apple-ios"
+                "aarch64-apple-ios-sim"
+              ])
+              ++ [
+                "aarch64-linux-android"
+                "armv7-linux-androideabi"
+                "i686-linux-android"
+                "x86_64-linux-android"
+              ];
           };
 
           craneLib = (inputs.crane.mkLib pkgs).overrideToolchain rustToolchain;
@@ -1307,6 +1314,48 @@
                 name = "ios-build";
                 help = "archive and export the iPhone app for App Store Connect";
                 command = "./scripts/ios.sh build \"$@\"";
+              }
+              {
+                category = "android";
+                name = "android-dev";
+                help = "run the Android app with Tauri hot reload";
+                command = "./scripts/android.sh dev \"$@\"";
+              }
+              {
+                category = "android";
+                name = "android-run";
+                help = "build and run the production app on Android";
+                command = "./scripts/android.sh run \"$@\"";
+              }
+              {
+                category = "android";
+                name = "android-check";
+                help = "build a debug ARM64 APK from the shared mobile shell";
+                command = "./scripts/android.sh check \"$@\"";
+              }
+              {
+                category = "android";
+                name = "android-test";
+                help = "build Android and run native instrumentation tests on an emulator";
+                command = "./scripts/android.sh test \"$@\"";
+              }
+              {
+                category = "android";
+                name = "android-build";
+                help = "build Android ARM64/ARMv7 app bundles for Google Play";
+                command = "./scripts/android.sh build \"$@\"";
+              }
+              {
+                category = "android";
+                name = "android-emulator";
+                help = "boot the external-storage Mold_API_37 emulator";
+                command = "./scripts/android.sh emulator \"$@\"";
+              }
+              {
+                category = "android";
+                name = "android-doctor";
+                help = "verify Android Studio, SDK, NDK, AVD, and cache paths";
+                command = "./scripts/android.sh doctor \"$@\"";
               }
               {
                 category = "desktop";

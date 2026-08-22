@@ -3469,6 +3469,9 @@ async function generate() {
     );
     void settled.then((done) => {
       void loadPromptHistory();
+      for (const warning of new Set(done.flatMap((job) => job.requestWarnings))) {
+        toasts.push(warning, "warning");
+      }
       const ok = done.filter((s) => s.status === "complete").length;
       const failedCount = done.filter((s) => s.status === "error").length;
       const failed = done.find((s) => s.status === "error");

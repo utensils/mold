@@ -28,13 +28,16 @@ pub(crate) const H3_TINY_MATH_MAX_PACKED_ROWS: u64 = 4_096;
 /// budget, never on this figure.
 ///
 /// The corrected per-phase host ledger puts the peak in the Qwen phases at the
-/// qualified envelope: ~20.26 GB of packed CPU parameters + 3.76 GB activation
+/// qualified envelope: ~20.26 GB of packed CPU parameters + 4.83 GB activation
 /// workspace + ~1.56 GB load staging + the ~0.67 GB fixed runtime baseline,
-/// about 26.3 GB. The old flat sum reached ~74 GB only by charging 42.5 GB of
-/// artifact FILE bytes and a 5.2 GB file-backed VAE mapping as anonymous
-/// demand. A 32 GiB host still fails — 26.3 GB plus the 8 GiB minimum floor
-/// exceeds it — so 64 GiB is the smallest honest recommendation. The old
-/// 128 GiB figure was L40S-era and derived from that same flat sum.
+/// about 27.3 GB. (The activation term was 3.96 GB before #1245 raised the
+/// reviewed prompt budget and re-measured the workspace at the longer Qwen
+/// sequence; the CPU-placed conditioner is what puts that grant on the host
+/// side.) The old flat sum reached ~74 GB only by charging 42.5 GB of artifact
+/// FILE bytes and a 5.2 GB file-backed VAE mapping as anonymous demand. A
+/// 32 GiB host still fails — 27.3 GB plus the 8 GiB minimum floor exceeds it —
+/// so 64 GiB is the smallest honest recommendation. The old 128 GiB figure was
+/// L40S-era and derived from that same flat sum.
 pub(crate) const H3_CURATED_HOST_RAM_RECOMMENDATION_BYTES: u64 = 64 * GIB;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -2725,7 +2728,7 @@ mod tests {
             enormous.safety_floor_bytes(),
             (u64::MAX / 100) * 15 + ((u64::MAX % 100) * 15 / 100)
         );
-        // The corrected per-phase host ledger peaks at ~26.3 GB in the Qwen
+        // The corrected per-phase host ledger peaks at ~27.3 GB in the Qwen
         // phases; 32 GiB cannot hold that plus the 8 GiB minimum floor.
         assert_eq!(H3_CURATED_HOST_RAM_RECOMMENDATION_BYTES, 64 * GIB);
 

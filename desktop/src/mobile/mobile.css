@@ -1926,7 +1926,8 @@ button.mobile-generate-disclosure {
 .mobile-advanced-sheet {
   display: none;
   position: fixed;
-  inset: 0;
+  inset: 0 0 auto;
+  height: var(--mobile-visual-viewport-height, 100dvh);
   z-index: 45;
   flex-direction: column;
   background: var(--bath);
@@ -2035,7 +2036,8 @@ button.mobile-generate-disclosure {
 .mobile-seam-sheet {
   display: none;
   position: fixed;
-  inset: 0;
+  inset: 0 0 auto;
+  height: var(--mobile-visual-viewport-height, 100dvh);
   z-index: 46;
   flex-direction: column;
   justify-content: flex-end;
@@ -2056,7 +2058,7 @@ button.mobile-generate-disclosure {
   position: relative;
   display: flex;
   min-height: 0;
-  max-height: 86dvh;
+  max-height: min(86dvh, var(--mobile-visual-viewport-height, 100dvh));
   flex-direction: column;
   border-top: 1px solid var(--edge);
   border-radius: 18px 18px 0 0;
@@ -2769,6 +2771,7 @@ button:disabled {
   max-height: none;
   grid-template-rows: auto minmax(0, 1fr) auto;
   box-sizing: border-box;
+  overflow: hidden;
   margin: 0;
   border: 0;
   padding-right: 0;
@@ -2789,10 +2792,13 @@ button:disabled {
 
 .gallery-viewer-header {
   display: flex;
+  width: 100%;
+  min-width: 0;
   min-height: 52px;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
+  box-sizing: border-box;
   padding: 6px max(16px, env(safe-area-inset-right)) 6px max(16px, env(safe-area-inset-left));
   border-bottom: 1px solid rgba(245, 239, 255, 0.12);
   background: rgba(8, 7, 12, 0.92);
@@ -2800,6 +2806,7 @@ button:disabled {
 
 .gallery-viewer-close {
   display: inline-flex;
+  flex: 0 0 auto;
   min-width: 44px;
   min-height: 44px;
   align-items: center;
@@ -2820,6 +2827,7 @@ button:disabled {
 }
 
 .gallery-viewer-origin {
+  flex: 1 1 0;
   min-width: 0;
   text-align: right;
 }
@@ -2846,6 +2854,8 @@ button:disabled {
 
 .gallery-viewer-stage {
   position: relative;
+  width: 100%;
+  min-width: 0;
   min-height: 0;
   overflow: hidden;
   background: #000;
@@ -2855,6 +2865,8 @@ button:disabled {
 .gallery-viewer-placeholder {
   display: block;
   width: 100%;
+  min-width: 0;
+  max-width: 100%;
   height: 100%;
   object-fit: contain;
 }
@@ -2893,6 +2905,9 @@ button:disabled {
 
 .gallery-viewer-details {
   display: grid;
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
   gap: 14px;
   padding: 14px max(16px, env(safe-area-inset-right)) 16px max(16px, env(safe-area-inset-left));
   border-top: 1px solid rgba(245, 239, 255, 0.12);
@@ -4666,7 +4681,8 @@ button:disabled {
 .mobile-library-sheet {
   display: none;
   position: fixed;
-  inset: 0;
+  inset: 0 0 auto;
+  height: var(--mobile-visual-viewport-height, 100dvh);
   z-index: 46;
   flex-direction: column;
   justify-content: flex-end;
@@ -4687,7 +4703,7 @@ button:disabled {
   position: relative;
   display: flex;
   min-height: 0;
-  max-height: 86dvh;
+  max-height: min(86dvh, var(--mobile-visual-viewport-height, 100dvh));
   flex-direction: column;
   border-top: 1px solid var(--edge);
   border-radius: 18px 18px 0 0;
@@ -4768,6 +4784,7 @@ button:disabled {
 
 .mobile-library-sheet-form .field {
   min-width: 0;
+  margin: 0;
 }
 
 /* Tag chips with an inline × remove target. */

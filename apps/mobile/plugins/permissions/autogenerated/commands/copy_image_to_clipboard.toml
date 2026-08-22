@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-copy-image-to-clipboard"
+description = "Enables the copy_image_to_clipboard command without any pre-configured scope."
+commands.allow = ["copy_image_to_clipboard"]
+
+[[permission]]
+identifier = "deny-copy-image-to-clipboard"
+description = "Denies the copy_image_to_clipboard command without any pre-configured scope."
+commands.deny = ["copy_image_to_clipboard"]

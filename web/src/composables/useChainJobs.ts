@@ -42,6 +42,7 @@ import type {
   ChainRequestWire,
 } from "@studio/lib/api/chainTypes";
 import type { RetakeRequest } from "../types";
+import { toast } from "../lib/toasts";
 
 export interface ChainJobsHostState {
   jobs: ChainJobSummary[];
@@ -299,7 +300,14 @@ async function create(
   ensureLoaded();
   const target = frozenTarget ?? targetFor(hostId);
   if (!target) throw new Error("That machine is no longer connected.");
-  const { job_id } = await createChainJob(req, target, operationId);
+  const { job_id } = await createChainJob(
+    req,
+    target,
+    operationId,
+    (warnings) => {
+      for (const warning of warnings) toast("warning", warning);
+    },
+  );
   track(hostId, job_id);
   void fetchHost(hostId);
   watch(hostId, job_id);

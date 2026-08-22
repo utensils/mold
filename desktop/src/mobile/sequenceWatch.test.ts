@@ -26,7 +26,7 @@ interface StreamCall {
   path: string;
   target: unknown;
   onEvent: (event: string, data: string) => void;
-  onOpen?: (() => void) | undefined;
+  onOpen?: ((response: Response) => void) | undefined;
   onClose?: ((error: Error | null) => void) | undefined;
   signal: AbortSignal;
 }
@@ -39,7 +39,7 @@ function harness() {
       options: {
         target?: unknown;
         onEvent: (event: string, data: string) => void;
-        onOpen?: () => void;
+        onOpen?: (response: Response) => void;
         onClose?: (error: Error | null) => void;
         signal: AbortSignal;
       },
@@ -149,7 +149,7 @@ describe("watchChainJob", () => {
       expect(h.streams).toHaveLength(2);
 
       // A later stream attempt that opens cleanly retires the poll.
-      h.streams.at(-1)?.onOpen?.();
+      h.streams.at(-1)?.onOpen?.(new Response());
       expect(handle.polling).toBe(false);
       await vi.advanceTimersByTimeAsync(5_000);
       expect(h.fetchDetail.mock.calls.length).toBe(initialFetches + 2);

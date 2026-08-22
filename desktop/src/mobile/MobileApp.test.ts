@@ -38,6 +38,7 @@ const {
   getCurrentDeepLinks,
   onOpenDeepLinks,
   unlistenDeepLinks,
+  isNativeAndroidRuntime,
   isNativeIOSRuntime,
 } = vi.hoisted(() => ({
   invoke: vi.fn(),
@@ -63,6 +64,7 @@ const {
   getCurrentDeepLinks: vi.fn(),
   onOpenDeepLinks: vi.fn(),
   unlistenDeepLinks: vi.fn(),
+  isNativeAndroidRuntime: vi.fn(),
   isNativeIOSRuntime: vi.fn(),
 }));
 
@@ -114,7 +116,7 @@ vi.mock("@studio/lib/generationSourceMedia", () => ({
   persistGenerationSourceMedia,
   restoreGenerationSourceMedia,
 }));
-vi.mock("./platform", () => ({ isNativeIOSRuntime }));
+vi.mock("./platform", () => ({ isNativeAndroidRuntime, isNativeIOSRuntime }));
 
 function plannedPlacement() {
   return {
@@ -311,9 +313,17 @@ beforeEach(() => {
       return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
     return Promise.reject(new Error(`Unexpected API path: ${path}`));
   });
-  apiFetchTo.mockReset().mockResolvedValue({
-    blob: () => Promise.resolve(new Blob(["thumbnail"])),
-  } as Response);
+  apiFetchTo
+    .mockReset()
+    .mockImplementation(async (requestTarget: unknown, path: string, init?: RequestInit) => {
+      if (path === "/api/chain-jobs" && init?.method === "POST") {
+        const body = await apiJsonTo(requestTarget, path, init);
+        return new Response(JSON.stringify(body));
+      }
+      return {
+        blob: () => Promise.resolve(new Blob(["thumbnail"])),
+      } as Response;
+    });
   openStreams.length = 0;
   sseStream.mockReset().mockImplementation(
     (
@@ -373,6 +383,7 @@ beforeEach(() => {
   getCurrentDeepLinks.mockReset().mockResolvedValue(null);
   unlistenDeepLinks.mockReset();
   onOpenDeepLinks.mockReset().mockResolvedValue(unlistenDeepLinks);
+  isNativeAndroidRuntime.mockReset().mockReturnValue(false);
   isNativeIOSRuntime.mockReset().mockReturnValue(false);
   objectUrlSequence = 0;
   URL.createObjectURL = vi.fn(() => `blob:thumbnail-${++objectUrlSequence}`);
@@ -879,6 +890,20 @@ describe("MobileApp sequence generation", () => {
       }
       return Promise.reject(new Error(`Unexpected API path: ${path}`));
     });
+    apiFetchTo.mockImplementation(
+      async (requestTarget: unknown, path: string, init?: RequestInit) => {
+        if (path === "/api/chain-jobs" && init?.method === "POST") {
+          const body = await apiJsonTo(requestTarget, path, init);
+          return new Response(JSON.stringify(body), {
+            headers: {
+              "x-mold-request-warning":
+                "Reference timing was adjusted; the sequence still rendered.",
+            },
+          });
+        }
+        return { blob: () => Promise.resolve(new Blob(["thumbnail"])) } as Response;
+      },
+    );
 
     let finishPreview!: (value: Awaited<ReturnType<typeof previewChainPlacement>>) => void;
     previewChainPlacement.mockReturnValueOnce(
@@ -936,6 +961,12 @@ describe("MobileApp sequence generation", () => {
     });
     expect(recovery).not.toContain(target.apiKey);
     expect(wrapper.get("[data-test='mobile-sequence-job']").text()).toContain("queued");
+    const advisory = wrapper.get("[data-test='mobile-request-advisories']");
+    expect(advisory.text()).toContain(
+      "Reference timing was adjusted; the sequence still rendered.",
+    );
+    await advisory.get("[data-test='mobile-request-advisories-dismiss']").trigger("click");
+    expect(wrapper.find("[data-test='mobile-request-advisories']").exists()).toBe(false);
   });
 
   it("parks a retained opening image when the checkpoint reads no source image", async () => {
@@ -2292,7 +2323,7 @@ describe("MobileApp generation queue", () => {
 
     expect(openStreams).toHaveLength(0);
     expect(wrapper.get("[data-test='mobile-generation-summary']").text()).toContain(
-      "Combined generation media must be 45 MiB or smaller on iPhone",
+      "Combined generation media must be 45 MiB or smaller on this phone",
     );
   });
 
@@ -5524,10 +5555,11 @@ describe("MobileApp foreground resume", () => {
     }
   });
 
-  it("counters visual-viewport keyboard panning so the header stays below iOS chrome", async () => {
+  it("tracks the visual viewport so sheets clear the keyboard and the header stays put", async () => {
     const originalViewport = Object.getOwnPropertyDescriptor(window, "visualViewport");
-    const visualViewport = new EventTarget() as EventTarget & { pageTop: number };
+    const visualViewport = new EventTarget() as EventTarget & { pageTop: number; height: number };
     visualViewport.pageTop = 58;
+    visualViewport.height = 510;
     Object.defineProperty(window, "visualViewport", {
       value: visualViewport,
       configurable: true,
@@ -5538,12 +5570,19 @@ describe("MobileApp foreground resume", () => {
       expect(
         document.documentElement.style.getPropertyValue("--mobile-visual-viewport-page-top"),
       ).toBe("58px");
+      expect(
+        document.documentElement.style.getPropertyValue("--mobile-visual-viewport-height"),
+      ).toBe("510px");
 
       visualViewport.pageTop = 0;
-      visualViewport.dispatchEvent(new Event("scroll"));
+      visualViewport.height = 844;
+      visualViewport.dispatchEvent(new Event("resize"));
       expect(
         document.documentElement.style.getPropertyValue("--mobile-visual-viewport-page-top"),
       ).toBe("0px");
+      expect(
+        document.documentElement.style.getPropertyValue("--mobile-visual-viewport-height"),
+      ).toBe("844px");
     } finally {
       wrapper?.unmount();
       wrapper = null;
@@ -7369,7 +7408,7 @@ describe("MobileApp gallery", () => {
 
     expect(readBlob).not.toHaveBeenCalled();
     expect(wrapper.get(".gallery-viewer-reuse-error").text()).toContain(
-      "Combined generation media must be 45 MiB or smaller on iPhone",
+      "Combined generation media must be 45 MiB or smaller on this phone",
     );
     expect(wrapper.find("[data-test='gallery-viewer']").exists()).toBe(true);
   });
@@ -7666,6 +7705,58 @@ describe("MobileApp host and catalog coordination", () => {
     await wrapper.get("[data-test='mobile-scan-pairing']").trigger("click");
     await flushPromises();
   }
+
+  it("offers secure Android pairing and nearby discovery", async () => {
+    isNativeAndroidRuntime.mockReturnValue(true);
+    invoke.mockImplementation((command: string) => {
+      if (command === "keychain_get_api_key") return Promise.resolve(target.apiKey);
+      if (command === "discover_mold_hosts") {
+        return Promise.resolve([{ name: "Render Box", host: "192.168.1.50", port: 7680 }]);
+      }
+      return Promise.resolve(null);
+    });
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-hosts']").trigger("click");
+
+    expect(wrapper.find("[data-test='mobile-scan-pairing']").exists()).toBe(true);
+    await wrapper.get("[data-test='mobile-discover-hosts']").trigger("click");
+    await flushPromises();
+
+    expect(invoke).toHaveBeenCalledWith("discover_mold_hosts", { timeoutMs: 2500 });
+    expect(wrapper.get("[data-test='mobile-discovered-host']").text()).toContain("Render Box");
+    expect(wrapper.get("[data-test='mobile-discovered-host']").text()).toContain(
+      "192.168.1.50:7680",
+    );
+    expect(wrapper.text()).toContain("API key");
+  });
+
+  it("names Google Play instead of TestFlight in Android settings", async () => {
+    isNativeAndroidRuntime.mockReturnValue(true);
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    await wrapper.get("[data-test='mobile-open-settings']").trigger("click");
+
+    expect(wrapper.get("[data-test='mobile-update-channel']").text()).toBe("Google Play");
+  });
+
+  it("claims Android pairing codes with an Android client identity", async () => {
+    isNativeAndroidRuntime.mockReturnValue(true);
+    scanPairingQr.mockResolvedValue({ content: pairingPayload() });
+    claimPairingSession.mockResolvedValue({
+      api_key: "paired-key",
+      instance_id: "wrong-host",
+      hostname: "impostor",
+    });
+
+    await scanFromMachines();
+
+    expect(claimPairingSession).toHaveBeenCalledWith("http://pair.local:7680", "one-time-token", {
+      name: "Mold on Android",
+      kind: "android",
+    });
+  });
 
   it("settles first-run camera permission before opening the pairing scanner", async () => {
     checkBarcodeScannerPermissions.mockResolvedValue("prompt");

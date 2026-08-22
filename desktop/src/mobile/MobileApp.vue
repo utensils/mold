@@ -41,7 +41,11 @@ import {
   validateRemixVariants,
   DEFAULT_REMIX_VARIATIONS,
 } from "@studio/lib/promptTransform";
-import { claimPairingSession, parseMobilePairingPayload } from "@studio/api/pairing";
+import {
+  claimPairingSession,
+  parseMobilePairingPayload,
+  type PairingClientIdentity,
+} from "@studio/api/pairing";
 import { imageDimensionsFromBase64 } from "@studio/lib/imageDimensions";
 import {
   resolveDefaultSourceResolution,
@@ -260,6 +264,7 @@ import type { HostRoute } from "../stores/hosts";
 import { domCanvasOps } from "../lib/sourceFitCanvas";
 import { applyH3BoundaryFit, applySourceFitPreprocess } from "../lib/sourceFitPreprocess";
 import { coerceSourceFitForMaskless, parseSourceFitPolicy } from "@studio/lib/sourceFit";
+import { requestWarningsFromHeaders } from "@studio/lib/requestWarnings";
 import {
   persistGenerationSourceMedia,
   restoreGenerationSourceMedia,
@@ -381,7 +386,7 @@ import {
   type MobileSettings,
 } from "./settings";
 import { useMobileDownloadsStore } from "./mobileDownloads";
-import { isNativeIOSRuntime } from "./platform";
+import { isNativeAndroidRuntime, isNativeIOSRuntime } from "./platform";
 import {
   createMobileExpansionRecovery,
   mobileExpansionRecoveryStaleReason,
@@ -540,6 +545,7 @@ const OUTPUT_OPTIONS = [
   { value: "single" as const, label: "One shot" },
   { value: "sequence" as const, label: "Sequence" },
 ];
+const androidNativeRuntime = isNativeAndroidRuntime();
 const tab = ref<Tab>("generate");
 // Output is a setting of Create, not a place. The store hydrates here (before
 // first paint) so the legacy `mold.mobile.create-mode.v1` key migrates into
@@ -812,6 +818,8 @@ const libraryHostCounts = ref<Record<string, number>>({});
 const libraryPrintCount = ref(0);
 /** Inline (never a toast) organization failure banner. */
 const organizationError = ref("");
+/** Accepted-request advisories stay visible until dismissed or superseded. */
+const requestAdvisories = ref<string[]>([]);
 const organizationBusy = ref(false);
 /** Trash listing, fetched lazily the first time the Trash scope opens. */
 let trashCopies: PendingGalleryPrint[] = [];
@@ -2219,8 +2227,12 @@ function persistHosts(): void {
 async function hydrateApiKeys(): Promise<void> {
   await Promise.all(
     hosts.value.map(async (host) => {
-      host.apiKey =
-        (await invoke<string | null>("keychain_get_api_key", { hostId: host.id })) ?? "";
+      try {
+        host.apiKey =
+          (await invoke<string | null>("keychain_get_api_key", { hostId: host.id })) ?? "";
+      } catch {
+        host.apiKey = "";
+      }
     }),
   );
 }
@@ -2300,10 +2312,10 @@ async function pairFromCode(code: () => Promise<string>): Promise<void> {
     const iPad =
       /iPad/i.test(navigator.userAgent) ||
       (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
-    const claim = await claimPairingSession(baseUrl, payload.token, {
-      name: iPad ? "Mold on iPad" : "Mold on iPhone",
-      kind: iPad ? "ipad" : "iphone",
-    });
+    const client: PairingClientIdentity = androidNativeRuntime
+      ? { name: "Mold on Android", kind: "android" }
+      : { name: iPad ? "Mold on iPad" : "Mold on iPhone", kind: iPad ? "ipad" : "iphone" };
+    const claim = await claimPairingSession(baseUrl, payload.token, client);
     if (claim.instance_id !== payload.instance_id) {
       throw new Error("The pairing code was redeemed by a different Mold host.");
     }
@@ -3350,7 +3362,8 @@ async function submitMobileSequence(): Promise<void> {
         `/api/chain-jobs/${encodeURIComponent(operationId)}/operations/${encodeURIComponent(operationId)}/cancel`,
         { method: "POST", keepalive: true },
       );
-    const response = await apiJsonTo<CreateChainJobResponse>(target, "/api/chain-jobs", {
+    requestAdvisories.value = [];
+    const chainResponse = await apiFetchTo(target, "/api/chain-jobs", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -3358,6 +3371,8 @@ async function submitMobileSequence(): Promise<void> {
       },
       body: JSON.stringify(request),
     });
+    requestAdvisories.value = requestWarningsFromHeaders(chainResponse.headers);
+    const response = (await chainResponse.json()) as CreateChainJobResponse;
     if (!isCurrent()) {
       await apiFetchTo(target, `/api/chain-jobs/${encodeURIComponent(response.job_id)}/cancel`, {
         method: "POST",
@@ -5164,6 +5179,7 @@ async function generate(): Promise<void> {
   // prepared/quick submission's frozen route, or the pinned machine. Every
   // Batch sibling spreads this one request, so they share the outcome.
   request = fileUnderForFrozenRoute(request, route);
+  requestAdvisories.value = [];
   const { settled } = generation.submitBatch(
     request,
     batchSize,
@@ -5218,6 +5234,7 @@ async function generate(): Promise<void> {
       isActive: () => !unmounted,
     });
     if (unmounted) return;
+    requestAdvisories.value = [...new Set(jobs.flatMap((candidate) => candidate.requestWarnings))];
     for (const candidate of jobs) handledGenerationClientIds.add(candidate.clientId);
     const completed = jobs.filter(
       (candidate) => candidate.status === "complete" && candidate.result,
@@ -7802,11 +7819,20 @@ function usesSoftwareKeyboard(target: EventTarget | null): target is HTMLElement
 }
 
 function syncVisualViewportOffset(): void {
-  const pageTop = window.visualViewport?.pageTop ?? window.scrollY;
+  const viewport = window.visualViewport;
+  const pageTop = viewport?.pageTop ?? window.scrollY;
   document.documentElement.style.setProperty(
     "--mobile-visual-viewport-page-top",
     `${Math.max(0, pageTop)}px`,
   );
+  if (viewport && Number.isFinite(viewport.height) && viewport.height > 0) {
+    document.documentElement.style.setProperty(
+      "--mobile-visual-viewport-height",
+      `${viewport.height}px`,
+    );
+  } else {
+    document.documentElement.style.removeProperty("--mobile-visual-viewport-height");
+  }
 }
 
 function restoreNativeViewport(): void {
@@ -7961,6 +7987,7 @@ onBeforeUnmount(() => {
   window.visualViewport?.removeEventListener("resize", syncVisualViewportOffset);
   window.visualViewport?.removeEventListener("scroll", syncVisualViewportOffset);
   document.documentElement.style.removeProperty("--mobile-visual-viewport-page-top");
+  document.documentElement.style.removeProperty("--mobile-visual-viewport-height");
   window.removeEventListener("pageshow", handleForegroundResume);
   cancelKeyboardViewportRestore();
   if (resultMediaRecoveryTimer !== null) {
@@ -8076,6 +8103,7 @@ onBeforeUnmount(() => {
         :host-count="hosts.length"
         :app-version="appVersion"
         :host="selectedHost ?? null"
+        :update-channel="androidNativeRuntime ? 'Google Play' : 'TestFlight'"
         @update="updateSettings"
         @manage-hosts="manageHostsFromSettings"
       />
@@ -8240,6 +8268,21 @@ onBeforeUnmount(() => {
               type="button"
               data-test="mobile-file-under-dropped-dismiss"
               @click="fileUnderDropNotice = ''"
+            >
+              Dismiss
+            </button>
+          </div>
+          <div
+            v-if="requestAdvisories.length > 0"
+            class="mobile-file-under-dropped"
+            role="status"
+            data-test="mobile-request-advisories"
+          >
+            <p v-for="warning in requestAdvisories" :key="warning">{{ warning }}</p>
+            <button
+              type="button"
+              data-test="mobile-request-advisories-dismiss"
+              @click="requestAdvisories = []"
             >
               Dismiss
             </button>
@@ -9606,11 +9649,17 @@ onBeforeUnmount(() => {
             class="secondary-button"
             type="button"
             :disabled="discovering"
+            data-test="mobile-discover-hosts"
             @click="discoverHosts"
           >
             {{ discovering ? "Scanning…" : "Discover nearby" }}
           </button>
-          <div v-for="host in discovered" :key="`${host.host}:${host.port}`" class="host-row">
+          <div
+            v-for="host in discovered"
+            :key="`${host.host}:${host.port}`"
+            class="host-row"
+            data-test="mobile-discovered-host"
+          >
             <div class="host-row-head">
               <div>
                 <div class="host-name">{{ host.name }}</div>

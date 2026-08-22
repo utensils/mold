@@ -64,16 +64,11 @@ export function collectionSlug(name: string): string {
 const CONTROL_CHARS = /[\u0000-\u001f\u007f]/;
 const CONTROL_CHARS_ALL = /[\u0000-\u001f\u007f]/g;
 
-/** Display form of a tag as typed: trimmed, inner whitespace collapsed, a
- * leading `#` dropped, control characters removed. Case is preserved —
+/** Display and wire form of a tag: trimmed, inner whitespace collapsed, and
+ * control characters removed. A leading `#` is literal. Case is preserved —
  * the server stores tags `COLLATE NOCASE`, so compare with `tagKey`. */
 export function normalizeTagName(raw: string): string {
-  return raw
-    .replace(CONTROL_CHARS_ALL, "")
-    .replace(/\s+/g, " ")
-    .trim()
-    .replace(/^#+\s*/, "")
-    .trim();
+  return raw.replace(CONTROL_CHARS_ALL, "").replace(/\s+/g, " ").trim();
 }
 
 /** Case-insensitive merge key for a tag (tags merge across hosts by it). */

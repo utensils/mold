@@ -1459,16 +1459,17 @@ describe("organization fan-out", () => {
     await gallery.addTags(print, ["#Blue", " portrait "]);
     expect(organization.organizeGallery).toHaveBeenCalledWith(HAL_TARGET, {
       filenames: ["shared.png"],
-      add_tags: ["Blue", "portrait"],
+      add_tags: ["#Blue", "portrait"],
     });
-    // local already had "blue": only portrait is new there.
-    expect(gallery.buckets["local"]!.items[0]!.tags).toEqual(["blue", "portrait"]);
+    // A leading hash is literal, so #Blue is distinct from the existing blue.
+    expect(gallery.buckets["local"]!.items[0]!.tags).toEqual(["blue", "#Blue", "portrait"]);
     expect(gallery.tagsByHost["local"]!.items).toEqual([
       { name: "blue", count: 1 },
+      { name: "#Blue", count: 1 },
       { name: "portrait", count: 1 },
     ]);
     expect(gallery.tagsByHost["hal9000-7680"]!.items).toEqual([
-      { name: "Blue", count: 1 },
+      { name: "#Blue", count: 1 },
       { name: "portrait", count: 1 },
     ]);
 
@@ -1477,9 +1478,12 @@ describe("organization fan-out", () => {
       filenames: ["shared.png"],
       remove_tags: ["BLUE"],
     });
-    expect(gallery.buckets["local"]!.items[0]!.tags).toEqual(["portrait"]);
-    expect(gallery.tagsByHost["local"]!.items).toEqual([{ name: "portrait", count: 1 }]);
-    expect(gallery.organizationOf(print).tags).toEqual(["portrait"]);
+    expect(gallery.buckets["local"]!.items[0]!.tags).toEqual(["#Blue", "portrait"]);
+    expect(gallery.tagsByHost["local"]!.items).toEqual([
+      { name: "#Blue", count: 1 },
+      { name: "portrait", count: 1 },
+    ]);
+    expect(gallery.organizationOf(print).tags).toEqual(["#Blue", "portrait"]);
   });
 
   it("addToCollection creates the collection by name on hosts lacking the slug first", async () => {

@@ -13,7 +13,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use candle_core::Device;
 use mold_candle::minimax_h3::{
     H3AuthenticatedQwenNvfp4Authority, H3ComfyOpenedInt8Checkpoint, H3ComfyPublishedArtifact,
-    H3QwenNvfp4RuntimePlacement, H3TransformerTask,
+    H3QwenNvfp4RuntimePlacement, H3RawTokenizer, H3TransformerTask,
 };
 use mold_core::manifest::{find_manifest, storage_path, ModelComponent, ModelManifest};
 use mold_core::minimax_h3::{self as contract, Layout, Mode, Task};
@@ -657,6 +657,14 @@ pub(crate) struct H3PrivatePreparedFl2VaAttempt {
 pub(crate) struct H3PrivateFl2VaAdmissionPreparedRequest {
     pub(crate) request: H3FactoryPreparedRequestInput,
     pub(crate) seed: u64,
+    /// How many of `request.rows.qwen_output_text_rows` the prompt itself
+    /// contributed, tokenized by the same tokenizer that built the
+    /// presentation. Everything else in that row count is fixed presentation
+    /// overhead, which is what lets admission report the exact prompt budget
+    /// instead of a transcribed constant (#1245). It is deliberately NOT part
+    /// of `H3FactoryPreparedRequestInput`: that struct's identity is hashed
+    /// into the frozen plan, and this is a diagnostic, not an authority.
+    pub(crate) prompt_tokens: u64,
 }
 
 pub(crate) struct H3PrivatePreparedFl2VaFactoryInputs {
@@ -942,10 +950,26 @@ pub(crate) fn prepare_private_ref2va_admission_request(
 ) -> Result<H3PrivateFl2VaAdmissionPreparedRequest> {
     let (prepared, factory_request) =
         prepare_private_ref2va_request_input(request, references, support, progress, observer)?;
+    let prompt_tokens = prompt_token_count(support, prepared.prompt())?;
     Ok(H3PrivateFl2VaAdmissionPreparedRequest {
         seed: prepared.seed(),
         request: factory_request,
+        prompt_tokens,
     })
+}
+
+/// How many conditioner rows the prompt itself contributes.
+///
+/// Tokenized with the SAME tokenizer the presentation was built from, so the
+/// difference between this and the presentation's text rows is exactly the
+/// fixed overhead (labels and vision pads) and the derived prompt budget is
+/// this build's real one.
+fn prompt_token_count(support: &H3PrivateQwenSupport, prompt: &str) -> Result<u64> {
+    let tokens = support
+        .tokenizer()
+        .encode_raw(prompt)
+        .map_err(|error| anyhow!(error.to_string()))?;
+    Ok(u64::try_from(tokens.len())?)
 }
 
 /// The shared Ref2VA preparation both admission and the frozen-plan reopen
@@ -1011,11 +1035,13 @@ pub(crate) fn prepare_private_fl2va_admission_request(
     // preparation before the allocation commit. The delegated pipeline path
     // may construct CPU-only Candle tensors, but it cannot open a CUDA device
     // or construct a CUDA tensor.
-    let (prepared, request) =
+    let (prepared, factory_request) =
         prepare_private_fl2va_request_input(request, support, progress, observer)?;
+    let prompt_tokens = prompt_token_count(support, &prepared.prompt)?;
     Ok(H3PrivateFl2VaAdmissionPreparedRequest {
         seed: prepared.seed,
-        request,
+        request: factory_request,
+        prompt_tokens,
     })
 }
 
@@ -1570,14 +1596,18 @@ fn validate_vae_contract(expected_task: Task, task: Task, canonical_model: &str)
     Ok(())
 }
 
-/// FL2VA's corrected observed Qwen activation workspace and the Qwen
-/// sequence it was measured over (2026-08-19 on hal9000, RTX 4090 SM89,
-/// issue #827): the qualifying render encoded 1,058 output-text rows plus
-/// 4,032 vision rows. `public_runtime_bounds` applies its margin policy to
-/// the same observation; restated here because that function is compiled
-/// only under `h3`.
-const FL2VA_OBSERVED_QWEN_ACTIVATION_WORKSPACE_BYTES: u64 = 3_400_171_520;
-const FL2VA_OBSERVED_QWEN_SEQUENCE_ROWS: u64 = 1_058 + 4_032;
+/// FL2VA's observed Qwen activation workspace and the Qwen sequence it was
+/// measured over (2026-08-21 on hal9000, RTX 4090 SM89, issue #1245): the
+/// qualifying render encoded 2,033 output-text rows plus 4,032 vision rows.
+/// It replaces #827's 3,400,171,520 over 1,058 + 4,032 rows, measured before
+/// the reviewed prompt budget was raised. The per-row cost the two imply
+/// agrees to 2.9% across a 19% change in sequence length, which is what makes
+/// the linear model credible; the newer, longer sample is the conservative
+/// one, so it is the one kept.
+/// `public_runtime_bounds` applies its margin policy to the same observation;
+/// restated here because that function is compiled only under `h3`.
+const FL2VA_OBSERVED_QWEN_ACTIVATION_WORKSPACE_BYTES: u64 = 4_168_069_120;
+const FL2VA_OBSERVED_QWEN_SEQUENCE_ROWS: u64 = 2_033 + 4_032;
 
 /// The Qwen activation workspace one request charges into its exact budget
 /// and freezes into its factory authority.
@@ -1588,7 +1618,7 @@ const FL2VA_OBSERVED_QWEN_SEQUENCE_ROWS: u64 = 1_058 + 4_032;
 /// while the request's Qwen sequence varies by an order of magnitude with
 /// the ordered reference set, so charging the grant as a constant
 /// undercharges any request past the grant's sizing point (three
-/// maximum-canvas references already reach 2.62x the measured sequence).
+/// maximum-canvas references already reach 2.20x the measured sequence).
 /// The exact budget therefore charges the REQUEST-derived demand — the
 /// corrected observed per-row cost scaled by the request's own text+vision
 /// rows, under the same x1.15 + 64 MiB-grid policy as the corrected public
@@ -2530,12 +2560,12 @@ mod tests {
     /// keeps its reviewed grant verbatim (its envelope caps the sequence at
     /// the rows the grant was measured over), the scripted one-reference
     /// campaign shape stays admitted at its own derived demand, and a
-    /// three-reference maximum-canvas request — 2.62x FL2VA's measured
+    /// three-reference maximum-canvas request — 2.20x FL2VA's measured
     /// sequence, above the capture profile's 2x provisional grant — is a
     /// named refusal instead of an undercharged admit.
     #[test]
     fn qwen_activation_charge_follows_the_request_sequence() {
-        const FL2VA_PUBLIC_CEILING: u64 = 3_959_422_976;
+        const FL2VA_PUBLIC_CEILING: u64 = 4_831_838_208;
         const CAPTURE_GRANT: u64 = 2 * FL2VA_PUBLIC_CEILING;
         let (_, fl2va_frozen) = prepared_runtime_pair();
 
@@ -2554,18 +2584,29 @@ mod tests {
             request
         };
 
+        // The derivation reproduces the public ceiling exactly at the very
+        // sequence the observation was taken over, which is the check that the
+        // per-row model and the flat FL2VA grant are the same statement.
+        let at_measured_sequence = ref2va_shape(FL2VA_OBSERVED_QWEN_SEQUENCE_ROWS - 1_058);
+        assert_eq!(
+            qwen_activation_workspace_demand_bytes(&at_measured_sequence, CAPTURE_GRANT).unwrap(),
+            FL2VA_PUBLIC_CEILING
+        );
+
         // The scripted campaign request: one 2048-square still (4,096 vision
-        // pads). Its derived demand lands exactly on the corrected public
-        // ceiling — the same per-row cost at essentially the same sequence —
-        // and sits inside the capture grant.
+        // pads). Its 5,154-row sequence is SHORTER than the 6,065 rows the
+        // observation was taken over — since #1245 raised FL2VA's own prompt
+        // budget — so it charges proportionally less and sits well inside the
+        // capture grant.
         let campaign = ref2va_shape(4_096);
         let campaign_demand =
             qwen_activation_workspace_demand_bytes(&campaign, CAPTURE_GRANT).unwrap();
-        assert_eq!(campaign_demand, FL2VA_PUBLIC_CEILING);
+        assert_eq!(campaign_demand, 4_093_640_704);
+        assert!(campaign_demand < FL2VA_PUBLIC_CEILING);
         assert!(campaign_demand <= CAPTURE_GRANT);
 
         // Three maximum-canvas references: 1,058 + 3 x 4,096 = 13,346 rows =
-        // 2.62x the measured 5,090-row sequence. The derived demand exceeds
+        // 2.2x the measured 6,065-row sequence. The derived demand exceeds
         // the 2x grant, so the request is refused by name rather than
         // admitted under insufficient authority.
         let three_references = ref2va_shape(3 * 4_096);
@@ -2573,12 +2614,12 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("Qwen activation workspace"), "{error}");
-        assert!(error.contains("10267656192"), "{error}");
-        assert!(error.contains("7918845952"), "{error}");
+        assert!(error.contains("10603200512"), "{error}");
+        assert!(error.contains("9663676416"), "{error}");
         // And the derived figure really is beyond twice the FL2VA ceiling:
         // at an unbounded grant the same shape charges exactly that demand.
         let unfenced = qwen_activation_workspace_demand_bytes(&three_references, u64::MAX).unwrap();
-        assert_eq!(unfenced, 10_267_656_192);
+        assert_eq!(unfenced, 10_603_200_512);
         assert!(unfenced > 2 * FL2VA_PUBLIC_CEILING);
 
         // A demand exactly at the grant is admitted — the fence refuses only

@@ -3,13 +3,6 @@
   "identifier": "default",
   "description": "Mold mobile capability set",
   "windows": ["main"],
-  "platforms": ["iOS"],
-  "permissions": [
-    "core:default",
-    "deep-link:default",
-    "barcode-scanner:allow-check-permissions",
-    "barcode-scanner:allow-request-permissions",
-    "barcode-scanner:allow-scan",
-    "barcode-scanner:allow-cancel"
-  ]
+  "platforms": ["iOS", "android"],
+  "permissions": ["core:default", "deep-link:default"]
 }

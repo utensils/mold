@@ -23,7 +23,7 @@ const props = withDefaults(
   {
     title: "Opening image",
     maxBytes: MAX_MOBILE_GENERATION_REQUEST_MEDIA_BYTES,
-    oversizeMessage: "The opening image must be 45 MiB or smaller on iPhone.",
+    oversizeMessage: "The opening image must be 45 MiB or smaller on this phone.",
   },
 );
 
@@ -144,7 +144,7 @@ async function chooseGallery(entry: GalleryImage): Promise<void> {
       <header>
         <div>
           <strong>{{ title }}</strong>
-          <p>Choose a PNG or JPEG from this iPhone or the selected machine.</p>
+          <p>Choose a PNG or JPEG from this phone or the selected machine.</p>
         </div>
         <button
           type="button"

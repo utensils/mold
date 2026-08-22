@@ -121,6 +121,7 @@ fn require_platform_image<T>(image: Option<T>, action: &str) -> Result<T, String
     image.ok_or_else(|| format!("could not decode the image to {action}"))
 }
 
+#[cfg(not(target_os = "android"))]
 async fn wait_for_image_action(
     receiver: std::sync::mpsc::Receiver<Result<(), String>>,
     action: &'static str,
@@ -140,6 +141,32 @@ pub async fn copy_image_to_clipboard(
     data_b64: String,
 ) -> Result<(), String> {
     let bytes = decode_image(&data_b64)?;
+    platform_copy_image(window, bytes, data_b64).await
+}
+
+#[cfg(target_os = "android")]
+async fn platform_copy_image(
+    window: tauri::WebviewWindow,
+    _bytes: Vec<u8>,
+    data_b64: String,
+) -> Result<(), String> {
+    use tauri::Manager;
+    use tauri_plugin_mold_mobile_native::MoldMobileNativeExt;
+
+    window
+        .app_handle()
+        .mold_mobile_native()
+        .copy_image_to_clipboard(data_b64)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(not(target_os = "android"))]
+async fn platform_copy_image(
+    window: tauri::WebviewWindow,
+    bytes: Vec<u8>,
+    _data_b64: String,
+) -> Result<(), String> {
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);
     window
         .with_webview(move |_webview| {
@@ -165,7 +192,9 @@ pub async fn copy_image_to_clipboard(
             #[cfg(not(target_os = "ios"))]
             {
                 let _ = (_webview, bytes);
-                let _ = sender.send(Ok(()));
+                let _ = sender.send(Err(
+                    "copying images is available in the mobile builds".to_string()
+                ));
             }
         })
         .map_err(|error| format!("could not copy image: {error}"))?;
@@ -178,6 +207,32 @@ pub async fn save_image_to_photos(
     data_b64: String,
 ) -> Result<(), String> {
     let bytes = decode_image(&data_b64)?;
+    platform_save_image(window, bytes, data_b64).await
+}
+
+#[cfg(target_os = "android")]
+async fn platform_save_image(
+    window: tauri::WebviewWindow,
+    _bytes: Vec<u8>,
+    data_b64: String,
+) -> Result<(), String> {
+    use tauri::Manager;
+    use tauri_plugin_mold_mobile_native::MoldMobileNativeExt;
+
+    window
+        .app_handle()
+        .mold_mobile_native()
+        .save_image_to_photos(data_b64)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(not(target_os = "android"))]
+async fn platform_save_image(
+    window: tauri::WebviewWindow,
+    bytes: Vec<u8>,
+    _data_b64: String,
+) -> Result<(), String> {
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);
     window
         .with_webview(move |_webview| {
@@ -219,7 +274,9 @@ pub async fn save_image_to_photos(
             #[cfg(not(target_os = "ios"))]
             {
                 let _ = (_webview, bytes);
-                let _ = sender.send(Ok(()));
+                let _ = sender.send(Err(
+                    "saving images is available in the mobile builds".to_string()
+                ));
             }
         })
         .map_err(|error| format!("could not save image to Photos: {error}"))?;
@@ -312,13 +369,29 @@ async fn download_and_save_video(url: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn save_video_to_photos(url: String) -> Result<(), String> {
+pub async fn save_video_to_photos(app: tauri::AppHandle, url: String) -> Result<(), String> {
     validate_video_url(&url)?;
-    #[cfg(target_os = "ios")]
-    return download_and_save_video(url).await;
+    platform_save_video(app, url).await
+}
 
-    #[cfg(not(target_os = "ios"))]
-    Ok(())
+#[cfg(target_os = "ios")]
+async fn platform_save_video(_app: tauri::AppHandle, url: String) -> Result<(), String> {
+    download_and_save_video(url).await
+}
+
+#[cfg(target_os = "android")]
+async fn platform_save_video(app: tauri::AppHandle, url: String) -> Result<(), String> {
+    use tauri_plugin_mold_mobile_native::MoldMobileNativeExt;
+
+    app.mold_mobile_native()
+        .save_video_to_photos(url)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+async fn platform_save_video(_app: tauri::AppHandle, _url: String) -> Result<(), String> {
+    Err("saving videos is available in the mobile builds".to_string())
 }
 
 #[tauri::command]
@@ -496,8 +569,32 @@ pub async fn share_exported_animation(
 
     #[cfg(not(target_os = "ios"))]
     {
-        let _ = (window, api_key, request, filename, reuse_key);
-        Ok("shared".to_string())
+        #[cfg(target_os = "android")]
+        {
+            use tauri::Manager;
+            use tauri_plugin_mold_mobile_native::{MoldMobileNativeExt, ShareAnimationRequest};
+
+            let request_json = serde_json::to_string(&request)
+                .map_err(|error| format!("could not encode the animation options: {error}"))?;
+            return window
+                .app_handle()
+                .mold_mobile_native()
+                .share_exported_animation(ShareAnimationRequest {
+                    url,
+                    api_key,
+                    request_json,
+                    filename,
+                    reuse_key,
+                })
+                .await
+                .map_err(|error| error.to_string());
+        }
+
+        #[cfg(not(target_os = "android"))]
+        {
+            let _ = (window, api_key, request, filename, reuse_key);
+            Err("sharing animations is available in the mobile builds".to_string())
+        }
     }
 }
 
