@@ -27,6 +27,21 @@ fn progress_to_sse(event: mold_inference::ProgressEvent) -> SseProgressEvent {
     event.into()
 }
 
+fn forward_generation_progress(
+    registry: &crate::job_registry::SharedJobRegistry,
+    job_id: &str,
+    tx: Option<&tokio::sync::mpsc::UnboundedSender<SseMessage>>,
+    event: mold_inference::ProgressEvent,
+) {
+    let event = progress_to_sse(event);
+    if let SseProgressEvent::Preview { image, step, total } = &event {
+        registry.record_preview(job_id, image.clone(), *step, *total);
+    }
+    if let Some(tx) = tx {
+        let _ = tx.send(SseMessage::Progress(event));
+    }
+}
+
 /// Strips backtrace frames from candle error messages.
 ///
 /// Renders the full anyhow cause chain (`{:#}`) so wrappers like
@@ -1868,19 +1883,14 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
 
     set_active_generation(state, &job.request.model, &job.request.prompt);
 
-    // Install progress callback before crossing into spawn_blocking — keeps
-    // the callback installation off the blocking thread. Mirrors the pre-
-    // refactor behavior: when streaming, set the callback; when not, clear
-    // it (and only clear after generate when streaming).
-    let was_streaming = progress_tx.is_some();
-    if let Some(ref ptx) = progress_tx {
-        let ptx = ptx.clone();
-        cached_engine.engine.set_on_progress(Box::new(move |event| {
-            let _ = ptx.send(SseMessage::Progress(progress_to_sse(event)));
-        }));
-    } else {
-        cached_engine.engine.clear_on_progress();
-    }
+    // Install progress capture before crossing into spawn_blocking. The live
+    // registry snapshot is useful even when the submitting SSE receiver is
+    // gone, so queue selection can still follow the render from another client.
+    let registry = state.job_registry.clone();
+    let job_id = job.id.clone();
+    cached_engine.engine.set_on_progress(Box::new(move |event| {
+        forward_generation_progress(&registry, &job_id, progress_tx.as_ref(), event);
+    }));
 
     #[cfg(feature = "metrics")]
     let inference_start = Instant::now();
@@ -1897,9 +1907,7 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
                 .engine
                 .generate_with_reference_bindings(&gen_req, &reference_bindings)
         }));
-        if was_streaming {
-            cached_engine.engine.clear_on_progress();
-        }
+        cached_engine.engine.clear_on_progress();
         (cached_engine, result)
     })
     .await;

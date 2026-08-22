@@ -17,6 +17,7 @@ import { useToastStore } from "../stores/toasts";
 import { useDownloadsStore } from "../stores/downloads";
 import { useUiStore } from "../stores/ui";
 import { useAppPrefsStore } from "../stores/appPrefs";
+import { useComposerStore } from "../stores/composer";
 import { expandPrompt } from "../lib/api/expand";
 import { remixPrompt } from "../lib/api/remix";
 import { startCatalogDownload } from "../lib/api/catalog";
@@ -53,6 +54,10 @@ vi.mock("../lib/api/client", () => ({
   apiJsonTo: (...args: unknown[]) => apiJsonTo(...args),
   apiFetch: vi.fn(),
   apiFetchTo: vi.fn(),
+}));
+vi.mock("@studio/api/client", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@studio/api/client")>()),
+  apiJsonTo: (...args: unknown[]) => apiJsonTo(...args),
 }));
 vi.mock("../lib/ipc", () => ({ ipc: {} }));
 vi.mock("../lib/api/expand", () => ({ expandPrompt: vi.fn() }));
@@ -193,6 +198,51 @@ describe("GenerateView prepared expansion batches", () => {
       "aerial coast",
     ]);
     expect(prepared.props("batch").route.hostId).toBe("local");
+  });
+
+  it("restores every selected queue setting and shows its live render", async () => {
+    apiJsonTo.mockImplementation((_target: unknown, path: string) =>
+      Promise.resolve(
+        path === "/api/queue/remote-print/preview"
+          ? { image: "UFJFVklFVw==", step: 8, total: 20 }
+          : path === "/api/models"
+            ? [model]
+            : [],
+      ),
+    );
+    useComposerStore().set({
+      metadata: {
+        version: "1",
+        model: model.name,
+        prompt: "queue lighthouse",
+        title: "Queue study",
+        negative_prompt: "fog",
+        seed: 42,
+        steps: 20,
+        guidance: 3.5,
+        width: 1024,
+        height: 576,
+      },
+      queueSelection: { hostId: "local", jobId: "remote-print", running: true },
+    });
+
+    const wrapper = mountView();
+    await flushPromises();
+
+    expect(useGenerateFormStore().form).toMatchObject({
+      prompt: "queue lighthouse",
+      title: "Queue study",
+      negativePrompt: "fog",
+      seed: "42",
+      steps: 20,
+      guidance: 3.5,
+      width: 1024,
+      height: 576,
+    });
+    expect(wrapper.get('[data-test="develop-preview"]').attributes("src")).toBe(
+      "data:image/png;base64,UFJFVklFVw==",
+    );
+    expect(wrapper.get('[data-test="generation-live-status"]').text()).toBe("Developing 8/20");
   });
 
   it("expands in Auto when model owners differ only by patch version", async () => {

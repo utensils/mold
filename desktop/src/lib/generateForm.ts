@@ -1327,6 +1327,10 @@ export interface ScalarPrefill {
 /** Full-fidelity prefill: the gallery item's embedded metadata, verbatim. */
 export interface MetadataPrefill {
   metadata: OutputMetadata;
+  /** Present only when Queue selection supplied the metadata. Create uses it
+   * to show that exact server-owned render while the canonical Library reuse
+   * mapper restores the settings. */
+  queueSelection?: import("@studio/api/generationSelection").SelectedQueuePreviewSource;
 }
 
 /** Exact queued request, including advanced and media inputs. */

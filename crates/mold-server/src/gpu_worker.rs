@@ -2300,6 +2300,21 @@ fn progress_to_sse(event: mold_inference::ProgressEvent) -> SseProgressEvent {
     event.into()
 }
 
+fn forward_generation_progress(
+    registry: &crate::job_registry::SharedJobRegistry,
+    job_id: &str,
+    progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<SseMessage>>,
+    event: mold_inference::ProgressEvent,
+) {
+    let event = progress_to_sse(event);
+    if let SseProgressEvent::Preview { image, step, total } = &event {
+        registry.record_preview(job_id, image.clone(), *step, *total);
+    }
+    if let Some(progress_tx) = progress_tx {
+        let _ = progress_tx.send(SseMessage::Progress(event));
+    }
+}
+
 #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 pub(crate) fn record_h3_progress(
     event: mold_inference::ProgressEvent,
@@ -3149,12 +3164,17 @@ fn run_claimed_h3_generation(
     let _active_cleanup = ActiveGenerationCleanup { worker };
 
     let progress_tx = job.progress_tx.clone();
+    let preview_registry = job.registry.clone();
+    let preview_job_id = job.id.clone();
     let mut progress = mold_inference::progress::ProgressReporter::default();
     progress.set_callback(Box::new(move |event| {
         record_phase_timing(&event);
-        if let Some(tx) = &progress_tx {
-            let _ = tx.send(SseMessage::Progress(progress_to_sse(event)));
-        }
+        forward_generation_progress(
+            &preview_registry,
+            &preview_job_id,
+            progress_tx.as_ref(),
+            event,
+        );
     }));
 
     let allocation_commits = Arc::new(std::sync::atomic::AtomicU8::new(0));
@@ -4104,11 +4124,16 @@ fn process_job_with_sink(
 
     // Set progress callback if SSE streaming.
     let progress_tx = job.progress_tx.clone();
+    let preview_registry = job.registry.clone();
+    let preview_job_id = job.id.clone();
     cached_engine.engine.set_on_progress(Box::new(move |event| {
         record_phase_timing(&event);
-        if let Some(tx) = &progress_tx {
-            let _ = tx.send(SseMessage::Progress(progress_to_sse(event)));
-        }
+        forward_generation_progress(
+            &preview_registry,
+            &preview_job_id,
+            progress_tx.as_ref(),
+            event,
+        );
     }));
 
     // RSS sample taken just before inference; the post-inference sample below

@@ -113,6 +113,9 @@ struct EntryInternal {
     target_gpu: Option<usize>,
     seed_pinned: Option<bool>,
     metadata: Option<Box<mold_core::OutputMetadata>>,
+    /// Latest denoise preview for this live row. It is served separately so
+    /// `/api/queue` polling never carries image payloads.
+    preview: Option<QueueJobPreview>,
     /// Cancellation signal for `DELETE /api/queue/:id`. The submitting
     /// handler holds the clone returned by `register*()` and selects on
     /// `notified()` alongside the job's result channel; `cancel_queued`
@@ -190,6 +193,13 @@ struct BatchParentEntry {
 
 /// Cheap-cloneable handle. Workers and routes pass this around by value.
 pub type SharedJobRegistry = Arc<JobRegistry>;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+pub struct QueueJobPreview {
+    pub image: String,
+    pub step: usize,
+    pub total: usize,
+}
 
 impl JobRegistry {
     pub fn new() -> SharedJobRegistry {
@@ -273,6 +283,7 @@ impl JobRegistry {
                 target_gpu,
                 seed_pinned,
                 metadata,
+                preview: None,
                 cancel: cancel.clone(),
                 running_cancel: None,
                 cancel_requested: false,
@@ -735,6 +746,31 @@ impl JobRegistry {
         })
     }
 
+    /// Replace the selected job's ephemeral preview. A late callback cannot
+    /// resurrect terminal work because only a currently-live registry row is
+    /// allowed to publish.
+    pub fn record_preview(&self, id: &str, image: String, step: usize, total: usize) {
+        let mut entries = self
+            .inner
+            .write()
+            .unwrap_or_else(|error| error.into_inner());
+        let Some(entry) = entries.iter_mut().find(|entry| entry.id == id) else {
+            return;
+        };
+        entry.preview = Some(QueueJobPreview { image, step, total });
+    }
+
+    /// The outer option is live-row existence; the inner option is whether
+    /// that live row has emitted a denoise preview yet.
+    pub fn preview_snapshot(&self, id: &str) -> Option<Option<QueueJobPreview>> {
+        self.inner
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .iter()
+            .find(|entry| entry.id == id)
+            .map(|entry| entry.preview.clone())
+    }
+
     /// Drop the entry — call once on every terminal path (success, error,
     /// client-disconnect skip, dispatch failure). Idempotent.
     pub fn remove(&self, id: &str) {
@@ -1054,6 +1090,25 @@ mod tests {
         let snap = reg.snapshot();
         assert_eq!(snap.entries.len(), 1);
         assert_eq!(snap.entries[0].state, JobLifecycle::Queued);
+    }
+
+    #[test]
+    fn preview_exists_only_for_the_live_job() {
+        let reg = JobRegistry::new();
+        reg.register("a", "flux-dev:fp16");
+        reg.record_preview("a", "UFJFVklFVw==".into(), 3, 20);
+        assert_eq!(
+            reg.preview_snapshot("a"),
+            Some(Some(QueueJobPreview {
+                image: "UFJFVklFVw==".into(),
+                step: 3,
+                total: 20,
+            }))
+        );
+        reg.remove("a");
+        assert_eq!(reg.preview_snapshot("a"), None);
+        reg.record_preview("a", "TEFURQ==".into(), 20, 20);
+        assert_eq!(reg.preview_snapshot("a"), None);
     }
 
     #[test]

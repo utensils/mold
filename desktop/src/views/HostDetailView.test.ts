@@ -982,6 +982,9 @@ describe("HostDetailView queue drawer", () => {
     await flushPromises();
     const prefill = useComposerStore().prefill as { metadata: Record<string, unknown> };
     expect(prefill.metadata).toMatchObject({ prompt: "a lighthouse at dusk", seed: null });
+    expect(useComposerStore().prefill).toMatchObject({
+      queueSelection: { hostId: REMOTE_ID, jobId: "srv-1", running: true },
+    });
     expect(router.currentRoute.value.path).toBe("/generate");
     // Loading settings closes the drawer.
     expect(wrapper.find("[data-test='queue-entry-drawer']").exists()).toBe(false);

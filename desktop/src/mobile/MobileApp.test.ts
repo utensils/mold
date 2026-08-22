@@ -656,6 +656,7 @@ describe("MobileApp sequence generation", () => {
   it("loads a tapped server-owned generation into Create like desktop", async () => {
     const metadata = {
       prompt: "a lighthouse beyond the red dunes",
+      title: "Queue lighthouse study",
       negative_prompt: "fog",
       model: model.name,
       seed: 0,
@@ -701,6 +702,9 @@ describe("MobileApp sequence generation", () => {
           plan: null,
         });
       }
+      if (path === "/api/queue/foreign-job/preview") {
+        return Promise.resolve({ image: "UFJFVklFVw==", step: 7, total: 18 });
+      }
       return Promise.reject(new Error(`Unexpected API path: ${path}`));
     });
     wrapper = mountMobileApp();
@@ -717,11 +721,20 @@ describe("MobileApp sequence generation", () => {
       "a lighthouse beyond the red dunes",
     );
     expect(fieldControl("Steps").element).toHaveProperty("value", "18");
+    expect(fieldControl("Guidance").element).toHaveProperty("value", "2.5");
+    expect(fieldControl("Negative prompt").element).toHaveProperty("value", "fog");
+    expect(fieldControl("Title").element).toHaveProperty("value", "Queue lighthouse study");
     expect(wrapper.text()).toContain("New seed for every print.");
-    expect(wrapper.get("[data-test='mobile-generation-summary']").text()).toBe(
-      "Prompt settings restored",
+    expect(wrapper.get("[data-test='mobile-generation-summary']").text()).toBe("Developing 7 / 18");
+    expect(wrapper.get("[data-test='mobile-develop-preview']").attributes("src")).toBe(
+      "data:image/png;base64,UFJFVklFVw==",
     );
     expect(apiJsonTo).toHaveBeenCalledWith(target, "/api/queue");
+    expect(apiJsonTo).toHaveBeenCalledWith(
+      target,
+      "/api/queue/foreign-job/preview",
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
   });
 
   it("loads a tapped server-owned sequence script into the clip rail", async () => {

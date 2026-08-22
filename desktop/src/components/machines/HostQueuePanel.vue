@@ -32,6 +32,7 @@ import {
 import type { OutputMetadata } from "../../lib/api/types";
 import QueuePlanWorkList from "@studio/components/QueuePlanWorkList.vue";
 import { queuePlanOnlyWork } from "@studio/lib/queuePlanPresentation";
+import { settingsRestoreMetadata } from "@studio/api/generationSelection";
 
 const props = withDefaults(
   defineProps<{
@@ -236,10 +237,21 @@ watch(flatEntries, (entries) => {
 
 /** Unpinned seeds restore as random; `seed_pinned` disambiguates seed 0. */
 function loadQueueSettings(metadata: OutputMetadata) {
-  const pinned = queueDetail.value?.seed_pinned ?? metadata.seed !== 0;
-  composer.set({
-    metadata: pinned ? metadata : ({ ...metadata, seed: null } as unknown as OutputMetadata),
-  });
+  const detail = queueDetail.value;
+  const pinned = detail?.seed_pinned ?? metadata.seed !== 0;
+  const restored = settingsRestoreMetadata(metadata, { seedPinned: pinned });
+  composer.set(
+    detail
+      ? {
+          metadata: restored,
+          queueSelection: {
+            hostId: props.host.id,
+            jobId: detail.id,
+            running: detail.state === "running",
+          },
+        }
+      : { metadata: restored },
+  );
   queueDetail.value = null;
   void router.push("/generate");
 }
