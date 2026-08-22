@@ -8163,7 +8163,9 @@ mod tests {
             .unwrap();
         assert_eq!(generate_resp.status(), StatusCode::OK);
 
-        assert_eq!(progress_set_count.load(Ordering::SeqCst), 2);
+        // Non-streaming generations now install the shared preview observer too,
+        // and must clear that observer before returning the engine to the cache.
+        assert_eq!(progress_set_count.load(Ordering::SeqCst), 3);
         assert_eq!(progress_clear_count.load(Ordering::SeqCst), 3);
     }
 
