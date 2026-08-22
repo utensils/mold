@@ -75,6 +75,10 @@ with prompt, model, seed, and generation metadata.
   settings
 - **Images**: text-to-image, img2img, multimodal editing, inpainting,
   ControlNet, LoRA, prompt expansion, and Real-ESRGAN upscaling
+- **Face identity (PuLID-FLUX)**: keep one person's face across arbitrary
+  prompts with `--id-image`, on `flux-dev:q4` and `flux-dev:q8` — pure Rust
+  SCRFD, ArcFace, EVA02-CLIP, and IDFormer feeding twenty cross-attention
+  modules inside the FLUX transformer
 - **Video and audio**: text/image-to-video, multi-prompt sequences, clip
   continuation (`--extend`), lip dub (`--pipeline lip-dub`), text-to-audio
   (`--pipeline t2a`), native MP4 with generated audio, and LTX-2 output up to
@@ -179,3 +183,11 @@ transformer and VAE derived from them, were ported from
 [diffusers](https://github.com/huggingface/diffusers). Those files remain
 Apache-2.0; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for this and
 every other third-party notice.
+
+**Face-identity weights.** Face identity additionally downloads two InsightFace
+**pretrained models** (`scrfd_10g_bnkps`, `glintr100`), which are licensed for
+**non-commercial research purposes only** — the InsightFace _code_ is MIT, the
+_weights_ are not. Mold ships neither and refuses to download them until you
+record acceptance with `mold pull pulid-flux --accept-license insightface-antelopev2`;
+`mold licenses` lists what has been accepted. The PuLID adapter is Apache-2.0 and
+the EVA02-CLIP tower is MIT.
