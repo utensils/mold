@@ -1042,14 +1042,6 @@ fn validate_private_execution_route_facts(
         },
         None => H3AttentionDevice::Metal,
     };
-    let expected_location = match admitted.compute_capability {
-        Some(_) => DeviceLocation::Cuda {
-            gpu_id: admitted.device_ordinal,
-        },
-        None => DeviceLocation::Metal {
-            gpu_id: admitted.device_ordinal,
-        },
-    };
     let mut mismatches = Vec::new();
     for (axis, mismatch) in [
         ("active", !actual.active),
@@ -1064,7 +1056,14 @@ fn validate_private_execution_route_facts(
             actual.backend
                 != H3CandleBackendDevice::from_compute_capability(admitted.compute_capability),
         ),
-        ("location", actual.location != expected_location),
+        (
+            "location",
+            !private_execution_location_matches(
+                actual.location,
+                admitted.compute_capability,
+                admitted.device_ordinal,
+            ),
+        ),
         (
             "admitted-attention",
             admitted.attention.device != expected_attention_device,
@@ -1085,6 +1084,22 @@ fn validate_private_execution_route_facts(
         );
     }
     Ok(())
+}
+
+fn private_execution_location_matches(
+    actual: DeviceLocation,
+    compute_capability: Option<(u16, u16)>,
+    device_ordinal: usize,
+) -> bool {
+    match (compute_capability, actual) {
+        (Some(_), DeviceLocation::Cuda { gpu_id }) => gpu_id == device_ordinal,
+        // Candle's Metal gpu_id is a process-global MetalDevice identity, not
+        // a physical GPU ordinal. The private constructor already selects the
+        // pooled device for the admitted ordinal; binding retains that exact
+        // Device while backend and stable device_id fence the physical route.
+        (None, DeviceLocation::Metal { .. }) => true,
+        _ => false,
+    }
 }
 
 /// Snapshot the safe execution-lease surface once. In particular, the Candle
@@ -3314,6 +3329,30 @@ mod tests {
                 "continuing {axis}"
             );
         }
+    }
+
+    #[test]
+    fn metal_location_uses_candle_identity_while_cuda_keeps_the_ordinal_fence() {
+        assert!(private_execution_location_matches(
+            DeviceLocation::Metal { gpu_id: 41 },
+            None,
+            0,
+        ));
+        assert!(private_execution_location_matches(
+            DeviceLocation::Cuda { gpu_id: 2 },
+            Some((8, 9)),
+            2,
+        ));
+        assert!(!private_execution_location_matches(
+            DeviceLocation::Cuda { gpu_id: 41 },
+            Some((8, 9)),
+            2,
+        ));
+        assert!(!private_execution_location_matches(
+            DeviceLocation::Metal { gpu_id: 2 },
+            Some((8, 9)),
+            2,
+        ));
     }
 
     struct AlternatingDeviceLease {
