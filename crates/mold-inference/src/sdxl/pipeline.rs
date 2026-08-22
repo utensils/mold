@@ -319,6 +319,29 @@ impl SDXLEngine {
         self.identity.adapter_path()
     }
 
+    /// The adapter's residency follows the UNet's.
+    ///
+    /// Called once at the end of every `generate`, so the two drop sites
+    /// inside the render — the sequential path's `drop(unet)` and the eager
+    /// path's VAE-decode drop — do not each need their own copy of this rule,
+    /// and neither can forget it. It is also the backstop for a render that
+    /// never reaches a drop site at all: a cancellation checkpoint or an error
+    /// inside `denoise_loop` returns straight out of `generate_inner`, and
+    /// without this the ~682 MB adapter would stay resident until a later
+    /// unload or unconditioned request. Whenever the UNet did not survive the
+    /// render the adapter must not either — nothing is going to use it before
+    /// the next conditioned request, which reloads it anyway.
+    fn release_identity_adapter_unless_unet_resident(&mut self) {
+        let unet_resident = self
+            .base
+            .loaded
+            .as_ref()
+            .is_some_and(|loaded| loaded.unet.is_some());
+        if !unet_resident {
+            self.identity.drop_adapter();
+        }
+    }
+
     /// Device bytes the PuLID adapter is currently holding, or 0.
     ///
     /// The `InferenceEngine` trait has no resident-bytes method to fold this
@@ -1878,6 +1901,7 @@ impl InferenceEngine for SDXLEngine {
         let result = self.generate_inner(req);
         self.pending_placement = None;
         self.pending_loras.clear();
+        self.release_identity_adapter_unless_unet_resident();
         result
     }
 
@@ -2435,6 +2459,81 @@ mod tests {
     #[test]
     fn test_cfg_enabled_at_guidance_7_5() {
         assert!(cfg_active(7.5));
+    }
+
+    /// The adapter's residency follows the UNet's, and the end-of-`generate`
+    /// backstop is what makes that true on the paths that never reach a drop
+    /// site — a cancellation checkpoint or an error inside `denoise_loop`
+    /// returns straight out of `generate_inner`, and ~682 MB would otherwise
+    /// stay on the device until a later unload.
+    #[test]
+    fn a_render_that_never_reaches_a_drop_site_still_releases_the_adapter() {
+        use std::sync::Arc;
+
+        let device = candle_core::Device::Cpu;
+        let config = super::super::pulid::tests::sdxl_tiny_config();
+        let adapter = Arc::new(super::super::pulid::tests::synthetic_adapter(
+            &config, &device,
+        ));
+        let modules = super::super::pulid::plan_attn_layers(&config).len();
+
+        let mut engine = SDXLEngine::new(
+            "sdxl-test".to_string(),
+            ModelPaths {
+                low_noise_transformer: None,
+                low_noise_distilled_lora: None,
+                transformer: PathBuf::from("/nonexistent/unet.safetensors"),
+                transformer_shards: Vec::new(),
+                vae: PathBuf::from("/nonexistent/vae.safetensors"),
+                spatial_upscaler: None,
+                temporal_upscaler: None,
+                distilled_lora: None,
+                t5_encoder: None,
+                clip_encoder: None,
+                t5_tokenizer: None,
+                clip_tokenizer: None,
+                clip_encoder_2: None,
+                clip_tokenizer_2: None,
+                text_encoder_files: Vec::new(),
+                text_tokenizer: None,
+                decoder: None,
+            },
+            Scheduler::default(),
+            false,
+            LoadStrategy::Eager,
+            0,
+            None,
+            None,
+        );
+        engine.identity.install_resident_for_test(
+            Arc::clone(&adapter),
+            device.clone(),
+            candle_core::DType::F32,
+            modules,
+        );
+        assert!(engine.identity_resident_bytes() > 0);
+
+        // No `loaded` at all is the strongest form of "the UNet did not
+        // survive this render".
+        engine.release_identity_adapter_unless_unet_resident();
+        assert_eq!(
+            engine.identity_resident_bytes(),
+            0,
+            "the backstop must release the adapter when no UNet is resident"
+        );
+
+        // And `unload()` — which `ModelCache` calls to PARK an engine while
+        // keeping it cached, zeroing the entry's accounted `vram_bytes` —
+        // must release it too, or those bytes are unaccounted for.
+        engine.identity.install_resident_for_test(
+            adapter,
+            device,
+            candle_core::DType::F32,
+            modules,
+        );
+        assert!(engine.identity_resident_bytes() > 0);
+        InferenceEngine::unload(&mut engine);
+        assert_eq!(engine.identity_resident_bytes(), 0);
     }
 
     /// `lora_stack_fingerprint` must produce equal fingerprints for the same
