@@ -5,6 +5,8 @@ import VideoExportDialog from "@ui/components/VideoExportDialog.vue";
 import { apiFetchTo, apiJsonTo, type ApiTarget } from "../lib/api/client";
 import type { GalleryImage } from "../lib/api/types";
 import { blobToBase64 } from "../lib/image";
+import { formatBytes, formatScheduler } from "../lib/format";
+import { modelDisplayNameForId } from "../lib/models";
 import {
   evictMedia,
   galleryMediaPath,
@@ -33,6 +35,7 @@ import {
 } from "@studio/lib/libraryOrganization";
 import type { TagCount } from "@studio/lib/api/galleryOrganization";
 import { mobileIdentityProvenanceRows } from "./identity";
+import { strengthSemanticsForModel } from "@studio/lib/strengthSemantics";
 import MobileLibrarySheet from "./MobileLibrarySheet.vue";
 import {
   validateCollectionName,
@@ -167,10 +170,8 @@ const deleteForeverArmed = ref(false);
  */
 const identityRows = computed(() => mobileIdentityProvenanceRows(props.item.metadata));
 // Identity provenance is worth reading on a host that has no organization
-// capability at all, so it opens the Info sheet in its own right.
-const infoAvailable = computed(
-  () => props.organizeEnabled || props.trashed || identityRows.value !== null,
-);
+// Metadata is useful on every print, even when its host cannot organize.
+const infoAvailable = computed(() => true);
 const savedTitle = computed(() => props.organization?.title ?? null);
 /** Header line: the print's title, else its prompt, else the filename. */
 const viewerTitle = computed(() =>
@@ -192,6 +193,30 @@ const purgeCopy = computed(() => {
   const purgeAt =
     props.organization?.purgeAt ?? (props.item as MobileGalleryImage).purge_at ?? null;
   return purgeCountdownFromPurgeAt(purgeAt, Date.now()).label;
+});
+const modelLabel = computed(() => modelDisplayNameForId(props.item.metadata.model, []));
+const schedulerName = computed(() => formatScheduler(props.item.metadata.scheduler));
+const strengthCaption = computed(
+  () => strengthSemanticsForModel(props.item.metadata.model, null).label,
+);
+const frames = computed(
+  () => props.item.metadata.frames ?? props.item.metadata.video_frames ?? null,
+);
+const fps = computed(() => props.item.metadata.fps ?? props.item.metadata.video_fps ?? null);
+const fileFormat = computed(() => props.item.format ?? props.item.metadata.output_format ?? null);
+const fileSize = computed(() =>
+  props.item.size_bytes != null ? formatBytes(props.item.size_bytes) : null,
+);
+const createdAt = computed(() =>
+  new Date(props.item.timestamp * 1000).toLocaleString(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }),
+);
+const loraStack = computed(() => {
+  const metadata = props.item.metadata;
+  if (metadata.loras?.length) return metadata.loras;
+  return metadata.lora ? [{ path: metadata.lora, scale: metadata.lora_scale ?? 1 }] : [];
 });
 
 function openInfo(): void {
@@ -813,6 +838,7 @@ onBeforeUnmount(() => {
     <MobileLibrarySheet
       :open="infoOpen"
       :title="viewerTitle"
+      :focus-first-control="false"
       test-id="gallery-viewer-info-sheet"
       @close="infoOpen = false"
     >
@@ -974,6 +1000,100 @@ onBeforeUnmount(() => {
           </template>
         </dl>
       </template>
+      <section class="gallery-viewer-print-details" data-test="gallery-viewer-print-details">
+        <p class="mobile-library-sheet-label">Print details</p>
+        <p class="gallery-viewer-info-filename" :title="item.filename">{{ item.filename }}</p>
+        <p class="gallery-viewer-info-prompt" :title="item.metadata.prompt">
+          {{ item.metadata.prompt }}
+        </p>
+        <p
+          v-if="item.metadata.prompt.trim() && item.metadata.original_prompt"
+          class="gallery-viewer-info-secondary"
+          data-test="gallery-viewer-original"
+        >
+          <span>Original</span> {{ item.metadata.original_prompt }}
+        </p>
+        <p
+          v-if="item.metadata.negative_prompt"
+          class="gallery-viewer-info-secondary"
+          data-test="gallery-viewer-negative"
+        >
+          <span>Negative</span> {{ item.metadata.negative_prompt }}
+        </p>
+        <p
+          v-if="item.metadata.batch_id && item.metadata.batch_index && item.metadata.batch_count"
+          class="gallery-viewer-info-secondary"
+          data-test="gallery-viewer-batch"
+          :title="item.metadata.batch_id"
+        >
+          <span>Prepared batch</span> {{ item.metadata.batch_index }} of
+          {{ item.metadata.batch_count }} · {{ item.metadata.batch_id }}
+        </p>
+        <dl class="gallery-viewer-info-facts">
+          <div>
+            <dt>Model</dt>
+            <dd>{{ modelLabel }}</dd>
+          </div>
+          <div>
+            <dt>Seed</dt>
+            <dd>{{ item.metadata.seed }}</dd>
+          </div>
+          <div>
+            <dt>Dimensions</dt>
+            <dd>{{ item.metadata.width }}×{{ item.metadata.height }}</dd>
+          </div>
+          <div>
+            <dt>Steps · guidance</dt>
+            <dd>{{ item.metadata.steps }} · {{ item.metadata.guidance.toFixed(1) }}</dd>
+          </div>
+          <div v-if="schedulerName">
+            <dt>Scheduler</dt>
+            <dd>{{ schedulerName }}</dd>
+          </div>
+          <div v-if="item.metadata.cfg_plus">
+            <dt>CFG++</dt>
+            <dd>on</dd>
+          </div>
+          <div v-if="item.metadata.strength != null">
+            <dt>{{ strengthCaption }}</dt>
+            <dd>{{ item.metadata.strength.toFixed(2) }}</dd>
+          </div>
+          <div v-if="frames">
+            <dt>Frames</dt>
+            <dd>
+              {{ frames }}<template v-if="fps"> · {{ fps }} fps</template>
+            </dd>
+          </div>
+          <div v-if="pipeline">
+            <dt>Pipeline</dt>
+            <dd>{{ pipeline }}</dd>
+          </div>
+          <div v-for="lora in loraStack" :key="lora.path">
+            <dt>LoRA</dt>
+            <dd :title="lora.path">{{ lora.path }} × {{ lora.scale.toFixed(2) }}</dd>
+          </div>
+          <div v-if="fileSize">
+            <dt>File size</dt>
+            <dd>{{ fileSize }}</dd>
+          </div>
+          <div v-if="fileFormat">
+            <dt>Format</dt>
+            <dd>{{ fileFormat.toUpperCase() }}</dd>
+          </div>
+          <div>
+            <dt>Created</dt>
+            <dd>{{ createdAt }}</dd>
+          </div>
+          <div>
+            <dt>Host</dt>
+            <dd>{{ hostName }}</dd>
+          </div>
+        </dl>
+        <p v-if="item.metadata.version" class="gallery-viewer-info-version">
+          mold {{ item.metadata.version }}
+        </p>
+        <span v-if="item.metadata_synthetic" class="edge-code">SYNTHETIC METADATA</span>
+      </section>
       <template v-if="trashed">
         <p class="status-line" data-test="gallery-viewer-purge">{{ purgeCopy }}</p>
         <button
@@ -1020,6 +1140,73 @@ onBeforeUnmount(() => {
   font-family: var(--font-mono, ui-monospace, monospace);
   font-size: 13px;
   overflow-wrap: anywhere;
+}
+
+.gallery-viewer-print-details {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.gallery-viewer-info-filename,
+.gallery-viewer-info-prompt,
+.gallery-viewer-info-secondary,
+.gallery-viewer-info-version {
+  margin: 0;
+}
+
+.gallery-viewer-info-filename,
+.gallery-viewer-info-version {
+  overflow: hidden;
+  color: var(--ink-3);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gallery-viewer-info-prompt {
+  color: var(--rebate);
+  font-size: var(--text-body);
+  overflow-wrap: anywhere;
+}
+
+.gallery-viewer-info-secondary {
+  color: var(--ink-2);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.gallery-viewer-info-secondary span {
+  color: var(--ink-3);
+}
+
+.gallery-viewer-info-facts {
+  display: grid;
+  gap: 8px;
+  margin: 2px 0 0;
+}
+
+.gallery-viewer-info-facts > div {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.7fr);
+  gap: 12px;
+}
+
+.gallery-viewer-info-facts dt {
+  color: var(--ink-3);
+  font-size: 13px;
+}
+
+.gallery-viewer-info-facts dd {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: var(--rebate);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+  text-align: right;
 }
 
 .gallery-viewer-media,
