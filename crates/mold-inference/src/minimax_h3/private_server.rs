@@ -3001,10 +3001,17 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
         prepared.budget_echo_input().clone(),
         attention_input,
     )?;
+    let (prepared_fence_device_bytes, prepared_fence_host_bytes) =
+        private_h3_project_owner_fence_budget(
+            owner_fence.compute_capability,
+            prepared.predicted_device_peak_bytes(),
+            prepared.predicted_host_increment_bytes(),
+            private_h3_unified_target_peak_bytes(&prepared.factory_attempt_input().target_budget)?,
+        );
     if prepared.prepared_attempt_identity_sha256() != owner_fence.prepared_attempt_identity_sha256
         || prepared.target_budget_identity_sha256() != owner_fence.target_budget_identity_sha256
-        || prepared.predicted_device_peak_bytes() != owner_fence.predicted_device_peak_bytes
-        || prepared.predicted_host_increment_bytes() != owner_fence.predicted_host_increment_bytes
+        || prepared_fence_device_bytes != owner_fence.predicted_device_peak_bytes
+        || prepared_fence_host_bytes != owner_fence.predicted_host_increment_bytes
     {
         bail!("private H3 prepared budget differs from the scheduler owner fence")
     }
@@ -3112,6 +3119,20 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
         consumption_binding,
     };
     H3PrivateFl2VaPreparedAttempt::from_runner(facts, runner)
+}
+
+#[cfg(feature = "mp4")]
+const fn private_h3_project_owner_fence_budget(
+    compute_capability: Option<(u16, u16)>,
+    split_device_bytes: u64,
+    split_host_bytes: u64,
+    unified_device_bytes: u64,
+) -> (u64, u64) {
+    if compute_capability.is_some() {
+        (split_device_bytes, split_host_bytes)
+    } else {
+        (unified_device_bytes, 0)
+    }
 }
 
 #[cfg(feature = "mp4")]
@@ -7540,6 +7561,19 @@ mod tests {
         assert_eq!(
             private_h3_factory_attention_backend(Some((8, 9))),
             AttentionBackend::Flash,
+        );
+    }
+
+    #[cfg(feature = "mp4")]
+    #[test]
+    fn owner_fence_budget_preserves_cuda_and_projects_metal_unified_memory() {
+        assert_eq!(
+            private_h3_project_owner_fence_budget(Some((8, 9)), 30, 12, 38),
+            (30, 12),
+        );
+        assert_eq!(
+            private_h3_project_owner_fence_budget(None, 30, 12, 38),
+            (38, 0),
         );
     }
 
