@@ -5903,6 +5903,13 @@ describe("MobileApp create settings reset", () => {
     await fieldControl("Prompt").setValue("a ship crossing violet lightning");
     await fieldControl("Negative prompt").setValue("calm water");
     await fieldControl("Steps").setValue("12");
+    await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
+    expect(wrapper.get("[data-test='mobile-batch-value']").attributes("value")).toBe("2");
+    expect(
+      wrapper
+        .get("[data-test='mobile-batch-control']")
+        .element.closest("[data-test='mobile-advanced-sheet']"),
+    ).toBeNull();
     await wrapper.get("[data-test='mobile-settings-reset']").trigger("click");
     await flushPromises();
 
@@ -5912,12 +5919,18 @@ describe("MobileApp create settings reset", () => {
     expect((fieldControl("Negative prompt").element as HTMLInputElement).value).toBe("");
     // The selected model's defaults, not the bare form defaults.
     expect((fieldControl("Steps").element as HTMLInputElement).value).toBe("30");
+    expect(wrapper.get("[data-test='mobile-batch-value']").attributes("value")).toBe("1");
     expect(wrapper.get("[data-test='mobile-settings-reset']").attributes("aria-label")).toBe(
       "Reset settings to model defaults",
     );
     expect(wrapper.get("[data-test='mobile-settings-reset']").element.parentElement).toBe(
       wrapper.get(".mobile-create-head").element,
     );
+
+    await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
+    await wrapper.get("[data-test='mobile-open-advanced']").trigger("click");
+    await wrapper.get("[data-test='mobile-advanced-reset']").trigger("click");
+    expect(wrapper.get("[data-test='mobile-batch-value']").attributes("value")).toBe("2");
 
     const draft = useSequenceDraftStore();
     draft.output = "sequence";

@@ -1219,15 +1219,13 @@ describe("useGenerateForm", () => {
     expect(form.state.value.gifPreview).toBe(false);
   });
 
-  it("resetSettings preserves the prompt, style, model and batch size", () => {
+  it("resetSettings preserves the prompt, style, and model while resetting Batch", () => {
     const form = useGenerateForm();
     const model = makeModel({ name: "sdxl:fp16", family: "sdxl" });
     form.applyModelDefaults(model);
     Object.assign(form.state.value, {
       prompt: "a lighthouse in a storm",
       stylePreset: "cinematic",
-      // Prepared batch work is never silently resized (CLAUDE.md), so the
-      // batch stepper survives a settings reset.
       batchSize: 4,
       steps: 3,
     });
@@ -1238,7 +1236,7 @@ describe("useGenerateForm", () => {
     expect(form.state.value.stylePreset).toBe("cinematic");
     expect(form.state.value.model).toBe("sdxl:fp16");
     expect(form.state.value.modelFamily).toBe("sdxl");
-    expect(form.state.value.batchSize).toBe(4);
+    expect(form.state.value.batchSize).toBe(1);
     expect(form.state.value.steps).toBe(20);
   });
 

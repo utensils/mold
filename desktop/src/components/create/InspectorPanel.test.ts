@@ -628,7 +628,7 @@ describe("InspectorPanel — reset to model defaults", () => {
     expect(reset.attributes("aria-label")).toBe("Reset settings to model defaults");
   });
 
-  it("restores the model's defaults while preserving prompt, model, and batch", async () => {
+  it("restores the model's defaults while preserving prompt/model and resetting Batch", async () => {
     useModelStore().all = [model];
     const form = useGenerateFormStore().form;
     form.model = model.name;
@@ -644,7 +644,7 @@ describe("InspectorPanel — reset to model defaults", () => {
 
     expect(form.prompt).toBe("a lighthouse at dusk");
     expect(form.model).toBe("sdxl:base");
-    expect(form.batchSize).toBe(4);
+    expect(form.batchSize).toBe(1);
     expect(form.negativePrompt).toBe("");
     expect(form.seed).toBe("");
     expect(form.steps).toBe(30);

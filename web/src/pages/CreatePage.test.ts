@@ -817,6 +817,7 @@ describe("CreatePage layout and behavior", () => {
     form.state.value.seedMode = "static";
     form.state.value.seed = 42;
     form.state.value.negativePrompt = "blurry";
+    form.state.value.batchSize = 4;
     await wrapper.get("[data-test='controls-reset']").trigger("click");
     expect(form.state.value.steps).toBe(30);
     expect(form.state.value.guidance).toBe(7.5);
@@ -824,6 +825,7 @@ describe("CreatePage layout and behavior", () => {
     expect(form.state.value.negativePrompt).toBe("");
     expect(form.state.value.prompt).toBe("a lighthouse in a storm");
     expect(form.state.value.model).toBe("sdxl:fp16");
+    expect(form.state.value.batchSize).toBe(1);
 
     const notifications = useNotifications();
     const settingsToast = notifications.toasts.find((t) =>
@@ -834,6 +836,7 @@ describe("CreatePage layout and behavior", () => {
     expect(form.state.value.steps).toBe(3);
     expect(form.state.value.seed).toBe(42);
     expect(form.state.value.negativePrompt).toBe("blurry");
+    expect(form.state.value.batchSize).toBe(4);
 
     const draft = useSequenceDraftStore();
     draft.output = "sequence";

@@ -1647,6 +1647,10 @@ textarea.control {
   margin: 4px 0 16px;
 }
 
+.mobile-batch-control {
+  margin: 4px 0 16px;
+}
+
 .mobile-generate-section {
   padding: 14px 0 0;
   border-top: 1px solid var(--edge);

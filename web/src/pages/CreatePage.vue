@@ -2598,11 +2598,10 @@ function onNewPrint() {
 }
 
 // Controls rail "Reset" (spec §06): put every generation setting back to the
-// current model's defaults. The prompt, style, model and batch size stay —
-// this re-tunes the print being composed, it does not start a new one, and
-// prepared batch work is never silently resized. Nothing leaves the browser,
-// so an undo toast is enough; a blocking confirm would be heavier than the
-// action deserves.
+// current model's defaults. The prompt, style, and model stay while Batch
+// returns to one. Prepared work remains retained and becomes explicitly stale;
+// nothing leaves the browser, so an undo toast is enough and a blocking confirm
+// would be heavier than the action deserves.
 function onResetSettings() {
   // resetSettings swaps in a freshly built state object, so the previous one is
   // never mutated and can be handed straight back on undo.

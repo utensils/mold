@@ -515,11 +515,11 @@ function modelDefaultsPatch(
  * the factory default, then to the selected model's own defaults on top.
  *
  * What survives is what the reset is *for* — the user is re-tuning a print they
- * are still composing: the prompt, the style preset, the selected model/family,
- * and the batch size (prepared batch work is never silently resized, see
- * CLAUDE.md). Everything else — shape, resolution, detail, prompt strength,
- * seed, and every advanced field including source media, LoRAs and the video
- * suite — goes back to defaults.
+ * are still composing: the prompt, the style preset, and the selected
+ * model/family. Batch is a general setting and returns to one; prepared work is
+ * retained and becomes explicitly stale. Everything else — shape, resolution,
+ * detail, prompt strength, seed, and every advanced field including source
+ * media, LoRAs and the video suite — goes back to defaults.
  */
 export function settingsResetPatch(
   current: GenerateFormState,
@@ -531,7 +531,7 @@ export function settingsResetPatch(
     stylePreset: current.stylePreset,
     model: current.model,
     modelFamily: current.modelFamily,
-    batchSize: current.batchSize,
+    batchSize: 1,
   };
   // With a resolved catalog row the model's own defaults (and its capability
   // gates) win over the generic ones; without it the generic defaults stand and
@@ -1002,7 +1002,7 @@ export interface UseGenerateForm {
   state: Ref<GenerateFormState>;
   reset: () => void;
   /** Restore every generation setting to the selected model's defaults while
-   * keeping the prompt, style, model and batch size (`settingsResetPatch`). */
+   * keeping the prompt, style, and model (`settingsResetPatch`). */
   resetSettings: (model: ModelInfoExtended | null) => void;
   applyModelDefaults: (model: ModelInfoExtended) => void;
   /**

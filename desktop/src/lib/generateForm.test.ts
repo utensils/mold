@@ -2352,14 +2352,14 @@ describe("resetFormToModelDefaults", () => {
     return form;
   }
 
-  it("preserves the prompt, its expand provenance, the model, and the prepared batch size", () => {
+  it("preserves authored prompt/model state and resets Batch to one", () => {
     const form = dirtyForm();
     resetFormToModelDefaults(form, sdxl);
     expect(form.prompt).toBe("a lighthouse at dusk");
     expect(form.originalPrompt).toBe("a lighthouse");
     expect(form.model).toBe("sdxl:base");
     expect(form.family).toBe("sdxl");
-    expect(form.batchSize).toBe(4);
+    expect(form.batchSize).toBe(1);
   });
 
   it("restores every other field to its default", () => {
@@ -2394,7 +2394,7 @@ describe("resetFormToModelDefaults", () => {
     expect(form.model).toBe("sdxl:base");
     expect(form.family).toBe("sdxl");
     expect(form.prompt).toBe("a lighthouse at dusk");
-    expect(form.batchSize).toBe(4);
+    expect(form.batchSize).toBe(1);
     expect(form.steps).toBe(defaults.steps);
     expect(form.negativePrompt).toBe("");
   });
@@ -2489,6 +2489,7 @@ describe("resetAdvancedToModelDefaults", () => {
 
   it("still resets the genuinely advanced fields and keeps the prompt", () => {
     const form = mediaDirtyForm();
+    form.batchSize = 4;
     resetAdvancedToModelDefaults(form, ltx2);
     expect(form.prompt).toBe("a river at dawn");
     expect(form.negativePrompt).toBe("");
@@ -2500,6 +2501,7 @@ describe("resetAdvancedToModelDefaults", () => {
     expect(form.cameraControl).toBeNull();
     expect(form.width).toBe(1280);
     expect(form.height).toBe(704);
+    expect(form.batchSize).toBe(4);
   });
 
   it("keeps media even when no model entry is available", () => {
