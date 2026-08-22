@@ -201,6 +201,8 @@ fn local_generation_profile(
     config: &Config,
     model: &str,
 ) -> Option<mold_core::GenerationProfileSet> {
+    let family = resolve_family(model, config);
+    mold_core::require_model_activation(model, family.as_deref()).ok()?;
     let canonical = manifest::resolve_model_name(model);
     let mut catalog = mold_core::build_model_catalog(config, None, false);
     mold_core::qualify_catalog_generation_delivery(
@@ -3548,13 +3550,11 @@ mod tests {
                     .contains(&OutputFormat::Webp)
             }));
         }
-        if !cfg!(feature = "mp4") {
-            assert!(local_generation_profile(
-                &Config::default(),
-                mold_core::minimax_h3::FL2VA_OFFICIAL
-            )
-            .is_none());
-        }
+        assert!(local_generation_profile(
+            &Config::default(),
+            mold_core::minimax_h3::FL2VA_OFFICIAL
+        )
+        .is_none());
     }
 
     #[test]
