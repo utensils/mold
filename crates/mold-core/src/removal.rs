@@ -495,12 +495,12 @@ mod tests {
             std::fs::write(path, b"asset").unwrap();
         }
 
-        // The derived vision tower and its sidecar are mold's own conversion
-        // output, not manifest files — nothing that walks the manifest can see
-        // them, so a removal that only enumerated the manifest would leave
-        // 609 MB behind.
+        // The derived vision tower and face parser, with their sidecars, are
+        // mold's own conversion output rather than manifest files — nothing
+        // that walks the manifest can see them, so a removal that only
+        // enumerated the manifest would leave 660 MB behind.
         let derived = crate::pulid_assets::derived_pulid_paths(&config);
-        assert_eq!(derived.len(), 2, "{derived:?}");
+        assert_eq!(derived.len(), 4, "{derived:?}");
         for path in &derived {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(path, b"derived").unwrap();

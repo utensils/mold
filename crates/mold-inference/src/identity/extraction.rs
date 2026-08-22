@@ -53,12 +53,12 @@ use mold_core::identity::{FrozenIdentityEmbedding, IdentityAssetDigests};
 use mold_core::manifest::ModelComponent;
 use mold_core::pulid_assets::PulidPaths;
 
+use crate::encoders::eva_clip_preprocess::{planar_rgb_from_image, preprocess_planar_rgb};
+use crate::encoders::eva_clip_vision::EvaClipVisionTower;
 use crate::encoders::pickle_convert::{
     ensure_bisenet_parser_safetensors, ensure_eva_clip_vision_safetensors, BISENET_DERIVED_SHA256,
     EVA_DERIVED_SHA256,
 };
-use crate::encoders::eva_clip_preprocess::{planar_rgb_from_image, preprocess_planar_rgb};
-use crate::encoders::eva_clip_vision::EvaClipVisionTower;
 use crate::flux::pulid_encoder::IdFormer;
 
 use super::parsing::{apply_pulid_face_mask, BiSeNetParser};

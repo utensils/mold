@@ -103,8 +103,8 @@ pub(crate) fn is_legacy_container(bytes: &[u8]) -> bool {
 
 /// Read every tensor of a legacy archive, in the archive's own key order.
 pub(crate) fn read_legacy_pth(path: &Path) -> Result<Vec<LegacyTensor>> {
-    let file = std::fs::File::open(path)
-        .with_context(|| format!("failed to open {}", path.display()))?;
+    let file =
+        std::fs::File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
     let mut reader = BufReader::new(file);
 
     let mut preamble = [0_u8; LEGACY_PREAMBLE.len()];
@@ -137,16 +137,15 @@ pub(crate) fn read_legacy_pth(path: &Path) -> Result<Vec<LegacyTensor>> {
             infos.push(info);
         }
     }
-    ensure!(
-        !infos.is_empty(),
-        "{} carries no tensors",
-        path.display()
-    );
+    ensure!(!infos.is_empty(), "{} carries no tensors", path.display());
 
     let keys = match read_pickle(&mut reader).context("reading the storage-key pickle")? {
         Object::List(keys) => keys
             .into_iter()
-            .map(|key| key.unicode().map_err(|other| anyhow::anyhow!("a storage key is not a string: {other:?}")))
+            .map(|key| {
+                key.unicode()
+                    .map_err(|other| anyhow::anyhow!("a storage key is not a string: {other:?}"))
+            })
             .collect::<Result<Vec<String>>>()?,
         other => bail!("the storage-key list must be a list, found {other:?}"),
     };
@@ -287,7 +286,10 @@ mod tests {
         }
         assert_eq!(value, 0x1950a86a20f9469cfc6c);
         assert_eq!(LEGACY_PREAMBLE[14], b'.');
-        assert_eq!(&LEGACY_PREAMBLE[15..], &[0x80, 0x02, b'M', 0xe9, 0x03, b'.']);
+        assert_eq!(
+            &LEGACY_PREAMBLE[15..],
+            &[0x80, 0x02, b'M', 0xe9, 0x03, b'.']
+        );
         // 1001, the legacy PROTOCOL_VERSION.
         assert_eq!(u16::from_le_bytes([0xe9, 0x03]), 1001);
     }

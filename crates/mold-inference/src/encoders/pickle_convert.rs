@@ -63,7 +63,8 @@ use std::path::{Path, PathBuf};
 /// than restated.
 pub(crate) const EVA_DERIVED_FILENAME: &str = mold_core::pulid_assets::DERIVED_VISION_FILENAME;
 /// Informational provenance beside the derived artifact.
-pub(crate) const EVA_SIDECAR_FILENAME: &str = mold_core::pulid_assets::DERIVED_VISION_SIDECAR_FILENAME;
+pub(crate) const EVA_SIDECAR_FILENAME: &str =
+    mold_core::pulid_assets::DERIVED_VISION_SIDECAR_FILENAME;
 
 /// Source pin, mirrored from `mold_core::manifest`'s `pulid-flux` entry. Kept
 /// here as well so the conversion refuses to read anything else even if it is
@@ -641,15 +642,20 @@ fn convert_pickle(
         let mut probe = File::open(&private_source).context("reopening the private copy")?;
         // A short read is fine here: the two `is_*_container` predicates only
         // ever inspect a prefix, and neither container can be this small.
-        let read = probe.read(&mut magic).context("reading the container magic")?;
+        let read = probe
+            .read(&mut magic)
+            .context("reading the container magic")?;
         magic[read..].fill(0);
     }
 
     let mut tensors = if super::legacy_pth::is_legacy_container(&magic) {
         let mut kept = Vec::new();
-        for tensor in super::legacy_pth::read_legacy_pth(&private_source)
-            .with_context(|| format!("failed to read {} as a legacy torch archive", source.display()))?
-        {
+        for tensor in super::legacy_pth::read_legacy_pth(&private_source).with_context(|| {
+            format!(
+                "failed to read {} as a legacy torch archive",
+                source.display()
+            )
+        })? {
             let Some(renamed) = select(&tensor.name) else {
                 continue;
             };
@@ -1427,7 +1433,8 @@ mod tests {
     fn conversion_is_deterministic_on_the_pinned_source() {
         let source = pulid_asset("EVA02_CLIP_L_336_psz14_s6B.pt");
         let dir = tempfile::tempdir().unwrap();
-        let first = convert_eva_clip_vision(&source, &dir.path().join(EVA_DERIVED_FILENAME)).unwrap();
+        let first =
+            convert_eva_clip_vision(&source, &dir.path().join(EVA_DERIVED_FILENAME)).unwrap();
         let second =
             convert_eva_clip_vision(&source, &dir.path().join("again.safetensors")).unwrap();
         assert_eq!(first, second, "conversion is not deterministic");
@@ -1462,7 +1469,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let first =
             convert_bisenet_parser(&source, &dir.path().join(BISENET_DERIVED_FILENAME)).unwrap();
-        let second = convert_bisenet_parser(&source, &dir.path().join("again.safetensors")).unwrap();
+        let second =
+            convert_bisenet_parser(&source, &dir.path().join("again.safetensors")).unwrap();
         assert_eq!(first, second, "conversion is not deterministic");
         println!("derived sha256: {first}");
         assert_eq!(first, BISENET_DERIVED_SHA256);

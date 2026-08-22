@@ -46,7 +46,9 @@
 use anyhow::{ensure, Context, Result};
 use candle_core::{DType, Device, Module, Tensor};
 use candle_nn::ModuleT;
-use candle_nn::{batch_norm, conv2d_no_bias, BatchNorm, BatchNormConfig, Conv2d, Conv2dConfig, VarBuilder};
+use candle_nn::{
+    batch_norm, conv2d_no_bias, BatchNorm, BatchNormConfig, Conv2d, Conv2dConfig, VarBuilder,
+};
 
 /// `BiSeNet(num_class=19)` (`pipeline_flux.py:53` via
 /// `facexlib/parsing/__init__.py:9`).
@@ -141,10 +143,7 @@ impl BasicBlock {
     }
 
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let residual = self
-            .bn1
-            .forward_t(&self.conv1.forward(x)?, false)?
-            .relu()?;
+        let residual = self.bn1.forward_t(&self.conv1.forward(x)?, false)?.relu()?;
         let residual = self.bn2.forward_t(&self.conv2.forward(&residual)?, false)?;
         let shortcut = match &self.downsample {
             Some((conv, bn)) => bn.forward_t(&conv.forward(x)?, false)?,
@@ -203,10 +202,7 @@ impl ResNet18 {
 
     /// Returns `(feat8, feat16, feat32)` — the 1/8, 1/16 and 1/32 stages.
     fn forward(&self, x: &Tensor) -> Result<(Tensor, Tensor, Tensor)> {
-        let x = self
-            .bn1
-            .forward_t(&self.conv1.forward(x)?, false)?
-            .relu()?;
+        let x = self.bn1.forward_t(&self.conv1.forward(x)?, false)?.relu()?;
         // `resnet.py:54`: `MaxPool2d(kernel_size=3, stride=2, padding=1)`.
         // candle's pooling has no padding argument, so the border is added
         // explicitly. Zero is the correct fill here and not merely a
@@ -407,7 +403,7 @@ impl BiSeNetParser {
                 .context("building the BiSeNet feature-fusion module")?,
             conv_out: BiSeNetOutput::new(256, 256, NUM_CLASSES, vb.pp("conv_out"))
                 .context("building the BiSeNet output head")?,
-        device: device.clone(),
+            device: device.clone(),
         })
     }
 
@@ -426,8 +422,12 @@ impl BiSeNetParser {
     pub fn from_safetensors(path: &std::path::Path, device: &Device) -> Result<Self> {
         // SAFETY: see the contract above.
         let vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(std::slice::from_ref(&path.to_path_buf()), DType::F32, device)
-                .with_context(|| format!("reading the face parser {}", path.display()))?
+            VarBuilder::from_mmaped_safetensors(
+                std::slice::from_ref(&path.to_path_buf()),
+                DType::F32,
+                device,
+            )
+            .with_context(|| format!("reading the face parser {}", path.display()))?
         };
         Self::new(vb, device)
     }
@@ -459,7 +459,9 @@ impl BiSeNetParser {
             .to_dtype(DType::F32)?;
 
         let (feat_res8, feat_cp8) = self.cp.forward(&input)?;
-        let logits = self.conv_out.forward(&self.ffm.forward(&feat_res8, &feat_cp8)?)?;
+        let logits = self
+            .conv_out
+            .forward(&self.ffm.forward(&feat_res8, &feat_cp8)?)?;
 
         let (_, classes, low_h, low_w) = logits.dims4()?;
         let flat = logits.flatten_all()?.to_vec1::<f32>()?;
@@ -527,7 +529,6 @@ fn bilinear_align_corners_argmax(
     }
     labels
 }
-
 
 // ---------------------------------------------------------------------------
 // The mask itself (`PuLID/pulid/pipeline_flux.py:166-170`).
@@ -642,7 +643,10 @@ mod tests {
         ];
         let labels = bilinear_align_corners_argmax(&logits, 3, 1, 2, 1, 3);
         assert_eq!(labels[0], 0);
-        assert_eq!(labels[1], 2, "the midpoint belongs to the class that is second everywhere");
+        assert_eq!(
+            labels[1], 2,
+            "the midpoint belongs to the class that is second everywhere"
+        );
         assert_eq!(labels[2], 1);
     }
 
@@ -735,9 +739,7 @@ mod tests {
     }
 
     fn parser() -> Option<BiSeNetParser> {
-        if std::env::var_os("MOLD_TEST_PULID_ASSETS").is_none() {
-            return None;
-        }
+        std::env::var_os("MOLD_TEST_PULID_ASSETS")?;
         let source = crate::pulid_fixtures::pulid_asset("parsing_bisenet.pth");
         let dir = Box::leak(Box::new(tempfile::tempdir().unwrap()));
         let destination = dir
@@ -776,7 +778,8 @@ mod tests {
         };
         let faces = crate::pulid_fixtures::testdata_dir().join("faces");
         for stem in golden_faces() {
-            let (planar, height, width) = planar_from_png(&faces.join(format!("{stem}.eva512.png")));
+            let (planar, height, width) =
+                planar_from_png(&faces.join(format!("{stem}.eva512.png")));
             let labels = parser.labels(&planar, height, width).unwrap();
             assert_eq!(labels.len(), height * width);
 
@@ -805,13 +808,13 @@ mod tests {
                 .unwrap()
                 .to_vec1::<f32>()
                 .unwrap();
-            let mut histogram = vec![0_f64; NUM_CLASSES];
+            let mut histogram = [0_f64; NUM_CLASSES];
             for label in &labels {
                 histogram[*label as usize] += 1.0;
             }
             for class in 0..NUM_CLASSES {
-                let delta = (histogram[class] - golden_histogram[class] as f64).abs()
-                    / labels.len() as f64;
+                let delta =
+                    (histogram[class] - golden_histogram[class] as f64).abs() / labels.len() as f64;
                 assert!(
                     delta <= HISTOGRAM_BUDGET,
                     "{stem}: class {class} covers {delta} more of the crop than upstream"
