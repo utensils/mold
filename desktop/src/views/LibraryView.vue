@@ -191,11 +191,21 @@ const hostScopeLabel = computed(() =>
     ? null
     : (gallery.sources.find((s) => s.key === gallery.filter)?.label ?? null),
 );
-const scopeCounts = computed(() => ({
-  prints: gallery.merged.length,
-  collections: gallery.mergedCollections.length,
-  trash: gallery.trashCount,
-}));
+const scopeCounts = computed(() => {
+  const hidden = new Set(
+    gallery.mergedCollections
+      .filter((collection) => collection.hidden)
+      .map((collection) => collection.slug),
+  );
+  const prints = gallery.merged.filter(
+    (entry) => !gallery.organizationOf(entry).collections.some((slug) => hidden.has(slug)),
+  ).length;
+  return {
+    prints,
+    collections: gallery.mergedCollections.length,
+    trash: gallery.trashCount,
+  };
+});
 const countLabel = computed(() => {
   if (showShelf.value) {
     const n = shelfCards.value.length;
@@ -213,7 +223,9 @@ const countLabel = computed(() => {
 const trashBytes = computed(() =>
   gallery.trashMerged.reduce((sum, e) => sum + (e.item.size_bytes ?? 0), 0),
 );
-const favoritesCount = computed(() => gallery.merged.filter((e) => isFavorite(e)).length);
+const favoritesCount = computed(
+  () => gallery.basePrints.filter((entry) => isFavorite(entry)).length,
+);
 const sourceLabel = (key: string) => gallery.sources.find((s) => s.key === key)?.label ?? key;
 /** "This Mac · plato" — every organize-capable host, for the fan-out notes. */
 const organizeHostNote = computed(() => {
@@ -575,6 +587,14 @@ async function onCollectionRenameSave(name: string) {
   reportFanout(await gallery.renameCollection(slug, name), `Renamed to “${name}”`);
 }
 
+async function setCollectionHidden(slug: string, hidden: boolean) {
+  const name = collectionNamed(slug);
+  reportFanout(
+    await gallery.setCollectionHidden(slug, hidden),
+    hidden ? `Hidden collection “${name}”` : `Showing collection “${name}”`,
+  );
+}
+
 async function confirmDeleteCollection() {
   const slug = collectionDeleteSlug.value;
   collectionDeleteSlug.value = null;
@@ -766,6 +786,7 @@ const shelfCards = computed<ShelfCard[]>(() => {
       hostLabels: c.hosts.map((h) => sourceLabel(h.hostId)),
       updatedAt: collectionUpdatedAt(c),
       covers: coversFor(c),
+      hidden: c.hidden === true,
     }));
 });
 
@@ -785,8 +806,14 @@ function exitCollection() {
 }
 
 function collectionMenu(slug: string): MenuEntry[] {
+  const hidden =
+    gallery.mergedCollections.find((collection) => collection.slug === slug)?.hidden === true;
   return [
     { label: "Open", action: () => openCollectionSlug(slug) },
+    {
+      label: hidden ? "Show in Library" : "Hide from Library",
+      action: () => void setCollectionHidden(slug, !hidden),
+    },
     { label: "Rename…", action: () => (collectionRenameSlug.value = slug) },
     { separator: true },
     {
@@ -1962,11 +1989,11 @@ onUnmounted(() => {
       :organize="organizeAvailable"
       :favorites-only="gallery.favoritesOnly"
       :favorites-count="favoritesCount"
-      :tags="gallery.mergedTags"
+      :tags="gallery.filterChipTags"
       :active-tags="gallery.tagFilter"
       :host-chips="gallery.chipCounts"
       :host-filter="gallery.filter"
-      :all-count="gallery.merged.length"
+      :all-count="gallery.basePrintCount"
       :collection-name="drillInName"
       @update:favorites-only="gallery.favoritesOnly = $event"
       @toggle-tag="toggleTagFilter"

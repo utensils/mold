@@ -13,11 +13,13 @@ import {
   retentionLabel,
   sortCollections,
   sortTags,
+  tagCountsForOrganizations,
   tagKey,
   titleSlug,
   trashRetentionSummary,
   unionOrganization,
   validatePrintTitle,
+  visibleTagCounts,
 } from "./libraryOrganization";
 
 /**
@@ -236,6 +238,7 @@ describe("mergeCollectionsAcrossHosts", () => {
             name: "studio shots",
             count: 2,
             cover_filename: "s.png",
+            hidden: true,
           }),
           collection({ id: "p1", name: "Alpha", count: 5 }),
         ],
@@ -255,6 +258,7 @@ describe("mergeCollectionsAcrossHosts", () => {
       { hostId: "plato", id: "p9", count: 2 },
     ]);
     expect(studio.cover).toEqual({ hostId: "plato", filename: "s.png" });
+    expect(studio.hidden).toBe(true);
     expect(merged.find((entry) => entry.slug === "zebras")!.cover).toEqual({
       hostId: "local",
       filename: "z.png",
@@ -675,6 +679,36 @@ describe("sorting", () => {
       "alpha",
       "zeta",
       "gamma",
+    ]);
+  });
+
+  it("counts each logical print once per normalized tag", () => {
+    expect(
+      tagCountsForOrganizations([
+        { tags: ["Blue", "blue", "Portrait"] },
+        { tags: ["BLUE"] },
+        { tags: [] },
+      ]),
+    ).toEqual([
+      { name: "Blue", count: 2 },
+      { name: "Portrait", count: 1 },
+    ]);
+  });
+
+  it("keeps inventory-only legacy tags but removes tags known only on excluded prints", () => {
+    expect(
+      visibleTagCounts(
+        [
+          { name: "Blue", count: 4 },
+          { name: "Legacy", count: 2 },
+          { name: "Secret", count: 1 },
+        ],
+        [{ tags: ["Blue"] }],
+        [{ tags: ["Secret"] }],
+      ),
+    ).toEqual([
+      { name: "Legacy", count: 2 },
+      { name: "Blue", count: 1 },
     ]);
   });
 });

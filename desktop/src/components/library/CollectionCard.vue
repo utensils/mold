@@ -31,6 +31,7 @@ const props = withDefaults(
     updatedAt?: number | null;
     /** Up to four cover thumbnails, set cover first. */
     covers: readonly CoverTile[];
+    hidden?: boolean;
     /** Optional clock for deterministic tests. */
     nowMs?: number | undefined;
   }>(),
@@ -84,6 +85,12 @@ const mosaic = computed(() => props.covers.slice(0, 4));
     </span>
     <span class="font-display text-[15px] font-semibold text-ink" data-test="collection-name">
       {{ name }}
+      <span
+        v-if="hidden"
+        class="ml-1.5 font-utility text-[9.5px] font-medium uppercase text-ink-3"
+        data-test="collection-hidden-badge"
+        >Hidden</span
+      >
     </span>
     <span class="font-utility text-[10.5px] text-ink-3" data-test="collection-meta">{{
       meta

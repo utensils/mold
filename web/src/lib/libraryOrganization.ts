@@ -26,6 +26,7 @@ import {
   setCollectionItems,
   trashMany,
   updateCollection,
+  updateCollectionHidden,
 } from "@studio/api/galleryOrganization";
 import type { ApiTarget } from "@studio/api/client";
 import {
@@ -263,6 +264,8 @@ export interface OrganizationFilter {
   tags?: readonly string[];
   /** Collection slug the print must belong to. */
   collectionSlug?: string | null;
+  /** Collection slugs whose members are omitted from the default Prints view. */
+  excludeCollectionSlugs?: ReadonlySet<string>;
 }
 
 function entryTagKeys(entry: GalleryImage): Set<string> {
@@ -287,6 +290,14 @@ export function entryMatchesOrganization(
   if (filter.collectionSlug) {
     if (!entryCollectionSlugs(entry).includes(filter.collectionSlug))
       return false;
+  }
+  if (
+    filter.excludeCollectionSlugs?.size &&
+    entryCollectionSlugs(entry).some((slug) =>
+      filter.excludeCollectionSlugs!.has(slug),
+    )
+  ) {
+    return false;
   }
   return true;
 }
@@ -581,6 +592,17 @@ export function renameCollectionEverywhere(
 ): Promise<FanoutResult> {
   return fanout(collection.hosts, hostById, (host, _entry, target) =>
     updateCollection(target, host.id, { name }).then(() => undefined),
+  );
+}
+
+/** Hide/show every host copy of a merged collection. */
+export function setCollectionHiddenEverywhere(
+  collection: MergedCollection,
+  hidden: boolean,
+  hostById: HostLookup,
+): Promise<FanoutResult> {
+  return fanout(collection.hosts, hostById, (host, _entry, target) =>
+    updateCollectionHidden(target, host.id, hidden).then(() => undefined),
   );
 }
 

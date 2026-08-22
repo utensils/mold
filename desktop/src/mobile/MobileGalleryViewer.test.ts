@@ -866,6 +866,7 @@ describe("MobileGalleryViewer info sheet", () => {
       hostIds: ["studio"],
       hostsLabel: "Studio",
       cover: null,
+      hidden: false,
     },
     {
       slug: "landscapes",
@@ -874,6 +875,7 @@ describe("MobileGalleryViewer info sheet", () => {
       hostIds: ["studio"],
       hostsLabel: "Studio",
       cover: null,
+      hidden: false,
     },
   ];
 

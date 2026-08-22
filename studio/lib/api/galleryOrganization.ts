@@ -46,6 +46,8 @@ export interface Collection {
   slug: string;
   description: string | null;
   cover_filename: string | null;
+  /** Members stay available in Collections but are omitted from Prints/search. */
+  hidden?: boolean;
   /** Number of prints on this host in the collection. */
   count: number;
   /** Unix seconds. */
@@ -111,6 +113,7 @@ export interface CollectionUpdateRequest {
   name?: string | null;
   description?: string | null;
   cover_filename?: string | null;
+  hidden?: boolean | null;
 }
 
 /** `PUT /api/gallery/collections/:id/items` body — filenames. */

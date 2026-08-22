@@ -511,6 +511,12 @@ CREATE TABLE collection_items (
 CREATE INDEX IF NOT EXISTS idx_collection_items_generation ON collection_items(generation_id);
 "#;
 
+/// Hidden collections stay visible on the Collections shelf, but clients omit
+/// their members from the default Library grid and its search results.
+const V21_HIDDEN_COLLECTIONS: &str = r#"
+ALTER TABLE collections ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0;
+"#;
+
 /// Ordered list of schema migrations. Version numbers must be strictly
 /// increasing — [`apply_pending`] validates this at startup.
 pub(crate) const MIGRATIONS: &[Migration] = &[
@@ -594,11 +600,15 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         version: 20,
         kind: MigrationKind::Sql(V20_LIBRARY_ORGANIZATION),
     },
+    Migration {
+        version: 21,
+        kind: MigrationKind::Sql(V21_HIDDEN_COLLECTIONS),
+    },
 ];
 
 /// The highest migration version this build ships. Exposed publicly so
 /// operators / tests can assert what schema level they're running against.
-pub const SCHEMA_VERSION: i64 = 20;
+pub const SCHEMA_VERSION: i64 = 21;
 
 /// v1 → v2: rewrite every `output_dir` value to its canonical form so
 /// rows written by the v0.8.x release (which keyed on raw paths) keep
@@ -974,7 +984,7 @@ mod tests {
             SCHEMA_VERSION,
             "fresh DB must end at the latest SCHEMA_VERSION",
         );
-        assert_eq!(SCHEMA_VERSION, 20);
+        assert_eq!(SCHEMA_VERSION, 21);
         assert!(table_exists(&conn, "device_preferences"));
         assert_eq!(
             column_names(&conn, "device_preferences"),
@@ -1127,8 +1137,8 @@ mod tests {
 
         apply_pending(&mut conn).unwrap();
 
-        assert_eq!(current_version(&conn).unwrap(), 20);
-        assert_eq!(SCHEMA_VERSION, 20);
+        assert_eq!(current_version(&conn).unwrap(), 21);
+        assert_eq!(SCHEMA_VERSION, 21);
         assert!(table_exists(&conn, "generation_queue"));
         let columns = column_names(&conn, "generation_queue");
         for expected in [
@@ -1163,9 +1173,8 @@ mod tests {
         assert_eq!(kept, 1, "the upgrade must not disturb existing rows");
     }
 
-    /// v20: a v19 database gains the organization columns, side tables, and
-    /// indexes while every existing gallery row survives with the
-    /// user-owned columns at their neutral defaults.
+    /// v20/v21: a v19 database gains organization plus hidden collections
+    /// while every existing gallery row survives at neutral defaults.
     #[test]
     fn v20_upgrade_adds_library_organization_and_preserves_existing_rows() {
         let mut conn = Connection::open_in_memory().unwrap();
@@ -1192,8 +1201,8 @@ mod tests {
 
         apply_pending(&mut conn).unwrap();
 
-        assert_eq!(current_version(&conn).unwrap(), 20);
-        assert_eq!(SCHEMA_VERSION, 20);
+        assert_eq!(current_version(&conn).unwrap(), 21);
+        assert_eq!(SCHEMA_VERSION, 21);
         let columns = column_names(&conn, "generations");
         for expected in ["title", "favorite", "trashed_at_ms"] {
             assert!(
@@ -1204,6 +1213,8 @@ mod tests {
         for table in ["tags", "generation_tags", "collections", "collection_items"] {
             assert!(table_exists(&conn, table), "missing table {table}");
         }
+        let collection_columns = column_names(&conn, "collections");
+        assert!(collection_columns.iter().any(|column| column == "hidden"));
         for index in [
             "idx_gen_trashed",
             "idx_gen_favorite",
@@ -1452,7 +1463,7 @@ mod v9_tests {
 
     #[test]
     fn schema_version_is_current() {
-        assert_eq!(SCHEMA_VERSION, 20);
+        assert_eq!(SCHEMA_VERSION, 21);
     }
 
     #[test]

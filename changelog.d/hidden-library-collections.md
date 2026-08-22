@@ -1,0 +1,1 @@
+- **Hide collections from Prints.** Web, desktop, iPhone, and Android can hide a collection's members from the default Library and search while keeping the collection available to browse or show again.

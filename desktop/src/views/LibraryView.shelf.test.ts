@@ -20,6 +20,7 @@ const { apiFetchTo, apiJsonTo, localGalleryList, localGalleryTrashList, org } = 
     listCollections: vi.fn(),
     createCollection: vi.fn(),
     updateCollection: vi.fn(),
+    updateCollectionHidden: vi.fn(),
     deleteCollection: vi.fn().mockResolvedValue(undefined),
     setCollectionItems: vi.fn(),
     listTags: vi.fn(),
@@ -234,9 +235,16 @@ async function mountView(
     count: 0,
   }));
   org.updateCollection.mockImplementation(
-    async (_t: unknown, id: string, body: { name?: string }) => ({
+    async (_t: unknown, id: string, body: { name?: string; hidden?: boolean }) => ({
       ...(id === "col-smurfs" ? smurfs : riverStudies),
+      ...body,
       ...(body.name ? { name: body.name, slug: body.name.toLowerCase() } : {}),
+    }),
+  );
+  org.updateCollectionHidden.mockImplementation(
+    async (_t: unknown, id: string, hidden: boolean) => ({
+      ...(id === "col-smurfs" ? smurfs : riverStudies),
+      hidden,
     }),
   );
 
@@ -782,6 +790,30 @@ describe("Collections scope", () => {
     expect(gallery.mergedCollections.map((c) => c.name)).not.toContain("Smurfs");
     // The prints are untouched.
     expect(gallery.merged).toHaveLength(4);
+    wrapper.unmount();
+  });
+
+  it("hides collection members from Prints and search while preserving drill-in", async () => {
+    const { wrapper, gallery } = await mountView("/library?scope=collections");
+    await wrapper.get("[data-test='collection-card'][data-slug='smurfs']").trigger("contextmenu");
+    useContextMenuStore().activate(menuEntry("Hide from Library")!);
+    await flushPromises();
+    expect(org.updateCollectionHidden).toHaveBeenCalledWith(PLATO, "col-smurfs", true);
+    expect(
+      gallery.mergedCollections.find((collection) => collection.slug === "smurfs")?.hidden,
+    ).toBe(true);
+    expect(wrapper.get("[data-test='collection-hidden-badge']").text()).toBe("Hidden");
+
+    gallery.scope = "prints";
+    gallery.query = "smurf";
+    await flushPromises();
+    expect(wrapper.findAll(".ms-lib-tile")).toHaveLength(0);
+
+    gallery.query = "";
+    gallery.scope = "collections";
+    gallery.collectionSlug = "smurfs";
+    await flushPromises();
+    expect(wrapper.findAll(".ms-lib-tile")).toHaveLength(2);
     wrapper.unmount();
   });
 

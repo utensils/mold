@@ -19,6 +19,7 @@ import {
   trashGalleryImage,
   trashMany,
   updateCollection,
+  updateCollectionHidden,
 } from "./galleryOrganization";
 
 const target: ApiTarget = { baseUrl: "http://plato:7680", apiKey: "secret" };
@@ -163,6 +164,30 @@ describe("gallery organization API", () => {
       method: "DELETE",
     });
     expect(captured().headers.get("x-api-key")).toBe("secret");
+  });
+
+  it("rejects an older server that silently ignores hidden collection updates", async () => {
+    stub(() => Response.json({ id: "c1", name: "Studio" }));
+    await expect(updateCollectionHidden(target, "c1", true)).rejects.toThrow(
+      /does not support hidden collections/,
+    );
+  });
+
+  it("accepts a hidden collection update only when the echoed state matches", async () => {
+    let captured = stub(() => Response.json({ id: "c1", hidden: true }));
+    await expect(
+      updateCollectionHidden(target, "c1", true),
+    ).resolves.toMatchObject({
+      hidden: true,
+    });
+    expect(captured().body).toEqual({ hidden: true });
+
+    captured = stub(() => Response.json({ id: "c1", hidden: false }));
+    await expect(
+      updateCollectionHidden(target, "c1", false),
+    ).resolves.toMatchObject({
+      hidden: false,
+    });
   });
 
   it("PUTs collection item changes and hands back the collection when returned", async () => {

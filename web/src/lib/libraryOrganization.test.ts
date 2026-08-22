@@ -335,6 +335,11 @@ describe("filtering", () => {
     expect(
       filterByOrganization([smurf, frog], { collectionSlug: "smurfs" }),
     ).toEqual([smurf]);
+    expect(
+      filterByOrganization([smurf, frog], {
+        excludeCollectionSlugs: new Set(["smurfs"]),
+      }),
+    ).toEqual([frog]);
   });
 
   it("searches title and tags as well as prompt, model, and filename", () => {

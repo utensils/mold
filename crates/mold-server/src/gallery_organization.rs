@@ -180,6 +180,7 @@ fn collection_to_wire(row: CollectionRow) -> Collection {
         slug: row.slug,
         description: row.description,
         cover_filename: row.cover_filename,
+        hidden: row.hidden,
         count: row.count,
         created_at: (row.created_at_ms / 1000).max(0) as u64,
         updated_at: (row.updated_at_ms / 1000).max(0) as u64,
@@ -498,6 +499,7 @@ pub(crate) async fn update_collection(
                 request.name.as_deref(),
                 request.description.as_deref(),
                 request.cover_filename.as_deref(),
+                request.hidden,
             )
             .map_err(map_org_error)
     })

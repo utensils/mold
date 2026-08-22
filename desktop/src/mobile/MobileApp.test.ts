@@ -9054,14 +9054,27 @@ describe("MobileApp Library organization", () => {
     trashed_at: nowSecs - 86_400,
     purge_at: nowSecs + 3 * 86_400,
   });
+  let libraryCollectionHidden = false;
 
   function installLibraryApi(): void {
+    libraryCollectionHidden = false;
     apiJsonTo.mockImplementation((_target: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([model]);
       if (path === "/api/capabilities") return Promise.resolve(organizedCapabilities);
       if (path === "/api/gallery") return Promise.resolve([favoritePrint, plainPrint]);
       if (path === "/api/gallery?view=trash") return Promise.resolve([trashedPrint]);
+      if (path.startsWith("/api/gallery/collections/") && init?.method === "PATCH") {
+        const body = JSON.parse(String(init.body)) as { hidden?: boolean };
+        libraryCollectionHidden = body.hidden === true;
+        return Promise.resolve({
+          id: "c1",
+          name: "Portraits",
+          slug: "portraits",
+          count: 1,
+          hidden: libraryCollectionHidden,
+        });
+      }
       if (path === "/api/gallery/collections") {
         return Promise.resolve([
           {
@@ -9073,6 +9086,7 @@ describe("MobileApp Library organization", () => {
             count: 1,
             created_at: 1,
             updated_at: 1,
+            hidden: libraryCollectionHidden,
           },
         ]);
       }
@@ -9193,6 +9207,28 @@ describe("MobileApp Library organization", () => {
     await wrapper?.get("[data-test='mobile-collection-back']").trigger("click");
     await flushPromises();
     expect(wrapper?.find("[data-test='mobile-collection-list']").exists()).toBe(true);
+  });
+
+  it("offers Hide from Library from a collection card on iPhone and Android", async () => {
+    installLibraryApi();
+    await openLibrary();
+
+    await wrapper?.get("[data-test='mobile-library-scope-collections']").trigger("click");
+    await flushPromises();
+    const card = wrapper!.get("[data-test='mobile-collection-portraits']");
+    await card.get("[data-test='mobile-collection-menu']").trigger("click");
+    expect(card.get("[data-test='mobile-collection-hidden']").text()).toBe("Hide from Library");
+    await card.get("[data-test='mobile-collection-hidden']").trigger("click");
+    await flushPromises();
+
+    const patch = apiJsonTo.mock.calls.find(
+      ([, path, init]) => path === "/api/gallery/collections/c1" && init?.method === "PATCH",
+    );
+    expect(JSON.parse(String(patch?.[2]?.body))).toEqual({ hidden: true });
+    await wrapper?.get("[data-test='mobile-library-scope-prints']").trigger("click");
+    await flushPromises();
+    expect(wrapper?.get("[data-test='mobile-library-scope-prints']").text()).toContain("1");
+    expect(wrapper?.find("[data-test='mobile-library-chip-tag']").exists()).toBe(false);
   });
 
   it("fans a bulk favorite out through /api/gallery/organize", async () => {
