@@ -204,12 +204,16 @@ These files are owned by this branch and are current:
 
 ## 5. Known gaps a reviewer should see
 
-- **CUDA is unmeasured.** plato has no mold checkout and no PuLID bundle;
-  standing both up was past this phase's budget.
-  `the_measured_device_peak_is_within_ten_percent_of_the_charged_term` is
-  CUDA-only and has never run, so `EXTRACTION_DEVICE_PEAK_BYTES` is currently
-  justified by derivation from the artifacts' pinned sizes rather than by a
-  live sample.
+- **CUDA is measured** (plato, 4x L40S, at `3163ed47`): whole extraction
+  573.2 ms, parity worst 4.908e-5 against the 5e-5 budget, device peak
+  643,825,664 bytes against a 700,000,000 charge, render cosine 0.6259.
+  `pulid-perf.md` §4b's plato subsections carry the tables. Two things a
+  reviewer should carry forward: **CUDA uses 98% of the parity budget**
+  (Metal used 76%), so a future change to the tower's CUDA arithmetic fails
+  there first and the constant must not be loosened in response; and the
+  device-peak test must run cold on a fresh context through
+  `extract_identity_embeddings`, because candle's CUDA allocator never returns
+  freed blocks to the driver and a warmed-up measurement reports zero.
 - **`EXTRACTION_HOST_PEAK_BYTES` is now documentation.** It was the figure
   `ExtractionSlot` charged; with the slot retired nothing reads it as a gate.
   It still describes the host path correctly (a CPU placement really does peak

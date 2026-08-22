@@ -802,8 +802,12 @@ a story.
 | --- | --- |
 | whole-extraction p95 ≤ **2,147.9 ms** on halcyon | **PASS** — 1,907.3 ms on the CPU (33.4% under), 395.3 ms on Metal (86.2% under) |
 | device path within the recorded parity tolerance | **PASS** — worst 3.82e-5 of peak across the four committed portraits, against the 5e-5 the whole-stack golden already states. No new tolerance |
-| measured device peak within 10% of the charged term | **not measured** — see plato, below |
+| measured device peak within 10% of the charged term | **PASS** — 643,825,664 measured on plato against a 700,000,000 charge (8.7% margin). See "plato: the memory measurement", below, including why the first version of the test reported zero |
 | ordering: the tower is released before the adapter is resident | **PASS** — structural: extraction runs before the model load, and `EngineIdentityState` cannot begin until the engine exists |
+
+CUDA is now measured too: whole extraction **573.2 ms** on an L40S, parity
+worst 4.908e-5 against the 5e-5 budget, and a real render at cosine 0.6259.
+Those numbers and their caveats are in the plato subsections below.
 
 The threshold was not moved. It is 25% under the phase-1 figure of 2,863.9 ms,
 which is a *harder* target than it looks now: the phase-1 run predates #1292's
@@ -861,26 +865,115 @@ separate measurement, taken through the production entry point on Metal:
 **cold 2,184.8 ms → warm 1.8 ms**, with the second extraction opening no
 detector, recognizer, parser, tower, or adapter at all.
 
-### plato: not measured, again, and what that leaves open
+### plato (CUDA): measured
 
-Named rather than quietly omitted, as §4 did. plato has no mold checkout and no
-PuLID bundle on it; standing both up means a CUDA `nix develop`, a release
-build of `mold-ai-inference` with `pulid,cuda,dev-bins` (nvcc kernels), and a
-~2.5 GB pull, which is well past the half hour this phase had for it.
+Measured on **plato** (128-core x86_64 NixOS, 4x L40S) at `3163ed47`, after PR
+#1295 opened — the phase-2 branch's own head, not a reconstruction. Same
+5-warmup / 20-run protocol. Both device arms of the same build, back to back:
 
-Two things are therefore unverified on CUDA and should be the first thing the
-next person with an L40S runs:
+| stage | CUDA (L40S) | CPU (same box) |
+| --- | ---: | ---: |
+| `scrfd` | 18.9 | 498.6 |
+| `arcface` | 6.7 | 848.7 |
+| **face stack** | **25.4** | **1346.2** |
+| `bisenet` | 25.3 | 412.6 |
+| `eva-build` | 464.2 | 1248.9 |
+| — `parser` | 44.6 | 24.3 |
+| — `eva-auth` | 311.1 | 362.7 |
+| — `eva-ctor` | 69.7 | 831.5 |
+| `eva-forward` | 12.4 | 2266.9 |
+| `idformer-build` | 45.6 | 183.4 |
+| `idformer-fwd` | 5.8 | 536.4 |
+| **whole extraction** | **573.2** | **6024.9** |
 
-- `the_measured_device_peak_is_within_ten_percent_of_the_charged_term`
-  (`tests/pulid_device_parity.rs`). It is CUDA-only by construction — on
-  unified memory there is no second pool to measure and `free_vram_bytes`
-  reports system availability, which moves by gigabytes for unrelated reasons.
-  `EXTRACTION_DEVICE_PEAK_BYTES` is therefore currently justified by
-  derivation from the artifacts' pinned sizes (its own doc carries the table),
-  not by a live sample.
-- The CUDA arm of the device path itself. The arithmetic is device-generic
-  candle and the Metal arm agrees with the host to 3.8e-5, but "no CUDA
-  measurement" is a different statement from "CUDA measured fine".
+p95 milliseconds per image. `BASELINE_PLATO_FULL_P95_MS` is now the CUDA figure
+(573.2); the CPU one is recorded here rather than in the probe because nothing
+gates on it, and putting it in the same slot would check the device path
+against a number no device run can produce.
+
+Three things in that table are worth reading twice. `eva-forward` is **12.4 ms
+against the CPU's 2,266.9** — 183x, which is what a 300 GFLOP dense ViT is
+supposed to do on a datacentre card and is the single result phase 2 was built
+to get. `eva-auth` is **311.1 ms on CUDA against 362.7 on the CPU**, i.e. the
+memo works identically because it is a host-side file read either way — the
+absolute figure is higher than halcyon's 51 ms because plato's storage is
+slower, not because the memo is weaker. And `eva-ctor` collapses from 831.5 to
+69.7 ms for the reason `eva_working_dtype` exists: the CPU arm widens f16 to
+f32 and the device arm does not.
+
+`--regress-against plato` (the face-stack criterion, stated against #1222's
+1,574.5 ms `candle-onnx` CPU baseline) **passes on CUDA at 98.4% faster** and
+**fails on the CPU at 14.5%** — the same shape halcyon shows, and for the same
+reason §1 records: the criterion was sized against a re-materialization cost
+that turned out not to exist. The face-stack baseline is deliberately left as
+the CPU measurement it always was.
+
+### plato: parity, and how little margin CUDA leaves
+
+Device-vs-host token parity **passes**, against the same 5e-5 the whole-stack
+golden already states:
+
+| portrait | relative error of peak |
+| --- | ---: |
+| rubio | 2.661e-5 |
+| chari | 2.062e-5 |
+| barron | 3.828e-5 |
+| **jemison** | **4.908e-5** |
+
+**Record this: CUDA leaves almost no margin.** 4.908e-5 against a 5e-5 budget
+is 98% of it, where Metal's worst was 3.82e-5 (76%). The budget is not being
+loosened — it is the tolerance the whole stack is already qualified at, and
+inventing a wider one for the device path would retire the very check this is.
+But a future change that moves the tower's arithmetic even slightly on CUDA
+will fail here first, and the correct response is to investigate the change,
+not the constant.
+
+### plato: the memory measurement, and the test that reported zero
+
+The first version of `the_measured_device_peak_is_within_ten_percent_of_the_charged_term`
+reported **"measured device peak 0 bytes, charged 1100000000"** on an L40S —
+and passed, because zero is under any ceiling. Both flaws are recorded here
+rather than quietly fixed, because both are easy to reintroduce:
+
+1. **It warmed up first.** candle's CUDA allocator does not return freed blocks
+   to the driver, so the warm-up left the whole peak already reserved: the
+   baseline was sampled with the memory outstanding and the measured run reused
+   the same blocks. Run 1 dropped 643,825,664 bytes and never recovered them;
+   runs 2 and 3 dipped by nothing.
+2. **It measured the wrong function.** `compose_identity_tokens_observed` takes
+   an already-computed ArcFace vector and an already-aligned crop, so SCRFD and
+   ArcFace never ran and their weights were never placed — on a measurement
+   whose charge covers the whole extraction.
+
+Measured properly — through `extract_identity_embeddings`, from a fresh CUDA
+context, cold, no warm-up, taking the allocator high-water — the whole-extraction
+device peak is **643,825,664 bytes at `3163ed47`** (945,815,552 at the earlier
+head `99889dd5`; the ~302 MB difference is `glintr100` and its activations no
+longer coexisting with the tower, after the face stack's lifetime was narrowed
+to the photographs that actually need detecting). Per-stage deltas: parser
++33.6 MB, `eva-ctor` +570.4 MB (the f16 tower, as designed — the widening never
+appears), `eva-forward` +6.3 MB, `idformer-build` +33.6 MB.
+
+So the pre-measurement 1.1 GB derivation was **1.71x the truth**: it assumed
+SCRFD and ArcFace stayed resident beside the tower and added ~120 MB of
+activation headroom, when in fact the allocator hands each stage's freed blocks
+to the next. `EXTRACTION_DEVICE_PEAK_BYTES` is now **700,000,000**, 8.7% above
+the measurement — the smallest margin that stays inside the ±10% band the
+acceptance criterion names while still absorbing allocator block rounding
+(driver- and card-specific) and a multi-photograph set's ~12 MB of retained
+hidden states per extra photograph. Over-charging by 1.71x would park renders an
+L40S could run, which is exactly the mistake #1223 named when it removed
+#1220's placeholder.
+
+### plato: the render itself
+
+Not only the harness. `mold run --local flux-dev:q8` with a reference
+photograph produced a print scoring **cosine 0.6259** against it — inside
+PuLID's own reported 0.6-0.8 band and well above InsightFace's 0.28
+same-person threshold. A server render on a private `mold serve` was
+**byte-identical** to the forced-local one, which is the local/remote parity
+`resolve_identity_for_lease` being one function is supposed to give, and the
+new phase shows up in the client as `✓ Extracting face identity [10.4s]`.
 
 ---
 

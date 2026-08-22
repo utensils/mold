@@ -204,7 +204,8 @@ identity** stage, and the queue learns how long it takes on your hardware and
 includes it in the time estimates it shows you.
 
 Measured on an Apple M4 Max, one extraction is about **0.4 s** on the GPU and
-about **1.9 s** on a CPU-only host. Rendering the same face again within a
+about **1.9 s** on a CPU-only host; on an NVIDIA L40S it is about **0.6 s**,
+against **6 s** on that machine's CPU. Rendering the same face again within a
 session is under **2 ms** — the identity is cached in memory, keyed on the
 photograph and on every model file involved, so a repaired or updated bundle
 never serves a stale face. Nothing is written to disk: a face embedding is
@@ -212,7 +213,7 @@ biometric data, and mold keeps it only for as long as the server runs.
 
 On the GPU, identity costs about **1.25 GB** of VRAM beside the checkpoint (the
 adapter's twenty cross-attention modules plus their activations) and roughly
-10% of denoise time. The extraction itself needs about **1.1 GB** more while it
+10% of denoise time. The extraction itself needs about **0.7 GB** more while it
 runs, which mold reserves for you when the job is queued and releases before
 the checkpoint loads.
 

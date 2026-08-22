@@ -108,6 +108,44 @@ pub struct ResolvedIdentity {
     pub warning: Option<String>,
 }
 
+/// [`resolve_identity_for_lease`], with the batch parent's own pin as the
+/// authority.
+///
+/// This is what the worker calls, and the ordering is the contract: the pin is
+/// read BEFORE the resolver and written from it, so a sibling arriving after
+/// another has already extracted renders that exact face rather than one it
+/// composed itself. The per-photograph cache underneath still does the work of
+/// making concurrent siblings compose once; the pin is what makes "one identity
+/// per parent" survive the cache's own bounded eviction — sixteen unrelated
+/// photographs between two waves of siblings, or a retry after a long gap.
+///
+/// A pin hit reports `extracted: false`, so it neither counts as an extraction
+/// nor teaches the scheduler what this phase costs.
+pub fn resolve_pinned_identity_for_lease(
+    request: &GenerateRequest,
+    paths: Option<&PulidPaths>,
+    pin: &crate::execution_plan::IdentityPin,
+    backend: mold_core::GpuBackend,
+    ordinal: usize,
+) -> Result<ResolvedIdentity, String> {
+    if let Some(pinned) = pin.get() {
+        return Ok(ResolvedIdentity {
+            extracted: false,
+            embedding: Some(pinned),
+            warning: None,
+        });
+    }
+    let resolved = resolve_identity_for_lease(request, paths, backend, ordinal)?;
+    // Adopt whatever is pinned afterwards, never the local value: a sibling
+    // that raced and lost must render the WINNER's face. Keeping its own would
+    // leave two siblings of one print conditioned on two identities that differ
+    // at the measured device tolerance, and look like it had worked.
+    Ok(ResolvedIdentity {
+        embedding: resolved.embedding.map(|embedding| pin.pin(embedding)),
+        ..resolved
+    })
+}
+
 /// Extract and freeze the identity for one leased job, on that job's device.
 ///
 /// Returns an empty [`ResolvedIdentity`] for every request that does not
@@ -681,6 +719,143 @@ mod tests {
             keys.len(),
             1,
             "four siblings must resolve to one cache key, not four"
+        );
+    }
+
+    /// The parent's pin is the authority for "one identity per parent", and
+    /// the per-photograph LRU is only an accelerator underneath it.
+    ///
+    /// Simulated harder than eviction actually is: the stub returns a
+    /// DIFFERENT embedding on every call, which is what a re-extraction on
+    /// another GPU after the cache dropped the entry amounts to — the two
+    /// agree to the measured 3.82e-5 device tolerance and are not equal. Four
+    /// siblings must still render one face.
+    #[test]
+    fn siblings_share_the_pinned_identity_even_when_the_cache_forgets() {
+        static CALLS: AtomicU64 = AtomicU64::new(0);
+        fn diverging(
+            _: &PulidPaths,
+            images: &[Vec<u8>],
+            want_uncond: bool,
+        ) -> Result<ResolvedIdentity, String> {
+            // Every call produces a distinguishable identity, so an equal
+            // result can only mean the pin was honoured.
+            let nth = CALLS.fetch_add(1, Ordering::SeqCst);
+            let values: Vec<f32> = (0..mold_core::identity::ID_EMBEDDING_VALUES)
+                .map(|index| (index as f32) + (nth as f32) * 1000.0)
+                .collect();
+            let sources = images
+                .iter()
+                .map(|bytes| mold_core::identity::id_image_sha256(bytes))
+                .collect();
+            let mut embedding = mold_core::identity::FrozenIdentityEmbedding::from_sources(
+                &values,
+                sources,
+                mold_core::identity::IdentityAssetDigests {
+                    adapter: "stub-adapter".to_string(),
+                    vision: "stub-vision".to_string(),
+                    face_detector: "stub-detector".to_string(),
+                    face_recognizer: "stub-recognizer".to_string(),
+                    face_parser: "stub-parser".to_string(),
+                },
+            )
+            .expect("a well-shaped embedding");
+            if want_uncond {
+                embedding = embedding.with_uncond(&values).expect("an uncond half");
+            }
+            Ok(ResolvedIdentity {
+                extracted: true,
+                embedding: Some(embedding),
+                warning: None,
+            })
+        }
+
+        let stubbed = StubbedExtractor::install(diverging);
+        CALLS.store(0, Ordering::SeqCst);
+        let pin = crate::execution_plan::IdentityPin::default();
+        let request = request(None);
+
+        let fingerprints: std::collections::BTreeSet<String> = (0..4)
+            .map(|_| {
+                resolve_pinned_identity_for_lease(
+                    &request,
+                    Some(&paths()),
+                    &pin,
+                    LEASED_BACKEND,
+                    LEASED_ORDINAL,
+                )
+                .expect("every sibling resolves")
+                .embedding
+                .expect("an identity")
+                .fingerprint()
+                .to_string()
+            })
+            .collect();
+
+        assert_eq!(
+            fingerprints.len(),
+            1,
+            "four siblings must render one face, not four"
+        );
+        assert_eq!(
+            stubbed.extractions(),
+            1,
+            "only the first sibling may extract"
+        );
+
+        // A SECOND parent, interleaved, gets its own cell and its own identity
+        // — the pin is per parent, not per process.
+        let other = crate::execution_plan::IdentityPin::default();
+        let second = resolve_pinned_identity_for_lease(
+            &request,
+            Some(&paths()),
+            &other,
+            LEASED_BACKEND,
+            LEASED_ORDINAL,
+        )
+        .expect("the second parent resolves")
+        .embedding
+        .expect("an identity");
+        assert!(
+            !fingerprints.contains(second.fingerprint()),
+            "a second parent must not inherit the first parent's pin"
+        );
+        assert_eq!(stubbed.extractions(), 2);
+    }
+
+    /// A pin hit is not an extraction, and must not be reported as a phase.
+    #[test]
+    fn a_pinned_sibling_reports_no_extraction() {
+        let stubbed = StubbedExtractor::install(stub);
+        let pin = crate::execution_plan::IdentityPin::default();
+        let request = request(None);
+
+        let first = resolve_pinned_identity_for_lease(
+            &request,
+            Some(&paths()),
+            &pin,
+            LEASED_BACKEND,
+            LEASED_ORDINAL,
+        )
+        .expect("the first sibling extracts");
+        assert!(first.extracted);
+
+        let second = resolve_pinned_identity_for_lease(
+            &request,
+            Some(&paths()),
+            &pin,
+            LEASED_BACKEND,
+            LEASED_ORDINAL,
+        )
+        .expect("the second sibling is pinned");
+        assert!(
+            !second.extracted,
+            "a pinned sibling must not be counted or timed as an extraction"
+        );
+        assert_eq!(stubbed.extractions(), 1);
+        assert_eq!(
+            first.embedding.map(|e| e.fingerprint().to_string()),
+            second.embedding.map(|e| e.fingerprint().to_string())
         );
     }
 

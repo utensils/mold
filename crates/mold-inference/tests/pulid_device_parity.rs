@@ -173,19 +173,36 @@ fn the_device_path_matches_the_host_path_within_the_recorded_tolerance() {
 /// extraction's bytes ARE host bytes, mold's rule is that Metal reserves no
 /// host RAM separately (CLAUDE.md), and `free_vram_bytes` on macOS reports
 /// system availability, which on a shared box moves by gigabytes for reasons
-/// that have nothing to do with this phase. A number taken there would be
-/// noise wearing a measurement's clothes.
+/// that have nothing to do with this phase.
 ///
-/// The charge itself is a `mold_core` constant so the admission gate — which
-/// compiles without the `pulid` feature — can read it;
-/// `EXTRACTION_DEVICE_PEAK_BYTES`'s own doc carries the per-term derivation
-/// from the artifacts' pinned sizes, and this is the live check on it.
-/// Sampling is at the composer's stage boundaries, which is where the peak
-/// lives: the tower's weights are resident across `EvaConstruct` and
-/// `EvaForward`, and the IDFormer's across `IdFormerBuild`.
+/// ## Two ways to measure this wrongly, both of which the first version did
+///
+/// The first version of this test reported a peak of **0 bytes** on an L40S,
+/// and the charge passed anyway because zero is under any ceiling. Both flaws
+/// are worth naming, because both are easy to reintroduce:
+///
+/// 1. **It warmed up first.** candle's CUDA allocator does not return freed
+///    blocks to the driver, so a warm-up run leaves the whole peak already
+///    reserved: the baseline is sampled with the memory outstanding and the
+///    measured run simply reuses it, moving `free_vram_bytes` by nothing. The
+///    only run that can be measured is the FIRST one on a fresh context.
+/// 2. **It measured the wrong function.** `compose_identity_tokens_observed`
+///    takes an already-computed ArcFace vector and an already-aligned crop, so
+///    SCRFD and ArcFace never ran and their weights were never placed. The
+///    charge covers the whole extraction, so the measurement has to go through
+///    `extract_identity_embeddings`, which is what admission's job actually
+///    calls.
+///
+/// Measured properly on plato at `3163ed47`: **643,825,664 bytes**, against a
+/// 700,000,000 charge — 8.7% of headroom, inside the 10% band the acceptance
+/// criterion names.
 #[test]
 #[ignore = "requires the pinned PuLID checkpoints via MOLD_TEST_PULID_ASSETS and a CUDA device"]
 fn the_measured_device_peak_is_within_ten_percent_of_the_charged_term() {
+    use mold_inference::identity::extraction::{
+        extract_identity_embeddings, forget_cached_identities,
+    };
+
     let Some(paths) = paths() else {
         eprintln!("skipping: MOLD_TEST_PULID_ASSETS is unset or incomplete");
         return;
@@ -195,41 +212,70 @@ fn the_measured_device_peak_is_within_ten_percent_of_the_charged_term() {
         return;
     };
     let charged = mold_core::identity::EXTRACTION_DEVICE_PEAK_BYTES;
+    let recorded = mold_core::identity::EXTRACTION_DEVICE_PEAK_MEASURED_BYTES;
 
-    let Some((stem, arcface, crop)) = fixtures().into_iter().next() else {
-        panic!("the face fixtures are committed");
-    };
-    // Warm: the derived artifacts are converted on first use, and a
-    // conversion's allocations are not what this phase costs on a warm host.
-    compose_identity_tokens_observed(&paths, &arcface, &crop, &device, &mut |_, _| {})
-        .expect("the device path composes");
-
+    // The baseline must be taken on a context that has never run this phase.
+    // There is deliberately NO warm-up: see the doc comment above.
     let Some(idle) = mold_inference::device::free_vram_bytes(0) else {
         eprintln!("skipping: this device reports no VRAM accounting");
         return;
     };
-    let mut low = idle;
-    compose_identity_tokens_observed(&paths, &arcface, &crop, &device, &mut |_, _| {
-        if let Some(free) = mold_inference::device::free_vram_bytes(0) {
-            low = low.min(free);
-        }
-    })
-    .expect("the device path composes");
+    forget_cached_identities();
 
-    let measured = idle.saturating_sub(low);
+    let photo = std::fs::read(
+        testdata_dir()
+            .join("faces")
+            .join("frank-rubio-official-portrait.jpg"),
+    )
+    .expect("the portrait fixture is committed");
+
+    // High-water across the whole extraction, sampled from a peer thread: the
+    // allocator's peak is what the charge has to cover, and it lives inside
+    // the call rather than at its edges.
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let low = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(idle));
+    let sampler = {
+        let stop = stop.clone();
+        let low = low.clone();
+        std::thread::spawn(move || {
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                if let Some(free) = mold_inference::device::free_vram_bytes(0) {
+                    low.fetch_min(free, std::sync::atomic::Ordering::Relaxed);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        })
+    };
+    let extraction = extract_identity_embeddings(&paths, &[photo.as_slice()], true, &device)
+        .expect("the cold device extraction runs");
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    sampler.join().expect("the sampler thread joins");
+    assert!(
+        extraction.extracted,
+        "the measured run must be the cold one, not a cache hit"
+    );
+
+    let measured = idle.saturating_sub(low.load(std::sync::atomic::Ordering::Relaxed));
     eprintln!(
-        "{stem}: measured device peak {measured} bytes, charged {charged} bytes ({:.1}% of charge)",
+        "cold device peak {measured} bytes, charged {charged}, recorded {recorded} \
+         ({:.1}% of charge)",
         measured as f64 / charged as f64 * 100.0
     );
     assert!(
+        measured > 0,
+        "a peak of zero means the allocator was already warm — this test must \
+         run on a fresh context, with no warm-up, through the production entry \
+         point"
+    );
+    assert!(
         measured <= charged,
-        "the charge {charged} must cover the measured {measured}; a device admitted on \
-         an under-charge OOMs mid-extraction"
+        "the charge {charged} must cover the measured {measured}; a device \
+         admitted on an under-charge OOMs mid-extraction"
     );
     assert!(
         measured * 10 >= charged * 9,
-        "the charge {charged} is more than 10% above the measured {measured}; an \
-         over-charge parks renders the device could actually run"
+        "the charge {charged} is more than 10% above the measured {measured}; \
+         an over-charge parks renders the device could actually run"
     );
 }
 

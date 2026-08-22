@@ -4,7 +4,8 @@
   every conditioned request. One extraction on an M4 Max went from 3,074 ms to
   **395 ms**; a CPU-only host still improves to 1,907 ms. Repeating the same
   reference photograph within a session is served from a small in-memory cache
-  in **under 2 ms**, opening no models at all
+  in **under 2 ms**, opening no models at all. On an NVIDIA L40S the same
+  extraction is **573 ms**, against 6.0 s on that machine's CPU
   ([#1227](https://github.com/utensils/mold/issues/1227)).
 - **Identity extraction is a scheduled phase.** It is reported as its own
   progress stage, its runtime feeds the queue's learned time estimates

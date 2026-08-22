@@ -1602,6 +1602,20 @@ pub(crate) async fn prepare_inputs_for_devices(
     let _ = policy;
     let identity_embedding = context.frozen_identity.clone();
     let identity_warning: Option<String> = None;
+    // The batch-lifetime authority for "one identity per parent". Minted here,
+    // once, for the preparation a parent's plan is frozen from — every child
+    // clones `PreparedExecutionInputs` and therefore shares this exact `Arc`,
+    // so whichever child extracts first pins the result for all of them. A
+    // re-prepared child inherits its parent's cell through
+    // `compose_prepared_generation`, which carries it exactly as it carries the
+    // frozen embedding.
+    //
+    // Pre-filled when preparation already holds the answer, so a re-prepared
+    // child never re-extracts even if its own dispatch reaches the pin first.
+    let identity_pin = crate::execution_plan::IdentityPin::default();
+    if let Some(frozen) = identity_embedding.clone() {
+        let _ = identity_pin.pin(frozen);
+    }
 
     let prepared = PreparedExecutionInputs {
         authority_fingerprint,
@@ -1610,6 +1624,7 @@ pub(crate) async fn prepare_inputs_for_devices(
         model_config_overlay,
         identity_embedding,
         identity_warning,
+        identity_pin,
         #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
         h3_private_ingress_grant: context.h3_private_ingress_grant,
         #[cfg(any(feature = "h3", feature = "h3-private-uat"))]

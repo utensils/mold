@@ -3630,6 +3630,31 @@ impl Drop for SingletonCancelGuard<'_> {
     }
 }
 
+/// Classify a face-extraction failure, quarantining the worker on a fatal CUDA
+/// context, and return the message the caller reports.
+///
+/// #1227 phase 2 put real CUDA kernels in this phase — a 24-block ViT and two
+/// convolutional backbones, ahead of the model load — so it is now a place a
+/// context can die. A fatal driver error invalidates every CUDA object this
+/// worker owns, and CLAUDE.md's rule is absolute: such a context is never
+/// reused or reset in process. Reporting an illegal address here as an
+/// ordinary job failure would leave the next BUFFERED job to inherit the
+/// poison, which is exactly the failure `ensure_model_ready_sync_inner_guarded`
+/// and the generation path already quarantine for.
+///
+/// A fatal context is deliberately not counted against this GPU's reliability
+/// record: the process is going down for a restart either way, and degrading a
+/// healthy card out of rotation on the way out helps nobody. That mirrors the
+/// model-load arm's `count_worker_failure = false`.
+fn settle_identity_extraction_failure(worker: &GpuWorker, model_name: &str, error: &str) -> String {
+    if has_fatal_cuda_error(error) {
+        quarantine_poisoned_worker(worker);
+        return fatal_cuda_user_message(model_name);
+    }
+    record_failure(worker);
+    format!("face-identity conditioning failed: {error}")
+}
+
 fn process_job_with_sink(
     worker: &GpuWorker,
     mut job: GpuJob,
@@ -3816,16 +3841,32 @@ fn process_job_with_sink(
                 .as_ref()
                 .and_then(|child| child.prepared_inputs.identity_warning.clone())
         });
-    let frozen_identity = match carried_identity {
+    // The batch plan's own cell, shared by every sibling. Consulted BEFORE the
+    // resolver: a sibling arriving after another has already extracted takes
+    // that exact embedding, whatever the bounded per-photograph LRU has done in
+    // the meantime. The cache is a cross-request accelerator; this is the
+    // authority for "one identity per parent".
+    let identity_pin = job
+        .prepared_execution_inputs
+        .as_ref()
+        .map(|inputs| inputs.identity_pin.clone())
+        .or_else(|| {
+            job.batch_child
+                .as_ref()
+                .map(|child| child.prepared_inputs.identity_pin.clone())
+        });
+    let frozen_identity = match carried_identity.or_else(|| identity_pin.as_ref()?.get()) {
         Some(frozen) => Some(frozen),
         None => {
             let identity_paths = job
                 .execution_plan
                 .as_ref()
                 .and_then(|plan| plan.engine_config.identity_assets.clone());
-            match crate::identity_extraction::resolve_identity_for_lease(
+            let pin = identity_pin.clone().unwrap_or_default();
+            match crate::identity_extraction::resolve_pinned_identity_for_lease(
                 &job.request,
                 identity_paths.as_ref(),
+                &pin,
                 worker.gpu.backend,
                 ordinal,
             ) {
@@ -3863,8 +3904,12 @@ fn process_job_with_sink(
                     resolved.embedding
                 }
                 Err(error) => {
-                    let err_msg = format!("face-identity conditioning failed: {error}");
-                    tracing::error!(gpu = ordinal, model = %model_name, "{err_msg}");
+                    let err_msg = settle_identity_extraction_failure(worker, &model_name, &error);
+                    tracing::error!(
+                        gpu = ordinal,
+                        model = %model_name,
+                        "face-identity conditioning failed: {error}"
+                    );
                     if let Some(ref tx) = job.progress_tx {
                         let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
                     }
@@ -10800,6 +10845,62 @@ mod tests {
         assert!(!is_fatal_cuda_error(&anyhow::anyhow!(
             "CublasError(CUBLAS_STATUS_NOT_INITIALIZED)"
         )));
+    }
+
+    /// #1227 phase 2 runs the EVA tower, both face backbones, and the IDFormer
+    /// on the leased GPU before the model is even loaded, so a fatal driver
+    /// error can now originate there. It must quarantine exactly as one from
+    /// the model load or the generation does — otherwise the next BUFFERED job
+    /// picks up the poisoned context and the fatal-context invariant is gone.
+    #[test]
+    fn a_fatal_cuda_error_during_face_extraction_quarantines_the_worker() {
+        let worker = single_worker_pool_with_parked("flux-dev:q4", Duration::ZERO);
+
+        // An ordinary failure — an absent face, a torn file — is an ordinary
+        // job failure and leaves the context alone.
+        let ordinary = settle_identity_extraction_failure(
+            &worker,
+            "flux-dev:q4",
+            "no face was detected in the identity image",
+        );
+        assert!(
+            ordinary.contains("face-identity conditioning failed"),
+            "{ordinary}"
+        );
+        assert!(!worker.poisoned.load(Ordering::SeqCst));
+        assert!(worker_unavailable(&worker, "flux-dev:q4").is_none());
+        assert_eq!(worker.consecutive_failures.load(Ordering::SeqCst), 1);
+
+        // A fatal context is not a job failure. On a FRESH worker it
+        // quarantines and reports the restart message, and the failure counter
+        // it leaves behind is `quarantine_poisoned_worker`'s own latch — the
+        // same 3 that `quarantine_helper_ignores_ordinary_errors_and_latches_fatal_errors`
+        // pins — rather than an ordinary `record_failure` on top of it.
+        let worker = single_worker_pool_with_parked("flux-dev:q4", Duration::ZERO);
+        let fatal = settle_identity_extraction_failure(
+            &worker,
+            "flux-dev:q4",
+            "extracting the face identity: DriverError(CUDA_ERROR_ILLEGAL_ADDRESS, an illegal \
+             memory access was encountered)",
+        );
+        assert!(fatal.contains("Restart the mold server"), "{fatal}");
+        assert!(worker.poisoned.load(Ordering::SeqCst));
+        assert_eq!(worker.consecutive_failures.load(Ordering::SeqCst), 3);
+        assert!(
+            worker.degraded_until.read().unwrap().is_none(),
+            "a fatal context must not also degrade the GPU on its way out"
+        );
+
+        // And this is what makes the next buffered job safe: dispatch asks
+        // `worker_unavailable` before touching CUDA, and it now refuses.
+        let unavailable =
+            worker_unavailable(&worker, "flux-dev:q4").expect("a poisoned worker is unavailable");
+        assert!(
+            unavailable.message.contains("Restart the mold server"),
+            "{}",
+            unavailable.message
+        );
+        assert!(ensure_worker_not_poisoned(&worker, "flux-dev:q4").is_err());
     }
 
     #[tokio::test]

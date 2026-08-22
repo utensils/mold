@@ -65,22 +65,39 @@ pub const EXTRACTION_HOST_PEAK_BYTES: u64 = 2_400_000_000;
 /// one grant, and a term that quietly assumed another phase's bytes were free
 /// would admit a render with nowhere to put this one.
 ///
-/// | Term | Bytes | Where it comes from |
-/// | --- | --- | --- |
-/// | SCRFD detector, f32, resident for the whole extraction | 16,923,827 | the manifest's pinned graph size |
-/// | ArcFace `glintr100`, f32, resident for the whole extraction | 260,665,334 | same |
-/// | Face-stack activations (640x640 detector blob, feature pyramid, 112x112 crop) | ~120,000,000 | measured headroom |
-/// | The largest ONE of the three sequential stages, which never coexist: | | |
-/// | — BiSeNet parser, f32 | 53,271,152 | dropped before the tower is built |
-/// | — EVA02-CLIP tower, f16 on a device, plus activations | 609,062,496 + ~60,000,000 | `eva_working_dtype` keeps the file's own dtype |
-/// | — IDFormer (`pulid_encoder.*`), f32, plus activations | 605,600,000 + ~40,000,000 | built after the tower is dropped |
-/// | **Total** | **1,100,000,000** | |
+/// **MEASURED**, on plato (L40S, CUDA), through the production entry point
+/// from a fresh context with no warm-up, taking the allocator's high-water
+/// mark: **643,825,664 bytes**. Per-stage deltas, which is what makes the
+/// table below a description rather than a guess:
 ///
-/// The three-stage max rather than their sum is not an optimism: the composer
-/// scopes each one to the block that consumes it, which is the same
-/// drop-and-reload discipline the host peak is derived under and which
-/// `mold_inference::identity::extraction` re-derives from the artifacts' own
-/// pinned sizes.
+/// | Stage | Device delta | What it is |
+/// | --- | ---: | --- |
+/// | BiSeNet parser build | +33,554,432 | f32 parser, dropped before the tower |
+/// | Face stack (SCRFD + ArcFace) | included above | their weights are freed into the same pool the tower then reuses |
+/// | EVA02-CLIP tower construct | +570,425,344 | f16, the file's own dtype — the widening `eva_working_dtype` avoids never appears |
+/// | EVA02-CLIP tower forward | +6,291,456 | activations, small because the tower is 577 tokens |
+/// | IDFormer build | +33,554,432 | reuses the pool the tower released |
+/// | **Peak** | **643,825,664** | |
+///
+/// The peak is far below the sum of the parts because the composer scopes each
+/// stage to the block that consumes it — the same drop-and-reload discipline
+/// the host peak is derived under — and candle's CUDA allocator hands the
+/// freed blocks straight back to the next stage. An earlier head measured
+/// 945,815,552; the ~302 MB it lost is `glintr100` plus its activations no
+/// longer coexisting with the tower, after the face stack's lifetime was
+/// narrowed to the photographs that actually need detecting.
+///
+/// **The charge is 700,000,000**, which is 8.7% above the measurement. The
+/// margin is deliberately the smallest one that stays inside the ±10% band the
+/// acceptance criterion names while still absorbing the two things a single
+/// host cannot measure: allocator block rounding, which differs by driver and
+/// card, and a multi-photograph set, whose retained hidden states add ~12 MB
+/// each (`EXTRACTION_RETAINED_BYTES_PER_IMAGE`) up to
+/// [`ID_IMAGES_MAX`]. A rounder 1.1 GB — the pre-measurement derivation, which
+/// assumed SCRFD and ArcFace stayed resident beside the tower and added ~120 MB
+/// of activation headroom — is 1.71x the truth and would park renders an L40S
+/// could run, which is the exact mistake #1223 called out when it removed
+/// #1220's placeholder.
 ///
 /// **Metal charges this ONCE, through the unified device gate**, and adds
 /// nothing to the host ledger — CLAUDE.md's rule that Metal reserves no host
@@ -88,7 +105,16 @@ pub const EXTRACTION_HOST_PEAK_BYTES: u64 = 2_400_000_000;
 /// [`EXTRACTION_HOST_PEAK_BYTES`] are two genuinely separate pools and both are
 /// charged, the host side being only the private authenticated copy the
 /// `VarBuilder` reads from rather than the whole widened stack.
-pub const EXTRACTION_DEVICE_PEAK_BYTES: u64 = 1_100_000_000;
+pub const EXTRACTION_DEVICE_PEAK_BYTES: u64 = 700_000_000;
+
+/// The measurement [`EXTRACTION_DEVICE_PEAK_BYTES`] is sized against, so the
+/// charge and the number it came from cannot drift apart silently.
+///
+/// Taken on plato (L40S) at `3163ed47` through `extract_identity_embeddings`
+/// from a fresh CUDA context, cold, allocator high-water. The weight-gated
+/// `the_measured_device_peak_is_within_ten_percent_of_the_charged_term`
+/// re-takes it on any CUDA host.
+pub const EXTRACTION_DEVICE_PEAK_MEASURED_BYTES: u64 = 643_825_664;
 
 /// The semantic version of the face-extraction pipeline.
 ///
@@ -401,6 +427,44 @@ pub fn request_mentions_identity(req: &GenerateRequest) -> bool {
         || req.id_image_names.is_some()
         || req.id_weight.is_some()
         || req.id_start_step.is_some()
+}
+
+/// A payload-free marker that this request conditioned on a face.
+///
+/// The durable live-batch manifest needs to recognise itself as an identity
+/// batch after a restart, and it cannot do that from the request alone: the
+/// redaction that keeps the photograph off disk clears `id_image` and
+/// `id_images`, and a request that named neither `id_weight` nor
+/// `id_image_name` — the ordinary CLI shape, since both have defaults — has
+/// nothing left for [`request_mentions_identity`] to see. A recovered attempt
+/// would then look like a plain batch, pass validation, and resume its
+/// remaining siblings with no face at all: prints of the wrong person, under
+/// the requested name, with nothing downstream noticing.
+///
+/// So the marker is derived BEFORE redaction and travels instead of the
+/// photograph. It is a SHA-256 over the photographs' own SHA-256s and the
+/// effective conditioning knobs — never the bytes, and never an embedding
+/// (which is a biometric derivative and is exactly what
+/// [`FrozenIdentityEmbedding`]'s `Debug` exists to keep out of files). Its
+/// only job is to be `Some`.
+///
+/// `None` for a request that conditions on no face, so an ordinary batch
+/// records nothing and stays resumable.
+pub fn request_identity_marker(req: &GenerateRequest) -> Option<String> {
+    if !request_mentions_identity(req) {
+        return None;
+    }
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(b"mold.identity.batch-marker.v1\0");
+    for photo in identity_images(req) {
+        hasher.update(id_image_sha256(photo).as_bytes());
+        hasher.update(b"\0");
+    }
+    hasher.update(effective_id_weight(req).to_le_bytes());
+    hasher.update(effective_id_start_step(req).to_le_bytes());
+    hasher.update(effective_true_cfg(req).to_le_bytes());
+    Some(format!("{:x}", hasher.finalize()))
 }
 
 /// Whether the request names either true-CFG knob.

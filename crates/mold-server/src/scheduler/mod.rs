@@ -758,7 +758,17 @@ fn compose_prepared_generation(pending: &mut PendingGeneration, prepared: Prepar
         .prepared_inputs
         .as_ref()
         .and_then(|inputs| inputs.identity_warning.clone());
+    // The batch-lifetime identity cell outlives re-preparation for the same
+    // reason the frozen value does: a fresh preparation mints a fresh cell, and
+    // a child that adopted one would stop sharing its parent's.
+    let identity_pin = pending
+        .prepared_inputs
+        .as_ref()
+        .map(|inputs| inputs.identity_pin.clone());
     pending.prepared_inputs = prepared.execution_inputs;
+    if let (Some(inputs), Some(pin)) = (pending.prepared_inputs.as_mut(), identity_pin) {
+        inputs.identity_pin = pin;
+    }
     if let (Some(inputs), Some(identity)) = (pending.prepared_inputs.as_mut(), frozen_identity) {
         inputs.identity_embedding = Some(identity);
     }
