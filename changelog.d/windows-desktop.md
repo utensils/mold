@@ -37,3 +37,13 @@
   `core.autocrlf` checked the tree out as CRLF, which prettier rejects for
   every file and which makes a `#!/usr/bin/env bash` shebang invalid. A
   `.gitattributes` pins LF in the working tree on all platforms.
+- **`scripts\windows.ps1` gives the same answers in both PowerShell editions.**
+  A `.ps1` runs under whichever edition the user's shell is, and the helper's
+  architecture probe did not survive that: under Windows PowerShell 5.1
+  `RuntimeInformation::OSArchitecture` reports **X64 on an ARM64 machine**
+  (pwsh 7 reports Arm64 on the same box), and on some .NET Framework builds the
+  property is missing entirely, which under `Set-StrictMode` crashed the script
+  outright. Since that probe gates whether `cuda` enters the build recipe, the
+  quiet wrong answer was the worse half. Architecture now comes from WMI, the
+  x64 question is answered by the Rust host triple that actually decides what
+  cargo builds, and a new test refuses to let the two editions disagree.

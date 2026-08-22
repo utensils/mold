@@ -47,11 +47,56 @@ function Write-Miss { param([string]$Text) Write-Host "  MISS $Text" -Foreground
 
 function Test-Tool { param([string]$Name) return [bool](Get-Command $Name -ErrorAction SilentlyContinue) }
 
-function Get-OSArch { return [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString() }
+# The machine's architecture, asked of the MACHINE rather than of this process.
+#
+# Every convenient source lies on an ARM64 Windows box, because the shell is
+# usually x64-emulated. Measured on one Surface, same machine, same moment:
+# `PROCESSOR_ARCHITECTURE` says AMD64 in both shells;
+# `RuntimeInformation::OSArchitecture` says Arm64 under pwsh 7 and **X64**
+# under Windows PowerShell 5.1; `Win32_Processor.Architecture` says 12 (ARM64)
+# in both. On some .NET Framework builds that property is missing entirely,
+# which under `Set-StrictMode` is a terminating PropertyNotFoundStrict rather
+# than a null — the crash that sent us looking. So: WMI first, and every
+# fallback guarded, because a wrong answer here is worse than no answer.
+function Get-OSArch {
+  try {
+    $processor = Get-CimInstance Win32_Processor -ErrorAction Stop | Select-Object -First 1
+    switch ([int]$processor.Architecture) {
+      0 { return 'x86' }
+      5 { return 'arm' }
+      9 { return 'x64' }
+      12 { return 'arm64' }
+    }
+  }
+  catch { }
+  try {
+    $reported = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
+    if ($reported) { return $reported.ToString().ToLowerInvariant() }
+  }
+  catch { }
+  # Set only when a 32-bit process runs under WOW64, but correct when present.
+  if ($env:PROCESSOR_ARCHITEW6432) { return $env:PROCESSOR_ARCHITEW6432.ToLowerInvariant() }
+  if ($env:PROCESSOR_ARCHITECTURE) { return $env:PROCESSOR_ARCHITECTURE.ToLowerInvariant() }
+  return 'unknown'
+}
 
-# The Surface dev box runs an x64-emulated shell, so PROCESSOR_ARCHITECTURE
-# reports AMD64 on an ARM64 machine. Ask the runtime, never the variable.
-function Test-IsX64Host { return (Get-OSArch) -eq 'X64' }
+function Get-RustHostTriple {
+  if (-not (Test-Tool 'rustup')) { return $null }
+  $shown = & rustup show 2>$null | Select-String 'Default host:\s*(\S+)' | Select-Object -First 1
+  if ($shown) { return $shown.Matches[0].Groups[1].Value }
+  return $null
+}
+
+# The real question behind the CUDA decision is "will cargo produce an x86_64
+# binary?", not "what CPU is this". Ask the Rust host triple, which answers it
+# directly and — unlike every architecture probe above — reads the same in
+# Windows PowerShell and pwsh. OS architecture is only the fallback for a
+# machine with no rustup, where nothing is going to be built anyway.
+function Test-IsX64Host {
+  $triple = Get-RustHostTriple
+  if ($triple) { return $triple.StartsWith('x86_64') }
+  return (Get-OSArch) -eq 'x64'
+}
 
 function Get-VsInstallPath {
   $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
@@ -180,10 +225,9 @@ function Invoke-Doctor {
   elseif ($rustc -lt $MSRV) { Write-Miss "rustc $rustc is below MSRV $MSRV - run: rustup update stable"; $fatal++ }
   else { Write-Good "rustc $rustc (MSRV $MSRV)" }
 
-  if (Test-Tool 'rustup') {
-    $shown = (& rustup show 2>$null | Select-String 'Default host: (.+)')
-    if ($shown) { Write-Good "rust host: $($shown.Matches.Groups[1].Value)" }
-  }
+  $triple = Get-RustHostTriple
+  if ($triple) { Write-Good "rust host: $triple" }
+  else { Write-Note 'rustup not found - cannot confirm the build target triple' }
 
   $wv2 = Get-WebView2Version
   if ($wv2) { Write-Good "WebView2 runtime $wv2" }

@@ -52,6 +52,7 @@ on:
       - "scripts/prepare-desktop-linuxdeploy.sh"
       - "scripts/verify-h3-release-exclusion.sh"
       - "scripts/windows.ps1"
+      - "scripts/tests/windows-helper-shells.sh"
       - "scripts/prune-desktop-nightly-assets.sh"
       - "scripts/select-desktop-stable-latest.sh"
       - "scripts/tests/check-desktop-nightly-main-head.sh"
@@ -143,6 +144,7 @@ jobs:
               - 'flake.nix'
               - 'scripts/verify-h3-release-exclusion.sh'
               - 'scripts/windows.ps1'
+              - 'scripts/tests/windows-helper-shells.sh'
               - '.github/workflows/desktop.yml'
               - '.github/workflows/desktop-distribution.yml'
             rust_format:
@@ -239,6 +241,13 @@ jobs:
           choco install --no-progress -y protoc nasm
           echo "$env:ProgramFiles\NASM" >> $env:GITHUB_PATH
       - uses: oven-sh/setup-bun@v2
+      # The helper must answer identically under Windows PowerShell 5.1 and
+      # pwsh 7 — a bare `.\scripts\windows.ps1` runs under whichever the
+      # user's shell is, and the two disagree about machine architecture
+      # unless the script is careful.
+      - name: Helper script agrees across PowerShell editions
+        shell: bash
+        run: bash ../scripts/tests/windows-helper-shells.sh
       - run: bun install --frozen-lockfile
         working-directory: .
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
