@@ -744,11 +744,23 @@ describe("Collections scope", () => {
     expect(wrapper.get("[data-test='library-count']").text()).toBe("2 collections");
     expect(wrapper.find("input[aria-label='Thumbnail size']").exists()).toBe(false);
 
+    // The collection endpoint records membership order (when prints were
+    // added), which is deliberately the reverse of generation time here.
+    apiJsonTo.mockImplementation(async (_target: unknown, path: string) => {
+      if (path === "/api/gallery") return live.map((p) => structuredClone(p));
+      if (path.startsWith("/api/gallery/collections/")) {
+        return { filenames: [smurf03.filename, smurf04.filename] };
+      }
+      return undefined;
+    });
     await cards[1]!.trigger("click");
     await flushPromises();
     expect(router.currentRoute.value.query).toMatchObject({ scope: "collections", c: "smurfs" });
     expect(wrapper.get("[data-test='crumb-here']").text()).toBe("Smurfs");
     expect(wrapper.findAll(".ms-lib-tile")).toHaveLength(2);
+    expect(wrapper.findAll(".ms-lib-tile").map((tile) => tile.attributes("data-filename"))).toEqual(
+      [smurf04.filename, smurf03.filename],
+    );
     expect(wrapper.get("[data-test='collection-chip']").text()).toContain("Smurfs");
 
     // Inside the collection the tile menu offers Use as cover / Remove.

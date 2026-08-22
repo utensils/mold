@@ -796,7 +796,6 @@ function openCollectionSlug(slug: string) {
   gallery.collectionSlug = slug;
   setSelectMode(false);
   selected.value = null;
-  void gallery.fetchCollectionItems(slug);
 }
 function exitCollection() {
   gallery.collectionSlug = null;
@@ -1905,15 +1904,6 @@ watch(
     ] as const,
   ([, organize, trash]) => {
     if (organize || trash) void gallery.fetchOrganization();
-  },
-  { immediate: true },
-);
-
-// A drill-in needs the origin order of its collection.
-watch(
-  () => (inCollections.value ? gallery.collectionSlug : null),
-  (slug) => {
-    if (slug) void gallery.fetchCollectionItems(slug);
   },
   { immediate: true },
 );

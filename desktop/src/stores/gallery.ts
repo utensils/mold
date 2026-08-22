@@ -351,9 +351,6 @@ export const useGalleryStore = defineStore("gallery", {
     collectionsByHost: {} as Record<string, CollectionsBucket>,
     /** Per-host tag counts, merged by case-insensitive name in `mergedTags`. */
     tagsByHost: {} as Record<string, TagsBucket>,
-    /** Per-host `{ collectionId → ordered filenames }` from
-     *  `GET /api/gallery/collections/:id`; orders a drill-in when present. */
-    collectionItemsByHost: {} as Record<string, Record<string, string[]>>,
   }),
   getters: {
     /**
@@ -650,9 +647,9 @@ export const useGalleryStore = defineStore("gallery", {
     /**
      * What the Gallery grid renders: host chip → media kind → text query →
      * ♥ favorites → tag chips (AND over the union tags) → the open
-     * collection (Collections scope drill-in only). Inside a collection the
-     * origin's recorded order wins when its item list has loaded; otherwise
-     * newest first.
+     * collection (Collections scope drill-in only). Filtering preserves the
+     * gallery's newest-first generation order; collection membership order is
+     * deliberately irrelevant because it records when prints were filed.
      */
     filtered(): MergedPrint[] {
       let entries = this.narrowByKindAndQuery(this.hostFiltered);
@@ -672,39 +669,7 @@ export const useGalleryStore = defineStore("gallery", {
         if (slug && !org.collections.includes(slug)) return false;
         return true;
       });
-      if (slug) {
-        const order = this.collectionOrder(slug);
-        if (order) {
-          const rank = (entry: MergedPrint): number => {
-            let best = Number.POSITIVE_INFINITY;
-            const copies = entry.copies ?? [{ sourceKey: entry.sourceKey, item: entry.item }];
-            for (const copy of copies) {
-              const at = order.get(copy.item.filename);
-              if (at !== undefined && at < best) best = at;
-            }
-            return best;
-          };
-          entries = [...entries].sort((a, b) => rank(a) - rank(b));
-        }
-      }
       return entries;
-    },
-    /** `filename → position` for a collection's origin order (local host
-     *  preferred, else the first host whose item list has loaded). */
-    collectionOrder(): (slug: string) => Map<string, number> | null {
-      return (slug) => {
-        const merged = this.mergedCollections.find((c) => c.slug === slug);
-        if (!merged) return null;
-        const hosts = [...merged.hosts].sort((a, b) =>
-          a.hostId === "local" ? -1 : b.hostId === "local" ? 1 : 0,
-        );
-        for (const host of hosts) {
-          const filenames = this.collectionItemsByHost[host.hostId]?.[host.id];
-          if (!filenames) continue;
-          return new Map(filenames.map((filename, index) => [filename, index]));
-        }
-        return null;
-      };
     },
     /** Per-kind counts for the All/Images/Video/Audio chips. Computed over
      *  the host-chip-filtered set only, so chip labels stay stable while the
@@ -840,9 +805,6 @@ export const useGalleryStore = defineStore("gallery", {
       }
       for (const key of Object.keys(this.tagsByHost)) {
         if (!keys.has(key)) delete this.tagsByHost[key];
-      }
-      for (const key of Object.keys(this.collectionItemsByHost)) {
-        if (!keys.has(key)) delete this.collectionItemsByHost[key];
       }
       if (this.filter !== "all" && !keys.has(this.filter)) this.filter = "all";
     },
@@ -1356,31 +1318,6 @@ export const useGalleryStore = defineStore("gallery", {
       this.syncBuckets();
       await Promise.all([this.fetchCollections(), this.fetchTags(), this.fetchTrash()]);
     },
-    /** `GET /api/gallery/collections/:id` on every host holding the slug —
-     *  records the origin order used inside a drill-in. */
-    async fetchCollectionItems(slug: string) {
-      const merged = this.mergedCollections.find((c) => c.slug === slug);
-      if (!merged) return;
-      await Promise.all(
-        merged.hosts.map(async (host) => {
-          const target = this.targetOf(host.hostId);
-          if (!target) return;
-          try {
-            const detail = await apiJsonTo<{ filenames?: string[] }>(
-              target,
-              `/api/gallery/collections/${encodeURIComponent(host.id)}`,
-            );
-            const filenames = Array.isArray(detail?.filenames) ? detail.filenames : [];
-            const byHost = this.collectionItemsByHost[host.hostId] ?? {};
-            byHost[host.id] = filenames;
-            this.collectionItemsByHost[host.hostId] = byHost;
-          } catch {
-            // Order is a nicety; the drill-in falls back to newest first.
-          }
-        }),
-      );
-    },
-
     // ── Organization: mutate ─────────────────────────────────────────────
     /** Organize-capable per-host targets for a set of copies. Hosts that
      *  cannot organize (old servers, the offline IPC bucket) are skipped,
@@ -1705,8 +1642,6 @@ export const useGalleryStore = defineStore("gallery", {
               }
             }
           }
-          const items = this.collectionItemsByHost[host.hostId];
-          if (items) delete items[host.id];
         }),
       );
       const outcome = this.settleHosts(keys, results);
