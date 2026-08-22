@@ -859,8 +859,8 @@ model is selected again. `id_weight` and
 never fitted or cropped to the canvas, and an unqualified combination is
 reported inline with Generate blocked. The Library shows the recorded name,
 digest, strength, and start step, and Reuse settings restores them plus the
-photo itself when the device still holds it. iPhone, TUI, and Discord do not
-expose identity conditioning yet.
+photo itself when the device still holds it. iPhone, TUI, and Discord expose
+the same conditioning, as described below.
 
 **Surfaces.** The TUI's Create form carries an **Identity photo** section in
 the Advanced accordion — a local path row plus Strength and Start step — shown
