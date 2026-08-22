@@ -231,7 +231,7 @@ message rather than silently rendered:
   `--id-weight`). They are refused on an ordinary FLUX render rather than
   accepted and ignored.
 - **Older servers refuse both.** They are gated on
-  `GET /api/capabilities.identity`; see [Older servers](#older-servers).
+  `GET /api/capabilities` → `identity`; see [Older servers](#older-servers).
 - Multiple photographs and true CFG are **CLI and API only** so far. The web,
   desktop, iPhone, TUI, and Discord surfaces still offer a single photograph and
   no true-CFG control.

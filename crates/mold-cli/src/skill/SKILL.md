@@ -835,8 +835,7 @@ when that predicate holds AND the checkpoint is qualified, so the capability is
 advertised only once the runtime adapter is present; it is absent on servers
 that predate identity conditioning, which clients read as "no". The same fact
 rides `generation_profile.capabilities.supports_identity`; never derive a second
-predicate. `id_images` and `true_cfg` are gated separately: `GET
-/api/capabilities.identity` (`{ multi_photo, max_photos, true_cfg }`) is the
+predicate. `id_images` and `true_cfg` are gated separately: `GET /api/capabilities` → `identity` (`{ multi_photo, max_photos, true_cfg }`) is the
 authority for those two additive shapes specifically, and absence — the whole
 block is all-false on an older server — reads as no, so a client that needs
 either shape probes first and refuses by name rather than sending fields an

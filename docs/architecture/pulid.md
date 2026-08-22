@@ -560,7 +560,7 @@ distilled path at a guidance value the caller chose for a branch that never ran.
 Both are the accept-and-ignore this contract refuses everywhere else, and
 neither is visible to anyone.
 
-`GET /api/capabilities.identity` is the fix:
+`GET /api/capabilities` → `identity` is the fix:
 `{ multi_photo, max_photos, true_cfg }`, built by
 `IdentityCapabilities::advertised()` straight from `mold_core::identity`'s
 constants — one authority, so it cannot advertise a bound the validator does not
