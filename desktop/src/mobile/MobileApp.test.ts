@@ -5555,6 +5555,31 @@ describe("MobileApp foreground resume", () => {
     }
   });
 
+  it("scrolls the prompt field into view when its keyboard opens", async () => {
+    vi.useFakeTimers();
+    try {
+      wrapper = mountMobileApp();
+      await flushPromises();
+
+      const prompt = fieldControl("Prompt").element as HTMLTextAreaElement;
+      const promptField = prompt.closest<HTMLElement>(".field")!;
+      const scrollIntoView = vi.fn();
+      Object.defineProperty(promptField, "scrollIntoView", {
+        configurable: true,
+        value: scrollIntoView,
+      });
+
+      prompt.focus();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(scrollIntoView).toHaveBeenCalledWith({ block: "center", inline: "nearest" });
+
+      await vi.advanceTimersByTimeAsync(400);
+      expect(scrollIntoView).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("tracks the visual viewport so sheets clear the keyboard and the header stays put", async () => {
     const originalViewport = Object.getOwnPropertyDescriptor(window, "visualViewport");
     const visualViewport = new EventTarget() as EventTarget & { pageTop: number; height: number };

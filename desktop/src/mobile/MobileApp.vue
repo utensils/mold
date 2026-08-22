@@ -7845,6 +7845,12 @@ function restoreNativeViewport(): void {
   void invoke("restore_mobile_viewport").catch(() => undefined);
 }
 
+function revealFocusedPrompt(editor: HTMLElement): void {
+  if (editor.id !== "mobile-prompt") return;
+  const field = editor.closest<HTMLElement>(".field") ?? editor;
+  field.scrollIntoView?.({ block: "center", inline: "nearest" });
+}
+
 function cancelKeyboardViewportRestore(): void {
   if (!keyboardViewportRestoreTimer) return;
   clearTimeout(keyboardViewportRestoreTimer);
@@ -7861,10 +7867,12 @@ function handleKeyboardFocusIn(event: FocusEvent): void {
   queueMicrotask(() => {
     if (unmounted || document.activeElement !== editor) return;
     restoreNativeViewport();
+    revealFocusedPrompt(editor);
     keyboardViewportRestoreTimer = setTimeout(() => {
       keyboardViewportRestoreTimer = null;
       if (document.activeElement !== editor) return;
       restoreNativeViewport();
+      revealFocusedPrompt(editor);
     }, KEYBOARD_VIEWPORT_SETTLE_MS);
   });
 }
