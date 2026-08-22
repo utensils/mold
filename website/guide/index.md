@@ -92,6 +92,8 @@ the `sh` side of the install pipe.
 - [Desktop App](/guide/desktop) — local and multi-host native studio
 - [iPhone App](/guide/iphone) — remote Create, Library, Models, Machines, and
   Settings
+- [Android App](/guide/android) — the same remote Studio surface with native
+  secure credentials, pairing, discovery, and media actions
 - [Machines](/guide/machines) — connect, discover, and monitor web hosts
 - [Feature Support](/guide/feature-matrix) — which model families support which
   features

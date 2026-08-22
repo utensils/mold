@@ -343,6 +343,18 @@
           "markdownDescription": "Denies the get_api_key command without any pre-configured scope."
         },
         {
+          "description": "Enables the pick_identity_photo command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-pick-identity-photo",
+          "markdownDescription": "Enables the pick_identity_photo command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the pick_identity_photo command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-pick-identity-photo",
+          "markdownDescription": "Denies the pick_identity_photo command without any pre-configured scope."
+        },
+        {
           "description": "Enables the save_image_to_photos command without any pre-configured scope.",
           "type": "string",
           "const": "allow-save-image-to-photos",

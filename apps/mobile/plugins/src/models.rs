@@ -69,3 +69,18 @@ pub struct ShareAnimationResponse {
 pub struct AppearanceRequest {
     pub appearance: String,
 }
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct IdentityPhotoRequest {
+    pub source: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IdentityPhotoResponse {
+    pub cancelled: bool,
+    pub filename: Option<String>,
+    pub mime_type: Option<String>,
+    pub size_bytes: Option<u64>,
+    pub data_b64: Option<String>,
+}

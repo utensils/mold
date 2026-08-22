@@ -10415,6 +10415,76 @@ describe("MobileApp identity photo", () => {
     await flushPromises();
   }
 
+  it("uses Android's native photo picker and stages the returned bytes", async () => {
+    isNativeAndroidRuntime.mockReturnValue(true);
+    serveIdentity([identityModel]);
+    invoke.mockImplementation((command: string) => {
+      if (command === "keychain_get_api_key") return Promise.resolve(target.apiKey);
+      if (command === "pick_identity_photo") {
+        return Promise.resolve({
+          cancelled: false,
+          filename: "ada.png",
+          mimeType: "image/png",
+          sizeBytes: 68,
+          dataB64: PNG_1X1,
+        });
+      }
+      return Promise.resolve(null);
+    });
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    await wrapper.get("[data-test='identity-well']").trigger("click");
+    expect(wrapper.get("[data-test='mobile-identity-picker']").classes()).toContain("is-open");
+    await wrapper.get("[data-test='mobile-identity-pick-library']").trigger("click");
+    await flushPromises();
+
+    expect(invoke).toHaveBeenCalledWith("pick_identity_photo", { source: "library" });
+    expect(well().props("image")).toBe(PNG_1X1);
+    expect(well().props("filename")).toBe("ada.png");
+  });
+
+  it("closes Android's identity source sheet on the system back gesture", async () => {
+    isNativeAndroidRuntime.mockReturnValue(true);
+    serveIdentity([identityModel]);
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    await wrapper.get("[data-test='identity-well']").trigger("click");
+    window.dispatchEvent(new PopStateEvent("popstate"));
+    await flushPromises();
+
+    expect(wrapper.get("[data-test='mobile-identity-picker']").classes()).not.toContain("is-open");
+    expect(invoke).not.toHaveBeenCalledWith("pick_identity_photo", expect.anything());
+  });
+
+  it("keeps an oversized Android pick inline and never stages its bytes", async () => {
+    isNativeAndroidRuntime.mockReturnValue(true);
+    serveIdentity([identityModel]);
+    invoke.mockImplementation((command: string) => {
+      if (command === "keychain_get_api_key") return Promise.resolve(target.apiKey);
+      if (command === "pick_identity_photo") {
+        return Promise.resolve({
+          cancelled: false,
+          filename: "huge.jpg",
+          mimeType: "image/jpeg",
+          sizeBytes: 16 * 1024 * 1024 + 1,
+          dataB64: PNG_1X1,
+        });
+      }
+      return Promise.resolve(null);
+    });
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    await wrapper.get("[data-test='identity-well']").trigger("click");
+    await wrapper.get("[data-test='mobile-identity-pick-camera']").trigger("click");
+    await flushPromises();
+
+    expect(wrapper.get("[data-test='identity-conditioning-error']").text()).toContain("16 MiB");
+    expect(well().props("image")).toBeNull();
+  });
+
   it("mounts the well and the two knobs only for a checkpoint that advertises support", async () => {
     serveIdentity([identityModel, plainModel]);
     wrapper = mountMobileApp();

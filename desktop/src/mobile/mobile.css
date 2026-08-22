@@ -4757,7 +4757,7 @@ button:disabled {
 }
 
 .mobile-library-sheet-done {
-  min-height: 46px;
+  min-height: var(--mobile-sheet-touch-target, 46px);
   margin-top: 2px;
   border: 1px solid var(--control-edge);
   border-radius: var(--radius-control);

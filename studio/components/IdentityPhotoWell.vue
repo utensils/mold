@@ -31,6 +31,9 @@ const props = withDefaults(
     gallery?: boolean;
     disabled?: boolean;
     touchFriendly?: boolean;
+    touchTargetSize?: number;
+    /** Delegates acquisition to the platform shell while retaining this UI. */
+    nativePicker?: boolean;
   }>(),
   {
     image: null,
@@ -40,10 +43,17 @@ const props = withDefaults(
     gallery: false,
     disabled: false,
     touchFriendly: false,
+    touchTargetSize: 44,
+    nativePicker: false,
   },
 );
 
-const emit = defineEmits<{ file: [file: File]; gallery: []; clear: [] }>();
+const emit = defineEmits<{
+  file: [file: File];
+  gallery: [];
+  clear: [];
+  pick: [];
+}>();
 
 const accept = ID_IMAGE_ACCEPT;
 const sectionLabel = IDENTITY_SECTION_LABEL;
@@ -72,11 +82,14 @@ const attached = computed(() => Boolean(props.image || props.filename));
       :disabled="disabled"
       :gallery="gallery"
       :touch-friendly="touchFriendly"
+      :touch-target-size="touchTargetSize"
+      :native-picker="nativePicker"
       alt="Identity photo"
       test-id="identity"
       @file="emit('file', $event)"
       @gallery="emit('gallery')"
       @clear="emit('clear')"
+      @pick="emit('pick')"
     />
     <p
       v-if="error"

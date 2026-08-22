@@ -3,9 +3,12 @@ package com.utensils.mold.mobile_native
 import android.Manifest
 import android.app.Activity
 import android.content.res.Configuration
+import android.content.Intent
 import android.os.Build
+import androidx.activity.result.ActivityResult
 import app.tauri.PermissionState
 import app.tauri.annotation.Command
+import app.tauri.annotation.ActivityCallback
 import app.tauri.annotation.InvokeArg
 import app.tauri.annotation.Permission
 import app.tauri.annotation.PermissionCallback
@@ -56,6 +59,11 @@ class AppearanceArgs {
     lateinit var appearance: String
 }
 
+@InvokeArg
+class IdentityPhotoArgs {
+    lateinit var source: String
+}
+
 private const val LEGACY_MEDIA_WRITE = "legacyMediaWrite"
 
 private sealed interface PendingLegacyMedia {
@@ -74,6 +82,8 @@ private sealed interface PendingLegacyMedia {
 class MoldMobileNativePlugin(private val hostActivity: Activity) : Plugin(hostActivity) {
     private val vault = CredentialVault(hostActivity.applicationContext)
     private val media = AndroidMedia(hostActivity.applicationContext)
+    private val identityPhoto = AndroidIdentityPhoto(hostActivity.applicationContext)
+    private var pendingIdentityCamera: AndroidIdentityPhoto.CameraTarget? = null
     private var pendingLegacyMedia: PendingLegacyMedia? = null
 
     @Command
@@ -176,6 +186,68 @@ class MoldMobileNativePlugin(private val hostActivity: Activity) : Plugin(hostAc
                 )
             }
         }.start()
+    }
+
+    @Command
+    fun pickIdentityPhoto(invoke: Invoke) {
+        val source = invoke.parseArgs(IdentityPhotoArgs::class.java).source
+        val intent = when (source) {
+            "library" -> {
+                pendingIdentityCamera = null
+                identityPhoto.libraryIntent()
+            }
+            "camera" -> {
+                val target = identityPhoto.createCameraTarget()
+                pendingIdentityCamera = target
+                identityPhoto.cameraIntent(target)
+            }
+            else -> {
+                invoke.reject("unknown identity photo source $source")
+                return
+            }
+        }
+        if (intent.resolveActivity(hostActivity.packageManager) == null) {
+            pendingIdentityCamera?.file?.delete()
+            pendingIdentityCamera = null
+            invoke.reject("No Android app can open that identity photo source.")
+            return
+        }
+        startActivityForResult(invoke, intent, "identityPhotoResult")
+    }
+
+    @ActivityCallback
+    fun identityPhotoResult(invoke: Invoke, result: ActivityResult) {
+        val camera = pendingIdentityCamera.also { pendingIdentityCamera = null }
+        if (result.resultCode == Activity.RESULT_CANCELED) {
+            camera?.file?.delete()
+            invoke.resolve(JSObject().apply { put("cancelled", true) })
+            return
+        }
+        if (result.resultCode != Activity.RESULT_OK) {
+            camera?.file?.delete()
+            invoke.reject("Android could not pick that identity photo.")
+            return
+        }
+        val uri = camera?.uri ?: result.data?.data
+        if (uri == null) {
+            camera?.file?.delete()
+            invoke.reject("Android returned no identity photo.")
+            return
+        }
+        runAsync(invoke, "read identity photo") {
+            try {
+                val photo = identityPhoto.readPicked(uri, camera?.file)
+                invoke.resolve(JSObject().apply {
+                    put("cancelled", false)
+                    put("filename", photo.filename)
+                    put("mimeType", photo.mimeType)
+                    put("sizeBytes", photo.sizeBytes)
+                    put("dataB64", photo.dataB64)
+                })
+            } finally {
+                camera?.file?.delete()
+            }
+        }
     }
 
     @Command
