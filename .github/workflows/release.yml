@@ -249,7 +249,7 @@ jobs:
         env:
           CUDA_COMPUTE_CAP: "89"
           LIBRARY_PATH: /usr/local/cuda/lib64/stubs
-        run: cargo build --release -p mold-ai --features h3-cuda,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid,pulid
+        run: cargo build --release -p mold-ai --features h3-cuda,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid
 
       - name: Seal generated CUDA PTX manifest
         run: scripts/seal-cuda-ptx-manifest.py target/release/mold 89 target/release/build
