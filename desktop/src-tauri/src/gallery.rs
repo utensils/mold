@@ -125,20 +125,28 @@ fn output_dir() -> Option<std::path::PathBuf> {
     (!config.is_output_disabled()).then(|| config.effective_output_dir())
 }
 
-/// A gallery filename is a server-generated basename
-/// (`mold-{model}-{ts}[-{idx}]~{slug}.{ext}`), so anything that can address a
-/// second location is refused. The colon is here for Windows and matters on
-/// every platform's copy of the rule: `Path::join` treats `C:evil` as
-/// drive-relative and REPLACES the gallery directory rather than appending to
-/// it, and `name.png:hidden` names an NTFS alternate data stream. Neither can
-/// occur in a name mold produced.
+/// A gallery filename is a basename, so anything that can address a second
+/// location is refused.
+///
+/// The colon is **Windows-only, deliberately**. There it reaches a second
+/// location twice over: `Path::join` reads `C:evil.png` as drive-relative and
+/// resolves it against that drive's working directory instead of the gallery,
+/// and `name.png:hidden` names an NTFS alternate data stream. On macOS and
+/// Linux a colon is an ordinary filename byte, and the gallery is NOT limited
+/// to names mold generated — `mold_db::reconcile` imports whatever it finds by
+/// extension, so an existing install can hold a user's `beach: sunset.png`.
+/// Rejecting it everywhere would turn that row into a tile that cannot be
+/// opened, saved, revealed, or deleted.
 pub(crate) fn valid_filename(filename: &str) -> bool {
+    #[cfg(windows)]
+    if filename.contains(':') {
+        return false;
+    }
     !filename.is_empty()
         && filename != "."
         && filename != ".."
         && !filename.contains('/')
         && !filename.contains('\\')
-        && !filename.contains(':')
         && !filename.contains('\0')
 }
 
@@ -1725,11 +1733,62 @@ mod tests {
         assert!(!valid_filename("../secrets.json"));
         assert!(!valid_filename("nested/image.png"));
         assert!(!valid_filename("nested\\image.png"));
-        // `Path::join` resolves a drive-relative name against that drive's own
-        // working directory, leaving the gallery root behind entirely.
-        assert!(!valid_filename("C:evil.png"));
-        assert!(!valid_filename("mold-flux-1.png:hidden"));
         assert!(valid_filename("mold-flux-1.png"));
+
+        // `Path::join` resolves a drive-relative name against that drive's own
+        // working directory, leaving the gallery root behind entirely, and a
+        // `:` suffix names an NTFS alternate data stream.
+        #[cfg(windows)]
+        {
+            assert!(!valid_filename("C:evil.png"));
+            assert!(!valid_filename("mold-flux-1.png:hidden"));
+        }
+        // On unix a colon is an ordinary filename byte, and reconcile imports
+        // files mold did not name. Refusing it there would strand real rows.
+        #[cfg(unix)]
+        assert!(valid_filename("beach: sunset.png"));
+    }
+
+    /// On Windows `valid_filename` rejects `:`, and model tags are full of
+    /// them (`flux-dev:q8`). That is only safe because
+    /// `default_output_filename` replaces the colon before it reaches a
+    /// filename — so the two rules have to be pinned together, or a future
+    /// generator change silently makes every print of a tagged model
+    /// unreachable through this guard.
+    ///
+    /// Resolved manifest identities only. A raw `hf:owner/repo` id still
+    /// carries its slash through the generator, which is a separate
+    /// pre-existing question about a path that does not reach gallery naming.
+    #[test]
+    fn every_filename_mold_generates_passes_the_guard() {
+        let tagged = [
+            "flux-dev:q8",
+            "flux-dev:q4",
+            "z-image:turbo",
+            "sdxl:base",
+            "flux2-klein:q4",
+            "minimax-h3-fl2va:comfy-pruned-int8-turbo-8step",
+        ];
+        for model in tagged {
+            for (batch, index) in [(1u32, 0u32), (4, 2)] {
+                for ext in ["png", "jpg", "mp4"] {
+                    let plain =
+                        mold_core::default_output_filename(model, 1_700_000_000, ext, batch, index);
+                    assert!(valid_filename(&plain), "generator produced {plain}");
+
+                    let slug = mold_core::title_slug("A Titled Print!");
+                    let titled = mold_core::default_output_filename_titled(
+                        model,
+                        1_700_000_000,
+                        ext,
+                        batch,
+                        index,
+                        slug.as_deref(),
+                    );
+                    assert!(valid_filename(&titled), "generator produced {titled}");
+                }
+            }
+        }
     }
 
     #[test]

@@ -6,7 +6,8 @@
   every relevant pull request and builds the installer on `main`. Windows gets
   native click-to-route toast notifications, a Window menu whose items all do
   something, and Ctrl+A now drives Library's Select All (it was recognised only
-  as ⌘A, so it did nothing off macOS). Two capabilities are honestly absent for
+  as ⌘A, so it did nothing off macOS — **Linux gains this too, and Meta+A stops
+  triggering it there**). Two capabilities are honestly absent for
   now: generated AAC audio tracks (`fdk-aac` does not compile with MSVC — video
   still renders), and in-app updates, which stay macOS-only.
 - **The embedded engine starts on Windows.** Three separate defects stopped it

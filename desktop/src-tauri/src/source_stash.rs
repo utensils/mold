@@ -358,6 +358,35 @@ mod tests {
         );
     }
 
+    /// The whole reason these encodings are not `to_str()` is that an OS path
+    /// need not be valid Unicode. A test using only well-formed text would
+    /// pass against a naive `to_string_lossy` implementation and prove
+    /// nothing, so each platform round-trips a path its own API can produce
+    /// and UTF-8 cannot represent.
+    #[cfg(windows)]
+    #[test]
+    fn a_lone_surrogate_survives_the_round_trip() {
+        use std::os::windows::ffi::OsStringExt;
+
+        // Unpaired high surrogate: legal in a Windows path, unrepresentable
+        // as UTF-8.
+        let name = std::ffi::OsString::from_wide(&[0x0061, 0xD800, 0x0062]);
+        assert!(name.to_str().is_none(), "fixture must not be valid UTF-8");
+        let path = PathBuf::from(name);
+        assert_eq!(decode_native_path(encode_native_path(&path)), Some(path));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_non_utf8_byte_survives_the_round_trip() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let name = std::ffi::OsString::from_vec(vec![b'a', 0xFF, b'b']);
+        assert!(name.to_str().is_none(), "fixture must not be valid UTF-8");
+        let path = PathBuf::from(name);
+        assert_eq!(decode_native_path(encode_native_path(&path)), Some(path));
+    }
+
     #[cfg(windows)]
     #[test]
     fn a_torn_windows_pointer_misses_instead_of_naming_a_wrong_path() {

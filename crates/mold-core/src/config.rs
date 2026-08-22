@@ -1711,23 +1711,30 @@ impl Config {
         // non-temp config path. This catches the race condition where parallel tests
         // set MOLD_HOME to /tmp/... and a config.save() writes the corrupted
         // models_dir to the user's real config file.
-        // `/tmp` is only the unix spelling of "a temporary directory": on
-        // Windows a tempdir lives under `%LOCALAPPDATA%\Temp`, so both halves
-        // of this guard were dead there and the race it protects against was
-        // unguarded. Ask the platform where temp is instead of adding a second
-        // hardcoded prefix, and keep the literal `/tmp/` checks so a unix path
-        // built by a test that overrode TMPDIR still matches.
-        let temp_root = std::env::temp_dir();
-        let under_temp = |value: &str| {
-            value.contains("/tmp/")
-                || Path::new(value).starts_with(&temp_root)
-                || value.contains("/mold-config-test-")
-                || value.contains("\\mold-config-test-")
-        };
+        // `/tmp` is only the unix spelling of "a temporary directory", so on
+        // Windows both halves of this guard were dead and the race went
+        // unguarded. The Windows arm is added WITHOUT widening the unix one:
+        // the existing literals decide unix exactly as before, because
+        // loosening them would start silently refusing to save a real config
+        // whose `models_dir` merely happens to sit under a temp path (a
+        // scratch or RAM volume is a legitimate place to keep weights), and
+        // this refusal reports success.
+        let temp_marker = "mold-config-test-";
         let path_str = path.to_string_lossy();
-        let is_temp_config = under_temp(&path_str);
-        let has_temp_models_dir = under_temp(&self.models_dir)
-            && (self.models_dir.contains("mold-") || self.models_dir.contains("mold_"));
+        let mut is_temp_config =
+            path_str.contains("/tmp/") || path_str.contains(&format!("/{temp_marker}"));
+        let mut has_temp_models_dir = self.models_dir.contains("/tmp/mold-")
+            || self.models_dir.contains(&format!("/{temp_marker}"));
+        #[cfg(windows)]
+        {
+            // Only the test-harness marker, never `%TEMP%` at large: that
+            // directory is a plausible home for a real `models_dir`, and
+            // `std::env::temp_dir()` degrades to `%USERPROFILE%` when neither
+            // TMP nor TEMP is set, which would match nearly every user path.
+            let marker = format!("\\{temp_marker}");
+            is_temp_config = is_temp_config || path_str.contains(&marker);
+            has_temp_models_dir = has_temp_models_dir || self.models_dir.contains(&marker);
+        }
         if has_temp_models_dir && !is_temp_config {
             eprintln!(
                 "warning: refusing to save config with test models_dir ({}) to real config ({})",

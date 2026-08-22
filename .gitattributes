@@ -39,6 +39,12 @@
 *.pth binary
 *.bin binary
 *.b64 binary
+# Safetensors header goldens: an 8-byte little-endian length prefix followed by
+# JSON. They contain CR bytes, so a text classification would rewrite them, and
+# their whole purpose is to be byte-exact. Today git's NUL heuristic happens to
+# catch the zero bytes in that length prefix — this rule means byte-exactness
+# does not depend on a heuristic continuing to happen to work.
+*.header binary
 
 # Xcode project files are machine-owned; leave their bytes alone.
 *.pbxproj -text

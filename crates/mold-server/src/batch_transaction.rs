@@ -4874,9 +4874,11 @@ fn verify_gallery_bookkeeping_lock_target(output_dir: &Path, file: &File) -> any
 /// ordinary contention — the outcome each probe is asserting — as a hard error
 /// that refused to start the server at all.
 fn is_lock_contention(error: &std::io::Error) -> bool {
+    // `lock_contended_error()` always carries a raw OS error (EWOULDBLOCK on
+    // unix, ERROR_LOCK_VIOLATION on Windows), so comparing the options
+    // directly cannot match on a mutual `None`.
     error.kind() == std::io::ErrorKind::WouldBlock
-        || (error.raw_os_error().is_some()
-            && error.raw_os_error() == fs2::lock_contended_error().raw_os_error())
+        || error.raw_os_error() == fs2::lock_contended_error().raw_os_error()
 }
 
 fn probe_gallery_bookkeeping_lock_semantics(output_dir: &Path) -> anyhow::Result<()> {

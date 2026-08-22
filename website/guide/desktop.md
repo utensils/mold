@@ -577,9 +577,12 @@ Two capabilities are absent rather than degraded, and both say so by name:
 - **The `h3` / `h3-private-uat` features.** MiniMax-H3 is an SM89 CUDA surface
   whose private evidence capture is written against unix ownership semantics
   (`/proc/self/statm`, uid/mode identity), so those features do not compile for
-  Windows at all. Nothing in the Windows recipe enables them, but it does mean
-  `cargo test --workspace` fails on Windows where `scripts\windows.ps1 test`
-  passes — the desktop crate is the Windows gate.
+  Windows at all. Nothing in the Windows recipe enables them.
+- **`cargo test --workspace` is not the Windows gate** — `scripts\windows.ps1
+test` is. Besides the `h3` compile above, a handful of `mold-core` tests
+  assert unix path separators (`should end with .mold/output`) and fail on
+  Windows on `main` today, independently of any Windows work. The desktop
+  crate, which is what the Windows app actually builds, passes cleanly.
 
 Signed Windows installers are also still to come; the `main` CI artifact is
 unsigned, so SmartScreen will warn on first run.

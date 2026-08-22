@@ -1083,16 +1083,24 @@ pub async fn run_server(
 
     // Windows has no SIGTERM, so without this arm the graceful path — and with
     // it the queue journal's retention fence, which MUST go up before the
-    // scheduler is cancelled — was unreachable on Windows by anything except
-    // `POST /api/shutdown`. Closing the console window or shutting the machine
-    // down would drop every retained queue row on the floor.
+    // scheduler is cancelled — was reachable on Windows only through
+    // `POST /api/shutdown`.
     //
-    // `CTRL_CLOSE` and `CTRL_SHUTDOWN` are the real SIGTERM analogues: the OS
-    // delivers them with a short grace period and then terminates the process
-    // regardless, which is exactly the bounded window `arm_shutdown_deadline`
-    // already assumes. `CTRL_C` joins them because `mold serve` in a console is
-    // the ordinary way to run one, and the take-once `shutdown_tx` makes a
-    // duplicate from the CLI's own handler a no-op.
+    // `CTRL_CLOSE` and `CTRL_SHUTDOWN` are the SIGTERM analogues. `CTRL_C` is
+    // included even though the unix arm deliberately leaves SIGINT alone,
+    // because a console `mold serve` is the ordinary way to run one on Windows
+    // and Ctrl+C is how it is stopped; the cost is that Ctrl+C now drains
+    // rather than killing instantly. `serve` calls `allow_hard_shutdown_exit`,
+    // and a second Ctrl+C falls through to the OS default once this task has
+    // ended, so it cannot become a hang.
+    //
+    // Two limits, stated rather than implied. The OS grace period for
+    // CTRL_CLOSE is a few seconds, well under `DEFAULT_SHUTDOWN_ABORT_SECS`,
+    // so the tail of the drain WILL be cut off — what this buys is that
+    // `retain_all()` runs first, in the opening milliseconds. And these events
+    // reach console-attached processes only: the GUI desktop app embeds this
+    // server in a windowed process that receives none of them, so its quit and
+    // machine-shutdown paths still need Tauri's own exit hooks.
     #[cfg(windows)]
     {
         let console_state = state.clone();
