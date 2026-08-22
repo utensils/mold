@@ -3922,7 +3922,7 @@ impl H3PrivateFl2VaPreparedRunner for H3PrivateConcretePreparedRunner {
                     match authority.compute_capability() {
                         Some(_) => Device::new_cuda(owner.device_ordinal)
                             .context("failed to construct the reviewed H3 CUDA route"),
-                        None => Device::new_metal(owner.device_ordinal)
+                        None => crate::device::metal_device(owner.device_ordinal)
                             .context("failed to construct the H3 Metal route"),
                     }
                 })?;
@@ -8396,6 +8396,20 @@ mod tests {
             assert_eq!(attempt.matches("attempt.finish()").count(), 2);
             assert!(attempt.contains("status.resources_retained()"));
         }
+    }
+
+    #[test]
+    fn private_h3_metal_execution_reuses_the_process_device() {
+        let source = include_str!("private_server.rs");
+        let production = source
+            .split_once("#[cfg(test)]\nmod tests")
+            .expect("private server test module boundary")
+            .0;
+        assert!(production.contains("crate::device::metal_device(owner.device_ordinal)"));
+        assert!(
+            !production.contains("Device::new_metal"),
+            "private H3 must not mint a second Candle Metal identity"
+        );
     }
 
     #[cfg(feature = "mp4")]
