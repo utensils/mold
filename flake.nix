@@ -226,7 +226,17 @@
           # `h3-cuda` implies `cuda` so it replaces the device feature.
           desktopFeatureFor =
             computeCap: if isLinux then if computeCap == "89" then "h3-cuda" else "cuda" else "metal";
-          desktopFeature = desktopFeatureFor cudaComputeCap;
+          # The desktop app's complete feature recipe. `pulid` rides every
+          # desktop build for the same reason it rides every `mold` release
+          # recipe (#1223): the embedded This-device server advertises
+          # `supports_identity` only when the feature is compiled, and the
+          # identity photo well is gated on that advertisement, so a desktop
+          # build without it hides face identity permanently.
+          desktopFeaturesFor = computeCap: [
+            (desktopFeatureFor computeCap)
+            "pulid"
+          ];
+          desktopFeatures = lib.concatStringsSep "," (desktopFeaturesFor cudaComputeCap);
 
           gpuFeature =
             if isLinux then
@@ -544,7 +554,7 @@
                   "cudarc-0.19.8" = "sha256-ARnabIhBCzahrk/kVCt5084gftGDyCBme3jxg+mvkUA=";
                 };
               };
-              buildFeatures = [ (desktopFeatureFor computeCap) ];
+              buildFeatures = desktopFeaturesFor computeCap;
 
               MOLD_GIT_SHA = gitRev;
               MOLD_BUILD_DATE = gitDate;
@@ -558,6 +568,10 @@
                 pkgs.cargo-tauri.hook
                 pkgs.pkg-config
                 pkgs.nasm
+                # `candle-onnx`'s build script drives `prost-build`, which
+                # shells out to `protoc`. The `pulid` feature pulls that crate
+                # into the desktop graph too.
+                pkgs.protobuf
                 pkgs.makeBinaryWrapper
               ]
               ++ lib.optionals isLinux [
@@ -1377,7 +1391,7 @@
                   fi
                   bun install --frozen-lockfile
                   cd desktop
-                  cargo tauri dev --features ${desktopFeature} "$@"
+                  cargo tauri dev --features ${desktopFeatures} "$@"
                 '';
               }
               {
@@ -1399,7 +1413,7 @@
                         if [ -x /usr/bin/xdg-open ]; then
                           export XDG_CACHE_HOME="''${MOLD_DESKTOP_CACHE_HOME:-''${XDG_CACHE_HOME:-$HOME/.cache}/mold-desktop}"
                           ../scripts/prepare-desktop-linuxdeploy.sh
-                          cargo tauri build --features ${desktopFeature} --bundles appimage "$@"
+                          cargo tauri build --features ${desktopFeatures} --bundles appimage "$@"
                         else
                           # Tauri's downloaded linuxdeploy tools require an FHS
                           # host. NixOS has a first-class native package instead.
@@ -1408,7 +1422,7 @@
                         fi
                       ''
                     else
-                      ''cargo tauri build --features ${desktopFeature} --bundles app "$@"''
+                      ''cargo tauri build --features ${desktopFeatures} --bundles app "$@"''
                   }
                 '';
               }

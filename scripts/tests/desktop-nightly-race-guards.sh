@@ -30,7 +30,7 @@ grep -Fq 'run: cargo test --manifest-path src-tauri/Cargo.toml' <<< "$rust_job" 
   || fail "the native desktop gate no longer runs the test suite"
 
 linux_job="$(sed -n '/^  desktop-linux:/,/^  desktop-nightly:/p' "$workflow")"
-grep -Fq 'bunx tauri build --features h3-cuda --bundles appimage --ci -v' <<< "$linux_job" \
+grep -Fq 'bunx tauri build --features h3-cuda,pulid --bundles appimage --ci -v' <<< "$linux_job" \
   || fail "main pushes have no Linux packaging proof"
 grep -Fq "if: github.event_name != 'pull_request'" <<< "$linux_job" \
   || fail "Linux packaging is not reserved for main pushes"
@@ -69,5 +69,29 @@ manifest_upload_line="$(grep -nF "gh release upload latest \"\$manifest\"" "$wor
   || fail "second live-main guard does not run after payload verification"
 [[ "${guard_lines[1]}" -lt "$manifest_upload_line" ]] \
   || fail "second live-main guard does not run immediately before manifest upload"
+
+# Face identity ships in every desktop recipe (#1223).
+#
+# The embedded This-device server advertises `supports_identity` only when
+# `pulid` is compiled, and `studio/lib/identityConditioning.ts` gates the
+# identity photo well on that advertisement — absence reads as NO. So a
+# desktop recipe that drops the feature does not degrade, it hides the whole
+# feature permanently, silently, with nothing in the UI to explain it. Each
+# published recipe is asserted by hand because there is no single build
+# command to read.
+grep -Fq 'pulid = ["mold-core/pulid", "mold-server/pulid"]' "$repo_root/desktop/src-tauri/Cargo.toml" \
+  || fail "the desktop crate no longer forwards the pulid feature"
+desktop_feature_recipe="$(sed -n '/desktopFeaturesFor = computeCap:/,/;/p' "$repo_root/flake.nix")"
+grep -Fq '"pulid"' <<< "$desktop_feature_recipe" \
+  || fail "the Nix desktop feature recipe no longer builds face identity"
+grep -Fq 'buildFeatures = desktopFeaturesFor computeCap;' "$repo_root/flake.nix" \
+  || fail "the Nix desktop packages no longer use the shared desktop feature recipe"
+grep -Fq 'pkgs.protobuf' "$repo_root/flake.nix" \
+  || fail "the Nix build has no protoc for candle-onnx"
+distribution="$repo_root/.github/workflows/desktop-distribution.yml"
+grep -Fq 'bunx tauri build --features metal,pulid --bundles app --ci --config' "$distribution" \
+  || fail "the signed macOS desktop build no longer ships face identity"
+grep -Fq 'brew install minisign protobuf' "$distribution" \
+  || fail "the signed macOS desktop build has no protoc for candle-onnx"
 
 echo "PASS: desktop-nightly-race-guards"

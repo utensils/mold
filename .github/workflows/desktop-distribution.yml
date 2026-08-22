@@ -63,7 +63,9 @@ jobs:
       - run: bun install --frozen-lockfile
         working-directory: .
       - name: Install updater verification tooling
-        run: HOMEBREW_NO_AUTO_UPDATE=1 brew install minisign
+        # `protobuf` is for the `pulid` feature: `candle-onnx`'s build script
+        # drives `prost-build`, which shells out to `protoc`.
+        run: HOMEBREW_NO_AUTO_UPDATE=1 brew install minisign protobuf
 
       - name: Resolve channel version and artifact names
         id: release
@@ -191,7 +193,7 @@ jobs:
               }
             }' \
             > "$updater_config"
-          bunx tauri build --features metal --bundles app --ci --config "$updater_config"
+          bunx tauri build --features metal,pulid --bundles app --ci --config "$updater_config"
           ../scripts/create-desktop-dmg.sh \
             src-tauri/target/release/bundle/macos/Mold.app \
             "src-tauri/target/release/bundle/dmg/$MOLD_DESKTOP_DMG_NAME" \
