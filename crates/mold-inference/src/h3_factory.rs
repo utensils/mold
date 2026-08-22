@@ -6825,12 +6825,9 @@ mod tests {
         assert!(frozen
             .validate_engine_seam(contract::FL2VA_COMFY_TURBO_4STEP_768P, 0, true)
             .is_ok());
-        assert_eq!(
-            frozen
-                .validate_engine_seam(contract::FL2VA_COMFY, 0, true)
-                .is_ok(),
-            cfg!(feature = "h3-private-uat")
-        );
+        assert!(frozen
+            .validate_engine_seam(contract::FL2VA_COMFY, 0, true)
+            .is_ok());
         assert!(!media_model_matches_h3_authority(
             contract::FL2VA_COMFY_TURBO_8STEP,
             &frozen
