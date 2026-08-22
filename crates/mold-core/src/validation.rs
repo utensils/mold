@@ -3583,6 +3583,10 @@ mod tests {
             id_image_name: None,
             id_weight: None,
             id_start_step: None,
+            id_images: None,
+            id_image_names: None,
+            true_cfg: None,
+            cfg_start_step: None,
         }
     }
 
@@ -6406,7 +6410,7 @@ mod tests {
         bare.model = "flux-dev:q8".to_string();
         bare.id_weight = Some(1.5);
         let error = validate_generate_request_with_family(&bare, None).unwrap_err();
-        assert!(error.contains("id_image is required"), "{error}");
+        assert!(error.contains("id_image (or id_images) is required"), "{error}");
     }
 
     /// Whatever the feature, a build that cannot execute identity refuses the

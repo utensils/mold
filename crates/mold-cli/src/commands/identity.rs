@@ -20,26 +20,42 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use mold_core::identity::ID_IMAGE_LIMITS;
 
-/// The three identity flags exactly as clap parsed them.
+/// The identity flags exactly as clap parsed them.
+///
+/// `--id-image` is repeatable, so the path field is a `Vec` even in the
+/// overwhelmingly common one-photograph case; [`IdentityOptions`] is where the
+/// two wire shapes are decided.
 #[derive(Debug, Clone, Default)]
 pub struct IdentityArgs {
-    pub id_image: Option<PathBuf>,
+    pub id_images: Vec<PathBuf>,
     pub id_weight: Option<f64>,
     pub id_start_step: Option<u32>,
+    pub true_cfg: Option<f64>,
+    pub cfg_start_step: Option<u32>,
 }
 
-/// The same three, resolved: bytes read, provenance derived.
+/// The same flags, resolved: bytes read, provenance derived.
 ///
 /// One type for both the remote and the forced-local path, which is what makes
 /// the two requests identical by construction rather than by review.
+///
+/// The singular and plural request fields are mutually exclusive by contract
+/// (`mold_core::identity::IDENTITY_IMAGE_FORM_CONFLICT`), and this is the one
+/// place the CLI chooses between them: exactly one `--id-image` produces the
+/// singular form, so a one-photograph `mold run` puts the same bytes on the
+/// same field it always has and an older server still understands it.
 #[derive(Debug, Clone, Default)]
 pub struct IdentityOptions {
     pub id_image: Option<Vec<u8>>,
     /// The file's own name, never the client path. Provenance the gallery and
     /// the embedded metadata record.
     pub id_image_name: Option<String>,
+    pub id_images: Option<Vec<Vec<u8>>>,
+    pub id_image_names: Option<Vec<String>>,
     pub id_weight: Option<f64>,
     pub id_start_step: Option<u32>,
+    pub true_cfg: Option<f64>,
+    pub cfg_start_step: Option<u32>,
 }
 
 impl IdentityArgs {
@@ -49,31 +65,66 @@ impl IdentityArgs {
     /// side, where the fields are still a path rather than bytes.
     #[cfg(test)]
     pub fn mentions_identity(&self) -> bool {
-        self.id_image.is_some() || self.id_weight.is_some() || self.id_start_step.is_some()
+        !self.id_images.is_empty() || self.id_weight.is_some() || self.id_start_step.is_some()
     }
 
-    /// Read the reference photograph and produce the request fields.
+    /// Read the reference photographs and produce the request fields.
     ///
     /// A knob without an image is refused here rather than at the server, so
     /// the user finds out before a 16 MB upload rather than after one — the
-    /// wording is deliberately the same either way.
+    /// wording is deliberately the same either way. The count and the whole-set
+    /// budgets come from `mold_core::identity`, so a fifth `--id-image` is
+    /// refused before the fifth file is even opened.
     pub fn resolve(self) -> Result<IdentityOptions> {
-        let Some(path) = self.id_image else {
-            if self.id_weight.is_some() || self.id_start_step.is_some() {
+        if self.id_images.is_empty() {
+            if self.id_weight.is_some()
+                || self.id_start_step.is_some()
+                || self.true_cfg.is_some()
+                || self.cfg_start_step.is_some()
+            {
                 anyhow::bail!(
-                    "--id-weight and --id-start-step require --id-image; there is no identity to \
-                     condition on without a reference photograph"
+                    "--id-weight, --id-start-step, --true-cfg and --cfg-start-step require \
+                     --id-image; there is no identity to condition on without a reference \
+                     photograph"
                 );
             }
             return Ok(IdentityOptions::default());
-        };
-        let (bytes, name) = read_id_image(&path)?;
-        Ok(IdentityOptions {
-            id_image: Some(bytes),
-            id_image_name: Some(name),
+        }
+        if self.id_images.len() > mold_core::identity::ID_IMAGES_MAX {
+            anyhow::bail!(
+                "--id-image was given {} times; at most {} reference photographs are accepted",
+                self.id_images.len(),
+                mold_core::identity::ID_IMAGES_MAX
+            );
+        }
+
+        let mut bytes = Vec::with_capacity(self.id_images.len());
+        let mut names = Vec::with_capacity(self.id_images.len());
+        for path in &self.id_images {
+            let (payload, name) = read_id_image(path)?;
+            bytes.push(payload);
+            names.push(name);
+        }
+        // The whole-set budgets, applied before anything is uploaded.
+        let borrowed: Vec<&[u8]> = bytes.iter().map(Vec::as_slice).collect();
+        mold_core::identity::validate_id_images(&borrowed)
+            .map_err(|reason| anyhow::anyhow!("invalid --id-image set: {reason}"))?;
+
+        let mut options = IdentityOptions {
             id_weight: self.id_weight,
             id_start_step: self.id_start_step,
-        })
+            true_cfg: self.true_cfg,
+            cfg_start_step: self.cfg_start_step,
+            ..IdentityOptions::default()
+        };
+        if bytes.len() == 1 {
+            options.id_image = bytes.pop();
+            options.id_image_name = names.pop();
+        } else {
+            options.id_images = Some(bytes);
+            options.id_image_names = Some(names);
+        }
+        Ok(options)
     }
 }
 
@@ -254,8 +305,12 @@ mod tests {
         let resolved = IdentityArgs::default().resolve().expect("nothing to do");
         assert!(resolved.id_image.is_none());
         assert!(resolved.id_image_name.is_none());
+        assert!(resolved.id_images.is_none());
+        assert!(resolved.id_image_names.is_none());
         assert!(resolved.id_weight.is_none());
         assert!(resolved.id_start_step.is_none());
+        assert!(resolved.true_cfg.is_none());
+        assert!(resolved.cfg_start_step.is_none());
     }
 
     #[test]
@@ -267,6 +322,10 @@ mod tests {
             },
             IdentityArgs {
                 id_start_step: Some(2),
+                ..IdentityArgs::default()
+            },
+            IdentityArgs {
+                true_cfg: Some(2.0),
                 ..IdentityArgs::default()
             },
         ] {
@@ -283,9 +342,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = write(dir.path(), "face.png", &png_1x1());
         let resolved = IdentityArgs {
-            id_image: Some(path),
+            id_images: vec![path],
             id_weight: Some(0.85),
             id_start_step: Some(3),
+            true_cfg: Some(2.0),
+            cfg_start_step: Some(1),
         }
         .resolve()
         .expect("a real PNG resolves");
@@ -294,6 +355,73 @@ mod tests {
         assert_eq!(resolved.id_image_name.as_deref(), Some("face.png"));
         assert_eq!(resolved.id_weight, Some(0.85));
         assert_eq!(resolved.id_start_step, Some(3));
+        assert_eq!(resolved.true_cfg, Some(2.0));
+        assert_eq!(resolved.cfg_start_step, Some(1));
+    }
+
+    /// Exactly one `--id-image` must produce the SINGULAR wire field. The two
+    /// shapes are mutually exclusive at admission, and a one-photograph run
+    /// that silently switched shapes would stop working against a server that
+    /// predates `id_images`.
+    #[test]
+    fn one_photograph_takes_the_singular_wire_shape() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(dir.path(), "face.png", &png_1x1());
+        let resolved = IdentityArgs {
+            id_images: vec![path],
+            ..IdentityArgs::default()
+        }
+        .resolve()
+        .expect("a real PNG resolves");
+        assert!(resolved.id_image.is_some());
+        assert_eq!(resolved.id_image_name.as_deref(), Some("face.png"));
+        assert!(resolved.id_images.is_none());
+        assert!(resolved.id_image_names.is_none());
+    }
+
+    /// Several photographs take the plural shape, in the order they were
+    /// given, with one name per photograph — which is what admission requires.
+    #[test]
+    fn several_photographs_take_the_plural_wire_shape_in_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let one = write(dir.path(), "one.png", &png_1x1());
+        let two = write(dir.path(), "two.png", &png_1x1());
+        let resolved = IdentityArgs {
+            id_images: vec![one, two],
+            ..IdentityArgs::default()
+        }
+        .resolve()
+        .expect("two real PNGs resolve");
+
+        assert!(resolved.id_image.is_none());
+        assert!(resolved.id_image_name.is_none());
+        assert_eq!(resolved.id_images.as_ref().map(Vec::len), Some(2));
+        assert_eq!(
+            resolved.id_image_names.as_deref(),
+            Some(["one.png".to_string(), "two.png".to_string()].as_slice())
+        );
+    }
+
+    /// The count bound is the contract's, applied before the extra files are
+    /// even opened.
+    #[test]
+    fn too_many_photographs_are_refused_before_the_upload() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths: Vec<PathBuf> = (0..mold_core::identity::ID_IMAGES_MAX + 1)
+            .map(|index| write(dir.path(), &format!("face{index}.png"), &png_1x1()))
+            .collect();
+        let error = IdentityArgs {
+            id_images: paths,
+            ..IdentityArgs::default()
+        }
+        .resolve()
+        .unwrap_err();
+        let rendered = format!("{error:#}");
+        assert!(rendered.contains("at most"), "{rendered}");
+        assert!(
+            rendered.contains(&mold_core::identity::ID_IMAGES_MAX.to_string()),
+            "{rendered}"
+        );
     }
 
     #[test]

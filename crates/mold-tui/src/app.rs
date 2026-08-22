@@ -8105,6 +8105,10 @@ impl App {
                             id_image_sha256: None,
                             id_weight: None,
                             id_start_step: None,
+                            id_image_names: None,
+                            id_image_sha256s: None,
+                            true_cfg: None,
+                            cfg_start_step: None,
                         };
 
                         if let (Ok(Some(db)), Some(output_dir)) =
@@ -8544,6 +8548,10 @@ impl App {
                         id_image_sha256: None,
                         id_weight: None,
                         id_start_step: None,
+                        id_image_names: None,
+                        id_image_sha256s: None,
+                        true_cfg: None,
+                        cfg_start_step: None,
                     };
 
                     self.gallery.entries.insert(
@@ -9734,6 +9742,10 @@ mod tests {
                 id_image_sha256: None,
                 id_weight: None,
                 id_start_step: None,
+                id_image_names: None,
+                id_image_sha256s: None,
+                true_cfg: None,
+                cfg_start_step: None,
             },
             generation_time_ms: Some(5000),
             timestamp: 1234,
@@ -9814,6 +9826,10 @@ mod tests {
                 id_image_sha256: None,
                 id_weight: None,
                 id_start_step: None,
+                id_image_names: None,
+                id_image_sha256s: None,
+                true_cfg: None,
+                cfg_start_step: None,
             },
             generation_time_ms: None,
             timestamp: 0,
@@ -9960,6 +9976,10 @@ mod tests {
             id_image_sha256: None,
             id_weight: None,
             id_start_step: None,
+            id_image_names: None,
+            id_image_sha256s: None,
+            true_cfg: None,
+            cfg_start_step: None,
         }
     }
 

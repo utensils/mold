@@ -853,6 +853,10 @@ pub async fn run(
                         id_image_name: None,
                         id_weight: None,
                         id_start_step: None,
+                        id_images: None,
+                        id_image_names: None,
+                        true_cfg: None,
+                        cfg_start_step: None,
                     };
                     materialize_local_builtin_control(&mut probe_req, &config).await?;
                     let control_loras = probe_req.loras.take().unwrap_or_default();
@@ -1009,8 +1013,12 @@ pub async fn run(
         placement,
         id_image: identity.id_image,
         id_image_name: identity.id_image_name,
+        id_images: identity.id_images,
+        id_image_names: identity.id_image_names,
         id_weight: identity.id_weight,
         id_start_step: identity.id_start_step,
+        true_cfg: identity.true_cfg,
+        cfg_start_step: identity.cfg_start_step,
     };
     // A continuation that named no overlap renders with its family's own
     // carryover, and the metadata `record_local_save` builds resolves the

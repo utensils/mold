@@ -517,7 +517,11 @@ fn redacted_recovery_envelope(
     identity: Option<&mold_core::identity::FrozenIdentityEmbedding>,
 ) -> LiveBatchRecoveryEnvelope {
     let mut request = request.clone();
+    // Both wire shapes: a manifest that kept `id_images` because the redaction
+    // only knew about `id_image` would leave a whole set of photographs on
+    // disk indefinitely.
     request.id_image = None;
+    request.id_images = None;
     LiveBatchRecoveryEnvelope {
         version: LIVE_BATCH_RECOVERY_VERSION,
         request,
@@ -551,7 +555,7 @@ fn decode_recovery_envelope(
     // Belt and braces: a manifest that somehow carries a photograph is not one
     // this build wrote, and it is not a file to keep acting on.
     ensure!(
-        envelope.request.id_image.is_none(),
+        !mold_core::identity::request_carries_identity_photo(&envelope.request),
         "durable live-batch recovery envelope retains a reference photograph"
     );
     // A batch that conditioned on a face cannot be resumed, because the face

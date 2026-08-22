@@ -114,7 +114,10 @@ pub struct JournalAdmission<'a> {
 /// flag, and there is nothing to resolve — the bytes are either on the request
 /// or they are not.
 fn carries_identity_photograph(request: &mold_core::GenerateRequest) -> bool {
-    request.id_image.is_some()
+    // Either wire shape. Asking only about `id_image` would journal every
+    // multi-photograph request's faces into `mold.db`, which is the exact
+    // outcome this predicate exists to prevent.
+    mold_core::identity::request_carries_identity_photo(request)
 }
 
 /// Directory of per-identity claim records, one file per queue owner.

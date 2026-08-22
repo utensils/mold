@@ -569,6 +569,12 @@ pub fn build_generate_request(params: BuildParams<'_>) -> GenerateRequest {
         collection: None,
         tags: None,
         title: None,
+        // Discord has no multi-photograph or true-CFG surface yet (#1226): a
+        // slash command caps at 25 options and /identity is already full.
+        id_images: None,
+        id_image_names: None,
+        true_cfg: None,
+        cfg_start_step: None,
         source_fit: None,
         hdr_exr_dir: None,
         hdr_exr_full_float: false,

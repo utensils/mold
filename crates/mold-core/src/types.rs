@@ -1264,6 +1264,48 @@ pub struct GenerateRequest {
     /// Absent means `identity::ID_START_STEP_DEFAULT`. Requires `id_image`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id_start_step: Option<u32>,
+    /// Ordered face-identity reference images (raw PNG/JPEG bytes,
+    /// base64-encoded in JSON). The multi-photograph form of [`Self::id_image`]:
+    /// every photo is extracted independently and the resulting identity token
+    /// sets are averaged, which is how `cubiq/PuLID_ComfyUI` combines several
+    /// references (`pulid.py:406,415-419`).
+    ///
+    /// `id_image` and `id_images` are the SAME field in two shapes and supplying
+    /// both is a validation error, never a silent precedence rule — see
+    /// `identity::IDENTITY_IMAGE_FORM_CONFLICT`. The count and the per-image
+    /// and whole-set byte and pixel budgets are
+    /// `identity::ID_IMAGES_MAX`, `identity::ID_IMAGE_LIMITS`,
+    /// `identity::ID_IMAGES_TOTAL_ENCODED_BYTES_MAX`, and
+    /// `identity::ID_IMAGES_TOTAL_DECODED_PIXELS_MAX`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "base64_vec_opt"
+    )]
+    pub id_images: Option<Vec<Vec<u8>>>,
+    /// Client-supplied provenance labels for [`Self::id_images`], in the same
+    /// order. Either absent or exactly as long as `id_images`; the engine never
+    /// reads it. Requires `id_images`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id_image_names: Option<Vec<String>>,
+    /// PuLID true classifier-free guidance scale, in
+    /// `identity::TRUE_CFG_OFF..=identity::TRUE_CFG_MAX`.
+    ///
+    /// Absent — or within `identity::TRUE_CFG_EPSILON` of
+    /// `identity::TRUE_CFG_OFF` — keeps FLUX's distilled single-forward
+    /// guidance and renders bit-identically to a request that never named it
+    /// (`PuLID/flux/sampling.py:120`). Above that, every step from
+    /// `cfg_start_step` runs a second forward over `negative_prompt` and the
+    /// unconditional identity, combined as
+    /// `neg + true_cfg * (pos - neg)` (`PuLID/flux/sampling.py:136-149`).
+    /// Qualified only alongside active identity conditioning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub true_cfg: Option<f64>,
+    /// First denoise step the true-CFG negative branch runs at. Must be
+    /// `< steps`. Absent means `identity::CFG_START_STEP_DEFAULT`. Requires
+    /// `true_cfg`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cfg_start_step: Option<u32>,
     /// Source images for Qwen-Image-Edit generation (raw PNG/JPEG bytes, base64-encoded in JSON).
     /// The first image is the primary edit target; additional images are reference images.
     #[serde(
@@ -2180,6 +2222,25 @@ pub struct OutputMetadata {
     /// the print actually carried an identity reference.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id_start_step: Option<u32>,
+    /// Provenance labels of every identity reference, in request order —
+    /// present only for the multi-photograph form. A single-photograph print
+    /// records `id_image_name` exactly as it always did and leaves this absent,
+    /// so its metadata is byte-identical to a pre-`id_images` build's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id_image_names: Option<Vec<String>>,
+    /// SHA-256 (hex) of each identity reference, in request order — present
+    /// only for the multi-photograph form. Names and hashes only, never the
+    /// face payloads themselves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id_image_sha256s: Option<Vec<String>>,
+    /// Effective true-CFG scale, recorded only when the print actually ran the
+    /// negative branch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub true_cfg: Option<f64>,
+    /// Effective first true-CFG denoise step, recorded only when the print
+    /// actually ran the negative branch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cfg_start_step: Option<u32>,
     /// Opaque client-shaped source-fit (crop/pad) policy provenance. The
     /// engine never reads it — fitting happens client-side before the bytes
     /// ship — but recording it verbatim lets Reuse settings and running-job
@@ -2400,14 +2461,32 @@ impl OutputMetadata {
                 hasher.update(bytes);
                 format!("{:x}", hasher.finalize())
             }),
-            id_weight: req
-                .id_image
+            id_weight: crate::identity::request_carries_identity_photo(req)
+                .then(|| crate::identity::effective_id_weight(req)),
+            id_start_step: crate::identity::request_carries_identity_photo(req)
+                .then(|| crate::identity::effective_id_start_step(req)),
+            // The plural provenance is recorded ONLY for the multi form, so a
+            // single-photograph print's metadata stays byte-identical to what
+            // every build before `id_images` wrote.
+            id_image_names: req
+                .id_images
                 .as_ref()
-                .map(|_| crate::identity::effective_id_weight(req)),
-            id_start_step: req
-                .id_image
+                .filter(|images| !images.is_empty())
+                .and_then(|_| req.id_image_names.clone()),
+            id_image_sha256s: req
+                .id_images
                 .as_ref()
-                .map(|_| crate::identity::effective_id_start_step(req)),
+                .filter(|images| !images.is_empty())
+                .map(|images| {
+                    images
+                        .iter()
+                        .map(|bytes| crate::identity::id_image_sha256(bytes))
+                        .collect()
+                }),
+            true_cfg: crate::identity::request_uses_true_cfg(req)
+                .then(|| crate::identity::effective_true_cfg(req)),
+            cfg_start_step: crate::identity::request_uses_true_cfg(req)
+                .then(|| crate::identity::effective_cfg_start_step(req)),
             source_fit: req.source_fit.clone(),
             edit_image_sha256s: req.edit_images.as_ref().and_then(|images| {
                 (!images.is_empty()).then(|| {
@@ -4728,6 +4807,10 @@ mod tests {
             id_image_name: None,
             id_weight: None,
             id_start_step: None,
+            id_images: None,
+            id_image_names: None,
+            true_cfg: None,
+            cfg_start_step: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         let back: GenerateRequest = serde_json::from_str(&json).unwrap();
@@ -4935,6 +5018,10 @@ mod tests {
             id_image_name: None,
             id_weight: None,
             id_start_step: None,
+            id_images: None,
+            id_image_names: None,
+            true_cfg: None,
+            cfg_start_step: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("negative_prompt"));
@@ -5009,6 +5096,10 @@ mod tests {
             id_image_name: None,
             id_weight: None,
             id_start_step: None,
+            id_images: None,
+            id_image_names: None,
+            true_cfg: None,
+            cfg_start_step: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(!json.contains("negative_prompt"));
@@ -5135,6 +5226,10 @@ mod tests {
             id_image_name: None,
             id_weight: None,
             id_start_step: None,
+            id_images: None,
+            id_image_names: None,
+            true_cfg: None,
+            cfg_start_step: None,
         };
 
         let metadata = OutputMetadata::from_generate_request(&req, 7, None, "0.1.0");
@@ -5189,6 +5284,110 @@ mod tests {
         assert_eq!(back.id_image_name.as_deref(), Some("face.png"));
         assert_eq!(back.id_weight, Some(0.8));
         assert_eq!(back.id_start_step, Some(2));
+    }
+
+    /// The multi-photograph and true-CFG fields ride the wire additively too,
+    /// and an ordinary request never grows their keys.
+    #[test]
+    fn multi_image_and_true_cfg_fields_round_trip_and_stay_absent_when_unset() {
+        let mut req = crate::test_support::minimal_generate_request("flux-dev:q8");
+        let json = serde_json::to_string(&req).unwrap();
+        for key in ["id_images", "id_image_names", "true_cfg", "cfg_start_step"] {
+            assert!(!json.contains(key), "{key} must be absent: {json}");
+        }
+
+        req.id_images = Some(vec![vec![0x89, 0x50, 0x4E, 0x47], vec![0xFF, 0xD8, 0xFF]]);
+        req.id_image_names = Some(vec!["one.png".to_string(), "two.jpg".to_string()]);
+        req.true_cfg = Some(2.5);
+        req.cfg_start_step = Some(3);
+        let json = serde_json::to_string(&req).unwrap();
+        let back: GenerateRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            back.id_images.as_deref(),
+            Some([vec![0x89, 0x50, 0x4E, 0x47], vec![0xFF, 0xD8, 0xFF]].as_slice())
+        );
+        assert_eq!(
+            back.id_image_names.as_deref(),
+            Some(["one.png".to_string(), "two.jpg".to_string()].as_slice())
+        );
+        assert_eq!(back.true_cfg, Some(2.5));
+        assert_eq!(back.cfg_start_step, Some(3));
+        assert!(back.id_image.is_none(), "the two shapes never merge");
+    }
+
+    /// A multi-photograph print records every source; a single-photograph one
+    /// records exactly what it always did and grows no keys, so its metadata
+    /// stays byte-identical to a pre-`id_images` build's.
+    #[test]
+    fn identity_metadata_records_every_photograph_only_for_the_plural_form() {
+        let mut single = crate::test_support::minimal_generate_request("flux-dev:q8");
+        single.id_image = Some(vec![0x89, 0x50, 0x4E, 0x47]);
+        single.id_image_name = Some("face.png".to_string());
+        let metadata = OutputMetadata::from_generate_request(&single, 7, None, "0.1.0");
+        assert_eq!(metadata.id_image_name.as_deref(), Some("face.png"));
+        assert_eq!(
+            metadata.id_image_sha256.as_deref(),
+            Some(crate::identity::id_image_sha256(&[0x89, 0x50, 0x4E, 0x47]).as_str())
+        );
+        assert!(metadata.id_image_names.is_none());
+        assert!(metadata.id_image_sha256s.is_none());
+        let json = serde_json::to_string(&metadata).unwrap();
+        for key in ["id_image_names", "id_image_sha256s", "true_cfg", "cfg_start_step"] {
+            assert!(!json.contains(key), "{key} must be absent: {json}");
+        }
+
+        let mut plural = crate::test_support::minimal_generate_request("flux-dev:q8");
+        plural.id_images = Some(vec![vec![0x89, 0x50, 0x4E, 0x47], vec![0xFF, 0xD8, 0xFF]]);
+        plural.id_image_names = Some(vec!["one.png".to_string(), "two.jpg".to_string()]);
+        plural.id_weight = Some(0.9);
+        let metadata = OutputMetadata::from_generate_request(&plural, 7, None, "0.1.0");
+        assert_eq!(
+            metadata.id_image_sha256s.as_deref(),
+            Some(
+                [
+                    crate::identity::id_image_sha256(&[0x89, 0x50, 0x4E, 0x47]),
+                    crate::identity::id_image_sha256(&[0xFF, 0xD8, 0xFF]),
+                ]
+                .as_slice()
+            )
+        );
+        assert_eq!(
+            metadata.id_image_names.as_deref(),
+            Some(["one.png".to_string(), "two.jpg".to_string()].as_slice())
+        );
+        // The effective knobs are recorded from the plural form too.
+        assert_eq!(metadata.id_weight, Some(0.9));
+        assert_eq!(metadata.id_start_step, Some(crate::identity::ID_START_STEP_DEFAULT));
+    }
+
+    /// The true-CFG provenance is recorded only when the print actually ran the
+    /// negative branch: an inert scale must leave the metadata untouched.
+    #[test]
+    fn true_cfg_metadata_is_recorded_only_when_the_branch_actually_ran() {
+        let mut req = crate::test_support::minimal_generate_request("flux-dev:q8");
+        req.id_image = Some(vec![0x89, 0x50, 0x4E, 0x47]);
+        let metadata = OutputMetadata::from_generate_request(&req, 7, None, "0.1.0");
+        assert!(metadata.true_cfg.is_none());
+        assert!(metadata.cfg_start_step.is_none());
+
+        req.true_cfg = Some(1.0);
+        let metadata = OutputMetadata::from_generate_request(&req, 7, None, "0.1.0");
+        assert!(metadata.true_cfg.is_none(), "an inert scale ran no branch");
+
+        req.true_cfg = Some(2.0);
+        let metadata = OutputMetadata::from_generate_request(&req, 7, None, "0.1.0");
+        assert_eq!(metadata.true_cfg, Some(2.0));
+        assert_eq!(
+            metadata.cfg_start_step,
+            Some(crate::identity::CFG_START_STEP_DEFAULT)
+        );
+
+        req.id_weight = Some(0.0);
+        let metadata = OutputMetadata::from_generate_request(&req, 7, None, "0.1.0");
+        assert!(
+            metadata.true_cfg.is_none(),
+            "a zero weight renders the plain print, so nothing is recorded"
+        );
     }
 
     /// Identity provenance is recorded from the effective values, and only
@@ -5317,6 +5516,10 @@ mod tests {
             id_image_name: None,
             id_weight: None,
             id_start_step: None,
+            id_images: None,
+            id_image_names: None,
+            true_cfg: None,
+            cfg_start_step: None,
         };
 
         let metadata = OutputMetadata::from_generate_request(&req, 7, None, "0.1.0");
@@ -5557,6 +5760,10 @@ mod tests {
             id_image_name: None,
             id_weight: None,
             id_start_step: None,
+            id_images: None,
+            id_image_names: None,
+            true_cfg: None,
+            cfg_start_step: None,
         };
         let metadata = OutputMetadata::from_generate_request(&req, 1, None, "0.1.0");
         assert_eq!(metadata.negative_prompt.as_deref(), Some("blurry, ugly"));
@@ -5628,6 +5835,10 @@ mod tests {
             id_image_name: None,
             id_weight: None,
             id_start_step: None,
+            id_images: None,
+            id_image_names: None,
+            true_cfg: None,
+            cfg_start_step: None,
         };
 
         let metadata =
@@ -5709,6 +5920,10 @@ mod tests {
             id_image_name: None,
             id_weight: None,
             id_start_step: None,
+            id_images: None,
+            id_image_names: None,
+            true_cfg: None,
+            cfg_start_step: None,
         };
 
         let metadata = OutputMetadata::from_generate_request(&req, 9, None, "0.1.0");
@@ -6349,6 +6564,10 @@ mod tests {
             id_image_name: None,
             id_weight: None,
             id_start_step: None,
+            id_images: None,
+            id_image_names: None,
+            true_cfg: None,
+            cfg_start_step: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         // Verify base64 encoding is in the JSON
@@ -6426,6 +6645,10 @@ mod tests {
             id_image_name: None,
             id_weight: None,
             id_start_step: None,
+            id_images: None,
+            id_image_names: None,
+            true_cfg: None,
+            cfg_start_step: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("edit_images"));
@@ -6516,6 +6739,10 @@ mod tests {
             id_image_name: None,
             id_weight: None,
             id_start_step: None,
+            id_images: None,
+            id_image_names: None,
+            true_cfg: None,
+            cfg_start_step: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(!json.contains("source_image"));
@@ -6591,6 +6818,10 @@ mod tests {
             id_image_name: None,
             id_weight: None,
             id_start_step: None,
+            id_images: None,
+            id_image_names: None,
+            true_cfg: None,
+            cfg_start_step: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("control_image"));
@@ -6730,6 +6961,10 @@ mod tests {
             id_image_name: None,
             id_weight: None,
             id_start_step: None,
+            id_images: None,
+            id_image_names: None,
+            true_cfg: None,
+            cfg_start_step: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("mask_image"));

@@ -1118,7 +1118,8 @@ Examples:
         #[arg(long, requires = "image", help_heading = "img2img", value_hint = ValueHint::FilePath)]
         mask: Option<String>,
 
-        /// Reference photograph to preserve the face of (PuLID-FLUX).
+        /// Reference photograph to preserve the face of (PuLID-FLUX). Repeat
+        /// up to 4 times to average several references of the same person.
         /// Qualified for flux-dev:q4 and flux-dev:q8 on a server built with
         /// the `pulid` feature; needs `mold pull pulid-flux --accept-license
         /// insightface-antelopev2`.
@@ -1128,7 +1129,7 @@ Examples:
             help_heading = "Identity",
             value_hint = ValueHint::FilePath
         )]
-        id_image: Option<std::path::PathBuf>,
+        id_image: Vec<std::path::PathBuf>,
 
         /// Identity strength, 0.0-3.0 (default: 1.0). Exactly 0.0 renders the
         /// unconditioned print — nothing is pulled, loaded, or extracted.
@@ -1139,6 +1140,18 @@ Examples:
         /// below --steps.
         #[arg(long, requires = "id_image", help_heading = "Identity")]
         id_start_step: Option<u32>,
+
+        /// True classifier-free guidance scale, 1.0-10.0 (default: 1.0 = off).
+        /// Above 1.0 each step from --cfg-start-step runs a second forward
+        /// over --negative-prompt and the unconditional identity. Requires
+        /// --id-image; upstream recommends lowering --guidance to 1.0 with it.
+        #[arg(long, requires = "id_image", help_heading = "Identity")]
+        true_cfg: Option<f64>,
+
+        /// First denoise step the true-CFG negative branch runs at
+        /// (default: 1). Must be below --steps.
+        #[arg(long, requires = "true_cfg", help_heading = "Identity")]
+        cfg_start_step: Option<u32>,
 
         /// Control image for ControlNet conditioning (file path, e.g. edges.png)
         #[arg(long, help_heading = "ControlNet", value_hint = ValueHint::FilePath)]
@@ -2023,6 +2036,8 @@ async fn run() -> anyhow::Result<()> {
             id_image,
             id_weight,
             id_start_step,
+            true_cfg,
+            cfg_start_step,
             control,
             control_model,
             control_scale,
@@ -2211,9 +2226,11 @@ async fn run() -> anyhow::Result<()> {
                 strength,
                 mask,
                 commands::identity::IdentityArgs {
-                    id_image,
+                    id_images: id_image,
                     id_weight,
                     id_start_step,
+                    true_cfg,
+                    cfg_start_step,
                 },
                 control,
                 control_model,
@@ -3757,7 +3774,7 @@ mod tests {
     }
 
     #[test]
-    fn run_parses_the_three_identity_flags() {
+    fn run_parses_every_identity_flag() {
         let cli = parse(&[
             "run",
             "flux-dev:q4",
@@ -3768,21 +3785,54 @@ mod tests {
             "0.85",
             "--id-start-step",
             "2",
+            "--true-cfg",
+            "2.5",
+            "--cfg-start-step",
+            "3",
         ]);
         match cli.command {
             Commands::Run {
                 id_image,
                 id_weight,
                 id_start_step,
+                true_cfg,
+                cfg_start_step,
                 ..
             } => {
-                assert_eq!(
-                    id_image.as_deref(),
-                    Some(std::path::Path::new("/photos/face.png"))
-                );
+                assert_eq!(id_image, vec![std::path::PathBuf::from("/photos/face.png")]);
                 assert_eq!(id_weight, Some(0.85));
                 assert_eq!(id_start_step, Some(2));
+                assert_eq!(true_cfg, Some(2.5));
+                assert_eq!(cfg_start_step, Some(3));
             }
+            _ => panic!("expected Run command"),
+        }
+    }
+
+    /// Several references of the same person average into one identity, so the
+    /// flag repeats and the order it was given in is the order that ships.
+    #[test]
+    fn run_accepts_repeated_id_image_flags_in_order() {
+        let cli = parse(&[
+            "run",
+            "flux-dev:q4",
+            "a portrait",
+            "--id-image",
+            "/photos/one.png",
+            "--id-image",
+            "/photos/two.png",
+            "--id-image",
+            "/photos/three.jpg",
+        ]);
+        match cli.command {
+            Commands::Run { id_image, .. } => assert_eq!(
+                id_image,
+                vec![
+                    std::path::PathBuf::from("/photos/one.png"),
+                    std::path::PathBuf::from("/photos/two.png"),
+                    std::path::PathBuf::from("/photos/three.jpg"),
+                ]
+            ),
             _ => panic!("expected Run command"),
         }
     }
@@ -3795,11 +3845,15 @@ mod tests {
                 id_image,
                 id_weight,
                 id_start_step,
+                true_cfg,
+                cfg_start_step,
                 ..
             } => {
-                assert!(id_image.is_none());
+                assert!(id_image.is_empty());
                 assert!(id_weight.is_none());
                 assert!(id_start_step.is_none());
+                assert!(true_cfg.is_none());
+                assert!(cfg_start_step.is_none());
             }
             _ => panic!("expected Run command"),
         }
@@ -3809,13 +3863,26 @@ mod tests {
     /// server round trip.
     #[test]
     fn run_rejects_an_identity_knob_without_an_image() {
-        for flag in ["--id-weight", "--id-start-step"] {
+        for flag in ["--id-weight", "--id-start-step", "--true-cfg"] {
             let Err(error) = try_parse(&["run", "flux-dev:q4", "a portrait", flag, "1"]) else {
                 panic!("{flag} without an image must be refused");
             };
             let error = error.to_string();
             assert!(error.contains("--id-image"), "{flag}: {error}");
         }
+        // A start step with no scale to start is refused on its own flag.
+        let Err(error) = try_parse(&[
+            "run",
+            "flux-dev:q4",
+            "a portrait",
+            "--id-image",
+            "/photos/face.png",
+            "--cfg-start-step",
+            "2",
+        ]) else {
+            panic!("--cfg-start-step without --true-cfg must be refused");
+        };
+        assert!(error.to_string().contains("--true-cfg"), "{error}");
     }
 
     /// The two combinations `mold_core::identity` refuses at admission are

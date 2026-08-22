@@ -810,9 +810,12 @@ mod tests {
         let (_root, config) = flux_case(models.path());
 
         let frozen = crate::identity_extraction::stub_embedding(b"parent-face");
-        let stubbed = crate::identity_extraction::StubbedExtractor::install(|_, image| {
+        let stubbed = crate::identity_extraction::StubbedExtractor::install(|_, images, want_uncond| {
             Ok(crate::identity_extraction::ResolvedIdentity {
-                embedding: Some(crate::identity_extraction::stub_embedding(image)),
+                embedding: Some(crate::identity_extraction::stub_embedding_for(
+                    images,
+                    want_uncond,
+                )),
                 warning: None,
             })
         });
@@ -869,9 +872,12 @@ mod tests {
         let _env = EnvGuard::new(home.path(), models.path());
         let (_root, config) = flux_case(models.path());
 
-        let stubbed = crate::identity_extraction::StubbedExtractor::install(|_, image| {
+        let stubbed = crate::identity_extraction::StubbedExtractor::install(|_, images, want_uncond| {
             Ok(crate::identity_extraction::ResolvedIdentity {
-                embedding: Some(crate::identity_extraction::stub_embedding(image)),
+                embedding: Some(crate::identity_extraction::stub_embedding_for(
+                    images,
+                    want_uncond,
+                )),
                 warning: None,
             })
         });
@@ -916,9 +922,12 @@ mod tests {
         let _env = EnvGuard::new(home.path(), models.path());
         let (_root, config) = flux_case(models.path());
 
-        let stubbed = crate::identity_extraction::StubbedExtractor::install(|_, image| {
+        let stubbed = crate::identity_extraction::StubbedExtractor::install(|_, images, want_uncond| {
             Ok(crate::identity_extraction::ResolvedIdentity {
-                embedding: Some(crate::identity_extraction::stub_embedding(image)),
+                embedding: Some(crate::identity_extraction::stub_embedding_for(
+                    images,
+                    want_uncond,
+                )),
                 warning: None,
             })
         });
@@ -995,9 +1004,12 @@ mod tests {
         let _env = EnvGuard::new(home.path(), models.path());
         let (_root, config) = flux_case(models.path());
 
-        let _stubbed = crate::identity_extraction::StubbedExtractor::install(|_, image| {
+        let _stubbed = crate::identity_extraction::StubbedExtractor::install(|_, images, want_uncond| {
             Ok(crate::identity_extraction::ResolvedIdentity {
-                embedding: Some(crate::identity_extraction::stub_embedding(image)),
+                embedding: Some(crate::identity_extraction::stub_embedding_for(
+                    images,
+                    want_uncond,
+                )),
                 warning: Some("3 faces were detected".to_string()),
             })
         });
@@ -1040,9 +1052,12 @@ mod tests {
         let _env = EnvGuard::new(home.path(), models.path());
         let (_root, config) = flux_case(models.path());
 
-        let stubbed = crate::identity_extraction::StubbedExtractor::install(|_, image| {
+        let stubbed = crate::identity_extraction::StubbedExtractor::install(|_, images, want_uncond| {
             Ok(crate::identity_extraction::ResolvedIdentity {
-                embedding: Some(crate::identity_extraction::stub_embedding(image)),
+                embedding: Some(crate::identity_extraction::stub_embedding_for(
+                    images,
+                    want_uncond,
+                )),
                 warning: None,
             })
         });
