@@ -20,7 +20,7 @@ use crate::device::{
 };
 use crate::encoders;
 use crate::engine::{
-    rand_seed, resolve_cfg_plus, InferenceEngine, LoadStrategy, OptionRestoreGuard,
+    cfg_active, rand_seed, resolve_cfg_plus, InferenceEngine, LoadStrategy, OptionRestoreGuard,
 };
 use crate::engine_base::EngineBase;
 use crate::image::{build_output_metadata, encode_image};
@@ -934,8 +934,8 @@ impl SD3Engine {
                 .map(|m| m.len())
                 .unwrap_or(0)
         };
-        // SD3 runs CFG by default → batch=2 if guidance > 1, else batch=1.
-        let xformer_batch = if req.guidance > 1.0 { 2 } else { 1 };
+        // SD3 doubles the transformer batch only while CFG is active.
+        let xformer_batch = if cfg_active(req.guidance) { 2 } else { 1 };
         let xformer_activation_budget = crate::device::activation_bytes(
             req.width,
             req.height,

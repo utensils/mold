@@ -43,7 +43,7 @@ fn debug_tensor_stats(name: &str, tensor: &Tensor) {
 /// - `cfg_scale`: Classifier-free guidance scale (1.0 = no guidance, e.g. turbo)
 /// - `cfg_plus`: When true, take the CFG++ step (x_0 from guided velocity,
 ///   renoise with the unconditional velocity). Falls back to the standard
-///   Euler step when CFG is inactive (cfg ≈ 1.0) since there is no uncond
+///   Euler step when guidance does not activate CFG since there is no uncond
 ///   row to read from. See `cfg_plus_step` for the math derivation.
 /// - `time_shift`: Alpha for resolution-dependent timestep shifting (typically 3.0)
 /// - `is_quantized`: If true, use F32 dtype for noise (GGUF dequantizes to F32)
@@ -89,8 +89,8 @@ pub fn euler_sample(
 
     let total_steps = sigmas.len().saturating_sub(1);
 
-    // Fast path: at cfg ≈ 1.0 the uncond pred contributes 0 to the mix
-    // (`apply_cfg(1, .) = cond`), so skip the doubled forward entirely.
+    // Fast path: when guidance does not activate CFG, skip the doubled
+    // forward and use the conditional prediction directly.
     // Saves ~2× denoise time for distilled-CFG (Turbo) workflows.
     // The encoder still produces `[cond, uncond]` in y/context; we slice
     // the cond row here.
@@ -102,7 +102,7 @@ pub fn euler_sample(
     };
 
     // CFG++ requires the doubled `[cond, uncond]` forward so we can read the
-    // unconditional row at integration time. When CFG is disabled (cfg ≈ 1.0)
+    // unconditional row at integration time. When guidance does not activate CFG
     // the loop runs a single conditional forward and there's no uncond row to
     // use — degrade to the standard step and warn once. Loud enough to catch
     // misconfiguration but doesn't fail the request.
@@ -110,7 +110,7 @@ pub fn euler_sample(
     if cfg_plus && !use_cfg {
         tracing::warn!(
             cfg_scale,
-            "cfg_plus requested but cfg_scale ≈ 1.0 — falling back to standard step (no uncond available)"
+            "cfg_plus requested but cfg_scale does not activate CFG — falling back to standard step (no uncond available)"
         );
     }
 
@@ -374,9 +374,14 @@ mod tests {
     }
 
     // `euler_sample` gates the doubled `[cond, uncond]` forward on
-    // `cfg_active(cfg_scale)`. These tests pin the predicate so a regression
-    // to `cfg_scale > 1.0` (which would silently keep doubling the
-    // transformer at cfg=1.0 — the SD3 Turbo case) is caught here.
+    // `cfg_active(cfg_scale)`. These tests pin the one-sided predicate so
+    // zero-guidance Turbo requests cannot accidentally select the
+    // unconditional prediction.
+
+    #[test]
+    fn test_cfg_disabled_at_guidance_0_0() {
+        assert!(!cfg_active(0.0));
+    }
 
     #[test]
     fn test_cfg_disabled_at_guidance_1_0() {

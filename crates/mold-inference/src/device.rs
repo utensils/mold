@@ -837,8 +837,8 @@ impl ActivationFamily {
 /// accounts for the 8× VAE downsample via the per-family factor, so you
 /// pass `req.width`/`req.height` directly, not latent dims.
 /// `batch` is typically `1` for non-CFG (FLUX, Z-Image, distilled
-/// schedulers) and `2` for CFG-doubled forwards (SDXL, SD3 with
-/// `guidance != 1.0`).
+/// schedulers) and `2` for CFG-doubled forwards (SDXL and SD3 when
+/// classifier-free guidance is active).
 /// `dtype_bytes` is `2` for bf16/fp16, `4` for f32, `8` for f64.
 ///
 /// Floors at 256 MB so even tiny inputs reserve enough for kernel workspaces

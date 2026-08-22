@@ -1218,9 +1218,9 @@ pub struct GenerateRequest {
     /// At each Euler step, x_0 is estimated from the CFG-guided velocity but the
     /// re-noise direction uses the unconditional velocity, keeping the trajectory
     /// on the data manifold and allowing lower CFG scales (e.g. 1.5–2 instead of 7).
-    /// SD3 only in this release; SDXL/SD15 ports require scheduler-API extensions
-    /// and are tracked separately. Ignored by distilled families (FLUX schnell,
-    /// Z-Image) and any model run at cfg ≈ 1.0.
+    /// Supported by SD3, SDXL, and SD1.5 with DDIM. Ignored by distilled
+    /// families (FLUX schnell, Z-Image) and whenever guidance does not
+    /// activate CFG.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cfg_plus: Option<bool>,
     /// Source image for img2img generation (raw PNG/JPEG bytes, base64-encoded in JSON).

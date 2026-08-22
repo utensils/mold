@@ -823,7 +823,7 @@ impl SD15Engine {
             if cfg_plus && !use_cfg {
                 tracing::warn!(
                     guidance,
-                    "cfg_plus requested but cfg_scale ≈ 1.0 — falling back to standard step (no uncond available)"
+                    "cfg_plus requested but cfg_scale does not activate CFG — falling back to standard step (no uncond available)"
                 );
             } else if cfg_plus {
                 tracing::warn!(
@@ -1287,8 +1287,8 @@ impl SD15Engine {
         let unet_size = std::fs::metadata(&self.base.paths.transformer)
             .map(|m| m.len())
             .unwrap_or(0);
-        // SD1.5 runs CFG by default → batch=2 unless guidance ≈ 1 (LCM).
-        let unet_batch = if req.guidance > 1.0 { 2 } else { 1 };
+        // SD1.5 doubles the UNet batch only while CFG is active.
+        let unet_batch = if cfg_active(req.guidance) { 2 } else { 1 };
         let unet_activation_budget = crate::device::activation_bytes(
             req.width,
             req.height,
@@ -2101,9 +2101,14 @@ mod tests {
     }
 
     // The SD1.5 denoise loop and prompt encoder both gate the unconditional
-    // pass on `cfg_active(guidance)`. These tests pin the predicate that
-    // those branches use so a regression to `guidance > 1.0` (which would
-    // break LCM / Lightning at exactly cfg=1.0) is caught here.
+    // pass on `cfg_active(guidance)`. These tests pin the one-sided predicate
+    // so zero-guidance distilled requests cannot accidentally select the
+    // unconditional prediction.
+
+    #[test]
+    fn test_cfg_disabled_at_guidance_0_0() {
+        assert!(!cfg_active(0.0));
+    }
 
     #[test]
     fn test_cfg_disabled_at_guidance_1_0() {
