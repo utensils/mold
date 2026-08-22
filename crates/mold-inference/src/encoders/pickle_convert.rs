@@ -961,6 +961,37 @@ struct ArtifactIdentity {
     platform: [u64; 6],
 }
 
+impl ArtifactIdentity {
+    /// Whether this identity is fine-grained enough to memoize on.
+    ///
+    /// The memo's whole safety argument is that a write moves `ctime`. On a
+    /// filesystem whose timestamps have one-second granularity — HFS+, ext3,
+    /// some network mounts — two same-length writes inside one tick produce an
+    /// IDENTICAL key, and the second one's bytes would be built without ever
+    /// being hashed. Nanosecond fields that are BOTH zero are the signature of
+    /// exactly that: a real nanosecond filesystem effectively never lands both
+    /// on zero, and a coarse one always does.
+    ///
+    /// So a coarse identity is not memoized at all — never consulted, never
+    /// recorded — and every load there pays the full SHA-256. That is slower
+    /// and correct, which is the right way round; the memo is an optimization
+    /// and the pin is the contract.
+    #[cfg(unix)]
+    fn is_fine_grained(&self) -> bool {
+        let [_dev, _ino, _mtime, mtime_nsec, _ctime, ctime_nsec] = self.platform;
+        mtime_nsec != 0 || ctime_nsec != 0
+    }
+
+    /// Non-Unix has no `ctime` at all, so the memo is never eligible there.
+    /// The degraded `(size, mtime)` key `pinned_file_identity` falls back to is
+    /// acceptable for a digest CACHE, whose entry is a value it re-derives;
+    /// it is not acceptable for skipping the derivation entirely.
+    #[cfg(not(unix))]
+    fn is_fine_grained(&self) -> bool {
+        false
+    }
+}
+
 fn artifact_identity(file: &File) -> Result<ArtifactIdentity> {
     let metadata = file
         .metadata()
@@ -1025,9 +1056,36 @@ type VerifiedArtifacts = Mutex<HashSet<(ArtifactIdentity, &'static str)>>;
 ///
 /// This is `mold_core::download::pinned_file_digest`'s memo applied to the one
 /// artifact that reads its bytes privately rather than hashing a descriptor in
-/// place; the private-copy contract in [`AuthenticatedArtifact`] is unchanged,
-/// because the copy is what the `VarBuilder` reads and the memo only ever
-/// removes the SHA-256 pass over it.
+/// place — the same shape, the same key material, and (see below) the same
+/// residual. The private-copy contract in [`AuthenticatedArtifact`] is
+/// unchanged, because the copy is what the `VarBuilder` reads and the memo only
+/// ever removes the SHA-256 pass over it.
+///
+/// ## The residual, stated rather than implied
+///
+/// The key is METADATA, not content. A same-length in-place overwrite that
+/// lands inside a single timestamp tick produces the same key as the bytes
+/// before it, and would be served from the memo without being hashed.
+///
+/// Two things bound that, and the second is why it is accepted rather than
+/// merely tolerated:
+///
+/// * **Granularity is fenced.** [`ArtifactIdentity::is_fine_grained`] refuses
+///   to memoize at all when both nanosecond fields are zero, which is the
+///   signature of a one-second-granularity filesystem. On such a mount every
+///   load pays the full hash. What remains is a same-length write landing in
+///   the same NANOSECOND on a filesystem that reports them — and `ctime` is
+///   not settable by userspace at all, so this is a race, not a mechanism.
+/// * **It is exactly `pinned_file_digest`'s residual**, which already guards
+///   every model weight mold loads on every install. Accepting a different
+///   answer here would mean the 609 MB tower were held to a stricter standard
+///   than the 24 GB checkpoint beside it, for no reason anyone could state.
+///
+/// The alternative — keeping the verified private copy resident for the process
+/// lifetime, which makes the bytes immutable by construction — was considered
+/// and rejected on cost: it is 609 MB of host RAM held forever against a
+/// re-read that the memo already reduces to ~50 ms, on a phase whose whole
+/// point was to stop paying for the tower when nothing is using it.
 fn artifact_verified() -> &'static VerifiedArtifacts {
     static VERIFIED: OnceLock<VerifiedArtifacts> = OnceLock::new();
     VERIFIED.get_or_init(|| Mutex::new(HashSet::new()))
@@ -1125,7 +1183,10 @@ pub(crate) fn open_authenticated(
     // and a full verification only records a proof for an identity that held
     // still while it was being taken.
     let identity_after = artifact_identity(&file)?;
-    let stable = identity_before == identity_after;
+    // Both readings must agree AND the timestamps must be fine-grained enough
+    // to have noticed a write between them. A coarse filesystem is never
+    // memoized, in either direction.
+    let stable = identity_before == identity_after && identity_after.is_fine_grained();
     let memoized = stable
         && artifact_verified()
             .lock()
@@ -1364,6 +1425,66 @@ mod tests {
             artifact_verification_count(),
             before + 2,
             "a replaced file inherited an earlier proof"
+        );
+    }
+
+    /// The memo's key is metadata, so it is only ever consulted where the
+    /// metadata is fine-grained enough to have noticed a write.
+    ///
+    /// A filesystem reporting whole-second timestamps sets both nanosecond
+    /// fields to zero, and two same-length writes inside one tick would then
+    /// share a key. Such an identity is refused outright — never consulted,
+    /// never recorded — so every load there hashes.
+    #[test]
+    fn a_coarse_timestamp_identity_is_never_memoized() {
+        let mut coarse = ArtifactIdentity {
+            len: 17,
+            platform: [1, 2, 3, 0, 4, 0],
+        };
+        assert!(
+            !coarse.is_fine_grained(),
+            "whole-second timestamps must not be memoized"
+        );
+        // Either nanosecond field being non-zero is a real nanosecond FS.
+        coarse.platform[3] = 1;
+        assert!(coarse.is_fine_grained());
+        coarse.platform[3] = 0;
+        coarse.platform[5] = 1;
+        assert!(coarse.is_fine_grained());
+    }
+
+    /// The identity a memo hit is keyed on is re-read from the SAME retained
+    /// descriptor AFTER the private copy is taken, and both readings must
+    /// agree. Ordering is the whole safety argument: a stat taken only before
+    /// the read cannot see a write that lands during it.
+    ///
+    /// Asserted structurally, because the race it guards cannot be provoked
+    /// deterministically — what can be checked is that the code does the two
+    /// reads in the required order and requires them to match.
+    #[test]
+    fn the_memo_key_is_re_read_after_the_private_copy() {
+        let source = include_str!("pickle_convert.rs");
+        let body = source
+            .split_once("pub(crate) fn open_authenticated(")
+            .expect("the function exists")
+            .1;
+        let before = body.find("let identity_before = artifact_identity(&file)?;");
+        let read = body.find(".read_to_end(&mut bytes)");
+        let after = body.find("let identity_after = artifact_identity(&file)?;");
+        let (before, read, after) = (
+            before.expect("a stat before the read"),
+            read.expect("the private read"),
+            after.expect("a stat after the read"),
+        );
+        assert!(before < read, "the first stat must precede the read");
+        assert!(
+            read < after,
+            "the memo key must be re-read AFTER the private copy, or a write \
+             landing during the read is invisible to it"
+        );
+        assert!(
+            body.contains("identity_before == identity_after"),
+            "a memo hit must require both readings to agree"
         );
     }
 

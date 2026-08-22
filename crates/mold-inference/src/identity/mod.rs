@@ -75,6 +75,27 @@ pub enum IdentityError {
     Runtime(#[from] anyhow::Error),
 }
 
+impl IdentityError {
+    /// Whether this refusal is about the PHOTOGRAPH the caller supplied rather
+    /// than about the machine that tried to read it.
+    ///
+    /// #1227 phase 2 runs the extraction on the render's leased GPU, so its
+    /// failures now reach a worker's reliability counter. Three unusable
+    /// photographs must not degrade a healthy card out of rotation for a
+    /// minute: a face that is not there, a payload that will not decode, and
+    /// landmarks that will not fit the template are all answers about the
+    /// input, reproducible on any device, and the caller's to fix.
+    ///
+    /// [`Self::Runtime`] is the only device-attributable arm — a load failure,
+    /// a kernel failure, a driver fault — and is the only one that counts.
+    pub fn is_user_input(&self) -> bool {
+        match self {
+            Self::NoFaceDetected | Self::Decode(_) | Self::Alignment(_) => true,
+            Self::Runtime(_) => false,
+        }
+    }
+}
+
 /// Everything one identity image yields.
 #[derive(Debug, Clone)]
 pub struct IdentityFeatures {

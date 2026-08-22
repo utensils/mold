@@ -814,6 +814,31 @@ which is a *harder* target than it looks now: the phase-1 run predates #1292's
 BiSeNet mask, so the comparable before-figure on this branch's parent is
 3,073.6 ms and the CPU result is 38% under that.
 
+### The memo's residual, and why it is the one already accepted
+
+`open_authenticated`'s memo is keyed on the file's METADATA — `(dev, ino, len,
+mtime, ctime)` plus the pin — so a same-length in-place overwrite landing
+inside one timestamp tick would be served without being hashed. Two things
+bound that:
+
+- **Coarse filesystems are fenced out entirely.** A mount reporting
+  whole-second timestamps sets both nanosecond fields to zero, and
+  `ArtifactIdentity::is_fine_grained` refuses to memoize such an identity in
+  either direction — never consulted, never recorded. Every load there pays the
+  full SHA-256, which is slower and correct.
+- **What remains is exactly `mold_core::download::pinned_file_digest`'s
+  residual**, which already guards every model weight mold loads: a same-length
+  write landing in the same nanosecond on a filesystem that reports
+  nanoseconds, where `ctime` is not settable from userspace at all. Holding the
+  609 MB tower to a stricter standard than the 24 GB checkpoint beside it would
+  need a reason nobody can state.
+
+The alternative was considered: keep the verified private copy resident for the
+process lifetime, which makes the bytes immutable by construction and removes
+the re-read as well as the hash. It was rejected on cost — 609 MB of host RAM
+held forever, against a re-read the memo already reduces to ~50 ms, on a phase
+whose entire point was to stop paying for the tower when nothing is using it.
+
 ### The cache is single-flight, and that is not an optimization
 
 §2 designed the cache as a lock-free get/put around the extraction, which was
@@ -886,10 +911,21 @@ Measured on **plato** (128-core x86_64 NixOS, 4x L40S) at `3163ed47`, after PR
 | `idformer-fwd` | 5.8 | 536.4 |
 | **whole extraction** | **573.2** | **6024.9** |
 
-p95 milliseconds per image. `BASELINE_PLATO_FULL_P95_MS` is now the CUDA figure
-(573.2); the CPU one is recorded here rather than in the probe because nothing
-gates on it, and putting it in the same slot would check the device path
-against a number no device run can produce.
+p95 milliseconds per image, **on a quiet box**. That caveat is load-bearing:
+under plato's normal load average of 10-32 the same build measures the whole
+extraction at **688-795 ms**. The 573.2 ms figure is the floor, not the
+expectation, and any comparison drawn against it has to carry the load average
+the way §4's own cautionary example demands.
+
+`BASELINE_PLATO_FULL_P95_MS` is the **CPU 6,024.9**, not this CUDA number, and
+the first attempt got that wrong in an instructive way. A
+`--regress-against-full` baseline is a *before* figure: halcyon's 2,863.9 is
+phase 1's own pre-phase-2 measurement, so demanding 25% off it means something.
+Putting phase 2's own CUDA result in the same slot produced a check that
+demanded the run be 25% faster than itself — it failed by construction, and on
+a loaded box it failed loudly. The CPU full stack is the pre-phase-2 analogue
+for this host, and 25% under it (4,518.7 ms) is a bar both arms clear, which is
+correct, because both got faster.
 
 Three things in that table are worth reading twice. `eva-forward` is **12.4 ms
 against the CPU's 2,266.9** — 183x, which is what a 300 GFLOP dense ViT is
@@ -902,7 +938,8 @@ slower, not because the memo is weaker. And `eva-ctor` collapses from 831.5 to
 f32 and the device arm does not.
 
 `--regress-against plato` (the face-stack criterion, stated against #1222's
-1,574.5 ms `candle-onnx` CPU baseline) **passes on CUDA at 98.4% faster** and
+1,574.5 ms `candle-onnx` CPU baseline — also a before figure, also left alone)
+**passes on CUDA at 98.4% faster** and
 **fails on the CPU at 14.5%** — the same shape halcyon shows, and for the same
 reason §1 records: the criterion was sized against a re-materialization cost
 that turned out not to exist. The face-stack baseline is deliberately left as
@@ -954,16 +991,27 @@ to the photographs that actually need detecting). Per-stage deltas: parser
 +33.6 MB, `eva-ctor` +570.4 MB (the f16 tower, as designed — the widening never
 appears), `eva-forward` +6.3 MB, `idformer-build` +33.6 MB.
 
+Three cold runs came in at **637,534,208 / 643,825,664 / 643,825,664** — a
+6.3 MB spread — and that spread is why the CHECK, not the constant, had to
+change. A naive `measured >= 0.9 x charged` floors at 630,000,000, only 7.5 MB
+under the smallest observation, and raising the charge makes it worse rather
+than better: 710,000,000 floors at 639,000,000 and fails on a run already
+taken. The tension is structural — the measurement is one photograph and the
+charge budgets for `ID_IMAGES_MAX` — so the over-charge half of the test now
+nets out `EXTRACTION_DEVICE_MULTI_IMAGE_ALLOWANCE_BYTES` first, leaving a real
+±10% band around a single-photograph run (floor 597,600,000, ~40 MB of margin).
+The coverage half still uses the full charge, because under-charging is what
+OOMs a card mid-extraction.
+
 So the pre-measurement 1.1 GB derivation was **1.71x the truth**: it assumed
 SCRFD and ArcFace stayed resident beside the tower and added ~120 MB of
 activation headroom, when in fact the allocator hands each stage's freed blocks
-to the next. `EXTRACTION_DEVICE_PEAK_BYTES` is now **700,000,000**, 8.7% above
-the measurement — the smallest margin that stays inside the ±10% band the
-acceptance criterion names while still absorbing allocator block rounding
-(driver- and card-specific) and a multi-photograph set's ~12 MB of retained
-hidden states per extra photograph. Over-charging by 1.71x would park renders an
-L40S could run, which is exactly the mistake #1223 named when it removed
-#1220's placeholder.
+to the next. `EXTRACTION_DEVICE_PEAK_BYTES` is **700,000,000**: it covers the
+largest admissible set (643,825,664 + 36 MB of retained hidden states for the
+`ID_IMAGES_MAX - 1` further photographs = 679,825,664) with ~20 MB left for
+allocator block rounding, which differs by driver and card. Over-charging by
+1.71x would park renders an L40S could run, which is exactly the mistake #1223
+named when it removed #1220's placeholder.
 
 ### plato: the render itself
 

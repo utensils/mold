@@ -3646,12 +3646,24 @@ impl Drop for SingletonCancelGuard<'_> {
 /// record: the process is going down for a restart either way, and degrading a
 /// healthy card out of rotation on the way out helps nobody. That mirrors the
 /// model-load arm's `count_worker_failure = false`.
-fn settle_identity_extraction_failure(worker: &GpuWorker, model_name: &str, error: &str) -> String {
-    if has_fatal_cuda_error(error) {
+fn settle_identity_extraction_failure(
+    worker: &GpuWorker,
+    model_name: &str,
+    error: &crate::identity_extraction::IdentityFailure,
+) -> String {
+    if has_fatal_cuda_error(&error.message) {
         quarantine_poisoned_worker(worker);
         return fatal_cuda_user_message(model_name);
     }
-    record_failure(worker);
+    // Only a device-attributable failure may touch this worker's health. A
+    // photograph with no detectable face is reproducible on every GPU in the
+    // fleet, so counting it would degrade a card for something no card could
+    // have done differently — and on a single-GPU host three bad photographs
+    // would take the whole machine out of rotation for a minute, telling the
+    // person who supplied them an unrelated story about GPU health.
+    if !error.user_input {
+        record_failure(worker);
+    }
     format!("face-identity conditioning failed: {error}")
 }
 
@@ -3855,7 +3867,13 @@ fn process_job_with_sink(
                 .as_ref()
                 .map(|child| child.prepared_inputs.identity_pin.clone())
         });
-    let frozen_identity = match carried_identity.or_else(|| identity_pin.as_ref()?.get()) {
+    // The pin carries the advisory too, so a sibling that never enters the
+    // resolver still reports which face was chosen.
+    let pinned = identity_pin.as_ref().and_then(|pin| pin.get());
+    if let Some(warning) = pinned.as_ref().and_then(|pinned| pinned.warning.clone()) {
+        identity_warning.get_or_insert(warning);
+    }
+    let frozen_identity = match carried_identity.or_else(|| pinned.map(|pinned| pinned.embedding)) {
         Some(frozen) => Some(frozen),
         None => {
             let identity_paths = job
@@ -10852,24 +10870,51 @@ mod tests {
     /// error can now originate there. It must quarantine exactly as one from
     /// the model load or the generation does — otherwise the next BUFFERED job
     /// picks up the poisoned context and the fatal-context invariant is gone.
+    ///
+    /// And the counterpart: an unusable PHOTOGRAPH must leave the worker's
+    /// reliability counter alone. That counter takes a sick card out of
+    /// rotation; a face that is not there is reproducible on every card in the
+    /// fleet, and on a single-GPU host three bad photographs would otherwise
+    /// degrade the whole machine for a minute.
     #[test]
     fn a_fatal_cuda_error_during_face_extraction_quarantines_the_worker() {
+        use crate::identity_extraction::IdentityFailure;
+
         let worker = single_worker_pool_with_parked("flux-dev:q4", Duration::ZERO);
 
-        // An ordinary failure — an absent face, a torn file — is an ordinary
-        // job failure and leaves the context alone.
-        let ordinary = settle_identity_extraction_failure(
-            &worker,
-            "flux-dev:q4",
-            "no face was detected in the identity image",
-        );
-        assert!(
-            ordinary.contains("face-identity conditioning failed"),
-            "{ordinary}"
+        // A refusal about the caller's photograph. Reported, never counted.
+        for _ in 0..3 {
+            let refused = settle_identity_extraction_failure(
+                &worker,
+                "flux-dev:q4",
+                &IdentityFailure::user_input("no face was detected in the identity image"),
+            );
+            assert!(
+                refused.contains("no face was detected"),
+                "the caller must be told what is wrong with the photograph: {refused}"
+            );
+        }
+        assert_eq!(
+            worker.consecutive_failures.load(Ordering::SeqCst),
+            0,
+            "three unusable photographs must not degrade a healthy GPU"
         );
         assert!(!worker.poisoned.load(Ordering::SeqCst));
         assert!(worker_unavailable(&worker, "flux-dev:q4").is_none());
+
+        // A device-attributable failure — a load that could not place weights
+        // — is an ordinary job failure and does count.
+        let engine = settle_identity_extraction_failure(
+            &worker,
+            "flux-dev:q4",
+            &IdentityFailure::device("loading the PuLID face-extraction models: broken pipe"),
+        );
+        assert!(
+            engine.contains("face-identity conditioning failed"),
+            "{engine}"
+        );
         assert_eq!(worker.consecutive_failures.load(Ordering::SeqCst), 1);
+        assert!(!worker.poisoned.load(Ordering::SeqCst));
 
         // A fatal context is not a job failure. On a FRESH worker it
         // quarantines and reports the restart message, and the failure counter
@@ -10880,8 +10925,10 @@ mod tests {
         let fatal = settle_identity_extraction_failure(
             &worker,
             "flux-dev:q4",
-            "extracting the face identity: DriverError(CUDA_ERROR_ILLEGAL_ADDRESS, an illegal \
-             memory access was encountered)",
+            &IdentityFailure::device(
+                "extracting the face identity: DriverError(CUDA_ERROR_ILLEGAL_ADDRESS, an \
+                 illegal memory access was encountered)",
+            ),
         );
         assert!(fatal.contains("Restart the mold server"), "{fatal}");
         assert!(worker.poisoned.load(Ordering::SeqCst));

@@ -1018,13 +1018,25 @@ pub struct DeviceFact {
 ///
 /// Empty (and cheap) for every request that conditions on no face.
 #[derive(Clone, Debug, Default)]
-pub struct IdentityPin(
-    std::sync::Arc<std::sync::OnceLock<mold_core::identity::FrozenIdentityEmbedding>>,
-);
+pub struct IdentityPin(std::sync::Arc<std::sync::OnceLock<PinnedIdentity>>);
+
+/// What a parent pins: the identity AND the advisory that came with it.
+///
+/// The advisory is here rather than beside it because a later child skips the
+/// resolver entirely on a pin hit, and post-lease preparation leaves
+/// `identity_warning` empty — so a child that took the pin would silently drop
+/// "several faces were found, the largest was used". The person who supplied a
+/// group photograph needs that on every print of the batch, not just on
+/// whichever sibling happened to extract.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PinnedIdentity {
+    pub embedding: mold_core::identity::FrozenIdentityEmbedding,
+    pub warning: Option<String>,
+}
 
 impl IdentityPin {
-    /// The pinned identity, if a sibling has already extracted one.
-    pub fn get(&self) -> Option<mold_core::identity::FrozenIdentityEmbedding> {
+    /// The pinned identity and advisory, if a sibling has already extracted.
+    pub fn get(&self) -> Option<PinnedIdentity> {
         self.0.get().cloned()
     }
 
@@ -1034,10 +1046,7 @@ impl IdentityPin {
     /// embedding back and must use that, discarding its own. Returning `()` and
     /// letting the caller keep its own value would leave two siblings holding
     /// two tolerance-different identities while looking like it had worked.
-    pub fn pin(
-        &self,
-        value: mold_core::identity::FrozenIdentityEmbedding,
-    ) -> mold_core::identity::FrozenIdentityEmbedding {
+    pub fn pin(&self, value: PinnedIdentity) -> PinnedIdentity {
         let _ = self.0.set(value);
         self.0
             .get()
@@ -1046,9 +1055,6 @@ impl IdentityPin {
     }
 }
 
-/// Compared by CONTENT, not by pointer: two plans carrying the same pinned
-/// identity are the same plan, and two carrying nothing are too. Pointer
-/// equality would make a plan unequal to its own clone-and-refill.
 impl PartialEq for IdentityPin {
     fn eq(&self, other: &Self) -> bool {
         self.0.get() == other.0.get()

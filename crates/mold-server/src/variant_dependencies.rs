@@ -1614,7 +1614,13 @@ pub(crate) async fn prepare_inputs_for_devices(
     // child never re-extracts even if its own dispatch reaches the pin first.
     let identity_pin = crate::execution_plan::IdentityPin::default();
     if let Some(frozen) = identity_embedding.clone() {
-        let _ = identity_pin.pin(frozen);
+        // The advisory a re-prepared child carries is its parent's, and it is
+        // already on `PreparedExecutionInputs`; pinning `None` here would let a
+        // sibling that reads the pin lose it.
+        let _ = identity_pin.pin(crate::execution_plan::PinnedIdentity {
+            embedding: frozen,
+            warning: context.frozen_identity_warning.clone(),
+        });
     }
 
     let prepared = PreparedExecutionInputs {
@@ -1975,6 +1981,14 @@ pub struct DependencyPreparationContext {
     /// chances for the siblings to disagree. Populated, the extraction is
     /// skipped entirely and the parent's exact value is carried forward.
     pub(crate) frozen_identity: Option<mold_core::identity::FrozenIdentityEmbedding>,
+    /// The advisory that came with [`Self::frozen_identity`].
+    ///
+    /// Carried beside it so the pin this preparation mints holds the pair. A
+    /// child that reads the pin never enters the resolver, so an advisory left
+    /// out here is one the sibling never reports — and "several faces were
+    /// found, the largest was used" is exactly the note the person who supplied
+    /// a group photograph needs on every print of the batch.
+    pub(crate) frozen_identity_warning: Option<String>,
 }
 
 pub async fn prepare_execution_inputs(

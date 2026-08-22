@@ -98,7 +98,15 @@ pub use mold_core::identity::EXTRACTION_HOST_PEAK_BYTES;
 /// photograph contributes, which the IDFormer needs after the tower is gone.
 ///
 /// `5 * 577 * 1024 * 4` = 11,816,960 bytes, plus the projection, rounded up.
-pub const EXTRACTION_RETAINED_BYTES_PER_IMAGE: u64 = 12_000_000;
+///
+/// Re-exported from `mold_core::identity` for the same reason
+/// [`EXTRACTION_HOST_PEAK_BYTES`] is: `mold_core` composes the device charge's
+/// multi-photograph allowance from it and is compiled without the `pulid`
+/// feature, so it cannot read a constant that lives here. A second literal
+/// there and here is what let the host peak drift by a gigabyte.
+/// `the_retained_per_image_charge_covers_the_towers_own_shape` re-derives it
+/// from the tower's geometry, which only this crate can see.
+pub use mold_core::identity::EXTRACTION_RETAINED_BYTES_PER_IMAGE;
 
 /// Where one extraction runs.
 ///

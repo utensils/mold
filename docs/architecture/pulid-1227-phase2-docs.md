@@ -139,6 +139,26 @@ and the EVA02-CLIP release is converted before it is ever loaded** bullet.
 >   An uncond-only miss (first true-CFG request after an ordinary one) loads
 >   the IDFormer alone and never the face stack: 60.6 ms against ~340 ms.
 
+> - **An identity extraction failure is classified before it touches worker
+>   health.** Phase 2 put the extraction on the leased GPU, so its failures now
+>   reach the reliability counter that takes a sick card out of rotation.
+>   `IdentityError::is_user_input` is the authority — `NoFaceDetected`,
+>   `Decode`, `Alignment` are about the photograph and reproducible on every
+>   card; only `Runtime` is device-attributable — and `IdentityFailure` carries
+>   that attribution to `settle_identity_extraction_failure`, which quarantines
+>   on a fatal CUDA context, counts a device failure, and counts NOTHING for an
+>   unusable photograph. Three faceless images must not degrade a single-GPU
+>   host for a minute.
+>
+> - **The derived-artifact memo is fenced on timestamp granularity.** Its key is
+>   metadata, so `ArtifactIdentity::is_fine_grained` refuses to memoize when
+>   both nanosecond fields are zero (the signature of a one-second-granularity
+>   filesystem), and the key is re-read from the same retained descriptor AFTER
+>   the private copy with both readings required to agree. What remains — a
+>   same-length write inside one nanosecond, with `ctime` not settable from
+>   userspace — is exactly `mold_core::download::pinned_file_digest`'s residual,
+>   which already guards every model weight mold loads.
+
 ### 1c. Amend the metadata-DB paragraph
 
 The **Metadata DB** section's schema sentence needs the bump. Current text ends
@@ -204,9 +224,10 @@ These files are owned by this branch and are current:
 
 ## 5. Known gaps a reviewer should see
 
-- **CUDA is measured** (plato, 4x L40S, at `3163ed47`): whole extraction
-  573.2 ms, parity worst 4.908e-5 against the 5e-5 budget, device peak
-  643,825,664 bytes against a 700,000,000 charge, render cosine 0.6259.
+- **CUDA is measured** (plato, 4x L40S): whole extraction 573.2 ms on a QUIET
+  box and 688-795 ms under its normal load average of 10-32, parity worst
+  4.908e-5 against the 5e-5 budget, device peak 637.5-643.8 MB against a
+  700,000,000 charge, render cosine 0.6259.
   `pulid-perf.md` §4b's plato subsections carry the tables. Two things a
   reviewer should carry forward: **CUDA uses 98% of the parity budget**
   (Metal used 76%), so a future change to the tower's CUDA arithmetic fails

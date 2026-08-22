@@ -83,6 +83,56 @@ pub(crate) fn request_resolves_identity(request: &GenerateRequest) -> bool {
     crate::identity_dependencies::request_needs_identity_assets(request)
 }
 
+/// Why one identity resolution failed, and whose fault it is.
+///
+/// #1227 phase 2 moved the extraction onto the render's leased GPU, so its
+/// failures now reach a worker's reliability counter for the first time. That
+/// counter exists to take a sick card out of rotation, and an unusable
+/// photograph is not a sick card: three faceless images in a row would
+/// otherwise degrade a healthy single-GPU worker for a minute and the person
+/// who supplied them would see an unrelated "GPU degraded" story.
+///
+/// So the attribution travels with the message. `mold_inference`'s
+/// `IdentityError::is_user_input` is the authority for the extraction itself —
+/// a face that is not there, a payload that will not decode, landmarks that
+/// will not fit — and this module adds the request-shape refusals it raises
+/// before the extractor is ever entered.
+#[derive(Debug, Clone)]
+pub struct IdentityFailure {
+    /// The message the caller sees.
+    pub message: String,
+    /// True when the refusal is about the request, reproducible on any device.
+    /// Only a `false` may touch the worker's health.
+    pub user_input: bool,
+}
+
+impl IdentityFailure {
+    /// A refusal about the request or the photograph.
+    pub fn user_input(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            user_input: true,
+        }
+    }
+
+    /// A refusal about the machine: a load failure, a kernel fault, a driver
+    /// error.
+    pub fn device(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            user_input: false,
+        }
+    }
+}
+
+impl std::fmt::Display for IdentityFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for IdentityFailure {}
+
 /// What one parent request's identity resolution produced.
 #[derive(Debug, Default, Clone)]
 pub struct ResolvedIdentity {
@@ -127,12 +177,17 @@ pub fn resolve_pinned_identity_for_lease(
     pin: &crate::execution_plan::IdentityPin,
     backend: mold_core::GpuBackend,
     ordinal: usize,
-) -> Result<ResolvedIdentity, String> {
+) -> Result<ResolvedIdentity, IdentityFailure> {
     if let Some(pinned) = pin.get() {
         return Ok(ResolvedIdentity {
             extracted: false,
-            embedding: Some(pinned),
-            warning: None,
+            embedding: Some(pinned.embedding),
+            // The advisory rides the pin, so every sibling reports the face
+            // choice the extraction actually made. Post-lease preparation
+            // leaves `identity_warning` empty, so a child that took the pin and
+            // did not carry this would drop it silently — and the person who
+            // supplied a group photograph would see it on one print of four.
+            warning: pinned.warning,
         });
     }
     let resolved = resolve_identity_for_lease(request, paths, backend, ordinal)?;
@@ -140,9 +195,17 @@ pub fn resolve_pinned_identity_for_lease(
     // that raced and lost must render the WINNER's face. Keeping its own would
     // leave two siblings of one print conditioned on two identities that differ
     // at the measured device tolerance, and look like it had worked.
+    let Some(embedding) = resolved.embedding else {
+        return Ok(resolved);
+    };
+    let pinned = pin.pin(crate::execution_plan::PinnedIdentity {
+        embedding,
+        warning: resolved.warning,
+    });
     Ok(ResolvedIdentity {
-        embedding: resolved.embedding.map(|embedding| pin.pin(embedding)),
-        ..resolved
+        extracted: resolved.extracted,
+        embedding: Some(pinned.embedding),
+        warning: pinned.warning,
     })
 }
 
@@ -165,7 +228,7 @@ pub fn resolve_identity_for_lease(
     paths: Option<&PulidPaths>,
     backend: mold_core::GpuBackend,
     ordinal: usize,
-) -> Result<ResolvedIdentity, String> {
+) -> Result<ResolvedIdentity, IdentityFailure> {
     if !request_resolves_identity(request) {
         return Ok(ResolvedIdentity::default());
     }
@@ -177,23 +240,25 @@ pub fn resolve_identity_for_lease(
         .map(<[u8]>::to_vec)
         .collect();
     if images.is_empty() {
-        return Err(
+        return Err(IdentityFailure::user_input(
             "id_image (or id_images) is required when id_weight, id_start_step, id_image_name, \
-             or id_image_names is set"
-                .to_string(),
-        );
+             or id_image_names is set",
+        ));
     }
     // The unconditional identity is computed only for a request that actually
     // runs the true-CFG negative branch; an ordinary identity render pays
     // nothing for it.
     let want_uncond = mold_core::identity::request_uses_true_cfg(request);
     let Some(paths) = paths.cloned() else {
-        return Err(
+        // A missing bundle is a machine that has not been provisioned, not a
+        // photograph the caller can fix — but it is equally not a fault the
+        // GPU's health counter can act on, and every retry will hit it. Named
+        // as request-scoped so a mis-provisioned host is not also degraded.
+        return Err(IdentityFailure::user_input(
             "this request asks for face-identity conditioning but no PuLID bundle resolved on \
              any eligible device; run `mold pull pulid-flux --accept-license \
-             insightface-antelopev2`"
-                .to_string(),
-        );
+             insightface-antelopev2`",
+        ));
     };
 
     #[cfg(test)]
@@ -229,7 +294,7 @@ fn extract_on_device(
     want_uncond: bool,
     backend: mold_core::GpuBackend,
     ordinal: usize,
-) -> Result<ResolvedIdentity, String> {
+) -> Result<ResolvedIdentity, IdentityFailure> {
     use mold_inference::identity::extraction::ExtractionPlacement;
 
     let borrowed: Vec<&[u8]> = images.iter().map(Vec::as_slice).collect();
@@ -239,7 +304,12 @@ fn extract_on_device(
         want_uncond,
         ExtractionPlacement::Gpu { backend, ordinal },
     )
-    .map_err(|error| format!("{error:#}"))?;
+    // `IdentityError::is_user_input` is the authority: only a `Runtime` arm is
+    // about the machine that ran it.
+    .map_err(|error| IdentityFailure {
+        message: format!("{error:#}"),
+        user_input: error.is_user_input(),
+    })?;
 
     if let Some(warning) = &outcome.warning {
         tracing::warn!(target: "mold::identity", "{warning}");
@@ -263,12 +333,14 @@ fn extract_on_device(
     _want_uncond: bool,
     _backend: mold_core::GpuBackend,
     _ordinal: usize,
-) -> Result<ResolvedIdentity, String> {
-    Err(mold_core::identity::IDENTITY_BUILD_UNSUPPORTED.to_string())
+) -> Result<ResolvedIdentity, IdentityFailure> {
+    Err(IdentityFailure::user_input(
+        mold_core::identity::IDENTITY_BUILD_UNSUPPORTED,
+    ))
 }
 
 #[cfg(test)]
-type Stub = fn(&PulidPaths, &[Vec<u8>], bool) -> Result<ResolvedIdentity, String>;
+type Stub = fn(&PulidPaths, &[Vec<u8>], bool) -> Result<ResolvedIdentity, IdentityFailure>;
 
 #[cfg(test)]
 static TEST_STUB: std::sync::Mutex<Option<Stub>> = std::sync::Mutex::new(None);
@@ -392,7 +464,7 @@ mod tests {
         _: &PulidPaths,
         images: &[Vec<u8>],
         want_uncond: bool,
-    ) -> Result<ResolvedIdentity, String> {
+    ) -> Result<ResolvedIdentity, IdentityFailure> {
         Ok(ResolvedIdentity {
             extracted: true,
             embedding: Some(stub_embedding_for(images, want_uncond)),
@@ -412,7 +484,7 @@ mod tests {
         _: &PulidPaths,
         images: &[Vec<u8>],
         want_uncond: bool,
-    ) -> Result<ResolvedIdentity, String> {
+    ) -> Result<ResolvedIdentity, IdentityFailure> {
         Ok(ResolvedIdentity {
             extracted: true,
             embedding: Some(stub_embedding_for(images, want_uncond)),
@@ -480,8 +552,12 @@ mod tests {
         let error =
             resolve_identity_for_lease(&request(None), None, LEASED_BACKEND, LEASED_ORDINAL)
                 .expect_err("no bundle, no render");
-        assert!(error.contains("mold pull pulid-flux"), "{error}");
-        assert!(error.contains("insightface-antelopev2"), "{error}");
+        assert!(error.message.contains("mold pull pulid-flux"), "{error}");
+        assert!(error.message.contains("insightface-antelopev2"), "{error}");
+        assert!(
+            error.user_input,
+            "a host with no bundle is not a sick GPU: {error}"
+        );
         assert_eq!(
             stubbed.extractions(),
             0,
@@ -498,7 +574,7 @@ mod tests {
         _: &PulidPaths,
         images: &[Vec<u8>],
         want_uncond: bool,
-    ) -> Result<ResolvedIdentity, String> {
+    ) -> Result<ResolvedIdentity, IdentityFailure> {
         let now = IN_FLIGHT.fetch_add(1, Ordering::SeqCst) + 1;
         PEAK_IN_FLIGHT.fetch_max(now, Ordering::SeqCst);
         // Long enough that a genuinely concurrent peer would be observed.
@@ -652,7 +728,7 @@ mod tests {
             _: &PulidPaths,
             images: &[Vec<u8>],
             want_uncond: bool,
-        ) -> Result<ResolvedIdentity, String> {
+        ) -> Result<ResolvedIdentity, IdentityFailure> {
             Ok(ResolvedIdentity {
                 extracted: false,
                 embedding: Some(stub_embedding_for(images, want_uncond)),
@@ -737,7 +813,7 @@ mod tests {
             _: &PulidPaths,
             images: &[Vec<u8>],
             want_uncond: bool,
-        ) -> Result<ResolvedIdentity, String> {
+        ) -> Result<ResolvedIdentity, IdentityFailure> {
             // Every call produces a distinguishable identity, so an equal
             // result can only mean the pin was honoured.
             let nth = CALLS.fetch_add(1, Ordering::SeqCst);
@@ -821,6 +897,47 @@ mod tests {
             "a second parent must not inherit the first parent's pin"
         );
         assert_eq!(stubbed.extractions(), 2);
+    }
+
+    /// The multi-face advisory belongs to the identity, so every sibling that
+    /// takes the pin reports it — not just the one that extracted.
+    ///
+    /// Post-lease preparation leaves `identity_warning` empty for a new parent,
+    /// so a child reading the pin has no other source for it. Three of four
+    /// prints from a group photograph silently losing "the largest one was
+    /// used" is a worse failure than it looks: the caller cannot tell which
+    /// prints the note applied to.
+    #[test]
+    fn every_sibling_reports_the_advisory_the_extraction_produced() {
+        let stubbed = StubbedExtractor::install(stub_with_warning);
+        let pin = crate::execution_plan::IdentityPin::default();
+        let request = request(None);
+
+        let mut advisories = Vec::new();
+        for _ in 0..4 {
+            let resolved = resolve_pinned_identity_for_lease(
+                &request,
+                Some(&paths()),
+                &pin,
+                LEASED_BACKEND,
+                LEASED_ORDINAL,
+            )
+            .expect("every sibling resolves");
+            advisories.push(resolved.warning);
+        }
+
+        assert_eq!(stubbed.extractions(), 1, "only the first sibling extracts");
+        for (index, advisory) in advisories.iter().enumerate() {
+            let advisory = advisory
+                .as_deref()
+                .unwrap_or_else(|| panic!("sibling {index} lost the advisory"));
+            assert!(advisory.contains("faces were detected"), "{advisory}");
+            assert!(advisory.contains("largest"), "{advisory}");
+        }
+        assert!(
+            advisories.windows(2).all(|pair| pair[0] == pair[1]),
+            "every sibling must report the SAME advisory: {advisories:?}"
+        );
     }
 
     /// A pin hit is not an extraction, and must not be reported as a phase.

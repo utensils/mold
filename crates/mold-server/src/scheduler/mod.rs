@@ -1807,12 +1807,21 @@ impl Coordinator {
                 .prepared_inputs
                 .as_ref()
                 .and_then(|inputs| inputs.identity_embedding.clone());
+            // Its advisory travels with it, so the pin this preparation mints
+            // holds the pair a sibling reading it will report.
+            let frozen_identity_warning = pending
+                .prepared_inputs
+                .as_ref()
+                .and_then(|inputs| inputs.identity_warning.clone());
             #[cfg(not(any(feature = "h3", feature = "h3-private-uat")))]
-            let context =
-                crate::variant_dependencies::DependencyPreparationContext { frozen_identity };
+            let context = crate::variant_dependencies::DependencyPreparationContext {
+                frozen_identity,
+                frozen_identity_warning,
+            };
             #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
             let context = crate::variant_dependencies::DependencyPreparationContext {
                 frozen_identity,
+                frozen_identity_warning,
                 ..context
             };
             let preparer = self.preparer.clone();

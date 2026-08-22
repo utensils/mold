@@ -193,9 +193,24 @@ fn the_device_path_matches_the_host_path_within_the_recorded_tolerance() {
 ///    `extract_identity_embeddings`, which is what admission's job actually
 ///    calls.
 ///
-/// Measured properly on plato at `3163ed47`: **643,825,664 bytes**, against a
-/// 700,000,000 charge — 8.7% of headroom, inside the 10% band the acceptance
-/// criterion names.
+/// ## The band nets out what the charge deliberately reserves
+///
+/// This measures ONE photograph; the charge budgets for `ID_IMAGES_MAX` of
+/// them. Comparing the two directly puts an honest measurement permanently at
+/// the bottom of the ±10% band — plato's three cold runs came in at
+/// 637,534,208 / 643,825,664 / 643,825,664 against a naive floor of
+/// 630,000,000, i.e. 7.5 MB from a false failure. Raising the charge makes it
+/// worse, not better: 710,000,000 floors at 639,000,000 and fails on the
+/// 637.5 MB run already observed.
+///
+/// So the over-charge half subtracts
+/// `EXTRACTION_DEVICE_MULTI_IMAGE_ALLOWANCE_BYTES` first, leaving a real ±10%
+/// band around a single-photograph run (floor 597,600,000, ~40 MB of margin).
+/// The coverage half is unchanged and still uses the full charge, because
+/// under-charging is what OOMs a card mid-extraction.
+///
+/// Measured properly on plato: **637,534,208–643,825,664 bytes** against a
+/// 700,000,000 charge.
 #[test]
 #[ignore = "requires the pinned PuLID checkpoints via MOLD_TEST_PULID_ASSETS and a CUDA device"]
 fn the_measured_device_peak_is_within_ten_percent_of_the_charged_term() {
@@ -213,6 +228,9 @@ fn the_measured_device_peak_is_within_ten_percent_of_the_charged_term() {
     };
     let charged = mold_core::identity::EXTRACTION_DEVICE_PEAK_BYTES;
     let recorded = mold_core::identity::EXTRACTION_DEVICE_PEAK_MEASURED_BYTES;
+    // What the charge holds back for photographs this run does not supply.
+    let allowance = mold_core::identity::EXTRACTION_DEVICE_MULTI_IMAGE_ALLOWANCE_BYTES;
+    let single_image_charge = charged - allowance;
 
     // The baseline must be taken on a context that has never run this phase.
     // There is deliberately NO warm-up: see the doc comment above.
@@ -273,9 +291,39 @@ fn the_measured_device_peak_is_within_ten_percent_of_the_charged_term() {
          admitted on an under-charge OOMs mid-extraction"
     );
     assert!(
-        measured * 10 >= charged * 9,
-        "the charge {charged} is more than 10% above the measured {measured}; \
-         an over-charge parks renders the device could actually run"
+        measured * 10 >= single_image_charge * 9,
+        "the charge {charged} less its {allowance}-byte multi-photograph \
+         allowance is more than 10% above the measured {measured}; an \
+         over-charge parks renders the device could actually run"
+    );
+}
+
+/// The charge covers the largest admissible photograph set, not just the one
+/// the measurement above supplies.
+///
+/// Stated arithmetically rather than by extracting four photographs, because
+/// the four-photograph peak is the one-photograph peak plus a term the
+/// composer's own structure fixes: the tower is built once and run per
+/// photograph, so only the retained hidden states scale.
+#[test]
+fn the_charge_covers_the_largest_admissible_photograph_set() {
+    let charged = mold_core::identity::EXTRACTION_DEVICE_PEAK_BYTES;
+    let measured = mold_core::identity::EXTRACTION_DEVICE_PEAK_MEASURED_BYTES;
+    let allowance = mold_core::identity::EXTRACTION_DEVICE_MULTI_IMAGE_ALLOWANCE_BYTES;
+    assert_eq!(
+        allowance,
+        mold_inference::identity::extraction::EXTRACTION_RETAINED_BYTES_PER_IMAGE
+            * (mold_core::identity::ID_IMAGES_MAX as u64 - 1),
+        "the allowance must be the per-photograph charge, not a second number"
+    );
+    assert!(
+        charged >= measured + allowance,
+        "the charge {charged} must cover the largest set ({measured} + {allowance})"
+    );
+    // And not by so much that the single-photograph band above cannot hold.
+    assert!(
+        (charged - allowance) * 9 <= measured * 10,
+        "the netted charge is still more than 10% above one photograph"
     );
 }
 

@@ -93,25 +93,26 @@ const BASELINE_PLATO_P95_MS: f64 = 1574.5;
 /// paid. That makes the criterion HARDER, not looser, so it stands unchanged.
 const BASELINE_HALCYON_FULL_P95_MS: f64 = 2863.9;
 
-/// plato's whole-extraction warm p95, measured after PR #1295 opened.
+/// plato's whole-extraction warm p95 BEFORE phase 2, measured on its CPU.
 ///
-/// This is the **CUDA** figure (L40S), because that is the path plato runs and
-/// the one phase 2 exists for; the CPU number on the same box in the same
-/// session was 6,024.9 ms, recorded in `pulid-perf.md` §4b rather than here
-/// because nothing gates on it. Phase 1 skipped this host entirely, which is
-/// why the constant it left behind was `None`.
-const BASELINE_PLATO_FULL_P95_MS: Option<f64> = Some(573.2);
-
-/// plato's whole-extraction warm p95 on the CPU, for the record only.
+/// A `--regress-against-full` baseline is a **before** figure, not a result.
+/// halcyon's 2,863.9 works because it is phase 1's own pre-phase-2
+/// measurement; plato had none, so the first attempt at this constant put
+/// phase 2's CUDA result (573.2 ms) here and produced a check that demanded
+/// the run be 25% faster than itself. It failed by construction, and on a
+/// loaded box it failed loudly — plato at load 10-32 measures the same build
+/// at 688-795 ms.
 ///
-/// Carried beside the gated figure so the two are not confused: a regression
-/// check against a CPU number on a host that renders on CUDA would be checking
-/// a path nothing takes. `the_plato_baselines_name_which_device_they_came_from`
-/// pins that they are different numbers. Nothing outside that test reads it,
-/// deliberately — a CPU figure that reached a gate would be checking a path
-/// this host does not take.
-#[cfg(test)]
-const BASELINE_PLATO_FULL_CPU_P95_MS: f64 = 6024.9;
+/// So this is the pre-phase-2 analogue: the same box's CPU full stack, which
+/// is what an extraction cost there before the device path existed, measured
+/// in the same session as the CUDA number. 25% under it is 4,518.7 ms, which
+/// the CUDA path clears by an order of magnitude and the CPU path also clears
+/// — both correctly, because both got faster.
+///
+/// The CUDA result itself is recorded in `pulid-perf.md` §4b, with the load
+/// caveat, rather than in a constant: it is an outcome, and wiring an outcome
+/// into the gate is exactly the mistake above.
+const BASELINE_PLATO_FULL_P95_MS: Option<f64> = Some(6024.9);
 
 /// §1's acceptance criterion, "p95 at least 25% faster", as a ratio.
 const REGRESSION_MARGIN: f64 = 0.75;
@@ -896,20 +897,24 @@ mod tests {
         assert!((ceiling - 2147.925).abs() < 1e-9, "{ceiling}");
     }
 
-    /// plato's whole-extraction baseline is the CUDA one, because that is the
-    /// path it renders on. Recording the CPU figure in the same slot would
-    /// gate the device path against a number no device run can produce.
+    /// Both of plato's baselines are BEFORE figures, on the same host, from
+    /// the path each criterion was stated over.
+    ///
+    /// The whole-extraction one is deliberately the CPU full stack rather than
+    /// phase 2's own 573.2 ms CUDA result: a baseline that is the result makes
+    /// `--regress-against-full` demand a run be 25% faster than itself.
     #[test]
-    fn the_plato_baselines_name_which_device_they_came_from() {
-        assert_eq!(baseline_for("plato").unwrap().full_p95_ms, Some(573.2));
-        assert!(
-            BASELINE_PLATO_FULL_CPU_P95_MS > BASELINE_PLATO_FULL_P95_MS.unwrap() * 5.0,
-            "the CPU and CUDA figures must not be interchangeable"
-        );
+    fn the_plato_baselines_are_pre_phase_two_figures() {
+        let plato = baseline_for("plato").unwrap();
+        assert_eq!(plato.full_p95_ms, Some(6024.9));
         // The face-stack baseline stays #1222's `candle-onnx` CPU measurement:
-        // it is what `--regress-against` was stated over, and re-basing it on
-        // a CUDA number would silently retire that criterion.
-        assert_eq!(baseline_for("plato").unwrap().p95_ms, 1574.5);
+        // it is what `--regress-against` was stated over, and re-basing it on a
+        // phase-2 number would silently retire that criterion.
+        assert_eq!(plato.p95_ms, 1574.5);
+        // Neither is a phase-2 measurement. 573.2 ms (CUDA, quiet box) and the
+        // 688-795 ms it becomes under plato's normal load are recorded in
+        // `pulid-perf.md` §4b, where an outcome belongs.
+        assert!(plato.full_p95_ms.unwrap() > 795.0 * 5.0);
     }
 
     #[test]
