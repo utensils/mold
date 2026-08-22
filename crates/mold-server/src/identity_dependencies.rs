@@ -827,6 +827,7 @@ mod tests {
             DependencyMaterializationPolicy::ExistingOnly,
             DependencyPreparationContext {
                 frozen_identity: Some(frozen.clone()),
+                ..Default::default()
             },
         )
         .await
@@ -948,6 +949,7 @@ mod tests {
                 DependencyMaterializationPolicy::ExistingOnly,
                 DependencyPreparationContext {
                     frozen_identity: Some(parent.clone()),
+                    ..Default::default()
                 },
             )
             .await
@@ -1002,6 +1004,7 @@ mod tests {
             DependencyMaterializationPolicy::ExistingOnly,
             DependencyPreparationContext {
                 frozen_identity: Some(crate::identity_extraction::stub_embedding(b"parent-face")),
+                ..Default::default()
             },
         )
         .await

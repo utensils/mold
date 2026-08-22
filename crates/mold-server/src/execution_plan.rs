@@ -1546,10 +1546,30 @@ fn resolve_private_h3_execution_plans(
         crate::h3_admission::current_h3_host_memory().headroom_bytes();
     let mut plans = Vec::new();
     let mut rejections = Vec::new();
+    let mut host_shortfall: Option<String> = None;
     for device in eligible {
         let Some(evidence) = prepared.h3_private_admission_by_device.get(&device.id) else {
             continue;
         };
+        // Ask the host-memory question directly, before the frozen evidence is
+        // revalidated. The live headroom recheck is one of `validate_for`'s
+        // conjuncts and its refusal is a single opaque sentence, so the
+        // host-vs-device distinction used to be recovered by sniffing that
+        // sentence for the substring "host" — which it never contains. Every
+        // H3 job blocked on host RAM was therefore filed as a VRAM shortfall
+        // it did not have and reported to the planner as zero candidates,
+        // which is the untyped `no_schedulable_device` of #1272.
+        let required_host_bytes = evidence.predicted_host_increment_bytes();
+        if available_host_headroom_bytes < required_host_bytes {
+            host_shortfall.get_or_insert_with(|| {
+                h3_host_headroom_shortfall_reason(
+                    &device.id,
+                    required_host_bytes,
+                    available_host_headroom_bytes,
+                )
+            });
+            continue;
+        }
         if let Err(error) = evidence.validate_for(
             request,
             &device.id,
@@ -1650,19 +1670,32 @@ fn resolve_private_h3_execution_plans(
         });
     }
     if plans.is_empty() {
-        if rejections.iter().any(|rejection| {
-            rejection
-                .advice
-                .as_deref()
-                .is_some_and(|advice| advice.contains("host"))
-        }) {
-            return Err(ExecutionPlanError::PreparedInputsStale(
-                "MiniMax H3 host-memory capacity changed after private admission".into(),
-            ));
+        if let Some(reason) = host_shortfall {
+            // The frozen evidence was minted against a host sample that no
+            // longer holds, so only a fresh admission can decide. Staleness is
+            // what re-runs it; its own refusal then names required vs sampled.
+            return Err(ExecutionPlanError::PreparedInputsStale(reason));
         }
         return Err(insufficient_vram_error(&rejections));
     }
     Ok(plans)
+}
+
+/// Name both numbers a host-headroom shortfall turns on.
+///
+/// A bare "capacity changed" sentence is indistinguishable from every other
+/// staleness, and the whole point of #1218's honest refusals is that a user can
+/// read the shortfall and act on it.
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+pub(crate) fn h3_host_headroom_shortfall_reason(
+    device_id: &str,
+    required_host_bytes: u64,
+    available_host_headroom_bytes: u64,
+) -> String {
+    format!(
+        "MiniMax H3 host-memory capacity changed after private admission: {device_id} needs \
+         {required_host_bytes} host bytes but only {available_host_headroom_bytes} are available"
+    )
 }
 
 /// LTX-2 rejections name a shape that does fit on this device, so the user is
