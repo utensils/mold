@@ -624,7 +624,7 @@ pub async fn run(
         );
     }
     let effective_frames = if is_h3 {
-        Some(frames.unwrap_or(mold_core::minimax_h3::MIN_FRAMES))
+        Some(frames.unwrap_or(mold_core::minimax_h3::REVIEWED_COMPACT_FRAMES))
     } else {
         frames.or_else(|| model_cfg.effective_frames())
     };
@@ -3900,7 +3900,7 @@ mod tests {
             "batch_size": 1,
             "output_format": "mp4",
             "strength": 1.0,
-            "frames": mold_core::minimax_h3::MIN_FRAMES,
+            "frames": mold_core::minimax_h3::REVIEWED_COMPACT_FRAMES,
             "fps": mold_core::minimax_h3::FIXED_FPS,
             "enable_audio": true
         }))
@@ -4426,7 +4426,10 @@ mod tests {
         assert_eq!(body["steps"], mold_core::minimax_h3::COMFY_DEFAULT_STEPS);
         assert_eq!(body["guidance"], 0.0);
         assert_eq!(body["strength"], 1.0);
-        assert_eq!(body["frames"], mold_core::minimax_h3::MIN_FRAMES);
+        assert_eq!(
+            body["frames"],
+            mold_core::minimax_h3::REVIEWED_COMPACT_FRAMES
+        );
         assert_eq!(body["fps"], mold_core::minimax_h3::FIXED_FPS);
         assert_eq!(body["enable_audio"], true);
         assert!(body["negative_prompt"].is_null());
@@ -4910,7 +4913,7 @@ mod tests {
                         "height": mold_core::minimax_h3::DEFAULT_HEIGHT,
                         "steps": effective_generation_steps(true, model, &stale, &config, None),
                         "guidance": 0.0,
-                        "frames": mold_core::minimax_h3::MIN_FRAMES,
+                        "frames": mold_core::minimax_h3::REVIEWED_COMPACT_FRAMES,
                         "fps": mold_core::minimax_h3::FIXED_FPS,
                     }))
                     .unwrap();

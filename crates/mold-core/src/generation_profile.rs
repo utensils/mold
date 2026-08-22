@@ -1124,11 +1124,11 @@ fn recipe(
     let mut temporal = temporal_profile(input, family);
     if let Some(temporal) = temporal.as_mut().filter(|_| h3_compact) {
         temporal.frames = IntegerControl {
-            default: crate::minimax_h3::MIN_FRAMES,
-            min: crate::minimax_h3::MIN_FRAMES,
-            max: crate::minimax_h3::MIN_FRAMES,
+            default: crate::minimax_h3::REVIEWED_COMPACT_FRAMES,
+            min: crate::minimax_h3::REVIEWED_COMPACT_FRAMES,
+            max: crate::minimax_h3::REVIEWED_COMPACT_FRAMES,
             step: crate::minimax_h3::FRAME_STEP,
-            recommended: vec![crate::minimax_h3::MIN_FRAMES],
+            recommended: vec![crate::minimax_h3::REVIEWED_COMPACT_FRAMES],
             mode: ControlMode::Fixed,
         };
     }
@@ -2225,7 +2225,7 @@ mod tests {
             assert_eq!(recipe.defaults.steps, steps, "{model}");
             assert_eq!(
                 recipe.defaults.frames,
-                Some(crate::minimax_h3::MIN_FRAMES),
+                Some(crate::minimax_h3::REVIEWED_COMPACT_FRAMES),
                 "{model}"
             );
 
@@ -2239,17 +2239,17 @@ mod tests {
             assert_eq!(temporal.frames.mode, ControlMode::Fixed, "{model}");
             assert_eq!(
                 temporal.frames.min,
-                crate::minimax_h3::MIN_FRAMES,
+                crate::minimax_h3::REVIEWED_COMPACT_FRAMES,
                 "{model}"
             );
             assert_eq!(
                 temporal.frames.max,
-                crate::minimax_h3::MIN_FRAMES,
+                crate::minimax_h3::REVIEWED_COMPACT_FRAMES,
                 "{model}"
             );
             assert_eq!(
                 temporal.frames.default,
-                crate::minimax_h3::MIN_FRAMES,
+                crate::minimax_h3::REVIEWED_COMPACT_FRAMES,
                 "{model}"
             );
 
@@ -2280,11 +2280,14 @@ mod tests {
 
             let mut wrong_frames = request.clone();
             wrong_frames.frames =
-                Some(crate::minimax_h3::MIN_FRAMES + crate::minimax_h3::FRAME_STEP);
+                Some(crate::minimax_h3::REVIEWED_COMPACT_FRAMES + crate::minimax_h3::FRAME_STEP);
             assert!(
                 validate_request_against_generation_profile(&profile, &wrong_frames)
                     .unwrap_err()
-                    .contains("frames is fixed at 124"),
+                    .contains(&format!(
+                        "frames is fixed at {}",
+                        crate::minimax_h3::REVIEWED_COMPACT_FRAMES
+                    )),
                 "{model}"
             );
         }

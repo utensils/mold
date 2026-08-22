@@ -3420,7 +3420,7 @@ fn validate_h3_publication_contract(
     let expected_frames = job
         .request
         .frames
-        .unwrap_or(mold_core::minimax_h3::MIN_FRAMES);
+        .unwrap_or(mold_core::minimax_h3::REVIEWED_COMPACT_FRAMES);
     let expected_duration_ms = mold_inference::av_media::timeline_duration_ms(
         u64::from(expected_frames),
         mold_core::minimax_h3::FIXED_FPS,

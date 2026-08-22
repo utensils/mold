@@ -344,7 +344,7 @@ impl H3PrivateRuntimeEnvelopeRecord {
         };
         if self.width != contract::DEFAULT_WIDTH
             || self.height != contract::DEFAULT_HEIGHT
-            || self.frames != contract::MIN_FRAMES
+            || self.frames != contract::REVIEWED_COMPACT_FRAMES
             || self.fps != contract::FIXED_FPS
             || self.batch_size != 1
             // The step axis is owned by `validate_for_task_with_adapter`,
@@ -2843,7 +2843,7 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
         seed,
         width: request.width,
         height: request.height,
-        frames: request.frames.unwrap_or(contract::MIN_FRAMES),
+        frames: request.frames.unwrap_or(contract::REVIEWED_COMPACT_FRAMES),
         fps: request.fps.unwrap_or(contract::FIXED_FPS),
     };
     media.validate()?;
@@ -4695,7 +4695,7 @@ fn public_runtime_envelope_for_steps(max_steps: u32) -> H3PrivateRuntimeEnvelope
     H3PrivateRuntimeEnvelopeRecord {
         width: contract::DEFAULT_WIDTH,
         height: contract::DEFAULT_HEIGHT,
-        frames: contract::MIN_FRAMES,
+        frames: contract::REVIEWED_COMPACT_FRAMES,
         fps: contract::FIXED_FPS,
         batch_size: 1,
         max_steps,
@@ -4780,7 +4780,7 @@ fn capture_runtime_envelope() -> H3PrivateRuntimeEnvelopeRecord {
     H3PrivateRuntimeEnvelopeRecord {
         width: contract::DEFAULT_WIDTH,
         height: contract::DEFAULT_HEIGHT,
-        frames: contract::MIN_FRAMES,
+        frames: contract::REVIEWED_COMPACT_FRAMES,
         fps: contract::FIXED_FPS,
         batch_size: 1,
         max_steps: contract::COMFY_DEFAULT_STEPS,
@@ -6017,7 +6017,7 @@ mod tests {
         H3PrivateRuntimeEnvelopeRecord {
             width: contract::DEFAULT_WIDTH,
             height: contract::DEFAULT_HEIGHT,
-            frames: contract::MIN_FRAMES,
+            frames: contract::REVIEWED_COMPACT_FRAMES,
             fps: contract::FIXED_FPS,
             batch_size: 1,
             max_steps,
@@ -6609,7 +6609,7 @@ mod tests {
             envelope: H3PrivateRuntimeEnvelopeRecord {
                 width: contract::DEFAULT_WIDTH,
                 height: contract::DEFAULT_HEIGHT,
-                frames: contract::MIN_FRAMES,
+                frames: contract::REVIEWED_COMPACT_FRAMES,
                 fps: contract::FIXED_FPS,
                 batch_size: 1,
                 max_steps: contract::COMFY_DEFAULT_STEPS,
@@ -6675,7 +6675,7 @@ mod tests {
             batch_size: 1,
             width: contract::DEFAULT_WIDTH,
             height: contract::DEFAULT_HEIGHT,
-            frames: contract::MIN_FRAMES,
+            frames: contract::REVIEWED_COMPACT_FRAMES,
             fps: contract::FIXED_FPS,
             synchronized_audio: true,
             mp4_output: true,

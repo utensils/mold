@@ -533,7 +533,7 @@ pub fn build_generate_request(params: BuildParams<'_>) -> GenerateRequest {
                 .frames
                 .or_else(|| params.defaults.and_then(|value| value.default_frames))
                 .unwrap_or(if is_h3 {
-                    mold_core::minimax_h3::MIN_FRAMES
+                    mold_core::minimax_h3::REVIEWED_COMPACT_FRAMES
                 } else {
                     25
                 }),
@@ -1756,7 +1756,7 @@ mod tests {
     #[test]
     fn h3_duration_uses_its_five_offset_frame_grid() {
         let defs = mold_core::ModelDefaults {
-            default_frames: Some(mold_core::minimax_h3::MIN_FRAMES),
+            default_frames: Some(mold_core::minimax_h3::REVIEWED_COMPACT_FRAMES),
             default_fps: Some(mold_core::minimax_h3::FIXED_FPS),
             max_runtime_seconds: Some(mold_core::minimax_h3::MAX_DURATION_SECONDS),
             max_frames_absolute: Some(mold_core::minimax_h3::MAX_FRAMES),
@@ -1793,10 +1793,13 @@ mod tests {
                 Some(&defs),
                 None,
                 None,
-                Some(4.9),
+                Some(3.9),
             )
             .unwrap_err(),
-            "MiniMax H3 duration must be at least 5 seconds."
+            format!(
+                "MiniMax H3 duration must be at least {} seconds.",
+                mold_core::minimax_h3::MIN_DURATION_SECONDS
+            )
         );
     }
 
@@ -1813,7 +1816,7 @@ mod tests {
         let frames_error = resolve_video_timing(
             Some("minimax_h3"),
             None,
-            Some(mold_core::minimax_h3::MIN_FRAMES),
+            Some(mold_core::minimax_h3::REVIEWED_COMPACT_FRAMES),
             Some(30),
             None,
         )
@@ -1826,7 +1829,7 @@ mod tests {
     #[test]
     fn h3_request_builder_preserves_mandatory_av_contract() {
         let defs = mold_core::ModelDefaults {
-            default_frames: Some(mold_core::minimax_h3::MIN_FRAMES),
+            default_frames: Some(mold_core::minimax_h3::REVIEWED_COMPACT_FRAMES),
             default_fps: Some(mold_core::minimax_h3::FIXED_FPS),
             default_width: mold_core::minimax_h3::DEFAULT_WIDTH,
             default_height: mold_core::minimax_h3::DEFAULT_HEIGHT,

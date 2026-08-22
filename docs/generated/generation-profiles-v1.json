@@ -16057,7 +16057,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "minimax-h3.minimax-h3-fl2va",
-        "profile_hash": "baf5ebbfd706859adbfcd3b7b66378e4fbe7412fe94fc482bac99dc0f50f2034",
+        "profile_hash": "f4cf59a95e3d30301960f0acd08393ddb8431a532510fef48b692ab711c3aa05",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -16175,7 +16175,7 @@
             "temporal": {
               "frames": {
                 "default": 124,
-                "min": 124,
+                "min": 107,
                 "max": 345,
                 "step": 17,
                 "recommended": [
@@ -16437,7 +16437,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "minimax-h3.minimax-h3-ref2va",
-        "profile_hash": "1ec8cf397fdfa2d5da47e32f40162236fb66dba6059edfd39400cfa76a4184c3",
+        "profile_hash": "5fdc7173e1186bed5cb11809aa474bfe924047c21d9647cb00c010507657dfbe",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -16555,7 +16555,7 @@
             "temporal": {
               "frames": {
                 "default": 124,
-                "min": 124,
+                "min": 107,
                 "max": 345,
                 "step": 17,
                 "recommended": [

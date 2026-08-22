@@ -624,7 +624,9 @@ impl H3PreparedRequestShape {
         }
         let width = u64::from(request.width);
         let height = u64::from(request.height);
-        let target_frames = request.frames.unwrap_or(minimax_h3::MIN_FRAMES);
+        let target_frames = request
+            .frames
+            .unwrap_or(minimax_h3::REVIEWED_COMPACT_FRAMES);
         let frames = u64::from(target_frames);
         let video_latent_frames = frames
             .checked_sub(u64::from(minimax_h3::FRAME_OFFSET))

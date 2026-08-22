@@ -504,7 +504,7 @@ fn build_fl2va_capability(models_root: &std::path::Path) -> Option<mold_core::Mi
                     Some(mold_core::MiniMaxH3RequestCapability {
                         width: mold_core::minimax_h3::DEFAULT_WIDTH,
                         height: mold_core::minimax_h3::DEFAULT_HEIGHT,
-                        frames: mold_core::minimax_h3::MIN_FRAMES,
+                        frames: mold_core::minimax_h3::REVIEWED_COMPACT_FRAMES,
                         fps: mold_core::minimax_h3::FIXED_FPS,
                         steps: tier.steps,
                         batch_size: 1,
@@ -559,7 +559,7 @@ fn build_fl2va_capability(models_root: &std::path::Path) -> Option<mold_core::Mi
             request: Some(mold_core::MiniMaxH3RequestCapability {
                 width: mold_core::minimax_h3::DEFAULT_WIDTH,
                 height: mold_core::minimax_h3::DEFAULT_HEIGHT,
-                frames: mold_core::minimax_h3::MIN_FRAMES,
+                frames: mold_core::minimax_h3::REVIEWED_COMPACT_FRAMES,
                 fps: mold_core::minimax_h3::FIXED_FPS,
                 steps: mold_core::minimax_h3::COMFY_DEFAULT_STEPS,
                 batch_size: 1,
@@ -609,7 +609,7 @@ fn reviewed_h3_private_generation_profile_for(
 
     let width = mold_core::minimax_h3::DEFAULT_WIDTH;
     let height = mold_core::minimax_h3::DEFAULT_HEIGHT;
-    let frames = mold_core::minimax_h3::MIN_FRAMES;
+    let frames = mold_core::minimax_h3::REVIEWED_COMPACT_FRAMES;
     let fps = mold_core::minimax_h3::FIXED_FPS;
     let mut profile = mold_core::resolve_generation_profile(mold_core::GenerationProfileInput {
         model,
@@ -711,7 +711,7 @@ pub(crate) fn authenticated_h3_private_model_row(
         || !partition.runtime_available
         || request.width != mold_core::minimax_h3::DEFAULT_WIDTH
         || request.height != mold_core::minimax_h3::DEFAULT_HEIGHT
-        || request.frames != mold_core::minimax_h3::MIN_FRAMES
+        || request.frames != mold_core::minimax_h3::REVIEWED_COMPACT_FRAMES
         || request.fps != mold_core::minimax_h3::FIXED_FPS
         || request.steps != mold_core::minimax_h3::COMFY_DEFAULT_STEPS
         || request.batch_size != 1
@@ -781,7 +781,7 @@ pub(crate) fn authenticated_h3_private_model_rows(
         if !variant.installed
             || request.width != mold_core::minimax_h3::DEFAULT_WIDTH
             || request.height != mold_core::minimax_h3::DEFAULT_HEIGHT
-            || request.frames != mold_core::minimax_h3::MIN_FRAMES
+            || request.frames != mold_core::minimax_h3::REVIEWED_COMPACT_FRAMES
             || request.fps != mold_core::minimax_h3::FIXED_FPS
             || request.steps != tier.steps
             || request.batch_size != 1
@@ -1134,7 +1134,9 @@ impl H3PreparedMediaContract {
         let seed = request
             .seed
             .ok_or_else(|| "MiniMax H3 prepared media has no frozen seed".to_string())?;
-        let frames = request.frames.unwrap_or(mold_core::minimax_h3::MIN_FRAMES);
+        let frames = request
+            .frames
+            .unwrap_or(mold_core::minimax_h3::REVIEWED_COMPACT_FRAMES);
         let (reference_fingerprint_sha256, resolved_fingerprint, reference_count) = match task {
             mold_core::minimax_h3::Task::Fl2va => {
                 if resolved_reference_fingerprint_sha256.is_some() {
@@ -1886,7 +1888,7 @@ mod tests {
             Some(mold_core::MiniMaxH3RequestCapability {
                 width: mold_core::minimax_h3::DEFAULT_WIDTH,
                 height: mold_core::minimax_h3::DEFAULT_HEIGHT,
-                frames: mold_core::minimax_h3::MIN_FRAMES,
+                frames: mold_core::minimax_h3::REVIEWED_COMPACT_FRAMES,
                 fps: mold_core::minimax_h3::FIXED_FPS,
                 steps: mold_core::minimax_h3::COMFY_DEFAULT_STEPS,
                 batch_size: 1,
@@ -2018,7 +2020,10 @@ mod tests {
         assert_eq!(request.steps, eight_step.steps);
         assert_eq!(request.width, mold_core::minimax_h3::DEFAULT_WIDTH);
         assert_eq!(request.height, mold_core::minimax_h3::DEFAULT_HEIGHT);
-        assert_eq!(request.frames, mold_core::minimax_h3::MIN_FRAMES);
+        assert_eq!(
+            request.frames,
+            mold_core::minimax_h3::REVIEWED_COMPACT_FRAMES
+        );
         let base_request = capability.partitions[0].request.as_ref().unwrap();
         assert_ne!(
             request.generation_profile_sha256,

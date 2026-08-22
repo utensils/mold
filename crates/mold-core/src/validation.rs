@@ -419,7 +419,7 @@ pub fn max_frames_for_family(family: &str) -> Option<u32> {
 /// engine refuses after the load is paid for.
 pub fn max_frames_for_model_at_fps(family: &str, model: &str, fps: u32) -> Option<u32> {
     if crate::minimax_h3::uses_reviewed_compact_envelope(family, model) {
-        return Some(crate::minimax_h3::MIN_FRAMES);
+        return Some(crate::minimax_h3::REVIEWED_COMPACT_FRAMES);
     }
     max_frames_for_family_at_fps(family, fps)
 }
@@ -428,7 +428,7 @@ pub fn max_frames_for_model_at_fps(family: &str, model: &str, fps: u32) -> Optio
 /// [`max_frames_for_model_at_fps`] for why the H3 answer is per layout.
 pub fn max_frames_absolute_for_model(family: &str, model: &str) -> Option<u32> {
     if crate::minimax_h3::uses_reviewed_compact_envelope(family, model) {
-        return Some(crate::minimax_h3::MIN_FRAMES);
+        return Some(crate::minimax_h3::REVIEWED_COMPACT_FRAMES);
     }
     max_frames_absolute_for_family(family)
 }
@@ -437,6 +437,19 @@ pub fn max_frames_absolute_for_model(family: &str, model: &str) -> Option<u32> {
 /// generic single-frame floor. `None` retains the historical minimum of one.
 pub fn min_frames_for_family(family: &str) -> Option<u32> {
     crate::minimax_h3::is_family(family).then_some(crate::minimax_h3::MIN_FRAMES)
+}
+
+/// [`min_frames_for_family`], narrowed by the concrete model.
+///
+/// The reviewed compact runtime renders exactly one clip length, so its floor
+/// and its ceiling are the same number. Answering the family floor here would
+/// pair a `min_frames` of 107 with a `max_frames` of 124 on a row whose
+/// profile fixes both at 124.
+pub fn min_frames_for_model(family: &str, model: &str) -> Option<u32> {
+    if crate::minimax_h3::uses_reviewed_compact_envelope(family, model) {
+        return Some(crate::minimax_h3::REVIEWED_COMPACT_FRAMES);
+    }
+    min_frames_for_family(family)
 }
 
 /// A family's mandatory frame rate, when the checkpoint does not support
@@ -5242,7 +5255,10 @@ mod tests {
             Some(crate::minimax_h3::FAMILY),
         )
         .unwrap_err();
-        assert!(short.contains("124"), "got: {short}");
+        assert!(
+            short.contains(&crate::minimax_h3::MIN_FRAMES.to_string()),
+            "got: {short}"
+        );
 
         let retimed = validate_family_video_timing_constraints(
             Some(crate::minimax_h3::MIN_FRAMES),

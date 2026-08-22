@@ -169,7 +169,7 @@ pub(crate) fn prepare_authoring(
     }
     let frames = match duration_seconds {
         Some(seconds) => frames_for_duration(seconds)?,
-        None => frames.unwrap_or(minimax_h3::MIN_FRAMES),
+        None => frames.unwrap_or(minimax_h3::REVIEWED_COMPACT_FRAMES),
     };
     if !minimax_h3::valid_frame_count(frames) {
         anyhow::bail!(
@@ -728,11 +728,14 @@ mod tests {
 
     #[test]
     fn duration_resolves_onto_exact_h3_grid() {
+        // The model card's floor is 4 seconds, whose first grid point is 107.
+        assert_eq!(frames_for_duration(4.0).unwrap(), minimax_h3::MIN_FRAMES);
+        assert_eq!(frames_for_duration(4.0).unwrap(), 107);
         assert_eq!(frames_for_duration(5.0).unwrap(), 124);
         assert_eq!(frames_for_duration(10.0).unwrap(), 243);
         assert_eq!(frames_for_duration(15.0).unwrap(), 345);
         assert_eq!(frames_for_duration(200.5 / 24.0).unwrap(), 192);
-        assert!(frames_for_duration(4.99).is_err());
+        assert!(frames_for_duration(3.99).is_err());
         assert!(frames_for_duration(15.01).is_err());
         assert!(frames_for_duration(f64::NAN).is_err());
     }

@@ -182,13 +182,35 @@ pub const DEFAULT_HEIGHT: u32 = 768;
 pub const DEFAULT_STEPS: u32 = 50;
 pub const COMFY_DEFAULT_STEPS: u32 = 21;
 pub const FIXED_FPS: u32 = 24;
-pub const MIN_DURATION_SECONDS: u32 = 5;
+pub const MIN_DURATION_SECONDS: u32 = 4;
 pub const MAX_DURATION_SECONDS: u32 = 15;
-pub const MIN_FRAMES: u32 = 124;
+/// Lowest `17n+5` frame count that reaches 4 seconds at the fixed 24 FPS
+/// rate.
+///
+/// The published model card states an output duration of **4-15 seconds**
+/// (`MiniMax-AI/MiniMax-H3` `README.md:73`), and 107 frames is 4.458 s — the
+/// first grid point at or above that floor, since 90 frames is only 3.75 s.
+/// This was 124 while [`MIN_DURATION_SECONDS`] said 5, which refused the
+/// 107-frame clip the model card permits.
+///
+/// This is the FAMILY floor. It is deliberately **not** the reviewed compact
+/// runtime's frame count — see [`REVIEWED_COMPACT_FRAMES`], which is exactly
+/// 124 and stayed there. The two were one constant until they were separated,
+/// which is only invisible while they happen to be equal.
+pub const MIN_FRAMES: u32 = 107;
 /// Highest `17n+5` frame count that remains within 15 seconds at the fixed
 /// 24 FPS rate. The next grid value, 362, is 15.083 seconds and is rejected by
 /// the pinned upstream Diffusers oracle.
 pub const MAX_FRAMES: u32 = 345;
+/// The exact frame count the reviewed compact runtime qualification admits.
+///
+/// `H3PrivateRuntimeEnvelopeRecord` validates this by equality, the compact
+/// generation profiles pin it as a fixed control, and every builder that
+/// submits the reviewed envelope uses it. It is an authority of its own: a
+/// campaign that qualifies a different clip length moves this and nothing
+/// else, and widening the family floor must never widen what the runtime
+/// admits.
+pub const REVIEWED_COMPACT_FRAMES: u32 = 124;
 pub const FRAME_STEP: u32 = 17;
 pub const FRAME_OFFSET: u32 = 5;
 pub const DIMENSION_ALIGNMENT: u32 = 32;
@@ -2484,7 +2506,11 @@ fn defaults_with_steps(steps: u32) -> ManifestDefaults {
         is_schnell: false,
         scheduler: None,
         negative_prompt: None,
-        frames: Some(MIN_FRAMES),
+        // The shipped default clip length, deliberately the reviewed compact
+        // count rather than the family floor: widening the floor to the model
+        // card's 4-second minimum must not move what a request renders by
+        // default.
+        frames: Some(REVIEWED_COMPACT_FRAMES),
         fps: Some(FIXED_FPS),
         // T2VA runs unconditioned; FL2VA's boundary frames ride the
         // dedicated first/last contract, not the generic source well.
@@ -3038,9 +3064,11 @@ mod tests {
             *frame_count = Some(450);
             *fps = 30.0;
         }
-        let short = reference_prepared_shape_for_target(&video, MIN_FRAMES).unwrap();
-        assert_eq!(short.normalized_video_frames, Some(MIN_FRAMES));
-        assert_eq!(short.video_frames, Some(MIN_FRAMES));
+        // The reviewed clip length, which is what actually renders — this
+        // exercises CFR truncation, not the family floor.
+        let short = reference_prepared_shape_for_target(&video, REVIEWED_COMPACT_FRAMES).unwrap();
+        assert_eq!(short.normalized_video_frames, Some(REVIEWED_COMPACT_FRAMES));
+        assert_eq!(short.video_frames, Some(REVIEWED_COMPACT_FRAMES));
         assert_eq!(short.qwen_video_frames, Some(11));
         assert_eq!(short.audio_samples_per_channel, Some(165_334));
         assert_eq!(short.audio_rows, 414);
@@ -3349,7 +3377,9 @@ mod tests {
             );
         }
 
-        for frames in [107, 125, 379] {
+        // 90 is on the `17n+5` grid but only 3.75 s, below the model card's
+        // 4-second floor; 125 is off the grid; 379 is past 15 seconds.
+        for frames in [90, 125, 379] {
             let mut req = request();
             req.frames = Some(frames);
             assert_eq!(
@@ -3397,6 +3427,84 @@ mod tests {
         }
     }
 
+    /// The frame bounds are DERIVED from the published duration contract, not
+    /// transcribed beside it. `MiniMax-AI/MiniMax-H3` `README.md:73` states an
+    /// output duration of 4-15 seconds; at the fixed 24 fps that is the first
+    /// and last `17n+5` grid point inside `[4, 15]` seconds. `MIN_FRAMES` was
+    /// 124 for exactly as long as `MIN_DURATION_SECONDS` said 5, which refused
+    /// the 107-frame clip the model card permits.
+    #[test]
+    fn frame_bounds_are_derived_from_the_published_duration_contract() {
+        let grid: Vec<u32> = (0..40)
+            .map(|n| FRAME_OFFSET + n * FRAME_STEP)
+            .take_while(|frames| *frames < 1_000)
+            .collect();
+
+        let lowest = grid
+            .iter()
+            .copied()
+            .find(|frames| {
+                f64::from(*frames) / f64::from(FIXED_FPS) >= f64::from(MIN_DURATION_SECONDS)
+            })
+            .expect("a grid point reaches the minimum duration");
+        let highest = grid
+            .iter()
+            .copied()
+            .rfind(|frames| {
+                f64::from(*frames) / f64::from(FIXED_FPS) <= f64::from(MAX_DURATION_SECONDS)
+            })
+            .expect("a grid point sits inside the maximum duration");
+
+        assert_eq!(MIN_FRAMES, lowest, "minimum frames");
+        assert_eq!(MAX_FRAMES, highest, "maximum frames");
+        assert_eq!(MIN_FRAMES, 107);
+        assert_eq!(MAX_FRAMES, 345);
+        // The grid point below the floor really is short of the contract, so
+        // 107 is a floor rather than a rounding artefact.
+        assert!(
+            f64::from(MIN_FRAMES - FRAME_STEP) / f64::from(FIXED_FPS)
+                < f64::from(MIN_DURATION_SECONDS)
+        );
+        assert!(valid_frame_count(MIN_FRAMES));
+        assert!(valid_frame_count(MAX_FRAMES));
+    }
+
+    /// The reviewed compact runtime's clip length is its own authority. It sat
+    /// on `MIN_FRAMES` while the two happened to be equal, so widening the
+    /// family floor would silently have widened what the runtime admits.
+    #[test]
+    fn the_reviewed_compact_clip_length_is_independent_of_the_family_floor() {
+        assert_eq!(REVIEWED_COMPACT_FRAMES, 124);
+        assert!(valid_frame_count(REVIEWED_COMPACT_FRAMES));
+        // Strictly greater: the reviewed clip is longer than the family
+        // floor, so collapsing the two constants back into one fails here.
+        assert_eq!(
+            REVIEWED_COMPACT_FRAMES.cmp(&MIN_FRAMES),
+            std::cmp::Ordering::Greater
+        );
+        assert_ne!(
+            REVIEWED_COMPACT_FRAMES.cmp(&MAX_FRAMES),
+            std::cmp::Ordering::Greater
+        );
+    }
+
+    /// Mold's canvas resolver is a port of ComfyUI's `adapt_canvas`
+    /// (`comfy_extras/nodes_minimax_h3.py:50-61`), which is the reference for
+    /// the compact checkpoints. Its constants are pinned here so a drift in
+    /// either is a failure rather than a silently different canvas.
+    #[test]
+    fn canvas_constants_match_the_comfyui_reference() {
+        // CANVAS_MULTIPLE = 32, BASE_SHORT_EDGE = 768, MAX_PIXELS = 768 * 1344
+        assert_eq!(DIMENSION_ALIGNMENT, 32);
+        assert_eq!(CANVAS_SHORT_EDGE, 768);
+        assert_eq!(CANVAS_MAX_PIXELS, 768 * 1344);
+        assert_eq!(FIXED_FPS, 24);
+        // `align_frame_count`: `while n % 17 != 5: n += 1`.
+        for frames in [MIN_FRAMES, REVIEWED_COMPACT_FRAMES, MAX_FRAMES] {
+            assert_eq!(frames % FRAME_STEP, FRAME_OFFSET, "{frames} on the grid");
+        }
+    }
+
     #[test]
     fn canvas_recommendations_match_the_official_short_edge_area_then_round_order() {
         for ((aspect_width, aspect_height), expected) in [
@@ -3439,9 +3547,16 @@ mod tests {
             assert!(!caps.audio_disable_supported);
             assert_eq!(caps.audio_sample_rate_hz, 32_000);
             assert_eq!(caps.audio_channels, 2);
+            // Derived, not transcribed: the advertised window is the model
+            // card's own 4-15 seconds (`MiniMax-AI/MiniMax-H3`
+            // `README.md:73`).
             assert_eq!(
                 (caps.min_duration_seconds, caps.max_duration_seconds),
-                (5, 15)
+                (MIN_DURATION_SECONDS, MAX_DURATION_SECONDS)
+            );
+            assert_eq!(
+                (caps.min_duration_seconds, caps.max_duration_seconds),
+                (4, 15)
             );
             assert_eq!(caps.default_dimensions, (1344, 768));
             assert_eq!(caps.min_aspect_ratio, (1, 4));
@@ -3736,7 +3851,7 @@ mod tests {
             assert_eq!(manifest.defaults.steps, tier.steps);
             assert_eq!(manifest.defaults.width, DEFAULT_WIDTH);
             assert_eq!(manifest.defaults.height, DEFAULT_HEIGHT);
-            assert_eq!(manifest.defaults.frames, Some(MIN_FRAMES));
+            assert_eq!(manifest.defaults.frames, Some(REVIEWED_COMPACT_FRAMES));
             assert_eq!(manifest.defaults.fps, Some(FIXED_FPS));
 
             // Every base compact file is present byte-for-byte, plus exactly

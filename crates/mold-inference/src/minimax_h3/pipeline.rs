@@ -126,7 +126,7 @@ impl H3Fl2VaGeometry {
     fn from_request(req: &GenerateRequest, mode: Mode, endpoint_count: usize) -> Result<Self> {
         let width = usize::try_from(req.width).context("H3 width does not fit usize")?;
         let height = usize::try_from(req.height).context("H3 height does not fit usize")?;
-        let frames = usize::try_from(req.frames.unwrap_or(contract::MIN_FRAMES))
+        let frames = usize::try_from(req.frames.unwrap_or(contract::REVIEWED_COMPACT_FRAMES))
             .context("H3 frame count does not fit usize")?;
         let latent_frames = VisualTemporalGeometry::default().encoded_frames(frames)?;
         let latent_width = width / VIDEO_VAE_SPATIAL_COMPRESSION;
@@ -1120,7 +1120,7 @@ pub(crate) fn collect_endpoint_bytes(
     req: &GenerateRequest,
     mode: Mode,
 ) -> Result<Vec<(H3EndpointAnchor, &[u8])>> {
-    let last_frame = req.frames.unwrap_or(contract::MIN_FRAMES) - 1;
+    let last_frame = req.frames.unwrap_or(contract::REVIEWED_COMPACT_FRAMES) - 1;
     let mut first = req.source_image.as_deref();
     let mut last = None;
     for keyframe in req.keyframes.as_deref().unwrap_or_default() {

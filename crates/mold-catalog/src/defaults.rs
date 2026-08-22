@@ -122,7 +122,7 @@ pub fn runtime_defaults_for_family(
             steps: mold_core::minimax_h3::DEFAULT_STEPS,
             guidance: 0.0,
             is_schnell: None,
-            frames: Some(mold_core::minimax_h3::MIN_FRAMES),
+            frames: Some(mold_core::minimax_h3::REVIEWED_COMPACT_FRAMES),
             fps: Some(mold_core::minimax_h3::FIXED_FPS),
         },
         "sdxl" => CatalogRuntimeDefaults {
@@ -181,7 +181,10 @@ mod tests {
         assert_eq!(ltx_video.fps, Some(30));
 
         let h3 = runtime_defaults_for_family("minimax-h3", None);
-        assert_eq!(h3.frames, Some(mold_core::minimax_h3::MIN_FRAMES));
+        assert_eq!(
+            h3.frames,
+            Some(mold_core::minimax_h3::REVIEWED_COMPACT_FRAMES)
+        );
         assert_eq!(h3.fps, Some(mold_core::minimax_h3::FIXED_FPS));
         assert_eq!((h3.width, h3.height), (1344, 768));
         assert_eq!(h3.guidance, 0.0);

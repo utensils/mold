@@ -25,7 +25,7 @@ use mold_candle::minimax_h3::{
 };
 use mold_core::minimax_h3::{
     self as contract, GenerationReferencePreparedShape, DEFAULT_HEIGHT, DEFAULT_WIDTH, FIXED_FPS,
-    MAX_FRAMES, MIN_FRAMES,
+    MAX_FRAMES, REVIEWED_COMPACT_FRAMES,
 };
 use mold_core::{GenerationReference, GenerationReferenceAuthority, GenerationReferenceProvenance};
 use serde::Serialize;
@@ -70,17 +70,17 @@ struct ScenarioSpec {
 const SCENARIOS: &[ScenarioSpec] = &[
     ScenarioSpec {
         id: "release-124-target",
-        target_frames: MIN_FRAMES,
+        target_frames: REVIEWED_COMPACT_FRAMES,
         reference_mix: ReferenceMix::None,
     },
     ScenarioSpec {
         id: "release-124-image",
-        target_frames: MIN_FRAMES,
+        target_frames: REVIEWED_COMPACT_FRAMES,
         reference_mix: ReferenceMix::Image,
     },
     ScenarioSpec {
         id: "release-124-mixed",
-        target_frames: MIN_FRAMES,
+        target_frames: REVIEWED_COMPACT_FRAMES,
         reference_mix: ReferenceMix::VideoImageAudio,
     },
     ScenarioSpec {
