@@ -199,19 +199,42 @@ Hugging Face mirror `DIAMONIK7777/antelopev2`
 and Mold pulls the same two files from the same mirror, pinned by SHA-256 and
 verified on download.
 
-## facexlib (identity crop geometry)
+## facexlib (face crop geometry and parsing)
 
-PuLID produces the 512x512 crop its vision tower conditions on with
-[facexlib](https://github.com/xinntao/facexlib)'s `FaceRestoreHelper`
-(`PuLID/pulid/pipeline_flux.py:47-53`, `:145-147`). Mold reimplements that
-crop's geometry in Rust — facexlib's standard FFHQ five-point template and its
-constant grey warp border (`facexlib/utils/face_restoration_helper.py:73-74`,
-`:242-259`) — in `crates/mold-inference/src/identity/align.rs`. No facexlib
-source file is vendored, and Mold downloads no facexlib model: facexlib's
-RetinaFace detector and BiSeNet parser are not used (see
-`docs/architecture/pulid-face-extraction.md`).
+PuLID uses [facexlib](https://github.com/xinntao/facexlib) for two things, and
+Mold follows both.
+
+PuLID produces the 512x512 crop its vision tower conditions on with facexlib's
+`FaceRestoreHelper` (`PuLID/pulid/pipeline_flux.py:47-53`, `:145-147`). Mold
+reimplements that crop's geometry in Rust — facexlib's standard FFHQ five-point
+template and its constant grey warp border
+(`facexlib/utils/face_restoration_helper.py:73-74`, `:242-259`) — in
+`crates/mold-inference/src/identity/align.rs`. No facexlib source file is
+vendored for this step, and Mold downloads no model for it.
+
+PuLID also masks that crop before the vision tower sees it, using the BiSeNet
+face parser facexlib publishes (`pulid/pipeline_flux.py:53`, `:161-170`). Mold
+pulls the released checkpoint `parsing_bisenet.pth` as part of the
+`pulid-flux` bundle, from the Hugging Face mirror
+[`leonelhs/facexlib`](https://huggingface.co/leonelhs/facexlib) whose LFS
+object is byte-identical to facexlib's own GitHub release
+(<https://github.com/xinntao/facexlib/releases/download/v0.2.0/parsing_bisenet.pth>,
+sha256 `468e13ca13a9b43cc0881a9f99083a430e9c0a38abd935431d1c28ee94b26567`,
+53,289,463 bytes, verified 2026-08-21). Mold ports two facexlib source files
+rather than vendoring them — `facexlib/parsing/bisenet.py` and
+`facexlib/parsing/resnet.py`, as
+`crates/mold-inference/src/identity/parsing.rs`. Every ported function names
+the upstream file and line range it follows, and no facexlib source file is
+vendored anywhere in Mold, which ships no Python.
+
+Unlike the InsightFace pretrained models above, facexlib places **no**
+non-commercial restriction on its released weights: the project is MIT and its
+licence covers the repository as published. `mold pull pulid-flux` therefore
+requires no recorded acceptance for `parsing_bisenet.pth`.
 
 facexlib is licensed under the MIT License
 (<https://github.com/xinntao/facexlib/blob/master/LICENSE>).
+
+    MIT License
 
     Copyright (c) 2020 Xintao Wang

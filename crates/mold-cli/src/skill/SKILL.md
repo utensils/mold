@@ -756,31 +756,52 @@ mold pull pulid-flux --accept-license insightface-antelopev2
 mold run flux-dev:q4 "an astronaut in a diner" --id-image face.jpg
 mold run flux-dev:q4 "a Renaissance portrait" --id-image face.jpg --id-weight 0.6
 mold run flux-dev:q4 "a hiker on a ridge" --id-image face.jpg --id-start-step 4
+
+# Several references of the same person, averaged (up to 4)
+mold run flux-dev:q4 "a chef in a kitchen" \
+  --id-image front.jpg --id-image side.jpg --id-image smiling.jpg
+
+# A real negative branch (upstream advises --guidance 1.0 with it)
+mold run flux-dev:q4 "a hiker on a ridge" --id-image face.jpg \
+  --true-cfg 2.0 --guidance 1.0 --negative-prompt "blurry, cartoon"
 ```
 
 | Flag                  | Default | Range                                    | Notes                                                                                                                 |
 | --------------------- | ------- | ---------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| `--id-image <path>`   | —       | PNG/JPEG, ≤16 MiB, ≤8192 px/axis, ≤32 MP | Reference photograph                                                                                                  |
+| `--id-image <path>`   | —       | PNG/JPEG, ≤16 MiB, ≤8192 px/axis, ≤32 MP | Reference photograph. **Repeatable, up to 4** — several references of one person are averaged into one identity; whole-set byte/pixel caps sit below the per-image limits times the count. |
 | `--id-weight <f>`     | `1.0`   | `0.0`–`3.0`                              | `0` is completely inert: nothing pulled, loaded, or extracted, and the render is byte-identical to no identity at all |
 | `--id-start-step <n>` | `0`     | `< --steps`                              | First denoise step identity applies from                                                                              |
+| `--true-cfg <f>`      | `1.0`   | `1.0`–`10.0`                              | True classifier-free guidance scale. `1.0` is off. Requires `--id-image` and a non-zero `--id-weight`; drop `--guidance` to `1.0` alongside it. ~2x denoise time. |
+| `--cfg-start-step <n>` | `1`    | `< --steps`, requires `--true-cfg`       | First denoise step the true-CFG negative branch runs at                                                              |
 
 Refused, by name rather than silently: any other model, a LoRA alongside an
-identity, img2img alongside an identity, and a build without the `pulid`
-feature. Works over `$MOLD_HOST` and with `--local`; the bundle and the licence
-acceptance must be on the machine that RENDERS, which for a remote run is the
-server. Saved metadata records the photograph's file name, its SHA-256, and the
-applied weight and start step — never the photograph. `mold rm pulid-flux`
-removes the bundle and the derived vision tower. Full guide:
-`website/guide/identity.md`.
+identity, img2img alongside an identity, a build without the `pulid` feature,
+both `--id-image` repeated beyond 4, and `--true-cfg` without an active
+identity. `--negative-prompt` does nothing on FLUX unless `--true-cfg` is
+above `1.0` — FLUX.1-dev is guidance-distilled and has no negative branch
+without it. Works over `$MOLD_HOST` and with `--local`; the bundle and the
+licence acceptance must be on the machine that RENDERS, which for a remote run
+is the server. Repeated `--id-image` and `--true-cfg` additionally need a
+server that advertises `capabilities.identity`: against an older one `mold run`
+refuses by name rather than submitting, because that server would drop the
+fields and render without them, while a single `--id-image` works against any
+identity-capable server. Saved metadata records the photograph's file name(s),
+SHA-256(s), and the applied weight and start step — plural fields only for the
+plural form, never the photograph. `mold rm pulid-flux` removes the bundle and
+the derived vision tower and parser. Full guide: `website/guide/identity.md`.
 
 Wire contract — additive `GenerateRequest` fields (read `supports_identity`, never the feature, to decide whether to offer the control):
 
-| Field           | Purpose                                                                                                                                                                                    |
-| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `id_image`      | Face-identity reference as base64 PNG/JPEG bytes. Bounds-checked from its header alone (≤ 16 MiB encoded, ≤ 8192 px per axis, ≤ 32 MP) before anything decodes it.                         |
-| `id_image_name` | Client-supplied provenance label for `id_image`; recorded into `OutputMetadata.id_image_name` so Reuse settings can restore the reference. The engine never reads it. Requires `id_image`. |
-| `id_weight`     | Identity strength in `0.0..=3.0`. Absent means `1.0`. Requires `id_image`.                                                                                                                 |
-| `id_start_step` | First denoise step at which identity is applied, so composition settles before the face is pinned. Must be `< steps`. Absent means `0`. Requires `id_image`.                               |
+| Field            | Purpose                                                                                                                                                                                    |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `id_image`       | Face-identity reference as base64 PNG/JPEG bytes. Bounds-checked from its header alone (≤ 16 MiB encoded, ≤ 8192 px per axis, ≤ 32 MP) before anything decodes it.                         |
+| `id_image_name`  | Client-supplied provenance label for `id_image`; recorded into `OutputMetadata.id_image_name` so Reuse settings can restore the reference. The engine never reads it. Requires `id_image`. |
+| `id_weight`      | Identity strength in `0.0..=3.0`. Absent means `1.0`. Requires `id_image`.                                                                                                                 |
+| `id_start_step`  | First denoise step at which identity is applied, so composition settles before the face is pinned. Must be `< steps`. Absent means `0`. Requires `id_image`.                               |
+| `id_images`      | Plural shape of `id_image`: several references of one person, up to `ID_IMAGES_MAX` (4), averaged post-IDFormer into one identity. Mutually exclusive with `id_image` — sending both is an error, never a precedence rule. Whole-set encoded-byte and decoded-pixel caps sit below the per-image limits times the count. A photograph with no detectable face refuses the whole request and names its one-based position. |
+| `id_image_names` | Plural form of `id_image_name`, one per entry in `id_images`, in the same order.                                                                                                          |
+| `true_cfg`       | True classifier-free guidance scale, `1.0..=10.0`. Absent or `1.0` is off. Qualified only alongside an active identity (an image and non-zero `id_weight`); refused on a plain FLUX render rather than accepted and ignored. Reuses `negative_prompt`.                                    |
+| `cfg_start_step` | First denoise step the true-CFG negative branch runs at. Must be `< steps`. Absent means `1`. Requires `true_cfg`.                                                                        |
 
 Milestone-1 gate — every rule below is a 422 at admission, never a silent drop:
 
@@ -789,8 +810,12 @@ Milestone-1 gate — every rule below is a 422 at admission, never a silent drop
   `flux-dev-q4` resolves too). `flux-dev:bf16` and every other model are refused.
 - Identity may not be combined with a LoRA or with an img2img `source_image` —
   neither combination is qualified yet.
-- Any of `id_weight` / `id_start_step` / `id_image_name` without `id_image` is
-  an error, not an ignored field.
+- Any of `id_weight` / `id_start_step` / `id_image_name` without `id_image`
+  (or `id_image_names` without `id_images`) is an error, not an ignored field.
+  Sending both `id_image` and `id_images` is likewise an error.
+- `true_cfg` / `cfg_start_step` without an active identity (a photograph and a
+  non-zero `id_weight`) is an error — true CFG never runs on an ordinary FLUX
+  render.
 - A server that cannot execute identity conditioning refuses any request
   carrying an identity field. It never accepts-and-ignores, because that would
   render a print with no face in it and say nothing. Two distinct messages, so
@@ -810,17 +835,26 @@ when that predicate holds AND the checkpoint is qualified, so the capability is
 advertised only once the runtime adapter is present; it is absent on servers
 that predate identity conditioning, which clients read as "no". The same fact
 rides `generation_profile.capabilities.supports_identity`; never derive a second
-predicate. Saved metadata records `id_image_name`, `id_image_sha256`,
-`id_weight`, and `id_start_step` only when the print actually carried an
-identity reference — hashes and names, never the face payload.
+predicate. `id_images` and `true_cfg` are gated separately: `GET /api/capabilities` → `identity` (`{ multi_photo, max_photos, true_cfg }`) is the
+authority for those two additive shapes specifically, and absence — the whole
+block is all-false on an older server — reads as no, so a client that needs
+either shape probes first and refuses by name rather than sending fields an
+older server would silently drop. The singular `id_image` predates that block
+and needs no probe. Saved metadata records `id_image_name(s)`,
+`id_image_sha256(s)`, `id_weight`, `id_start_step`, and — for a true-CFG print —
+the scale and start step actually used, only when the print carried the
+relevant field — hashes and names, never the face payload.
 
-Assets: identity conditioning needs the hidden auxiliary bundle `pulid-flux`
-(PuLID-FLUX v0.9.1 adapter, the EVA02-CLIP-L-14-336 vision tower, and the
-InsightFace antelopev2 face detector + recognizer, every file SHA-256 pinned,
-stored under `shared/pulid/`). The two antelopev2 files are licensed for
-non-commercial research only, so every pull path — `mold pull`, the server's
-auto-pull, client-triggered downloads — refuses them until acceptance is
-recorded once per `MOLD_HOME`:
+Assets: identity conditioning needs the hidden auxiliary bundle `pulid-flux` —
+five files, about 2.2 GB (PuLID-FLUX v0.9.1 adapter, the EVA02-CLIP-L-14-336
+vision tower, the InsightFace antelopev2 face detector + recognizer, and
+facexlib's BiSeNet face parser (`parsing_bisenet.pth`, MIT, no acceptance
+needed) that masks the aligned crop before the vision tower sees it), every
+file SHA-256 pinned, stored under `shared/pulid/`. An install made before mold
+0.24 has four files; re-running the pull below fetches only the missing
+parser. The two antelopev2 files are licensed for non-commercial research
+only, so every pull path — `mold pull`, the server's auto-pull, client-triggered
+downloads — refuses them until acceptance is recorded once per `MOLD_HOME`:
 
 ```bash
 mold pull pulid-flux --accept-license insightface-antelopev2
@@ -836,18 +870,19 @@ You do not have to pull it by hand. A request that actually conditions on a
 face plans the bundle through the same dependency preparation the encoder
 ladders use: `POST /api/generate/placement-preview` reports whatever is missing
 under `pending_downloads` (kinds `identity_adapter`, `identity_vision_encoder`,
-`face_detector`, `face_recognizer`) without fetching anything, and admission
-materializes it into `shared/pulid/` — after the license gate, so an unaccepted
-antelopev2 fails the job with that same `--accept-license` message instead of
-downloading. Every file is verified against its manifest SHA-256 pin before it
-can be used — Hugging Face `main` is a mutable branch — so a changed or tampered
-artifact is named, deleted, and refused rather than frozen into a plan. The
-bytes are always hashed (through a retained no-follow descriptor, once per
-process per unchanged file); the `.sha256-verified` sidecar is still written for
-installed-state reporting but is never read as proof, because a group-writable
-model root lets whoever writes the weights write the sidecar too. An
-`id_weight` of `0` applies no identity at all and is completely
-inert: it plans no assets, downloads nothing, and adds no memory demand.
+`face_detector`, `face_recognizer`, `face_parser`) without fetching anything,
+and admission materializes it into `shared/pulid/` — after the license gate, so
+an unaccepted antelopev2 fails the job with that same `--accept-license`
+message instead of downloading. Every file is verified against its manifest
+SHA-256 pin before it can be used — Hugging Face `main` is a mutable branch —
+so a changed or tampered artifact is named, deleted, and refused rather than
+frozen into a plan. The bytes are always hashed (through a retained no-follow
+descriptor, once per process per unchanged file); the `.sha256-verified`
+sidecar is still written for installed-state reporting but is never read as
+proof, because a group-writable model root lets whoever writes the weights
+write the sidecar too. An `id_weight` of `0` applies no identity at all and is
+completely inert: it plans no assets, downloads nothing, and adds no memory
+demand; the same holds for `true_cfg` absent or `1.0`.
 
 Studio surfaces: web and desktop Create render an **Identity** photo well
 beside the source-image wells with **Identity strength** and **Identity start
@@ -860,7 +895,10 @@ never fitted or cropped to the canvas, and an unqualified combination is
 reported inline with Generate blocked. The Library shows the recorded name,
 digest, strength, and start step, and Reuse settings restores them plus the
 photo itself when the device still holds it. iPhone, TUI, and Discord expose
-the same conditioning, as described below.
+the same conditioning, as described below. Multiple photographs (`id_images`)
+and true CFG are core, server, and CLI only so far (#1226) — every Studio
+surface, web and desktop included, still offers a single photograph and no
+true-CFG control.
 
 **Surfaces.** The TUI's Create form carries an **Identity photo** section in
 the Advanced accordion — a local path row plus Strength and Start step — shown
