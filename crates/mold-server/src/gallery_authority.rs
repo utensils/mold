@@ -11,7 +11,7 @@ use crate::batch_transaction::{
 use anyhow::{ensure, Context};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -217,8 +217,12 @@ fn read_marker(root: &Path) -> anyhow::Result<Option<MutationMarker>> {
 }
 
 fn sync_dir(path: &Path) -> anyhow::Result<()> {
-    File::open(path)?.sync_all()?;
-    Ok(())
+    // A bare `File::open` on a directory is ERROR_ACCESS_DENIED on Windows, so
+    // this was not a silent no-op like the other four copies were — it failed
+    // the whole startup recovery with a bare `Access is denied. (os error 5)`
+    // and no context. `dir_sync` opens the handle the way Windows requires.
+    crate::dir_sync::sync_directory(path)
+        .with_context(|| format!("fsync gallery authority directory '{}'", path.display()))
 }
 
 fn atomic_write_json<T: Serialize>(path: &Path, value: &T) -> anyhow::Result<()> {

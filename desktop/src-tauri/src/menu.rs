@@ -22,8 +22,11 @@ const NAVIGATION_MENU_ITEMS: [(&str, &str, &str); 4] = [
     ("nav:/machines", "Machines", "4"),
 ];
 
-#[cfg(target_os = "linux")]
-const LINUX_WINDOW_MENU_ITEMS: [(&str, &str); 3] = [
+/// macOS gets the predefined Window items; every other platform builds the same
+/// three entries as ordinary commands, handled by the platform-independent
+/// `on_menu_event` arms below.
+#[cfg(not(target_os = "macos"))]
+const WINDOW_MENU_ITEMS: [(&str, &str); 3] = [
     ("window:minimize", "Minimize"),
     ("window:toggle-maximize", "Maximize"),
     ("window:close", "Close Window"),
@@ -82,15 +85,19 @@ pub fn build<R: Runtime>(app: &AppHandle<R>, is_development: bool) -> tauri::Res
                 .accelerator(accelerator(","))
                 .build(app)?,
         )
-        .separator()
+        .separator();
+    // Services and the hide/show family are macOS application-menu concepts
+    // with no counterpart on Windows or Linux, where they render as dead
+    // entries.
+    #[cfg(target_os = "macos")]
+    let app_menu = app_menu
         .services()
         .separator()
         .hide()
         .hide_others()
         .show_all()
-        .separator()
-        .quit()
-        .build()?;
+        .separator();
+    let app_menu = app_menu.quit().build()?;
 
     let file = SubmenuBuilder::new(app, "File")
         .item(
@@ -184,10 +191,10 @@ pub fn build<R: Runtime>(app: &AppHandle<R>, is_development: bool) -> tauri::Res
         .fullscreen()
         .build()?;
 
-    #[cfg(target_os = "linux")]
+    #[cfg(not(target_os = "macos"))]
     let window = {
         let mut window = SubmenuBuilder::new(app, "Window");
-        for (id, label) in LINUX_WINDOW_MENU_ITEMS {
+        for (id, label) in WINDOW_MENU_ITEMS {
             let mut item = MenuItemBuilder::with_id(id, label);
             if id == "window:close" {
                 item = item.accelerator(accelerator("W"));
@@ -197,7 +204,10 @@ pub fn build<R: Runtime>(app: &AppHandle<R>, is_development: bool) -> tauri::Res
         window.build()?
     };
 
-    #[cfg(not(target_os = "linux"))]
+    // `bring_all_to_front` is a macOS-only predefined item, so this arm is
+    // macOS-only too — Windows took it by being "not Linux" and got a Window
+    // menu whose last entry does nothing.
+    #[cfg(target_os = "macos")]
     let window = SubmenuBuilder::new(app, "Window")
         .minimize()
         .maximize()
@@ -273,8 +283,8 @@ pub fn build<R: Runtime>(app: &AppHandle<R>, is_development: bool) -> tauri::Res
 
 #[cfg(test)]
 mod tests {
-    #[cfg(target_os = "linux")]
-    use super::LINUX_WINDOW_MENU_ITEMS;
+    #[cfg(not(target_os = "macos"))]
+    use super::WINDOW_MENU_ITEMS;
     use super::{about_metadata, accelerator, app_name, NAVIGATION_MENU_ITEMS};
 
     #[test]
@@ -320,11 +330,14 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "linux")]
+    /// Windows and Linux build the Window menu from plain command items whose
+    /// handlers are platform-independent. macOS keeps the predefined items,
+    /// including `bring_all_to_front`, which exists only there.
+    #[cfg(not(target_os = "macos"))]
     #[test]
-    fn linux_window_menu_uses_supported_command_items() {
+    fn non_mac_window_menu_uses_supported_command_items() {
         assert_eq!(
-            LINUX_WINDOW_MENU_ITEMS,
+            WINDOW_MENU_ITEMS,
             [
                 ("window:minimize", "Minimize"),
                 ("window:toggle-maximize", "Maximize"),

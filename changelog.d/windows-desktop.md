@@ -4,22 +4,35 @@
   `test`, `build`), a `tauri.windows.conf.json` bundles a decorated window into
   an NSIS installer, and a `windows-latest` CI job runs clippy and the tests on
   every relevant pull request and builds the installer on `main`. Windows gets
-  native click-to-route toast notifications, and Ctrl+A now drives Library's
-  Select All (it was recognised only as ⌘A, so it did nothing off macOS).
-  Two capabilities are honestly absent for now: generated AAC audio tracks
-  (`fdk-aac` does not compile with MSVC — video still renders and muxes), and
-  in-app updates, which stay macOS-only.
+  native click-to-route toast notifications, a Window menu whose items all do
+  something, and Ctrl+A now drives Library's Select All (it was recognised only
+  as ⌘A, so it did nothing off macOS). Two capabilities are honestly absent for
+  now: generated AAC audio tracks (`fdk-aac` does not compile with MSVC — video
+  still renders), and in-app updates, which stay macOS-only.
+- **The embedded engine starts on Windows.** Three separate defects stopped it
+  before it could serve a request, and each of them reported something other
+  than what was wrong. Gallery lock probing classified contention by
+  `ErrorKind::WouldBlock`, which is only the unix spelling — Windows reports
+  `ERROR_LOCK_VIOLATION`, so the probe read its own expected answer as a fatal
+  error and refused to start. Startup recovery flushed a directory by opening
+  it read-only, which Windows answers with a bare "Access is denied". And the
+  scheduler's artifact-identity check used two nightly-only APIs. All three are
+  fixed, and the engine now boots, authenticates, and shuts down cleanly.
+- **Publishing a print, a chain output, or a batch record is durable on
+  Windows.** Five copies of the post-rename directory fsync each assumed a unix
+  handle: four were `#[cfg(unix)]` with a silent no-op twin, so nothing ran,
+  and the fifth failed outright. They now share one implementation that opens
+  the directory the way Windows requires and flushes it on both platforms.
 - **Gallery filenames can no longer address a second location on Windows.**
   The desktop reveal-in-folder command carried its own weaker traversal check
   that missed `\` and `:`; every gallery path now shares one rule, which also
   refuses a drive-relative `C:name.png` — a form `Path::join` resolves against
-  that drive's working directory rather than the gallery
-  ([#1305](https://github.com/utensils/mold/issues/1305)).
-- **Publishing a print, a chain output, or a batch record is durable on
-  Windows.** The four copies of the post-rename directory fsync were each
-  `#[cfg(unix)]` with a silent no-op twin, so on Windows none of them ran and a
-  renamed entry could be lost while the file's own bytes survived. They now
-  share one implementation that flushes the directory on both platforms.
+  that drive's working directory rather than the gallery.
+- **A `mold serve` on Windows shuts down gracefully.** With no SIGTERM there,
+  the graceful path — and with it the queue journal's retention fence — was
+  reachable only through `POST /api/shutdown`, so closing the console window or
+  shutting the machine down discarded every retained queue row. Ctrl-C, console
+  close, and system shutdown now all take the same path SIGTERM takes.
 - **A Windows clone no longer fails every formatting gate.** Git's default
   `core.autocrlf` checked the tree out as CRLF, which prettier rejects for
   every file and which makes a `#!/usr/bin/env bash` shebang invalid. A

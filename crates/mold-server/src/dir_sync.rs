@@ -29,12 +29,16 @@ pub(crate) fn sync_directory(path: &Path) -> std::io::Result<()> {
     use std::os::windows::fs::OpenOptionsExt;
     use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS;
 
-    // A plain `File::open` on a directory fails with ERROR_ACCESS_DENIED;
-    // `FILE_FLAG_BACKUP_SEMANTICS` is the documented flag that makes
-    // `CreateFileW` return a directory handle. Read access is enough —
-    // `FlushFileBuffers` needs a handle, not write permission.
+    // Two Windows requirements, and missing either one is ERROR_ACCESS_DENIED
+    // rather than a no-op. `FILE_FLAG_BACKUP_SEMANTICS` is the documented flag
+    // that makes `CreateFileW` return a directory handle at all; and
+    // `FlushFileBuffers` — which is what `sync_all` calls — requires the handle
+    // to carry GENERIC_WRITE, so a read-only directory handle opens fine and
+    // then fails on the flush. Measured on NTFS: read-only flushes with os
+    // error 5, write and read+write both succeed.
     std::fs::OpenOptions::new()
         .read(true)
+        .write(true)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
         .open(path)?
         .sync_all()

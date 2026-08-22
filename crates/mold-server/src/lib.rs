@@ -1081,6 +1081,44 @@ pub async fn run_server(
         });
     }
 
+    // Windows has no SIGTERM, so without this arm the graceful path — and with
+    // it the queue journal's retention fence, which MUST go up before the
+    // scheduler is cancelled — was unreachable on Windows by anything except
+    // `POST /api/shutdown`. Closing the console window or shutting the machine
+    // down would drop every retained queue row on the floor.
+    //
+    // `CTRL_CLOSE` and `CTRL_SHUTDOWN` are the real SIGTERM analogues: the OS
+    // delivers them with a short grace period and then terminates the process
+    // regardless, which is exactly the bounded window `arm_shutdown_deadline`
+    // already assumes. `CTRL_C` joins them because `mold serve` in a console is
+    // the ordinary way to run one, and the take-once `shutdown_tx` makes a
+    // duplicate from the CLI's own handler a no-op.
+    #[cfg(windows)]
+    {
+        let console_state = state.clone();
+        tokio::spawn(async move {
+            use tokio::signal::windows;
+
+            let (Ok(mut interrupt), Ok(mut close), Ok(mut shutdown)) = (
+                windows::ctrl_c(),
+                windows::ctrl_close(),
+                windows::ctrl_shutdown(),
+            ) else {
+                tracing::warn!("could not install Windows console control handlers");
+                return;
+            };
+            let event = tokio::select! {
+                _ = interrupt.recv() => "CTRL_C",
+                _ = close.recv() => "CTRL_CLOSE",
+                _ = shutdown.recv() => "CTRL_SHUTDOWN",
+            };
+            tracing::info!("received {event}, initiating graceful shutdown");
+            if let Some(tx) = console_state.shutdown_tx.lock().await.take() {
+                let _ = tx.send(());
+            }
+        });
+    }
+
     // Spawn the resource telemetry aggregator (1 Hz). Keep the `JoinHandle`
     // bound so we can `.abort()` it when `axum::serve` returns — otherwise
     // the task outlives server shutdown and keeps ticking until process exit.

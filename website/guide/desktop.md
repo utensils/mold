@@ -574,6 +574,12 @@ Two capabilities are absent rather than degraded, and both say so by name:
 - **In-app updates.** The updater's preflight is built around macOS bundle
   identity, `codesign`/Gatekeeper, and `RENAME_SWAP`. Windows reports updates
   as unsupported and is replaced by re-running the installer.
+- **The `h3` / `h3-private-uat` features.** MiniMax-H3 is an SM89 CUDA surface
+  whose private evidence capture is written against unix ownership semantics
+  (`/proc/self/statm`, uid/mode identity), so those features do not compile for
+  Windows at all. Nothing in the Windows recipe enables them, but it does mean
+  `cargo test --workspace` fails on Windows where `scripts\windows.ps1 test`
+  passes — the desktop crate is the Windows gate.
 
 Signed Windows installers are also still to come; the `main` CI artifact is
 unsigned, so SmartScreen will warn on first run.

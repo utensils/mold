@@ -157,6 +157,18 @@ pub(crate) fn parent_protects_entries(path: &Path) -> std::result::Result<(), Un
     parent_policy(metadata.uid(), metadata.mode(), euid)
 }
 
+/// Windows answers only the "is it a directory" half.
+///
+/// The unix rule is expressed in owner-and-mode terms (sticky bit, group/other
+/// write) that have no direct NTFS equivalent — the same question there is a
+/// DACL walk for `FILE_ADD_FILE`/`DELETE` grants to principals other than the
+/// current user. Until that exists, this admits any directory, so the
+/// staging-hijack defence documented in [`parent_policy`] is NOT in force on
+/// Windows: the private copy and the `renameat` between retained descriptors
+/// still hold, but a model root deliberately shared with another principal is
+/// not detected as one. `%LOCALAPPDATA%\Temp` and `%APPDATA%` — where the
+/// staging root actually lands — are per-user by default, which is why this is
+/// a documented gap rather than an open door.
 #[cfg(not(unix))]
 pub(crate) fn parent_protects_entries(path: &Path) -> std::result::Result<(), UnprotectedParent> {
     if path.is_dir() {

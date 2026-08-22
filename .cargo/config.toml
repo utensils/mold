@@ -31,5 +31,7 @@ rustflags = ["-C", "link-arg=-fuse-ld=lld"]
 # from `--manifest-path`: a config next to that crate is invisible to both
 # `cargo --manifest-path desktop/src-tauri/Cargo.toml` from the root and to
 # `scripts/windows.ps1`, which runs cargo from `desktop/`.
+# `fp16` is rustc's stable name for what LLVM calls `fullfp16`; spelling the
+# LLVM name here builds but warns "unknown and unstable feature" on every crate.
 [target.aarch64-pc-windows-msvc]
-rustflags = ["-C", "target-feature=+fullfp16"]
+rustflags = ["-C", "target-feature=+fp16"]

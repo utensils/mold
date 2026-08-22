@@ -2176,18 +2176,28 @@ mod tests {
 
     #[test]
     fn offline_trash_never_escapes_the_gallery_directory() {
-        let dir = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
         let db = mold_db::MetadataDb::open_in_memory().unwrap();
-        let outside = tempfile::tempdir().unwrap();
-        let victim = outside.path().join("victim.png");
+        // The gallery is a SUBDIRECTORY so a relative escape from it actually
+        // reaches the victim. `contained_file` is a containment guard, not a
+        // name guard — a name that resolves to nothing is a no-op, so pointing
+        // the escape at a file that does not exist would pass with the guard
+        // removed and prove nothing.
+        let dir = root.path().join("gallery");
+        std::fs::create_dir(&dir).unwrap();
+        let victim = root.path().join("victim.png");
         std::fs::write(&victim, b"x").unwrap();
 
-        // Name-shaped escapes are refused on every platform. `C:victim.png` is
-        // the Windows one that a `/`-and-`..` guard lets through: `Path::join`
-        // reads it as drive-relative and drops the gallery root.
-        for escape in ["../victim.png", "..\\victim.png", "C:victim.png"] {
+        // Both separators, because `Path` accepts either one on Windows.
+        for escape in ["../victim.png", "..\\victim.png"] {
+            let refused = offline_trash(&dir, Some(&db), escape, 5).is_err();
+            #[cfg(windows)]
+            assert!(refused, "{escape} was not refused");
+            // A unix `Path` treats the backslash form as one ordinary filename,
+            // so it resolves to nothing and is a no-op rather than a refusal.
+            #[cfg(unix)]
             assert!(
-                offline_trash(dir.path(), Some(&db), escape, 5).is_err(),
+                refused || !escape.contains('\\'),
                 "{escape} was not refused"
             );
         }
@@ -2195,11 +2205,11 @@ mod tests {
         // The symlink arm needs a privilege Windows does not grant by default.
         #[cfg(unix)]
         {
-            std::os::unix::fs::symlink(&victim, dir.path().join("link.png")).unwrap();
-            assert!(offline_trash(dir.path(), Some(&db), "link.png", 5).is_err());
+            std::os::unix::fs::symlink(&victim, dir.join("link.png")).unwrap();
+            assert!(offline_trash(&dir, Some(&db), "link.png", 5).is_err());
         }
 
-        assert!(victim.exists());
+        assert!(victim.exists(), "the victim was moved out of its directory");
     }
 
     #[tokio::test]

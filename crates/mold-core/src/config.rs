@@ -1711,10 +1711,23 @@ impl Config {
         // non-temp config path. This catches the race condition where parallel tests
         // set MOLD_HOME to /tmp/... and a config.save() writes the corrupted
         // models_dir to the user's real config file.
+        // `/tmp` is only the unix spelling of "a temporary directory": on
+        // Windows a tempdir lives under `%LOCALAPPDATA%\Temp`, so both halves
+        // of this guard were dead there and the race it protects against was
+        // unguarded. Ask the platform where temp is instead of adding a second
+        // hardcoded prefix, and keep the literal `/tmp/` checks so a unix path
+        // built by a test that overrode TMPDIR still matches.
+        let temp_root = std::env::temp_dir();
+        let under_temp = |value: &str| {
+            value.contains("/tmp/")
+                || Path::new(value).starts_with(&temp_root)
+                || value.contains("/mold-config-test-")
+                || value.contains("\\mold-config-test-")
+        };
         let path_str = path.to_string_lossy();
-        let is_temp_config = path_str.contains("/tmp/") || path_str.contains("/mold-config-test-");
-        let has_temp_models_dir = self.models_dir.contains("/tmp/mold-")
-            || self.models_dir.contains("/mold-config-test-");
+        let is_temp_config = under_temp(&path_str);
+        let has_temp_models_dir = under_temp(&self.models_dir)
+            && (self.models_dir.contains("mold-") || self.models_dir.contains("mold_"));
         if has_temp_models_dir && !is_temp_config {
             eprintln!(
                 "warning: refusing to save config with test models_dir ({}) to real config ({})",
