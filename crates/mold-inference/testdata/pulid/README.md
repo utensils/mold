@@ -71,10 +71,39 @@ with the weights could forge it to match.
 | `goldens.json` | Human-readable statistics and capture parameters |
 | `input_pattern.png` | The 512x512 preprocessing input (force-added past the repo-wide `*.png` ignore) |
 | `capture_eva_goldens.py` | Provenance, above |
+| `true_cfg_goldens.safetensors` | The unconditional identity embedding (256 KB) |
+| `true_cfg_goldens.json` | Its statistics and capture parameters |
+| `capture_true_cfg_goldens.py` | Provenance for the two files above |
 
 `faces/`, `fetch_faces.py`, `onnx-inventory.json` and `capture_goldens.py`
 belong to the face-extraction goldens and are documented in
 `faces/README.md`.
+
+### The true-CFG golden
+
+A separate file and a separate script
+([#1226](https://github.com/utensils/mold/issues/1226)) so that regenerating
+either set never requires re-running the other's 609 MB tower load. It holds one
+tensor and its statistics: the **unconditional** identity embedding PuLID's true
+classifier-free guidance conditions its negative branch on, which upstream
+builds by running the IDFormer on all-zero conditioning
+(`PuLID/pulid/pipeline_flux.py:188-192`).
+
+It is not a zero tensor — the IDFormer's biases, LayerNorms, and learned latent
+queries land all-zero inputs around ±13000 — and it depends on no photograph at
+all, which is why one committed tensor is the complete answer. Captured on the
+same pinned `pulid_flux_v0.9.1.safetensors` as the IDFormer golden above.
+
+```bash
+/tmp/pulid-venv/bin/python capture_true_cfg_goldens.py \
+  --pulid-repo /tmp/PuLID \
+  --adapter /path/to/pulid_flux_v0.9.1.safetensors \
+  --out .
+```
+
+Checked by `flux::pulid_encoder::tests::the_unconditional_identity_matches_upstream`,
+which is `#[ignore]` behind `MOLD_TEST_PULID_ASSETS` like the rest of the
+weight-gated set. Measured error: **3.7e-7** of the tensor's own scale.
 
 ### Inputs are generated, not committed
 

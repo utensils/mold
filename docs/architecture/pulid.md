@@ -454,11 +454,119 @@ manifest files. Both names live in `mold_core::pulid_assets`
 `mold-inference`; the converter reads them from there so the two can never name
 different files.
 
+## Several photographs, and true CFG (#1226)
+
+Two independent additions land on the same seam and are documented together
+because both change what one extraction produces.
+
+### Averaging is post-IDFormer, and the reference is ComfyUI
+
+`ToTheBeginning/PuLID` only ever handles one image: `get_id_embedding`
+(`pulid/pipeline_flux.py:120-194`) takes a single `image` and there is no
+multi-reference path in the repository at all. The reference for the multi case
+is therefore `cubiq/PuLID_ComfyUI`, and what it does is specific:
+
+```python
+for i in range(image.shape[0]):
+    ...
+    cond.append(pulid_model.get_image_embeds(id_cond, id_vit_hidden))   # pulid.py:406
+cond = torch.cat(cond)
+if cond.shape[0] > 1:
+    cond = torch.mean(cond, dim=0, keepdim=True)                        # pulid.py:415-419
+```
+
+`get_image_embeds` **is** the IDFormer, so the mean is over final
+`[1, 32, 2048]` token sets — not over the raw ArcFace vectors, and not over the
+EVA hidden states. Averaging before the IDFormer would feed it a conditioning
+vector no training pass ever saw; mold does not do it, and the distinction is
+recorded here because it is the one thing a reader is likely to assume the
+other way round.
+
+`mold_core::identity::average_identity_tokens` is that mean, and
+`identity::extraction::compose_identity_token_sets` is the loop around it: the
+609 MB tower is built ONCE and run per photograph, then dropped, and the
+IDFormer is built once afterwards and run per photograph. So N photographs cost
+N times the latency and one host peak — the only term that scales with N is the
+retained hidden states, `EXTRACTION_RETAINED_BYTES_PER_IMAGE` (~12 MB each
+against a 1.4 GB peak), which is why `ID_IMAGES_MAX` is a *latency* budget
+rather than a memory one.
+
+Ordering: the mean is order-independent, so nothing sorts or canonicalizes. The
+recorded provenance keeps request order, and the frozen fingerprint hashes the
+digests in that order — so two requests with the same photographs in different
+orders freeze the same values under different fingerprints. That is deliberate:
+a fingerprint describes what was supplied.
+
+A photograph with no detectable face refuses the whole request, naming its
+one-based position. `PuLID_ComfyUI` warns and skips it (`pulid.py:360-373`),
+which changes the face that renders with nothing visible to the caller.
+
+### The unconditional identity is a constant of the adapter
+
+True CFG (`PuLID/flux/sampling.py:136-149`) runs a second forward per step over
+the negative prompt AND an unconditional identity embedding. That embedding is
+built by running the IDFormer on all-zero conditioning:
+
+```python
+id_uncond = torch.zeros_like(id_cond)
+id_vit_hidden_uncond = [torch.zeros_like(h) for h in id_vit_hidden]
+uncond_id_embedding = self.pulid_encoder(id_uncond, id_vit_hidden_uncond)
+```
+
+(`PuLID/pulid/pipeline_flux.py:188-192`). It is **not** a zero tensor — the
+IDFormer has biases, LayerNorms, and learned latent queries, so all-zero inputs
+land it around ±13000 — and it depends on no photograph at all. That is also why
+`PuLID_ComfyUI`'s per-image uncond is the same tensor for every image at
+`noise == 0` (`pulid.py:396-407`) and its mean is that tensor
+(`pulid.py:416-419`): mold computes it once, and only when the request runs the
+branch.
+
+`testdata/pulid/true_cfg_goldens.safetensors` pins it against upstream's own
+value, captured by `capture_true_cfg_goldens.py`; mold reproduces it to 3.7e-7
+of its scale.
+
+### The gates
+
+Three separate structural gates keep an unbranched render byte-identical:
+
+1. `identity::request_uses_true_cfg` is `false` for an absent scale, for one
+   within `TRUE_CFG_EPSILON` of 1.0 (`sampling.py:120`'s own comparison), and
+   for a zero `id_weight`. It is what admission, the memory estimate, the
+   extractor, and the engine all read.
+2. `FluxTransformer::denoise` takes `Option<&TrueCfgBranch>`; `None` leaves the
+   loop byte-for-byte the loop that always ran, and a step below `start_step`
+   takes the same path. Pinned per transformer variant in
+   `flux/pulid_variants.rs`, on the same synthetic route the zero-weight tests
+   use.
+3. `1.0` is refused as a *scale* rather than run as an identity lerp:
+   `neg + 1.0 * (pos - neg)` is `pos` arithmetically but not bit-identically.
+
+Both halves of the frozen identity are installed and cleared by ONE call
+(`EngineIdentityState::set_embedding`), because an unconditional embedding left
+over from a previous request would condition this render's negative branch on
+the previous person's absence.
+
+A true-CFG request whose host froze no unconditional identity is an explicit
+error, never a silent distilled render: `req.guidance` is chosen for whichever
+regime is running, so dropping the branch renders at a guidance value the caller
+picked for a branch that never ran.
+
+### Memory
+
+`memory_preflight::TRUE_CFG_VRAM_OVERHEAD_BYTES` (150 MB) is charged on top of
+`IDENTITY_VRAM_OVERHEAD_BYTES`. The two forwards run in sequence, so the peak
+does not double; what is genuinely additional is the negative conditioning
+(~4.2 MB of T5 output), the unconditional identity context, the conditional
+prediction held across the negative forward, and a second cross-attention
+working set. The cost that is *not* memory is time — close to 2x the denoise —
+which the scheduler's learned phase timings observe rather than predict.
+
 ## Not yet built
 
 - facexlib's BiSeNet background mask, which upstream applies before the vision
   tower (`PuLID/pulid/pipeline_flux.py:145-170`). Issue #1225.
-- Fusing several reference photographs into one stronger identity.
+- Multiple photographs and true CFG on the web, desktop, iPhone, TUI, and
+  Discord surfaces. #1226 shipped the contract, the runtime, and the CLI only.
 - Identity on tiers other than `flux-dev:q4` / `:q8`, alongside a LoRA, or
   alongside img2img. All three are refused by name at the request contract; a
   milestone-2 qualification pass owns them.
