@@ -11,7 +11,7 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::rc::Rc;
 
-#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+#[cfg(any(test, feature = "h3", feature = "h3-private-uat"))]
 pub(crate) fn private_work_identity_sha256(work_id: &str) -> String {
     use sha2::{Digest, Sha256};
 
@@ -22,7 +22,7 @@ pub(crate) fn private_work_identity_sha256(work_id: &str) -> String {
     format!("{:x}", digest.finalize())
 }
 
-#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+#[cfg(any(test, feature = "h3", feature = "h3-private-uat"))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn private_cancellation_scope_identity_sha256(
     work_identity_sha256: &str,
@@ -528,16 +528,9 @@ impl H3GenerationAttempt {
 }
 
 #[cfg(test)]
-pub(crate) fn generation_attempt_for_test(
-    work_id: &str,
-    cancellation: mold_inference::InferenceCancellationToken,
-) -> (
-    H3GenerationAttempt,
-    H3AttemptCurrent,
-    std::sync::Arc<std::sync::atomic::AtomicUsize>,
-) {
+fn generation_attempt_claim_for_test(work_id: &str) -> H3AttemptClaim {
     let identity = |byte: char| std::iter::repeat_n(byte, 64).collect::<String>();
-    let claim = H3AttemptClaim {
+    H3AttemptClaim {
         work_id: work_id.to_string(),
         device_id: "cuda:0".to_string(),
         device_ordinal: 0,
@@ -553,7 +546,49 @@ pub(crate) fn generation_attempt_for_test(
         component_set_identity_sha256: identity('d'),
         predicted_device_peak_bytes: 11_000_000_000,
         predicted_host_increment_bytes: 2_000_000_000,
-    };
+    }
+}
+
+/// The private run binding a `generation_attempt_for_test` scope hands the
+/// runtime through `private_run_context`, as `(work identity, cancellation
+/// scope identity, memory ledger sequence)`.
+///
+/// `matches_private_run_binding` re-derives these from the owner's own claim,
+/// so a prepared-attempt test double must echo exactly them or the fence
+/// correctly refuses it as a changed owner run binding. Both sides read this
+/// one derivation because a fixture that restates constants instead is what
+/// left ten `claimed_*` tests failing against a fence that was working (#1204).
+#[cfg(test)]
+pub(crate) fn private_run_binding_for_test(work_id: &str) -> (String, String, u64) {
+    let claim = generation_attempt_claim_for_test(work_id);
+    let work_identity_sha256 = private_work_identity_sha256(&claim.work_id);
+    let cancellation_scope_identity_sha256 = private_cancellation_scope_identity_sha256(
+        &work_identity_sha256,
+        &claim.device_id,
+        claim.owner_epoch,
+        claim.state_version,
+        claim.plan_version,
+        claim.worker_generation,
+        claim.memory_sample_generation,
+        claim.memory_ledger_sequence,
+    );
+    (
+        work_identity_sha256,
+        cancellation_scope_identity_sha256,
+        claim.memory_ledger_sequence,
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn generation_attempt_for_test(
+    work_id: &str,
+    cancellation: mold_inference::InferenceCancellationToken,
+) -> (
+    H3GenerationAttempt,
+    H3AttemptCurrent,
+    std::sync::Arc<std::sync::atomic::AtomicUsize>,
+) {
+    let claim = generation_attempt_claim_for_test(work_id);
     let current = H3AttemptCurrent {
         work_id: claim.work_id.clone(),
         device_id: claim.device_id.clone(),
@@ -1286,5 +1321,48 @@ mod tests {
             assert_eq!(error, H3AttemptError::StaleOwnerFence);
             assert!(!called.load(Ordering::SeqCst));
         }
+    }
+
+    /// The owner scope accepts exactly the binding it derives from its own
+    /// claim, and nothing else. `private_run_binding_for_test` is therefore
+    /// the only correct source for a prepared-attempt test double's echoed
+    /// identities: a constant digest is refused on every axis (#1204).
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+    #[test]
+    fn the_owner_scope_accepts_only_its_own_derived_private_run_binding() {
+        let work_id = "h3-attempt-derived-run-binding";
+        let (work_identity, cancellation_scope, ledger_sequence) =
+            private_run_binding_for_test(work_id);
+        let constant: String = std::iter::repeat_n('2', 64).collect();
+        let (attempt, current, _settlements) = generation_attempt_for_test(
+            work_id,
+            mold_inference::InferenceCancellationToken::default(),
+        );
+
+        attempt
+            .run_once(current, |scope| {
+                let facts = scope.facts();
+                assert!(facts.matches_private_run_binding(
+                    &work_identity,
+                    &cancellation_scope,
+                    ledger_sequence,
+                ));
+                assert!(!facts.matches_private_run_binding(
+                    &constant,
+                    &cancellation_scope,
+                    ledger_sequence,
+                ));
+                assert!(!facts.matches_private_run_binding(
+                    &work_identity,
+                    &constant,
+                    ledger_sequence,
+                ));
+                assert!(!facts.matches_private_run_binding(
+                    &work_identity,
+                    &cancellation_scope,
+                    ledger_sequence + 1,
+                ));
+            })
+            .expect("the synthetic owner attempt runs once");
     }
 }
