@@ -7727,7 +7727,7 @@ mod tests {
             &artifact_report(),
             DEVICE_0,
             0,
-            (8, 9),
+            Some((8, 9)),
             &runtime_identity,
             kernel.identity(),
             &runtime_identity,
