@@ -3353,8 +3353,11 @@ fn validate_h3_prepared_attempt_facts(
         || prepared.component_set_identity_sha256 != scope.component_set_identity_sha256()
         || prepared.predicted_device_peak_bytes != scope.predicted_device_peak_bytes()
         || prepared.predicted_host_increment_bytes != scope.predicted_host_increment_bytes()
-        || prepared.predicted_device_peak_bytes == 0
-        || prepared.predicted_host_increment_bytes == 0
+        || !h3_claimed_budget_is_complete(
+            scope.backend(),
+            prepared.predicted_device_peak_bytes,
+            prepared.predicted_host_increment_bytes,
+        )
         || prepared.memory_ledger_sequence == 0
         || digests
             .into_iter()
@@ -3363,6 +3366,16 @@ fn validate_h3_prepared_attempt_facts(
         anyhow::bail!("MiniMax H3 prepared attempt differs from the claimed owner scope")
     }
     Ok(())
+}
+
+#[cfg(any(test, feature = "h3-private-bridge", feature = "h3-private-uat"))]
+fn h3_claimed_budget_is_complete(
+    backend: mold_core::GpuBackend,
+    predicted_device_peak_bytes: u64,
+    predicted_host_increment_bytes: u64,
+) -> bool {
+    predicted_device_peak_bytes > 0
+        && (predicted_host_increment_bytes > 0 || backend == mold_core::GpuBackend::Metal)
 }
 
 #[cfg(any(test, feature = "h3-private-bridge", feature = "h3-private-uat"))]
@@ -12239,6 +12252,25 @@ mod tests {
         )
         .expect_err("ledger-aware headroom below the frozen host increment must reject");
         assert!(error.error.contains("canonical safety floor"));
+    }
+
+    #[test]
+    fn claimed_h3_budget_accepts_unified_metal_and_preserves_cuda_split_fence() {
+        assert!(h3_claimed_budget_is_complete(
+            mold_core::GpuBackend::Metal,
+            40 << 30,
+            0,
+        ));
+        assert!(!h3_claimed_budget_is_complete(
+            mold_core::GpuBackend::Cuda,
+            40 << 30,
+            0,
+        ));
+        assert!(h3_claimed_budget_is_complete(
+            mold_core::GpuBackend::Cuda,
+            32 << 30,
+            8 << 30,
+        ));
     }
 
     /// Ordinary work gets the same host-RAM fence H3 already had.

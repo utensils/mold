@@ -407,6 +407,7 @@ impl<'a> H3AttemptScope<'a> {
             work_id: &self.claim.work_id,
             device_id: &self.claim.device_id,
             device_ordinal: self.claim.device_ordinal,
+            backend: self.claim.backend,
             owner_epoch: self.claim.owner_epoch,
             worker_generation: self.claim.worker_generation,
             state_version: self.claim.state_version,
@@ -429,6 +430,7 @@ pub(crate) struct H3AttemptScopeFacts<'a> {
     work_id: &'a str,
     device_id: &'a str,
     device_ordinal: usize,
+    backend: mold_core::GpuBackend,
     owner_epoch: u64,
     worker_generation: u64,
     state_version: u64,
@@ -451,6 +453,10 @@ impl<'a> H3AttemptScopeFacts<'a> {
 
     pub(crate) fn device_ordinal(self) -> usize {
         self.device_ordinal
+    }
+
+    pub(crate) fn backend(self) -> mold_core::GpuBackend {
+        self.backend
     }
 
     pub(crate) fn matches_lease(self, lease: &crate::scheduler::LeaseFence) -> bool {
