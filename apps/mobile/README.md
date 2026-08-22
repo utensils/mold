@@ -195,8 +195,9 @@ pushed screen opened from the header.
   as a new draft (raising any clip duration the selected model's motion tail no
   longer allows, and saying so); iPhone is reuse-only — **Edit sequence** stays
   a desktop/web action until mobile has a chain-detail recovery route.
-  Generated stills open the same viewer on tap. Press and hold an image to keep
-  the native iOS Share, Save to Photos, Copy, Copy Subject, and Look Up menu.
+  Generated stills open the same viewer on tap. Press and hold a Library image
+  to keep the native iOS Share, Save to Photos, Copy, Copy Subject, and Look Up
+  menu, plus **Select** to enter multi-select with that print selected.
   Pinch the grid to resize thumbnails between two and five across — the iPhone
   counterpart to the web/desktop thumbnail-size slider. The choice persists at
   `mold.mobile.galleryColumns.v1`, separately from the shared pixel-target key

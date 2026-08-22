@@ -3,6 +3,7 @@
 //! Mold servers.
 
 mod appearance;
+mod context_menu;
 mod discovery;
 mod identity;
 mod keychain;
@@ -46,6 +47,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             appearance::set_mobile_appearance,
+            context_menu::extend_gallery_context_menu,
             discovery::discover_mold_hosts,
             keychain::keychain_set_api_key,
             keychain::keychain_get_api_key,
