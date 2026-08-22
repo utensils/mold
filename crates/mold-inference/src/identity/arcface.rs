@@ -18,14 +18,13 @@
 //! travels to #1229, and [`ArcFaceEmbedding::l2_normalized`] is offered beside
 //! it for the cosine-similarity comparisons parity testing needs.
 
-use std::collections::HashMap;
-
 use anyhow::{bail, Context, Result};
-use candle_core::{DType, Device, Tensor};
+use candle_core::{Device, Tensor};
 use candle_onnx::onnx::ModelProto;
 use image::RgbImage;
 
 use super::align::{estimate_arcface_norm, Landmarks5};
+use super::arcface_net::IResNet100;
 use super::warp::warp_affine;
 
 /// The aligned crop size the recognizer takes, `glintr100`'s declared input.
@@ -82,37 +81,35 @@ pub fn norm_crop(image: &RgbImage, landmarks: &Landmarks5) -> Result<RgbImage> {
         .context("the ArcFace alignment transform was not invertible")
 }
 
-/// The recognizer: one decoded `glintr100` graph.
+/// The recognizer: the resident `glintr100` network.
+///
+/// The `ModelProto` is consumed at construction and dropped — see
+/// [`super::arcface_net`] and `docs/architecture/pulid-perf.md` §1. This is
+/// where the per-call re-materialization of 261 MB of initializers used to be.
 pub struct ArcFaceRecognizer {
-    model: ModelProto,
-    input_name: String,
-    output_name: String,
+    net: IResNet100,
 }
 
 impl ArcFaceRecognizer {
-    /// Wrap a decoded `glintr100` graph.
+    /// Wrap a decoded `glintr100` graph, on the CPU.
     pub fn new(model: ModelProto) -> Result<Self> {
+        Self::new_on_device(model, &Device::Cpu)
+    }
+
+    /// Wrap a decoded `glintr100` graph, placing its weights on `device`.
+    pub fn new_on_device(model: ModelProto, device: &Device) -> Result<Self> {
         let graph = model
             .graph
             .as_ref()
             .context("the ArcFace model carries no graph")?;
-        let input_name = graph
-            .input
-            .first()
-            .context("the ArcFace graph declares no input")?
-            .name
-            .clone();
         if graph.output.len() != 1 {
             bail!(
                 "expected exactly one ArcFace output (arcface_onnx.py:56), got {}",
                 graph.output.len()
             );
         }
-        let output_name = graph.output[0].name.clone();
         Ok(Self {
-            model,
-            input_name,
-            output_name,
+            net: IResNet100::new(&model, device).context("building the ArcFace network")?,
         })
     }
 
@@ -142,17 +139,10 @@ impl ArcFaceRecognizer {
 
     /// Embed an already-aligned 112x112 crop.
     pub fn embed_crop(&self, crop: &RgbImage) -> Result<ArcFaceEmbedding> {
-        let mut inputs = HashMap::new();
-        inputs.insert(self.input_name.clone(), Self::blob(crop)?);
-        let outputs = candle_onnx::simple_eval(&self.model, inputs)
-            .context("ArcFace graph evaluation failed")?;
-        let tensor = outputs
-            .get(&self.output_name)
-            .with_context(|| format!("ArcFace produced no `{}` output", self.output_name))?;
-        let raw = tensor
-            .to_dtype(DType::F32)?
-            .flatten_all()?
-            .to_vec1::<f32>()?;
+        let raw = self
+            .net
+            .forward(&Self::blob(crop)?)
+            .context("ArcFace evaluation failed")?;
         if raw.len() != EMBEDDING_DIM {
             bail!(
                 "ArcFace returned {} values, expected {EMBEDDING_DIM}",
@@ -167,15 +157,16 @@ impl ArcFaceRecognizer {
         self.embed_crop(&norm_crop(image, landmarks)?)
     }
 
-    /// The device every evaluation runs on.
+    /// The device this recognizer's weights are resident on.
     ///
-    /// `candle-onnx` materializes each initializer with `Device::Cpu`
-    /// (`candle-onnx/src/eval.rs:191-232`) and `Gemm` builds its `alpha`/`beta`
-    /// tensors there too (`:1794-1798`), so the evaluator is CPU-only by
-    /// construction. Stated as a function rather than a comment so a caller
-    /// that plans placement reads it from one place.
-    pub fn device() -> Device {
-        Device::Cpu
+    /// Since #1227 the network is an ordinary resident candle module, so this
+    /// is a real property of the instance rather than the `candle-onnx`
+    /// evaluator's hardcoded `Device::Cpu`. Milestone 1 still only ever builds
+    /// it on the CPU — extraction runs at admission, before any device is
+    /// leased (`docs/architecture/pulid-perf.md` §1) — and
+    /// [`super::IdentityExtractor::load`] keeps asserting that.
+    pub fn device(&self) -> &Device {
+        self.net.device()
     }
 }
 
@@ -251,10 +242,5 @@ mod tests {
         assert!((n[1] - 0.8).abs() < 1e-6);
         let len: f32 = n.iter().map(|v| v * v).sum::<f32>().sqrt();
         assert!((len - 1.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn the_evaluator_device_is_cpu() {
-        assert!(ArcFaceRecognizer::device().is_cpu());
     }
 }

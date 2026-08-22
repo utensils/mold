@@ -12,14 +12,13 @@
 //! `static_input_size` is `None` and the detector runs at the 640x640 default
 //! (`scrfd.py:97`, `DEFAULT_DET_SIZES[-1]`).
 
-use std::collections::HashMap;
-
 use anyhow::{bail, Context, Result};
-use candle_core::{DType, Device, Tensor};
+use candle_core::{Device, Tensor};
 use candle_onnx::onnx::ModelProto;
 use image::RgbImage;
 
 use super::align::Landmarks5;
+use super::scrfd_net::ScrfdNet;
 use super::warp::letterbox_top_left;
 
 /// Feature-pyramid strides, `scrfd.py:122`.
@@ -119,11 +118,13 @@ pub fn non_max_suppression(boxes: &[[f32; 4]], threshold: f32) -> Vec<usize> {
     keep
 }
 
-/// The SCRFD detector: one decoded graph plus upstream's thresholds.
+/// The SCRFD detector: the resident network plus upstream's thresholds.
+///
+/// The `ModelProto` is consumed at construction and dropped — see
+/// [`super::scrfd_net`] and `docs/architecture/pulid-perf.md` §1. Nothing here
+/// touches `candle-onnx` after `new` returns.
 pub struct ScrfdDetector {
-    model: ModelProto,
-    input_name: String,
-    output_names: Vec<String>,
+    net: ScrfdNet,
     /// Score threshold; defaults to [`DEFAULT_SCORE_THRESHOLD`].
     pub score_threshold: f32,
     /// NMS IoU threshold; defaults to [`DEFAULT_NMS_THRESHOLD`].
@@ -131,36 +132,37 @@ pub struct ScrfdDetector {
 }
 
 impl ScrfdDetector {
-    /// Wrap a decoded `scrfd_10g_bnkps` graph.
+    /// Wrap a decoded `scrfd_10g_bnkps` graph, on the CPU.
+    pub fn new(model: ModelProto) -> Result<Self> {
+        Self::new_on_device(model, &Device::Cpu)
+    }
+
+    /// Wrap a decoded `scrfd_10g_bnkps` graph, placing its weights on `device`.
     ///
     /// Fails closed on any graph whose output arity is not the nine-tensor
     /// keypoint variant, because every stride offset below is derived from
     /// `fmc = 3`.
-    pub fn new(model: ModelProto) -> Result<Self> {
+    pub fn new_on_device(model: ModelProto, device: &Device) -> Result<Self> {
         let graph = model
             .graph
             .as_ref()
             .context("the SCRFD model carries no graph")?;
-        let input_name = graph
-            .input
-            .first()
-            .context("the SCRFD graph declares no input")?
-            .name
-            .clone();
-        let output_names: Vec<String> = graph.output.iter().map(|o| o.name.clone()).collect();
-        if output_names.len() != FEATURE_STRIDES.len() * 3 {
+        let outputs = graph.output.len();
+        if outputs != FEATURE_STRIDES.len() * 3 {
             bail!(
-                "expected a 9-output SCRFD keypoint graph (scrfd.py:127-132), got {} outputs",
-                output_names.len()
+                "expected a 9-output SCRFD keypoint graph (scrfd.py:127-132), got {outputs} outputs"
             );
         }
         Ok(Self {
-            model,
-            input_name,
-            output_names,
+            net: ScrfdNet::new(&model, device).context("building the SCRFD network")?,
             score_threshold: DEFAULT_SCORE_THRESHOLD,
             nms_threshold: DEFAULT_NMS_THRESHOLD,
         })
+    }
+
+    /// The device the detector's weights are resident on.
+    pub fn device(&self) -> &Device {
+        self.net.device()
     }
 
     /// Build the network blob from an already letterboxed RGB canvas.
@@ -186,26 +188,13 @@ impl ScrfdDetector {
     pub fn detect(&self, image: &RgbImage) -> Result<Vec<DetectedFace>> {
         let boxed = letterbox_top_left(image, DETECTOR_INPUT);
         let blob = Self::blob(&boxed.image)?;
-        let mut inputs = HashMap::new();
-        inputs.insert(self.input_name.clone(), blob);
-        let outputs = candle_onnx::simple_eval(&self.model, inputs)
-            .context("SCRFD graph evaluation failed")?;
-        let fetch = |name: &str| -> Result<Vec<f32>> {
-            let tensor = outputs
-                .get(name)
-                .with_context(|| format!("SCRFD produced no `{name}` output"))?;
-            Ok(tensor
-                .to_dtype(DType::F32)?
-                .flatten_all()?
-                .to_vec1::<f32>()?)
-        };
+        let raw = self.net.forward(&blob).context("SCRFD evaluation failed")?;
 
         let mut candidates: Vec<DetectedFace> = Vec::new();
-        let fmc = FEATURE_STRIDES.len();
         for (idx, stride) in FEATURE_STRIDES.iter().copied().enumerate() {
-            let scores = fetch(&self.output_names[idx])?;
-            let bbox_preds = fetch(&self.output_names[idx + fmc])?;
-            let kps_preds = fetch(&self.output_names[idx + fmc * 2])?;
+            let scores = &raw.scores[idx];
+            let bbox_preds = &raw.bboxes[idx];
+            let kps_preds = &raw.keypoints[idx];
             let extent = DETECTOR_INPUT as usize / stride;
             let centres = anchor_centers(extent, extent, stride, ANCHORS_PER_CELL);
             if scores.len() != centres.len() {
