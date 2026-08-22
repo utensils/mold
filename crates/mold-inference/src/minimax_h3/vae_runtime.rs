@@ -1320,6 +1320,19 @@ impl FactoryError {
 
 struct ProductionVaeFactory;
 
+fn validate_comfy_visual_dtypes(
+    stored_weight_dtype: DType,
+    decode_compute_dtype: DType,
+    expected_compute_dtype: DType,
+) -> std::result::Result<(), String> {
+    if stored_weight_dtype == DType::F16 && decode_compute_dtype == expected_compute_dtype {
+        return Ok(());
+    }
+    Err(format!(
+        "Comfy visual VAE did not preserve FP16 resident weights with {expected_compute_dtype:?} reference compute"
+    ))
+}
+
 impl VaeFactory for ProductionVaeFactory {
     type Visual = MiniMaxH3VisualVae;
     type Audio = AudioVae;
@@ -1397,11 +1410,13 @@ impl VaeFactory for ProductionVaeFactory {
             observer,
             cancelled: false,
         };
+        let decode_policy = DecodeComputePolicy::Reference;
+        let expected_compute_dtype = decode_policy.effective_dtype(device);
         let model = MiniMaxH3VisualVae::from_validated(
             config,
             &validated,
             device,
-            DecodeComputePolicy::Reference,
+            decode_policy,
             VisualAttentionBackend::Auto,
             &mut visual_observer,
         );
@@ -1420,12 +1435,14 @@ impl VaeFactory for ProductionVaeFactory {
                 ));
             }
         };
-        if model.stored_weight_dtype() != DType::F16 || model.decode_compute_dtype() != DType::F16 {
-            return Err(FactoryError::construction(
-                H3ComfyVaeArtifactRole::VisualWeights,
-                "Comfy visual VAE did not preserve FP16 resident/reference execution",
-            ));
-        }
+        validate_comfy_visual_dtypes(
+            model.stored_weight_dtype(),
+            model.decode_compute_dtype(),
+            expected_compute_dtype,
+        )
+        .map_err(|error| {
+            FactoryError::construction(H3ComfyVaeArtifactRole::VisualWeights, error)
+        })?;
         let header_bytes = header.header_len.checked_add(8).ok_or_else(|| {
             FactoryError::validation(
                 H3ComfyVaeArtifactRole::VisualWeights,
@@ -2781,6 +2798,18 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
+
+    #[test]
+    fn comfy_visual_dtype_guard_accepts_backend_reference_compute() {
+        assert!(validate_comfy_visual_dtypes(DType::F16, DType::F16, DType::F16).is_ok());
+        assert!(validate_comfy_visual_dtypes(DType::F16, DType::F32, DType::F32).is_ok());
+    }
+
+    #[test]
+    fn comfy_visual_dtype_guard_rejects_storage_or_compute_drift() {
+        assert!(validate_comfy_visual_dtypes(DType::F32, DType::F32, DType::F32).is_err());
+        assert!(validate_comfy_visual_dtypes(DType::F16, DType::F16, DType::F32).is_err());
+    }
 
     #[derive(Debug)]
     struct FakeVisual(u8);
