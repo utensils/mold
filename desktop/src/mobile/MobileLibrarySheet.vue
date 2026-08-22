@@ -13,13 +13,20 @@ const props = withDefaults(
   defineProps<{
     open: boolean;
     title: string;
+    /** Focus the first editor when the sheet opens. Disable for read-first sheets. */
+    focusFirstControl?: boolean;
     /** Trailing label of the one closing control. */
     doneLabel?: string;
     testId?: string;
     /** Platform-specific minimum target for the closing control. */
     touchTargetSize?: number;
   }>(),
-  { doneLabel: "Done", testId: "mobile-library-sheet", touchTargetSize: 46 },
+  {
+    focusFirstControl: true,
+    doneLabel: "Done",
+    testId: "mobile-library-sheet",
+    touchTargetSize: 46,
+  },
 );
 
 const emit = defineEmits<{ close: [] }>();
@@ -32,9 +39,13 @@ watch(
   (open) => {
     if (open) {
       restoreFocus = document.activeElement as HTMLElement | null;
-      // Land focus on the first editable control so the keyboard rises with
-      // the sheet; fall back to the panel itself.
+      // Editing sheets may raise the keyboard immediately. Read-first sheets
+      // focus the panel so the keyboard waits for an explicit field tap.
       queueMicrotask(() => {
+        if (!props.focusFirstControl) {
+          panel.value?.focus?.();
+          return;
+        }
         const first = panel.value?.querySelector<HTMLElement>(
           "input, textarea, select, button:not([data-sheet-close])",
         );

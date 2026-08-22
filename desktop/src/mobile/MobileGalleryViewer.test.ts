@@ -899,10 +899,62 @@ describe("MobileGalleryViewer info sheet", () => {
     return wrapper;
   }
 
-  it("hides the Info control until a host can organize or the print is trashed", async () => {
+  it("shows metadata Info even when the host cannot organize", async () => {
     const view = mountViewer();
     await flushPromises();
-    expect(view.find("[data-test='gallery-viewer-info']").exists()).toBe(false);
+    expect(view.find("[data-test='gallery-viewer-info']").exists()).toBe(true);
+    await view.get("[data-test='gallery-viewer-info']").trigger("click");
+    await flushPromises();
+
+    expect(document.activeElement).toBe(view.get(".mobile-library-sheet-panel").element);
+    expect(view.get("[data-test='gallery-viewer-print-details']").text()).toContain("flux-dev:q8");
+    expect(view.get("[data-test='gallery-viewer-print-details']").text()).toContain("1024×1024");
+  });
+
+  it("matches the desktop print-detail metadata fields", async () => {
+    const view = mountViewer({
+      ...image,
+      size_bytes: 1_500_000,
+      metadata: {
+        ...image.metadata,
+        original_prompt: "a beacon",
+        negative_prompt: "fog",
+        batch_id: "batch-9",
+        batch_index: 2,
+        batch_count: 3,
+        scheduler: "euler-a",
+        cfg_plus: true,
+        strength: 0.65,
+        frames: 97,
+        fps: 24,
+        pipeline: "two-stage",
+        loras: [{ path: "detail.safetensors", scale: 0.8 }],
+        version: "0.21.0",
+      },
+    });
+    await flushPromises();
+    await view.get("[data-test='gallery-viewer-info']").trigger("click");
+
+    const details = view.get("[data-test='gallery-viewer-print-details']").text();
+    for (const value of [
+      "print one.png",
+      "Original a beacon",
+      "Negative fog",
+      "Prepared batch 2 of 3 · batch-9",
+      "Seed42",
+      "Steps · guidance4 · 3.5",
+      "Schedulereuler-a",
+      "CFG++on",
+      "Denoise strength0.65",
+      "Frames97 · 24 fps",
+      "LoRAdetail.safetensors × 0.80",
+      "File size1.5 MB",
+      "FormatPNG",
+      "HostStudio",
+      "mold 0.21.0",
+    ]) {
+      expect(details).toContain(value);
+    }
   });
 
   it("shows the saved title as the viewer title line", async () => {
