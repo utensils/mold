@@ -151,8 +151,10 @@ error: http://gpu-box:7680 does not support more than one identity photograph,
 
 A single `--id-image` needs no such check — every identity-capable server has
 always understood it — and `--local` is unaffected. If the server cannot be
-reached at all, nothing is refused: the ordinary local fallback takes over, and
-both shapes work in full there.
+reached **at all**, nothing is refused: the ordinary local fallback takes over,
+and both shapes work in full there. A server that *is* reachable but cannot
+answer the check is treated as not supporting them, because that is exactly how
+an older one behaves.
 
 ### Choosing a photograph
 

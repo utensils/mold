@@ -581,19 +581,37 @@ back to local inference, where both shapes are honoured in full. Turning an
 unreachable host into a hard error would take that fallback away from exactly
 the requests that need it most. `--local` never probes at all.
 
+Every OTHER probe failure IS a refusal, and the distinction is load-bearing
+rather than pedantic. A reachable server predating `/api/capabilities` answers
+404, and one whose body cannot be decoded answers 200-with-garbage — and both
+then ACCEPT the generate request while dropping exactly the fields the probe
+asked about. Treating those like an unreachable host reintroduces the whole bug.
+`MoldClient::is_connection_error` is the existing authority for "server
+unreachable, fall back to local", so the gate reuses it rather than inventing a
+second rule, and everything it does not classify is read as an all-false
+capability block.
+
 ### The estimate has to know about the second forward
 
 A branched step runs two transformer forwards, so a branched render is close to
 twice the denoise wall clock of an identical ordinary one. Two things follow,
 and both are in `scheduler/mod.rs`:
 
-`generation_shape_bucket` carries a `:cfg<permille>` suffix, so branched and
+`generation_shape_bucket` appends a `:cfg<permille>` suffix, so branched and
 ordinary runs of the same geometry never share a learned bucket. Sharing one
 would teach the model an average that is wrong for both, and that number is what
 a client renders as a queue ETA and what `placement-preview` compares when Auto
 picks a host. The suffix is the multiplier rather than a bare flag, so a run
-starting the branch at step 1 and one starting it at step 15 also stay separate;
-everything that does not engage the branch renders `cfg1000`.
+starting the branch at step 1 and one starting it at step 15 also stay separate.
+
+The suffix is appended **only for an engaged branch**, and an unbranched request
+produces the byte-identical legacy key. That is a migration constraint, not
+tidiness: `scheduler_estimates` is persisted and keyed on this string, and it
+carries the failure-only VRAM floors as well as the learned timings. Suffixing
+every ordinary bucket would rename all of them on upgrade, stranding both — so a
+shape already known to OOM would be admitted again until it failed a second
+time. `an_ordinary_request_keeps_the_legacy_bucket_key` pins the legacy string
+against a literal; changing it is a migration, not an edit.
 
 `static_generation_time_ms` — the cold estimate, which is exactly what a first
 true-CFG render hits — scales its denoise term by

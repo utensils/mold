@@ -87,10 +87,13 @@ identity-photo invariant paragraph:
 > the authority, and ABSENCE READS AS NO — the whole block is `#[serde(default)]`
 > all-false, which is exactly what an older server's response deserializes to. A
 > client that needs either shape probes first and refuses by name; the singular
-> `id_image` predates the block and pays no round trip. A probe that cannot
-> reach the host is deliberately not a refusal, because the ordinary remote
-> attempt fails the same way and falls back to local inference, where both
-> shapes are honoured in full.
+> `id_image` predates the block and pays no round trip. Only a genuine transport
+> failure — `MoldClient::is_connection_error`, the same authority the local
+> fallback already uses — falls through unrefused, because the ordinary remote
+> attempt fails the same way and falls back to local inference. A REACHABLE
+> server that answers 404 or garbage is read as all-false and refused, since
+> that is precisely how an older server answers before accepting the request and
+> dropping the fields.
 
 ### 1d. Amend the PuLID face-extraction bullet
 
@@ -235,8 +238,11 @@ either attachment-list handling or a second command.
   `capabilities.identity` block; absence reads as NO. A probe that cannot reach
   the host is not a refusal, so the offline local-fallback path is preserved.
 - **The true-CFG branch is part of the estimate identity.** The shape-bucket key
-  carries a `:cfg<permille>` suffix so learned samples never mix branched and
-  ordinary runs, and the static estimate scales the denoise term (not the fixed
-  setup term) by `1 + (steps - cfg_start_step)/steps` — the branched fraction,
-  never a flat 2x. Placement preview reads the same two functions, so Auto host
-  choice cannot misprice a branched render.
+  gains a `:cfg<permille>` suffix **only for an engaged branch** — an unbranched
+  request keeps the byte-identical legacy key, because `scheduler_estimates` is
+  persisted and carries the failure-only VRAM floors, so renaming every bucket
+  on upgrade would re-admit a shape already known to OOM. The static estimate
+  scales the denoise term (not the fixed setup term) by
+  `1 + (steps - cfg_start_step)/steps` — the branched fraction, never a flat 2x.
+  Placement preview reads the same two functions, so Auto host choice cannot
+  misprice a branched render.
