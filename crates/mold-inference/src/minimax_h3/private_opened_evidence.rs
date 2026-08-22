@@ -81,18 +81,6 @@ struct H3PrivateStorageRootIdentity {
     device: u64,
     #[cfg(unix)]
     inode: u64,
-    #[cfg(unix)]
-    user: u32,
-    #[cfg(unix)]
-    mode: u32,
-    #[cfg(unix)]
-    modified_seconds: i64,
-    #[cfg(unix)]
-    modified_nanoseconds: i64,
-    #[cfg(unix)]
-    changed_seconds: i64,
-    #[cfg(unix)]
-    changed_nanoseconds: i64,
 }
 
 impl H3PrivateStorageRootIdentity {
@@ -102,33 +90,12 @@ impl H3PrivateStorageRootIdentity {
             device: metadata.dev(),
             #[cfg(unix)]
             inode: metadata.ino(),
-            #[cfg(unix)]
-            user: metadata.uid(),
-            #[cfg(unix)]
-            mode: metadata.mode(),
-            #[cfg(unix)]
-            modified_seconds: metadata.mtime(),
-            #[cfg(unix)]
-            modified_nanoseconds: metadata.mtime_nsec(),
-            #[cfg(unix)]
-            changed_seconds: metadata.ctime(),
-            #[cfg(unix)]
-            changed_nanoseconds: metadata.ctime_nsec(),
         }
     }
 
     fn update_digest(&self, digest: &mut Sha256) {
         #[cfg(unix)]
-        for value in [
-            self.device,
-            self.inode,
-            u64::from(self.user),
-            u64::from(self.mode),
-            self.modified_seconds as u64,
-            self.modified_nanoseconds as u64,
-            self.changed_seconds as u64,
-            self.changed_nanoseconds as u64,
-        ] {
+        for value in [self.device, self.inode] {
             digest.update(value.to_le_bytes());
         }
     }
@@ -2901,6 +2868,22 @@ mod tests {
 
         let error = authority.validate().unwrap_err();
         assert!(error.to_string().contains("authority changed"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hidden_storage_survives_runtime_staging_below_the_same_root() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("models");
+        std::fs::create_dir(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        let authority = H3PrivateComfyStorageAuthority::resolve(&root, Task::Fl2va).unwrap();
+
+        std::fs::create_dir(root.join("runtime-staging")).unwrap();
+
+        authority
+            .validate()
+            .expect("staging must not replace the canonical models root");
     }
 
     /// The two tasks resolve different storage, and the Ref2VA route differs
