@@ -85,8 +85,8 @@ MOLD_HOST=http://gpu-box:7680 mold run flux-dev:q4 "a chef in a kitchen" \
 | ------------------ | ------- | ------------------------------------------------------------------------------------------------------------------------- |
 | `--id-image`       | —       | Reference photograph. PNG or JPEG, at most 16 MiB, 8192 px per axis, 32 MP. **Repeatable**, up to 4 times.                |
 | `--id-weight`      | `1.0`   | Identity strength, `0.0`–`3.0`. Around `0.6`–`0.8` trades likeness for prompt adherence; above `1.2` starts to look waxy. |
-| `--id-start-step`  | `0`     | First denoise step identity is applied from. Must be below `--steps`.                                                    |
-| `--true-cfg`       | `1.0`   | True classifier-free guidance scale, `1.0`–`10.0`. `1.0` is off. Requires `--id-image`.                                  |
+| `--id-start-step`  | `0`     | First denoise step identity is applied from. Must be below `--steps`.                                                     |
+| `--true-cfg`       | `1.0`   | True classifier-free guidance scale, `1.0`–`10.0`. `1.0` is off. Requires `--id-image`.                                   |
 | `--cfg-start-step` | `1`     | First denoise step the true-CFG negative branch runs at. Must be below `--steps`. Requires `--true-cfg`.                  |
 
 **`--id-weight 0` is completely inert.** Nothing is pulled, decoded, loaded, or
@@ -118,7 +118,7 @@ FLUX.1-dev is guidance-distilled: it runs a single forward per step and
 `--negative-prompt` normally does nothing on FLUX. `--true-cfg` restores actual
 classifier-free guidance for identity renders — from `--cfg-start-step`
 onwards, each step also runs a second forward over your negative prompt and the
-*unconditional* identity, and the two predictions are combined.
+_unconditional_ identity, and the two predictions are combined.
 
 Upstream's own advice, which mold follows rather than enforces: when you turn
 true CFG on, drop `--guidance` to `1.0`. Leaving the distilled guidance high
@@ -152,7 +152,7 @@ error: http://gpu-box:7680 does not support more than one identity photograph,
 A single `--id-image` needs no such check — every identity-capable server has
 always understood it — and `--local` is unaffected. If the server cannot be
 reached **at all**, nothing is refused: the ordinary local fallback takes over,
-and both shapes work in full there. A server that *is* reachable but cannot
+and both shapes work in full there. A server that _is_ reachable but cannot
 answer the check is treated as not supporting them, because that is exactly how
 an older one behaves.
 
