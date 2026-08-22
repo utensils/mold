@@ -609,10 +609,15 @@ Against facexlib on the four committed portraits, from the same 512 crop:
 | masked, resized, CLIP-normalized tensor, max abs | 1e-3 | 4.3e-5 |
 | final `[1, 32, 2048]` identity, relative to peak | 5e-5 | 1.0e-5 |
 
-Latency, re-measured with the parser as a third stage — the 2.0 s budget is
+Latency, re-measured with the parser as its own stage — the 2.0 s budget is
 per extraction, not per model. halcyon, release build, 5 warmups / 20 runs,
 under a load average of **19.5** (three agents building; the idle numbers
-above were taken on a quiet machine, and this is the honest working figure):
+above were taken on a quiet machine, and this is the honest working figure).
+
+Measured on the **pre-#1227** stack, so the SCRFD and ArcFace rows are the
+`candle-onnx` baselines the note at the top of this page describes rather than
+what ships today. The BiSeNet row is unaffected either way — the parser never
+went through `candle-onnx` — and it is the number #1225 contributes:
 
 | stage | p50 | p95 | max |
 | --- | --- | --- | --- |
@@ -624,6 +629,14 @@ above were taken on a quiet machine, and this is the honest working figure):
 Peak RSS 1179 MiB; decode + construct + convert 799.9 ms, once, at load.
 **PASS**, with 2.5x headroom on a busy machine. The parser is the cheapest of
 the three stages, which is what a 53 MB ResNet18 should be.
+
+Since #1227 the parser is timed by the extraction itself rather than by a
+probe-local loop: `ComposeStage::Parse` brackets materializing the parser,
+segmenting the crop, and applying the mask, and `pulid_face_probe bench --full`
+reports it as `bisenet` beside `eva-build`, `eva-forward`, `idformer-build` and
+`idformer-fwd`. It is charged apart from `EvaBuild` deliberately — it is a
+second network, not the tower's setup — and it is included in that command's
+`per-image` total.
 
 ### Still out of scope
 
