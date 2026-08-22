@@ -1629,7 +1629,12 @@ fn validate_request_contract_with_reference_authority(
         ));
     }
 
-    let frames = req.frames.unwrap_or(MIN_FRAMES);
+    // An omitted frame count means the shipped default clip length, NOT the
+    // family floor. Reading the floor here would interpret the same request as
+    // 107 frames while the profile, the manifest default, and the renderer all
+    // read 124 — so an advertised final keyframe at index 123 would be refused
+    // for exceeding a duration nothing else believes in.
+    let frames = req.frames.unwrap_or(REVIEWED_COMPACT_FRAMES);
     if !valid_frame_count(frames) {
         let mut error = violation(
             "MINIMAX_H3_FRAME_GRID",
