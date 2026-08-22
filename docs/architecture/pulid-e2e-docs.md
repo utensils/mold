@@ -117,6 +117,15 @@ executable yet on any build"*. Replace it with:
 > `mold licenses` lists what has been accepted. The PuLID adapter is Apache-2.0
 > and the EVA02-CLIP tower is MIT.
 
+**Build-from-source note** — wherever `cargo build --features` is shown:
+
+> The `pulid` feature (face identity) needs `protoc` on `PATH` at build time —
+> `candle-onnx`'s build script drives `prost-build`. `nix develop` provides it;
+> otherwise `brew install protobuf` or `apt-get install protobuf-compiler`
+> before building. Every official binary already ships the feature, so this only
+> concerns building mold yourself. `website/guide/installation.md` carries the
+> full note.
+
 ## 4. `THIRD_PARTY_NOTICES.md`
 
 Checked: it already carries PuLID (Apache-2.0), EVA-CLIP (MIT), and the

@@ -843,7 +843,14 @@ jobs:
             # From crates.io (CPU-only, no GPU acceleration)
             cargo install mold-ai
 
-            # From source with GPU support
+            # From source with GPU support.
+            # `protoc` is a BUILD requirement of the `pulid` feature (face
+            # identity): candle-onnx's build script drives prost-build, which
+            # shells out to it. Install it first or the build fails partway.
+            brew install protobuf                                        # macOS
+            sudo apt-get install -y protobuf-compiler                    # Debian/Ubuntu
+            # (Arch: pacman -S protobuf · Fedora: dnf install protobuf-compiler)
+
             cargo install --git https://github.com/utensils/mold --tag ${{ github.ref_name }} --features metal,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid  # macOS
             cargo install --git https://github.com/utensils/mold --tag ${{ github.ref_name }} --features cuda,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid   # Linux; use the SM89 artifact for H3
 
