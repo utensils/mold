@@ -1793,6 +1793,7 @@ async fn prepare_h3_private_inputs_for_devices(
     let mut failures = BTreeMap::new();
 
     for device in devices {
+        #[cfg(not(feature = "h3"))]
         if device.backend != mold_core::GpuBackend::Cuda {
             failures.insert(
                 device.id,
@@ -1800,13 +1801,29 @@ async fn prepare_h3_private_inputs_for_devices(
             );
             continue;
         }
-        let Some(compute_capability) = device.compute_capability else {
+        #[cfg(feature = "h3")]
+        if !matches!(
+            device.backend,
+            mold_core::GpuBackend::Cuda | mold_core::GpuBackend::Metal
+        ) {
+            failures.insert(device.id, "MiniMax H3 requires CUDA or Metal".to_string());
+            continue;
+        }
+        let compute_capability = device.compute_capability;
+        if device.backend == mold_core::GpuBackend::Cuda && compute_capability.is_none() {
             failures.insert(
                 device.id,
-                "MiniMax H3 private UAT requires exact CUDA compute capability".to_string(),
+                "MiniMax H3 CUDA requires exact compute capability".to_string(),
             );
             continue;
-        };
+        }
+        if device.backend == mold_core::GpuBackend::Metal && compute_capability.is_some() {
+            failures.insert(
+                device.id,
+                "MiniMax H3 Metal route carried a CUDA compute capability".to_string(),
+            );
+            continue;
+        }
         let admission_request = resolved_request.clone();
         let paths = uat_paths.clone();
         // Each device's admission mints its own descriptors rather than

@@ -168,14 +168,15 @@ pub const fn reviewed_h3_private_runtime_available_for_task(task: Task) -> bool 
     }
 }
 
-/// One scheduler-visible CUDA route eligible for authenticated private H3
+/// One scheduler-visible GPU route eligible for authenticated H3
 /// capability presentation. Supplying this record grants nothing: the
 /// source-controlled runtime record must match it exactly.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct H3PrivatePresentationRoute<'a> {
     pub device_id: &'a str,
     pub device_ordinal: usize,
-    pub compute_capability: (u16, u16),
+    /// `Some` identifies an exact CUDA architecture; `None` identifies Metal.
+    pub compute_capability: Option<(u16, u16)>,
 }
 
 /// Payload-free proof that the exact reviewed FL2VA qualification, external
@@ -187,7 +188,7 @@ pub struct H3PrivatePresentationAuthority {
     task: Task,
     device_id: String,
     device_ordinal: usize,
-    compute_capability: (u16, u16),
+    compute_capability: Option<(u16, u16)>,
 }
 
 impl H3PrivatePresentationAuthority {
@@ -207,7 +208,7 @@ impl H3PrivatePresentationAuthority {
         self.device_ordinal
     }
 
-    pub const fn compute_capability(&self) -> (u16, u16) {
+    pub const fn compute_capability(&self) -> Option<(u16, u16)> {
         self.compute_capability
     }
 }
@@ -1039,7 +1040,8 @@ pub struct H3PrivateFl2VaAdmissionInput<'a> {
     pub paths: H3PrivateFl2VaUatPaths<'a>,
     pub device_id: &'a str,
     pub device_ordinal: usize,
-    pub compute_capability: (u16, u16),
+    /// `Some` identifies an exact CUDA architecture; `None` identifies Metal.
+    pub compute_capability: Option<(u16, u16)>,
     pub available_device_bytes: u64,
     /// Host RAM available after the server's canonical 15%-or-8-GiB safety
     /// floor, never the raw operating-system available-memory sample.
@@ -1164,7 +1166,7 @@ pub struct H3PrivateFl2VaAdmissionEvidence {
     mode: Mode,
     device_id: String,
     device_ordinal: usize,
-    compute_capability: (u16, u16),
+    compute_capability: Option<(u16, u16)>,
     admitted_available_device_bytes: u64,
     admitted_host_headroom_bytes: u64,
     base_factory_authority: FrozenH3FactoryAuthority,
@@ -1207,7 +1209,7 @@ impl H3PrivateFl2VaAdmissionEvidence {
         self.device_ordinal
     }
 
-    pub const fn compute_capability(&self) -> (u16, u16) {
+    pub const fn compute_capability(&self) -> Option<(u16, u16)> {
         self.compute_capability
     }
 
@@ -1295,7 +1297,7 @@ impl H3PrivateFl2VaAdmissionEvidence {
         Ok(resolved)
     }
 
-    /// Revalidate this immutable DTO against an exact request and CUDA route.
+    /// Revalidate this immutable DTO against an exact request and GPU route.
     /// Current capacity may differ from the admission snapshot, but both
     /// current values must still cover the canonical target peaks.
     #[allow(clippy::too_many_arguments)]
@@ -1304,7 +1306,7 @@ impl H3PrivateFl2VaAdmissionEvidence {
         request: &GenerateRequest,
         device_id: &str,
         device_ordinal: usize,
-        compute_capability: (u16, u16),
+        compute_capability: Option<(u16, u16)>,
         available_device_bytes: u64,
         available_host_headroom_bytes: u64,
     ) -> Result<()> {
@@ -1338,10 +1340,7 @@ impl H3PrivateFl2VaAdmissionEvidence {
             || self.base_factory_authority.task() != self.task
             || self.base_factory_authority.device_id() != self.device_id
             || self.base_factory_authority.device_ordinal() != self.device_ordinal
-            // The public runtime profile is CUDA SM89 only, so a Metal factory
-            // authority (which carries no compute capability) can never match
-            // here and fails closed without a separate branch.
-            || self.base_factory_authority.compute_capability() != Some(self.compute_capability)
+            || self.base_factory_authority.compute_capability() != self.compute_capability
             || self.base_factory_authority.execution_fingerprint() != self.execution_fingerprint
             || self.base_factory_authority.component_set_identity_sha256()
                 != self.component_set_identity_sha256
@@ -1449,11 +1448,11 @@ fn prepare_reviewed_h3_private_fl2va_admission(
         available_host_headroom_bytes,
     } = input;
     if device_id.trim().is_empty()
-        || compute_capability.0 == 0
+        || compute_capability.is_some_and(|capability| capability.0 == 0)
         || available_device_bytes == 0
         || available_host_headroom_bytes == 0
     {
-        bail!("private H3 admission requires one concrete nonempty CUDA capacity sample")
+        bail!("private H3 admission requires one concrete nonempty GPU capacity sample")
     }
     // The admitted route is derived once, from the request model's own pinned
     // contract, and threaded through every step below. Reading it again from a
@@ -1581,13 +1580,17 @@ fn prepare_reviewed_h3_private_fl2va_admission(
         },
     )?;
 
-    let attention_device = H3AttentionDevice::Cuda {
-        compute_capability: Some(compute_capability),
-    };
     let attention_model = H3AttentionModelContract::released_bf16();
-    let attention =
-        H3AttentionRuntimeAuthority::qualify_flash_attention_v2(attention_device, attention_model)
-            .map_err(|error| anyhow!(error.to_string()))?;
+    let attention = match compute_capability {
+        Some(compute_capability) => H3AttentionRuntimeAuthority::qualify_flash_attention_v2(
+            H3AttentionDevice::Cuda {
+                compute_capability: Some(compute_capability),
+            },
+            attention_model,
+        ),
+        None => H3AttentionRuntimeAuthority::metal_chunked_dense(attention_model),
+    }
+    .map_err(|error| anyhow!(error.to_string()))?;
     #[cfg(feature = "h3")]
     let attention_qualification_sha256 = attention.identity_sha256().to_string();
     #[cfg(not(feature = "h3"))]
@@ -1617,11 +1620,14 @@ fn prepare_reviewed_h3_private_fl2va_admission(
     let turbo_adapter =
         super::turbo::resolve_turbo_authority_for_request(admitted_model, paths.models_root)?;
     #[cfg(not(feature = "h3"))]
+    let private_compute_capability = compute_capability
+        .ok_or_else(|| anyhow!("private H3 reviewed evidence requires one concrete CUDA route"))?;
+    #[cfg(not(feature = "h3"))]
     let runtime_qualification = runtime_qualification_source.authenticate(
         &artifact_report,
         device_id,
         device_ordinal,
-        compute_capability,
+        private_compute_capability,
         attention.identity_sha256(),
         attention.kernel().identity(),
         &attention_qualification_sha256,
@@ -1719,10 +1725,7 @@ fn prepare_reviewed_h3_private_fl2va_admission(
             model: partition_model.into(),
             device_id: device_id.into(),
             device_ordinal,
-            // The public H3 runtime profile is CUDA SM89, so this is always a
-            // CUDA route; the factory input is optional only because a Metal
-            // plan carries no compute capability.
-            compute_capability: Some(compute_capability),
+            compute_capability,
             execution_fingerprint: execution_fingerprint.clone(),
             conditioner_placement: H3FactoryConditionerPlacement::HostCpuThenDrop,
             qwen_parameter_bytes: qwen_memory.source_parameter_bytes,
@@ -1744,7 +1747,11 @@ fn prepare_reviewed_h3_private_fl2va_admission(
             condition_visual_rows: admission_request.request.rows.condition_visual_rows,
             resident_block_count: 0,
             prefetch_depth: 0,
-            attention_backend: AttentionBackend::Flash,
+            attention_backend: if compute_capability.is_some() {
+                AttentionBackend::Flash
+            } else {
+                AttentionBackend::Math
+            },
             attention_chunk: AttentionChunkPolicy::Off,
             attention_kernel_identity: attention.kernel().identity().into(),
             attention_qualification_sha256: attention_qualification_sha256.clone(),
@@ -1770,7 +1777,7 @@ fn prepare_reviewed_h3_private_fl2va_admission(
         &qwen_support,
         device_id,
         device_ordinal,
-        Some(compute_capability),
+        compute_capability,
         &qwen_artifact.sha256,
         qwen_header_identity,
         qwen_policy_identity,
@@ -2116,7 +2123,7 @@ fn private_h3_admission_execution_fingerprint(
     runtime_qualification_identity_sha256: &str,
     device_id: &str,
     device_ordinal: usize,
-    compute_capability: (u16, u16),
+    compute_capability: Option<(u16, u16)>,
     attention_runtime_identity_sha256: &str,
     components: &[H3PrivateComponentDigest],
 ) -> String {
@@ -2138,8 +2145,14 @@ fn private_h3_admission_execution_fingerprint(
         update_string(&mut digest, value);
     }
     digest.update((device_ordinal as u64).to_le_bytes());
-    digest.update(compute_capability.0.to_le_bytes());
-    digest.update(compute_capability.1.to_le_bytes());
+    match compute_capability {
+        Some((major, minor)) => {
+            digest.update(b"cuda\0");
+            digest.update(major.to_le_bytes());
+            digest.update(minor.to_le_bytes());
+        }
+        None => digest.update(b"metal\0"),
+    }
     for component in components {
         update_string(&mut digest, private_h3_component_role_id(component.role));
         update_string(&mut digest, &component.content_sha256);
@@ -2199,10 +2212,15 @@ fn private_h3_admission_evidence_identity(evidence: &H3PrivateFl2VaAdmissionEvid
         Task::Fl2va => b"fl2va".as_slice(),
         Task::Ref2va => b"ref2va".as_slice(),
     });
+    let (backend, major, minor) = match evidence.compute_capability {
+        Some((major, minor)) => (1, u64::from(major), u64::from(minor)),
+        None => (2, 0, 0),
+    };
     for value in [
         evidence.device_ordinal as u64,
-        u64::from(evidence.compute_capability.0),
-        u64::from(evidence.compute_capability.1),
+        backend,
+        major,
+        minor,
         evidence.admitted_available_device_bytes,
         evidence.admitted_host_headroom_bytes,
         evidence.predicted_device_peak_bytes,
@@ -2256,7 +2274,8 @@ pub struct H3PrivateFl2VaOwnerFenceFacts {
     pub cancellation_scope_identity_sha256: String,
     pub device_id: String,
     pub device_ordinal: usize,
-    pub compute_capability: (u16, u16),
+    /// `Some` identifies an exact CUDA architecture; `None` identifies Metal.
+    pub compute_capability: Option<(u16, u16)>,
     pub memory_ledger_sequence: u64,
     pub admission_evidence_identity_sha256: String,
     pub artifact_qualification_identity_sha256: String,
@@ -2270,7 +2289,9 @@ pub struct H3PrivateFl2VaOwnerFenceFacts {
 impl H3PrivateFl2VaOwnerFenceFacts {
     pub fn validate(&self) -> Result<()> {
         if self.device_id.trim().is_empty()
-            || self.compute_capability.0 == 0
+            || self
+                .compute_capability
+                .is_some_and(|capability| capability.0 == 0)
             || self.memory_ledger_sequence == 0
             || self.predicted_device_peak_bytes == 0
             || self.predicted_host_increment_bytes == 0
@@ -2619,10 +2640,14 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
         paths.runtime_qualification_record,
     )?;
     #[cfg(not(feature = "h3"))]
+    let private_compute_capability = owner_fence
+        .compute_capability
+        .ok_or_else(|| anyhow!("private H3 reviewed evidence requires one concrete CUDA route"))?;
+    #[cfg(not(feature = "h3"))]
     runtime_qualification_source.validate_route(
         &owner_fence.device_id,
         owner_fence.device_ordinal,
-        owner_fence.compute_capability,
+        private_compute_capability,
     )?;
 
     let artifact_report = qualify_private_artifacts_with_control(
@@ -2647,13 +2672,17 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
     }
     progress.checkpoint()?;
 
-    let attention_device = H3AttentionDevice::Cuda {
-        compute_capability: Some(owner_fence.compute_capability),
-    };
     let attention_model = H3AttentionModelContract::released_bf16();
-    let attention =
-        H3AttentionRuntimeAuthority::qualify_flash_attention_v2(attention_device, attention_model)
-            .map_err(|error| anyhow!(error.to_string()))?;
+    let attention = match owner_fence.compute_capability {
+        Some(compute_capability) => H3AttentionRuntimeAuthority::qualify_flash_attention_v2(
+            H3AttentionDevice::Cuda {
+                compute_capability: Some(compute_capability),
+            },
+            attention_model,
+        ),
+        None => H3AttentionRuntimeAuthority::metal_chunked_dense(attention_model),
+    }
+    .map_err(|error| anyhow!(error.to_string()))?;
     #[cfg(feature = "h3")]
     let attention_qualification_sha256 = attention.identity_sha256().to_string();
     #[cfg(not(feature = "h3"))]
@@ -2678,7 +2707,7 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
         &artifact_report,
         &owner_fence.device_id,
         owner_fence.device_ordinal,
-        owner_fence.compute_capability,
+        private_compute_capability,
         attention.identity_sha256(),
         attention.kernel().identity(),
         &attention_qualification_sha256,
@@ -2775,7 +2804,7 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
         &qwen_support,
         &owner_fence.device_id,
         owner_fence.device_ordinal,
-        Some(owner_fence.compute_capability),
+        owner_fence.compute_capability,
         &qwen_artifact.sha256,
         qwen_header_identity,
         qwen_policy_identity,
@@ -2945,7 +2974,7 @@ fn validate_base_factory(
         || factory.canonical_model() != contract::base_compact_model_for_task(task)
         || factory.device_id() != owner.device_id
         || factory.device_ordinal() != owner.device_ordinal
-        || factory.compute_capability() != Some(owner.compute_capability)
+        || factory.compute_capability() != owner.compute_capability
         || factory.prepared_target_attempt_identities().is_some()
         || !factory.attention_runtime_identity_sha256().is_empty()
         || factory.attention_backend() != AttentionBackend::Flash
@@ -3668,50 +3697,70 @@ impl H3PrivateFl2VaPreparedRunner for H3PrivateConcretePreparedRunner {
             H3AttentionDevice::Cuda {
                 compute_capability: Some((major, minor)),
             } => [major, minor],
-            device => bail!(
-                "private H3 terminal authority requires a concrete CUDA compute capability, got {device:?}"
-            ),
+            H3AttentionDevice::Metal => [0, 0],
+            device => bail!("private H3 terminal authority requires CUDA or Metal, got {device:?}"),
         };
-        let observed_authority = H3PrivateRuntimeAuthorityObservation {
-            bootstrap_record_sha256: activation.runtime_qualification.record_file_sha256().into(),
-            runtime_qualification_identity_sha256: activation
-                .runtime_qualification
-                .identity_sha256()
-                .into(),
-            device_id: owner.device_id.clone(),
-            device_ordinal: owner.device_ordinal,
-            compute_capability: observed_compute_capability,
-            attention_runtime_identity_sha256: attention.identity_sha256().into(),
-            attention_kernel_identity: attention.kernel().identity().into(),
-            attention_qualification_sha256: artifact_lease.attention_qualification_sha256.clone(),
-            process: capture_process_observation()?,
-        };
+        let observed_authority = authority
+            .compute_capability()
+            .map(|_| {
+                Ok::<_, anyhow::Error>(H3PrivateRuntimeAuthorityObservation {
+                    bootstrap_record_sha256: activation
+                        .runtime_qualification
+                        .record_file_sha256()
+                        .into(),
+                    runtime_qualification_identity_sha256: activation
+                        .runtime_qualification
+                        .identity_sha256()
+                        .into(),
+                    device_id: owner.device_id.clone(),
+                    device_ordinal: owner.device_ordinal,
+                    compute_capability: observed_compute_capability,
+                    attention_runtime_identity_sha256: attention.identity_sha256().into(),
+                    attention_kernel_identity: attention.kernel().identity().into(),
+                    attention_qualification_sha256: artifact_lease
+                        .attention_qualification_sha256
+                        .clone(),
+                    process: capture_process_observation()?,
+                })
+            })
+            .transpose()?;
         with_private_h3_cuda_execution_attempt(|| {
             consumption_binding.revalidate(&owner, &activation.scheduler_ledger)?;
-            let cuda_device = commit_private_h3_allocation_then(&mut allocation_commit, || {
-                Device::new_cuda(owner.device_ordinal)
-                    .context("failed to construct the reviewed private H3 CUDA route")
-            })?;
+            let execution_device =
+                commit_private_h3_allocation_then(&mut allocation_commit, || {
+                    match authority.compute_capability() {
+                        Some(_) => Device::new_cuda(owner.device_ordinal)
+                            .context("failed to construct the reviewed H3 CUDA route"),
+                        None => Device::new_metal(owner.device_ordinal)
+                            .context("failed to construct the H3 Metal route"),
+                    }
+                })?;
             let qwen_on_cpu = matches!(
                 authority.conditioner_placement(),
                 H3FactoryConditionerPlacement::HostCpuThenDrop
             );
-            let runtime_bound_capture = H3PrivateRuntimeBoundCapture::begin(
-                &cuda_device,
-                qwen_on_cpu,
-                observed_envelope,
-                observed_authority,
-            )?;
+            let runtime_bound_capture = observed_authority
+                .map(|authority| {
+                    H3PrivateRuntimeBoundCapture::begin(
+                        &execution_device,
+                        qwen_on_cpu,
+                        observed_envelope,
+                        authority,
+                    )
+                })
+                .transpose()?;
             // Keep one completion fence alive outside the concrete owner graph.
             // It runs only after a successful pipeline result and before any
             // CUDA-bearing local leaves the execution-attempt boundary.
-            let completion_device = cuda_device.clone();
+            let completion_device = execution_device.clone();
             let conditioner_device = match authority.conditioner_placement() {
-                H3FactoryConditionerPlacement::AssignedCudaThenDrop => cuda_device.clone(),
+                H3FactoryConditionerPlacement::AssignedCudaThenDrop
+                | H3FactoryConditionerPlacement::AssignedMetalThenDrop => execution_device.clone(),
                 H3FactoryConditionerPlacement::HostCpuThenDrop => Device::Cpu,
             };
             let conditioner_device_id = match authority.conditioner_placement() {
-                H3FactoryConditionerPlacement::AssignedCudaThenDrop => owner.device_id.clone(),
+                H3FactoryConditionerPlacement::AssignedCudaThenDrop
+                | H3FactoryConditionerPlacement::AssignedMetalThenDrop => owner.device_id.clone(),
                 H3FactoryConditionerPlacement::HostCpuThenDrop => "cpu".into(),
             };
             let conditioner_lease = H3PrivateServerConditionerLease::new(
@@ -3724,7 +3773,7 @@ impl H3PrivateFl2VaPreparedRunner for H3PrivateConcretePreparedRunner {
             );
             let execution_lease = H3PrivateServerExecutionLease::new(
                 &authority,
-                cuda_device,
+                execution_device,
                 &owner.work_identity_sha256,
                 &owner.cancellation_scope_identity_sha256,
                 "runtime-execution",
@@ -3754,12 +3803,14 @@ impl H3PrivateFl2VaPreparedRunner for H3PrivateConcretePreparedRunner {
             cancellation.checkpoint()?;
             progress.checkpoint()?;
             let output = private_run_output(output, owner, &consumption_binding, started)?;
-            let runtime_bound_observation = runtime_bound_capture.finish()?;
-            tracing::info!(
-                target: "mold::minimax_h3::private_runtime_bound",
-                observation = %serde_json::to_string(&runtime_bound_observation)?,
-                "captured private MiniMax H3 runtime bounds"
-            );
+            if let Some(runtime_bound_capture) = runtime_bound_capture {
+                let runtime_bound_observation = runtime_bound_capture.finish()?;
+                tracing::info!(
+                    target: "mold::minimax_h3::private_runtime_bound",
+                    observation = %serde_json::to_string(&runtime_bound_observation)?,
+                    "captured private MiniMax H3 runtime bounds"
+                );
+            }
             Ok(output)
         })
     }
@@ -4404,7 +4455,7 @@ pub struct H3PrivateRuntimeQualificationAuthority {
     bounds: H3PrivateQualifiedRuntimeBounds,
     device_id: String,
     device_ordinal: usize,
-    compute_capability: (u16, u16),
+    compute_capability: Option<(u16, u16)>,
 }
 
 impl std::fmt::Debug for H3PrivateRuntimeQualificationAuthority {
@@ -4438,7 +4489,7 @@ impl H3PrivateRuntimeQualificationAuthority {
         self.device_ordinal
     }
 
-    pub const fn compute_capability(&self) -> (u16, u16) {
+    pub const fn compute_capability(&self) -> Option<(u16, u16)> {
         self.compute_capability
     }
 
@@ -4523,7 +4574,7 @@ impl RuntimeQualificationStorage {
 #[cfg(feature = "h3")]
 const PUBLIC_RUNTIME_PROFILE_SCHEMA: &str = "mold.minimax-h3.public-runtime-profile.v1";
 #[cfg(feature = "h3")]
-const PUBLIC_RUNTIME_PROFILE_DECISION: &str = "supported-compact-fl2va-sm89";
+const PUBLIC_RUNTIME_PROFILE_DECISION: &str = "supported-compact-fl2va-cuda-sm89-or-metal";
 
 /// Margin applied to every measured workspace bound, then rounded up to
 /// [`PUBLIC_RUNTIME_BOUND_GRID_BYTES`].
@@ -4736,11 +4787,11 @@ fn validate_public_runtime_profile_with_turbo(
         || record.decision != PUBLIC_RUNTIME_PROFILE_DECISION
         || record.canonical_model != contract::FL2VA_COMFY
         || record.task != "fl2va"
-        || record.compute_capability != [8, 9]
+        || !matches!(record.compute_capability, [8, 9] | [0, 0])
         || record.identity_sha256 != runtime_qualification_identity(record)
         || profile_sha256 != record.identity_sha256
     {
-        bail!("public H3 runtime profile changed or is not the supported SM89 profile")
+        bail!("public H3 runtime profile changed or is not the supported CUDA/Metal profile")
     }
     Ok(())
 }
@@ -5040,7 +5091,7 @@ fn capture_runtime_qualification(
         bounds,
         device_id: device_id.into(),
         device_ordinal,
-        compute_capability,
+        compute_capability: Some(compute_capability),
     })
 }
 
@@ -5089,7 +5140,7 @@ fn public_runtime_qualification(
     artifact: &H3PrivateArtifactQualificationReport,
     device_id: &str,
     device_ordinal: usize,
-    compute_capability: (u16, u16),
+    compute_capability: Option<(u16, u16)>,
     attention_runtime_identity_sha256: &str,
     attention_kernel_identity: &str,
     attention_qualification_sha256: &str,
@@ -5108,14 +5159,14 @@ fn public_runtime_qualification(
         }
     }
     let turbo_steps = turbo.map(H3FactoryTurboAdapterAuthority::grid_points);
-    if compute_capability != (8, 9)
+    if !matches!(compute_capability, Some((8, 9)) | None)
         || artifact.canonical_model != contract::FL2VA_COMFY
         || artifact.task != "fl2va"
         || !valid_sha256(attention_runtime_identity_sha256)
         || !valid_sha256(attention_qualification_sha256)
         || attention_kernel_identity.is_empty()
     {
-        bail!("public H3 runtime requires the exact compact FL2VA SM89 authority")
+        bail!("public H3 runtime requires the exact compact FL2VA CUDA SM89 or Metal authority")
     }
     let mut record = H3PrivateRuntimeQualificationRecord {
         schema: PUBLIC_RUNTIME_PROFILE_SCHEMA.into(),
@@ -5134,7 +5185,9 @@ fn public_runtime_qualification(
         artifact_total_bytes: artifact.total_bytes,
         device_id: device_id.into(),
         device_ordinal,
-        compute_capability: [8, 9],
+        compute_capability: compute_capability
+            .map(|(major, minor)| [major, minor])
+            .unwrap_or([0, 0]),
         attention_runtime_identity_sha256: attention_runtime_identity_sha256.into(),
         attention_kernel_identity: attention_kernel_identity.into(),
         attention_qualification_sha256: attention_qualification_sha256.into(),
@@ -5273,7 +5326,7 @@ impl H3PrivateReviewedRuntimeQualification {
             bounds,
             device_id: device_id.to_string(),
             device_ordinal,
-            compute_capability,
+            compute_capability: Some(compute_capability),
         };
         authority.revalidate()?;
         Ok(authority)
@@ -5546,7 +5599,8 @@ pub fn authenticate_h3_private_presentation(
     )
 }
 
-/// Authenticate the compiled public H3 profile against one live SM89 CUDA
+/// Authenticate the compiled public H3 profile against one live SM89 CUDA or
+/// Metal route.
 /// route. This presentation check opens neither model weights nor external
 /// compliance files; generation separately verifies every artifact and applies
 /// the compiled conservative memory profile.
@@ -5555,18 +5609,25 @@ pub fn authenticate_h3_public_presentation(
     routes: &[H3PrivatePresentationRoute<'_>],
 ) -> Result<H3PrivatePresentationAuthority> {
     if routes.is_empty() {
-        bail!("MiniMax H3 presentation requires one live schedulable CUDA route")
+        bail!("MiniMax H3 presentation requires one live schedulable CUDA or Metal route")
     }
     let route = routes
         .iter()
-        .find(|route| route.compute_capability == (8, 9))
-        .ok_or_else(|| anyhow!("public H3 requires one live schedulable SM89 CUDA route"))?;
-    H3AttentionRuntimeAuthority::qualify_flash_attention_v2(
-        H3AttentionDevice::Cuda {
-            compute_capability: Some(route.compute_capability),
-        },
-        H3AttentionModelContract::released_bf16(),
-    )
+        .find(|route| matches!(route.compute_capability, Some((8, 9)) | None))
+        .ok_or_else(|| {
+            anyhow!("public H3 requires one live schedulable SM89 CUDA or Metal route")
+        })?;
+    match route.compute_capability {
+        Some(compute_capability) => H3AttentionRuntimeAuthority::qualify_flash_attention_v2(
+            H3AttentionDevice::Cuda {
+                compute_capability: Some(compute_capability),
+            },
+            H3AttentionModelContract::released_bf16(),
+        ),
+        None => H3AttentionRuntimeAuthority::metal_chunked_dense(
+            H3AttentionModelContract::released_bf16(),
+        ),
+    }
     .map_err(|error| anyhow!(error.to_string()))?;
     Ok(H3PrivatePresentationAuthority {
         canonical_model: contract::FL2VA_COMFY.into(),
@@ -5605,16 +5666,20 @@ fn authenticate_h3_private_presentation_with_scope(
         .find(|route| {
             reviewed.record.device_id == route.device_id
                 && reviewed.record.device_ordinal == route.device_ordinal
-                && reviewed.record.compute_capability
-                    == [route.compute_capability.0, route.compute_capability.1]
+                && route.compute_capability.is_some_and(|(major, minor)| {
+                    reviewed.record.compute_capability == [major, minor]
+                })
         })
         .ok_or_else(|| {
             anyhow!("private H3 presentation has no live route matching reviewed evidence")
         })?;
+    let route_compute_capability = route
+        .compute_capability
+        .ok_or_else(|| anyhow!("private H3 reviewed presentation requires a CUDA route"))?;
     reviewed.validate_route(
         route.device_id,
         route.device_ordinal,
-        route.compute_capability,
+        route_compute_capability,
     )?;
     let attention;
     let (attention_runtime_identity_sha256, attention_kernel_identity) =
@@ -5623,7 +5688,7 @@ fn authenticate_h3_private_presentation_with_scope(
         } else {
             attention = H3AttentionRuntimeAuthority::qualify_flash_attention_v2(
                 H3AttentionDevice::Cuda {
-                    compute_capability: Some(route.compute_capability),
+                    compute_capability: Some(route_compute_capability),
                 },
                 H3AttentionModelContract::released_bf16(),
             )
@@ -6394,7 +6459,7 @@ mod tests {
                 &artifact,
                 "gpu-0",
                 0,
-                (8, 9),
+                Some((8, 9)),
                 &sha('a'),
                 "synthetic-qualified-kernel",
                 &sha('b'),
@@ -6944,7 +7009,7 @@ mod tests {
                 route: H3PrivatePresentationRoute {
                     device_id: DEVICE_0,
                     device_ordinal: 0,
-                    compute_capability: (8, 9),
+                    compute_capability: Some((8, 9)),
                 },
             }
         }
@@ -6974,7 +7039,7 @@ mod tests {
         assert_eq!(authority.task(), Task::Fl2va);
         assert_eq!(authority.device_id(), DEVICE_0);
         assert_eq!(authority.device_ordinal(), 0);
-        assert_eq!(authority.compute_capability(), (8, 9));
+        assert_eq!(authority.compute_capability(), Some((8, 9)));
     }
 
     #[cfg(unix)]
@@ -6990,7 +7055,7 @@ mod tests {
         let wrong_route = H3PrivatePresentationRoute {
             device_id: DEVICE_1,
             device_ordinal: 1,
-            compute_capability: (8, 9),
+            compute_capability: Some((8, 9)),
         };
         assert!(authenticate_h3_private_presentation_for_test(
             &fixture.models_root,
@@ -7105,7 +7170,7 @@ mod tests {
             mode: Mode::TextToAudioVideo,
             device_id: DEVICE_0.into(),
             device_ordinal: 0,
-            compute_capability: (8, 9),
+            compute_capability: Some((8, 9)),
             admitted_available_device_bytes: 10,
             admitted_host_headroom_bytes: 10,
             base_factory_authority: factory.clone(),
@@ -7256,9 +7321,7 @@ mod tests {
             cancellation_scope_identity_sha256: sha('2'),
             device_id: factory.device_id().into(),
             device_ordinal: factory.device_ordinal(),
-            compute_capability: factory
-                .compute_capability()
-                .expect("contract fixtures freeze a CUDA route"),
+            compute_capability: factory.compute_capability(),
             memory_ledger_sequence: 9,
             admission_evidence_identity_sha256: sha('3'),
             artifact_qualification_identity_sha256: sha('4'),
@@ -7526,7 +7589,7 @@ mod tests {
             &artifact_report(),
             DEVICE_0,
             0,
-            (8, 9),
+            Some((8, 9)),
             &runtime_identity,
             kernel.identity(),
             &runtime_identity,
@@ -8267,19 +8330,32 @@ mod tests {
 
     #[cfg(feature = "h3")]
     #[test]
-    fn public_presentation_uses_compiled_sm89_policy_without_a_runtime_record() {
+    fn public_presentation_accepts_compiled_cuda_and_metal_policies() {
+        let metal = H3PrivatePresentationRoute {
+            device_id: "metal:00000000000000000000000000000000",
+            device_ordinal: 0,
+            compute_capability: None,
+        };
+        let metal_authority = authenticate_h3_public_presentation(&[metal]).unwrap();
+        assert_eq!(metal_authority.canonical_model(), contract::FL2VA_COMFY);
+        assert_eq!(metal_authority.task(), Task::Fl2va);
+        assert_eq!(metal_authority.compute_capability(), None);
+
         let route = H3PrivatePresentationRoute {
             device_id: "cuda:00000000000000000000000000000000",
             device_ordinal: 0,
-            compute_capability: (8, 9),
+            compute_capability: Some((8, 9)),
         };
-        let authority = authenticate_h3_public_presentation(&[route]).unwrap();
-        assert_eq!(authority.canonical_model(), contract::FL2VA_COMFY);
-        assert_eq!(authority.task(), Task::Fl2va);
-        assert_eq!(authority.compute_capability(), (8, 9));
+        #[cfg(feature = "cuda")]
+        {
+            let authority = authenticate_h3_public_presentation(&[route]).unwrap();
+            assert_eq!(authority.canonical_model(), contract::FL2VA_COMFY);
+            assert_eq!(authority.task(), Task::Fl2va);
+            assert_eq!(authority.compute_capability(), Some((8, 9)));
+        }
 
         let unsupported = H3PrivatePresentationRoute {
-            compute_capability: (9, 0),
+            compute_capability: Some((9, 0)),
             ..route
         };
         assert!(authenticate_h3_public_presentation(&[unsupported]).is_err());
@@ -8436,7 +8512,7 @@ mod tests {
             &artifact,
             DEVICE_0,
             0,
-            (8, 9),
+            Some((8, 9)),
             &sha('d'),
             "flash-attention-v2-sm89",
             &sha('e'),
@@ -8446,7 +8522,7 @@ mod tests {
         authority.revalidate().unwrap();
         assert_eq!(authority.device_id(), DEVICE_0);
         assert_eq!(authority.device_ordinal(), 0);
-        assert_eq!(authority.compute_capability(), (8, 9));
+        assert_eq!(authority.compute_capability(), Some((8, 9)));
         assert_eq!(authority.artifact_qualification_identity_sha256(), sha('c'));
         assert_eq!(
             H3PrivateFl2VaRuntimeBounds::from(authority.bounds()),
@@ -8521,7 +8597,7 @@ mod tests {
                 &crossed,
                 DEVICE_0,
                 0,
-                cc,
+                Some(cc),
                 &attention,
                 kernel,
                 &qualification,
@@ -8533,7 +8609,7 @@ mod tests {
                 &crossed,
                 DEVICE_0,
                 0,
-                (8, 9),
+                Some((8, 9)),
                 &sha('d'),
                 "flash-attention-v2-sm89",
                 &sha('e'),
@@ -8547,7 +8623,7 @@ mod tests {
             &crossed_model,
             DEVICE_0,
             0,
-            (8, 9),
+            Some((8, 9)),
             &sha('d'),
             "flash-attention-v2-sm89",
             &sha('e'),

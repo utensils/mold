@@ -42,10 +42,11 @@ const QWEN_VISION_LAYER_COUNT: usize = 27;
 const QWEN_VISION_CHECKPOINTS_PER_PASS: usize = 1 + QWEN_VISION_LAYER_COUNT;
 
 /// Private admission route used to derive the exact retained representation
-/// before a concrete CUDA device is created.
+/// before a concrete accelerator device is created.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum H3PrivateQwenLoaderMemoryRoute {
     Cuda,
+    Metal,
     Cpu,
 }
 
@@ -101,6 +102,9 @@ impl H3PrivateQwenOpenRouteAuthority {
             H3FactoryConditionerPlacement::AssignedCudaThenDrop => {
                 H3PrivateQwenLoaderMemoryRoute::Cuda
             }
+            H3FactoryConditionerPlacement::AssignedMetalThenDrop => {
+                H3PrivateQwenLoaderMemoryRoute::Metal
+            }
             H3FactoryConditionerPlacement::HostCpuThenDrop => H3PrivateQwenLoaderMemoryRoute::Cpu,
         };
         let placement = route.placement();
@@ -151,6 +155,9 @@ impl H3PrivateQwenOpenRouteAuthority {
             H3FactoryConditionerPlacement::AssignedCudaThenDrop => {
                 H3PrivateQwenLoaderMemoryRoute::Cuda
             }
+            H3FactoryConditionerPlacement::AssignedMetalThenDrop => {
+                H3PrivateQwenLoaderMemoryRoute::Metal
+            }
             H3FactoryConditionerPlacement::HostCpuThenDrop => H3PrivateQwenLoaderMemoryRoute::Cpu,
         };
         let expected_memory =
@@ -184,7 +191,7 @@ impl H3PrivateQwenOpenRouteAuthority {
 impl H3PrivateQwenLoaderMemoryRoute {
     const fn placement(self) -> H3QwenNvfp4RuntimePlacement {
         match self {
-            Self::Cuda => H3QwenNvfp4RuntimePlacement::Accelerated,
+            Self::Cuda | Self::Metal => H3QwenNvfp4RuntimePlacement::Accelerated,
             Self::Cpu => H3QwenNvfp4RuntimePlacement::Cpu,
         }
     }
@@ -196,7 +203,9 @@ pub fn released_h3_private_qwen_loader_memory_authority(
     route: H3PrivateQwenLoaderMemoryRoute,
 ) -> Result<H3PrivateQwenLoaderMemoryAuthority> {
     let placement = match route {
-        H3PrivateQwenLoaderMemoryRoute::Cuda => H3QwenNvfp4RuntimePlacement::Accelerated,
+        H3PrivateQwenLoaderMemoryRoute::Cuda | H3PrivateQwenLoaderMemoryRoute::Metal => {
+            H3QwenNvfp4RuntimePlacement::Accelerated
+        }
         H3PrivateQwenLoaderMemoryRoute::Cpu => H3QwenNvfp4RuntimePlacement::Cpu,
     };
     let facts = released_h3_qwen_nvfp4_runtime_memory_facts_for_placement(placement)?;
@@ -224,7 +233,9 @@ pub fn validate_h3_private_qwen_loader_memory_authority(
     route: H3PrivateQwenLoaderMemoryRoute,
 ) -> Result<()> {
     let placement = match route {
-        H3PrivateQwenLoaderMemoryRoute::Cuda => H3QwenNvfp4RuntimePlacement::Accelerated,
+        H3PrivateQwenLoaderMemoryRoute::Cuda | H3PrivateQwenLoaderMemoryRoute::Metal => {
+            H3QwenNvfp4RuntimePlacement::Accelerated
+        }
         H3PrivateQwenLoaderMemoryRoute::Cpu => H3QwenNvfp4RuntimePlacement::Cpu,
     };
     let facts = released_h3_qwen_nvfp4_runtime_memory_facts_for_placement(placement)?;
@@ -912,8 +923,10 @@ struct LeaseBindingClaims {
     loaded_matches_conditioner_device: bool,
     conditioner_is_cpu: bool,
     conditioner_is_cuda: bool,
+    conditioner_is_metal: bool,
     conditioner_matches_execution_device: bool,
     execution_is_cuda: bool,
+    execution_is_metal: bool,
 }
 
 fn frozen_binding_claims(authority: &FrozenH3FactoryAuthority) -> Result<FrozenBindingClaims> {
@@ -980,8 +993,10 @@ where
         loaded_matches_conditioner_device,
         conditioner_is_cpu: conditioner.device().is_cpu(),
         conditioner_is_cuda: conditioner.device().is_cuda(),
+        conditioner_is_metal: conditioner.device().is_metal(),
         conditioner_matches_execution_device: conditioner.device().same_device(execution.device()),
         execution_is_cuda: execution.device().is_cuda(),
+        execution_is_metal: execution.device().is_metal(),
     }
 }
 
@@ -1025,7 +1040,8 @@ fn validate_parameter_memory(
         )
     }
     let residency_is_bound = match authority.conditioner_placement() {
-        H3FactoryConditionerPlacement::AssignedCudaThenDrop => {
+        H3FactoryConditionerPlacement::AssignedCudaThenDrop
+        | H3FactoryConditionerPlacement::AssignedMetalThenDrop => {
             facts.host_resident_parameter_bytes > 0 && facts.device_resident_parameter_bytes > 0
         }
         H3FactoryConditionerPlacement::HostCpuThenDrop => {
@@ -1141,6 +1157,11 @@ where
                 && conditioner.device().is_cuda()
                 && conditioner.device().same_device(execution.device())
         }
+        H3FactoryConditionerPlacement::AssignedMetalThenDrop => {
+            conditioner.device_id() == authority.device_id()
+                && conditioner.device().is_metal()
+                && conditioner.device().same_device(execution.device())
+        }
         H3FactoryConditionerPlacement::HostCpuThenDrop => {
             conditioner.device_id() == "cpu" && conditioner.device().is_cpu()
         }
@@ -1246,6 +1267,11 @@ fn validate_binding(
                 && leases.conditioner_is_cuda
                 && leases.conditioner_matches_execution_device
         }
+        H3FactoryConditionerPlacement::AssignedMetalThenDrop => {
+            leases.conditioner_device_id == frozen.device_id
+                && leases.conditioner_is_metal
+                && leases.conditioner_matches_execution_device
+        }
         H3FactoryConditionerPlacement::HostCpuThenDrop => {
             leases.conditioner_device_id == "cpu" && leases.conditioner_is_cpu
         }
@@ -1260,9 +1286,12 @@ fn validate_binding(
         || leases.execution_device_id != frozen.device_id
         || leases.execution_fingerprint != frozen.execution_fingerprint
         || leases.execution_backend != expected_backend
-        || !leases.execution_is_cuda
+        || match expected_backend {
+            H3CandleBackendDevice::Cuda { .. } => !leases.execution_is_cuda,
+            H3CandleBackendDevice::Metal => !leases.execution_is_metal,
+        }
     {
-        bail!("private H3 Qwen execution lease differs from the frozen CUDA route")
+        bail!("private H3 Qwen execution lease differs from the frozen GPU route")
     }
     if !leases.artifact_active {
         bail!("private H3 Qwen artifact lease was revoked")
@@ -1939,8 +1968,10 @@ mod tests {
             loaded_matches_conditioner_device: true,
             conditioner_is_cpu: false,
             conditioner_is_cuda: true,
+            conditioner_is_metal: false,
             conditioner_matches_execution_device: true,
             execution_is_cuda: true,
+            execution_is_metal: false,
         };
         (loaded, frozen, leases)
     }

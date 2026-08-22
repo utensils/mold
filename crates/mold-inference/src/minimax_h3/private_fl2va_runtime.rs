@@ -751,10 +751,12 @@ where
     ) -> Result<Self> {
         let kind = if execution_authority.device().is_cuda() {
             H3PipelineBackendKind::Cuda
+        } else if execution_authority.device().is_metal() {
+            H3PipelineBackendKind::Metal
         } else if cfg!(test) && execution_authority.device().is_cpu() {
             H3PipelineBackendKind::SyntheticCpu
         } else {
-            bail!("private MiniMax H3 streamed core requires one CUDA execution device");
+            bail!("private MiniMax H3 streamed core requires one CUDA or Metal execution device");
         };
         let frozen_identity = H3PipelineBackendIdentity {
             kind,
@@ -1040,16 +1042,21 @@ fn validate_private_execution_route_facts(
         },
         None => H3AttentionDevice::Metal,
     };
+    let expected_location = match admitted.compute_capability {
+        Some(_) => DeviceLocation::Cuda {
+            gpu_id: admitted.device_ordinal,
+        },
+        None => DeviceLocation::Metal {
+            gpu_id: admitted.device_ordinal,
+        },
+    };
     if !actual.active
         || actual.lease_id.trim().is_empty()
         || actual.device_id != admitted.device_id
         || actual.execution_fingerprint != admitted.execution_fingerprint
         || actual.backend
             != H3CandleBackendDevice::from_compute_capability(admitted.compute_capability)
-        || actual.location
-            != (DeviceLocation::Cuda {
-                gpu_id: admitted.device_ordinal,
-            })
+        || actual.location != expected_location
         || admitted.attention.device != expected_attention_device
         || actual.attention_device != admitted.attention.device
     {

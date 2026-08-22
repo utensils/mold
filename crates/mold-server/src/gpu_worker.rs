@@ -38,7 +38,7 @@ thread_local! {
         }) };
 }
 
-#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+#[cfg(all(any(feature = "h3", feature = "h3-private-uat"), feature = "cuda"))]
 const H3_CUDA_ATTEMPT_RETAINED_MARKER: &str =
     "CUDA execution attempt retained resources; server restart required";
 
@@ -1399,7 +1399,7 @@ fn request_lease_host_headroom(
         .map_err(crate::routes::ApiError::internal)
 }
 
-#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+#[cfg(all(any(feature = "h3", feature = "h3-private-uat"), feature = "cuda"))]
 fn with_private_h3_cuda_preparation_attempt<T>(
     worker: &GpuWorker,
     operation: impl FnOnce() -> Result<T, crate::routes::ApiError>,
@@ -1466,6 +1466,14 @@ fn with_private_h3_cuda_preparation_attempt<T>(
             result
         }
     }
+}
+
+#[cfg(all(any(feature = "h3", feature = "h3-private-uat"), not(feature = "cuda")))]
+fn with_private_h3_cuda_preparation_attempt<T>(
+    _worker: &GpuWorker,
+    operation: impl FnOnce() -> Result<T, crate::routes::ApiError>,
+) -> Result<T, crate::routes::ApiError> {
+    operation()
 }
 
 fn validate_scheduled_generation_before_cuda(
@@ -2546,7 +2554,7 @@ fn synchronize_after_oom(worker: &GpuWorker) -> bool {
     }
 }
 
-#[cfg(any(test, feature = "cuda", feature = "h3-private-uat"))]
+#[cfg(any(test, feature = "cuda", feature = "h3", feature = "h3-private-uat"))]
 fn device_memory_api_error(error: device::DeviceMemoryError) -> crate::routes::ApiError {
     if error.is_fatal_cuda() {
         crate::routes::ApiError::internal(error.to_string())

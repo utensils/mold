@@ -280,8 +280,11 @@ if release_change_allowed M src/production.rs; then
 fi
 
 require_text "$ci" \
-  "cargo clippy -p mold-ai --features metal,preview,expand,tui,webp,mp4,mdns,pulid --all-targets -- -D warnings" \
+  "cargo clippy -p mold-ai --features h3,metal,preview,expand,tui,webp,mp4,mdns,pulid --all-targets -- -D warnings" \
   "Metal-gated production code is not linted"
+require_text "$ci" \
+  "cargo check -p mold-ai-server --features h3,metal,expand,mdns,metrics,mp4,pulid,webp" \
+  "the reviewed H3 Metal server recipe is not compiled"
 require_text "$ci" \
   "nix run nixpkgs#actionlint -- .github/workflows/*.yml" \
   "main release validation has no protected actionlint proof"

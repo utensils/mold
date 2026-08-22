@@ -389,7 +389,7 @@ impl FrozenH3Fl2VaCandlePlan {
             bail!("MiniMax H3 backend model, task, or layout authority changed after freezing");
         }
         if self.device_id.trim().is_empty() {
-            bail!("MiniMax H3 backend requires one frozen CUDA device ID");
+            bail!("MiniMax H3 backend requires one frozen GPU device ID");
         }
         self.backend.validate()?;
         require_sha256(&self.execution_fingerprint, "H3 scheduler execution")?;

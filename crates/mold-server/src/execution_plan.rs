@@ -1361,7 +1361,7 @@ pub fn eligible_devices_for_request(
 /// Placement-only counterpart for an already authenticated private H3
 /// ingress grant. It deliberately does not call model/artifact activation;
 /// inference preflight owns that authority. The canonical private runtime
-/// keeps Qwen on the host and requires transformer/VAE execution on one CUDA
+/// keeps Qwen on the host and requires transformer/VAE execution on one CUDA or Metal
 /// owner, while preserving the generic explicit-device conflict semantics.
 #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 pub(crate) fn eligible_devices_for_private_h3(
@@ -1645,12 +1645,7 @@ fn resolve_private_h3_execution_plans(
             request,
             &device.id,
             device.ordinal,
-            device.compute_capability.ok_or_else(|| {
-                ExecutionPlanError::PreparedInputsStale(format!(
-                    "MiniMax H3 device '{}' lost its CUDA compute capability",
-                    device.id
-                ))
-            })?,
+            device.compute_capability,
             device.available_vram_bytes,
             available_host_headroom_bytes,
         ) {
