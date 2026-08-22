@@ -841,12 +841,11 @@ fn qualification_manifest(
         || manifest.family != contract::FAMILY
         || authority.task != task
         || authority.layout != contract::Layout::ComfyPrunedInt8ConvrotNvfp4Awq
-        || authority.runtime_available
+        || (!cfg!(feature = "h3") && authority.runtime_available)
     {
-        bail!(
-            "private H3 artifact qualification requires the exact inactive compact family manifest"
-        )
+        bail!("private H3 artifact qualification requires the exact compact family manifest")
     }
+    #[cfg(not(feature = "h3"))]
     if contract::capabilities(task).runtime_available {
         bail!("private artifact qualification refuses an already-active public H3 runtime")
     }

@@ -262,11 +262,10 @@ impl FrozenH3ComfyVaeLoadPlan {
             || manifest.name != model
             || manifest.family != contract::FAMILY
             || manifest_authority.layout != contract::Layout::ComfyPrunedInt8ConvrotNvfp4Awq
-            || manifest_authority.runtime_available
+            || (!cfg!(feature = "h3") && manifest_authority.runtime_available)
         {
             return Err(H3ComfyVaeLoadError::InvalidPlan(
-                "private H3 VAE storage resolution requires an exact inactive compact manifest"
-                    .into(),
+                "private H3 VAE storage resolution requires an exact compact manifest".into(),
             ));
         }
         let path_for = |role: H3ComfyVaeArtifactRole| -> LoadResult<PathBuf> {
@@ -3315,6 +3314,14 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let staged = StagedWeights::create(&plan, &mut opened, &mut observer).unwrap();
+        let descriptor_header_error =
+            inspect_safetensors_header(staged.path(H3ComfyVaeArtifactRole::VisualWeights).unwrap())
+                .unwrap_err()
+                .to_string();
+        assert!(
+            !descriptor_header_error.contains("No such file or directory"),
+            "descriptor-aware header inspection must reach the retained bytes: {descriptor_header_error}"
+        );
         let target = staged
             .storage_path(H3ComfyVaeArtifactRole::VisualWeights)
             .unwrap()
