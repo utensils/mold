@@ -432,6 +432,7 @@ interface GalleryPrint extends MobileGalleryImage {
   hostName: string;
   target: ApiTarget;
   thumbnailUrl: string;
+  thumbnailPending: boolean;
 }
 
 interface PendingGalleryPrint extends MobileGalleryImage {
@@ -542,6 +543,12 @@ const HOST_PROBE_TIMEOUT_MS = 9_000;
  *  a deadline that fires with no route would manufacture a dead end. */
 const MOBILE_PLACEMENT_SETTLE_MS = 1_500;
 const GALLERY_HOST_TIMEOUT_MS = 9_000;
+/** A broken WebView connection must not hold a thumbnail page forever. Five
+ * seconds is long enough for a remote cache miss while keeping the next page
+ * visibly responsive on a degraded mobile network. */
+const GALLERY_THUMBNAIL_TIMEOUT_MS = 5_000;
+const GALLERY_THUMBNAIL_PLACEHOLDER = "data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=";
+const GALLERY_THUMBNAIL_RETRY_MAX_MS = 30_000;
 const REUSE_PRESENTATION_TIMEOUT_MS = 9_000;
 const OUTPUT_OPTIONS = [
   { value: "single" as const, label: "One shot" },
@@ -878,8 +885,9 @@ let galleryRefreshTask: Promise<void> | null = null;
 let galleryOperationTail: Promise<void> = Promise.resolve();
 let galleryLoadMoreQueued = false;
 let gallerySentinelObserver: IntersectionObserver | null = null;
-let galleryChainedFetches = 0;
-const MAX_GALLERY_CHAINED_FETCHES = 3;
+let galleryContinuationFrame: number | null = null;
+const activeGalleryThumbnailControllers = new Set<AbortController>();
+const galleryThumbnailRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
 let galleryDragPointerId: number | null = null;
 let galleryDragActive = false;
 let galleryDragSelect = true;
@@ -5454,24 +5462,103 @@ function retryGeneratedPreview(): void {
 }
 
 async function thumbnailUrl(target: ApiTarget, hostId: string, filename: string): Promise<string> {
-  let blob = await loadCachedGalleryMedia(hostId, filename, "thumbnail");
-  if (!blob) {
-    const response = await apiFetchTo(target, galleryMediaPath(filename, "host", true));
-    blob = await response.blob();
-    void storeCachedGalleryMedia(hostId, filename, "thumbnail", blob);
+  const controller = new AbortController();
+  activeGalleryThumbnailControllers.add(controller);
+  let timeout: ReturnType<typeof setTimeout> | null = null;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    controller.signal.addEventListener(
+      "abort",
+      () => reject(new Error(`Gallery thumbnail timed out: ${filename}`)),
+      { once: true },
+    );
+    timeout = setTimeout(() => controller.abort(), GALLERY_THUMBNAIL_TIMEOUT_MS);
+  });
+  const load = async () => {
+    let blob = await loadCachedGalleryMedia(hostId, filename, "thumbnail");
+    if (controller.signal.aborted) throw new Error(`Gallery thumbnail timed out: ${filename}`);
+    if (!blob) {
+      const response = await apiFetchTo(target, galleryMediaPath(filename, "host", true), {
+        signal: controller.signal,
+      });
+      blob = await response.blob();
+      if (controller.signal.aborted) throw new Error(`Gallery thumbnail timed out: ${filename}`);
+      void storeCachedGalleryMedia(hostId, filename, "thumbnail", blob);
+    }
+    // WKWebView's native image context menu forwards an object URL as text to
+    // Share extensions. Give iOS an inline image resource so Share, Copy, and
+    // Save to Photos receive image data rather than a process-local `blob:` URL.
+    // Thumbnails are bounded to 256 px by the server, so the base64 expansion
+    // stays small; browser development keeps cheaper revocable object URLs.
+    if (isNativeIOSRuntime()) {
+      const mimeType = blob.type.startsWith("image/") ? blob.type : "image/png";
+      return `data:${mimeType};base64,${await blobToBase64(blob)}`;
+    }
+    const url = URL.createObjectURL(blob);
+    objectUrls.add(url);
+    return url;
+  };
+  try {
+    // The explicit race is intentional: some WKWebView/Android WebView fetch
+    // implementations have been observed to ignore an abort while suspended.
+    return await Promise.race([load(), deadline]);
+  } finally {
+    if (timeout !== null) clearTimeout(timeout);
+    activeGalleryThumbnailControllers.delete(controller);
   }
-  // WKWebView's native image context menu forwards an object URL as text to
-  // Share extensions. Give iOS an inline image resource so Share, Copy, and
-  // Save to Photos receive image data rather than a process-local `blob:` URL.
-  // Thumbnails are bounded to 256 px by the server, so the base64 expansion
-  // stays small; browser development keeps cheaper revocable object URLs.
-  if (isNativeIOSRuntime()) {
-    const mimeType = blob.type.startsWith("image/") ? blob.type : "image/png";
-    return `data:${mimeType};base64,${await blobToBase64(blob)}`;
-  }
-  const url = URL.createObjectURL(blob);
-  objectUrls.add(url);
-  return url;
+}
+
+function galleryThumbnailRetryKey(print: Pick<GalleryPrint, "cacheKey" | "filename">): string {
+  return `${print.cacheKey}\u0000${print.filename}`;
+}
+
+function cancelGalleryThumbnailRetries(): void {
+  for (const timer of galleryThumbnailRetryTimers.values()) clearTimeout(timer);
+  galleryThumbnailRetryTimers.clear();
+}
+
+function galleryThumbnailRetryDelay(filename: string, attempt: number): number {
+  const backoff = Math.min(2_000 * 2 ** attempt, GALLERY_THUMBNAIL_RETRY_MAX_MS);
+  // Spread a failed page across two seconds instead of waking every tile at
+  // once. The filename makes the stagger stable across reactive rerenders.
+  const stagger =
+    [...filename].reduce((sum, character) => sum + character.charCodeAt(0), 0) % 2_000;
+  return backoff + stagger;
+}
+
+function scheduleGalleryThumbnailRetry(print: GalleryPrint, attempt = 0): void {
+  if (unmounted) return;
+  const key = galleryThumbnailRetryKey(print);
+  if (galleryThumbnailRetryTimers.has(key)) return;
+  const timer = setTimeout(
+    () => {
+      galleryThumbnailRetryTimers.delete(key);
+      if (unmounted) return;
+      const current = gallery.value.find(
+        (candidate) => galleryThumbnailRetryKey(candidate) === key && candidate.thumbnailPending,
+      );
+      if (!current) return;
+      loadGalleryThumbnail(current, attempt + 1);
+    },
+    galleryThumbnailRetryDelay(print.filename, attempt),
+  );
+  galleryThumbnailRetryTimers.set(key, timer);
+}
+
+function loadGalleryThumbnail(print: GalleryPrint, failedAttempts = 0): void {
+  const key = galleryThumbnailRetryKey(print);
+  void thumbnailUrl(print.target, print.cacheKey, print.filename)
+    .then((url) => {
+      const latest = gallery.value.find(
+        (candidate) => galleryThumbnailRetryKey(candidate) === key && candidate.thumbnailPending,
+      );
+      if (!latest || unmounted) {
+        revokeObjectUrl(url);
+        return;
+      }
+      latest.thumbnailUrl = url;
+      latest.thumbnailPending = false;
+    })
+    .catch(() => scheduleGalleryThumbnailRetry(print, failedAttempts));
 }
 
 function mobileGalleryCacheKey(host: MobileHost): string {
@@ -5522,6 +5609,7 @@ function enqueueGalleryOperation(operation: () => Promise<void>): Promise<void> 
 }
 
 async function performGalleryRefresh(): Promise<void> {
+  cancelGalleryThumbnailRetries();
   clearGallerySelection();
   galleryLoading.value = true;
   galleryError.value = "";
@@ -5678,22 +5766,27 @@ function loadMoreGallery(): Promise<void> {
 
 async function loadMoreGalleryPage(): Promise<void> {
   galleryLoadingMore.value = true;
-  const page = pendingGallery.splice(0, 40);
-  for (let offset = 0; offset < page.length; offset += 4) {
-    const batch = await Promise.allSettled(
-      page.slice(offset, offset + 4).map(async ({ target, ...print }) => ({
-        ...print,
-        target,
-        thumbnailUrl: await thumbnailUrl(target, print.cacheKey, print.filename),
-      })),
-    );
-    gallery.value.push(
-      ...batch.flatMap((result) => (result.status === "fulfilled" ? [result.value] : [])),
-    );
+  try {
+    const page = pendingGallery.splice(0, 40);
+    // Place every row immediately, then hydrate each thumbnail independently.
+    // One slow WebView request cannot withhold the other 39 rows or the page's
+    // layout; browser connection pooling still bounds sockets per host.
+    const placed = page.map((print): GalleryPrint => ({
+      ...print,
+      thumbnailUrl: GALLERY_THUMBNAIL_PLACEHOLDER,
+      thumbnailPending: true,
+    }));
+    gallery.value.push(...placed);
+    for (const print of placed) loadGalleryThumbnail(print);
+    markMobileLibrarySeen(galleryCopies);
+  } finally {
+    // Loading state must settle even if a future cache/rendering change throws.
+    if (!unmounted) {
+      galleryRemaining.value = pendingGallery.length;
+      galleryLoadingMore.value = false;
+      scheduleGalleryContinuation();
+    }
   }
-  markMobileLibrarySeen(galleryCopies);
-  galleryRemaining.value = pendingGallery.length;
-  galleryLoadingMore.value = false;
 }
 
 async function reusePrint(print: GalleryPrint): Promise<void> {
@@ -6554,6 +6647,7 @@ function visibleRepresentatives(): PendingGalleryPrint[] {
 
 /** Rebuild the paged grid from the current scope, filters, and organization. */
 async function resetGalleryPaging(): Promise<void> {
+  cancelGalleryThumbnailRetries();
   for (const item of gallery.value) revokeObjectUrl(item.thumbnailUrl);
   gallery.value = [];
   pendingGallery = visibleRepresentatives();
@@ -7857,7 +7951,6 @@ watch(gallerySentinel, (sentinel) => {
     (entries) => {
       for (const entry of entries) gallerySentinelVisible.value = entry.isIntersecting;
       if (gallerySentinelVisible.value) {
-        galleryChainedFetches = 0;
         void loadMoreGallery();
       }
     },
@@ -7866,14 +7959,21 @@ watch(gallerySentinel, (sentinel) => {
   gallerySentinelObserver.observe(sentinel);
 });
 
-// Failed thumbnails can leave the sentinel in view without producing another
-// observer event. Advance a bounded number of pages so valid older prints
-// behind that failed page still become reachable.
+function scheduleGalleryContinuation(): void {
+  if (!gallerySentinelVisible.value || galleryRemaining.value === 0) return;
+  if (galleryContinuationFrame !== null) return;
+  galleryContinuationFrame = requestAnimationFrame(() => {
+    galleryContinuationFrame = null;
+    if (gallerySentinelVisible.value && galleryRemaining.value > 0) void loadMoreGallery();
+  });
+}
+
+// A sentinel can remain in view without producing another observer event.
+// Re-check once the browser has laid out the completed placeholder page; there
+// is deliberately no arbitrary page cap that can strand older prints.
 watch(galleryLoadingMore, (loading) => {
-  if (loading || !gallerySentinelVisible.value || galleryRemaining.value === 0) return;
-  if (galleryChainedFetches >= MAX_GALLERY_CHAINED_FETCHES) return;
-  galleryChainedFetches += 1;
-  void loadMoreGallery();
+  if (loading) return;
+  scheduleGalleryContinuation();
 });
 
 // One failed model load must not become a manual-Retry dead end: the 10s
@@ -8116,6 +8216,11 @@ onBeforeUnmount(() => {
   liveActivityTimer = null;
   gallerySentinelObserver?.disconnect();
   gallerySentinelObserver = null;
+  cancelGalleryThumbnailRetries();
+  for (const controller of activeGalleryThumbnailControllers) controller.abort();
+  activeGalleryThumbnailControllers.clear();
+  if (galleryContinuationFrame !== null) cancelAnimationFrame(galleryContinuationFrame);
+  galleryContinuationFrame = null;
   stopSequenceTransport();
   for (const id of [...hostProbes.keys()]) cancelHostProbe(id);
   generation.resetJobs();
@@ -9389,9 +9494,17 @@ onBeforeUnmount(() => {
                 <img
                   :src="print.thumbnailUrl"
                   :alt="print.metadata.prompt || print.filename"
+                  :class="{ 'is-thumbnail-pending': print.thumbnailPending }"
                   loading="lazy"
                   @contextmenu="rememberNativeGalleryContext(print)"
                 />
+                <span
+                  v-if="print.thumbnailPending"
+                  class="gallery-thumbnail-pending"
+                  data-test="gallery-thumbnail-pending"
+                  aria-hidden="true"
+                  >↻</span
+                >
                 <span
                   v-if="isVideoItem(print) || isAudioItem(print)"
                   class="gallery-video-badge"
