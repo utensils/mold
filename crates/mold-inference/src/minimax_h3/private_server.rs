@@ -845,6 +845,26 @@ fn private_h3_unified_target_peak_bytes(budget: &H3FactoryTargetBudgetInput) -> 
     })
 }
 
+#[cfg(feature = "mp4")]
+fn private_h3_qwen_route(
+    compute_capability: Option<(u16, u16)>,
+) -> (
+    H3PrivateQwenLoaderMemoryRoute,
+    H3FactoryConditionerPlacement,
+) {
+    if compute_capability.is_some() {
+        (
+            H3PrivateQwenLoaderMemoryRoute::Cpu,
+            H3FactoryConditionerPlacement::HostCpuThenDrop,
+        )
+    } else {
+        (
+            H3PrivateQwenLoaderMemoryRoute::Metal,
+            H3FactoryConditionerPlacement::AssignedMetalThenDrop,
+        )
+    }
+}
+
 impl H3PrivateRuntimeBoundRecord {
     fn into_authority(self) -> H3PrivateQualifiedRuntimeBounds {
         H3PrivateQualifiedRuntimeBounds {
@@ -1697,7 +1717,11 @@ fn prepare_reviewed_h3_private_fl2va_admission(
     let attention_qualification_sha256 =
         runtime_qualification_source.attention_qualification_sha256(&attention);
     let attention_input = H3FactoryAttentionInput {
-        generic_backend: AttentionBackend::Flash,
+        generic_backend: if compute_capability.is_some() {
+            AttentionBackend::Flash
+        } else {
+            AttentionBackend::Math
+        },
         generic_chunk: AttentionChunkPolicy::Off,
         runtime_backend: attention.backend(),
         kernel: attention.kernel(),
@@ -1801,8 +1825,8 @@ fn prepare_reviewed_h3_private_fl2va_admission(
         attention.identity_sha256(),
         &component_digests,
     );
-    let qwen_memory =
-        released_h3_private_qwen_loader_memory_authority(H3PrivateQwenLoaderMemoryRoute::Cpu)?;
+    let (qwen_route, conditioner_placement) = private_h3_qwen_route(compute_capability);
+    let qwen_memory = released_h3_private_qwen_loader_memory_authority(qwen_route)?;
     let transformer_policy_sha256 = opened_transformer
         .candidate()
         .strategy
@@ -1827,7 +1851,7 @@ fn prepare_reviewed_h3_private_fl2va_admission(
             device_ordinal,
             compute_capability,
             execution_fingerprint: execution_fingerprint.clone(),
-            conditioner_placement: H3FactoryConditionerPlacement::HostCpuThenDrop,
+            conditioner_placement,
             qwen_parameter_bytes: qwen_memory.source_parameter_bytes,
             qwen_host_resident_parameter_bytes: qwen_memory.host_resident_parameter_bytes,
             qwen_device_resident_parameter_bytes: qwen_memory.device_resident_parameter_bytes,
@@ -8647,6 +8671,25 @@ mod tests {
         assert!(metal.contains("9000000001"), "{metal}");
         assert!(metal.contains("9000000000"), "{metal}");
         assert!(metal.contains("unified-memory"), "{metal}");
+    }
+
+    #[cfg(feature = "mp4")]
+    #[test]
+    fn metal_runs_qwen_on_the_assigned_unified_memory_device() {
+        assert_eq!(
+            private_h3_qwen_route(None),
+            (
+                H3PrivateQwenLoaderMemoryRoute::Metal,
+                H3FactoryConditionerPlacement::AssignedMetalThenDrop,
+            )
+        );
+        assert_eq!(
+            private_h3_qwen_route(Some((8, 9))),
+            (
+                H3PrivateQwenLoaderMemoryRoute::Cpu,
+                H3FactoryConditionerPlacement::HostCpuThenDrop,
+            )
+        );
     }
 
     #[cfg(feature = "h3")]
