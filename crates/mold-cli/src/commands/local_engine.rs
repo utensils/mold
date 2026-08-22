@@ -258,6 +258,32 @@ pub(crate) fn build_local_engine_from_plan(
             plan.predicted_vram_peak_bytes
         );
     }
+    // The forced-local twin of the worker's extraction point, and it is BEFORE
+    // the engine is built for the same reason (#1227 phase 2,
+    // `docs/architecture/pulid-perf.md` §5): the tower, the parser, the two
+    // face networks, and the IDFormer are built, forwarded, and fully released
+    // before `EngineIdentityState` makes the ~1.14 GB adapter resident, so the
+    // transient never coexists with it or with the transformer's own peak.
+    //
+    // It runs the same `resolve_identity_for_lease` the server's worker runs,
+    // on the same admitted device, so this engine gets the value a remote
+    // render would have used — which is what makes local/remote parity
+    // structural rather than reviewed. A CPU-only local device is the
+    // `ExtractionPlacement::Host` arm of the identical code.
+    let identity = mold_server::identity_extraction::resolve_identity_for_lease(
+        request,
+        plan.engine_config.identity_assets.as_ref(),
+        plan.device_backend,
+        plan.device_ordinal,
+    )
+    .map_err(|error| anyhow::anyhow!("face-identity conditioning failed: {error}"))?;
+    let identity = match identity.embedding {
+        // Preparation may still carry a frozen value — a batch child re-prepared
+        // from its parent — in which case nothing was extracted here.
+        None => prepared.identity_embedding.clone(),
+        resolved => resolved,
+    };
+
     let mut engine = mold_inference::create_engine_with_frozen_config(
         request.model.clone(),
         plan.engine_paths.clone(),
@@ -267,13 +293,8 @@ pub(crate) fn build_local_engine_from_plan(
         plan.offload_mode == mold_server::execution_plan::OffloadMode::Block,
         None,
     )?;
-    // The forced-local twin of the worker's install point. Local preparation
-    // ran the extractor exactly once through the same
-    // `prepare_local_execution_inputs` path the server uses, so this engine
-    // gets the identical frozen value a remote render would have used — which
-    // is what makes local/remote parity structural rather than reviewed.
     engine
-        .install_identity_embedding(prepared.identity_embedding.as_ref())
+        .install_identity_embedding(identity.as_ref())
         .map_err(|error| {
             anyhow::anyhow!("failed to install face-identity conditioning: {error:#}")
         })?;

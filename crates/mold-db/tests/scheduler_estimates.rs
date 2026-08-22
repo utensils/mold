@@ -26,6 +26,7 @@ fn scheduler_estimates_round_trip_and_prune() {
             ewma_audio_decode_ms: Some(40.0),
             ewma_mux_ms: Some(10.0),
             ewma_upscale_ms: None,
+            ewma_identity_extract_ms: None,
             vram_high_water_bytes: Some(12_000),
             host_high_water_bytes: Some(16_000),
             failure_count: 1,

@@ -1583,40 +1583,25 @@ pub(crate) async fn prepare_inputs_for_devices(
                 .join("; ")
         ));
     }
-    // The identity is resolved ONCE, here, after the per-device loop and
-    // before any fan-out, and the value is device-independent by construction.
-    // This is the whole of #1223's extraction lifetime: a batch parent clones
-    // this struct into every child, so every sibling and every denoise step
-    // reuses this exact embedding. See `crate::identity_extraction`.
-    let resolved_identity = match context.frozen_identity.clone() {
-        // A batch child, re-prepared by the scheduler: the parent already
-        // resolved this exact face. Reusing it is the contract, not an
-        // optimization. No warning rides along, because the sibling did not
-        // extract — the parent's prepared inputs already carry it, and every
-        // child clones those.
-        Some(frozen) => crate::identity_extraction::ResolvedIdentity {
-            embedding: Some(frozen),
-            warning: None,
-        },
-        // Placement preview is a read-only probe. It must never spend seconds
-        // and 1.4 GB running the extractor, and it does not need to: identity
-        // changes the memory demand, which `memory_preflight` charges from the
-        // request, not from the embedding.
-        None if policy == DependencyMaterializationPolicy::ExistingOnly => {
-            crate::identity_extraction::ResolvedIdentity::default()
-        }
-        None => {
-            let identity_paths = by_device
-                .values()
-                .find_map(|device| device.engine_config.identity_assets.clone());
-            crate::identity_extraction::resolve_identity_embedding(request, identity_paths.as_ref())
-                .await?
-        }
-    };
-    let crate::identity_extraction::ResolvedIdentity {
-        embedding: identity_embedding,
-        warning: identity_warning,
-    } = resolved_identity;
+    // The identity is NOT resolved here any more. #1227 phase 2 moved the
+    // extraction inside the leased job and onto the render's own device
+    // (`docs/architecture/pulid-perf.md` §5), because the EVA02-CLIP tower was
+    // 79% of a 2,840 ms host extraction and there is no device to name until a
+    // lease exists. What survives is the ONE case admission still answers: a
+    // batch child re-prepared by the scheduler carries its parent's frozen
+    // value, and reusing it is the contract rather than an optimization.
+    //
+    // No warning rides along with that value, because the child did not
+    // extract — the parent's prepared inputs already carry it, and every child
+    // clones those.
+    //
+    // Placement preview is unaffected for the same reason it always was: it is
+    // a read-only probe that must never run the extractor, and identity
+    // changes the memory demand, which `memory_preflight` charges from the
+    // request rather than from the embedding.
+    let _ = policy;
+    let identity_embedding = context.frozen_identity.clone();
+    let identity_warning: Option<String> = None;
 
     let prepared = PreparedExecutionInputs {
         authority_fingerprint,

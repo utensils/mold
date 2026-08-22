@@ -27,6 +27,7 @@ thread_local! {
         const { RefCell::new(mold_scheduler::EstimatePhaseTimings {
             cold_load_ms: None,
             warm_reload_ms: None,
+            identity_extract_ms: None,
             prompt_encode_ms: None,
             denoise_ms: None,
             vae_ms: None,
@@ -102,6 +103,9 @@ fn record_phase_timing(event: &mold_inference::ProgressEvent) {
                 name: _,
             } => match phase {
                 mold_inference::ProgressPhase::ModelLoad => {}
+                mold_inference::ProgressPhase::IdentityExtract => {
+                    add_phase_sample(&mut timings.identity_extract_ms, *elapsed)
+                }
                 mold_inference::ProgressPhase::PromptEncode => {
                     add_phase_sample(&mut timings.prompt_encode_ms, *elapsed)
                 }
@@ -3776,6 +3780,95 @@ fn process_job_with_sink(
         return false;
     }
 
+    // Face-identity extraction, FIRST, before anything else this lease does
+    // (#1227 phase 2, `docs/architecture/pulid-perf.md` §5).
+    //
+    // Before the model load rather than merely before prompt encode, and that
+    // ordering is the drop-before-adapter rule made concrete: the detector,
+    // the recognizer, the parser, the tower, and the IDFormer are all built,
+    // forwarded, and fully released here, so on a cold load none of them ever
+    // coexists with the transformer, let alone with the ~1.14 GB PuLID adapter
+    // `EngineIdentityState` makes resident below. A warm cache hit does have
+    // the transformer resident already, which is exactly why
+    // `memory_preflight::IDENTITY_EXTRACTION_VRAM_OVERHEAD_BYTES` is charged
+    // additively rather than as a maximum.
+    //
+    // A batch child whose parent already froze this face reuses that value and
+    // extracts nothing; a sibling that arrives second is answered by the
+    // per-photograph cache in `mold_inference::identity::extraction` without
+    // opening a model. Either way the counter moves once per parent.
+    let identity_started = Instant::now();
+    let carried_identity = job
+        .prepared_execution_inputs
+        .as_ref()
+        .and_then(|inputs| inputs.identity_embedding.clone())
+        .or_else(|| {
+            job.batch_child
+                .as_ref()
+                .and_then(|child| child.prepared_inputs.identity_embedding.clone())
+        });
+    let mut identity_warning = job
+        .prepared_execution_inputs
+        .as_ref()
+        .and_then(|inputs| inputs.identity_warning.clone())
+        .or_else(|| {
+            job.batch_child
+                .as_ref()
+                .and_then(|child| child.prepared_inputs.identity_warning.clone())
+        });
+    let frozen_identity = match carried_identity {
+        Some(frozen) => Some(frozen),
+        None => {
+            let identity_paths = job
+                .execution_plan
+                .as_ref()
+                .and_then(|plan| plan.engine_config.identity_assets.clone());
+            match crate::identity_extraction::resolve_identity_for_lease(
+                &job.request,
+                identity_paths.as_ref(),
+                worker.gpu.backend,
+                ordinal,
+            ) {
+                Ok(resolved) => {
+                    if resolved.embedding.is_some() {
+                        let elapsed = identity_started.elapsed();
+                        // The scheduler's learned evidence for this phase.
+                        // Only the sibling that actually extracted reports it;
+                        // every other one leaves `identity_extract_ms` at
+                        // `None`, exactly as `cold_load_ms` does on a warm
+                        // reuse.
+                        record_phase_timing(&mold_inference::ProgressEvent::PhaseDone {
+                            phase: mold_inference::ProgressPhase::IdentityExtract,
+                            name: "Extracting face identity".to_string(),
+                            elapsed,
+                        });
+                        if let Some(ref tx) = job.progress_tx {
+                            let _ = tx.send(SseMessage::Progress(progress_to_sse(
+                                mold_inference::ProgressEvent::StageDone {
+                                    name: "Extracting face identity".to_string(),
+                                    elapsed,
+                                },
+                            )));
+                        }
+                    }
+                    if let Some(warning) = resolved.warning {
+                        identity_warning.get_or_insert(warning);
+                    }
+                    resolved.embedding
+                }
+                Err(error) => {
+                    let err_msg = format!("face-identity conditioning failed: {error}");
+                    tracing::error!(gpu = ordinal, model = %model_name, "{err_msg}");
+                    if let Some(ref tx) = job.progress_tx {
+                        let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
+                    }
+                    let _ = job.result_tx.send(Err(err_msg));
+                    return false;
+                }
+            }
+        }
+    };
+
     // Ensure model is loaded on this GPU.
     let config_snapshot = job.config.blocking_read().clone();
     let family_slug = crate::model_manager::family_for_model_sync(&model_name, &config_snapshot);
@@ -3976,33 +4069,13 @@ fn process_job_with_sink(
             .expect("failed to spawn RSS watchdog")
     };
 
-    // Install the identity admission froze for this request, or clear it.
+    // Install the identity this lease resolved above, or clear it.
     //
     // Unconditional in both directions: the engine is cached across requests
     // and an embedding left installed would condition the NEXT print on the
-    // PREVIOUS person. This is also the one place the extraction lifetime
-    // terminates — the value was resolved once at parent admission and is only
-    // ever read from here on.
-    let frozen_identity = job
-        .prepared_execution_inputs
-        .as_ref()
-        .and_then(|inputs| inputs.identity_embedding.clone())
-        .or_else(|| {
-            job.batch_child
-                .as_ref()
-                .and_then(|child| child.prepared_inputs.identity_embedding.clone())
-        });
-    // The advisory that came with that identity, read from the same two
-    // places, so a batch child reports it exactly as its parent does.
-    let identity_warning = job
-        .prepared_execution_inputs
-        .as_ref()
-        .and_then(|inputs| inputs.identity_warning.clone())
-        .or_else(|| {
-            job.batch_child
-                .as_ref()
-                .and_then(|child| child.prepared_inputs.identity_warning.clone())
-        });
+    // PREVIOUS person. This is where the extraction lifetime terminates — the
+    // value was resolved once, before the model load, and is only ever read
+    // from here on.
     // Run inference — cache mutex is FREE during this.
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         ensure_worker_not_poisoned(worker, &model_name)?;

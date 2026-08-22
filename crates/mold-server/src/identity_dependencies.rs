@@ -949,11 +949,16 @@ mod tests {
 
         // The parent. `freeze_batch_plan` validates a `batch_size = 1` clone,
         // which is what reaches preparation, so the request here matches.
-        let parent = crate::identity_extraction::resolve_identity_embedding(
+        // #1227 phase 2: the parent's own extraction now happens inside its
+        // lease, on the device the plan admitted, rather than in preparation.
+        // What preparation still answers is the CHILD question below, which is
+        // what this test is about.
+        let parent = crate::identity_extraction::resolve_identity_for_lease(
             &request(None, true),
             Some(&expected_paths(models.path())),
+            mold_core::GpuBackend::Cuda,
+            0,
         )
-        .await
         .expect("the stub extractor answers")
         .embedding
         .expect("a conditioned parent resolves an identity");

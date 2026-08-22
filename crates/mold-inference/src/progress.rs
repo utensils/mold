@@ -73,6 +73,17 @@ pub fn is_inference_cancelled(error: &anyhow::Error) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProgressPhase {
     ModelLoad,
+    /// Face-identity extraction: the detector, the recognizer, the BiSeNet
+    /// parser, the EVA02-CLIP tower, and the IDFormer, run on the render's own
+    /// leased device before anything else touches it (#1227 phase 2,
+    /// `docs/architecture/pulid-perf.md` §5).
+    ///
+    /// Emitted only by the ONE sibling of a parent request that actually
+    /// performs the once-per-parent extraction, and not at all for a request
+    /// that does not condition on a face or whose effective `id_weight` is
+    /// zero. Every other sibling's `identity_extract_ms` stays `None`, exactly
+    /// as `cold_load_ms` already does on a warm reuse.
+    IdentityExtract,
     PromptEncode,
     /// Legacy family-neutral VAE work. Existing image/video families retain
     /// this bucket while synchronized A/V families can report their output

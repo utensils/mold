@@ -75,6 +75,7 @@ fn resolved_estimate_exposes_learned_setup_and_run_phases_for_planning() {
             phases: EstimatePhaseTimings {
                 cold_load_ms: Some(100),
                 warm_reload_ms: Some(25),
+                identity_extract_ms: None,
                 prompt_encode_ms: Some(200),
                 denoise_ms: Some(500),
                 vae_ms: Some(100),
@@ -250,6 +251,7 @@ fn legacy_total_without_learned_load_remains_a_nonzero_run_estimate() {
         ewma_audio_decode_ms: None,
         ewma_mux_ms: None,
         ewma_upscale_ms: None,
+        ewma_identity_extract_ms: None,
         vram_conservative_bytes: None,
         host_conservative_bytes: None,
         failure_count: 0,
