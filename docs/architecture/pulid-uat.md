@@ -475,3 +475,81 @@ accounting for them are still unverified on Apple Silicon, while the CPU
 extraction half continues to run there (it is what scored the cosines in #1222).
 Closing it needs a token on a Metal host and nothing more — the commands are
 #12 and #13 above with `--width 512 --height 512`.
+
+## SDXL (PuLID v1.1, #1228)
+
+The extras-milestone stretch: the same extractor, a second hidden bundle
+(`pulid-sdxl`, one new 984 MB file), and a 70-layer cross-attention adapter in
+the SDXL UNet. Run on both hosts from `feat/pulid-sdxl` at `53cd4a62`, built
+with `--features cuda,pulid` (plato) and `--features metal,preview,pulid`
+(halcyon). Checkpoints: `sdxl-base:fp16` everywhere, `juggernaut-xl:fp16` for
+one cross-checkpoint render. 1024x1024, 25 steps, guidance 7.5 (ordinary SDXL
+CFG — there is no true-CFG on this family). Outputs: `/storage/mold/uat-1228/`
+on plato, `/Volumes/ExternalStorage/pulid-dev/uat-sdxl/` on halcyon.
+
+| # | Check | plato (CUDA) | halcyon (Metal) |
+| --- | --- | --- | --- |
+| 19 | `mold pull pulid-sdxl --accept-license insightface-antelopev2` | **PASS** — 984 MB adapter + the BiSeNet parser the pre-#1225 install lacked; the four shared extractor files were not re-downloaded | **PASS** — full 2.2 GB bundle on a machine without `pulid-flux` |
+| 20 | Zero-weight byte identity (`--id-weight 0.0` vs no identity, `--no-metadata`) | **PASS** — sha256 `d6f6c345…ecdae` both | **PASS** — sha256 `4f5461da…8bf3d` both |
+| 21 | Weight sweep 0.4 / 0.8 / 1.0 / 1.5, `--id-start-step 5`, second face, two-photo average | **PASS** — 70 modules engaged, 27–31 s each | **PASS** — 97–123 s each (two renders first refused by a transient host-memory admission check and re-run) |
+| 22 | ArcFace cosine rises with `id_weight` (the check the goldens cannot make) | **PASS** — see table below | **PASS** — see below |
+| 23 | Refusals: `--true-cfg` on SDXL, `sdxl-turbo`, `playground-v2.5`, `--image`, `--lora` | **PASS** — five refusals, nothing rendered | **PASS** — identical messages |
+| 24 | `/api/models` `supports_identity` per SDXL entry | **PASS** — `true` for exactly `sdxl-base`, `dreamshaper-xl`, `juggernaut-xl`, `realvis-xl`; `false` for `playground-v2.5`, `pony-v6`, `cyberrealistic-pony`, `sdxl-turbo` | **PASS** — same eight |
+| 25 | `/api/capabilities.identity` | `{multi_photo: true, max_photos: 4, true_cfg: true}` (server-wide; `true_cfg` names the FLUX capability) | same |
+
+### 22. The cosine sweep
+
+The close-up prompt used for the byte checks produces a face that overflows
+the 1024² frame, and SCRFD finds nothing in it — in the *plain* render as well
+as the conditioned ones — so the objective check was rendered with a wider
+framing ("a head and shoulders portrait photograph of a person, medium shot,
+looking at the camera, plain grey studio background, soft light", seed 11) and
+scored with `pulid_identity_fidelity` (threshold 0.28, the FLUX UAT's gate):
+
+| render (plato, CUDA) | ArcFace cosine |
+| --- | --- |
+| plain, no identity — control | -0.0711 |
+| Frank, `--id-weight 0.4` | 0.4675 |
+| Frank, `--id-weight 0.8` | 0.6660 |
+| Frank, `--id-weight 1.0` | 0.6844 |
+| Frank, `--id-weight 1.5` | 0.6857 |
+| Frank, `--id-weight 1.0`, `juggernaut-xl:fp16` | 0.7033 |
+| Kayla, `--id-weight 1.0` | 0.7873 |
+| Raja, two photographs averaged | 0.7254 |
+| Frank reference vs the Kayla render — cross-identity control | 0.0440 |
+| Kayla reference vs the Frank render — cross-identity control | 0.1395 |
+
+Monotonic in the weight, saturating past 1.0, and the two cross-identity
+controls sit where the plain control does. A mis-ordered layer table — the one
+defect parity goldens on three layers cannot see — renders plausible faces at
+flat similarity, and this is not that. The SDXL v1.1 numbers sit above the
+FLUX q4/q8 figures (0.60–0.72) recorded earlier in this file.
+
+The same three-render subset on Metal, scored on the same machine:
+
+| render (halcyon, Metal) | ArcFace cosine | CUDA |
+| --- | --- | --- |
+| plain, no identity — control | -0.0721 | -0.0711 |
+| Frank, `--id-weight 1.0` | 0.6807 | 0.6844 |
+| Kayla, `--id-weight 1.0` | 0.7901 | 0.7873 |
+| Frank reference vs the Kayla render — cross-identity control | 0.0431 | 0.0440 |
+| Kayla reference vs the plain render — control | 0.0135 | 0.0098 |
+
+Metal and CUDA agree to within 0.004 on every row — the two backends render
+the same identity from the same seed, which is the cross-backend determinism
+the CPU-seeded noise and the shared adapter code path are meant to deliver.
+(The fidelity test reports its controls as `FAIL` against the 0.28 gate; that
+is the expected reading for a render that should NOT match.)
+
+### Not covered here
+
+- `realvis-xl:fp16` and `dreamshaper-xl:fp16` were not rendered; they are
+  qualified on upstream's own evidence (`docs/pulid_v1.1.md`) and share the
+  UNet geometry the layer table is derived from, so the adapter either loads on
+  all four or none — the inventory check refuses a checkpoint whose attn2 set
+  differs.
+- Residency under a long-lived server (adapter dropped after an unconditioned
+  request) is pinned by unit tests on the engine state, not re-measured here.
+- Follow-up filed as #1305: the CLI auto-pulls an unqualified checkpoint before
+  the identity gate refuses it, observed here for `sdxl-turbo` and
+  `playground-v2.5` (pre-existing; FLUX behaves the same).
