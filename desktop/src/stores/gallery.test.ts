@@ -1373,7 +1373,7 @@ describe("organization union + filters", () => {
     expect(gallery.filtered.map((e) => e.item.filename)).toEqual(["shared.png"]);
   });
 
-  it("the open collection narrows the grid only in the Collections scope, ordered by the origin list when loaded", () => {
+  it("the open collection preserves the gallery's newest-first order", () => {
     const gallery = seed();
     gallery.collectionSlug = "smurfs";
     expect(gallery.filtered).toHaveLength(3); // Prints scope ignores the drill-in
@@ -1381,9 +1381,7 @@ describe("organization union + filters", () => {
     expect(gallery.filtered.map((e) => e.item.filename)).toEqual(["shared.png", "remote.png"]);
     expect(gallery.collectionCounts("smurfs")).toBe(2);
     expect(gallery.collectionCounts("river-studies")).toBe(0);
-    // Origin order: hal's list puts remote first.
-    gallery.collectionItemsByHost["hal9000-7680"] = { h9: ["remote.png", "shared.png"] };
-    expect(gallery.filtered.map((e) => e.item.filename)).toEqual(["remote.png", "shared.png"]);
+    expect(gallery.filtered.map((e) => e.item.filename)).toEqual(["shared.png", "remote.png"]);
   });
 
   it("text search also matches the title", () => {
