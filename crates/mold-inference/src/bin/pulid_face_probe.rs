@@ -41,16 +41,16 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
+use candle_core::Device;
 use image::RgbImage;
+use mold_core::pulid_assets::PulidPaths;
+use mold_inference::identity::arcface_net::IResNet100;
+use mold_inference::identity::extraction::{compose_identity_tokens_observed, ComposeStage};
 use mold_inference::identity::onnx_graph::load_onnx_model;
 use mold_inference::identity::onnx_inventory::{
     graph_inventory, ignored_attributes, pinned_input_makes_pooling_exact,
     unsupported_by_candle_onnx, GraphInventory,
 };
-use candle_core::Device;
-use mold_core::pulid_assets::PulidPaths;
-use mold_inference::identity::extraction::{compose_identity_tokens_observed, ComposeStage};
-use mold_inference::identity::arcface_net::IResNet100;
 use mold_inference::identity::scrfd_net::ScrfdNet;
 use mold_inference::identity::{arcface::ArcFaceRecognizer, scrfd::ScrfdDetector};
 
@@ -354,8 +354,8 @@ fn run_bench(dir: &Path, options: BenchOptions) -> Result<()> {
         .zip(embed_ms.iter())
         .map(|(d, e)| d + e)
         .collect();
-    report("scrfd", detect_ms.clone());
-    report("arcface", embed_ms.clone());
+    report("scrfd", detect_ms);
+    report("arcface", embed_ms);
     let face_p95 = report("face-stack", total.clone());
     let mut full_p95 = None;
     if full.is_some() {
@@ -371,7 +371,7 @@ fn run_bench(dir: &Path, options: BenchOptions) -> Result<()> {
             *sample +=
                 eva_build_ms[i] + eva_forward_ms[i] + idformer_build_ms[i] + idformer_forward_ms[i];
         }
-        full_p95 = Some(report("per-image", total.clone()));
+        full_p95 = Some(report("per-image", total));
     }
 
     if let Some((detector_graph, recognizer_graph)) = oracle {

@@ -51,9 +51,11 @@ with:
 > re-measures instead of re-arguing: `--compare` runs both evaluators
 > alternately in one loop, `--full` adds the EVA tower and the IDFormer, and
 > `--regress-against` checks a p95 against the committed per-host baselines.
-> **The re-materialization was not the cost centre** — §4 records the measured
-> numbers, and the EVA02-CLIP tower, unmeasured until #1227, is the majority of
-> a real extraction.
+> **The re-materialization was not the cost centre** — measured 1.04x, not the
+> 25% #1227 set out to find, because a 261 MB copy is cheap next to 23 GFLOP of
+> f32 convolution. §4 records the numbers, and the EVA02-CLIP tower, unmeasured
+> until #1227, is **79%** of a real extraction (2,237 ms of 2,840 ms p50 on
+> halcyon) against the face stack's 13%.
 
 **Point (2)** stays, with one clause added at the end, because the workaround is
 now oracle-only:

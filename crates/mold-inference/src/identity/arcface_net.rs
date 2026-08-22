@@ -201,9 +201,11 @@ impl IResNet100 {
         //
         // Computed as `W @ X^T` rather than `X @ W^T` on purpose. `W` is
         // `[512, 25088]` — 51 MB — so materializing its transpose is 51 MB read
-        // and 51 MB written **per forward**, which measured as roughly a fifth
-        // of the whole 112x112 embedding. `X^T` is 25088 values. Same product,
-        // one transpose of the small operand.
+        // and 51 MB written **per forward**. That was about a sixth of the
+        // whole 112x112 embedding when this module first shipped it (~241 ms
+        // mean, against ~204 ms once it was gone), which was enough to make the
+        // resident port SLOWER than the evaluator it replaced. `X^T` is 25088
+        // values. Same product, one transpose of the small operand.
         let xs = self
             .fc_weight
             .matmul(&xs.t()?.contiguous()?)?

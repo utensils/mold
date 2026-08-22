@@ -6,9 +6,14 @@ whether extraction should move off `candle-onnx`/CPU, a cross-request
 identity-embedding cache, EVA-CLIP residency under a GPU path, and the
 benchmark protocol that qualifies whichever of these ships.
 
-This is a **decision record, written before code**, exactly as
-[#1222](https://github.com/utensils/mold/issues/1222)'s Step 0 was. Nothing in
-this document changes Rust — see `docs/architecture/pulid-face-extraction.md`
+This began as a **decision record, written before code**, exactly as
+[#1222](https://github.com/utensils/mold/issues/1222)'s Step 0 was. Phase 1 has
+since shipped, so the sections below now carry what was measured beside what was
+predicted — and in one case (§1's re-materialization hypothesis) the measurement
+**falsified** the prediction. Those corrections are inline and marked
+`MEASURED`, never quietly edited over the original reasoning: a decision record
+that reads as if it had been right all along teaches nobody why it was wrong.
+For what already shipped before this issue, see `docs/architecture/pulid-face-extraction.md`
 (Step 0: the `candle-onnx` runtime decision, the measured budget, the stage
 table), `docs/architecture/pulid.md` (encoder lifecycle, residency, the
 extraction call site), and `docs/architecture/pulid-uat.md` (real-hardware
@@ -70,6 +75,14 @@ claim this issue produces is incomplete until this is measured — §4 makes
 extending the bench harness to cover it the first concrete deliverable of the
 implementation phase, ahead of deciding where to spend GPU/hand-port effort.
 
+> **MEASURED (phase 1).** `pulid_face_probe bench --full` now measures it, and
+> the suspicion was an understatement. On halcyon, one identity extraction is
+> **2,840 ms** (p50) end to end, of which the EVA tower is **2,237 ms — 79%**
+> and the face stack `pulid_face_probe` had been gating on is **360 ms — 13%**.
+> The full table is in §4. Every number below that reasons about SCRFD and
+> ArcFace is reasoning about an eighth of the problem, which is exactly what §0
+> was written to find out and is what §5's phase-2 plan is aimed at.
+
 ---
 
 ## 1. Runtime decision: hand-ported candle vs. a cached ONNX evaluator
@@ -112,6 +125,18 @@ size, not with per-request compute (`eval.rs:191-232`, `:249-257`; the Step-0
 doc: "the second call costs what the thousandth does and there is nothing to
 amortize"). SCRFD's 16,923,827-byte graph pays the same tax at ~1/15th the
 size and shows a correspondingly smaller, though still real, share.
+
+> **MEASURED (phase 1) — this inference was wrong.** "Consistent with" was
+> doing all the work: ArcFace also dominates because it is ~23 GFLOP against
+> SCRFD's ~10, and that, not the memcpy, is why it costs more. Running both
+> evaluators **alternately inside one loop** on byte-identical blobs
+> (`pulid_face_probe bench --compare`, so both see the same contention) puts
+> the resident port at **1.04x** the `candle-onnx` evaluator on the face stack —
+> 371.0 ms to 357.9 ms mean, 376.5 ms to 364.9 ms p95. Re-materializing 278 MB
+> is worth about 3-4%, not the majority of anything: halcyon is an M4 Max, whose
+> memory bandwidth makes a 261 MB copy cheap next to 23 GFLOP of f32
+> convolution at candle's ~110 GFLOP/s. The hypothesis was testable and is now
+> tested; §4 records the consequence for the acceptance criterion.
 
 ### Why B does not answer the question B looks like it answers
 
@@ -167,6 +192,15 @@ side effect of "port the backbone to candle."
 
 ### Recommendation
 
+> **MEASURED (phase 1).** Option A shipped and the port is parity-exact, but
+> read the "buys most of the re-materialization win" clause below as the
+> prediction it was: the win it buys is ~4%, because the tax it removes was
+> ~4%. What survives unqualified is the SECOND half of the argument — "it is a
+> strict prerequisite for a future GPU path either way, because candle-onnx
+> cannot reach a GPU at all" — and that is now the load-bearing reason the port
+> is worth keeping. It also removes a retained 261 MB `ModelProto` per
+> extractor, which the evaluator had to keep alive to re-read on every call.
+
 **Ship option A (hand-ported SCRFD + iResNet100 in candle), but keep it
 CPU-resident at today's call site for milestone 1.** Concretely: replace only
 the internals of `IdentityExtractor` (`identity/mod.rs`,
@@ -203,6 +237,20 @@ out to dominate SCRFD/ArcFace entirely.
 - **Speed**: p95 ≥ 25% faster than the recorded baseline (415.7 ms halcyon,
   1574.5 ms plato, SCRFD+ArcFace only — see §4 for how this is checked
   mechanically rather than by eyeballing a percentage).
+
+> **MEASURED (phase 1): parity PASSES, speed FAILS, and the threshold was not
+> moved.** Parity is exact — SCRFD is bit-identical to `simple_eval` on all
+> nine head tensors across the whole fixture set, ArcFace agrees to 2.62e-6
+> with cosine 1.0, and the unchanged InsightFace golden gate still reports
+> worst landmark 0.232 px and worst cosine 0.999384. Speed does not:
+> face-stack p95 is **370.9 ms against the 415.7 ms baseline, 10.8% faster**,
+> where the criterion asked for 25% (ceiling 311.8 ms). That gap is not a
+> missing optimization in the port, it is the falsified premise in §1's "what
+> the numbers say" — the criterion was sized against a cost that turned out not
+> to exist. `--regress-against halcyon` reports exactly this and exits non-zero,
+> which is what it is for. The port is kept anyway, for the prerequisite
+> argument above; the 25% target moves to §5, restated over the whole
+> extraction, where there is a 79% cost centre to take it out of.
 
 ---
 
@@ -502,19 +550,117 @@ cargo build --release -p mold-ai-inference --features dev-bins,pulid --bin pulid
 ./target/release/pulid_face_probe bench /path/to/pulid-assets-dir
 ```
 
-### Required extension (first implementation-phase deliverable, not this doc)
+### The extension, as it shipped
 
-A second bench mode covering the currently-unmeasured half of §0's finding —
-`pulid_face_probe bench --full` (or a separate `bench-full` subcommand) that
-additionally warm-repeats `extraction::compose_identity_tokens` (EVA tower +
-IDFormer forward, given a fixed aligned 512×512 crop and ArcFace vector so
-the bench isolates encode cost from detection) per image, reusing the exact
-5-warmup/20-run protocol and `validate_bench_args`'s existing refusal/advisory
-logic verbatim. Report a **four-row** stage table (SCRFD / ArcFace / EVA /
-IDFormer / per-image total) rather than today's two-row one. This must land
-and produce real numbers before any claim of "performance qualification" is
-made, because today's gate is silent on what may be the larger half of the
-real cost.
+`pulid_face_probe bench <dir>` gained three flags in phase 1:
+
+| flag | what it adds | why |
+| --- | --- | --- |
+| `--full --adapter <safetensors> --eva <pt>` | four more rows: `eva-build`, `eva-forward`, `idformer-build`, `idformer-fwd`, plus a whole-extraction total | §0's finding. Build and forward are separate rows because they answer different questions: the forward is arithmetic, the build is what the drop-and-reload rule **re-pays on every request** and is therefore what §5 would buy back |
+| `--compare` | re-measures the retained `candle-onnx` oracle, **alternating with the port inside one iteration**, on byte-identical blobs | Two sequential blocks measure whatever else a shared box was doing during each block. Alternating makes both evaluators see the same contention, which is what makes the 1.04x number above trustworthy on a machine that never goes quiet |
+| `--regress-against halcyon\|plato` | checks the face-stack p95 against `BASELINE_*_P95_MS` at `REGRESSION_MARGIN` (0.75) | §1's "25% faster" as a mechanical check with a non-zero exit, not a percentage a reviewer recomputes |
+
+It runs through `extraction::compose_identity_tokens_observed` — the SAME
+implementation the server calls, with a per-stage observer;
+`compose_identity_tokens` delegates to it with a no-op closure, so the benchmark
+cannot drift from production by measuring a copy of it.
+
+Two scoping rules, both load-bearing:
+
+- **The whole-extraction total is reported, never gated.** #1222's
+  `LATENCY_BUDGET_MS` was stated over SCRFD + ArcFace and nothing else, so
+  applying it to a four-stage measurement would fail a gate this build was
+  never subject to. The gate stays on the face stack; the total is printed as
+  the first per-request figure for the whole extraction, and §5 states the
+  budget that *should* cover it.
+- **Every run prints the 1-minute load average at both ends.**
+  `pulid-face-extraction.md`'s own cautionary example is a p95 that tripled
+  under load average 83. A benchmark that does not report this invites the same
+  mistake again.
+
+```bash
+cargo build --release -p mold-ai-inference --features dev-bins,pulid --bin pulid_face_probe
+./target/release/pulid_face_probe bench /path/to/antelopev2 --compare --full \
+  --adapter /path/to/pulid_flux_v0.9.1.safetensors \
+  --eva /path/to/EVA02_CLIP_L_336_psz14_s6B.pt
+```
+
+### MEASURED: one identity extraction on halcyon
+
+Apple M4 Max, 16 cores, 48 GiB, macOS aarch64, release build, the 5-warmup /
+20-run gate protocol, **load average 9.76 at start and 12.22 at end** — the box
+was running peer builds throughout and a quiet window never came, which is why
+the paired `--compare` numbers rather than the absolutes carry the argument.
+Sample spread was nonetheless tight (every stage's min-to-max is under 6%).
+
+| stage | p50 (ms) | p95 (ms) | share of p50 total |
+| --- | ---: | ---: | ---: |
+| `scrfd` — letterbox, blob, detect, decode, NMS | 160.0 | 165.1 | 5.6% |
+| `arcface` — align, blob, embed | 198.7 | 209.4 | 7.0% |
+| **face stack** (what #1222 measured) | **359.7** | **370.9** | **12.7%** |
+| `eva-build` — re-authenticate 609 MB, mmap, widen f16→f32, construct | 1267.9 | 1273.1 | 44.6% |
+| `eva-forward` — 24 blocks, 577 tokens, f32 | 969.2 | 981.6 | 34.1% |
+| `idformer-build` | 46.0 | 47.1 | 1.6% |
+| `idformer-fwd` | 194.2 | 202.4 | 6.8% |
+| **whole extraction** | **2840.4** | **2863.9** | **100%** |
+
+Three things fall out of that table and none of them was predictable from the
+Step-0 numbers:
+
+1. **The EVA tower is 79% of an extraction** (2,237 ms of 2,840 ms). Every
+   optimization argument in §1 was about the 13% the harness happened to be
+   pointed at.
+2. **`eva-build` is the single largest line item in the entire pipeline** —
+   larger than the tower's own forward pass, and nearly four times the whole
+   face stack. It is pure per-request setup: `derived_artifact_is_authentic`
+   re-hashes the 609 MB derived safetensors on every call (deliberately —
+   CLAUDE.md's "reuse is authenticated by the compiled-in `DERIVED_SHA256`,
+   never by the sidecar"), and `VarBuilder::from_mmaped_safetensors(...,
+   DType::F32, ...)` then widens those f16 weights into ~1.2 GB of f32. The
+   drop-and-reload rule pays for both on every conditioned request. Splitting
+   that line further — hash vs. mmap vs. construct — is the first thing §5
+   should measure, because the two halves have completely different fixes.
+3. **The IDFormer's build is nearly free** (46 ms) while its forward is 194 ms,
+   the opposite shape, because its `VarBuilder` is lazily mmap-backed over the
+   adapter file rather than a re-authenticated widening copy.
+
+### MEASURED: the port against the evaluator it replaced
+
+Same run, `--compare`, alternating inside one iteration:
+
+| | `candle-onnx` mean | resident port mean | speedup |
+| --- | ---: | ---: | ---: |
+| SCRFD graph | 163.7 ms | 159.1 ms | 1.03x |
+| ArcFace graph | 207.3 ms | 198.8 ms | 1.04x |
+| both | 371.0 ms | 357.9 ms | 1.04x |
+| both, p95 | 376.5 ms | 364.9 ms | 1.03x |
+
+That is the honest value of the hand port as a speed change, and it is the
+number §1's "what the numbers say" was wrong about. Its real value is
+elsewhere: `candle-onnx` cannot place a tensor anywhere but `Device::Cpu`, so
+without this port §5 is not implementable at all.
+
+The regression pin committed for this is deliberately **relative** —
+`the_resident_port_is_never_slower_than_the_evaluator_it_replaced` in
+`tests/pulid_handport_parity.rs`, asset-gated and `#[ignore]`d, alternating the
+two evaluators exactly as `--compare` does. A millisecond ceiling is a property
+of the machine and its load; a ratio survives both. It is not a hypothetical
+guard: the first version of `arcface_net` computed the fully-connected layer as
+`X @ W^T`, materializing a transpose of the 51 MB weight on **every forward**,
+which made the "faster" port about a tenth slower than `simple_eval` on the
+recognizer. This ratio is what caught it, before it shipped.
+
+### plato: not measured
+
+Deliberately skipped in phase 1 and named rather than quietly omitted. A release
+build of `mold-ai-inference` on plato is well past the time this issue had for
+it, and the conclusion does not turn on it: the falsified claim is about
+*whether re-materialization is the cost centre*, and the four-stage table shows
+the answer is "no, and neither is the face stack" on any host where the EVA
+tower runs the same 300 GFLOP. plato's own 1574.5 ms face-stack baseline stays
+committed in `pulid_face_probe` for whoever runs `--regress-against plato`
+there. A phase-2 measurement should take both hosts, because §5's win is a
+device question and plato has four L40S.
 
 ### Warm-repeat protocol
 
@@ -537,16 +683,21 @@ without re-baselining:
 
 ### Regression test at the measured numbers
 
-Add pinned baseline constants beside `LATENCY_BUDGET_MS` in
-`pulid_face_probe.rs` — `BASELINE_HALCYON_P95_MS: f64 = 415.7`,
-`BASELINE_PLATO_P95_MS: f64 = 1574.5` (the SCRFD+ArcFace numbers this doc
-cites from `pulid-face-extraction.md`; add the EVA/IDFormer baselines once
-the extended bench above produces them) — and a `--regress-against
-<halcyon|plato>` flag that fails (non-zero exit, matching the existing gate's
-convention) when the measured p95 exceeds 0.75× the named baseline, i.e. the
-literal "p95 ≥ 25% faster" acceptance criterion expressed as a mechanically
-checkable ratio against numbers already committed to this repository, rather
-than a comment a reviewer has to recompute by hand.
+Shipped as described: `BASELINE_HALCYON_P95_MS = 415.7`,
+`BASELINE_PLATO_P95_MS = 1574.5`, `REGRESSION_MARGIN = 0.75`, and
+`--regress-against <halcyon|plato>` exiting non-zero when the face-stack p95
+exceeds the ceiling. On halcyon it currently **fails at 370.9 ms against a
+311.8 ms ceiling**, and that is left as-is rather than loosened: the flag is
+reporting a real gap between what §1 predicted and what the port delivers, and
+a threshold edited to match the outcome measures nothing. §5 is where the 25%
+is now expected to come from.
+
+The committed *pass/fail* pin is the relative one described above
+(`the_resident_port_is_never_slower_than_the_evaluator_it_replaced`), because
+it holds on any machine under any load. The absolute baselines stay as
+documentation of where the numbers came from, checked into
+`pulid_face_probe.rs` where the flag that reads them lives, and pinned by
+`the_named_baselines_are_the_ones_the_doc_records`.
 
 ### Device-path parity
 
@@ -559,6 +710,88 @@ absolute, hidden states to ~1e-4 of peak magnitude) — run through the
 existing `capture_goldens.py`/`capture_eva_goldens.py` fixtures,
 `MOLD_TEST_PULID_ASSETS`-gated, `#[ignore]`d in the ordinary suite exactly as
 they are today.
+
+---
+
+## 5. Phase 2 — the plan the phase-1 numbers actually justify
+
+Phase 1 kept extraction exactly where it was: CPU, at admission, before any
+lease. §4 says that is now the expensive decision, not a free one. This section
+is the concrete follow-up, written against the measured table rather than
+against the issue title. It is **not** implemented on the phase-1 branch, for a
+reason worth stating: everything below edits
+`crates/mold-server/src/identity_extraction.rs`, which #1226 is rewriting for
+multi-photo and true-CFG conditioning. Phase 2 rebases onto #1226; landing both
+into that file at once buys nothing and costs a merge.
+
+### What moves, and what deliberately does not
+
+| stage | p50 today | phase 2 |
+| --- | ---: | --- |
+| `eva-build` | 1268 ms | **the first target, and it is not a device question.** Roughly half is `derived_artifact_is_authentic` re-hashing 609 MB and half is widening f16 → f32 into ~1.2 GB. Measure that split first (one more `ComposeStage`); the hash half wants a process-lifetime memo keyed on `(dev, ino, size, mtime)` **plus** a re-verify on any mismatch — never a bare "we checked once" flag, because the whole point of the compiled-in `DERIVED_SHA256` is that the file may change under us — and the widening half wants the tower built at its stored f16/bf16 dtype on a device that has one. |
+| `eva-forward` | 969 ms | **moves to the leased device.** ~300 GFLOP of dense f32 matmul is the canonical GPU workload; candle already runs this tower on any device, and phase 1 is what makes the whole stack device-capable. |
+| `idformer-fwd` | 194 ms | moves with it — same `VarBuilder`, same device, no separate decision. |
+| `scrfd` / `arcface` | 360 ms | move last, or not at all. They are 13% of the extraction and their kernels are small; taking them along is nearly free once the device exists, but they do not justify the lease-ordering change on their own. That was §1's mistake and phase 2 must not repeat it. |
+| `idformer-build` | 46 ms | leave alone. |
+
+### Where it runs, and the ordering that makes it legal
+
+Extraction moves from `variant_dependencies::prepare_inputs_for_devices`
+(pre-lease) to **inside the leased job, first, before prompt encode** — the
+`ProgressPhase::IdentityExtract` arm §3 designs, with the
+`EstimatePhaseTimings` / `EstimateBucket` fields and the schema bump §3
+enumerates. Only the sibling that actually performs the once-per-parent
+extraction records a sample; every other sibling's `identity_extract_ms` stays
+`None`, exactly as `cold_load_ms` already does on a warm reuse.
+
+`ExtractionSlot`'s bespoke semaphore-plus-`ram_snapshot()` gate is **retired**,
+not run in parallel with the ledger. Its module doc's own justification —
+"extraction happens strictly BEFORE this job has a lease" — stops being true the
+moment this lands, and two admission-time memory gates that can disagree is
+worse than one.
+
+### The drop-before-adapter rule
+
+Non-negotiable, and the reason this is a phase and not a residency change: the
+tower and the IDFormer are **built, forwarded, and fully released** before
+`flux::identity::EngineIdentityState` begins the adapter's ordinary residency
+for that dispatch. The extraction is a strictly earlier, strictly disjoint
+phase of the same lease — never a third permanent resident alongside the
+~1.14 GB adapter and the transformer's own peak. Phase 1's measurement makes
+this concrete: the tower is ~609 MB at rest and ~1.2 GB widened, which is not
+memory a conditioned FLUX render has spare.
+
+### CUDA versus Metal are different problems
+
+- **CUDA**: a discrete VRAM budget. The tower's transient peak is charged
+  against the frozen plan's grant and released before the adapter loads. This
+  is the ordinary case and the ledger discipline already exists for it.
+- **Metal**: unified memory, so "moving to the device" does not move bytes off
+  the host, and mold's existing rule is that Metal reserves no host RAM
+  separately — its host claim rides the unified device gate. Phase 2 must
+  therefore charge the tower ONCE on Apple Silicon, through that gate, not
+  once to the host ledger and once to the device. It is also the host where
+  phase 1 measured everything, so a Metal `eva-forward` number is the direct
+  before/after: 969 ms on the CPU of the same machine.
+
+### Acceptance
+
+Stated over the **whole extraction**, which is what §4 showed the previous
+criterion should have been stated over all along.
+
+- **Speed**: whole-extraction p95 at least **25% under 2,863.9 ms**, i.e.
+  **≤ 2,147.9 ms** on halcyon under `pulid_face_probe bench --full` at the
+  5-warmup / 20-run protocol, with the load average reported. Add
+  `BASELINE_HALCYON_FULL_P95_MS` beside the existing constants and a
+  `--regress-against-full` that reads it, so the check stays mechanical. Take
+  plato too — it has four L40S and phase 2 is a device change, so skipping it
+  a second time would leave the interesting host unmeasured.
+- **Parity**: unchanged tolerances, and one addition — the device path must
+  produce a `FrozenIdentityEmbedding` byte-identical to the CPU path's for the
+  same photo and assets, or the fingerprint stops identifying an identity and
+  every cache and provenance claim built on it breaks.
+- **Ordering**: a test proving the tower is released before the adapter is
+  resident, not merely that both fit.
 
 ---
 
@@ -576,3 +809,19 @@ they are today.
   schema v21 bump that would give it learned runtime evidence (§3) — gated on
   §4's extended measurement actually showing GPU dispatch is worth the
   lease-ordering change, not assumed from the issue title alone.
+
+### What phase 1 actually shipped, and what it changed about the above
+
+- **Shipped**: the §1 hand port (parity-exact) and the §4 harness, with the
+  measurements in §4 and §5's plan derived from them.
+- **Not shipped, deliberately**: §2's embedding cache. It lives in
+  `mold-server/src/identity_extraction.rs`, which
+  [#1226](https://github.com/utensils/mold/issues/1226) is rewriting for
+  multi-photo and true-CFG conditioning; landing a cache into that file
+  concurrently would conflict for no benefit, and §2's own design already
+  depends on #1226's post-IDFormer averaging. It rebases on top.
+- **Changed**: §3's gating condition is satisfied, from the other direction
+  than expected. §4 was supposed to decide "is GPU dispatch worth the
+  lease-ordering change"; the answer is yes, but the case rests on the EVA
+  tower rather than on SCRFD/ArcFace, and half of the tower's cost is setup
+  rather than arithmetic. §5 restates the phase accordingly.

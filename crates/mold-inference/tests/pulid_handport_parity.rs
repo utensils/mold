@@ -51,7 +51,7 @@ const DISTANCE_TOLERANCE: f32 = 1e-4;
 /// Raw ArcFace components run to about ±5 with a vector norm near 20. This is
 /// the one place the port differs arithmetically: `FoldedBatchNorm` collapses
 /// the spec's divide-and-affine into one multiply-add per channel, which moves
-/// the last bits. Measured worst case across the fixture set: 1.16e-5.
+/// the last bits. Measured worst case across the fixture set: 2.62e-6.
 const EMBEDDING_TOLERANCE: f32 = 1e-4;
 /// The upstream gate is 0.99 against InsightFace. Against the evaluator this
 /// port replaced, anything below five nines means the graphs diverged.
@@ -275,8 +275,9 @@ const GATE_RUNS: usize = 20;
 ///
 /// It is not a hypothetical guard. The first version of `arcface_net` computed
 /// the fully-connected layer as `X @ W^T` and so materialized a transpose of
-/// the 51 MB weight on **every forward**, which made the "faster" port 6%
-/// slower than `simple_eval`; this ratio is what caught it.
+/// the 51 MB weight on **every forward**, which made the "faster" port about a
+/// tenth SLOWER than `simple_eval` on the recognizer; this ratio is what caught
+/// it.
 ///
 /// The margin is generous — the port only has to not regress — because the
 /// measured win is small: see `docs/architecture/pulid-perf.md` §4, which
@@ -321,8 +322,11 @@ fn the_resident_port_is_never_slower_than_the_evaluator_it_replaced() {
         let o = milliseconds(|| {
             mold_inference::identity::scrfd_net::reference_forward(&detector.model, &detect_blob)
                 .expect("candle-onnx runs");
-            mold_inference::identity::arcface_net::reference_forward(&recognizer.model, &embed_blob)
-                .expect("candle-onnx runs");
+            mold_inference::identity::arcface_net::reference_forward(
+                &recognizer.model,
+                &embed_blob,
+            )
+            .expect("candle-onnx runs");
         });
         if i >= GATE_WARMUPS {
             port.push(p);
