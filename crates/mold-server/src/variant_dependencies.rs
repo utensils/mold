@@ -1801,7 +1801,7 @@ async fn prepare_h3_private_inputs_for_devices(
     let mut evidence_by_device = BTreeMap::new();
     let mut failures = BTreeMap::new();
 
-    for device in devices {
+    for mut device in devices {
         #[cfg(not(feature = "h3"))]
         if device.backend != mold_core::GpuBackend::Cuda {
             failures.insert(
@@ -1832,6 +1832,12 @@ async fn prepare_h3_private_inputs_for_devices(
                 "MiniMax H3 Metal route carried a CUDA compute capability".to_string(),
             );
             continue;
+        }
+        if device.backend == mold_core::GpuBackend::Metal {
+            device.available_vram_bytes =
+                mold_inference::device::metal_unified_capacity_with_safety_floor(
+                    device.available_vram_bytes,
+                );
         }
         let admission_request = resolved_request.clone();
         let paths = uat_paths.clone();

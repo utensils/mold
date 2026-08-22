@@ -4930,8 +4930,13 @@ pub(crate) fn prepare_private_h3_allocation_boundary(
     if unloaded {
         worker.set_resident_model(None);
     }
-    let available_device_bytes = device::post_drop_free_vram_bytes(worker.gpu.ordinal)
+    let sampled_available_device_bytes = device::post_drop_free_vram_bytes(worker.gpu.ordinal)
         .map_err(|error| private_h3_memory_sample_error(worker, error))?;
+    let available_device_bytes = if worker.gpu.backend == mold_core::GpuBackend::Metal {
+        device::metal_unified_capacity_with_safety_floor(sampled_available_device_bytes)
+    } else {
+        sampled_available_device_bytes
+    };
     validate_private_h3_physical_capacity(
         model_name,
         predicted_device_peak_bytes,

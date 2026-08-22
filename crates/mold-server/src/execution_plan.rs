@@ -1622,6 +1622,13 @@ fn resolve_private_h3_execution_plans(
         let Some(evidence) = prepared.h3_private_admission_by_device.get(&device.id) else {
             continue;
         };
+        let available_device_bytes = if device.backend == GpuBackend::Metal {
+            mold_inference::device::metal_unified_capacity_with_safety_floor(
+                device.available_vram_bytes,
+            )
+        } else {
+            device.available_vram_bytes
+        };
         // Ask the host-memory question directly, before the frozen evidence is
         // revalidated. The live headroom recheck is one of `validate_for`'s
         // conjuncts and its refusal is a single opaque sentence, so the
@@ -1646,13 +1653,13 @@ fn resolve_private_h3_execution_plans(
             &device.id,
             device.ordinal,
             device.compute_capability,
-            device.available_vram_bytes,
+            available_device_bytes,
             available_host_headroom_bytes,
         ) {
             rejections.push(DeviceInfeasibility {
                 device_id: device.id,
                 predicted_peak_bytes: evidence.predicted_device_peak_bytes(),
-                available_bytes: device.available_vram_bytes,
+                available_bytes: available_device_bytes,
                 advice: Some(format!(
                     "private admission evidence no longer fits: {error:#}"
                 )),
