@@ -107,6 +107,16 @@ pub struct JournalAdmission<'a> {
     pub carries_reference_authority: bool,
 }
 
+/// Whether this request carries a face photograph.
+///
+/// Derived from the request rather than passed in beside it, deliberately: a
+/// caller cannot forget it at a fifth admission site the way it could forget a
+/// flag, and there is nothing to resolve — the bytes are either on the request
+/// or they are not.
+fn carries_identity_photograph(request: &mold_core::GenerateRequest) -> bool {
+    request.id_image.is_some()
+}
+
 /// Directory of per-identity claim records, one file per queue owner.
 const QUEUE_OWNERS_DIR: &str = "queue-owners";
 
@@ -510,14 +520,35 @@ impl QueueJournal {
     /// Persist an admitted job, returning the ticket that owns its row.
     ///
     /// `None` means the job is not durable. Every reason is deliberate:
-    /// no gallery target, reference-upload authority (bearer secrets), a batch
-    /// child (owned by the batch transaction's own recovery), an oversized
-    /// payload, or no journal at all.
+    /// no gallery target, reference-upload authority (bearer secrets), a face
+    /// photograph (biometric data), a batch child (owned by the batch
+    /// transaction's own recovery), an oversized payload, or no journal at all.
     pub fn record(self: &Arc<Self>, admission: JournalAdmission<'_>) -> Option<QueueTicket> {
         let owner_uuid = self.owner_uuid.as_deref()?;
         let db = self.db()?;
         let output_dir = admission.output_dir?;
         if admission.batch_child || admission.carries_reference_authority {
+            return None;
+        }
+        // `mold.db` never holds a secret, and a face photograph is the most
+        // sensitive payload a request can carry: an identity image is
+        // biometric data about a real person, supplied for one render.
+        // Journaling it would leave it in a SQLite row on disk, surviving the
+        // process, for as long as the row is retained.
+        //
+        // Excluded at admission rather than redacted, exactly as
+        // reference-upload authority is (#1223). A redacted row is worse than
+        // no row: replay would resubmit the request with no `id_image`, and
+        // `resolve_identity_embedding` would either error or — if the weight
+        // fields went with it — render the print with a stranger's face and
+        // say nothing. The job runs normally and is advertised
+        // `durable: false`, which is the honest answer.
+        if carries_identity_photograph(admission.request) {
+            tracing::info!(
+                job = %admission.id,
+                "generation is not durable: it conditions on a reference photograph, \
+                 which is never written to the database"
+            );
             return None;
         }
         let request_json = match serde_json::to_string(admission.request) {
@@ -1767,5 +1798,40 @@ mod tests {
         carrying.carries_reference_authority = true;
         assert!(journal.record(carrying).is_none());
         assert!(rows(&journal).is_empty());
+    }
+
+    /// A reference photograph is biometric data about a real person, handed
+    /// over for one render. It follows the same rule as reference-upload
+    /// authority — excluded at admission, never redacted — so no part of it
+    /// can reach `mold.db`, and the job is honestly `durable: false` rather
+    /// than replayable with the face missing.
+    #[test]
+    fn an_identity_request_never_writes_the_photograph_to_the_database() {
+        let journal = journal_with_db();
+        let mut request = request();
+        request.model = "flux-dev:q4".to_string();
+        request.id_image = Some(b"\x89PNG\r\n\x1a\n-pretend-this-is-a-face".to_vec());
+        request.id_image_name = Some("face.png".to_string());
+        request.id_weight = Some(1.0);
+
+        assert!(journal
+            .record(admission("job-1", &request, Path::new("/gallery")))
+            .is_none());
+        assert!(rows(&journal).is_empty());
+
+        // The exclusion is the photograph itself, not the mere mention of
+        // identity: a request whose bytes were already dropped is ordinary.
+        let mut without_photo = request.clone();
+        without_photo.id_image = None;
+        let ticket = journal
+            .record(admission("job-2", &without_photo, Path::new("/gallery")))
+            .expect("a request carrying no photograph is ordinary durable work");
+        let persisted = journal.list_all();
+        assert_eq!(persisted.len(), 1);
+        assert!(
+            !persisted[0].request_json.contains("pretend-this-is-a-face"),
+            "no journaled row may contain reference-photograph bytes"
+        );
+        ticket.discard();
     }
 }
