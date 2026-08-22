@@ -794,7 +794,7 @@ Face-identity extraction runs on the same GPU that renders the print, as the
 first thing that job does, and is reported as an **Extracting face identity**
 stage. One extraction is ~0.4 s on an M4 Max GPU and ~1.9 s on a CPU-only
 host; a photograph already used in this server run is reused from memory in
-under 2 ms. It needs ~1.1 GB of device memory while it runs, which the
+under 2 ms. It needs ~~0.7 GB of device memory while it runs, which the
 scheduler reserves as part of the job's plan and which is released before the
 checkpoint loads — separate from the ~1.25 GB the identity adapter holds for
 the whole denoise.
