@@ -3100,7 +3100,11 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
         &opened_vae,
         &memory_overlap,
     )?;
-    let facts = owner.attempt_facts(&consumption_binding);
+    let facts = owner.attempt_facts_with_scheduler_budget(
+        &consumption_binding,
+        prepared_fence_device_bytes,
+        prepared_fence_host_bytes,
+    );
     let runner = H3PrivateConcretePreparedRunner {
         authority: enriched_factory,
         activation,
@@ -4199,6 +4203,19 @@ impl H3PrivateFl2VaOwnerFacts {
         &self,
         consumption: &H3PrivateAttemptConsumptionBinding,
     ) -> H3PrivateFl2VaAttemptFacts {
+        self.attempt_facts_with_scheduler_budget(
+            consumption,
+            self.predicted_device_peak_bytes,
+            self.predicted_host_increment_bytes,
+        )
+    }
+
+    fn attempt_facts_with_scheduler_budget(
+        &self,
+        consumption: &H3PrivateAttemptConsumptionBinding,
+        scheduler_device_peak_bytes: u64,
+        scheduler_host_increment_bytes: u64,
+    ) -> H3PrivateFl2VaAttemptFacts {
         H3PrivateFl2VaAttemptFacts {
             device_id: self.device_id.clone(),
             device_ordinal: self.device_ordinal,
@@ -4206,8 +4223,8 @@ impl H3PrivateFl2VaOwnerFacts {
             prepared_attempt_identity_sha256: self.prepared_attempt_identity_sha256.clone(),
             target_budget_identity_sha256: self.target_budget_identity_sha256.clone(),
             component_set_identity_sha256: self.component_set_identity_sha256.clone(),
-            predicted_device_peak_bytes: self.predicted_device_peak_bytes,
-            predicted_host_increment_bytes: self.predicted_host_increment_bytes,
+            predicted_device_peak_bytes: scheduler_device_peak_bytes,
+            predicted_host_increment_bytes: scheduler_host_increment_bytes,
             media: self.media.clone(),
             admission_evidence_identity_sha256: self.admission_evidence_identity_sha256.clone(),
             artifact_qualification_identity_sha256: self
