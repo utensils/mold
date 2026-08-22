@@ -759,10 +759,11 @@ export function keepingPrintIdentity(form: GenerateForm, rewrite: () => void): v
 
 /**
  * Restore every generation knob to the selected model's defaults. The prompt
- * (with its expand provenance), the model/family, and the batch size survive:
- * the prompt is the user's authored work, and prepared batch siblings must
- * never be silently resized by an unrelated control. The print's name and
- * filing survive too — see {@link keepingPrintIdentity}.
+ * (with its expand provenance) and the model/family survive. Batch is a
+ * general generation setting, so the primary Reset restores it to one. Any
+ * prepared siblings remain retained and become explicitly stale rather than
+ * being silently discarded. The print's name and filing survive too — see
+ * {@link keepingPrintIdentity}.
  *
  * With no `ModelEntry` — an uninstalled or not-yet-resolved model — the named
  * model and family are kept and the form falls back to `newGenerateForm()`
@@ -772,7 +773,7 @@ export function resetFormToModelDefaults(
   form: GenerateForm,
   m: ModelEntry | null | undefined,
 ): void {
-  const { prompt, originalPrompt, batchSize, model, family } = form;
+  const { prompt, originalPrompt, model, family } = form;
   keepingPrintIdentity(form, () => Object.assign(form, newGenerateForm()));
   if (m) {
     applyModelDefaults(form, m);
@@ -782,9 +783,7 @@ export function resetFormToModelDefaults(
   }
   form.prompt = prompt;
   form.originalPrompt = originalPrompt;
-  form.batchSize = generationCapabilitiesForFamily(form.family, form.model).forcesBatchSizeOne
-    ? 1
-    : batchSize;
+  form.batchSize = 1;
 }
 
 /**
@@ -798,6 +797,7 @@ export function resetAdvancedToModelDefaults(
   form: GenerateForm,
   m: ModelEntry | null | undefined,
 ): void {
+  const batchSize = form.batchSize;
   const media = {
     strength: form.strength,
     sourceImage: form.sourceImage,
@@ -827,6 +827,9 @@ export function resetAdvancedToModelDefaults(
     h3Authoring: form.h3Authoring,
   };
   resetFormToModelDefaults(form, m);
+  form.batchSize = generationCapabilitiesForFamily(form.family, form.model).forcesBatchSizeOne
+    ? 1
+    : batchSize;
   Object.assign(form, media);
 }
 

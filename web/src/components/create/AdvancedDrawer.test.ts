@@ -607,6 +607,7 @@ describe("AdvancedDrawer interactions", () => {
   it("Reset clears advanced fields but preserves the prompt", async () => {
     const wrapper = factory("sdxl", {
       prompt: "a lighthouse in a storm",
+      batchSize: 4,
       negativePrompt: "blurry",
       loras: [{ path: "a", scale: 1 }],
       upscaleModel: "real-esrgan-x4plus",
@@ -616,6 +617,7 @@ describe("AdvancedDrawer interactions", () => {
       GenerateFormState,
     ];
     expect(next.prompt).toBe("a lighthouse in a storm");
+    expect(next.batchSize).toBe(4);
     expect(next.negativePrompt).toBe("");
     expect(next.loras).toEqual([]);
     expect(next.upscaleModel).toBe("");

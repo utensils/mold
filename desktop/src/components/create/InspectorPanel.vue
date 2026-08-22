@@ -568,8 +568,9 @@ function setFileUnder(next: FileUnderState) {
   props.form.fileUnder = next;
 }
 
-// Same contract as the Advanced pane's Reset, surfaced without opening it:
-// the prompt, the model, and any prepared batch size survive.
+// The primary Reset restores every general setting, including Batch. Prompt,
+// model, and retained prepared work survive; changing Batch makes that work
+// explicitly stale instead of silently discarding it.
 function resetSettings() {
   resetFormToModelDefaults(props.form, selectedModel.value);
   // The canvas is part of what Reset restores, so its authority resets with

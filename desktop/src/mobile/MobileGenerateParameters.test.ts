@@ -168,39 +168,18 @@ describe("MobileGenerateParameters", () => {
     );
   });
 
-  it("offers an editable unbounded batch stepper and image-only post upscale", async () => {
+  it("offers image-only post upscale without unrelated scheduler controls", async () => {
     const { wrapper, form } = mountParameters(formFor("flux"), [upscaler]);
 
-    expect(wrapper.get("[data-test='mobile-batch-value']").attributes("value")).toBe("1");
     expect(wrapper.find("[data-test='mobile-scheduler']").exists()).toBe(false);
     expect(wrapper.find("[data-test='mobile-cfg-plus']").exists()).toBe(false);
     expect(wrapper.get("[data-test='mobile-upscale']").text()).toContain("downloads on first use");
 
-    for (let index = 0; index < 10; index += 1) {
-      await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
-    }
-    expect(form.batchSize).toBe(11);
-    expect(wrapper.get("[data-test='mobile-batch-increment']").attributes()).not.toHaveProperty(
-      "disabled",
-    );
-
-    await wrapper.get("[data-test='mobile-batch-value']").setValue("250");
-    await wrapper.get("[data-test='mobile-batch-value']").trigger("change");
-    expect(form.batchSize).toBe(250);
-
-    await wrapper.get("[data-test='mobile-batch-value']").setValue("999999999999");
-    await wrapper.get("[data-test='mobile-batch-value']").trigger("change");
-    expect(form.batchSize).toBe(10_000);
-
-    await wrapper.get("[data-test='mobile-batch-value']").setValue("250");
-    await wrapper.get("[data-test='mobile-batch-value']").trigger("change");
-    await wrapper.get("[data-test='mobile-batch-decrement']").trigger("click");
-    expect(form.batchSize).toBe(249);
     await wrapper.get("[data-test='mobile-upscale']").setValue(upscaler.name);
     expect(form.upscaleModel).toBe(upscaler.name);
   });
 
-  it("capability-gates scheduler and CFG++, and locks edit-model batches to one", async () => {
+  it("capability-gates scheduler and CFG++", async () => {
     const sd15 = mountParameters(formFor("sd15"));
     expect(sd15.wrapper.find("[data-test='mobile-scheduler']").exists()).toBe(true);
     await sd15.wrapper.get("[data-test='mobile-scheduler']").setValue("ddim");
@@ -212,18 +191,6 @@ describe("MobileGenerateParameters", () => {
     await sd3.wrapper.get("[data-test='mobile-cfg-plus']").setValue(true);
     expect(sd3.form.cfgPlus).toBe(true);
     sd3.wrapper.unmount();
-
-    const editForm = formFor("qwen-image-edit");
-    editForm.batchSize = 6;
-    const edit = mountParameters(editForm);
-    await flushPromises();
-    expect(edit.form.batchSize).toBe(1);
-    expect(edit.wrapper.get("[data-test='mobile-batch-locked']").text()).toContain(
-      "render one at a time",
-    );
-    expect(edit.wrapper.get("[data-test='mobile-batch-increment']").attributes()).toHaveProperty(
-      "disabled",
-    );
   });
 
   it("swaps the scheduler row for wan's sampler recipe", async () => {

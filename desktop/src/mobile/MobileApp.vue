@@ -357,6 +357,7 @@ import {
   tracksPointer,
 } from "./galleryZoom";
 import MobileAdvancedSheet from "./MobileAdvancedSheet.vue";
+import MobileBatchControl from "./MobileBatchControl.vue";
 import MobileCatalogView from "./MobileCatalogView.vue";
 import MobileExpansionPullStatus from "./MobileExpansionPullStatus.vue";
 import MobileFileUnder from "./MobileFileUnder.vue";
@@ -692,8 +693,9 @@ function closeAdvancedSheet(): void {
 }
 
 /** Restore every generation knob to the selected model's defaults, keeping the
- * prompt, the model, and any prepared batch size. Same contract as the desktop
- * inspector's Reset — the sheet's scoped reset below is deliberately narrower. */
+ * prompt and model while returning the general Batch control to one. Same
+ * contract as the desktop inspector's Reset — the sheet's scoped reset below
+ * is deliberately narrower. */
 /**
  * Run a wholesale form reset while keeping the print's own identity.
  *
@@ -8698,6 +8700,8 @@ onBeforeUnmount(() => {
               @seed-validity="seedValid = $event"
               @canvas-intent="setCanvasIntent"
             />
+
+            <MobileBatchControl :form="form" :selected-model="selectedGenerationModel" />
 
             <label
               v-if="caps.supportsAudio && !isMinimaxH3Identity(form.family, form.model)"
