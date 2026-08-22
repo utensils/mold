@@ -62,7 +62,9 @@ use mold_core::manifest::ModelComponent;
 use mold_core::pulid_assets::PulidPaths;
 
 use crate::encoders::eva_clip_preprocess::{planar_rgb_from_image, preprocess_planar_rgb};
-use crate::encoders::eva_clip_vision::EvaClipVisionTower;
+use crate::encoders::eva_clip_vision::{
+    EvaClipVisionTower, EMBED_DIM, HIDDEN_STATE_BLOCKS, PROJECTION_DIM, SEQUENCE_LEN,
+};
 use crate::encoders::pickle_convert::{
     ensure_bisenet_parser_safetensors, ensure_eva_clip_vision_safetensors, BISENET_DERIVED_SHA256,
     EVA_DERIVED_SHA256,
@@ -176,6 +178,136 @@ pub fn extract_identity_embeddings_at(
     extract_identity_embeddings(paths, images, want_uncond, &device)
 }
 
+/// One photograph's cached identity.
+#[derive(Clone, Debug)]
+struct CachedIdentity {
+    /// The final `[1, 32, 2048]` tokens, flattened. 256 KiB.
+    tokens: std::sync::Arc<Vec<f32>>,
+    /// The advisory that photograph produced, verbatim and unpositioned — a
+    /// hit must report "several faces were found" exactly as the extraction
+    /// that produced it did, and the "photo N of M" prefix is applied by the
+    /// caller because it belongs to the request, not to the photograph.
+    warning: Option<String>,
+}
+
+/// How many photographs' identities this process keeps.
+///
+/// `docs/architecture/pulid-perf.md` §2 sizes this for the SESSION's hot set —
+/// a batch's siblings, a sequence's per-clip identity, a `Prepare N
+/// variations` review, an interactive retry — never for a photo library. Each
+/// entry is `ID_EMBEDDING_VALUES` f32 (256 KiB) plus a short warning and a
+/// 64-character key, so sixteen of them is about **4.2 MB**: an entry-count cap
+/// alone is sufficient because the entry size is fixed, and a byte budget would
+/// be complexity buying nothing.
+const IDENTITY_CACHE_ENTRIES: usize = 16;
+
+/// The per-photograph identity cache, and the degenerate one-entry memo for
+/// the unconditional identity beside it.
+///
+/// In process, never on disk. `pulid-perf.md` §2 recommends against
+/// persistence and the reason is not performance: these values are a biometric
+/// derivative, which is why [`FrozenIdentityEmbedding`]'s own `Debug` redacts
+/// them, and putting them at rest would introduce a retention-and-deletion
+/// story — how long, who may read it, what `mold rm pulid-flux` does to it —
+/// that nothing in this codebase's posture toward these bytes anticipates.
+/// Recomputation is cheap enough to make that trade obvious.
+///
+/// A plain `Vec` in most-recent-first order rather than a crate: at sixteen
+/// entries a linear scan is faster than a hash lookup and there is nothing to
+/// tune.
+type IdentityCache = std::sync::Mutex<Vec<(String, CachedIdentity)>>;
+
+fn identity_cache() -> &'static IdentityCache {
+    static CACHE: std::sync::OnceLock<IdentityCache> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+}
+
+/// The unconditional identity is a pure function of the adapter checkpoint —
+/// `PuLID/pulid/pipeline_flux.py:188-192` runs the IDFormer over
+/// `zeros_like(id_cond)` and zeroed hidden states, which depend on no
+/// photograph at all. So it is memoized on the adapter digest and the pipeline
+/// version, NOT held as an LRU entry under a sentinel key: it is computed once
+/// per process and never needs eviction.
+///
+/// It matters more than its own forward pass costs. Without it, a true-CFG
+/// request whose photograph IS cached would still have to open and materialize
+/// the 605 MB `pulid_encoder.*` half of the adapter just to produce a tensor
+/// that never varies.
+type UncondMemo = std::sync::Mutex<Option<(String, std::sync::Arc<Vec<f32>>)>>;
+
+fn uncond_memo() -> &'static UncondMemo {
+    static MEMO: std::sync::OnceLock<UncondMemo> = std::sync::OnceLock::new();
+    MEMO.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+static IDENTITY_CACHE_HITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Photographs served from the cache since this process started.
+///
+/// Exported for the tests that state the contract: a second render of the same
+/// face must not re-run a 300 GFLOP tower.
+pub fn identity_cache_hit_count() -> u64 {
+    IDENTITY_CACHE_HITS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Empty the cache and the uncond memo. Test-only: both are process-global, so
+/// a test that wants to observe a miss has to start from nothing.
+pub fn forget_cached_identities() {
+    identity_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clear();
+    *uncond_memo()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+}
+
+fn cache_get(key: &str) -> Option<CachedIdentity> {
+    let mut cache = identity_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let index = cache.iter().position(|(held, _)| held == key)?;
+    // Most-recent-first: a hit is promoted, so the cap evicts the least
+    // recently USED entry rather than the oldest inserted one.
+    let entry = cache.remove(index);
+    let value = entry.1.clone();
+    cache.insert(0, entry);
+    IDENTITY_CACHE_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    Some(value)
+}
+
+fn cache_put(key: String, value: CachedIdentity) {
+    let mut cache = identity_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    cache.retain(|(held, _)| held != &key);
+    cache.insert(0, (key, value));
+    cache.truncate(IDENTITY_CACHE_ENTRIES);
+}
+
+/// Every asset digest this build's extraction will record, known before any of
+/// them is opened.
+///
+/// A cache key needs the digests BEFORE the extraction runs, which is why they
+/// are resolved from the manifest pins and compiled-in constants here rather
+/// than from an [`IdentityAssetDigests`] a request has not produced yet. The
+/// two cannot disagree: the loaders refuse any file whose bytes do not hash to
+/// the pin, so a post-load digest that differed from this one would have
+/// failed the load instead of being recorded.
+pub fn pinned_asset_digests() -> IdentityAssetDigests {
+    IdentityAssetDigests {
+        adapter: adapter_sha256(),
+        vision: EVA_DERIVED_SHA256.to_string(),
+        face_detector: super::onnx_graph::pinned_artifact(ModelComponent::FaceDetector)
+            .map(|pin| pin.sha256.to_string())
+            .unwrap_or_else(|| "unpinned".to_string()),
+        face_recognizer: super::onnx_graph::pinned_artifact(ModelComponent::FaceRecognizer)
+            .map(|pin| pin.sha256.to_string())
+            .unwrap_or_else(|| "unpinned".to_string()),
+        face_parser: BISENET_DERIVED_SHA256.to_string(),
+    }
+}
+
 /// What one extraction produced.
 #[derive(Debug)]
 pub struct IdentityExtraction {
@@ -245,52 +377,100 @@ pub fn extract_identity_embeddings(
     // a public entry point and the check costs a header read.
     mold_core::identity::validate_id_images(images).map_err(IdentityError::Decode)?;
 
-    let extractor = IdentityExtractor::load(paths, device)
-        .context("loading the PuLID face-extraction models")?;
-
     let count = images.len();
-    let mut faces = Vec::with_capacity(count);
+    let assets = pinned_asset_digests();
+    let sources: Vec<String> = images
+        .iter()
+        .map(|bytes| mold_core::identity::id_image_sha256(bytes))
+        .collect();
+    // Consulted BEFORE anything is opened. A set whose every photograph is
+    // cached loads no detector, no recognizer, no parser, no tower, and no
+    // adapter — which is the whole point: the value is a pure function of the
+    // photograph and the five assets, all of which are known here.
+    let keys: Vec<String> = sources
+        .iter()
+        .map(|sha| mold_core::identity::identity_cache_key(sha, &assets))
+        .collect();
+    let mut cached: Vec<Option<CachedIdentity>> = keys.iter().map(|key| cache_get(key)).collect();
+    // The uncond half is memoized separately on the adapter alone; see
+    // [`uncond_memo`].
+    let mut uncond = if want_uncond {
+        uncond_memo()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .filter(|(digest, _)| digest == &assets.adapter)
+            .map(|(_, tokens)| tokens.clone())
+    } else {
+        None
+    };
+    let missing: Vec<usize> = (0..count)
+        .filter(|index| cached[*index].is_none())
+        .collect();
+
+    if !missing.is_empty() || (want_uncond && uncond.is_none()) {
+        let extractor = IdentityExtractor::load(paths, device)
+            .context("loading the PuLID face-extraction models")?;
+        let mut faces = Vec::with_capacity(missing.len());
+        let mut detected_warnings = Vec::with_capacity(missing.len());
+        for &index in &missing {
+            let features = extractor.extract(images[index]).map_err(|error| {
+                if count == 1 {
+                    error
+                } else {
+                    IdentityError::Runtime(anyhow::anyhow!(
+                        "identity photo {} of {count}: {error}",
+                        index + 1
+                    ))
+                }
+            })?;
+            detected_warnings.push(features.warning);
+            faces.push((features.arcface.raw, features.eva_crop_512));
+        }
+        let composed =
+            compose_identity_token_sets(paths, &faces, want_uncond && uncond.is_none(), device)
+                .context("composing the PuLID identity embedding")?;
+        for ((&index, tokens), warning) in missing
+            .iter()
+            .zip(composed.per_image)
+            .zip(detected_warnings)
+        {
+            let value = CachedIdentity {
+                tokens: std::sync::Arc::new(tokens),
+                warning,
+            };
+            cache_put(keys[index].clone(), value.clone());
+            cached[index] = Some(value);
+        }
+        if let Some(fresh) = composed.uncond {
+            let fresh = std::sync::Arc::new(fresh);
+            *uncond_memo()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                Some((assets.adapter.clone(), fresh.clone()));
+            uncond = Some(fresh);
+        }
+    }
+
     let mut warnings = Vec::new();
-    for (index, bytes) in images.iter().enumerate() {
-        let features = extractor.extract(bytes).map_err(|error| {
-            if count == 1 {
-                error
-            } else {
-                IdentityError::Runtime(anyhow::anyhow!(
-                    "identity photo {} of {count}: {error}",
-                    index + 1
-                ))
-            }
-        })?;
-        if let Some(warning) = features.warning {
+    let mut per_image = Vec::with_capacity(count);
+    for (index, entry) in cached.into_iter().enumerate() {
+        let entry = entry.context("an identity photograph produced no tokens")?;
+        if let Some(warning) = &entry.warning {
             warnings.push(if count == 1 {
-                warning
+                warning.clone()
             } else {
                 format!("identity photo {} of {count}: {warning}", index + 1)
             });
         }
-        faces.push((features.arcface.raw, features.eva_crop_512));
+        per_image.push(entry.tokens.as_ref().clone());
     }
-
-    let composed = compose_identity_token_sets(paths, &faces, want_uncond, device)
-        .context("composing the PuLID identity embedding")?;
-    let tokens = mold_core::identity::average_identity_tokens(&composed.per_image)
+    let tokens = mold_core::identity::average_identity_tokens(&per_image)
         .map_err(|reason| IdentityError::Runtime(anyhow::anyhow!(reason)))?;
 
-    let assets = IdentityAssetDigests {
-        adapter: adapter_sha256(),
-        vision: EVA_DERIVED_SHA256.to_string(),
-        face_detector: extractor.detector_sha256().to_string(),
-        face_recognizer: extractor.recognizer_sha256().to_string(),
-        face_parser: BISENET_DERIVED_SHA256.to_string(),
-    };
-    let sources = images
-        .iter()
-        .map(|bytes| mold_core::identity::id_image_sha256(bytes))
-        .collect();
     let embedding = FrozenIdentityEmbedding::from_sources(&tokens, sources, assets)
         .map_err(|reason| IdentityError::Runtime(anyhow::anyhow!(reason)))?;
-    let embedding = match composed.uncond {
+    let embedding = match uncond {
         Some(uncond) => embedding
             .with_uncond(&uncond)
             .map_err(|reason| IdentityError::Runtime(anyhow::anyhow!(reason)))?,
@@ -443,7 +623,10 @@ pub(crate) fn compose_identity_token_sets_observed(
     device: &Device,
     observe: &mut dyn FnMut(ComposeStage, std::time::Duration),
 ) -> Result<ComposedIdentityTokens> {
-    anyhow::ensure!(!faces.is_empty(), "composing needs at least one face");
+    anyhow::ensure!(
+        !faces.is_empty() || want_uncond,
+        "composing needs at least one face"
+    );
     let tower_dtype = eva_working_dtype(device);
     // Everything before the tower's first forward pass is one window, and the
     // per-crop parse work is subtracted out of it below rather than restarting
@@ -464,7 +647,13 @@ pub(crate) fn compose_identity_token_sets_observed(
     // the parser is a second network, and parsing everything first lets it be
     // dropped before the tower is built. The three large halves still never
     // coexist.
-    let prepared: Vec<Tensor> = {
+    // A set whose every photograph was served from the cache still needs the
+    // unconditional identity if this request runs the true-CFG branch, and
+    // that value depends on no photograph at all. So the parser, the tower,
+    // and their two stages are skipped entirely rather than run over nothing.
+    let prepared: Vec<Tensor> = if faces.is_empty() {
+        Vec::new()
+    } else {
         // The derived artifact arrives as verified private BYTES — never a
         // pathname a loader would resolve a second time, never a shared mapping
         // another writer could edit underneath it. See
@@ -477,6 +666,7 @@ pub(crate) fn compose_identity_token_sets_observed(
                 .context("materializing the BiSeNet face parser")?;
             let parser = BiSeNetParser::from_authenticated(&artifact, device)
                 .context("building the BiSeNet face parser")?;
+            settle(device)?;
             observe(ComposeStage::ParserBuild, started.elapsed());
             parser
         };
@@ -491,6 +681,7 @@ pub(crate) fn compose_identity_token_sets_observed(
             apply_pulid_face_mask(&mut planar, &labels).context("masking the aligned face crop")?;
             let pixels = preprocess_planar_rgb(&planar, height, width, device)
                 .context("preprocessing the aligned face crop for EVA02-CLIP")?;
+            settle(device)?;
             let elapsed = parse_started.elapsed();
             parse_elapsed += elapsed;
             observe(ComposeStage::Parse, elapsed);
@@ -501,9 +692,11 @@ pub(crate) fn compose_identity_token_sets_observed(
 
     // The tower and the IDFormer are built and dropped in sequence, never held
     // together: the tower is 609 MB and the IDFormer's `id_embedding_mapping`
-    // alone is a 1280 x 5120 matrix, and admission is the one place in the
-    // process where host RAM is not already committed to a render.
-    let vision: Vec<(Vec<Tensor>, Tensor)> = {
+    // alone is a 1280 x 5120 matrix, and this phase is deliberately disjoint
+    // from the adapter residency that follows it on the same lease.
+    let vision: Vec<(Vec<Tensor>, Tensor)> = if prepared.is_empty() {
+        Vec::new()
+    } else {
         // As above: verified private bytes, scoped to the build that consumes
         // them, so the tower's 609 MB copy is released as soon as it owns its
         // tensors.
@@ -515,6 +708,7 @@ pub(crate) fn compose_identity_token_sets_observed(
             let started = std::time::Instant::now();
             let tower = EvaClipVisionTower::from_authenticated(&artifact, device, tower_dtype)
                 .context("building the EVA02-CLIP-L-14-336 vision tower")?;
+            settle(device)?;
             observe(ComposeStage::EvaConstruct, started.elapsed());
             tower
         };
@@ -533,6 +727,7 @@ pub(crate) fn compose_identity_token_sets_observed(
             let output = tower
                 .forward(pixels)
                 .context("running the EVA02-CLIP vision tower")?;
+            settle(device)?;
             observe(ComposeStage::EvaForward, stage_started.elapsed());
             outputs.push((output.hidden_states, output.cls_projection));
         }
@@ -559,6 +754,7 @@ pub(crate) fn compose_identity_token_sets_observed(
         .with_context(|| format!("reading the PuLID adapter {}", paths.adapter.display()))?
     };
     let idformer = IdFormer::new(vb.pp("pulid_encoder")).context("building the PuLID IDFormer")?;
+    settle(device)?;
     observe(ComposeStage::IdFormerBuild, stage_started.elapsed());
 
     let mut per_image = Vec::with_capacity(faces.len());
@@ -592,18 +788,26 @@ pub(crate) fn compose_identity_token_sets_observed(
     let uncond = if want_uncond {
         stage_started = std::time::Instant::now();
         // `pipeline_flux.py:188-192`: `zeros_like(id_cond)` and a zeroed hidden
-        // state per scale. Shaped from the first photograph's tensors, which is
-        // exactly what `zeros_like` means — the values are all zero, so which
-        // photograph they were shaped from cannot matter.
-        let (hidden_states, cls_projection) = &vision[0];
-        let width = ID_ANTE_DIM + cls_projection.dim(1)?;
+        // state per scale. Shaped from the tower's OWN declared geometry rather
+        // than from a live output, because `zeros_like` means the values are
+        // all zero and a cached photograph set produces no live tensor to copy
+        // a shape from. `the_uncond_geometry_matches_the_tower_it_stands_in_for`
+        // keeps the constants honest, and the assertion below re-checks them
+        // against a tower that actually ran.
+        let width = ID_ANTE_DIM + PROJECTION_DIM;
+        if let Some((hidden_states, cls_projection)) = vision.first() {
+            anyhow::ensure!(
+                hidden_states.len() == HIDDEN_STATE_BLOCKS.len()
+                    && hidden_states[0].dims() == [1, SEQUENCE_LEN, EMBED_DIM]
+                    && cls_projection.dims() == [1, PROJECTION_DIM],
+                "the vision tower's output geometry no longer matches the constants the \
+                 unconditional identity is shaped from"
+            );
+        }
         let id_uncond = Tensor::zeros((1, width), DType::F32, device)
             .context("materializing the unconditional identity condition")?;
-        // Shaped from the tower's output but built at the IDFormer's dtype,
-        // for the same reason the conditional branch widens above.
-        let hidden_uncond = hidden_states
-            .iter()
-            .map(|hidden| Tensor::zeros(hidden.shape(), DType::F32, device))
+        let hidden_uncond = (0..HIDDEN_STATE_BLOCKS.len())
+            .map(|_| Tensor::zeros((1, SEQUENCE_LEN, EMBED_DIM), DType::F32, device))
             .collect::<candle_core::Result<Vec<_>>>()
             .context("materializing the unconditional vision hidden states")?;
         let uncond = run_idformer(&idformer, &id_uncond, &hidden_uncond)?;
@@ -646,6 +850,26 @@ pub fn eva_working_dtype(device: &Device) -> DType {
     }
 }
 
+/// Force the device to finish before a stage's clock is read.
+///
+/// Metal and CUDA enqueue: `tower.forward(...)` returns as soon as the
+/// commands are submitted, so an un-synchronized stage boundary attributes the
+/// GPU's work to whichever LATER stage happens to block first. The first Metal
+/// measurement of this pipeline reported `eva-forward` at 3.2 ms and hid 300
+/// GFLOP inside the IDFormer's `to_vec1`, which is a measurement that would
+/// have sent phase 3 after the wrong stage.
+///
+/// The cost is nothing to defend: every stage here consumes the previous
+/// stage's output, so the pipeline was already serial, and the final
+/// `to_vec1` synchronizes regardless. A failure to synchronize is a real
+/// device error and is propagated rather than swallowed — a stage that could
+/// not be waited for did not produce a value either.
+fn settle(device: &Device) -> Result<()> {
+    device
+        .synchronize()
+        .context("waiting for the identity extraction device")
+}
+
 /// Width of the raw ArcFace half of the IDFormer's conditioning vector.
 const ID_ANTE_DIM: usize = 512;
 
@@ -666,6 +890,202 @@ fn run_idformer(idformer: &IdFormer, id_cond: &Tensor, hidden: &[Tensor]) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every test that observes the process-global cache counter must run
+    /// alone, for the same reason the memo tests in `pickle_convert` do.
+    static CACHE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn digests(vision: &str) -> IdentityAssetDigests {
+        IdentityAssetDigests {
+            adapter: "a".repeat(64),
+            vision: vision.to_string(),
+            face_detector: "d".repeat(64),
+            face_recognizer: "r".repeat(64),
+            face_parser: "p".repeat(64),
+        }
+    }
+
+    /// The digests a cache key is composed from must be knowable BEFORE any
+    /// asset is opened, or there is nothing to look a value up with.
+    ///
+    /// They are also the digests the extraction records afterwards: the
+    /// loaders refuse any file whose bytes do not hash to the pin, so a
+    /// post-load digest that differed from this one would have failed the load
+    /// rather than been recorded.
+    #[test]
+    fn the_cache_key_digests_are_all_available_before_anything_is_loaded() {
+        let assets = pinned_asset_digests();
+        for (label, digest) in [
+            ("adapter", &assets.adapter),
+            ("vision", &assets.vision),
+            ("face_detector", &assets.face_detector),
+            ("face_recognizer", &assets.face_recognizer),
+            ("face_parser", &assets.face_parser),
+        ] {
+            assert_eq!(digest.len(), 64, "{label} is not a SHA-256: {digest}");
+            assert_ne!(digest, "unpinned", "{label} is unpinned");
+        }
+    }
+
+    /// Every component of the key must actually change it. A component that
+    /// does not is a component that cannot invalidate, which is the whole
+    /// failure `pulid-perf.md` §2 enumerates: a repair pull that swapped the
+    /// adapter, or a code change to the arithmetic, silently serving the old
+    /// answer.
+    #[test]
+    fn every_key_component_changes_the_key() {
+        use mold_core::identity::identity_cache_key;
+        let photo = "0".repeat(64);
+        let base = identity_cache_key(&photo, &digests("v"));
+        assert_ne!(base, identity_cache_key(&"1".repeat(64), &digests("v")));
+        assert_ne!(base, identity_cache_key(&photo, &digests("v2")));
+        for mutate in [
+            |a: &mut IdentityAssetDigests| a.adapter.push('x'),
+            |a: &mut IdentityAssetDigests| a.face_detector.push('x'),
+            |a: &mut IdentityAssetDigests| a.face_recognizer.push('x'),
+            |a: &mut IdentityAssetDigests| a.face_parser.push('x'),
+        ] {
+            let mut assets = digests("v");
+            mutate(&mut assets);
+            assert_ne!(base, identity_cache_key(&photo, &assets));
+        }
+        // Same inputs, same key — a cache whose key was not a pure function of
+        // its inputs would never hit.
+        assert_eq!(base, identity_cache_key(&photo, &digests("v")));
+    }
+
+    /// The one invalidation case that is not structural. A reviewer can check
+    /// the constant moved; this checks it is an input at all.
+    #[test]
+    fn the_cache_key_changes_when_the_pipeline_version_does() {
+        use sha2::{Digest, Sha256};
+        // Recomposed here rather than called, because the constant cannot be
+        // varied at runtime — this is the only way to state "the version is
+        // mixed in" as a test rather than as a code reading.
+        let compose = |version: u32| {
+            let assets = digests("v");
+            let mut hasher = Sha256::new();
+            hasher.update(b"mold.identity.cache.v1\0");
+            hasher.update("0".repeat(64).as_bytes());
+            hasher.update(b"\0");
+            hasher.update(version.to_le_bytes());
+            hasher.update(b"\0");
+            for digest in [
+                &assets.adapter,
+                &assets.vision,
+                &assets.face_detector,
+                &assets.face_recognizer,
+                &assets.face_parser,
+            ] {
+                hasher.update(digest.as_bytes());
+                hasher.update(b"\0");
+            }
+            format!("{:x}", hasher.finalize())
+        };
+        assert_eq!(
+            compose(mold_core::identity::IDENTITY_PIPELINE_VERSION),
+            mold_core::identity::identity_cache_key(&"0".repeat(64), &digests("v")),
+            "the shipped key is not this composition"
+        );
+        assert_ne!(
+            compose(mold_core::identity::IDENTITY_PIPELINE_VERSION),
+            compose(mold_core::identity::IDENTITY_PIPELINE_VERSION + 1)
+        );
+    }
+
+    /// A hit returns the stored value and promotes it; a miss is a miss.
+    #[test]
+    fn the_cache_hits_misses_and_promotes() {
+        let _guard = CACHE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        forget_cached_identities();
+        let value = |seed: f32| CachedIdentity {
+            tokens: std::sync::Arc::new(vec![seed; 4]),
+            warning: None,
+        };
+        assert!(cache_get("absent").is_none());
+        cache_put("a".to_string(), value(1.0));
+        cache_put("b".to_string(), value(2.0));
+        let before = identity_cache_hit_count();
+        assert_eq!(cache_get("a").unwrap().tokens.as_ref(), &vec![1.0; 4]);
+        assert_eq!(identity_cache_hit_count(), before + 1);
+        // "a" was just used, so it is now the most recent.
+        let cache = identity_cache().lock().unwrap();
+        assert_eq!(cache[0].0, "a");
+        drop(cache);
+        // A miss does not count as a hit.
+        assert!(cache_get("c").is_none());
+        assert_eq!(identity_cache_hit_count(), before + 1);
+    }
+
+    /// The cap is on entries, and it evicts the least recently USED one —
+    /// which is what makes a batch's siblings, all sharing one photograph,
+    /// safe from a burst of unrelated faces.
+    #[test]
+    fn the_cache_is_bounded_and_evicts_the_least_recently_used_entry() {
+        let _guard = CACHE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        forget_cached_identities();
+        for index in 0..IDENTITY_CACHE_ENTRIES {
+            cache_put(
+                format!("key-{index}"),
+                CachedIdentity {
+                    tokens: std::sync::Arc::new(vec![index as f32]),
+                    warning: None,
+                },
+            );
+        }
+        // Touch the oldest so it is no longer the eviction candidate.
+        assert!(cache_get("key-0").is_some());
+        cache_put(
+            "overflow".to_string(),
+            CachedIdentity {
+                tokens: std::sync::Arc::new(vec![99.0]),
+                warning: None,
+            },
+        );
+        assert_eq!(
+            identity_cache().lock().unwrap().len(),
+            IDENTITY_CACHE_ENTRIES
+        );
+        assert!(
+            cache_get("key-0").is_some(),
+            "the touched entry was evicted"
+        );
+        assert!(cache_get("key-1").is_none(), "the LRU entry survived");
+    }
+
+    /// The advisory belongs to the photograph, so a hit must report it exactly
+    /// as the extraction that produced it did. A cached "several faces were
+    /// found" that went silent on the second render would tell the person who
+    /// supplied a group photograph nothing.
+    #[test]
+    fn a_cached_photograph_keeps_its_advisory() {
+        let _guard = CACHE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        forget_cached_identities();
+        cache_put(
+            "k".to_string(),
+            CachedIdentity {
+                tokens: std::sync::Arc::new(vec![0.0]),
+                warning: Some("several faces were found".to_string()),
+            },
+        );
+        assert_eq!(
+            cache_get("k").unwrap().warning.as_deref(),
+            Some("several faces were found")
+        );
+    }
+
+    /// The unconditional identity depends on the adapter alone
+    /// (`pipeline_flux.py:188-192`), so its geometry is the tower's declared
+    /// shape rather than a live output — which is what lets a fully cached
+    /// photograph set produce it without building a tower at all.
+    #[test]
+    fn the_uncond_geometry_matches_the_tower_it_stands_in_for() {
+        assert_eq!(SEQUENCE_LEN, 577);
+        assert_eq!(EMBED_DIM, 1024);
+        assert_eq!(PROJECTION_DIM, 768);
+        assert_eq!(HIDDEN_STATE_BLOCKS.len(), 5);
+        assert_eq!(ID_ANTE_DIM + PROJECTION_DIM, 1280);
+    }
 
     /// The whole extraction, mask included, against upstream's on a real
     /// photograph.

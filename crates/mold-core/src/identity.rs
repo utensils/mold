@@ -55,6 +55,104 @@ use crate::types::GenerateRequest;
 /// here and there is what let the two drift by a gigabyte.
 pub const EXTRACTION_HOST_PEAK_BYTES: u64 = 2_400_000_000;
 
+/// Device bytes one extraction peaks at while it runs on a leased GPU.
+///
+/// #1227 phase 2 moved the extraction from the host at admission onto the
+/// render's own leased device (`docs/architecture/pulid-perf.md` §5), so this
+/// joins `memory_preflight::IDENTITY_VRAM_OVERHEAD_BYTES` and
+/// `TRUE_CFG_VRAM_OVERHEAD_BYTES` as its OWN named term on the peak estimate.
+/// It is charged additively for the same reason those are: the phases run in
+/// one grant, and a term that quietly assumed another phase's bytes were free
+/// would admit a render with nowhere to put this one.
+///
+/// | Term | Bytes | Where it comes from |
+/// | --- | --- | --- |
+/// | SCRFD detector, f32, resident for the whole extraction | 16,923,827 | the manifest's pinned graph size |
+/// | ArcFace `glintr100`, f32, resident for the whole extraction | 260,665,334 | same |
+/// | Face-stack activations (640x640 detector blob, feature pyramid, 112x112 crop) | ~120,000,000 | measured headroom |
+/// | The largest ONE of the three sequential stages, which never coexist: | | |
+/// | — BiSeNet parser, f32 | 53,271,152 | dropped before the tower is built |
+/// | — EVA02-CLIP tower, f16 on a device, plus activations | 609,062,496 + ~60,000,000 | `eva_working_dtype` keeps the file's own dtype |
+/// | — IDFormer (`pulid_encoder.*`), f32, plus activations | 605,600,000 + ~40,000,000 | built after the tower is dropped |
+/// | **Total** | **1,100,000,000** | |
+///
+/// The three-stage max rather than their sum is not an optimism: the composer
+/// scopes each one to the block that consumes it, which is the same
+/// drop-and-reload discipline the host peak is derived under and which
+/// `mold_inference::identity::extraction` re-derives from the artifacts' own
+/// pinned sizes.
+///
+/// **Metal charges this ONCE, through the unified device gate**, and adds
+/// nothing to the host ledger — CLAUDE.md's rule that Metal reserves no host
+/// RAM separately. On CUDA the device bytes here and the host bytes in
+/// [`EXTRACTION_HOST_PEAK_BYTES`] are two genuinely separate pools and both are
+/// charged, the host side being only the private authenticated copy the
+/// `VarBuilder` reads from rather than the whole widened stack.
+pub const EXTRACTION_DEVICE_PEAK_BYTES: u64 = 1_100_000_000;
+
+/// The semantic version of the face-extraction pipeline.
+///
+/// Every input to a cached identity that is NOT a file — the arithmetic itself
+/// — is represented by this number, and it exists because
+/// `docs/architecture/pulid-perf.md` §2 identified the one invalidation case
+/// that is not structural: a code change to SCRFD, the alignment, the warp,
+/// ArcFace, the EVA preprocessing, the tower, the mask, or the IDFormer would
+/// otherwise serve a stale embedding under an unchanged photo-plus-asset-SHA
+/// key, because none of those files moved.
+///
+/// **Bump it in the same PR as any semantic change to that stack.** A reviewer
+/// can then check the constant actually moved;
+/// `the_cache_key_changes_when_the_pipeline_version_does` pins that it is an
+/// input at all.
+///
+/// | version | shipped in |
+/// | --- | --- |
+/// | 1 | #1227 phase 2, the first build with a cache to invalidate |
+pub const IDENTITY_PIPELINE_VERSION: u32 = 1;
+
+/// The key one photograph's extracted identity is cached under.
+///
+/// Composed exactly as [`FrozenIdentityEmbedding::fingerprint`] is — domain
+/// separated, NUL-joined, SHA-256 — but over the inputs that are all knowable
+/// BEFORE the extraction runs, which is what a cache needs and what an output
+/// fingerprint cannot supply. `docs/architecture/pulid-perf.md` §2 enumerates
+/// each one and why it is mandatory rather than an optimization to drop:
+/// keying on the photograph alone would serve a stale identity across a repair
+/// pull that swapped the adapter, or across a code change
+/// [`IDENTITY_PIPELINE_VERSION`] exists to catch.
+///
+/// It is deliberately per-PHOTOGRAPH and carries no request state: multi-photo
+/// averaging happens after the IDFormer (`cubiq/PuLID_ComfyUI`'s
+/// `pulid.py:406,415-419`), so each photograph of a set hits or misses this
+/// key independently and the request's own ordering — which the composed
+/// fingerprint IS sensitive to — never reaches it.
+///
+/// It also deliberately carries no DEVICE. The device path and the host path
+/// agree on the identity to a measured tolerance rather than bit-for-bit, so
+/// including the device would give one fleet several fingerprints for one
+/// face; pinning whichever device computed it first makes the value stable for
+/// the process, which is what provenance wants.
+pub fn identity_cache_key(image_sha256: &str, assets: &IdentityAssetDigests) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(b"mold.identity.cache.v1\0");
+    hasher.update(image_sha256.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(IDENTITY_PIPELINE_VERSION.to_le_bytes());
+    hasher.update(b"\0");
+    for digest in [
+        &assets.adapter,
+        &assets.vision,
+        &assets.face_detector,
+        &assets.face_recognizer,
+        &assets.face_parser,
+    ] {
+        hasher.update(digest.as_bytes());
+        hasher.update(b"\0");
+    }
+    format!("{:x}", hasher.finalize())
+}
+
 /// Models qualified to accept identity conditioning in milestone 1.
 ///
 /// These are resolved manifest names. A request naming the bare `flux-dev`
