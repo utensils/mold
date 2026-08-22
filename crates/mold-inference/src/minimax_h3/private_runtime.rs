@@ -461,6 +461,26 @@ pub(crate) struct H3PrivateBoundComfyStream {
     models_root: std::path::PathBuf,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum H3PrivateAttentionDispatch {
+    ReleaseCandidateFlash,
+    QualifiedMetalMath,
+}
+
+fn private_attention_dispatch(backend: H3AttentionBackend) -> Result<H3PrivateAttentionDispatch> {
+    match backend {
+        H3AttentionBackend::FlashAttentionV2 => {
+            Ok(H3PrivateAttentionDispatch::ReleaseCandidateFlash)
+        }
+        H3AttentionBackend::MetalChunkedDenseMath => {
+            Ok(H3PrivateAttentionDispatch::QualifiedMetalMath)
+        }
+        H3AttentionBackend::BoundedDenseMath => {
+            bail!("private MiniMax H3 production binding rejects synthetic dense attention")
+        }
+    }
+}
+
 impl H3PrivateBoundComfyStream {
     /// Read-only snapshot of the exact opened checkpoint and attention facts
     /// bound before any resident transformer allocation.
@@ -555,9 +575,14 @@ pub(crate) fn bind_private_comfy_stream(
         &H3PrivateAttentionRuntimeFacts::from(&attention),
         actual_device,
     )?;
-    attention
-        .verify_current_release_candidate_dispatch(device)
-        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    match private_attention_dispatch(attention.backend())? {
+        H3PrivateAttentionDispatch::ReleaseCandidateFlash => attention
+            .verify_current_release_candidate_dispatch(device)
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?,
+        H3PrivateAttentionDispatch::QualifiedMetalMath => attention
+            .verify_model(expected.attention.model_contract, device)
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?,
+    }
 
     let candidate = opened.candidate();
     let actual_checkpoint = H3PrivateComfyCheckpointFacts {
@@ -825,6 +850,19 @@ mod tests {
             }),
             AttentionBackend::Flash,
         );
+    }
+
+    #[test]
+    fn production_attention_dispatch_separates_metal_from_flash_qualification() {
+        assert_eq!(
+            private_attention_dispatch(H3AttentionBackend::MetalChunkedDenseMath).unwrap(),
+            H3PrivateAttentionDispatch::QualifiedMetalMath,
+        );
+        assert_eq!(
+            private_attention_dispatch(H3AttentionBackend::FlashAttentionV2).unwrap(),
+            H3PrivateAttentionDispatch::ReleaseCandidateFlash,
+        );
+        assert!(private_attention_dispatch(H3AttentionBackend::BoundedDenseMath).is_err());
     }
 
     #[test]
