@@ -52,9 +52,12 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 /// The derived artifact's filename, written beside the `.pt` it came from.
-pub(crate) const DERIVED_FILENAME: &str = "eva02_clip_l_336_vision.safetensors";
+/// The derived artifact's name. `mold_core` is the authority — removal has to
+/// delete this file and cannot see this crate — so it is re-exported rather
+/// than restated.
+pub(crate) const DERIVED_FILENAME: &str = mold_core::pulid_assets::DERIVED_VISION_FILENAME;
 /// Informational provenance beside the derived artifact.
-pub(crate) const SIDECAR_FILENAME: &str = "eva02_clip_l_336_vision.json";
+pub(crate) const SIDECAR_FILENAME: &str = mold_core::pulid_assets::DERIVED_VISION_SIDECAR_FILENAME;
 
 /// Source pin, mirrored from `mold_core::manifest`'s `pulid-flux` entry. Kept
 /// here as well so the conversion refuses to read anything else even if it is

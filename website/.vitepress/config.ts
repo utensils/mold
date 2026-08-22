@@ -111,6 +111,7 @@ export default defineConfig({
             { text: 'Android App', link: '/guide/android' },
             { text: 'Machines', link: '/guide/machines' },
             { text: 'Image-to-Image', link: '/guide/img2img' },
+            { text: 'Identity Photos', link: '/guide/identity' },
             { text: 'Upscaling', link: '/guide/upscaling' },
             { text: 'Prompt Expansion', link: '/guide/expansion' },
             { text: 'Feature Support', link: '/guide/feature-matrix' },

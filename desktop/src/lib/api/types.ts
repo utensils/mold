@@ -618,6 +618,12 @@ export type ProgressEvent =
   | { type: "pull_complete"; model: string };
 
 export interface CompleteEvent {
+  /** Advisories the server attached to this render: it succeeded, but
+   * something was adjusted, dropped, or is worth knowing — the multi-face
+   * identity note among them. Additive; absent on older servers and on every
+   * render that carried no advisory. An SSE render has no response headers to
+   * read, so this is the only delivery `x-mold-request-warning` has here. */
+  request_warnings?: string[] | null;
   /** Base64 payload — empty when the client requested a metadata-only completion. */
   image: string;
   format: OutputFormat;

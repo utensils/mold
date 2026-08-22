@@ -217,4 +217,65 @@ mod tests {
             "the runtime response is authoritative when an Auto request omitted pipeline"
         );
     }
+
+    /// The CLI's own local-save path records identity provenance, so a print
+    /// rendered through `--local` is as attributable as one the server saved.
+    /// Both go through `OutputMetadata::from_generate_request`, which is why
+    /// this is a round trip rather than a second implementation.
+    #[test]
+    fn a_local_save_records_the_identity_provenance_it_rendered_with() {
+        let dir = tempfile::tempdir().unwrap();
+        let saved = dir.path().join("mold-flux-dev-q4-1.png");
+        std::fs::write(&saved, b"fake-bytes").unwrap();
+        let db = MetadataDb::open(&dir.path().join("mold.db")).unwrap();
+
+        let mut request = req();
+        request.id_image = Some(b"pretend-png".to_vec());
+        request.id_image_name = Some("portrait.png".to_string());
+        request.id_weight = Some(0.85);
+        request.id_start_step = Some(2);
+
+        let metadata = metadata_for_local_save(&request, 42, None);
+        assert_eq!(metadata.id_image_name.as_deref(), Some("portrait.png"));
+        assert_eq!(metadata.id_weight, Some(0.85));
+        assert_eq!(metadata.id_start_step, Some(2));
+        assert_eq!(
+            metadata.id_image_sha256.as_deref(),
+            Some(mold_core::identity::id_image_sha256(b"pretend-png").as_str()),
+            "the recorded digest must identify the exact reference photograph"
+        );
+
+        let mut rec = GenerationRecord::from_save(
+            dir.path(),
+            "mold-flux-dev-q4-1.png",
+            OutputFormat::Png,
+            metadata,
+            RecordSource::Cli,
+            1_700_000_000_000,
+        );
+        rec.stat_from_disk(&saved);
+        db.upsert(&rec).unwrap();
+
+        let got = db
+            .get(dir.path(), "mold-flux-dev-q4-1.png")
+            .unwrap()
+            .expect("the row round-trips");
+        assert_eq!(got.metadata.id_image_name.as_deref(), Some("portrait.png"));
+        assert_eq!(got.metadata.id_weight, Some(0.85));
+        assert_eq!(got.metadata.id_start_step, Some(2));
+        // The photograph itself is never stored — only its digest.
+        let serialized = serde_json::to_string(&got.metadata).unwrap();
+        assert!(!serialized.contains("pretend-png"), "{serialized}");
+    }
+
+    /// A print with no identity records none, so a bare knob on an ordinary
+    /// render can never read as conditioning that did not happen.
+    #[test]
+    fn a_local_save_without_identity_records_no_identity_fields() {
+        let metadata = metadata_for_local_save(&req(), 42, None);
+        assert!(metadata.id_image_name.is_none());
+        assert!(metadata.id_image_sha256.is_none());
+        assert!(metadata.id_weight.is_none());
+        assert!(metadata.id_start_step.is_none());
+    }
 }

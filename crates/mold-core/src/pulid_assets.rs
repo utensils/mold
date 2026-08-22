@@ -82,10 +82,50 @@ pub fn missing_pulid_files(config: &Config) -> Vec<&'static ModelFile> {
         .collect()
 }
 
-/// Canonical on-disk destinations for every PuLID asset, present or not.
+/// The EVA02-CLIP vision tower mold DERIVES from the `.pt` source on first use.
 ///
-/// Used by removal, which must delete the files it planned to write rather
-/// than only the ones it can currently see.
+/// The name lives here rather than beside the converter in `mold-inference`
+/// because removal has to delete it and `mold-core` cannot see that crate. It
+/// is the converter's authority all the same — `encoders::eva_clip_convert`
+/// reads it from here — so the two can never name different files.
+pub const DERIVED_VISION_FILENAME: &str = "eva02_clip_l_336_vision.safetensors";
+
+/// Provenance sidecar written beside [`DERIVED_VISION_FILENAME`]. Never read
+/// back to decide anything; deleted with the artifact it describes.
+pub const DERIVED_VISION_SIDECAR_FILENAME: &str = "eva02_clip_l_336_vision.json";
+
+/// The artifacts mold derived rather than downloaded, present or not.
+///
+/// These are NOT manifest files, so nothing that enumerates the manifest can
+/// find them — which is exactly how a `mold rm pulid-flux` would leave 609 MB
+/// of converted weights and their sidecar behind. They live beside the `.pt`
+/// they were converted from.
+pub fn derived_pulid_paths(config: &Config) -> Vec<PathBuf> {
+    let manifest = pulid_manifest();
+    let models_dir = config.resolved_models_dir();
+    let Some(source) = file_for(ModelComponent::IdentityVisionEncoder) else {
+        return Vec::new();
+    };
+    let root = models_dir
+        .join(crate::manifest::storage_path(manifest, source))
+        .parent()
+        .map(std::path::Path::to_path_buf);
+    root.map(|root| {
+        vec![
+            root.join(DERIVED_VISION_FILENAME),
+            root.join(DERIVED_VISION_SIDECAR_FILENAME),
+        ]
+    })
+    .unwrap_or_default()
+}
+
+/// Canonical on-disk destinations for every DOWNLOADED PuLID asset, present or
+/// not.
+///
+/// Deliberately the four manifest files only. Removal also has to delete what
+/// mold DERIVED from them, which is [`derived_pulid_paths`] and is kept
+/// separate because a caller asking "where do the bundle's downloads land" is
+/// not asking the same question.
 pub fn pulid_storage_paths(config: &Config) -> Vec<PathBuf> {
     let manifest = pulid_manifest();
     let models_dir = config.resolved_models_dir();
@@ -242,5 +282,30 @@ mod tests {
         let paths = pulid_storage_paths(&config);
         assert_eq!(paths.len(), 4);
         assert!(paths.iter().all(|path| !path.exists()));
+    }
+
+    /// The derived artifacts live beside the `.pt` they were converted from,
+    /// and removal has to be able to name them before they exist.
+    #[test]
+    fn derived_paths_sit_beside_the_conversion_source() {
+        let _lock = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_for(dir.path());
+        let derived = derived_pulid_paths(&config);
+        assert_eq!(derived.len(), 2);
+
+        let source = pulid_storage_paths(&config)
+            .into_iter()
+            .find(|path| path.extension().is_some_and(|ext| ext == "pt"))
+            .expect("the vision encoder source is a .pt");
+        for path in &derived {
+            assert_eq!(path.parent(), source.parent(), "{}", path.display());
+        }
+        assert!(derived
+            .iter()
+            .any(|path| path.file_name().unwrap() == DERIVED_VISION_FILENAME));
+        assert!(derived
+            .iter()
+            .any(|path| path.file_name().unwrap() == DERIVED_VISION_SIDECAR_FILENAME));
     }
 }

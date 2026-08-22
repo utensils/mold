@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  applyCompletionWarnings,
   applyProgress,
   jobPhase,
   jobProgress,
@@ -341,5 +342,45 @@ describe("railOrder", () => {
     const { railOrder } = await import("./generation");
     const jobs = [job(5, "queued", null), job(6, "queued", 1), job(7, "loading", null)];
     expect(railOrder(jobs).map((j) => j.clientId)).toEqual([7, 6, 5]);
+  });
+});
+
+describe("completion advisories", () => {
+  // The identity extractor decides which of several detected faces to
+  // condition on while the job's dependencies are prepared — after `onOpen`
+  // read the response headers, so the completion event is the only channel it
+  // can arrive on. Reading headers alone dropped the notice entirely.
+  it("appends advisories the render produced to the header ones", () => {
+    const job = newJob(req);
+    job.requestWarnings = ["the requested collection was dropped"];
+
+    applyCompletionWarnings(job, {
+      request_warnings: [
+        "3 faces were detected in the identity image; conditioning on the largest one",
+      ],
+    });
+
+    expect(job.requestWarnings).toEqual([
+      "the requested collection was dropped",
+      "3 faces were detected in the identity image; conditioning on the largest one",
+    ]);
+  });
+
+  it("shows a repeated advisory once", () => {
+    const job = newJob(req);
+    job.requestWarnings = ["a lip dub was retimed"];
+    applyCompletionWarnings(job, { request_warnings: ["a lip dub was retimed"] });
+    expect(job.requestWarnings).toEqual(["a lip dub was retimed"]);
+  });
+
+  // The field is additive: an older server omits it, an ordinary render sends
+  // nothing, and neither may disturb what the headers already said.
+  it("leaves the header advisories alone when the render said nothing", () => {
+    const job = newJob(req);
+    job.requestWarnings = ["a lip dub was retimed"];
+    applyCompletionWarnings(job, { seed_used: 7 });
+    applyCompletionWarnings(job, { request_warnings: [] });
+    applyCompletionWarnings(job, null);
+    expect(job.requestWarnings).toEqual(["a lip dub was retimed"]);
   });
 });

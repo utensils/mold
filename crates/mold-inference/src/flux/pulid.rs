@@ -388,6 +388,20 @@ impl IdentityEmbedding {
         })
     }
 
+    /// Rehydrate the identity admission froze for this request.
+    ///
+    /// The frozen form is plain little-endian `f32` — device-independent by
+    /// construction, which is what lets ONE extraction serve every sibling of
+    /// a batch on every device it fans out to. The tensor is built on the CPU;
+    /// [`PulidContext::new`] moves it to the transformer's device and dtype.
+    pub fn from_frozen(frozen: &mold_core::identity::FrozenIdentityEmbedding) -> Result<Self> {
+        Self::new(Tensor::from_vec(
+            frozen.values(),
+            (1, ID_TOKENS, ID_TOKEN_DIM),
+            &Device::Cpu,
+        )?)
+    }
+
     /// Read the embedding from a safetensors file.
     ///
     /// `name` defaults to `pulid_id`, the tensor name stable-diffusion.cpp's

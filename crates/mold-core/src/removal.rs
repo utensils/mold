@@ -82,11 +82,23 @@ pub fn model_owned_paths(config: &Config, canonical: &str) -> Vec<String> {
     if let Some(manifest) = crate::manifest::find_manifest(canonical) {
         if manifest.is_files_only_bundle() {
             let models_dir = config.resolved_models_dir();
-            for file in &manifest.files {
-                let path = models_dir
-                    .join(crate::manifest::storage_path(manifest, file))
-                    .to_string_lossy()
-                    .to_string();
+            let manifest_files = manifest
+                .files
+                .iter()
+                .map(|file| models_dir.join(crate::manifest::storage_path(manifest, file)));
+            // A bundle can own artifacts it never downloaded. PuLID converts
+            // the EVA02-CLIP `.pt` into safetensors on first use, and nothing
+            // that walks the manifest can see the result — so a removal that
+            // enumerated manifest files alone would leave 609 MB of derived
+            // weights and their sidecar behind.
+            let derived: Vec<std::path::PathBuf> =
+                if manifest.name == crate::manifest::PULID_FLUX_MANIFEST {
+                    crate::pulid_assets::derived_pulid_paths(config)
+                } else {
+                    Vec::new()
+                };
+            for owned in manifest_files.chain(derived) {
+                let path = owned.to_string_lossy().to_string();
                 if !paths.contains(&path) {
                     paths.push(path);
                 }
@@ -483,6 +495,18 @@ mod tests {
             std::fs::write(path, b"asset").unwrap();
         }
 
+        // The derived vision tower and its sidecar are mold's own conversion
+        // output, not manifest files — nothing that walks the manifest can see
+        // them, so a removal that only enumerated the manifest would leave
+        // 609 MB behind.
+        let derived = crate::pulid_assets::derived_pulid_paths(&config);
+        assert_eq!(derived.len(), 2, "{derived:?}");
+        for path in &derived {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"derived").unwrap();
+        }
+        let expected: Vec<PathBuf> = expected.into_iter().chain(derived).collect();
+
         let plan = plan_removal(&config, crate::manifest::PULID_FLUX_MANIFEST);
         let planned: Vec<String> = plan
             .unique_files
@@ -502,6 +526,37 @@ mod tests {
         assert_eq!(outcome.removed.len(), expected.len());
         for path in &expected {
             assert!(!path.exists(), "{} survived removal", path.display());
+        }
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A bundle that was never converted removes cleanly: the derived paths
+    /// are planned by name, and their absence is a warning rather than a
+    /// failure — the same disposition every other absent manifest file gets.
+    #[test]
+    fn removing_a_never_converted_bundle_does_not_fail_on_the_derived_artifact() {
+        let _lock = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tmp_dir("pulid-unconverted");
+        let manifest =
+            crate::manifest::find_manifest(crate::manifest::PULID_FLUX_MANIFEST).unwrap();
+        let config = Config {
+            models_dir: tmp.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        for file in &manifest.files {
+            let path = tmp.join(crate::manifest::storage_path(manifest, file));
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, b"asset").unwrap();
+        }
+
+        let plan = plan_removal(&config, crate::manifest::PULID_FLUX_MANIFEST);
+        let outcome = execute_removal(&config, &plan);
+        assert_eq!(outcome.removed.len(), manifest.files.len());
+        for path in crate::pulid_assets::derived_pulid_paths(&config) {
+            assert!(!path.exists(), "{}", path.display());
         }
 
         let _ = std::fs::remove_dir_all(&tmp);

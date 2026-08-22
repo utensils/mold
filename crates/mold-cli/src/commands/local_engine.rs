@@ -258,7 +258,7 @@ pub(crate) fn build_local_engine_from_plan(
             plan.predicted_vram_peak_bytes
         );
     }
-    mold_inference::create_engine_with_frozen_config(
+    let mut engine = mold_inference::create_engine_with_frozen_config(
         request.model.clone(),
         plan.engine_paths.clone(),
         &plan.engine_config,
@@ -266,7 +266,18 @@ pub(crate) fn build_local_engine_from_plan(
         plan.device_ordinal,
         plan.offload_mode == mold_server::execution_plan::OffloadMode::Block,
         None,
-    )
+    )?;
+    // The forced-local twin of the worker's install point. Local preparation
+    // ran the extractor exactly once through the same
+    // `prepare_local_execution_inputs` path the server uses, so this engine
+    // gets the identical frozen value a remote render would have used — which
+    // is what makes local/remote parity structural rather than reviewed.
+    engine
+        .install_identity_embedding(prepared.identity_embedding.as_ref())
+        .map_err(|error| {
+            anyhow::anyhow!("failed to install face-identity conditioning: {error:#}")
+        })?;
+    Ok(engine)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

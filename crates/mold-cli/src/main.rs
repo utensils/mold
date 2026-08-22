@@ -1117,6 +1117,28 @@ Examples:
         #[arg(long, requires = "image", help_heading = "img2img", value_hint = ValueHint::FilePath)]
         mask: Option<String>,
 
+        /// Reference photograph to preserve the face of (PuLID-FLUX).
+        /// Qualified for flux-dev:q4 and flux-dev:q8 on a server built with
+        /// the `pulid` feature; needs `mold pull pulid-flux --accept-license
+        /// insightface-antelopev2`.
+        #[arg(
+            long,
+            conflicts_with_all = ["image", "lora"],
+            help_heading = "Identity",
+            value_hint = ValueHint::FilePath
+        )]
+        id_image: Option<std::path::PathBuf>,
+
+        /// Identity strength, 0.0-3.0 (default: 1.0). Exactly 0.0 renders the
+        /// unconditioned print — nothing is pulled, loaded, or extracted.
+        #[arg(long, requires = "id_image", help_heading = "Identity")]
+        id_weight: Option<f64>,
+
+        /// First denoise step identity is applied from (default: 0). Must be
+        /// below --steps.
+        #[arg(long, requires = "id_image", help_heading = "Identity")]
+        id_start_step: Option<u32>,
+
         /// Control image for ControlNet conditioning (file path, e.g. edges.png)
         #[arg(long, help_heading = "ControlNet", value_hint = ValueHint::FilePath)]
         control: Option<String>,
@@ -1997,6 +2019,9 @@ async fn run() -> anyhow::Result<()> {
             image,
             strength,
             mask,
+            id_image,
+            id_weight,
+            id_start_step,
             control,
             control_model,
             control_scale,
@@ -2184,6 +2209,11 @@ async fn run() -> anyhow::Result<()> {
                 image,
                 strength,
                 mask,
+                commands::identity::IdentityArgs {
+                    id_image,
+                    id_weight,
+                    id_start_step,
+                },
                 control,
                 control_model,
                 control_scale,
@@ -3723,5 +3753,110 @@ mod tests {
             mold_core::build_info::version_string(),
             "--version should match `mold version` output"
         );
+    }
+
+    #[test]
+    fn run_parses_the_three_identity_flags() {
+        let cli = parse(&[
+            "run",
+            "flux-dev:q4",
+            "a portrait",
+            "--id-image",
+            "/photos/face.png",
+            "--id-weight",
+            "0.85",
+            "--id-start-step",
+            "2",
+        ]);
+        match cli.command {
+            Commands::Run {
+                id_image,
+                id_weight,
+                id_start_step,
+                ..
+            } => {
+                assert_eq!(
+                    id_image.as_deref(),
+                    Some(std::path::Path::new("/photos/face.png"))
+                );
+                assert_eq!(id_weight, Some(0.85));
+                assert_eq!(id_start_step, Some(2));
+            }
+            _ => panic!("expected Run command"),
+        }
+    }
+
+    #[test]
+    fn run_leaves_every_identity_field_absent_by_default() {
+        let cli = parse(&["run", "flux-dev:q4", "a portrait"]);
+        match cli.command {
+            Commands::Run {
+                id_image,
+                id_weight,
+                id_start_step,
+                ..
+            } => {
+                assert!(id_image.is_none());
+                assert!(id_weight.is_none());
+                assert!(id_start_step.is_none());
+            }
+            _ => panic!("expected Run command"),
+        }
+    }
+
+    /// A knob with no reference photograph is caught at parse time, before a
+    /// server round trip.
+    #[test]
+    fn run_rejects_an_identity_knob_without_an_image() {
+        for flag in ["--id-weight", "--id-start-step"] {
+            let Err(error) = try_parse(&["run", "flux-dev:q4", "a portrait", flag, "1"]) else {
+                panic!("{flag} without an image must be refused");
+            };
+            let error = error.to_string();
+            assert!(error.contains("--id-image"), "{flag}: {error}");
+        }
+    }
+
+    /// The two combinations `mold_core::identity` refuses at admission are
+    /// refused at parse time too, so the user is not told after the upload.
+    #[test]
+    fn run_rejects_identity_combined_with_img2img_or_a_lora() {
+        for extra in [
+            vec!["--image", "/photos/source.png"],
+            vec!["--lora", "/loras/style.safetensors"],
+        ] {
+            let mut args = vec![
+                "run",
+                "flux-dev:q4",
+                "a portrait",
+                "--id-image",
+                "/photos/face.png",
+            ];
+            args.extend(extra.iter().copied());
+            let Err(error) = try_parse(&args) else {
+                panic!("{extra:?}: identity with img2img or a LoRA is not yet qualified");
+            };
+            let error = error.to_string();
+            assert!(error.contains("cannot be used with"), "{extra:?}: {error}");
+        }
+    }
+
+    /// `--id-weight 0` is a legitimate, meaningful value — the falsification
+    /// case from `tmp/sdcpp/docs/pulid.md` — and must survive parsing.
+    #[test]
+    fn run_accepts_an_explicit_zero_identity_weight() {
+        let cli = parse(&[
+            "run",
+            "flux-dev:q4",
+            "a portrait",
+            "--id-image",
+            "/photos/face.png",
+            "--id-weight",
+            "0",
+        ]);
+        match cli.command {
+            Commands::Run { id_weight, .. } => assert_eq!(id_weight, Some(0.0)),
+            _ => panic!("expected Run command"),
+        }
     }
 }

@@ -241,7 +241,7 @@ if wants rust; then
       cargo "+$msrv" check --workspace --all-targets --locked
     step "rust: MSRV $msrv feature check" \
       cargo "+$msrv" check -p mold-ai --locked \
-      --features preview,discord,expand,tui,metrics,webp,mp4,mdns
+      --features preview,discord,expand,tui,metrics,webp,mp4,mdns,pulid
   fi
   step "rust: fmt" cargo fmt --all -- --check
   step "rust: generated generation profiles" \
@@ -249,7 +249,7 @@ if wants rust; then
   step "rust: clippy" cargo clippy --workspace --all-targets -- -D warnings
   step "rust: test (full main suite)" cargo test --workspace
   step "rust: optional feature check" \
-    cargo check -p mold-ai --features preview,discord,expand,tui,webp,mp4,mdns
+    cargo check -p mold-ai --features preview,discord,expand,tui,webp,mp4,mdns,pulid
   step "rust: MiniMax H3 private foundations" \
     cargo test -p mold-ai-inference --lib --features h3-private-uat minimax_h3
   for bin in h3_artifact_qualification h3_qwen_layer50_capture \
@@ -344,12 +344,12 @@ if wants gpu; then
   case "$(uname -s)" in
     Darwin)
       step "gpu: Metal forced-local clippy" \
-        cargo clippy -p mold-ai --features metal,preview,expand,tui,webp,mp4,mdns --all-targets -- -D warnings
+        cargo clippy -p mold-ai --features metal,preview,expand,tui,webp,mp4,mdns,pulid --all-targets -- -D warnings
       ;;
     *)
       if command -v nvcc >/dev/null 2>&1; then
         step "gpu: CUDA forced-local clippy" \
-          cargo clippy -p mold-ai --features h3-cuda,preview,expand,tui,webp,mp4,mdns --all-targets -- -D warnings
+          cargo clippy -p mold-ai --features h3-cuda,preview,expand,tui,webp,mp4,mdns,pulid --all-targets -- -D warnings
         step "gpu: clippy h3_runtime_qualification_record" \
           cargo clippy -p mold-ai-inference --features dev-bins,h3-cuda \
           --bin h3_runtime_qualification_record -- -D warnings

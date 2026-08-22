@@ -332,16 +332,129 @@ the raw hidden states to ~1e-4 of their own peak magnitude — the last of these
 being f32 accumulation amplified by EVA02's extreme activations rather than a
 port defect.
 
+## The extraction lifetime (#1223)
+
+The encoders above are the *computation*. What #1223 added is the *lifetime*,
+and the lifetime is the part with teeth: an identity must be resolved exactly
+once per parent request, before batch fan-out, and every sibling and every
+denoise step must reuse that one value.
+
+### Where it runs, and why there
+
+`mold_inference::identity::extraction::extract_identity_embedding` composes the
+whole stack — SCRFD, ArcFace, `ensure_eva_clip_vision_safetensors`, the tower,
+the IDFormer — into one `[1, 32, 2048]` answer. It is called from exactly one
+place: `variant_dependencies::prepare_inputs_for_devices`, **after** the
+per-device loop and **before** anything fans out.
+
+That position is chosen, not incidental.
+
+- **After the device loop**, because asset *paths* are per-device (a
+  mixed-capacity host can select different encoder variants per GPU) but an
+  identity is not. It is a function of the request's own bytes and is identical
+  on every device, so resolving it inside the loop would compute the same value
+  N times.
+- **Before fan-out**, because `PreparedExecutionInputs` is precisely what
+  `batch_runtime::submit_child` clones into every `BatchChildExecution`. Storing
+  the embedding there makes "one extraction, every sibling" structural rather
+  than a convention somebody has to keep.
+- **On the CPU**, because `candle-onnx` materializes every initializer on
+  `Device::Cpu` and refuses anything else — and because at admission the
+  scheduler has not leased a device yet, so there is no GPU to run it on. That
+  constraint turns into the guarantee the issue asked for: extraction's ~1.4 GB
+  peak is allocated and released before the job is dispatched, so it *cannot*
+  overlap the T5/CLIP encode peak. No scheduled slot and no new typed
+  learned-scheduling phase was needed, because the two peaks cannot coexist.
+
+### The frozen value
+
+`mold_core::identity::FrozenIdentityEmbedding` is deliberately plain data:
+little-endian `f32` bytes, not a `candle` tensor. That makes it `Clone`, `Eq`,
+`Hash`, and device-independent, which is what lets one extraction serve a batch
+that fans out across several GPUs. It carries the reference photograph's
+SHA-256, the four asset digests, and a fingerprint over all three — the
+fingerprint being what a test can compare across siblings to prove nothing
+re-extracted. Its `Debug` redacts the values: they are a biometric derivative
+and must never reach a log line, an error body, or a probe payload.
+
+At 32 x 2048 f32 it is 256 KiB, which is why carrying it per child costs
+nothing worth optimizing.
+
+### The three ways it could have leaked, and what stops each
+
+1. **The scheduler re-prepares dependencies for EVERY pending job**, batch
+   children included, and `compose_prepared_generation` replaces
+   `pending.prepared_inputs` wholesale. Left alone, a `batch_size = 4` parent
+   would extract five times and then discard the parent's value. So the child's
+   frozen identity is handed to preparation through
+   `DependencyPreparationContext::frozen_identity`, which short-circuits the
+   extraction entirely, and `compose_prepared_generation` carries it across as a
+   backstop for a preparer that ignored the context.
+2. **Placement preview** runs the same preparation path read-only. It must never
+   spend seconds and 1.4 GB on a probe, and it does not need to: identity
+   changes the *memory demand*, which `memory_preflight` charges from the
+   request, not from the extracted value. `DependencyMaterializationPolicy::
+   ExistingOnly` therefore extracts nothing.
+3. **The engine is cached across requests and the identity is not.** The GPU
+   worker calls `InferenceEngine::install_identity_embedding` before EVERY
+   dispatch — with `Some` when the plan froze one and `None` otherwise. Passing
+   `None` is not an optimization, it is the clear; without it a cached
+   `FluxEngine` would condition the next print on the previous print's face. The
+   default trait implementation REFUSES a populated embedding rather than
+   dropping it, because a family that cannot condition on a face must not render
+   a print that silently has none; only `FluxEngine` overrides it.
+
+Forced-local installs at the same point
+(`mold-cli/src/commands/local_engine.rs::build_local_engine_from_plan`) from the
+same `prepare_local_execution_inputs` path, which is what makes local/remote
+parity structural rather than reviewed.
+
+### Weight zero
+
+An explicit `id_weight` of 0 is inert at every layer:
+`identity_dependencies::request_needs_identity_assets` plans no assets,
+`identity_extraction::resolve_identity_embedding` returns `None` without
+counting an extraction, `memory_preflight` charges nothing, and
+`flux::identity::identity_request` returns `None` so the denoise loop takes the
+exact code path an unconditioned build takes. The falsification test from
+`tmp/sdcpp/docs/pulid.md` — same seed, `--id-weight 0`, byte-identical output —
+is therefore structural rather than numerical.
+
+### Memory
+
+Measured, replacing #1220's declared 2.3 GB placeholder:
+
+| Where | Bytes | What |
+| --- | --- | --- |
+| Device | 839,270,400 | 20 cross-attention modules at FLUX.1's geometry, f16/bf16 |
+| Device | ~410,000,000 | cross-attention activation headroom at 1024x1024 |
+| **Device total** | **1,250,000,000** | `IDENTITY_VRAM_OVERHEAD_BYTES` |
+| Host | 16,923,827 | `scrfd_10g_bnkps.onnx` |
+| Host | 260,665,334 | `glintr100.onnx` |
+| Host | 856,461,210 | the EVA02-CLIP `.pt` (609 MB derived, plus f32 activations) |
+
+The old placeholder charged the tower and the IDFormer to VRAM on the assumption
+that the extractor would run on the generation device. It does not, and
+over-charging VRAM by ~1 GB parks renders a card could actually run.
+`ComponentRole::IdentityVisionEncoder` is consequently `is_host_only`, alongside
+the two ONNX graphs; `IdentityAdapter` deliberately is not, because it is the
+one identity artifact that IS device-resident for the whole denoise.
+
+### Removal
+
+`mold rm pulid-flux` now deletes the derived
+`eva02_clip_l_336_vision.safetensors` and its sidecar as well as the four
+manifest files. Both names live in `mold_core::pulid_assets`
+(`DERIVED_VISION_FILENAME`, `DERIVED_VISION_SIDECAR_FILENAME`) rather than in
+`encoders::eva_clip_convert`, because removal is in `mold-core` and cannot see
+`mold-inference`; the converter reads them from there so the two can never name
+different files.
+
 ## Not yet built
 
-- FLUX cross-attention integration (`pulid_ca.*` in the adapter) and the
-  generation path.
-- Face detection and alignment (SCRFD + ArcFace); issue #1222.
-- Any admission-side call to `ensure_eva_clip_vision_safetensors`. The function
-  exists and is idempotent; nothing invokes it yet.
-- Removal of the derived artifact. `mold rm pulid-flux` deletes what
-  `pulid_storage_paths` lists, which is the four manifest files — the derived
-  `eva02_clip_l_336_vision.safetensors` and its sidecar are not among them and
-  would be left behind as a ~609 MB orphan. Harmless today because nothing
-  produces them yet, but this must be fixed in the same change that wires the
-  conversion into admission.
+- facexlib's BiSeNet background mask, which upstream applies before the vision
+  tower (`PuLID/pulid/pipeline_flux.py:145-170`). Issue #1225.
+- Fusing several reference photographs into one stronger identity.
+- Identity on tiers other than `flux-dev:q4` / `:q8`, alongside a LoRA, or
+  alongside img2img. All three are refused by name at the request contract; a
+  milestone-2 qualification pass owns them.

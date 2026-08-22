@@ -3956,6 +3956,15 @@ pub enum SseProgressEvent {
 /// carry the metadata needed to reconstruct [`VideoData`] on the client.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct SseCompleteEvent {
+    /// Advisories the server attached to this render: it succeeded, but
+    /// something the caller asked for was adjusted, dropped, or is worth
+    /// knowing — the same set the JSON path returns on
+    /// `x-mold-request-warning`. Streaming clients would otherwise never see
+    /// them, because an SSE render has no response headers to read (#1223).
+    ///
+    /// Additive; absent on every event that carried no advisory.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub request_warnings: Vec<String>,
     /// Base64-encoded payload — image bytes for images, video bytes for video.
     pub image: String,
     pub format: OutputFormat,
@@ -5990,6 +5999,7 @@ mod tests {
     #[test]
     fn sse_complete_event_roundtrip() {
         let event = SseCompleteEvent {
+            request_warnings: Vec::new(),
             audio_sample_rate: None,
             audio_channels: None,
             audio_duration_ms: None,
@@ -6604,6 +6614,7 @@ mod tests {
     #[test]
     fn atomic_batch_complete_round_trips_as_one_ordered_parent() {
         let output = |index| SseCompleteEvent {
+            request_warnings: Vec::new(),
             audio_sample_rate: None,
             audio_channels: None,
             audio_duration_ms: None,
@@ -6975,6 +6986,7 @@ mod tests {
     #[test]
     fn sse_complete_event_video_roundtrip() {
         let event = SseCompleteEvent {
+            request_warnings: Vec::new(),
             audio_sample_rate: None,
             audio_channels: None,
             audio_duration_ms: None,
@@ -7027,6 +7039,7 @@ mod tests {
     #[test]
     fn sse_complete_event_video_no_audio_omits_audio_fields() {
         let event = SseCompleteEvent {
+            request_warnings: Vec::new(),
             audio_sample_rate: None,
             audio_channels: None,
             audio_duration_ms: None,
@@ -7105,6 +7118,7 @@ mod tests {
     fn sse_complete_event_image_no_video_fields_in_json() {
         // An image-only event should not include any video_* keys in JSON
         let event = SseCompleteEvent {
+            request_warnings: Vec::new(),
             audio_sample_rate: None,
             audio_channels: None,
             audio_duration_ms: None,
