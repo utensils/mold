@@ -3775,8 +3775,9 @@ async fn placement_preview_for_request_authenticated(
         h3_resolved_references: None,
         // Same boundary: only the scheduler carries a parent's frozen
         // identity, from the owning job. This probe has no job and must not
-        // invent one.
-        frozen_identity: None,
+        // invent one. Default the remaining context so additive optional
+        // preparation inputs cannot leave this H3-only literal unbuildable.
+        ..Default::default()
     };
     // Ref2VA plans depend on the staged reference media, which this probe
     // deliberately never carries. Preparation would therefore fail for the
