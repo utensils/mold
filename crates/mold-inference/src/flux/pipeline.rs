@@ -2773,6 +2773,19 @@ impl FluxEngine {
 }
 
 impl InferenceEngine for FluxEngine {
+    /// FLUX is the one family that can honour this, so it is the one family
+    /// that overrides the trait's refusal.
+    fn install_identity_embedding(
+        &mut self,
+        embedding: Option<&mold_core::identity::FrozenIdentityEmbedding>,
+    ) -> Result<()> {
+        let embedding = embedding
+            .map(crate::flux::pulid::IdentityEmbedding::from_frozen)
+            .transpose()?;
+        self.set_identity_embedding(embedding);
+        Ok(())
+    }
+
     fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
         self.base.progress.checkpoint()?;
         self.pending_placement = req.placement.clone();

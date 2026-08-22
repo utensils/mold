@@ -109,6 +109,19 @@ h3 = ["mold-core/h3", "mold-server/h3"]
 h3-cuda = ["h3", "cuda", "mold-server/h3-cuda"]
 nvml = ["mold-server/nvml"]
 metal = ["mold-server/metal"]
+# Face-identity conditioning (#1223). Unconditional in every desktop recipe,
+# for the same reason it is unconditional in every `mold` release recipe: the
+# embedded **This device** server advertises `supports_identity` only when the
+# feature is compiled, and `studio/lib/identityConditioning.ts` gates the
+# identity photo well on that advertisement — absence reads as NO. A desktop
+# build without `pulid` therefore hides the whole feature permanently rather
+# than degrading, and no runtime setting can recover it.
+#
+# `mold-core` is named explicitly even though `mold-server/pulid` already
+# forwards to it: this crate depends on `mold-core` directly, and the gate
+# `mold_core::identity::identity_runtime_available()` is `cfg!(feature =
+# "pulid")` inside mold-core's own compilation.
+pulid = ["mold-core/pulid", "mold-server/pulid"]
 
 [profile.release]
 lto = "thin"

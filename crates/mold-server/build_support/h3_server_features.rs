@@ -62,6 +62,13 @@ pub const PUBLIC_H3_ORTHOGONAL_FEATURES: &[&str] = &[
     "CARGO_FEATURE_EXPAND",
     "CARGO_FEATURE_MDNS",
     "CARGO_FEATURE_METRICS",
+    // PuLID face identity (#1223). Orthogonal in the strongest sense: it is
+    // qualified for two FLUX checkpoints and `mold_core::identity` refuses it
+    // for every other model, so it cannot reach an H3 render at all. It is in
+    // this list rather than the reviewed sets because it entered every
+    // shipping recipe, and this fence is an exact allowlist — omitting it
+    // would fail the SM89 release build at its build script.
+    "CARGO_FEATURE_PULID",
     "CARGO_FEATURE_WEBP",
 ];
 

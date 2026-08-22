@@ -722,7 +722,27 @@ fn compose_prepared_generation(pending: &mut PendingGeneration, prepared: Prepar
     {
         pending.job.h3_private_ingress_grant = Some(grant);
     }
+    // The identity a parent request froze outlives any re-preparation of one
+    // of its children: preparation is handed the frozen value and must return
+    // it unchanged, and this is the backstop for a preparer that did not.
+    let frozen_identity = pending
+        .prepared_inputs
+        .as_ref()
+        .and_then(|inputs| inputs.identity_embedding.clone());
+    // The advisory the extraction produced belongs to the same value and
+    // outlives re-preparation for the same reason: a child never extracts, so
+    // it would otherwise lose the parent's "which face did you pick" note.
+    let identity_warning = pending
+        .prepared_inputs
+        .as_ref()
+        .and_then(|inputs| inputs.identity_warning.clone());
     pending.prepared_inputs = prepared.execution_inputs;
+    if let (Some(inputs), Some(identity)) = (pending.prepared_inputs.as_mut(), frozen_identity) {
+        inputs.identity_embedding = Some(identity);
+    }
+    if let (Some(inputs), Some(warning)) = (pending.prepared_inputs.as_mut(), identity_warning) {
+        inputs.identity_warning.get_or_insert(warning);
+    }
 }
 
 type PreparationFuture = Pin<Box<dyn Future<Output = Result<PreparedGeneration, String>> + Send>>;
@@ -1733,8 +1753,23 @@ impl Coordinator {
                     .as_ref()
                     .map(crate::reference_uploads::ResolvedReferenceSet::admission_view),
             };
+            // A batch child arrives already holding the parent's frozen
+            // identity. Handing it to preparation is what keeps ONE extraction
+            // per parent request: without it this re-preparation would run the
+            // extractor again for every sibling and then overwrite the
+            // parent's value with its own.
+            let frozen_identity = pending
+                .prepared_inputs
+                .as_ref()
+                .and_then(|inputs| inputs.identity_embedding.clone());
             #[cfg(not(any(feature = "h3", feature = "h3-private-uat")))]
-            let context = crate::variant_dependencies::DependencyPreparationContext::default();
+            let context =
+                crate::variant_dependencies::DependencyPreparationContext { frozen_identity };
+            #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+            let context = crate::variant_dependencies::DependencyPreparationContext {
+                frozen_identity,
+                ..context
+            };
             let preparer = self.preparer.clone();
             let tx = self.preparation_tx.clone();
             let slots = self.preparation_slots.clone();

@@ -257,6 +257,16 @@ impl mold_inference::InferenceEngine for PlannedInferenceEngine {
     fn as_chain_renderer(&mut self) -> Option<&mut dyn mold_inference::chain::ChainStageRenderer> {
         self.inner.as_chain_renderer()
     }
+
+    /// Forwarded, not defaulted. Every scheduler-V2 job runs inside this
+    /// wrapper, so a default here would silently swallow the identity for
+    /// exactly the jobs that go through admission — the ones that have one.
+    fn install_identity_embedding(
+        &mut self,
+        embedding: Option<&mold_core::identity::FrozenIdentityEmbedding>,
+    ) -> anyhow::Result<()> {
+        self.inner.install_identity_embedding(embedding)
+    }
 }
 
 fn record_planned_engine_mode(
@@ -3966,9 +3976,42 @@ fn process_job_with_sink(
             .expect("failed to spawn RSS watchdog")
     };
 
+    // Install the identity admission froze for this request, or clear it.
+    //
+    // Unconditional in both directions: the engine is cached across requests
+    // and an embedding left installed would condition the NEXT print on the
+    // PREVIOUS person. This is also the one place the extraction lifetime
+    // terminates — the value was resolved once at parent admission and is only
+    // ever read from here on.
+    let frozen_identity = job
+        .prepared_execution_inputs
+        .as_ref()
+        .and_then(|inputs| inputs.identity_embedding.clone())
+        .or_else(|| {
+            job.batch_child
+                .as_ref()
+                .and_then(|child| child.prepared_inputs.identity_embedding.clone())
+        });
+    // The advisory that came with that identity, read from the same two
+    // places, so a batch child reports it exactly as its parent does.
+    let identity_warning = job
+        .prepared_execution_inputs
+        .as_ref()
+        .and_then(|inputs| inputs.identity_warning.clone())
+        .or_else(|| {
+            job.batch_child
+                .as_ref()
+                .and_then(|child| child.prepared_inputs.identity_warning.clone())
+        });
     // Run inference — cache mutex is FREE during this.
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         ensure_worker_not_poisoned(worker, &model_name)?;
+        cached_engine
+            .engine
+            .install_identity_embedding(frozen_identity.as_ref())
+            .map_err(|error| {
+                anyhow::anyhow!("failed to install face-identity conditioning: {error:#}")
+            })?;
         match inference_cancellation {
             Some(cancellation) => mold_inference::with_inference_cancellation(
                 &mut *cached_engine.engine,
@@ -4059,6 +4102,22 @@ fn process_job_with_sink(
 
             // Attach GPU ordinal to response.
             response.gpu = Some(ordinal);
+
+            // Admission's identity advisory is a property of this print, so
+            // it rides the response the client actually receives — the JSON
+            // route turns it into `x-mold-request-warning` and the SSE route
+            // into the complete event. Logging it server-side was the only
+            // delivery before #1223, which reached nobody who supplied the
+            // photograph.
+            if let Some(warning) = identity_warning {
+                if !response
+                    .request_warnings
+                    .iter()
+                    .any(|held| held == &warning)
+                {
+                    response.request_warnings.push(warning);
+                }
+            }
 
             if response.images.is_empty() && response.video.is_none() && response.audio.is_none() {
                 let err_msg =

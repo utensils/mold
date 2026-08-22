@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { requestWarningsFromHeaders } from "./requestWarnings";
+import {
+  requestWarningsFromCompleteEvent,
+  requestWarningsFromHeaders,
+} from "./requestWarnings";
 
 describe("requestWarningsFromHeaders", () => {
   it("keeps a semicolon inside one advisory", () => {
@@ -30,5 +33,41 @@ describe("requestWarningsFromHeaders", () => {
         },
       }),
     ).toEqual(["one combined advisory"]);
+  });
+});
+
+describe("requestWarningsFromCompleteEvent", () => {
+  it("reads the advisories a streaming render produced", () => {
+    expect(
+      requestWarningsFromCompleteEvent({
+        image: "",
+        request_warnings: [
+          "3 faces were detected in the identity image; conditioning on the largest one",
+        ],
+      }),
+    ).toEqual([
+      "3 faces were detected in the identity image; conditioning on the largest one",
+    ]);
+  });
+
+  it("is silent on an ordinary render and on an older server", () => {
+    expect(requestWarningsFromCompleteEvent({ image: "" })).toEqual([]);
+    expect(requestWarningsFromCompleteEvent({ request_warnings: [] })).toEqual(
+      [],
+    );
+  });
+
+  // The field is additive, so a print must never be lost to a shape surprise.
+  it("never throws on a malformed payload", () => {
+    expect(requestWarningsFromCompleteEvent(null)).toEqual([]);
+    expect(requestWarningsFromCompleteEvent("complete")).toEqual([]);
+    expect(
+      requestWarningsFromCompleteEvent({ request_warnings: "one" }),
+    ).toEqual([]);
+    expect(
+      requestWarningsFromCompleteEvent({
+        request_warnings: [1, "  ", " kept "],
+      }),
+    ).toEqual(["kept"]);
   });
 });

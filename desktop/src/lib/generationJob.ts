@@ -7,6 +7,7 @@ import type {
 } from "./api/types";
 import type { DevelopPhase } from "@ui/lib/grain";
 import { queueWaitCode, resolveQueueWait } from "@studio/lib/queuePosition";
+import { requestWarningsFromCompleteEvent } from "@studio/lib/requestWarnings";
 
 export type JobStatus = "queued" | "loading" | "denoising" | "finishing" | "complete" | "error";
 
@@ -150,6 +151,30 @@ export function markJobSettled(job: Job): void {
 }
 
 /** Pure SSE reducer shared by desktop and mobile. Mutates and returns the job. */
+/**
+ * Fold the advisories a completion event carried into the job's list.
+ *
+ * A job has two advisory channels and needs both. `onOpen` reads the response
+ * headers, which are written before the job runs, so they can only carry what
+ * admission already knew. An advisory the RENDER produced — which of several
+ * detected faces the identity extractor conditioned on — is decided while the
+ * job's dependencies are prepared, long after those headers went out, and can
+ * only travel in the completion event.
+ *
+ * Appending onto the same list is deliberate: both surfaces already show
+ * `job.requestWarnings` (desktop as a toast, iPhone as a persistent inline
+ * banner), so this needs no new UI on either.
+ *
+ * Deduplicated, because a server may repeat a header advisory in the
+ * completion event and a caller should see it once.
+ */
+export function applyCompletionWarnings(job: Job, complete: unknown): Job {
+  for (const warning of requestWarningsFromCompleteEvent(complete)) {
+    if (!job.requestWarnings.includes(warning)) job.requestWarnings.push(warning);
+  }
+  return job;
+}
+
 export function applyProgress(job: Job, event: ProgressEvent): Job {
   switch (event.type) {
     case "queued":

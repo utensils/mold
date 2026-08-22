@@ -269,6 +269,35 @@ pub trait InferenceEngine: Send + Sync {
     fn as_chain_renderer(&mut self) -> Option<&mut dyn crate::chain::ChainStageRenderer> {
         None
     }
+
+    /// Install the face identity admission extracted for the next request, or
+    /// clear it.
+    ///
+    /// Called once per dispatch, immediately before `generate`, because the
+    /// engine is cached across requests and the identity is not: an embedding
+    /// left installed would condition the *next* print on the *previous*
+    /// person. Passing `None` is therefore not an optimization, it is the
+    /// clear, and every dispatch performs it.
+    ///
+    /// The default refuses a populated embedding rather than dropping it. A
+    /// family that cannot condition on a face must not render a print that
+    /// silently has no face in it — the same rule
+    /// `mold_core::identity::IDENTITY_BUILD_UNSUPPORTED` states for a build
+    /// without the feature. Clearing is always accepted, so a caller can
+    /// unconditionally clear without asking what family it holds.
+    fn install_identity_embedding(
+        &mut self,
+        embedding: Option<&mold_core::identity::FrozenIdentityEmbedding>,
+    ) -> anyhow::Result<()> {
+        if embedding.is_some() {
+            anyhow::bail!(
+                "this engine does not support face-identity conditioning; \
+                 identity is qualified only for {}",
+                mold_core::identity::IDENTITY_QUALIFIED_MODELS.join(" and ")
+            );
+        }
+        Ok(())
+    }
 }
 
 /// Run one attempt with a cancellation token installed, clearing it before

@@ -924,6 +924,7 @@ pub async fn run(
     image: Vec<String>,
     strength: Option<f64>,
     mask: Option<String>,
+    identity: crate::commands::identity::IdentityArgs,
     control: Option<String>,
     control_model: Option<String>,
     control_scale: f64,
@@ -1133,6 +1134,11 @@ pub async fn run(
     } else {
         None
     };
+
+    // Read the identity reference. Secure-open, bound, and validate against
+    // the request contract's decode limits BEFORE any request bytes exist —
+    // see `commands::identity`.
+    let identity = identity.resolve()?;
 
     // Read control image if --control specified
     let control_image = if let Some(ref ctrl_path) = control {
@@ -1560,6 +1566,7 @@ pub async fn run(
         batch_prompts,
         effective_lora,
         server_expand,
+        identity,
     )
     .await
 }

@@ -62,8 +62,23 @@ pub(crate) fn validate_live_server_batch_size(
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct LiveBatchRecoveryEnvelope {
     version: u32,
+    /// The parent request, with the reference photograph removed.
+    ///
+    /// See [`recovery_envelope`]. `id_image_name`, `id_weight`,
+    /// `id_start_step`, and every other field are untouched; only the bytes
+    /// go.
     request: GenerateRequest,
     execution_equivalence_fingerprint: String,
+    /// The fingerprint of the identity this batch froze, when it conditioned
+    /// on a face.
+    ///
+    /// Recorded so a recovered attempt can *recognise* itself as an identity
+    /// batch even in the degenerate case where the request's own identity
+    /// fields were somehow lost, and so the refusal names something concrete.
+    /// It is a SHA-256 over the embedding, the source digest, and the asset
+    /// digests — not the embedding, and not the face.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    identity_fingerprint: Option<String>,
 }
 
 #[derive(Debug)]
@@ -470,14 +485,44 @@ fn normalize_children(
         .collect()
 }
 
+/// The durable manifest for one live batch.
+///
+/// This value is serialized to JSON and written to disk, where it outlives the
+/// process. The reference photograph therefore cannot travel in it: an
+/// `id_image` is biometric data about a real person, handed over for one
+/// render, and a crash would leave it in a manifest file indefinitely.
+///
+/// Redaction rather than exclusion, unlike the queue journal (whose whole row
+/// is skipped for an identity request), because the batch attempt is what owns
+/// the children's disk records — there is no "run it without durability"
+/// option here. What that costs is resumability, and `decode_recovery_envelope`
+/// spends it honestly: a recovered identity batch is refused, never resumed
+/// with the face silently missing.
 fn recovery_envelope(
     request: &GenerateRequest,
     plan: &FrozenBatchPlan,
 ) -> LiveBatchRecoveryEnvelope {
+    redacted_recovery_envelope(
+        request,
+        &plan.equivalence,
+        plan.prepared_inputs.identity_embedding.as_ref(),
+    )
+}
+
+/// The redaction itself, independent of the plan's shape so the rule can be
+/// stated and tested on its own.
+fn redacted_recovery_envelope(
+    request: &GenerateRequest,
+    execution_equivalence_fingerprint: &str,
+    identity: Option<&mold_core::identity::FrozenIdentityEmbedding>,
+) -> LiveBatchRecoveryEnvelope {
+    let mut request = request.clone();
+    request.id_image = None;
     LiveBatchRecoveryEnvelope {
         version: LIVE_BATCH_RECOVERY_VERSION,
-        request: request.clone(),
-        execution_equivalence_fingerprint: plan.equivalence.clone(),
+        request,
+        execution_equivalence_fingerprint: execution_equivalence_fingerprint.to_string(),
+        identity_fingerprint: identity.map(|identity| identity.fingerprint().to_string()),
     }
 }
 
@@ -502,6 +547,25 @@ fn decode_recovery_envelope(
     ensure!(
         !envelope.execution_equivalence_fingerprint.is_empty(),
         "durable live-batch recovery equivalence is empty"
+    );
+    // Belt and braces: a manifest that somehow carries a photograph is not one
+    // this build wrote, and it is not a file to keep acting on.
+    ensure!(
+        envelope.request.id_image.is_none(),
+        "durable live-batch recovery envelope retains a reference photograph"
+    );
+    // A batch that conditioned on a face cannot be resumed, because the face
+    // is deliberately not on disk. Refusing is the whole point: re-running the
+    // siblings without the identity would publish prints of the wrong person
+    // under the requested name, and nothing downstream would notice — the
+    // request still validates, the seeds still match, and only the faces are
+    // wrong. The attempt is rolled back terminally and the user re-submits.
+    ensure!(
+        envelope.identity_fingerprint.is_none()
+            && !mold_core::identity::request_mentions_identity(&envelope.request),
+        "durable live-batch recovery cannot resume a batch that conditions on a reference \
+         photograph; the photograph is never written to disk, so the siblings would render \
+         without the face. Re-submit the batch."
     );
     Ok(envelope)
 }
@@ -1927,6 +1991,7 @@ mod tests {
             version: LIVE_BATCH_RECOVERY_VERSION,
             request,
             execution_equivalence_fingerprint: "frozen-but-unavailable".to_string(),
+            identity_fingerprint: None,
         };
         let mut attempt = DurableBatchAttempt::begin(
             directory,
@@ -1951,6 +2016,8 @@ mod tests {
             cancellation,
             execution_equivalence_fingerprint: "same".to_string(),
             prepared_inputs: PreparedExecutionInputs {
+                identity_embedding: None,
+                identity_warning: None,
                 authority_fingerprint: "prepared".to_string(),
                 by_device: BTreeMap::new(),
                 retryable_device_failures: BTreeMap::new(),
@@ -2253,5 +2320,106 @@ mod tests {
         assert!(filenames
             .iter()
             .all(|filename| !directory.path().join(filename).exists()));
+    }
+
+    fn identity_request(batch_size: u32) -> GenerateRequest {
+        let mut request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "a portrait",
+            "model": "flux-dev:q4",
+            "width": 64,
+            "height": 64,
+            "steps": 1,
+            "batch_size": batch_size,
+            "seed": 9,
+            "output_format": "png"
+        }))
+        .unwrap();
+        request.id_image = Some(b"\x89PNG\r\n\x1a\n-pretend-this-is-a-face".to_vec());
+        request.id_image_name = Some("face.png".to_string());
+        request.id_weight = Some(1.0);
+        request
+    }
+
+    fn frozen_identity() -> mold_core::identity::FrozenIdentityEmbedding {
+        mold_core::identity::FrozenIdentityEmbedding::new(
+            &vec![0.5_f32; mold_core::identity::ID_EMBEDDING_VALUES],
+            "0".repeat(64),
+            mold_core::identity::IdentityAssetDigests {
+                adapter: "a".repeat(64),
+                vision: "b".repeat(64),
+                face_detector: "c".repeat(64),
+                face_recognizer: "d".repeat(64),
+            },
+        )
+        .expect("a well-shaped embedding")
+    }
+
+    /// The durable manifest is a JSON file that outlives the process. A
+    /// reference photograph is biometric data about a real person, handed over
+    /// for one render, and a crash must not leave it sitting on disk.
+    #[test]
+    fn a_persisted_identity_batch_carries_no_photograph() {
+        let request = identity_request(4);
+        let identity = frozen_identity();
+        let envelope = redacted_recovery_envelope(&request, "frozen", Some(&identity));
+
+        assert!(envelope.request.id_image.is_none());
+        // Provenance stays: what the print recorded is still recoverable.
+        assert_eq!(envelope.request.id_image_name.as_deref(), Some("face.png"));
+        assert_eq!(envelope.request.id_weight, Some(1.0));
+        assert_eq!(
+            envelope.identity_fingerprint.as_deref(),
+            Some(identity.fingerprint())
+        );
+
+        let serialized = serde_json::to_string(&envelope).unwrap();
+        assert!(
+            !serialized.contains("pretend-this-is-a-face"),
+            "no byte of the photograph may reach the durable manifest"
+        );
+        // Nor its base64 encoding, which is how `Vec<u8>` would actually land.
+        let encoded = {
+            use base64::Engine as _;
+            base64::engine::general_purpose::STANDARD.encode(request.id_image.as_ref().unwrap())
+        };
+        assert!(!serialized.contains(&encoded));
+    }
+
+    /// Because the photograph is gone, the batch cannot be resumed — and the
+    /// alternative is far worse than refusing. Re-running the siblings without
+    /// the identity would publish prints of the wrong person under the
+    /// requested name, with matching seeds and a valid request, and nothing
+    /// downstream would notice.
+    #[test]
+    fn a_recovered_identity_batch_is_refused_rather_than_rendered_faceless() {
+        let request = identity_request(4);
+        let identity = frozen_identity();
+        let envelope = redacted_recovery_envelope(&request, "frozen", Some(&identity));
+        let value = serde_json::to_value(&envelope).unwrap();
+
+        let error = decode_recovery_envelope(&value)
+            .expect_err("a batch conditioning on a face must not silently resume without it")
+            .to_string();
+        assert!(error.contains("reference photograph"), "{error}");
+
+        // Ordinary batches are untouched by the rule.
+        let mut plain = identity_request(4);
+        plain.id_image = None;
+        plain.id_image_name = None;
+        plain.id_weight = None;
+        let ordinary = redacted_recovery_envelope(&plain, "frozen", None);
+        decode_recovery_envelope(&serde_json::to_value(&ordinary).unwrap())
+            .expect("a batch that never conditioned on a face still resumes");
+    }
+
+    /// A manifest carrying photograph bytes is not one this build wrote.
+    #[test]
+    fn a_recovery_envelope_that_retains_a_photograph_is_refused() {
+        let mut envelope = redacted_recovery_envelope(&identity_request(4), "frozen", None);
+        envelope.request.id_image = Some(b"raw bytes".to_vec());
+        let error = decode_recovery_envelope(&serde_json::to_value(&envelope).unwrap())
+            .expect_err("a manifest retaining a photograph must be refused")
+            .to_string();
+        assert!(error.contains("retains a reference photograph"), "{error}");
     }
 }

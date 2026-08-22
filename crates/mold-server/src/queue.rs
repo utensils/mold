@@ -1241,6 +1241,7 @@ pub(crate) fn build_sse_complete_event(
     });
     if let Some(ref audio) = response.audio {
         return SseCompleteEvent {
+            request_warnings: response.request_warnings.clone(),
             image: if include_media {
                 b64.encode(&audio.data)
             } else {
@@ -1277,6 +1278,7 @@ pub(crate) fn build_sse_complete_event(
     }
     if let Some(ref video) = response.video {
         SseCompleteEvent {
+            request_warnings: response.request_warnings.clone(),
             audio_sample_rate: None,
             audio_channels: None,
             audio_duration_ms: None,
@@ -1314,6 +1316,7 @@ pub(crate) fn build_sse_complete_event(
         }
     } else {
         SseCompleteEvent {
+            request_warnings: response.request_warnings.clone(),
             audio_sample_rate: None,
             audio_channels: None,
             audio_duration_ms: None,
@@ -5330,6 +5333,73 @@ mod tests {
             thumbnail_width: 640,
             thumbnail_height: 360,
         }
+    }
+
+    /// An SSE render has no response headers, so `x-mold-request-warning` —
+    /// the JSON path's whole delivery mechanism for advisories — reaches
+    /// nobody streaming. The identity extraction's "several faces, largest
+    /// used" is decided during admission and is exactly the kind of thing the
+    /// person who supplied the photograph needs, so the complete event carries
+    /// it too (#1223).
+    #[test]
+    fn build_sse_complete_event_carries_the_renders_request_warnings() {
+        let identity =
+            "3 faces were detected in the identity image; conditioning on the largest one";
+        let image = ImageData {
+            data: vec![0x89, 0x50, 0x4E, 0x47],
+            format: OutputFormat::Png,
+            width: 64,
+            height: 64,
+            index: 0,
+        };
+        let resp = mold_core::GenerateResponse {
+            request_warnings: vec![identity.to_string()],
+            audio: None,
+            images: vec![image.clone()],
+            video: None,
+            generation_time_ms: 1,
+            model: "flux-dev:q4".to_string(),
+            seed_used: 7,
+            gpu: Some(0),
+        };
+
+        let event = build_sse_complete_event(
+            &resp,
+            &image,
+            None,
+            None,
+            &SavedOutputNames::default(),
+            SseCompletionPayload::Full,
+        );
+        assert_eq!(event.request_warnings, vec![identity.to_string()]);
+
+        // A metadata-only payload drops the media, never the advisory: a
+        // client that asked for no bytes still asked for the truth.
+        let lean = build_sse_complete_event(
+            &resp,
+            &image,
+            None,
+            None,
+            &SavedOutputNames::default(),
+            SseCompletionPayload::MetadataOnly,
+        );
+        assert_eq!(lean.request_warnings, vec![identity.to_string()]);
+
+        // And an ordinary render says nothing, so the field serializes away.
+        let mut quiet = resp.clone();
+        quiet.request_warnings.clear();
+        let quiet = build_sse_complete_event(
+            &quiet,
+            &image,
+            None,
+            None,
+            &SavedOutputNames::default(),
+            SseCompletionPayload::Full,
+        );
+        assert!(quiet.request_warnings.is_empty());
+        assert!(!serde_json::to_string(&quiet)
+            .unwrap()
+            .contains("request_warnings"));
     }
 
     /// An audio-only response must arrive as audio, not as a degraded image:

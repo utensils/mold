@@ -212,6 +212,23 @@ Optional features can be added to the same build, for example
 `--features metal,preview,expand,discord,tui` if you also want terminal preview,
 local prompt expansion, the Discord bot, or the interactive TUI.
 
+`pulid` — [face identity](/guide/identity) — is one of those features, and it is
+the only one with a build-time dependency of its own: `protoc` must be on `PATH`,
+because `candle-onnx`'s build script drives `prost-build`. It is in the `nix
+develop` shell already; otherwise install it before building, since the build
+fails partway through without it.
+
+```bash
+brew install protobuf                       # macOS
+sudo apt-get install -y protobuf-compiler   # Debian/Ubuntu
+sudo pacman -S protobuf                     # Arch
+sudo dnf install protobuf-compiler          # Fedora
+```
+
+Every official binary — the release tarballs, the Nix packages, the AUR
+packages, and the desktop app — already ships with `pulid` on, so this only
+concerns building it yourself.
+
 `dev-fast` is the repo's local-iteration profile: it keeps debuginfo, enables
 incremental compilation, and uses thin LTO plus more codegen units so optimized
 builds stay much faster than the shipping `--release` profile.

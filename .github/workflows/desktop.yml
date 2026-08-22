@@ -196,10 +196,17 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: desktop/src-tauri
+      - name: Install protoc
+        # The `pulid` feature pulls in `candle-onnx`, whose build script shells
+        # out to `protoc`. It ships in every desktop recipe (#1223).
+        run: HOMEBREW_NO_AUTO_UPDATE=1 brew install protobuf
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
       # CPU-only: the metal feature is deliberately off in CI.
       - run: cargo test --manifest-path src-tauri/Cargo.toml
+      # `pulid` is in every shipped desktop recipe, so its lints must compile
+      # here rather than first on a release runner.
+      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --features pulid -- -D warnings
 
   desktop-linux:
     name: Linux (clippy, test; main AppImage)
@@ -224,8 +231,10 @@ jobs:
       - name: Install Tauri build dependencies
         run: |
           sudo apt-get update
+          # `protobuf-compiler` is for the `pulid` feature: `candle-onnx`'s
+          # build script drives `prost-build`, which shells out to `protoc`.
           sudo apt-get install -y \
-            build-essential clang lld nasm pkg-config \
+            build-essential clang lld nasm pkg-config protobuf-compiler \
             libwebkit2gtk-4.1-dev libxdo-dev libssl-dev \
             libayatana-appindicator3-dev librsvg2-dev
       - name: Install AppImage smoke dependencies
@@ -256,8 +265,9 @@ jobs:
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
       - run: cargo test --manifest-path src-tauri/Cargo.toml
+      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --features pulid -- -D warnings
       - if: github.event_name == 'push'
-        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --features h3-cuda -- -D warnings
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --features h3-cuda,pulid -- -D warnings
       - name: Prepare linuxdeploy and the CI driver stub
         if: github.event_name == 'push'
         shell: bash
@@ -273,7 +283,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          bunx tauri build --features h3-cuda --bundles appimage --ci -v
+          bunx tauri build --features h3-cuda,pulid --bundles appimage --ci -v
       - name: Verify bundled CUDA libraries
         if: github.event_name == 'push'
         shell: bash

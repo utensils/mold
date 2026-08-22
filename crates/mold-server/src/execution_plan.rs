@@ -59,7 +59,8 @@ pub enum ComponentRole {
     /// the generation device beside the transformer it conditions.
     IdentityAdapter,
     /// The EVA02-CLIP-L-14-336 vision tower PuLID encodes the reference face
-    /// with. Also a generation-device artifact.
+    /// with. CPU-only: the tower runs once at admission, on the host, and the
+    /// generation device never sees it.
     IdentityVisionEncoder,
     /// InsightFace SCRFD face detector. ONNX, and CPU-only in milestone 1.
     FaceDetector,
@@ -80,6 +81,12 @@ impl ComponentRole {
         )
     }
 
+    /// [`Self::is_host_only`] for a sibling module's test.
+    #[cfg(test)]
+    pub(crate) fn is_host_only_for_test(&self) -> bool {
+        self.is_host_only()
+    }
+
     fn is_host_only(&self) -> bool {
         matches!(
             self,
@@ -88,14 +95,22 @@ impl ComponentRole {
                 | Self::ClipGTokenizer
                 | Self::TextTokenizer
                 | Self::Lora(_)
-                // Milestone 1 runs both InsightFace models through an ONNX
-                // runtime on the CPU: they crop and embed the reference face
-                // once, before the denoise, and never touch the generation
-                // device. Their bytes are therefore host demand, never VRAM.
-                // The identity adapter and the EVA-CLIP vision tower are NOT
-                // host-only — those two load on the generation device.
+                // The whole identity EXTRACTION runs on the host, at
+                // admission, before the scheduler has leased a device (#1223):
+                // both InsightFace ONNX graphs, and the EVA02-CLIP tower that
+                // turns the aligned crop into the IDFormer's five hidden
+                // states. None of the three ever touches the generation
+                // device, so their bytes are host demand and never VRAM.
+                //
+                // `IdentityAdapter` is deliberately NOT in this list: its
+                // twenty cross-attention modules are the one identity artifact
+                // that IS resident on the generation device, for the whole
+                // denoise. It is also the file the IDFormer weights live in,
+                // which is why the extraction reads it on the host too — but
+                // the residency that matters for placement is the device one.
                 | Self::FaceDetector
                 | Self::FaceRecognizer
+                | Self::IdentityVisionEncoder
         )
     }
 }
@@ -1000,6 +1015,30 @@ pub struct PreparedExecutionInputs {
     /// admission, and pre-CUDA validation independent of endpoint call order
     /// and of `refresh_config()` erasing in-memory catalog entries.
     pub model_config_overlay: Option<Arc<mold_core::ModelConfig>>,
+    /// The face identity this parent request conditions on, extracted ONCE.
+    ///
+    /// It lives here rather than in `FrozenEngineConfig` for two reasons that
+    /// both matter. The engine is cached across requests while the identity is
+    /// per request, so putting it in the engine's construction config would
+    /// rebuild the engine for every new face; and this struct is exactly what
+    /// the batch parent clones into every child
+    /// (`batch_runtime::submit_child` → `BatchChildExecution::prepared_inputs`),
+    /// which is what makes "one extraction per parent, reused by every sibling
+    /// on every device" structural instead of a convention.
+    ///
+    /// `None` covers every request that does not condition on a face, an
+    /// explicit `id_weight` of 0, and a build without the `pulid` feature.
+    pub identity_embedding: Option<mold_core::identity::FrozenIdentityEmbedding>,
+    /// A caller-facing advisory the identity extraction produced — today only
+    /// "several faces were found, the largest was used".
+    ///
+    /// It rides here beside the embedding, and therefore into every batch
+    /// child that clones these inputs, because the person who handed mold a
+    /// group photograph is the one who needs to know which face it picked. The
+    /// worker copies it onto `GenerateResponse.request_warnings` at
+    /// completion, which is what puts it on `x-mold-request-warning` for the
+    /// JSON path and in the SSE complete event for the streaming one.
+    pub identity_warning: Option<String>,
     /// Payload-free authenticated authority for the private H3 ingress. This
     /// is only a transport seam; per-device admission evidence is attached by
     /// dependency preparation before generic execution planning may consume it.
@@ -6052,6 +6091,8 @@ mod tests {
         selected_config.t5_variant = Some("fp16".to_string());
         selected_config.selected_t5_path = Some(selected_t5.clone());
         let prepared = PreparedExecutionInputs {
+            identity_warning: None,
+            identity_embedding: None,
             authority_fingerprint: preparation_authority_fingerprint(
                 &config,
                 &request,
@@ -6138,6 +6179,8 @@ mod tests {
         let engine_config =
             mold_inference::FrozenEngineConfig::resolve(&request.model, &effective_config);
         let prepared = PreparedExecutionInputs {
+            identity_warning: None,
+            identity_embedding: None,
             authority_fingerprint: preparation_authority_fingerprint(
                 &effective_config,
                 &request,
@@ -6196,6 +6239,8 @@ mod tests {
         let paths = ModelPaths::resolve(&request.model, &config).unwrap();
         let engine_config = mold_inference::FrozenEngineConfig::resolve(&request.model, &config);
         let prepared = PreparedExecutionInputs {
+            identity_warning: None,
+            identity_embedding: None,
             authority_fingerprint: preparation_authority_fingerprint(
                 &config,
                 &request,
@@ -6662,6 +6707,8 @@ mod tests {
         let paths = ModelPaths::resolve(&request.model, &config).unwrap();
         let engine_config = mold_inference::FrozenEngineConfig::resolve(&request.model, &config);
         let prepared = PreparedExecutionInputs {
+            identity_warning: None,
+            identity_embedding: None,
             authority_fingerprint: preparation_authority_fingerprint(
                 &config,
                 &request,

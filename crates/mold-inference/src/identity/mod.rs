@@ -20,6 +20,7 @@
 
 pub mod align;
 pub mod arcface;
+pub mod extraction;
 pub mod onnx_graph;
 pub mod onnx_inventory;
 pub mod scrfd;

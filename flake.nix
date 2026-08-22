@@ -148,6 +148,11 @@
               pkgs.nasm
               pkgs.clang
               pkgs.llvmPackages.libclang.lib
+              # `candle-onnx`'s build script drives `prost-build`, which shells
+              # out to `protoc`. The `pulid` feature pulls that crate in and is
+              # now in every release recipe, so this is a build requirement
+              # rather than a devshell convenience.
+              pkgs.protobuf
             ]
             ++ lib.optionals isLinux [
               pkgs.gitMinimal
@@ -221,7 +226,17 @@
           # `h3-cuda` implies `cuda` so it replaces the device feature.
           desktopFeatureFor =
             computeCap: if isLinux then if computeCap == "89" then "h3-cuda" else "cuda" else "metal";
-          desktopFeature = desktopFeatureFor cudaComputeCap;
+          # The desktop app's complete feature recipe. `pulid` rides every
+          # desktop build for the same reason it rides every `mold` release
+          # recipe (#1223): the embedded This-device server advertises
+          # `supports_identity` only when the feature is compiled, and the
+          # identity photo well is gated on that advertisement, so a desktop
+          # build without it hides face identity permanently.
+          desktopFeaturesFor = computeCap: [
+            (desktopFeatureFor computeCap)
+            "pulid"
+          ];
+          desktopFeatures = lib.concatStringsSep "," (desktopFeaturesFor cudaComputeCap);
 
           gpuFeature =
             if isLinux then
@@ -234,21 +249,30 @@
           devProfile = "dev-fast";
 
           # Full shipping feature set used for release builds and feature coverage.
+          #
+          # `pulid` ships ON. The feature only decides whether the binary LINKS
+          # the PuLID stack; the capability stays unadvertised unless a
+          # qualified checkpoint is installed AND the four-file bundle has been
+          # pulled with the InsightFace licence explicitly accepted, so a user
+          # who never asks for a face never sees it. Shipping it off would make
+          # building from source the only route to identity conditioning, which
+          # is not a licence decision — the licence gate is the acceptance
+          # record, and it is enforced at download time.
           releaseFeaturesFor =
             computeCap:
             if isLinux then
               "${
                 if computeCap == "89" then "h3-cuda" else "cuda"
-              },preview,discord,expand,tui,webp,mp4,metrics,mdns"
+              },preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid"
             else if gpuFeature != "" then
-              "${gpuFeature},preview,discord,expand,tui,webp,mp4,metrics,mdns"
+              "${gpuFeature},preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid"
             else
-              "preview,discord,expand,tui,webp,mp4,metrics,mdns";
+              "preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid";
 
           # Shell completion generation only needs CLI shape, not GPU linkage.
           # Keep this CUDA-free so Linux sandbox builds can generate completion
           # scripts without loading the host-only NVIDIA driver library.
-          completionFeatures = "preview,discord,expand,tui,webp,mp4,metrics,mdns";
+          completionFeatures = "preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid";
 
           # Devshell defaults compile the full shipping feature set so that
           # `mold tui`, `mold discord`, WebP/MP4 output, Prometheus metrics,
@@ -530,7 +554,7 @@
                   "cudarc-0.19.8" = "sha256-ARnabIhBCzahrk/kVCt5084gftGDyCBme3jxg+mvkUA=";
                 };
               };
-              buildFeatures = [ (desktopFeatureFor computeCap) ];
+              buildFeatures = desktopFeaturesFor computeCap;
 
               MOLD_GIT_SHA = gitRev;
               MOLD_BUILD_DATE = gitDate;
@@ -544,6 +568,10 @@
                 pkgs.cargo-tauri.hook
                 pkgs.pkg-config
                 pkgs.nasm
+                # `candle-onnx`'s build script drives `prost-build`, which
+                # shells out to `protoc`. The `pulid` feature pulls that crate
+                # into the desktop graph too.
+                pkgs.protobuf
                 pkgs.makeBinaryWrapper
               ]
               ++ lib.optionals isLinux [
@@ -918,10 +946,9 @@
               pkgs.openssl
               pkgs.nasm
               # `candle-onnx`'s build script drives `prost-build`, which shells
-              # out to `protoc` to parse `onnx.proto3`. Only the `pulid`
-              # feature pulls that crate in, so this is devshell-only until a
-              # release recipe enables it — at which point the crane
-              # `nativeBuildInputs` need it too.
+              # out to `protoc` to parse `onnx.proto3`. The `pulid` feature
+              # pulls that crate in; it is in the shipping feature set, so the
+              # crane `nativeBuildInputs` carry it too.
               pkgs.protobuf
               pkgs.sccache
               pkgs.git
@@ -1364,7 +1391,7 @@
                   fi
                   bun install --frozen-lockfile
                   cd desktop
-                  cargo tauri dev --features ${desktopFeature} "$@"
+                  cargo tauri dev --features ${desktopFeatures} "$@"
                 '';
               }
               {
@@ -1386,7 +1413,7 @@
                         if [ -x /usr/bin/xdg-open ]; then
                           export XDG_CACHE_HOME="''${MOLD_DESKTOP_CACHE_HOME:-''${XDG_CACHE_HOME:-$HOME/.cache}/mold-desktop}"
                           ../scripts/prepare-desktop-linuxdeploy.sh
-                          cargo tauri build --features ${desktopFeature} --bundles appimage "$@"
+                          cargo tauri build --features ${desktopFeatures} --bundles appimage "$@"
                         else
                           # Tauri's downloaded linuxdeploy tools require an FHS
                           # host. NixOS has a first-class native package instead.
@@ -1395,7 +1422,7 @@
                         fi
                       ''
                     else
-                      ''cargo tauri build --features ${desktopFeature} --bundles app "$@"''
+                      ''cargo tauri build --features ${desktopFeatures} --bundles app "$@"''
                   }
                 '';
               }
@@ -1422,7 +1449,7 @@
                       done
                       bun install --frozen-lockfile
                       cd desktop
-                      cargo tauri build --features metal --bundles app,dmg "$@"
+                      cargo tauri build --features ${desktopFeatures} --bundles app,dmg "$@"
                       cd ..
                       app="desktop/src-tauri/target/release/bundle/macos/Mold.app"
                       dmg=$(find desktop/src-tauri/target/release/bundle/dmg -maxdepth 1 -name '*.dmg' -print -quit)
@@ -1444,6 +1471,9 @@
                   ${desktopSetup}
                   cargo fmt --manifest-path desktop/src-tauri/Cargo.toml -- --check
                   cargo clippy --manifest-path desktop/src-tauri/Cargo.toml --all-targets -- -D warnings
+                  # `pulid` is in every shipped desktop recipe, so its lints
+                  # belong in the gate rather than first on a release runner.
+                  cargo clippy --manifest-path desktop/src-tauri/Cargo.toml --all-targets --features pulid -- -D warnings
                   bun install --frozen-lockfile
                   cd desktop
                   bunx vue-tsc -b
