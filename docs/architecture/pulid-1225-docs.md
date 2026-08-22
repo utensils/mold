@@ -129,12 +129,17 @@ New bullet, to follow it:
 >   `encoders/legacy_pth.rs` reads the container while candle's own `Stack`
 >   still parses every pickle in it. Pinning a stranger's re-save was the
 >   alternative and is not one. **Both derived artifacts reach their loaders as
->   `AuthenticatedArtifact` — a descriptor resolved once through a `Dir`,
->   mapped, and pinned on that mapping — never as a `PathBuf`**, because
->   hashing a path and reopening it resolves one name twice and a rename needs
->   only the PARENT's write bit, which the model-storage rule lets a shared
->   root grant; the parser's production code names no path type at all, and a
->   structural test keeps it that way. The PuLID adapter stays a pathname load
+>   `AuthenticatedArtifact` — resolved once through a retained `Dir`
+>   descriptor, `fstat`ed against a pinned length, read once into a PRIVATE
+>   buffer under a `size + 1` bound, hashed there, and handed to the
+>   `VarBuilder` as those same bytes — never as a `PathBuf` and never as a
+>   shared mapping.** Both halves are load-bearing: a pathname resolves one
+>   name twice and a rename needs only the PARENT's write bit, while a mapping
+>   is a live view and collaborative `0664` weights mean another member may
+>   write the inode in place after the digest — descriptor retention proves
+>   which inode, never which bytes. The parser's production code names no path
+>   type at all and none of the four files in the chain names a mapping type;
+>   structural tests keep it that way. The PuLID adapter stays a pathname load
 >   on purpose: it is a manifest file verified at download, with no fresher
 >   authentication to discard. **RetinaFace stays unimplemented on evidence,
 >   not on deferral**: with the mask in place, swapping SCRFD's landmarks for

@@ -37,9 +37,9 @@
 //! device-independent 256 KiB value, which is what lets one extraction serve
 //! every sibling of a batch on every device it fans out to.
 //!
-//! Peak host RAM is the EVA tower (~609 MB f16 mmap'd, widened to f32
-//! activations) plus the two ONNX graphs (~278 MB) plus the IDFormer
-//! (~330 MB) — [`EXTRACTION_HOST_PEAK_BYTES`]. Admission charges the host-RAM
+//! Peak host RAM is the EVA tower — its 609 MB f16 file read into a private
+//! buffer, widened to ~1.2 GB of f32 weights, plus activations — beside the two
+//! ONNX graphs (~278 MB); see [`EXTRACTION_HOST_PEAK_BYTES`]. Admission charges the host-RAM
 //! ledger from the artifacts' own sizes through their `is_host_only` component
 //! roles rather than from this constant; the constant is the MEASUREMENT those
 //! charges are sized against, and the reason
@@ -70,19 +70,35 @@ use super::{IdentityError, IdentityExtractor};
 /// | --- | --- |
 /// | SCRFD `scrfd_10g_bnkps.onnx` graph, decoded | 17 MB |
 /// | ArcFace `glintr100.onnx` graph, decoded | 261 MB |
-/// | BiSeNet face parser, f32 mmap + f32 activations | 53 MB + ~200 MB |
-/// | EVA02-CLIP vision tower, f16 mmap + f32 activations | 609 MB + ~180 MB |
+/// | BiSeNet parser: verified buffer + f32 weights + activations | 53 + 53 + ~200 MB |
+/// | EVA02-CLIP tower: verified buffer + f32 weights + activations | 609 + 1218 + ~180 MB |
 /// | IDFormer (`pulid_encoder.*` of the adapter file), f32 | ~330 MB |
+///
+/// Two things about the tower row are easy to get wrong and both are load-bearing.
+///
+/// The **verified buffer** is the artifact's own bytes, read into private
+/// memory so the digest and the load observe the same bytes
+/// (`pickle_convert::AuthenticatedArtifact` — a shared mapping would let
+/// another writer edit the file after the check, and `0664` weights are
+/// supported storage). It is transient: each artifact is scoped to the build
+/// that consumes it and released the moment that module owns its tensors. It
+/// does NOT replace the row beside it — the buffer is f16 on disk and the
+/// weights are f32 in memory, so during construction both exist.
+///
+/// The **f32 weights** are 609 MB of f16 widened by the `VarBuilder`'s
+/// `DType::F32`. That widening always happened; the old table simply did not
+/// name it, which is why this figure went up without the code getting hungrier
+/// in any way a mapping would have avoided.
 ///
 /// The parser is dropped before the tower is built and the tower before the
 /// IDFormer, so the three large stages do not coexist; the peak is the tower
-/// stage. Rounded up to a round 1.4 GB so the figure is conservative rather
-/// than exact.
+/// stage, at ~2.1 GB. Rounded up to a round 2.4 GB so the figure is
+/// conservative rather than exact.
 ///
 /// Nothing reads this at runtime — the ledger charges the artifacts themselves
 /// — so it is the recorded measurement, kept beside the code that produces it
 /// and pinned by a test, rather than an input to a calculation.
-pub const EXTRACTION_HOST_PEAK_BYTES: u64 = 1_400_000_000;
+pub const EXTRACTION_HOST_PEAK_BYTES: u64 = 2_400_000_000;
 
 /// Host bytes each ADDITIONAL identity photograph adds to that peak.
 ///
@@ -341,21 +357,14 @@ pub(crate) fn compose_identity_token_sets_observed(
 ) -> Result<ComposedIdentityTokens> {
     anyhow::ensure!(!faces.is_empty(), "composing needs at least one face");
     let device = Device::Cpu;
-    // Everything before the tower's forward pass is one window, and the parse
-    // is subtracted out of it below rather than restarting the clock — a
-    // restart would silently drop whatever ran before the parse (materializing
-    // the tower, decoding the crop) from every stage's account.
-    let setup_started = std::time::Instant::now();
-    // Assigned exactly once, inside the block below, which runs
-    // unconditionally — so it is declared without a value rather than with a
-    // zero nobody ever reads.
-    let parse_elapsed;
-    // Both derived artifacts arrive as verified MAPPINGS, never as pathnames a
-    // loader would resolve a second time — see
-    // `pickle_convert::AuthenticatedArtifact`.
-    let vision = ensure_eva_clip_vision_safetensors(paths)
-        .context("materializing the EVA02-CLIP vision tower")?;
-
+    // Everything before the tower's first forward pass is one window, and the
+    // per-crop parse work is subtracted out of it below rather than restarting
+    // the clock — a restart would silently drop whatever ran before the parse
+    // (materializing the tower, decoding the crops) from every stage's
+    // account. `parse_elapsed` accumulates because `Parse` is emitted once per
+    // photograph.
+    let mut stage_started = std::time::Instant::now();
+    let mut parse_elapsed = std::time::Duration::ZERO;
     // `pipeline_flux.py:161-174`: every crop is parsed, masked, and only then
     // resized and normalized for the tower. Both models read the SAME `[0, 1]`
     // planar tensor and normalize it differently — ImageNet for the parser,
@@ -367,7 +376,6 @@ pub(crate) fn compose_identity_token_sets_observed(
     // the parser is a second network, and parsing everything first lets it be
     // dropped before the tower is built. The three large halves still never
     // coexist.
-    let mut parse_elapsed = std::time::Duration::ZERO;
     let prepared: Vec<Tensor> = {
         // The derived artifact arrives as verified private BYTES — never a
         // pathname a loader would resolve a second time, never a shared mapping
@@ -435,7 +443,7 @@ pub(crate) fn compose_identity_token_sets_observed(
         }
         outputs
     };
-    let mut stage_started = std::time::Instant::now();
+    stage_started = std::time::Instant::now();
 
     // SAFETY: the ordinary mold safetensors mmap contract — the file must not
     // be mutated while the IDFormer holds it.
@@ -619,12 +627,16 @@ mod tests {
     fn the_charged_host_peak_covers_every_stage_of_the_extraction() {
         const SCRFD: u64 = 16_923_827;
         const GLINTR100: u64 = 260_665_334;
-        // The derived vision tower, f16.
-        const TOWER: u64 = 609 * 1_000_000;
+        // The derived vision tower's own bytes, read into a private buffer so
+        // the digest and the load see the same ones. Transient, but alive
+        // while the weights below are being materialized from it.
+        const TOWER_VERIFIED_BYTES: u64 = crate::encoders::pickle_convert::EVA_DERIVED.size_bytes;
+        // The same weights as f32: the `VarBuilder` widens the f16 file.
+        const TOWER_WEIGHTS: u64 = 2 * TOWER_VERIFIED_BYTES;
         // f32 activations for 577 tokens x 1024 across 24 blocks, plus the
         // five retained hidden states.
         const TOWER_ACTIVATIONS: u64 = 180 * 1_000_000;
-        let peak = SCRFD + GLINTR100 + TOWER + TOWER_ACTIVATIONS;
+        let peak = SCRFD + GLINTR100 + TOWER_VERIFIED_BYTES + TOWER_WEIGHTS + TOWER_ACTIVATIONS;
         assert!(
             EXTRACTION_HOST_PEAK_BYTES >= peak,
             "the charged peak {EXTRACTION_HOST_PEAK_BYTES} must cover the measured {peak}"

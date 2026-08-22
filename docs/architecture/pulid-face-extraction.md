@@ -537,38 +537,56 @@ into an `i64` with `<< (i * 8)`, which panics in a debug build at `i = 8`. The
 reader compares the fixed 21-byte preamble as bytes instead, which both avoids
 that and is stricter than reading the value.
 
-### The derived artifacts reach their loaders as mappings, not as names
+### The derived artifacts reach their loaders as verified bytes
 
 The two ONNX graphs are authenticated by `AuthenticatedBytes` — one bounded
 read, a digest of that buffer, no way to obtain a digest and a buffer from
 different calls. The two DERIVED artifacts (the vision tower and the parser)
-need the same property and cannot use the same mechanism, because 609 MB is
-not a thing to hold twice.
+get exactly the same treatment, in `pickle_convert::AuthenticatedArtifact`, and
+review made it take two passes to get there. Both attacks it closes are worth
+naming, because the first fix only closed one of them.
 
-`pickle_convert::AuthenticatedArtifact` is that property for a file: the final
-component is resolved exactly once, through a `Dir` descriptor
-(`openat` + `O_NOFOLLOW`), the descriptor is mapped, and the pin is checked
-against **that mapping**. `ensure_eva_clip_vision_safetensors` and
-`ensure_bisenet_parser_safetensors` hand out that value and never a `PathBuf`,
-and both loaders — `EvaClipVisionTower::from_authenticated` and
-`BiSeNetParser::from_authenticated` — read it through
-`VarBuilder::from_slice_safetensors`.
+**Rename.** Hashing a path and then reopening it for
+`from_mmaped_safetensors` resolves one name twice, and **renaming an entry
+needs write permission on the containing directory, not on the file** —
+exactly the grant `CLAUDE.md`'s model-storage rule says a shared model root may
+legitimately hand out. A second member could let the digest check pass and then
+swap the file the loader opened. Resolving the final component exactly once,
+through a retained `Dir` descriptor (`openat` + `O_NOFOLLOW`), closes it.
 
-The gap this closes is specific and was found in review. Hashing a path and
-then reopening it for `from_mmaped_safetensors` resolves one name twice, and
-**renaming an entry needs write permission on the containing directory, not on
-the file** — exactly the grant `CLAUDE.md`'s model-storage rule says a shared
-model root may legitimately hand out. A second member could therefore let the
-digest check pass and then swap the file the loader opened. Mapping the
-retained descriptor makes that unrepresentable: after the rename the mapping
-still refers to the inode that was hashed.
+**In-place write.** That was the first fix, and it was not enough. The same
+rule supports collaborative `0664` weights, so another member may hold the file
+open for writing — and a shared mapping is a live view, so it would show the
+loader edits landing AFTER the digest was computed. Descriptor retention and a
+`(dev, ino)` recheck prove which INODE, never which BYTES. So the artifact is
+`fstat`ed against a pinned length, read once into a private `Vec` under a
+`size + 1` bound (growth is refused, not truncated), hashed there, and that
+buffer — not the file — is what
+`VarBuilder::from_slice_safetensors` reads.
 
-`a_renamed_artifact_cannot_be_handed_to_a_loader` performs that rename and
-asserts both halves — a handle already held still reads what it verified, and a
-fresh open of the same name is refused on its digest.
-`the_parser_cannot_be_loaded_from_a_bare_path` is the structural guard, in the
-style of `onnx_graph`'s: the parser's production code never names a path type
-at all, so no constructor can accept one.
+`ensure_eva_clip_vision_safetensors` and `ensure_bisenet_parser_safetensors`
+hand out that value and never a `PathBuf`, and both loaders —
+`EvaClipVisionTower::from_authenticated` and
+`BiSeNetParser::from_authenticated` — take it. The length is pinned beside the
+digest in one `PinnedDerived`, for the same reason `PinnedArtifact` pairs them:
+a caller cannot mix one artifact's digest with another's length, and the read
+can be bounded before a byte enters memory.
+
+Three tests hold the shape. `a_renamed_artifact_cannot_be_handed_to_a_loader`
+performs the rename; `an_in_place_write_cannot_reach_a_loader_after_the_digest`
+edits the same inode to the same length and asserts the handle still carries
+what it verified; `a_wrong_length_is_refused_before_the_bytes_are_read` proves
+the bound runs first. `the_parser_cannot_be_loaded_from_a_bare_path` is the
+structural guard, in the style of `onnx_graph`'s — the parser's production code
+never names a path type at all — and its sibling asserts no mapping type is
+reachable from any of the four files in the chain.
+
+The cost is honest and charged: a transient 609 MB (tower) or 53 MB (parser)
+copy, scoped to the build that consumes it and released as soon as that module
+owns its tensors. `EXTRACTION_HOST_PEAK_BYTES` went from 1.4 GB to 2.4 GB when
+this landed, but only the buffer is new — the same table now also names the f32
+widening of the f16 tower, ~1.2 GB that the `VarBuilder`'s `DType::F32` always
+performed and the old figure simply never counted.
 
 One load in the extraction is deliberately still by pathname — the PuLID
 adapter, in `compose_identity_tokens`. It is a MANIFEST file, verified when it

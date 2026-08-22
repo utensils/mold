@@ -789,8 +789,7 @@ mod tests {
 
     fn parser() -> Option<BiSeNetParser> {
         use crate::encoders::pickle_convert::{
-            convert_bisenet_parser, open_authenticated, BISENET_DERIVED_FILENAME,
-            BISENET_DERIVED_SHA256,
+            convert_bisenet_parser, open_authenticated, BISENET_DERIVED, BISENET_DERIVED_FILENAME,
         };
         std::env::var_os("MOLD_TEST_PULID_ASSETS")?;
         let source = crate::pulid_fixtures::pulid_asset("parsing_bisenet.pth");
@@ -799,7 +798,7 @@ mod tests {
         convert_bisenet_parser(&source, &destination).unwrap();
         // The same authenticated handle production uses, so the tests exercise
         // the loader that ships rather than a shortcut around it.
-        let artifact = open_authenticated(&destination, BISENET_DERIVED_SHA256).unwrap();
+        let artifact = open_authenticated(&destination, BISENET_DERIVED).unwrap();
         Some(BiSeNetParser::from_authenticated(&artifact, &Device::Cpu).unwrap())
     }
 

@@ -178,11 +178,6 @@ libc = "0.2"
 exr = "1.74"
 base64 = "0.22"
 fs2 = "0.4"
-# The derived PuLID artifacts are mapped from a RETAINED descriptor rather than
-# reopened by pathname, so the bytes that were hashed are the bytes that are
-# used (`encoders::pickle_convert::AuthenticatedArtifact`). candle already
-# depends on this exact version, so it adds nothing to the Nix vendor set.
-memmap2 = "0.9"
 mp4-rs = { package = "mp4", version = "0.14" }
 openh264 = { version = "0.9", features = ["source"] }
 png = "0.18"

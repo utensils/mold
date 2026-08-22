@@ -38,11 +38,13 @@
 //!    the hash and the publish. See [`publish`] and [`super::secure_dir`].
 //! 3. **Reuse is authenticated by a compiled-in pin, not by the sidecar.**
 //!    See [`EVA_DERIVED_SHA256`] and [`BISENET_DERIVED_SHA256`]. And the pin is
-//!    checked on the bytes a consumer will actually read, not on a pathname it
-//!    will reopen: [`AuthenticatedArtifact`] maps the retained descriptor once
-//!    and hashes THAT MAPPING, so a rename in a group-writable model root
-//!    cannot substitute a different file between the check and the load. Every
-//!    loader downstream takes that handle; none of them takes a path.
+//!    checked on the bytes a consumer will actually read:
+//!    [`AuthenticatedArtifact`] reads the retained descriptor ONCE into private
+//!    memory, hashes that buffer, and hands the buffer itself to the loader, so
+//!    neither a rename nor an in-place write can put different bytes in front
+//!    of a `VarBuilder` than the ones that satisfied the pin. Every loader
+//!    downstream takes that handle; none of them takes a path, and none of them
+//!    sees a shared mapping.
 
 // The PuLID pipeline that consumes this module lands with the FLUX
 // integration (milestone "PuLID-FLUX: functional"); issue #1229 delivers the
@@ -110,6 +112,29 @@ pub(crate) const BISENET_SOURCE_SHA256: &str =
 /// re-derives it from the real checkpoint.
 pub(crate) const BISENET_DERIVED_SHA256: &str =
     "e62470d5595acee3550138cb2969bc1eee63bcbefba4dd2a624f1f1951ff7b1b";
+
+/// A derived artifact's compiled-in identity: its digest AND its exact byte
+/// count, carried together for the same reason `PinnedArtifact` carries both
+/// in `identity/onnx_graph.rs` — so a caller cannot pair one artifact's digest
+/// with another's length, and so the read that produces the digest can be
+/// bounded before a single byte is pulled into memory.
+#[derive(Clone, Copy)]
+pub(crate) struct PinnedDerived {
+    pub sha256: &'static str,
+    pub size_bytes: u64,
+}
+
+/// The derived EVA02-CLIP vision tower, f16, 514 tensors.
+pub(crate) const EVA_DERIVED: PinnedDerived = PinnedDerived {
+    sha256: EVA_DERIVED_SHA256,
+    size_bytes: 609_062_496,
+};
+
+/// The derived BiSeNet face parser, f32, 191 tensors.
+pub(crate) const BISENET_DERIVED: PinnedDerived = PinnedDerived {
+    sha256: BISENET_DERIVED_SHA256,
+    size_bytes: 53_271_152,
+};
 
 /// Tensors to keep: the vision tower, and nothing else.
 const VISION_PREFIX: &str = "visual.";
@@ -724,12 +749,13 @@ fn ensure_derived(
     conversion: &PickleConversion,
     source: &Path,
     destination: &Path,
-    derived_sha256: &'static str,
+    pin: PinnedDerived,
 ) -> Result<AuthenticatedArtifact> {
-    if let Ok(artifact) = open_authenticated(destination, derived_sha256) {
+    if let Ok(artifact) = open_authenticated(destination, pin) {
         return Ok(artifact);
     }
     let derived = convert_pickle(conversion, source, destination)?;
+    let derived_sha256 = pin.sha256;
     // A fresh conversion that does not reproduce the pin means the pin and the
     // converter have diverged. Say so once, loudly, instead of silently
     // reconverting on every later call.
@@ -739,10 +765,10 @@ fn ensure_derived(
          {derived_sha256}",
         source.display()
     );
-    // Re-opened rather than trusted: `convert_pickle` returns the digest of
-    // what it published, and this is the handle a loader will read. They agree
-    // in the ordinary case and must not be assumed to.
-    open_authenticated(destination, derived_sha256)
+    // Re-read rather than trusted: `convert_pickle` returns the digest of what
+    // it published, and this is the buffer a loader will read. They agree in
+    // the ordinary case and must not be assumed to.
+    open_authenticated(destination, pin)
 }
 
 /// The EVA02-CLIP vision tower: keep `visual.*`, drop the duplicated per-block
@@ -842,31 +868,33 @@ pub(crate) fn derived_parser_path(paths: &PulidPaths) -> PathBuf {
         .with_file_name(BISENET_DERIVED_FILENAME)
 }
 
-/// A derived artifact, opened through its parent directory's descriptor,
-/// mapped once, and authenticated on the bytes of that same mapping.
+/// A derived artifact, resolved through its parent directory's descriptor,
+/// read ONCE into private memory, and authenticated on those exact bytes.
 ///
-/// This is [`super::super::identity::onnx_graph`]'s `AuthenticatedBytes`
-/// argument applied to a file too large to hold twice. Hashing a path and then
-/// reopening it for the loader is two resolutions of one name, and renaming an
-/// entry needs write permission on the PARENT — which `CLAUDE.md`'s
-/// model-storage rule explicitly allows a shared model root to grant. So the
-/// name is resolved exactly once, through a `Dir` descriptor, and the digest is
-/// computed over the mapping the `VarBuilder` will read. There is deliberately
-/// no constructor that takes bytes and a digest separately: the two cannot come
-/// from different files because they cannot come from different calls.
+/// This is `identity/onnx_graph.rs`'s `AuthenticatedBytes` for a file large
+/// enough that the obvious shortcut is tempting. Two attacks are in scope, and
+/// only one of them is about names:
 ///
-/// # Safety contract
+/// * **Rename.** Renaming an entry needs write permission on the PARENT, which
+///   `CLAUDE.md`'s model-storage rule explicitly lets a shared model root
+///   grant. Hashing a path and then reopening it resolves one name twice, so a
+///   second member could satisfy the pin and then swap the file the loader
+///   opens. Resolving once, through a retained `Dir` descriptor, closes it.
+/// * **In-place write.** The same rule supports collaborative `0664` weights,
+///   so another member may hold the file open for writing. A shared `mmap`
+///   would show them those edits AFTER the digest was computed — descriptor
+///   retention proves which inode, never which bytes. So the bytes are copied
+///   into a private `Vec` and the digest is taken of that copy, which is the
+///   buffer the `VarBuilder` then reads. There is deliberately no constructor
+///   that takes bytes and a digest separately: the two cannot come from
+///   different files because they cannot come from different calls.
 ///
-/// The mapping is shared and read-only, so the file must still not be MUTATED
-/// IN PLACE while it is held — the same contract every mold safetensors loader
-/// carries. In-place mutation needs write permission on the file itself, which
-/// is a different (and narrower) grant than the rename this type exists to
-/// stop.
+/// The cost is a transient private copy — 609 MB for the tower, 53 MB for the
+/// parser — charged in [`crate::identity::extraction::EXTRACTION_HOST_PEAK_BYTES`]
+/// and released as soon as the module is built. Mapping instead would save it
+/// and would not be authentication.
 pub(crate) struct AuthenticatedArtifact {
-    map: memmap2::Mmap,
-    /// Retained so the mapping's inode stays open and so a diagnostic can name
-    /// what it verified. Never re-resolved.
-    _file: File,
+    bytes: Vec<u8>,
     display_path: PathBuf,
     sha256: String,
 }
@@ -874,7 +902,7 @@ pub(crate) struct AuthenticatedArtifact {
 impl AuthenticatedArtifact {
     /// The verified bytes. Hand these to `VarBuilder::from_slice_safetensors`.
     pub(crate) fn bytes(&self) -> &[u8] {
-        &self.map
+        &self.bytes
     }
 
     /// Where the artifact was found, for messages only.
@@ -893,22 +921,31 @@ impl std::fmt::Debug for AuthenticatedArtifact {
         f.debug_struct("AuthenticatedArtifact")
             .field("path", &self.display_path)
             .field("sha256", &self.sha256)
-            .field("bytes", &self.map.len())
+            .field("bytes", &self.bytes.len())
             .finish()
     }
 }
 
-/// Open `destination` and prove it is the artifact `expected_sha256` names.
+/// Open `destination` and prove it is the artifact `pin` names.
 ///
 /// Resolves the final component through the parent's descriptor (`openat`,
-/// `O_NOFOLLOW`), maps it, hashes the mapping, and finally re-reads the name
-/// through that same parent descriptor to confirm it still refers to the inode
-/// that was mapped. That last step proves nothing the hash has not already
-/// proved — it is a diagnostic, so a concurrent republication is reported as
-/// itself rather than as a stale load.
+/// `O_NOFOLLOW`), `fstat`s that descriptor, refuses any length but the pinned
+/// one, and reads it in a single bounded pass into a private buffer. The bound
+/// is `size_bytes + 1`, so a file that GREW between the stat and the read
+/// overshoots and is refused rather than being truncated to a prefix that
+/// happens to parse — and the buffer is reserved at that same figure, because
+/// `read_to_end` grows geometrically and one sentinel byte would otherwise
+/// double a 609 MB allocation on exactly the concurrent-growth race the bound
+/// exists to survive.
+///
+/// A final re-read of the name through the same parent descriptor confirms it
+/// still refers to the inode that was read. That proves nothing the digest has
+/// not already proved — the bytes are private by then — so it is a diagnostic:
+/// a concurrent republication is reported as itself rather than as a stale
+/// load.
 pub(crate) fn open_authenticated(
     destination: &Path,
-    expected_sha256: &str,
+    pin: PinnedDerived,
 ) -> Result<AuthenticatedArtifact> {
     let parent = destination
         .parent()
@@ -921,32 +958,52 @@ pub(crate) fn open_authenticated(
         .context("a derived artifact's name must be valid UTF-8")?;
     let dir = Dir::open(parent)?;
 
-    let file = dir.open_file(name)?;
-    let mapped_identity = identity(&file)?;
-    // SAFETY: see `AuthenticatedArtifact`'s safety contract. The descriptor is
-    // owned by this call and retained by the value returned.
-    let map = unsafe { memmap2::Mmap::map(&file) }
-        .with_context(|| format!("failed to map {}", destination.display()))?;
-
-    let sha256 = {
-        let mut hasher = Sha256::new();
-        hasher.update(&map[..]);
-        format!("{:x}", hasher.finalize())
-    };
+    let mut file = dir.open_file(name)?;
+    let read_identity = identity(&file)?;
+    // `fstat` on the retained descriptor, never a `stat` on the path: the
+    // point of holding the descriptor is that this describes the same file the
+    // bytes come from.
+    let reported = file
+        .metadata()
+        .with_context(|| format!("failed to stat {}", destination.display()))?
+        .len();
     ensure!(
-        sha256 == expected_sha256,
-        "{} hashes to {sha256}, but this build pins {expected_sha256}",
-        destination.display()
+        reported == pin.size_bytes,
+        "{} is {reported} bytes, but this build pins {}",
+        destination.display(),
+        pin.size_bytes
+    );
+
+    let bounded = pin.size_bytes.saturating_add(1);
+    let capacity = usize::try_from(bounded)
+        .with_context(|| format!("{} does not fit in memory here", destination.display()))?;
+    let mut bytes = Vec::with_capacity(capacity);
+    Read::by_ref(&mut file)
+        .take(bounded)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("failed to read {}", destination.display()))?;
+    ensure!(
+        bytes.len() as u64 == pin.size_bytes,
+        "{} changed length while it was being read ({} bytes)",
+        destination.display(),
+        bytes.len()
+    );
+
+    let sha256 = format!("{:x}", Sha256::digest(&bytes));
+    ensure!(
+        sha256 == pin.sha256,
+        "{} hashes to {sha256}, but this build pins {}",
+        destination.display(),
+        pin.sha256
     );
     ensure!(
-        identity(&dir.open_file(name)?)? == mapped_identity,
+        identity(&dir.open_file(name)?)? == read_identity,
         "{} was replaced while it was being verified",
         destination.display()
     );
 
     Ok(AuthenticatedArtifact {
-        map,
-        _file: file,
+        bytes,
         display_path: destination.to_path_buf(),
         sha256,
     })
@@ -979,7 +1036,7 @@ pub(crate) fn ensure_eva_clip_vision_safetensors(
         &EVA_CLIP_VISION,
         &paths.vision_encoder_source,
         &derived_vision_path(paths),
-        EVA_DERIVED_SHA256,
+        EVA_DERIVED,
     )
 }
 
@@ -994,7 +1051,7 @@ pub(crate) fn ensure_bisenet_parser_safetensors(
         &BISENET_PARSER,
         &paths.face_parser_source,
         &derived_parser_path(paths),
-        BISENET_DERIVED_SHA256,
+        BISENET_DERIVED,
     )
 }
 
@@ -1652,7 +1709,7 @@ mod tests {
         std::fs::write(&destination, &tampered).unwrap();
         write_sidecar(&destination, EVA_SOURCE_SHA256, EVA_DERIVED_SHA256).unwrap();
         assert!(!artifact_is_authentic(&destination, EVA_DERIVED_SHA256));
-        assert!(open_authenticated(&destination, EVA_DERIVED_SHA256).is_err());
+        assert!(open_authenticated(&destination, EVA_DERIVED).is_err());
 
         let artifact = ensure_eva_clip_vision_safetensors(&paths).unwrap();
         assert_eq!(
@@ -1662,34 +1719,113 @@ mod tests {
         );
     }
 
-    /// The handle is the authentication, so a substituted file cannot reach a
-    /// loader: a rename that lands a different artifact at the same name is
-    /// invisible to a mapping already made, and a fresh open of that name is
-    /// refused on its digest.
+    /// Build a pin for a file this test just wrote.
+    ///
+    /// Production pins are compiled in; a test has to compute one, and
+    /// `PinnedDerived` deliberately carries a `&'static str` so a production
+    /// caller cannot assemble one from runtime data.
+    fn pin_for(path: &Path) -> PinnedDerived {
+        let bytes = std::fs::read(path).unwrap();
+        PinnedDerived {
+            sha256: Box::leak(format!("{:x}", Sha256::digest(&bytes)).into_boxed_str()),
+            size_bytes: bytes.len() as u64,
+        }
+    }
+
+    /// The name is resolved once, so a rename cannot substitute an artifact
+    /// between the check and the load.
     #[test]
     fn a_renamed_artifact_cannot_be_handed_to_a_loader() {
         let dir = tempfile::tempdir().unwrap();
         let destination = dir.path().join("derived.safetensors");
-        let tensors = vec![raw("a", &[1.0, 2.0], &[2])];
-        let digest = write_atomically(&tensors, &destination).unwrap();
+        write_atomically(&[raw("a", &[1.0, 2.0], &[2])], &destination).unwrap();
+        let pin = pin_for(&destination);
 
-        let artifact = open_authenticated(&destination, &digest).unwrap();
-        let mapped = artifact.bytes().to_vec();
+        let artifact = open_authenticated(&destination, pin).unwrap();
+        let verified = artifact.bytes().to_vec();
 
-        // The attack the type exists to stop: replace the ENTRY, which needs
-        // only write permission on the directory.
+        // The attack: replace the ENTRY, which needs only write permission on
+        // the directory — a grant the model-storage rule explicitly allows.
         let impostor = dir.path().join("impostor.safetensors");
-        let other = vec![raw("a", &[9.0, 9.0], &[2])];
-        write_atomically(&other, &impostor).unwrap();
+        write_atomically(&[raw("a", &[9.0, 9.0], &[2])], &impostor).unwrap();
         std::fs::rename(&impostor, &destination).unwrap();
 
-        // A handle already held still reads the bytes it verified...
-        assert_eq!(artifact.bytes(), mapped);
+        // A handle already held still carries the bytes it verified...
+        assert_eq!(artifact.bytes(), verified);
         // ...and a fresh open of the same name is refused rather than loaded.
-        let error = open_authenticated(&destination, &digest)
+        let error = open_authenticated(&destination, pin)
             .unwrap_err()
             .to_string();
         assert!(error.contains("but this build pins"), "{error}");
+    }
+
+    /// The other half, and the reason the bytes are COPIED rather than mapped:
+    /// a shared mapping would show a concurrent in-place write to the loader
+    /// after the digest was taken. `0664` weights are supported storage, so
+    /// this is a write another member is permitted to make.
+    #[test]
+    fn an_in_place_write_cannot_reach_a_loader_after_the_digest() {
+        use std::io::Seek;
+
+        let dir = tempfile::tempdir().unwrap();
+        let destination = dir.path().join("derived.safetensors");
+        write_atomically(&[raw("a", &[1.0, 2.0], &[2])], &destination).unwrap();
+        let pin = pin_for(&destination);
+
+        let artifact = open_authenticated(&destination, pin).unwrap();
+        let verified = artifact.bytes().to_vec();
+
+        // Same inode, same name, same length — only the bytes change. Nothing
+        // about a descriptor or a `(dev, ino)` recheck can see this.
+        {
+            let mut writer = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&destination)
+                .unwrap();
+            let last = pin.size_bytes - 1;
+            writer.seek(SeekFrom::Start(last)).unwrap();
+            let original = verified[last as usize];
+            writer.write_all(&[original ^ 0xff]).unwrap();
+            writer.sync_all().unwrap();
+        }
+        assert_eq!(
+            std::fs::metadata(&destination).unwrap().len(),
+            pin.size_bytes,
+            "the fixture must change bytes, not length"
+        );
+
+        // The handle holds a private copy, so what a loader reads is still
+        // exactly what satisfied the pin.
+        assert_eq!(artifact.bytes(), verified);
+        assert_ne!(artifact.bytes(), &std::fs::read(&destination).unwrap()[..]);
+        // And the next load refuses the tampered file outright.
+        let error = open_authenticated(&destination, pin)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("but this build pins"), "{error}");
+    }
+
+    /// The length is checked against the pin BEFORE the read, so an oversized
+    /// replacement is refused without being pulled into memory — the argument
+    /// `AuthenticatedBytes` makes in `onnx_graph`, for a file twenty times
+    /// larger.
+    #[test]
+    fn a_wrong_length_is_refused_before_the_bytes_are_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let destination = dir.path().join("derived.safetensors");
+        write_atomically(&[raw("a", &[1.0, 2.0], &[2])], &destination).unwrap();
+        let honest = pin_for(&destination);
+
+        // The digest is right and the length is not: a load that read first
+        // and checked afterwards would accept this.
+        let lying = PinnedDerived {
+            sha256: honest.sha256,
+            size_bytes: honest.size_bytes + 4096,
+        };
+        let error = open_authenticated(&destination, lying)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("bytes, but this build pins"), "{error}");
     }
 
     /// Structural guard, matching `onnx_graph`'s. The type system already
@@ -1714,7 +1850,29 @@ mod tests {
         let back_to_a_name = concat!("display", "_path");
         assert!(
             !code.contains(back_to_a_name),
-            "a derived artifact must reach its loader as a mapping, not as a name"
+            "a derived artifact must reach its loader as bytes, not as a name"
         );
+
+        // And nothing in the chain may reintroduce a shared mapping: a mapping
+        // is a live view of a file other members may write, which is the whole
+        // reason `AuthenticatedArtifact` owns a private `Vec`.
+        // Split so this test's own source is not what the scan finds.
+        let mapping = concat!("Mm", "ap");
+        for (label, source) in [
+            ("pickle_convert", include_str!("pickle_convert.rs")),
+            ("extraction", include_str!("../identity/extraction.rs")),
+            ("parsing", include_str!("../identity/parsing.rs")),
+            ("eva_clip_vision", include_str!("eva_clip_vision.rs")),
+        ] {
+            let text = source
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                !text.contains(mapping),
+                "{label} must not map a derived artifact; it is read into private memory"
+            );
+        }
     }
 }
