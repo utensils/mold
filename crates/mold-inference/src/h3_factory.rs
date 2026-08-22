@@ -4620,7 +4620,14 @@ impl FrozenH3FactoryAuthority {
         self.validate_frozen()?;
         let request_contract = contract::capability_contract_for_model(model)
             .ok_or_else(|| anyhow!("{model:?} has no MiniMax H3 capability contract"))?;
-        if !media_model_matches_h3_authority(model, self)
+        // Internal preparation authorities name the base engine partition,
+        // while the final engine constructor carries the full reviewed media
+        // identity (including its Turbo tier). This seam accepts either exact
+        // representation; production dispatch below accepts only the latter
+        // and proves the adapter tier with `media_model_matches_h3_authority`.
+        let model_matches = request_contract.canonical_model == self.canonical_model()
+            || media_model_matches_h3_authority(model, self);
+        if !model_matches
             || request_contract.task != self.task()
             || gpu_ordinal != self.device_ordinal
             || offload != self.block_offload
