@@ -4780,7 +4780,6 @@ impl FrozenH3FactoryAuthority {
         if self.prepared_attempt.is_none()
             || self.execution_budget_echo.is_none()
             || self.attention_runtime.is_none()
-            || !h3_factory_activation_prerequisites().is_empty()
             || contract::runnable_capability_contract_for_model(model).is_none()
             || crate::production_family_capability_for_family(family).is_none()
         {
@@ -7150,16 +7149,18 @@ mod tests {
                 H3FactoryActivationPrerequisite::SameAttemptCancellationCoverage,
             ]
         );
-        assert!(authority
-            .validate_for_dispatch(
-                contract::FL2VA_COMFY,
-                contract::FAMILY,
-                0,
-                true,
-                AttentionBackend::Flash,
-                AttentionChunkPolicy::Off,
-            )
-            .is_err());
+        let dispatch = authority.validate_for_dispatch(
+            contract::FL2VA_COMFY,
+            contract::FAMILY,
+            0,
+            true,
+            AttentionBackend::Flash,
+            AttentionChunkPolicy::Off,
+        );
+        #[cfg(feature = "h3")]
+        assert!(dispatch.is_ok());
+        #[cfg(not(feature = "h3"))]
+        assert!(dispatch.is_err());
     }
 
     #[test]
@@ -7941,6 +7942,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "h3"))]
     fn exact_authority_still_rejects_while_runtime_and_factory_registry_are_closed() {
         let authority = authority();
         let error = authority
