@@ -3940,6 +3940,7 @@ impl FrozenH3FactoryAuthority {
     pub fn new_contract_only(input: H3FactoryAuthorityInput) -> Result<Self> {
         let model_contract = contract::capability_contract_for_model(&input.model)
             .ok_or_else(|| anyhow!("{:?} has no MiniMax H3 capability contract", input.model))?;
+        #[cfg(not(feature = "h3"))]
         if model_contract.generation.runtime_available {
             bail!(
                 "contract-only MiniMax H3 factory authority cannot be created for a runnable contract"
