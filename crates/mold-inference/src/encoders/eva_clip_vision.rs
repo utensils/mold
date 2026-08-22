@@ -360,6 +360,30 @@ pub(crate) struct EvaClipVisionTower {
 }
 
 impl EvaClipVisionTower {
+    /// Build from an artifact [`super::pickle_convert`] has already
+    /// authenticated.
+    ///
+    /// The production entry point, and deliberately not a path: see
+    /// [`super::pickle_convert::AuthenticatedArtifact`] for why a loader that
+    /// hashed a pathname and then reopened it would be re-resolving a name a
+    /// shared model root lets another member rename. [`Self::new`] stays for
+    /// the golden test, which builds a `VarBuilder` over a file it converted
+    /// itself moments earlier inside its own temporary directory.
+    pub(crate) fn from_authenticated(
+        artifact: &super::pickle_convert::AuthenticatedArtifact,
+        device: &Device,
+    ) -> Result<Self> {
+        let vb =
+            VarBuilder::from_slice_safetensors(artifact.bytes(), candle_core::DType::F32, device)
+                .with_context(|| {
+                format!(
+                    "reading the vision tower {}",
+                    artifact.display_path().display()
+                )
+            })?;
+        Self::new(vb, device)
+    }
+
     pub(crate) fn new(vb: VarBuilder, device: &Device) -> Result<Self> {
         let dtype = vb.dtype();
         let patch_embed = Conv2d::new(

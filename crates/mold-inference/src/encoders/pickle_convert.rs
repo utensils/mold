@@ -37,7 +37,12 @@
 //!    cannot have our staging directory renamed away and substituted between
 //!    the hash and the publish. See [`publish`] and [`super::secure_dir`].
 //! 3. **Reuse is authenticated by a compiled-in pin, not by the sidecar.**
-//!    See [`EVA_DERIVED_SHA256`] and [`BISENET_DERIVED_SHA256`].
+//!    See [`EVA_DERIVED_SHA256`] and [`BISENET_DERIVED_SHA256`]. And the pin is
+//!    checked on the bytes a consumer will actually read, not on a pathname it
+//!    will reopen: [`AuthenticatedArtifact`] maps the retained descriptor once
+//!    and hashes THAT MAPPING, so a rename in a group-writable model root
+//!    cannot substitute a different file between the check and the load. Every
+//!    loader downstream takes that handle; none of them takes a path.
 
 // The PuLID pipeline that consumes this module lands with the FLUX
 // integration (milestone "PuLID-FLUX: functional"); issue #1229 delivers the
@@ -720,9 +725,9 @@ fn ensure_derived(
     source: &Path,
     destination: &Path,
     derived_sha256: &'static str,
-) -> Result<PathBuf> {
-    if artifact_is_authentic(destination, derived_sha256) {
-        return Ok(destination.to_path_buf());
+) -> Result<AuthenticatedArtifact> {
+    if let Ok(artifact) = open_authenticated(destination, derived_sha256) {
+        return Ok(artifact);
     }
     let derived = convert_pickle(conversion, source, destination)?;
     // A fresh conversion that does not reproduce the pin means the pin and the
@@ -734,7 +739,10 @@ fn ensure_derived(
          {derived_sha256}",
         source.display()
     );
-    Ok(destination.to_path_buf())
+    // Re-opened rather than trusted: `convert_pickle` returns the digest of
+    // what it published, and this is the handle a loader will read. They agree
+    // in the ordinary case and must not be assumed to.
+    open_authenticated(destination, derived_sha256)
 }
 
 /// The EVA02-CLIP vision tower: keep `visual.*`, drop the duplicated per-block
@@ -834,6 +842,116 @@ pub(crate) fn derived_parser_path(paths: &PulidPaths) -> PathBuf {
         .with_file_name(BISENET_DERIVED_FILENAME)
 }
 
+/// A derived artifact, opened through its parent directory's descriptor,
+/// mapped once, and authenticated on the bytes of that same mapping.
+///
+/// This is [`super::super::identity::onnx_graph`]'s `AuthenticatedBytes`
+/// argument applied to a file too large to hold twice. Hashing a path and then
+/// reopening it for the loader is two resolutions of one name, and renaming an
+/// entry needs write permission on the PARENT — which `CLAUDE.md`'s
+/// model-storage rule explicitly allows a shared model root to grant. So the
+/// name is resolved exactly once, through a `Dir` descriptor, and the digest is
+/// computed over the mapping the `VarBuilder` will read. There is deliberately
+/// no constructor that takes bytes and a digest separately: the two cannot come
+/// from different files because they cannot come from different calls.
+///
+/// # Safety contract
+///
+/// The mapping is shared and read-only, so the file must still not be MUTATED
+/// IN PLACE while it is held — the same contract every mold safetensors loader
+/// carries. In-place mutation needs write permission on the file itself, which
+/// is a different (and narrower) grant than the rename this type exists to
+/// stop.
+pub(crate) struct AuthenticatedArtifact {
+    map: memmap2::Mmap,
+    /// Retained so the mapping's inode stays open and so a diagnostic can name
+    /// what it verified. Never re-resolved.
+    _file: File,
+    display_path: PathBuf,
+    sha256: String,
+}
+
+impl AuthenticatedArtifact {
+    /// The verified bytes. Hand these to `VarBuilder::from_slice_safetensors`.
+    pub(crate) fn bytes(&self) -> &[u8] {
+        &self.map
+    }
+
+    /// Where the artifact was found, for messages only.
+    pub(crate) fn display_path(&self) -> &Path {
+        &self.display_path
+    }
+
+    /// The digest of [`Self::bytes`].
+    pub(crate) fn sha256(&self) -> &str {
+        &self.sha256
+    }
+}
+
+impl std::fmt::Debug for AuthenticatedArtifact {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuthenticatedArtifact")
+            .field("path", &self.display_path)
+            .field("sha256", &self.sha256)
+            .field("bytes", &self.map.len())
+            .finish()
+    }
+}
+
+/// Open `destination` and prove it is the artifact `expected_sha256` names.
+///
+/// Resolves the final component through the parent's descriptor (`openat`,
+/// `O_NOFOLLOW`), maps it, hashes the mapping, and finally re-reads the name
+/// through that same parent descriptor to confirm it still refers to the inode
+/// that was mapped. That last step proves nothing the hash has not already
+/// proved — it is a diagnostic, so a concurrent republication is reported as
+/// itself rather than as a stale load.
+pub(crate) fn open_authenticated(
+    destination: &Path,
+    expected_sha256: &str,
+) -> Result<AuthenticatedArtifact> {
+    let parent = destination
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .context("a derived artifact must live in a directory")?;
+    let name = destination
+        .file_name()
+        .context("a derived artifact must have a filename")?
+        .to_str()
+        .context("a derived artifact's name must be valid UTF-8")?;
+    let dir = Dir::open(parent)?;
+
+    let file = dir.open_file(name)?;
+    let mapped_identity = identity(&file)?;
+    // SAFETY: see `AuthenticatedArtifact`'s safety contract. The descriptor is
+    // owned by this call and retained by the value returned.
+    let map = unsafe { memmap2::Mmap::map(&file) }
+        .with_context(|| format!("failed to map {}", destination.display()))?;
+
+    let sha256 = {
+        let mut hasher = Sha256::new();
+        hasher.update(&map[..]);
+        format!("{:x}", hasher.finalize())
+    };
+    ensure!(
+        sha256 == expected_sha256,
+        "{} hashes to {sha256}, but this build pins {expected_sha256}",
+        destination.display()
+    );
+    ensure!(
+        identity(&dir.open_file(name)?)? == mapped_identity,
+        "{} was replaced while it was being verified",
+        destination.display()
+    );
+
+    Ok(AuthenticatedArtifact {
+        map,
+        _file: file,
+        display_path: destination.to_path_buf(),
+        sha256,
+    })
+}
+
 /// Is the file already at `destination` the artifact `expected_sha256` names?
 ///
 /// Opened no-follow and hashed. The sidecar is deliberately not consulted: it
@@ -854,7 +972,9 @@ fn artifact_is_authentic(destination: &Path, expected_sha256: &str) -> bool {
 /// convert-on-first-use rather than a download post-hook: the bundle's install
 /// flow is being built concurrently (#1220 / dependency planning), and hanging
 /// an 856 MB pickle read off the download path would couple the two.
-pub(crate) fn ensure_eva_clip_vision_safetensors(paths: &PulidPaths) -> Result<PathBuf> {
+pub(crate) fn ensure_eva_clip_vision_safetensors(
+    paths: &PulidPaths,
+) -> Result<AuthenticatedArtifact> {
     ensure_derived(
         &EVA_CLIP_VISION,
         &paths.vision_encoder_source,
@@ -867,7 +987,9 @@ pub(crate) fn ensure_eva_clip_vision_safetensors(paths: &PulidPaths) -> Result<P
 ///
 /// Same contract, and a much cheaper one: the release is 53 MB rather than
 /// 856 MB, so the transient private copy is negligible.
-pub(crate) fn ensure_bisenet_parser_safetensors(paths: &PulidPaths) -> Result<PathBuf> {
+pub(crate) fn ensure_bisenet_parser_safetensors(
+    paths: &PulidPaths,
+) -> Result<AuthenticatedArtifact> {
     ensure_derived(
         &BISENET_PARSER,
         &paths.face_parser_source,
@@ -1503,15 +1625,20 @@ mod tests {
             face_parser_source: dir.path().join("parser.pth"),
         };
 
-        let destination = ensure_eva_clip_vision_safetensors(&paths).unwrap();
-        assert!(artifact_is_authentic(&destination, EVA_DERIVED_SHA256));
-        let good = std::fs::read(&destination).unwrap();
+        let destination = derived_vision_path(&paths);
+        let artifact = ensure_eva_clip_vision_safetensors(&paths).unwrap();
+        assert_eq!(artifact.display_path(), destination);
+        assert_eq!(artifact.sha256(), EVA_DERIVED_SHA256);
+        // The handle carries the bytes; a consumer never re-reads the name.
+        let good = artifact.bytes().to_vec();
+        assert_eq!(good, std::fs::read(&destination).unwrap());
+        drop(artifact);
 
         // Reuse must not rewrite the file.
         let before = std::fs::metadata(&destination).unwrap().modified().unwrap();
         assert_eq!(
-            ensure_eva_clip_vision_safetensors(&paths).unwrap(),
-            destination
+            ensure_eva_clip_vision_safetensors(&paths).unwrap().sha256(),
+            EVA_DERIVED_SHA256
         );
         assert_eq!(
             std::fs::metadata(&destination).unwrap().modified().unwrap(),
@@ -1525,15 +1652,69 @@ mod tests {
         std::fs::write(&destination, &tampered).unwrap();
         write_sidecar(&destination, EVA_SOURCE_SHA256, EVA_DERIVED_SHA256).unwrap();
         assert!(!artifact_is_authentic(&destination, EVA_DERIVED_SHA256));
+        assert!(open_authenticated(&destination, EVA_DERIVED_SHA256).is_err());
 
+        let artifact = ensure_eva_clip_vision_safetensors(&paths).unwrap();
         assert_eq!(
-            ensure_eva_clip_vision_safetensors(&paths).unwrap(),
-            destination
-        );
-        assert_eq!(
-            std::fs::read(&destination).unwrap(),
+            artifact.bytes(),
             good,
             "the tampered artifact was not restored"
+        );
+    }
+
+    /// The handle is the authentication, so a substituted file cannot reach a
+    /// loader: a rename that lands a different artifact at the same name is
+    /// invisible to a mapping already made, and a fresh open of that name is
+    /// refused on its digest.
+    #[test]
+    fn a_renamed_artifact_cannot_be_handed_to_a_loader() {
+        let dir = tempfile::tempdir().unwrap();
+        let destination = dir.path().join("derived.safetensors");
+        let tensors = vec![raw("a", &[1.0, 2.0], &[2])];
+        let digest = write_atomically(&tensors, &destination).unwrap();
+
+        let artifact = open_authenticated(&destination, &digest).unwrap();
+        let mapped = artifact.bytes().to_vec();
+
+        // The attack the type exists to stop: replace the ENTRY, which needs
+        // only write permission on the directory.
+        let impostor = dir.path().join("impostor.safetensors");
+        let other = vec![raw("a", &[9.0, 9.0], &[2])];
+        write_atomically(&other, &impostor).unwrap();
+        std::fs::rename(&impostor, &destination).unwrap();
+
+        // A handle already held still reads the bytes it verified...
+        assert_eq!(artifact.bytes(), mapped);
+        // ...and a fresh open of the same name is refused rather than loaded.
+        let error = open_authenticated(&destination, &digest)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("but this build pins"), "{error}");
+    }
+
+    /// Structural guard, matching `onnx_graph`'s. The type system already
+    /// stops a consumer loading a DERIVED artifact by pathname — `ensure_*`
+    /// hands out an [`AuthenticatedArtifact`] and never a `PathBuf` — but
+    /// [`AuthenticatedArtifact::display_path`] is a way back to a name, and it
+    /// exists only so a loader can quote one in an error. If the extraction
+    /// ever names it, someone has reintroduced the round trip.
+    ///
+    /// Deliberately NOT asserted here: that `identity/extraction.rs` contains
+    /// no path-based mmap at all. It has exactly one, for the PuLID adapter,
+    /// which is a manifest file verified when it was downloaded rather than an
+    /// artifact mold derived and just hashed — see `adapter_sha256`. Widening
+    /// this test to cover it would be asserting a different decision.
+    #[test]
+    fn the_extraction_never_turns_an_authenticated_handle_back_into_a_path() {
+        let code = include_str!("../identity/extraction.rs")
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let back_to_a_name = concat!("display", "_path");
+        assert!(
+            !code.contains(back_to_a_name),
+            "a derived artifact must reach its loader as a mapping, not as a name"
         );
     }
 }

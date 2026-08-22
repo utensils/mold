@@ -87,32 +87,6 @@ pub mod progress;
 #[cfg(test)]
 pub(crate) mod pulid_fixtures;
 
-/// Development-only surface for `bin/pulid_face_probe`.
-///
-/// The probe measures the real extraction path, so it needs the pickle
-/// conversion and the planar decode that `identity::extraction` uses. Neither
-/// is part of mold's API — hence `dev-bins`, `doc(hidden)`, and the explicit
-/// `_for_probe` names, so a call site that ends up outside the probe is
-/// obvious in review.
-#[cfg(all(feature = "pulid", feature = "dev-bins"))]
-#[doc(hidden)]
-pub mod pulid_probe {
-    /// See `crate::encoders::eva_clip_preprocess::planar_rgb_from_image`.
-    pub fn planar_rgb_from_image_for_probe(
-        image: &image::DynamicImage,
-    ) -> (Vec<f32>, usize, usize) {
-        crate::encoders::eva_clip_preprocess::planar_rgb_from_image(image)
-    }
-
-    /// See `crate::encoders::pickle_convert::convert_bisenet_parser`.
-    pub fn convert_bisenet_parser_for_probe(
-        source: &std::path::Path,
-        destination: &std::path::Path,
-    ) -> anyhow::Result<String> {
-        crate::encoders::pickle_convert::convert_bisenet_parser(source, destination)
-    }
-}
-
 pub(crate) mod quantized_dmmv;
 pub mod qwen_image;
 pub(crate) mod reference_media;

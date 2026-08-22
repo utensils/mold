@@ -3285,6 +3285,7 @@ dependencies = [
  "half",
  "image",
  "libc",
+ "memmap2",
  "mold-ai-candle",
  "mold-ai-catalog",
  "mold-ai-core",

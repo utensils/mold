@@ -387,12 +387,14 @@ pub struct BiSeNetParser {
 }
 
 impl BiSeNetParser {
-    /// Build from the DERIVED safetensors — never from the `.pth`.
+    /// Assemble the modules. Private: the only entry point is
+    /// [`Self::from_authenticated`], so no caller can arrive here holding a
+    /// `VarBuilder` it built from an unverified pathname.
     ///
     /// `device` is asserted rather than honoured, for the same reason
     /// [`super::IdentityExtractor::load`] asserts it: the whole extraction runs
     /// on the host at admission, before the scheduler has leased a device.
-    pub fn new(vb: VarBuilder, device: &Device) -> Result<Self> {
+    fn from_var_builder(vb: VarBuilder, device: &Device) -> Result<Self> {
         ensure!(
             device.is_cpu(),
             "PuLID face parsing runs on the CPU beside the rest of the extraction"
@@ -407,29 +409,31 @@ impl BiSeNetParser {
         })
     }
 
-    /// Build from a derived safetensors file on disk.
+    /// Build from an artifact `pickle_convert` has already authenticated.
     ///
-    /// The convenience `new` wants for callers that hold a path rather than a
-    /// `VarBuilder` — the `dev-bins` probe, and any future consumer that is
-    /// not already inside the extraction.
+    /// This is the ONLY way to load a parser, and it deliberately does not
+    /// take a path. A pathname is a name that can be re-resolved, and renaming
+    /// an entry needs write permission on the parent directory, which
+    /// `CLAUDE.md`'s model-storage rule allows a shared model root to grant —
+    /// so a loader that hashed a path and then reopened it could execute
+    /// weights nobody vouched for. `AuthenticatedArtifact` maps the descriptor
+    /// once and hashes that mapping, and this reads the same mapping.
+    /// `the_parser_cannot_be_loaded_from_a_bare_path` pins the shape.
     ///
-    /// # Safety contract
-    ///
-    /// The file is mmap'd, so it must not be mutated while the parser holds
-    /// it. Production reaches this through
-    /// `pickle_convert::ensure_bisenet_parser_safetensors`, which has just
-    /// authenticated those bytes against a compiled-in pin.
-    pub fn from_safetensors(path: &std::path::Path, device: &Device) -> Result<Self> {
-        // SAFETY: see the contract above.
-        let vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(
-                std::slice::from_ref(&path.to_path_buf()),
-                DType::F32,
-                device,
-            )
-            .with_context(|| format!("reading the face parser {}", path.display()))?
-        };
-        Self::new(vb, device)
+    /// `pub(crate)` because the handle it takes is: there is deliberately no
+    /// way for a caller outside this crate to build a parser at all.
+    pub(crate) fn from_authenticated(
+        artifact: &crate::encoders::pickle_convert::AuthenticatedArtifact,
+        device: &Device,
+    ) -> Result<Self> {
+        let vb = VarBuilder::from_slice_safetensors(artifact.bytes(), DType::F32, device)
+            .with_context(|| {
+                format!(
+                    "reading the face parser {}",
+                    artifact.display_path().display()
+                )
+            })?;
+        Self::from_var_builder(vb, device)
     }
 
     /// `BiSeNet.forward`'s first output (`bisenet.py:126-135`), already
@@ -664,6 +668,51 @@ mod tests {
         assert_eq!(labels, vec![0]);
     }
 
+    /// Structural guard for the P1 this module was built around: a loader that
+    /// takes a pathname resolves a name twice — once to hash it, once to map
+    /// it — and renaming an entry needs write permission on the PARENT, which
+    /// `CLAUDE.md`'s model-storage rule lets a shared model root grant. So this
+    /// module's production code never names a path type at ALL, which is a
+    /// stronger and far more checkable claim than auditing each signature: a
+    /// constructor cannot accept something the module cannot spell.
+    #[test]
+    fn the_parser_cannot_be_loaded_from_a_bare_path() {
+        let source = include_str!("parsing.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("the module has production code above its tests");
+        let code = production
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            // `ContextPath` is upstream's module name, not a path type.
+            .replace("ContextPath", "");
+        // Split so this test's own source is not what the assertions find.
+        let path_mmap = concat!("from_mmaped", "_safetensors");
+        let opener = concat!("File", "::open");
+        assert!(
+            !code.contains("Path"),
+            "the parser must not name a path type: it is loaded from an \
+             authenticated mapping"
+        );
+        assert!(
+            !code.contains(path_mmap),
+            "candle's path-based loader would reopen a name already verified"
+        );
+        assert!(
+            !code.contains(opener),
+            "the parser opens no file of its own"
+        );
+        // And the assembling constructor stays private, so nobody can arrive
+        // at it holding a `VarBuilder` they built from an unverified name.
+        assert!(code.contains("fn from_var_builder"));
+        assert!(!code.contains("pub fn from_var_builder"));
+        assert!(!code.contains("pub(crate) fn from_var_builder"));
+        assert!(code.contains("fn from_authenticated"));
+    }
+
     #[test]
     fn the_background_label_set_is_upstreams_verbatim() {
         assert_eq!(BACKGROUND_LABELS, [0, 16, 18, 7, 8, 9, 14, 15]);
@@ -739,19 +788,19 @@ mod tests {
     }
 
     fn parser() -> Option<BiSeNetParser> {
+        use crate::encoders::pickle_convert::{
+            convert_bisenet_parser, open_authenticated, BISENET_DERIVED_FILENAME,
+            BISENET_DERIVED_SHA256,
+        };
         std::env::var_os("MOLD_TEST_PULID_ASSETS")?;
         let source = crate::pulid_fixtures::pulid_asset("parsing_bisenet.pth");
-        let dir = Box::leak(Box::new(tempfile::tempdir().unwrap()));
-        let destination = dir
-            .path()
-            .join(crate::encoders::pickle_convert::BISENET_DERIVED_FILENAME);
-        crate::encoders::pickle_convert::convert_bisenet_parser(&source, &destination).unwrap();
-        // SAFETY: a file this process just wrote into its own temporary
-        // directory and is about to read once.
-        let vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(&[destination], DType::F32, &Device::Cpu).unwrap()
-        };
-        Some(BiSeNetParser::new(vb, &Device::Cpu).unwrap())
+        let dir = tempfile::tempdir().unwrap();
+        let destination = dir.path().join(BISENET_DERIVED_FILENAME);
+        convert_bisenet_parser(&source, &destination).unwrap();
+        // The same authenticated handle production uses, so the tests exercise
+        // the loader that ships rather than a shortcut around it.
+        let artifact = open_authenticated(&destination, BISENET_DERIVED_SHA256).unwrap();
+        Some(BiSeNetParser::from_authenticated(&artifact, &Device::Cpu).unwrap())
     }
 
     /// The parser's own output, against `facexlib`'s.

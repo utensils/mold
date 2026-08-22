@@ -537,6 +537,46 @@ into an `i64` with `<< (i * 8)`, which panics in a debug build at `i = 8`. The
 reader compares the fixed 21-byte preamble as bytes instead, which both avoids
 that and is stricter than reading the value.
 
+### The derived artifacts reach their loaders as mappings, not as names
+
+The two ONNX graphs are authenticated by `AuthenticatedBytes` — one bounded
+read, a digest of that buffer, no way to obtain a digest and a buffer from
+different calls. The two DERIVED artifacts (the vision tower and the parser)
+need the same property and cannot use the same mechanism, because 609 MB is
+not a thing to hold twice.
+
+`pickle_convert::AuthenticatedArtifact` is that property for a file: the final
+component is resolved exactly once, through a `Dir` descriptor
+(`openat` + `O_NOFOLLOW`), the descriptor is mapped, and the pin is checked
+against **that mapping**. `ensure_eva_clip_vision_safetensors` and
+`ensure_bisenet_parser_safetensors` hand out that value and never a `PathBuf`,
+and both loaders — `EvaClipVisionTower::from_authenticated` and
+`BiSeNetParser::from_authenticated` — read it through
+`VarBuilder::from_slice_safetensors`.
+
+The gap this closes is specific and was found in review. Hashing a path and
+then reopening it for `from_mmaped_safetensors` resolves one name twice, and
+**renaming an entry needs write permission on the containing directory, not on
+the file** — exactly the grant `CLAUDE.md`'s model-storage rule says a shared
+model root may legitimately hand out. A second member could therefore let the
+digest check pass and then swap the file the loader opened. Mapping the
+retained descriptor makes that unrepresentable: after the rename the mapping
+still refers to the inode that was hashed.
+
+`a_renamed_artifact_cannot_be_handed_to_a_loader` performs that rename and
+asserts both halves — a handle already held still reads what it verified, and a
+fresh open of the same name is refused on its digest.
+`the_parser_cannot_be_loaded_from_a_bare_path` is the structural guard, in the
+style of `onnx_graph`'s: the parser's production code never names a path type
+at all, so no constructor can accept one.
+
+One load in the extraction is deliberately still by pathname — the PuLID
+adapter, in `compose_identity_tokens`. It is a MANIFEST file, verified when it
+was downloaded, and mold does not re-hash 1.1 GB per request; there is no
+fresher authentication there to discard by reopening a name. That distinction
+is what the two comments at those call sites say, and it is why the structural
+test scopes itself rather than banning path loads outright.
+
 ### The mask itself
 
 `pipeline_flux.py:161-170`, and every clause matters:
@@ -613,7 +653,7 @@ the three stages, which is what a 53 MB ResNet18 should be.
 | `identity/warp.rs` | OpenCV-convention resize and affine warp |
 | `identity/parsing.rs` | the BiSeNet port, the label upsample, and PuLID's mask |
 | `encoders/legacy_pth.rs` | the pre-1.6 `torch.save` container |
-| `encoders/pickle_convert.rs` | both pinned pickles, converted once to safetensors |
+| `encoders/pickle_convert.rs` | both pinned pickles, converted once to safetensors, and `AuthenticatedArtifact` |
 | `img_utils::decode_oriented_srgb` | the crate's one EXIF/ICC decode, shared with LTX-2 |
 | `bin/pulid_face_probe.rs` | the inventory and benchmark tool this record cites |
 | `tests/pulid_face_parity.rs` | hermetic + weight-gated parity |

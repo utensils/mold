@@ -128,7 +128,15 @@ New bullet, to follow it:
 >   pre-1.6 `torch.save` archive candle cannot read, so
 >   `encoders/legacy_pth.rs` reads the container while candle's own `Stack`
 >   still parses every pickle in it. Pinning a stranger's re-save was the
->   alternative and is not one. **RetinaFace stays unimplemented on evidence,
+>   alternative and is not one. **Both derived artifacts reach their loaders as
+>   `AuthenticatedArtifact` — a descriptor resolved once through a `Dir`,
+>   mapped, and pinned on that mapping — never as a `PathBuf`**, because
+>   hashing a path and reopening it resolves one name twice and a rename needs
+>   only the PARENT's write bit, which the model-storage rule lets a shared
+>   root grant; the parser's production code names no path type at all, and a
+>   structural test keeps it that way. The PuLID adapter stays a pathname load
+>   on purpose: it is a manifest file verified at download, with no fresher
+>   authentication to discard. **RetinaFace stays unimplemented on evidence,
 >   not on deferral**: with the mask in place, swapping SCRFD's landmarks for
 >   facexlib's moves the final identity by at most 2.8e-3 of peak, against the
 >   1.2–1.5e-2 the mask itself was worth. Mold runs ONE detection and gives the

@@ -342,7 +342,10 @@ pub(crate) fn compose_identity_token_sets_observed(
     anyhow::ensure!(!faces.is_empty(), "composing needs at least one face");
     let device = Device::Cpu;
     let mut stage_started = std::time::Instant::now();
-    let vision_path = ensure_eva_clip_vision_safetensors(paths)
+    // Both derived artifacts arrive as verified MAPPINGS, never as pathnames a
+    // loader would resolve a second time — see
+    // `pickle_convert::AuthenticatedArtifact`.
+    let vision = ensure_eva_clip_vision_safetensors(paths)
         .context("materializing the EVA02-CLIP vision tower")?;
 
     // `pipeline_flux.py:161-174`: every crop is parsed, masked, and only then
@@ -358,21 +361,17 @@ pub(crate) fn compose_identity_token_sets_observed(
     // coexist.
     let mut parse_elapsed = std::time::Duration::ZERO;
     let prepared: Vec<Tensor> = {
-        let parser_path = ensure_bisenet_parser_safetensors(paths)
-            .context("materializing the BiSeNet face parser")?;
-        // SAFETY: the same mmap contract every other mold safetensors loader
-        // relies on. These bytes were just authenticated against
-        // `BISENET_DERIVED_SHA256`.
+        // The derived artifact arrives as verified private BYTES — never a
+        // pathname a loader would resolve a second time, never a shared mapping
+        // another writer could edit underneath it. See
+        // `pickle_convert::AuthenticatedArtifact`. Scoped to the build that
+        // consumes it, so its 53 MB copy is released as soon as the parser owns
+        // its tensors.
         let parser = {
-            let vb = unsafe {
-                VarBuilder::from_mmaped_safetensors(
-                    std::slice::from_ref(&parser_path),
-                    DType::F32,
-                    &device,
-                )
-                .with_context(|| format!("reading the face parser {}", parser_path.display()))?
-            };
-            BiSeNetParser::new(vb, &device).context("building the BiSeNet face parser")?
+            let artifact = ensure_bisenet_parser_safetensors(paths)
+                .context("materializing the BiSeNet face parser")?;
+            BiSeNetParser::from_authenticated(&artifact, &device)
+                .context("building the BiSeNet face parser")?
         };
         let mut prepared = Vec::with_capacity(faces.len());
         for (_, eva_crop_512) in faces {
@@ -399,19 +398,15 @@ pub(crate) fn compose_identity_token_sets_observed(
     // alone is a 1280 x 5120 matrix, and admission is the one place in the
     // process where host RAM is not already committed to a render.
     let vision: Vec<(Vec<Tensor>, Tensor)> = {
-        // SAFETY: the same mmap contract every other mold safetensors loader
-        // relies on — the file must not be mutated while the tower holds it.
-        // These bytes were just authenticated against `DERIVED_SHA256`.
-        let vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(
-                std::slice::from_ref(&vision_path),
-                DType::F32,
-                &device,
-            )
-            .with_context(|| format!("reading the vision tower {}", vision_path.display()))?
+        // As above: verified private bytes, scoped to the build that consumes
+        // them, so the tower's 609 MB copy is released as soon as it owns its
+        // tensors.
+        let tower = {
+            let artifact = ensure_eva_clip_vision_safetensors(paths)
+                .context("materializing the EVA02-CLIP vision tower")?;
+            EvaClipVisionTower::from_authenticated(&artifact, &device)
+                .context("building the EVA02-CLIP-L-14-336 vision tower")?
         };
-        let tower = EvaClipVisionTower::new(vb, &device)
-            .context("building the EVA02-CLIP-L-14-336 vision tower")?;
         // Everything paid once before the first forward, minus the per-crop
         // parse work the pre-pass already reported. Restarting the clock after
         // the pre-pass instead would silently drop materializing the tower from
@@ -434,8 +429,16 @@ pub(crate) fn compose_identity_token_sets_observed(
     };
     stage_started = std::time::Instant::now();
 
-    // SAFETY: as above. `pipeline_flux.py:99-109` splits the checkpoint by
-    // leading module name; the IDFormer half is `pulid_encoder.*`.
+    // SAFETY: the ordinary mold safetensors mmap contract — the file must not
+    // be mutated while the IDFormer holds it.
+    //
+    // This one IS loaded by pathname, and deliberately: the adapter is a
+    // MANIFEST file whose digest the download verified, not an artifact mold
+    // derived and hashed moments ago. There is no fresher authentication here
+    // to throw away by reopening a name (see `adapter_sha256`, and
+    // `pickle_convert::AuthenticatedArtifact` for the case that is different).
+    // `pipeline_flux.py:99-109` splits the checkpoint by leading module name;
+    // the IDFormer half is `pulid_encoder.*`.
     let vb = unsafe {
         VarBuilder::from_mmaped_safetensors(
             std::slice::from_ref(&paths.adapter),
