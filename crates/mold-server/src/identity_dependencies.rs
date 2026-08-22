@@ -433,7 +433,7 @@ mod tests {
         .unwrap();
 
         let downloads = prepared.pending_downloads_for_device("cuda:0");
-        assert_eq!(downloads.len(), 4, "{downloads:?}");
+        assert_eq!(downloads.len(), 5, "{downloads:?}");
         let by_kind = downloads
             .iter()
             .map(|download| {
@@ -474,6 +474,10 @@ mod tests {
         assert_eq!(
             by_kind["face_recognizer"],
             ("DIAMONIK7777/antelopev2", "glintr100.onnx", 260_665_334)
+        );
+        assert_eq!(
+            by_kind["face_parser"],
+            ("leonelhs/facexlib", "parsing_bisenet.pth", 53_289_463)
         );
 
         let device_inputs = &prepared.by_device["cuda:0"];
@@ -568,7 +572,7 @@ mod tests {
 
         assert_eq!(
             prepared.pending_downloads_for_device("cuda:0").len(),
-            4,
+            5,
             "unproven bytes are not evidence that nothing needs downloading"
         );
         // The preview stays read-only about them: nothing deleted, nothing

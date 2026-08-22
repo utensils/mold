@@ -66,39 +66,17 @@ use super::{IdentityError, IdentityExtractor};
 
 /// Host bytes one extraction peaks at, measured on the shipped artifacts.
 ///
-/// | Stage | Bytes |
-/// | --- | --- |
-/// | SCRFD `scrfd_10g_bnkps.onnx` graph, decoded | 17 MB |
-/// | ArcFace `glintr100.onnx` graph, decoded | 261 MB |
-/// | BiSeNet parser: verified buffer + f32 weights + activations | 53 + 53 + ~200 MB |
-/// | EVA02-CLIP tower: verified buffer + f32 weights + activations | 609 + 1218 + ~180 MB |
-/// | IDFormer (`pulid_encoder.*` of the adapter file), f32 | ~330 MB |
+/// Re-exported from [`mold_core::identity`], which is the one authority: the
+/// admission gate in `mold-server` charges this number and is compiled WITHOUT
+/// the `pulid` feature, so it cannot read a constant that lives here. It used
+/// to restate the literal, and the two drifted by a gigabyte the moment this
+/// measurement moved — an admission gate under-charging by that much is a host
+/// that OOMs instead of queuing.
 ///
-/// Two things about the tower row are easy to get wrong and both are load-bearing.
-///
-/// The **verified buffer** is the artifact's own bytes, read into private
-/// memory so the digest and the load observe the same bytes
-/// (`pickle_convert::AuthenticatedArtifact` — a shared mapping would let
-/// another writer edit the file after the check, and `0664` weights are
-/// supported storage). It is transient: each artifact is scoped to the build
-/// that consumes it and released the moment that module owns its tensors. It
-/// does NOT replace the row beside it — the buffer is f16 on disk and the
-/// weights are f32 in memory, so during construction both exist.
-///
-/// The **f32 weights** are 609 MB of f16 widened by the `VarBuilder`'s
-/// `DType::F32`. That widening always happened; the old table simply did not
-/// name it, which is why this figure went up without the code getting hungrier
-/// in any way a mapping would have avoided.
-///
-/// The parser is dropped before the tower is built and the tower before the
-/// IDFormer, so the three large stages do not coexist; the peak is the tower
-/// stage, at ~2.1 GB. Rounded up to a round 2.4 GB so the figure is
-/// conservative rather than exact.
-///
-/// Nothing reads this at runtime — the ledger charges the artifacts themselves
-/// — so it is the recorded measurement, kept beside the code that produces it
-/// and pinned by a test, rather than an input to a calculation.
-pub const EXTRACTION_HOST_PEAK_BYTES: u64 = 2_400_000_000;
+/// The measurement itself is documented on the core constant, and
+/// `the_charged_host_peak_covers_every_stage_of_the_extraction` below re-derives
+/// it from the artifacts' own pinned sizes, which only this crate can see.
+pub use mold_core::identity::EXTRACTION_HOST_PEAK_BYTES;
 
 /// Host bytes each ADDITIONAL identity photograph adds to that peak.
 ///

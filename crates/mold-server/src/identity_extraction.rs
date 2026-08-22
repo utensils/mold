@@ -85,11 +85,14 @@ static EXTRACTION_SLOT: tokio::sync::Semaphore = tokio::sync::Semaphore::const_n
 
 /// Bytes one extraction is charged.
 ///
-/// Restated here rather than read from `mold_inference` because that module is
-/// behind the `pulid` feature while this gate is not; a build without the
-/// feature still admits and refuses requests. `the_charged_peak_matches_the_
-/// measurement` pins the two together on the builds that have both.
-const EXTRACTION_PEAK_BYTES: u64 = 1_400_000_000;
+/// Read from `mold_core::identity`, which is compiled unconditionally, rather
+/// than from `mold_inference`, whose identity module is behind the `pulid`
+/// feature while this gate is not — a build without the feature still admits
+/// and refuses requests. It used to be a second literal, and the two drifted by
+/// a gigabyte the first time the measurement moved.
+/// `the_charged_peak_matches_the_measurement` pins this against the inference
+/// crate's re-export on the builds that have both.
+const EXTRACTION_PEAK_BYTES: u64 = mold_core::identity::EXTRACTION_HOST_PEAK_BYTES;
 
 /// Reads host memory. Injectable so the gate can be tested without a machine
 /// that happens to be short on RAM.
