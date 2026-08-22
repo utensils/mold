@@ -1160,6 +1160,21 @@ carrying no device (§2), so one fleet still has one fingerprint per face.
 - **Item 4, qualification**: `--device`, `--regress-against-full`, the
   decomposed rows, and the numbers in §4b. plato skipped again, named again.
 
+### A known gap: `EXTRACTION_HOST_PEAK_BYTES` is now documentation
+
+It was the figure `ExtractionSlot::acquire()` charged against a fresh
+`ram_snapshot()`. With the slot retired (§4b, "the cache is single-flight")
+nothing reads it as a gate any more — the host-placement path is charged the
+ordinary way, through the identity artifacts' own `is_host_only` component
+roles and their pinned sizes, and CUDA's device-resident path is charged
+separately through `EXTRACTION_DEVICE_PEAK_BYTES`. The constant still
+describes the `ExtractionPlacement::Host` arm correctly (a CPU placement
+really does peak there) and `mold_inference` still derives it from the
+artifacts' own sizes via `the_charged_peaks_match_their_measurements`, so it
+is not stale — just no longer load-bearing for admission. A follow-up could
+narrow it to the private-copy figure the device path actually reads, since
+that is smaller than the full CPU-resident peak this constant states.
+
 ### What phase 1 actually shipped, and what it changed about the above
 
 - **Shipped**: the §1 hand port (parity-exact) and the §4 harness, with the

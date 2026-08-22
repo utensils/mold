@@ -790,6 +790,15 @@ SHA-256(s), and the applied weight and start step — plural fields only for the
 plural form, never the photograph. `mold rm pulid-flux` removes the bundle and
 the derived vision tower and parser. Full guide: `website/guide/identity.md`.
 
+Face-identity extraction runs on the same GPU that renders the print, as the
+first thing that job does, and is reported as an **Extracting face identity**
+stage. One extraction is ~0.4 s on an M4 Max GPU and ~1.9 s on a CPU-only
+host; a photograph already used in this server run is reused from memory in
+under 2 ms. It needs ~1.1 GB of device memory while it runs, which the
+scheduler reserves as part of the job's plan and which is released before the
+checkpoint loads — separate from the ~1.25 GB the identity adapter holds for
+the whole denoise.
+
 Wire contract — additive `GenerateRequest` fields (read `supports_identity`, never the feature, to decide whether to offer the control):
 
 | Field            | Purpose                                                                                                                                                                                    |
