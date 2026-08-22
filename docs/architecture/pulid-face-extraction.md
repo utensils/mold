@@ -317,11 +317,12 @@ handing #1229 a unit vector would silently change the IDFormer's input scale.
 PuLID does not: it takes the ArcFace embedding from InsightFace's SCRFD and the
 512 crop's landmarks from **facexlib's RetinaFace**
 (`pipeline_flux.py:145-147`, `get_face_landmarks_5(only_center_face=True)`),
-then masks that crop's background with BiSeNet (`:161-170`). #1222 scopes both
-out. Mold warps the 512 crop from the **same SCRFD landmarks** and applies **no
-mask**.
+then masks that crop's background with BiSeNet (`:161-170`). #1222 scoped both
+out; #1225 measured both and implemented the mask. Mold warps the 512 crop
+from the **same SCRFD landmarks** and applies the **same mask**.
 
-This is a named, measured divergence, not a silent one. See "Deferred", below.
+The remaining divergence — one detector rather than two — is named and
+measured, not silent. See "#1225", below.
 
 ---
 
@@ -415,30 +416,189 @@ recorded license acceptance (`THIRD_PARTY_NOTICES.md`).
 
 ---
 
-## Deferred, and what decides it
+## #1225 — the two deferrals, resolved
 
-Owned by [#1225](https://github.com/utensils/mold/issues/1225), named here so
-neither is silent:
+#1222 named two divergences from upstream rather than hiding them: the BiSeNet
+background mask, and the second detector upstream fits its 512 crop with.
+[#1225](https://github.com/utensils/mold/issues/1225) measured both end to end
+and closed them differently. **The mask is now implemented. RetinaFace is
+not, on the evidence below.**
 
-1. **facexlib's RetinaFace detector** for the 512 crop's landmarks. Mold uses
-   SCRFD's. Also note upstream selects the **centre** face for that crop
-   (`only_center_face=True`) while selecting the **largest** for ArcFace; mold
-   uses the largest for both, from one detection.
-2. **The BiSeNet background mask** applied to the 512 crop before the EVA
-   tower (`pipeline_flux.py:161-170`: background labels are replaced with
-   white and the face is converted to grey). Mold passes the unmasked colour
-   crop.
+### What the two cost, measured
 
-#1222's fidelity gate decides whether #1225 moves into this milestone: run the
-full mold extractor (this issue plus #1229) against the pinned Python pipeline
-and record the final IDFormer-output error plus a rendered-identity check
-(ArcFace cosine between the reference photo and a generated face). That gate
-cannot be evaluated until #1229 lands the EVA tower and the IDFormer.
+Upstream's own pipeline, run in a scratch venv on the four committed
+portraits, produces the `[1, 32, 2048]` value FLUX is conditioned on. Every
+row below is mold's crop and mold's landmarks fed through THAT pipeline, so
+the only variable is the thing named — the port itself contributes nothing to
+these numbers.
 
-Also not done here: the CLI's `--id-image` path handling
-([#1223](https://github.com/utensils/mold/issues/1223)).
+Reference = upstream exactly: RetinaFace's centre-face landmarks, masked.
 
----
+| variant | rel. error of peak | cosine vs upstream |
+| --- | --- | --- |
+| SCRFD landmarks, **unmasked** (mold before #1225) | 1.2–1.5e-2 | 0.99916–0.99945 |
+| RetinaFace landmarks, **unmasked** | 1.3–1.5e-2 | 0.99918–0.99950 |
+| SCRFD landmarks, **masked** (mold after #1225) | 0.9–2.8e-3 | 0.99996–0.99998 |
+
+Read the first two rows together: swapping the detector while unmasked changes
+almost nothing, so the detector was never what the gap was made of. The mask
+is, and applying it closes 80–93% of it.
+
+The third row is also the answer on RetinaFace. With the mask in place, the
+detector choice is worth at most 2.8e-3 of peak — an order of magnitude below
+what the mask was worth, and below the level at which a second detector, a
+second 109 MB download, and a second set of five landmarks could be justified.
+The geometric difference is real but small: RetinaFace's landmarks sit 1.8–2.7
+px from SCRFD's on average (5.5 px worst), which moves the 512 crop by 6–13
+mean LSB.
+
+Then mold's actual port, against upstream's masked pipeline on the same
+photographs — this is the acceptance pin, `the_identity_matches_upstream_end_to_end`:
+
+| face | relative error of peak |
+| --- | --- |
+| Frank Rubio | 7.0e-7 |
+| Kayla Barron | 4.3e-7 |
+| Mae Jemison | 1.0e-5 |
+| Raja Chari | 5.4e-7 |
+
+So mold now sits ~100x closer to upstream than the RetinaFace divergence it
+declines to close, and ~1000x closer than it did unmasked.
+
+### Face selection: one detection, largest, both crops
+
+Upstream selects **differently for its two halves**: the largest face for
+ArcFace (`pipeline_flux.py:127-129`) and the most CENTRAL one for the 512
+crop, because facexlib is called with `only_center_face=True` (`:145`, and
+`face_restoration_helper.py:152-163`). On a group photograph those are
+different people, and the identity it builds is half of one face and half of
+another. That is a defect, not a contract.
+
+Mold runs one detection, takes the largest by area, hands the same face to
+both crops, and reports the choice through `x-mold-request-warning` when there
+was more than one. `one_detection_serves_both_crops_even_when_centre_and_largest_disagree`
+constructs the disagreeing case explicitly so the divergence stays deliberate.
+On a single-face photograph — every fixture, and the overwhelming majority of
+real reference photographs — the two rules agree by construction, which is why
+the table above is measurable at all.
+
+### Step 0, again: why the parser is a candle port
+
+The face stack's other two models are ONNX run through
+`candle_onnx::simple_eval`, so the first thing #1225 tried was the same for
+BiSeNet. The gate is the one this document already describes, run over a real
+`torch.onnx.export(..., opset_version=11)` of `facexlib.parsing.bisenet.BiSeNet`
+through the probe's new `gate` subcommand:
+
+```text
+$ pulid_face_probe gate bisenet_opset11.onnx
+=== bisenet_opset11.onnx  sha256=176d6ce2…9bfd9  52598436 bytes
+    opset: {"": 11}
+    …
+    x1    Resize   coordinate_transformation_mode=align_corners cubic_coeff_a=-0.75 mode=linear nearest_mode=floor
+    x3    Resize   coordinate_transformation_mode=asymmetric    cubic_coeff_a=-0.75 mode=nearest nearest_mode=floor
+    x1    MaxPool  ceil_mode=0 dilations=1,1 kernel_shape=3,3 pads=1,1,1,1 strides=2,2
+    OP GATE: FAIL
+      - candle-onnx's `MaxPool` rejects pads=1,1,1,1 (only all-zero pads (eval.rs:472-476, :507-511))
+      - candle-onnx's `Resize` rejects mode=linear (only `nearest` (eval.rs:2325))
+      - candle-onnx's `Resize` rejects coordinate_transformation_mode=align_corners (only `asymmetric` (eval.rs:2333))
+```
+
+Reproduce it with `crates/mold-inference/testdata/pulid/export_bisenet_onnx.py`.
+
+None of the three is an exporter idiom mold could normalize away the way the
+empty-`scales` rewrite handles SCRFD's. The `MaxPool` padding is ResNet18's
+stem (`resnet.py:54`) and both `Resize` restrictions are the final logit
+upsample (`bisenet.py:135`), so all three are load-bearing and all three are
+missing *evaluator support*. Closing them is three separate candle-onnx
+changes — a padded pooling arm, a bilinear kernel, and the `align_corners`
+coordinate transform — weighed against porting a network that is 191 tensors
+of `Conv → BatchNorm → ReLU`.
+
+**Decision: port it.** `identity/parsing.rs`. The weights then arrive the way
+the EVA02-CLIP tower's do — a pinned torch pickle, converted once to
+safetensors, loaded through an ordinary `VarBuilder` — so mold's runtime still
+never reads a pickle.
+
+One thing that decision dragged in. facexlib published `parsing_bisenet.pth`
+in 2020, in the **legacy** flat `torch.save` container, and
+`candle_core::pickle::PthTensors` reads only the modern zip one. There is no
+newer release of those weights, so `encoders/legacy_pth.rs` reads the
+container: five sequential pickles, then `i64` element count plus raw
+elements per storage key, in the sorted order the fifth pickle lists. Only the
+container is new — every pickle inside it is parsed by candle's own `Stack`,
+so the opcode surface mold trusts is unchanged. The alternative was pinning a
+stranger's re-save, which moves the provenance from "facexlib published these
+bytes" to "someone says these are facexlib's weights".
+
+The one detail worth knowing before touching that file: the archive opens with
+a pickle of a **ten-byte** magic number, and candle's `Long1` arm accumulates
+into an `i64` with `<< (i * 8)`, which panics in a debug build at `i = 8`. The
+reader compares the fixed 21-byte preamble as bytes instead, which both avoids
+that and is stricter than reading the value.
+
+### The mask itself
+
+`pipeline_flux.py:161-170`, and every clause matters:
+
+* The parser's input is normalized with the **ImageNet** statistics (`:163`),
+  while the tower's is normalized with the **OpenAI CLIP** ones (`:174`), on
+  the same crop. Two normalizations, one image.
+* Background labels are `[0, 16, 18, 7, 8, 9, 14, 15]` — hair (17) is NOT one
+  of them — replaced with exact white, not with facexlib's border grey. The
+  border grey fills pixels the warp had no source for; white fills pixels the
+  parser called not-face.
+* The face is converted to **greyscale** (Rec. 601 luma, `:113-116`), not
+  passed through. A port that left the face in colour still produces a
+  plausible-looking image.
+* The upsample-then-argmax order is load-bearing and the two are fused in
+  `bilinear_align_corners_argmax` so it cannot be taken the other way round:
+  interpolating logits can elect a class that wins at no low-resolution
+  sample, so upsampling the labels instead is a different function.
+
+### Parity, and the cost
+
+Against facexlib on the four committed portraits, from the same 512 crop:
+
+| check | tolerance | measured worst |
+| --- | --- | --- |
+| per-class pixel count, as a fraction of the crop | 1e-4 | < 5e-7 (every one of 262 144 labels agrees) |
+| probed labels differing (of 512) | 1 | 0 |
+| masked crop, mean abs channel delta | 0.02 / 255 | 0.0001 |
+| masked crop, fraction of channels differing at all | 1e-3 | 9.2e-5 |
+| masked, resized, CLIP-normalized tensor, max abs | 1e-3 | 4.3e-5 |
+| final `[1, 32, 2048]` identity, relative to peak | 5e-5 | 1.0e-5 |
+
+Latency, re-measured with the parser as a third stage — the 2.0 s budget is
+per extraction, not per model. halcyon, release build, 5 warmups / 20 runs,
+under a load average of **19.5** (three agents building; the idle numbers
+above were taken on a quiet machine, and this is the honest working figure):
+
+| stage | p50 | p95 | max |
+| --- | --- | --- | --- |
+| SCRFD | 185.1 ms | 276.8 ms | 285.1 ms |
+| ArcFace | 235.2 ms | 307.7 ms | 395.1 ms |
+| BiSeNet | 156.3 ms | 244.5 ms | 247.8 ms |
+| **per image** | **576.1 ms** | **810.0 ms** | 855.9 ms |
+
+Peak RSS 1179 MiB; decode + construct + convert 799.9 ms, once, at load.
+**PASS**, with 2.5x headroom on a busy machine. The parser is the cheapest of
+the three stages, which is what a 53 MB ResNet18 should be.
+
+### Still out of scope
+
+* **facexlib's RetinaFace detector.** Declined on the measurement above, not
+  deferred again. If a future change makes the residual matter — a
+  higher-fidelity milestone, or a checkpoint more sensitive to crop geometry —
+  the number to beat is 2.8e-3 of peak.
+* **BiSeNet's auxiliary heads** (`conv_out16`, `conv_out32`). They are training
+  outputs; PuLID reads `[0]` only. They are retained in the derived
+  safetensors, which is a faithful re-container, and never constructed.
+* A rendered-identity ArcFace cosine between the reference photograph and a
+  generated face. That is a GPU measurement of the whole pipeline including
+  the adapter, and belongs with the milestone's UAT rather than with the
+  extraction; the `[1, 32, 2048]` pin above is what bounds this issue's own
+  contribution to it.
 
 ## Files
 
@@ -451,6 +611,9 @@ Also not done here: the CLI's `--id-image` path handling
 | `identity/align.rs` | both templates, Umeyama fit, residuals |
 | `identity/arcface.rs` | `norm_crop`, blob, 512-d embedding |
 | `identity/warp.rs` | OpenCV-convention resize and affine warp |
+| `identity/parsing.rs` | the BiSeNet port, the label upsample, and PuLID's mask |
+| `encoders/legacy_pth.rs` | the pre-1.6 `torch.save` container |
+| `encoders/pickle_convert.rs` | both pinned pickles, converted once to safetensors |
 | `img_utils::decode_oriented_srgb` | the crate's one EXIF/ICC decode, shared with LTX-2 |
 | `bin/pulid_face_probe.rs` | the inventory and benchmark tool this record cites |
 | `tests/pulid_face_parity.rs` | hermetic + weight-gated parity |

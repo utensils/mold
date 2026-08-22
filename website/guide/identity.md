@@ -42,7 +42,7 @@ rather than render it without the face.
 mold pull flux-dev:q4
 ```
 
-**3. The PuLID bundle**, four auxiliary artifacts totalling about 2.1 GB:
+**3. The PuLID bundle**, five auxiliary artifacts totalling about 2.2 GB:
 
 ```bash
 mold pull pulid-flux --accept-license insightface-antelopev2
@@ -171,7 +171,9 @@ an older one behaves.
 your photograph
       |  SCRFD detects the face and five landmarks       (CPU)
       |  ArcFace embeds the aligned 112x112 crop         (CPU)
-      |  EVA02-CLIP-L-14-336 encodes the 512x512 crop    (CPU)
+      |  BiSeNet segments the aligned 512x512 crop        (CPU)
+      |    background -> white, face -> greyscale
+      |  EVA02-CLIP-L-14-336 encodes that masked crop    (CPU)
       |  IDFormer resamples both into 32 identity tokens (CPU)
       v
   [32 x 2048] identity
@@ -181,6 +183,11 @@ your photograph
       v
    your print
 ```
+
+The mask is not a background *removal*: the face is greyscaled too, so the
+vision tower sees shape and no colour at all. That is what PuLID was trained
+against, and skipping it costs about a thousandfold in how closely the
+extracted identity matches the reference implementation.
 
 Everything up to the 32 tokens runs **once**, on the CPU, when the request is
 admitted — before the model is even placed on a GPU. A batch of eight siblings
@@ -250,6 +257,7 @@ flag.
 | `pulid_flux_v0.9.1.safetensors`          | Apache-2.0 ([guozinan/PuLID](https://huggingface.co/guozinan/PuLID)) |
 | `EVA02_CLIP_L_336_psz14_s6B.pt`          | MIT ([QuanSun/EVA-CLIP](https://huggingface.co/QuanSun/EVA-CLIP))    |
 | `scrfd_10g_bnkps.onnx`, `glintr100.onnx` | InsightFace pretrained models — **non-commercial research only**     |
+| `parsing_bisenet.pth`                    | MIT ([facexlib](https://github.com/xinntao/facexlib))                |
 | `flux-dev:q4` / `flux-dev:q8`            | FLUX.1-dev Non-Commercial License                                    |
 
 Mold ships none of these; it downloads them on request, and refuses the
