@@ -1,0 +1,1 @@
+- **Queued generations survive app disconnects.** Desktop and mobile no longer cancel accepted work when a generation stream drops, the app is backgrounded, or the app closes; reference and identity-photo jobs continue on their selected host.

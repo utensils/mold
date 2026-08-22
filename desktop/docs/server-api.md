@@ -143,12 +143,12 @@ A queued generation survives a server restart on hosts that report
 queued and replayed after the restart **under the same job id**, so a client
 that kept the id can rejoin rather than re-submit.
 
-Three client rules follow, and the first is not optional:
+Four client rules follow, and the first is not optional:
 
-1. **Never `DELETE` a queued job because its stream died** against a host that
-   advertises `durable_queue`. On that host the job is still going to run;
-   deleting it destroys work the server has promised to finish. Keep polling
-   `/api/queue` instead.
+1. **Never `DELETE` a queued job because its stream died.** Accepted work is
+   detached from the client stream and still runs in the current server
+   process. `durable` only controls restart replay; even a `durable: false`
+   reference-upload job must remain queued. Keep polling `/api/queue` instead.
 2. **`SseErrorEvent` gains additive `retained: bool` and `code: Option<String>`.**
    A terminal frame with `retained: true` (`code: "server_restarting"`) means
    the job did **not** fail — the host is restarting and will finish it. Treat
@@ -166,7 +166,8 @@ Three client rules follow, and the first is not optional:
    `capabilities.queue.durable_queue` says the host _can_ promise durability;
    `JobEntry.durable` says whether _this_ job got it. A job with no gallery
    target, one carrying reference-upload media, or one whose request exceeded
-   the payload ceiling reports `durable: false` and behaves as before.
+   the payload ceiling reports `durable: false`; it still runs normally but
+   cannot be replayed after a server restart.
 
 **Replay finishes before the router serves.** A restarted host does not answer
 `/api/queue` until every retained job has been re-registered under its original

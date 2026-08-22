@@ -1,4 +1,4 @@
-import { ApiError, apiFetchTo, apiJsonTo, type ApiTarget } from "./api/client";
+import { ApiError, apiJsonTo, type ApiTarget } from "./api/client";
 import { describeTransportError, isTransportFailure } from "./api/errors";
 import type {
   ChainJobDetail,
@@ -23,9 +23,9 @@ import {
  * the app is backgrounded, so every held generation stream dies with a raw
  * WebKit transport error even though the host kept working; and on any surface
  * a durable-queue host ends a retained job's stream while keeping the job. In
- * both cases the host is still the authority: a RUNNING job finishes
- * and lands in the host's gallery, a QUEUED job is skipped at dispatch once
- * its stream is gone. This module re-queries the job's frozen submission
+ * both cases the host is still the authority: an accepted RUNNING or QUEUED
+ * job finishes and lands in the host's gallery independently of the client
+ * stream. This module re-queries the job's frozen submission
  * route and settles each interrupted job with its true outcome — the
  * finished print, a re-attached live job, or a directed human failure —
  * before any raw transport text can reach the UI.
@@ -56,17 +56,18 @@ const RETAINED_TRANSPORT_RETRIES = 75;
  *  is invisible until replay resubmits it — so it is sized like the retry
  *  budget above rather than like a normal poll. */
 const RETAINED_HANDOFF_POLLS = 75;
-/** How many times a visible, journalled `queued` row may be re-read before
- *  reconciliation stops waiting on it. A durable row normally means "the host
- *  has this and will run it", so the wait is patient by design — but it is not
- *  a promise of dispatch: a host booted with no dispatch owner (`MOLD_GPUS=none`)
- *  keeps that row listed and durable forever. Unbounded there does not merely
+/** How many times a visible `queued` row may be re-read before reconciliation
+ *  stops waiting on it. Every accepted row belongs to the host and runs without
+ *  an attached client stream. `durable` only says whether a server restart can
+ *  replay the request; it never authorizes the client to cancel live work.
+ *  Waiting is patient by design, but a host booted with no dispatch owner
+ *  (`MOLD_GPUS=none`) may keep a row listed forever. Unbounded there does not merely
  *  spin — desktop awaits this inside `settled`, so the batch's completion toast
  *  and its pending-consumer entry are stranded with it. ~30 minutes at the
  *  default poll interval, which outlasts an ordinary queue wait; giving up is
  *  purely a client-side decision, so it settles as unreconciled and the host's
  *  own row is released to surface the work if it ever does run. */
-const DURABLE_QUEUE_POLLS = 450;
+const QUEUED_JOB_POLLS = 450;
 /** How long a finished reconciliation pass suppresses another one for the same
  *  job. The shared store runs recovery as part of a batch settling and the
  *  iPhone shell calls the same entry point immediately afterwards in its own
@@ -553,10 +554,10 @@ async function reconcileJob(job: Job, opts: GenerationRecoveryOptions): Promise<
   // Successful polls that found no row for a retained job — the restart
   // handoff window, bounded so reconciliation always ends.
   let handoffPolls = 0;
-  // Re-reads of a visible durable `queued` row, bounded so a row the host never
+  // Re-reads of a visible `queued` row, bounded so a row the host never
   // dispatches cannot hold the reconcile open forever.
-  let durableQueuePolls = 0;
-  const durableStalledCopy =
+  let queuedJobPolls = 0;
+  const queuedStalledCopy =
     `${opts.hostLabel} still has this print queued but hasn’t started it. ` +
     `It will finish there if the host picks it up — check the Library.`;
   let h3Identity: H3RecoveryIdentity | null | undefined;
@@ -712,37 +713,22 @@ async function reconcileJob(job: Job, opts: GenerationRecoveryOptions): Promise<
         return;
       }
       if (entry?.state === "queued") {
-        if (entry.durable === true) {
-          // The host journalled THIS job: it runs whether or not a client is
-          // attached and is replayed if a restart interrupts it. Deleting the
-          // row would destroy exactly the work the host kept — wait for it.
-          // Deliberately per-job, never `capabilities.queue.durable_queue`: a
-          // durable host still reports `durable: false` for a job with no
-          // gallery target, reference-upload media, or an oversized payload,
-          // and waiting on one of those would hang forever.
-          if (durableQueuePolls >= DURABLE_QUEUE_POLLS) {
-            // Listed, durable, and never dispatched. The host still owns the
-            // work, so this is never announced as a failure — but the wait
-            // ends, because a caller is blocked on it.
-            settleUnreconciled(job, durableStalledCopy);
-            return;
-          }
-          durableQueuePolls += 1;
-          job.stage = `Waiting in ${opts.hostLabel}’s queue`;
-          await sleep(interval);
-          continue;
+        // The server detached accepted work from its submitting stream. A
+        // reference-upload job reports `durable: false` because its media is
+        // intentionally not journalled for restart replay, but it still runs
+        // normally while this server process remains alive. Only an explicit
+        // user cancellation may DELETE it.
+        if (queuedJobPolls >= QUEUED_JOB_POLLS) {
+          // Listed and never dispatched. The host still owns the work, so this
+          // is never announced as a failure — but the wait ends, because a
+          // caller is blocked on it.
+          settleUnreconciled(job, queuedStalledCopy);
+          return;
         }
-        // The host skips queued jobs whose client stream died with the
-        // suspension — clear the zombie row instead of letting it linger.
-        await apiFetchTo(opts.target, `/api/queue/${encodeURIComponent(entry.id)}`, {
-          method: "DELETE",
-        }).catch(() => undefined);
-        if (settledExternally(job) || !isActive()) return;
-        settleFailure(
-          job,
-          `The connection dropped while this print waited in ${opts.hostLabel}’s queue. Develop again to requeue it.`,
-        );
-        return;
+        queuedJobPolls += 1;
+        job.stage = `Waiting in ${opts.hostLabel}’s queue`;
+        await sleep(interval);
+        continue;
       }
       const prints = await apiJsonTo<GalleryImage[]>(opts.target, "/api/gallery");
       transportRetries = 0;

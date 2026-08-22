@@ -684,23 +684,27 @@ describe("reconcileInterruptedGenerationJobs", () => {
     expect(opts.refreshResultUrl).toHaveBeenCalledWith(7);
   });
 
-  it("removes a zombie queued row and explains the outcome in human copy", async () => {
+  it("keeps an accepted queued row alive after its client stream disconnects", async () => {
+    let queueCalls = 0;
     apiJsonTo.mockImplementation((_target: unknown, path: string) => {
       if (path === "/api/queue") {
+        queueCalls += 1;
         return Promise.resolve({
-          entries: [{ id: "job-9", model: "ltx2:q8", state: "queued", position: 0 }],
+          entries:
+            queueCalls === 1
+              ? [{ id: "job-9", model: "ltx2:q8", state: "queued", position: 0 }]
+              : [],
         });
       }
+      if (path === "/api/gallery") return Promise.resolve([galleryPrint]);
       return Promise.reject(new Error(`Unexpected path ${path}`));
     });
     const job = makeJob();
     await reconcileInterruptedGenerationJobs([job], options());
 
-    expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/queue/job-9", { method: "DELETE" });
-    expect(job.status).toBe("error");
-    expect(job.error).toBe(
-      "The connection dropped while this print waited in Studio’s queue. Develop again to requeue it.",
-    );
+    expect(apiFetchTo).not.toHaveBeenCalled();
+    expect(job.status).toBe("complete");
+    expect(job.result?.filename).toBe("resumed print.png");
   });
 
   it("keeps a queued row waiting when THAT JOB is durable on the host", async () => {
@@ -772,25 +776,37 @@ describe("reconcileInterruptedGenerationJobs", () => {
     expect(job.recoveredJobId).toBe("job-9");
   });
 
-  it("clears a queued row the durable host did not journal", async () => {
+  it("keeps a reference-upload row that cannot be replayed after a server restart", async () => {
     // `durable: false` on a durable host — no gallery target, reference-upload
     // media, or an oversized request. Host capability alone would over-promise
     // and hang this row forever.
+    let queueCalls = 0;
     apiJsonTo.mockImplementation((_target: unknown, path: string) => {
       if (path === "/api/queue") {
+        queueCalls += 1;
         return Promise.resolve({
-          entries: [
-            { id: "job-9", model: "ltx2:q8", state: "queued", position: 0, durable: false },
-          ],
+          entries:
+            queueCalls === 1
+              ? [
+                  {
+                    id: "job-9",
+                    model: "ltx2:q8",
+                    state: "queued",
+                    position: 0,
+                    durable: false,
+                  },
+                ]
+              : [],
         });
       }
+      if (path === "/api/gallery") return Promise.resolve([galleryPrint]);
       return Promise.reject(new Error(`Unexpected path ${path}`));
     });
     const job = makeJob();
     await reconcileInterruptedGenerationJobs([job], options());
 
-    expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/queue/job-9", { method: "DELETE" });
-    expect(job.status).toBe("error");
+    expect(apiFetchTo).not.toHaveBeenCalled();
+    expect(job.status).toBe("complete");
   });
 
   it("adopts the id of the row it recovered, so the job can still be cancelled", async () => {
@@ -830,30 +846,37 @@ describe("reconcileInterruptedGenerationJobs", () => {
     expect(job.status).toBe("complete");
   });
 
-  it("adopts the id before deleting a row the host did not journal", async () => {
+  it("adopts the id before waiting on a row the host did not journal", async () => {
+    let queueCalls = 0;
     apiJsonTo.mockImplementation((_target: unknown, path: string) => {
       if (path === "/api/queue") {
+        queueCalls += 1;
         return Promise.resolve({
-          entries: [
-            {
-              id: "zombie-id",
-              model: "ltx2:q8",
-              state: "queued",
-              position: 0,
-              durable: false,
-              started_at_unix_ms: job.submittedAtUnixMs + 10,
-              metadata: galleryPrint.metadata,
-            },
-          ],
+          entries:
+            queueCalls === 1
+              ? [
+                  {
+                    id: "recovered-id",
+                    model: "ltx2:q8",
+                    state: "queued",
+                    position: 0,
+                    durable: false,
+                    started_at_unix_ms: job.submittedAtUnixMs + 10,
+                    metadata: galleryPrint.metadata,
+                  },
+                ]
+              : [],
         });
       }
+      if (path === "/api/gallery") return Promise.resolve([galleryPrint]);
       return Promise.reject(new Error(`Unexpected path ${path}`));
     });
     const job = makeJob({ id: "" });
     await reconcileInterruptedGenerationJobs([job], options());
 
-    expect(job.id).toBe("zombie-id");
-    expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/queue/zombie-id", { method: "DELETE" });
+    expect(job.id).toBe("recovered-id");
+    expect(apiFetchTo).not.toHaveBeenCalled();
+    expect(job.status).toBe("complete");
   });
 
   it("waits out the handoff gap when a retained job is briefly absent", async () => {
@@ -1047,36 +1070,43 @@ describe("reconcileInterruptedGenerationJobs", () => {
     expect(job.result?.filename).toBe("resumed print.png");
   });
 
-  it("joins an id-less job to its queue row by pinned seed before deleting it", async () => {
+  it("joins an id-less job to its queue row by pinned seed without cancelling it", async () => {
+    let queueCalls = 0;
     apiJsonTo.mockImplementation((_target: unknown, path: string) => {
       if (path === "/api/queue") {
+        queueCalls += 1;
         return Promise.resolve({
-          entries: [
-            {
-              id: "someone-elses",
-              model: "ltx2:q8",
-              state: "queued",
-              position: 0,
-              metadata: { ...galleryPrint.metadata, seed: 41 },
-            },
-            {
-              id: "mine",
-              model: "ltx2:q8",
-              state: "queued",
-              position: 1,
-              started_at_unix_ms: job.submittedAtUnixMs + 100,
-              metadata: galleryPrint.metadata,
-            },
-          ],
+          entries:
+            queueCalls === 1
+              ? [
+                  {
+                    id: "someone-elses",
+                    model: "ltx2:q8",
+                    state: "queued",
+                    position: 0,
+                    metadata: { ...galleryPrint.metadata, seed: 41 },
+                  },
+                  {
+                    id: "mine",
+                    model: "ltx2:q8",
+                    state: "queued",
+                    position: 1,
+                    started_at_unix_ms: job.submittedAtUnixMs + 100,
+                    metadata: galleryPrint.metadata,
+                  },
+                ]
+              : [],
         });
       }
+      if (path === "/api/gallery") return Promise.resolve([galleryPrint]);
       return Promise.reject(new Error(`Unexpected path ${path}`));
     });
     const job = makeJob({ id: "" });
     await reconcileInterruptedGenerationJobs([job], options());
 
-    expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/queue/mine", { method: "DELETE" });
-    expect(job.status).toBe("error");
+    expect(job.id).toBe("mine");
+    expect(apiFetchTo).not.toHaveBeenCalled();
+    expect(job.status).toBe("complete");
   });
 
   it("joins an id-less H3 job only to the queue row with matching conditioning hashes", async () => {
@@ -1106,8 +1136,22 @@ describe("reconcileInterruptedGenerationJobs", () => {
       source_image_sha256: ABC_SHA256,
       keyframes: [{ frame: 124, name: "closing.png", sha256: DEF_SHA256 }],
     };
+    let queueCalls = 0;
     apiJsonTo.mockImplementation((_target: unknown, path: string) => {
       if (path === "/api/queue") {
+        queueCalls += 1;
+        if (queueCalls > 1) {
+          return Promise.resolve({
+            entries: [
+              {
+                id: "h3-mine",
+                model: request.model,
+                state: "held",
+                held_reason: "test stop",
+              },
+            ],
+          });
+        }
         return Promise.resolve({
           entries: [
             {
@@ -1154,23 +1198,9 @@ describe("reconcileInterruptedGenerationJobs", () => {
 
     await reconcileInterruptedGenerationJobs([job], options());
 
-    expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/queue/h3-mine", {
-      method: "DELETE",
-    });
-    expect(apiFetchTo).not.toHaveBeenCalledWith(
-      target,
-      "/api/queue/same-settings-wrong-conditioning",
-      { method: "DELETE" },
-    );
-    for (const id of [
-      "same-settings-missing-shape",
-      "same-settings-missing-frames",
-      "same-settings-wrong-fps",
-    ]) {
-      expect(apiFetchTo).not.toHaveBeenCalledWith(target, `/api/queue/${id}`, {
-        method: "DELETE",
-      });
-    }
+    expect(job.id).toBe("h3-mine");
+    expect(apiFetchTo).not.toHaveBeenCalled();
+    expect(job.error).toContain("test stop");
   });
 
   it("hashes H3 conditioning once across repeated queue polls and gallery recovery", async () => {
@@ -1309,10 +1339,17 @@ describe("reconcileInterruptedGenerationJobs", () => {
     expect(opts.refreshResultUrl).not.toHaveBeenCalled();
   });
 
-  it("does not delete a compatible pre-ID duplicate submitted after the interrupted job", async () => {
+  it("does not cancel a compatible pre-ID duplicate submitted after the interrupted job", async () => {
     const submittedAtUnixMs = 1_700_000_000_000;
+    let queueCalls = 0;
     apiJsonTo.mockImplementation((_target: unknown, path: string) => {
       if (path === "/api/queue") {
+        queueCalls += 1;
+        if (queueCalls > 1) {
+          return Promise.resolve({
+            entries: [{ id: "mine", model: "ltx2:q8", state: "held" }],
+          });
+        }
         return Promise.resolve({
           entries: [
             {
@@ -1338,10 +1375,8 @@ describe("reconcileInterruptedGenerationJobs", () => {
 
     await reconcileInterruptedGenerationJobs([job], options());
 
-    expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/queue/mine", { method: "DELETE" });
-    expect(apiFetchTo).not.toHaveBeenCalledWith(target, "/api/queue/later-duplicate", {
-      method: "DELETE",
-    });
+    expect(job.id).toBe("mine");
+    expect(apiFetchTo).not.toHaveBeenCalled();
   });
 
   it("humanizes a reconciliation query that itself cannot reach the host", async () => {
