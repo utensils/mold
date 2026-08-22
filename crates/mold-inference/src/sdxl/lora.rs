@@ -1297,6 +1297,10 @@ mod tests {
             id_image_name: None,
             id_weight: None,
             id_start_step: None,
+            id_images: None,
+            id_image_names: None,
+            true_cfg: None,
+            cfg_start_step: None,
         }
     }
 

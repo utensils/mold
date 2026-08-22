@@ -1032,6 +1032,10 @@ mod tests {
             id_image_sha256: None,
             id_weight: None,
             id_start_step: None,
+            id_image_names: None,
+            id_image_sha256s: None,
+            true_cfg: None,
+            cfg_start_step: None,
         }
     }
 
@@ -3915,6 +3919,53 @@ mod tests {
             body["reference_uploads"]["max_file_bytes"],
             crate::reference_uploads::MAX_REFERENCE_UPLOAD_FILE_BYTES
         );
+    }
+
+    /// The identity block is what stops a client silently degrading a request
+    /// an older server would drop: `id_images` becomes a render with no face,
+    /// `true_cfg` becomes the distilled path. It must be advertised straight
+    /// from `mold_core::identity`'s own constants, so it can never claim a
+    /// bound the validator does not enforce.
+    #[tokio::test]
+    async fn capabilities_advertise_identity_shapes_from_the_contract_constants() {
+        let app = app_with_state(AppState::for_tests());
+        let resp = app
+            .oneshot(
+                Request::get("/api/capabilities")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = json_body(resp).await;
+
+        let available = mold_core::identity::identity_runtime_available();
+        assert_eq!(body["identity"]["multi_photo"], available);
+        assert_eq!(body["identity"]["true_cfg"], available);
+        assert_eq!(
+            body["identity"]["max_photos"],
+            if available {
+                mold_core::identity::ID_IMAGES_MAX
+            } else {
+                0
+            }
+        );
+
+        // Absence is NO, never unknown: an older server's response omits the
+        // block entirely and must deserialize to all-false rather than to a
+        // permissive default. Modelled by removing the key from a real body,
+        // which is exactly the shape such a server sends.
+        let mut older = serde_json::to_value(mold_core::ServerCapabilities::default()).unwrap();
+        older
+            .as_object_mut()
+            .expect("a capabilities object")
+            .remove("identity")
+            .expect("the block is serialized, so an older server is the one that omits it");
+        let legacy: mold_core::ServerCapabilities = serde_json::from_value(older).unwrap();
+        assert!(!legacy.identity.multi_photo);
+        assert!(!legacy.identity.true_cfg);
+        assert_eq!(legacy.identity.max_photos, 0);
     }
 
     #[tokio::test]
@@ -9716,6 +9767,10 @@ mod tests {
             id_image_sha256: None,
             id_weight: None,
             id_start_step: None,
+            id_image_names: None,
+            id_image_sha256s: None,
+            true_cfg: None,
+            cfg_start_step: None,
         };
         let mut rec = GenerationRecord::from_save(
             dir.path(),
@@ -10643,6 +10698,10 @@ mod tests {
             id_image_sha256: None,
             id_weight: None,
             id_start_step: None,
+            id_image_names: None,
+            id_image_sha256s: None,
+            true_cfg: None,
+            cfg_start_step: None,
         };
         let rec = GenerationRecord::from_save(
             dir.path(),

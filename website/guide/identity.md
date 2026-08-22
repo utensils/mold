@@ -60,8 +60,16 @@ recorded per machine, in `$MOLD_HOME`; a remote server needs its own.
 # The whole feature
 mold run flux-dev:q4 "an astronaut in a diner" --id-image face.jpg
 
+# Several references of the same person, averaged into one identity
+mold run flux-dev:q4 "a chef in a kitchen" \
+  --id-image front.jpg --id-image side.jpg --id-image smiling.jpg
+
 # Weaker identity, more prompt freedom
 mold run flux-dev:q4 "a Renaissance oil portrait" --id-image face.jpg --id-weight 0.6
+
+# True CFG: a real negative branch instead of FLUX's distilled guidance
+mold run flux-dev:q4 "a hiker on a ridge" --id-image face.jpg \
+  --true-cfg 2.0 --guidance 1.0 --negative-prompt "blurry, cartoon"
 
 # Let the composition settle first, then apply the face
 mold run flux-dev:q4 "a hiker on a ridge" --id-image face.jpg --id-start-step 4
@@ -73,16 +81,80 @@ MOLD_HOST=http://gpu-box:7680 mold run flux-dev:q4 "a chef in a kitchen" \
 
 ### Flags
 
-| Flag              | Default | Meaning                                                                                                                   |
-| ----------------- | ------- | ------------------------------------------------------------------------------------------------------------------------- |
-| `--id-image`      | —       | Reference photograph. PNG or JPEG, at most 16 MiB, 8192 px per axis, 32 MP.                                               |
-| `--id-weight`     | `1.0`   | Identity strength, `0.0`–`3.0`. Around `0.6`–`0.8` trades likeness for prompt adherence; above `1.2` starts to look waxy. |
-| `--id-start-step` | `0`     | First denoise step identity is applied from. Must be below `--steps`.                                                     |
+| Flag               | Default | Meaning                                                                                                                   |
+| ------------------ | ------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `--id-image`       | —       | Reference photograph. PNG or JPEG, at most 16 MiB, 8192 px per axis, 32 MP. **Repeatable**, up to 4 times.                |
+| `--id-weight`      | `1.0`   | Identity strength, `0.0`–`3.0`. Around `0.6`–`0.8` trades likeness for prompt adherence; above `1.2` starts to look waxy. |
+| `--id-start-step`  | `0`     | First denoise step identity is applied from. Must be below `--steps`.                                                     |
+| `--true-cfg`       | `1.0`   | True classifier-free guidance scale, `1.0`–`10.0`. `1.0` is off. Requires `--id-image`.                                   |
+| `--cfg-start-step` | `1`     | First denoise step the true-CFG negative branch runs at. Must be below `--steps`. Requires `--true-cfg`.                  |
 
 **`--id-weight 0` is completely inert.** Nothing is pulled, decoded, loaded, or
 extracted, and the render is byte-identical to the same seed with no identity
 flags at all. That is the falsification case: if the two differ, the injection
 is doing something it should not be.
+
+### Several photographs
+
+Repeat `--id-image` (up to four times) to give mold more than one reference of
+the **same person**. Each photograph is run through the whole pipeline
+independently and the resulting identity tokens are averaged, which is how
+[PuLID_ComfyUI](https://github.com/cubiq/PuLID_ComfyUI) combines references.
+Two or three photographs from different angles usually hold the likeness better
+across poses than one does.
+
+The whole set has budgets of its own beside the per-photograph ones: at most
+4 images, 32 MiB of encoded bytes, and 64 MP in total. A photograph with no
+detectable face refuses the whole request and names which one — dropping it
+silently would change the face that renders with nothing to show for it.
+
+Averaging is order-independent, but the saved provenance records every
+photograph's name and SHA-256 in the order you gave them.
+
+### True CFG
+
+FLUX.1-dev is guidance-distilled: it runs a single forward per step and
+`--guidance` steers it without a real negative branch, which is why
+`--negative-prompt` normally does nothing on FLUX. `--true-cfg` restores actual
+classifier-free guidance for identity renders — from `--cfg-start-step`
+onwards, each step also runs a second forward over your negative prompt and the
+_unconditional_ identity, and the two predictions are combined.
+
+Upstream's own advice, which mold follows rather than enforces: when you turn
+true CFG on, drop `--guidance` to `1.0`. Leaving the distilled guidance high
+while a real CFG scale is also applied stacks two guidance mechanisms.
+
+It costs close to twice the denoise time — two forwards per step instead of one
+— and about 150 MB of extra VRAM, which admission charges before the render is
+accepted rather than discovering mid-denoise.
+
+`--true-cfg 1.0` is inert in exactly the way `--id-weight 0` is: the branch is
+never constructed and the render is bit-identical to one that never named it.
+
+### Older servers
+
+Both of the above are additive request fields, and a server that predates them
+does not reject them — it **ignores** them. Sending several photographs to such
+a server would render with no face at all; sending `--true-cfg` would render the
+ordinary distilled path with no negative branch. Neither would tell you.
+
+So `mold run` asks first. When the render target does not advertise
+`capabilities.identity`, the request is **refused by name** rather than
+submitted:
+
+```
+$ mold run flux-dev:q4 "a chef" --id-image a.jpg --id-image b.jpg
+error: http://gpu-box:7680 does not support more than one identity photograph,
+       and sending several to it would render with no face at all. Use a single
+       --id-image, or upgrade that server.
+```
+
+A single `--id-image` needs no such check — every identity-capable server has
+always understood it — and `--local` is unaffected. If the server cannot be
+reached **at all**, nothing is refused: the ordinary local fallback takes over,
+and both shapes work in full there. A server that _is_ reachable but cannot
+answer the check is treated as not supporting them, because that is exactly how
+an older one behaves.
 
 ### Choosing a photograph
 
@@ -125,7 +197,9 @@ adapter's twenty cross-attention modules plus their activations) and roughly
 A print rendered with an identity records it. Saved metadata and the gallery row
 carry the reference photograph's **file name** and its **SHA-256**, plus the
 weight and start step that were applied — never the photograph itself, and never
-your directory layout.
+your directory layout. A print made from several photographs records every name
+and digest in request order, and a true-CFG print records the scale and start
+step the branch actually ran with.
 
 ```bash
 mold info ~/.mold/output/mold-flux-dev-q4-1.png
@@ -145,9 +219,18 @@ message rather than silently rendered:
 - Video families, Flux.2, Z-Image, Qwen-Image, SD, and Wuerstchen do not support
   identity at all.
 
+- **True CFG needs an identity**: `--true-cfg` and `--cfg-start-step` are
+  qualified only alongside an active identity (a photograph and a non-zero
+  `--id-weight`). They are refused on an ordinary FLUX render rather than
+  accepted and ignored.
+- **Older servers refuse both.** They are gated on
+  `GET /api/capabilities.identity`; see [Older servers](#older-servers).
+- Multiple photographs and true CFG are **CLI and API only** so far. The web,
+  desktop, iPhone, TUI, and Discord surfaces still offer a single photograph and
+  no true-CFG control.
+
 Also not implemented: facexlib's background mask (upstream applies one before
-the vision tower), and fusing several photographs of the same person into one
-stronger identity.
+the vision tower).
 
 ## Removing it
 
@@ -185,6 +268,16 @@ closer to frontal.
 
 **"does not support face-identity conditioning"** — the model is not one of the
 two qualified tiers.
+
+**"identity photo 2 of 3: no face was detected"** — one photograph of a set is
+unusable. The number is the position you gave it in.
+
+**"id_image and id_images are the same field in two shapes"** — an API client
+sent both. Put every photograph in `id_images`, or a single one in `id_image`.
+
+**"true_cfg and cfg_start_step are qualified only alongside active
+face-identity conditioning"** — `--true-cfg` was used without `--id-image`, or
+with `--id-weight 0`.
 
 **"no PuLID bundle resolved"** — run
 `mold pull pulid-flux --accept-license insightface-antelopev2` on the machine

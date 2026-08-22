@@ -38,6 +38,13 @@ use crate::flux::pulid::{IdentityEmbedding, PulidAdapter, PulidContext, PulidRun
 pub(crate) struct IdentityRequest {
     pub(crate) id_weight: f32,
     pub(crate) start_step: usize,
+    /// The true-CFG scale, or `None` when the request renders the distilled
+    /// single-forward path. Absent and an inert 1.0 are the same answer, so
+    /// nothing downstream has to re-apply the tolerance.
+    pub(crate) true_cfg: Option<f64>,
+    /// First step the negative branch runs at. Meaningless — and never read —
+    /// when `true_cfg` is `None`.
+    pub(crate) cfg_start_step: usize,
 }
 
 /// Read the identity fields off a request.
@@ -58,6 +65,12 @@ pub(crate) fn identity_request(req: &GenerateRequest) -> Option<IdentityRequest>
     Some(IdentityRequest {
         id_weight: id_weight as f32,
         start_step: mold_core::identity::effective_id_start_step(req) as usize,
+        // `request_uses_true_cfg` already answers the whole question — a
+        // photograph, a live weight, and a scale outside upstream's tolerance
+        // — so this never re-derives it.
+        true_cfg: mold_core::identity::request_uses_true_cfg(req)
+            .then(|| mold_core::identity::effective_true_cfg(req)),
+        cfg_start_step: mold_core::identity::effective_cfg_start_step(req) as usize,
     })
 }
 
@@ -66,11 +79,28 @@ pub(crate) fn identity_request(req: &GenerateRequest) -> Option<IdentityRequest>
 pub(crate) struct ResolvedIdentity {
     adapter: Arc<PulidAdapter>,
     context: PulidContext,
+    /// The unconditional context the true-CFG negative branch injects, and the
+    /// scale it combines with. `None` for every render that does not run one.
+    negative: Option<NegativeIdentity>,
+}
+
+/// The negative half of a true-CFG render.
+#[derive(Debug)]
+pub(crate) struct NegativeIdentity {
+    context: PulidContext,
+    scale: f64,
+    cfg_start_step: usize,
 }
 
 impl ResolvedIdentity {
     pub(crate) fn runtime(&self) -> PulidRuntime<'_> {
         PulidRuntime::new(&self.adapter, &self.context)
+    }
+
+    fn negative_runtime(&self) -> Option<PulidRuntime<'_>> {
+        self.negative
+            .as_ref()
+            .map(|negative| PulidRuntime::new(&self.adapter, &negative.context))
     }
 }
 
@@ -105,6 +135,22 @@ impl RenderIdentity<'_> {
     /// Whether this render conditions on a face at all.
     pub(crate) fn is_active(&self) -> bool {
         self.resolved.is_some()
+    }
+
+    /// The unconditional identity runtime the true-CFG negative branch drives,
+    /// and the scale and start step it uses.
+    ///
+    /// `None` for every render that does not run the branch — which is every
+    /// render that did not ask for it, and every one whose host froze no
+    /// unconditional embedding.
+    pub(crate) fn negative(&self) -> Option<(PulidRuntime<'_>, f64, usize)> {
+        let resolved = self.resolved.as_ref()?;
+        let negative = resolved.negative.as_ref()?;
+        Some((
+            resolved.negative_runtime()?,
+            negative.scale,
+            negative.cfg_start_step,
+        ))
     }
 
     /// Cross-attention modules the render is driving, for the progress line.
@@ -165,6 +211,11 @@ pub(crate) struct EngineIdentityState {
     /// sets it, which is why a conditioned request with no embedding is an
     /// explicit error rather than a silently unconditioned render.
     pending_embedding: Option<IdentityEmbedding>,
+    /// The unconditional identity for the next true-CFG request, when
+    /// admission froze one. Cleared and installed by the same call as
+    /// [`Self::pending_embedding`], so the two can never describe different
+    /// requests.
+    pending_uncond_embedding: Option<IdentityEmbedding>,
     resident: Option<ResidentAdapter>,
 }
 
@@ -173,13 +224,25 @@ impl EngineIdentityState {
         Self {
             assets,
             pending_embedding: None,
+            pending_uncond_embedding: None,
             resident: None,
         }
     }
 
-    /// Install the identity signal the next conditioned request will use.
-    pub(crate) fn set_embedding(&mut self, embedding: Option<IdentityEmbedding>) {
+    /// Install the identity signal the next conditioned request will use, and
+    /// the unconditional one beside it.
+    ///
+    /// One setter for both, because an unconditional embedding left over from
+    /// a previous request would condition THIS render's negative branch on the
+    /// previous person's absence — and the clear is what every dispatch
+    /// performs, so it must not be possible to clear one and not the other.
+    pub(crate) fn set_embedding(
+        &mut self,
+        embedding: Option<IdentityEmbedding>,
+        uncond: Option<IdentityEmbedding>,
+    ) {
         self.pending_embedding = embedding;
+        self.pending_uncond_embedding = uncond;
     }
 
     pub(crate) fn adapter_path(&self) -> Option<&PathBuf> {
@@ -223,6 +286,7 @@ impl EngineIdentityState {
                 resident.dtype,
                 &resident.device,
             ),
+            negative: None,
         });
         RenderIdentity {
             resolved,
@@ -307,7 +371,43 @@ impl EngineIdentityState {
         let adapter = self.ensure_adapter(device, dtype, cfg)?;
         let context =
             PulidContext::new(&embedding, asked.id_weight, asked.start_step, device, dtype)?;
-        Ok(Some(ResolvedIdentity { adapter, context }))
+
+        // The negative branch. Both halves must be present: the request has to
+        // have asked for true CFG, and admission has to have frozen the
+        // unconditional identity for it. A request that asked and was frozen
+        // without one is an error rather than a silent distilled render —
+        // upstream's negative pass is what the guidance scale is applied to,
+        // so quietly dropping it would render something the caller did not ask
+        // for at a guidance value chosen for a branch that never ran.
+        let negative = match asked.true_cfg {
+            Some(scale) => {
+                let uncond = self.pending_uncond_embedding.clone().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "this request asks for true classifier-free guidance but no \
+                             unconditional identity embedding was frozen for it"
+                    )
+                })?;
+                Some(NegativeIdentity {
+                    // `PuLID/flux/sampling.py:145-146`: the negative branch uses
+                    // the same `id_weight` and the same `id_start_step`.
+                    context: PulidContext::new(
+                        &uncond,
+                        asked.id_weight,
+                        asked.start_step,
+                        device,
+                        dtype,
+                    )?,
+                    scale,
+                    cfg_start_step: asked.cfg_start_step,
+                })
+            }
+            None => None,
+        };
+        Ok(Some(ResolvedIdentity {
+            adapter,
+            context,
+            negative,
+        }))
     }
 
     fn ensure_adapter(
@@ -524,20 +624,23 @@ pub(crate) mod tests {
     #[test]
     fn a_conditioned_request_without_prepared_assets_names_the_missing_bundle() {
         let mut state = EngineIdentityState::new(None);
-        state.set_embedding(Some(
-            IdentityEmbedding::new(
-                Tensor::zeros(
-                    (
-                        crate::flux::pulid::ID_TOKENS,
-                        crate::flux::pulid::ID_TOKEN_DIM,
-                    ),
-                    DType::F32,
-                    &Device::Cpu,
+        state.set_embedding(
+            Some(
+                IdentityEmbedding::new(
+                    Tensor::zeros(
+                        (
+                            crate::flux::pulid::ID_TOKENS,
+                            crate::flux::pulid::ID_TOKEN_DIM,
+                        ),
+                        DType::F32,
+                        &Device::Cpu,
+                    )
+                    .unwrap(),
                 )
                 .unwrap(),
-            )
-            .unwrap(),
-        ));
+            ),
+            None,
+        );
         let mut req = request();
         req.id_image = Some(vec![1, 2, 3]);
         let cfg = flux::model::Config::dev();
@@ -545,6 +648,135 @@ pub(crate) mod tests {
             .resolve(&req, &Device::Cpu, DType::F32, &cfg)
             .expect_err("no adapter path is an error");
         assert!(error.to_string().contains("no PuLID adapter"), "{error}");
+    }
+
+    // ---- true CFG (#1226) ----
+
+    fn identity_embedding_fixture() -> IdentityEmbedding {
+        IdentityEmbedding::new(
+            Tensor::zeros(
+                (
+                    crate::flux::pulid::ID_TOKENS,
+                    crate::flux::pulid::ID_TOKEN_DIM,
+                ),
+                DType::F32,
+                &Device::Cpu,
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
+    /// Absent, and an inert 1.0, are the same answer — the request contract
+    /// applies upstream's tolerance once and nothing downstream re-derives it.
+    #[test]
+    fn a_request_carries_the_true_cfg_it_will_actually_run() {
+        let mut req = request();
+        req.id_image = Some(vec![1, 2, 3]);
+        assert_eq!(identity_request(&req).unwrap().true_cfg, None);
+
+        req.true_cfg = Some(1.0);
+        assert_eq!(
+            identity_request(&req).unwrap().true_cfg,
+            None,
+            "an inert scale runs the distilled path"
+        );
+
+        req.true_cfg = Some(2.5);
+        req.cfg_start_step = Some(3);
+        let asked = identity_request(&req).unwrap();
+        assert_eq!(asked.true_cfg, Some(2.5));
+        assert_eq!(asked.cfg_start_step, 3);
+
+        // A zero weight applies no identity at all, so there is nothing for a
+        // negative branch to be the negative of.
+        req.id_weight = Some(0.0);
+        assert_eq!(identity_request(&req), None);
+    }
+
+    /// An ordinary identity render resolves no negative branch even when an
+    /// unconditional embedding happens to be installed: what decides is the
+    /// request, never the residency.
+    #[test]
+    fn an_ordinary_identity_render_resolves_no_negative_branch() {
+        let mut state = state_holding_an_adapter();
+        state.set_embedding(
+            Some(identity_embedding_fixture()),
+            Some(identity_embedding_fixture()),
+        );
+        let mut req = request();
+        req.id_image = Some(vec![1, 2, 3]);
+        let mut cfg = flux::model::Config::dev();
+        cfg.depth = 4;
+        cfg.depth_single_blocks = 8;
+
+        let identity = state
+            .resolve_for_render(&req, &Device::Cpu, DType::F32, &cfg)
+            .expect("an ordinary identity render resolves");
+        assert!(identity.is_active());
+        assert!(identity.negative().is_none());
+    }
+
+    #[test]
+    fn a_true_cfg_render_resolves_the_unconditional_branch() {
+        let mut state = state_holding_an_adapter();
+        state.set_embedding(
+            Some(identity_embedding_fixture()),
+            Some(identity_embedding_fixture()),
+        );
+        let mut req = request();
+        req.id_image = Some(vec![1, 2, 3]);
+        req.true_cfg = Some(2.5);
+        req.cfg_start_step = Some(2);
+        let mut cfg = flux::model::Config::dev();
+        cfg.depth = 4;
+        cfg.depth_single_blocks = 8;
+
+        let identity = state
+            .resolve_for_render(&req, &Device::Cpu, DType::F32, &cfg)
+            .expect("a true-CFG render resolves");
+        let (_, scale, start_step) = identity.negative().expect("a negative branch");
+        assert_eq!(scale, 2.5);
+        assert_eq!(start_step, 2);
+    }
+
+    /// A true-CFG request whose host froze no unconditional identity must fail
+    /// loudly. Rendering it on the distilled path would apply a `guidance` the
+    /// caller chose for a branch that never ran, and nothing would say so.
+    #[test]
+    fn a_true_cfg_request_without_an_unconditional_identity_is_an_explicit_error() {
+        let mut state = state_holding_an_adapter();
+        state.set_embedding(Some(identity_embedding_fixture()), None);
+        let mut req = request();
+        req.id_image = Some(vec![1, 2, 3]);
+        req.true_cfg = Some(2.0);
+        let mut cfg = flux::model::Config::dev();
+        cfg.depth = 4;
+        cfg.depth_single_blocks = 8;
+
+        let error = state
+            .resolve(&req, &Device::Cpu, DType::F32, &cfg)
+            .expect_err("no unconditional identity is an error, never a silent downgrade");
+        assert!(
+            error.to_string().contains("unconditional identity"),
+            "{error}"
+        );
+    }
+
+    /// Both halves are installed and cleared together, so a leftover
+    /// unconditional embedding can never condition the next render's negative
+    /// branch on the previous person's absence.
+    #[test]
+    fn clearing_the_identity_clears_the_unconditional_half_too() {
+        let mut state = EngineIdentityState::new(None);
+        state.set_embedding(
+            Some(identity_embedding_fixture()),
+            Some(identity_embedding_fixture()),
+        );
+        assert!(state.pending_uncond_embedding.is_some());
+        state.set_embedding(None, None);
+        assert!(state.pending_embedding.is_none());
+        assert!(state.pending_uncond_embedding.is_none());
     }
 
     #[test]

@@ -1,0 +1,28 @@
+{
+  "uncond": {
+    "source": "PuLID/pulid/pipeline_flux.py:188-192",
+    "id_cond_shape": [
+      1,
+      1280
+    ],
+    "vit_hidden_shape": [
+      5,
+      1,
+      577,
+      1024
+    ],
+    "inputs": "all zeros \u2014 the unconditional embedding depends on no photograph",
+    "output": {
+      "shape": [
+        1,
+        32,
+        2048
+      ],
+      "mean": -0.08208931237459183,
+      "std": 114.38872528076172,
+      "min": -13086.8583984375,
+      "max": 11792.1279296875,
+      "l2": 29283.205078125
+    }
+  }
+}

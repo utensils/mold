@@ -428,6 +428,10 @@ mod tests {
             id_image_sha256: None,
             id_weight: None,
             id_start_step: None,
+            id_image_names: None,
+            id_image_sha256s: None,
+            true_cfg: None,
+            cfg_start_step: None,
         };
 
         let bytes = encode_image(&tensor, OutputFormat::Png, 4, 4, Some(&metadata)).unwrap();
@@ -532,6 +536,10 @@ mod tests {
             id_image_name: None,
             id_weight: None,
             id_start_step: None,
+            id_images: None,
+            id_image_names: None,
+            true_cfg: None,
+            cfg_start_step: None,
         };
 
         assert!(build_output_metadata(&req, 42, None).is_none());
@@ -605,6 +613,10 @@ mod tests {
             id_image_sha256: None,
             id_weight: None,
             id_start_step: None,
+            id_image_names: None,
+            id_image_sha256s: None,
+            true_cfg: None,
+            cfg_start_step: None,
         });
 
         update_output_metadata_size(&mut metadata, 1008, 1008);
@@ -683,6 +695,10 @@ mod tests {
             id_image_sha256: None,
             id_weight: None,
             id_start_step: None,
+            id_image_names: None,
+            id_image_sha256s: None,
+            true_cfg: None,
+            cfg_start_step: None,
         }
     }
 
@@ -854,6 +870,10 @@ mod tests {
             id_image_sha256: None,
             id_weight: None,
             id_start_step: None,
+            id_image_names: None,
+            id_image_sha256s: None,
+            true_cfg: None,
+            cfg_start_step: None,
         };
         let bytes = encode_image(&tensor, OutputFormat::Jpeg, 8, 8, Some(&metadata)).unwrap();
 

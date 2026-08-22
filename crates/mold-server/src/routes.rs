@@ -5626,6 +5626,14 @@ async fn server_capabilities(
         devices: device_capabilities(&state.scheduled_work),
         dispatch: dispatch_capabilities(&state.scheduled_work),
         expand: Some(expand),
+        // A build that cannot execute identity conditioning advertises
+        // nothing, so a client is told "no" rather than being allowed to send
+        // fields this server would drop on the floor.
+        identity: if mold_core::identity::identity_runtime_available() {
+            mold_core::IdentityCapabilities::advertised()
+        } else {
+            mold_core::IdentityCapabilities::default()
+        },
     })
 }
 

@@ -1441,6 +1441,10 @@ fn build_generate_request(
         id_image_name: None,
         id_weight: None,
         id_start_step: None,
+        id_images: None,
+        id_image_names: None,
+        true_cfg: None,
+        cfg_start_step: None,
     })
 }
 
@@ -2320,6 +2324,10 @@ mod tests {
             id_image_name: None,
             id_weight: None,
             id_start_step: None,
+            id_images: None,
+            id_image_names: None,
+            true_cfg: None,
+            cfg_start_step: None,
         };
 
         let id = jobs.create(&req).await;
@@ -2446,6 +2454,10 @@ mod tests {
                 id_image_sha256: None,
                 id_weight: None,
                 id_start_step: None,
+                id_image_names: None,
+                id_image_sha256s: None,
+                true_cfg: None,
+                cfg_start_step: None,
             },
             timestamp,
             format: Some(OutputFormat::Png),

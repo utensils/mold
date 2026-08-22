@@ -114,6 +114,81 @@ pub const ID_IMAGE_LIMITS: IdImageLimits = IdImageLimits {
     max_decode_allocation_bytes: 32_000_000 * 4,
 };
 
+/// Maximum identity photographs one request may carry.
+///
+/// Four, and the number is an extraction-latency budget rather than a taste.
+/// Every photo pays a whole CPU extraction — two ONNX graph evaluations, a
+/// 336px EVA02-CLIP forward, and an IDFormer pass — and `docs/architecture/
+/// pulid-face-extraction.md` measured that at p95 415.7 ms on halcyon and
+/// 1574.5 ms on plato against a 2.0 s budget. Extractions are serialized
+/// (`mold_server::identity_extraction::ExtractionSlot`), so the whole-request
+/// cost is N times the slowest measurement: four photos is ~6.3 s of admission
+/// latency on the slowest qualified box, which is the most that can sit in
+/// front of a render without the client believing the request was lost.
+///
+/// The averaging itself has no natural ceiling — `cubiq/PuLID_ComfyUI`
+/// (`pulid.py:415-419`) means over however many frames the batch carried — so
+/// this is mold's bound, not upstream's.
+pub const ID_IMAGES_MAX: usize = 4;
+
+/// Maximum total encoded bytes across every identity photograph in one request.
+///
+/// Deliberately BELOW `ID_IMAGES_MAX * ID_IMAGE_LIMITS.max_encoded_bytes`
+/// (64 MiB), because a per-image bound that is never collectively enforced is
+/// not a bound: four 16 MiB payloads are one 64 MiB request body an admission
+/// path has to buffer before it can read a single header.
+pub const ID_IMAGES_TOTAL_ENCODED_BYTES_MAX: usize = 32 * 1024 * 1024;
+
+/// Maximum total header-declared pixels across every identity photograph.
+///
+/// Twice the single-image budget for the same reason: the set is what the
+/// process decodes, one image at a time, and 4 x 32 MP is a decode schedule
+/// nothing on the request path asked for.
+pub const ID_IMAGES_TOTAL_DECODED_PIXELS_MAX: u64 = 64_000_000;
+
+/// Refusal for a request that carries BOTH `id_image` and `id_images`.
+///
+/// They are one field in two shapes, so a precedence rule would silently drop
+/// a photograph the caller supplied — and with averaging, dropping one photo
+/// changes the face that renders without changing anything the caller can see.
+/// Refusing is the only answer that cannot be wrong.
+pub const IDENTITY_IMAGE_FORM_CONFLICT: &str =
+    "id_image and id_images are the same field in two shapes; supply exactly one \
+     (put every photograph in id_images, or a single photograph in id_image)";
+
+/// The true-CFG scale that leaves FLUX's distilled guidance untouched.
+///
+/// `PuLID/flux/sampling.py:120` is the authority for the comparison, not just
+/// the value: `use_true_cfg = abs(true_cfg - 1.0) > 1e-2`, so 1.0 and anything
+/// within [`TRUE_CFG_EPSILON`] of it are inert.
+pub const TRUE_CFG_OFF: f64 = 1.0;
+
+/// Inclusive upper bound for `true_cfg`, matching upstream's own control
+/// (`PuLID/app_flux.py:221`, a 1.0-10.0 slider).
+pub const TRUE_CFG_MAX: f64 = 10.0;
+
+/// The tolerance around [`TRUE_CFG_OFF`] within which true CFG does nothing
+/// (`PuLID/flux/sampling.py:120`).
+pub const TRUE_CFG_EPSILON: f64 = 1e-2;
+
+/// Default `cfg_start_step` — upstream's own default
+/// (`PuLID/app_flux.py:68`, `flux/sampling.py:112`), which lets the first step
+/// establish composition on the conditional branch alone.
+pub const CFG_START_STEP_DEFAULT: u32 = 1;
+
+/// Refusal for a true-CFG request that is not conditioning on a face.
+///
+/// True CFG is not a general FLUX control in this milestone: the negative
+/// branch needs the *unconditional identity embedding* the extractor produces
+/// beside the real one (`PuLID/pulid/pipeline_flux.py:188-192`), and a request
+/// with no active identity has none. Accepting it and quietly rendering the
+/// distilled path would be the accept-and-ignore failure the whole identity
+/// contract refuses.
+pub const TRUE_CFG_REQUIRES_IDENTITY: &str =
+    "true_cfg and cfg_start_step are qualified only alongside active face-identity \
+     conditioning; supply an id_image (or id_images) with a non-zero id_weight, \
+     or remove them";
+
 /// Whether `model` is qualified for identity conditioning.
 ///
 /// The name is resolved first, so callers may pass whatever the request
@@ -175,11 +250,111 @@ pub fn validate_id_start_step(start_step: u32, steps: u32) -> Result<(), String>
 
 /// Whether the request asks for identity conditioning in any way — including
 /// the incomplete forms (a knob without an image) validation must refuse.
+///
+/// Deliberately does NOT cover `true_cfg` / `cfg_start_step`. This predicate is
+/// what plans the PuLID asset bundle and charges the device overhead
+/// (`mold_server::identity_dependencies`, `mold_server::memory_preflight`), and
+/// a true-CFG scale on a request with no face must plan nothing — it is a
+/// validation error, not an identity request. [`request_mentions_true_cfg`] is
+/// the separate question.
 pub fn request_mentions_identity(req: &GenerateRequest) -> bool {
     req.id_image.is_some()
+        || req.id_images.is_some()
         || req.id_image_name.is_some()
+        || req.id_image_names.is_some()
         || req.id_weight.is_some()
         || req.id_start_step.is_some()
+}
+
+/// Whether the request names either true-CFG knob.
+pub fn request_mentions_true_cfg(req: &GenerateRequest) -> bool {
+    req.true_cfg.is_some() || req.cfg_start_step.is_some()
+}
+
+/// The ordered identity photographs this request carries, in either shape.
+///
+/// One accessor so no consumer has to know which form arrived, and so the
+/// singular form is never quietly treated as a special case somewhere it is
+/// not. Empty for a request that carries no photograph at all — including the
+/// incomplete forms validation refuses.
+pub fn identity_images(req: &GenerateRequest) -> Vec<&[u8]> {
+    if let Some(images) = req.id_images.as_ref() {
+        return images.iter().map(Vec::as_slice).collect();
+    }
+    req.id_image
+        .as_deref()
+        .map(|bytes| vec![bytes])
+        .unwrap_or_default()
+}
+
+/// Whether this request actually carries a face reference, in either shape.
+pub fn request_carries_identity_photo(req: &GenerateRequest) -> bool {
+    !identity_images(req).is_empty()
+}
+
+/// SHA-256 of every identity photograph, in request order.
+pub fn identity_image_sha256s(req: &GenerateRequest) -> Vec<String> {
+    identity_images(req)
+        .into_iter()
+        .map(id_image_sha256)
+        .collect()
+}
+
+/// Validate the whole identity-photograph set.
+///
+/// The order is the same discipline [`validate_id_image_bytes`] applies to one
+/// payload, lifted to the set: count first (so an absurd list is refused before
+/// anything is read), then the collective encoded size, then each image on its
+/// own header, then the collective decoded-pixel budget. Nothing decodes.
+///
+/// Per-image refusals are prefixed with the photograph's one-based position, so
+/// a caller who supplied four references is told which one is wrong rather than
+/// being handed a sentence about "id_image" and left to guess.
+pub fn validate_id_images(images: &[&[u8]]) -> Result<(), String> {
+    if images.is_empty() {
+        return Err("id_images must not be empty".to_string());
+    }
+    if images.len() > ID_IMAGES_MAX {
+        return Err(format!(
+            "id_images carries {} photographs; at most {ID_IMAGES_MAX} are accepted",
+            images.len()
+        ));
+    }
+    let total_encoded: usize = images.iter().map(|bytes| bytes.len()).sum();
+    if total_encoded > ID_IMAGES_TOTAL_ENCODED_BYTES_MAX {
+        return Err(format!(
+            "id_images is {total_encoded} bytes in total, which exceeds the {} byte (32 MiB) \
+             limit across the whole set",
+            ID_IMAGES_TOTAL_ENCODED_BYTES_MAX
+        ));
+    }
+
+    let count = images.len();
+    // A one-photograph set is the singular form, so its refusals stay exactly
+    // the sentences every surface has always shown; only a genuine set names
+    // which photograph is at fault.
+    let locate = |index: usize, reason: String| {
+        if count == 1 {
+            reason
+        } else {
+            format!("identity photo {} of {count}: {reason}", index + 1)
+        }
+    };
+    let mut total_pixels: u64 = 0;
+    for (index, bytes) in images.iter().enumerate() {
+        validate_id_image_bytes(bytes).map_err(|reason| locate(index, reason))?;
+        // Already proven a well-formed PNG or JPEG header by the line above.
+        let (width, height) = header_dimensions(bytes).map_err(|reason| locate(index, reason))?;
+        total_pixels = total_pixels.saturating_add(u64::from(width) * u64::from(height));
+    }
+    if total_pixels > ID_IMAGES_TOTAL_DECODED_PIXELS_MAX {
+        return Err(format!(
+            "id_images declares {total_pixels} pixels in total, which exceeds the {} pixel \
+             limit across the whole set",
+            ID_IMAGES_TOTAL_DECODED_PIXELS_MAX
+        ));
+    }
+    Ok(())
 }
 
 /// The `id_weight` that will actually be applied.
@@ -190,6 +365,55 @@ pub fn effective_id_weight(req: &GenerateRequest) -> f64 {
 /// The `id_start_step` that will actually be applied.
 pub fn effective_id_start_step(req: &GenerateRequest) -> u32 {
     req.id_start_step.unwrap_or(ID_START_STEP_DEFAULT)
+}
+
+/// The `true_cfg` scale that will actually be applied.
+pub fn effective_true_cfg(req: &GenerateRequest) -> f64 {
+    req.true_cfg.unwrap_or(TRUE_CFG_OFF)
+}
+
+/// The `cfg_start_step` that will actually be applied.
+pub fn effective_cfg_start_step(req: &GenerateRequest) -> u32 {
+    req.cfg_start_step.unwrap_or(CFG_START_STEP_DEFAULT)
+}
+
+/// Whether a scale engages the true-CFG branch at all
+/// (`PuLID/flux/sampling.py:120`).
+pub fn true_cfg_engages(scale: f64) -> bool {
+    scale.is_finite() && (scale - TRUE_CFG_OFF).abs() > TRUE_CFG_EPSILON
+}
+
+/// Whether this request will actually run the true-CFG negative branch.
+///
+/// All three conditions, because each one alone renders the distilled path: a
+/// photograph must be present, its effective weight must be above zero, and the
+/// scale must engage. That last clause is what keeps `true_cfg: 1.0` as inert
+/// as `id_weight: 0.0` — both are accepted, and both render exactly what a
+/// request that never named them renders.
+pub fn request_uses_true_cfg(req: &GenerateRequest) -> bool {
+    request_carries_identity_photo(req)
+        && effective_id_weight(req) > 0.0
+        && true_cfg_engages(effective_true_cfg(req))
+}
+
+/// Validate a `true_cfg` against the one advertised range.
+pub fn validate_true_cfg(scale: f64) -> Result<(), String> {
+    if !scale.is_finite() || !(TRUE_CFG_OFF..=TRUE_CFG_MAX).contains(&scale) {
+        return Err(format!(
+            "true_cfg ({scale}) must be a finite value in range [{TRUE_CFG_OFF}, {TRUE_CFG_MAX}]"
+        ));
+    }
+    Ok(())
+}
+
+/// Validate a `cfg_start_step` against the run's own step count.
+pub fn validate_cfg_start_step(start_step: u32, steps: u32) -> Result<(), String> {
+    if start_step >= steps {
+        return Err(format!(
+            "cfg_start_step ({start_step}) must be less than steps ({steps})"
+        ));
+    }
+    Ok(())
 }
 
 /// Header-declared pixel dimensions of a PNG or JPEG payload.
@@ -317,6 +541,12 @@ pub fn validate_id_image_bytes(bytes: &[u8]) -> Result<(), String> {
 /// safe to call unconditionally from the shared generate-request validator.
 pub fn validate_identity_conditioning(req: &GenerateRequest) -> Result<(), String> {
     if !request_mentions_identity(req) {
+        // True CFG rides on the identity contract and nothing else in this
+        // milestone, so a request that names it without a face is refused here
+        // rather than accepted and quietly rendered without a negative branch.
+        if request_mentions_true_cfg(req) {
+            return Err(TRUE_CFG_REQUIRES_IDENTITY.to_string());
+        }
         return Ok(());
     }
 
@@ -331,12 +561,36 @@ pub fn validate_identity_conditioning(req: &GenerateRequest) -> Result<(), Strin
         return Err(IDENTITY_RUNTIME_PENDING.to_string());
     }
 
-    let Some(bytes) = req.id_image.as_deref() else {
+    // One field in two shapes: both is a contradiction, never a precedence.
+    if req.id_image.is_some() && req.id_images.is_some() {
+        return Err(IDENTITY_IMAGE_FORM_CONFLICT.to_string());
+    }
+
+    let images = identity_images(req);
+    if images.is_empty() {
         return Err(
-            "id_image is required when id_weight, id_start_step, or id_image_name is set"
+            "id_image (or id_images) is required when id_weight, id_start_step, id_image_name, \
+             or id_image_names is set"
                 .to_string(),
         );
-    };
+    }
+
+    if let Some(names) = req.id_image_names.as_ref() {
+        if req.id_images.is_none() {
+            return Err("id_image_names requires id_images".to_string());
+        }
+        if names.len() != images.len() {
+            return Err(format!(
+                "id_image_names has {} entries but id_images carries {} photographs; either omit \
+                 the names or supply one per photograph",
+                names.len(),
+                images.len()
+            ));
+        }
+    }
+    if req.id_image_name.is_some() && req.id_image.is_none() {
+        return Err("id_image_name requires id_image".to_string());
+    }
 
     if !identity_qualified_model(&req.model) {
         return Err(identity_model_gate_message(&req.model));
@@ -353,7 +607,29 @@ pub fn validate_identity_conditioning(req: &GenerateRequest) -> Result<(), Strin
     validate_id_weight(effective_id_weight(req))?;
     validate_id_start_step(effective_id_start_step(req), req.steps)?;
 
-    validate_id_image_bytes(bytes)
+    if request_mentions_true_cfg(req) {
+        // A zero weight applies no identity at all, so there is no
+        // unconditional identity embedding for the negative branch to use and
+        // nothing that would distinguish the render from a plain FLUX one.
+        // Refusing keeps `id_weight: 0.0` byte-indistinguishable from a request
+        // that named no identity field whatsoever.
+        if effective_id_weight(req) == 0.0 {
+            return Err(TRUE_CFG_REQUIRES_IDENTITY.to_string());
+        }
+        validate_true_cfg(effective_true_cfg(req))?;
+        if req.cfg_start_step.is_some() && !true_cfg_engages(effective_true_cfg(req)) {
+            return Err(
+                "cfg_start_step requires a true_cfg above 1.0; at 1.0 there is no negative branch \
+                 to start"
+                    .to_string(),
+            );
+        }
+        validate_cfg_start_step(effective_cfg_start_step(req), req.steps)?;
+    }
+
+    // Both shapes go through the set validator, so the single form is a
+    // one-element set rather than a second code path that can drift.
+    validate_id_images(&images)
 }
 
 /// Token count of the identity embedding the IDFormer produces.
@@ -406,10 +682,22 @@ pub struct IdentityAssetDigests {
 pub struct FrozenIdentityEmbedding {
     /// `ID_EMBEDDING_VALUES` little-endian `f32`s, token-major.
     values_le: std::sync::Arc<Vec<u8>>,
-    /// SHA-256 of the encoded `id_image` bytes the extraction consumed.
-    source_sha256: String,
+    /// SHA-256 of every encoded identity photograph the extraction consumed,
+    /// in request order. Exactly one entry for the singular `id_image` form.
+    ///
+    /// Order is recorded even though the averaging itself is
+    /// order-independent, because provenance is about what was supplied, not
+    /// about what the arithmetic happened to need.
+    source_sha256s: Vec<String>,
     assets: IdentityAssetDigests,
-    /// SHA-256 over source, assets, and values — the identity half of the
+    /// The unconditional identity the true-CFG negative branch conditions on
+    /// (`PuLID/pulid/pipeline_flux.py:188-192`), when this request runs one.
+    ///
+    /// `None` for every request that does not, which is what keeps a plain
+    /// identity render's frozen value — and its fingerprint — byte-identical
+    /// to what it was before true CFG existed.
+    uncond_values_le: Option<std::sync::Arc<Vec<u8>>>,
+    /// SHA-256 over sources, assets, and values — the identity half of the
     /// prepared plan's profile hash.
     fingerprint: String,
 }
@@ -424,46 +712,93 @@ impl FrozenIdentityEmbedding {
         source_sha256: impl Into<String>,
         assets: IdentityAssetDigests,
     ) -> Result<Self, String> {
-        if values.len() != ID_EMBEDDING_VALUES {
+        Self::from_sources(values, vec![source_sha256.into()], assets)
+    }
+
+    /// Freeze an identity averaged over several photographs.
+    ///
+    /// `source_sha256s` is every photograph the extraction consumed, in request
+    /// order; the singular [`Self::new`] is the one-element case rather than a
+    /// second code path.
+    pub fn from_sources(
+        values: &[f32],
+        source_sha256s: Vec<String>,
+        assets: IdentityAssetDigests,
+    ) -> Result<Self, String> {
+        check_embedding_values(values)?;
+        if source_sha256s.is_empty() {
+            return Err(
+                "a frozen identity embedding must record at least one source photograph"
+                    .to_string(),
+            );
+        }
+        if source_sha256s.len() > ID_IMAGES_MAX {
             return Err(format!(
-                "a frozen identity embedding must carry {ID_EMBEDDING_VALUES} values \
-                 ({ID_EMBEDDING_TOKENS}x{ID_EMBEDDING_DIM}), got {}",
-                values.len()
+                "a frozen identity embedding may average at most {ID_IMAGES_MAX} photographs, \
+                 got {}",
+                source_sha256s.len()
             ));
         }
-        if let Some(bad) = values.iter().find(|value| !value.is_finite()) {
-            return Err(format!(
-                "the identity extractor produced a non-finite value ({bad}); \
-                 the embedding is not usable"
-            ));
-        }
-        let mut values_le = Vec::with_capacity(ID_EMBEDDING_VALUES * 4);
-        for value in values {
-            values_le.extend_from_slice(&value.to_le_bytes());
-        }
-        let source_sha256 = source_sha256.into();
-        let fingerprint = fingerprint_of(&values_le, &source_sha256, &assets);
+        let values_le = to_le_bytes(values);
+        let fingerprint = fingerprint_of(&values_le, &source_sha256s, &assets, None);
         Ok(Self {
             values_le: std::sync::Arc::new(values_le),
-            source_sha256,
+            source_sha256s,
             assets,
+            uncond_values_le: None,
             fingerprint,
         })
     }
 
-    /// The embedding, token-major, as `ID_EMBEDDING_VALUES` `f32`s.
-    pub fn values(&self) -> Vec<f32> {
-        self.values_le
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .map(|chunk| f32::from_le_bytes(*chunk))
-            .collect()
+    /// Attach the unconditional identity the true-CFG negative branch uses.
+    ///
+    /// A separate builder rather than an argument on the constructors because
+    /// the overwhelming majority of identity renders never compute one, and a
+    /// `None` threaded through every call site is a `None` somebody eventually
+    /// passes by accident. Re-derives the fingerprint, so a request that runs
+    /// the negative branch is never mistaken for the same identity without it.
+    pub fn with_uncond(mut self, uncond_values: &[f32]) -> Result<Self, String> {
+        check_embedding_values(uncond_values)?;
+        let uncond_values_le = to_le_bytes(uncond_values);
+        self.fingerprint = fingerprint_of(
+            &self.values_le,
+            &self.source_sha256s,
+            &self.assets,
+            Some(&uncond_values_le),
+        );
+        self.uncond_values_le = Some(std::sync::Arc::new(uncond_values_le));
+        Ok(self)
     }
 
-    /// SHA-256 of the `id_image` this identity came from.
+    /// The embedding, token-major, as `ID_EMBEDDING_VALUES` `f32`s.
+    pub fn values(&self) -> Vec<f32> {
+        decode_values(&self.values_le)
+    }
+
+    /// The unconditional identity, when this request runs a true-CFG negative
+    /// branch.
+    pub fn uncond_values(&self) -> Option<Vec<f32>> {
+        self.uncond_values_le
+            .as_ref()
+            .map(|bytes| decode_values(bytes))
+    }
+
+    /// Whether an unconditional identity was frozen beside this one.
+    pub fn has_uncond(&self) -> bool {
+        self.uncond_values_le.is_some()
+    }
+
+    /// SHA-256 of the first identity photograph this identity came from.
+    ///
+    /// Retained for every caller that predates multiple photographs; the whole
+    /// ordered set is [`Self::source_sha256s`].
     pub fn source_sha256(&self) -> &str {
-        &self.source_sha256
+        &self.source_sha256s[0]
+    }
+
+    /// SHA-256 of every identity photograph, in request order.
+    pub fn source_sha256s(&self) -> &[String] {
+        &self.source_sha256s
     }
 
     /// The artifacts the extraction ran on.
@@ -487,18 +822,70 @@ impl std::fmt::Debug for FrozenIdentityEmbedding {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FrozenIdentityEmbedding")
             .field("fingerprint", &self.fingerprint)
-            .field("source_sha256", &self.source_sha256)
+            .field("source_sha256s", &self.source_sha256s)
             .field("values", &"<redacted>")
+            .field("uncond", &self.uncond_values_le.is_some())
             .finish()
     }
 }
 
-fn fingerprint_of(values_le: &[u8], source_sha256: &str, assets: &IdentityAssetDigests) -> String {
+/// Shape and finiteness, checked once at the boundary rather than at the twenty
+/// injection sites that eventually consume the values.
+fn check_embedding_values(values: &[f32]) -> Result<(), String> {
+    if values.len() != ID_EMBEDDING_VALUES {
+        return Err(format!(
+            "a frozen identity embedding must carry {ID_EMBEDDING_VALUES} values \
+             ({ID_EMBEDDING_TOKENS}x{ID_EMBEDDING_DIM}), got {}",
+            values.len()
+        ));
+    }
+    if let Some(bad) = values.iter().find(|value| !value.is_finite()) {
+        return Err(format!(
+            "the identity extractor produced a non-finite value ({bad}); \
+             the embedding is not usable"
+        ));
+    }
+    Ok(())
+}
+
+fn to_le_bytes(values: &[f32]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(ID_EMBEDDING_VALUES * 4);
+    for value in values {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    bytes
+}
+
+fn decode_values(values_le: &[u8]) -> Vec<f32> {
+    values_le
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|chunk| f32::from_le_bytes(*chunk))
+        .collect()
+}
+
+/// The identity half of a prepared plan's profile hash.
+///
+/// The single-photograph, no-uncond case hashes exactly the byte sequence it
+/// always did — one source digest and its NUL, then the four assets, then the
+/// values — so a fingerprint recorded before multiple photographs existed still
+/// matches the identity it names. The set case extends it with the remaining
+/// digests in order, and an unconditional identity appends a distinct section
+/// so a true-CFG plan is never confused with the plain one.
+fn fingerprint_of(
+    values_le: &[u8],
+    source_sha256s: &[String],
+    assets: &IdentityAssetDigests,
+    uncond_values_le: Option<&[u8]>,
+) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(b"mold.identity.v1\0");
-    hasher.update(source_sha256.as_bytes());
-    hasher.update(b"\0");
+    for source in source_sha256s {
+        hasher.update(source.as_bytes());
+        hasher.update(b"\0");
+    }
     for digest in [
         &assets.adapter,
         &assets.vision,
@@ -509,7 +896,46 @@ fn fingerprint_of(values_le: &[u8], source_sha256: &str, assets: &IdentityAssetD
         hasher.update(b"\0");
     }
     hasher.update(values_le);
+    if let Some(uncond) = uncond_values_le {
+        hasher.update(b"mold.identity.uncond.v1\0");
+        hasher.update(uncond);
+    }
     format!("{:x}", hasher.finalize())
+}
+
+/// Elementwise mean of several identity token sets.
+///
+/// This is how several reference photographs become one identity, and the
+/// reference is `cubiq/PuLID_ComfyUI` rather than `ToTheBeginning/PuLID`, whose
+/// pipeline only ever handles a single image
+/// (`pulid/pipeline_flux.py:120-194`). ComfyUI runs the WHOLE per-image
+/// pipeline — detector, ArcFace, EVA02-CLIP, and the IDFormer — and averages
+/// the IDFormer's `[1, 32, 2048]` OUTPUT (`pulid.py:406` appends
+/// `get_image_embeds(...)` per image; `pulid.py:415-419` means over them). It
+/// deliberately does NOT average the raw ArcFace vectors or the EVA hidden
+/// states before the IDFormer, which is a different and untrained composition.
+///
+/// The mean is order-independent, which is why nothing here sorts or
+/// canonicalizes: the recorded provenance keeps request order, the arithmetic
+/// does not care.
+pub fn average_identity_tokens(sets: &[Vec<f32>]) -> Result<Vec<f32>, String> {
+    if sets.is_empty() {
+        return Err("averaging needs at least one identity token set".to_string());
+    }
+    for set in sets {
+        check_embedding_values(set)?;
+    }
+    if sets.len() == 1 {
+        return Ok(sets[0].clone());
+    }
+    let scale = 1.0 / sets.len() as f64;
+    let mut averaged = vec![0.0_f32; ID_EMBEDDING_VALUES];
+    for index in 0..ID_EMBEDDING_VALUES {
+        let sum: f64 = sets.iter().map(|set| f64::from(set[index])).sum();
+        averaged[index] = (sum * scale) as f32;
+    }
+    check_embedding_values(&averaged)?;
+    Ok(averaged)
 }
 
 /// SHA-256 of an `id_image` payload — the provenance a frozen embedding
@@ -1015,7 +1441,7 @@ mod tests {
                     req.id_image = None;
                     req.id_weight = Some(1.0);
                 },
-                expect: "id_image is required",
+                expect: "id_image (or id_images) is required",
             },
             Case {
                 name: "start step without image",
@@ -1023,7 +1449,7 @@ mod tests {
                     req.id_image = None;
                     req.id_start_step = Some(1);
                 },
-                expect: "id_image is required",
+                expect: "id_image (or id_images) is required",
             },
             Case {
                 name: "name without image",
@@ -1031,7 +1457,7 @@ mod tests {
                     req.id_image = None;
                     req.id_image_name = Some("face.png".to_string());
                 },
-                expect: "id_image is required",
+                expect: "id_image (or id_images) is required",
             },
             Case {
                 name: "unusable image bytes",
@@ -1188,5 +1614,420 @@ mod tests {
             id_image_sha256(b"abc"),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
+    }
+
+    // ---- multiple identity photographs and true CFG (#1226) ----
+
+    fn multi_request(count: usize) -> GenerateRequest {
+        let mut req = identity_request("flux-dev:q8");
+        req.id_image = None;
+        req.id_images = Some((0..count).map(|_| png_1x1()).collect());
+        req
+    }
+
+    fn assets() -> IdentityAssetDigests {
+        IdentityAssetDigests {
+            adapter: "adapter".to_string(),
+            vision: "vision".to_string(),
+            face_detector: "detector".to_string(),
+            face_recognizer: "recognizer".to_string(),
+        }
+    }
+
+    fn tokens(fill: f32) -> Vec<f32> {
+        vec![fill; ID_EMBEDDING_VALUES]
+    }
+
+    /// The two shapes are one field, so both together is a contradiction the
+    /// contract refuses rather than a precedence rule that silently discards a
+    /// photograph the caller supplied.
+    #[test]
+    fn supplying_both_id_image_and_id_images_is_refused() {
+        if !identity_runtime_available() {
+            return;
+        }
+        let mut req = multi_request(2);
+        req.id_image = Some(png_1x1());
+        let error = validate_identity_conditioning(&req).unwrap_err();
+        assert_eq!(error, IDENTITY_IMAGE_FORM_CONFLICT);
+        assert!(error.contains("same field in two shapes"), "{error}");
+    }
+
+    #[test]
+    fn identity_images_reads_either_shape_in_order() {
+        let mut single = identity_request("flux-dev:q8");
+        single.id_image = Some(png_1x1());
+        assert_eq!(identity_images(&single).len(), 1);
+        assert!(request_carries_identity_photo(&single));
+
+        let mut plural = multi_request(3);
+        plural.id_images = Some(vec![
+            png_with_dimensions(2, 2),
+            png_with_dimensions(3, 3),
+            png_with_dimensions(4, 4),
+        ]);
+        let images = identity_images(&plural);
+        assert_eq!(images.len(), 3);
+        // Order is the request's, not a canonicalization.
+        assert_eq!(images[0], png_with_dimensions(2, 2).as_slice());
+        assert_eq!(images[2], png_with_dimensions(4, 4).as_slice());
+
+        let mut none = identity_request("flux-dev:q8");
+        none.id_image = None;
+        assert!(identity_images(&none).is_empty());
+        assert!(!request_carries_identity_photo(&none));
+    }
+
+    #[test]
+    fn the_photograph_count_is_bounded() {
+        if !identity_runtime_available() {
+            return;
+        }
+        let ok = multi_request(ID_IMAGES_MAX);
+        validate_identity_conditioning(&ok).expect("the maximum count is admitted");
+
+        let too_many = multi_request(ID_IMAGES_MAX + 1);
+        let error = validate_identity_conditioning(&too_many).unwrap_err();
+        assert!(
+            error.contains(&format!("at most {ID_IMAGES_MAX}")),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn an_empty_photograph_list_is_refused() {
+        if !identity_runtime_available() {
+            return;
+        }
+        let mut req = multi_request(0);
+        req.id_images = Some(Vec::new());
+        let error = validate_identity_conditioning(&req).unwrap_err();
+        assert!(
+            error.contains("id_image (or id_images) is required"),
+            "{error}"
+        );
+    }
+
+    /// The per-image limits are the single form's, applied to each photograph,
+    /// and a refusal names WHICH photograph rather than leaving the caller to
+    /// guess which of four is wrong.
+    #[test]
+    fn each_photograph_is_bounded_on_its_own_header_and_named_when_it_fails() {
+        let good = png_1x1();
+        let oversized_axis = png_with_dimensions(ID_IMAGE_LIMITS.max_axis_pixels + 1, 8);
+        let error =
+            validate_id_images(&[good.as_slice(), oversized_axis.as_slice(), good.as_slice()])
+                .unwrap_err();
+        assert!(error.starts_with("identity photo 2 of 3:"), "{error}");
+        assert!(error.contains("each axis must be at most"), "{error}");
+    }
+
+    /// One photograph is the singular form, so its wording must stay exactly
+    /// what every surface has always shown — no positional prefix.
+    #[test]
+    fn a_single_photograph_keeps_the_singular_wording() {
+        let oversized = png_with_dimensions(ID_IMAGE_LIMITS.max_axis_pixels + 1, 8);
+        let set = validate_id_images(&[oversized.as_slice()]).unwrap_err();
+        let single = validate_id_image_bytes(&oversized).unwrap_err();
+        assert_eq!(set, single);
+        assert!(!set.contains("identity photo"), "{set}");
+    }
+
+    /// A per-image bound nothing enforces collectively is not a bound: four
+    /// separately-legal payloads must not add up to a request body admission
+    /// has to buffer.
+    #[test]
+    fn the_whole_set_is_bounded_by_total_bytes_and_total_pixels() {
+        // A total bound sitting at the per-image sum would never bite.
+        const {
+            assert!(
+                ID_IMAGES_TOTAL_ENCODED_BYTES_MAX
+                    < ID_IMAGES_MAX * ID_IMAGE_LIMITS.max_encoded_bytes
+            );
+            assert!(
+                ID_IMAGES_TOTAL_DECODED_PIXELS_MAX
+                    < ID_IMAGES_MAX as u64 * ID_IMAGE_LIMITS.max_decoded_pixels
+            );
+        }
+
+        let mut fat = png_1x1();
+        fat.resize(ID_IMAGE_LIMITS.max_encoded_bytes, 0);
+        let images: Vec<&[u8]> = vec![fat.as_slice(); 3];
+        let error = validate_id_images(&images).unwrap_err();
+        assert!(error.contains("in total"), "{error}");
+        assert!(error.contains("32 MiB"), "{error}");
+
+        // Each of these is inside the single-image pixel budget; together they
+        // are not.
+        let wide = jpeg_with_dimensions(8000, 4000);
+        assert!(validate_id_image_bytes(&wide).is_ok());
+        let error =
+            validate_id_images(&[wide.as_slice(), wide.as_slice(), wide.as_slice()]).unwrap_err();
+        assert!(error.contains("pixels in total"), "{error}");
+    }
+
+    #[test]
+    fn names_must_match_the_photographs_they_label() {
+        if !identity_runtime_available() {
+            return;
+        }
+        let mut req = multi_request(2);
+        req.id_image_names = Some(vec!["a.png".to_string()]);
+        let error = validate_identity_conditioning(&req).unwrap_err();
+        assert!(error.contains("one per photograph"), "{error}");
+
+        req.id_image_names = Some(vec!["a.png".to_string(), "b.png".to_string()]);
+        validate_identity_conditioning(&req).expect("one name per photograph is admitted");
+
+        let mut singular = identity_request("flux-dev:q8");
+        singular.id_image_names = Some(vec!["a.png".to_string()]);
+        let error = validate_identity_conditioning(&singular).unwrap_err();
+        assert!(
+            error.contains("id_image_names requires id_images"),
+            "{error}"
+        );
+    }
+
+    /// The zero-weight rule is unchanged by the plural form: it plans nothing,
+    /// charges nothing, and is byte-indistinguishable from a plain request.
+    #[test]
+    fn a_zero_weight_multi_image_request_is_still_inert() {
+        if !identity_runtime_available() {
+            return;
+        }
+        let mut req = multi_request(3);
+        req.id_weight = Some(0.0);
+        validate_identity_conditioning(&req).expect("zero weight is admitted");
+        assert_eq!(effective_id_weight(&req), 0.0);
+        assert!(!request_uses_true_cfg(&req));
+    }
+
+    // --- true CFG ----------------------------------------------------------
+
+    /// Absent is off, and so is 1.0 — `PuLID/flux/sampling.py:120` compares
+    /// against a tolerance, not against equality.
+    #[test]
+    fn true_cfg_is_inert_at_and_around_one() {
+        let mut req = identity_request("flux-dev:q8");
+        assert_eq!(effective_true_cfg(&req), TRUE_CFG_OFF);
+        assert!(!request_uses_true_cfg(&req));
+
+        for scale in [
+            1.0,
+            1.0 + TRUE_CFG_EPSILON / 2.0,
+            1.0 - TRUE_CFG_EPSILON / 2.0,
+        ] {
+            req.true_cfg = Some(scale);
+            assert!(
+                !request_uses_true_cfg(&req),
+                "{scale} is within the upstream tolerance and must render the distilled path"
+            );
+        }
+        req.true_cfg = Some(1.5);
+        assert!(request_uses_true_cfg(&req));
+    }
+
+    #[test]
+    fn true_cfg_defaults_and_bounds_match_upstream() {
+        assert_eq!(CFG_START_STEP_DEFAULT, 1, "PuLID/app_flux.py:68");
+        assert_eq!(TRUE_CFG_MAX, 10.0, "PuLID/app_flux.py:221");
+        assert!(validate_true_cfg(TRUE_CFG_OFF).is_ok());
+        assert!(validate_true_cfg(TRUE_CFG_MAX).is_ok());
+        assert!(validate_true_cfg(0.9).is_err());
+        assert!(validate_true_cfg(TRUE_CFG_MAX + 0.1).is_err());
+        assert!(validate_true_cfg(f64::NAN).is_err());
+        assert!(validate_cfg_start_step(19, 20).is_ok());
+        assert!(validate_cfg_start_step(20, 20).is_err());
+    }
+
+    /// True CFG rides on the identity contract: without an active identity
+    /// there is no unconditional embedding for the negative branch, so it is
+    /// refused rather than accepted and quietly ignored.
+    #[test]
+    fn true_cfg_without_active_identity_is_refused() {
+        if !identity_runtime_available() {
+            return;
+        }
+        let mut plain = crate::test_support::minimal_generate_request("flux-dev:q8");
+        plain.steps = 20;
+        plain.true_cfg = Some(2.0);
+        let error = validate_identity_conditioning(&plain).unwrap_err();
+        assert_eq!(error, TRUE_CFG_REQUIRES_IDENTITY);
+
+        let mut start_only = crate::test_support::minimal_generate_request("flux-dev:q8");
+        start_only.steps = 20;
+        start_only.cfg_start_step = Some(2);
+        assert_eq!(
+            validate_identity_conditioning(&start_only).unwrap_err(),
+            TRUE_CFG_REQUIRES_IDENTITY
+        );
+
+        let mut zero_weight = identity_request("flux-dev:q8");
+        zero_weight.id_weight = Some(0.0);
+        zero_weight.true_cfg = Some(2.0);
+        assert_eq!(
+            validate_identity_conditioning(&zero_weight).unwrap_err(),
+            TRUE_CFG_REQUIRES_IDENTITY,
+            "a zero weight must stay byte-indistinguishable from a plain request"
+        );
+    }
+
+    #[test]
+    fn true_cfg_ranges_are_enforced_on_an_identity_request() {
+        if !identity_runtime_available() {
+            return;
+        }
+        let mut req = identity_request("flux-dev:q8");
+        req.true_cfg = Some(2.0);
+        validate_identity_conditioning(&req).expect("an in-range scale is admitted");
+
+        req.true_cfg = Some(TRUE_CFG_MAX + 1.0);
+        assert!(validate_identity_conditioning(&req)
+            .unwrap_err()
+            .contains("true_cfg"));
+
+        req.true_cfg = Some(2.0);
+        req.cfg_start_step = Some(req.steps);
+        assert!(validate_identity_conditioning(&req)
+            .unwrap_err()
+            .contains("cfg_start_step"));
+
+        // A start step with nothing to start is a contradiction, not a no-op.
+        req.true_cfg = Some(1.0);
+        req.cfg_start_step = Some(2);
+        assert!(validate_identity_conditioning(&req)
+            .unwrap_err()
+            .contains("requires a true_cfg above 1.0"));
+    }
+
+    // --- frozen embedding --------------------------------------------------
+
+    /// The averaging reference is ComfyUI's mean over IDFormer OUTPUTS
+    /// (`pulid.py:415-419`), and it is order-independent.
+    #[test]
+    fn averaging_is_the_elementwise_mean_and_ignores_order() {
+        let one = tokens(1.0);
+        let two = tokens(2.0);
+        let three = tokens(6.0);
+        let averaged = average_identity_tokens(&[one.clone(), two.clone(), three.clone()]).unwrap();
+        assert!(averaged.iter().all(|value| (value - 3.0).abs() < 1e-6));
+
+        let reordered = average_identity_tokens(&[three, one.clone(), two]).unwrap();
+        assert_eq!(averaged, reordered);
+
+        // One set is itself, exactly — never a mean that rounds.
+        assert_eq!(
+            average_identity_tokens(std::slice::from_ref(&one)).unwrap(),
+            one
+        );
+        assert!(average_identity_tokens(&[]).is_err());
+    }
+
+    #[test]
+    fn a_frozen_identity_records_every_source_in_request_order() {
+        let frozen = FrozenIdentityEmbedding::from_sources(
+            &tokens(0.25),
+            vec!["aa".to_string(), "bb".to_string()],
+            assets(),
+        )
+        .expect("a two-photograph identity");
+        assert_eq!(
+            frozen.source_sha256s(),
+            ["aa".to_string(), "bb".to_string()]
+        );
+        assert_eq!(frozen.source_sha256(), "aa");
+        assert!(!frozen.has_uncond());
+
+        assert!(
+            FrozenIdentityEmbedding::from_sources(&tokens(0.25), Vec::new(), assets()).is_err()
+        );
+        assert!(FrozenIdentityEmbedding::from_sources(
+            &tokens(0.25),
+            vec!["x".to_string(); ID_IMAGES_MAX + 1],
+            assets(),
+        )
+        .is_err());
+    }
+
+    /// A single-photograph identity with no unconditional half must fingerprint
+    /// exactly as it did before either feature existed — otherwise every frozen
+    /// plan recorded by an older build stops matching itself.
+    #[test]
+    fn the_single_photograph_fingerprint_is_unchanged() {
+        let values = tokens(0.5);
+        let assets = assets();
+        let frozen =
+            FrozenIdentityEmbedding::new(&values, "source-digest", assets.clone()).unwrap();
+
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(b"mold.identity.v1\0");
+        hasher.update(b"source-digest");
+        hasher.update(b"\0");
+        for digest in [
+            &assets.adapter,
+            &assets.vision,
+            &assets.face_detector,
+            &assets.face_recognizer,
+        ] {
+            hasher.update(digest.as_bytes());
+            hasher.update(b"\0");
+        }
+        for value in &values {
+            hasher.update(value.to_le_bytes());
+        }
+        assert_eq!(frozen.fingerprint(), format!("{:x}", hasher.finalize()));
+    }
+
+    #[test]
+    fn the_fingerprint_separates_sets_orders_and_the_unconditional_half() {
+        let values = tokens(0.5);
+        let one = FrozenIdentityEmbedding::from_sources(
+            &values,
+            vec!["a".to_string(), "b".to_string()],
+            assets(),
+        )
+        .unwrap();
+        let reordered = FrozenIdentityEmbedding::from_sources(
+            &values,
+            vec!["b".to_string(), "a".to_string()],
+            assets(),
+        )
+        .unwrap();
+        assert_ne!(
+            one.fingerprint(),
+            reordered.fingerprint(),
+            "provenance is what was supplied, so order is part of it"
+        );
+
+        let with_uncond = one.clone().with_uncond(&tokens(0.125)).unwrap();
+        assert_ne!(one.fingerprint(), with_uncond.fingerprint());
+        assert!(with_uncond.has_uncond());
+        assert_eq!(with_uncond.values(), one.values());
+        assert!(with_uncond
+            .uncond_values()
+            .unwrap()
+            .iter()
+            .all(|value| (value - 0.125).abs() < 1e-9));
+        assert!(one.uncond_values().is_none());
+
+        assert!(one.with_uncond(&[0.0; 4]).is_err());
+    }
+
+    /// Biometric derivatives must never reach a log line.
+    #[test]
+    fn the_debug_rendering_redacts_both_halves() {
+        let frozen = FrozenIdentityEmbedding::from_sources(
+            &tokens(0.75),
+            vec!["digest".to_string()],
+            assets(),
+        )
+        .unwrap()
+        .with_uncond(&tokens(0.25))
+        .unwrap();
+        let rendered = format!("{frozen:?}");
+        assert!(rendered.contains("<redacted>"), "{rendered}");
+        assert!(!rendered.contains("0.75"), "{rendered}");
+        assert!(!rendered.contains("0.25"), "{rendered}");
     }
 }

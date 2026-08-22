@@ -645,6 +645,42 @@ pub(crate) fn request_charges_identity_overhead(req: &GenerateRequest) -> bool {
         && mold_core::identity::effective_id_weight(req) > 0.0
 }
 
+/// Device memory a PuLID true-CFG render needs beside
+/// [`IDENTITY_VRAM_OVERHEAD_BYTES`].
+///
+/// True CFG runs TWO transformer forwards per step instead of one, but they run
+/// in sequence, so the peak does not double — the second forward reuses the
+/// first's activation arena. What is genuinely additional, and resident for the
+/// whole denoise, is:
+///
+/// | Term | Bytes | Where it comes from |
+/// | --- | --- | --- |
+/// | Negative T5 conditioning, `[1, 512, 4096]` bf16 | 4,194,304 | a second `prepare()` (`PuLID/app_flux.py:111`) |
+/// | Negative pooled CLIP vector and its packed ids | ~50,000 | same |
+/// | Unconditional identity context, `[1, 32, 2048]` bf16 | 131,072 | `PuLID/pulid/pipeline_flux.py:188-192` |
+/// | The conditional prediction, held while the negative forward runs | 524,288 | `[1, 4096, 64]` bf16 at 1024x1024 |
+/// | Cross-attention working headroom for the second injection pass | ~145,000,000 | the `[1, 4096, 3072]` + `[1, 4096, 2048]` pair, not reused between passes |
+/// | **Total** | **150,000,000** | |
+///
+/// It is charged as its own term rather than folded into the identity overhead
+/// because the two answer different requests: every identity render pays the
+/// adapter, and only a true-CFG one pays this. Charging a request on the plain
+/// identity estimate would admit a render whose second pass has nowhere to go.
+///
+/// The cost that is NOT memory is time: a true-CFG render is close to twice the
+/// denoise wall clock, which the scheduler's learned phase timings observe
+/// directly rather than predict from this constant.
+pub(crate) const TRUE_CFG_VRAM_OVERHEAD_BYTES: u64 = 150_000_000;
+
+/// Whether this request will actually run the true-CFG negative branch.
+///
+/// Delegates to the request contract so admission and the engine cannot
+/// disagree about which requests are true-CFG requests — an inert 1.0 scale and
+/// a zero identity weight both answer `false` here exactly as they do there.
+pub(crate) fn request_charges_true_cfg_overhead(req: &GenerateRequest) -> bool {
+    mold_core::identity::request_uses_true_cfg(req)
+}
+
 fn activation_memory_for_estimate(hint: Option<ActivationHint>, qwen_quantized: bool) -> u64 {
     if qwen_quantized {
         0
@@ -1400,6 +1436,15 @@ pub(crate) fn estimate_generation_memory_for_request(
     } else {
         peak
     };
+    // A true-CFG render's second forward per step is additional resident
+    // conditioning and a second cross-attention pass. Charged separately from
+    // the identity overhead because only a request that engages the branch pays
+    // it — never let one be admitted on the plain estimate.
+    let peak = if request_charges_true_cfg_overhead(req) {
+        peak.saturating_add(TRUE_CFG_VRAM_OVERHEAD_BYTES)
+    } else {
+        peak
+    };
     let load_strategy = request_aware_load_strategy(
         select_server_load_strategy_for_budget(paths, available_memory_bytes, hint),
         paths,
@@ -1993,6 +2038,69 @@ mod fail_closed_tests {
         let mut weighted = request.clone();
         weighted.id_weight = Some(0.85);
         assert_eq!(estimate(&weighted), plain + IDENTITY_VRAM_OVERHEAD_BYTES);
+    }
+
+    /// A true-CFG render runs a second forward per step over a second
+    /// conditioning pair. It is charged its own named overhead ON TOP of the
+    /// identity one, and — like `id_weight: 0` — an inert scale must cost
+    /// exactly nothing.
+    #[test]
+    fn true_cfg_charges_its_own_overhead_and_an_inert_scale_charges_nothing() {
+        let mut request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "portrait",
+            "model": "flux-dev:q8",
+            "width": 1024,
+            "height": 1024,
+            "steps": 20,
+            "guidance": 3.5,
+            "batch_size": 1
+        }))
+        .unwrap();
+        let model_paths = paths("/models/flux-dev/flux1-dev-Q8_0.gguf");
+        let activation = Some(hint(ActivationFamily::FluxDit));
+        let estimate = |request: &GenerateRequest| {
+            estimate_generation_memory_for_request(
+                request,
+                &model_paths,
+                activation,
+                offload(AdmissionPolicy::Disabled),
+                Some(24_000_000_000),
+                false,
+                false,
+            )
+            .peak_memory_bytes
+        };
+
+        request.id_image = Some(vec![0x89, 0x50, 0x4e, 0x47]);
+        let identity_only = estimate(&request);
+        assert!(!request_charges_true_cfg_overhead(&request));
+
+        let mut inert = request.clone();
+        inert.true_cfg = Some(1.0);
+        assert!(!request_charges_true_cfg_overhead(&inert));
+        assert_eq!(
+            estimate(&inert),
+            identity_only,
+            "an inert scale runs the distilled path, so it must add no demand"
+        );
+
+        let mut branched = request.clone();
+        branched.true_cfg = Some(2.5);
+        assert!(request_charges_true_cfg_overhead(&branched));
+        assert_eq!(
+            estimate(&branched),
+            identity_only + TRUE_CFG_VRAM_OVERHEAD_BYTES,
+            "a true-CFG render must never be admitted on the plain identity estimate"
+        );
+
+        // A zero weight renders the plain print, so neither term is charged.
+        let mut zero = branched.clone();
+        zero.id_weight = Some(0.0);
+        assert!(!request_charges_true_cfg_overhead(&zero));
+        assert_eq!(
+            estimate(&zero),
+            identity_only - IDENTITY_VRAM_OVERHEAD_BYTES
+        );
     }
 
     /// Wan never reaches `OffloadMode::Block` through the request-controlled

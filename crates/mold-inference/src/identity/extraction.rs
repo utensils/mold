@@ -76,6 +76,18 @@ use super::{IdentityError, IdentityExtractor};
 /// and pinned by a test, rather than an input to a calculation.
 pub const EXTRACTION_HOST_PEAK_BYTES: u64 = 1_400_000_000;
 
+/// Host bytes each ADDITIONAL identity photograph adds to that peak.
+///
+/// A multi-photograph extraction does not multiply the peak, because the
+/// expensive halves are still built once and dropped in sequence: the tower is
+/// loaded once and run N times, then dropped, and the IDFormer is built once
+/// afterwards. The only thing that scales with N is the five retained
+/// `[1, 577, 1024]` f32 hidden states and the `[1, 768]` projection each
+/// photograph contributes, which the IDFormer needs after the tower is gone.
+///
+/// `5 * 577 * 1024 * 4` = 11,816,960 bytes, plus the projection, rounded up.
+pub const EXTRACTION_RETAINED_BYTES_PER_IMAGE: u64 = 12_000_000;
+
 /// What one extraction produced.
 #[derive(Debug)]
 pub struct IdentityExtraction {
@@ -94,17 +106,86 @@ pub fn extract_identity_embedding(
     paths: &PulidPaths,
     image_bytes: &[u8],
 ) -> std::result::Result<IdentityExtraction, IdentityError> {
+    extract_identity_embeddings(paths, &[image_bytes], false)
+}
+
+/// Extract, average, compose, and freeze the identity for one request.
+///
+/// The multi-photograph form, of which [`extract_identity_embedding`] is the
+/// one-element case rather than a second code path. Called EXACTLY ONCE per
+/// parent request, at admission, before batch fan-out; everything it loads is
+/// released before it returns.
+///
+/// ## Averaging
+///
+/// Each photograph is run through the WHOLE pipeline independently — detector,
+/// ArcFace, EVA02-CLIP, IDFormer — and the resulting `[1, 32, 2048]` token sets
+/// are averaged. The reference is `cubiq/PuLID_ComfyUI`, not
+/// `ToTheBeginning/PuLID`, whose pipeline only ever handles a single image
+/// (`pulid/pipeline_flux.py:120-194`): `pulid.py:406` appends
+/// `pulid_model.get_image_embeds(id_cond, id_vit_hidden)` — the IDFormer's
+/// output — once per image, and `pulid.py:415-419` means over them. Averaging
+/// the raw ArcFace vectors or the EVA hidden states BEFORE the IDFormer would
+/// be a different and untrained composition, so it is not done.
+///
+/// ## Ordering and refusals
+///
+/// The mean is order-independent, but the recorded provenance keeps request
+/// order. A photograph with no detectable face refuses the whole request and
+/// names which one: `PuLID_ComfyUI` warns and silently skips it
+/// (`pulid.py:360-373`), which would change the face that renders without
+/// changing anything the caller can see.
+///
+/// ## `want_uncond`
+///
+/// When the request runs a true-CFG negative branch it also needs the
+/// UNCONDITIONAL identity — the IDFormer over all-zero conditioning
+/// (`PuLID/pulid/pipeline_flux.py:188-192`). It is a pure function of the
+/// adapter weights: it depends on no photograph, which is also why
+/// `PuLID_ComfyUI`'s per-image uncond is the same tensor for every image at
+/// `noise == 0` and its mean is that tensor (`pulid.py:396-407,416-419`). It is
+/// computed only when asked for, so an ordinary identity render pays nothing.
+pub fn extract_identity_embeddings(
+    paths: &PulidPaths,
+    images: &[&[u8]],
+    want_uncond: bool,
+) -> std::result::Result<IdentityExtraction, IdentityError> {
     // The bounded-decode limits are the request contract's, checked before any
     // decoder sees the bytes. Admission has already applied them, but this is
     // a public entry point and the check costs a header read.
-    mold_core::identity::validate_id_image_bytes(image_bytes).map_err(IdentityError::Decode)?;
+    mold_core::identity::validate_id_images(images).map_err(IdentityError::Decode)?;
 
     let extractor = IdentityExtractor::load(paths, &Device::Cpu)
         .context("loading the PuLID face-extraction models")?;
-    let features = extractor.extract(image_bytes)?;
 
-    let tokens = compose_identity_tokens(paths, &features.arcface.raw, &features.eva_crop_512)
+    let count = images.len();
+    let mut faces = Vec::with_capacity(count);
+    let mut warnings = Vec::new();
+    for (index, bytes) in images.iter().enumerate() {
+        let features = extractor.extract(bytes).map_err(|error| {
+            if count == 1 {
+                error
+            } else {
+                IdentityError::Runtime(anyhow::anyhow!(
+                    "identity photo {} of {count}: {error}",
+                    index + 1
+                ))
+            }
+        })?;
+        if let Some(warning) = features.warning {
+            warnings.push(if count == 1 {
+                warning
+            } else {
+                format!("identity photo {} of {count}: {warning}", index + 1)
+            });
+        }
+        faces.push((features.arcface.raw, features.eva_crop_512));
+    }
+
+    let composed = compose_identity_token_sets(paths, &faces, want_uncond)
         .context("composing the PuLID identity embedding")?;
+    let tokens = mold_core::identity::average_identity_tokens(&composed.per_image)
+        .map_err(|reason| IdentityError::Runtime(anyhow::anyhow!(reason)))?;
 
     let assets = IdentityAssetDigests {
         adapter: adapter_sha256(),
@@ -112,16 +193,22 @@ pub fn extract_identity_embedding(
         face_detector: extractor.detector_sha256().to_string(),
         face_recognizer: extractor.recognizer_sha256().to_string(),
     };
-    let embedding = FrozenIdentityEmbedding::new(
-        &tokens,
-        mold_core::identity::id_image_sha256(image_bytes),
-        assets,
-    )
-    .map_err(|reason| IdentityError::Runtime(anyhow::anyhow!(reason)))?;
+    let sources = images
+        .iter()
+        .map(|bytes| mold_core::identity::id_image_sha256(bytes))
+        .collect();
+    let embedding = FrozenIdentityEmbedding::from_sources(&tokens, sources, assets)
+        .map_err(|reason| IdentityError::Runtime(anyhow::anyhow!(reason)))?;
+    let embedding = match composed.uncond {
+        Some(uncond) => embedding
+            .with_uncond(&uncond)
+            .map_err(|reason| IdentityError::Runtime(anyhow::anyhow!(reason)))?,
+        None => embedding,
+    };
 
     Ok(IdentityExtraction {
         embedding,
-        warning: features.warning,
+        warning: (!warnings.is_empty()).then(|| warnings.join("; ")),
     })
 }
 
@@ -165,48 +252,81 @@ pub enum ComposeStage {
     IdFormerForward,
 }
 
-/// Run the EVA tower and the IDFormer over one aligned crop.
+/// Run the EVA tower and the IDFormer over one aligned crop, with a per-stage
+/// wall-clock observer.
 ///
-/// Split out from [`extract_identity_embedding`] so the weight-gated parity
-/// test can drive it from a crop it produced by other means.
-pub(crate) fn compose_identity_tokens(
-    paths: &PulidPaths,
-    arcface: &[f32],
-    eva_crop_512: &image::RgbImage,
-) -> Result<Vec<f32>> {
-    compose_identity_tokens_observed(paths, arcface, eva_crop_512, &mut |_, _| {})
-}
-
-/// [`compose_identity_tokens`] with a per-stage wall-clock observer.
-///
-/// The observer is the ONLY difference — `compose_identity_tokens` delegates
-/// here with a no-op, so there is one implementation and the benchmark cannot
-/// drift from the production path by measuring a copy of it. It exists for
-/// `pulid_face_probe bench --full`, which §4 requires before any performance
-/// claim about identity extraction is made.
+/// The one-photograph case of [`compose_identity_token_sets_observed`], and the
+/// entry point `pulid_face_probe bench --full` drives — which §4 requires
+/// before any performance claim about identity extraction is made. It
+/// delegates rather than duplicating, so the benchmark cannot drift from the
+/// production path by measuring a copy of it.
 pub fn compose_identity_tokens_observed(
     paths: &PulidPaths,
     arcface: &[f32],
     eva_crop_512: &image::RgbImage,
     observe: &mut dyn FnMut(ComposeStage, std::time::Duration),
 ) -> Result<Vec<f32>> {
+    let faces = [(arcface.to_vec(), eva_crop_512.clone())];
+    let composed = compose_identity_token_sets_observed(paths, &faces, false, observe)?;
+    composed
+        .per_image
+        .into_iter()
+        .next()
+        .context("the composer returned no identity tokens")
+}
+
+/// What one composition produced.
+pub(crate) struct ComposedIdentityTokens {
+    /// One `[32 * 2048]` token set per photograph, in request order.
+    pub(crate) per_image: Vec<Vec<f32>>,
+    /// The unconditional identity, when it was asked for.
+    pub(crate) uncond: Option<Vec<f32>>,
+}
+
+/// Run the EVA tower and the IDFormer over every aligned crop.
+pub(crate) fn compose_identity_token_sets(
+    paths: &PulidPaths,
+    faces: &[(Vec<f32>, image::RgbImage)],
+    want_uncond: bool,
+) -> Result<ComposedIdentityTokens> {
+    compose_identity_token_sets_observed(paths, faces, want_uncond, &mut |_, _| {})
+}
+
+/// The one implementation: every photograph, the optional unconditional
+/// identity, and the per-stage observer.
+///
+/// The tower is built ONCE and run per photograph, then dropped; the IDFormer
+/// is built once afterwards and run per photograph. That ordering is why N
+/// photographs do not multiply the host peak: the two large halves still never
+/// coexist, and the only thing that scales with N is the retained hidden
+/// states — [`EXTRACTION_RETAINED_BYTES_PER_IMAGE`], ~12 MB each against a
+/// 1.4 GB peak.
+///
+/// The observer sees [`ComposeStage::EvaBuild`] and
+/// [`ComposeStage::IdFormerBuild`] exactly once each, because they are paid
+/// once however many photographs arrive — which is the whole point of building
+/// the tower outside the loop. `EvaForward` and `IdFormerForward` are emitted
+/// once PER photograph (and once more for the unconditional identity), so a
+/// caller measuring a set sees the per-photograph cost rather than a sum it
+/// cannot decompose. `pulid_face_probe bench --full` passes one photograph, so
+/// its samples are unchanged.
+pub(crate) fn compose_identity_token_sets_observed(
+    paths: &PulidPaths,
+    faces: &[(Vec<f32>, image::RgbImage)],
+    want_uncond: bool,
+    observe: &mut dyn FnMut(ComposeStage, std::time::Duration),
+) -> Result<ComposedIdentityTokens> {
+    anyhow::ensure!(!faces.is_empty(), "composing needs at least one face");
     let device = Device::Cpu;
     let mut stage_started = std::time::Instant::now();
     let vision_path = ensure_eva_clip_vision_safetensors(paths)
         .context("materializing the EVA02-CLIP vision tower")?;
 
-    let pixels = {
-        let image = image::DynamicImage::ImageRgb8(eva_crop_512.clone());
-        let (planar, height, width) = planar_rgb_from_image(&image);
-        preprocess_planar_rgb(&planar, height, width, &device)
-            .context("preprocessing the aligned face crop for EVA02-CLIP")?
-    };
-
     // The tower and the IDFormer are built and dropped in sequence, never held
     // together: the tower is 609 MB and the IDFormer's `id_embedding_mapping`
     // alone is a 1280 x 5120 matrix, and admission is the one place in the
     // process where host RAM is not already committed to a render.
-    let (hidden_states, cls_projection) = {
+    let vision: Vec<(Vec<Tensor>, Tensor)> = {
         // SAFETY: the same mmap contract every other mold safetensors loader
         // relies on — the file must not be mutated while the tower holds it.
         // These bytes were just authenticated against `DERIVED_SHA256`.
@@ -221,22 +341,25 @@ pub fn compose_identity_tokens_observed(
         let tower = EvaClipVisionTower::new(vb, &device)
             .context("building the EVA02-CLIP-L-14-336 vision tower")?;
         observe(ComposeStage::EvaBuild, stage_started.elapsed());
-        stage_started = std::time::Instant::now();
-        let output = tower
-            .forward(&pixels)
-            .context("running the EVA02-CLIP vision tower")?;
-        observe(ComposeStage::EvaForward, stage_started.elapsed());
-        (output.hidden_states, output.cls_projection)
+
+        let mut outputs = Vec::with_capacity(faces.len());
+        for (_, eva_crop_512) in faces {
+            stage_started = std::time::Instant::now();
+            let pixels = {
+                let image = image::DynamicImage::ImageRgb8(eva_crop_512.clone());
+                let (planar, height, width) = planar_rgb_from_image(&image);
+                preprocess_planar_rgb(&planar, height, width, &device)
+                    .context("preprocessing the aligned face crop for EVA02-CLIP")?
+            };
+            let output = tower
+                .forward(&pixels)
+                .context("running the EVA02-CLIP vision tower")?;
+            observe(ComposeStage::EvaForward, stage_started.elapsed());
+            outputs.push((output.hidden_states, output.cls_projection));
+        }
+        outputs
     };
     stage_started = std::time::Instant::now();
-
-    // `pipeline_flux.py:181`: `cat([id_ante_embedding, id_cond_vit])` — the
-    // RAW ArcFace output, not the L2-normalized one; only the CLIP projection
-    // is normalized, and the tower already did that.
-    let arcface = Tensor::from_slice(arcface, (1, arcface.len()), &device)
-        .context("materializing the ArcFace embedding")?;
-    let id_cond = Tensor::cat(&[&arcface, &cls_projection], 1)
-        .context("concatenating the ArcFace and EVA02-CLIP conditions")?;
 
     // SAFETY: as above. `pipeline_flux.py:99-109` splits the checkpoint by
     // leading module name; the IDFormer half is `pulid_encoder.*`.
@@ -250,21 +373,61 @@ pub fn compose_identity_tokens_observed(
     };
     let idformer = IdFormer::new(vb.pp("pulid_encoder")).context("building the PuLID IDFormer")?;
     observe(ComposeStage::IdFormerBuild, stage_started.elapsed());
-    stage_started = std::time::Instant::now();
-    let tokens = idformer
-        .forward(&id_cond, &hidden_states)
-        .context("running the PuLID IDFormer")?;
 
+    let mut per_image = Vec::with_capacity(faces.len());
+    for ((arcface, _), (hidden_states, cls_projection)) in faces.iter().zip(vision.iter()) {
+        stage_started = std::time::Instant::now();
+        // `pipeline_flux.py:181`: `cat([id_ante_embedding, id_cond_vit])` — the
+        // RAW ArcFace output, not the L2-normalized one; only the CLIP
+        // projection is normalized, and the tower already did that.
+        let arcface = Tensor::from_slice(arcface, (1, arcface.len()), &device)
+            .context("materializing the ArcFace embedding")?;
+        let id_cond = Tensor::cat(&[&arcface, cls_projection], 1)
+            .context("concatenating the ArcFace and EVA02-CLIP conditions")?;
+        per_image.push(run_idformer(&idformer, &id_cond, hidden_states)?);
+        observe(ComposeStage::IdFormerForward, stage_started.elapsed());
+    }
+
+    let uncond = if want_uncond {
+        stage_started = std::time::Instant::now();
+        // `pipeline_flux.py:188-192`: `zeros_like(id_cond)` and a zeroed hidden
+        // state per scale. Shaped from the first photograph's tensors, which is
+        // exactly what `zeros_like` means — the values are all zero, so which
+        // photograph they were shaped from cannot matter.
+        let (hidden_states, cls_projection) = &vision[0];
+        let width = ID_ANTE_DIM + cls_projection.dim(1)?;
+        let id_uncond = Tensor::zeros((1, width), DType::F32, &device)
+            .context("materializing the unconditional identity condition")?;
+        let hidden_uncond = hidden_states
+            .iter()
+            .map(|hidden| hidden.zeros_like())
+            .collect::<candle_core::Result<Vec<_>>>()
+            .context("materializing the unconditional vision hidden states")?;
+        let uncond = run_idformer(&idformer, &id_uncond, &hidden_uncond)?;
+        observe(ComposeStage::IdFormerForward, stage_started.elapsed());
+        Some(uncond)
+    } else {
+        None
+    };
+
+    Ok(ComposedIdentityTokens { per_image, uncond })
+}
+
+/// Width of the raw ArcFace half of the IDFormer's conditioning vector.
+const ID_ANTE_DIM: usize = 512;
+
+fn run_idformer(idformer: &IdFormer, id_cond: &Tensor, hidden: &[Tensor]) -> Result<Vec<f32>> {
+    let tokens = idformer
+        .forward(id_cond, hidden)
+        .context("running the PuLID IDFormer")?;
     let tokens = tokens.i(0).context("the IDFormer returned no batch")?;
-    let tokens = tokens
+    tokens
         .flatten_all()
         .context("flattening the identity tokens")?
         .to_dtype(DType::F32)
         .context("the identity tokens are numeric")?
         .to_vec1::<f32>()
-        .context("reading the identity tokens")?;
-    observe(ComposeStage::IdFormerForward, stage_started.elapsed());
-    Ok(tokens)
+        .context("reading the identity tokens")
 }
 
 #[cfg(test)]
@@ -302,6 +465,59 @@ mod tests {
         let sha = adapter_sha256();
         assert_eq!(sha.len(), 64, "{sha}");
         assert_ne!(sha, "unpinned");
+    }
+
+    /// A multi-photograph extraction must not multiply the peak. The two large
+    /// halves are still built once and dropped in sequence; only the retained
+    /// hidden states scale with the count, and the whole budget has to stay
+    /// inside the charge admission makes.
+    #[test]
+    fn the_charged_peak_still_covers_the_largest_admissible_photograph_set() {
+        let extra =
+            EXTRACTION_RETAINED_BYTES_PER_IMAGE * (mold_core::identity::ID_IMAGES_MAX as u64 - 1);
+        // The five retained f32 hidden states, from the tower's own shape.
+        let measured_per_image: u64 = 5 * 577 * 1024 * 4;
+        assert!(
+            EXTRACTION_RETAINED_BYTES_PER_IMAGE >= measured_per_image,
+            "the per-photograph charge must cover the retained hidden states"
+        );
+        assert!(
+            EXTRACTION_RETAINED_BYTES_PER_IMAGE < 2 * measured_per_image,
+            "a charge more than twice the measurement parks hosts that could run this"
+        );
+        const SCRFD: u64 = 16_923_827;
+        const GLINTR100: u64 = 260_665_334;
+        const TOWER: u64 = 609 * 1_000_000;
+        const TOWER_ACTIVATIONS: u64 = 180 * 1_000_000;
+        let peak = SCRFD + GLINTR100 + TOWER + TOWER_ACTIVATIONS + extra;
+        assert!(
+            EXTRACTION_HOST_PEAK_BYTES >= peak,
+            "the charged peak {EXTRACTION_HOST_PEAK_BYTES} must cover {peak} at \
+             {} photographs",
+            mold_core::identity::ID_IMAGES_MAX
+        );
+    }
+
+    /// The set validator is what this entry point applies, so a set that is
+    /// individually legal but collectively over budget is refused here too —
+    /// before two ONNX graph decodes are paid for.
+    #[test]
+    fn an_over_budget_set_is_refused_before_any_model_loads() {
+        let paths = PulidPaths {
+            adapter: "/nonexistent/adapter.safetensors".into(),
+            vision_encoder_source: "/nonexistent/eva.pt".into(),
+            face_detector: "/nonexistent/scrfd.onnx".into(),
+            face_recognizer: "/nonexistent/glintr100.onnx".into(),
+        };
+        let png = b"\x89PNG\r\n\x1a\n".to_vec();
+        let too_many: Vec<&[u8]> = vec![png.as_slice(); mold_core::identity::ID_IMAGES_MAX + 1];
+        let error = extract_identity_embeddings(&paths, &too_many, false).unwrap_err();
+        let rendered = format!("{error:#}");
+        assert!(rendered.contains("at most"), "{rendered}");
+        assert!(!rendered.contains("scrfd.onnx"), "{rendered}");
+
+        let error = extract_identity_embeddings(&paths, &[], false).unwrap_err();
+        assert!(format!("{error:#}").contains("must not be empty"));
     }
 
     /// The bounded-decode limits are re-checked at this entry point, before

@@ -73,6 +73,14 @@ pub(crate) fn extraction_count() -> u64 {
 /// is CPU-bound for a second or more and holds
 /// [`EXTRACTION_HOST_PEAK_BYTES`], so running two concurrently doubles the
 /// peak to buy nothing. Queuing is the correct behaviour, not a compromise.
+///
+/// The permit covers the WHOLE photograph set, not one photograph. A request
+/// with several identity references extracts them serially inside this one
+/// permit, so the set costs N times the latency and one peak — see
+/// `mold_inference::identity::extraction::EXTRACTION_RETAINED_BYTES_PER_IMAGE`
+/// for the only term that scales with N, and
+/// `a_multi_photograph_request_holds_one_slot_and_one_peak` for the
+/// observation that proves it.
 static EXTRACTION_SLOT: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
 
 /// Bytes one extraction is charged.
@@ -172,12 +180,24 @@ pub(crate) async fn resolve_identity_embedding(
     if !request_resolves_identity(request) {
         return Ok(ResolvedIdentity::default());
     }
-    let Some(image) = request.id_image.clone() else {
+    // Either wire shape, in request order. One extraction serves the whole set:
+    // the photographs are processed serially inside a single slot, so N
+    // references cost N times the latency and ONE host peak, never N peaks.
+    let images: Vec<Vec<u8>> = mold_core::identity::identity_images(request)
+        .into_iter()
+        .map(<[u8]>::to_vec)
+        .collect();
+    if images.is_empty() {
         return Err(
-            "id_image is required when id_weight, id_start_step, or id_image_name is set"
+            "id_image (or id_images) is required when id_weight, id_start_step, id_image_name, \
+             or id_image_names is set"
                 .to_string(),
         );
-    };
+    }
+    // The unconditional identity is computed only for a request that actually
+    // runs the true-CFG negative branch; an ordinary identity render pays
+    // nothing for it.
+    let want_uncond = mold_core::identity::request_uses_true_cfg(request);
     let Some(paths) = paths.cloned() else {
         return Err(
             "this request asks for face-identity conditioning but no PuLID bundle resolved on \
@@ -195,10 +215,10 @@ pub(crate) async fn resolve_identity_embedding(
 
     #[cfg(test)]
     if let Some(stub) = test_stub() {
-        return stub(&paths, &image);
+        return stub(&paths, &images, want_uncond);
     }
 
-    extract_blocking(paths, image).await
+    extract_blocking(paths, images, want_uncond).await
 }
 
 /// The real extraction, off the async runtime.
@@ -206,9 +226,18 @@ pub(crate) async fn resolve_identity_embedding(
 /// It is CPU-bound for seconds — two ONNX graph decodes, a 609 MB tower load,
 /// and a 24-block forward — so it never runs on a reactor thread.
 #[cfg(feature = "pulid")]
-async fn extract_blocking(paths: PulidPaths, image: Vec<u8>) -> Result<ResolvedIdentity, String> {
+async fn extract_blocking(
+    paths: PulidPaths,
+    images: Vec<Vec<u8>>,
+    want_uncond: bool,
+) -> Result<ResolvedIdentity, String> {
     let outcome = tokio::task::spawn_blocking(move || {
-        mold_inference::identity::extraction::extract_identity_embedding(&paths, &image)
+        let borrowed: Vec<&[u8]> = images.iter().map(Vec::as_slice).collect();
+        mold_inference::identity::extraction::extract_identity_embeddings(
+            &paths,
+            &borrowed,
+            want_uncond,
+        )
     })
     .await
     .map_err(|error| format!("the identity extractor panicked: {error}"))?
@@ -229,12 +258,16 @@ async fn extract_blocking(paths: PulidPaths, image: Vec<u8>) -> Result<ResolvedI
 /// into `prepare_inputs_for_devices`, which would be a second place the
 /// lifetime could diverge.
 #[cfg(not(feature = "pulid"))]
-async fn extract_blocking(_paths: PulidPaths, _image: Vec<u8>) -> Result<ResolvedIdentity, String> {
+async fn extract_blocking(
+    _paths: PulidPaths,
+    _images: Vec<Vec<u8>>,
+    _want_uncond: bool,
+) -> Result<ResolvedIdentity, String> {
     Err(mold_core::identity::IDENTITY_BUILD_UNSUPPORTED.to_string())
 }
 
 #[cfg(test)]
-type Stub = fn(&PulidPaths, &[u8]) -> Result<ResolvedIdentity, String>;
+type Stub = fn(&PulidPaths, &[Vec<u8>], bool) -> Result<ResolvedIdentity, String>;
 
 #[cfg(test)]
 static TEST_STUB: std::sync::Mutex<Option<Stub>> = std::sync::Mutex::new(None);
@@ -289,12 +322,22 @@ impl Drop for StubbedExtractor {
 /// A frozen embedding built from a stub, for tests that need a concrete value.
 #[cfg(test)]
 pub(crate) fn stub_embedding(image: &[u8]) -> FrozenIdentityEmbedding {
+    stub_embedding_for(std::slice::from_ref(&image.to_vec()), false)
+}
+
+/// The set-aware form: records every source in order, and attaches an
+/// unconditional half exactly when the request asked for one.
+#[cfg(test)]
+pub(crate) fn stub_embedding_for(images: &[Vec<u8>], want_uncond: bool) -> FrozenIdentityEmbedding {
     let values: Vec<f32> = (0..mold_core::identity::ID_EMBEDDING_VALUES)
         .map(|index| (index % 97) as f32 / 97.0)
         .collect();
-    FrozenIdentityEmbedding::new(
+    let embedding = FrozenIdentityEmbedding::from_sources(
         &values,
-        mold_core::identity::id_image_sha256(image),
+        images
+            .iter()
+            .map(|image| mold_core::identity::id_image_sha256(image))
+            .collect(),
         mold_core::identity::IdentityAssetDigests {
             adapter: "stub-adapter".to_string(),
             vision: "stub-vision".to_string(),
@@ -302,7 +345,14 @@ pub(crate) fn stub_embedding(image: &[u8]) -> FrozenIdentityEmbedding {
             face_recognizer: "stub-recognizer".to_string(),
         },
     )
-    .expect("the stub embedding is correctly shaped")
+    .expect("the stub embedding is correctly shaped");
+    if want_uncond {
+        embedding
+            .with_uncond(&vec![0.25_f32; mold_core::identity::ID_EMBEDDING_VALUES])
+            .expect("the stub unconditional embedding is correctly shaped")
+    } else {
+        embedding
+    }
 }
 
 #[cfg(test)]
@@ -335,18 +385,26 @@ mod tests {
         }
     }
 
-    fn stub(_: &PulidPaths, image: &[u8]) -> Result<ResolvedIdentity, String> {
+    fn stub(
+        _: &PulidPaths,
+        images: &[Vec<u8>],
+        want_uncond: bool,
+    ) -> Result<ResolvedIdentity, String> {
         Ok(ResolvedIdentity {
-            embedding: Some(stub_embedding(image)),
+            embedding: Some(stub_embedding_for(images, want_uncond)),
             warning: None,
         })
     }
 
     /// The multi-face advisory the real extractor emits, so the plumbing that
     /// carries it out of admission can be tested without a group photograph.
-    fn stub_with_warning(_: &PulidPaths, image: &[u8]) -> Result<ResolvedIdentity, String> {
+    fn stub_with_warning(
+        _: &PulidPaths,
+        images: &[Vec<u8>],
+        want_uncond: bool,
+    ) -> Result<ResolvedIdentity, String> {
         Ok(ResolvedIdentity {
-            embedding: Some(stub_embedding(image)),
+            embedding: Some(stub_embedding_for(images, want_uncond)),
             warning: Some(
                 "3 faces were detected in the identity image; conditioning on the largest one"
                     .to_string(),
@@ -434,14 +492,18 @@ mod tests {
     static IN_FLIGHT: AtomicU64 = AtomicU64::new(0);
     static PEAK_IN_FLIGHT: AtomicU64 = AtomicU64::new(0);
 
-    fn overlap_observing_stub(_: &PulidPaths, image: &[u8]) -> Result<ResolvedIdentity, String> {
+    fn overlap_observing_stub(
+        _: &PulidPaths,
+        images: &[Vec<u8>],
+        want_uncond: bool,
+    ) -> Result<ResolvedIdentity, String> {
         let now = IN_FLIGHT.fetch_add(1, Ordering::SeqCst) + 1;
         PEAK_IN_FLIGHT.fetch_max(now, Ordering::SeqCst);
         // Long enough that a genuinely concurrent peer would be observed.
         std::thread::sleep(std::time::Duration::from_millis(60));
         IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
         Ok(ResolvedIdentity {
-            embedding: Some(stub_embedding(image)),
+            embedding: Some(stub_embedding_for(images, want_uncond)),
             warning: None,
         })
     }
@@ -539,6 +601,93 @@ mod tests {
             .expect("the stub extractor answers");
         assert!(resolved.embedding.is_some());
         assert!(resolved.warning.is_none());
+    }
+
+    /// A multi-photograph request is still ONE extraction: one slot, one host
+    /// peak, and one frozen identity every sibling reuses. The counter is the
+    /// only way to state that — four photographs handled by four separate
+    /// resolutions would agree on nothing and cost four peaks.
+    #[tokio::test]
+    async fn a_multi_photograph_request_holds_one_slot_and_one_peak() {
+        let stubbed = StubbedExtractor::install(overlap_observing_stub);
+        let _memory = ForcedHostMemory::available(EXTRACTION_PEAK_BYTES + 200_000_000);
+        IN_FLIGHT.store(0, Ordering::SeqCst);
+        PEAK_IN_FLIGHT.store(0, Ordering::SeqCst);
+
+        let mut request = request(None);
+        request.id_image = None;
+        request.id_images = Some(vec![
+            b"pretend-png-one".to_vec(),
+            b"pretend-png-two".to_vec(),
+            b"pretend-png-three".to_vec(),
+        ]);
+
+        let frozen = resolve_identity_embedding(&request, Some(&paths()))
+            .await
+            .expect("the stub extractor answers")
+            .embedding
+            .expect("a conditioned request resolves an identity");
+
+        assert_eq!(
+            stubbed.extractions(),
+            1,
+            "three photographs are one extraction, not three"
+        );
+        assert_eq!(
+            PEAK_IN_FLIGHT.load(Ordering::SeqCst),
+            1,
+            "a photograph set must never hold more than one host peak"
+        );
+        assert_eq!(
+            frozen.source_sha256s(),
+            [
+                mold_core::identity::id_image_sha256(b"pretend-png-one"),
+                mold_core::identity::id_image_sha256(b"pretend-png-two"),
+                mold_core::identity::id_image_sha256(b"pretend-png-three"),
+            ],
+            "every photograph is recorded, in request order"
+        );
+    }
+
+    /// The unconditional identity is computed only for a request that actually
+    /// runs the negative branch: an ordinary identity render must pay nothing
+    /// for a true-CFG feature it is not using.
+    #[tokio::test]
+    async fn the_unconditional_identity_is_resolved_only_for_a_true_cfg_request() {
+        let _stubbed = StubbedExtractor::install(stub);
+        let plain = resolve_identity_embedding(&request(None), Some(&paths()))
+            .await
+            .expect("the stub extractor answers")
+            .embedding
+            .expect("an identity");
+        assert!(
+            !plain.has_uncond(),
+            "an ordinary identity render computes no unconditional half"
+        );
+
+        let mut cfg = request(None);
+        cfg.true_cfg = Some(2.0);
+        let branched = resolve_identity_embedding(&cfg, Some(&paths()))
+            .await
+            .expect("the stub extractor answers")
+            .embedding
+            .expect("an identity");
+        assert!(branched.has_uncond());
+        assert_ne!(
+            plain.fingerprint(),
+            branched.fingerprint(),
+            "a true-CFG plan must never be mistaken for the plain one"
+        );
+
+        // An inert scale is not a true-CFG request.
+        let mut inert = request(None);
+        inert.true_cfg = Some(1.0);
+        assert!(!resolve_identity_embedding(&inert, Some(&paths()))
+            .await
+            .expect("the stub extractor answers")
+            .embedding
+            .expect("an identity")
+            .has_uncond());
     }
 
     /// The charged peak is the measurement, not a second number that can

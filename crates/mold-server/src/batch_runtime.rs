@@ -517,7 +517,11 @@ fn redacted_recovery_envelope(
     identity: Option<&mold_core::identity::FrozenIdentityEmbedding>,
 ) -> LiveBatchRecoveryEnvelope {
     let mut request = request.clone();
+    // Both wire shapes: a manifest that kept `id_images` because the redaction
+    // only knew about `id_image` would leave a whole set of photographs on
+    // disk indefinitely.
     request.id_image = None;
+    request.id_images = None;
     LiveBatchRecoveryEnvelope {
         version: LIVE_BATCH_RECOVERY_VERSION,
         request,
@@ -551,7 +555,7 @@ fn decode_recovery_envelope(
     // Belt and braces: a manifest that somehow carries a photograph is not one
     // this build wrote, and it is not a file to keep acting on.
     ensure!(
-        envelope.request.id_image.is_none(),
+        !mold_core::identity::request_carries_identity_photo(&envelope.request),
         "durable live-batch recovery envelope retains a reference photograph"
     );
     // A batch that conditioned on a face cannot be resumed, because the face
@@ -2383,6 +2387,43 @@ mod tests {
             base64::engine::general_purpose::STANDARD.encode(request.id_image.as_ref().unwrap())
         };
         assert!(!serialized.contains(&encoded));
+    }
+
+    /// The plural shape is redacted identically. A manifest that kept
+    /// `id_images` because the redaction only knew about `id_image` would leave
+    /// a whole SET of photographs on disk indefinitely (#1226).
+    #[test]
+    fn a_persisted_multi_photograph_batch_carries_no_photograph_either() {
+        let mut request = identity_request(4);
+        request.id_image = None;
+        request.id_image_name = None;
+        request.id_images = Some(vec![
+            b"\x89PNG\r\n\x1a\n-first-face".to_vec(),
+            b"\x89PNG\r\n\x1a\n-second-face".to_vec(),
+        ]);
+        request.id_image_names = Some(vec!["one.png".to_string(), "two.png".to_string()]);
+        let identity = frozen_identity();
+        let envelope = redacted_recovery_envelope(&request, "frozen", Some(&identity));
+
+        assert!(envelope.request.id_images.is_none());
+        // Provenance stays: the names are what the print recorded.
+        assert_eq!(
+            envelope.request.id_image_names.as_deref(),
+            Some(["one.png".to_string(), "two.png".to_string()].as_slice())
+        );
+
+        let serialized = serde_json::to_string(&envelope).unwrap();
+        use base64::Engine as _;
+        for photograph in request.id_images.as_ref().unwrap() {
+            let encoded = base64::engine::general_purpose::STANDARD.encode(photograph);
+            assert!(
+                !serialized.contains(&encoded),
+                "no byte of any photograph may reach the durable manifest"
+            );
+        }
+
+        // And such a manifest cannot be resumed, for the same reason.
+        assert!(decode_recovery_envelope(&serde_json::to_value(&envelope).unwrap()).is_err());
     }
 
     /// Because the photograph is gone, the batch cannot be resumed — and the

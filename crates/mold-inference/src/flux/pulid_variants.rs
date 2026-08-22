@@ -35,7 +35,7 @@ use crate::flux::pulid::{
     tests::{synthetic_adapter, synthetic_context, tiny_config},
     PulidAdapter, PulidContext, PulidRuntime,
 };
-use crate::flux::transformer::FluxTransformer;
+use crate::flux::transformer::{FluxTransformer, TrueCfgBranch};
 use crate::progress::ProgressReporter;
 
 const DEPTH: usize = 4;
@@ -162,6 +162,15 @@ fn denoise(
     inputs: &Inputs,
     pulid: Option<PulidRuntime<'_>>,
 ) -> Vec<f32> {
+    denoise_with_true_cfg(transformer, inputs, pulid, None)
+}
+
+fn denoise_with_true_cfg(
+    transformer: &FluxTransformer,
+    inputs: &Inputs,
+    pulid: Option<PulidRuntime<'_>>,
+    true_cfg: Option<&TrueCfgBranch<'_>>,
+) -> Vec<f32> {
     let progress = ProgressReporter::default();
     transformer
         .denoise(
@@ -176,6 +185,7 @@ fn denoise(
             None,
             None,
             pulid,
+            true_cfg,
         )
         .expect("the tiny transformer denoises")
         .flatten_all()
@@ -391,5 +401,166 @@ fn the_four_variants_are_the_same_model() {
                 "{name} diverges from {reference_name} by {worst}"
             );
         }
+    }
+}
+
+/// True CFG must be as structurally inert as `id_weight: 0` when it is not
+/// engaged, on the SAME transformer route — the branch is `None` at the call
+/// site and the loop below it is byte-for-byte the loop that always ran.
+///
+/// The scale-1.0 case is the one that matters most: upstream treats it as off
+/// (`PuLID/flux/sampling.py:120`), and `neg + 1.0 * (pos - neg)` is `pos`
+/// arithmetically but NOT bit-identically once floating point is involved — so
+/// mold refuses the branch rather than running it and rounding.
+#[test]
+fn every_variant_is_bit_identical_when_true_cfg_is_not_engaged() {
+    let cfg = tiny_flux_config();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let gguf = dir.path().join("tiny-flux.gguf");
+    let inputs = inputs();
+    let adapter = adapter();
+    let live = context(1.0, 0);
+    // Four steps run as 0..=3, so a branch that starts at 4 never runs.
+    let uncond = context(1.0, 0);
+    let negative = negative_inputs();
+
+    for (name, transformer) in variants(&cfg, &gguf) {
+        let baseline = denoise(
+            &transformer,
+            &inputs,
+            Some(PulidRuntime::new(&adapter, &live)),
+        );
+
+        let never_starts = TrueCfgBranch {
+            scale: 2.0,
+            start_step: 4,
+            txt: &negative.txt,
+            txt_ids: &negative.txt_ids,
+            vec_: &negative.vec_,
+            pulid: Some(PulidRuntime::new(&adapter, &uncond)),
+        };
+        assert_eq!(
+            baseline,
+            denoise_with_true_cfg(
+                &transformer,
+                &inputs,
+                Some(PulidRuntime::new(&adapter, &live)),
+                Some(&never_starts),
+            ),
+            "{name}: a branch that never starts must render bit-identically"
+        );
+
+        // And a live branch must actually change the render, so the assertion
+        // above is about the gate rather than about a transformer that ignores
+        // the negative pass entirely.
+        let live_branch = TrueCfgBranch {
+            scale: 3.0,
+            start_step: 0,
+            txt: &negative.txt,
+            txt_ids: &negative.txt_ids,
+            vec_: &negative.vec_,
+            pulid: Some(PulidRuntime::new(&adapter, &uncond)),
+        };
+        assert_ne!(
+            baseline,
+            denoise_with_true_cfg(
+                &transformer,
+                &inputs,
+                Some(PulidRuntime::new(&adapter, &live)),
+                Some(&live_branch),
+            ),
+            "{name}: an engaged true-CFG branch must change the render"
+        );
+    }
+}
+
+/// `neg + scale * (pos - neg)` — `PuLID/flux/sampling.py:149`.
+///
+/// Checked on the dense arm alone because the formula is variant-independent;
+/// what the four arms differ in is the forward pass, which the test above
+/// covers. A scale of 1 must reproduce the conditional prediction and a scale
+/// of 0 the negative one, which is what pins the direction of the lerp: the
+/// two are trivially swappable and swapping them renders the negative prompt.
+#[test]
+fn the_true_cfg_combination_matches_upstreams_formula() {
+    let cfg = tiny_flux_config();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let gguf = dir.path().join("tiny-flux.gguf");
+    let inputs = inputs();
+    let adapter = adapter();
+    let live = context(1.0, 0);
+    let uncond = context(1.0, 0);
+    let negative = negative_inputs();
+    let (_, transformer) = variants(&cfg, &gguf).remove(0);
+
+    let branch = |scale: f64| TrueCfgBranch {
+        scale,
+        start_step: 0,
+        txt: &negative.txt,
+        txt_ids: &negative.txt_ids,
+        vec_: &negative.vec_,
+        pulid: Some(PulidRuntime::new(&adapter, &uncond)),
+    };
+    let run = |branch: Option<&TrueCfgBranch<'_>>| {
+        denoise_with_true_cfg(
+            &transformer,
+            &inputs,
+            Some(PulidRuntime::new(&adapter, &live)),
+            branch,
+        )
+    };
+
+    let conditional = run(None);
+    let at_one = run(Some(&branch(1.0)));
+    let worst = conditional
+        .iter()
+        .zip(&at_one)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f32, f32::max);
+    assert!(
+        worst < 1e-5,
+        "scale 1 must reproduce the conditional prediction, worst {worst}"
+    );
+
+    // Scale 0 is `neg_pred` — outside the accepted request range, but the one
+    // value that proves the lerp is not reversed.
+    let at_zero = run(Some(&branch(0.0)));
+    let worst = conditional
+        .iter()
+        .zip(&at_zero)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f32, f32::max);
+    assert!(
+        worst > 1e-5,
+        "scale 0 must render the NEGATIVE prediction, not the conditional one"
+    );
+}
+
+/// A second, different conditioning pair standing in for the negative prompt's
+/// T5 and pooled CLIP output.
+fn negative_inputs() -> Inputs {
+    let device = Device::Cpu;
+    let base = inputs();
+    Inputs {
+        // The image half is shared with the conditional branch upstream
+        // (`prepare(..., img=x, prompt=neg_prompt)`), so only the text half
+        // differs here.
+        txt: Tensor::from_vec(
+            (0..TXT_TOKENS * CONTEXT_IN_DIM)
+                .map(|i| 0.5 - i as f32 / 64.0)
+                .collect::<Vec<_>>(),
+            (1, TXT_TOKENS, CONTEXT_IN_DIM),
+            &device,
+        )
+        .expect("negative txt"),
+        vec_: Tensor::from_vec(
+            (0..VEC_IN_DIM)
+                .map(|i| 0.25 - i as f32 / 32.0)
+                .collect::<Vec<_>>(),
+            (1, VEC_IN_DIM),
+            &device,
+        )
+        .expect("negative vec"),
+        ..base
     }
 }

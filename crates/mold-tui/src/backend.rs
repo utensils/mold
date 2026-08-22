@@ -912,6 +912,12 @@ fn build_request(
             .map(mold_core::CollectionRef::by_name),
         tags: (!composed.tags.is_empty()).then_some(composed.tags),
         title: params.title.clone(),
+        // The TUI has no multi-photograph or true-CFG control yet (#1226); its
+        // single `--id-image` equivalent rides the singular fields below.
+        id_images: None,
+        id_image_names: None,
+        true_cfg: None,
+        cfg_start_step: None,
         source_fit: None,
         hdr_exr_dir: None,
         hdr_exr_full_float: false,

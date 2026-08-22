@@ -92,6 +92,22 @@ pub(crate) fn golden(name: &str) -> Tensor {
         .expect("golden is numeric")
 }
 
+/// Load one named array out of `true_cfg_goldens.safetensors`.
+///
+/// A separate file from `goldens.safetensors` on purpose: it was captured by a
+/// separate script (`capture_true_cfg_goldens.py`, #1226) and regenerating one
+/// set must never require re-running the other's 609 MB tower load.
+pub(crate) fn true_cfg_golden(name: &str) -> Tensor {
+    let path = testdata_dir().join("true_cfg_goldens.safetensors");
+    let tensors = candle_core::safetensors::load(&path, &Device::Cpu)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+    tensors
+        .get(name)
+        .unwrap_or_else(|| panic!("golden {name} is missing from {}", path.display()))
+        .to_dtype(DType::F32)
+        .expect("golden is numeric")
+}
+
 /// Gather the flat elements a probe golden pins.
 pub(crate) fn gather_probe(tensor: &Tensor, seed: u64) -> Vec<f32> {
     let flat = tensor.flatten_all().expect("flatten");
@@ -133,7 +149,16 @@ pub(crate) struct GoldenStats {
 
 impl GoldenStats {
     pub(crate) fn load(name: &str) -> Self {
-        let values = golden(name).to_vec1::<f32>().expect("stats golden");
+        Self::from_tensor(name, golden(name))
+    }
+
+    /// The same five slots, read from the true-CFG golden file.
+    pub(crate) fn load_true_cfg(name: &str) -> Self {
+        Self::from_tensor(name, true_cfg_golden(name))
+    }
+
+    fn from_tensor(name: &str, tensor: Tensor) -> Self {
+        let values = tensor.to_vec1::<f32>().expect("stats golden");
         assert_eq!(values.len(), 5, "{name} is not a five-slot stats golden");
         Self {
             mean: values[0],

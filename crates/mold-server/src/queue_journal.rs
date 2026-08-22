@@ -114,7 +114,10 @@ pub struct JournalAdmission<'a> {
 /// flag, and there is nothing to resolve — the bytes are either on the request
 /// or they are not.
 fn carries_identity_photograph(request: &mold_core::GenerateRequest) -> bool {
-    request.id_image.is_some()
+    // Either wire shape. Asking only about `id_image` would journal every
+    // multi-photograph request's faces into `mold.db`, which is the exact
+    // outcome this predicate exists to prevent.
+    mold_core::identity::request_carries_identity_photo(request)
 }
 
 /// Directory of per-identity claim records, one file per queue owner.
@@ -1833,5 +1836,26 @@ mod tests {
             "no journaled row may contain reference-photograph bytes"
         );
         ticket.discard();
+    }
+
+    /// The plural wire shape is the SAME photograph, so it is excluded the same
+    /// way. A predicate that only knew about `id_image` would journal every
+    /// multi-reference request's faces into `mold.db` — the exact outcome the
+    /// exclusion exists to prevent (#1226).
+    #[test]
+    fn a_multi_photograph_request_is_excluded_from_the_database_too() {
+        let journal = journal_with_db();
+        let mut request = request();
+        request.model = "flux-dev:q4".to_string();
+        request.id_images = Some(vec![
+            b"\x89PNG\r\n\x1a\n-first-face".to_vec(),
+            b"\x89PNG\r\n\x1a\n-second-face".to_vec(),
+        ]);
+        request.id_image_names = Some(vec!["one.png".to_string(), "two.png".to_string()]);
+
+        assert!(journal
+            .record(admission("job-1", &request, Path::new("/gallery")))
+            .is_none());
+        assert!(rows(&journal).is_empty());
     }
 }
