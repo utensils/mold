@@ -173,11 +173,12 @@ until touched and never appears for other families. LTX-2's optional STG
 scale/blocks, CFG rescale, modality scale, and guidance-skip rows keep their
 request fields absent until edited, so pipeline constants stay authoritative.
 
-#### Identity photo (PuLID-FLUX)
+#### Identity photo (PuLID)
 
 The **Identity photo** section appears only while the selected checkpoint's
 `/api/models[]` entry advertises `supports_identity` — face-identity
-conditioning is qualified for the FLUX dev tiers, on a server built with PuLID
+conditioning is qualified for a fixed list of FLUX and SDXL checkpoints (see
+the [Identity Photos guide](/guide/identity)), on a server built with PuLID
 support. It is never inferred from the family or from how your local `mold` was
 compiled, because the render happens on the server.
 

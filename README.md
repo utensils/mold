@@ -75,12 +75,16 @@ with prompt, model, seed, and generation metadata.
   settings
 - **Images**: text-to-image, img2img, multimodal editing, inpainting,
   ControlNet, LoRA, prompt expansion, and Real-ESRGAN upscaling
-- **Face identity (PuLID-FLUX)**: keep one person's face across arbitrary
-  prompts with `--id-image` (repeatable up to 4, averaged into one identity),
-  on `flux-dev:q4` and `flux-dev:q8` — pure Rust SCRFD, ArcFace, a BiSeNet
-  face mask, EVA02-CLIP, and IDFormer feeding twenty cross-attention modules
-  inside the FLUX transformer, plus `--true-cfg` for a real negative branch
-  on an otherwise guidance-distilled model
+- **Face identity (PuLID)**: keep one person's face across arbitrary prompts
+  with `--id-image` (repeatable up to 4, averaged into one identity), on FLUX
+  (`flux-dev:q4`, `flux-dev:q8`, the `pulid-flux` bundle) and SDXL
+  (`sdxl-base:fp16`, `juggernaut-xl:fp16`, `realvis-xl:fp16`,
+  `dreamshaper-xl:fp16`, the `pulid-sdxl` bundle) — pure Rust SCRFD, ArcFace, a
+  BiSeNet face mask, EVA02-CLIP, and IDFormer shared by both adapters, feeding
+  twenty cross-attention modules inside the FLUX transformer or seventy inside
+  the SDXL UNet, plus `--true-cfg` on FLUX for a real negative branch on an
+  otherwise guidance-distilled model (SDXL's own `--guidance` is already the
+  classifier-free scale)
 - **Video and audio**: text/image-to-video, multi-prompt sequences, clip
   continuation (`--extend`), lip dub (`--pipeline lip-dub`), text-to-audio
   (`--pipeline t2a`), native MP4 with generated audio, and LTX-2 output up to

@@ -1,36 +1,50 @@
-# PuLID-FLUX: asset and encoder lifecycle
+# PuLID: asset and encoder lifecycle
 
-PuLID conditions a FLUX render on a face. This document records how its four
-assets get onto disk, how the two that are models become runnable tensors, and
-which invariants hold along the way. It is the reference for the
-"PuLID-FLUX: functional" milestone; the FLUX cross-attention integration is not
-covered here because it does not exist yet.
+PuLID conditions a render on a face, on FLUX and on SDXL. This document
+records how its assets get onto disk, how the ones that are models become
+runnable tensors, and which invariants hold along the way. It is the
+reference for the "PuLID-FLUX: functional" milestone and its SDXL follow-on
+(#1228); the per-family cross-attention integration is documented in
+`CLAUDE.md`'s identity bullets rather than duplicated here.
 
-## The bundle is four unrelated artifacts
+## The bundle is five artifacts, and there are two bundles
 
-`pulid-flux` is a **hidden, auxiliary, files-only** manifest
-(`mold_core::manifest::pulid_manifests`). It is not a checkpoint: it never
-appears in a model picker, never becomes a default model, and deliberately
-cannot resolve to a `ModelPaths`, because `ModelPaths` requires a generator and
-none of these four files is one.
+`pulid-flux` and `pulid-sdxl` are both **hidden, auxiliary, files-only**
+manifests (`mold_core::manifest::pulid_manifests`). Neither is a checkpoint:
+neither appears in a model picker, becomes a default model, or resolves to a
+`ModelPaths`, because `ModelPaths` requires a generator and none of these
+files is one.
 
-| Component | File | Source | Role |
-| --- | --- | --- | --- |
-| `IdentityAdapter` | `pulid_flux_v0.9.1.safetensors` | `guozinan/PuLID` | IDFormer + FLUX cross-attention weights |
-| `IdentityVisionEncoder` | `EVA02_CLIP_L_336_psz14_s6B.pt` | `QuanSun/EVA-CLIP` | Vision tower — a **conversion input**, never loaded directly |
-| `FaceDetector` | `scrfd_10g_bnkps.onnx` | InsightFace antelopev2 mirror | Face detection |
-| `FaceRecognizer` | `glintr100.onnx` | InsightFace antelopev2 mirror | ArcFace identity embedding |
+Four of the five files are identical downloads for both bundles — the
+detector, recognizer, parser, and vision tower are family-blind extraction
+components, not FLUX- or SDXL-specific — so only the adapter differs:
 
-All four land under `models/shared/pulid/`.
-`mold_core::pulid_assets::pulid_paths` returns `Some` only when **every** one
-is complete, so holding a `PulidPaths` means holding a runnable bundle;
-`missing_pulid_files` is the repair signal.
+| Component | File | Source | Role | Bundle |
+| --- | --- | --- | --- | --- |
+| `IdentityAdapter` | `pulid_flux_v0.9.1.safetensors` | `guozinan/PuLID` | IDFormer + FLUX cross-attention weights | `pulid-flux` only |
+| `IdentityAdapter` | `pulid_v1.1.safetensors` | `guozinan/PuLID` | IDFormer + SDXL UNet cross-attention weights | `pulid-sdxl` only |
+| `IdentityVisionEncoder` | `EVA02_CLIP_L_336_psz14_s6B.pt` | `QuanSun/EVA-CLIP` | Vision tower — a **conversion input**, never loaded directly | shared |
+| `FaceDetector` | `scrfd_10g_bnkps.onnx` | InsightFace antelopev2 mirror | Face detection | shared |
+| `FaceRecognizer` | `glintr100.onnx` | InsightFace antelopev2 mirror | ArcFace identity embedding | shared |
+| `FaceParser` | `parsing_bisenet.pth` | facexlib release mirror | BiSeNet crop mask before the vision tower | shared |
+
+Both bundles land under the same `models/shared/pulid/` root, because
+`IdentityAdapter` is not treated as a model-specific component: `storage_path`
+lands the four shared extraction artifacts at identical paths by
+construction, never as a special case keyed on which bundle asked for them. A
+machine that already has one bundle installed therefore downloads only the
+other's adapter file to complete the second.
+`mold_core::pulid_assets::pulid_paths` returns `Some` for a given family only
+when **every** one of its five files is complete, so holding a `PulidPaths`
+means holding a runnable bundle for that family; `missing_pulid_files` is the
+repair signal.
 
 The two ONNX files are InsightFace *pretrained models*, which are
-non-commercial-research-only even though the InsightFace code is MIT. Mold does
-not bundle them and refuses to download them until the user has recorded
-acceptance. The other two are Apache-2.0 (PuLID) and MIT (EVA-CLIP) and need no
-acceptance.
+non-commercial-research-only even though the InsightFace code is MIT. Mold
+does not bundle them and refuses to download them until the user has
+recorded acceptance — once, covering both bundles, since they pull the same
+two files. The other three shared files are Apache-2.0 (PuLID adapters) and
+MIT (EVA-CLIP, facexlib parser) and need no acceptance.
 
 ## The vision tower is converted, never loaded as a pickle
 
@@ -283,10 +297,20 @@ The parts that are easy to get wrong:
 The tower is ~609 MB and follows the crate's **drop-and-reload** rule: build,
 encode, drop. Nothing caches it.
 
-### IDFormer (`flux::pulid_encoder`)
+### IDFormer (shared by both families)
 
-Ported from `pulid/encoders_transformer.py`, loaded from the `pulid_encoder.*`
-tensors of the adapter. It is a resampler run five times: 32 learned latents
+The IDFormer is the same class in both of upstream's pipelines, and mold
+shares one implementation rather than porting it twice: the only
+family-specific fact is which tensor prefix the adapter stores it under —
+`identity::extraction::idformer_prefix` answers `pulid_encoder` for FLUX and
+`id_adapter` for SDXL, because upstream instantiates `IDFormer()` under those
+two different attribute names. The extraction cache key includes the
+family's own adapter digest, so one photograph never serves one family the
+other's embedding.
+
+Ported from `pulid/encoders_transformer.py`, loaded from the adapter's
+IDFormer tensors under that prefix. It is a resampler run five times: 32
+learned latents
 are concatenated with five identity tokens **once**, then each vision scale
 drives two `[PerceiverAttention, FeedForward]` layers in order. The identity
 tokens stay in the key/value context for every scale, which is why they are
@@ -331,6 +355,32 @@ its scale, the tower's CLS projection to 1.3e-5 absolute on a unit vector, and
 the raw hidden states to ~1e-4 of their own peak magnitude — the last of these
 being f32 accumulation amplified by EVA02's extreme activations rather than a
 port defect.
+
+### SDXL goldens (#1228)
+
+`crates/mold-inference/testdata/pulid/` also carries the SDXL adapter's own
+goldens, weight-gated behind the same `MOLD_TEST_PULID_ASSETS` invocation and
+captured against the pinned `pulid_v1.1.safetensors` (SHA-256
+`4cb8ceec1078e0165399b88332ab3c5971619111b8e1730e6bae64144aabae41`,
+984,405,232 bytes, Apache-2.0). Measured error, relative to each tensor's own
+peak:
+
+| Golden | Error |
+| --- | --- |
+| `idformer.single.output` | 4.286e-7 |
+| `idformer.uncond.output` | 1.154e-6 |
+| `attn1.id_hidden_states` (down_blocks.1, 640 channels) | 2.268e-7 |
+| `attn1.combined_s1p0` / `_s0p7` | 1.243e-7 / 1.100e-7 |
+| `attn121.id_hidden_states` (mid_block, 1280 channels) | 1.535e-7 |
+| `attn121.combined_s1p0` / `_s0p7` | 7.520e-8 / 6.226e-8 |
+| `attn49.id_hidden_states` (up_blocks.0, 1280 channels) | 2.201e-7 |
+| `attn49.combined_s1p0` / `_s0p7` | 1.032e-7 / 9.369e-8 |
+
+Layer geometry: 70 `attn2` modules — 10 at 640 channels / 10 heads
+(`down_blocks.1`, `up_blocks.1`) and 60 at 1280 / 20 heads (`down_blocks.2`,
+`up_blocks.0`, `mid_block`); `dim_head` is 64 throughout; `cross_attention_dim`
+2048. Weights: `2 x 2048 x (10 x 640 + 60 x 1280) = 340,787,200` elements =
+681,574,400 bytes at f16/bf16.
 
 ## The extraction lifetime (#1223)
 
@@ -444,11 +494,20 @@ over-charging VRAM by ~1 GB parks renders a card could actually run.
 the two ONNX graphs; `IdentityAdapter` deliberately is not, because it is the
 one identity artifact that IS device-resident for the whole denoise.
 
+SDXL's adapter is charged separately, `IDENTITY_SDXL_VRAM_OVERHEAD_BYTES` (850
+MB), because its 70 smaller `attn2` modules and their activation headroom are
+genuinely lighter than FLUX's 20 larger ones — the two are sibling constants
+in the same module, never a shared estimate scaled by a family factor, so a
+future change to either geometry cannot silently move the other's charge.
+
 ### Removal
 
-`mold rm pulid-flux` now deletes the derived
-`eva02_clip_l_336_vision.safetensors` and its sidecar as well as the four
-manifest files. Both names live in `mold_core::pulid_assets`
+`mold rm pulid-flux` and `mold rm pulid-sdxl` each delete their own adapter
+file. The derived `eva02_clip_l_336_vision.safetensors` (and its sidecar) and
+the derived BiSeNet parser are shared, so they are ref-counted: removing one
+bundle leaves them in place as long as the other bundle still needs them, and
+only removing both bundles deletes the shared derived files too. The derived
+filenames live in `mold_core::pulid_assets`
 (`DERIVED_VISION_FILENAME`, `DERIVED_VISION_SIDECAR_FILENAME`) rather than in
 `encoders::eva_clip_convert`, because removal is in `mold-core` and cannot see
 `mold-inference`; the converter reads them from there so the two can never name
@@ -638,10 +697,33 @@ which the scheduler's learned phase timings observe rather than predict.
 
 ## Not yet built
 
-- facexlib's BiSeNet background mask, which upstream applies before the vision
-  tower (`PuLID/pulid/pipeline_flux.py:145-170`). Issue #1225.
 - Multiple photographs and true CFG on the web, desktop, iPhone, TUI, and
   Discord surfaces. #1226 shipped the contract, the runtime, and the CLI only.
-- Identity on tiers other than `flux-dev:q4` / `:q8`, alongside a LoRA, or
-  alongside img2img. All three are refused by name at the request contract; a
-  milestone-2 qualification pass owns them.
+  SDXL gets both for free once those surfaces gate on `supports_identity`
+  rather than a hard-coded FLUX check, since neither is family-specific.
+- Identity on FLUX/SDXL tiers beyond the qualified list (see `CLAUDE.md`'s
+  identity bullets), alongside a LoRA, or alongside img2img. All three are
+  refused by name at the request contract; a later qualification pass owns
+  them.
+- **`StableDiffusionConfig` exposes no accessor for its `unet` field**, so
+  `sdxl::pulid::sdxl_unet_layout()` is mold's own copy of the published SDXL
+  `unet/config.json` rather than reading it off the loaded config. A one-line
+  `pub fn unet(&self) -> &UNet2DConditionModelConfig` in the candle fork would
+  remove the duplication; until then a fixture test and two runtime guards
+  are the defence.
+- **No PuLID checkpoint exists yet for SD1.5.** `plan_attn_layers` already
+  handles its geometry (16 `attn2` modules, pinned against
+  `attn_layer_map_sd15.json`), so if one is ever published the remaining work
+  is a manifest entry and a qualified-model list entry, not a new adapter.
+- **PuLID weights are opened by pathname, on both families** — a
+  cross-family hardening issue rather than a per-PR fix. `SdxlPulidAdapter::load`
+  and `flux::pulid`'s loader, plus the `id_adapter.*` / `pulid_encoder.*`
+  IDFormer loads in `identity::extraction`, all load a manifest-pinned
+  adapter by path rather than through a retained descriptor. The residual
+  risk is a group-writable model root where another member replaces a pinned
+  adapter between download and load — real, but identical for FLUX today, so
+  it is an existing invariant gap rather than one #1228 opened. The fix
+  belongs with the `StableDiffusionConfig::unet()` accessor above:
+  `VarBuilder::from_mmaped_safetensors` takes paths, and authenticating means
+  either a ~1 GB private read (defeating the mmap the residency accounting is
+  built on) or a candle API that accepts a retained descriptor.

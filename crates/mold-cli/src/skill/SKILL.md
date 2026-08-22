@@ -744,16 +744,24 @@ mold run "a golden retriever" --image park.png --mask mask.png
 # mask: white = repaint, black = preserve
 ```
 
-### Face-identity conditioning (PuLID-FLUX)
+### Face-identity conditioning (PuLID)
 
-Keep one person's face across arbitrary prompts. Qualified for `flux-dev:q4`
-and `flux-dev:q8`, on CUDA and Metal, in every official release build.
+Keep one person's face across arbitrary prompts. FLUX takes PuLID-FLUX v0.9.1
+(`flux-dev:q4`, `flux-dev:q8`); SDXL takes PuLID v1.1 (`sdxl-base:fp16`,
+`juggernaut-xl:fp16`, `realvis-xl:fp16`, `dreamshaper-xl:fp16`). On CUDA and
+Metal, in every official release build. Clients read the server's advertised
+`/api/models[].supports_identity` rather than this list.
 
 ```bash
-# One-time setup: the bundle is licence-gated and will not download without this
+# FLUX — one-time setup: the bundle is licence-gated and will not download without this
 mold pull pulid-flux --accept-license insightface-antelopev2
-
 mold run flux-dev:q4 "an astronaut in a diner" --id-image face.jpg
+
+# SDXL — a machine that already has pulid-flux pulls only the 984 MB adapter
+mold pull pulid-sdxl --accept-license insightface-antelopev2
+mold run sdxl-base:fp16 "an astronaut in a diner" --id-image face.jpg
+mold run juggernaut-xl:fp16 "a studio portrait" --id-image face.jpg --id-weight 0.8
+
 mold run flux-dev:q4 "a Renaissance portrait" --id-image face.jpg --id-weight 0.6
 mold run flux-dev:q4 "a hiker on a ridge" --id-image face.jpg --id-start-step 4
 
@@ -761,7 +769,7 @@ mold run flux-dev:q4 "a hiker on a ridge" --id-image face.jpg --id-start-step 4
 mold run flux-dev:q4 "a chef in a kitchen" \
   --id-image front.jpg --id-image side.jpg --id-image smiling.jpg
 
-# A real negative branch (upstream advises --guidance 1.0 with it)
+# A real negative branch (FLUX only; upstream advises --guidance 1.0 with it)
 mold run flux-dev:q4 "a hiker on a ridge" --id-image face.jpg \
   --true-cfg 2.0 --guidance 1.0 --negative-prompt "blurry, cartoon"
 ```
@@ -771,15 +779,18 @@ mold run flux-dev:q4 "a hiker on a ridge" --id-image face.jpg \
 | `--id-image <path>`    | —       | PNG/JPEG, ≤16 MiB, ≤8192 px/axis, ≤32 MP | Reference photograph. **Repeatable, up to 4** — several references of one person are averaged into one identity; whole-set byte/pixel caps sit below the per-image limits times the count. |
 | `--id-weight <f>`      | `1.0`   | `0.0`–`3.0`                              | `0` is completely inert: nothing pulled, loaded, or extracted, and the render is byte-identical to no identity at all                                                                      |
 | `--id-start-step <n>`  | `0`     | `< --steps`                              | First denoise step identity applies from                                                                                                                                                   |
-| `--true-cfg <f>`       | `1.0`   | `1.0`–`10.0`                             | True classifier-free guidance scale. `1.0` is off. Requires `--id-image` and a non-zero `--id-weight`; drop `--guidance` to `1.0` alongside it. ~2x denoise time.                          |
-| `--cfg-start-step <n>` | `1`     | `< --steps`, requires `--true-cfg`       | First denoise step the true-CFG negative branch runs at                                                                                                                                    |
+| `--true-cfg <f>`       | `1.0`   | `1.0`–`10.0`                             | **FLUX only.** True classifier-free guidance scale. `1.0` is off. Requires `--id-image` and a non-zero `--id-weight`; drop `--guidance` to `1.0` alongside it. ~2x denoise time. SDXL's `--guidance` already is the classifier-free scale, so naming this on an SDXL identity request is refused. |
+| `--cfg-start-step <n>` | `1`     | `< --steps`, requires `--true-cfg`       | **FLUX only.** First denoise step the true-CFG negative branch runs at                                                                                                                    |
 
 Refused, by name rather than silently: any other model, a LoRA alongside an
 identity, img2img alongside an identity, a build without the `pulid` feature,
 both `--id-image` repeated beyond 4, and `--true-cfg` without an active
 identity. `--negative-prompt` does nothing on FLUX unless `--true-cfg` is
 above `1.0` — FLUX.1-dev is guidance-distilled and has no negative branch
-without it. Works over `$MOLD_HOST` and with `--local`; the bundle and the
+without it. On SDXL `--negative-prompt` works normally, as it does for any
+CFG model, and PuLID conditions the negative pass on the unconditional
+identity automatically — there is no `--true-cfg` to gate it. Works over
+`$MOLD_HOST` and with `--local`; the bundle and the
 licence acceptance must be on the machine that RENDERS, which for a remote run
 is the server. Repeated `--id-image` and `--true-cfg` additionally need a
 server that advertises `capabilities.identity`: against an older one `mold run`
@@ -787,8 +798,11 @@ refuses by name rather than submitting, because that server would drop the
 fields and render without them, while a single `--id-image` works against any
 identity-capable server. Saved metadata records the photograph's file name(s),
 SHA-256(s), and the applied weight and start step — plural fields only for the
-plural form, never the photograph. `mold rm pulid-flux` removes the bundle and
-the derived vision tower and parser. Full guide: `website/guide/identity.md`.
+plural form, never the photograph. `mold rm pulid-flux` and `mold rm
+pulid-sdxl` each remove their own adapter; removing one keeps the four shared
+extraction artifacts (vision tower, face detector, recognizer, parser)
+installed for as long as the other bundle needs them. Full guide:
+`website/guide/identity.md`.
 
 Face-identity extraction runs on the same GPU that renders the print, as the
 first thing that job does, and is reported as an **Extracting face identity**
@@ -796,8 +810,8 @@ stage. One extraction is ~0.4 s on an M4 Max GPU and ~1.9 s on a CPU-only
 host; a photograph already used in this server run is reused from memory in
 under 2 ms. It needs ~0.7 GB of device memory while it runs, which the
 scheduler reserves as part of the job's plan and which is released before the
-checkpoint loads — separate from the ~1.25 GB the identity adapter holds for
-the whole denoise.
+checkpoint loads — separate from the adapter's own resident overhead for the
+whole denoise: ~1.25 GB for the FLUX adapter, ~850 MB for the SDXL one.
 
 Wire contract — additive `GenerateRequest` fields (read `supports_identity`, never the feature, to decide whether to offer the control):
 
@@ -812,19 +826,23 @@ Wire contract — additive `GenerateRequest` fields (read `supports_identity`, n
 | `true_cfg`       | True classifier-free guidance scale, `1.0..=10.0`. Absent or `1.0` is off. Qualified only alongside an active identity (an image and non-zero `id_weight`); refused on a plain FLUX render rather than accepted and ignored. Reuses `negative_prompt`.                                                                                                                                                                    |
 | `cfg_start_step` | First denoise step the true-CFG negative branch runs at. Must be `< steps`. Absent means `1`. Requires `true_cfg`.                                                                                                                                                                                                                                                                                                        |
 
-Milestone-1 gate — every rule below is a 422 at admission, never a silent drop:
+Identity gate — every rule below is a 422 at admission, never a silent drop:
 
-- Only the identity-qualified checkpoints `flux-dev:q4` and `flux-dev:q8` are
-  accepted (bare `flux-dev` resolves to `:q8`, and the legacy dash form
-  `flux-dev-q4` resolves too). `flux-dev:bf16` and every other model are refused.
+- Only the identity-qualified checkpoints are accepted: FLUX's `flux-dev:q4`
+  and `flux-dev:q8` (bare `flux-dev` resolves to `:q8`, and the legacy dash
+  form `flux-dev-q4` resolves too), and SDXL's `sdxl-base:fp16`,
+  `juggernaut-xl:fp16`, `realvis-xl:fp16`, and `dreamshaper-xl:fp16`.
+  `flux-dev:bf16`, every SDXL checkpoint not on that list (turbo/lightning
+  tiers, Playground, the Pony derivatives), and every other model are refused.
 - Identity may not be combined with a LoRA or with an img2img `source_image` —
-  neither combination is qualified yet.
+  neither combination is qualified yet, on either family.
 - Any of `id_weight` / `id_start_step` / `id_image_name` without `id_image`
   (or `id_image_names` without `id_images`) is an error, not an ignored field.
   Sending both `id_image` and `id_images` is likewise an error.
-- `true_cfg` / `cfg_start_step` without an active identity (a photograph and a
-  non-zero `id_weight`) is an error — true CFG never runs on an ordinary FLUX
-  render.
+- `true_cfg` / `cfg_start_step` are FLUX-only and are refused outright on an
+  SDXL identity request; on FLUX, either without an active identity (a
+  photograph and a non-zero `id_weight`) is an error — true CFG never runs on
+  an ordinary FLUX render.
 - A server that cannot execute identity conditioning refuses any request
   carrying an identity field. It never accepts-and-ignores, because that would
   render a print with no face in it and say nothing. Two distinct messages, so
@@ -854,26 +872,33 @@ and needs no probe. Saved metadata records `id_image_name(s)`,
 the scale and start step actually used, only when the print carried the
 relevant field — hashes and names, never the face payload.
 
-Assets: identity conditioning needs the hidden auxiliary bundle `pulid-flux` —
-five files, about 2.2 GB (PuLID-FLUX v0.9.1 adapter, the EVA02-CLIP-L-14-336
-vision tower, the InsightFace antelopev2 face detector + recognizer, and
-facexlib's BiSeNet face parser (`parsing_bisenet.pth`, MIT, no acceptance
-needed) that masks the aligned crop before the vision tower sees it), every
-file SHA-256 pinned, stored under `shared/pulid/`. An install made before mold
-0.24 has four files; re-running the pull below fetches only the missing
-parser. The two antelopev2 files are licensed for non-commercial research
-only, so every pull path — `mold pull`, the server's auto-pull, client-triggered
-downloads — refuses them until acceptance is recorded once per `MOLD_HOME`:
+Assets: identity conditioning needs one of two hidden auxiliary bundles,
+`pulid-flux` and `pulid-sdxl`, sharing one `pulid` family and one
+`shared/pulid/` storage root — five files each, but four of them are the SAME
+files: the EVA02-CLIP-L-14-336 vision tower, the InsightFace antelopev2 face
+detector + recognizer, and facexlib's BiSeNet face parser
+(`parsing_bisenet.pth`, MIT, no acceptance needed) that masks the aligned crop
+before the vision tower sees it. Only the fifth file differs — PuLID-FLUX
+v0.9.1's adapter (~1.14 GB) or PuLID v1.1's (984 MB) — so a machine that
+already has one bundle pulls only the other's adapter, about 2.2 GB total for
+both. Every file is SHA-256 pinned. An install made before mold 0.24 has four
+files; re-running the pull below fetches only the missing parser. The two
+antelopev2 files are licensed for non-commercial research only, so every pull
+path — `mold pull`, the server's auto-pull, client-triggered downloads —
+refuses them until acceptance is recorded once per `MOLD_HOME`, for whichever
+bundle is pulled first:
 
 ```bash
 mold pull pulid-flux --accept-license insightface-antelopev2
+mold pull pulid-sdxl --accept-license insightface-antelopev2
 ```
 
 The flag prints the restriction and the pinned terms URL, then records the
 acceptance on **whichever machine runs the pull** — see
 [Third-party model licenses](#third-party-model-licenses). A refusal names the
-license, its URL, and that exact command. `mold rm pulid-flux` removes the
-bundle; `mold pull pulid-flux` repairs a partial one.
+license, its URL, and that exact command. `mold rm pulid-flux` / `mold rm
+pulid-sdxl` remove their own bundle; `mold pull` of either repairs a partial
+one.
 
 You do not have to pull it by hand. A request that actually conditions on a
 face plans the bundle through the same dependency preparation the encoder

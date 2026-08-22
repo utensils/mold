@@ -28,7 +28,7 @@ MOLD_HOST=http://gpu-host:7680 MOLD_DISCORD_TOKEN="your-token" mold discord
 | Command              | Description                                                                                                                                                                                                                       |
 | -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `/generate`          | Generate an image or video, including attachment-driven LTX-2 audio-to-video, retake, and keyframe modes                                                                                                                          |
-| `/identity`          | Generate an image conditioned on a face reference photo (PuLID-FLUX), with `identity_strength` and `identity_start_step`                                                                                                          |
+| `/identity`          | Generate an image conditioned on a face reference photo (PuLID), with `identity_strength` and `identity_start_step`                                                                                                               |
 | `/sequence`          | Submit 2–16 `\|`-separated prompts as a durable video sequence (LTX-2, LTX-Video — which joins independently rendered clips — or Wan, per the model's advertised sequence support), with per-clip progress and final MP4 delivery |
 | `/expand`            | Expand a short prompt into detailed generation prompts                                                                                                                                                                            |
 | `/models`            | List available models with download/loaded status                                                                                                                                                                                 |
@@ -42,9 +42,10 @@ MOLD_HOST=http://gpu-host:7680 MOLD_DISCORD_TOKEN="your-token" mold discord
 
 Face-identity conditioning has its own command rather than options on
 `/generate`. Discord caps a chat-input command at **25 options** and
-`/generate` is already at exactly 25 — and identity is qualified only for the
-FLUX dev tiers, so none of `/generate`'s video and conditioning options apply
-to it anyway.
+`/generate` is already at exactly 25 — and identity is qualified only for a
+fixed list of FLUX and SDXL checkpoints (see the
+[Identity Photos guide](/guide/identity)), so none of `/generate`'s video and
+conditioning options apply to it anyway.
 
 | Option                | Purpose                                                                                        |
 | --------------------- | ---------------------------------------------------------------------------------------------- |
