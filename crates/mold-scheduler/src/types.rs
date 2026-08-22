@@ -205,6 +205,10 @@ pub struct CandidatePlacement {
     /// adapters derive it from authoritative free and safely reclaimable
     /// resident bytes, then replan if it changes.
     pub device_available_vram_bytes: u64,
+    /// The concrete admission owns a stable capacity authority and the runtime
+    /// owner performs its own final physical-pressure fence. This is false for
+    /// ordinary work: live device snapshots remain authoritative by default.
+    pub frozen_device_capacity: bool,
     pub incremental_host_ram_bytes: u64,
     pub cold_setup_ms: u64,
     pub warm_setup_ms: u64,
@@ -296,6 +300,7 @@ impl CandidatePlacement {
             execution_equivalence_fingerprint: None,
             predicted_vram_bytes: 0,
             device_available_vram_bytes: u64::MAX,
+            frozen_device_capacity: false,
             incremental_host_ram_bytes,
             cold_setup_ms: 0,
             warm_setup_ms: 0,
@@ -319,6 +324,16 @@ impl CandidatePlacement {
 
     pub fn with_device_available_vram(mut self, available_vram_bytes: u64) -> Self {
         self.device_available_vram_bytes = available_vram_bytes;
+        self
+    }
+
+    /// Use the concrete admission's capacity instead of the generic live
+    /// device sample for scheduling and grant validation.
+    ///
+    /// Callers may opt in only when the runtime owner independently rechecks
+    /// physical capacity immediately before its first allocation.
+    pub fn with_frozen_device_capacity(mut self) -> Self {
+        self.frozen_device_capacity = true;
         self
     }
 
@@ -835,14 +850,17 @@ impl Plan {
                 current: current.execution_fingerprint.clone(),
             });
         }
-        if current.available_vram_bytes < lease.placement.predicted_vram_bytes {
+        if !lease.placement.frozen_device_capacity
+            && current.available_vram_bytes < lease.placement.predicted_vram_bytes
+        {
             return Err(PlanValidationError::InsufficientCurrentVram {
                 device_id: lease.device_id.clone(),
                 planned_bytes: lease.placement.predicted_vram_bytes,
                 available_bytes: current.available_vram_bytes,
             });
         }
-        if lease.placement.device_available_vram_bytes != u64::MAX
+        if !lease.placement.frozen_device_capacity
+            && lease.placement.device_available_vram_bytes != u64::MAX
             && current.available_vram_bytes != lease.placement.device_available_vram_bytes
         {
             return Err(PlanValidationError::DeviceVramSampleChanged {

@@ -3608,7 +3608,7 @@ impl Coordinator {
                         let estimate = self.estimates.estimate(&key, static_estimate);
                         let (cold_setup_ms, warm_setup_ms, predicted_run_ms) =
                             timing_with_static_floors(estimate, static_estimate);
-                        CandidatePlacement::new(
+                        let candidate = CandidatePlacement::new(
                             DeviceId::new(plan.device_id),
                             ExecutionFingerprint::new(plan.execution_fingerprint),
                             estimate.host_bytes,
@@ -3616,7 +3616,15 @@ impl Coordinator {
                         .with_execution_equivalence(plan.execution_equivalence_fingerprint)
                         .with_vram(estimate.vram_bytes)
                         .with_timing(cold_setup_ms, warm_setup_ms, predicted_run_ms)
-                        .with_device_available_vram(plan.admitted_available_vram_bytes)
+                        .with_device_available_vram(plan.admitted_available_vram_bytes);
+                        if generation_uses_frozen_device_capacity(
+                            plan.device_backend,
+                            &plan.model_family,
+                        ) {
+                            candidate.with_frozen_device_capacity()
+                        } else {
+                            candidate
+                        }
                     })
                     .collect::<Vec<_>>();
                 let mut work = WorkSnapshot::new(
@@ -4111,16 +4119,24 @@ impl Coordinator {
                     (plan.device_id.clone(), plan.execution_fingerprint.clone()),
                     wire_estimate_confidence(estimate.confidence),
                 );
+                let candidate = CandidatePlacement::new(
+                    DeviceId::new(plan.device_id),
+                    ExecutionFingerprint::new(plan.execution_fingerprint),
+                    estimate.host_bytes,
+                )
+                .with_execution_equivalence(plan.execution_equivalence_fingerprint)
+                .with_vram(estimate.vram_bytes)
+                .with_timing(cold_setup_ms, warm_setup_ms, predicted_run_ms)
+                .with_device_available_vram(plan.admitted_available_vram_bytes);
                 Some(
-                    CandidatePlacement::new(
-                        DeviceId::new(plan.device_id),
-                        ExecutionFingerprint::new(plan.execution_fingerprint),
-                        estimate.host_bytes,
-                    )
-                    .with_execution_equivalence(plan.execution_equivalence_fingerprint)
-                    .with_vram(estimate.vram_bytes)
-                    .with_timing(cold_setup_ms, warm_setup_ms, predicted_run_ms)
-                    .with_device_available_vram(plan.admitted_available_vram_bytes),
+                    if generation_uses_frozen_device_capacity(
+                        plan.device_backend,
+                        &plan.model_family,
+                    ) {
+                        candidate.with_frozen_device_capacity()
+                    } else {
+                        candidate
+                    },
                 )
             })
             .collect::<Vec<_>>();
@@ -6500,6 +6516,13 @@ fn static_generation_estimate(
         vram_bytes,
         host_bytes,
     }
+}
+
+fn generation_uses_frozen_device_capacity(
+    backend: mold_core::GpuBackend,
+    model_family: &str,
+) -> bool {
+    backend == mold_core::GpuBackend::Metal && model_family == mold_core::minimax_h3::FAMILY
 }
 
 fn timing_with_static_floors(
@@ -9123,6 +9146,22 @@ mod tests {
             coordinator.device_snapshots()[0].available_vram_bytes,
             5 << 30
         );
+    }
+
+    #[test]
+    fn only_h3_metal_uses_frozen_device_capacity() {
+        assert!(generation_uses_frozen_device_capacity(
+            mold_core::GpuBackend::Metal,
+            mold_core::minimax_h3::FAMILY,
+        ));
+        assert!(!generation_uses_frozen_device_capacity(
+            mold_core::GpuBackend::Cuda,
+            mold_core::minimax_h3::FAMILY,
+        ));
+        assert!(!generation_uses_frozen_device_capacity(
+            mold_core::GpuBackend::Metal,
+            "flux",
+        ));
     }
 
     #[test]

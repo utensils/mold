@@ -539,7 +539,8 @@ fn classify_no_candidate(
         && candidates.iter().any(|candidate| {
             devices.get(&candidate.device_id).is_some_and(|device| {
                 device.is_schedulable()
-                    && candidate.predicted_vram_bytes > device.available_vram_bytes
+                    && candidate.predicted_vram_bytes
+                        > candidate_available_vram_bytes(candidate, device)
             })
         });
     if vram_blocked {
@@ -643,7 +644,17 @@ fn candidate_is_eligible(
             .is_none_or(|backend| backend == device.backend)
         // A full device is precisely when an unload must run, so releasing work
         // is not asked to fit in the VRAM it is about to return.
-        && (releasing || candidate.predicted_vram_bytes <= device.available_vram_bytes)
+        && (releasing
+            || candidate.predicted_vram_bytes
+                <= candidate_available_vram_bytes(candidate, device))
+}
+
+fn candidate_available_vram_bytes(candidate: &CandidatePlacement, device: &DeviceSnapshot) -> u64 {
+    if candidate.frozen_device_capacity {
+        candidate.device_available_vram_bytes
+    } else {
+        device.available_vram_bytes
+    }
 }
 
 fn build_immediate_leases(
