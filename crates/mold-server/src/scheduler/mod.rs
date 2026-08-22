@@ -1752,6 +1752,9 @@ impl Coordinator {
                     .resolved_references
                     .as_ref()
                     .map(crate::reference_uploads::ResolvedReferenceSet::admission_view),
+                // Replaced immediately below with the parent's frozen value;
+                // named here because a struct literal must be total.
+                frozen_identity: None,
             };
             // A batch child arrives already holding the parent's frozen
             // identity. Handing it to preparation is what keeps ONE extraction
