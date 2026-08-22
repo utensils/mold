@@ -373,7 +373,13 @@ pub fn build_model_catalog(
             source_image: None,
             supports_sequence: sequence_capable,
             supports_extend: extend_capable_model(&family, source_image_contract),
-            supports_audio: family == "ltx2",
+            // Same authority as the row below. A config-only entry can reach
+            // this branch for a reviewed H3 id that `find_manifest` missed
+            // (policy matches the id case-insensitively, the manifest lookup
+            // does not), and a recipe saying `false` beside a row saying
+            // `true` is worse than either alone: a client may let the profile
+            // win.
+            supports_audio: declared_audio_capability(&family, name).unwrap_or(family == "ltx2"),
         });
         let resolution = resolution_defaults_from_profile(&generation_profile);
 
