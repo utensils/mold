@@ -4777,14 +4777,26 @@ impl FrozenH3FactoryAuthority {
                 "MiniMax H3 frozen route, attention, or offload authority changed before dispatch"
             );
         }
-        if self.prepared_attempt.is_none()
-            || self.execution_budget_echo.is_none()
-            || self.attention_runtime.is_none()
-            || contract::runnable_capability_contract_for_model(model).is_none()
-            || crate::production_family_capability_for_family(family).is_none()
+        let missing_prepared_attempt = self.prepared_attempt.is_none();
+        let missing_budget_echo = self.execution_budget_echo.is_none();
+        let missing_typed_attention = self.attention_runtime.is_none();
+        let missing_runnable_contract =
+            contract::runnable_capability_contract_for_model(model).is_none();
+        let missing_family_registry =
+            crate::production_family_capability_for_family(family).is_none();
+        if missing_prepared_attempt
+            || missing_budget_echo
+            || missing_typed_attention
+            || missing_runnable_contract
+            || missing_family_registry
         {
             bail!(
-                "MiniMax H3 public capability or production factory registry remains runtime unavailable"
+                "MiniMax H3 public runtime registry is incomplete: prepared_attempt={}; budget_echo={}; typed_attention={}; runnable_contract={}; family_registry={}",
+                !missing_prepared_attempt,
+                !missing_budget_echo,
+                !missing_typed_attention,
+                !missing_runnable_contract,
+                !missing_family_registry,
             );
         }
         Ok(())

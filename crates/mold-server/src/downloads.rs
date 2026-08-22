@@ -134,8 +134,7 @@ fn require_manifest_enqueue_activation(
             });
     if contains_gated_identity {
         mold_core::require_model_acquisition(&manifest.name, Some(&manifest.family))?;
-        let reviewed = mold_core::manifest::find_manifest(&manifest.name);
-        if !reviewed.is_some_and(|reviewed| std::ptr::eq(reviewed, manifest)) {
+        if !mold_core::is_exact_registered_manifest(manifest) {
             mold_core::require_model_activation("minimax-h3", Some("minimax-h3"))?;
         }
     } else {
