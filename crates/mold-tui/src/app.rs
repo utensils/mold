@@ -460,7 +460,7 @@ pub enum ParamField {
     ControlImage,
     ControlModel,
     ControlScale,
-    // Advanced — Identity (PuLID-FLUX)
+    // Advanced — Identity (PuLID)
     IdentityImage,
     IdentityWeight,
     IdentityStartStep,
@@ -670,7 +670,7 @@ pub struct GenerateParams {
     pub reference_paths: Vec<crate::h3_references::ReferencePath>,
     pub strength: f64,
     pub mask_image_path: Option<String>,
-    // Identity (PuLID-FLUX). The path is transient TUI state: only the
+    // Identity (PuLID). The path is transient TUI state: only the
     // basename and the bytes cross the wire, exactly as the source image
     // does. Validated once at entry (`crate::identity::load_identity_image`)
     // so an unreadable or out-of-bounds photo never reaches a queue slot.

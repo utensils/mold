@@ -1,4 +1,9 @@
-//! Face detection and identity embedding for PuLID-FLUX (#1222).
+//! Face detection and identity embedding for PuLID (#1222).
+//!
+//! Shared by both families: `pipeline_v1_1.py:get_id_embedding` runs the same
+//! detector, recognizer, parser, and vision tower as `pipeline_flux.py`'s, and
+//! only the IDFormer's checkpoint prefix differs
+//! (`extraction::idformer_prefix`).
 //!
 //! One image in, one identity out: SCRFD finds the face and its five
 //! landmarks, a similarity fit lands them on the ArcFace template, `glintr100`

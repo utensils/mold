@@ -1,5 +1,5 @@
 //! `/identity` — generate an image conditioned on a face reference photo
-//! (PuLID-FLUX).
+//! (PuLID).
 //!
 //! ## Why this is not an option on `/generate`
 //!
@@ -123,7 +123,8 @@ pub fn resolve_identity_model(models: &[ModelInfoExtended]) -> Option<String> {
 /// Refusal shown when the fleet advertises no identity-capable checkpoint.
 pub const NO_IDENTITY_MODEL: &str =
     "This server advertises no identity-capable model. Face-identity conditioning is qualified \
-     only for the FLUX dev tiers, on a server built with PuLID support.";
+     only for the FLUX dev tiers and a few SDXL checkpoints, on a server built with PuLID \
+     support.";
 
 /// Display-safe attachment basename for `id_image_name`. Discord filenames
 /// are user-controlled, so the same sanitizer the H3 reference path uses
@@ -155,7 +156,7 @@ async fn autocomplete_identity_model(ctx: Context<'_>, partial: &str) -> Vec<Str
         .collect()
 }
 
-/// Generate an image conditioned on a face reference photo (PuLID-FLUX).
+/// Generate an image conditioned on a face reference photo (PuLID).
 #[allow(clippy::too_many_arguments)]
 #[poise::command(slash_command)]
 pub async fn identity(

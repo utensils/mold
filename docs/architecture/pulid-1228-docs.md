@@ -167,10 +167,10 @@ Section **"Face-identity conditioning (PuLID-FLUX)"** (~line 747).
 
 ## 3. `README.md`
 
-Wherever PuLID is introduced, change "PuLID-FLUX" to "PuLID" and name both
-families and both bundles. Keep the InsightFace non-commercial licence sentence
-verbatim — it is unchanged and applies to both bundles, because the gated files
-are the shared extractor's.
+**`README.md:78-83`** (the identity paragraph). Change "PuLID-FLUX" to
+"PuLID" and name both families and both bundles. Keep the InsightFace
+non-commercial licence sentence verbatim — it is unchanged and applies to both
+bundles, because the gated files are the shared extractor's.
 
 ---
 
@@ -222,9 +222,24 @@ The largest delta. Suggested structure:
 ## 6. `website/guide/generating.md`, `website/guide/tui.md`, `website/api/*`
 
 Anywhere the identity control is described as FLUX-only, make it family-neutral
-and point at `supports_identity`. The TUI, Discord, iPhone, and browser
-surfaces need no behavioural change, so their pages need only the model list
-updated.
+and point at `supports_identity`. **`website/api/index.md:455`** is the one a
+review found by line number; grep the rest. The TUI, Discord, iPhone, and
+browser surfaces need no behavioural change, so their pages need only the model
+list updated.
+
+### Already done in this PR (do not redo)
+
+These are code, not docs, and were corrected here rather than staged:
+
+- `crates/mold-cli/src/main.rs` — the `--id-image` help now names both bundles
+  and both model lists; `--true-cfg` is marked FLUX only.
+- `crates/mold-discord/src/commands/identity.rs` — `NO_IDENTITY_MODEL` no
+  longer says "only for the FLUX dev tiers", and the slash-command description
+  says PuLID rather than PuLID-FLUX.
+- `crates/mold-inference/src/identity/onnx_graph.rs` — the digest/size repair
+  hint names both bundles.
+- The TUI and `mold-inference` module doc headers that described the shared
+  extractor as FLUX-only.
 
 ## 7. `docs/architecture/pulid.md`
 
