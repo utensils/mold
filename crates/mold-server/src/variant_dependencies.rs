@@ -1981,7 +1981,14 @@ async fn prepare_h3_private_inputs_for_devices(
                 engine_config: frozen,
                 pending_artifacts: BTreeMap::new(),
                 prepared_available_vram_bytes: device.available_vram_bytes,
-                capacity_sensitive: true,
+                // H3's artifact/layout route is exact and never selects a
+                // dependency variant from capacity. Marking it sensitive made
+                // Metal compare its stable unified-memory admission against
+                // the post-authentication live sample, discard successful
+                // evidence, and re-hash the 44 GB stack forever. Execution
+                // planning and the final owner boundary still revalidate the
+                // frozen peak before any allocation.
+                capacity_sensitive: false,
             },
         );
         admissions.insert(device_id, evidence);
