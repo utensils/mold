@@ -233,13 +233,38 @@ jobs:
           cache-on-failure: true
       - name: Install protoc and nasm
         shell: pwsh
+        env:
+          PROTOC_VERSION: "29.3"
         run: |
+          $ErrorActionPreference = 'Stop'
+
           # protoc: the `pulid` feature drives `candle-onnx` -> `prost-build`.
+          # Taken straight from the upstream release rather than a package
+          # feed: chocolatey's copy 504'd once and `choco install` STILL
+          # exited 0 ("installed 1/1 packages", counting only nasm), so the
+          # step went green and the missing binary surfaced ten minutes later
+          # as a candle-onnx build-script failure.
+          $zip = "$env:RUNNER_TEMP\protoc.zip"
+          $dest = "$env:RUNNER_TEMP\protoc"
+          $url = "https://github.com/protocolbuffers/protobuf/releases/download/v$env:PROTOC_VERSION/protoc-$env:PROTOC_VERSION-win64.zip"
+          Invoke-WebRequest -Uri $url -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath $dest -Force
+          "$dest\bin" >> $env:GITHUB_PATH
+          # prost-build reads PROTOC directly, so it does not depend on the
+          # PATH addition above taking effect in the next step.
+          "PROTOC=$dest\bin\protoc.exe" >> $env:GITHUB_ENV
+
           # nasm: `openh264-sys2` compiles x86_64 assembly when it is present
           # and silently drops to a slower C path when it is not, so pin the
           # fast path rather than letting the runner decide.
-          choco install --no-progress -y protoc nasm
-          echo "$env:ProgramFiles\NASM" >> $env:GITHUB_PATH
+          choco install --no-progress -y nasm
+          "$env:ProgramFiles\NASM" >> $env:GITHUB_PATH
+
+          # Prove both landed. An installer that reports success without
+          # producing the binary is exactly what happened here, so the check
+          # is the point of the step, not decoration.
+          & "$dest\bin\protoc.exe" --version
+          if (-not (Test-Path "$env:ProgramFiles\NASM\nasm.exe")) { throw "nasm was not installed" }
       - uses: oven-sh/setup-bun@v2
       # The helper must answer identically under Windows PowerShell 5.1 and
       # pwsh 7 — a bare `.\scripts\windows.ps1` runs under whichever the
