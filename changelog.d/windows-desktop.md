@@ -54,3 +54,6 @@
   certificate, SHA-256 coverage, explicit trust instructions, and Windows-logo
   download cards alongside macOS. CI fails closed when the retained PFX or
   either signature is missing. Public-trust signing remains future work.
+- **The Windows CLI now compiles without pretending Unix self-update semantics
+  apply.** Running executables cannot be renamed in place on Windows, so the
+  command reports manual zip installation until a post-exit updater exists.

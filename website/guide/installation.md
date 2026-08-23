@@ -41,7 +41,8 @@ commands. Add `%LOCALAPPDATA%\Mold\bin` to your user `PATH` for a permanent
 or point it at a GPU host with `mold run --host http://gpu-host:7680 "prompt"`
 or `MOLD_HOST`. Build from source on an x64 machine with the CUDA toolkit to get a
 CUDA-enabled local binary; the [Windows contributor commands](/guide/desktop#commands)
-cover the supported helper.
+cover the supported helper. Upgrade by downloading and expanding the newest
+zip again; `mold update` cannot replace a running Windows executable yet.
 
 ## One-Line Install (recommended)
 
