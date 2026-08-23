@@ -896,7 +896,11 @@ impl DependencyPreparer for PostUpscalePreparer {
                             .map_err(|_| "prompt expansion owner worker dropped its result".to_string())?;
                     }
                     _ = registry_notify.notified() => {
-                        if state.job_registry.entry(&work_id).is_none() {
+                        if state
+                            .job_registry
+                            .scheduler_lifecycle(&work_id)
+                            .is_none()
+                        {
                             cancellation.cancel();
                             return Err(format!(
                                 "generation job {work_id} was cancelled during prompt expansion"
@@ -1524,8 +1528,8 @@ impl Coordinator {
     /// notification and on a 10 ms ticker, so announcing unconditionally would
     /// be a firehose. The first observation seeds silently: the submit-time
     /// event has already told that client where it stands.
-    fn announce_queue_positions(&mut self, listing: &crate::job_registry::QueueListing) {
-        for entry in &listing.entries {
+    fn announce_queue_positions(&mut self, entries: &[crate::job_registry::SchedulerQueueEntry]) {
+        for entry in entries {
             if entry.state != crate::job_registry::JobLifecycle::Queued {
                 continue;
             }
@@ -2594,10 +2598,9 @@ impl Coordinator {
             self.mutate(immediate);
         }
 
-        let listing = self.state.job_registry.snapshot();
-        self.announce_queue_positions(&listing);
-        let queue_shape = listing
-            .entries
+        let registry_entries = self.state.job_registry.scheduler_snapshot();
+        self.announce_queue_positions(&registry_entries);
+        let queue_shape = registry_entries
             .iter()
             .filter(|entry| entry.state == crate::job_registry::JobLifecycle::Queued)
             .map(|entry| (entry.id.clone(), entry.target_gpu))
@@ -2620,7 +2623,7 @@ impl Coordinator {
             .filter(|(id, pending)| {
                 pending.job.result_tx.is_closed()
                     || (!id.starts_with("runtime-generation-")
-                        && self.state.job_registry.entry(id).is_none())
+                        && self.state.job_registry.scheduler_lifecycle(id).is_none())
             })
             .map(|(id, _)| id.clone())
             .collect::<Vec<_>>();
@@ -4700,9 +4703,9 @@ impl Coordinator {
                     .is_some_and(|pending| pending.preparation == PreparationState::Ready)
                     || utility.is_some();
                 let work_cancelled = if let Some(pending) = generation {
-                    self.state.job_registry.entry(&work_id).is_none_or(|entry| {
-                        entry.state != crate::job_registry::JobLifecycle::Queued
-                    }) || pending.job.result_tx.is_closed()
+                    self.state.job_registry.scheduler_lifecycle(&work_id)
+                        != Some(crate::job_registry::JobLifecycle::Queued)
+                        || pending.job.result_tx.is_closed()
                 } else {
                     utility.is_none_or(|pending| pending.work.is_cancelled())
                 };
@@ -7335,6 +7338,13 @@ mod tests {
 
         state.job_registry.remove("a");
         coordinator.reconcile_external_mutations(&mut immediate);
+        let cancelled = match results[0].try_recv() {
+            Ok(Err(error)) => error,
+            Ok(Ok(_)) => panic!("registry removal unexpectedly completed queued work"),
+            Err(error) => panic!("removed registry row did not settle queued work: {error}"),
+        };
+        assert!(cancelled.contains("generation job a was cancelled while queued"));
+        assert_eq!(state.queue.pending(), 2);
         assert_eq!(
             drain_queued_positions(&mut progress[1]),
             vec![0],

@@ -103,6 +103,21 @@ pub struct QueueListing {
     pub plan: Option<mold_core::QueuePlan>,
 }
 
+/// Payload-free registry row for the scheduler's frequent reconciliation.
+///
+/// This is deliberately distinct from [`JobEntry`]: the coordinator needs
+/// only queue identity, lifecycle, order, and lane preference. Keeping the
+/// type exhaustive prevents a 10 ms scheduler tick from accidentally cloning
+/// request metadata, denoise previews, cancellation handles, or other
+/// registry-owned state as those types grow.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SchedulerQueueEntry {
+    pub(crate) id: String,
+    pub(crate) state: JobLifecycle,
+    pub(crate) position: usize,
+    pub(crate) target_gpu: Option<usize>,
+}
+
 #[derive(Debug, Clone)]
 struct EntryInternal {
     id: String,
@@ -869,6 +884,39 @@ impl JobRegistry {
         }
     }
 
+    /// Snapshot only the fields consumed by scheduler reconciliation.
+    ///
+    /// Unlike [`snapshot`](Self::snapshot), work here is independent of the
+    /// size of retained request metadata and previews: one small row is
+    /// projected per registry entry and no payload-bearing field is touched.
+    pub(crate) fn scheduler_snapshot(&self) -> Vec<SchedulerQueueEntry> {
+        self.inner
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .iter()
+            .enumerate()
+            .map(|(position, entry)| SchedulerQueueEntry {
+                id: entry.id.clone(),
+                state: entry.state,
+                position,
+                target_gpu: entry.target_gpu,
+            })
+            .collect()
+    }
+
+    /// Read only the lifecycle needed by scheduler cancellation/grant checks.
+    ///
+    /// This retains the full snapshot API for wire callers without making a
+    /// scheduler existence check clone the selected row's metadata.
+    pub(crate) fn scheduler_lifecycle(&self, id: &str) -> Option<JobLifecycle> {
+        self.inner
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .iter()
+            .find(|entry| entry.id == id)
+            .map(|entry| entry.state)
+    }
+
     /// Currently-tracked job count. Exposed for tests and metrics.
     pub fn len(&self) -> usize {
         self.inner.read().unwrap_or_else(|e| e.into_inner()).len()
@@ -1401,6 +1449,127 @@ mod tests {
         let rich = snap.entries[1].metadata.as_ref().expect("metadata rides");
         assert_eq!(rich.prompt, "a cat");
         assert_eq!(rich.width, 512);
+    }
+
+    #[test]
+    fn scheduler_projection_matches_wire_queue_semantics_without_payload_fields() {
+        let reg = JobRegistry::new();
+        let mut request: mold_core::GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"payload","model":"flux-dev:fp16","width":512,"height":512,"steps":4,"guidance":3.5}"#,
+        )
+        .expect("minimal request parses");
+        request.prompt = "metadata".repeat(8 * 1024);
+        let metadata = Box::new(mold_core::OutputMetadata::from_generate_request(
+            &request,
+            0,
+            None,
+            "test-version",
+        ));
+        reg.register_job(
+            "queued",
+            "flux-dev:fp16",
+            Some(2),
+            Some(true),
+            Some(metadata),
+        );
+        reg.record_preview("queued", "preview".repeat(8 * 1024), 3, 20);
+        reg.register("running", "sdxl:q8");
+        reg.mark_running("running", Some(1));
+
+        let full = reg.snapshot();
+        let scheduler = reg.scheduler_snapshot();
+        let full_semantics = full
+            .entries
+            .iter()
+            .map(|entry| {
+                (
+                    entry.id.as_str(),
+                    entry.state,
+                    entry.position,
+                    entry.target_gpu,
+                )
+            })
+            .collect::<Vec<_>>();
+        let scheduler_semantics = scheduler
+            .iter()
+            .map(|entry| {
+                (
+                    entry.id.as_str(),
+                    entry.state,
+                    entry.position,
+                    entry.target_gpu,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(scheduler_semantics, full_semantics);
+
+        // Exhaustive destructuring is a compile-time guard on the hot-path
+        // contract: adding metadata, previews, request bodies, or any other
+        // field to this type must make this test fail to compile.
+        let SchedulerQueueEntry {
+            id,
+            state,
+            position,
+            target_gpu,
+        } = &scheduler[0];
+        assert_eq!(id, "queued");
+        assert_eq!(*state, JobLifecycle::Queued);
+        assert_eq!(*position, 0);
+        assert_eq!(*target_gpu, Some(2));
+        assert_eq!(
+            reg.scheduler_lifecycle("queued"),
+            Some(JobLifecycle::Queued)
+        );
+        assert_eq!(
+            reg.scheduler_lifecycle("running"),
+            Some(JobLifecycle::Running)
+        );
+        assert_eq!(reg.scheduler_lifecycle("missing"), None);
+        assert!(full.entries[0].metadata.is_some());
+        assert!(reg.preview_snapshot("queued").flatten().is_some());
+    }
+
+    #[test]
+    fn scheduler_projection_work_is_structurally_independent_of_payload_size_at_depth() {
+        fn projection(depth: usize, payload_bytes: usize) -> Vec<SchedulerQueueEntry> {
+            let reg = JobRegistry::new();
+            for index in 0..depth {
+                let mut request: mold_core::GenerateRequest = serde_json::from_str(
+                    r#"{"prompt":"","model":"flux-dev:fp16","width":512,"height":512,"steps":4,"guidance":3.5}"#,
+                )
+                .expect("minimal request parses");
+                request.prompt = "m".repeat(payload_bytes);
+                let metadata = Box::new(mold_core::OutputMetadata::from_generate_request(
+                    &request,
+                    index as u64,
+                    None,
+                    "test-version",
+                ));
+                let id = format!("job-{index:03}");
+                reg.register_job(
+                    &id,
+                    "flux-dev:fp16",
+                    Some(index % 3),
+                    Some(index % 2 == 0),
+                    Some(metadata),
+                );
+                reg.record_preview(&id, "p".repeat(payload_bytes), 1, 2);
+                if index % 5 == 0 {
+                    reg.mark_running(&id, Some(index % 3));
+                }
+            }
+            reg.scheduler_snapshot()
+        }
+
+        const DEPTH: usize = 64;
+        let empty_payloads = projection(DEPTH, 0);
+        let large_payloads = projection(DEPTH, 64 * 1024);
+
+        // This is deliberately not a timing assertion. The exhaustive entry
+        // shape above and equality here establish that projection work is one
+        // fixed-size row per queue entry, regardless of retained payload size.
+        assert_eq!(large_payloads, empty_payloads);
+        assert_eq!(large_payloads.len(), DEPTH);
     }
 
     mod event_emission {
