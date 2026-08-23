@@ -13,6 +13,26 @@ pub(crate) struct FeederReport {
     pub held: usize,
 }
 
+/// Clear ownership tokens left by the prior runtime before any new HTTP
+/// admission can mint one. This is a serving precondition: callers must await
+/// it and propagate failure before constructing the router.
+pub(crate) async fn recover_runtime(
+    state: &AppState,
+) -> anyhow::Result<mold_db::generation_queue::RuntimeClaimRecovery> {
+    let journal = state.queue_journal.clone();
+    let report = tokio::task::spawn_blocking(move || journal.recover_feeder_runtime())
+        .await
+        .map_err(|error| anyhow::anyhow!("durable feeder recovery task failed: {error}"))??;
+    if report.claims_cleared > 0 || report.running_requeued > 0 {
+        tracing::info!(
+            claims_cleared = report.claims_cleared,
+            running_requeued = report.running_requeued,
+            "durable feeder recovered prior runtime claims"
+        );
+    }
+    Ok(report)
+}
+
 pub(crate) fn spawn(
     state: AppState,
     shutdown: tokio_util::sync::CancellationToken,
@@ -31,27 +51,6 @@ async fn run(state: AppState, shutdown: tokio_util::sync::CancellationToken) {
         let config = state.config.read().await;
         (!state.is_output_disabled(&config)).then(|| config.effective_output_dir())
     };
-    let journal = state.queue_journal.clone();
-    let recovery = tokio::task::spawn_blocking(move || journal.recover_feeder_runtime()).await;
-    match recovery {
-        Ok(Ok(report)) => {
-            if report.claims_cleared > 0 || report.running_requeued > 0 {
-                tracing::info!(
-                    claims_cleared = report.claims_cleared,
-                    running_requeued = report.running_requeued,
-                    "durable feeder recovered prior runtime claims"
-                );
-            }
-        }
-        Ok(Err(error)) => {
-            tracing::error!(error = %format!("{error:#}"), "durable feeder claim recovery failed");
-            return;
-        }
-        Err(error) => {
-            tracing::error!(%error, "durable feeder recovery task failed");
-            return;
-        }
-    }
     loop {
         // Construct both futures before the scan. Notify retains one permit,
         // so a commit or capacity release in the scan-to-wait gap is consumed
@@ -204,7 +203,8 @@ async fn feed_available(
                 }
             }
         }
-        let request: mold_core::GenerateRequest = match serde_json::from_str(&row.request_json) {
+        let mut request: mold_core::GenerateRequest = match serde_json::from_str(&row.request_json)
+        {
             Ok(request) => request,
             Err(error) => {
                 let _ = tokio::task::spawn_blocking(move || {
@@ -218,12 +218,24 @@ async fn feed_available(
             }
         };
         let target_gpu = match row.target_device_id.as_deref() {
-            Some(device_id) => state
+            Some(device_id) => match state
                 .gpu_pool
                 .workers
                 .iter()
                 .find(|worker| crate::scheduler::worker_device_id(worker) == device_id)
-                .map(|worker| worker.gpu.ordinal),
+                .map(|worker| worker.gpu.ordinal)
+            {
+                Some(ordinal) => Some(ordinal),
+                None => {
+                    scrub_accelerator_pins(&mut request);
+                    tracing::warn!(
+                        job = %row.id,
+                        device = %device_id,
+                        "the device this job was pinned to is not present; resuming on Auto"
+                    );
+                    None
+                }
+            },
             None => row.target_gpu,
         };
         let metadata = Box::new(mold_core::OutputMetadata::from_generate_request(
@@ -309,6 +321,41 @@ async fn feed_available(
         }
     }
     Ok(report)
+}
+
+/// A missing stable lane invalidates every process-local accelerator reference
+/// captured with it. CPU is a durable semantic choice, so preserve it while
+/// turning only GPU ordinals and stable device IDs back into Auto.
+pub(crate) fn scrub_accelerator_pins(request: &mut mold_core::GenerateRequest) {
+    fn scrub(device: &mut mold_core::DeviceRef) {
+        if matches!(
+            device,
+            mold_core::DeviceRef::Gpu { .. } | mold_core::DeviceRef::Device { .. }
+        ) {
+            *device = mold_core::DeviceRef::Auto;
+        }
+    }
+
+    let Some(placement) = request.placement.as_mut() else {
+        return;
+    };
+    scrub(&mut placement.text_encoders);
+    let Some(advanced) = placement.advanced.as_mut() else {
+        return;
+    };
+    scrub(&mut advanced.transformer);
+    scrub(&mut advanced.vae);
+    for device in [
+        advanced.clip_l.as_mut(),
+        advanced.clip_g.as_mut(),
+        advanced.t5.as_mut(),
+        advanced.qwen.as_mut(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        scrub(device);
+    }
 }
 
 #[cfg(test)]
@@ -495,9 +542,98 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn post_recovery_direct_admission_keeps_its_live_runtime_token() {
+        let (state, mut rx) = state(2);
+        let request = request("interrupted before startup barrier");
+        let output = state.config.try_read().unwrap().effective_output_dir();
+        let interrupted_ticket = state
+            .queue_journal
+            .record(JournalAdmission {
+                id: "interrupted-direct",
+                request: &request,
+                output_dir: Some(&output),
+                target_gpu: None,
+                completion_payload: SseCompletionPayload::MetadataOnly,
+                batch_child: false,
+                carries_reference_authority: false,
+            })
+            .unwrap();
+        state.queue_journal.retain_all();
+        drop(interrupted_ticket);
+
+        let recovered = recover_runtime(&state).await.unwrap();
+        assert_eq!(recovered.claims_cleared, 1);
+
+        // This admission represents an HTTP request accepted only after the
+        // startup barrier has completed. The feeder must never run recovery
+        // again and erase this live submitter's ownership token.
+        let live_ticket = state
+            .queue_journal
+            .record(JournalAdmission {
+                id: "post-barrier-direct",
+                request: &request,
+                output_dir: Some(&output),
+                target_gpu: None,
+                completion_payload: SseCompletionPayload::MetadataOnly,
+                batch_child: false,
+                carries_reference_authority: false,
+            })
+            .unwrap();
+
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let handle = spawn(state.clone(), shutdown.clone());
+        let mut replayed = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(replayed.id, "interrupted-direct");
+        assert_eq!(
+            live_ticket.claim_dispatch(),
+            crate::queue_journal::DispatchClaim::Granted,
+            "post-barrier admission must remain owned by its live submitter"
+        );
+
+        replayed.journal.take().unwrap().complete_before_dispatch();
+        live_ticket.discard();
+        state.job_registry.remove(&replayed.id);
+        state.queue.decrement();
+        shutdown.cancel();
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn missing_stable_device_pin_resumes_on_auto_not_recorded_ordinal() {
         let (state, mut rx) = state(1);
-        admit(&state, 1);
+        let mut pinned = request("mixed placement");
+        pinned.placement = Some(mold_core::DevicePlacement {
+            text_encoders: mold_core::DeviceRef::Cpu,
+            advanced: Some(mold_core::AdvancedPlacement {
+                transformer: mold_core::DeviceRef::device("cuda:missing-this-boot"),
+                vae: mold_core::DeviceRef::gpu(7),
+                clip_l: Some(mold_core::DeviceRef::Cpu),
+                clip_g: Some(mold_core::DeviceRef::Auto),
+                t5: Some(mold_core::DeviceRef::device("cuda:also-stale")),
+                qwen: Some(mold_core::DeviceRef::gpu(9)),
+            }),
+        });
+        let output = state.config.try_read().unwrap().effective_output_dir();
+        state
+            .queue_journal
+            .record_batch(BatchJournalAdmission {
+                id: "batch",
+                client_batch_id: "client",
+                request_sha256: "sha",
+                children: &[JournalAdmission {
+                    id: "job-0",
+                    request: &pinned,
+                    output_dir: Some(&output),
+                    target_gpu: None,
+                    completion_payload: SseCompletionPayload::MetadataOnly,
+                    batch_child: false,
+                    carries_reference_authority: false,
+                }],
+            })
+            .unwrap();
         mold_db::generation_queue::set_target_gpu(
             state.metadata_db.as_ref().as_ref().unwrap(),
             "job-0",
@@ -515,6 +651,22 @@ mod tests {
             .unwrap();
         assert_eq!(job.id, "job-0");
         assert_eq!(state.job_registry.target_gpu("job-0"), Some(None));
+        assert_eq!(
+            state
+                .gpu_pool
+                .resolve_explicit_placement_gpu(job.request.placement.as_ref()),
+            Ok(None),
+            "the hydrated job must not retain an ordinal or stable accelerator pin"
+        );
+        let placement = job.request.placement.as_ref().unwrap();
+        assert_eq!(placement.text_encoders, mold_core::DeviceRef::Cpu);
+        let advanced = placement.advanced.as_ref().unwrap();
+        assert_eq!(advanced.transformer, mold_core::DeviceRef::Auto);
+        assert_eq!(advanced.vae, mold_core::DeviceRef::Auto);
+        assert_eq!(advanced.clip_l, Some(mold_core::DeviceRef::Cpu));
+        assert_eq!(advanced.clip_g, Some(mold_core::DeviceRef::Auto));
+        assert_eq!(advanced.t5, Some(mold_core::DeviceRef::Auto));
+        assert_eq!(advanced.qwen, Some(mold_core::DeviceRef::Auto));
 
         state.queue_journal.retain_all();
         shutdown.cancel();
@@ -529,6 +681,7 @@ mod tests {
         let claimed = state.queue_journal.claim_next_feeder().unwrap().unwrap();
         assert_eq!(claimed.row.id, "job-0");
         state.queue_journal.cancel_id("job-0");
+        recover_runtime(&state).await.unwrap();
 
         let shutdown = tokio_util::sync::CancellationToken::new();
         let handle = spawn(state.clone(), shutdown.clone());

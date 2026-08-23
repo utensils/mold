@@ -661,6 +661,12 @@ pub async fn run_server(
     state.generation_cancel = generation_cancel.clone();
     state.device_registry = device_registry;
 
+    // Startup token recovery is a serving precondition. Await it before any
+    // generation producer or router exists, so an HTTP admission from this
+    // runtime can never have its freshly minted ownership token cleared by a
+    // late feeder recovery pass. Propagating the error fails startup closed.
+    durable_queue_feeder::recover_runtime(&state).await?;
+
     let mut recovered_live_batches = None;
     // Batch recovery is a serving precondition, including when SQLite is
     // disabled. No router, gallery observer, or generation job producer is started
@@ -901,8 +907,9 @@ pub async fn run_server(
         }
     }
 
-    // The feeder performs token recovery and per-claim output idempotence in
-    // its own task. Router startup never materializes the retained backlog.
+    // Runtime-token recovery already completed as a startup barrier. The
+    // feeder performs bounded claims and per-claim output idempotence without
+    // materializing the retained backlog.
     let durable_feeder_handle = startup
         .start_generation_runner
         .then(|| durable_queue_feeder::spawn(state.clone(), scheduler_shutdown.child_token()));

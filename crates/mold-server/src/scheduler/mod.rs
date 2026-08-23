@@ -65,6 +65,19 @@ const DISPATCH_RETRY_MAX_MS: u64 = 1_000;
 const UNSCHEDULABLE_IDLE_GRACE_MS: u64 = 60_000;
 pub(crate) const CPU_UTILITY_DEVICE_ID: &str = "cpu:utility:0";
 
+fn generation_hard_ordinal(
+    state: &AppState,
+    id: &str,
+    request: &mold_core::GenerateRequest,
+) -> Option<usize> {
+    let request_pin = state
+        .gpu_pool
+        .resolve_explicit_placement_gpu(request.placement.as_ref())
+        .ok()
+        .flatten();
+    request_pin.or_else(|| state.job_registry.target_gpu(id).flatten())
+}
+
 fn wire_estimate_confidence(
     confidence: mold_scheduler::EstimateConfidence,
 ) -> mold_core::QueueEstimateConfidence {
@@ -3672,14 +3685,7 @@ impl Coordinator {
                 if let Some(started) = pending.warm_wait_started_ms {
                     work = work.with_warm_wait_started_at(started);
                 }
-                let request_pin = self
-                    .state
-                    .gpu_pool
-                    .resolve_explicit_placement_gpu(pending.job.request.placement.as_ref())
-                    .ok()
-                    .flatten();
-                let explicit =
-                    request_pin.or_else(|| self.state.job_registry.target_gpu(id).flatten());
+                let explicit = generation_hard_ordinal(&self.state, id, &pending.job.request);
                 if let Some(ordinal) = explicit {
                     if let Some(worker) = self.state.gpu_pool.worker_by_ordinal(ordinal) {
                         work = work.with_hard_device(DeviceId::new(worker_device_id(&worker)));
@@ -7176,6 +7182,55 @@ mod tests {
             job_tx,
         });
         (worker, job_rx)
+    }
+
+    #[test]
+    fn missing_restart_pin_scrub_removes_v2_hard_ordinal_and_preserves_cpu() {
+        let (worker, _worker_rx) = test_worker(7);
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker].into(),
+        });
+        let (queue_tx, _queue_rx) = tokio::sync::mpsc::channel(1);
+        let state = AppState::empty(
+            mold_core::Config::default(),
+            QueueHandle::new(queue_tx),
+            pool,
+            1,
+        );
+        let mut request: mold_core::GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "restart placement",
+            "model": "mock-model",
+            "width": 64,
+            "height": 64,
+            "steps": 1,
+            "batch_size": 1,
+            "output_format": "png"
+        }))
+        .unwrap();
+        request.placement = Some(mold_core::DevicePlacement {
+            text_encoders: mold_core::DeviceRef::Cpu,
+            advanced: Some(mold_core::AdvancedPlacement {
+                transformer: mold_core::DeviceRef::gpu(7),
+                // This is the current boot's worker identity at the stale
+                // ordinal, not the missing stable target recorded on the row.
+                vae: mold_core::DeviceRef::device(format!("cuda:{:032x}", 8)),
+                clip_l: Some(mold_core::DeviceRef::Cpu),
+                ..mold_core::AdvancedPlacement::default()
+            }),
+        });
+
+        assert_eq!(
+            generation_hard_ordinal(&state, "replayed", &request),
+            Some(7)
+        );
+        crate::durable_queue_feeder::scrub_accelerator_pins(&mut request);
+        assert_eq!(generation_hard_ordinal(&state, "replayed", &request), None);
+        let placement = request.placement.unwrap();
+        assert_eq!(placement.text_encoders, mold_core::DeviceRef::Cpu);
+        assert_eq!(
+            placement.advanced.unwrap().clip_l,
+            Some(mold_core::DeviceRef::Cpu)
+        );
     }
 
     /// A worker whose device collapses VRAM and host RAM onto one pool.
