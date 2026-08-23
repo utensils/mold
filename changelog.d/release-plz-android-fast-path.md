@@ -1,1 +1,0 @@
-- **Release version bumps no longer rebuild Android.** Repository-owned release-plz PRs now use the same guarded metadata-only fast path as desktop and iOS, while untrusted lookalike branches still run the full Android validation route.

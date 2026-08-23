@@ -11,6 +11,34 @@ Pull requests do not edit the `[Unreleased]` section directly: each adds a
 
 ## [Unreleased]
 
+## [0.25.0] - 2026-08-23
+
+- **Release version bumps no longer rebuild Android.** Repository-owned release-plz PRs now use the same guarded metadata-only fast path as desktop and iOS, while untrusted lookalike branches still run the full Android validation route.
+- **MiniMax H3 seam refusals say what moved.** When an admitted H3 job is refused at engine construction or dispatch because the frozen authority no longer matches, the error now names each drifted field with its expected and actual values (model partition, task, device ordinal, block offload, attention backend/chunk) instead of the bare "authority changed" sentence, so an operator can tell an ordinal drift from an identity drift.
+- **MiniMax H3 pruned NVFP4 transformer is downloadable.** `minimax-h3-fl2va:comfy-pruned-nvfp4`
+  and `minimax-h3-ref2va:comfy-pruned-nvfp4` pull, verify, and appear in
+  Models → Discover/Installed like any other model — a 12.529 GB transformer
+  download on top of an already-installed compact variant, since every other
+  component is shared. Mold has no engine arm for this weight layout yet
+  (tracked in [#1318](https://github.com/utensils/mold/issues/1318)), so
+  generation is refused up front with a truthful "no runtime for this weight
+  layout" message rather than a licensing error, and `GET /api/models` reports
+  the new additive `runtime_available: false` on the row. The pinned
+  `official-bf16` qualification references are refused the same honest way
+  now, instead of the misleading compliance-gated message they returned before
+  ([#1319](https://github.com/utensils/mold/issues/1319)).
+- **MiniMax H3 renders faster: the NVFP4 text encoder now unpacks its weights
+  on the GPU.** Every H3 render encodes its prompt through a Qwen3-VL
+  conditioner whose ~24.4 G quantized weights were unpacked by a
+  single-threaded scalar loop on the CPU and then uploaded as dense 32-bit
+  floats — once per render. On CUDA that work now happens on the GPU, from the
+  packed bytes themselves, cutting the host-to-device traffic for those weights
+  by 8x; measured on an RTX 4090, the widest projection at the sequence length
+  a real render encodes drops from 285 ms to 41 ms, a 7.0x speedup. The images
+  and videos are unchanged: the two paths are bit-identical, gated by a test
+  that compares every element's bits
+  ([#1317](https://github.com/utensils/mold/issues/1317)).
+
 ## [0.24.0] - 2026-08-23
 
 - **Bound MiniMax H3 memory on Apple Metal.** The reviewed Metal runtime now streams Qwen, transformer, and Turbo adapter blocks from authenticated model files, sweeps pooled buffers between large pipeline phases, and uses a best-effort sampled host-memory guard to cancel sustained pressure. The shared FL2VA sequence now finishes and drops Qwen before constructing the VAEs, reducing peak overlap on CUDA too without changing its kernels or placement ([#1296](https://github.com/utensils/mold/issues/1296)).
@@ -2764,7 +2792,8 @@ Initial public release on [crates.io](https://crates.io/crates/mold-ai).
 | [`mold-ai-inference`](https://crates.io/crates/mold-ai-inference) | Candle-based inference engine           |
 | [`mold-ai-server`](https://crates.io/crates/mold-ai-server)       | Axum HTTP inference server              |
 
-[Unreleased]: https://github.com/utensils/mold/compare/v0.24.0...HEAD
+[Unreleased]: https://github.com/utensils/mold/compare/v0.25.0...HEAD
+[0.25.0]: https://github.com/utensils/mold/compare/v0.24.0...v0.25.0
 [0.24.0]: https://github.com/utensils/mold/compare/v0.23.3...v0.24.0
 [0.23.3]: https://github.com/utensils/mold/compare/v0.23.2...v0.23.3
 [0.23.2]: https://github.com/utensils/mold/compare/v0.23.1...v0.23.2
