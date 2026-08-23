@@ -992,14 +992,15 @@ describe("InspectorPanel — source media in the primary form", () => {
     expect(wrapper.find("[data-test='inspector-identity']").exists()).toBe(false);
   });
 
-  it("keeps H3 Ref2VA references out of the primary form", () => {
+  it("exposes H3 Ref2VA references in the primary form", () => {
     const form = formFor("minimax-h3");
     form.model = "minimax-h3-ref2va:comfy-pruned-int8";
     useModelStore().all = [
       { name: form.model, family: form.family, downloaded: true } as ModelEntry,
     ];
     const wrapper = mount(InspectorPanel, { props: { form } });
-    expect(wrapper.find("[data-test='inspector-source-media']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='inspector-source-media']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='h3-reference-files']").exists()).toBe(true);
   });
 
   it("stands down in sequence mode — the sequence composer owns its opening image", () => {

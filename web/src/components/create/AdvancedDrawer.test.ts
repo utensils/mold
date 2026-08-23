@@ -77,7 +77,7 @@ function factory(
 }
 
 describe("AdvancedDrawer sequence contract", () => {
-  it("keeps only the Ref2VA ordered-reference panel — boundaries live in the primary form", () => {
+  it("keeps all H3 media controls in the primary form", () => {
     const fl2va = {
       name: "minimax-h3-fl2va:comfy-pruned-int8",
       family: "minimax-h3",
@@ -104,9 +104,9 @@ describe("AdvancedDrawer sequence contract", () => {
       { models: [ref2va] },
     );
     expect(references.find("[data-test='section-h3-authoring']").exists()).toBe(
-      true,
+      false,
     );
-    expect(references.text()).toContain("Ordered references");
+    expect(references.text()).not.toContain("Ordered references");
   });
 
   it("preserves but disables clip negatives for a distilled recipe", () => {

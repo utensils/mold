@@ -59,15 +59,27 @@ describe("sourceMediaPlan", () => {
   });
 
   it("maps MiniMax H3 tasks to boundary wells and the reference panel", () => {
-    expect(plan("minimax-h3", "minimax-h3-fl2va:comfy-pruned-int8")).toEqual({
-      kind: "h3-boundaries",
-      requiredEndpoint: null,
-    });
+    for (const model of [
+      "minimax-h3-fl2va:official-bf16",
+      "minimax-h3-fl2va:comfy-pruned-int8",
+      "minimax-h3-fl2va:comfy-pruned-int8-turbo-8step",
+      "minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p",
+      "minimax-h3-fl2va:comfy-pruned-nvfp4",
+    ]) {
+      expect(plan("minimax-h3", model)).toEqual({
+        kind: "h3-boundaries",
+        requiredEndpoint: null,
+      });
+    }
     expect(
       plan("minimax-h3", "minimax-h3-fl2va:comfy-pruned-int8", "required"),
     ).toEqual({ kind: "h3-boundaries", requiredEndpoint: "first" });
-    expect(plan("minimax-h3", "minimax-h3-ref2va:comfy-pruned-int8")).toEqual({
-      kind: "h3-references",
-    });
+    for (const model of [
+      "minimax-h3-ref2va:official-bf16",
+      "minimax-h3-ref2va:comfy-pruned-int8",
+      "minimax-h3-ref2va:comfy-pruned-nvfp4",
+    ]) {
+      expect(plan("minimax-h3", model)).toEqual({ kind: "h3-references" });
+    }
   });
 });

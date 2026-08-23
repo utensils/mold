@@ -568,6 +568,18 @@ describe("MobileSourceControls", () => {
 });
 
 describe("MobileSourceControls — MiniMax H3 FL2VA boundaries", () => {
+  it("exposes Ref2VA ordered references in the primary Create stack", () => {
+    const form = formFor("minimax-h3");
+    form.model = "minimax-h3-ref2va:comfy-pruned-int8";
+    const wrapper = mount(MobileSourceControls, {
+      props: { form, model: model(form.model, form.family) },
+    });
+
+    expect(wrapper.find("[data-test='mobile-h3-authoring']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='h3-reference-files']").exists()).toBe(true);
+    expect(wrapper.text()).toContain("Add at least one image or video reference.");
+  });
+
   it("renders the shared wells and applies a gallery pick to the first frame", async () => {
     const form = formFor("minimax-h3");
     form.model = "minimax-h3-fl2va:comfy-pruned-int8";

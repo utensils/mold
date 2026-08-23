@@ -4,6 +4,10 @@ export const MINIMAX_H3_FL2VA_OFFICIAL = "minimax-h3-fl2va:official-bf16";
 export const MINIMAX_H3_REF2VA_OFFICIAL = "minimax-h3-ref2va:official-bf16";
 export const MINIMAX_H3_FL2VA_COMFY = "minimax-h3-fl2va:comfy-pruned-int8";
 export const MINIMAX_H3_REF2VA_COMFY = "minimax-h3-ref2va:comfy-pruned-int8";
+export const MINIMAX_H3_FL2VA_COMFY_NVFP4 =
+  "minimax-h3-fl2va:comfy-pruned-nvfp4";
+export const MINIMAX_H3_REF2VA_COMFY_NVFP4 =
+  "minimax-h3-ref2va:comfy-pruned-nvfp4";
 export const MINIMAX_H3_FL2VA_COMFY_TURBO_8STEP =
   "minimax-h3-fl2va:comfy-pruned-int8-turbo-8step";
 export const MINIMAX_H3_FL2VA_COMFY_TURBO_4STEP_768P =
@@ -33,6 +37,8 @@ export function canonicalMinimaxH3ModelName(
     value === MINIMAX_H3_REF2VA_OFFICIAL ||
     value === MINIMAX_H3_FL2VA_COMFY ||
     value === MINIMAX_H3_REF2VA_COMFY ||
+    value === MINIMAX_H3_FL2VA_COMFY_NVFP4 ||
+    value === MINIMAX_H3_REF2VA_COMFY_NVFP4 ||
     value === MINIMAX_H3_FL2VA_COMFY_TURBO_8STEP ||
     value === MINIMAX_H3_FL2VA_COMFY_TURBO_4STEP_768P
   ) {
