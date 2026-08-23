@@ -1,25 +1,19 @@
 <script setup lang="ts">
 import { computed } from "vue";
+import { STARTER_MODELS } from "@studio/lib/starterModels";
 import { useDownloadsStore } from "../../stores/downloads";
+import { useToastStore } from "../../stores/toasts";
 import { percent } from "../../lib/format";
 import type { DownloadJob } from "../../lib/api/types";
 
 const emit = defineEmits<{ (e: "browse"): void }>();
 
 const downloads = useDownloadsStore();
+const toasts = useToastStore();
 
 // Cold start (§08 G10): the shortest path to a first print. Three small,
 // fast-to-pull models — the recommended one first — each a one-click pull.
-interface Starter {
-  model: string;
-  label: string;
-  recommended?: boolean;
-}
-const STARTERS: Starter[] = [
-  { model: "flux2-klein:q4", label: "fast, 6.9 GB", recommended: true },
-  { model: "z-image:turbo", label: "fastest, 3.4 GB" },
-  { model: "sdxl:base", label: "classic, 6.6 GB" },
-];
+const STARTERS = STARTER_MODELS;
 
 // Match an in-flight download to a starter by model base name (the server may
 // canonicalize the tag we posted).
@@ -30,8 +24,16 @@ function jobFor(model: string): DownloadJob | null {
 const pulling = computed(() => new Set(STARTERS.map((s) => s.model).filter((m) => jobFor(m))));
 
 async function pull(model: string) {
-  await downloads.createDownload(model);
-  downloads.subscribe();
+  try {
+    await downloads.createDownload(model);
+    void downloads.subscribe().catch((error) => {
+      const detail = error instanceof Error ? error.message : String(error);
+      toasts.push(`Pull started, but progress is unavailable — ${detail}`, "error");
+    });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    toasts.push(`Couldn't pull ${model} — ${detail}`, "error");
+  }
 }
 </script>
 
@@ -66,7 +68,7 @@ async function pull(model: string) {
             Recommended
           </span>
         </div>
-        <span class="text-caption text-ink-3">{{ starter.label }}</span>
+        <span class="text-caption text-ink-3">{{ starter.speed }}, {{ starter.size }}</span>
         <div class="flex-1" />
         <template v-if="jobFor(starter.model)">
           <div class="h-1.5 overflow-hidden rounded-full bg-bath">

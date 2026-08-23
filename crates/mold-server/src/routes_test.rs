@@ -11354,6 +11354,36 @@ mod tests {
         assert_eq!(listing.queued[0].model, "flux-schnell:q4");
     }
 
+    #[tokio::test]
+    async fn post_api_downloads_accepts_every_cold_start_starter() {
+        let state = AppState::empty(
+            mold_core::Config::default(),
+            crate::state::QueueHandle::new(tokio::sync::mpsc::channel(1).0),
+            AppState::empty_gpu_pool_for_test(),
+            200,
+        );
+        let app = app_with_state(state.clone());
+
+        for model in ["flux2-klein:q4", "z-image-turbo:q8", "sdxl-base:fp16"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::post("/api/downloads")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({ "model": model }).to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "starter {model}");
+        }
+
+        let listing = state.downloads.listing().await;
+        assert_eq!(listing.queued.len(), 3);
+    }
+
     /// Point `MOLD_HOME` at a throwaway root through the SHARED env guard.
     ///
     /// License acceptance is per Mold data root, so these tests write to it —

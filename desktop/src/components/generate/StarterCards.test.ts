@@ -1,8 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { mount } from "@vue/test-utils";
+import { flushPromises, mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import StarterCards from "./StarterCards.vue";
 import { useDownloadsStore } from "../../stores/downloads";
+import { useToastStore } from "../../stores/toasts";
 import type { DownloadJob } from "../../lib/api/types";
 
 function job(overrides: Partial<DownloadJob> = {}): DownloadJob {
@@ -37,17 +38,37 @@ describe("StarterCards (cold start G10)", () => {
     expect(wrapper.text()).toContain("Browse all models");
   });
 
-  it("pulls a model through the downloads store on click", async () => {
+  it("pulls every starter with its canonical manifest id", async () => {
     const store = useDownloadsStore();
     const createDownload = vi.spyOn(store, "createDownload").mockResolvedValue(undefined);
     const subscribe = vi.spyOn(store, "subscribe").mockResolvedValue(undefined);
     const wrapper = mount(StarterCards);
 
-    await wrapper.findAll("[data-test='starter-pull']")[0]!.trigger("click");
-    await Promise.resolve();
+    for (const button of wrapper.findAll("[data-test='starter-pull']")) {
+      await button.trigger("click");
+      await flushPromises();
+    }
 
-    expect(createDownload).toHaveBeenCalledWith("flux2-klein:q4");
-    expect(subscribe).toHaveBeenCalled();
+    expect(createDownload.mock.calls).toEqual([
+      ["flux2-klein:q4"],
+      ["z-image-turbo:q8"],
+      ["sdxl-base:fp16"],
+    ]);
+    expect(subscribe).toHaveBeenCalledTimes(3);
+  });
+
+  it("reports a rejected starter pull instead of failing silently", async () => {
+    const store = useDownloadsStore();
+    vi.spyOn(store, "createDownload").mockRejectedValue(new Error("unknown model"));
+    const wrapper = mount(StarterCards);
+
+    await wrapper.findAll("[data-test='starter-pull']")[1]!.trigger("click");
+    await flushPromises();
+
+    expect(useToastStore().items.at(-1)).toMatchObject({
+      kind: "error",
+      message: "Couldn't pull z-image-turbo:q8 — unknown model",
+    });
   });
 
   it("shows inline progress on the pulling card instead of a Pull button", () => {

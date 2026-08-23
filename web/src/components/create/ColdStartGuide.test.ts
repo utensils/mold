@@ -1,8 +1,9 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { mount } from "@vue/test-utils";
 import ColdStartGuide from "./ColdStartGuide.vue";
 
 const enqueue = vi.hoisted(() => vi.fn(async () => undefined));
+const toastMock = vi.hoisted(() => vi.fn());
 const dlState = vi.hoisted(() => ({
   active: [] as unknown[],
   queued: [] as unknown[],
@@ -14,10 +15,17 @@ vi.mock("../../composables/useDownloads", () => ({
     enqueue,
   }),
 }));
+vi.mock("../../lib/toasts", () => ({ toast: toastMock }));
 
 function mountGuide() {
   return mount(ColdStartGuide);
 }
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  dlState.active = [];
+  dlState.queued = [];
+});
 
 describe("ColdStartGuide", () => {
   it("renders the guide with three starter models, recommended first", () => {
@@ -29,21 +37,45 @@ describe("ColdStartGuide", () => {
     expect(wrapper.find('[data-test="starter-flux2-klein:q4"]').exists()).toBe(
       true,
     );
-    expect(wrapper.find('[data-test="starter-z-image:turbo"]').exists()).toBe(
+    expect(
+      wrapper.find('[data-test="starter-z-image-turbo:q8"]').exists(),
+    ).toBe(true);
+    expect(wrapper.find('[data-test="starter-sdxl-base:fp16"]').exists()).toBe(
       true,
     );
-    expect(wrapper.find('[data-test="starter-sdxl:base"]').exists()).toBe(true);
     expect(wrapper.text()).toContain("recommended");
   });
 
-  it("enqueues a download when a starter's Pull is clicked", async () => {
+  it("enqueues every starter with its canonical manifest id", async () => {
     dlState.active = [];
     dlState.queued = [];
     const wrapper = mountGuide();
+    for (const model of [
+      "flux2-klein:q4",
+      "z-image-turbo:q8",
+      "sdxl-base:fp16",
+    ]) {
+      await wrapper.get(`[data-test="starter-pull-${model}"]`).trigger("click");
+    }
+    expect(enqueue.mock.calls).toEqual([
+      ["flux2-klein:q4"],
+      ["z-image-turbo:q8"],
+      ["sdxl-base:fp16"],
+    ]);
+  });
+
+  it("reports a rejected starter pull instead of failing silently", async () => {
+    enqueue.mockRejectedValueOnce(new Error("unknown model"));
+    const wrapper = mountGuide();
+
     await wrapper
-      .get('[data-test="starter-pull-flux2-klein:q4"]')
+      .get('[data-test="starter-pull-z-image-turbo:q8"]')
       .trigger("click");
-    expect(enqueue).toHaveBeenCalledWith("flux2-klein:q4");
+
+    expect(toastMock).toHaveBeenCalledWith(
+      "error",
+      "couldn't pull z-image-turbo:q8 — unknown model",
+    );
   });
 
   it("shows inline progress in place of Pull while a starter is downloading", () => {
@@ -70,7 +102,7 @@ describe("ColdStartGuide", () => {
   it("marks a queued starter as queued", () => {
     dlState.active = [];
     dlState.queued = [
-      { id: "q1", model: "sdxl:base", status: "queued", bytes_total: 0 },
+      { id: "q1", model: "sdxl-base:fp16", status: "queued", bytes_total: 0 },
     ];
     const wrapper = mountGuide();
     expect(wrapper.text()).toContain("queued");
