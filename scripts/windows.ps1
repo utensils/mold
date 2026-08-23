@@ -108,7 +108,9 @@ function Get-VsInstallPath {
   # workload bundle itself is not portable across VS installer layouts (the
   # GitHub runner has the component but does not expose that workload package).
   $triple = Get-RustHostTriple
-  $component = if ($triple -and $triple.StartsWith('aarch64')) {
+  $isArm64Target = ($triple -and $triple.StartsWith('aarch64')) -or
+    ((-not $triple) -and (Get-OSArch) -eq 'arm64')
+  $component = if ($isArm64Target) {
     'Microsoft.VisualStudio.Component.VC.Tools.ARM64'
   }
   else {
