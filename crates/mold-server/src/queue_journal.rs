@@ -1728,8 +1728,19 @@ impl QueueTicket {
             };
             match retained {
                 Ok(true) => {
-                    self.journal
-                        .set_batch_child_state(&self.id, "accepted", None);
+                    if let (Some(db), Some(owner)) =
+                        (self.journal.db(), self.journal.owner_uuid.as_deref())
+                    {
+                        if let Err(error) =
+                            generation_batches::restore_child_after_retain(db, owner, &self.id, now)
+                        {
+                            tracing::warn!(
+                                job = %self.id,
+                                %error,
+                                "could not restore a retained batch child"
+                            );
+                        }
+                    }
                     self.journal.wake_feeder();
                     self.settled = true;
                     return RetainOutcome::Released;

@@ -604,6 +604,32 @@ pub fn child_cancel_requested(db: &MetadataDb, owner_uuid: &str, job_id: &str) -
     })
 }
 
+/// Restore a retained feeder child to `accepted` only while its owning queue
+/// row still exists and cancellation has not won. The queue claim release and
+/// this summary update are separate calls, so both predicates are necessary:
+/// cancellation may either mark the child `cancelling` or terminalize it and
+/// delete the row between them.
+pub fn restore_child_after_retain(
+    db: &MetadataDb,
+    owner_uuid: &str,
+    job_id: &str,
+    updated_at_ms: i64,
+) -> Result<bool> {
+    db.with_conn(|conn| {
+        Ok(conn.execute(
+            "UPDATE generation_batch_children
+                SET state = 'accepted', error = NULL, updated_at_ms = ?3
+              WHERE job_id = ?1
+                AND state NOT IN ('cancelling', 'complete', 'failed', 'cancelled')
+                AND EXISTS (
+                    SELECT 1 FROM generation_queue AS q
+                     WHERE q.id = ?1 AND q.owner_uuid = ?2
+                )",
+            params![job_id, owner_uuid, updated_at_ms],
+        )? > 0)
+    })
+}
+
 fn update_terminal_child(
     conn: &rusqlite::Connection,
     job_id: &str,
@@ -1297,6 +1323,60 @@ mod tests {
         assert_eq!(child.state, "cancelled");
         assert_eq!(child.error.as_deref(), Some("Cancelled"));
         assert!(child.result_json.is_none());
+    }
+
+    #[test]
+    fn retaining_a_claim_cannot_erase_or_resurrect_cancellation() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        insert_or_get(&db, &batch("same"), &rows(1)).unwrap();
+        crate::generation_queue::claim_next(&db, "owner-1", "worker", 2)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            cancel_owned(
+                &db,
+                "owner-1",
+                "job-0",
+                GenerationBatchTerminal {
+                    state: GenerationBatchTerminalState::Cancelled,
+                    error: Some("Cancelled"),
+                    terminal_error_json: Some(r#"{"message":"Cancelled"}"#),
+                    result_json: None,
+                    completed_at_ms: 3,
+                },
+            )
+            .unwrap(),
+            OwnedCancellation::Requested
+        );
+        crate::generation_queue::release_claim(&db, "job-0", "worker", 4).unwrap();
+
+        assert!(!restore_child_after_retain(&db, "owner-1", "job-0", 4).unwrap());
+        assert_eq!(
+            get(&db, "owner-1", "batch-1").unwrap().unwrap().children[0].state,
+            "cancelling"
+        );
+
+        assert_eq!(
+            cancel_owned(
+                &db,
+                "owner-1",
+                "job-0",
+                GenerationBatchTerminal {
+                    state: GenerationBatchTerminalState::Cancelled,
+                    error: Some("Cancelled"),
+                    terminal_error_json: Some(r#"{"message":"Cancelled"}"#),
+                    result_json: None,
+                    completed_at_ms: 5,
+                },
+            )
+            .unwrap(),
+            OwnedCancellation::Settled
+        );
+        assert!(!restore_child_after_retain(&db, "owner-1", "job-0", 6).unwrap());
+        assert_eq!(
+            get(&db, "owner-1", "batch-1").unwrap().unwrap().children[0].state,
+            "cancelled"
+        );
     }
 
     #[test]
