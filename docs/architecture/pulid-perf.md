@@ -210,7 +210,7 @@ forward) from `candle-onnx::simple_eval` calls to ordinary
 initializers once (candle-onnx's tensor-proto parsing can still be reused
 *at load time only*, to pull weights out, exactly as `onnx_inventory.rs`
 already introspects the graphs, or the weights can be converted once to
-safetensors mirroring `encoders::eva_clip_convert`'s pattern) and calling
+safetensors mirroring `encoders::pickle_convert`'s pattern) and calling
 `.forward()` per request against a resident, mmap-backed set of tensors. Keep
 `IdentityExtractor::load`'s `Device::Cpu` argument and assertion exactly as
 they are (`identity/mod.rs:106-114`) — the call site, the lifetime, the
@@ -276,7 +276,7 @@ version constants involved:
 | `sha256(id_image bytes)` | `mold_core::identity::id_image_sha256` (`identity.rs:517-522`) | Yes — pure function of the request |
 | **A new `IDENTITY_PIPELINE_VERSION: u32`** | Does not exist today; add to `mold_core::identity` | Yes — a compiled constant |
 | Adapter SHA | `mold_core::pulid_assets::pulid_manifest()`'s pin for `ModelComponent::IdentityAdapter` — the same read `extraction.rs::adapter_sha256()` (lines 133-141) already performs | Yes — a manifest pin, no file read |
-| Vision (derived tower) SHA | `crate::encoders::eva_clip_convert::DERIVED_SHA256` — a compiled constant | Yes |
+| Vision (derived tower) SHA | `crate::encoders::pickle_convert::EVA_DERIVED_SHA256` — a compiled constant | Yes |
 | Face-detector SHA | `onnx_graph::pinned_artifact(ModelComponent::FaceDetector)`'s pin | Yes — the manifest pin, not the post-load `det.sha256` (which is checked equal to the pin or the load fails, so they never disagree) |
 | Face-recognizer SHA | `onnx_graph::pinned_artifact(ModelComponent::FaceRecognizer)`'s pin | Yes, same reasoning |
 

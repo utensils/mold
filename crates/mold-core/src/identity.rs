@@ -410,14 +410,15 @@ pub const ID_IMAGE_LIMITS: IdImageLimits = IdImageLimits {
 /// Maximum identity photographs one request may carry.
 ///
 /// Four, and the number is an extraction-latency budget rather than a taste.
-/// Every photo pays a whole CPU extraction — two ONNX graph evaluations, a
-/// 336px EVA02-CLIP forward, and an IDFormer pass — and `docs/architecture/
+/// Every photo pays a whole extraction — SCRFD, ArcFace, the BiSeNet parse,
+/// a 336px EVA02-CLIP forward, and an IDFormer pass — and `docs/architecture/
 /// pulid-face-extraction.md` measured that at p95 415.7 ms on halcyon and
-/// 1574.5 ms on plato against a 2.0 s budget. Extractions are serialized
-/// (`mold_server::identity_extraction::ExtractionSlot`), so the whole-request
-/// cost is N times the slowest measurement: four photos is ~6.3 s of admission
-/// latency on the slowest qualified box, which is the most that can sit in
-/// front of a render without the client believing the request was lost.
+/// 1574.5 ms on plato against a 2.0 s budget. Extractions run inside the
+/// leased job, serialized by the lease itself (exclusive on its device), so
+/// the whole-request cost is N times the slowest measurement: four photos is
+/// ~6.3 s of extraction latency on the slowest qualified box, which is the
+/// most that can sit in front of a render without the client believing the
+/// request was lost.
 ///
 /// The averaging itself has no natural ceiling — `cubiq/PuLID_ComfyUI`
 /// (`pulid.py:415-419`) means over however many frames the batch carried — so
@@ -535,7 +536,7 @@ pub fn identity_model_gate_message(model: &str) -> String {
 /// ignoring it would let a caller believe they had tuned something; accepting
 /// and applying it would double the guidance the render already performs.
 pub const TRUE_CFG_FLUX_ONLY: &str =
-    "true_cfg and cfg_start_step apply only to guidance-distilled FLUX identity renders;      SDXL runs classifier-free guidance already, so use guidance instead and remove them";
+    "true_cfg and cfg_start_step apply only to guidance-distilled FLUX identity renders; SDXL runs classifier-free guidance already, so use guidance instead and remove them";
 
 /// Refusal for an identity request that also carries a LoRA.
 ///

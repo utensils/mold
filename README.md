@@ -194,9 +194,10 @@ every other third-party notice.
 **pretrained models** (`scrfd_10g_bnkps`, `glintr100`), which are licensed for
 **non-commercial research purposes only** — the InsightFace _code_ is MIT, the
 _weights_ are not. Mold ships neither and refuses to download them until you
-record acceptance with `mold pull pulid-flux --accept-license insightface-antelopev2`;
-`mold licenses` lists what has been accepted. The PuLID adapter is Apache-2.0,
-the EVA02-CLIP tower is MIT, and facexlib's BiSeNet face parser
+record acceptance with `mold pull pulid-flux --accept-license insightface-antelopev2`
+(or `pulid-sdxl` — the acceptance covers both bundles);
+`mold licenses` lists what has been accepted. The PuLID adapters are
+Apache-2.0, the EVA02-CLIP tower is MIT, and facexlib's BiSeNet face parser
 (`parsing_bisenet.pth`, masking the aligned crop before the tower sees it) is
-also MIT with no acceptance step of its own — the `pulid-flux` bundle is five
-artifacts in total, about 2.2 GB.
+also MIT with no acceptance step of its own — each bundle is five artifacts in
+total: about 2.3 GB for `pulid-flux`, about 2.2 GB for `pulid-sdxl`.

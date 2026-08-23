@@ -49,7 +49,7 @@ MIT (EVA-CLIP, facexlib parser) and need no acceptance.
 ## The vision tower is converted, never loaded as a pickle
 
 BAAI ships EVA02-CLIP as a torch pickle. **Mold's runtime never reads a
-pickle.** `encoders::eva_clip_convert` is the single place one is opened, and
+pickle.** `encoders::pickle_convert` is the single place one is opened, and
 what it produces is ordinary safetensors that everything downstream loads
 through a normal `VarBuilder`.
 
@@ -202,7 +202,7 @@ The sidecar is written by mold. Anything able to tamper with the derived
 weights could rewrite it to match, so authenticating the weights against it
 would mean authenticating them against the attacker's own claim.
 
-`DERIVED_SHA256` is a compiled-in constant instead. The conversion is
+`EVA_DERIVED_SHA256` is a compiled-in constant instead. The conversion is
 deterministic, so converting the pinned source always produces exactly those
 bytes; the weight-gated `conversion_is_deterministic_on_the_pinned_source`
 re-derives the constant from the real checkpoint, so a `safetensors` layout
@@ -213,7 +213,7 @@ different weights. The sidecar stays as provenance for a human.
 
 `ensure_eva_clip_vision_safetensors(&PulidPaths)` converts **on first use** and
 is idempotent on the *bytes*: a derived file is reused only when it hashes to
-`DERIVED_SHA256`. Anything else — missing, truncated, tampered with, or
+`EVA_DERIVED_SHA256`. Anything else — missing, truncated, tampered with, or
 carrying a forged sidecar — reconverts from the pinned source, and a source
 that fails its own pin errors rather than falling back to what is on disk. A
 fresh conversion that does not reproduce the pin is a hard error, not a silent
@@ -358,8 +358,10 @@ port defect.
 
 ### SDXL goldens (#1228)
 
-`crates/mold-inference/testdata/pulid/` also carries the SDXL adapter's own
-goldens, weight-gated behind the same `MOLD_TEST_PULID_ASSETS` invocation and
+`crates/mold-inference/testdata/pulid_sdxl/` carries the SDXL adapter's own
+goldens, independent of the FLUX set above (nothing in either directory
+overlaps or is touched by the other), weight-gated behind the same
+`MOLD_TEST_PULID_ASSETS` invocation and
 captured against the pinned `pulid_v1.1.safetensors` (SHA-256
 `4cb8ceec1078e0165399b88332ab3c5971619111b8e1730e6bae64144aabae41`,
 984,405,232 bytes, Apache-2.0). Measured error, relative to each tensor's own
@@ -467,8 +469,9 @@ parity structural rather than reviewed.
 
 An explicit `id_weight` of 0 is inert at every layer:
 `identity_dependencies::request_needs_identity_assets` plans no assets,
-`identity_extraction::resolve_identity_embedding` returns `None` without
-counting an extraction, `memory_preflight` charges nothing, and
+`identity_extraction::resolve_identity_for_lease` returns an empty
+`ResolvedIdentity` without counting an extraction, `memory_preflight` charges
+nothing, and
 `flux::identity::identity_request` returns `None` so the denoise loop takes the
 exact code path an unconditioned build takes. The falsification test from
 `tmp/sdcpp/docs/pulid.md` — same seed, `--id-weight 0`, byte-identical output —
@@ -509,7 +512,7 @@ bundle leaves them in place as long as the other bundle still needs them, and
 only removing both bundles deletes the shared derived files too. The derived
 filenames live in `mold_core::pulid_assets`
 (`DERIVED_VISION_FILENAME`, `DERIVED_VISION_SIDECAR_FILENAME`) rather than in
-`encoders::eva_clip_convert`, because removal is in `mold-core` and cannot see
+`encoders::pickle_convert`, because removal is in `mold-core` and cannot see
 `mold-inference`; the converter reads them from there so the two can never name
 different files.
 

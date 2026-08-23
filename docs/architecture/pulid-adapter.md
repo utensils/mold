@@ -153,12 +153,13 @@ than silently feeding the transformer the wrong precision.
 boundary instead of at each of the twenty injection sites. It is the seam the
 face extractor plugs into: the detector → ArcFace → EVA-CLIP → IDFormer stack
 produces one of these and installs it with
-`FluxEngine::set_identity_embedding`, and nothing downstream changes.
+`InferenceEngine::install_identity_embedding`, and nothing downstream changes.
 
-Until that lands, a face-conditioned request with no embedding installed is an
-**explicit error**. Accept-and-ignore is not an option for the same reason it
-is not one at the request contract: the print would come back without the face
-and nothing would say so.
+A face-conditioned request that reaches the engine with no embedding installed
+is an **explicit error** rather than a silently unconditioned render.
+Accept-and-ignore is not an option for the same reason it is not one at the
+request contract: the print would come back without the face and nothing
+would say so.
 
 For bring-up and for comparison against the oracle, `IdentityEmbedding` also
 loads from a safetensors file and from stable-diffusion.cpp's `.pulidembd`

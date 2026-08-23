@@ -80,7 +80,7 @@ files-only bundles that share one `pulid` family, one storage root, and four of
 their five files — the face detector, recognizer, parser, and vision tower are
 identical downloads either way, so a machine that already has one bundle pulls
 only the other's adapter (about 984 MB for `pulid-sdxl`, ~1.14 GB for
-`pulid-flux`; ~2.2 GB total for both from a clean machine):
+`pulid-flux`; ~3.3 GB total for both from a clean machine):
 
 ```bash
 mold pull pulid-flux --accept-license insightface-antelopev2
@@ -387,9 +387,9 @@ sent both. Put every photograph in `id_images`, or a single one in `id_image`.
 face-identity conditioning"** — `--true-cfg` was used without `--id-image`, or
 with `--id-weight 0`, on FLUX.
 
-**"true_cfg is not supported for this model"** — `--true-cfg` was used against
-an SDXL identity request. Drop it; SDXL's `--guidance` is already the
-classifier-free scale.
+**"true_cfg and cfg_start_step apply only to guidance-distilled FLUX identity
+renders"** — `--true-cfg` was used against an SDXL identity request. Drop it;
+SDXL's `--guidance` is already the classifier-free scale.
 
 **"no PuLID bundle resolved"** — run `mold pull pulid-flux` (for FLUX) or
 `mold pull pulid-sdxl` (for SDXL) with `--accept-license
