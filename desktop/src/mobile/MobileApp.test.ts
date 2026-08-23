@@ -6120,6 +6120,8 @@ describe("MobileApp create settings reset", () => {
     expect(batch.attributes("value")).toBe("30");
     expect(wrapper.find("[data-test='mobile-advanced-trigger-count']").exists()).toBe(false);
 
+    // The reported Hal9000 batch restored this actual Advanced field; it is
+    // the source of the pictured `1`, not the adjacent Batch value.
     await fieldControl("Negative prompt").setValue("anime, cartoon, graphic, washed out");
     await flushPromises();
     expect(wrapper.get("[data-test='mobile-advanced-trigger-count']").text()).toBe("1");
