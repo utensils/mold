@@ -553,3 +553,39 @@ is the expected reading for a render that should NOT match.)
 - Follow-up filed as #1305: the CLI auto-pulls an unqualified checkpoint before
   the identity gate refuses it, observed here for `sdxl-turbo` and
   `playground-v2.5` (pre-existing; FLUX behaves the same).
+
+## SDXL surface UAT (#1309)
+
+The user-facing follow-up ran on 2026-08-22 with the repository's public-domain
+Frank Rubio portrait and the same head-and-shoulders prompt used by the SDXL
+cosine sweep. iPhone and TUI targeted the CUDA UAT server at `e219538a`; the
+Discord render targeted a temporary server from `f79bcab` with
+`MOLD_HOME=/Volumes/ExternalStorage/mold2`. The production Discord bot was
+temporarily pointed at that server for the two commands and restored to its
+original host immediately afterward. Retained evidence is under
+`/Volumes/ExternalStorage/pulid-dev/uat-1309/`.
+
+| Surface | Qualified `sdxl-base:fp16` | Unqualified `sdxl-turbo:fp16` | Library / result provenance | ArcFace cosine |
+| --- | --- | --- | --- | --- |
+| iPhone Create | **PASS** — the identity well appeared, accepted the portrait, and rendered a 1024x1024 print | **PASS** — switching to Turbo parked the attached portrait off-wire; returning to Base restored it | **PASS** — Library Info showed the source filename/hash, strength `1`, and start step `0`; **Reuse settings** reattached the retained photo (manually observed; no separate screenshot retained) | **0.7234** |
+| TUI Create | **PASS** — Advanced exposed Identity photo/strength/start-step and rendered after the request-shaping fix below | **PASS** — Advanced omitted the identity section for Turbo | **PASS** — Library Details named the identity portrait with model, seed, size, and machine | **0.7499** |
+| Discord `/identity` | **PASS** — attachment render reported model, 1024x1024 size, seed `11`, and `frank-rubio-official-portrait.jpg · strength 1.00 · from step 0` | **PASS** — refused before rendering with the shared `does not support face-identity conditioning` qualification message | **PASS** — the result embed carried the complete identity provenance row | **0.6807** |
+
+The issue's proposed Discord spelling was `/generate`, but the shipped command
+is `/identity`: Discord caps slash commands at 25 options and `/generate`
+already uses all 25. The dedicated command is the production surface under
+test and delegates qualification wording to `mold_core::identity`.
+
+### TUI defect found by UAT
+
+The first qualified TUI attempt was refused by the server with `frames and fps
+are not supported by this recipe`. The TUI had been serializing its hidden
+video defaults for image families. `build_request` now includes `frames` and
+`fps` only when the resolved family advertises video support, with a regression
+test that pins both fields absent for SDXL. The same UAT then completed without
+changing the prompt, model, or identity inputs.
+
+All three retained surface renders are above the 0.28 same-person gate and sit
+inside PuLID's expected 0.6-0.8 similarity band. The Discord CDN artifact is
+byte-identical to the server output (`sha256 5ac6ac13…b0531a4f`), so the score
+also verifies that Discord returned the generated print without re-encoding it.
