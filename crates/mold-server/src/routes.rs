@@ -6121,7 +6121,7 @@ async fn cancel_queue_job(
             let journal = state.queue_journal.clone();
             let probe_id = id.clone();
             let owns_row =
-                spawn_queue_read(move || Ok(journal.owns_cancellable_row(&probe_id))).await?;
+                spawn_queue_read(move || journal.owns_cancellable_row(&probe_id)).await?;
             if !owns_row {
                 return Err(ApiError::queue_job_not_found(format!(
                     "queue job {id} not found"

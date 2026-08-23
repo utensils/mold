@@ -1187,17 +1187,14 @@ impl QueueJournal {
     /// clear either, and listing work an operator cannot then act on would be
     /// half an answer. A `running` row is excluded — the endpoint refuses
     /// running work, and the registry is the authority on that.
-    pub fn owns_cancellable_row(&self, id: &str) -> bool {
+    pub fn owns_cancellable_row(&self, id: &str) -> anyhow::Result<bool> {
         let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
-            return false;
+            return Ok(false);
         };
-        generation_queue::get(db, id)
-            .ok()
-            .flatten()
-            .is_some_and(|row| {
-                row.owner_uuid == owner
-                    && matches!(row.state, QueueRowState::Held | QueueRowState::Queued)
-            })
+        Ok(generation_queue::get(db, id)?.is_some_and(|row| {
+            row.owner_uuid == owner
+                && matches!(row.state, QueueRowState::Held | QueueRowState::Queued)
+        }))
     }
 
     /// Park a row by id, for a caller that has no ticket.
@@ -2278,7 +2275,7 @@ mod tests {
         let second_owner = second.owner_uuid().unwrap();
         seed_row(db.as_ref().as_ref().unwrap(), second_owner, "foreign-job");
 
-        assert!(!first.owns_cancellable_row("foreign-job"));
+        assert!(!first.owns_cancellable_row("foreign-job").unwrap());
         assert!(!first.cancel_id("foreign-job").unwrap());
         assert_eq!(second.list_all().len(), 1);
         assert!(second.cancel_id("foreign-job").unwrap());
