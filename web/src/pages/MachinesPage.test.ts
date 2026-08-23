@@ -19,6 +19,8 @@ let poll: {
   status: ReturnType<typeof ref<HostStatus | null>>;
   resources: ReturnType<typeof ref<ResourceSnapshot | null>>;
   online: ReturnType<typeof ref<boolean>>;
+  stale: ReturnType<typeof ref<boolean>>;
+  authorityRejected: ReturnType<typeof ref<boolean>>;
   lastSeen: ReturnType<typeof ref<number | null>>;
   error: ReturnType<typeof ref<string | null>>;
   loading: ReturnType<typeof ref<boolean>>;
@@ -67,6 +69,8 @@ beforeEach(() => {
     status: ref<HostStatus | null>(null),
     resources: ref<ResourceSnapshot | null>(null),
     online: ref(false),
+    stale: ref(false),
+    authorityRejected: ref(false),
     lastSeen: ref<number | null>(null),
     error: ref<string | null>(null),
     loading: ref(true),
@@ -127,19 +131,37 @@ describe("MachinesPage", () => {
     expect(w.find('[data-test="machine-context-menu"]').exists()).toBe(false);
   });
 
-  it("shows an offline card with a retry that forces a poll", async () => {
+  it("shows a reconnecting card without claiming a never-reached host is offline", async () => {
     poll.loading.value = false;
     poll.online.value = false;
     poll.lastSeen.value = Date.now();
     const w = mountPage();
     await nextTick();
-    expect(w.find('[data-test="host-offline"]').exists()).toBe(true);
+    expect(w.find('[data-test="host-offline"]').exists()).toBe(false);
+    expect(w.find('[data-test="host-reconnecting-state"]').exists()).toBe(true);
     // The poll keeps retrying on its own — the card says so.
     expect(w.get('[data-test="host-reconnecting"]').text()).toBe(
       "reconnecting…",
     );
     await w.get('[data-test="host-retry"]').trigger("click");
     expect(poll.refresh).toHaveBeenCalled();
+  });
+
+  it("keeps last-good telemetry visible while a verified host reconnects", async () => {
+    poll.loading.value = false;
+    poll.online.value = true;
+    poll.stale.value = true;
+    poll.lastSeen.value = Date.now();
+    poll.status.value = makeStatus({ queue_depth: 7 });
+
+    const w = mountPage();
+    await nextTick();
+
+    expect(w.find('[data-test="host-offline"]').exists()).toBe(false);
+    expect(w.get('[data-test="host-reconnecting-state"]').text()).toContain(
+      "reconnecting",
+    );
+    expect(w.get('[data-test="host-queue"]').text()).toBe("queue 7");
   });
 
   it("shows a remembered disconnected host and reconnects it explicitly", async () => {

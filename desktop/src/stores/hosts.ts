@@ -496,21 +496,31 @@ export const useHostsStore = defineStore("hosts", {
           const live = this.extras.find((h) => h.id === twin.id);
           if (live) {
             const keyChanged = apiKey !== null && live.apiKey !== apiKey;
+            const urlChanged = live.url !== url;
             const needsRevival = twin.status !== "ready" || twin.stale;
-            if (keyChanged || needsRevival) {
+            const authorityChanged = keyChanged || urlChanged;
+            if (authorityChanged || needsRevival) {
               // Fence a status/capability response started under the retired
               // address or credential before mutating the live authority.
               this.refreshGenerations[twin.id] = (this.refreshGenerations[twin.id] ?? 0) + 1;
             }
             if (apiKey) live.apiKey = apiKey;
-            if (needsRevival) {
+            if (authorityChanged) {
+              // Even a probe that proves the same instance cannot make queue,
+              // model, or capability data read under another URL/key current.
+              delete this.telemetry[twin.id];
+              delete this.capabilities[twin.id];
+              delete useHostModelsStore().byHost[twin.id];
               live.url = url;
-              live.status = "ready";
+              live.status = "connecting";
               live.error = null;
               live.instanceId = instanceId;
               await this.persist(twin.id, url, name, instanceId);
               void this.refreshAfterCurrent();
-            } else if (keyChanged) {
+            } else if (needsRevival) {
+              live.status = "ready";
+              live.error = null;
+              live.instanceId = instanceId;
               void this.refreshAfterCurrent();
             }
           }
@@ -518,19 +528,26 @@ export const useHostsStore = defineStore("hosts", {
         }
       }
 
+      let retiredExistingAuthority = false;
       if (existing) {
         this.refreshGenerations[id] = (this.refreshGenerations[id] ?? 0) + 1;
         const previousInstanceId = this.telemetry[id]?.instanceId ?? existing.instanceId;
         const existingExtra = this.extras.find((host) => host.id === id);
+        const keyChanged =
+          apiKey !== null && existingExtra !== undefined && existingExtra.apiKey !== apiKey;
+        const urlChanged = existingExtra !== undefined && existingExtra.url !== url;
         const unverifiedAddressReplacement =
-          existingExtra?.url !== url &&
+          urlChanged &&
           (instanceId === null || previousInstanceId === null || previousInstanceId !== instanceId);
         if (
+          keyChanged ||
+          urlChanged ||
           (previousInstanceId !== null &&
             instanceId !== null &&
             previousInstanceId !== instanceId) ||
           unverifiedAddressReplacement
         ) {
+          retiredExistingAuthority = true;
           delete this.telemetry[id];
           delete this.capabilities[id];
           delete useHostModelsStore().byHost[id];
@@ -542,7 +559,7 @@ export const useHostsStore = defineStore("hosts", {
         label: name ?? test.hostname ?? url.replace(/^https?:\/\//, ""),
         url,
         apiKey,
-        status: "ready",
+        status: retiredExistingAuthority ? "connecting" : "ready",
         error: null,
         instanceId,
       });
@@ -1186,6 +1203,24 @@ export const useHostsStore = defineStore("hosts", {
               current.apiKey === host.apiKey
             );
           };
+          const retireRejectedAuthority = (error: unknown): boolean => {
+            if (!(error instanceof ApiError) || (error.status !== 401 && error.status !== 403))
+              return false;
+            delete this.telemetry[host.id];
+            delete this.capabilities[host.id];
+            delete useHostModelsStore().byHost[host.id];
+            const extra = this.extras.find((candidate) => candidate.id === host.id);
+            if (extra) {
+              extra.status = "connecting";
+              extra.error = String(error);
+            }
+            if (host.id === "local") {
+              const conn = useConnectionStore();
+              conn.status = "starting";
+              conn.error = String(error);
+            }
+            return true;
+          };
           try {
             const previousTelemetry = this.telemetry[host.id];
             const previousInstanceId = previousTelemetry?.instanceId ?? host.instanceId ?? null;
@@ -1202,18 +1237,25 @@ export const useHostsStore = defineStore("hosts", {
                 entries: mergeQueueEntries(listing.entries, listing.live_only_entries ?? []),
               }));
             });
-            const [status, devices, queue] = await Promise.all([
+            const [status, devicesResult, queueResult] = await Promise.all([
               statusRequest,
               listDevices(target).then(
-                (snapshot) => snapshot.devices,
-                () => null,
+                (snapshot) => ({ value: snapshot.devices, error: null }),
+                (error: unknown) => ({ value: null, error }),
               ),
               queueRequest.then(
-                (listing) => listing,
-                () => null,
+                (listing) => ({ value: listing, error: null }),
+                (error: unknown) => ({ value: null, error }),
               ),
             ]);
             if (!isCurrent()) return;
+            if (
+              retireRejectedAuthority(devicesResult.error) ||
+              retireRejectedAuthority(queueResult.error)
+            )
+              return;
+            const devices = devicesResult.value;
+            const queue = queueResult.value;
             const nextInstanceId = status.instance_id ?? null;
             const instanceChanged = previousInstanceId !== nextInstanceId;
             if (instanceChanged) delete useHostModelsStore().byHost[host.id];
@@ -1261,32 +1303,18 @@ export const useHostsStore = defineStore("hosts", {
               } else {
                 delete this.capabilities[host.id];
               }
-            } catch {
+            } catch (error) {
               // Capability discovery is advisory. A failed/unsupported probe
               // must not mark a healthy host unavailable or erase last-good
               // policy. A changed server identity is the exception: authority
               // from the prior installation is security-sensitive and cannot
               // cross that fence.
+              if (retireRejectedAuthority(error)) return;
               if (instanceChanged) delete this.capabilities[host.id];
             }
           } catch (err) {
             if (!isCurrent()) return;
-            const authorityRejected =
-              err instanceof ApiError && (err.status === 401 || err.status === 403);
-            if (authorityRejected) {
-              // HTTP authentication is authoritative security evidence, not a
-              // transport blip. Retire data obtained under the rejected
-              // credential without claiming that the server process is dead.
-              delete this.telemetry[host.id];
-              delete this.capabilities[host.id];
-              delete useHostModelsStore().byHost[host.id];
-              const extra = this.extras.find((h) => h.id === host.id);
-              if (extra) {
-                extra.status = "connecting";
-                extra.error = String(err);
-              }
-              return;
-            }
+            if (retireRejectedAuthority(err)) return;
             const previous = this.telemetry[host.id];
             if (previous) this.telemetry[host.id] = { ...previous, stale: true };
             const extra = this.extras.find((h) => h.id === host.id);

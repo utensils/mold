@@ -3,7 +3,7 @@
  * Host detail (spec §04 / §08 G3). Live telemetry, the relocated queue
  * management card, active downloads, and installed models for one machine —
  * the primary origin or any remembered remote, all through the same per-host
- * client. Absent metrics render as em dashes and an offline host keeps its
+ * client. Absent metrics render as em dashes and a reconnecting host keeps its
  * last-good data dimmed behind a retry banner (G4).
  */
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
@@ -57,7 +57,7 @@ import {
   setGenerateTargetId,
   updateHost,
 } from "../lib/hostRegistry";
-import { reorderQueueJob, updateQueueJobTargetGpu } from "../api";
+import { ApiHttpError, reorderQueueJob, updateQueueJobTargetGpu } from "../api";
 import { requestConfirm, requestText, toast } from "../lib/toasts";
 import { subscribeToDeviceSnapshots } from "../lib/deviceEvents";
 import type { DownloadJobWire, ModelInfoExtended, QueueEntry } from "../types";
@@ -89,12 +89,17 @@ const poll = useHostPoll(liveHost, { withResources: true, intervalMs: 4000 });
 
 const online = computed(() => poll.online.value);
 const loading = computed(() => poll.loading.value);
-const offline = computed(
-  () => !!host.value && !disconnected.value && !loading.value && !online.value,
+const reconnecting = computed(
+  () =>
+    !!host.value &&
+    !disconnected.value &&
+    !loading.value &&
+    (!online.value || poll.stale.value),
 );
 const dotState = computed<"online" | "offline" | "unknown">(() => {
-  if (!host.value || disconnected.value || loading.value) return "unknown";
-  return online.value ? "online" : "offline";
+  if (!host.value || disconnected.value || loading.value || reconnecting.value)
+    return "unknown";
+  return "online";
 });
 
 const telemetry = computed(() =>
@@ -159,6 +164,9 @@ const h3Host = computed(() => [
 
 let sessionEpoch = 0;
 let queueRequestGeneration = 0;
+let capabilityRequestGeneration = 0;
+let modelRequestGeneration = 0;
+let downloadRequestGeneration = 0;
 
 function isCurrentSession(
   entry: NonNullable<typeof host.value>,
@@ -191,7 +199,7 @@ async function reloadQueue(
       queuePlan.value = listing.plan ?? null;
     }
   } catch {
-    // Keep the last-good queue; the offline banner covers the failure.
+    // Keep the last-good queue; the reconnecting banner covers the failure.
   }
 }
 
@@ -254,9 +262,11 @@ async function reloadModels(
   signal?: AbortSignal,
 ) {
   if (!entry) return;
+  const generation = ++modelRequestGeneration;
   try {
     const next = await hostModels(entry, signal);
-    if (isCurrentSession(entry, epoch)) models.value = next;
+    if (generation === modelRequestGeneration && isCurrentSession(entry, epoch))
+      models.value = next;
   } catch {
     /* keep stale */
   }
@@ -268,6 +278,7 @@ async function reloadDownloads(
   signal?: AbortSignal,
 ) {
   if (!entry) return;
+  const generation = ++downloadRequestGeneration;
   try {
     const listing = await hostDownloads(entry, signal);
     const active = [
@@ -275,13 +286,17 @@ async function reloadDownloads(
       ...(listing.active_jobs ?? []),
       ...listing.queued,
     ];
-    if (isCurrentSession(entry, epoch)) downloads.value = active;
+    if (
+      generation === downloadRequestGeneration &&
+      isCurrentSession(entry, epoch)
+    )
+      downloads.value = active;
   } catch {
     /* keep stale */
   }
 }
 
-async function reloadAll(
+async function reloadAllOnce(
   entry = host.value,
   epoch = sessionEpoch,
   signal?: AbortSignal,
@@ -398,11 +413,24 @@ async function reloadCapabilities(
   signal?: AbortSignal,
 ) {
   if (!entry) return;
+  const generation = ++capabilityRequestGeneration;
   try {
     const next = await hostCapabilities(entry, signal);
-    if (isCurrentSession(entry, epoch)) caps.value = next;
-  } catch {
-    if (isCurrentSession(entry, epoch)) caps.value = null;
+    if (
+      generation === capabilityRequestGeneration &&
+      isCurrentSession(entry, epoch)
+    )
+      caps.value = next;
+  } catch (error) {
+    // A transport blip cannot erase verified capability policy. HTTP auth is
+    // different authority and must fail closed until the credential changes.
+    if (
+      generation === capabilityRequestGeneration &&
+      isCurrentSession(entry, epoch) &&
+      error instanceof ApiHttpError &&
+      (error.status === 401 || error.status === 403)
+    )
+      caps.value = null;
   }
 }
 
@@ -538,19 +566,65 @@ function downloadPct(job: DownloadJobWire): number {
   return Math.min(100, (job.bytes_done / job.bytes_total) * 100);
 }
 
-let timer: ReturnType<typeof setInterval> | null = null;
+let timer: ReturnType<typeof setTimeout> | null = null;
 let deviceEventsAbort: AbortController | null = null;
 let sessionAbort: AbortController | null = null;
+let reloadAllInFlight: Promise<void> | null = null;
+let reloadAllPending = false;
+
+function reloadAll(
+  entry: NonNullable<typeof host.value>,
+  epoch: number,
+  signal: AbortSignal,
+): Promise<void> {
+  if (reloadAllInFlight) {
+    reloadAllPending = true;
+    return reloadAllInFlight;
+  }
+  const run = (async () => {
+    do {
+      reloadAllPending = false;
+      await reloadAllOnce(entry, epoch, signal);
+    } while (
+      reloadAllPending &&
+      !signal.aborted &&
+      isCurrentSession(entry, epoch)
+    );
+  })().finally(() => {
+    if (reloadAllInFlight === run) reloadAllInFlight = null;
+  });
+  reloadAllInFlight = run;
+  return run;
+}
+
+function scheduleReload(
+  entry: NonNullable<typeof host.value>,
+  epoch: number,
+  signal: AbortSignal,
+) {
+  if (timer || signal.aborted || !isCurrentSession(entry, epoch)) return;
+  timer = setTimeout(() => {
+    timer = null;
+    void reloadAll(entry, epoch, signal).finally(() =>
+      scheduleReload(entry, epoch, signal),
+    );
+  }, 4000);
+}
 
 function stopHostSession() {
   sessionEpoch += 1;
   queueRequestGeneration += 1;
-  if (timer) clearInterval(timer);
+  capabilityRequestGeneration += 1;
+  modelRequestGeneration += 1;
+  downloadRequestGeneration += 1;
+  if (timer) clearTimeout(timer);
   timer = null;
   deviceEventsAbort?.abort();
   deviceEventsAbort = null;
   sessionAbort?.abort();
   sessionAbort = null;
+  reloadAllPending = false;
+  reloadAllInFlight = null;
 }
 
 function startHostSession() {
@@ -566,7 +640,9 @@ function startHostSession() {
   if (!entry) return;
   sessionAbort = new AbortController();
   const signal = sessionAbort.signal;
-  void reloadAll(entry, epoch, signal);
+  void reloadAll(entry, epoch, signal).finally(() =>
+    scheduleReload(entry, epoch, signal),
+  );
   deviceEventsAbort = new AbortController();
   subscribeToDeviceSnapshots(
     { baseUrl: entry.url, apiKey: entry.apiKey ?? null },
@@ -576,7 +652,6 @@ function startHostSession() {
       void reloadAll(entry, epoch, signal);
     },
   );
-  timer = setInterval(() => void reloadAll(entry, epoch, signal), 4000);
 }
 
 function onHostsChanged() {
@@ -680,14 +755,20 @@ onBeforeUnmount(() => {
         </button>
       </div>
 
-      <div v-if="offline" class="md-offline" data-test="detail-offline">
-        <span>This machine is offline. Showing the last known values.</span>
+      <div
+        v-if="reconnecting"
+        class="md-offline"
+        data-test="detail-reconnecting"
+      >
+        <span
+          >This machine is reconnecting. Showing the last known values.</span
+        >
         <button type="button" class="md-retry" @click="poll?.refresh()">
           Retry
         </button>
       </div>
 
-      <div class="md-grid" :data-dimmed="offline ? 'true' : undefined">
+      <div class="md-grid" :data-dimmed="reconnecting ? 'true' : undefined">
         <CardSurface class="md-telemetry">
           <div class="md-label">Telemetry</div>
           <div class="md-gpu" data-test="telemetry-gpu">
@@ -853,7 +934,7 @@ onBeforeUnmount(() => {
         </CardSurface>
       </div>
 
-      <div class="md-queue" :data-dimmed="offline ? 'true' : undefined">
+      <div class="md-queue" :data-dimmed="reconnecting ? 'true' : undefined">
         <CardSurface class="mb-4">
           <DevicePanel
             :devices="poll?.devices.value ?? []"
@@ -880,7 +961,7 @@ onBeforeUnmount(() => {
           :can-cancel-running="caps?.queue?.cooperative_cancellation === true"
           :cancelling-ids="cancellingIds"
           :paused="paused"
-          :dimmed="offline"
+          :dimmed="reconnecting"
           @cancel="onCancel"
           @set-lane="onSetLane"
           @move="onMove"
@@ -891,7 +972,7 @@ onBeforeUnmount(() => {
 
       <CardSurface
         class="md-downloads"
-        :data-dimmed="offline ? 'true' : undefined"
+        :data-dimmed="reconnecting ? 'true' : undefined"
       >
         <div class="md-label">Downloads</div>
         <p

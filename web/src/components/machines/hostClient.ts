@@ -34,6 +34,7 @@ import {
 } from "../../api";
 import {
   conditionalApiJsonTo,
+  ApiError,
   parseCurrentServerStatus,
   type ApiTarget,
 } from "@studio/api/client";
@@ -344,6 +345,10 @@ export interface HostPoll {
   deviceState: Ref<DeviceListResponse | null>;
   resources: Ref<ResourceSnapshot | null>;
   online: Ref<boolean>;
+  /** Latest status read failed after this exact target was verified. */
+  stale: Ref<boolean>;
+  /** The exact target rejected its HTTP credential. */
+  authorityRejected: Ref<boolean>;
   /** Epoch ms of the last successful status read, or null before the first. */
   lastSeen: Ref<number | null>;
   error: Ref<string | null>;
@@ -375,6 +380,8 @@ export function useHostPoll(
   const deviceState = ref<DeviceListResponse | null>(null);
   const resources = ref<ResourceSnapshot | null>(null);
   const online = ref(false);
+  const stale = ref(false);
+  const authorityRejected = ref(false);
   const lastSeen = ref<number | null>(null);
   const error = ref<string | null>(null);
   const loading = ref(true);
@@ -382,6 +389,8 @@ export function useHostPoll(
   let stopped = false;
   let timer: ReturnType<typeof setTimeout> | null = null;
   let controller: AbortController | null = null;
+  let refreshInFlight: Promise<void> | null = null;
+  let followUpRequested = false;
   const currentHost = () => (isRef(host) ? host.value : host);
   const isCurrentTarget = (target: HostEntry) => {
     const current = currentHost();
@@ -397,15 +406,17 @@ export function useHostPoll(
     deviceState.value = null;
     resources.value = null;
     online.value = false;
+    stale.value = false;
+    authorityRejected.value = false;
     lastSeen.value = null;
     error.value = null;
     loading.value = true;
   };
 
-  async function refresh(): Promise<void> {
-    controller?.abort();
-    controller = new AbortController();
-    const signal = controller.signal;
+  async function refreshOnce(): Promise<void> {
+    const requestController = new AbortController();
+    controller = requestController;
+    const signal = requestController.signal;
     const target = currentHost();
     if (!target) {
       clearTargetState();
@@ -413,28 +424,82 @@ export function useHostPoll(
       return;
     }
     try {
-      const [nextStatus, nextResources, nextDevices] = await Promise.all([
+      const [nextStatus, resourceResult, deviceResult] = await Promise.all([
         hostStatus(target, signal),
         options.withResources
-          ? hostResources(target, signal).catch(() => null)
-          : Promise.resolve(null),
-        hostDevices(target, signal).catch(() => null),
+          ? hostResources(target, signal).then(
+              (value) => ({ value, error: null }),
+              (error: unknown) => ({ value: null, error }),
+            )
+          : Promise.resolve({ value: null, error: null }),
+        hostDevices(target, signal).then(
+          (value) => ({ value, error: null }),
+          (error: unknown) => ({ value: null, error }),
+        ),
       ]);
       if (signal.aborted || !isCurrentTarget(target)) return;
+      const auxiliaryAuthorityError = [
+        resourceResult.error,
+        deviceResult.error,
+      ].find(
+        (error) =>
+          (error instanceof ApiHttpError || error instanceof ApiError) &&
+          (error.status === 401 || error.status === 403),
+      );
+      if (auxiliaryAuthorityError) throw auxiliaryAuthorityError;
       status.value = nextStatus;
-      deviceState.value = nextDevices;
-      devices.value = nextDevices?.devices ?? null;
-      if (options.withResources) resources.value = nextResources;
+      if (deviceResult.error === null) {
+        deviceState.value = deviceResult.value;
+        devices.value = deviceResult.value?.devices ?? null;
+      }
+      if (options.withResources && resourceResult.error === null)
+        resources.value = resourceResult.value;
       online.value = true;
+      stale.value = false;
+      authorityRejected.value = false;
       lastSeen.value = Date.now();
       error.value = null;
     } catch (e) {
-      if (signal.aborted) return;
-      online.value = false;
+      if (signal.aborted || !isCurrentTarget(target)) return;
+      const rejected =
+        (e instanceof ApiHttpError || e instanceof ApiError) &&
+        (e.status === 401 || e.status === 403);
+      if (rejected) {
+        status.value = null;
+        devices.value = null;
+        deviceState.value = null;
+        resources.value = null;
+        online.value = false;
+        stale.value = false;
+        authorityRejected.value = true;
+      } else {
+        const verified = status.value !== null;
+        online.value = verified;
+        stale.value = verified;
+        authorityRejected.value = false;
+      }
       error.value = e instanceof Error ? e.message : String(e);
     } finally {
       if (!signal.aborted) loading.value = false;
+      if (controller === requestController) controller = null;
     }
+  }
+
+  function refresh(): Promise<void> {
+    if (refreshInFlight) {
+      followUpRequested = true;
+      return refreshInFlight;
+    }
+    const run = (async () => {
+      do {
+        followUpRequested = false;
+        await refreshOnce();
+      } while (!stopped && followUpRequested);
+    })().finally(() => {
+      if (refreshInFlight === run) refreshInFlight = null;
+    });
+    refreshInFlight = run;
+    return run;
   }
 
   async function tick(): Promise<void> {
@@ -449,6 +514,7 @@ export function useHostPoll(
     timer = null;
     controller?.abort();
     controller = null;
+    followUpRequested = false;
   }
 
   if (isRef(host)) {
@@ -476,6 +542,8 @@ export function useHostPoll(
     deviceState,
     resources,
     online,
+    stale,
+    authorityRejected,
     lastSeen,
     error,
     loading,

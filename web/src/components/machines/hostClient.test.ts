@@ -42,12 +42,57 @@ function failed(status: number, body = "") {
   };
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((next, fail) => {
+    resolve = next;
+    reject = fail;
+  });
+  return { promise, resolve, reject };
+}
+
 const currentStatus = {
   version: "0.20.2",
   instance_id: "instance-1",
   hostname: "studio",
   queue_depth: 0,
   gpu_info: { backend: "cuda" },
+};
+
+const currentDevice = {
+  id: "cuda:0",
+  backend: "cuda",
+  ordinal: 0,
+  device_kind: "full_gpu",
+  nvml_uuid: "GPU-0",
+  physical_uuid: "GPU-0",
+  mig_uuid: null,
+  mig_parent_uuid: null,
+  mig_profile: null,
+  name: "GPU 0",
+  pci_bus_id: null,
+  compute_capability: "8.6",
+  memory: {
+    total_bytes: 24 * 1024 ** 3,
+    used_bytes: 0,
+    mold_used_bytes: 0,
+    other_used_bytes: 0,
+  },
+  telemetry: {
+    utilization_percent: 0,
+    temperature_c: 30,
+    power_w: 20,
+  },
+  desired_enabled: true,
+  admin_state: "enabled",
+  health: "healthy",
+  activity: "idle",
+  schedulable: true,
+  unschedulable_reason: null,
+  loaded_models: [],
+  active_work_id: null,
+  planned_work_ids: [],
 };
 
 const remote: HostEntry = {
@@ -235,6 +280,107 @@ describe("hostClient auth + requests", () => {
 });
 
 describe("useHostPoll target sessions", () => {
+  it("keeps verified status online but stale through a transient timeout", async () => {
+    let failStatus = false;
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/api/status")) {
+        return failStatus
+          ? Promise.reject(new Error("status timeout"))
+          : Promise.resolve(ok(currentStatus));
+      }
+      return Promise.resolve(ok({ devices: [], plan_version: 1 }));
+    });
+    const poll = useHostPoll(remote, { intervalMs: 60_000 });
+    await vi.waitFor(() => expect(poll.online.value).toBe(true));
+
+    failStatus = true;
+    await poll.refresh();
+
+    expect(poll.status.value).toEqual(currentStatus);
+    expect(poll.online.value).toBe(true);
+    expect(poll.stale.value).toBe(true);
+    expect(poll.error.value).toBe("status timeout");
+    poll.stop();
+  });
+
+  it("retires a verified poll session when an auxiliary health endpoint rejects auth", async () => {
+    let rejectResources = false;
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/api/status"))
+        return Promise.resolve(ok(currentStatus));
+      if (url.endsWith("/api/resources"))
+        return Promise.resolve(
+          rejectResources
+            ? failed(403, "API key was rejected")
+            : ok({ hostname: "studio", gpus: [] }),
+        );
+      return Promise.resolve(ok({ devices: [], plan_version: 1 }));
+    });
+    const poll = useHostPoll(remote, {
+      withResources: true,
+      intervalMs: 60_000,
+    });
+    await vi.waitFor(() => expect(poll.online.value).toBe(true));
+
+    rejectResources = true;
+    await poll.refresh();
+
+    expect(poll.status.value).toBeNull();
+    expect(poll.online.value).toBe(false);
+    expect(poll.stale.value).toBe(false);
+    expect(poll.authorityRejected.value).toBe(true);
+    poll.stop();
+  });
+
+  it("retains last-good devices when only the device probe blips", async () => {
+    let failDevices = false;
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/api/status"))
+        return Promise.resolve(ok(currentStatus));
+      if (failDevices) return Promise.reject(new Error("device timeout"));
+      return Promise.resolve(ok({ devices: [currentDevice], plan_version: 1 }));
+    });
+    const poll = useHostPoll(remote, { intervalMs: 60_000 });
+    await vi.waitFor(() => expect(poll.devices.value).toHaveLength(1));
+
+    failDevices = true;
+    await poll.refresh();
+
+    expect(poll.devices.value).toHaveLength(1);
+    expect(poll.online.value).toBe(true);
+    poll.stop();
+  });
+
+  it("queues one follow-up instead of overlapping same-target refreshes", async () => {
+    const first = deferred<ReturnType<typeof ok>>();
+    const second = deferred<ReturnType<typeof ok>>();
+    let statusCalls = 0;
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      if (String(input).endsWith("/api/status")) {
+        statusCalls += 1;
+        return statusCalls === 1 ? first.promise : second.promise;
+      }
+      return Promise.resolve(ok({ devices: [], plan_version: 1 }));
+    });
+    const poll = useHostPoll(remote, { intervalMs: 60_000 });
+
+    const requested = poll.refresh();
+    void poll.refresh();
+    expect(statusCalls).toBe(1);
+
+    first.resolve(ok(currentStatus));
+    await vi.waitFor(() => expect(statusCalls).toBe(2));
+    expect(statusCalls).toBe(2);
+
+    second.resolve(ok({ ...currentStatus, queue_depth: 2 }));
+    await requested;
+    expect(poll.status.value?.queue_depth).toBe(2);
+    poll.stop();
+  });
+
   it("clears host A immediately when rebinding to a stalled host B", async () => {
     const target = ref<HostEntry>({ ...remote });
     fetchMock.mockImplementation(

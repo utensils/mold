@@ -30,8 +30,8 @@ import {
 
 /** Per-host canned `/api/status` + `/api/models` responses, keyed by host id. */
 const statuses = new Map<string, unknown>();
-const models = new Map<string, ModelInfoExtended[]>();
-const devices = new Map<string, DeviceListResponse>();
+const models = new Map<string, ModelInfoExtended[] | Error>();
+const devices = new Map<string, DeviceListResponse | Error>();
 const capabilities = new Map<string, ServerCapabilities | Error>();
 const hostStatusCall = vi.hoisted(() => vi.fn());
 const hostQueueCall = vi.hoisted(() => vi.fn());
@@ -51,15 +51,19 @@ vi.mock("../components/machines/hostClient", () => ({
   hostStatus: (...args: unknown[]) => hostStatusCall(...args),
   hostModels: (host: HostEntry) => {
     const canned = models.get(host.id);
-    return canned
-      ? Promise.resolve(canned)
-      : Promise.reject(new Error("unreachable"));
+    return canned instanceof Error
+      ? Promise.reject(canned)
+      : canned
+        ? Promise.resolve(canned)
+        : Promise.reject(new Error("unreachable"));
   },
   hostDevices: (host: HostEntry) => {
     const canned = devices.get(host.id);
-    return canned
-      ? Promise.resolve(canned)
-      : Promise.reject(new Error("legacy server"));
+    return canned instanceof Error
+      ? Promise.reject(canned)
+      : canned
+        ? Promise.resolve(canned)
+        : Promise.reject(new Error("legacy server"));
   },
   hostQueue: (...args: unknown[]) => hostQueueCall(...args),
   hostCapabilities: (host: HostEntry) => {
@@ -1704,45 +1708,65 @@ describe("useHostRouting", () => {
     });
   });
 
-  it("retires verified routing authority after an authenticated host rejects its credential", async () => {
-    const studio = addHost({
-      url: "http://studio:7680",
-      name: "Studio",
-      apiKey: "rejected-key",
-      instanceId: "instance-a",
-    });
-    statuses.set(ORIGIN_HOST_ID, status());
-    models.set(ORIGIN_HOST_ID, []);
-    statuses.set(
-      studio.id,
-      status({ instance_id: "instance-a", queue_depth: 4 }),
-    );
-    models.set(studio.id, [model("old-model")]);
-    capabilities.set(studio.id, { gallery: { can_delete: true } });
-    setGenerateTargetId(studio.id);
-    const routing = useHostRouting();
-    await routing.refresh();
+  it.each(["status", "models", "devices", "queue", "capabilities"] as const)(
+    "retires verified routing authority when %s rejects the host credential",
+    async (endpoint) => {
+      const studio = addHost({
+        url: "http://studio:7680",
+        name: "Studio",
+        apiKey: "rejected-key",
+        instanceId: "instance-a",
+      });
+      statuses.set(ORIGIN_HOST_ID, status());
+      models.set(ORIGIN_HOST_ID, []);
+      statuses.set(
+        studio.id,
+        status({ instance_id: "instance-a", queue_depth: 4 }),
+      );
+      models.set(studio.id, [model("old-model")]);
+      capabilities.set(studio.id, { gallery: { can_delete: true } });
+      setGenerateTargetId(studio.id);
+      const routing = useHostRouting();
+      await routing.refresh();
 
-    hostStatusCall.mockImplementation((host: HostEntry) =>
-      host.id === studio.id
-        ? Promise.reject(
-            new ApiHttpError("GET /api/status", 401, "API key was rejected"),
-          )
-        : Promise.resolve(status()),
-    );
-    await routing.refresh();
+      const rejection = new ApiHttpError(
+        `GET /api/${endpoint}`,
+        401,
+        "API key was rejected",
+      );
+      if (endpoint === "status") {
+        hostStatusCall.mockImplementation((host: HostEntry) =>
+          host.id === studio.id
+            ? Promise.reject(rejection)
+            : Promise.resolve(status()),
+        );
+      } else if (endpoint === "models") {
+        models.set(studio.id, rejection);
+      } else if (endpoint === "devices") {
+        devices.set(studio.id, rejection);
+      } else if (endpoint === "queue") {
+        hostQueueCall.mockImplementation((host: HostEntry) =>
+          host.id === studio.id
+            ? Promise.reject(rejection)
+            : Promise.resolve({ entries: [], plan: null }),
+        );
+      } else {
+        capabilities.set(studio.id, rejection);
+      }
+      await routing.refresh();
 
-    expect(
-      routing.hosts.value.find((host) => host.id === studio.id),
-    ).toMatchObject({
-      status: "connecting",
-      stale: false,
-      queueDepth: null,
-    });
-    expect(routing.capabilitiesByHost.value[studio.id]).toBeUndefined();
-    expect(routing.inventoryKnown(studio.id)).toBe(false);
-    expect(routing.resolve("old-model")).toBeNull();
-  });
+      expect(
+        routing.hosts.value.find((host) => host.id === studio.id),
+      ).toMatchObject({
+        status: "connecting",
+        stale: false,
+        queueDepth: null,
+      });
+      expect(routing.capabilitiesByHost.value[studio.id]).toBeUndefined();
+      expect(routing.inventoryKnown(studio.id)).toBe(false);
+      expect(routing.resolve("old-model")).toBeNull();
+    },
+  );
 
   it("fences last-good authority when a successful poll reports a replacement instance", async () => {
     const studio = addHost({

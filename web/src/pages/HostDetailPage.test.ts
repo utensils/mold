@@ -29,6 +29,8 @@ let poll: {
   deviceState: ReturnType<typeof ref<DeviceListResponse | null>>;
   resources: ReturnType<typeof ref<ResourceSnapshot | null>>;
   online: ReturnType<typeof ref<boolean>>;
+  stale: ReturnType<typeof ref<boolean>>;
+  authorityRejected: ReturnType<typeof ref<boolean>>;
   lastSeen: ReturnType<typeof ref<number | null>>;
   error: ReturnType<typeof ref<string | null>>;
   loading: ReturnType<typeof ref<boolean>>;
@@ -291,6 +293,8 @@ beforeEach(() => {
     deviceState: ref<DeviceListResponse | null>(null),
     resources: ref<ResourceSnapshot | null>(makeResources()),
     online: ref(true),
+    stale: ref(false),
+    authorityRejected: ref(false),
     lastSeen: ref<number | null>(Date.now()),
     error: ref<string | null>(null),
     loading: ref(false),
@@ -305,6 +309,20 @@ afterEach(() => {
 });
 
 describe("HostDetailPage — telemetry", () => {
+  it("shows reconnecting with last-good detail instead of a false offline state", async () => {
+    poll.stale.value = true;
+    poll.online.value = true;
+    poll.status.value = makeStatus({ queue_depth: 6 });
+
+    const w = await mountDetail();
+
+    expect(w.find('[data-test="detail-offline"]').exists()).toBe(false);
+    expect(w.get('[data-test="detail-reconnecting"]').text()).toContain(
+      "reconnecting",
+    );
+    expect(w.text()).toContain("6");
+  });
+
   it("subscribes with the viewed host key and refreshes authoritative state", async () => {
     const host = getHost(routeHolder.id)!;
     updateHost(routeHolder.id, { apiKey: "host-key" });
@@ -329,30 +347,33 @@ describe("HostDetailPage — telemetry", () => {
     expect(subscribeToDeviceSnapshots).toHaveBeenCalledTimes(1);
   });
 
-  it("threads the active session signal through interval and SSE reloads", async () => {
+  it("serializes interval and SSE reloads behind the active session wave", async () => {
     vi.useFakeTimers();
     try {
+      const first = deferred<{ entries: QueueEntry[] }>();
+      const second = deferred<{ entries: QueueEntry[] }>();
+      hostQueueCall
+        .mockImplementationOnce(() => first.promise)
+        .mockImplementationOnce(() => second.promise);
       wrapper = mount(HostDetailPage);
       await nextTick();
       await Promise.resolve();
       const sessionSignal = hostQueueCall.mock.calls[0]![1] as AbortSignal;
       const refresh = subscribeToDeviceSnapshots.mock
         .calls[0]![2] as () => void;
-
-      hostQueueCall.mockClear();
       await vi.advanceTimersByTimeAsync(4_000);
-      expect(hostQueueCall).toHaveBeenCalledWith(
-        expect.objectContaining({ id: routeHolder.id }),
-        sessionSignal,
-      );
-
-      hostQueueCall.mockClear();
       refresh();
       await Promise.resolve();
-      expect(hostQueueCall).toHaveBeenCalledWith(
+      expect(hostQueueCall).toHaveBeenCalledTimes(1);
+
+      first.resolve({ entries: [queued("first", 0)] });
+      await vi.waitFor(() => expect(hostQueueCall).toHaveBeenCalledTimes(2));
+      expect(hostQueueCall).toHaveBeenLastCalledWith(
         expect.objectContaining({ id: routeHolder.id }),
         sessionSignal,
       );
+      second.resolve({ entries: [queued("second", 0)] });
+      await flushPromises();
       expect(sessionSignal.aborted).toBe(false);
     } finally {
       wrapper?.unmount();
@@ -361,7 +382,29 @@ describe("HostDetailPage — telemetry", () => {
     }
   });
 
-  it("ignores an older same-host queue response after a newer event refresh", async () => {
+  it("preserves last-good capabilities when a later wave times out", async () => {
+    const lastGood = { ...caps, gallery: { can_delete: true } };
+    poll.devices.value = [makeDevice(0)];
+    poll.deviceState.value = {
+      devices: poll.devices.value,
+      plan_version: 1,
+    };
+    hostCapabilitiesCall
+      .mockResolvedValueOnce(lastGood)
+      .mockRejectedValueOnce(new Error("capability timeout"));
+
+    wrapper = mount(HostDetailPage);
+    await flushPromises();
+    const refresh = subscribeToDeviceSnapshots.mock.calls[0]![2] as () => void;
+    refresh();
+    await flushPromises();
+
+    expect(hostCapabilitiesCall).toHaveBeenCalledTimes(2);
+    expect(wrapper.find('[data-test="detail-offline"]').exists()).toBe(false);
+    expect(wrapper.find('[data-test="device-toggle-0"]').exists()).toBe(true);
+  });
+
+  it("runs an event refresh after the current same-host queue wave settles", async () => {
     const older = deferred<{ entries: QueueEntry[] }>();
     const newer = deferred<{ entries: QueueEntry[] }>();
     hostQueueCall
@@ -374,10 +417,11 @@ describe("HostDetailPage — telemetry", () => {
     const refresh = subscribeToDeviceSnapshots.mock.calls[0]![2] as () => void;
     refresh();
     await Promise.resolve();
+    expect(hostQueueCall).toHaveBeenCalledTimes(1);
 
-    newer.resolve({ entries: [queued("newer", 0)] });
-    await flushPromises();
     older.resolve({ entries: [queued("older", 0)] });
+    await vi.waitFor(() => expect(hostQueueCall).toHaveBeenCalledTimes(2));
+    newer.resolve({ entries: [queued("newer", 0)] });
     await flushPromises();
 
     expect(wrapper.text()).toContain("flux-newer");

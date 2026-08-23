@@ -1742,12 +1742,134 @@ describe("hosts store", () => {
     expect(secretSet).toHaveBeenCalledWith(`remote-api-key.${hal.id}`, "rotated-key");
     expect(hosts.extras.find((host) => host.id === hal.id)).toMatchObject({
       apiKey: "rotated-key",
-      status: "ready",
+      status: "connecting",
       error: null,
     });
+    await hosts.refresh();
+    expect(hosts.extras.find((host) => host.id === hal.id)?.status).toBe("ready");
+  });
+
+  it.each(["devices", "queue", "capabilities"] as const)(
+    "retires all verified authority when the %s health probe rejects the credential",
+    async (endpoint) => {
+      const hosts = useHostsStore();
+      hosts.extras.push({
+        id: hal.id,
+        label: "hal9000",
+        url: hal.url,
+        apiKey: "rejected-key",
+        status: "ready",
+        error: null,
+        instanceId: "instance-a",
+      });
+      hosts.telemetry[hal.id] = {
+        queueDepth: 2,
+        queueCapacity: 8,
+        version: "last-good",
+        instanceId: "instance-a",
+        stale: false,
+      };
+      hosts.capabilities[hal.id] = { gallery: { can_delete: true } };
+      useHostModelsStore().byHost[hal.id] = {
+        entries: [installedModel("old-model")],
+        fetchedAt: Date.now(),
+        error: null,
+      };
+      apiJsonTo.mockImplementation((target: { baseUrl: string }, path: string) => {
+        if (
+          endpoint === "capabilities" &&
+          target.baseUrl.includes("hal9000") &&
+          path === "/api/capabilities"
+        )
+          return Promise.reject(new ApiError("API key was rejected", 403));
+        return Promise.resolve({
+          queue_depth: 1,
+          queue_capacity: 8,
+          version: "current",
+          instance_id: target.baseUrl.includes("hal9000") ? "instance-a" : "local",
+        });
+      });
+      listDevices.mockImplementation((target: { baseUrl: string }) =>
+        endpoint === "devices" && target.baseUrl.includes("hal9000")
+          ? Promise.reject(new ApiError("API key was rejected", 401))
+          : Promise.resolve({ plan_version: 1, devices: [device(0)] }),
+      );
+      listQueue.mockImplementation((target: { baseUrl: string }) =>
+        endpoint === "queue" && target.baseUrl.includes("hal9000")
+          ? Promise.reject(new ApiError("API key was rejected", 401))
+          : Promise.resolve({ entries: [], plan: null }),
+      );
+
+      await hosts.refresh();
+
+      expect(hosts.all.find((host) => host.id === hal.id)).toMatchObject({
+        status: "connecting",
+        stale: false,
+      });
+      expect(hosts.telemetry[hal.id]).toBeUndefined();
+      expect(hosts.capabilities[hal.id]).toBeUndefined();
+      expect(useHostModelsStore().byHost[hal.id]).toBeUndefined();
+    },
+  );
+
+  it("retires verified authority immediately when a host key changes", async () => {
+    const nextStatus = deferred<Record<string, unknown>>();
+    const hosts = useHostsStore();
+    hosts.extras.push({
+      id: hal.id,
+      label: "hal9000",
+      url: hal.url,
+      apiKey: "old-key",
+      status: "ready",
+      error: null,
+      instanceId: "instance-a",
+    });
+    hosts.telemetry[hal.id] = {
+      queueDepth: 4,
+      queueCapacity: 8,
+      version: "old",
+      instanceId: "instance-a",
+      stale: false,
+    };
+    hosts.capabilities[hal.id] = { gallery: { can_delete: true } };
+    useHostModelsStore().byHost[hal.id] = {
+      entries: [installedModel("old-model")],
+      fetchedAt: Date.now(),
+      error: null,
+    };
+    testRemoteHost.mockResolvedValue({
+      ok: true,
+      version: "current",
+      error: null,
+      instanceId: "instance-a",
+      hostname: "hal9000",
+    });
+    apiJsonTo.mockImplementation(
+      (target: { baseUrl: string; apiKey: string | null }, path: string) =>
+        target.baseUrl.includes("hal9000") && target.apiKey === "new-key" && path === "/api/status"
+          ? nextStatus.promise
+          : Promise.resolve({}),
+    );
+
+    const connected = await hosts.connect(hal.url, "new-key", null);
+
+    expect(connected.status).toBe("connecting");
+    expect(hosts.telemetry[hal.id]).toBeUndefined();
+    expect(hosts.capabilities[hal.id]).toBeUndefined();
+    expect(useHostModelsStore().byHost[hal.id]).toBeUndefined();
+
+    nextStatus.resolve({
+      queue_depth: 1,
+      queue_capacity: 8,
+      version: "new",
+      instance_id: "instance-a",
+    });
+    await hosts.refresh();
+    expect(hosts.all.find((host) => host.id === hal.id)?.status).toBe("ready");
   });
 
   it("adopts a validated replacement address for a verified stale instance twin", async () => {
+    const nextStatus = deferred<Record<string, unknown>>();
     const hosts = useHostsStore();
     hosts.extras.push({
       id: hal.id,
@@ -1766,6 +1888,12 @@ describe("hosts store", () => {
       hostname: "hal9000",
       stale: true,
     };
+    hosts.capabilities[hal.id] = { gallery: { can_delete: true } };
+    useHostModelsStore().byHost[hal.id] = {
+      entries: [installedModel("old-model")],
+      fetchedAt: Date.now(),
+      error: null,
+    };
     testRemoteHost.mockResolvedValue({
       ok: true,
       version: "current",
@@ -1773,12 +1901,29 @@ describe("hosts store", () => {
       instanceId: "instance-a",
       hostname: "hal9000",
     });
+    apiJsonTo.mockImplementation((target: { baseUrl: string }, path: string) =>
+      target.baseUrl.includes("192.168.1.99") && path === "/api/status"
+        ? nextStatus.promise
+        : Promise.resolve({}),
+    );
 
     const connected = await hosts.connect("http://192.168.1.99:7680", "host-key", null);
 
     expect(connected.id).toBe(hal.id);
+    expect(connected.status).toBe("connecting");
     expect(connected.baseUrl).toBe("http://192.168.1.99:7680");
     expect(hosts.extras.find((host) => host.id === hal.id)?.url).toBe("http://192.168.1.99:7680");
+    expect(hosts.telemetry[hal.id]).toBeUndefined();
+    expect(hosts.capabilities[hal.id]).toBeUndefined();
+    expect(useHostModelsStore().byHost[hal.id]).toBeUndefined();
+
+    nextStatus.resolve({
+      queue_depth: 0,
+      queue_capacity: 8,
+      version: "new",
+      instance_id: "instance-a",
+    });
+    await hosts.refresh();
   });
 
   it("fences capabilities from a replaced server identity", async () => {
@@ -2325,12 +2470,14 @@ describe("hosts store", () => {
     // The twin's surviving slug adopts the validated URL instead of keeping
     // the dead one forever.
     expect(view.id).toBe(hal.id);
-    expect(view.status).toBe("ready");
+    expect(view.status).toBe("connecting");
     expect(view.baseUrl).toBe("http://192.168.1.99:7680");
     const persisted = appSettingsSet.mock.lastCall?.[0] as ReturnType<typeof settings>;
     expect(persisted.savedHosts.find((h: SavedHost) => h.id === hal.id)?.url).toBe(
       "http://192.168.1.99:7680",
     );
+    await hosts.refresh();
+    expect(hosts.extras.find((host) => host.id === hal.id)?.status).toBe("ready");
   });
 
   it("connect() adopts a newly typed key onto its errored twin (key rotation)", async () => {
@@ -2363,8 +2510,10 @@ describe("hosts store", () => {
     expect(secretSet).toHaveBeenCalledWith("remote-api-key.hal9000-7680", "new-key");
     const live = hosts.extras.find((h) => h.id === hal.id)!;
     expect(live.apiKey).toBe("new-key");
-    expect(live.status).toBe("ready");
+    expect(live.status).toBe("connecting");
     expect(live.error).toBeNull();
+    await hosts.refresh();
+    expect(live.status).toBe("ready");
   });
 
   it("connect() keeps two servers with the same instance id but different hostnames separate", async () => {

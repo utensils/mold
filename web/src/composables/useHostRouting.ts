@@ -507,11 +507,13 @@ async function pollHost(entry: HostEntry): Promise<void> {
     return;
   }
   let instanceChanged = false;
-  const authorityRejected =
-    status.status === "rejected" &&
-    (status.reason instanceof ApiError ||
-      status.reason instanceof ApiHttpError) &&
-    (status.reason.status === 401 || status.reason.status === 403);
+  const authorityRejected = [status, models, devices, queue, capabilities].some(
+    (result) =>
+      result.status === "rejected" &&
+      (result.reason instanceof ApiError ||
+        result.reason instanceof ApiHttpError) &&
+      (result.reason.status === 401 || result.reason.status === 403),
+  );
   if (authorityRejected) {
     // Authentication is authoritative security evidence, unlike congestion.
     // Retire everything read under the rejected credential without claiming
