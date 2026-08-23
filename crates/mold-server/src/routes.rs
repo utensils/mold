@@ -301,6 +301,7 @@ use crate::queue::clean_error_message;
         list_devices,
         patch_device,
         list_queue,
+        get_queue_job_preview,
         patch_queue_job,
         cancel_queue_job,
         pause_queue,
@@ -709,6 +710,7 @@ pub fn create_router(state: AppState) -> Router {
             "/api/queue/:id",
             patch(patch_queue_job).delete(cancel_queue_job),
         )
+        .route("/api/queue/:id/preview", get(get_queue_job_preview))
         .route("/api/history", get(list_history).delete(delete_history))
         .route("/api/capabilities", get(server_capabilities))
         .route("/api/licenses", get(list_licenses_endpoint))
@@ -5034,6 +5036,27 @@ async fn list_queue(State(state): State<AppState>) -> Json<crate::job_registry::
     listing.plan = state.scheduled_work.latest_plan();
     project_durable_queue_state(&state, &mut listing);
     Json(listing)
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/queue/{id}/preview",
+    tag = "queue",
+    params(("id" = String, Path, description = "Server generation job ID")),
+    responses(
+        (status = 200, description = "Latest live denoise preview, or null before the first preview", body = Option<crate::job_registry::QueueJobPreview>),
+        (status = 404, description = "Job is no longer live"),
+    )
+)]
+async fn get_queue_job_preview(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Option<crate::job_registry::QueueJobPreview>>, ApiError> {
+    state
+        .job_registry
+        .preview_snapshot(&id)
+        .map(Json)
+        .ok_or_else(|| ApiError::queue_job_not_found(format!("queue job {id} is no longer live")))
 }
 
 /// Fold the durable journal into a `/api/queue` listing.

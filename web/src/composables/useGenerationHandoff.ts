@@ -1,9 +1,11 @@
 import { ref, type Ref } from "vue";
 import type { OutputMetadata } from "../types";
+import type { SelectedQueuePreviewSource } from "@studio/api/generationSelection";
 
 export interface GenerationHandoff {
   metadata: OutputMetadata;
   seedPinned: boolean | null;
+  queueSelection?: SelectedQueuePreviewSource;
 }
 
 const pending = ref<GenerationHandoff | null>(null);

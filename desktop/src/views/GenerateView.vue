@@ -24,6 +24,11 @@ import DownloadTargetDialog from "../components/models/DownloadTargetDialog.vue"
 import { useLicenseAcceptance } from "@studio/composables/useLicenseAcceptance";
 import { licenseRequirements } from "@studio/lib/licenseAcceptance";
 import type { GenerationPlacementPreview } from "@studio/api/generationPlacement";
+import {
+  watchSelectedQueuePreview,
+  type QueueJobPreview,
+  type SelectedQueuePreviewSource,
+} from "@studio/api/generationSelection";
 import CreateHeader from "../components/create/CreateHeader.vue";
 import ActivityStrip from "../components/create/ActivityStrip.vue";
 import ComposerCard from "../components/create/ComposerCard.vue";
@@ -760,7 +765,54 @@ function onDocumentKeydown(event: KeyboardEvent) {
   void nextTick(() => templatesToggleEl.value?.focus());
 }
 
-const job = computed(() => generation.active);
+const selectedQueueRender = ref<{
+  source: SelectedQueuePreviewSource;
+  width: number;
+  height: number;
+  model: string;
+  preview: QueueJobPreview | null;
+} | null>(null);
+let stopSelectedQueuePreview: (() => void) | null = null;
+
+function clearSelectedQueueRender() {
+  stopSelectedQueuePreview?.();
+  stopSelectedQueuePreview = null;
+  selectedQueueRender.value = null;
+}
+
+function inspectSelectedQueueRender(source: SelectedQueuePreviewSource | undefined) {
+  clearSelectedQueueRender();
+  if (!source?.running) return;
+  const host = hosts.all.find((candidate) => candidate.id === source.hostId);
+  if (!host?.baseUrl) return;
+  selectedQueueRender.value = {
+    source,
+    width: form.width,
+    height: form.height,
+    model: form.model,
+    preview: null,
+  };
+  stopSelectedQueuePreview = watchSelectedQueuePreview(
+    { baseUrl: host.baseUrl, apiKey: host.apiKey },
+    source.jobId,
+    (preview) => {
+      if (
+        selectedQueueRender.value?.source.hostId === source.hostId &&
+        selectedQueueRender.value.source.jobId === source.jobId
+      ) {
+        selectedQueueRender.value = { ...selectedQueueRender.value, preview };
+      }
+    },
+    750,
+    () => {
+      if (selectedQueueRender.value?.source.jobId === source.jobId) {
+        clearSelectedQueueRender();
+      }
+    },
+  );
+}
+
+const job = computed(() => (selectedQueueRender.value ? null : generation.active));
 const jobErrorMessage = computed(() =>
   job.value?.error
     ? describeTransportError(job.value.error, job.value.hostLabel)
@@ -1711,6 +1763,7 @@ async function generateSequence() {
     cancelSequenceSubmission();
     return;
   }
+  clearSelectedQueueRender();
   const entry = selectedSequenceEntry.value;
   if (!entry) {
     toasts.push("Choose an installed sequence-capable video model first.", "error");
@@ -2021,8 +2074,12 @@ function cancelSubmissionPlanning() {
   preparedSubmitting.value = false;
 }
 
-const previewWidth = computed(() => job.value?.width ?? form.width);
-const previewHeight = computed(() => job.value?.height ?? form.height);
+const previewWidth = computed(
+  () => selectedQueueRender.value?.width ?? job.value?.width ?? form.width,
+);
+const previewHeight = computed(
+  () => selectedQueueRender.value?.height ?? job.value?.height ?? form.height,
+);
 /**
  * The frame sizes itself with pure CSS — no measurement, observers, or
  * layout races (a JS-measured frame collapsed to 0×0 whenever the region
@@ -2038,6 +2095,12 @@ const previewFrameStyle = computed(() => ({
 }));
 
 const liveGenerationStatus = computed(() => {
+  const selected = selectedQueueRender.value;
+  if (selected) {
+    return selected.preview
+      ? `Developing ${selected.preview.step}/${selected.preview.total}`
+      : "Preparing selected print…";
+  }
   const j = job.value;
   if (!j || j.status === "complete" || j.status === "error") return "";
   if (j.status === "queued") return "Queued";
@@ -2047,6 +2110,14 @@ const liveGenerationStatus = computed(() => {
 });
 
 const edgeCode = computed(() => {
+  const selected = selectedQueueRender.value;
+  if (selected) {
+    const name = modelDisplayNameForId(selected.model, installedModels.value);
+    const progress = selected.preview
+      ? `${selected.preview.step}/${selected.preview.total}`
+      : "waiting for preview";
+    return `${name} · ${progress}`;
+  }
   const j = job.value;
   if (!j) return "";
   const name = modelDisplayNameForId(j.model, installedModels.value);
@@ -3152,6 +3223,7 @@ const emptyCanvasGuidance = computed(() =>
 async function generate() {
   if (generationInputBlockerReason.value || preparedSubmitting.value || submissionPlanning.value)
     return;
+  clearSelectedQueueRender();
   const prepared = preparedBatch.value;
   if (
     prepared &&
@@ -3645,6 +3717,7 @@ function applyPrefill() {
     );
   }
   applyPrefillToForm(form, prefill, installedModels.value);
+  inspectSelectedQueueRender("metadata" in prefill ? prefill.queueSelection : undefined);
   discloseMissingRestoredModel();
   if ("metadata" in prefill && prefill.metadata) {
     // A first/last-frame print restores every knob except its closing still:
@@ -3977,6 +4050,7 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  clearSelectedQueueRender();
   promptHistoryCoordinator.invalidate();
   if (!import.meta.env.TEST) liveActivity.stop();
   preparationGuard.invalidate();
@@ -4082,7 +4156,10 @@ onBeforeUnmount(() => {
           <!-- Must stretch to the canvas: the preview region's flex-1 height
                is what the frame is measured against — a content-sized column
                would collapse the frame to 0×0 (an invisible develop view). -->
-          <div v-else-if="job" class="flex h-full w-full min-h-0 flex-col items-center">
+          <div
+            v-else-if="job || selectedQueueRender"
+            class="flex h-full w-full min-h-0 flex-col items-center"
+          >
             <div
               data-test="preview-region"
               class="grid min-h-0 w-full flex-1 place-items-center self-stretch overflow-hidden [container-type:size]"
@@ -4091,7 +4168,7 @@ onBeforeUnmount(() => {
                 class="relative max-h-full w-full max-w-full overflow-hidden rounded-media border border-control-edge bg-print-surface"
                 data-test="preview-frame"
                 :style="previewFrameStyle"
-                @contextmenu="contextMenu.open($event, canvasMenu())"
+                @contextmenu="job ? contextMenu.open($event, canvasMenu()) : undefined"
               >
                 <!-- Audio is checked first: an audio print has no frames, so
                      the video probe falls through and the <img> below renders
@@ -4130,25 +4207,54 @@ onBeforeUnmount(() => {
                      tightens as denoising progresses and the grain resolves
                      over it, so the print literally develops on the canvas. -->
                 <img
-                  v-if="job && job.status !== 'complete' && job.previewUrl"
-                  :src="job.previewUrl"
+                  v-if="
+                    selectedQueueRender?.preview ||
+                    (job && job.status !== 'complete' && job.previewUrl)
+                  "
+                  data-test="develop-preview"
+                  :src="
+                    selectedQueueRender?.preview
+                      ? `data:image/png;base64,${selectedQueueRender.preview.image}`
+                      : (job?.previewUrl ?? '')
+                  "
                   alt=""
                   class="absolute inset-0 h-full w-full object-contain"
-                  :style="{ filter: `blur(${Math.max(2, 14 - 12 * jobProgress(job))}px)` }"
+                  :style="{
+                    filter: `blur(${Math.max(2, 14 - 12 * (selectedQueueRender?.preview ? selectedQueueRender.preview.step / selectedQueueRender.preview.total : job ? jobProgress(job) : 0))}px)`,
+                  }"
                 />
                 <!-- The grain canvas paints edge-to-edge (temperature wash), so
                      once previews exist it thins out with progress to reveal
                      the forming print underneath. -->
                 <DevelopCanvas
-                  v-if="job && job.status !== 'complete'"
-                  :seed="job.visualSeed"
-                  :progress="jobProgress(job)"
-                  :phase="jobPhase(job)"
+                  v-if="selectedQueueRender || (job && job.status !== 'complete')"
+                  :seed="job?.visualSeed ?? 'selected-queue-render'"
+                  :progress="
+                    selectedQueueRender?.preview
+                      ? selectedQueueRender.preview.step / selectedQueueRender.preview.total
+                      : job
+                        ? jobProgress(job)
+                        : 0
+                  "
+                  :phase="job ? jobPhase(job) : 'developing'"
                   class="absolute inset-0"
                   :style="{
-                    opacity: job.previewUrl
-                      ? String(Math.max(0.18, 1 - jobProgress(job) * 0.9))
-                      : '1',
+                    opacity:
+                      selectedQueueRender?.preview || job?.previewUrl
+                        ? String(
+                            Math.max(
+                              0.18,
+                              1 -
+                                (selectedQueueRender?.preview
+                                  ? selectedQueueRender.preview.step /
+                                    selectedQueueRender.preview.total
+                                  : job
+                                    ? jobProgress(job)
+                                    : 0) *
+                                  0.9,
+                            ),
+                          )
+                        : '1',
                   }"
                 />
                 <!-- Grain is the signature; the ring overlays it until the
@@ -4156,11 +4262,25 @@ onBeforeUnmount(() => {
                      print itself takes over. The status stays below the frame
                      where the grain cannot obscure it. -->
                 <div
-                  v-if="job && job.status !== 'complete' && !job.previewUrl"
+                  v-if="
+                    (selectedQueueRender && !selectedQueueRender.preview) ||
+                    (job && job.status !== 'complete' && !job.previewUrl)
+                  "
                   data-test="develop-progress"
                   class="pointer-events-none absolute inset-0 flex items-center justify-center"
                 >
-                  <ProgressRing :value="jobProgress(job) * 100" :size="96" show-label />
+                  <ProgressRing
+                    :value="
+                      selectedQueueRender?.preview
+                        ? (selectedQueueRender.preview.step / selectedQueueRender.preview.total) *
+                          100
+                        : job
+                          ? jobProgress(job) * 100
+                          : 0
+                    "
+                    :size="96"
+                    show-label
+                  />
                 </div>
               </div>
             </div>

@@ -1,6 +1,7 @@
 import { useRouter } from "vue-router";
 import type { FleetActiveWork } from "@studio/api/activity";
 import { listQueue } from "@studio/api/queuePlan";
+import { selectedQueueGeneration } from "@studio/api/generationSelection";
 import type { OutputMetadata } from "../lib/api/types";
 import { useComposerStore } from "../stores/composer";
 import { useHostsStore } from "../stores/hosts";
@@ -27,17 +28,18 @@ export function useOpenLiveWork() {
       }
       try {
         const queue = await listQueue({ baseUrl: host.baseUrl, apiKey: host.apiKey });
-        const entry = queue.entries.find((candidate) => candidate.id === row.id);
-        if (!entry?.metadata) {
+        const selection = selectedQueueGeneration<OutputMetadata>(queue.entries, row.id);
+        if (!selection) {
           toasts.push("This host cannot restore settings for that generation", "error");
           return;
         }
-        const metadata = entry.metadata as OutputMetadata;
         composer.set({
-          metadata:
-            entry.seed_pinned === false
-              ? ({ ...metadata, seed: null } as unknown as OutputMetadata)
-              : metadata,
+          metadata: selection.metadata,
+          queueSelection: {
+            hostId: row.hostId,
+            jobId: selection.jobId,
+            running: selection.running,
+          },
         });
         await router.push("/create");
       } catch (error) {

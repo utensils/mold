@@ -152,6 +152,11 @@ import {
   type FleetActiveWork,
 } from "@studio/api/activity";
 import { listQueue, type QueueListing } from "@studio/api/queuePlan";
+import {
+  selectedQueueGeneration,
+  watchSelectedQueuePreview,
+  type QueueJobPreview,
+} from "@studio/api/generationSelection";
 import { buildChainRequest } from "@studio/lib/sequenceForm";
 import { chainScriptToClips } from "@studio/lib/sequenceForm";
 import { normalizeServerChainScript } from "@studio/lib/chainScriptWire";
@@ -212,7 +217,6 @@ import {
 } from "../lib/chainRouting";
 import {
   applyModelDefaults,
-  applyMetadataToForm,
   applyRequestToForm,
   buildRequest,
   chainFilingFields,
@@ -1836,9 +1840,24 @@ function toggleQueueFailure(key: string): void {
 }
 
 let mobilePrintSelectionEpoch = 0;
+const selectedQueueRender = ref<{
+  hostId: string;
+  jobId: string;
+  width: number;
+  height: number;
+  preview: QueueJobPreview | null;
+} | null>(null);
+let stopSelectedQueuePreview: (() => void) | null = null;
+
+function clearSelectedQueueRender(): void {
+  stopSelectedQueuePreview?.();
+  stopSelectedQueuePreview = null;
+  selectedQueueRender.value = null;
+}
 
 async function selectMobilePrint(job: Job): Promise<void> {
   const epoch = ++mobilePrintSelectionEpoch;
+  clearSelectedQueueRender();
   generation.select(job.clientId);
   if (job.hostId && hosts.value.some((host) => host.id === job.hostId)) {
     await selectHost(job.hostId);
@@ -1961,23 +1980,48 @@ async function openMobileLiveWork(row: FleetActiveWork): Promise<void> {
       if (epoch !== mobileLiveWorkSelectionEpoch) return;
       await verifyAuthority();
       if (epoch !== mobileLiveWorkSelectionEpoch) return;
-      const entry = queue.entries.find((candidate) => candidate.id === row.id);
-      if (!entry?.metadata) {
+      const selection = selectedQueueGeneration<OutputMetadata>(queue.entries, row.id);
+      if (!selection) {
         setGenerationStatus("This host cannot restore settings for that generation.", true);
         return;
       }
       await selectHost(host.id);
       if (epoch !== mobileLiveWorkSelectionEpoch) return;
-      const metadata = entry.metadata as OutputMetadata;
-      applyMetadataToForm(
-        form,
-        entry.seed_pinned === false
-          ? ({ ...metadata, seed: null } as unknown as OutputMetadata)
-          : metadata,
-        generationModels.value,
-      );
+      const reuse = applyMobileGalleryMetadata(form, selection.metadata, generationModels.value);
+      if (reuse.sequenceUnsupportedReason) {
+        throw new Error(reuse.sequenceUnsupportedReason);
+      }
       draft.stopEditing();
       draft.output = "single";
+      clearSelectedQueueRender();
+      if (selection.running) {
+        selectedQueueRender.value = {
+          hostId: host.id,
+          jobId: selection.jobId,
+          width: form.width,
+          height: form.height,
+          preview: null,
+        };
+        stopSelectedQueuePreview = watchSelectedQueuePreview(
+          target,
+          selection.jobId,
+          (preview) => {
+            if (
+              epoch === mobileLiveWorkSelectionEpoch &&
+              selectedQueueRender.value?.hostId === host.id &&
+              selectedQueueRender.value.jobId === selection.jobId
+            ) {
+              selectedQueueRender.value = { ...selectedQueueRender.value, preview };
+            }
+          },
+          750,
+          () => {
+            if (selectedQueueRender.value?.jobId === selection.jobId) {
+              clearSelectedQueueRender();
+            }
+          },
+        );
+      }
       setGenerationStatus("Prompt settings restored");
       tab.value = "generate";
       void nextTick(() => document.querySelector<HTMLTextAreaElement>("#mobile-prompt")?.focus());
@@ -2040,6 +2084,7 @@ const sequenceRowProgress = computed(() => {
   return progress && progress.total > 0 ? Math.round((progress.step / progress.total) * 100) : null;
 });
 const activeGeneration = computed(() => {
+  if (selectedQueueRender.value) return null;
   const active = generation.active;
   return active && active.status !== "complete" && active.status !== "error" ? active : null;
 });
@@ -2143,6 +2188,11 @@ const expansionPullEtaSeconds = computed(() => {
 });
 const queueAnnouncement = computed(() => activityAnnouncement(activityCounts.value));
 const generationStatus = computed(() => {
+  const selected = selectedQueueRender.value;
+  if (selected) {
+    const preview = selected.preview;
+    return preview ? `Developing ${preview.step} / ${preview.total}` : progress.value;
+  }
   const active = activeGeneration.value;
   if (!active) return progress.value;
   switch (active.status) {
@@ -3221,6 +3271,7 @@ async function submitMobileSequence(): Promise<void> {
     cancelMobileSequenceSubmission();
     return;
   }
+  clearSelectedQueueRender();
   fileUnderDropNotice.value = "";
   const automatic = automaticRouting.value;
   // Under an automatic policy the machine is provisional until the placement
@@ -4764,6 +4815,7 @@ async function prepareGenerationRequest(
 }
 
 async function generate(): Promise<void> {
+  clearSelectedQueueRender();
   fileUnderDropNotice.value = "";
   const prepared = preparedBatch.value;
   if (effectiveBatchSize.value > 1 && !prepared) {
@@ -5808,6 +5860,7 @@ async function loadMoreGalleryPage(): Promise<void> {
 
 async function reusePrint(print: GalleryPrint): Promise<void> {
   if (reusingPrint.value || print.metadata_synthetic) return;
+  clearSelectedQueueRender();
   const epoch = ++reusePrintEpoch;
   reusePrintController?.abort();
   const controller = new AbortController();
@@ -8181,6 +8234,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   unmounted = true;
+  clearSelectedQueueRender();
   reusePrintEpoch += 1;
   reusePrintController?.abort();
   sourceUseEpoch += 1;
@@ -8939,33 +8993,56 @@ onBeforeUnmount(() => {
                grain's rAF loop stays parked (nothing mounts), which keeps the
                WebKit compositor free during model load. -->
             <div
-              v-if="activeGeneration && activeGeneration.previewUrl"
+              v-if="
+                selectedQueueRender?.preview || (activeGeneration && activeGeneration.previewUrl)
+              "
               class="mobile-develop-bed"
               data-test="mobile-develop-bed"
               aria-hidden="true"
               :style="{
-                aspectRatio: `${activeGeneration.width} / ${activeGeneration.height}`,
+                aspectRatio: `${selectedQueueRender?.width ?? activeGeneration?.width ?? 1} / ${selectedQueueRender?.height ?? activeGeneration?.height ?? 1}`,
                 // The 55vh height cap rides the width axis (see mobile.css) so a
                 // portrait bed shrinks instead of distorting its layered media.
-                '--bed-ar': `${activeGeneration.width / Math.max(1, activeGeneration.height)}`,
+                '--bed-ar': `${(selectedQueueRender?.width ?? activeGeneration?.width ?? 1) / Math.max(1, selectedQueueRender?.height ?? activeGeneration?.height ?? 1)}`,
               }"
             >
               <img
                 class="mobile-develop-preview"
                 data-test="mobile-develop-preview"
-                :src="activeGeneration.previewUrl"
+                :src="
+                  selectedQueueRender?.preview
+                    ? `data:image/png;base64,${selectedQueueRender.preview.image}`
+                    : (activeGeneration?.previewUrl ?? '')
+                "
                 alt=""
                 :style="{
-                  filter: `blur(${Math.max(2, 14 - 12 * jobProgress(activeGeneration))}px)`,
+                  filter: `blur(${Math.max(2, 14 - 12 * (selectedQueueRender?.preview ? selectedQueueRender.preview.step / selectedQueueRender.preview.total : activeGeneration ? jobProgress(activeGeneration) : 0))}px)`,
                 }"
               />
               <DevelopCanvas
-                :seed="activeGeneration.visualSeed"
-                :progress="jobProgress(activeGeneration)"
-                :phase="jobPhase(activeGeneration)"
+                :seed="activeGeneration?.visualSeed ?? 0"
+                :progress="
+                  selectedQueueRender?.preview
+                    ? selectedQueueRender.preview.step / selectedQueueRender.preview.total
+                    : activeGeneration
+                      ? jobProgress(activeGeneration)
+                      : 0
+                "
+                :phase="activeGeneration ? jobPhase(activeGeneration) : 'developing'"
                 class="mobile-develop-grain"
                 :style="{
-                  opacity: String(Math.max(0.18, 1 - jobProgress(activeGeneration) * 0.9)),
+                  opacity: String(
+                    Math.max(
+                      0.18,
+                      1 -
+                        (selectedQueueRender?.preview
+                          ? selectedQueueRender.preview.step / selectedQueueRender.preview.total
+                          : activeGeneration
+                            ? jobProgress(activeGeneration)
+                            : 0) *
+                          0.9,
+                    ),
+                  ),
                 }"
               />
             </div>

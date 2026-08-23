@@ -2732,6 +2732,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn selected_queue_preview_is_scoped_to_a_live_job() {
+        let state = AppState::for_tests();
+        state.job_registry.register("rendering-a", "flux-dev:q4");
+        let registry = state.job_registry.clone();
+        let app = app_with_state(state);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get("/api/queue/rendering-a/preview")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(json_body(response).await, serde_json::Value::Null);
+
+        registry.record_preview("rendering-a", "UFJFVklFVw==".into(), 4, 20);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get("/api/queue/rendering-a/preview")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["image"], "UFJFVklFVw==");
+        assert_eq!(body["step"], 4);
+        assert_eq!(body["total"], 20);
+
+        registry.remove("rendering-a");
+        let response = app
+            .oneshot(
+                Request::get("/api/queue/rendering-a/preview")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
     async fn activity_snapshot_exposes_only_server_owned_nonterminal_work() {
         let mut state = AppState::for_tests();
         let home = tempfile::tempdir().unwrap();
@@ -8115,7 +8163,9 @@ mod tests {
             .unwrap();
         assert_eq!(generate_resp.status(), StatusCode::OK);
 
-        assert_eq!(progress_set_count.load(Ordering::SeqCst), 2);
+        // Non-streaming generations now install the shared preview observer too,
+        // and must clear that observer before returning the engine to the cache.
+        assert_eq!(progress_set_count.load(Ordering::SeqCst), 3);
         assert_eq!(progress_clear_count.load(Ordering::SeqCst), 3);
     }
 

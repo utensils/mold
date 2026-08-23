@@ -140,7 +140,9 @@ const placementPreviewMock = vi.hoisted(() =>
   })),
 );
 const promptHistoryApiMock = vi.hoisted(() =>
-  vi.fn(async () => ({ entries: [] })),
+  vi.fn<(...args: unknown[]) => Promise<unknown>>(async () => ({
+    entries: [],
+  })),
 );
 
 vi.mock("@studio/api/client", async (importOriginal) => ({
@@ -432,8 +434,18 @@ describe("CreatePage layout and behavior", () => {
 
   it("applies settings selected from recovered Now developing work", async () => {
     enterSequenceMode();
+    promptHistoryApiMock.mockImplementation(async (...args: unknown[]) =>
+      args[1] === "/api/queue/remote-print/preview"
+        ? { image: "UFJFVklFVw==", step: 8, total: 20 }
+        : { entries: [] },
+    );
     setGenerationHandoff({
       seedPinned: true,
+      queueSelection: {
+        hostId: ORIGIN_HOST_ID,
+        jobId: "remote-print",
+        running: true,
+      },
       metadata: {
         version: "1",
         model: "flux-dev",
@@ -446,7 +458,7 @@ describe("CreatePage layout and behavior", () => {
       } as OutputMetadata,
     });
 
-    mount(CreatePage, { global: { stubs: pageStubs() } });
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     await flushPromises();
 
     expect(useSequenceDraftStore().output).toBe("single");
@@ -457,6 +469,20 @@ describe("CreatePage layout and behavior", () => {
       steps: 20,
       guidance: 3.5,
     });
+    expect(promptHistoryApiMock).toHaveBeenCalledWith(
+      expect.objectContaining({ baseUrl: window.location.origin }),
+      "/api/queue/remote-print/preview",
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+    await flushPromises();
+    await wrapper.vm.$nextTick();
+    const previewSrc = wrapper
+      .getComponent({ name: "ResultCanvas" })
+      .props("previewSrc");
+    const stage = wrapper.getComponent({ name: "ResultCanvas" }).props("stage");
+    wrapper.unmount();
+    expect(stage).toBe("Developing 8 / 20");
+    expect(previewSrc).toBe("data:image/png;base64,UFJFVklFVw==");
     expect(takeGenerationHandoff()).toBeNull();
   });
 
@@ -4789,9 +4815,9 @@ function pageStubs() {
     },
     ResultCanvas: {
       name: "ResultCanvas",
-      props: ["mode", "variations", "resultCaption"],
+      props: ["mode", "variations", "resultCaption", "previewSrc", "stage"],
       template:
-        '<div data-test="result-canvas" :data-count="(variations||[]).length" :data-caption="resultCaption"><button data-test="queue-variations" @click="$emit(\'queue\')">queue</button></div>',
+        '<div data-test="result-canvas" :data-count="(variations||[]).length" :data-caption="resultCaption" :data-preview-src="previewSrc" :data-stage="stage"><button data-test="queue-variations" @click="$emit(\'queue\')">queue</button></div>',
     },
     CreateModelPicker: {
       name: "CreateModelPicker",

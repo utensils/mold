@@ -1,6 +1,7 @@
 import { useRouter } from "vue-router";
 import type { FleetActiveWork } from "@studio/api/activity";
 import { listQueue } from "@studio/api/queuePlan";
+import { selectedQueueGeneration } from "@studio/api/generationSelection";
 import type { OutputMetadata } from "../types";
 import type { HostRouting } from "./useHostRouting";
 import { setGenerationHandoff } from "./useGenerationHandoff";
@@ -34,10 +35,11 @@ export function useOpenLiveWork(routing: HostRouting) {
           baseUrl: host.url,
           apiKey: host.apiKey ?? null,
         });
-        const entry = queue.entries.find(
-          (candidate) => candidate.id === row.id,
+        const selection = selectedQueueGeneration<OutputMetadata>(
+          queue.entries,
+          row.id,
         );
-        if (!entry?.metadata) {
+        if (!selection) {
           toast(
             "error",
             "This host cannot restore settings for that generation.",
@@ -45,8 +47,13 @@ export function useOpenLiveWork(routing: HostRouting) {
           return;
         }
         setGenerationHandoff({
-          metadata: entry.metadata as OutputMetadata,
-          seedPinned: entry.seed_pinned ?? null,
+          metadata: selection.metadata,
+          seedPinned: true,
+          queueSelection: {
+            hostId: row.hostId,
+            jobId: selection.jobId,
+            running: selection.running,
+          },
         });
         await router.push("/create");
       } catch (error) {

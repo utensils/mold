@@ -135,6 +135,12 @@ import {
 } from "../api";
 import { apiJsonTo } from "@studio/api/client";
 import {
+  settingsRestoreMetadata,
+  watchSelectedQueuePreview,
+  type QueueJobPreview,
+  type SelectedQueuePreviewSource,
+} from "@studio/api/generationSelection";
+import {
   availablePromptHistoryStorage,
   PromptHistoryCoordinator,
   promptHistoryHostSignature,
@@ -1894,6 +1900,7 @@ async function onSubmitSequence() {
     cancelSequenceSubmit();
     return;
   }
+  clearSelectedQueueRender();
   const attempt = ++sequenceSubmitAttempt;
   const controller = new AbortController();
   sequenceSubmitController = controller;
@@ -2542,19 +2549,68 @@ watch(
   { immediate: true },
 );
 
+const selectedQueueRender = ref<{
+  source: SelectedQueuePreviewSource;
+  width: number;
+  height: number;
+  preview: QueueJobPreview | null;
+} | null>(null);
+let stopSelectedQueuePreview: (() => void) | null = null;
+
+function clearSelectedQueueRender() {
+  stopSelectedQueuePreview?.();
+  stopSelectedQueuePreview = null;
+  selectedQueueRender.value = null;
+}
+
+function inspectSelectedQueueRender(
+  source: SelectedQueuePreviewSource | undefined,
+) {
+  clearSelectedQueueRender();
+  if (!source?.running) return;
+  const host =
+    routing.hosts.value.find((candidate) => candidate.id === source.hostId) ??
+    listHosts().find((candidate) => candidate.id === source.hostId);
+  if (!host) return;
+  selectedQueueRender.value = {
+    source,
+    width: form.state.value.width,
+    height: form.state.value.height,
+    preview: null,
+  };
+  stopSelectedQueuePreview = watchSelectedQueuePreview(
+    { baseUrl: host.url, apiKey: host.apiKey ?? null },
+    source.jobId,
+    (preview) => {
+      if (
+        selectedQueueRender.value?.source.hostId === source.hostId &&
+        selectedQueueRender.value.source.jobId === source.jobId
+      ) {
+        selectedQueueRender.value = { ...selectedQueueRender.value, preview };
+      }
+    },
+    750,
+    () => {
+      if (selectedQueueRender.value?.source.jobId === source.jobId) {
+        clearSelectedQueueRender();
+      }
+    },
+  );
+}
+
 function applyGenerationHandoff() {
   const handoff = takeGenerationHandoff();
   if (!handoff) return;
   setOutput("single");
   draft.stopEditing();
   editBaselineShared.value = null;
-  const metadata =
-    handoff.seedPinned === false
-      ? ({ ...handoff.metadata, seed: null } as unknown as OutputMetadata)
-      : handoff.metadata;
+  const metadata = settingsRestoreMetadata(handoff.metadata, {
+    seedPinned: handoff.seedPinned,
+  });
   form.state.value = applyMetadataToForm(form.state.value, metadata, {
     models: models.value,
   });
+  inspectSelectedQueueRender(handoff.queueSelection);
   void restoreReusedIdentityPhoto(metadata);
   fileUnder.restoreFromMetadata(metadata);
   noticeFirstLastFrameRestore(metadata);
@@ -2729,6 +2785,7 @@ function percentFor(job: Job): number | null {
 // A naive newest-first pick would bind the canvas to a queued batch sibling
 // that never previews while an earlier sibling is mid-denoise.
 const runningJob = computed(() => {
+  if (selectedQueueRender.value) return null;
   const selected = stream.selectedJob.value;
   return selected?.state === "running"
     ? selected
@@ -2774,6 +2831,7 @@ const canvasMode = computed<
   "empty" | "generating" | "result" | "error" | "variations"
 >(() => {
   if (variations.value.length) return "variations";
+  if (selectedQueueRender.value) return "generating";
   if (runningJob.value) return "generating";
   // `latestError` exists only when an exact live/selected failure owns the
   // canvas. Do not second-guess that authority with persisted timestamps:
@@ -2785,9 +2843,23 @@ const canvasMode = computed<
 });
 
 const genProgress = computed(() =>
-  runningJob.value ? (percentFor(runningJob.value) ?? 0) : 0,
+  selectedQueueRender.value?.preview
+    ? Math.round(
+        (selectedQueueRender.value.preview.step /
+          selectedQueueRender.value.preview.total) *
+          100,
+      )
+    : runningJob.value
+      ? (percentFor(runningJob.value) ?? 0)
+      : 0,
 );
 const genStage = computed(() => {
+  const selected = selectedQueueRender.value;
+  if (selected) {
+    return selected.preview
+      ? `Developing ${selected.preview.step} / ${selected.preview.total}`
+      : "Preparing selected print";
+  }
   const j = runningJob.value;
   if (!j) return "";
   const p = j.progress;
@@ -2800,6 +2872,9 @@ const genStage = computed(() => {
 // latent until the first denoise step is reported, developing during, and the
 // canvas flips to result/error modes at finish so "fixed" never renders here.
 const developPhase = computed<DevelopPhase>(() => {
+  if (selectedQueueRender.value) {
+    return selectedQueueRender.value.preview ? "developing" : "latent";
+  }
   const j = runningJob.value;
   if (!j) return "latent";
   return j.progress.step !== null ? "developing" : "latent";
@@ -3553,6 +3628,7 @@ let submitController: AbortController | null = null;
 let submitAttempt = 0;
 async function onSubmit(allowStaleQuick = false) {
   if (submitInFlight.value) return;
+  clearSelectedQueueRender();
   const attempt = ++submitAttempt;
   const controller = new AbortController();
   submitController = controller;
@@ -4381,6 +4457,7 @@ function openItem(item: GalleryImage) {
 }
 
 function recreateFromGallery(item: GalleryImage) {
+  clearSelectedQueueRender();
   // The Create drawer can reuse a normal print without navigating, so retire
   // Sequence explicitly before applying that print's one-shot settings.
   setOutput("single");
@@ -4399,6 +4476,7 @@ function recreateFromGallery(item: GalleryImage) {
 let openJobEpoch = 0;
 
 function openJob(job: Job) {
+  clearSelectedQueueRender();
   const epoch = ++openJobEpoch;
   stream.select(job.id);
   setOutput("single");
@@ -4687,6 +4765,7 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
+  clearSelectedQueueRender();
   submitAttempt += 1;
   submitController?.abort(new Error("unmounted"));
   submitController = null;
@@ -5253,12 +5332,22 @@ onBeforeUnmount(() => {
             :prompt-optional="canSkipPrompt"
             :progress="genProgress"
             :stage="genStage"
-            :preview-src="runningJob?.previewUrl ?? undefined"
+            :preview-src="
+              selectedQueueRender?.preview
+                ? `data:image/png;base64,${selectedQueueRender.preview.image}`
+                : (runningJob?.previewUrl ?? undefined)
+            "
             :progress-fraction="genProgress / 100"
-            :develop-seed="runningJob?.seedVisual"
+            :develop-seed="
+              runningJob?.seedVisual ?? selectedQueueRender?.source.jobId
+            "
             :develop-phase="developPhase"
-            :print-width="runningJob?.request.width"
-            :print-height="runningJob?.request.height"
+            :print-width="
+              selectedQueueRender?.width ?? runningJob?.request.width
+            "
+            :print-height="
+              selectedQueueRender?.height ?? runningJob?.request.height
+            "
             :result-src="resultSrc"
             :result-audio-src="resultAudioSrc"
             :result-caption="resultCaption"
