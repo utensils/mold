@@ -58,6 +58,14 @@ concurrency:
 jobs:
   changes:
     name: Classify Android changes
+    # Generated release-plz PRs only mirror an already-tested main revision's
+    # version metadata. Match the repository-owned app and branch prefix so a
+    # user-controlled branch cannot bypass Android validation.
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.actor != 'release-plz-mold[bot]' ||
+      startsWith(github.head_ref, 'release-plz-') == false ||
+      github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ubuntu-latest
     permissions:
       contents: read
