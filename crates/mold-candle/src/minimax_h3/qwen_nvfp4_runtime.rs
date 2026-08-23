@@ -559,7 +559,7 @@ struct StreamingLayerLoader {
 }
 
 enum LoadedQwenArtifact {
-    Resident(OpenedH3QwenNvfp4AwqArtifact),
+    Resident(Box<OpenedH3QwenNvfp4AwqArtifact>),
     MetalStreamed(Arc<Mutex<StreamingArtifactState>>),
 }
 
@@ -973,7 +973,7 @@ pub unsafe fn load_h3_qwen_nvfp4_conditioner_from_authority(
     let policy_identity = authority.artifact.inspection().policy_sha256.clone();
     Ok(LoadedH3QwenNvfp4Conditioner {
         model: LoadedQwenModel::Resident(model),
-        artifact: LoadedQwenArtifact::Resident(authority.artifact),
+        artifact: LoadedQwenArtifact::Resident(Box::new(authority.artifact)),
         artifact_identity,
         header_identity,
         policy_identity,
