@@ -4184,8 +4184,18 @@ mod tests {
         use crate::removal::plan_removal;
         use crate::{Config, ModelConfig};
 
+        // Ownership is read from the manifest and requires a COMPLETE install,
+        // so this must be pinned to a temp root and materialize both stacks
+        // whole: the audio VAE and the runtime support configs count even
+        // though no `ModelConfig` field can name them, and without the pin the
+        // test consults whatever the host's real models dir happens to hold.
+        let _lock = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let root =
             std::env::temp_dir().join(format!("mold-h3-nvfp4-removal-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::env::set_var("MOLD_MODELS_DIR", &root);
         let int8 = find_manifest(FL2VA_COMFY).unwrap();
         let nvfp4 = find_manifest(FL2VA_COMFY_NVFP4).unwrap();
         let path_of = |manifest: &ModelManifest, component: ModelComponent| {
@@ -4198,16 +4208,19 @@ mod tests {
                 .to_string_lossy()
                 .to_string()
         };
+        for manifest in [int8, nvfp4] {
+            for file in &manifest.files {
+                let path = root.join(storage_path(manifest, file));
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(&path, b"weights").unwrap();
+            }
+        }
 
         let int8_transformer = path_of(int8, ModelComponent::Transformer);
         let nvfp4_transformer = path_of(nvfp4, ModelComponent::Transformer);
         let shared_encoder = path_of(int8, ModelComponent::TextEncoder);
         assert_eq!(shared_encoder, path_of(nvfp4, ModelComponent::TextEncoder));
-        for path in [&int8_transformer, &nvfp4_transformer, &shared_encoder] {
-            let path = std::path::Path::new(path);
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(path, b"weights").unwrap();
-        }
+        assert_ne!(int8_transformer, nvfp4_transformer);
 
         let mut config = Config::default();
         for (name, transformer) in [
@@ -4224,8 +4237,8 @@ mod tests {
             );
         }
 
-        // Removing the NVFP4 layout frees its own 12.5 GB transformer and
-        // nothing else: the conditioner is still owned by the INT8 stack.
+        // Removing the NVFP4 layout frees its own transformer and nothing
+        // else: the conditioner is still owned by the INT8 stack.
         let plan = plan_removal(&config, FL2VA_COMFY_NVFP4);
         let unique: Vec<&str> = plan
             .unique_files
@@ -4256,6 +4269,7 @@ mod tests {
             .any(|(path, owners)| path == &shared_encoder
                 && owners.iter().any(|owner| owner == FL2VA_COMFY_NVFP4)));
 
+        std::env::remove_var("MOLD_MODELS_DIR");
         let _ = std::fs::remove_dir_all(&root);
     }
 
