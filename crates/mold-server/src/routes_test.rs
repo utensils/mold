@@ -4521,6 +4521,7 @@ mod tests {
     async fn bulk_cancel_terminalizes_every_unhydrated_batch_child() {
         let root = tempfile::tempdir().unwrap();
         let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let blocking_db = db.clone();
         let (mut state, _rx) = durable_state(db, root.path());
         let (scheduled_tx, _scheduled_rx) = tokio::sync::mpsc::channel(1);
         state.scheduled_work = crate::scheduler::ScheduledWorkHandle::new(scheduled_tx);
@@ -4552,11 +4553,48 @@ mod tests {
         let admitted = json_body(admitted).await;
         let durable_id = admitted["id"].as_str().unwrap().to_string();
 
-        let cancelled = app
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let watchdog_released = Arc::new(AtomicBool::new(false));
+        let watchdog_released_in_thread = watchdog_released.clone();
+        let db_holder = std::thread::spawn(move || {
+            blocking_db
+                .as_ref()
+                .as_ref()
+                .unwrap()
+                .with_conn(|_| {
+                    locked_tx.send(()).unwrap();
+                    if release_rx.recv_timeout(Duration::from_secs(2)).is_err() {
+                        watchdog_released_in_thread.store(true, Ordering::SeqCst);
+                    }
+                    Ok(())
+                })
+                .unwrap();
+        });
+        locked_rx.recv().unwrap();
+
+        let cancel_app = app.clone();
+        let cancel_task = tokio::spawn(async move {
+            cancel_app
+                .oneshot(Request::delete("/api/queue").body(Body::empty()).unwrap())
+                .await
+                .unwrap()
+        });
+        tokio::task::yield_now().await;
+        let live_status = app
             .clone()
-            .oneshot(Request::delete("/api/queue").body(Body::empty()).unwrap())
+            .oneshot(Request::get("/api/status").body(Body::empty()).unwrap())
             .await
             .unwrap();
+        assert_eq!(live_status.status(), StatusCode::OK);
+        assert!(
+            !watchdog_released.load(Ordering::SeqCst),
+            "bulk cancellation blocked the current-thread async executor"
+        );
+        release_tx.send(()).unwrap();
+        db_holder.join().unwrap();
+
+        let cancelled = cancel_task.await.unwrap();
         assert_eq!(cancelled.status(), StatusCode::OK);
         let status = app
             .oneshot(

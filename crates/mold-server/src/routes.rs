@@ -5464,6 +5464,17 @@ where
         .map_err(|error| ApiError::internal(format!("queue read failed: {error:#}")))
 }
 
+async fn spawn_queue_mutation<T, F>(mutation: F) -> Result<T, ApiError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> anyhow::Result<T> + Send + 'static,
+{
+    tokio::task::spawn_blocking(mutation)
+        .await
+        .map_err(|error| ApiError::internal(format!("queue mutation task failed: {error}")))?
+        .map_err(|error| ApiError::internal(format!("queue mutation failed: {error:#}")))
+}
+
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 struct QueueListingResponse {
     entries: Vec<crate::job_registry::JobEntry>,
@@ -5844,7 +5855,11 @@ async fn cancel_queue_job(
         // falling straight through to 404 would show an operator work they
         // cannot act on.
         Err(crate::job_registry::QueuedJobCancelError::NotFound) => {
-            if !state.queue_journal.owns_cancellable_row(&id) {
+            let journal = state.queue_journal.clone();
+            let probe_id = id.clone();
+            let owns_row =
+                spawn_queue_read(move || Ok(journal.owns_cancellable_row(&probe_id))).await?;
+            if !owns_row {
                 return Err(ApiError::queue_job_not_found(format!(
                     "queue job {id} not found"
                 )));
@@ -5853,7 +5868,15 @@ async fn cancel_queue_job(
     }
     // Unconditional, not fence-aware: a cancel that lands during the shutdown
     // drain must not come back after the restart.
-    state.queue_journal.cancel_id(&id);
+    let journal = state.queue_journal.clone();
+    if let Err(error) = spawn_queue_mutation(move || {
+        journal.cancel_id(&id);
+        Ok(())
+    })
+    .await
+    {
+        tracing::warn!(?error, "queue cancellation persistence task failed");
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -5943,7 +5966,15 @@ async fn resume_queue(State(state): State<AppState>) -> Result<Json<QueuePauseRe
 async fn cancel_all_queue(State(state): State<AppState>) -> Json<QueueCancelAllResponse> {
     let _scheduler_mutation = state.scheduler_mutation_fence.lock().await;
     let cancelled = state.job_registry.cancel_all_queued();
-    state.queue_journal.cancel_all_queued();
+    let journal = state.queue_journal.clone();
+    if let Err(error) = spawn_queue_mutation(move || {
+        journal.cancel_all_queued();
+        Ok(())
+    })
+    .await
+    {
+        tracing::warn!(?error, "queue cancellation persistence task failed");
+    }
     Json(QueueCancelAllResponse { cancelled })
 }
 
@@ -9065,9 +9096,16 @@ mod tests {
         let blocking_thread = spawn_queue_read(|| Ok(std::thread::current().id()))
             .await
             .unwrap();
+        let mutation_thread = spawn_queue_mutation(|| Ok(std::thread::current().id()))
+            .await
+            .unwrap();
         assert_ne!(
             blocking_thread, runtime_thread,
             "SQLite queue reads must execute on Tokio's blocking pool"
+        );
+        assert_ne!(
+            mutation_thread, runtime_thread,
+            "SQLite queue mutations must execute on Tokio's blocking pool"
         );
     }
 

@@ -1778,6 +1778,41 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
         return;
     }
 
+    // The single-worker path owns the same durable dispatch transition as a
+    // GPU owner thread. In particular, feeder tickets start queued with an
+    // exact runtime token and must become running before terminal settlement
+    // can CAS and delete the row.
+    if let Some(claim) = claim_single_worker_dispatch(job.journal.as_ref()) {
+        match claim {
+            crate::queue_journal::DispatchClaim::Exhausted { attempts, cap } => {
+                let err_msg = format!(
+                    "'{}' was started {attempts} times without finishing (limit {cap}); \
+                     it is held for review instead of being retried",
+                    job.request.model
+                );
+                if let Some(ref tx) = job.progress_tx {
+                    let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
+                }
+                if let Some(ticket) = job.journal.take() {
+                    ticket.hold("dispatch attempts exhausted");
+                }
+                let _ = job.result_tx.send(Err(err_msg));
+                return;
+            }
+            crate::queue_journal::DispatchClaim::Fenced => {
+                let err_msg = "durable generation claim is stale; refusing dispatch".to_string();
+                tracing::warn!(job = %job.id, "single-worker path refused a stale durable feeder claim");
+                if let Some(ref tx) = job.progress_tx {
+                    let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
+                }
+                let _ = job.result_tx.send(Err(err_msg));
+                return;
+            }
+            crate::queue_journal::DispatchClaim::Granted
+            | crate::queue_journal::DispatchClaim::Untracked => {}
+        }
+    }
+
     // Single-GPU path: there's only one slot. `gpu=None` keeps the wire
     // shape consistent with multi-GPU even when we don't know the ordinal.
     state.job_registry.mark_running(&job.id, None);
@@ -2208,6 +2243,12 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
             let _ = job.result_tx.send(Err(err_msg));
         }
     }
+}
+
+fn claim_single_worker_dispatch(
+    ticket: Option<&crate::queue_journal::QueueTicket>,
+) -> Option<crate::queue_journal::DispatchClaim> {
+    ticket.map(crate::queue_journal::QueueTicket::claim_dispatch)
 }
 
 // ── Multi-GPU queue dispatcher ──────────────────────────────────────────────
@@ -3333,6 +3374,140 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["filename"], "print.png");
         assert_eq!(parsed["original_filename"], "print_original.png");
+    }
+
+    fn claimed_single_worker_ticket(
+        id: &str,
+    ) -> (
+        Arc<crate::queue_journal::QueueJournal>,
+        Arc<Option<MetadataDb>>,
+        crate::queue_journal::QueueTicket,
+    ) {
+        let root = tempfile::tempdir().unwrap().keep();
+        let db = Arc::new(Some(MetadataDb::open_in_memory().unwrap()));
+        let journal = Arc::new(crate::queue_journal::QueueJournal::new(
+            db.clone(),
+            Some(&root),
+            "single-worker-claim-test",
+        ));
+        let request = fake_request("mock-model");
+        journal
+            .record_batch(crate::queue_journal::BatchJournalAdmission {
+                id: "batch",
+                client_batch_id: "client",
+                request_sha256: "sha",
+                children: &[crate::queue_journal::JournalAdmission {
+                    id,
+                    request: &request,
+                    output_dir: Some(root.as_path()),
+                    target_gpu: None,
+                    completion_payload: SseCompletionPayload::MetadataOnly,
+                    batch_child: false,
+                    carries_reference_authority: false,
+                }],
+            })
+            .unwrap();
+        let claim = journal.claim_next_feeder().unwrap().unwrap();
+        assert_eq!(claim.row.id, id);
+        let ticket = journal.attach_claimed(id, claim.claim_token);
+        (journal, db, ticket)
+    }
+
+    #[test]
+    fn single_worker_claim_transitions_running_then_terminal_complete() {
+        let (journal, db, ticket) = claimed_single_worker_ticket("claimed");
+        assert_eq!(
+            mold_db::generation_queue::get(db.as_ref().as_ref().unwrap(), "claimed")
+                .unwrap()
+                .unwrap()
+                .state,
+            mold_db::generation_queue::QueueRowState::Queued
+        );
+        assert_eq!(
+            claim_single_worker_dispatch(Some(&ticket)),
+            Some(crate::queue_journal::DispatchClaim::Granted)
+        );
+        assert_eq!(
+            mold_db::generation_queue::get(db.as_ref().as_ref().unwrap(), "claimed")
+                .unwrap()
+                .unwrap()
+                .state,
+            mold_db::generation_queue::QueueRowState::Running
+        );
+        ticket.complete_with_result(Some(r#"{"filename":"claimed.png"}"#));
+        assert!(
+            mold_db::generation_queue::get(db.as_ref().as_ref().unwrap(), "claimed")
+                .unwrap()
+                .is_none()
+        );
+        let batch = journal.generation_batch("batch").unwrap();
+        assert_eq!(batch.children[0].state, "complete");
+    }
+
+    #[test]
+    fn single_worker_refuses_a_stale_claim_without_deleting_its_row() {
+        let (journal, db, ticket) = claimed_single_worker_ticket("stale");
+        let recovery = journal.recover_feeder_runtime().unwrap();
+        assert_eq!(recovery.claims_cleared, 1);
+        assert_eq!(
+            claim_single_worker_dispatch(Some(&ticket)),
+            Some(crate::queue_journal::DispatchClaim::Fenced)
+        );
+        drop(ticket);
+        let row = mold_db::generation_queue::get(db.as_ref().as_ref().unwrap(), "stale")
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.state, mold_db::generation_queue::QueueRowState::Queued);
+        assert_eq!(
+            journal.generation_batch("batch").unwrap().children[0].state,
+            "accepted"
+        );
+    }
+
+    #[test]
+    fn single_worker_keeps_unclaimed_legacy_ticket_behavior() {
+        let root = tempfile::tempdir().unwrap().keep();
+        let db = Arc::new(Some(MetadataDb::open_in_memory().unwrap()));
+        let journal = Arc::new(crate::queue_journal::QueueJournal::new(
+            db.clone(),
+            Some(&root),
+            "single-worker-legacy-test",
+        ));
+        let request = fake_request("mock-model");
+        let request_json = serde_json::to_string(&request).unwrap();
+        mold_db::generation_queue::insert(
+            db.as_ref().as_ref().unwrap(),
+            &mold_db::generation_queue::GenerationQueueRow {
+                id: "legacy".to_string(),
+                owner_uuid: journal.owner_uuid().unwrap().to_string(),
+                state: mold_db::generation_queue::QueueRowState::Queued,
+                model: request.model,
+                request_json,
+                output_dir: root,
+                target_gpu: None,
+                target_device_id: None,
+                completion_payload: "full".to_string(),
+                seed_pinned: false,
+                dispatch_attempts: 0,
+                replay_seen: 0,
+                held_reason: None,
+                created_at_ms: 1,
+                updated_at_ms: 1,
+                started_at_ms: None,
+            },
+        )
+        .unwrap();
+        let ticket = journal.attach("legacy");
+        assert_eq!(
+            claim_single_worker_dispatch(Some(&ticket)),
+            Some(crate::queue_journal::DispatchClaim::Granted)
+        );
+        ticket.discard();
+        assert!(
+            mold_db::generation_queue::get(db.as_ref().as_ref().unwrap(), "legacy")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

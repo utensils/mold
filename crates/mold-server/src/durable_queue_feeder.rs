@@ -217,18 +217,15 @@ async fn feed_available(
                 continue;
             }
         };
-        let target_gpu = row
-            .target_device_id
-            .as_deref()
-            .and_then(|device_id| {
-                state
-                    .gpu_pool
-                    .workers
-                    .iter()
-                    .find(|worker| crate::scheduler::worker_device_id(worker) == device_id)
-                    .map(|worker| worker.gpu.ordinal)
-            })
-            .or(row.target_gpu);
+        let target_gpu = match row.target_device_id.as_deref() {
+            Some(device_id) => state
+                .gpu_pool
+                .workers
+                .iter()
+                .find(|worker| crate::scheduler::worker_device_id(worker) == device_id)
+                .map(|worker| worker.gpu.ordinal),
+            None => row.target_gpu,
+        };
         let metadata = Box::new(mold_core::OutputMetadata::from_generate_request(
             &request,
             request.seed.unwrap_or(0),
@@ -445,6 +442,34 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(job.id, "job-0");
+        state.queue_journal.retain_all();
+        shutdown.cancel();
+        handle.await.unwrap();
+        drop(job);
+    }
+
+    #[tokio::test]
+    async fn missing_stable_device_pin_resumes_on_auto_not_recorded_ordinal() {
+        let (state, mut rx) = state(1);
+        admit(&state, 1);
+        mold_db::generation_queue::set_target_gpu(
+            state.metadata_db.as_ref().as_ref().unwrap(),
+            "job-0",
+            Some(7),
+            Some("cuda:missing-this-boot"),
+            2,
+        )
+        .unwrap();
+
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let handle = spawn(state.clone(), shutdown.clone());
+        let job = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(job.id, "job-0");
+        assert_eq!(state.job_registry.target_gpu("job-0"), Some(None));
+
         state.queue_journal.retain_all();
         shutdown.cancel();
         handle.await.unwrap();
