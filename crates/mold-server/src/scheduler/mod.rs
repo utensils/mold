@@ -5860,13 +5860,16 @@ fn exact_leased_execution_plan(
         .cloned()
 }
 
-fn reject_generation(state: &AppState, job: GenerationJob, error: String) {
+fn reject_generation(state: &AppState, mut job: GenerationJob, error: String) {
     if let Some(progress) = job.progress_tx {
         let _ = progress.send(SseMessage::Error(mold_core::SseErrorEvent::failed(
             error.clone(),
         )));
     }
     let id = job.id.clone();
+    if let Some(ticket) = job.journal.take() {
+        ticket.fail(&error);
+    }
     let _ = job.result_tx.send(Err(error));
     state.queue.decrement();
     state.job_registry.remove(&id);

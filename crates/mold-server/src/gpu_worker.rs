@@ -3753,24 +3753,32 @@ fn process_job_with_sink(
     // at replay instead would delete a job that merely waited behind a long
     // render through a few deploys, having never touched a GPU.
     if let Some(ticket) = job.journal.as_ref() {
-        if let crate::queue_journal::DispatchClaim::Exhausted { attempts, cap } =
-            ticket.claim_dispatch()
-        {
-            let err_msg = format!(
-                "'{model_name}' was started {attempts} times without finishing (limit {cap}); \
+        match ticket.claim_dispatch() {
+            crate::queue_journal::DispatchClaim::Exhausted { attempts, cap } => {
+                let err_msg = format!(
+                    "'{model_name}' was started {attempts} times without finishing (limit {cap}); \
                  it is held for review instead of being retried"
-            );
-            tracing::error!(gpu = ordinal, model = %model_name, attempts, cap, "held an exhausted durable queue row");
-            if let Some(ref tx) = job.progress_tx {
-                let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
+                );
+                tracing::error!(gpu = ordinal, model = %model_name, attempts, cap, "held an exhausted durable queue row");
+                if let Some(ref tx) = job.progress_tx {
+                    let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
+                }
+                // The row is already `held`; settle the ticket so its drop does
+                // not delete what the operator now needs to inspect.
+                if let Some(ticket) = job.journal.take() {
+                    ticket.hold("dispatch attempts exhausted");
+                }
+                let _ = job.result_tx.send(Err(err_msg));
+                return false;
             }
-            // The row is already `held`; settle the ticket so its drop does
-            // not delete what the operator now needs to inspect.
-            if let Some(ticket) = job.journal.take() {
-                ticket.hold("dispatch attempts exhausted");
+            crate::queue_journal::DispatchClaim::Fenced => {
+                let err_msg = "durable generation claim is stale; refusing dispatch".to_string();
+                tracing::warn!(job = %job.id, "refused a stale durable feeder claim");
+                let _ = job.result_tx.send(Err(err_msg));
+                return false;
             }
-            let _ = job.result_tx.send(Err(err_msg));
-            return false;
+            crate::queue_journal::DispatchClaim::Granted
+            | crate::queue_journal::DispatchClaim::Untracked => {}
         }
     }
 
@@ -4620,7 +4628,8 @@ fn finish_generation_success(
     // and replay it into a duplicate print.
     if let Some(ticket) = job.journal.take() {
         if saved_names.output.is_some() {
-            ticket.complete();
+            let result_json = saved_names.terminal_json();
+            ticket.complete_with_result(Some(&result_json));
         } else {
             tracing::error!(
                 job = %job.id,

@@ -447,6 +447,7 @@ pub struct QueueJournal {
     max_bytes: usize,
     max_dispatch_attempts: u32,
     max_replay_seen: u32,
+    feeder_notify: tokio::sync::Notify,
 }
 
 impl QueueJournal {
@@ -493,6 +494,7 @@ impl QueueJournal {
                 DEFAULT_MAX_DISPATCH_ATTEMPTS,
             ),
             max_replay_seen: env_u32(MAX_REPLAY_SEEN_ENV, DEFAULT_MAX_REPLAY_SEEN),
+            feeder_notify: tokio::sync::Notify::new(),
         }
     }
 
@@ -509,6 +511,7 @@ impl QueueJournal {
             max_bytes: DEFAULT_JOURNAL_MAX_BYTES,
             max_dispatch_attempts: DEFAULT_MAX_DISPATCH_ATTEMPTS,
             max_replay_seen: DEFAULT_MAX_REPLAY_SEEN,
+            feeder_notify: tokio::sync::Notify::new(),
         }
     }
 
@@ -644,17 +647,18 @@ impl QueueJournal {
         Some(QueueTicket {
             journal: Arc::clone(self),
             id: admission.id.to_string(),
+            claim_token: None,
             settled: false,
         })
     }
 
     /// Persist one heterogeneous parent index and all ordinary queue children
-    /// in a single SQLite transaction. `None` tickets means this was an
-    /// idempotent retry of an already-admitted parent.
+    /// in a single SQLite transaction. The boolean reports whether this call
+    /// inserted the batch rather than returning an idempotent retry.
     pub fn record_batch(
         self: &Arc<Self>,
         admission: BatchJournalAdmission<'_>,
-    ) -> Result<(GenerationBatchDetail, Option<Vec<QueueTicket>>), String> {
+    ) -> Result<(GenerationBatchDetail, bool), String> {
         let owner_uuid = self
             .owner_uuid
             .as_deref()
@@ -727,16 +731,10 @@ impl QueueJournal {
         };
         let (detail, inserted) = generation_batches::insert_or_get(db, &batch, &rows)
             .map_err(|error| format!("could not persist generation batch: {error:#}"))?;
-        let tickets = inserted.then(|| {
-            rows.iter()
-                .map(|(_, row)| QueueTicket {
-                    journal: Arc::clone(self),
-                    id: row.id.clone(),
-                    settled: false,
-                })
-                .collect()
-        });
-        Ok((detail, tickets))
+        if inserted {
+            self.feeder_notify.notify_one();
+        }
+        Ok((detail, inserted))
     }
 
     pub fn generation_batch(&self, id: &str) -> Option<GenerationBatchDetail> {
@@ -771,8 +769,69 @@ impl QueueJournal {
         QueueTicket {
             journal: Arc::clone(self),
             id: id.to_string(),
+            claim_token: None,
             settled: false,
         }
+    }
+
+    /// Claim exactly one oldest feeder-owned row. Payload hydration starts
+    /// only after this returns, so the deep backlog never enters memory.
+    pub(crate) fn claim_next_feeder(
+        self: &Arc<Self>,
+    ) -> anyhow::Result<Option<mold_db::generation_queue::QueueClaim>> {
+        let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
+            return Ok(None);
+        };
+        let token = uuid::Uuid::new_v4().to_string();
+        generation_queue::claim_next_feeder_owned(db, owner, &token, now_ms())
+    }
+
+    pub(crate) fn attach_claimed(self: &Arc<Self>, id: &str, claim_token: String) -> QueueTicket {
+        QueueTicket {
+            journal: Arc::clone(self),
+            id: id.to_string(),
+            claim_token: Some(claim_token),
+            settled: false,
+        }
+    }
+
+    pub(crate) fn feeder_notified(&self) -> impl std::future::Future<Output = ()> + '_ {
+        self.feeder_notify.notified()
+    }
+
+    pub(crate) fn wake_feeder(&self) {
+        self.feeder_notify.notify_one();
+    }
+
+    pub(crate) fn recover_feeder_runtime(
+        &self,
+    ) -> anyhow::Result<generation_queue::RuntimeClaimRecovery> {
+        let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
+            return Ok(generation_queue::RuntimeClaimRecovery::default());
+        };
+        generation_queue::recover_runtime_claims(db, owner, now_ms())
+    }
+
+    pub(crate) fn completed_output_exists(&self, id: &str) -> Result<bool, String> {
+        let Some(db) = self.db() else {
+            return Ok(false);
+        };
+        generation_queue::find_completed_job_ids(db, &[id.to_string()])
+            .map(|ids| ids.contains(id))
+            .map_err(|error| format!("{error:#}"))
+    }
+
+    pub(crate) fn repoint_output(&self, id: &str, output_dir: &Path) -> anyhow::Result<()> {
+        let Some(db) = self.db() else { return Ok(()) };
+        generation_queue::set_output_dir(db, id, &output_dir.to_string_lossy(), now_ms())?;
+        Ok(())
+    }
+
+    pub(crate) fn feeder_cancel_requested(&self, id: &str) -> anyhow::Result<bool> {
+        let Some(db) = self.db() else {
+            return Ok(false);
+        };
+        generation_batches::child_cancel_requested(db, id)
     }
 
     /// Drop one row regardless of the fence. The cancellation path: a job the
@@ -791,6 +850,33 @@ impl QueueJournal {
         }
     }
 
+    /// Cancel an API-visible queue id without stealing a feeder claim.
+    /// Unhydrated batch children settle atomically; claimed children are left
+    /// for their token-bearing ticket, and legacy rows keep direct deletion.
+    pub fn cancel_id(&self, id: &str) {
+        let Some(db) = self.db() else { return };
+        let terminal_error_json = serde_json::json!({ "message": "Cancelled" }).to_string();
+        let terminal = generation_batches::GenerationBatchTerminal {
+            state: generation_batches::GenerationBatchTerminalState::Cancelled,
+            error: Some("Cancelled"),
+            terminal_error_json: Some(&terminal_error_json),
+            result_json: None,
+            completed_at_ms: now_ms(),
+        };
+        if let Err(error) = generation_batches::finish_unclaimed_queued(db, id, terminal) {
+            tracing::warn!(job = %id, %error, "could not atomically cancel an unclaimed batch child");
+            return;
+        }
+        if let Err(error) = generation_batches::request_cancel_claimed(db, id, now_ms()) {
+            tracing::warn!(job = %id, %error, "could not mark a claimed batch child cancelling");
+            return;
+        }
+        if let Err(error) = generation_queue::delete_legacy(db, id) {
+            tracing::warn!(job = %id, %error, "could not remove a cancelled legacy queue row");
+        }
+        self.wake_feeder();
+    }
+
     /// Drop every still-queued row this server owns. Backs `DELETE /api/queue`.
     pub fn discard_all_queued(&self) {
         let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
@@ -802,6 +888,34 @@ impl QueueJournal {
                 "could not clear the durable queue after a bulk cancel"
             );
         }
+    }
+
+    pub fn cancel_all_queued(&self) {
+        let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
+            return;
+        };
+        let terminal_error_json = serde_json::json!({ "message": "Cancelled" }).to_string();
+        let terminal = generation_batches::GenerationBatchTerminal {
+            state: generation_batches::GenerationBatchTerminalState::Cancelled,
+            error: Some("Cancelled"),
+            terminal_error_json: Some(&terminal_error_json),
+            result_json: None,
+            completed_at_ms: now_ms(),
+        };
+        if let Err(error) = generation_batches::finish_all_unclaimed_queued(db, owner, terminal) {
+            tracing::warn!(%error, "could not atomically cancel unclaimed batch children");
+            return;
+        }
+        if let Err(error) =
+            generation_batches::request_cancel_all_claimed_queued(db, owner, now_ms())
+        {
+            tracing::warn!(%error, "could not mark claimed batch children cancelling");
+            return;
+        }
+        if let Err(error) = generation_queue::delete_all_queued_legacy(db, owner) {
+            tracing::warn!(%error, "could not clear legacy queued rows");
+        }
+        self.wake_feeder();
     }
 
     /// Reconcile the journal against reality before anything is replayed.
@@ -1328,6 +1442,8 @@ pub enum DispatchClaim {
     /// There is no row (journal disabled, or the job was cancelled). The job
     /// still runs — durability is additive, never a gate on execution.
     Untracked,
+    /// A feeder token no longer owns the row. The stale runtime must not run.
+    Fenced,
 }
 
 /// RAII owner of one journal row.
@@ -1340,6 +1456,7 @@ pub enum DispatchClaim {
 pub struct QueueTicket {
     journal: Arc<QueueJournal>,
     id: String,
+    claim_token: Option<String>,
     settled: bool,
 }
 
@@ -1350,11 +1467,48 @@ impl QueueTicket {
 
     /// The job produced its output. Delete the row unconditionally — a
     /// completed job must never be replayed, fence or no fence.
-    pub fn complete(mut self) {
+    pub fn complete(self) {
+        self.complete_with_result(None);
+    }
+
+    pub fn complete_with_result(mut self, result_json: Option<&str>) {
         self.settled = true;
+        if let Some(token) = self.claim_token.as_deref() {
+            self.finish_claimed(
+                token,
+                QueueRowState::Running,
+                mold_db::generation_batches::GenerationBatchTerminal {
+                    state: mold_db::generation_batches::GenerationBatchTerminalState::Complete,
+                    error: None,
+                    terminal_error_json: None,
+                    result_json,
+                    completed_at_ms: now_ms(),
+                },
+            );
+            return;
+        }
         self.journal
             .set_batch_child_state(&self.id, "complete", None);
         self.journal.discard_id(&self.id);
+    }
+
+    pub(crate) fn complete_before_dispatch(mut self) {
+        self.settled = true;
+        let Some(token) = self.claim_token.as_deref() else {
+            self.journal.discard_id(&self.id);
+            return;
+        };
+        self.finish_claimed(
+            token,
+            QueueRowState::Queued,
+            mold_db::generation_batches::GenerationBatchTerminal {
+                state: mold_db::generation_batches::GenerationBatchTerminalState::Complete,
+                error: None,
+                terminal_error_json: None,
+                result_json: None,
+                completed_at_ms: now_ms(),
+            },
+        );
     }
 
     /// The job was explicitly cancelled. Same unconditional delete as
@@ -1362,8 +1516,36 @@ impl QueueTicket {
     /// fence.
     pub fn discard(mut self) {
         self.settled = true;
+        if let Some(token) = self.claim_token.as_deref() {
+            let terminal = mold_db::generation_batches::GenerationBatchTerminal {
+                state: mold_db::generation_batches::GenerationBatchTerminalState::Cancelled,
+                error: Some("Cancelled"),
+                terminal_error_json: Some(r#"{"message":"Cancelled"}"#),
+                result_json: None,
+                completed_at_ms: now_ms(),
+            };
+            if !self.finish_claimed(token, QueueRowState::Running, terminal) {
+                self.finish_claimed(token, QueueRowState::Queued, terminal);
+            }
+            return;
+        }
         self.journal
             .set_batch_child_state(&self.id, "cancelled", Some("Cancelled"));
+        self.journal.discard_id(&self.id);
+    }
+
+    pub fn fail(mut self, message: &str) {
+        if self.journal.is_retaining() {
+            self.settled = true;
+            return;
+        }
+        self.settled = true;
+        if self.claim_token.is_some() {
+            self.fail_claimed(message);
+            return;
+        }
+        self.journal
+            .set_batch_child_state(&self.id, "failed", Some(message));
         self.journal.discard_id(&self.id);
     }
 
@@ -1374,6 +1556,13 @@ impl QueueTicket {
     /// retrying forever if the condition persists.
     pub fn retain(mut self) {
         self.settled = true;
+        if let Some(token) = self.claim_token.as_deref() {
+            let Some(db) = self.journal.db() else { return };
+            if let Err(error) = generation_queue::release_claim(db, &self.id, token, now_ms()) {
+                tracing::warn!(job = %self.id, %error, "could not release a retained feeder claim");
+            }
+            self.journal.wake_feeder();
+        }
     }
 
     /// Charge a dispatch attempt on the GPU owner thread, immediately before
@@ -1383,12 +1572,27 @@ impl QueueTicket {
             return DispatchClaim::Untracked;
         };
         let now = now_ms();
-        match generation_queue::mark_dispatched(db, &self.id, now) {
+        let claimed = match self.claim_token.as_deref() {
+            Some(token) => generation_queue::mark_dispatched_claimed(db, &self.id, token, now),
+            None => generation_queue::mark_dispatched(db, &self.id, now),
+        };
+        match claimed {
             Ok(Some(attempts)) if attempts > self.journal.max_dispatch_attempts => {
                 let cap = self.journal.max_dispatch_attempts;
                 let reason =
                     format!("dispatch attempts exhausted ({attempts} > {cap}); held for review");
-                if let Err(error) = generation_queue::hold(db, &self.id, &reason, now) {
+                let held = match self.claim_token.as_deref() {
+                    Some(token) => generation_queue::hold_claimed(
+                        db,
+                        &self.id,
+                        token,
+                        QueueRowState::Running,
+                        &reason,
+                        now,
+                    ),
+                    None => generation_queue::hold(db, &self.id, &reason, now),
+                };
+                if let Err(error) = held {
                     tracing::warn!(
                         job = %self.id,
                         error = %format!("{error:#}"),
@@ -1404,6 +1608,7 @@ impl QueueTicket {
                     .set_batch_child_state(&self.id, "running", None);
                 DispatchClaim::Granted
             }
+            Ok(None) if self.claim_token.is_some() => DispatchClaim::Fenced,
             Ok(None) => DispatchClaim::Untracked,
             Err(error) => {
                 tracing::warn!(
@@ -1411,7 +1616,11 @@ impl QueueTicket {
                     error = %format!("{error:#}"),
                     "could not claim a durable queue row; running the job anyway"
                 );
-                DispatchClaim::Untracked
+                if self.claim_token.is_some() {
+                    DispatchClaim::Fenced
+                } else {
+                    DispatchClaim::Untracked
+                }
             }
         }
     }
@@ -1419,6 +1628,55 @@ impl QueueTicket {
     /// Park the row: listed, never auto-run, and no longer owned by a ticket.
     pub fn hold(mut self, reason: &str) {
         self.settled = true;
+        if let Some(token) = self.claim_token.as_deref() {
+            let Some(db) = self.journal.db() else { return };
+            let held = generation_queue::hold_claimed(
+                db,
+                &self.id,
+                token,
+                QueueRowState::Running,
+                reason,
+                now_ms(),
+            )
+            .and_then(|held| {
+                if held {
+                    Ok(true)
+                } else {
+                    generation_queue::hold_claimed(
+                        db,
+                        &self.id,
+                        token,
+                        QueueRowState::Queued,
+                        reason,
+                        now_ms(),
+                    )
+                }
+            })
+            .and_then(|held| {
+                if held {
+                    Ok(true)
+                } else {
+                    generation_queue::hold_claimed(
+                        db,
+                        &self.id,
+                        token,
+                        QueueRowState::Held,
+                        reason,
+                        now_ms(),
+                    )
+                }
+            });
+            match held {
+                Ok(true) => self
+                    .journal
+                    .set_batch_child_state(&self.id, "held", Some(reason)),
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::warn!(job = %self.id, %error, "could not hold a claimed durable queue row");
+                }
+            }
+            return;
+        }
         self.journal
             .set_batch_child_state(&self.id, "held", Some(reason));
         let Some(db) = self.journal.db() else {
@@ -1430,6 +1688,51 @@ impl QueueTicket {
                 error = %format!("{error:#}"),
                 "could not hold a durable queue row"
             );
+        }
+    }
+
+    fn finish_claimed(
+        &self,
+        token: &str,
+        expected: QueueRowState,
+        terminal: mold_db::generation_batches::GenerationBatchTerminal<'_>,
+    ) -> bool {
+        let Some(db) = self.journal.db() else {
+            return false;
+        };
+        match generation_batches::finish_claimed(db, &self.id, token, expected, terminal) {
+            Ok(commit) => commit.queue_deleted,
+            Err(error) => {
+                tracing::warn!(job = %self.id, %error, "could not atomically settle a claimed generation");
+                false
+            }
+        }
+    }
+
+    fn fail_claimed(&self, message: &str) {
+        let Some(token) = self.claim_token.as_deref() else {
+            return;
+        };
+        let cancelled = self
+            .journal
+            .db()
+            .and_then(|db| generation_batches::child_cancel_requested(db, &self.id).ok())
+            .unwrap_or(false);
+        let terminal_message = if cancelled { "Cancelled" } else { message };
+        let terminal_error_json = serde_json::json!({ "message": terminal_message }).to_string();
+        let terminal = mold_db::generation_batches::GenerationBatchTerminal {
+            state: if cancelled {
+                mold_db::generation_batches::GenerationBatchTerminalState::Cancelled
+            } else {
+                mold_db::generation_batches::GenerationBatchTerminalState::Failed
+            },
+            error: Some(terminal_message),
+            terminal_error_json: Some(&terminal_error_json),
+            result_json: None,
+            completed_at_ms: now_ms(),
+        };
+        if !self.finish_claimed(token, QueueRowState::Running, terminal) {
+            self.finish_claimed(token, QueueRowState::Queued, terminal);
         }
     }
 }
@@ -1444,6 +1747,10 @@ impl Drop for QueueTicket {
                 job = %self.id,
                 "retaining an interrupted generation; it will be replayed after restart"
             );
+            return;
+        }
+        if self.claim_token.is_some() {
+            self.fail_claimed("generation ended before publishing an output");
             return;
         }
         self.journal.set_batch_child_state(
@@ -1477,6 +1784,7 @@ mod tests {
             max_bytes: DEFAULT_JOURNAL_MAX_BYTES,
             max_dispatch_attempts: DEFAULT_MAX_DISPATCH_ATTEMPTS,
             max_replay_seen: DEFAULT_MAX_REPLAY_SEEN,
+            feeder_notify: tokio::sync::Notify::new(),
         })
     }
 
@@ -1877,6 +2185,7 @@ mod tests {
             max_bytes: 64,
             max_dispatch_attempts: DEFAULT_MAX_DISPATCH_ATTEMPTS,
             max_replay_seen: DEFAULT_MAX_REPLAY_SEEN,
+            feeder_notify: tokio::sync::Notify::new(),
         });
         let mut request = request();
         request.prompt = "x".repeat(4096);
@@ -1900,6 +2209,7 @@ mod tests {
             max_bytes: DEFAULT_JOURNAL_MAX_BYTES,
             max_dispatch_attempts: 2,
             max_replay_seen: DEFAULT_MAX_REPLAY_SEEN,
+            feeder_notify: tokio::sync::Notify::new(),
         });
         let request = request();
         let ticket = journal

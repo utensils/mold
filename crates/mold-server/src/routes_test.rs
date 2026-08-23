@@ -4380,7 +4380,7 @@ mod tests {
         assert_eq!(second["live_only_entries"][0]["id"], "h3-live-only");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn heterogeneous_batch_admits_thirty_once_and_returns_same_ids_on_retry() {
         let root = tempfile::tempdir().unwrap();
         let db_path = root.path().join("mold.db");
@@ -4391,7 +4391,7 @@ mod tests {
             let (scheduled_tx, _scheduled_rx) = tokio::sync::mpsc::channel(1);
             state.scheduled_work = crate::scheduler::ScheduledWorkHandle::new(scheduled_tx);
             let journal = state.queue_journal.clone();
-            let app = app_with_state(state);
+            let app = app_with_state(state.clone());
             let client_batch_id = uuid::Uuid::new_v4().to_string();
             let requests: Vec<serde_json::Value> = (0..30)
                 .map(|index| {
@@ -4399,6 +4399,9 @@ mod tests {
                         serde_json::from_str(&generate_body(&format!("moon {index}"), 512, 512))
                             .unwrap();
                     request["batch_size"] = serde_json::json!(1);
+                    if index == 0 {
+                        request["model"] = serde_json::json!("not-installed-at-admission");
+                    }
                     request
                 })
                 .collect();
@@ -4418,6 +4421,7 @@ mod tests {
                 .unwrap();
             assert_eq!(admitted.status(), StatusCode::ACCEPTED);
             let admitted = json_body(admitted).await;
+            let batch_id = admitted["id"].as_str().unwrap().to_string();
             let first_ids: Vec<String> = admitted["children"]
                 .as_array()
                 .unwrap()
@@ -4432,6 +4436,7 @@ mod tests {
             );
 
             let retry = app
+                .clone()
                 .oneshot(json_request("POST", "/api/generation-batches", body))
                 .await
                 .unwrap();
@@ -4445,8 +4450,38 @@ mod tests {
                 .collect();
             assert_eq!(retry_ids, first_ids);
 
+            let cancelled_id = first_ids.last().unwrap().clone();
+            let cancelled = app
+                .clone()
+                .oneshot(
+                    Request::delete(format!("/api/queue/{cancelled_id}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(cancelled.status(), StatusCode::NO_CONTENT);
+            let status = app
+                .oneshot(
+                    Request::get(format!("/api/generation-batches/{batch_id}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = json_body(status).await;
+            assert_eq!(status["children"][29]["state"], "cancelled");
+            assert_eq!(journal.list_all().len(), 29);
+
+            assert!(
+                rx.try_recv().is_err(),
+                "admission must not construct or submit child jobs"
+            );
+            assert_eq!(state.job_registry.len(), 0, "the feeder owns hydration");
+            let feeder_shutdown = tokio_util::sync::CancellationToken::new();
+            let feeder = crate::durable_queue_feeder::spawn(state, feeder_shutdown.clone());
             let mut admitted_jobs = Vec::new();
-            for _ in 0..30 {
+            for _ in 0..29 {
                 admitted_jobs.push(
                     tokio::time::timeout(Duration::from_secs(5), rx.recv())
                         .await
@@ -4455,18 +4490,19 @@ mod tests {
                 );
             }
             journal.retain_all();
+            feeder_shutdown.cancel();
+            feeder.await.unwrap();
             drop(admitted_jobs);
             drop(journal);
-            first_ids
+            first_ids[..29].to_vec()
         };
 
         let reopened = Arc::new(Some(mold_db::MetadataDb::open(&db_path).unwrap()));
         let (state, mut rx) = durable_state(reopened, root.path());
-        let replay_state = state.clone();
-        let replay_task =
-            tokio::spawn(async move { crate::queue_journal::replay(&replay_state, true).await });
+        let feeder_shutdown = tokio_util::sync::CancellationToken::new();
+        let feeder = crate::durable_queue_feeder::spawn(state.clone(), feeder_shutdown.clone());
         let mut replayed = Vec::new();
-        for _ in 0..30 {
+        for _ in 0..29 {
             replayed.push(
                 tokio::time::timeout(Duration::from_secs(5), rx.recv())
                     .await
@@ -4475,10 +4511,69 @@ mod tests {
                     .id,
             );
         }
-        let report = replay_task.await.unwrap();
-        assert_eq!(report.resumed, 30);
+        feeder_shutdown.cancel();
+        feeder.await.unwrap();
         assert_eq!(replayed, first_ids);
         assert!(rx.try_recv().is_err(), "no child replays twice");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn bulk_cancel_terminalizes_every_unhydrated_batch_child() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, _rx) = durable_state(db, root.path());
+        let (scheduled_tx, _scheduled_rx) = tokio::sync::mpsc::channel(1);
+        state.scheduled_work = crate::scheduler::ScheduledWorkHandle::new(scheduled_tx);
+        let journal = state.queue_journal.clone();
+        let app = app_with_state(state);
+        let client_batch_id = uuid::Uuid::new_v4().to_string();
+        let requests = (0..12)
+            .map(|index| {
+                let mut request: serde_json::Value =
+                    serde_json::from_str(&generate_body(&format!("cancel {index}"), 512, 512))
+                        .unwrap();
+                request["batch_size"] = serde_json::json!(1);
+                request
+            })
+            .collect::<Vec<_>>();
+        let admitted = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/generation-batches",
+                serde_json::json!({
+                    "client_batch_id": client_batch_id,
+                    "requests": requests,
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(admitted.status(), StatusCode::ACCEPTED);
+        let admitted = json_body(admitted).await;
+        let durable_id = admitted["id"].as_str().unwrap().to_string();
+
+        let cancelled = app
+            .clone()
+            .oneshot(Request::delete("/api/queue").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(cancelled.status(), StatusCode::OK);
+        let status = app
+            .oneshot(
+                Request::get(format!("/api/generation-batches/{durable_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = json_body(status).await;
+        assert_eq!(status["children"].as_array().unwrap().len(), 12);
+        assert!(status["children"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|child| child["state"] == "cancelled"));
+        assert!(journal.list_all().is_empty());
     }
 
     /// The end-to-end shape: admit jobs, fence, drop the coordinator, rebuild

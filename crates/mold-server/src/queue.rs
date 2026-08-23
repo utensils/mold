@@ -347,6 +347,16 @@ pub(crate) struct SavedOutputNames {
     pub original: Option<String>,
 }
 
+impl SavedOutputNames {
+    pub(crate) fn terminal_json(&self) -> String {
+        serde_json::json!({
+            "filename": self.output,
+            "original_filename": self.original,
+        })
+        .to_string()
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn save_generated_image_outputs(
     dir: &std::path::Path,
@@ -2124,7 +2134,8 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
             // since the gallery file is its only delivery.
             if let Some(ticket) = job.journal.take() {
                 if saved_names.output.is_some() {
-                    ticket.complete();
+                    let result_json = saved_names.terminal_json();
+                    ticket.complete_with_result(Some(&result_json));
                 } else {
                     tracing::error!(
                         job = %job.id,
@@ -3311,6 +3322,18 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
     use std::sync::{Arc, Mutex, RwLock};
     use tempfile::TempDir;
+
+    #[test]
+    fn durable_terminal_result_carries_saved_gallery_names() {
+        let result = SavedOutputNames {
+            output: Some("print.png".to_string()),
+            original: Some("print_original.png".to_string()),
+        }
+        .terminal_json();
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["filename"], "print.png");
+        assert_eq!(parsed["original_filename"], "print_original.png");
+    }
 
     #[test]
     fn legacy_unavailable_backoff_warns_once_and_caps_retry_frequency() {

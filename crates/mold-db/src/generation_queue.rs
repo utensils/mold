@@ -214,6 +214,33 @@ pub fn delete_all_queued(db: &MetadataDb, owner_uuid: &str) -> Result<usize> {
     })
 }
 
+pub fn delete_legacy(db: &MetadataDb, id: &str) -> Result<bool> {
+    db.with_conn(|conn| {
+        Ok(conn.execute(
+            "DELETE FROM generation_queue
+              WHERE id = ?1
+                AND NOT EXISTS (
+                    SELECT 1 FROM generation_batch_children WHERE job_id = ?1
+                )",
+            params![id],
+        )? > 0)
+    })
+}
+
+pub fn delete_all_queued_legacy(db: &MetadataDb, owner_uuid: &str) -> Result<usize> {
+    db.with_conn(|conn| {
+        Ok(conn.execute(
+            "DELETE FROM generation_queue
+              WHERE owner_uuid = ?1 AND state = 'queued'
+                AND NOT EXISTS (
+                    SELECT 1 FROM generation_batch_children AS child
+                     WHERE child.job_id = generation_queue.id
+                )",
+            params![owner_uuid],
+        )?)
+    })
+}
+
 pub fn get(db: &MetadataDb, id: &str) -> Result<Option<GenerationQueueRow>> {
     db.with_conn(|conn| {
         conn.query_row(
@@ -437,6 +464,57 @@ pub fn claim_next(
     })
 }
 
+/// Reserve the oldest queued row explicitly admitted to the durable feeder.
+///
+/// The batch-child relation is the ownership marker: legacy singleton HTTP
+/// endpoints journal rows too, but submit those rows directly and must never
+/// race the feeder. Ordering is global across all eligible feeder rows and
+/// keeps SQLite's `rowid` tie-break for same-millisecond admissions.
+pub fn claim_next_feeder_owned(
+    db: &MetadataDb,
+    owner_uuid: &str,
+    claim_token: &str,
+    now_ms: i64,
+) -> Result<Option<QueueClaim>> {
+    if claim_token.is_empty() {
+        bail!("queue claim token must not be empty");
+    }
+    db.with_conn(|conn| {
+        conn.query_row(
+            "UPDATE generation_queue
+                SET claim_token = ?2, updated_at = ?3
+              WHERE id = (
+                    SELECT q.id
+                      FROM generation_queue AS q
+                      JOIN generation_batch_children AS child ON child.job_id = q.id
+                     WHERE q.owner_uuid = ?1
+                       AND q.state = 'queued'
+                       AND q.claim_token IS NULL
+                       AND NOT EXISTS (
+                            SELECT 1 FROM generation_queue WHERE claim_token = ?2
+                       )
+                     ORDER BY q.created_at, q.rowid
+                     LIMIT 1
+              )
+                AND state = 'queued'
+                AND claim_token IS NULL
+          RETURNING id, owner_uuid, state, model, request_json, output_dir,
+                    target_gpu, target_device_id, completion_payload, seed_pinned,
+                    dispatch_attempts, replay_seen, held_reason, created_at, updated_at,
+                    started_at",
+            params![owner_uuid, claim_token, now_ms],
+            |row| {
+                Ok(QueueClaim {
+                    row: row_to_queue_row(row)?,
+                    claim_token: claim_token.to_string(),
+                })
+            },
+        )
+        .optional()
+        .map_err(Into::into)
+    })
+}
+
 /// Clear a reservation that has not started execution.
 pub fn release_claim(db: &MetadataDb, id: &str, claim_token: &str, now_ms: i64) -> Result<bool> {
     db.with_conn(|conn| {
@@ -496,6 +574,27 @@ pub fn refund_dispatched_claim(
                     updated_at = ?3
               WHERE id = ?1 AND state = 'running' AND claim_token = ?2",
             params![id, claim_token, now_ms],
+        )? > 0)
+    })
+}
+
+/// Park a claimed row only while the caller still owns the exact runtime
+/// token. The token is retained as forensic ownership and is cleared by the
+/// ordinary startup recovery pass.
+pub fn hold_claimed(
+    db: &MetadataDb,
+    id: &str,
+    claim_token: &str,
+    expected_state: QueueRowState,
+    reason: &str,
+    now_ms: i64,
+) -> Result<bool> {
+    db.with_conn(|conn| {
+        Ok(conn.execute(
+            "UPDATE generation_queue
+                SET state = 'held', held_reason = ?4, updated_at = ?5
+              WHERE id = ?1 AND state = ?2 AND claim_token = ?3",
+            params![id, expected_state.as_str(), claim_token, reason, now_ms],
         )? > 0)
     })
 }
@@ -1132,6 +1231,54 @@ mod tests {
             25,
             "claiming is a one-row SQL primitive; it does not materialize or remove the backlog"
         );
+    }
+
+    #[test]
+    fn feeder_claim_skips_legacy_rows_and_preserves_global_batch_fifo() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        insert(&db, &row("legacy-oldest", "owner-a", 1)).unwrap();
+
+        insert(&db, &row("batch-first", "owner-a", 1)).unwrap();
+        insert(&db, &row("batch-second", "owner-a", 1)).unwrap();
+        db.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO generation_batches
+                    (id, client_batch_id, owner_uuid, request_sha256, created_at_ms)
+                 VALUES ('batch-a', 'client-a', 'owner-a', 'sha', 1)",
+                [],
+            )?;
+            for (index, id) in ["batch-first", "batch-second"].into_iter().enumerate() {
+                conn.execute(
+                    "INSERT INTO generation_batch_children
+                        (batch_id, job_id, batch_index, state, updated_at_ms)
+                     VALUES ('batch-a', ?1, ?2, 'accepted', 1)",
+                    rusqlite::params![id, index as i64 + 1],
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(
+            claim_next_feeder_owned(&db, "owner-a", "claim-1", 10)
+                .unwrap()
+                .unwrap()
+                .row
+                .id,
+            "batch-first"
+        );
+        assert_eq!(
+            claim_next_feeder_owned(&db, "owner-a", "claim-2", 11)
+                .unwrap()
+                .unwrap()
+                .row
+                .id,
+            "batch-second"
+        );
+        assert!(claim_next_feeder_owned(&db, "owner-a", "claim-3", 12)
+            .unwrap()
+            .is_none());
+        assert!(get(&db, "legacy-oldest").unwrap().is_some());
     }
 
     #[test]

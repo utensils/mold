@@ -118,6 +118,17 @@ pub struct QueueHandle {
     capacity_waiter: Arc<tokio::sync::Mutex<()>>,
 }
 
+/// One atomically reserved runtime queue slot.
+///
+/// The feeder reserves before claiming SQLite so a concurrent legacy submit
+/// can never make the hydrated live set exceed `queue_capacity`. Dropping an
+/// uncommitted reservation returns the slot and wakes the next producer.
+pub(crate) struct QueueReservation {
+    queue: QueueHandle,
+    position: usize,
+    committed: bool,
+}
+
 /// Reason a `QueueHandle::submit` attempt failed.
 #[derive(Debug)]
 pub enum SubmitError {
@@ -147,25 +158,43 @@ impl QueueHandle {
     /// burst of concurrent callers cannot all slip past a separate pending()
     /// pre-check (TOCTOU).  Returns the queue position on success.
     pub async fn submit(&self, job: GenerationJob, capacity: usize) -> Result<usize, SubmitError> {
-        let prev = self.pending_count.fetch_add(1, Ordering::SeqCst);
-        if prev >= capacity {
-            self.pending_count.fetch_sub(1, Ordering::SeqCst);
-            return Err(SubmitError::Full {
-                pending: prev,
-                capacity,
-            });
-        }
-        if self.job_tx.send(job).await.is_err() {
-            self.pending_count.fetch_sub(1, Ordering::SeqCst);
-            self.capacity_notify.notify_waiters();
-            return Err(SubmitError::Shutdown);
-        }
+        let reservation = self.try_reserve(capacity)?;
+        let position = reservation.position;
+        reservation
+            .submit(job)
+            .await
+            .map_err(|(error, _job)| error)?;
         #[cfg(feature = "metrics")]
         {
             crate::metrics::record_queue_submit();
             crate::metrics::record_queue_depth(self.pending_count.load(Ordering::SeqCst));
         }
-        Ok(prev)
+        Ok(position)
+    }
+
+    /// Reserve one slot without waiting. This is the feeder's atomic boundary
+    /// between runtime capacity and the next durable SQLite claim.
+    pub(crate) fn try_reserve(&self, capacity: usize) -> Result<QueueReservation, SubmitError> {
+        let previous = self.pending_count.fetch_add(1, Ordering::SeqCst);
+        if previous >= capacity {
+            self.pending_count.fetch_sub(1, Ordering::SeqCst);
+            return Err(SubmitError::Full {
+                pending: previous,
+                capacity,
+            });
+        }
+        Ok(QueueReservation {
+            queue: self.clone(),
+            position: previous,
+            committed: false,
+        })
+    }
+
+    /// Narrow notification seam used by the durable feeder. Construct this
+    /// future before scanning SQLite so a capacity release cannot be lost in
+    /// the scan-to-wait gap.
+    pub(crate) fn capacity_notified(&self) -> impl std::future::Future<Output = ()> + '_ {
+        self.capacity_notify.notified()
     }
 
     /// Wait for shared queue capacity without converting temporary occupancy
@@ -208,7 +237,7 @@ impl QueueHandle {
                             Err(returned) => {
                                 *job = Some(returned.0);
                                 self.pending_count.fetch_sub(1, Ordering::SeqCst);
-                                self.capacity_notify.notify_waiters();
+                                self.capacity_notify.notify_one();
                                 Err(SubmitError::Shutdown)
                             }
                             Ok(()) => Ok(previous),
@@ -220,7 +249,7 @@ impl QueueHandle {
                     // assume recovery.
                     _ = cancellation.cancelled() => {
                         self.pending_count.fetch_sub(1, Ordering::SeqCst);
-                        self.capacity_notify.notify_waiters();
+                        self.capacity_notify.notify_one();
                         Err(SubmitError::Cancelled)
                     }
                 };
@@ -244,6 +273,31 @@ impl QueueHandle {
 
     pub fn pending(&self) -> usize {
         self.pending_count.load(Ordering::SeqCst)
+    }
+}
+
+impl QueueReservation {
+    pub(crate) async fn submit(
+        mut self,
+        job: GenerationJob,
+    ) -> Result<usize, (SubmitError, GenerationJob)> {
+        match self.queue.job_tx.send(job).await {
+            Ok(()) => {
+                self.committed = true;
+                Ok(self.position)
+            }
+            Err(returned) => Err((SubmitError::Shutdown, returned.0)),
+        }
+    }
+}
+
+impl Drop for QueueReservation {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        self.queue.pending_count.fetch_sub(1, Ordering::SeqCst);
+        self.queue.capacity_notify.notify_one();
     }
 }
 
@@ -1051,6 +1105,37 @@ mod tests {
         handle.decrement();
 
         assert_eq!(handle.pending(), 0);
+    }
+
+    #[test]
+    fn queue_reservation_is_the_capacity_boundary_and_drop_returns_the_slot() {
+        let (tx, _rx) = tokio::sync::mpsc::channel::<GenerationJob>(2);
+        let handle = QueueHandle::new(tx);
+        let reservation = handle.try_reserve(1).expect("first slot");
+        assert_eq!(handle.pending(), 1);
+        assert!(matches!(
+            handle.try_reserve(1),
+            Err(SubmitError::Full {
+                pending: 1,
+                capacity: 1
+            })
+        ));
+        drop(reservation);
+        assert_eq!(handle.pending(), 0);
+        assert!(handle.try_reserve(1).is_ok());
+    }
+
+    #[tokio::test]
+    async fn dropping_a_queue_reservation_wakes_a_prearmed_capacity_waiter() {
+        let (tx, _rx) = tokio::sync::mpsc::channel::<GenerationJob>(1);
+        let handle = QueueHandle::new(tx);
+        let reservation = handle.try_reserve(1).unwrap();
+        let notified = handle.capacity_notified();
+        tokio::pin!(notified);
+        drop(reservation);
+        tokio::time::timeout(std::time::Duration::from_secs(1), &mut notified)
+            .await
+            .expect("capacity wake must be retained");
     }
 
     #[tokio::test]

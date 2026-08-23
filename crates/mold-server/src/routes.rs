@@ -2238,7 +2238,7 @@ fn generation_batch_status(
 )]
 async fn admit_generation_batch(
     State(state): State<AppState>,
-    authenticated: Option<Extension<crate::auth::ApiKeyAuthenticated>>,
+    _authenticated: Option<Extension<crate::auth::ApiKeyAuthenticated>>,
     Json(mut body): Json<mold_core::GenerationBatchAdmissionRequest>,
 ) -> Result<(StatusCode, Json<mold_core::GenerationBatchStatus>), ApiError> {
     if !state.scheduled_work.v2_authoritative() || !state.queue_journal.is_enabled() {
@@ -2272,149 +2272,127 @@ async fn admit_generation_batch(
     let fingerprint_bytes = serde_json::to_vec(&body.requests)
         .map_err(|error| ApiError::internal(format!("batch serialization failed: {error}")))?;
     let request_sha256 = format!("{:x}", Sha256::digest(&fingerprint_bytes));
-    if let Some(existing) = state
-        .queue_journal
-        .generation_batch_by_client(&body.client_batch_id)
-    {
-        if existing.batch.request_sha256 != request_sha256 {
-            return Err(ApiError::with_code(
-                "client_batch_id was already used for a different request",
-                "GENERATION_BATCH_IDEMPOTENCY_CONFLICT",
-                StatusCode::CONFLICT,
-            ));
-        }
-        return Ok((StatusCode::OK, Json(generation_batch_status(existing))));
-    }
-
-    let mut prepared_children = Vec::with_capacity(body.requests.len());
-    for mut request in body.requests {
-        let typed = (
-            request.prompt.clone(),
-            request.negative_prompt.clone(),
-            request.model.clone(),
-        );
-        let prepared = prepare_generation(
-            &state,
-            &mut request,
-            authenticated.as_ref().map(|Extension(auth)| auth),
-        )
-        .await?;
-        if prepared.output_dir.is_none() {
+    // This endpoint acknowledges SQLite durability, not runtime preparation.
+    // Keep admission to pure request checks plus cheap host-local defaults;
+    // the scheduler's bounded preparation semaphore remains the sole model
+    // dependency authority after the feeder hydrates each child.
+    let (output_dir, family_by_model) = {
+        let config = state.config.read().await;
+        if state.is_output_disabled(&config) {
             return Err(ApiError::validation(
                 "heterogeneous batches require server gallery output",
             ));
         }
-        if prepared.resolved_references.is_some() || request.references.is_some() {
+        let families = body
+            .requests
+            .iter()
+            .map(|request| {
+                (
+                    request.model.clone(),
+                    config
+                        .resolved_model_config(&request.model)
+                        .family
+                        .or_else(|| {
+                            mold_core::manifest::find_manifest(&request.model)
+                                .map(|manifest| manifest.family.clone())
+                        }),
+                )
+            })
+            .collect::<std::collections::HashMap<_, _>>();
+        (config.effective_output_dir(), families)
+    };
+    ensure_schedulable_device(&state)?;
+    let mut admitted_children = Vec::with_capacity(body.requests.len());
+    for (offset, mut request) in body.requests.into_iter().enumerate() {
+        if request.hdr_exr_dir.is_some() {
+            return Err(ApiError::validation(
+                "hdr_exr_dir is local-only and cannot be set through the server API",
+            ));
+        }
+        if request.references.is_some() {
             return Err(ApiError::validation(
                 "heterogeneous batches cannot persist temporary reference uploads",
             ));
         }
-        prepared_children.push((request, typed, prepared));
+        if mold_core::identity::request_carries_identity_photo(&request) {
+            return Err(ApiError::validation(
+                "heterogeneous batches cannot persist identity photographs",
+            ));
+        }
+        if mold_core::minimax_h3::capability_contract_for_model(&request.model).is_some() {
+            return Err(ApiError::with_code(
+                "heterogeneous batches cannot persist private MiniMax H3 requests",
+                "GENERATION_BATCH_NOT_DURABLE",
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ));
+        }
+        apply_default_metadata_setting(&state, &mut request).await;
+        normalize_generation_placement(&state, &mut request).await;
+        let preferred_gpu = validate_multi_gpu_placement(&state, request.placement.as_ref())?;
+        let family = family_by_model
+            .get(&request.model)
+            .and_then(|family| family.as_deref());
+        if request.output_format.is_none() {
+            request.normalise_output_format(family);
+        }
+        materialize_default_negative_prompt(&mut request, family);
+        mold_core::validation::materialize_extend_overlap_frames(&mut request, family);
+        let _ = mold_core::validation::materialize_request_organization(&mut request);
+        validate_generate_request(&request, family)
+            .map_err(|error| ApiError::validation(format!("requests[{}]: {error}", offset + 1)))?;
+        resolve_server_local_media_paths(&state, &mut request).await?;
+        admitted_children.push((request, preferred_gpu));
     }
 
     let batch_id = uuid::Uuid::new_v4().to_string();
-    let job_ids: Vec<String> = (0..prepared_children.len())
+    let job_ids: Vec<String> = (0..admitted_children.len())
         .map(|_| uuid::Uuid::new_v4().to_string())
         .collect();
-    let admissions: Vec<crate::queue_journal::JournalAdmission<'_>> = prepared_children
-        .iter()
-        .zip(&job_ids)
-        .map(
-            |((request, _, prepared), job_id)| crate::queue_journal::JournalAdmission {
-                id: job_id,
-                request,
-                output_dir: prepared.output_dir.as_deref(),
-                target_gpu: prepared.preferred_gpu,
-                completion_payload: SseCompletionPayload::MetadataOnly,
-                batch_child: false,
-                carries_reference_authority: false,
-            },
-        )
-        .collect();
-    let (detail, tickets) = state
-        .queue_journal
-        .record_batch(crate::queue_journal::BatchJournalAdmission {
-            id: &batch_id,
-            client_batch_id: &body.client_batch_id,
+    let journal = state.queue_journal.clone();
+    let batch_id_for_db = batch_id.clone();
+    let client_batch_id = body.client_batch_id.clone();
+    let (detail, inserted) = tokio::task::spawn_blocking(move || {
+        let admissions = admitted_children
+            .iter()
+            .zip(&job_ids)
+            .map(
+                |((request, preferred_gpu), job_id)| crate::queue_journal::JournalAdmission {
+                    id: job_id,
+                    request,
+                    output_dir: Some(output_dir.as_path()),
+                    target_gpu: *preferred_gpu,
+                    completion_payload: SseCompletionPayload::MetadataOnly,
+                    batch_child: false,
+                    carries_reference_authority: false,
+                },
+            )
+            .collect::<Vec<_>>();
+        journal.record_batch(crate::queue_journal::BatchJournalAdmission {
+            id: &batch_id_for_db,
+            client_batch_id: &client_batch_id,
             request_sha256: &request_sha256,
             children: &admissions,
         })
-        .map_err(|message| {
+    })
+    .await
+    .map_err(|error| ApiError::internal(format!("generation batch DB task failed: {error}")))?
+    .map_err(|message| {
+        if message == "client_batch_id was already used for a different request" {
+            ApiError::with_code(
+                message,
+                "GENERATION_BATCH_IDEMPOTENCY_CONFLICT",
+                StatusCode::CONFLICT,
+            )
+        } else {
             ApiError::with_code(
                 message,
                 "GENERATION_BATCH_NOT_DURABLE",
                 StatusCode::UNPROCESSABLE_ENTITY,
             )
-        })?;
-    let Some(tickets) = tickets else {
+        }
+    })?;
+    if !inserted {
         return Ok((StatusCode::OK, Json(generation_batch_status(detail))));
-    };
-
-    let mut jobs = Vec::with_capacity(prepared_children.len());
-    for ((((request, typed, prepared), job_id), ticket), _) in prepared_children
-        .into_iter()
-        .zip(job_ids.iter())
-        .zip(tickets)
-        .zip(0..)
-    {
-        record_prompt_history(&state, &typed.0, typed.1.as_deref(), &typed.2);
-        let queue_metadata = Box::new(mold_core::OutputMetadata::from_generate_request(
-            &request,
-            request.seed.unwrap_or(0),
-            request.scheduler,
-            mold_core::build_info::version_string(),
-        ));
-        let cancel = state.job_registry.register_job(
-            job_id,
-            &request.model,
-            prepared.preferred_gpu,
-            Some(request.seed.is_some()),
-            Some(queue_metadata),
-        );
-        let crate::job_supervisor::SupervisedJob {
-            result_tx,
-            outcome_rx,
-        } = crate::job_supervisor::supervise_job(job_id.clone(), cancel);
-        drop(outcome_rx);
-        jobs.push(GenerationJob {
-            id: job_id.clone(),
-            request,
-            resolved_references: prepared.resolved_references,
-            completion_payload: SseCompletionPayload::MetadataOnly,
-            progress_tx: None,
-            result_tx,
-            output_dir: prepared.output_dir,
-            batch_child: None,
-            journal: Some(ticket),
-            #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
-            h3_private_ingress_grant: prepared.h3_private_ingress_grant,
-        });
-    }
-    // Persistence is the admission acknowledgement. Feed every ordinary
-    // child into the bounded runtime queue independently in detached tasks,
-    // so an iPhone socket disappearing after the commit cannot cancel the
-    // remaining children and current queue occupancy cannot partially admit.
-    for job in jobs {
-        let queue = state.queue.clone();
-        let registry = state.job_registry.clone();
-        let capacity = state.queue_capacity;
-        let id = job.id.clone();
-        tokio::spawn(async move {
-            let mut pending = Some(job);
-            let keep_waiting = tokio_util::sync::CancellationToken::new();
-            if let Err(error) = queue
-                .submit_when_available(&mut pending, capacity, &keep_waiting)
-                .await
-            {
-                if let Some(mut retained) = pending {
-                    if let Some(ticket) = retained.journal.take() {
-                        ticket.retain();
-                    }
-                }
-                registry.remove(&id);
-                tracing::warn!(job = %id, ?error, "batch child retained for replay after queue transport stopped");
-            }
-        });
     }
     Ok((StatusCode::ACCEPTED, Json(generation_batch_status(detail))))
 }
@@ -2433,13 +2411,16 @@ async fn get_generation_batch(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<mold_core::GenerationBatchStatus>, ApiError> {
-    let detail = state.queue_journal.generation_batch(&id).ok_or_else(|| {
-        ApiError::with_code(
-            "generation batch not found",
-            "GENERATION_BATCH_NOT_FOUND",
-            StatusCode::NOT_FOUND,
-        )
-    })?;
+    let journal = state.queue_journal.clone();
+    let detail = spawn_queue_read(move || Ok(journal.generation_batch(&id)))
+        .await?
+        .ok_or_else(|| {
+            ApiError::with_code(
+                "generation batch not found",
+                "GENERATION_BATCH_NOT_FOUND",
+                StatusCode::NOT_FOUND,
+            )
+        })?;
     Ok(Json(generation_batch_status(detail)))
 }
 
@@ -5872,7 +5853,7 @@ async fn cancel_queue_job(
     }
     // Unconditional, not fence-aware: a cancel that lands during the shutdown
     // drain must not come back after the restart.
-    state.queue_journal.discard_id(&id);
+    state.queue_journal.cancel_id(&id);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -5962,7 +5943,7 @@ async fn resume_queue(State(state): State<AppState>) -> Result<Json<QueuePauseRe
 async fn cancel_all_queue(State(state): State<AppState>) -> Json<QueueCancelAllResponse> {
     let _scheduler_mutation = state.scheduler_mutation_fence.lock().await;
     let cancelled = state.job_registry.cancel_all_queued();
-    state.queue_journal.discard_all_queued();
+    state.queue_journal.cancel_all_queued();
     Json(QueueCancelAllResponse { cancelled })
 }
 

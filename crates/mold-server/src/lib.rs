@@ -25,6 +25,7 @@ pub mod test_support;
 pub mod device_registry;
 pub mod dispatch_mode;
 pub mod downloads;
+mod durable_queue_feeder;
 pub mod events;
 pub mod execution_plan;
 mod gallery_organization;
@@ -900,26 +901,11 @@ pub async fn run_server(
         }
     }
 
-    // Retained generations resume before the router serves, as ONE sequential
-    // task: `submit_when_available` serializes on a single global capacity
-    // mutex, so parallel replay would land in arbitrary order and destroy the
-    // ordering the journal exists to preserve.
-    {
-        let report = crate::queue_journal::replay(&state, startup.start_generation_runner).await;
-        if report.resumed > 0
-            || report.held > 0
-            || report.already_completed > 0
-            || report.skipped_unverified > 0
-        {
-            info!(
-                resumed = report.resumed,
-                already_completed = report.already_completed,
-                held = report.held,
-                skipped_unverified = report.skipped_unverified,
-                "durable generation queue replay complete"
-            );
-        }
-    }
+    // The feeder performs token recovery and per-claim output idempotence in
+    // its own task. Router startup never materializes the retained backlog.
+    let durable_feeder_handle = startup
+        .start_generation_runner
+        .then(|| durable_queue_feeder::spawn(state.clone(), scheduler_shutdown.child_token()));
 
     // Background idle-TTL sweeper: reclaims parked engines that haven't been
     // touched for `MOLD_CACHE_IDLE_TTL_SECS` seconds. Abort handle bound to
@@ -1314,6 +1300,9 @@ pub async fn run_server(
         let _ = handle.await;
     }
     scheduler_shutdown.cancel();
+    if let Some(handle) = durable_feeder_handle {
+        let _ = handle.await;
+    }
     if let Some(handle) = trash_sweeper_handle {
         // Its token is a child of `scheduler_shutdown`, so the loop exits on
         // the cancel above; a pass already inside `spawn_blocking` finishes.
