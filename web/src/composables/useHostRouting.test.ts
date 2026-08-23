@@ -171,6 +171,14 @@ function routeOf(result: FeasibilityResult) {
   return result.route;
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((next) => {
+    resolve = next;
+  });
+  return { promise, resolve };
+}
+
 describe("useHostRouting", () => {
   beforeEach(() => {
     localStorage.clear();
@@ -482,7 +490,7 @@ describe("useHostRouting", () => {
     },
   );
 
-  it("ignores an older same-host poll after a newer refresh settles", async () => {
+  it("coalesces concurrent refresh callers into one same-host poll", async () => {
     statuses.set(ORIGIN_HOST_ID, status({ queue_depth: 0 }));
     models.set(ORIGIN_HOST_ID, [model("flux-dev:q4")]);
     devices.set(ORIGIN_HOST_ID, {
@@ -491,59 +499,38 @@ describe("useHostRouting", () => {
     });
     const routing = useHostRouting();
     await routing.refresh();
+    hostStatusCall.mockClear();
     hostQueueCall.mockClear();
 
-    let resolveOlder!: (value: unknown) => void;
-    let resolveNewer!: (value: unknown) => void;
-    const older = new Promise((resolve) => {
-      resolveOlder = resolve;
+    const current = deferred<ReturnType<typeof status>>();
+    hostStatusCall.mockImplementationOnce(() => current.promise);
+    hostQueueCall.mockResolvedValueOnce({
+      entries: [
+        {
+          id: "current-queue",
+          model: "flux-dev:q4",
+          state: "queued",
+          started_at_unix_ms: 1,
+          position: 1,
+        },
+      ],
+      plan: null,
     });
-    const newer = new Promise((resolve) => {
-      resolveNewer = resolve;
-    });
-    hostStatusCall
-      .mockImplementationOnce(() => older)
-      .mockImplementationOnce(() => newer);
-    hostQueueCall
-      .mockResolvedValueOnce({
-        entries: [
-          {
-            id: "newer-queue",
-            model: "flux-dev:q4",
-            state: "queued",
-            started_at_unix_ms: 2,
-            position: 9,
-          },
-        ],
-        plan: null,
-      })
-      .mockResolvedValueOnce({
-        entries: [
-          {
-            id: "older-queue",
-            model: "flux-dev:q4",
-            state: "queued",
-            started_at_unix_ms: 1,
-            position: 1,
-          },
-        ],
-        plan: null,
-      });
 
     const first = routing.refresh();
     const second = routing.refresh();
-    resolveNewer(status({ queue_depth: 9 }));
-    await second;
-    resolveOlder(status({ queue_depth: 1 }));
-    await first;
+    expect(hostStatusCall).toHaveBeenCalledTimes(1);
+    current.resolve(status({ queue_depth: 1 }));
+    await Promise.all([first, second]);
 
-    expect(routing.hosts.value[0]?.queueDepth).toBe(9);
+    expect(routing.hosts.value[0]?.queueDepth).toBe(1);
     expect(
-      queueStatusFor(routing.queueStatus.value, ORIGIN_HOST_ID, "newer-queue"),
-    ).toMatchObject({ position: 9 });
-    expect(
-      queueStatusFor(routing.queueStatus.value, ORIGIN_HOST_ID, "older-queue"),
-    ).toBeNull();
+      queueStatusFor(
+        routing.queueStatus.value,
+        ORIGIN_HOST_ID,
+        "current-queue",
+      ),
+    ).toMatchObject({ position: 1 });
   });
 
   it("reports a remote host as ready with its live queue depth and GPU", async () => {
@@ -1585,6 +1572,41 @@ describe("useHostRouting", () => {
     expect(routing.resolve("flux2-klein:q4")?.hostId).toBe(ORIGIN_HOST_ID);
   });
 
+  it("keeps scheduled and host-change refreshes single-flight", async () => {
+    vi.useFakeTimers();
+    try {
+      const first = deferred<ReturnType<typeof status>>();
+      const second = deferred<ReturnType<typeof status>>();
+      let calls = 0;
+      hostStatusCall.mockImplementation(() => {
+        calls += 1;
+        return calls === 1 ? first.promise : second.promise;
+      });
+      models.set(ORIGIN_HOST_ID, []);
+      const routing = useHostRouting();
+
+      routing.start();
+      const initial = routing.refresh();
+      expect(hostStatusCall).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(__testing__.POLL_INTERVAL_MS * 2);
+      window.dispatchEvent(new Event("mold:hosts-changed"));
+      window.dispatchEvent(new Event("mold:hosts-changed"));
+      await Promise.resolve();
+      expect(hostStatusCall).toHaveBeenCalledTimes(1);
+
+      first.resolve(status({ version: "first" }));
+      await initial;
+      await Promise.resolve();
+      expect(hostStatusCall).toHaveBeenCalledTimes(2);
+
+      second.resolve(status({ version: "second" }));
+      await routing.refresh();
+      routing.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("keeps a verified host routable with last-good state through repeated status failures", async () => {
     const studio = addHost({
       url: "http://studio:7680",
@@ -1679,6 +1701,44 @@ describe("useHostRouting", () => {
       stale: false,
       queueDepth: 7,
     });
+  });
+
+  it("retires verified routing authority after an authenticated host rejects its credential", async () => {
+    const studio = addHost({
+      url: "http://studio:7680",
+      name: "Studio",
+      apiKey: "rejected-key",
+      instanceId: "instance-a",
+    });
+    statuses.set(ORIGIN_HOST_ID, status());
+    models.set(ORIGIN_HOST_ID, []);
+    statuses.set(
+      studio.id,
+      status({ instance_id: "instance-a", queue_depth: 4 }),
+    );
+    models.set(studio.id, [model("old-model")]);
+    capabilities.set(studio.id, { gallery: { can_delete: true } });
+    setGenerateTargetId(studio.id);
+    const routing = useHostRouting();
+    await routing.refresh();
+
+    hostStatusCall.mockImplementation((host: HostEntry) =>
+      host.id === studio.id
+        ? Promise.reject(new ApiError("API key was rejected", 401))
+        : Promise.resolve(status()),
+    );
+    await routing.refresh();
+
+    expect(
+      routing.hosts.value.find((host) => host.id === studio.id),
+    ).toMatchObject({
+      status: "connecting",
+      stale: false,
+      queueDepth: null,
+    });
+    expect(routing.capabilitiesByHost.value[studio.id]).toBeUndefined();
+    expect(routing.inventoryKnown(studio.id)).toBe(false);
+    expect(routing.resolve("old-model")).toBeNull();
   });
 
   it("fences last-good authority when a successful poll reports a replacement instance", async () => {

@@ -29,7 +29,10 @@ import { useOpenLiveWork } from "../../composables/useOpenLiveWork";
 const route = useRoute();
 const router = useRouter();
 const downloads = useDownloads();
-const { error: engineError } = useStatusPoll();
+const { error: engineError, stale: engineStale } = useStatusPoll();
+const engineReconnecting = computed(
+  () => engineStale.value || engineError.value !== null,
+);
 const routing = useHostRouting();
 const liveActivity = useLiveActivity(routing);
 const openLiveWork = useOpenLiveWork(routing);
@@ -140,13 +143,13 @@ const menuOpen = ref(false);
 <template>
   <header class="app-nav">
     <div
-      v-if="engineError"
-      class="engine-offline"
+      v-if="engineReconnecting"
+      class="engine-health"
       data-test="global-engine-status"
       role="status"
-      title="The serving Mold engine is unreachable"
+      title="Waiting for the serving Mold engine to answer"
     >
-      <span aria-hidden="true">●</span> Engine offline
+      <span aria-hidden="true">●</span> Engine reconnecting
     </div>
     <!-- Wide bar (≥640px) -->
     <div class="bar bar--wide">
@@ -288,16 +291,16 @@ const menuOpen = ref(false);
   z-index: 30;
   flex: 0 0 auto;
 }
-.engine-offline {
+.engine-health {
   position: absolute;
   z-index: 2;
   top: 100%;
   right: 14px;
   padding: 5px 9px;
-  border: 1px solid color-mix(in srgb, var(--stop) 45%, var(--edge));
+  border: 1px solid color-mix(in srgb, var(--warning) 45%, var(--edge));
   border-radius: 0 0 var(--radius-control) var(--radius-control);
   background: var(--bench);
-  color: var(--stop);
+  color: var(--warning);
   font-family: var(--f-mono);
   font-size: 10px;
 }

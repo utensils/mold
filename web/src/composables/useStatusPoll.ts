@@ -5,11 +5,14 @@ import type { ServerStatus } from "../types";
 export interface UseStatusPoll {
   status: Ref<ServerStatus | null>;
   error: Ref<string | null>;
+  /** The latest read failed after at least one verified status snapshot. */
+  stale: Ref<boolean>;
 }
 
 export function useStatusPoll(intervalMs = 5000): UseStatusPoll {
   const status = ref<ServerStatus | null>(null);
   const error = ref<string | null>(null);
+  const stale = ref(false);
   let timer: ReturnType<typeof setTimeout> | null = null;
   let controller: AbortController | null = null;
 
@@ -24,10 +27,12 @@ export function useStatusPoll(intervalMs = 5000): UseStatusPoll {
         return;
       status.value = nextStatus;
       error.value = null;
+      stale.value = false;
     } catch (e) {
       if (requestController.signal.aborted || controller !== requestController)
         return;
       error.value = e instanceof Error ? e.message : String(e);
+      stale.value = status.value !== null;
     } finally {
       if (controller !== requestController) return;
       controller = null;
@@ -64,5 +69,5 @@ export function useStatusPoll(intervalMs = 5000): UseStatusPoll {
     document.removeEventListener("visibilitychange", onVisibilityChange);
   });
 
-  return { status, error };
+  return { status, error, stale };
 }

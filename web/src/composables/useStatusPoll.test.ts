@@ -132,6 +132,22 @@ describe("useStatusPoll", () => {
     expect(mounted.poll.status.value?.version).toBe("second");
   });
 
+  it("retains the last verified status and reports reconnecting after a transient failure", async () => {
+    vi.mocked(fetchStatus)
+      .mockResolvedValueOnce(serverStatus("last-good"))
+      .mockRejectedValueOnce(new Error("status timeout"));
+    const mounted = mountStatusPoll();
+    wrapper = mounted.wrapper;
+    await flushPromises();
+
+    await vi.advanceTimersByTimeAsync(100);
+    await flushPromises();
+
+    expect(mounted.poll.status.value?.version).toBe("last-good");
+    expect(mounted.poll.stale.value).toBe(true);
+    expect(mounted.poll.error.value).toBe("status timeout");
+  });
+
   it("aborts the active request and stops scheduling when unmounted", async () => {
     const request = deferred<ServerStatus>();
     let signal: AbortSignal | undefined;

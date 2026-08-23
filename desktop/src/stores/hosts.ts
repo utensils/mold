@@ -455,7 +455,16 @@ export const useHostsStore = defineStore("hosts", {
       // primary's secret/routing keys.
       if (id === "local") throw new Error("That address is reserved for the built-in engine.");
       const existing = this.all.find((h) => h.id === id);
-      if (existing?.status === "ready") return existing;
+      // A fresh row already validated with this authority needs no work. A
+      // stale row (or an explicitly supplied replacement key) must probe:
+      // returning it here would make credential rotation and address recovery
+      // impossible precisely when the user needs them.
+      if (
+        existing?.status === "ready" &&
+        !existing.stale &&
+        (apiKey === null || existing.apiKey === apiKey)
+      )
+        return existing;
 
       const test = await ipc.testRemoteHost(url, apiKey);
       if (!test.ok) throw new Error(test.error ?? "Connection failed.");
@@ -486,13 +495,22 @@ export const useHostsStore = defineStore("hosts", {
           if (apiKey) await ipc.secretSet(`remote-api-key.${twin.id}`, apiKey);
           const live = this.extras.find((h) => h.id === twin.id);
           if (live) {
+            const keyChanged = apiKey !== null && live.apiKey !== apiKey;
+            const needsRevival = twin.status !== "ready" || twin.stale;
+            if (keyChanged || needsRevival) {
+              // Fence a status/capability response started under the retired
+              // address or credential before mutating the live authority.
+              this.refreshGenerations[twin.id] = (this.refreshGenerations[twin.id] ?? 0) + 1;
+            }
             if (apiKey) live.apiKey = apiKey;
-            if (twin.status !== "ready") {
+            if (needsRevival) {
               live.url = url;
               live.status = "ready";
               live.error = null;
               live.instanceId = instanceId;
               await this.persist(twin.id, url, name, instanceId);
+              void this.refreshAfterCurrent();
+            } else if (keyChanged) {
               void this.refreshAfterCurrent();
             }
           }
@@ -500,6 +518,24 @@ export const useHostsStore = defineStore("hosts", {
         }
       }
 
+      if (existing) {
+        this.refreshGenerations[id] = (this.refreshGenerations[id] ?? 0) + 1;
+        const previousInstanceId = this.telemetry[id]?.instanceId ?? existing.instanceId;
+        const existingExtra = this.extras.find((host) => host.id === id);
+        const unverifiedAddressReplacement =
+          existingExtra?.url !== url &&
+          (instanceId === null || previousInstanceId === null || previousInstanceId !== instanceId);
+        if (
+          (previousInstanceId !== null &&
+            instanceId !== null &&
+            previousInstanceId !== instanceId) ||
+          unverifiedAddressReplacement
+        ) {
+          delete this.telemetry[id];
+          delete this.capabilities[id];
+          delete useHostModelsStore().byHost[id];
+        }
+      }
       this.extras = this.extras.filter((h) => h.id !== id);
       this.extras.push({
         id,
@@ -519,6 +555,10 @@ export const useHostsStore = defineStore("hosts", {
     /** Drop a live extra host. Its saved entry and key stay for later. */
     async disconnect(id: string) {
       useDownloadsStore().unsubscribeHost(id);
+      // Retire every request issued before the explicit disconnect. URL/key
+      // equality is insufficient when the same slug reconnects to a replaced
+      // instance before an old response settles.
+      this.refreshGenerations[id] = (this.refreshGenerations[id] ?? 0) + 1;
       this.extras = this.extras.filter((h) => h.id !== id);
       delete this.telemetry[id];
       delete this.capabilities[id];
@@ -1231,6 +1271,22 @@ export const useHostsStore = defineStore("hosts", {
             }
           } catch (err) {
             if (!isCurrent()) return;
+            const authorityRejected =
+              err instanceof ApiError && (err.status === 401 || err.status === 403);
+            if (authorityRejected) {
+              // HTTP authentication is authoritative security evidence, not a
+              // transport blip. Retire data obtained under the rejected
+              // credential without claiming that the server process is dead.
+              delete this.telemetry[host.id];
+              delete this.capabilities[host.id];
+              delete useHostModelsStore().byHost[host.id];
+              const extra = this.extras.find((h) => h.id === host.id);
+              if (extra) {
+                extra.status = "connecting";
+                extra.error = String(err);
+              }
+              return;
+            }
             const previous = this.telemetry[host.id];
             if (previous) this.telemetry[host.id] = { ...previous, stale: true };
             const extra = this.extras.find((h) => h.id === host.id);

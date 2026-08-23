@@ -506,7 +506,32 @@ async function pollHost(entry: HostEntry): Promise<void> {
     return;
   }
   let instanceChanged = false;
-  if (status.status === "fulfilled") {
+  const authorityRejected =
+    status.status === "rejected" &&
+    status.reason instanceof ApiError &&
+    (status.reason.status === 401 || status.reason.status === 403);
+  if (authorityRejected) {
+    // Authentication is authoritative security evidence, unlike congestion.
+    // Retire everything read under the rejected credential without claiming
+    // the server process is offline; a registry credential change or later
+    // successful poll can establish fresh authority.
+    retireHostAuthority(entry.id);
+    routingAuthorityGeneration += 1;
+    telemetry.value = {
+      ...telemetry.value,
+      [entry.id]: {
+        status: "connecting",
+        stale: false,
+        version: null,
+        instanceId: entry.instanceId ?? null,
+        queueDepth: null,
+        gpu: null,
+        predictedCompletionMs: null,
+        queue: null,
+      },
+    };
+    return;
+  } else if (status.status === "fulfilled") {
     const previousTelemetry = telemetry.value[entry.id];
     const mergedQueue =
       queue.status === "fulfilled"
@@ -613,7 +638,7 @@ async function pollHost(entry: HostEntry): Promise<void> {
   }
 }
 
-async function refresh(): Promise<void> {
+async function refreshOnce(): Promise<void> {
   readRegistry();
   await Promise.all(entries.value.map((entry) => pollHost(entry)));
   modelsSettled.value = entries.value.every((e) =>
@@ -623,9 +648,31 @@ async function refresh(): Promise<void> {
 
 let timer: ReturnType<typeof setTimeout> | null = null;
 let consumers = 0;
+let refreshInFlight: Promise<void> | null = null;
+
+function refresh(): Promise<void> {
+  if (refreshInFlight) return refreshInFlight;
+  const run = refreshOnce().finally(() => {
+    if (refreshInFlight === run) refreshInFlight = null;
+  });
+  refreshInFlight = run;
+  return run;
+}
+
+async function refreshAfterCurrent(): Promise<void> {
+  const active = refreshInFlight;
+  if (active) {
+    try {
+      await active;
+    } catch {
+      // Registry changes still require a wave using the new authority.
+    }
+  }
+  await refresh();
+}
 
 function onHostsChanged(): void {
-  void refresh();
+  void refreshAfterCurrent();
 }
 
 function onGenerateTargetChanged(): void {
@@ -633,7 +680,9 @@ function onGenerateTargetChanged(): void {
 }
 
 function tick(): void {
+  if (timer !== null || consumers === 0) return;
   timer = setTimeout(() => {
+    timer = null;
     void refresh().finally(() => {
       if (consumers > 0) tick();
     });
@@ -650,8 +699,11 @@ function start(): void {
   );
   readRegistry();
   readTarget();
-  void refresh();
-  tick();
+  // If a prior consumer stopped while its request was still settling, wait
+  // for it and then poll the authority snapshot this new consumer just read.
+  void refreshAfterCurrent().finally(() => {
+    if (consumers > 0) tick();
+  });
 }
 
 function stop(): void {
@@ -1359,6 +1411,7 @@ export const __testing__ = {
     if (timer) clearTimeout(timer);
     timer = null;
     consumers = 0;
+    refreshInFlight = null;
     entries.value = [];
     telemetry.value = {};
     modelsByHost.value = {};

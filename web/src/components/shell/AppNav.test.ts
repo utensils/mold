@@ -57,9 +57,15 @@ vi.mock("../../composables/useLiveActivity", () => ({
 vi.mock("@studio/api/queuePlan", () => ({ listQueue: listQueueMock }));
 
 const notifState = vi.hoisted(() => ({ fresh: 0, offline: false }));
-const statusState = vi.hoisted(() => ({ error: null as string | null }));
+const statusState = vi.hoisted(() => ({
+  error: null as string | null,
+  stale: false,
+}));
 vi.mock("../../composables/useStatusPoll", () => ({
-  useStatusPoll: () => ({ error: { value: statusState.error } }),
+  useStatusPoll: () => ({
+    error: { value: statusState.error },
+    stale: { value: statusState.stale },
+  }),
 }));
 const markGalleryVisitedMock = vi.hoisted(() => vi.fn());
 vi.mock("../../lib/notifications", () => ({
@@ -91,6 +97,7 @@ describe("AppNav", () => {
     notifState.fresh = 0;
     notifState.offline = false;
     statusState.error = null;
+    statusState.stale = false;
     liveState.rows = [];
     takeGenerationHandoff();
     listQueueMock.mockReset();
@@ -232,13 +239,14 @@ describe("AppNav", () => {
     expect(dot.classes()).toContain("seg-dot--stop");
   });
 
-  it("shows a global engine-offline status outside Create", () => {
+  it("shows reconnecting instead of offline for a transient engine status failure", () => {
     routeState.name = "library";
     statusState.error = "connection refused";
     const wrapper = mountNav();
     expect(wrapper.get("[data-test='global-engine-status']").text()).toContain(
-      "Engine offline",
+      "Engine reconnecting",
     );
+    expect(wrapper.text()).not.toContain("Engine offline");
   });
 
   it("clears fresh prints when the library route is entered", () => {
